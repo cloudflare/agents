@@ -25,9 +25,12 @@ expectTypeOf<PiWhenBusy>().toEqualTypeOf<
 
 // Every input option pi takes is exposed, apart from the ones PiHarness
 // fills in itself: `type` and `content` from the input, `requestId` from
-// `operationId`.
+// `operationId`, and `whenIdle` (Pi 1.5), which PiHarness does not offer yet.
 expectTypeOf<
-  Exclude<keyof InputSubmissionDraft, "type" | "content" | "requestId">
+  Exclude<
+    keyof InputSubmissionDraft,
+    "type" | "content" | "requestId" | "whenIdle"
+  >
 >().toEqualTypeOf<Exclude<keyof PiSubmitOptions, "session" | "operationId">>();
 
 expectTypeOf<PiOperationResult["status"]>().toEqualTypeOf<

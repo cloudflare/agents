@@ -369,7 +369,7 @@ Every other model in the catalog takes the full set.
 
 ## Requirements
 
-This subpath needs `@earendil-works/pi-ai@~1.4.0`, an optional peer of `agents`. `agents`
+This subpath needs `@earendil-works/pi-ai@~1.5.0`, an optional peer of `agents`. `agents`
 takes no vendor package as a dependency, optional or otherwise. An unlisted `@cf/` id resolves with default metadata (a
 128k context window, 8192 output tokens, zero cost); pass overrides when you know better.
 

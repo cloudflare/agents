@@ -3,7 +3,7 @@ import type { EntryRecord, InputEntry } from "@earendil-works/pi-durable";
 /**
  * `PiHarness`'s own types: how the harness addresses sessions and reports
  * operations. Anything pi already publishes (input, transcript entries,
- * events) is pi's type, used directly.
+ * conversation views) is pi's type, used directly.
  */
 
 /** A pi conversation, addressed by its id as a string. The root is `"1"`. */
@@ -70,12 +70,8 @@ export type PiPromptResponse = PiOperationResult & {
 export type PiPendingOperation = {
   readonly operationId: string;
   readonly session: PiSessionId;
-  /**
-   * `queued` in pi's inbox, or `running` as part of the current run.
-   * `parked`: running, but pi's crash-loop guard (`settings.restartLimit`)
-   * stopped a task of the session; `retry()` runs it again.
-   */
-  readonly status: "queued" | "running" | "parked";
+  /** `queued` in pi's inbox, or `running` as part of the current run. */
+  readonly status: "queued" | "running";
 };
 
 export type PiSessionInfo = {
