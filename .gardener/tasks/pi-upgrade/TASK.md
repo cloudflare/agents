@@ -10,7 +10,7 @@ description: >-
 model: anthropic/claude-opus-5-5
 trigger:
   event: github.schedule
-  cron: 0 9,12,15 * * 1-5
+  cron: 0 9,15 * * 1-5
 tools:
   - repository.list_files
   - repository.read_file
@@ -62,7 +62,9 @@ runs out of turns or context before it opens anything. So:
   over several that each answer part of it.
 - **Keep output small.** Read only the lines you need (`sed -n '40,120p'`, `git grep -n -C3`). Pipe
   install, build, typecheck and test output through `tail -n 80` or a `grep -E` for errors and
-  summaries, and rerun narrower if you need more.
+  summaries, and rerun narrower if you need more. Commands run with `pipefail`, so a piped check
+  still exits non-zero when it fails: the exit status, not the shortened output, says whether it
+  passed. When it failed and the output doesn't show why, rerun it narrower until it does.
 - **Set `timeoutMs`.** A command is killed after 30 seconds unless you pass `timeoutMs`. Give every
   install, build, typecheck and test command `timeoutMs: 600000` (the maximum, 10 minutes), and split
   anything longer, such as one test project per command.
