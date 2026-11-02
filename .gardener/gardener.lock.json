@@ -671,7 +671,7 @@
     },
     "pi-upgrade": {
       "source": "tasks/pi-upgrade/TASK.md",
-      "bundleHash": "d2f76e64303b68accf1c6559c3620a0572b5c583880032e992c3023dcb0b2610",
+      "bundleHash": "656c668a3dc3f0163c0b6a278dd291a26ac53ab627c45c6bcf7270251f35d5ff",
       "workflow": ".github/workflows/gardener-pi-upgrade.yml",
       "bundle": {
         "schemaVersion": "gardener.task-bundle/v1",
@@ -685,7 +685,7 @@
           },
           {
             "kind": "github.schedule",
-            "cron": "0 9,15 * * 1-5"
+            "cron": "0 9,12,15 * * 1-5"
           }
         ],
         "tools": [

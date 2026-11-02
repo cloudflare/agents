@@ -10,7 +10,7 @@ description: >-
 model: anthropic/claude-opus-5-5
 trigger:
   event: github.schedule
-  cron: 0 9,15 * * 1-5
+  cron: 0 9,12,15 * * 1-5
 tools:
   - repository.list_files
   - repository.read_file

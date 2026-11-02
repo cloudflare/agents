@@ -2,14 +2,14 @@
 #
 # Source: .gardener/tasks/pi-upgrade/TASK.md
 # Task: pi-upgrade
-# Bundle: sha256:d2f76e64303b68accf1c6559c3620a0572b5c583880032e992c3023dcb0b2610
+# Bundle: sha256:656c668a3dc3f0163c0b6a278dd291a26ac53ab627c45c6bcf7270251f35d5ff
 # Regenerate: gardener generate
 # Do not edit this workflow directly.
 name: "Gardener · Pi upgrade"
 
 on:
   schedule:
-    - cron: "0 9,15 * * 1-5"
+    - cron: "0 9,12,15 * * 1-5"
   workflow_dispatch:
     inputs:
       prompt:
@@ -43,6 +43,6 @@ jobs:
       task-id: "pi-upgrade"
       task-name: "Pi upgrade"
       task-source: ".gardener/tasks/pi-upgrade/TASK.md"
-      task-bundle-hash: d2f76e64303b68accf1c6559c3620a0572b5c583880032e992c3023dcb0b2610
+      task-bundle-hash: 656c668a3dc3f0163c0b6a278dd291a26ac53ab627c45c6bcf7270251f35d5ff
       plan-timeout-minutes: 250
       pull-request-head: ${{ github.event.pull_request.number || (github.event.issue.pull_request && github.event.issue.number) || github.event.inputs.pull_request || '' }}
