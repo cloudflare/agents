@@ -1,8 +1,8 @@
 # Pi harness
 
 An example that runs [`@earendil-works/pi-durable`](https://github.com/earendil-works/pi/tree/main/packages/durable),
-pi's durable agent harness, inside a Durable Object. `PiHarness` and the
-session store come from `agents/harness/pi`, and the model provider from
+pi's durable agent harness, inside a Durable Object. `PiHarness` and pi's
+storage come from `agents/harness/pi`, and the model provider from
 `agents/models/pi-ai`. This example adds the app around them.
 
 New to `PiHarness`? Start with the
@@ -11,13 +11,13 @@ New to `PiHarness`? Start with the
 The example composes:
 
 - `PiHarness extends LifecycleCapability`, the harness interface:
-  `harness.prompt()`, `harness.submit()`, `harness.sessions`,
-  `harness.session(id)`, and `session.watch()` for pi's live view;
+  `harness.prompt()`, `harness.submit()`, `harness.conversations`,
+  `harness.conversation(id)`, and `conversation.watch()` for pi's live view;
 - one Lifecycle job as the wake, driven by pi's `onWake`: it keeps the
   object alive while pi has work running, is due when pi's next sleep ends,
   and completes when pi has nothing to do;
-- a pi session store on the object's SQLite database;
-- app glue that is not part of the harness: `sockets.ts` puts one session
+- pi's storage on the object's SQLite database;
+- app glue that is not part of the harness: `sockets.ts` puts one conversation
   per socket on `WebSockets`, and `view.ts` and `transcript.ts` project
   pi's view into what the UI shows;
 - a `Workspace` from `@cloudflare/computer` on the same SQLite database,
@@ -43,9 +43,9 @@ The example uses the remote Workers AI binding and may incur Workers AI
 usage. It needs no API key. If your Wrangler login has access to more than
 one account, set `CLOUDFLARE_ACCOUNT_ID` when starting.
 
-Each session is its own Durable Object with its own workspace. pi fixes a
-session's active tools when it creates the session, so a session created
-before a tool was added never sees it; start a new session instead.
+Each conversation is its own Durable Object with its own workspace. pi fixes a
+conversation's active tools when it creates the conversation, so a conversation created
+before a tool was added never sees it; start a new conversation instead.
 
 ## What to try
 
@@ -55,7 +55,7 @@ before a tool was added never sees it; start a new session instead.
 - While a turn runs, type and press Enter to queue a follow-up, or Steer to
   join the running turn.
 
-Reload the page mid-turn: the client gets the session's whole view,
+Reload the page mid-turn: the client gets the conversation's whole view,
 including the partial answer, and continues from there.
 
 A submit whose answer the socket never delivered is sent again on
@@ -79,7 +79,7 @@ pnpm test
 
 The harness's own tests live with it in `packages/agents`
 (`pnpm run test:harness:pi` there): pi's storage conformance suite on a
-real Durable Object, tool turns, follow-ups, abort, sessions, a harness
+real Durable Object, tool turns, follow-ups, abort, conversations, a harness
 without defaults, and a crash mid-tool-call that the wake job's alarm
 recovers.
 
@@ -118,9 +118,11 @@ export class PiAgent extends DurableObject<Env> {
     },
     defaults: { model: this.ai(MODEL_ID), thinkingLevel: "low" }
   });
-  // App glue: this app's socket protocol, built on session.watch().
-  readonly sockets = new PiSessionSockets(this.harness, this.registry, (tag) =>
-    this.ctx.getWebSockets(tag)
+  // App glue: this app's socket protocol, built on conversation.watch().
+  readonly sockets = new PiConversationSockets(
+    this.harness,
+    this.registry,
+    (tag) => this.ctx.getWebSockets(tag)
   );
   readonly webSockets = new WebSockets(this.sockets.options());
   readonly lifecycle = Lifecycle.install(this)
@@ -134,7 +136,7 @@ export class PiAgent extends DurableObject<Env> {
 
 // Anywhere in the object:
 const { text } = await this.harness.prompt("What is 47 × 19?");
-const side = await this.harness.sessions.create();
+const side = await this.harness.conversations.create();
 await side.submit("Summarise the repo", { whenBusy: "steer" });
 ```
 
@@ -149,18 +151,18 @@ model gets an interrupted result. For `agents/skills` sources,
 `this.registry.install(await skills(sources))` in the factory. See the
 [Pi harness docs](../../../../docs/agents/harnesses/pi.md).
 
-`defaults` applies to new sessions only; change one session's model with
-`session.setModel`. Without a default model, a session's prompts end
+`defaults` applies to new conversations only; change one conversation's model with
+`conversation.setModel`. Without a default model, a conversation's prompts end
 unanswered (`no_model`) until one is set.
 
-The harness does not choose a transport. `session.watch()` returns pi's own
-conversation view: a window over the transcript and the session's live state,
+The harness does not choose a transport. `conversation.watch()` returns pi's own
+conversation view: a window over the transcript and the conversation's live state,
 with pi's operations for each change. This app sends the view, then the
 operations, over WebSockets (`src/sockets.ts`, `src/protocol.ts`), applies them
 in the browser, and projects the view with `projectView` (`src/view.ts`) in the
 browser and in the tests. The window holds the newest 200 to 400 entries; a
 client that shows a longer transcript pages it with pi's
-`ConversationTranscript` and `session.entries()`.
+`ConversationTranscript` and `conversation.entries()`.
 
 `harness.messages()` and `prompt()`'s `messages` are pi's own transcript
 entries (`EntryRecord`). The display model the UI renders is this app's

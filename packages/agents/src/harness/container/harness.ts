@@ -394,7 +394,7 @@ function errorText(error: unknown): string {
 
 /**
  * An agent CLI running in a Cloudflare Container, driven from a Durable
- * Object, behind the same interface as `PiHarness`: `harness.prompt()`,
+ * Object, behind a small harness interface: `harness.prompt()`,
  * `harness.sessions`, `harness.session(id)`.
  *
  * The harness does not know which agent runs in the container. A preset

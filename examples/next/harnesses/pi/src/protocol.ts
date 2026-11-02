@@ -1,12 +1,12 @@
 import type { Op } from "@earendil-works/chord/delta";
 import type { JsonValue } from "@earendil-works/pi-ai";
 import type { ConversationView, UserInput } from "@earendil-works/pi-durable";
-import type { PiSessionId, PiWhenBusy } from "agents/harness/pi";
+import type { PiConversationId, PiWhenBusy } from "agents/harness/pi";
 
 /**
  * This app's WebSocket protocol, served by `sockets.ts`. The harness knows
- * nothing about it: it is one way to put `session.watch()` and
- * `session.submit()` on a socket.
+ * nothing about it: it is one way to put `conversation.watch()` and
+ * `conversation.submit()` on a socket.
  */
 
 export type PiToolInfo = {
@@ -32,23 +32,23 @@ export type PiClientMessage =
 export type PiServerMessage =
   | {
       readonly type: "hello";
-      readonly session: PiSessionId;
+      readonly conversation: PiConversationId;
       readonly tools: readonly PiToolInfo[];
     }
   /**
-   * pi's conversation view for the connection's session, from
-   * `session.watch()`: sent whole when the watch starts, and again after
+   * pi's conversation view for the connection's conversation, from
+   * `conversation.watch()`: sent whole when the watch starts, and again after
    * the server lost its watch. It replaces the client's view.
    */
   | {
       readonly type: "view";
-      readonly session: PiSessionId;
+      readonly conversation: PiConversationId;
       readonly view: ConversationView;
     }
   /** pi's operations for one change of the view, to apply to the last one. */
   | {
       readonly type: "ops";
-      readonly session: PiSessionId;
+      readonly conversation: PiConversationId;
       readonly ops: readonly Op[];
     }
   | { readonly type: "result"; readonly id: string; readonly result: JsonValue }
@@ -63,4 +63,4 @@ export type {
   PiMessage as TranscriptMessage,
   PiMessagePart as TranscriptPart
 } from "./transcript";
-export type { PiSessionView as SessionView } from "./view";
+export type { PiConversationView } from "./view";

@@ -16,10 +16,10 @@ export type PiRunningTool = {
 };
 
 /**
- * Everything a UI shows for one session, projected from pi's conversation
+ * Everything a UI shows for one conversation, projected from pi's conversation
  * view by `projectView` on either side of the wire.
  */
-export type PiSessionView = {
+export type PiConversationView = {
   readonly messages: readonly PiMessage[];
   /** The assistant message being streamed, or null. */
   readonly live: PiMessage | null;
@@ -36,7 +36,7 @@ export type PiSessionView = {
   readonly error: string | null;
 };
 
-export const EMPTY_VIEW: PiSessionView = {
+export const EMPTY_VIEW: PiConversationView = {
   messages: [],
   live: null,
   running: false,
@@ -76,7 +76,7 @@ function activeEntries(
  * tests run the same code: pi's view is the state, and this is the only
  * place that interprets it. App glue, not part of the harness.
  */
-export function projectView(view: ConversationView): PiSessionView {
+export function projectView(view: ConversationView): PiConversationView {
   const live = (view.docs["pi.live"] ?? {}) as LiveState;
   const inbox = view.docs["pi.inbox"] as InboxState | undefined;
   const agent = view.docs["pi.agent"] as AgentState | undefined;

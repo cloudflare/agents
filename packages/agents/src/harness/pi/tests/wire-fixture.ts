@@ -131,12 +131,12 @@ export class PiWireTestObject extends DurableObject<Cloudflare.Env> {
   }
 
   /**
-   * Prompt the root session, watching pi's live view meanwhile. `merged`:
+   * Prompt the root conversation, watching pi's live view meanwhile. `merged`:
    * whether a partial of the tool call added `__proto__` to arguments an
    * earlier partial already had, which is the merge the test is about.
    */
   async prompt(text: string): Promise<{ status: string; merged: boolean }> {
-    const watch = await this.harness.session().watch();
+    const watch = await this.harness.conversation().watch();
     let earlier = false;
     let merged = false;
     watch.start(async (call) => {

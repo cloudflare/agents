@@ -26,7 +26,7 @@ import {
 } from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
 import { WebSockets } from "agents/websockets";
-import { PiSessionSockets } from "../sockets";
+import { PiConversationSockets } from "../sockets";
 import { projectView } from "../view";
 import { createWorkspaceTools, JAVASCRIPT_BACKEND } from "../workspace";
 
@@ -130,8 +130,10 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     },
     defaults: { model: this.#faux.getModel() }
   });
-  readonly sockets = new PiSessionSockets(this.harness, this.registry, (tag) =>
-    this.ctx.getWebSockets(tag)
+  readonly sockets = new PiConversationSockets(
+    this.harness,
+    this.registry,
+    (tag) => this.ctx.getWebSockets(tag)
   );
   readonly webSockets = new WebSockets(this.sockets.options());
   readonly lifecycle = Lifecycle.install(this)
@@ -147,7 +149,7 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     this.#faux.setResponses(Array.from({ length: 200 }, () => script));
   }
 
-  /** Prompt the root session; the result without its transcript. */
+  /** Prompt the root conversation; the result without its transcript. */
   async prompt(text: string): Promise<PiOperationResult> {
     const { messages: _messages, ...result } = await this.harness.prompt(text);
     return result;
@@ -157,20 +159,20 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     text: string,
     options: {
       whenBusy?: PiWhenBusy;
-      session?: string;
+      conversation?: string;
       operationId?: string;
     } = {}
   ): Promise<PiReceipt> {
     return this.harness.submit(text, options);
   }
 
-  wait(operationId: string, session?: string): Promise<PiOperationResult> {
-    return this.harness.wait(operationId, session ? { session } : {});
+  wait(operationId: string, conversation?: string): Promise<PiOperationResult> {
+    return this.harness.wait(operationId, conversation ? { conversation } : {});
   }
 
-  /** Reset the root session's context. */
+  /** Reset the root conversation's context. */
   async reset(): Promise<void> {
-    await this.harness.session().reset();
+    await this.harness.conversation().reset();
   }
 
   /** Write a file into the workspace, as a test's setup. */
@@ -193,9 +195,9 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     await this.ctx.storage.put(RELEASE_KEY, true);
   }
 
-  /** Watch the root session through one run: the view projected from its last value. */
+  /** Watch the root conversation through one run: the view projected from its last value. */
   async watch(): Promise<string> {
-    const watch = await this.harness.session().watch();
+    const watch = await this.harness.conversation().watch();
     let sawRun = false;
     let view = projectView(watch.value);
     await new Promise<void>((resolve) => {
@@ -213,7 +215,7 @@ export class PiHarnessTestObject extends DurableObject<Env> {
 
   /** The view projected from a new watch, as a client joining now sees it. */
   async snapshotView(): Promise<string> {
-    const watch = await this.harness.session().watch();
+    const watch = await this.harness.conversation().watch();
     await watch.stop();
     return JSON.stringify(projectView(watch.value));
   }

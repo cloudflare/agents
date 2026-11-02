@@ -27,7 +27,7 @@ import {
   WORKSPACE_DAEMON_PORT,
   type BrowserState
 } from "./shared";
-import { PiSessionSockets } from "./sockets";
+import { PiConversationSockets } from "./sockets";
 import { createWorkspaceTools } from "./workspace";
 
 // Classes the runtime has to find in the Worker's main module:
@@ -155,8 +155,10 @@ export class BrowserAgent extends withWorkspaceContainer(BrowserAgentBase) {
     defaults: { model: this.ai(MODEL_ID), thinkingLevel: "low" }
   });
 
-  readonly sockets = new PiSessionSockets(this.harness, this.registry, (tag) =>
-    this.ctx.getWebSockets(tag)
+  readonly sockets = new PiConversationSockets(
+    this.harness,
+    this.registry,
+    (tag) => this.ctx.getWebSockets(tag)
   );
   readonly webSockets = new WebSockets(this.sockets.options());
   readonly lifecycle = Lifecycle.install(this)
@@ -243,7 +245,7 @@ export class BrowserAgent extends withWorkspaceContainer(BrowserAgentBase) {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    // /api/browser/<session>: the UI's browser panel.
+    // /api/browser/<conversation>: the UI's browser panel.
     const browser = url.pathname.match(/^\/api\/browser\/([\w-]+)$/);
     if (browser) {
       const agent = env.BrowserAgent.getByName(browser[1]);

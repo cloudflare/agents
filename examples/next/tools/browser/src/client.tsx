@@ -35,10 +35,10 @@ import {
   type ZoomImage
 } from "./messages";
 import { MODEL_ID } from "./shared";
-import { usePiSession } from "./use-pi-session";
+import { usePiConversation } from "./use-pi-conversation";
 import "./styles.css";
 
-const SESSION_KEY = "browser-tool-session";
+const CONVERSATION_KEY = "browser-tool-conversation";
 
 const SUGGESTIONS = [
   {
@@ -58,11 +58,11 @@ const SUGGESTIONS = [
   }
 ];
 
-function getSession(): string {
-  const existing = localStorage.getItem(SESSION_KEY);
+function getConversation(): string {
+  const existing = localStorage.getItem(CONVERSATION_KEY);
   if (existing) return existing;
   const created = crypto.randomUUID();
-  localStorage.setItem(SESSION_KEY, created);
+  localStorage.setItem(CONVERSATION_KEY, created);
   return created;
 }
 
@@ -200,7 +200,7 @@ function ImageDialog({
 }
 
 function App() {
-  const [session, setSession] = useState(getSession);
+  const [conversation, setConversation] = useState(getConversation);
   const [prompt, setPrompt] = useState("");
   const [mode, toggleMode] = useColorMode();
   const [aboutOpen, setAboutOpen] = useState(false);
@@ -223,8 +223,8 @@ function App() {
     error,
     submit: submitPrompt,
     abort
-  } = usePiSession(session);
-  const browser = useBrowserState(session, running);
+  } = usePiConversation(conversation);
+  const browser = useBrowserState(conversation, running);
 
   const connected = status === "open";
   const transcript = live ? [...messages, live] : messages;
@@ -248,8 +248,8 @@ function App() {
 
   const newChat = () => {
     const next = crypto.randomUUID();
-    localStorage.setItem(SESSION_KEY, next);
-    setSession(next);
+    localStorage.setItem(CONVERSATION_KEY, next);
+    setConversation(next);
   };
 
   const zoomImage = (image: ZoomImage) => {

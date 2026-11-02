@@ -194,8 +194,8 @@ function textOf(message: OpenCodeMessage | undefined): string {
 }
 
 /**
- * OpenCode v2 hosted in a Durable Object, behind the same harness interface
- * as `PiHarness`: `harness.prompt()`, `harness.sessions`, `harness.session(id)`.
+ * OpenCode v2 hosted in a Durable Object, behind a small harness interface:
+ * `harness.prompt()`, `harness.sessions`, `harness.session(id)`.
  * How a session reaches a client (sockets, SSE, RPC) is the host's glue,
  * built on `session.events()` and `session.log()`.
  *
@@ -1115,10 +1115,9 @@ export class OpenCodeSession {
 
   /**
    * The session's state now, then everything that happens to it after, as
-   * `OpenCodeSessionEvent`s: the same kinds of event `PiHarness` reports,
-   * live text deltas included. The stream holds OpenCode open until
-   * `stop()`. For OpenCode's own events, durable and resumable by sequence
-   * number, use `log()`.
+   * `OpenCodeSessionEvent`s, live text deltas included. The stream holds
+   * OpenCode open until `stop()`. For OpenCode's own events, durable and
+   * resumable by sequence number, use `log()`.
    */
   async events(): Promise<OpenCodeEventStream> {
     const release = this.#harness.lease();

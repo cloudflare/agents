@@ -175,18 +175,18 @@ export class PiFactoryTestObject extends DurableObject<Cloudflare.Env> {
     ];
   }
 
-  async prompt(input: string, session?: string) {
+  async prompt(input: string, conversation?: string) {
     const response = await this.harness.prompt(
       input,
-      session ? { session } : {}
+      conversation ? { conversation } : {}
     );
     return { status: response.status, text: response.text };
   }
 
-  async inspect(session?: string): Promise<Offered> {
+  async inspect(conversation?: string): Promise<Offered> {
     const response = await this.harness.prompt(
       "inspect",
-      session ? { session } : {}
+      conversation ? { conversation } : {}
     );
     return JSON.parse(response.text ?? "{}");
   }
@@ -203,8 +203,8 @@ export class PiFactoryTestObject extends DurableObject<Cloudflare.Env> {
     return "opened";
   }
 
-  async createSession(): Promise<string> {
-    return (await this.harness.sessions.create()).id;
+  async createConversation(): Promise<string> {
+    return (await this.harness.conversations.create()).id;
   }
 }
 

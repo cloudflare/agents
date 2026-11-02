@@ -1,9 +1,9 @@
 /**
  * An agent CLI in a Cloudflare Container, driven from a Durable Object.
- * `ContainerHarness` is a Lifecycle capability with the same interface as
- * `PiHarness`. Pick what runs with a preset (`claudeCode()`, `codex()`):
- * the harness sets the container up from `cloudflare/debian-trixie`, and
- * `ContainerEgress` keeps the credentials outside it.
+ * `ContainerHarness` is a Lifecycle capability. Pick what runs with a
+ * preset (`claudeCode()`, `codex()`): the harness sets the container up
+ * from `cloudflare/debian-trixie`, and `ContainerEgress` keeps the
+ * credentials outside it.
  *
  * @experimental The API may change before it stabilizes.
  */

@@ -7,13 +7,13 @@ import { EMPTY_VIEW, projectView } from "./view";
 import type {
   ClientMessage,
   ServerMessage,
-  SessionView,
+  PiConversationView,
   ToolInfo
 } from "./protocol";
 
 export type ConnectionStatus = "connecting" | "open" | "closed";
 
-type State = SessionView & {
+type State = PiConversationView & {
   readonly status: ConnectionStatus;
   /** Every registered tool, from the server's hello. */
   readonly catalog: readonly ToolInfo[];
@@ -26,7 +26,7 @@ const INITIAL_STATE: State = {
 };
 
 /**
- * One pi session over the harness's WebSocket protocol, connected with
+ * One pi conversation over the harness's WebSocket protocol, connected with
  * `useAgent`. The server sends pi's conversation view, then pi's operations
  * for each change; this applies them and projects the view with the same
  * `projectView` the server tests use. A reconnect gets the whole view
@@ -34,7 +34,7 @@ const INITIAL_STATE: State = {
  * socket never delivered; the harness deduplicates them by operation id, so
  * each runs once.
  */
-export function usePiSession(object: string) {
+export function usePiConversation(object: string) {
   const [state, setState] = useState<State>(INITIAL_STATE);
   // Unanswered submits, sent again each time the socket opens.
   const [outbox] = useState(() => new PiCommandOutbox());
@@ -48,7 +48,7 @@ export function usePiSession(object: string) {
   }
 
   const agent = useAgent({
-    agent: "pi-agent",
+    agent: "browser-agent",
     name: object,
     onOpen: () => setState((current) => ({ ...current, status: "open" })),
     onClose: () => setState((current) => ({ ...current, status: "closed" })),
@@ -84,7 +84,7 @@ export function usePiSession(object: string) {
   });
 
   useEffect(() => {
-    // Submits and the view belong to the last object's session.
+    // Submits and the view belong to the last object's conversation.
     outbox.clear();
     view.current = null;
   }, [object, outbox]);

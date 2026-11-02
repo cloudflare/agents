@@ -28,7 +28,7 @@ Every agent has the same shape:
 - `src/ai-sdk-agent.ts` is `AiSdkAgent`: `AiSdkHarness` runs each message
   with `streamText` on Workers AI. It has a client tool (`getLocation`, run
   by the participant who asked) and a tool that needs approval (`flipCoin`).
-- `src/pi/agent.ts` is `PiAgent`: `PiHarness` runs pi-durable sessions with
+- `src/pi/agent.ts` is `PiAgent`: `PiHarness` runs pi-durable conversations with
   a `current_time` tool. See [The pi agent](#the-pi-agent).
 - `src/client.tsx` is a browser client built on `WebChannelClient` from
   `agents/experimental/channels/web/client`. The URL hash picks the agent and room

@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 
 /**
  * `PiHarnessOptions` requires only the `harness` factory. Without
- * `defaults`, a session has no model, so pi leaves its prompts unanswered
+ * `defaults`, a conversation has no model, so pi leaves its prompts unanswered
  * until one is set.
  */
 describe("a harness without defaults", () => {
@@ -22,7 +22,7 @@ describe("a harness without defaults", () => {
     expect(await harness.alarmTime()).toBeNull();
   });
 
-  it("answers once the session's model is set", async () => {
+  it("answers once the conversation's model is set", async () => {
     const harness = stub();
     await harness.setFauxModel();
     const response = await harness.prompt("hello");

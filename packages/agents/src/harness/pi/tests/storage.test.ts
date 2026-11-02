@@ -3,17 +3,17 @@ import { runInDurableObject } from "cloudflare:test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { registerStorageConformance } from "@earendil-works/pi-durable/testing";
 import { describe, expect, it } from "vitest";
-import { openPiSessionStore } from "../session-store";
+import { openPiStorage } from "../storage";
 
-// pi's own storage conformance suite, run against the session store on a
+// pi's own storage conformance suite, run against the conversation store on a
 // real Durable Object's SQLite database. Each case gets a fresh object.
 registerStorageConformance(
   { describe, expect, it },
-  "pi session store on Durable Object SQLite",
+  "pi storage on Durable Object SQLite",
   async (use) => {
     const stub = env.PI_STORE_TEST.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (_instance, state) => {
-      const storage = await openPiSessionStore(state.storage);
+      const storage = await openPiStorage(state.storage);
       try {
         await use(storage);
       } finally {
@@ -33,13 +33,13 @@ function schemaNames(storage: DurableObjectStorage): string[] {
     .sort();
 }
 
-describe("pi session store", () => {
+describe("pi storage", () => {
   // Objects opened by earlier releases already hold pi's data under these
-  // names. If pi renames one, existing sessions would silently vanish.
+  // names. If pi renames one, existing conversations would silently vanish.
   it("keeps the table and index names existing objects use", async () => {
     const stub = env.PI_STORE_TEST.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (_instance, state) => {
-      await openPiSessionStore(state.storage);
+      await openPiStorage(state.storage);
       expect(schemaNames(state.storage)).toEqual(
         [
           "index:pi_conversations_by_owner_conversation",
@@ -75,7 +75,7 @@ describe("pi session store", () => {
   it("keeps pi's tables under its prefix", async () => {
     const stub = env.PI_STORE_TEST.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (_instance, state) => {
-      await openPiSessionStore(state.storage, { prefix: "pi_" });
+      await openPiStorage(state.storage, { prefix: "pi_" });
       const tables = state.storage.sql
         .exec<{ name: string }>(
           "SELECT name FROM sqlite_master WHERE type IN ('table', 'index') AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%'"
@@ -92,8 +92,8 @@ describe("pi session store", () => {
   it("reopens an existing store without migrating again", async () => {
     const stub = env.PI_STORE_TEST.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (_instance, state) => {
-      await openPiSessionStore(state.storage);
-      await openPiSessionStore(state.storage);
+      await openPiStorage(state.storage);
+      await openPiStorage(state.storage);
       const version = state.storage.sql
         .exec<{ version: number }>("SELECT version FROM pi_durable_schema")
         .one().version;
@@ -104,7 +104,7 @@ describe("pi session store", () => {
   it("rejects a prefix Durable Objects reserve", async () => {
     for (const prefix of ["_cf_x", "_CF_x"]) {
       await expect(
-        openPiSessionStore({} as DurableObjectStorage, { prefix })
+        openPiStorage({} as DurableObjectStorage, { prefix })
       ).rejects.toThrow("_cf_");
     }
   });
@@ -112,7 +112,7 @@ describe("pi session store", () => {
   it("uses another prefix when asked", async () => {
     const stub = env.PI_STORE_TEST.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (_instance, state) => {
-      await openPiSessionStore(state.storage, { prefix: "chat_" });
+      await openPiStorage(state.storage, { prefix: "chat_" });
       expect(schemaNames(state.storage)).toContain("table:chat_tasks");
       expect(
         schemaNames(state.storage).some((name) => name.includes(":pi_"))

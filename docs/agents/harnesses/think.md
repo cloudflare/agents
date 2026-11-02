@@ -4,7 +4,7 @@ pcx_content_type: reference
 description: Run Think's agent loop in a Durable Object with the experimental ThinkHarness lifecycle capability. Durable transcripts and turns that survive eviction.
 ---
 
-`ThinkHarness` runs Think's agent loop as a Lifecycle capability. It has the same shape as the [Pi harness](./pi.md): `harness.prompt()`, `harness.sessions` and `harness.session(id)`. The engine is the AI SDK. The harness owns its storage, so you install only the harness:
+`ThinkHarness` runs Think's agent loop as a Lifecycle capability. Its interface is `harness.prompt()`, `harness.sessions` and `harness.session(id)`. The engine is the AI SDK. The harness owns its storage, so you install only the harness:
 
 - Each session's transcript is kept as AI SDK `UIMessage`s, in the same tables the `Sessions` capability uses.
 - The output of a model call is kept while it streams, in the same tables the `Streams` capability uses.

@@ -345,10 +345,10 @@ function asSessionMessage(message: UIMessage): SessionMessage {
 }
 
 /**
- * Think's agent loop hosted in a Durable Object, behind the same small
- * harness interface as `PiHarness`: `harness.prompt()`, `harness.sessions`,
- * `harness.session(id)`. It implements the shared `AgentHarness`
- * interface, so a Channels host can serve its sessions.
+ * Think's agent loop hosted in a Durable Object, behind a small harness
+ * interface: `harness.prompt()`, `harness.sessions`, `harness.session(id)`.
+ * It implements the shared `AgentHarness` interface, so a Channels host can
+ * serve its sessions.
  *
  * Transcripts live in a Sessions capability and in-flight model output in
  * a Streams capability, both owned by the harness, and the harness's queue

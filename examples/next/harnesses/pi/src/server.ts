@@ -10,7 +10,7 @@ import { PiHarness } from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
 import { createAI } from "agents/models/pi-ai";
 import { WebSockets } from "agents/websockets";
-import { PiSessionSockets } from "./sockets";
+import { PiConversationSockets } from "./sockets";
 import { createWorkspaceTools, JAVASCRIPT_BACKEND } from "./workspace";
 
 const MODEL_ID = "@cf/zai-org/glm-5.3-flash";
@@ -18,7 +18,7 @@ const MODEL_ID = "@cf/zai-org/glm-5.3-flash";
 const PREAMBLE =
   "You are a concise playground assistant. You have a durable workspace at /workspace: read, write, edit, delete, list (ls), find and grep files there, and run JavaScript modules in it with exec, which can also use git. Paths are absolute. Use tools whenever they can answer the request, and explain their results plainly.";
 
-/** Playable pi session backed by one Durable Object. */
+/** Playable pi conversation backed by one Durable Object. */
 export class PiAgent extends DurableObject<Env> {
   // Workers AI and AI Gateway over the AI binding, as a pi-ai provider.
   readonly ai = createAI({ binding: this.env.AI });
@@ -69,9 +69,11 @@ export class PiAgent extends DurableObject<Env> {
     defaults: { model: this.ai(MODEL_ID), thinkingLevel: "low" }
   });
 
-  // App glue, not the harness: how this app puts sessions on a socket.
-  readonly sockets = new PiSessionSockets(this.harness, this.registry, (tag) =>
-    this.ctx.getWebSockets(tag)
+  // App glue, not the harness: how this app puts conversations on a socket.
+  readonly sockets = new PiConversationSockets(
+    this.harness,
+    this.registry,
+    (tag) => this.ctx.getWebSockets(tag)
   );
   readonly webSockets = new WebSockets(this.sockets.options());
   readonly lifecycle = Lifecycle.install(this)
@@ -86,9 +88,9 @@ export class PiAgent extends DurableObject<Env> {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    if (new URL(request.url).pathname === "/api/session") {
-      // A fresh session id for the client to open its WebSocket against.
-      return Response.json({ session: crypto.randomUUID() });
+    if (new URL(request.url).pathname === "/api/conversation") {
+      // A fresh conversation id for the client to open its WebSocket against.
+      return Response.json({ conversation: crypto.randomUUID() });
     }
     try {
       return (

@@ -42,20 +42,20 @@ describe("a harness factory on a Durable Object", () => {
     expect(await fresh().openWhileStarting()).toBe("opened");
   }, 5_000);
 
-  it("answers many sessions prompting and calling tools at once", async () => {
+  it("answers many conversations prompting and calling tools at once", async () => {
     const stub = fresh();
-    const sessions = await Promise.all(
-      Array.from({ length: 6 }, () => stub.createSession())
+    const conversations = await Promise.all(
+      Array.from({ length: 6 }, () => stub.createConversation())
     );
     const results = await Promise.all(
-      sessions.flatMap((session, s) =>
+      conversations.flatMap((conversation, s) =>
         Array.from({ length: 4 }, (_, n) =>
-          stub.prompt(`call sum {"values":[${s},${n}]}`, session)
+          stub.prompt(`call sum {"values":[${s},${n}]}`, conversation)
         )
       )
     );
     expect(results).toEqual(
-      sessions.flatMap((_, s) =>
+      conversations.flatMap((_, s) =>
         Array.from({ length: 4 }, (_, n) => ({
           status: "done",
           text: `tool said: ${s + n}`

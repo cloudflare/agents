@@ -265,7 +265,7 @@ describe("PiHarness on pi-durable", () => {
       operationId: "op-idle"
     });
     expect(idle).toEqual({
-      receipt: { operationId: "op-idle", session: "1", accepted: true }
+      receipt: { operationId: "op-idle", conversation: "1", accepted: true }
     });
     expect((await stub.wait("op-idle")).text).toBe("echo: hello");
 
@@ -280,7 +280,7 @@ describe("PiHarness on pi-durable", () => {
       conversationBusy: true
     });
     expect(await stub.pending()).toEqual([
-      { operationId: gate.operationId, session: "1", status: "running" }
+      { operationId: gate.operationId, conversation: "1", status: "running" }
     ]);
     // Retrying an admitted operation id is deduped, not refused.
     expect(
@@ -380,7 +380,7 @@ describe("PiHarness on pi-durable", () => {
     expect(await stub.pending()).toEqual([]);
   });
 
-  it("watches the session's view through a run, and a late watch shows the same transcript", async () => {
+  it("watches the conversation's view through a run, and a late watch shows the same transcript", async () => {
     const stub = fresh();
     const watching = stub.watch();
     const receipt = await stub.submit("multiply 5");
@@ -450,17 +450,17 @@ describe("PiHarness on pi-durable", () => {
   );
 
   it.each(["retry:", "nowake:retry:"])(
-    "runs pi's retry in one session while another session's run stays active (%s)",
+    "runs pi's retry in one conversation while another conversation's run stays active (%s)",
     async (variant) => {
       const stub = fresh(`${variant}${crypto.randomUUID()}`);
       const held = await stub.submit("hold");
       await stub.holdStarted(1);
       // The first generation fails as retryable, and pi sleeps two seconds
       // before its retry, beside the held run.
-      const session = await stub.createSession();
-      const flaky = await stub.submit("flaky", { session });
+      const conversation = await stub.createConversation();
+      const flaky = await stub.submit("flaky", { conversation });
       expect(
-        await stub.waitWithin(flaky.operationId, 8_000, session)
+        await stub.waitWithin(flaky.operationId, 8_000, conversation)
       ).toMatchObject({
         status: "done",
         text: "echo: flaky"
@@ -510,13 +510,13 @@ describe("PiHarness on pi-durable", () => {
       reason: "model_error"
     });
 
-    const receipt = await stub.continueSession("again");
+    const receipt = await stub.continueConversation("again");
     expect(receipt).toEqual({
       operationId: "again",
-      session: "1",
+      conversation: "1",
       accepted: true
     });
-    expect(await stub.continueSession("again")).toMatchObject({
+    expect(await stub.continueConversation("again")).toMatchObject({
       accepted: false
     });
     expect(await stub.wait(receipt.operationId)).toMatchObject({
@@ -527,7 +527,7 @@ describe("PiHarness on pi-durable", () => {
     expect(await stub.messages()).toEqual(["flaky", "", "echo: flaky"]);
   });
 
-  it("ends a run at the session's turn limit, and a continue answers it", async () => {
+  it("ends a run at the conversation's turn limit, and a continue answers it", async () => {
     const stub = fresh(`turns:${crypto.randomUUID()}`);
     // The round that reaches the limit still runs its tool.
     expect(await stub.prompt("multiply 3")).toMatchObject({
@@ -535,7 +535,7 @@ describe("PiHarness on pi-durable", () => {
       reason: "turn_limit",
       messages: ["multiply 3", "", "9"]
     });
-    const receipt = await stub.continueSession();
+    const receipt = await stub.continueConversation();
     expect(await stub.wait(receipt.operationId)).toMatchObject({
       status: "done",
       text: "tool said: 9"
@@ -545,7 +545,7 @@ describe("PiHarness on pi-durable", () => {
   it("settles a continue with nothing to answer as unanswered", async () => {
     const stub = fresh();
     await stub.prompt("hello");
-    const receipt = await stub.continueSession();
+    const receipt = await stub.continueConversation();
     expect(await stub.wait(receipt.operationId)).toMatchObject({
       status: "unanswered",
       reason: "nothing_to_answer"
@@ -587,7 +587,7 @@ describe("PiHarness on pi-durable", () => {
     }
   );
 
-  it("hands a per-session wake job from before Pi 1.4 over to the one wake", async () => {
+  it("hands a per-conversation wake job from before Pi 1.4 over to the one wake", async () => {
     const stub = fresh();
     await stub.addLegacyWakeJob();
     expect(await stub.wakeJobs()).toContain("pi-wake:1");
@@ -602,7 +602,7 @@ describe("PiHarness on pi-durable", () => {
     expect((await stub.prompt("hello")).text).toBe("echo: hello");
   });
 
-  it("answers every one of many submissions made to one session at once", async () => {
+  it("answers every one of many submissions made to one conversation at once", async () => {
     const stub = fresh();
     const inputs = Array.from({ length: 12 }, (_, n) => `burst ${n}`);
     const receipts = await Promise.all(
@@ -623,16 +623,16 @@ describe("PiHarness on pi-durable", () => {
     expect(await stub.pending()).toEqual([]);
   });
 
-  it("recovers every session's run after a crash, from one alarm", async () => {
+  it("recovers every conversation's run after a crash, from one alarm", async () => {
     const name = crypto.randomUUID();
     let stub = fresh(name);
-    const sessions = [
+    const conversations = [
       "1",
-      await stub.createSession(),
-      await stub.createSession()
+      await stub.createConversation(),
+      await stub.createConversation()
     ];
     const receipts = await Promise.all(
-      sessions.map((session) => stub.submit("gate", { session }))
+      conversations.map((conversation) => stub.submit("gate", { conversation }))
     );
     await stub.gateStarted(3);
 
@@ -641,12 +641,14 @@ describe("PiHarness on pi-durable", () => {
     // Run the wake alarm, unless its 1s heartbeat already fired on its own
     // while the three gates started. The gate runs below prove the recovery.
     await runDurableObjectAlarm(stub);
-    // Each session's safe tool runs again.
+    // Each conversation's safe tool runs again.
     await stub.gateStarted(6);
     await stub.release();
 
     const results = await Promise.all(
-      receipts.map((receipt, i) => stub.wait(receipt.operationId, sessions[i]))
+      receipts.map((receipt, i) =>
+        stub.wait(receipt.operationId, conversations[i])
+      )
     );
     expect(results.map((result) => result.status)).toEqual([
       "done",
@@ -806,17 +808,16 @@ describe("PiHarness on pi-durable", () => {
     ]);
   });
 
-  it("keeps sessions separate", async () => {
+  it("keeps conversations separate", async () => {
     const stub = fresh();
-    const other = await stub.createSession();
+    const other = await stub.createConversation();
     await stub.prompt("root");
     await stub.prompt("side", other);
     expect(await stub.messages()).toEqual(["root", "echo: root"]);
     expect(await stub.messages(other)).toEqual(["side", "echo: side"]);
-    expect((await stub.listSessions()).map((session) => session.id)).toEqual([
-      "1",
-      other
-    ]);
+    expect(
+      (await stub.listConversations()).map((conversation) => conversation.id)
+    ).toEqual(["1", other]);
   });
 });
 
@@ -841,7 +842,7 @@ describe("PiHarness after a failed run (settings.afterFailedRun)", () => {
     const followUp = await failWithFollowUp(stub);
     expect(await stub.waitWithin(followUp, 300)).toBe("waiting");
     expect(await stub.pending()).toEqual([
-      { operationId: followUp, session: "1", status: "queued" }
+      { operationId: followUp, conversation: "1", status: "queued" }
     ]);
     expect(await alarmCleared(stub)).toBe(true);
 

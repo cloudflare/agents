@@ -7,14 +7,14 @@ import type {
 import type { Connection, ConnectionContext } from "agents/lifecycle";
 import type { WebSocketMessage, WebSocketsOptions } from "agents/websockets";
 import {
-  ROOT_SESSION,
+  ROOT_CONVERSATION,
   type PiHarness,
-  type PiSessionId
+  type PiConversationId
 } from "agents/harness/pi";
 import type { PiClientMessage, PiServerMessage } from "./protocol";
 
-const SESSION_TAG_PREFIX = "pi-session:";
-const SESSION_QUERY = "session";
+const CONVERSATION_TAG_PREFIX = "pi-conversation:";
+const CONVERSATION_QUERY = "conversation";
 /**
  * How many entries a socket's view holds: the newest 200, up to 400. A
  * longer transcript shows only its newest entries; a client that pages older
@@ -24,24 +24,29 @@ const WINDOW: ConversationWindow = { min: 200 };
 /** `WebSocket.OPEN`; the constant is not defined on every runtime's global. */
 const OPEN = 1;
 
-function sessionTag(session: PiSessionId): string {
-  return `${SESSION_TAG_PREFIX}${session}`;
+function conversationTag(conversation: PiConversationId): string {
+  return `${CONVERSATION_TAG_PREFIX}${conversation}`;
 }
 
-function sessionFromRequest(request: Request, fallback: PiSessionId): string {
-  const session = new URL(request.url).searchParams.get(SESSION_QUERY);
-  if (session === null || session === "") return fallback;
-  if (!/^[1-9][0-9]{0,15}$/.test(session)) {
-    throw new Error(`Invalid pi session ${JSON.stringify(session)}`);
-  }
-  return session;
-}
-
-function sessionOf(tags: readonly string[]): string | undefined {
-  const tag = tags.find((candidate) =>
-    candidate.startsWith(SESSION_TAG_PREFIX)
+function conversationFromRequest(
+  request: Request,
+  fallback: PiConversationId
+): string {
+  const conversation = new URL(request.url).searchParams.get(
+    CONVERSATION_QUERY
   );
-  return tag?.slice(SESSION_TAG_PREFIX.length);
+  if (conversation === null || conversation === "") return fallback;
+  if (!/^[1-9][0-9]{0,15}$/.test(conversation)) {
+    throw new Error(`Invalid pi conversation ${JSON.stringify(conversation)}`);
+  }
+  return conversation;
+}
+
+function conversationOf(tags: readonly string[]): string | undefined {
+  const tag = tags.find((candidate) =>
+    candidate.startsWith(CONVERSATION_TAG_PREFIX)
+  );
+  return tag?.slice(CONVERSATION_TAG_PREFIX.length);
 }
 
 function send(socket: WebSocket, message: PiServerMessage): void {
@@ -54,17 +59,17 @@ function send(socket: WebSocket, message: PiServerMessage): void {
 }
 
 /**
- * App glue: this app's session protocol over the `WebSockets` capability,
+ * App glue: this app's conversation protocol over the `WebSockets` capability,
  * built only on the harness's public API.
  *
- * Each socket follows one session, picked by `?session=`, through its own
- * `session.watch()`: the whole view, then pi's operations for each change.
- * Commands on the socket call `session.submit()`, `abort()`, and `reset()`.
+ * Each socket follows one conversation, picked by `?conversation=`, through its own
+ * `conversation.watch()`: the whole view, then pi's operations for each change.
+ * Commands on the socket call `conversation.submit()`, `abort()`, and `reset()`.
  * Watches live in memory, so the host calls `reattach()` from its `onStart`
  * to give sockets that outlived the last isolate a new watch and the whole
  * view again.
  */
-export class PiSessionSockets {
+export class PiConversationSockets {
   readonly #harness: PiHarness;
   readonly #registry: RegistryReader;
   readonly #getWebSockets: (tag?: string) => WebSocket[];
@@ -84,7 +89,7 @@ export class PiSessionSockets {
   options(): WebSocketsOptions {
     return {
       getConnectionTags: (_connection, ctx) => [
-        sessionTag(sessionFromRequest(ctx.request, ROOT_SESSION))
+        conversationTag(conversationFromRequest(ctx.request, ROOT_CONVERSATION))
       ],
       handlers: {
         onConnect: (connection, ctx) => this.#onConnect(connection, ctx),
@@ -99,10 +104,10 @@ export class PiSessionSockets {
   /** Give every hibernated socket a new watch after the object restarts. */
   async reattach(): Promise<void> {
     if (this.#getWebSockets().length === 0) return;
-    // Sockets are found by tag, not tags by socket, so walk the sessions
+    // Sockets are found by tag, not tags by socket, so walk the conversations
     // and look up each one's tag.
-    for (const { id } of await this.#harness.sessions.list()) {
-      for (const socket of this.#getWebSockets(sessionTag(id))) {
+    for (const { id } of await this.#harness.conversations.list()) {
+      for (const socket of this.#getWebSockets(conversationTag(id))) {
         await this.#watch(socket, id);
       }
     }
@@ -115,23 +120,29 @@ export class PiSessionSockets {
   }
 
   async #onConnect(connection: Connection, ctx: ConnectionContext) {
-    const session = sessionFromRequest(ctx.request, ROOT_SESSION);
+    const conversation = conversationFromRequest(
+      ctx.request,
+      ROOT_CONVERSATION
+    );
     send(connection, {
       type: "hello",
-      session,
+      conversation,
       tools: this.#registry
         .snapshot()
         .tools()
         .map(({ tool }) => ({ name: tool.name, description: tool.description }))
     });
-    await this.#watch(connection, session);
+    await this.#watch(connection, conversation);
   }
 
-  async #watch(socket: WebSocket, session: PiSessionId): Promise<void> {
+  async #watch(
+    socket: WebSocket,
+    conversation: PiConversationId
+  ): Promise<void> {
     await this.#unwatch(socket);
-    const watch = await this.#harness.session(session).watch(WINDOW);
+    const watch = await this.#harness.conversation(conversation).watch(WINDOW);
     this.#watches.set(socket, watch);
-    send(socket, { type: "view", session, view: watch.value });
+    send(socket, { type: "view", conversation, view: watch.value });
     watch.start(async (call) => {
       // Pi ends a watch on failure instead of sending a `failed` call.
       if (call.kind !== "value") return;
@@ -139,7 +150,7 @@ export class PiSessionSockets {
         void this.#unwatch(socket);
         return;
       }
-      send(socket, { type: "ops", session, ops: call.ops });
+      send(socket, { type: "ops", conversation, ops: call.ops });
     });
   }
 
@@ -159,9 +170,9 @@ export class PiSessionSockets {
       send(connection, { type: "error", message: "Malformed JSON" });
       return;
     }
-    const session = sessionOf(connection.tags) ?? ROOT_SESSION;
+    const conversation = conversationOf(connection.tags) ?? ROOT_CONVERSATION;
     try {
-      const result = await this.#dispatch(connection, session, message);
+      const result = await this.#dispatch(connection, conversation, message);
       if (message.id !== undefined) {
         send(connection, { type: "result", id: message.id, result });
       }
@@ -176,10 +187,10 @@ export class PiSessionSockets {
 
   async #dispatch(
     connection: Connection,
-    session: PiSessionId,
+    conversation: PiConversationId,
     message: PiClientMessage
   ): Promise<JsonValue> {
-    const handle = this.#harness.session(session);
+    const handle = this.#harness.conversation(conversation);
     switch (message.type) {
       case "submit":
         return await handle.submit(message.input, {
@@ -192,7 +203,7 @@ export class PiSessionSockets {
         await handle.reset(message.handoff);
         return null;
       case "resync":
-        await this.#watch(connection, session);
+        await this.#watch(connection, conversation);
         return null;
       default:
         throw new Error(

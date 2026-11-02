@@ -1,16 +1,16 @@
 import type { EntryRecord, InputEntry } from "@earendil-works/pi-durable";
 
 /**
- * `PiHarness`'s own types: how the harness addresses sessions and reports
+ * `PiHarness`'s own types: how the harness addresses conversations and reports
  * operations. Anything pi already publishes (input, transcript entries,
  * events) is pi's type, used directly.
  */
 
 /** A pi conversation, addressed by its id as a string. The root is `"1"`. */
-export type PiSessionId = string;
+export type PiConversationId = string;
 
 /**
- * What a submission does when the session is already running.
+ * What a submission does when the conversation is already running.
  *
  * - `followUp` (default): answered after the current run, as its own run.
  * - `steer`: joins the running work after the current tool round.
@@ -21,7 +21,7 @@ export type PiSessionId = string;
 export type PiWhenBusy = "followUp" | "steer" | "reject";
 
 /**
- * What a submission does when the session is idle.
+ * What a submission does when the conversation is idle.
  *
  * - unset (default): starts a run.
  * - `reject`: not admitted. `submit()` rejects with pi-durable's
@@ -32,8 +32,8 @@ export type PiWhenBusy = "followUp" | "steer" | "reject";
 export type PiWhenIdle = "reject";
 
 export type PiSubmitOptions = {
-  /** Default: the root session. */
-  readonly session?: PiSessionId;
+  /** Default: the root conversation. */
+  readonly conversation?: PiConversationId;
   /** Idempotency key. Submitting the same id twice returns the same receipt. */
   readonly operationId?: string;
   readonly whenBusy?: PiWhenBusy;
@@ -53,15 +53,15 @@ export type PiContinueOptions = {
   readonly operationId?: string;
 };
 
-export type PiSessionOptions = {
-  /** Default: the root session. */
-  readonly session?: PiSessionId;
+export type PiConversationOptions = {
+  /** Default: the root conversation. */
+  readonly conversation?: PiConversationId;
 };
 
 /** Returned once a submission is durable. It says nothing about the model yet. */
 export type PiReceipt = {
   readonly operationId: string;
-  readonly session: PiSessionId;
+  readonly conversation: PiConversationId;
   /** False when this operation id was already submitted. */
   readonly accepted: boolean;
 };
@@ -69,7 +69,7 @@ export type PiReceipt = {
 /** How one operation ended. */
 export type PiOperationResult = {
   readonly operationId: string;
-  readonly session: PiSessionId;
+  readonly conversation: PiConversationId;
   /** `done`: answered. `unanswered`: failed, aborted, or withdrawn. */
   readonly status: "done" | "unanswered";
   /** Why an unanswered operation ended, in pi's words. */
@@ -79,21 +79,21 @@ export type PiOperationResult = {
 };
 
 export type PiPromptResponse = PiOperationResult & {
-  /** The session's active transcript after the operation. */
+  /** The conversation's active transcript after the operation. */
   readonly messages: readonly EntryRecord[];
 };
 
 /** A submission pi has not settled yet. */
 export type PiPendingOperation = {
   readonly operationId: string;
-  readonly session: PiSessionId;
+  readonly conversation: PiConversationId;
   /** `queued` in pi's inbox, or `running` as part of the current run. */
   readonly status: "queued" | "running";
 };
 
-export type PiSessionInfo = {
-  readonly id: PiSessionId;
-  /** The session this one was forked from. */
-  readonly parent?: PiSessionId;
+export type PiConversationInfo = {
+  readonly id: PiConversationId;
+  /** The conversation this one was forked from. */
+  readonly parent?: PiConversationId;
   readonly busy: boolean;
 };

@@ -31,8 +31,8 @@ import type {
 } from "agents/experimental/channels";
 import type {
   PiHarness,
-  PiOperationResult,
-  PiSession
+  PiConversation,
+  PiOperationResult
 } from "agents/harness/pi";
 import {
   projectEntries,
@@ -65,11 +65,11 @@ export function piChannelsHarness(
 ): AgentHarness {
   const ids = new MessageIds(pi, options.kv);
   const session = (id?: string): HarnessSession =>
-    new PiChannelsSession(pi, pi.session(id), ids);
+    new PiChannelsSession(pi, pi.conversation(id), ids);
   const sessions: HarnessSessions = {
-    create: async () => session((await pi.sessions.create()).id),
-    fork: async (from) => session((await pi.sessions.fork(from)).id),
-    list: (): Promise<SessionInfo[]> => pi.sessions.list()
+    create: async () => session((await pi.conversations.create()).id),
+    fork: async (from) => session((await pi.conversations.fork(from)).id),
+    list: (): Promise<SessionInfo[]> => pi.conversations.list()
   };
   return { sessions, session };
 }
@@ -163,10 +163,10 @@ class PiChannelsSession implements HarnessSession {
 
   constructor(
     private readonly pi: PiHarness,
-    private readonly session: PiSession,
+    private readonly conversation: PiConversation,
     private readonly ids: MessageIds
   ) {
-    this.id = session.id;
+    this.id = conversation.id;
   }
 
   async submit(
@@ -178,37 +178,41 @@ class PiChannelsSession implements HarnessSession {
     // pi has no participants, so `from` is dropped.
     const operationId = options.operationId ?? crypto.randomUUID();
     this.ids.record(this.id, operationId, input.messageId ?? operationId);
-    const receipt = await this.session.submit(toUserInput(input), {
+    const receipt = await this.conversation.submit(toUserInput(input), {
       operationId,
       ...(options.whenBusy && { whenBusy: options.whenBusy })
     });
     // Only once pi has it, so pending() lists it until it settles.
     this.unseen.add(operationId);
-    return receipt;
+    return {
+      operationId: receipt.operationId,
+      session: receipt.conversation,
+      accepted: receipt.accepted
+    };
   }
 
   /** Operation ids queued or running in pi. */
   async pending(): Promise<Set<string>> {
-    const pending = await this.pi.pending({ session: this.id });
+    const pending = await this.pi.pending({ conversation: this.id });
     return new Set(pending.map((p) => p.operationId));
   }
 
   abort(operationId?: string): Promise<boolean> {
-    return this.session.abort(operationId);
+    return this.conversation.abort(operationId);
   }
 
   async wait(operationId: string, signal?: AbortSignal) {
-    return toResult(await this.session.wait(operationId, signal));
+    return toResult(await this.conversation.wait(operationId, signal));
   }
 
   reset(handoff?: string): Promise<void> {
-    return this.session.reset(handoff);
+    return this.conversation.reset(handoff);
   }
 
   async watch(): Promise<SessionWatch> {
-    const watch = await this.session.watch();
+    const watch = await this.conversation.watch();
     const transcript = await this.transcript();
-    const pending = await this.pi.pending({ session: this.id });
+    const pending = await this.pi.pending({ conversation: this.id });
     const view = watch.value;
     const live = liveOf(view);
     const operations = await this.operations(live.run?.inputs ?? []);
@@ -244,7 +248,7 @@ class PiChannelsSession implements HarnessSession {
 
   /** The active transcript, with user messages under the caller's ids. */
   async transcript(): Promise<TranscriptMessage[]> {
-    const messages = projectEntries(await this.session.messages());
+    const messages = projectEntries(await this.conversation.messages());
     const users = messages.filter((m) => m.role === "user").map((m) => m.id);
     const ids = await this.ids.resolve(this.id, users);
     return toTranscript(messages, (entryId) => ids.get(entryId));
@@ -663,13 +667,13 @@ function toResult(result: PiOperationResult): OperationResult {
   return result.status === "done"
     ? {
         operationId: result.operationId,
-        session: result.session,
+        session: result.conversation,
         status: "done",
         ...(result.text !== undefined && { text: result.text })
       }
     : {
         operationId: result.operationId,
-        session: result.session,
+        session: result.conversation,
         status: "unanswered",
         ...(result.reason !== undefined && { reason: result.reason })
       };

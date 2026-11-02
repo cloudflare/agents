@@ -84,7 +84,7 @@ const Reminder = defineTask<
  * - `nowake:` opens pi without `onWake`.
  * - `retry:` retries a failed generation once, after two seconds.
  * - `park:` ends a task cut off once (pi's `restartLimit` of 1).
- * - `turns:` starts sessions with `maxTurns: 1`.
+ * - `turns:` starts conversations with `maxTurns: 1`.
  */
 function variantSettings(name: string) {
   const plain = name.replace(/^nowake:/, "");
@@ -262,7 +262,7 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
   }
 
   /**
-   * Leave a per-session wake job as a version before Pi 1.4 did, due now,
+   * Leave a per-conversation wake job as a version before Pi 1.4 did, due now,
    * with the alarm set for it.
    */
   async addLegacyWakeJob(): Promise<void> {
@@ -312,7 +312,7 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
   }
 
   /**
-   * Start a background reminder in the root session that sleeps until
+   * Start a background reminder in the root conversation that sleeps until
    * `until`, as pi's own retries and polls sleep.
    */
   async remindAt(until: number): Promise<void> {
@@ -349,10 +349,10 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return piHarnessInstances.countAfterGC(this.ctx.id.name ?? "");
   }
 
-  async prompt(text: string, session?: string) {
+  async prompt(text: string, conversation?: string) {
     const response = await this.harness.prompt(
       text,
-      session ? { session } : {}
+      conversation ? { conversation } : {}
     );
     return { ...response, messages: entryTexts(response.messages) };
   }
@@ -361,7 +361,7 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     text: string,
     options: {
       whenBusy?: PiWhenBusy;
-      session?: string;
+      conversation?: string;
       operationId?: string;
       entry?: InputEntry;
     } = {}
@@ -369,7 +369,7 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return this.harness.submit(text, options);
   }
 
-  continueSession(operationId?: string): Promise<PiReceipt> {
+  continueConversation(operationId?: string): Promise<PiReceipt> {
     return this.harness.continue(operationId ? { operationId } : {});
   }
 
@@ -406,21 +406,21 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     }
   }
 
-  wait(operationId: string, session?: string): Promise<PiOperationResult> {
-    return this.harness.wait(operationId, session ? { session } : {});
+  wait(operationId: string, conversation?: string): Promise<PiOperationResult> {
+    return this.harness.wait(operationId, conversation ? { conversation } : {});
   }
 
   /** `wait()`, given up after `ms`: `"waiting"` if it had not settled. */
   async waitWithin(
     operationId: string,
     ms: number,
-    session?: string
+    conversation?: string
   ): Promise<PiOperationResult | "waiting"> {
     const signal = AbortSignal.timeout(ms);
     try {
       return await this.harness.wait(operationId, {
         signal,
-        ...(session ? { session } : {})
+        ...(conversation ? { conversation } : {})
       });
     } catch (error) {
       if (signal.aborted) return "waiting";
@@ -428,8 +428,10 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     }
   }
 
-  async messages(session?: string): Promise<string[]> {
-    return entryTexts(await this.harness.messages(session ? { session } : {}));
+  async messages(conversation?: string): Promise<string[]> {
+    return entryTexts(
+      await this.harness.messages(conversation ? { conversation } : {})
+    );
   }
 
   async pending() {
@@ -485,12 +487,12 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return this.harness.abort({ operationId });
   }
 
-  async createSession(): Promise<string> {
-    return (await this.harness.sessions.create()).id;
+  async createConversation(): Promise<string> {
+    return (await this.harness.conversations.create()).id;
   }
 
-  async listSessions() {
-    return this.harness.sessions.list();
+  async listConversations() {
+    return this.harness.conversations.list();
   }
 
   /** Resolve once the gate tool has started `runs` times. */
@@ -507,11 +509,11 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
   }
 
   /**
-   * Watch the root session through one run: what the view showed on the way,
+   * Watch the root conversation through one run: what the view showed on the way,
    * and the transcript in its last value.
    */
   async watch(): Promise<{ sawRun: boolean; texts: string[] }> {
-    const watch = await this.harness.session().watch();
+    const watch = await this.harness.conversation().watch();
     let sawRun = false;
     let texts: string[] = [];
     await new Promise<void>((resolve) => {
@@ -532,20 +534,20 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   /** The transcript in a new watch's first value, as a client joining now sees it. */
   async watchTexts(): Promise<string[]> {
-    const watch = await this.harness.session().watch();
+    const watch = await this.harness.conversation().watch();
     await watch.stop();
     return entryTexts(watch.value.entries);
   }
 
-  /** The root session's transcript, oldest first, paged `size` entries at a time. */
+  /** The root conversation's transcript, oldest first, paged `size` entries at a time. */
   async pagedTexts(size: number): Promise<string[]> {
-    const session = this.harness.session();
+    const conversation = this.harness.conversation();
     const entries: EntryRecord[] = [];
-    let page = await session.entries({ order: "ascending" }, size);
+    let page = await conversation.entries({ order: "ascending" }, size);
     entries.push(...page.items);
     while (page.items.length === size) {
       const last = page.items[page.items.length - 1];
-      page = await session.entries(
+      page = await conversation.entries(
         { order: "ascending", minEntryId: (last.id + 1) as EntryRecord["id"] },
         size
       );
@@ -709,7 +711,7 @@ function multiplyTool(): ToolRegistration<typeof MultiplyParameters> {
 }
 
 /**
- * A harness given only its providers: no `defaults`, so new sessions start
+ * A harness given only its providers: no `defaults`, so new conversations start
  * without a model until one is set. Its factory does not pass `onWake`
  * either, so it runs on the polling fallback.
  */
@@ -749,7 +751,7 @@ export class PiNoDefaultsTestObject extends DurableObject<Cloudflare.Env> {
   }
 
   async setFauxModel(): Promise<void> {
-    await this.harness.session().setModel(this.#faux.getModel());
+    await this.harness.conversation().setModel(this.#faux.getModel());
   }
 
   async alarmTime(): Promise<number | null> {

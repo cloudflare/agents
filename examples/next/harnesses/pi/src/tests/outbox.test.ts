@@ -3,7 +3,7 @@ import { routeAgentRequest } from "agents";
 import { describe, expect, it } from "vitest";
 import { PiCommandOutbox } from "../outbox";
 import type { PiServerMessage } from "../protocol";
-import type { PiSessionView } from "../view";
+import type { PiConversationView } from "../view";
 
 async function connect(name: string): Promise<WebSocket> {
   const response = await routeAgentRequest(
@@ -102,7 +102,7 @@ describe("the client command outbox", () => {
     expect(outbox.pending()).toEqual([]);
     const stub = env.PI_HARNESS_TEST.getByName(name);
     await stub.wait(submit.operationId);
-    const view = JSON.parse(await stub.snapshotView()) as PiSessionView;
+    const view = JSON.parse(await stub.snapshotView()) as PiConversationView;
     const prompts = view.messages.filter(
       (message) =>
         message.role === "user" &&

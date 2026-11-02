@@ -7,15 +7,15 @@ here is in `agents`.
 
 ## What changed
 
-| Before (#2210)                               | Now                                                              |
-| -------------------------------------------- | ---------------------------------------------------------------- |
-| pi-agent-core `AgentHarness`                 | pi-durable `Harness`                                             |
-| `Tasks` run per lane, replay-driving pi      | one Lifecycle wake job, driven by pi's `onWake`                  |
-| intake table for queued submissions          | pi's own inbox                                                   |
-| `Streams` log per operation, cursors, replay | pi's conversation view (`session.watch()`), with its operations  |
-| pi's 7 session tables namespaced by adapter  | pi's own `SqliteStorage` schema, prefixed `pi_` (session store)  |
-| own event and message projections            | pi's view and operations on the wire, one projection (`view.ts`) |
-| compaction config                            | none; pi-durable has no compaction yet                           |
+| Before (#2210)                               | Now                                                                  |
+| -------------------------------------------- | -------------------------------------------------------------------- |
+| pi-agent-core `AgentHarness`                 | pi-durable `Harness`                                                 |
+| `Tasks` run per lane, replay-driving pi      | one Lifecycle wake job, driven by pi's `onWake`                      |
+| intake table for queued submissions          | pi's own inbox                                                       |
+| `Streams` log per operation, cursors, replay | pi's conversation view (`conversation.watch()`), with its operations |
+| pi's 7 session tables namespaced by adapter  | pi's own `SqliteStorage` schema, prefixed `pi_` (`openPiStorage`)    |
+| own event and message projections            | pi's view and operations on the wire, one projection (`view.ts`)     |
+| compaction config                            | none; pi-durable has no compaction yet                               |
 
 The harness went from about 3,600 lines to under 2,000, with no other SDK
 primitive besides Lifecycle jobs. It now lives in `packages/agents` as
@@ -30,7 +30,7 @@ and its `submit()` is durable before it resolves. Around it, the SDK only has
 to do one thing: wake the object when pi has work but no memory. That is one
 Lifecycle job, owned by `PiHarness` (`#wake`, `#wakeStep`,
 `#waitWhileActive` in `harness.ts`). Before Pi 1.4 it was one job per
-session; Pi 1.4's `Harness.wake()` made one job for the whole object enough.
+conversation; Pi 1.4's `Harness.wake()` made one job for the whole object enough.
 
 - **Tasks.** This was the old design. Tasks journals steps for replay, and pi
   is already the replay authority, so every Tasks step was a no-op wrapper
@@ -38,7 +38,7 @@ session; Pi 1.4's `Harness.wake()` made one job for the whole object enough.
   internal apertures.
 - **Driver (#2396).** We built this on the driver first, and it worked.
   But with pi owning admission and replay, all that was left of the driver
-  was a queue row per session plus a heartbeat job. The job alone is the
+  was a queue row per conversation plus a heartbeat job. The job alone is the
   durable state. The driver's queue, operation ids, `stop`, `onFail`, and
   retries went unused, and its atomic row-plus-job write needed
   `jobs.pushSync` (#2420). A harness with its own durable engine does not
@@ -85,22 +85,21 @@ cannot be lost to a wake that is completing.
 
 `onStart` pushes the wake if `pi.wake()` says pi has work. That covers
 restarts and conversations a subagent created without going through
-`submit()`. A per-session job left by an older version hands over to the
+`submit()`. A per-conversation job left by an older version hands over to the
 one wake when it runs. `wait()`, `pending()`, and `abort(operationId)` read or change
 pi's submissions directly. The wake holds no per-submission state.
 
 ## The harness interface
 
-`PiHarness` has the shape the other `examples/next/harnesses` share:
-`harness.prompt()`, `harness.submit()`, `harness.abort()`, `harness.wait()`,
-`harness.messages()` (pi's own `EntryRecord`s), `harness.sessions` (`create`, `get`, `fork`, `list`),
-`harness.session(id)` handles, and `session.watch()`. A session is a pi
-conversation. The root is `"1"`.
+`PiHarness` has `harness.prompt()`, `harness.submit()`, `harness.abort()`, `harness.wait()`,
+`harness.messages()` (pi's own `EntryRecord`s), `harness.conversations` (`create`, `get`, `fork`, `list`),
+`harness.conversation(id)` handles, and `conversation.watch()`. The root
+conversation is `"1"`.
 
-Transport is not part of the harness. The socket protocol (one session per
+Transport is not part of the harness. The socket protocol (one conversation per
 socket, a tool list on connect, commands) lives in the app's `sockets.ts` and
 `protocol.ts`, and the UI projection in `view.ts`. They use only the harness's
-public API, so another app could put the same sessions on SSE or RPC
+public API, so another app could put the same conversations on SSE or RPC
 instead.
 
 The shared `Harness` capability in #2285 goes further than this. It has
@@ -116,7 +115,7 @@ against it:
 - **No requests or replies.** pi-durable has no approval or permission
   primitive yet. A tool could park on a pi document and a hook, but that is
   ours to invent.
-- **No compaction.** `session.reset(handoff)` is the stand-in.
+- **No compaction.** `conversation.reset(handoff)` is the stand-in.
 
 ## Hard or unresolved
 
@@ -186,7 +185,7 @@ commits:
 - `submissionByRequest(conversationId, requestId)`, for `wait()`, `abort()`,
   and the `accepted` flag on a receipt. The Harness can only reacquire a
   submission by its pi id, and callers address operations by their own id.
-- `scanConversations()` for `sessions.list()`. The Harness has no
+- `scanConversations()` for `conversations.list()`. The Harness has no
   conversation listing.
 
 Both read committed state only, so they are safe here. **Ask for:**
@@ -196,7 +195,7 @@ Both read committed state only, so they are safe here. **Ask for:**
 
 pi's SQLite schema uses bare names such as `tasks`, `entries`,
 `conversations`, and `documents`, which easily collide in an object that
-also hosts other state. The session store rewrites identifiers outside
+also hosts other state. The storage rewrites identifiers outside
 string literals, using the names it reads from pi's exported
 `SQLITE_MIGRATIONS`. pi's conformance suite passes against it. It breaks if
 a future pi statement puts a table name in a string literal or builds SQL
@@ -211,12 +210,12 @@ check the signal. pi's abort has no grace period.
 ### Watches are per socket and in memory
 
 This is app glue in `sockets.ts`, not the harness. Each socket gets its own
-`session.watch()`. After hibernation or eviction, the host's
+`conversation.watch()`. After hibernation or eviction, the host's
 `onStart` calls `sockets.reattach()`, which re-watches every socket and
 sends the whole view again, and the client replaces its state.
 `ctx.getWebSockets(tag)` finds sockets by tag, but nothing gives the tags of
-a socket, so the re-watch walks `sessions.list()` and looks up each
-session's tag.
+a socket, so the re-watch walks `conversations.list()` and looks up each
+conversation's tag.
 
 ### Surprises in pi
 
@@ -287,4 +286,4 @@ example.
   or tested here.
 - `ExecutionEnv` for pi's own `read`/`bash`/`edit`/`write`. Unused here:
   the Workspace tools come from computer instead (see "Workspace tools").
-- Session deletion. pi has no conversation delete.
+- Conversation deletion. pi has no conversation delete.

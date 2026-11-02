@@ -12,16 +12,16 @@ import type { BrowserState } from "./shared";
 
 /**
  * The agent's browser for the UI: Live View URLs and each internal host's
- * target, from `GET /api/browser/<session>`. Polls while a turn runs, since
+ * target, from `GET /api/browser/<conversation>`. Polls while a turn runs, since
  * that's when the agent opens pages and assigns hosts.
  */
-export function useBrowserState(session: string, running: boolean) {
-  // Tagged with its session, so another session's state never shows.
+export function useBrowserState(conversation: string, running: boolean) {
+  // Tagged with its conversation, so another conversation's state never shows.
   const [loaded, setLoaded] = useState<{
-    session: string;
+    conversation: string;
     state: BrowserState;
   } | null>(null);
-  const state = loaded?.session === session ? loaded.state : null;
+  const state = loaded?.conversation === conversation ? loaded.state : null;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -29,31 +29,31 @@ export function useBrowserState(session: string, running: boolean) {
   // effects that call it.
   const refresh = useCallback(
     () =>
-      fetch(`/api/browser/${session}`)
+      fetch(`/api/browser/${conversation}`)
         .then(async (response) => {
           if (!response.ok) throw new Error(await response.text());
           return (await response.json()) as BrowserState;
         })
         .then(
           (state) => {
-            setLoaded({ session, state });
+            setLoaded({ conversation, state });
             setError(null);
           },
           (cause: unknown) =>
             setError(cause instanceof Error ? cause.message : String(cause))
         ),
-    [session]
+    [conversation]
   );
 
   const close = useCallback(async () => {
     setBusy(true);
     try {
-      await fetch(`/api/browser/${session}`, { method: "DELETE" });
+      await fetch(`/api/browser/${conversation}`, { method: "DELETE" });
       await refresh();
     } finally {
       setBusy(false);
     }
-  }, [session, refresh]);
+  }, [conversation, refresh]);
 
   // Once on load and when a turn ends, then every 5s during a turn.
   useEffect(() => {

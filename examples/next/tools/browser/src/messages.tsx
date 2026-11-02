@@ -329,7 +329,7 @@ export function AgentTurn({
   messages: readonly TranscriptMessage[];
   results: Map<string, ToolResultPart>;
   runningTools: readonly PiRunningTool[];
-  /** True while the session runs and this is the last turn. */
+  /** True while the conversation runs and this is the last turn. */
   turnRunning: boolean;
   /** True while the last message in `messages` is streaming. */
   streaming: boolean;

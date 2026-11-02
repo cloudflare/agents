@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { applyImmutable } from "@earendil-works/chord/delta";
 import type { ConversationView } from "@earendil-works/pi-durable";
 import type { PiServerMessage } from "../protocol";
-import { EMPTY_VIEW, projectView, type PiSessionView } from "../view";
+import { EMPTY_VIEW, projectView, type PiConversationView } from "../view";
 
 async function connect(name: string, query = ""): Promise<WebSocket> {
   const response = await routeAgentRequest(
@@ -23,7 +23,7 @@ async function connect(name: string, query = ""): Promise<WebSocket> {
 /** Applies every `view` and `ops` frame and projects the view, as the browser hook does. */
 function follow(socket: WebSocket) {
   let piView: ConversationView | null = null;
-  let view: PiSessionView = EMPTY_VIEW;
+  let view: PiConversationView = EMPTY_VIEW;
   const frames: PiServerMessage[] = [];
   const waiters: Array<() => void> = [];
   socket.addEventListener("message", (event) => {
@@ -53,7 +53,7 @@ function follow(socket: WebSocket) {
   return { view: () => view, frames, until };
 }
 
-describe("the session WebSocket protocol", () => {
+describe("the conversation WebSocket protocol", () => {
   it("sends the view, then pi's operations for a run started over the socket", async () => {
     const name = crypto.randomUUID();
     const socket = await connect(name);
@@ -63,7 +63,7 @@ describe("the session WebSocket protocol", () => {
     );
     expect(client.frames.find((frame) => frame.type === "hello")).toMatchObject(
       {
-        session: "1",
+        conversation: "1",
         tools: expect.arrayContaining([
           expect.objectContaining({ name: "multiply" })
         ])
@@ -89,7 +89,7 @@ describe("the session WebSocket protocol", () => {
       client.frames.find((frame) => frame.type === "result")
     ).toMatchObject({
       id: "c1",
-      result: { session: "1", accepted: true }
+      result: { conversation: "1", accepted: true }
     });
     // The operations rebuilt the same view a client joining now gets.
     const stub = env.PI_HARNESS_TEST.getByName(name);

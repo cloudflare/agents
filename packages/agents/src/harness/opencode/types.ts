@@ -2,9 +2,8 @@ import type { OpenCodeWorkerd } from "@opencode/sdk/workerd";
 
 /**
  * `OpenCodeHarness`'s own types: how the harness addresses sessions and
- * reports operations. They match `PiHarness`'s, field for field. Anything
- * OpenCode already publishes (prompt content, transcript messages, events)
- * is OpenCode's type, used directly.
+ * reports operations. Anything OpenCode already publishes (prompt content,
+ * transcript messages, events) is OpenCode's type, used directly.
  */
 
 /** The OpenCode host the factory returns: `OpenCodeWorkerd.create`'s result. */
@@ -145,7 +144,7 @@ export type OpenCodeFinish =
 
 /**
  * One event on a session's stream, translated from OpenCode's events into
- * the same kinds of event `PiHarness` and `ContainerHarness` report.
+ * the same kinds of event `ContainerHarness` reports.
  * `messageId` is OpenCode's assistant message id. Text and reasoning are
  * addressed by `ordinal`, their position among the message's parts of the
  * same kind.

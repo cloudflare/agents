@@ -5,19 +5,16 @@
  */
 export {
   PiHarness,
-  PiSession,
-  PiSessions,
-  ROOT_SESSION,
+  PiConversation,
+  PiConversations,
+  ROOT_CONVERSATION,
   type PiHarnessContext,
   type PiHarnessFactory,
   type PiHarnessOptions,
   type PiModel,
-  type PiSessionDefaults
+  type PiConversationDefaults
 } from "./harness";
-export {
-  openPiSessionStore,
-  type PiSessionStoreOptions
-} from "./session-store";
+export { openPiStorage, type PiStorageOptions } from "./storage";
 export { skills } from "./skills";
 export type {
   PiContinueOptions,
@@ -25,9 +22,9 @@ export type {
   PiPendingOperation,
   PiPromptResponse,
   PiReceipt,
-  PiSessionId,
-  PiSessionInfo,
-  PiSessionOptions,
+  PiConversationId,
+  PiConversationInfo,
+  PiConversationOptions,
   PiSubmitOptions,
   PiWhenBusy,
   PiWhenIdle

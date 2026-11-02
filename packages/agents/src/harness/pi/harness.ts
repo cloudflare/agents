@@ -31,23 +31,23 @@ import {
   withAbortSignal,
   type Context
 } from "@earendil-works/chord/context";
-import { openPiSessionStore } from "./session-store";
+import { openPiStorage } from "./storage";
 import type {
   PiContinueOptions,
   PiOperationResult,
   PiPendingOperation,
   PiPromptResponse,
   PiReceipt,
-  PiSessionId,
-  PiSessionInfo,
-  PiSessionOptions,
+  PiConversationId,
+  PiConversationInfo,
+  PiConversationOptions,
   PiSubmitOptions
 } from "./types";
 
 const BG = BACKGROUND_CONTEXT;
 
-/** The root session's id. */
-export const ROOT_SESSION: PiSessionId = String(ROOT_CONVERSATION_ID);
+/** The root conversation's id. */
+export const ROOT_CONVERSATION: PiConversationId = String(ROOT_CONVERSATION_ID);
 
 /**
  * The wake timings. They suit a real deployment; only tests change them,
@@ -102,8 +102,8 @@ export function setWakeTimingForTests(
 const WAKE_FN = "wake";
 
 /**
- * The one wake job. Before Pi 1.4 there was one per session, with ids
- * `pi-wake:<session>`; a left-over one hands over to this one.
+ * The one wake job. Before Pi 1.4 there was one per conversation, with ids
+ * `pi-wake:<conversation>`; a left-over one hands over to this one.
  */
 const WAKE_JOB_ID = "pi-wake";
 
@@ -153,7 +153,7 @@ export type PiHarnessFactory = (
  * A model, as pi-ai describes one: `createAI`'s `ai("@cf/…")` returns one.
  *
  * Only its `provider` and `id` are used. pi stores that reference with
- * the session and resolves it, at each request, against the `Models` the
+ * the conversation and resolves it, at each request, against the `Models` the
  * factory opened pi with. So the model must be one those `Models` list,
  * and options passed to `ai(id, options)` here, such as `fallback`, are not
  * applied.
@@ -161,14 +161,15 @@ export type PiHarnessFactory = (
 export type PiModel = Pick<Model<Api>, "provider" | "id">;
 
 /**
- * Applied to a session the first time it is created. Without a model, a
- * session's generation fails as unanswered until `session.setModel` sets one.
+ * Applied to a conversation the first time it is created. Without a model,
+ * a conversation's generation fails as unanswered until
+ * `conversation.setModel` sets one.
  */
-export type PiSessionDefaults = {
+export type PiConversationDefaults = {
   /**
-   * Model for new sessions, by its `provider` and `id`; it must be on the
+   * Model for new conversations, by its `provider` and `id`; it must be on the
    * `Models` the factory opens pi with (see `PiModel`). Change one
-   * session's with `session.setModel`.
+   * conversation's with `conversation.setModel`.
    */
   readonly model?: PiModel;
   readonly thinkingLevel?: ModelThinkingLevel;
@@ -194,8 +195,8 @@ type WakeTiming = {
 export type PiHarnessOptions = {
   /** Opens pi's `Harness` over the storage this object prepared. */
   readonly harness: PiHarnessFactory;
-  /** What a new session starts with. */
-  readonly defaults?: PiSessionDefaults;
+  /** What a new conversation starts with. */
+  readonly defaults?: PiConversationDefaults;
 };
 
 type Opened = {
@@ -208,10 +209,12 @@ function modelRef(model: PiModel): ModelRef {
   return { provider: model.provider, modelId: model.id };
 }
 
-function conversationId(session: PiSessionId): ConversationId {
-  const id = Number(session);
+function conversationId(conversation: PiConversationId): ConversationId {
+  const id = Number(conversation);
   if (!Number.isSafeInteger(id) || id < 1) {
-    throw new Error(`Invalid pi session ${JSON.stringify(session)}`);
+    throw new Error(
+      `Invalid pi conversation id ${JSON.stringify(conversation)}`
+    );
   }
   return id as ConversationId;
 }
@@ -225,19 +228,30 @@ function assistantText(entry: EntryRecord | undefined): string {
     .join("");
 }
 
+/** Pi's handle on a conversation, with every member. */
+async function piConversationOf(
+  pi: Harness,
+  id: PiConversationId
+): Promise<Conversation> {
+  const conversation = await pi.conversation(conversationId(id), BG);
+  if (!conversation) throw new Error(`Unknown pi conversation ${id}`);
+  return conversation;
+}
+
 function signalContext(signal: AbortSignal | undefined): Context {
   return signal ? withAbortSignal(signal, BG) : BG;
 }
 
 /**
  * pi-durable hosted in a Durable Object, behind a small harness interface:
- * `harness.prompt()`, `harness.sessions`, `harness.session(id)`. How a session reaches a
- * client (sockets, SSE, RPC) is the host's glue, built on `session.events()`.
+ * `harness.prompt()`, `harness.conversations`, `harness.conversation(id)`.
+ * How a conversation reaches a client (sockets, SSE, RPC) is the host's
+ * glue, built on `conversation.watch()`.
  *
  * pi owns everything about a run: the transcript, the inbox of steers and
  * follow-ups, generation and tool tasks, retries, crash recovery, and the
  * live view. It keeps all of it in its own tables in this object's SQLite
- * database (see `session-store.ts`).
+ * database (see `storage.ts`).
  *
  * What pi cannot do on a Durable Object is wake itself: its scheduler runs
  * in memory, and an evicted object has no memory. The harness is that wake,
@@ -251,7 +265,7 @@ function signalContext(signal: AbortSignal | undefined): Context {
  * and the job waits again.
  */
 export class PiHarness extends LifecycleCapability {
-  readonly sessions: PiSessions;
+  readonly conversations: PiConversations;
   readonly #options: PiHarnessOptions;
   /** The in-memory wait on pi's running work, inside an alarm's work. */
   #waiting: Promise<void> | undefined;
@@ -277,7 +291,7 @@ export class PiHarness extends LifecycleCapability {
   constructor(options: PiHarnessOptions) {
     super("pi-harness");
     this.#options = options;
-    this.sessions = new PiSessions(this);
+    this.conversations = new PiConversations(this);
   }
 
   #setWakeTiming(timing: WakeTiming): void {
@@ -303,7 +317,7 @@ export class PiHarness extends LifecycleCapability {
     if (context.job.fn !== WAKE_FN) return;
     let outcome: LifecycleJobOutcome;
     if (context.job.id !== WAKE_JOB_ID) {
-      // A per-session wake from before Pi 1.4: hand over to the one wake.
+      // A per-conversation wake from before Pi 1.4: hand over to the one wake.
       await this.#wake();
       outcome = undefined;
     } else {
@@ -353,9 +367,9 @@ export class PiHarness extends LifecycleCapability {
 
   // ── The harness interface ────────────────────────────────────────────────
 
-  /** A handle on one session. No I/O until you call it. */
-  session(id: PiSessionId = ROOT_SESSION): PiSession {
-    return new PiSession(this, id);
+  /** A handle on one conversation. No I/O until you call it. */
+  conversation(id: PiConversationId = ROOT_CONVERSATION): PiConversation {
+    return new PiConversation(this, id);
   }
 
   /** Submit a prompt and wait for its answer. */
@@ -363,50 +377,55 @@ export class PiHarness extends LifecycleCapability {
     input: UserInput,
     options: PiSubmitOptions = {}
   ): Promise<PiPromptResponse> {
-    return this.session(options.session).prompt(input, options);
+    return this.conversation(options.conversation).prompt(input, options);
   }
 
   /** Durably submit a prompt. Resolves before the model runs. */
   submit(input: UserInput, options: PiSubmitOptions = {}): Promise<PiReceipt> {
-    return this.session(options.session).submit(input, options);
+    return this.conversation(options.conversation).submit(input, options);
   }
 
   /**
-   * Run an idle session again on its transcript as it is, without new input.
-   * See `PiSession.continue`.
+   * Run an idle conversation again on its transcript as it is, without new
+   * input. See `PiConversation.continue`.
    */
   continue(
-    options: PiSessionOptions & PiContinueOptions = {}
+    options: PiConversationOptions & PiContinueOptions = {}
   ): Promise<PiReceipt> {
-    return this.session(options.session).continue(options);
+    return this.conversation(options.conversation).continue(options);
   }
 
-  /** Stop one operation, or everything running in a session. */
+  /** Stop one operation, or everything running in a conversation. */
   abort(
-    options: PiSessionOptions & { readonly operationId?: string } = {}
+    options: PiConversationOptions & { readonly operationId?: string } = {}
   ): Promise<boolean> {
-    return this.session(options.session).abort(options.operationId);
+    return this.conversation(options.conversation).abort(options.operationId);
   }
 
   wait(
     operationId: string,
-    options: PiSessionOptions & { readonly signal?: AbortSignal } = {}
+    options: PiConversationOptions & { readonly signal?: AbortSignal } = {}
   ): Promise<PiOperationResult> {
-    return this.session(options.session).wait(operationId, options.signal);
+    return this.conversation(options.conversation).wait(
+      operationId,
+      options.signal
+    );
   }
 
-  /** The session's active transcript, as pi's entries. */
-  messages(options: PiSessionOptions = {}): Promise<EntryRecord[]> {
-    return this.session(options.session).messages();
+  /** The conversation's active transcript, as pi's entries. */
+  messages(options: PiConversationOptions = {}): Promise<EntryRecord[]> {
+    return this.conversation(options.conversation).messages();
   }
 
   /** Submissions pi has not settled yet, oldest first. */
-  async pending(options: PiSessionOptions = {}): Promise<PiPendingOperation[]> {
+  async pending(
+    options: PiConversationOptions = {}
+  ): Promise<PiPendingOperation[]> {
     const { pi } = await this.#open();
     const id =
-      options.session === undefined
+      options.conversation === undefined
         ? undefined
-        : conversationId(options.session);
+        : conversationId(options.conversation);
     const inspection = await pi.inspect(BG);
     return inspection.submissions.flatMap((record): PiPendingOperation[] => {
       if (record.requestId === undefined) return [];
@@ -432,7 +451,7 @@ export class PiHarness extends LifecycleCapability {
       return [
         {
           operationId: record.requestId,
-          session: String(record.conversationId),
+          conversation: String(record.conversationId),
           status
         }
       ];
@@ -444,14 +463,11 @@ export class PiHarness extends LifecycleCapability {
     return (await this.#open()).pi;
   }
 
-  // ── Used by PiSession and PiSessions ─────────────────────────────────────
+  // ── Used by PiConversation and PiConversations ───────────────────────────
 
   /** @internal */
-  async conversation(session: PiSessionId): Promise<Conversation> {
-    const { pi } = await this.#open();
-    const conversation = await pi.conversation(conversationId(session), BG);
-    if (!conversation) throw new Error(`Unknown pi session ${session}`);
-    return conversation;
+  async piConversation(id: PiConversationId): Promise<Conversation> {
+    return piConversationOf((await this.#open()).pi, id);
   }
 
   /** @internal */
@@ -461,11 +477,11 @@ export class PiHarness extends LifecycleCapability {
 
   /** @internal */
   async enqueue(
-    session: PiSessionId,
+    conversation: PiConversationId,
     input: UserInput,
     options: PiSubmitOptions
   ): Promise<PiReceipt> {
-    return this.#admitDraft(session, options.operationId, {
+    return this.#admitDraft(conversation, options.operationId, {
       type: "input",
       content: input,
       whenBusy: options.whenBusy ?? "followUp",
@@ -474,42 +490,45 @@ export class PiHarness extends LifecycleCapability {
     });
   }
 
-  /** @internal Start a run on the context as it is, without new input. */
+  /** @internal */
   enqueueContinue(
-    session: PiSessionId,
+    conversation: PiConversationId,
     options: PiContinueOptions
   ): Promise<PiReceipt> {
-    return this.#admitDraft(session, options.operationId, {
+    return this.#admitDraft(conversation, options.operationId, {
       type: "continue"
     });
   }
 
   async #admitDraft(
-    session: PiSessionId,
+    conversation: PiConversationId,
     requested: string | undefined,
     draft: SubmissionDraft
   ): Promise<PiReceipt> {
     const operationId = requested ?? crypto.randomUUID();
-    const { storage } = await this.#open();
-    const conversation = await this.conversation(session);
+    const { pi, storage } = await this.#open();
+    const piConversation = await piConversationOf(pi, conversation);
     const accepted = await this.#admit(async () => {
       // The one admission. pi deduplicates by request id.
       const accepted =
         (await storage.submissionByRequest(
-          conversation.id,
+          piConversation.id,
           operationId,
           BG
         )) === undefined;
-      await conversation.submit({ ...draft, requestId: operationId }, BG);
+      await piConversation.submit({ ...draft, requestId: operationId }, BG);
       return accepted;
     });
-    return { operationId, session, accepted };
+    return { operationId, conversation, accepted };
   }
 
-  /** @internal Withdraw a queued input, or abort the run it joined. */
-  async withdraw(session: PiSessionId, operationId: string): Promise<boolean> {
+  /** @internal */
+  async withdraw(
+    conversation: PiConversationId,
+    operationId: string
+  ): Promise<boolean> {
     const { pi, storage } = await this.#open();
-    const id = conversationId(session);
+    const id = conversationId(conversation);
     const record = await storage.submissionByRequest(id, operationId, BG);
     if (!record || record.status === "done" || record.status === "unanswered") {
       return false;
@@ -532,29 +551,29 @@ export class PiHarness extends LifecycleCapability {
     }
   }
 
-  /** @internal Wait for pi to settle an operation, by its request id. */
+  /** @internal */
   async settled(
-    session: PiSessionId,
+    conversation: PiConversationId,
     operationId: string,
     signal?: AbortSignal
   ): Promise<PiOperationResult> {
-    const conversation = await this.conversation(session);
+    const piConversation = await this.piConversation(conversation);
     const context = signalContext(signal);
     const submission = await this.#findSubmission(
-      conversation.id,
+      piConversation.id,
       operationId,
       context
     );
     if (!submission) {
       return {
         operationId,
-        session,
+        conversation,
         status: "unanswered",
         reason: "not_found"
       };
     }
     return this.#result(
-      session,
+      conversation,
       operationId,
       await submission.wait(context),
       context
@@ -616,7 +635,7 @@ export class PiHarness extends LifecycleCapability {
 
   /**
    * One run of the wake job. It never admits or replays anything: it reads
-   * `pi.wake()`, which is all of pi's sessions at once. Running work is
+   * `pi.wake()`, which is all of pi's conversations at once. Running work is
    * waited on; a sleep reschedules the job for when it ends; no work
    * completes the job. pi does all the work in between.
    */
@@ -752,7 +771,7 @@ export class PiHarness extends LifecycleCapability {
     // have returned; let it finish before another opens over the same
     // database.
     await this.#lastClose;
-    const storage = await openPiSessionStore(this.lifecycle.storage);
+    const storage = await openPiStorage(this.lifecycle.storage);
     const pi = await this.#options.harness({
       storage,
       context: BG,
@@ -811,7 +830,7 @@ export class PiHarness extends LifecycleCapability {
     this.#lastClose = closed;
   }
 
-  /** @internal The per-conversation defaults supported by pi-durable. */
+  /** @internal */
   agentDefaults(): AgentChange {
     const defaults = this.#options.defaults;
     return {
@@ -839,7 +858,7 @@ export class PiHarness extends LifecycleCapability {
   }
 
   async #result(
-    session: PiSessionId,
+    conversation: PiConversationId,
     operationId: string,
     settled: SettledSubmissionRecord,
     context: Context
@@ -847,15 +866,15 @@ export class PiHarness extends LifecycleCapability {
     if (settled.status === "unanswered") {
       return {
         operationId,
-        session,
+        conversation,
         status: "unanswered",
         reason: settled.reason
       };
     }
     if (settled.type === "write")
-      return { operationId, session, status: "done" };
-    const conversation = await this.conversation(session);
-    const page = await conversation.entries(
+      return { operationId, conversation, status: "done" };
+    const piConversation = await this.piConversation(conversation);
+    const page = await piConversation.entries(
       { minEntryId: settled.answer, maxEntryId: settled.answer },
       1,
       undefined,
@@ -863,7 +882,7 @@ export class PiHarness extends LifecycleCapability {
     );
     return {
       operationId,
-      session,
+      conversation,
       status: "done",
       text: assistantText(page.items[0])
     };
@@ -871,11 +890,11 @@ export class PiHarness extends LifecycleCapability {
 }
 
 /** One pi conversation, addressed through the harness. */
-export class PiSession {
+export class PiConversation {
   readonly #harness: PiHarness;
-  readonly id: PiSessionId;
+  readonly id: PiConversationId;
 
-  constructor(harness: PiHarness, id: PiSessionId) {
+  constructor(harness: PiHarness, id: PiConversationId) {
     this.#harness = harness;
     this.id = id;
   }
@@ -898,9 +917,9 @@ export class PiSession {
   /**
    * Start a run on the transcript as it is, without a new message: for
    * example, after a run ended unanswered because the model failed or the
-   * object kept crashing. Only an idle session takes one; a busy one rejects
-   * with pi-durable's `ConversationBusy`. A transcript that ends in an answer
-   * settles `unanswered` with reason `nothing_to_answer`.
+   * object kept crashing. Only an idle conversation takes one; a busy one
+   * rejects with pi-durable's `ConversationBusy`. A transcript that ends in
+   * an answer settles `unanswered` with reason `nothing_to_answer`.
    */
   continue(options: PiContinueOptions = {}): Promise<PiReceipt> {
     return this.#harness.enqueueContinue(this.id, options);
@@ -918,45 +937,48 @@ export class PiSession {
 
   /**
    * Withdraw one queued operation (or abort the run it joined), or, with no
-   * id, abort the session: pi withdraws queued inputs and aborts the
+   * id, abort the conversation: pi withdraws queued inputs and aborts the
    * running work.
    */
   async abort(operationId?: string): Promise<boolean> {
     if (operationId !== undefined) {
       return this.#harness.withdraw(this.id, operationId);
     }
-    const conversation = await this.#harness.conversation(this.id);
+    const conversation = await this.#harness.piConversation(this.id);
     await conversation.abort(BG);
     return true;
   }
 
   /** Start a new context, optionally from a handoff note. */
   async reset(handoff?: string): Promise<void> {
-    await (await this.#harness.conversation(this.id)).reset(handoff, BG);
+    const pi = await this.#harness.pi();
+    await (await piConversationOf(pi, this.id)).reset(handoff, BG);
   }
 
   /**
-   * Change this session's model, by its `provider` and `id`; it must be on
+   * Change this conversation's model, by its `provider` and `id`; it must be on
    * the `Models` the factory opened pi with (see `PiModel`).
    */
   async setModel(model: PiModel): Promise<void> {
     await (
-      await this.#harness.conversation(this.id)
+      await this.#harness.piConversation(this.id)
     ).configure({ model: modelRef(model) }, BG);
   }
 
   /** The active transcript, as pi's entries since the newest reset. */
   async messages(): Promise<EntryRecord[]> {
-    const view = await (await this.#harness.conversation(this.id)).context(BG);
+    const view = await (
+      await this.#harness.piConversation(this.id)
+    ).context(BG);
     return [...view.entries];
   }
 
   /**
-   * Watch this session: pi's conversation view, a window over the transcript
-   * with the session's documents, such as `pi.live` (the answer being
-   * streamed, running tools, and why the last run ended without an answer)
-   * and `pi.inbox`. The first value holds the newest entries; new entries
-   * are appended. Each change carries pi's operations, for a client that
+   * Watch this conversation: pi's conversation view, a window over the
+   * transcript with the conversation's documents, such as `pi.live` (the
+   * answer being streamed, running tools, and why the last run ended without
+   * an answer) and `pi.inbox`. The first value holds the newest entries; new
+   * entries are appended. Each change carries pi's operations, for a client that
    * forwards them. To render more than the window, merge each value into a
    * `ConversationTranscript` that pages with `entries()`.
    */
@@ -964,11 +986,11 @@ export class PiSession {
     window?: ConversationWindow,
     context: Context = BG
   ): Promise<ConversationWatch> {
-    return (await this.#harness.conversation(this.id)).watch(context, window);
+    return (await this.#harness.piConversation(this.id)).watch(context, window);
   }
 
   /**
-   * A page of this session's transcript, newest first unless `query.order`
+   * A page of this conversation's transcript, newest first unless `query.order`
    * is `ascending`, including entries before its resets. The loader a
    * `ConversationTranscript` takes.
    */
@@ -977,7 +999,7 @@ export class PiSession {
     limit: number,
     context: Context = BG
   ): Promise<Page<EntryRecord, Cursor>> {
-    return (await this.#harness.conversation(this.id)).entries(
+    return (await this.#harness.piConversation(this.id)).entries(
       query,
       limit,
       undefined,
@@ -993,19 +1015,19 @@ export class PiSession {
 }
 
 /** Every pi conversation in this object. */
-export class PiSessions {
+export class PiConversations {
   readonly #harness: PiHarness;
 
   constructor(harness: PiHarness) {
     this.#harness = harness;
   }
 
-  get(id: PiSessionId): PiSession {
-    return this.#harness.session(id);
+  get(id: PiConversationId): PiConversation {
+    return this.#harness.conversation(id);
   }
 
-  /** A new top-level session, configured like the root. */
-  async create(): Promise<PiSession> {
+  /** A new top-level conversation, configured like the root. */
+  async create(): Promise<PiConversation> {
     const pi = await this.#harness.pi();
     const conversation = await pi.createConversation(
       {
@@ -1014,37 +1036,38 @@ export class PiSessions {
       },
       BG
     );
-    return this.#harness.session(String(conversation.id));
+    return this.#harness.conversation(String(conversation.id));
   }
 
-  /** A new session that sees `from`'s history up to its newest entry. */
-  async fork(from: PiSessionId): Promise<PiSession> {
-    const conversation = await this.#harness.conversation(from);
+  /** A new conversation that sees `from`'s history up to its newest entry. */
+  async fork(from: PiConversationId): Promise<PiConversation> {
+    const conversation = await this.#harness.piConversation(from);
     const newest = await conversation.entries({}, 1, undefined, BG);
     const at = newest.items[0];
-    if (!at) throw new Error(`Session ${from} has no entries to fork from`);
+    if (!at)
+      throw new Error(`Conversation ${from} has no entries to fork from`);
     const fork = await conversation.fork(
       at.id,
       { ownership: { kind: "ownerless" } },
       BG
     );
-    return this.#harness.session(String(fork.id));
+    return this.#harness.conversation(String(fork.id));
   }
 
   /**
    * Every conversation, including ones subagent tools own. Read from pi's
    * storage directly: the Harness has no conversation listing.
    */
-  async list(): Promise<PiSessionInfo[]> {
+  async list(): Promise<PiConversationInfo[]> {
     const storage = await this.#harness.storage();
     const pi = await this.#harness.pi();
-    const sessions: PiSessionInfo[] = [];
+    const conversations: PiConversationInfo[] = [];
     let cursor: Parameters<SqliteStorage["scanConversations"]>[2];
     for (;;) {
       const page = await storage.scanConversations({}, 100, cursor, BG);
       for (const record of page.items) {
         const live = await pi.snapshot(LiveDoc, record.id, BG);
-        sessions.push({
+        conversations.push({
           id: String(record.id),
           ...(record.parent
             ? { parent: String(record.parent.conversationId) }
@@ -1052,7 +1075,7 @@ export class PiSessions {
           busy: live?.run !== undefined
         });
       }
-      if (page.next === undefined) return sessions;
+      if (page.next === undefined) return conversations;
       cursor = page.next;
     }
   }

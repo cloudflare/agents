@@ -29,10 +29,10 @@ import type { ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { Streamdown } from "streamdown";
 import type { ToolInfo, TranscriptMessage, TranscriptPart } from "./protocol";
-import { usePiSession } from "./use-pi-session";
+import { usePiConversation } from "./use-pi-conversation";
 import "./styles.css";
 
-const SESSION_KEY = "pi-harness-session";
+const CONVERSATION_KEY = "pi-harness-conversation";
 const MODEL = "@cf/zai-org/glm-5.3-flash";
 
 const SUGGESTIONS = [
@@ -56,11 +56,11 @@ const SUGGESTIONS = [
   }
 ] satisfies Array<{ icon: ReactNode; label: string; value: string }>;
 
-function getSession(): string {
-  const existing = localStorage.getItem(SESSION_KEY);
+function getConversation(): string {
+  const existing = localStorage.getItem(CONVERSATION_KEY);
   if (existing) return existing;
   const created = crypto.randomUUID();
-  localStorage.setItem(SESSION_KEY, created);
+  localStorage.setItem(CONVERSATION_KEY, created);
   return created;
 }
 
@@ -373,7 +373,7 @@ function Sidebar({
 }
 
 function App() {
-  const [session, setSession] = useState(getSession);
+  const [conversation, setConversation] = useState(getConversation);
   const [prompt, setPrompt] = useState("");
   const [toolsOpen, setToolsOpen] = useState(
     () => window.matchMedia("(min-width: 1100px)").matches
@@ -391,7 +391,7 @@ function App() {
     error,
     submit: submitPrompt,
     abort
-  } = usePiSession(session);
+  } = usePiConversation(conversation);
   const runningTools = running_.map((tool) => tool.name);
 
   useEffect(() => {
@@ -408,10 +408,10 @@ function App() {
     submitPrompt(text, whenBusy);
   };
 
-  const newSession = () => {
+  const newConversation = () => {
     const next = crypto.randomUUID();
-    localStorage.setItem(SESSION_KEY, next);
-    setSession(next);
+    localStorage.setItem(CONVERSATION_KEY, next);
+    setConversation(next);
   };
 
   const empty = messages.length === 0 && !live && !running;
@@ -434,7 +434,7 @@ function App() {
               <div className="min-w-0">
                 <h1 className="truncate text-base font-semibold">Pi harness</h1>
                 <p className="truncate text-xs text-kumo-subtle">
-                  Session <code>{session.slice(0, 8)}</code>
+                  Conversation <code>{conversation.slice(0, 8)}</code>
                 </p>
               </div>
             </div>
@@ -460,8 +460,8 @@ function App() {
               <Button
                 variant="ghost"
                 shape="square"
-                aria-label="New session"
-                onClick={newSession}
+                aria-label="New conversation"
+                onClick={newConversation}
                 icon={<PlusIcon size={16} />}
               />
               <ModeToggle />

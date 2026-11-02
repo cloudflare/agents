@@ -33,7 +33,9 @@ expectTypeOf<PiWhenIdle>().toEqualTypeOf<
 // `operationId`.
 expectTypeOf<
   Exclude<keyof InputSubmissionDraft, "type" | "content" | "requestId">
->().toEqualTypeOf<Exclude<keyof PiSubmitOptions, "session" | "operationId">>();
+>().toEqualTypeOf<
+  Exclude<keyof PiSubmitOptions, "conversation" | "operationId">
+>();
 
 expectTypeOf<PiOperationResult["status"]>().toEqualTypeOf<
   SettledSubmissionRecord["status"]
