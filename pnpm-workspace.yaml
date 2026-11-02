@@ -52,3 +52,7 @@ minimumReleaseAgeExclude:
   - "@opentui/*"
 overrides:
   "@earendil-works/pi-agent-core>@earendil-works/pi-ai": "~1.4.0"
+  # Lifecycle.retryable() imports cloudflare:durable-objects, which first shipped
+  # in workerd 1.20261010.1. No vitest-pool-workers or miniflare release pins
+  # a workerd that new yet.
+  workerd: "1.20261023.1"
