@@ -9,6 +9,10 @@
  * reports what happened to the browser: a restart, a tab closed by someone
  * else, a tab shared with another scope, tabs the page opened.
  *
+ * A session opened with `lock: true` holds its scope's lock from its first
+ * call (or `lock()`) until it closes; other locking sessions in the scope
+ * wait for it, in order.
+ *
  * `browserTool` opens one per run.
  */
 
@@ -22,6 +26,12 @@ import type {
   BrowserConnectOptions,
   BrowserInternalHosts
 } from "./browser";
+import {
+  browserFunctions,
+  type BrowserFunction,
+  type SessionHosts
+} from "./browser-functions";
+import { DEFAULT_BROWSER_SCOPE } from "./scope";
 import type { SearchableCdpSpec } from "./spec";
 import { validate } from "./validate";
 
@@ -39,8 +49,8 @@ export interface BrowserSource {
    */
   connect(options?: BrowserConnectOptions): Promise<BrowserConnection>;
   /**
-   * The browser's internal hostnames, when it has any. `browserTool` lists
-   * them and adds the hosts functions to `browser`.
+   * The browser's internal hostnames, when it has any. The docs list them,
+   * and {@link BrowserSession.functions} adds the hosts functions.
    */
   readonly internalHosts?: BrowserInternalHosts;
 }
@@ -57,6 +67,36 @@ export interface BrowserSessionOptions {
    * JSON. Defaults to 1,000,000 bytes.
    */
   maxResultBytes?: number;
+  /**
+   * Lock the scope on this browser: the session takes the scope's lock at
+   * its first call (or at {@link BrowserSession.lock}) and holds it until it
+   * closes. Other locking sessions in the scope wait for the lock, in order,
+   * rather than fail, so their calls never interleave. Sessions without it
+   * don't wait and aren't waited for. Locks are per isolate, which is per
+   * Durable Object.
+   *
+   * Use it when several runs in one scope can start together (parallel
+   * tool calls, say) and must not see each other's navigation.
+   *
+   * Only `close()` releases the lock: not aborting a signal, losing the
+   * browser, or dropping the session. Close a locking session in `finally`,
+   * even when connecting failed, or its scope stays locked until the
+   * isolate restarts.
+   */
+  lock?: boolean;
+}
+
+/** {@link BrowserSession.lock}'s options. */
+export interface BrowserLockOptions {
+  /**
+   * Bounds this call's wait: when it aborts, this call rejects with its
+   * reason. The session keeps waiting while other calls still are; once
+   * none is, it leaves the queue at once, so it doesn't hold up the
+   * sessions behind it. A call without a signal, including the wait a
+   * session's first function call makes, never gives up. The signal does
+   * nothing once the lock is held: only `close()` releases it.
+   */
+  signal?: AbortSignal;
 }
 
 /** `send`'s input. */
@@ -110,6 +150,131 @@ export interface BrowserSessionReport {
   tabClosed: boolean;
   /** Another scope is working in this scope's active tab too. */
   tabShared: boolean;
+  /**
+   * The report as sentences for the model, one per thing that happened,
+   * empty when nothing did. Show them after the run's result.
+   */
+  notices: string[];
+}
+
+const RESTARTED_NOTICE =
+  "The browser was restarted before this run (it expired or was closed): earlier tabs, logins, and page state are gone. Your code ran in a fresh browser — navigate again before relying on page state.";
+
+const TAB_CLOSED_NOTICE =
+  'The tab you were working in was closed (by another conversation using this browser, or a person). `sessionId: "active"` now opens a blank tab — navigate again before relying on page state.';
+
+const TAB_SHARED_NOTICE =
+  "Another conversation using this browser is also working in your tab, so its page may change between your runs. Open a tab of your own with Target.createTarget if you need one.";
+
+/** What the report says, in sentences the model reads. */
+function reportNotices(report: Omit<BrowserSessionReport, "notices">) {
+  return [
+    report.restarted && RESTARTED_NOTICE,
+    report.tabClosed && !report.restarted && TAB_CLOSED_NOTICE,
+    report.tabShared && TAB_SHARED_NOTICE,
+    report.newTabs.length > 0 &&
+      `New tabs opened by the page: ${JSON.stringify(report.newTabs)}`
+  ].filter((notice) => typeof notice === "string");
+}
+
+/** One waiter in a {@link LockQueue}. */
+interface LockWaiter {
+  grant(): void;
+}
+
+/**
+ * Who holds a scope's lock, and who waits for it, in order. A waiter that
+ * gives up is removed at once, so nobody behind it waits on it.
+ */
+class LockQueue {
+  #held = false;
+  readonly #waiting: LockWaiter[] = [];
+
+  readonly #onIdle: () => void;
+
+  /** `onIdle` runs when the lock is freed with nobody waiting. */
+  constructor(onIdle: () => void) {
+    this.#onIdle = onIdle;
+  }
+
+  /** Resolve once this caller holds the lock. */
+  take(signal: AbortSignal): Promise<void> {
+    if (signal.aborted) {
+      if (!this.#held && this.#waiting.length === 0) this.#onIdle();
+      return Promise.reject(signal.reason);
+    }
+    if (!this.#held) {
+      this.#held = true;
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve, reject) => {
+      const onAbort = () => {
+        const index = this.#waiting.indexOf(waiter);
+        if (index !== -1) this.#waiting.splice(index, 1);
+        reject(signal.reason);
+      };
+      const waiter: LockWaiter = {
+        grant: () => {
+          signal.removeEventListener("abort", onAbort);
+          resolve();
+        }
+      };
+      this.#waiting.push(waiter);
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
+  /** Hand the lock to the next waiter, or free the scope. */
+  release(): void {
+    const next = this.#waiting.shift();
+    if (next) {
+      next.grant();
+      return;
+    }
+    this.#held = false;
+    this.#onIdle();
+  }
+}
+
+/**
+ * The lock queues per browser and scope. Keyed by the source, so custom
+ * sources lock too, and dropped with it.
+ */
+const lockQueues = new WeakMap<BrowserSource, Map<string, LockQueue>>();
+
+/**
+ * The scopes with a lock queue on `browser`: held, or waited for.
+ *
+ * @internal For tests that check queues are cleaned up.
+ */
+export function lockedScopes(browser: BrowserSource): string[] {
+  return [...(lockQueues.get(browser)?.keys() ?? [])];
+}
+
+/**
+ * One session's wait for its lock, shared by its concurrent `lock()` calls.
+ * It gives up only when every call waiting on it has: none waits without a
+ * signal, and every signal has aborted.
+ */
+interface LockAcquisition {
+  promise: Promise<void>;
+  /** Calls with a signal that are still waiting. */
+  bounded: number;
+  /** A call without a signal is waiting, so the wait never gives up. */
+  unbounded: boolean;
+  giveUp: AbortController;
+}
+
+function lockQueue(browser: BrowserSource, scope: string): LockQueue {
+  let queues = lockQueues.get(browser);
+  if (!queues) lockQueues.set(browser, (queues = new Map()));
+  let queue = queues.get(scope);
+  if (!queue) {
+    const scopes = queues;
+    queue = new LockQueue(() => scopes.delete(scope));
+    queues.set(scope, queue);
+  }
+  return queue;
 }
 
 /** `sessionId` value that addresses the tab the agent is working in. */
@@ -200,7 +365,7 @@ interface ConnectedState {
   activeResolved: boolean;
   /** Tabs this session closed with `Target.closeTarget`. */
   closed: Set<TargetId>;
-  report: BrowserSessionReport;
+  report: Omit<BrowserSessionReport, "notices">;
 }
 
 const SEND_SCHEMA = {
@@ -237,7 +402,8 @@ const DEBUG_LOG_SCHEMA = {
  * usually comes from model-written code.
  *
  * Create one per run with `browser.session({ scope })`, and close it when
- * the run ends. The browser itself stays open.
+ * the run ends. The browser itself stays open. Pass `lock: true` when
+ * runs in one scope may overlap; see {@link BrowserSessionOptions.lock}.
  *
  * @experimental The API surface may change before stabilizing.
  */
@@ -245,14 +411,110 @@ export class BrowserSession {
   readonly #browser: BrowserSource;
   readonly #scope: string | undefined;
   readonly #maxResultBytes: number;
+  readonly #locksScope: boolean;
   #state?: ConnectedState;
   #connecting?: Promise<ConnectedState>;
   #closed = false;
+  #functions?: Readonly<Record<string, BrowserFunction>>;
+  /** The wait for the lock, until it settles. */
+  #acquiring?: LockAcquisition;
+  /** The queue this session holds the lock in, until it closes. */
+  #heldLock?: LockQueue;
+  /** Aborts this session's wait for the lock when it closes. */
+  readonly #closing = new AbortController();
+  #waitedForLockMs = 0;
 
   constructor(browser: BrowserSource, options: BrowserSessionOptions = {}) {
     this.#browser = browser;
     this.#scope = options.scope;
     this.#maxResultBytes = options.maxResultBytes ?? DEFAULT_MAX_RESULT_BYTES;
+    this.#locksScope = options.lock ?? false;
+  }
+
+  /**
+   * The `browser.*` functions bound to this session, by name: the ones
+   * `Browser.functionDocs()` describes. Each takes one input object and
+   * validates it, so model-written code can call them directly. Like the
+   * session's methods, every one rejects once the session is closed, and
+   * waits for the scope's lock when the session locks.
+   */
+  get functions(): Readonly<Record<string, BrowserFunction>> {
+    this.#functions ??= Object.freeze(
+      browserFunctions(this, this.#sessionHosts())
+    );
+    return this.#functions;
+  }
+
+  /**
+   * Take this scope's lock now rather than at the first call, and hold it
+   * until {@link close}. For sessions opened with `lock: true`; a
+   * caller with its own time limit calls it first, so the wait doesn't count
+   * against the limit, or passes `signal` to bound the wait.
+   *
+   * Resolves once the session holds the lock, after the locking sessions
+   * ahead of it close; later and concurrent calls resolve with the same
+   * lock. Rejects when the session closes while waiting. Each call's
+   * `signal` bounds only that call's wait: it rejects with the signal's
+   * reason, and the session leaves the queue once no call is still
+   * waiting (see {@link BrowserLockOptions.signal}); a later call or first
+   * call waits again.
+   */
+  lock(options: BrowserLockOptions = {}): Promise<void> {
+    if (!this.#locksScope) {
+      return Promise.reject(
+        new Error(
+          "This browser session doesn't lock its scope. Open it with { lock: true }."
+        )
+      );
+    }
+    if (this.#closed) {
+      return Promise.reject(new Error("This browser session is closed."));
+    }
+    if (this.#heldLock) return Promise.resolve();
+    const { signal } = options;
+    if (signal?.aborted) return Promise.reject(signal.reason);
+    const acquisition = (this.#acquiring ??= this.#acquire());
+    if (acquisition.giveUp.signal.aborted) {
+      // Every earlier call gave up and the wait is ending: wait again once
+      // it has, unless it got the lock first.
+      return acquisition.promise.then(
+        () => undefined,
+        () => this.lock(options)
+      );
+    }
+    if (!signal) {
+      acquisition.unbounded = true;
+      return acquisition.promise;
+    }
+    acquisition.bounded++;
+    return new Promise<void>((resolve, reject) => {
+      const onAbort = () => {
+        acquisition.bounded--;
+        if (acquisition.bounded === 0 && !acquisition.unbounded) {
+          acquisition.giveUp.abort(signal.reason);
+        }
+        reject(signal.reason);
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      acquisition.promise.then(
+        () => {
+          signal.removeEventListener("abort", onAbort);
+          resolve();
+        },
+        (error: unknown) => {
+          signal.removeEventListener("abort", onAbort);
+          reject(error);
+        }
+      );
+    });
+  }
+
+  /**
+   * How long this session waited for its lock, in milliseconds: `0` until
+   * it has waited, and for sessions that don't lock.
+   */
+  get waitedForLockMs(): number {
+    return this.#waitedForLockMs;
   }
 
   /**
@@ -334,42 +596,111 @@ export class BrowserSession {
    * connected. Never rejects: failures to read the browser's state are
    * logged and leave the report incomplete. Later calls resolve with
    * `undefined`, and other methods reject.
+   *
+   * A locking session releases the lock once the active tab is saved, or
+   * stops waiting for it if it was still waiting.
    */
   async close(): Promise<BrowserSessionReport | undefined> {
     if (this.#closed) return undefined;
     this.#closed = true;
-    let state: ConnectedState | undefined;
+    // Stop waiting for the lock, if this session is.
+    this.#closing.abort(new Error("This browser session is closed."));
     try {
-      state = this.#state ?? (await this.#connecting);
-    } catch {
-      return undefined; // the connect failed; its caller got the error
-    }
-    if (!state) return undefined;
-    this.#state = undefined;
-    try {
-      const open = await this.#recordNewTabs(state);
-      const active = await this.#saveActiveTarget(state, open);
-      if (active && state.activeResolved) {
-        await this.#recordSharedTab(state, active);
+      let state: ConnectedState | undefined;
+      try {
+        state = this.#state ?? (await this.#connecting);
+      } catch {
+        return undefined; // the connect failed; its caller got the error
       }
+      if (!state) return undefined;
+      this.#state = undefined;
+      try {
+        const open = await this.#recordNewTabs(state);
+        const active = await this.#saveActiveTarget(state, open);
+        if (active && state.activeResolved) {
+          await this.#recordSharedTab(state, active);
+        }
+      } finally {
+        state.connected.cdp.disconnect();
+      }
+      return { ...state.report, notices: reportNotices(state.report) };
     } finally {
-      state.connected.cdp.disconnect();
+      // Release the lock only after the active tab is saved, so the next
+      // session in the scope finds where this one left off.
+      await this.#acquiring?.promise.catch(() => undefined);
+      this.#heldLock?.release();
+      this.#heldLock = undefined;
     }
-    return state.report;
   }
 
   // ── Internals ────────────────────────────────────────────────────────────
 
-  /** Connect once. Concurrent first calls share one connect. */
+  /**
+   * Connect once, after taking the lock if this session locks its scope.
+   * Concurrent first calls share one connect.
+   */
   #connect(): Promise<ConnectedState> {
     if (this.#closed) {
       return Promise.reject(new Error("This browser session is closed."));
     }
     if (this.#state) return Promise.resolve(this.#state);
-    this.#connecting ??= this.#open().finally(() => {
+    this.#connecting ??= this.#admitThenOpen().finally(() => {
       this.#connecting = undefined;
     });
     return this.#connecting;
+  }
+
+  /** The browser's internal hosts, behind this session's admission check. */
+  #sessionHosts(): SessionHosts | undefined {
+    const hosts = this.#browser.internalHosts;
+    return hosts && { hosts, admit: () => this.#admit() };
+  }
+
+  async #admitThenOpen(): Promise<ConnectedState> {
+    await this.#admit();
+    return this.#open();
+  }
+
+  /**
+   * The check every function makes before it touches the browser: reject
+   * once the session is closed, and wait for the lock when the session
+   * locks. It doesn't connect.
+   */
+  async #admit(): Promise<void> {
+    if (this.#closed) throw new Error("This browser session is closed.");
+    if (!this.#locksScope) return;
+    await this.lock();
+    if (this.#closed) throw new Error("This browser session is closed.");
+  }
+
+  /** Start waiting for the lock, given up when its calls do or on close. */
+  #acquire(): LockAcquisition {
+    const giveUp = new AbortController();
+    const promise: Promise<void> = this.#waitForLock(
+      AbortSignal.any([giveUp.signal, this.#closing.signal])
+    ).finally(() => {
+      if (this.#acquiring?.promise === promise) this.#acquiring = undefined;
+    });
+    // Callers get the error; this keeps a wait nobody awaits from going
+    // unhandled.
+    promise.catch(() => undefined);
+    return { promise, bounded: 0, unbounded: false, giveUp };
+  }
+
+  async #waitForLock(signal: AbortSignal): Promise<void> {
+    // Before the queue exists, so a wait given up at once leaves none.
+    signal.throwIfAborted();
+    const queue = lockQueue(
+      this.#browser,
+      this.#scope ?? DEFAULT_BROWSER_SCOPE
+    );
+    const started = Date.now();
+    try {
+      await queue.take(signal);
+      this.#heldLock = queue;
+    } finally {
+      this.#waitedForLockMs += Date.now() - started;
+    }
   }
 
   async #open(): Promise<ConnectedState> {

@@ -3,11 +3,7 @@
  * in `tools/` (`agents/browser/ai-sdk`, `agents/browser/tanstack-ai`,
  * `agents/browser/pi`). Internal — not an entry point.
  */
-import {
-  BROWSER_RULES,
-  browserFunctionDocs,
-  browserFunctions
-} from "./browser-functions";
+import { browserFunctionDocs } from "./browser-functions";
 import { runBrowserCode } from "./sandbox";
 import { DEFAULT_BROWSER_SCOPE } from "./scope";
 import {
@@ -202,8 +198,11 @@ export function createBrowserToolCore(
   }
 ) {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  // The source's own hosts, so custom sources need nothing beyond
+  // `BrowserSource`; a `Browser`'s `functionDocs()` returns the same.
+  const docs = browserFunctionDocs(options.browser.internalHosts);
   const rules = [
-    ...BROWSER_RULES,
+    ...docs.rules,
     "Results over about 24,000 characters are cut short.",
     `Each run times out after ${Math.round(timeoutMs / 1000)}s, so split long jobs (crawling a site, say) across runs.`,
     adapter.screenshotHint,
@@ -218,7 +217,7 @@ export function createBrowserToolCore(
     "",
     "## browser",
     "",
-    browserFunctionDocs(options.browser.internalHosts),
+    docs.functions,
     "",
     "## Rules",
     "",
@@ -235,7 +234,7 @@ export function createBrowserToolCore(
       const ran = await runBrowserCode({
         loader: options.loader,
         code: input.code,
-        functions: browserFunctions(session, options.browser.internalHosts),
+        functions: session.functions,
         timeoutMs
       });
       const logs = ran.logs.length > 0 ? { logs: ran.logs } : {};

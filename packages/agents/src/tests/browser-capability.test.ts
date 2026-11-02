@@ -439,6 +439,9 @@ describe("browserTool over a Browser", () => {
       expect(description).toContain("returnByValue: true");
       expect(description).toContain("document.readyState");
       expect(description).toContain("times out after 60s");
+      expect(description).toContain(
+        "Page.captureScreenshot throws when its result is over 1 MB"
+      );
       // None of codemode's generic text, which doesn't fit this tool.
       expect(description).not.toContain("codemode.search");
       expect(description).not.toContain("paused");

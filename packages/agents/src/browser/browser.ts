@@ -16,6 +16,10 @@ import {
   LifecycleCapability,
   type LifecycleRouteContext
 } from "../lifecycle/capability";
+import {
+  browserFunctionDocs,
+  type BrowserFunctionDocs
+} from "./browser-functions";
 import { browserCapabilityId } from "./capability-id";
 import type { CdpConnection } from "./cdp-connection";
 import {
@@ -359,6 +363,17 @@ export class Browser extends LifecycleCapability {
    */
   session(options?: BrowserSessionOptions): BrowserSession {
     return new BrowserSession(this, options);
+  }
+
+  /**
+   * What the model needs to know to use this browser's `browser.*`
+   * functions ({@link BrowserSession.functions}): the functions in Markdown,
+   * including the internal sites and hosts functions this browser has, and
+   * the rules for using them. For a tool or module description; add rules
+   * about how your code runs (timeouts, screenshots) yourself.
+   */
+  functionDocs(): BrowserFunctionDocs {
+    return browserFunctionDocs(this.internalHosts);
   }
 
   #connection(

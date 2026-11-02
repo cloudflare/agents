@@ -48,6 +48,8 @@ export {
 
 export { DEFAULT_BROWSER_SCOPE } from "./scope";
 
+export type { BrowserFunction, BrowserFunctionDocs } from "./browser-functions";
+
 export {
   InternalHostRouter,
   MAX_INTERNAL_HOSTS,
@@ -110,7 +112,8 @@ export {
   type BrowserSendInput,
   type BrowserSessionOptions,
   type BrowserSessionReport,
-  type BrowserSource
+  type BrowserSource,
+  type BrowserLockOptions
 } from "./session";
 
 export type {
