@@ -78,6 +78,29 @@ this.registry.install({
 - pi does not rerun a browser call cut off by an eviction, because the code may have clicked or submitted something. The model gets an interrupted result and can try again; the browser itself is still there.
 - Stopping a conversation does not stop a browser call already running. It finishes or times out.
 
+#### In pi's code mode
+
+pi-durable's code mode lets the model write one script that calls several tools. Install it beside the browser tool, and scripts can call `tools.browser({ code })` with no other setup:
+
+```ts
+import { RemoteCodemodeSandbox } from "@earendil-works/pi-codemode/cloudflare";
+import { createCodemodeExtension } from "@earendil-works/pi-durable/codemode";
+
+this.registry.install(
+  createCodemodeExtension({
+    sandbox: new RemoteCodemodeSandbox({
+      // A CodemodeSandboxDurableObject deployed as its own Worker.
+      remote: () => this.env.CODEMODE_SANDBOX.getByName(this.ctx.id.toString())
+    })
+  })
+);
+```
+
+- `tools.browser()` resolves to the run as an object, `{ status, executionId, result, error, logs, notice }`, on errors too, so check `status`.
+- A screenshot's `result` is an image block. Pass it to `image()` so the model sees it.
+- A script's browser calls run in its conversation's tab, one at a time, even under `Promise.all`.
+- The browser code is still a string inside the script, and each call runs in its own Dynamic Worker, as a direct call does.
+
 ### TanStack AI
 
 Import `browserTool` from `agents/browser/tanstack-ai`. It takes an optional `name` (default `"browser"`) and returns a `ServerTool`:

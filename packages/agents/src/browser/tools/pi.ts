@@ -1,10 +1,11 @@
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import type {
+  JsonObject,
   ToolExecutionApi,
   ToolExecutionResult,
   ToolRegistration
 } from "@earendil-works/pi-durable";
-import { obj, str } from "@earendil-works/pi-schema";
+import { obj, oneOf, opt, str, unknown } from "@earendil-works/pi-schema";
 import {
   createBrowserToolCore,
   type BrowserToolOptions,
@@ -48,6 +49,29 @@ const browserToolParameters = obj(
 );
 
 /**
+ * What a script gets from `tools.browser()` in pi's code mode: the run as an
+ * object, with a screenshot as an image block it can pass to `image()`.
+ */
+const browserToolOutputSchema = obj(
+  {
+    status: oneOf(["completed", "error"]),
+    executionId: str(),
+    result: opt(
+      unknown({
+        description:
+          "What the code returned. A screenshot is an image block: pass it to `image()`."
+      })
+    ),
+    error: opt(str({ description: "Why the code failed." })),
+    logs: opt(unknown({ description: "What the code wrote to the console." })),
+    notice: opt(
+      str({ description: "What happened to the browser and its tabs." })
+    )
+  },
+  { open: true }
+);
+
+/**
  * What a UI can show about a run without reading the content: its id and
  * outcome.
  */
@@ -78,9 +102,29 @@ function text(value: unknown): TextContent {
 }
 
 /**
+ * The model projection of the run (no `calls` log, bounded `logs`) as an
+ * object, for scripts.
+ */
+function structuredOf(output: unknown, executionId: string): JsonObject {
+  const model = browserExecuteModelOutput(output);
+  return model.type === "json" &&
+    typeof model.value === "object" &&
+    model.value !== null &&
+    !Array.isArray(model.value)
+    ? (model.value as JsonObject)
+    : {
+        status: "error",
+        executionId,
+        // Only when the run couldn't be serialized: `value` says so.
+        error: typeof model.value === "string" ? model.value : "No result."
+      };
+}
+
+/**
  * The tool result pi stores and sends: the model projection of the run as
  * JSON (no `calls` log, bounded `logs`), and a screenshot as an image part
- * after it. pi-ai only sends the image to models that accept images.
+ * after it. pi-ai only sends the image to models that accept images. Scripts
+ * get the same projection as an object, with the screenshot in `result`.
  */
 function browserToolResult(
   output: BrowserToolOutput
@@ -90,6 +134,7 @@ function browserToolResult(
   if (!screenshot) {
     return {
       output: [text(browserExecuteModelOutput(output).value)],
+      structuredOutput: structuredOf(output, output.executionId),
       details: details(output),
       ...(isError ? { isError } : {})
     };
@@ -111,6 +156,10 @@ function browserToolResult(
   };
   return {
     output: [text(summary), image],
+    structuredOutput: {
+      ...structuredOf({ ...output, result: undefined }, output.executionId),
+      result: { type: "image", data: image.data, mimeType: image.mimeType }
+    },
     details: details(output)
   };
 }
@@ -128,6 +177,10 @@ function conversationScope(api: ToolExecutionApi): string {
  * model last worked in, and a replaced browser is reported in the
  * result's `notice`. A returned screenshot comes back as an image part that
  * the model sees, when its model accepts images.
+ *
+ * Scripts in pi's code mode call it as `tools.browser({ code })`, which
+ * resolves to the run as an object (`status`, `result`, `error`, `notice`),
+ * on errors too. A screenshot's `result` is an image block, for `image()`.
  *
  * Each conversation gets its own active tab (see
  * {@link PiBrowserToolOptions.scope}). A conversation's calls run one at a
@@ -173,12 +226,13 @@ export function browserTool<TName extends string = "browser">(
   const { scope = conversationScope, ...coreOptions } = options;
   const core = createBrowserToolCore(coreOptions, {
     screenshotHint:
-      "To see a screenshot, return { type: 'browser_screenshot', mediaType, data } with data from Page.captureScreenshot and mediaType 'image/png', or 'image/jpeg' if you captured with format: 'jpeg'. The image is attached to the result."
+      "To see a screenshot, return { type: 'browser_screenshot', mediaType, data } with data from Page.captureScreenshot and mediaType 'image/png', or 'image/jpeg' if you captured with format: 'jpeg'. The image is attached to the result. In a codemode script, `tools.browser()` resolves to the result as an object, and the screenshot in its `result` is an image block: pass it to `image()`."
   });
   return {
     name: options.name ?? ("browser" as TName),
     description: core.description,
     parameters: browserToolParameters,
+    structuredOutputSchema: browserToolOutputSchema,
     // A conversation's calls share its tab, so they must not interleave.
     executionMode: "sequential",
     // The code may have clicked or submitted something; don't run it twice.
