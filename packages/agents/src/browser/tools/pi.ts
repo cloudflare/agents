@@ -1,13 +1,10 @@
-import {
-  Type,
-  type ImageContent,
-  type TextContent
-} from "@earendil-works/pi-ai";
+import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import type {
   ToolExecutionApi,
   ToolExecutionResult,
   ToolRegistration
 } from "@earendil-works/pi-durable";
+import { obj, str } from "@earendil-works/pi-schema";
 import {
   createBrowserToolCore,
   type BrowserToolOptions,
@@ -40,12 +37,15 @@ export interface PiBrowserToolOptions<
   scope?: string | ((api: ToolExecutionApi) => string);
 }
 
-const browserToolParameters = Type.Object({
-  code: Type.String({
-    description:
-      "An async arrow function that drives the browser with `browser`"
-  })
-});
+const browserToolParameters = obj(
+  {
+    code: str({
+      description:
+        "An async arrow function that drives the browser with `browser`"
+    })
+  },
+  { open: true }
+);
 
 /**
  * What a UI can show about a run without reading the content: its id and

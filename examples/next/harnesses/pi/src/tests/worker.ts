@@ -3,11 +3,11 @@ import {
   fauxProvider,
   fauxText,
   fauxToolCall,
-  Type,
   type AssistantMessage,
   type Message,
   type TranscriptContext
 } from "@earendil-works/pi-ai";
+import { num, obj } from "@earendil-works/pi-schema";
 import { createModels } from "@earendil-works/pi-ai/models";
 import {
   createRegistry,
@@ -255,8 +255,8 @@ export class PiHarnessTestObject extends DurableObject<Env> {
   }
 }
 
-const NoParameters = Type.Object({});
-const MultiplyParameters = Type.Object({ value: Type.Number() });
+const NoParameters = obj({});
+const MultiplyParameters = obj({ value: num() });
 
 /** Multiplies by three. */
 function multiplyTool(): ToolRegistration<typeof MultiplyParameters> {

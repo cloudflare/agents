@@ -11,10 +11,10 @@ Pi owns everything about a run: the transcript, the inbox of steers and follow-u
 ## Install the Pi packages
 
 ```sh
-npm install agents @earendil-works/pi-durable @earendil-works/pi-ai @earendil-works/chord
+npm install agents @earendil-works/pi-durable @earendil-works/pi-ai @earendil-works/pi-schema @earendil-works/chord
 ```
 
-The three Pi packages are optional peer dependencies of `agents`, at `~1.5.0`. pi-durable is experimental, and its API can change in minor releases, so `agents` supports one Pi minor at a time. The examples use Workers AI through the `AI` binding. To configure the binding and choose other models, refer to [Models for pi-ai](../models-pi-ai.md).
+The four Pi packages are optional peer dependencies of `agents`, at `~1.5.0`. pi-durable is experimental, and its API can change in minor releases, so `agents` supports one Pi minor at a time. The examples use Workers AI through the `AI` binding. To configure the binding and choose other models, refer to [Models for pi-ai](../models-pi-ai.md).
 
 ## Create the harness
 
@@ -74,13 +74,13 @@ A model in `defaults` or `session.setModel()` is stored by its provider and id o
 Tools and system prompt sections are Pi extensions. An extension is a plain object with a `name`, `tools` and `sections`:
 
 ```ts
-import { Type } from "@earendil-works/pi-ai";
 import {
   createRegistry,
   type ToolRegistration
 } from "@earendil-works/pi-durable";
+import { obj, str } from "@earendil-works/pi-schema";
 
-const WordCount = Type.Object({ text: Type.String() });
+const WordCount = obj({ text: str() });
 
 const wordCount: ToolRegistration<typeof WordCount> = {
   name: "word_count",

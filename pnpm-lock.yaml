@@ -2002,6 +2002,9 @@ importers:
       '@earendil-works/pi-durable':
         specifier: ~1.5.0
         version: 1.5.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(esbuild@0.28.2)(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.0)(zod@4.6.7)
+      '@earendil-works/pi-schema':
+        specifier: ~1.5.0
+        version: 1.5.0
       '@earendil-works/pi-telemetry':
         specifier: ~1.5.0
         version: 1.5.0
@@ -2286,6 +2289,9 @@ importers:
       '@earendil-works/pi-durable':
         specifier: ~1.5.0
         version: 1.5.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(esbuild@0.28.2)(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.0)(zod@4.6.7)
+      '@earendil-works/pi-schema':
+        specifier: ~1.5.0
+        version: 1.5.0
       '@earendil-works/pi-telemetry':
         specifier: ~1.5.0
         version: 1.5.0
@@ -2570,6 +2576,9 @@ importers:
       '@earendil-works/pi-ai':
         specifier: ~1.5.0
         version: 1.5.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
+      '@earendil-works/pi-schema':
+        specifier: ~1.5.0
+        version: 1.5.0
       agents:
         specifier: '*'
         version: link:../../../packages/agents
@@ -2748,6 +2757,9 @@ importers:
       '@earendil-works/pi-durable':
         specifier: ~1.5.0
         version: 1.5.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(esbuild@0.28.2)(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.0)(zod@4.6.7)
+      '@earendil-works/pi-schema':
+        specifier: ~1.5.0
+        version: 1.5.0
       '@earendil-works/pi-telemetry':
         specifier: ~1.5.0
         version: 1.5.0
@@ -4831,6 +4843,9 @@ importers:
       '@earendil-works/pi-durable':
         specifier: ~1.5.0
         version: 1.5.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(esbuild@0.28.1)(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.0)(zod@4.6.7)
+      '@earendil-works/pi-schema':
+        specifier: ~1.5.0
+        version: 1.5.0
       '@earendil-works/pi-tui':
         specifier: 1.5.0
         version: 1.5.0

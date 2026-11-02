@@ -3,8 +3,8 @@
  *
  * @beta
  */
-import { Type } from "@earendil-works/pi-ai";
 import type { ToolRegistration } from "@earendil-works/pi-durable";
+import { int, obj, opt, str } from "@earendil-works/pi-schema";
 import {
   MAX_WEB_SEARCH_QUERY_LENGTH,
   type WebSearchToolOutput
@@ -32,19 +32,22 @@ export type { WebSearchToolOptions } from "../tool";
  * round trip) but capped by the core. pi already coerces `"5"` to `5`.
  */
 function webSearchParameters(maxLimit: number) {
-  return Type.Object({
-    query: Type.String({
-      minLength: 1,
-      maxLength: MAX_WEB_SEARCH_QUERY_LENGTH,
-      description: "What to search for."
-    }),
-    limit: Type.Optional(
-      Type.Integer({
-        minimum: 1,
-        description: `How many results to return (at most ${maxLimit}).`
-      })
-    )
-  });
+  return obj(
+    {
+      query: str({
+        minLength: 1,
+        maxLength: MAX_WEB_SEARCH_QUERY_LENGTH,
+        description: "What to search for."
+      }),
+      limit: opt(
+        int({
+          minimum: 1,
+          description: `How many results to return (at most ${maxLimit}).`
+        })
+      )
+    },
+    { open: true }
+  );
 }
 
 type WebSearchParameters = ReturnType<typeof webSearchParameters>;

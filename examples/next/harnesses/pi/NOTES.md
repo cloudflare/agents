@@ -245,8 +245,8 @@ schemas, and its `exec` runs on a Workspace backend. What came up:
 - **Two loop models.** `createPiTools` returns declarations and one
   `execute(call)` for a hand-written loop. pi-durable wants a
   `ToolRegistration` per tool, so the adapter pairs them by name. The
-  declarations are JSON Schema, not TypeBox. pi validates with TypeBox, which
-  accepts either, so only the static type needs a cast.
+  declarations are plain JSON Schema. pi validates any JSON Schema with
+  pi-schema, so only the static type needs a cast.
 - **Replay is ours to choose.** computer has no replay notion. Reads,
   searches, whole-file `write` and forced `delete` are marked safe. `edit`
   would fail on text it already replaced, and `exec` runs arbitrary code, so

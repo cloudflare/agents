@@ -1,10 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
-import { Type } from "@earendil-works/pi-ai";
 import {
   createRegistry,
   Harness,
   type ToolRegistration
 } from "@earendil-works/pi-durable";
+import { obj } from "@earendil-works/pi-schema";
 import {
   Channels,
   type GatewayEvent,
@@ -25,7 +25,7 @@ const PREAMBLE =
 const currentTime: ToolRegistration = {
   name: "current_time",
   description: "Return the current UTC time.",
-  parameters: Type.Object({}),
+  parameters: obj({}),
   replay: "safe",
   async execute() {
     const iso = new Date().toISOString();
