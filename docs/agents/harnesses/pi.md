@@ -235,7 +235,7 @@ await session.submit("The deploy was approved. Run the migration.", {
 });
 ```
 
-The model sees no difference: it still gets the text as a user message. Only the transcript changes. The input is stored with your `kind` and `data` instead of `pi.user`, and `messages()` and `events()` return both, so your UI can show it differently, for example as "Approved by ben" rather than as something the user said. Pi reserves kinds that start with `pi.`, so use a prefix of your own, such as `app.`.
+The model sees no difference: it still gets the text as a user message. Only the transcript changes. The input is stored with your `kind` and `data` instead of `pi.user`, and `messages()`, `watch()` and `entries()` return both, so your UI can show it differently, for example as "Approved by ben" rather than as something the user said. Pi reserves kinds that start with `pi.`, so use a prefix of your own, such as `app.`.
 
 The kind is a label, not a permission. It records what your code said the input was, and nothing checks it. The model reads the input as if the user wrote it, so do not put anything in it that you would not let the user send.
 
@@ -277,7 +277,7 @@ A task that keeps crashing the object would restart it forever, so Pi ends a tas
 
 A storage error closes Pi for good: the call that hit it rejects with the error, and calls underway reject with Pi's `SessionFailed` and `watch()` handles already open end with `{ kind: "failed" }`, so retry them. If your factory passes `onReport` to `Harness.open`, Pi reports the failure there as `storage_failed`. Once the failed Pi has closed, the harness opens Pi again, which runs the factory again, on the next call or the job's next step. Closing waits for running task code, such as a tool call, to return, so code that ignores its abort signal delays the reopen. Pi recovers from what it committed and resumes its work the same way.
 
-If a step of the job fails, such as when the factory throws, the job is not dropped. It tries again after 30 seconds, doubling the delay with each failure in a row up to 10 minutes, and goes back to its usual schedule once a step succeeds. A Durable Object memory-limit reset that fails Pi while the job waits on it counts against the alarm's memory-limit circuit breaker. Lifecycle backs the job off and drops it after repeated resets. The next call opens Pi again and pushes the job again, so Pi's restart limit is what eventually parks a task that keeps causing resets.
+If a step of the job fails, such as when the factory throws, the job is not dropped. It tries again after 30 seconds, doubling the delay with each failure in a row up to 10 minutes, and goes back to its usual schedule once a step succeeds. A Durable Object memory-limit reset that fails Pi while the job waits on it counts against the alarm's memory-limit circuit breaker. Lifecycle backs the job off and drops it after repeated resets. The next call opens Pi again and pushes the job again, so Pi's restart limit is what eventually ends a task that keeps causing resets.
 
 Every operation waits for the object's startup, which runs the factory. A call over RPC that arrives first waits for it rather than opening Pi on its own.
 

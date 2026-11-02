@@ -74,7 +74,7 @@ which covers every conversation, background tasks included:
 - **Neither:** complete the job, so there is no alarm. If a submit is
   between steps 1 and 2 (an in-memory counter), reschedule instead.
 
-Before Pi's next release, the restart limit parked a crash-looping task
+Before Pi 1.5, the restart limit parked a crash-looping task
 until `pi.retryTask()`, and the step had to leave parked tasks out, or it
 would keep the object awake forever. Pi now ends such a task, so it is
 never left waiting.
