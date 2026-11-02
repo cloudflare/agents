@@ -601,6 +601,56 @@ describe("browserTool over a Browser", () => {
       );
     });
   });
+
+  it("waits for other locking sessions, outside its timeout", async () => {
+    const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
+
+    await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
+      const tool = browserTool({
+        browser: instance.browser,
+        loader: env.LOADER,
+        scope: "a",
+        timeoutMs: 100
+      });
+      // A Workspace run, say, holds scope a's lock.
+      const held = instance.browser.session({ scope: "a", lock: true });
+      await held.lock();
+      let finished = false;
+      const running = tool.execute({ code }, {}).then((output) => {
+        finished = true;
+        return output;
+      });
+      // Longer than the tool's timeout: the wait doesn't count.
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(finished).toBe(false);
+      await held.close();
+
+      const output = await running;
+      expect(output.status).toBe("completed");
+      expect(output.status === "completed" && output.result).toEqual({
+        result: { value: "evaluated in target-session-1-2" }
+      });
+    });
+  });
+
+  it("puts the session's notices on the result", async () => {
+    const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
+
+    await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
+      const tool = instance.browserTool();
+      await tool.execute({ code }, {});
+      instance.killBrowserSession("session-1");
+      const session = instance.browser.session();
+      await session.functions.cdp({ method: "Target.getTargets" });
+      const report = await session.close();
+      instance.killBrowserSession("session-2");
+
+      const output = await tool.execute({ code }, {});
+      expect(report?.notices).toHaveLength(1);
+      // The tool's notice is the session's notices, joined.
+      expect(output.notice).toBe(report?.notices.join(" "));
+    });
+  });
 });
 
 describe("TanStack AI browserTool over a Browser", () => {
