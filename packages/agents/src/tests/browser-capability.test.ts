@@ -633,6 +633,42 @@ describe("browserTool over a Browser", () => {
     });
   });
 
+  it("stops when its call is aborted, waiting or running", async () => {
+    const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
+
+    await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
+      const tool = browserTool({
+        browser: instance.browser,
+        loader: env.LOADER,
+        scope: "a"
+      });
+      // Waiting: a held lock keeps the call queued until it gives up.
+      const held = instance.browser.session({ scope: "a", lock: true });
+      await held.lock();
+      const waiting = new AbortController();
+      const queued = tool.execute({ code }, { abortSignal: waiting.signal });
+      waiting.abort(new Error("stopped by the user"));
+      await expect(queued).rejects.toThrow("stopped by the user");
+      await held.close();
+
+      // Running: code that never finishes ends at the abort, not the
+      // 60 s timeout, and frees the scope.
+      const running = new AbortController();
+      const hung = tool.execute(
+        { code: "async () => { await new Promise(() => {}); }" },
+        { abortSignal: running.signal }
+      );
+      setTimeout(() => running.abort(), 50);
+      const output = await hung;
+      expect(output.status === "error" && output.error).toBe(
+        "The run was stopped before it finished."
+      );
+      const next = instance.browser.session({ scope: "a", lock: true });
+      await next.lock({ signal: AbortSignal.timeout(1_000) });
+      await next.close();
+    });
+  });
+
   it("puts the session's notices on the result", async () => {
     const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
 

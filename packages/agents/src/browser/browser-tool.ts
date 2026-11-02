@@ -174,14 +174,23 @@ export function createBrowserToolCore(
 
   const defaultScope = options.scope ?? DEFAULT_BROWSER_SCOPE;
 
-  async function run(input: BrowserToolInput, scope: string) {
+  async function run(
+    input: BrowserToolInput,
+    scope: string,
+    signal: AbortSignal | undefined
+  ) {
     const session = new BrowserSession(options.browser, {
       scope,
       lock: true
     });
     // Take the scope's lock before the timeout starts, so the
     // wait doesn't count against the run.
-    await session.lock();
+    try {
+      await session.lock({ signal });
+    } catch (error) {
+      await session.close();
+      throw error;
+    }
     const executionId = crypto.randomUUID();
     let output: BrowserToolOutput;
     try {
@@ -189,7 +198,8 @@ export function createBrowserToolCore(
         loader: options.loader,
         code: input.code,
         functions: session.functions,
-        timeoutMs
+        timeoutMs,
+        signal
       });
       const logs = ran.logs.length > 0 ? { logs: ran.logs } : {};
       output =
@@ -225,10 +235,15 @@ export function createBrowserToolCore(
   return {
     description,
     inputSchema: browserToolInputSchema,
-    /** Run `input` in `scope`, which defaults to the tool's `scope`. */
+    /**
+     * Run `input` in `scope`, which defaults to the tool's `scope`. When
+     * `signal` aborts, a run still waiting for the lock rejects with its
+     * reason, and a running one stops with an error result.
+     */
     execute: (
       input: BrowserToolInput,
-      scope: string = defaultScope
-    ): Promise<BrowserToolOutput> => run(input, scope)
+      call: { scope?: string; signal?: AbortSignal } = {}
+    ): Promise<BrowserToolOutput> =>
+      run(input, call.scope ?? defaultScope, call.signal)
   };
 }

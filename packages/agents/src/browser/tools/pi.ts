@@ -185,10 +185,13 @@ export function browserTool<TName extends string = "browser">(
     executionMode: "sequential",
     // The code may have clicked or submitted something; don't run it twice.
     replay: "unsafe",
-    async execute(args, api) {
+    async execute(args, api, context) {
       const callScope = typeof scope === "string" ? scope : scope(api);
       return browserToolResult(
-        await core.execute({ code: args.code }, callScope)
+        await core.execute(
+          { code: args.code },
+          { scope: callScope, signal: context.abortSignal }
+        )
       );
     }
   };

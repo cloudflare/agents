@@ -76,7 +76,6 @@ this.registry.install({
 - A returned screenshot comes back as an image in the tool result, so the model can see the page and a UI can show it from the transcript. pi-ai only sends the image to models that accept images; other models get the text alone.
 - Each pi conversation gets its own active tab: `scope` defaults to the calling conversation, so sessions, forks, and subagents on one object do not drive each other's page. Pass `scope` as a string to share one tab, or as a function of the call (`(api) => string`) to choose.
 - pi does not rerun a browser call cut off by an eviction, because the code may have clicked or submitted something. The model gets an interrupted result and can try again; the browser itself is still there.
-- Stopping a conversation does not stop a browser call already running. It finishes or times out.
 
 ### TanStack AI
 
@@ -122,6 +121,7 @@ To show a screenshot, the model returns it from its code. The full result, image
 - If several chats or users share one `Browser` (for example, many threads on one Durable Object), pass each one's id as `scope`: `browserTool({ browser, loader, scope: threadId })`. Each scope keeps its own active tab, so one chat never drives another's page, while cookies and logins stay shared. Tools that leave `scope` out share one tab. Calls in the same scope wait for each other (and for your own sessions opened with `lock: true`); calls in different scopes run in parallel. The wait does not count toward `timeoutMs`.
 - The result's `notice` tells the model what happened to its browser: it was lost (idle past `keepAliveMs`, closed, or crashed) and the code ran in a new one, another chat closed its tab or works in it too, or the page opened new tabs.
 - Each call times out after `timeoutMs` (default 60 seconds).
+- When the harness aborts a call (the user stops the chat, say), a call still waiting for its scope gives up, and a running call ends with an error result and frees its scope. Anything its code already did in the browser stays done.
 - Results are cut to about 24,000 characters. A screenshot can be at most 1 MB, so a full-page screenshot of a long page fails; the model is told to capture the viewport or use JPEG instead.
 
 ### Configure the browser
