@@ -9,11 +9,13 @@
  * exhaustive switches in `harness/pi/harness.ts`.
  */
 import type {
+  Conversation,
   InputSubmissionDraft,
   SettledSubmissionRecord
 } from "@earendil-works/pi-durable";
 import { expectTypeOf } from "vitest";
 import type {
+  PiHarness,
   PiOperationResult,
   PiSubmitOptions,
   PiWhenBusy,
@@ -40,3 +42,9 @@ expectTypeOf<
 expectTypeOf<PiOperationResult["status"]>().toEqualTypeOf<
   SettledSubmissionRecord["status"]
 >();
+
+// `piConversation()` hands out Pi's conversation without the members that
+// go around the harness (see `PiRawConversation`) and with everything else.
+expectTypeOf<
+  keyof Awaited<ReturnType<PiHarness["piConversation"]>>
+>().toEqualTypeOf<Exclude<keyof Conversation, "submit" | "commit" | "reset">>();

@@ -204,6 +204,22 @@ type Opened = {
   readonly storage: SqliteStorage;
 };
 
+/**
+ * Pi's own handle on a conversation, as `PiHarness.piConversation()` returns
+ * it, without the members that would go around the harness. Use the
+ * `PiConversation` for these:
+ *
+ * - `submit`: skips the wake job the harness schedules before it hands input
+ *   to Pi, so input submitted just before an eviction can sit unrun until
+ *   something else wakes the object. It also gets no receipt, so
+ *   `wait(operationId)` can't find it and a repeat isn't deduplicated. Use
+ *   `PiConversation.submit()` or `continue()`.
+ * - `commit`: its `tx.submit()` and `tx.createTask()` start work the same
+ *   way, with no wake scheduled first.
+ * - `reset`: `PiConversation.reset()` does the same.
+ */
+type PiRawConversation = Omit<Conversation, "submit" | "commit" | "reset">;
+
 /** pi-durable's stored reference to a pi-ai model. */
 function modelRef(model: PiModel): ModelRef {
   return { provider: model.provider, modelId: model.id };
@@ -465,17 +481,31 @@ export class PiHarness extends LifecycleCapability {
 
   // ── Used by PiConversation and PiConversations ───────────────────────────
 
-  /** @internal */
-  async piConversation(id: PiConversationId): Promise<Conversation> {
+  /**
+   * @internal Not part of the supported API: it can change or go away in any
+   * release. Pi's own handle on the conversation, for what the
+   * `PiConversation` doesn't wrap, such as `configure()`, `compact()`, or
+   * `context({ at })`. Its type leaves out the members that would go around
+   * the harness, such as `submit` (see `PiRawConversation`).
+   */
+  async piConversation(id: PiConversationId): Promise<PiRawConversation> {
     return piConversationOf((await this.#open()).pi, id);
   }
 
-  /** @internal */
+  /**
+   * @internal Not part of the supported API: it can change or go away in any
+   * release. Pi's SQLite storage, for reading records the harness doesn't
+   * wrap, such as submissions. Don't write to it: Pi's Harness keeps its own
+   * state over it.
+   */
   async storage(): Promise<SqliteStorage> {
     return (await this.#open()).storage;
   }
 
-  /** @internal */
+  /**
+   * @internal Not part of the supported API: it can change or go away in any
+   * release. Use `PiConversation.submit()`.
+   */
   async enqueue(
     conversation: PiConversationId,
     input: UserInput,
@@ -490,7 +520,10 @@ export class PiHarness extends LifecycleCapability {
     });
   }
 
-  /** @internal */
+  /**
+   * @internal Not part of the supported API: it can change or go away in any
+   * release. Use `PiConversation.continue()`.
+   */
   enqueueContinue(
     conversation: PiConversationId,
     options: PiContinueOptions
@@ -522,7 +555,10 @@ export class PiHarness extends LifecycleCapability {
     return { operationId, conversation, accepted };
   }
 
-  /** @internal */
+  /**
+   * @internal Not part of the supported API: it can change or go away in any
+   * release. Use `PiConversation.abort(operationId)`.
+   */
   async withdraw(
     conversation: PiConversationId,
     operationId: string
@@ -551,7 +587,10 @@ export class PiHarness extends LifecycleCapability {
     }
   }
 
-  /** @internal */
+  /**
+   * @internal Not part of the supported API: it can change or go away in any
+   * release. Use `PiConversation.wait()`.
+   */
   async settled(
     conversation: PiConversationId,
     operationId: string,
@@ -830,7 +869,10 @@ export class PiHarness extends LifecycleCapability {
     this.#lastClose = closed;
   }
 
-  /** @internal */
+  /**
+   * @internal Not part of the supported API: it can change or go away in any
+   * release. The defaults a new conversation starts with, in Pi's terms.
+   */
   agentDefaults(): AgentChange {
     const defaults = this.#options.defaults;
     return {
