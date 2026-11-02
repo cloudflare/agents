@@ -46,7 +46,7 @@ export {
   type ResolvedBrowser
 } from "./browser";
 
-export { DEFAULT_BROWSER_SCOPE } from "./scope";
+export { DEFAULT_BROWSER_SCOPE, conversationScope } from "./scope";
 
 export type { BrowserFunction, BrowserFunctionDocs } from "./browser-functions";
 

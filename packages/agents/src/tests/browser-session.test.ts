@@ -7,6 +7,7 @@ import {
 } from "../browser/browser";
 import { browserFunctions } from "../browser/browser-functions";
 import { browserRun } from "../browser/providers/browser-run";
+import { conversationScope } from "../browser/scope";
 import {
   BrowserSession,
   lockedScopes,
@@ -1445,5 +1446,20 @@ describe("BrowserSession locks", () => {
     await expect(session.lock()).rejects.toThrow("lock: true");
     expect(session.waitedForLockMs).toBe(0);
     await session.close();
+  });
+});
+
+describe("conversationScope", () => {
+  it("names a conversation's scope", () => {
+    expect(conversationScope("2")).toBe("conversation:2");
+    expect(conversationScope("abc")).toBe("conversation:abc");
+  });
+
+  it("throws on a missing id instead of sharing one scope", () => {
+    expect(() => conversationScope("")).toThrow("conversation id");
+    // SAFETY: Simulates a missing metadata key at runtime.
+    expect(() => conversationScope(undefined as unknown as string)).toThrow(
+      "conversation id"
+    );
   });
 });

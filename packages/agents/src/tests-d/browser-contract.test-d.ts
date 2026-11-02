@@ -2,6 +2,7 @@ import { expectTypeOf } from "vitest";
 import {
   Browser,
   browserRun,
+  conversationScope,
   type BrowserFunction,
   type BrowserFunctionDocs,
   type BrowserSessionReport
@@ -36,3 +37,5 @@ expectTypeOf<BrowserFunction>().toEqualTypeOf<
   (input: unknown) => Promise<unknown>
 >();
 expectTypeOf<BrowserSessionReport["notices"]>().toEqualTypeOf<string[]>();
+
+expectTypeOf(conversationScope).toEqualTypeOf<(id: string) => string>();
