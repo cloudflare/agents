@@ -1,5 +1,6 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { PNG } from "./browser-fixture";
 
 /**
  * `browserTool` from `agents/browser/pi`, run by pi itself: pi validates
@@ -22,6 +23,23 @@ describe("the pi browser tool in a harness", () => {
     expect(response.parts[1]).toBe("image image/png aGVsbG8=");
     expect(JSON.parse(response.details)).toMatchObject({
       status: "completed"
+    });
+  });
+
+  it("gives a codemode script the run's result as an object, screenshot included", async () => {
+    const harness = env.PI_BROWSER_TEST.get(
+      env.PI_BROWSER_TEST.idFromName(crypto.randomUUID())
+    );
+    const response = await harness.prompt("codemode");
+
+    expect(response.status).toBe("done");
+    expect(response.parts[0]).toMatch(/^text Script completed/);
+    expect(response.parts).toContain(`image image/png ${PNG}`);
+    expect(JSON.parse(response.parts.at(-1)!.replace(/^text /, ""))).toEqual({
+      shot: "completed",
+      title: "Example",
+      failed: "error",
+      error: expect.stringContaining("boom")
     });
   });
 });
