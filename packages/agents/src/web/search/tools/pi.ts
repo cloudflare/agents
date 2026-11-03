@@ -4,9 +4,10 @@
  * @beta
  */
 import type { ToolRegistration } from "@earendil-works/pi-durable";
-import { int, obj, opt, str } from "@earendil-works/pi-schema";
+import { arr, int, obj, opt, str } from "@earendil-works/pi-schema";
 import {
   MAX_WEB_SEARCH_QUERY_LENGTH,
+  webSearchStructuredOutput,
   type WebSearchToolOutput
 } from "../contract";
 import type { WebSearchErrorCode } from "../source";
@@ -53,6 +54,30 @@ function webSearchParameters(maxLimit: number) {
 type WebSearchParameters = ReturnType<typeof webSearchParameters>;
 
 /**
+ * What a code mode script's `tools.web_search()` resolves to. A failed
+ * search rejects with the text the model would read.
+ */
+function webSearchOutputSchema() {
+  return obj(
+    {
+      query: str({ description: "The query as the provider saw it." }),
+      items: arr(
+        obj(
+          {
+            title: str(),
+            url: str({ description: "Read it with `web_fetch`." }),
+            description: opt(str({ description: "A snippet of the page." })),
+            lastModifiedDate: opt(str({ description: "ISO 8601." }))
+          },
+          { open: true }
+        )
+      )
+    },
+    { open: true }
+  );
+}
+
+/**
  * Host-side details pi stores with each `web_search` result: the full API
  * response (untrimmed descriptions, provider metadata) or the failure.
  */
@@ -78,6 +103,10 @@ export type WebSearchToolDetails =
  * again when the session recovers, which is a second billed search.
  * Completed results are stored and not searched again.
  *
+ * Scripts in pi's code mode get the results as an object,
+ * `{ query, items: [{ title, url, description, lastModifiedDate }] }`; a
+ * failed search rejects with the text the model would read.
+ *
  * @example
  * ```ts
  * import { createRegistry, Harness } from "@earendil-works/pi-durable";
@@ -102,12 +131,16 @@ export function webSearchTool(
     name: core.name,
     description: core.description,
     parameters: webSearchParameters(core.limit),
+    structuredOutputSchema: webSearchOutputSchema(),
     replay: "safe",
     async execute(input, _api, context) {
       const run = await core.run(input, { signal: context.abortSignal });
       if (run.ok) {
         return {
           output: [{ type: "text", text: run.text }],
+          structuredOutput: webSearchStructuredOutput(run.output, {
+            maxDescriptionChars: options.maxDescriptionChars
+          }),
           details: { ok: true, output: run.output }
         };
       }

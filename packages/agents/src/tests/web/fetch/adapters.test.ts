@@ -84,6 +84,17 @@ describe("pi adapter", () => {
         nextOffset: 31
       }
     });
+    // Code mode scripts get the window as an object, content still tagged.
+    expect(result.structuredOutput).toEqual({
+      url: "https://example.com/doc",
+      status: 200,
+      contentType: "text/html",
+      title: "Doc",
+      content: `<untrusted_web_content>\n${"a".repeat(30)}\n\n</untrusted_web_content>`,
+      offset: 0,
+      nextOffset: 31,
+      totalChars: 61
+    });
   });
 
   it("returns failures as error results with the source's detail", async () => {
