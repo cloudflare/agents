@@ -216,14 +216,14 @@ export function renderWebFetchPage(output: WebFetchToolOutput): string {
 }
 
 /**
- * A page window as an object for programs, such as code mode scripts. The
- * content stays wrapped in the untrusted-content tags, so a script that
+ * A page window as the pi tool's `structuredOutput`, which code mode scripts
+ * get. The content stays wrapped in the untrusted-content tags, so a script that
  * hands it back to the model still marks it as data, not instructions.
  */
-export function webFetchPageForPrograms(
+export function webFetchStructuredOutput(
   output: WebFetchToolOutput
-): WebFetchProgramOutput {
-  const page: WebFetchProgramOutput = {
+): WebFetchStructuredOutput {
+  const page: WebFetchStructuredOutput = {
     url: output.finalUrl,
     status: output.status,
     contentType: output.contentType,
@@ -236,8 +236,8 @@ export function webFetchPageForPrograms(
   return page;
 }
 
-/** What {@link webFetchPageForPrograms} returns. */
-export type WebFetchProgramOutput = {
+/** What {@link webFetchStructuredOutput} returns. */
+export type WebFetchStructuredOutput = {
   url: string;
   status: number;
   contentType: string;

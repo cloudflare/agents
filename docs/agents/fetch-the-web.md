@@ -233,7 +233,7 @@ With pi-durable's code mode installed beside the tool (setup in [Browse the Web]
 
 With `web_search` installed too, one script can search and read the results in parallel:
 
-```js
+```ts
 const found = await tools.web_search({ query: "Durable Objects alarms" });
 const pages = await Promise.all(
   found.items.slice(0, 3).map((item) => tools.web_fetch({ url: item.url }))

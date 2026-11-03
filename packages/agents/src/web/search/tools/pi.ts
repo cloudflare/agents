@@ -7,7 +7,7 @@ import type { ToolRegistration } from "@earendil-works/pi-durable";
 import { arr, int, obj, opt, str } from "@earendil-works/pi-schema";
 import {
   MAX_WEB_SEARCH_QUERY_LENGTH,
-  webSearchResultsForPrograms,
+  webSearchStructuredOutput,
   type WebSearchToolOutput
 } from "../contract";
 import type { WebSearchErrorCode } from "../source";
@@ -57,23 +57,25 @@ type WebSearchParameters = ReturnType<typeof webSearchParameters>;
  * What a code mode script's `tools.web_search()` resolves to. A failed
  * search rejects with the text the model would read.
  */
-const webSearchOutputSchema = obj(
-  {
-    query: str({ description: "The query as the provider saw it." }),
-    items: arr(
-      obj(
-        {
-          title: str(),
-          url: str({ description: "Read it with `web_fetch`." }),
-          description: opt(str({ description: "A snippet of the page." })),
-          lastModifiedDate: opt(str({ description: "ISO 8601." }))
-        },
-        { open: true }
+function webSearchOutputSchema() {
+  return obj(
+    {
+      query: str({ description: "The query as the provider saw it." }),
+      items: arr(
+        obj(
+          {
+            title: str(),
+            url: str({ description: "Read it with `web_fetch`." }),
+            description: opt(str({ description: "A snippet of the page." })),
+            lastModifiedDate: opt(str({ description: "ISO 8601." }))
+          },
+          { open: true }
+        )
       )
-    )
-  },
-  { open: true }
-);
+    },
+    { open: true }
+  );
+}
 
 /**
  * Host-side details pi stores with each `web_search` result: the full API
@@ -129,14 +131,14 @@ export function webSearchTool(
     name: core.name,
     description: core.description,
     parameters: webSearchParameters(core.limit),
-    structuredOutputSchema: webSearchOutputSchema,
+    structuredOutputSchema: webSearchOutputSchema(),
     replay: "safe",
     async execute(input, _api, context) {
       const run = await core.run(input, { signal: context.abortSignal });
       if (run.ok) {
         return {
           output: [{ type: "text", text: run.text }],
-          structuredOutput: webSearchResultsForPrograms(run.output, {
+          structuredOutput: webSearchStructuredOutput(run.output, {
             maxDescriptionChars: options.maxDescriptionChars
           }),
           details: { ok: true, output: run.output }

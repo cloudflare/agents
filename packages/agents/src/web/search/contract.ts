@@ -100,20 +100,20 @@ export interface RenderWebSearchResultsOptions {
 }
 
 /**
- * Search results as an object for programs, such as code mode scripts: the
- * query and each result's title, URL, description (trimmed as the model's
- * view trims it) and modified date.
+ * Search results as the pi tool's `structuredOutput`, which code mode scripts
+ * get: the query and each result's title, URL, description (trimmed as the
+ * model's view trims it) and modified date.
  */
-export function webSearchResultsForPrograms(
+export function webSearchStructuredOutput(
   response: WebSearchResponse,
   options: RenderWebSearchResultsOptions = {}
-): WebSearchProgramOutput {
+): WebSearchStructuredOutput {
   const maxChars =
     options.maxDescriptionChars ?? DEFAULT_WEB_SEARCH_DESCRIPTION_CHARS;
   return {
     query: response.metadata.query,
     items: response.items.map((item) => {
-      const result: WebSearchProgramOutput["items"][number] = {
+      const result: WebSearchStructuredOutput["items"][number] = {
         title: item.title.trim() || item.url,
         url: item.url
       };
@@ -126,8 +126,8 @@ export function webSearchResultsForPrograms(
   };
 }
 
-/** What {@link webSearchResultsForPrograms} returns. */
-export type WebSearchProgramOutput = {
+/** What {@link webSearchStructuredOutput} returns. */
+export type WebSearchStructuredOutput = {
   query: string;
   items: {
     title: string;
