@@ -37,7 +37,6 @@ export {
 
 export {
   Browser,
-  DEFAULT_BROWSER_SCOPE,
   MAX_BROWSER_SCOPES,
   type BrowserConnection,
   type BrowserConnectOptions,
@@ -46,6 +45,10 @@ export {
   type BrowserProvider,
   type ResolvedBrowser
 } from "./browser";
+
+export { DEFAULT_BROWSER_SCOPE, conversationScope } from "./scope";
+
+export type { BrowserFunction, BrowserFunctionDocs } from "./browser-functions";
 
 export {
   InternalHostRouter,
@@ -109,7 +112,8 @@ export {
   type BrowserSendInput,
   type BrowserSessionOptions,
   type BrowserSessionReport,
-  type BrowserSource
+  type BrowserSource,
+  type BrowserLockOptions
 } from "./session";
 
 export type {

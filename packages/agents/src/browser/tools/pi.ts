@@ -11,6 +11,7 @@ import {
   type BrowserToolOptions,
   type BrowserToolOutput
 } from "../browser-tool";
+import { conversationScope } from "../scope";
 import {
   browserExecuteModelOutput,
   browserScreenshotOutput
@@ -31,7 +32,7 @@ export interface PiBrowserToolOptions<
   /**
    * Which calls share an active tab: a string for every call, or a function
    * of the call. Defaults to `conversation:<id>` for the calling
-   * conversation, so each
+   * conversation (`conversationScope` from `agents/browser`), so each
    * conversation (and each fork or subagent) on the Durable Object keeps its
    * own tab, while cookies and logins stay shared.
    */
@@ -164,8 +165,9 @@ function browserToolResult(
   };
 }
 
-function conversationScope(api: ToolExecutionApi): string {
-  return `conversation:${api.conversationId}`;
+/** The default scope: the calling conversation's. */
+function callConversationScope(api: ToolExecutionApi): string {
+  return conversationScope(String(api.conversationId));
 }
 
 /**
@@ -223,7 +225,7 @@ function conversationScope(api: ToolExecutionApi): string {
 export function browserTool<TName extends string = "browser">(
   options: PiBrowserToolOptions<TName>
 ): PiBrowserTool<TName> {
-  const { scope = conversationScope, ...coreOptions } = options;
+  const { scope = callConversationScope, ...coreOptions } = options;
   const core = createBrowserToolCore(coreOptions, {
     screenshotHint:
       "To see a screenshot, return { type: 'browser_screenshot', mediaType, data } with data from Page.captureScreenshot and mediaType 'image/png', or 'image/jpeg' if you captured with format: 'jpeg'. The image is attached to the result. In a codemode script, `tools.browser()` resolves to the result as an object, and the screenshot in its `result` is an image block: pass it to `image()`."
@@ -237,10 +239,13 @@ export function browserTool<TName extends string = "browser">(
     executionMode: "sequential",
     // The code may have clicked or submitted something; don't run it twice.
     replay: "unsafe",
-    async execute(args, api) {
+    async execute(args, api, context) {
       const callScope = typeof scope === "string" ? scope : scope(api);
       return browserToolResult(
-        await core.execute({ code: args.code }, callScope)
+        await core.execute(
+          { code: args.code },
+          { scope: callScope, signal: context.abortSignal }
+        )
       );
     }
   };

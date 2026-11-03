@@ -76,7 +76,6 @@ this.registry.install({
 - A returned screenshot comes back as an image in the tool result, so the model can see the page and a UI can show it from the transcript. pi-ai only sends the image to models that accept images; other models get the text alone.
 - Each pi conversation gets its own active tab: `scope` defaults to the calling conversation, so sessions, forks, and subagents on one object do not drive each other's page. Pass `scope` as a string to share one tab, or as a function of the call (`(api) => string`) to choose.
 - pi does not rerun a browser call cut off by an eviction, because the code may have clicked or submitted something. The model gets an interrupted result and can try again; the browser itself is still there.
-- Stopping a conversation does not stop a browser call already running. It finishes or times out.
 
 #### In pi's code mode
 
@@ -142,9 +141,10 @@ To show a screenshot, the model returns it from its code. The full result, image
 - The model writes an async arrow function against a `browser` global: `browser.cdp({ method, params, sessionId })` sends a command, `browser.attachToTarget({ targetId })` switches tabs, `browser.spec()` lists the protocol's domains and `browser.spec({ domain })` returns one, and `browser.getDebugLog()` shows recent traffic. `sessionId: "active"` points at the tab it is working in, and that tab is remembered across turns.
 - The code runs in a fresh Dynamic Worker for each call, with no network access: `browser` is its only way out.
 - The tool's description covers the `browser` API and the CDP mistakes models commonly make, so the model does not need a discovery pass first.
-- If several chats or users share one `Browser` (for example, many threads on one Durable Object), pass each one's id as `scope`: `browserTool({ browser, loader, scope: threadId })`. Each scope keeps its own active tab, so one chat never drives another's page, while cookies and logins stay shared. Tools that leave `scope` out share one tab. Calls in the same scope wait for each other; calls in different scopes run in parallel.
+- If several chats or users share one `Browser` (for example, many threads on one Durable Object), pass each one's id as `scope`: `browserTool({ browser, loader, scope: threadId })`. Each scope keeps its own active tab, so one chat never drives another's page, while cookies and logins stay shared. Tools that leave `scope` out share one tab. Calls in the same scope wait for each other (and for your own sessions opened with `lock: true`); calls in different scopes run in parallel. The wait does not count toward `timeoutMs`.
 - The result's `notice` tells the model what happened to its browser: it was lost (idle past `keepAliveMs`, closed, or crashed) and the code ran in a new one, another chat closed its tab or works in it too, or the page opened new tabs.
 - Each call times out after `timeoutMs` (default 60 seconds).
+- When the harness aborts a call (the user stops the chat, say), a call still waiting for its scope gives up, and a running call ends with an error result and frees its scope. Anything its code already did in the browser stays done.
 - Results are cut to about 24,000 characters. A screenshot can be at most 1 MB, so a full-page screenshot of a long page fails; the model is told to capture the viewport or use JPEG instead.
 
 ### Configure the browser
@@ -184,9 +184,19 @@ try {
   });
 } finally {
   const report = await session.close();
-  // { restarted, newTabs, tabClosed, tabShared }, or undefined if unused
+  // { restarted, newTabs, tabClosed, tabShared, notices }, or undefined if unused
 }
 ```
+
+`report.notices` is the report as sentences for the model, the ones `browserTool` puts in its `notice`.
+
+To give model-written code the same `browser` object the tool does (in a sandbox of your own, say), pass it `session.functions`, the `browser.*` functions bound to the session, and describe them with `this.browser.functionDocs()`, which returns `{ functions, rules }`: the functions in Markdown and the rules for using them. Add rules about how your code runs, such as timeouts and what happens to screenshots.
+
+Runs in one scope drive one tab, so if yours can overlap with each other or with `browserTool` calls, open the session with `lock: true`. It takes the scope's lock at its first call and holds it until `close()`; other locking sessions in the scope, including `browserTool` runs, wait for it in order rather than fail. Every function in `session.functions`, the hosts functions included, waits for the lock and rejects once the session is closed. Call `await session.lock({ signal })` first to wait up front, outside any time limit of your own. A `signal` bounds only its own call: that call rejects when it aborts, and the session leaves the queue once no call is still waiting. A call without one, such as the wait a function call makes, never gives up. `session.waitedForLockMs` says how long the session waited.
+
+A session that has the lock holds it until `close()`, whatever happens to the run: aborting a signal, losing the browser, or dropping the session does not release it, and the scope's other locking sessions wait until the Durable Object restarts. Close every locking session in a `finally` block or your run's cleanup, including when connecting failed.
+
+For pi's per-conversation tabs, `conversationScope(String(conversationId))` from `agents/browser` returns the scope pi's `browserTool` uses, `conversation:<id>`. It takes a string and throws on an empty one.
 
 ### Internal hostnames
 
