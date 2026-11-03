@@ -20,7 +20,7 @@ import {
   type ToolCall,
   createAssistantMessageEventStream,
   getCurrentTools,
-  parseStreamingJson
+  ToolCallArgumentsStream
 } from "@earendil-works/pi-ai";
 import { convertMessages } from "@earendil-works/pi-ai/api/openai-completions";
 import {
@@ -46,7 +46,6 @@ import {
   recordWarnings
 } from "./shared";
 import type { WireRequest } from "../settings";
-import { PartialArguments } from "./partial-arguments";
 
 type Compat = Parameters<typeof convertMessages>[2];
 
@@ -125,8 +124,7 @@ interface Chunk {
 }
 
 type TextBlock = { type: "text"; text: string };
-type ToolCallBlock = ToolCall & { partialArguments?: string };
-type Block = TextBlock | ThinkingContent | ToolCallBlock;
+type Block = TextBlock | ThinkingContent | ToolCall;
 
 function mapFinishReason(reason: string): AssistantMessage["stopReason"] {
   switch (reason) {
@@ -175,9 +173,16 @@ function isFinalizer(call: ToolCallDelta): boolean {
 class CompletionAssembler {
   private textBlock: TextBlock | undefined;
   private thinkingBlock: ThinkingContent | undefined;
-  private readonly openToolCalls = new Map<number, ToolCallBlock>();
+  private readonly openToolCalls = new Map<number, ToolCall>();
+  /**
+   * Each open call's argument text, parsed as it arrives. Kept here rather
+   * than on the block, so the raw text never reaches a partial message.
+   */
+  private readonly toolCallArguments = new Map<
+    number,
+    ToolCallArgumentsStream
+  >();
   private readonly closedToolCalls = new Set<number>();
-  private readonly toolArguments = new Map<number, PartialArguments>();
   private lastToolIndex: number | undefined;
   private readonly blocks: Block[];
 
@@ -191,12 +196,6 @@ class CompletionAssembler {
 
   private indexOf(block: Block): number {
     return this.blocks.indexOf(block);
-  }
-
-  stripScratch(): void {
-    for (const block of this.blocks) {
-      if (block.type === "toolCall") delete block.partialArguments;
-    }
   }
 
   private endText(): void {
@@ -275,9 +274,11 @@ class CompletionAssembler {
     const block = this.openToolCalls.get(index);
     if (block === undefined || this.closedToolCalls.has(index)) return;
     this.closedToolCalls.add(index);
-    block.arguments = parseStreamingJson(block.partialArguments ?? "");
-    delete block.partialArguments;
-    this.toolArguments.delete(index);
+    const args = this.toolCallArguments.get(index);
+    this.toolCallArguments.delete(index);
+    // One full parse of the complete text; malformed arguments set
+    // `argumentsError`, which tool validation reports back to the model.
+    Object.assign(block, (args ?? new ToolCallArgumentsStream()).finish());
     this.stream.push({
       contentIndex: this.indexOf(block),
       partial: this.output,
@@ -311,10 +312,10 @@ class CompletionAssembler {
           arguments: {},
           id: call.id ?? crypto.randomUUID(),
           name: name ?? "",
-          partialArguments: "",
           type: "toolCall"
         };
         this.openToolCalls.set(index, block);
+        this.toolCallArguments.set(index, new ToolCallArgumentsStream());
         this.blocks.push(block);
         this.stream.push({
           contentIndex: this.indexOf(block),
@@ -327,13 +328,12 @@ class CompletionAssembler {
       }
       this.lastToolIndex = index;
       if (args.length > 0) {
-        let parser = this.toolArguments.get(index);
-        if (parser === undefined) {
-          parser = new PartialArguments();
-          this.toolArguments.set(index, parser);
+        let stream = this.toolCallArguments.get(index);
+        if (stream === undefined) {
+          stream = new ToolCallArgumentsStream();
+          this.toolCallArguments.set(index, stream);
         }
-        block.arguments = parser.push(args);
-        block.partialArguments = parser.text;
+        block.arguments = stream.append(args);
         this.stream.push({
           contentIndex: this.indexOf(block),
           delta: args,
@@ -671,7 +671,6 @@ export function streamCompletions(
       if (response?.body !== null && response?.body?.locked === false) {
         void response.body.cancel().catch(() => {});
       }
-      assembler.stripScratch();
       failStream(stream, output, error, options.signal);
     }
   })();

@@ -186,11 +186,6 @@ export function streamResponses(
       if (response?.body !== null && response?.body?.locked === false) {
         void response.body.cancel().catch(() => {});
       }
-      for (const block of output.content) {
-        delete (block as { index?: number }).index;
-        delete (block as { partialJson?: string }).partialJson;
-        delete (block as { customInput?: unknown }).customInput;
-      }
       failStream(stream, output, error, options.signal);
     }
   })();
