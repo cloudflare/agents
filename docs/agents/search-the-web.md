@@ -90,6 +90,16 @@ The API has no pagination. The tool description tells the model to search again 
 
 Results are for discovery. To let the model read the pages it finds, add the [`web_fetch` tool](./fetch-the-web.md) beside `web_search`; the `web_search` description tells the model to fetch result URLs with `web_fetch` when it is available.
 
+## In pi's code mode
+
+With pi-durable's code mode installed beside the tool (setup in [Browse the Web](./browse-the-web.md#in-pis-code-mode)), a script calls `tools.web_search({ query, limit })` and gets the results as an object, not the model's text:
+
+```ts
+{ query, items: [{ title, url, description?, lastModifiedDate? }] }
+```
+
+Descriptions are trimmed as they are for the model. A failed search rejects with the model's text. The model's own result is the same text as before. [Fetch the Web](./fetch-the-web.md#in-pis-code-mode) shows a script that searches, then reads the results.
+
 ## Failures
 
 A failed search becomes a `WebSearchError` with `status`, `code`, `retryable`, and `requestId` (AI Gateway's id for the request, for the gateway log). Every error has a `code`: the API's own when it sends one, for example `web_search_payment_required`, otherwise one derived from the HTTP status, such as `web_search_rate_limited` or `web_search_unavailable`. On a runtime older than the one above, the binding has no `websearch()` and the search fails with code `web_search_unsupported_runtime`.

@@ -703,6 +703,23 @@ describe("adapters", () => {
       { type: "text", text: expect.stringContaining("2 results") }
     ]);
     expect(result.details).toEqual({ ok: true, output: RESPONSE });
+    // Code mode scripts get the results as an object, trimmed as above.
+    expect(result.structuredOutput).toEqual({
+      query: "web search api",
+      items: [
+        {
+          title: "Introducing Web Search API via AI Gateway | Cloudflare Blog",
+          url: "https://blog.cloudflare.com/introducing-web-search-api/",
+          description:
+            "# Introducing Web Search API Today, we're announcing Cloudflare's partnership with web search providers.",
+          lastModifiedDate: "2026-10-02T14:16:00.000Z"
+        },
+        {
+          title: "Web Search · Cloudflare AI Gateway docs",
+          url: "https://developers.cloudflare.com/ai-gateway/usage/web-search/"
+        }
+      ]
+    });
   });
 
   it("pi: failures are error results with the API's code", async () => {

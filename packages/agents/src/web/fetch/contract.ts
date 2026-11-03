@@ -212,10 +212,46 @@ export function renderWebFetchPage(output: WebFetchToolOutput): string {
     );
     if (nextOffset !== null) parts.push(`continue with offset=${nextOffset}`);
   }
+  return [parts.join(" · "), wrapUntrusted(output.content)].join("\n");
+}
+
+/**
+ * A page window as an object for programs, such as code mode scripts. The
+ * content stays wrapped in the untrusted-content tags, so a script that
+ * hands it back to the model still marks it as data, not instructions.
+ */
+export function webFetchPageForPrograms(
+  output: WebFetchToolOutput
+): WebFetchProgramOutput {
+  const page: WebFetchProgramOutput = {
+    url: output.finalUrl,
+    status: output.status,
+    contentType: output.contentType,
+    content: wrapUntrusted(output.content),
+    offset: output.offset,
+    nextOffset: output.nextOffset,
+    totalChars: output.totalChars
+  };
+  if (output.title !== undefined) page.title = output.title;
+  return page;
+}
+
+/** What {@link webFetchPageForPrograms} returns. */
+export type WebFetchProgramOutput = {
+  url: string;
+  status: number;
+  contentType: string;
+  title?: string;
+  content: string;
+  offset: number;
+  nextOffset: number | null;
+  totalChars: number;
+};
+
+function wrapUntrusted(content: string): string {
   return [
-    parts.join(" · "),
     `<${UNTRUSTED_TAG}>`,
-    neutralizeTag(output.content),
+    neutralizeTag(content),
     `</${UNTRUSTED_TAG}>`
   ].join("\n");
 }
