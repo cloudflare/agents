@@ -48,6 +48,11 @@ export type PiSubmitOptions = {
   readonly entry?: InputEntry;
 };
 
+export type PiContinueOptions = {
+  /** Idempotency key. Continuing with the same id twice returns the same receipt. */
+  readonly operationId?: string;
+};
+
 export type PiSessionOptions = {
   /** Default: the root session. */
   readonly session?: PiSessionId;

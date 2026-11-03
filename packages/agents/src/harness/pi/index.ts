@@ -20,6 +20,7 @@ export {
 } from "./session-store";
 export { skills } from "./skills";
 export type {
+  PiContinueOptions,
   PiOperationResult,
   PiPendingOperation,
   PiPromptResponse,

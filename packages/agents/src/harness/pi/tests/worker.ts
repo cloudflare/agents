@@ -84,6 +84,7 @@ const Reminder = defineTask<
  * - `nowake:` opens pi without `onWake`.
  * - `retry:` retries a failed generation once, after two seconds.
  * - `park:` ends a task cut off once (pi's `restartLimit` of 1).
+ * - `turns:` starts sessions with `maxTurns: 1`.
  */
 function variantSettings(name: string) {
   const plain = name.replace(/^nowake:/, "");
@@ -231,7 +232,10 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
         )
       );
     },
-    defaults: { model: this.#faux.getModel() }
+    defaults: {
+      model: this.#faux.getModel(),
+      ...(this.ctx.id.name?.startsWith("turns:") ? { maxTurns: 1 } : {})
+    }
   });
   readonly lifecycle = Lifecycle.install(this).use(this.harness);
 
@@ -363,6 +367,10 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     } = {}
   ): Promise<PiReceipt> {
     return this.harness.submit(text, options);
+  }
+
+  continueSession(operationId?: string): Promise<PiReceipt> {
+    return this.harness.continue(operationId ? { operationId } : {});
   }
 
   /**
