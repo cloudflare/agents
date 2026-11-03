@@ -1,5 +1,77 @@
 # @cloudflare/agents
 
+## 0.33.0
+
+This release adds support for [Pi 1.5](https://github.com/earendil-works/pi/blob/v1.5.0/packages/durable/CHANGELOG.md#150---2026-11-02), which makes `PiHarness` much faster and lighter on memory, and lets you continue a run that ended without an answer.
+
+### Highlights
+
+- **Pi 1.5 support:** `agents/harness/pi`, `agents/models/pi-ai` and the Pi tools now run on Pi 1.5.
+- **Far fewer storage writes while streaming:** Pi stores streamed answers and tool output in batches, at the latest every second, instead of on every update. Over SQLite this cuts storage transactions about 27x for long answers and 5.7x for turns with parallel tools, and CPU by about a quarter. A crash can now lose up to about a second of streamed output.
+- **Faster with many sessions:** Pi's scheduler no longer rechecks every conversation on each commit, so on SQLite one Pi harness with 2,048 sessions went from 88 to 459 agent runs per second. Commits that arrive together now share one storage call, and a normal run makes no storage reads.
+- **Large answers no longer blow up memory:** streaming a 500 KB tool call used to take about 20 s of CPU and a 100 MB heap, and a 140 KB answer followed by a 140 KB tool call held over 100 MB. Pi now appends new text instead of copying it on every update.
+- **Conversation view:** `session.watch()` replaces `session.events()`. It returns the newest transcript entries and the session's live state, such as the answer being streamed, running tools, and why the last run ended without an answer. `session.entries()` pages older entries. See [Work with sessions](https://github.com/cloudflare/agents/blob/main/docs/agents/harnesses/pi.md#work-with-sessions).
+- **Continue a run:** `session.continue()` starts a run on the transcript as it is, without a new message, for example after the model errored or the run hit its turn limit.
+- **Turn limit:** `defaults.maxTurns` caps the tool rounds a run can take in new sessions. A run that reaches it ends without an answer, with reason `turn_limit`.
+- **Crash-looping tasks end instead of parking:** a tool call cut off by Pi's restart limit ends with an error result the model sees, and a model request ends its run without an answer, with reason `restart_limit`. See [How recovery works](https://github.com/cloudflare/agents/blob/main/docs/agents/harnesses/pi.md#how-recovery-works).
+- **Other changes:** `submit()` takes `whenIdle: "reject"`, so an idle session refuses input instead of starting a run. Streamed tool-call arguments on the chat-completions wire that aren't valid JSON now fail the tool call with an error the model can fix. In Pi's code mode, `browserTool` gives scripts its run as an object, with screenshots as image blocks for `image()`. `browserTool` stops when the harness aborts its call, and `BrowserSession` lets code outside `browserTool` run the same `browser` object. `useAgentChat().stop()` now cancels server-started turns streamed without a resume handshake.
+
+### Upgrading
+
+You only need to make changes if you use the Pi harness, `agents/models/pi-ai` or the Pi tools.
+
+1. **Update Pi to `~1.5.0`** (`@earendil-works/pi-durable`, `pi-ai`, `chord`) and install `@earendil-works/pi-schema` alongside them. Once a conversation runs on Pi 1.5, Pi 1.4 cannot read it, so a deployment cannot roll back past this release. Roll forward to fix a bad deploy instead.
+2. **Check [pi-durable's 1.5.0 changelog](https://github.com/earendil-works/pi/blob/v1.5.0/packages/durable/CHANGELOG.md#150---2026-11-02)** for its breaking changes, such as the removal of `watchEvents()`, tagged watch calls and ends, and `ConversationView.entries` becoming a window over the transcript.
+3. **Replace `session.events()` with `session.watch()`** and render the view each time it changes. To show a transcript longer than the window, merge each value into Pi's `ConversationTranscript`, which pages older entries with `session.entries()`. The view's entries now include those before a reset or compaction: Pi adds the reset or summary in place instead of cutting the transcript there. An idle `pi.live` now keeps `runFailure` after a failed run, so check `run === undefined` instead of comparing it with `{}`.
+
+   ```diff
+   - const stream = await session.events();
+   - initialize(stream.snapshot);
+   - stream.start(async (events) => events.forEach(apply));
+   + const watch = await session.watch();
+   + render(watch.value);
+   + watch.start(async (call) => {
+   +   if (call.kind === "value") render(call.value);
+   + });
+   ```
+
+4. **Build your Pi tool schemas with `@earendil-works/pi-schema`**, as pi-ai no longer exports TypeBox's `Type`. Unlike `Type.Object`, `obj()` rejects properties it doesn't list; pass `{ open: true }` to allow them. To keep TypeBox instead, import `Type` from `typebox`.
+
+   ```diff
+   - import { Type } from "@earendil-works/pi-ai";
+   - const WordCount = Type.Object({ text: Type.String() });
+   + import { obj, str } from "@earendil-works/pi-schema";
+   + const WordCount = obj({ text: str() });
+   ```
+
+5. **Remove calls to `retry()` and handling of the `parked` status.** To run work again after a run ended without an answer, call `session.continue()` or submit it again.
+6. **Update your `onReport` callback** if you pass one to `Harness.open`. It now takes one report tagged by `kind`, with the error on it. `session_failed` is now `storage_failed`, and a task the restart limit ends is reported as `task_interrupted` instead of `task_parked`.
+
+### Minor Changes
+
+- [#2796](https://github.com/cloudflare/agents/pull/2796) [`edf1b52`](https://github.com/cloudflare/agents/commit/edf1b5274b845571853a73fc1e8edd0ca4b62423) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Support Pi 1.5 (`~1.5.0`; Pi 1.4 is no longer supported): `session.watch()` replaces `session.events()` and returns Pi's conversation view, `session.entries()` pages the transcript, `retry()` and the `parked` pending status are removed as Pi now ends crash-looping tasks, `submit()` takes `whenIdle: "reject"`, and the Pi tools build their schemas with `@earendil-works/pi-schema`, a new optional peer, as pi-ai no longer exports TypeBox's `Type`. See [pi-durable 1.5.0's changelog](https://github.com/earendil-works/pi/blob/v1.5.0/packages/durable/CHANGELOG.md#150---2026-11-02).
+
+- [#2797](https://github.com/cloudflare/agents/pull/2797) [`77138fa`](https://github.com/cloudflare/agents/commit/77138fa1a36f2c16f74c584ab3388058d5909182) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Two new controls for the Pi harness, from Pi 1.5:
+
+  - `continue()` starts a run without sending a new message. Use it to try again after a run ended without an answer, for example because the model errored or the run hit its turn limit.
+  - `defaults.maxTurns` limits how many tool rounds a run can take. A run that reaches it ends without an answer, with reason `turn_limit`.
+
+  See [Pi harness](https://developers.cloudflare.com/agents/harnesses/pi/).
+
+### Patch Changes
+
+- [#2795](https://github.com/cloudflare/agents/pull/2795) [`3e21ee4`](https://github.com/cloudflare/agents/commit/3e21ee48df129513310b844b05928bf3b5123d00) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Add `Browser.functionDocs()`, `BrowserSession.functions`, report `notices`, opt-in scope locks (`browser.session({ lock: true })`, `session.lock()`) and `conversationScope()` to `agents/browser`, so code outside `browserTool` can run the same `browser` object. See [Browse the Web](https://developers.cloudflare.com/agents/tools/browser/).
+
+- [#2795](https://github.com/cloudflare/agents/pull/2795) [`3e21ee4`](https://github.com/cloudflare/agents/commit/3e21ee48df129513310b844b05928bf3b5123d00) Thanks [@ben-reitz](https://github.com/ben-reitz)! - `browserTool` stops when the harness aborts its call, for pi, the AI SDK and TanStack AI. See [Browse the Web](https://developers.cloudflare.com/agents/tools/browser/).
+
+- [#2798](https://github.com/cloudflare/agents/pull/2798) [`62ccd87`](https://github.com/cloudflare/agents/commit/62ccd8735b655dbe2d8d4f05716b6e6679958c8b) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Pi models on the chat-completions wire (Workers AI, and OpenAI-compatible models through AI Gateway) now parse streamed tool-call arguments with pi-ai's own parser. When a model sends arguments that aren't valid JSON, the tool call now fails with an error the model can see and fix, instead of running with whatever arguments could be salvaged.
+
+  See [Models for pi-ai](https://developers.cloudflare.com/agents/models/pi-ai/).
+
+- [#2801](https://github.com/cloudflare/agents/pull/2801) [`748e693`](https://github.com/cloudflare/agents/commit/748e69393c034ceedfd718f9c14ab8346222335d) Thanks [@ben-reitz](https://github.com/ben-reitz)! - The pi `browserTool` gives code mode scripts the run as an object, with screenshots as image blocks for `image()`. See [Browse the Web](https://developers.cloudflare.com/agents/tools/browser/#in-pis-code-mode).
+
+- [#2805](https://github.com/cloudflare/agents/pull/2805) [`baf26bc`](https://github.com/cloudflare/agents/commit/baf26bc0eb7e06507976592d15fcb1cd8a4ab78e) Thanks [@ben-reitz](https://github.com/ben-reitz)! - `useAgentChat().stop()` now cancels server-started turns streamed without a resume handshake. See [Request cancellation](https://developers.cloudflare.com/agents/agent-class/communication-channels/chat/chat-agents/#request-cancellation).
+
 ## 0.32.0
 
 ### Minor Changes
