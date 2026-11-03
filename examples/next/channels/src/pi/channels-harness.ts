@@ -154,6 +154,12 @@ class MessageIds {
 
 class PiChannelsSession implements HarnessSession {
   readonly id: string;
+  /**
+   * Operations submitted here that no view has shown yet. The watch takes
+   * them off once it reports them, or settles them if they came and went
+   * between two views.
+   */
+  readonly unseen = new Set<string>();
 
   constructor(
     private readonly pi: PiHarness,
@@ -172,10 +178,19 @@ class PiChannelsSession implements HarnessSession {
     // pi has no participants, so `from` is dropped.
     const operationId = options.operationId ?? crypto.randomUUID();
     this.ids.record(this.id, operationId, input.messageId ?? operationId);
-    return this.session.submit(toUserInput(input), {
+    const receipt = await this.session.submit(toUserInput(input), {
       operationId,
       ...(options.whenBusy && { whenBusy: options.whenBusy })
     });
+    // Only once pi has it, so pending() lists it until it settles.
+    this.unseen.add(operationId);
+    return receipt;
+  }
+
+  /** Operation ids queued or running in pi. */
+  async pending(): Promise<Set<string>> {
+    const pending = await this.pi.pending({ session: this.id });
+    return new Set(pending.map((p) => p.operationId));
   }
 
   abort(operationId?: string): Promise<boolean> {
@@ -336,6 +351,7 @@ class ViewTranslator {
       this.#open.add(item.id);
       const operations = await this.session.operations([item.id]);
       for (const operationId of operations) {
+        this.session.unseen.delete(operationId);
         out.push({
           type: "operation",
           status: { operationId, status: "queued" }
@@ -345,6 +361,7 @@ class ViewTranslator {
     if (live.run !== undefined && this.#runKey === undefined) {
       this.#startRun(live);
       const operations = await this.session.operations(live.run.inputs);
+      for (const id of operations) this.session.unseen.delete(id);
       out.push({ type: "run-start", operations });
     }
     // Inputs the run took, at its start or as steers.
@@ -354,6 +371,7 @@ class ViewTranslator {
       this.#open.add(id);
       const record = await this.session.submission(id);
       if (record?.type !== "input" || record.requestId === undefined) continue;
+      this.session.unseen.delete(record.requestId);
       this.session.placed(record);
       out.push({
         type: "operation",
@@ -363,6 +381,7 @@ class ViewTranslator {
     out.push(...(await this.#entries(view)));
     out.push(...this.#partial(live));
     out.push(...(await this.#settled(live, inbox)));
+    out.push(...(await this.#missed()));
     return out;
   }
 
@@ -471,6 +490,7 @@ class ViewTranslator {
       this.#open.delete(id);
       if (record.type !== "input" || record.requestId === undefined) continue;
       const operationId = record.requestId;
+      this.session.unseen.delete(operationId);
       out.push({
         type: "operation",
         status:
@@ -478,6 +498,28 @@ class ViewTranslator {
             ? { operationId, status: "done" }
             : { operationId, status: "unanswered", reason: record.reason }
       });
+    }
+    return out;
+  }
+
+  /**
+   * Operations submitted here that settled before any view showed them: a
+   * run that started and ended while the listener was busy is folded into
+   * the next view, which shows neither it nor its inputs.
+   */
+  async #missed(): Promise<SessionEvent[]> {
+    const unseen = this.session.unseen;
+    if (unseen.size === 0) return [];
+    const pending = await this.session.pending();
+    const out: SessionEvent[] = [];
+    for (const operationId of [...unseen]) {
+      // Still queued or running: a later view shows it.
+      if (pending.has(operationId)) continue;
+      unseen.delete(operationId);
+      // Settled, so this resolves at once.
+      const { session: _session, ...status } =
+        await this.session.wait(operationId);
+      out.push({ type: "operation", status });
     }
     return out;
   }
