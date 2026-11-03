@@ -3,16 +3,15 @@ import {
   fauxProvider,
   fauxText,
   fauxToolCall,
-  Type,
   type AssistantMessage,
   type Message,
   type TranscriptContext
 } from "@earendil-works/pi-ai";
+import { num, obj } from "@earendil-works/pi-schema";
 import { createModels } from "@earendil-works/pi-ai/models";
 import {
   createRegistry,
   Harness,
-  type AgentEvent,
   type Extension,
   type ToolRegistration
 } from "@earendil-works/pi-durable";
@@ -28,7 +27,7 @@ import {
 import { Lifecycle } from "agents/lifecycle";
 import { WebSockets } from "agents/websockets";
 import { PiSessionSockets } from "../sockets";
-import { EMPTY_VIEW, reduceEvents } from "../view";
+import { projectView } from "../view";
 import { createWorkspaceTools, JAVASCRIPT_BACKEND } from "../workspace";
 
 const RELEASE_KEY = "test:gate:release";
@@ -124,7 +123,7 @@ export class PiHarnessTestObject extends DurableObject<Env> {
           settings: {
             retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 }
           },
-          onReport: (error) => console.warn("pi report", error)
+          onReport: (report) => console.warn("pi report", report)
         },
         context
       );
@@ -169,6 +168,11 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     return this.harness.wait(operationId, session ? { session } : {});
   }
 
+  /** Reset the root session's context. */
+  async reset(): Promise<void> {
+    await this.harness.session().reset();
+  }
+
   /** Write a file into the workspace, as a test's setup. */
   async writeWorkspaceFile(path: string, text: string): Promise<void> {
     await this.workspace.fs.mkdir("/workspace", { recursive: true });
@@ -189,28 +193,29 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     await this.ctx.storage.put(RELEASE_KEY, true);
   }
 
-  /** Watch the root session's events until a run ends. */
-  async watch(): Promise<{ view: string; types: string[] }> {
-    const stream = await this.harness.session().events();
-    let view = reduceEvents(EMPTY_VIEW, [stream.snapshot]);
-    const types: string[] = ["snapshot"];
+  /** Watch the root session through one run: the view projected from its last value. */
+  async watch(): Promise<string> {
+    const watch = await this.harness.session().watch();
+    let sawRun = false;
+    let view = projectView(watch.value);
     await new Promise<void>((resolve) => {
-      stream.start(async (events: readonly AgentEvent[]) => {
-        types.push(...events.map((event) => event.type));
-        view = reduceEvents(view, events);
-        if (events.some((event) => event.type === "run_end")) resolve();
+      watch.start(async (call) => {
+        if (call.kind !== "value") return;
+        view = projectView(call.value);
+        if (view.running) sawRun = true;
+        if (sawRun && !view.running) resolve();
       });
     });
-    await stream.stop();
+    await watch.stop();
     // JSON, so the RPC type stays shallow for the test's type checker.
-    return { view: JSON.stringify(view), types };
+    return JSON.stringify(view);
   }
 
-  /** The view folded from a fresh snapshot, as a client joining now sees it. */
+  /** The view projected from a new watch, as a client joining now sees it. */
   async snapshotView(): Promise<string> {
-    const stream = await this.harness.session().events();
-    await stream.stop();
-    return JSON.stringify(reduceEvents(EMPTY_VIEW, [stream.snapshot]));
+    const watch = await this.harness.session().watch();
+    await watch.stop();
+    return JSON.stringify(projectView(watch.value));
   }
 
   /** The fixture's tools and preamble, as one pi extension. */
@@ -255,8 +260,8 @@ export class PiHarnessTestObject extends DurableObject<Env> {
   }
 }
 
-const NoParameters = Type.Object({});
-const MultiplyParameters = Type.Object({ value: Type.Number() });
+const NoParameters = obj({});
+const MultiplyParameters = obj({ value: num() });
 
 /** Multiplies by three. */
 function multiplyTool(): ToolRegistration<typeof MultiplyParameters> {

@@ -2,17 +2,18 @@ import type { Api, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import {
   LiveDoc,
   ROOT_CONVERSATION_ID,
-  watchEvents,
-  type AgentEventStream,
   type Conversation,
   type ConversationId,
+  type ConversationWatch,
+  type ConversationWindow,
+  type Cursor,
   type AgentChange,
+  type EntryQuery,
   type EntryRecord,
   type Harness,
-  type HarnessInspection,
   type ModelRef,
+  type Page,
   type SettledSubmissionRecord,
-  type TaskId,
   type UserInput,
   type Wake
 } from "@earendil-works/pi-durable";
@@ -369,14 +370,6 @@ export class PiHarness extends LifecycleCapability {
     return this.session(options.session).abort(options.operationId);
   }
 
-  /**
-   * Run again the tasks pi's crash-loop guard parked in a session's work.
-   * False when nothing was parked.
-   */
-  retry(options: PiSessionOptions = {}): Promise<boolean> {
-    return this.session(options.session).retry();
-  }
-
   wait(
     operationId: string,
     options: PiSessionOptions & { readonly signal?: AbortSignal } = {}
@@ -397,7 +390,6 @@ export class PiHarness extends LifecycleCapability {
         ? undefined
         : conversationId(options.session);
     const inspection = await pi.inspect(BG);
-    const parked = await this.#parked(inspection);
     return inspection.submissions.flatMap((record): PiPendingOperation[] => {
       if (record.requestId === undefined) return [];
       if (id !== undefined && record.conversationId !== id) return [];
@@ -407,11 +399,7 @@ export class PiHarness extends LifecycleCapability {
           status = "queued";
           break;
         case "placed":
-          status = parked.some((task) =>
-            task.sessions.has(record.conversationId)
-          )
-            ? "parked"
-            : "running";
+          status = "running";
           break;
         case "done":
         case "unanswered":
@@ -475,6 +463,7 @@ export class PiHarness extends LifecycleCapability {
           type: "input",
           content: input,
           whenBusy: options.whenBusy ?? "followUp",
+          ...(options.whenIdle ? { whenIdle: options.whenIdle } : {}),
           requestId: operationId,
           ...(options.entry ? { entry: options.entry } : {})
         },
@@ -483,20 +472,6 @@ export class PiHarness extends LifecycleCapability {
       return accepted;
     });
     return { operationId, session, accepted };
-  }
-
-  /** @internal Run again the tasks pi's restart limit parked in a session. */
-  async retryParked(session: PiSessionId): Promise<boolean> {
-    const { pi } = await this.#open();
-    const id = conversationId(session);
-    const parked = (await this.#parked(await pi.inspect(BG))).filter((task) =>
-      task.sessions.has(id)
-    );
-    if (parked.length === 0) return false;
-    await this.#admit(async () => {
-      for (const task of parked) await pi.retryTask(task.id, BG);
-    });
-    return true;
   }
 
   /** @internal Withdraw a queued input, or abort the run it joined. */
@@ -647,8 +622,7 @@ export class PiHarness extends LifecycleCapability {
     // A submit between its wake and pi's admission: check again later.
     if (this.#admitting > 0) return heartbeat;
     if (wake.at !== undefined) return { rescheduleAt: wake.at };
-    // Nothing to do. A task parked by pi's restart limit is not work: it
-    // waits for `retry()`.
+    // Nothing to do.
     return undefined;
   }
 
@@ -694,7 +668,7 @@ export class PiHarness extends LifecycleCapability {
       return true;
     } catch (error) {
       // A pi that began closing is expected to throw; it is no longer the
-      // harness's pi, and Pi reports a failure itself (`session_failed`).
+      // harness's pi, and Pi reports a failure itself (`storage_failed`).
       if (!this.#closing.has(pi)) this.#wakeError(error);
       // Only Lifecycle's alarm breaker can act on a memory-limit reset,
       // including one that failed pi's Session (SessionFailed's cause).
@@ -818,31 +792,6 @@ export class PiHarness extends LifecycleCapability {
     };
   }
 
-  /**
-   * Tasks pi's restart limit parked, each with the sessions whose work it
-   * is: its own, and every session that owns that one, such as the session
-   * of a tool that started a subagent.
-   */
-  async #parked(
-    inspection: HarnessInspection
-  ): Promise<{ id: TaskId; sessions: Set<ConversationId> }[]> {
-    const { storage } = await this.#open();
-    const parked: { id: TaskId; sessions: Set<ConversationId> }[] = [];
-    for (const { record, state } of inspection.tasks) {
-      if (state.kind !== "blocked" || state.reason !== "restart_limit") {
-        continue;
-      }
-      const sessions = new Set<ConversationId>();
-      let id: ConversationId | undefined = record.conversationId;
-      while (id !== undefined && !sessions.has(id)) {
-        sessions.add(id);
-        id = (await storage.conversation(id, BG))?.owner?.conversationId;
-      }
-      parked.push({ id: record.id, sessions });
-    }
-    return parked;
-  }
-
   async #findSubmission(
     id: ConversationId,
     operationId: string,
@@ -935,15 +884,6 @@ export class PiSession {
     return true;
   }
 
-  /**
-   * Run again the tasks pi's crash-loop guard (`settings.restartLimit`)
-   * parked in this session's work, including subagent sessions it owns.
-   * False when nothing was parked.
-   */
-  retry(): Promise<boolean> {
-    return this.#harness.retryParked(this.id);
-  }
-
   /** Start a new context, optionally from a handoff note. */
   async reset(handoff?: string): Promise<void> {
     await (await this.#harness.conversation(this.id)).reset(handoff, BG);
@@ -965,10 +905,38 @@ export class PiSession {
     return [...view.entries];
   }
 
-  /** pi's agent events for this session: a snapshot, then one batch per commit. */
-  async events(context: Context = BG): Promise<AgentEventStream> {
-    const pi = await this.#harness.pi();
-    return watchEvents(pi, conversationId(this.id), context);
+  /**
+   * Watch this session: pi's conversation view, a window over the transcript
+   * with the session's documents, such as `pi.live` (the answer being
+   * streamed, running tools, and why the last run ended without an answer)
+   * and `pi.inbox`. The first value holds the newest entries; new entries
+   * are appended. Each change carries pi's operations, for a client that
+   * forwards them. To render more than the window, merge each value into a
+   * `ConversationTranscript` that pages with `entries()`.
+   */
+  async watch(
+    window?: ConversationWindow,
+    context: Context = BG
+  ): Promise<ConversationWatch> {
+    return (await this.#harness.conversation(this.id)).watch(context, window);
+  }
+
+  /**
+   * A page of this session's transcript, newest first unless `query.order`
+   * is `ascending`, including entries before its resets. The loader a
+   * `ConversationTranscript` takes.
+   */
+  async entries(
+    query: Omit<EntryQuery, "conversationId">,
+    limit: number,
+    context: Context = BG
+  ): Promise<Page<EntryRecord, Cursor>> {
+    return (await this.#harness.conversation(this.id)).entries(
+      query,
+      limit,
+      undefined,
+      context
+    );
   }
 
   async busy(): Promise<boolean> {

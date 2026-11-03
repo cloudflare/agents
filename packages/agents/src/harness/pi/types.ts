@@ -20,12 +20,24 @@ export type PiSessionId = string;
  */
 export type PiWhenBusy = "followUp" | "steer" | "reject";
 
+/**
+ * What a submission does when the session is idle.
+ *
+ * - unset (default): starts a run.
+ * - `reject`: not admitted. `submit()` rejects with pi-durable's
+ *   `ConversationIdle` and saves nothing. With `whenBusy: "steer"`, the
+ *   input joins the running work or is refused, in one step that cannot
+ *   race the run's end.
+ */
+export type PiWhenIdle = "reject";
+
 export type PiSubmitOptions = {
   /** Default: the root session. */
   readonly session?: PiSessionId;
   /** Idempotency key. Submitting the same id twice returns the same receipt. */
   readonly operationId?: string;
   readonly whenBusy?: PiWhenBusy;
+  readonly whenIdle?: PiWhenIdle;
   /**
    * The transcript entry the input is placed as, instead of pi's `pi.user`:
    * for input the user did not type, such as a scheduled prompt, a webhook,
@@ -70,12 +82,8 @@ export type PiPromptResponse = PiOperationResult & {
 export type PiPendingOperation = {
   readonly operationId: string;
   readonly session: PiSessionId;
-  /**
-   * `queued` in pi's inbox, or `running` as part of the current run.
-   * `parked`: running, but pi's crash-loop guard (`settings.restartLimit`)
-   * stopped a task of the session; `retry()` runs it again.
-   */
-  readonly status: "queued" | "running" | "parked";
+  /** `queued` in pi's inbox, or `running` as part of the current run. */
+  readonly status: "queued" | "running";
 };
 
 export type PiSessionInfo = {

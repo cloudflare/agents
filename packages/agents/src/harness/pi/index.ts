@@ -28,5 +28,6 @@ export type {
   PiSessionInfo,
   PiSessionOptions,
   PiSubmitOptions,
-  PiWhenBusy
+  PiWhenBusy,
+  PiWhenIdle
 } from "./types";

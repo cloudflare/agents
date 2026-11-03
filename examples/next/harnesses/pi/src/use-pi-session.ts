@@ -1,7 +1,9 @@
+import { applyImmutable } from "@earendil-works/chord/delta";
+import type { ConversationView } from "@earendil-works/pi-durable";
 import { useAgent } from "agents/react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { PiCommandOutbox } from "./outbox";
-import { EMPTY_VIEW, reduceEvents } from "./view";
+import { EMPTY_VIEW, projectView } from "./view";
 import type {
   ClientMessage,
   ServerMessage,
@@ -25,9 +27,10 @@ const INITIAL_STATE: State = {
 
 /**
  * One pi session over the harness's WebSocket protocol, connected with
- * `useAgent`. The server sends pi's own agent events; this folds them with
- * the same `reduceEvents` the server tests use. A reconnect gets a fresh
- * snapshot, and the client sends again every submit whose answer the
+ * `useAgent`. The server sends pi's conversation view, then pi's operations
+ * for each change; this applies them and projects the view with the same
+ * `projectView` the server tests use. A reconnect gets the whole view
+ * again, and the client sends again every submit whose answer the
  * socket never delivered; the harness deduplicates them by operation id, so
  * each runs once.
  */
@@ -35,6 +38,8 @@ export function usePiSession(object: string) {
   const [state, setState] = useState<State>(INITIAL_STATE);
   // Unanswered submits, sent again each time the socket opens.
   const [outbox] = useState(() => new PiCommandOutbox());
+  // pi's view, as the server last sent it; the operations apply to it.
+  const view = useRef<ConversationView | null>(null);
   // Another object starts from a clean slate.
   const [stateObject, setStateObject] = useState(object);
   if (stateObject !== object) {
@@ -59,12 +64,16 @@ export function usePiSession(object: string) {
         case "hello":
           setState((current) => ({ ...current, catalog: message.tools }));
           return;
-        case "events":
-          setState((current) => ({
-            ...current,
-            ...reduceEvents(current, message.events)
-          }));
+        case "view":
+        case "ops": {
+          if (message.type === "view") view.current = message.view;
+          // Operations without a view to apply to: wait for the next view.
+          else if (view.current === null) return;
+          else view.current = applyImmutable(view.current, message.ops);
+          const projected = projectView(view.current);
+          setState((current) => ({ ...current, ...projected }));
           return;
+        }
         case "error":
           setState((current) => ({ ...current, error: message.message }));
           return;
@@ -75,8 +84,9 @@ export function usePiSession(object: string) {
   });
 
   useEffect(() => {
-    // Submits belong to the last object's session: never send them here.
+    // Submits and the view belong to the last object's session.
     outbox.clear();
+    view.current = null;
   }, [object, outbox]);
 
   useEffect(() => {

@@ -141,7 +141,7 @@ describe("pi adapter", () => {
     });
   });
 
-  it("describes url, offset, and format in its TypeBox schema", () => {
+  it("describes url, offset, and format in its JSON Schema", () => {
     const { properties, required } = piWebFetchTool({ source: okSource })
       .parameters as unknown as {
       properties: Record<string, Record<string, unknown>>;
