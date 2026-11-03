@@ -9,7 +9,7 @@ import { PiHarness } from "../index";
 import { TEST_SETTINGS } from "./faux";
 import { TEST_TIMING } from "./timing";
 
-/** Time between streamed chunks: longer than pi's 100 ms partial commits. */
+/** Time between streamed chunks, so pi publishes each partial on its own. */
 const CHUNK_GAP_MS = 60;
 
 /** An SSE `Response` that sends one `data:` event every {@link CHUNK_GAP_MS}. */
@@ -74,6 +74,22 @@ function protoToolCall(): string[] {
   ];
 }
 
+/** The arguments of the streamed `call_proto` in a `pi.live` doc, if any. */
+function protoCallArguments(live: unknown): object | undefined {
+  const content = (
+    live as
+      | { generation?: { message?: { content?: readonly unknown[] } } }
+      | undefined
+  )?.generation?.message?.content;
+  for (const part of content ?? []) {
+    const call = part as { id?: unknown; arguments?: unknown };
+    if (call.id === "call_proto" && typeof call.arguments === "object") {
+      return call.arguments ?? undefined;
+    }
+  }
+  return undefined;
+}
+
 function answer(text: string): string[] {
   return [
     chunk({ content: text, role: "assistant" }),
@@ -114,8 +130,27 @@ export class PiWireTestObject extends DurableObject<Cloudflare.Env> {
     setWakeTimingForTests(this.harness, TEST_TIMING);
   }
 
-  async prompt(text: string): Promise<string> {
-    return (await this.harness.prompt(text)).status;
+  /**
+   * Prompt the root session, watching pi's live view meanwhile. `merged`:
+   * whether a partial of the tool call added `__proto__` to arguments an
+   * earlier partial already had, which is the merge the test is about.
+   */
+  async prompt(text: string): Promise<{ status: string; merged: boolean }> {
+    const watch = await this.harness.session().watch();
+    let earlier = false;
+    let merged = false;
+    watch.start(async (call) => {
+      if (call.kind !== "value") return;
+      const args = protoCallArguments(call.value.docs["pi.live"]);
+      if (args === undefined) return;
+      if (Object.hasOwn(args, "__proto__")) merged ||= earlier;
+      else if (Object.hasOwn(args, "note")) earlier = true;
+    });
+    try {
+      return { status: (await this.harness.prompt(text)).status, merged };
+    } finally {
+      await watch.stop();
+    }
   }
 
   /** Whether anything wrote `polluted` onto `Object.prototype` in this isolate. */
