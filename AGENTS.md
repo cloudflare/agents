@@ -149,7 +149,7 @@ pnpm exec changeset       # interactive prompt — pick packages, semver bump, d
 
 This creates a markdown file in `.changeset/` that gets consumed during release.
 
-Keep the changeset description to a single line that links to the relevant documentation for details. Don't write multi-paragraph explanations — the docs are the source of truth. For example:
+Keep the changeset description to a single line. Don't write multi-paragraph explanations — the docs are the source of truth. Link to the relevant documentation when it tells the reader more than the line does, which it usually will; skip the link when it would add nothing. For example:
 
 ```md
 ---
