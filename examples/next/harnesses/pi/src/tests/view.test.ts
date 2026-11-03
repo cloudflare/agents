@@ -19,4 +19,18 @@ describe("the session view", () => {
     expect(late.running).toBe(false);
     expect(late.error).toBeNull();
   });
+
+  it("shows only the context after a reset", async () => {
+    const stub = env.PI_HARNESS_TEST.getByName(crypto.randomUUID());
+    await stub.wait((await stub.submit("before the reset")).operationId);
+    await stub.reset();
+    await stub.wait((await stub.submit("after the reset")).operationId);
+    const view = JSON.parse(await stub.snapshotView()) as PiSessionView;
+    const texts = view.messages.map((message) =>
+      message.parts.map((part) => ("text" in part ? part.text : "")).join("")
+    );
+    expect(texts[0]).toBe("Context reset");
+    expect(texts).toContain("after the reset");
+    expect(texts).not.toContain("before the reset");
+  });
 });

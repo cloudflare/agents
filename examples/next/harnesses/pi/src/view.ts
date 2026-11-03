@@ -2,6 +2,7 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type {
   AgentState,
   ConversationView,
+  EntryRecord,
   InboxState,
   LiveState
 } from "@earendil-works/pi-durable";
@@ -58,6 +59,19 @@ function failure(live: LiveState): string | null {
 }
 
 /**
+ * The entries of the active context. A reset starts a new one, so the view
+ * starts at the newest reset's notice, though pi's window may reach further.
+ */
+function activeEntries(
+  entries: readonly EntryRecord[]
+): readonly EntryRecord[] {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (entries[i].kind === "pi.reset") return entries.slice(i);
+  }
+  return entries;
+}
+
+/**
  * What a UI shows for pi's conversation view. Pure, so the browser and the
  * tests run the same code: pi's view is the state, and this is the only
  * place that interprets it. App glue, not part of the harness.
@@ -68,7 +82,7 @@ export function projectView(view: ConversationView): PiSessionView {
   const agent = view.docs["pi.agent"] as AgentState | undefined;
   const partial = live.generation?.message as AssistantMessage | undefined;
   return {
-    messages: projectEntries(view.entries),
+    messages: projectEntries(activeEntries(view.entries)),
     live: partial ? projectMessage(partial, LIVE_ID) : null,
     running: live.run !== undefined,
     tools: (live.tools ?? [])

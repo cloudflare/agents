@@ -168,6 +168,11 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     return this.harness.wait(operationId, session ? { session } : {});
   }
 
+  /** Reset the root session's context. */
+  async reset(): Promise<void> {
+    await this.harness.session().reset();
+  }
+
   /** Write a file into the workspace, as a test's setup. */
   async writeWorkspaceFile(path: string, text: string): Promise<void> {
     await this.workspace.fs.mkdir("/workspace", { recursive: true });
