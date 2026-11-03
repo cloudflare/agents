@@ -1321,6 +1321,9 @@ export class AIChatAgent<
           // that reconnects/re-mounts before the stream starts is parked and
           // told to keep waiting (see _resumeHandshake / onConnect), then
           // flushed into STREAM_RESUMING on _startStream or released on settle.
+          // Register cancellation before advertising acceptance: Stop can arrive
+          // while persistence, queue admission, or debounce is still waiting.
+          const abortSignal = this._abortRegistry.getSignal(chatMessageId);
           this._preStream.begin(chatMessageId);
 
           // Outer finally so the accepted pre-stream turn ALWAYS settles
@@ -1379,6 +1382,10 @@ export class AIChatAgent<
             await this._runExclusiveChatTurn(
               chatMessageId,
               async () => {
+                if (abortSignal?.aborted) {
+                  this._completeSkippedRequest(connection, chatMessageId);
+                  return;
+                }
                 if (
                   this._submitConcurrency.isSuperseded(
                     concurrencyDecision.submitSequence
@@ -1468,10 +1475,13 @@ export class AIChatAgent<
                   }
                 );
 
+                // Cancellation may also arrive during debounce, merge, or MCP
+                // preparation. Never invoke user code for that cancelled turn.
+                if (abortSignal?.aborted) {
+                  this._completeSkippedRequest(connection, chatMessageId);
+                  return;
+                }
                 this._emit("message:request");
-
-                const abortSignal =
-                  this._abortRegistry.getSignal(chatMessageId);
 
                 return this._tryCatchChat(async () => {
                   // Wrap in agentContext.run() to propagate connection context to onChatMessage
@@ -1503,6 +1513,13 @@ export class AIChatAgent<
                                 continuation: false
                               })
                           );
+                          if (abortSignal?.aborted) {
+                            this._completeSkippedRequest(
+                              connection,
+                              chatMessageId
+                            );
+                            return;
+                          }
                           const response = await this.onChatMessage(
                             async (_finishResult) => {
                               // User-provided hook. Cleanup is now handled by _reply,
@@ -1578,6 +1595,7 @@ export class AIChatAgent<
               }
             );
           } finally {
+            this._abortRegistry.remove(chatMessageId);
             // Guaranteed settle (#1784): on the happy path chatTurnBody /
             // _completeSkippedRequest already settled (idempotent here); this
             // covers a throw in a pre-turn-body step before chatTurnBody's

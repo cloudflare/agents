@@ -137,6 +137,43 @@ describe("reconnect-driven stream resume", () => {
     cleanup();
   });
 
+  it("shows an accepted pre-stream turn as busy and lets Stop cancel it (#2741)", async () => {
+    const { agent, target, sentMessages } = createFakeAgent({
+      name: "pending-resume",
+      url: "ws://localhost:3000/agents/chat/pending-resume?_pk=abc"
+    });
+    let chatInstance: AgentChatResult | null = null;
+    function TestComponent() {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        resume: true
+      });
+      chatInstance = chat;
+      return <div data-testid="busy">{String(chat.isServerStreaming)}</div>;
+    }
+    const { container } = await render(<TestComponent />);
+    await vi.waitFor(() => {
+      expect(countType(sentMessages, RESUME_REQUEST)).toBe(1);
+    });
+    dispatch(target, { type: "cf_agent_stream_pending", id: "queued-turn" });
+    await vi.waitFor(() => {
+      expect(container.querySelector('[data-testid="busy"]')?.textContent).toBe(
+        "true"
+      );
+    });
+    await requireChat(chatInstance).stop();
+    expect(
+      lastFrameOfType(sentMessages, "cf_agent_chat_request_cancel").id
+    ).toBe("queued-turn");
+    await vi.waitFor(() => {
+      expect(container.querySelector('[data-testid="busy"]')?.textContent).toBe(
+        "false"
+      );
+    });
+    expect(requireChat(chatInstance).status).toBe("ready");
+  });
+
   it.each([
     { label: "with done", done: true },
     { label: "without done", done: undefined }

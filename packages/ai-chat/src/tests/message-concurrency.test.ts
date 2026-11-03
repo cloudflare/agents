@@ -165,6 +165,65 @@ const thirdUserMessage: ChatMessage = {
 };
 
 describe("AIChatAgent messageConcurrency", () => {
+  it.each(["latest", "debounce"] as const)(
+    "%s does not execute a queued turn cancelled before admission",
+    async (strategy) => {
+      const room = crypto.randomUUID();
+      const { ws } = await connectChatWS(
+        `/agents/${strategy}-message-concurrency-agent/${room}`
+      );
+      const agentStub =
+        strategy === "latest"
+          ? await getAgentByName(env.LatestMessageConcurrencyAgent, room)
+          : await getAgentByName(env.DebounceMessageConcurrencyAgent, room);
+      const seen = recordMessages(ws);
+      try {
+        sendChatRequest(ws, "active", [firstUserMessage], {
+          format: "plaintext",
+          responseDelayMs: 1500,
+          chunkCount: 1,
+          chunkDelayMs: 10
+        });
+        await waitForActiveRequest(agentStub, "active");
+        sendChatRequest(ws, "queued", [firstUserMessage, secondUserMessage], {
+          format: "plaintext",
+          chunkCount: 1,
+          chunkDelayMs: 10
+        });
+        // Persistence is after acceptance and before queue admission. The
+        // active request still owns the queue while this cancellation lands.
+        await waitUntil(async () => {
+          const messages =
+            (await agentStub.getPersistedMessages()) as ChatMessage[];
+          return messages.some(
+            (message) => message.id === secondUserMessage.id
+          );
+        });
+        expect(await agentStub.getStartedRequestIds()).toEqual(["active"]);
+        const queuedDone = waitForDone(ws, "queued");
+        ws.send(
+          JSON.stringify({
+            type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
+            id: "queued"
+          })
+        );
+        await queuedDone;
+        await agentStub.waitForIdleForTest();
+        expect(await agentStub.getStartedRequestIds()).toEqual(["active"]);
+        expect(seen).toContainEqual(
+          expect.objectContaining({
+            type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+            id: "queued",
+            done: true,
+            outcome: "skipped"
+          })
+        );
+      } finally {
+        ws.close(1000);
+      }
+    }
+  );
+
   it("latest runs only the newest overlapping submit while preserving queued user messages", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(
