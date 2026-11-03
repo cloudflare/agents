@@ -72,8 +72,8 @@ issue's number, title, labels, author, `created_at` and `updated_at`; don't read
 `GET /repos/{owner}/{repo}/pulls?state=closed&sort=updated&direction=desc&per_page=50`, keeping
 those with a `merged_at` in the last 96 hours whose base is the default branch, at most 25, newest
 first. For each, read its title and body, and its changed files
-(`GET /repos/{owner}/{repo}/pulls/{number}/files?per_page=100`; filenames first, patches only when
-you verify a candidate).
+(`GET /repos/{owner}/{repo}/pulls/{number}/files?per_page=100`, page by page until a page returns
+fewer than 100; filenames first, patches only when you verify a candidate).
 
 **Daily: candidates.** Pair each pull request with the open issues it could have resolved, strongest
 signal first:
