@@ -510,9 +510,12 @@ class ViewTranslator {
   async #missed(): Promise<SessionEvent[]> {
     const unseen = this.session.unseen;
     if (unseen.size === 0) return [];
+    // Copy first: one submitted while pending() runs is missing from its
+    // answer though still running, so it waits for a later view.
+    const submitted = [...unseen];
     const pending = await this.session.pending();
     const out: SessionEvent[] = [];
-    for (const operationId of [...unseen]) {
+    for (const operationId of submitted) {
       // Still queued or running: a later view shows it.
       if (pending.has(operationId)) continue;
       unseen.delete(operationId);
