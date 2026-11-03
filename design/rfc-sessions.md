@@ -87,7 +87,7 @@ Default inline reconstruction still produces a complete data URL for compatibili
 
 Keep first-class Agent Skills in `agents/skills`, not in Sessions message storage. Prompt-level loadable context (`R2SkillProvider` and the `load_context` tool) is a separate, smaller thing and lives in `agents/context`.
 
-Think projects resolved `SKILL.md` files into the active workspace so Computer or legacy Shell tools can read and edit them. Computer uses `/workspace/.agents/skills`; legacy Shell uses `/.agents/skills`.
+Update: skills are now read directly from Workspace files (`skills.workspace()` over `/workspace/.agents/skills`) or from R2; Think no longer projects sources into the Workspace. See [skills.md](./skills.md).
 
 The source remains responsible for discovery and initial content. Workspace files become authoritative for subsequent activation and resource reads. Source fingerprints avoid statting and rewriting unchanged files on every wake. Resources copy lazily when first requested rather than fanning out one R2 read per resource during startup.
 

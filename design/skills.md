@@ -1,347 +1,205 @@
-# Think Skills
+# Agent Skills
 
-Status: implemented; Git-backed sources and source-level R2 write/delete helpers remain follow-ups
+Status: implemented. Skills are files; `agents/skills` parses them and loads
+them from a Computer Workspace, R2, or a manifest. The script runner is
+experimental.
 
-## Problem
+## Model
 
-Think currently inherits basic skill support from Session: a skill is a context
-provider with `get()` metadata and `load(key)` content, surfaced through generic
-`load_context` and `unload_context` tools. This is enough to prove the runtime
-model, but it is not a first-class Think story:
-
-- Users configure skills indirectly through `configureSession()`.
-- Only the R2 provider exists, and it stores keyed text rather than standard
-  Agent Skills directories with `SKILL.md`.
-- There is no standard parser for the Agent Skills format.
-- There is no story for colocated/bundled skills or deploy-to-deploy changes.
-- Script execution and permissions are not specified.
-
-We want Think to support the Agent Skills format from
-https://agentskills.io/ while staying aligned with Workers constraints and the
-existing Session architecture.
-
-## Proposal
-
-Make Think skills a thin first-class layer over Session, not a parallel context
-system. The public abstraction is a `SkillSource`: a source can list skill
-metadata, load `SKILL.md` instructions, read bundled resources, and report a
-deterministic fingerprint.
-
-```ts
-import { Think, skills } from "@cloudflare/think";
-import productSkills from "agents:skills"; // -> ./skills next to this file
-
-export class MyAgent extends Think<Env> {
-  getSkills() {
-    return [
-      productSkills,
-      skills.r2(this.env.SKILLS_BUCKET, { prefix: "skills/" })
-    ];
-  }
-}
-```
-
-The imported value should already be the canonical `SkillSource`; authors should
-not need to wrap it in `skills.bundle()`. Helper constructors remain useful for
-sources that are not statically imported, such as R2, GitHub-backed sources, and
-test manifests.
-
-## Skill Loading
-
-Skills declared through `getSkills()` are available to the agent but are not
-always-on instructions. Think loads the skill catalog into the prompt and exposes
-`activate_skill`; the model loads full `SKILL.md` instructions only when the
-request matches the skill description.
-
-This matches the common Agent Skills pattern used by Claude Code, Cursor, and
-Ash: always-on behavior belongs in `getSystemPrompt()`, `instructions.md`, or a
-Session context block, while skills are optional procedures that load on demand.
-Once activated, a skill remains part of the conversation snapshot. If an
-application needs disposable/reclaimable context, it should use Session's
-lower-level loadable context providers rather than Think's first-class skills
-API.
-
-## Workspace projection
-
-Think projects resolved `SKILL.md` files into its operational workspace by
-default:
-
-- Computer uses `/workspace/.agents/skills/<name>/SKILL.md`.
-- legacy Shell uses `/.agents/skills/<name>/SKILL.md`.
-
-This is independent of Sessions message and attachment storage. Workspace is the
-place file tools read and edit skills; Sessions remains the conversation owner.
-
-Existing workspace files win by default. Activation parses the workspace
-`SKILL.md`, so edits affect later turns. Resource files are copied lazily on
-first read or script execution; startup does not issue one source or R2 read per
-resource. Later resource reads use the workspace copy and observe edits.
-
-Think records a separate durable projection fingerprint. On an unchanged cold
-wake, the registry attaches to the existing workspace paths without statting or
-rewriting every skill. A source fingerprint change reseeds instructions while
-preserving existing files unless replacement is explicitly configured.
-
-Custom callers can use `SkillRegistry.seedWorkspace()`. Think users can disable
-projection with `skillWorkspace = false` or set `skillWorkspace.root` for a
-proxy whose structural shape does not identify its Computer path.
-
-## Bundled Skills
-
-Colocated skills are the first implementation target:
-
-```ts
-import skills from "agents:skills"; // -> ./skills next to the importer
-import other from "agents:skills/marketing"; // -> ./marketing next to the importer
-```
-
-Workers do not have a general runtime filesystem, so this is a build-time
-feature. The `agents/vite` plugin resolves the `agents:skills` virtual
-specifier alongside decorator transforms. The default export is typed by
-ambient declarations shipped from `agents` (`skills-module.d.ts`), so no
-per-project shim module is needed.
-
-The skills engine (sources, registry, runner, and tools) lives in the
-framework-agnostic `agents/skills` module, so it is not tied to Think.
-`@cloudflare/think` re-exports it as `skills` and adds the `getSkills()` /
-Session wiring; `@cloudflare/ai-chat` (or any AI SDK caller) can build a
-`SkillRegistry` directly and merge `registry.tools()` and
-`registry.systemPrompt()` into its own turn.
-
-The plugin:
-
-- Resolves a directory import such as `./skills`.
-- Discovers child directories containing `SKILL.md`.
-- Parses YAML frontmatter and markdown body.
-- Validates required Agent Skills fields leniently enough for interoperability.
-- Bundles `SKILL.md` bodies and resources under `references/`, `scripts/`,
-  `assets/`, and a small set of common asset roots such as `graphics/` and
-  `fonts/`, with diagnostics for ignored top-level files so unrelated local
-  files do not leak into the Worker bundle.
-- Records resource size, MIME type when known, and content encoding. Text
-  resources are stored as text; binary resources are stored as base64.
-- Emits a deterministic fingerprint over metadata, bodies, resource paths, and
-  resource contents.
-- Generates a plain `SkillSource` module that Think consumes without making
-  `agents/vite` depend on `@cloudflare/think`.
-
-Tests and non-Vite environments should be able to use an equivalent manifest
-helper directly.
-
-## R2 Skills
-
-R2 is the mutable cloud storage story. The Think R2 skill source models the
-standard Agent Skills directory layout:
+A skill is a directory with a `SKILL.md` file, as defined by the
+[Agent Skills spec](https://agentskills.io/specification):
 
 ```text
-skills/code-review/SKILL.md
-skills/code-review/references/checklist.md
-skills/code-review/scripts/run-review.ts
+<skills root>/
+  release-notes/
+    SKILL.md                 # YAML frontmatter + Markdown instructions
+    references/style-guide.md
+    scripts/format.js
+    assets/logo.png
 ```
 
-This differs from the current `R2SkillProvider`, which stores arbitrary keyed
-text plus optional object metadata. The Think source is `skills.r2(bucket,
-options)`, which parses `SKILL.md`, enumerates resources, and implements the
-same `SkillSource` interface as bundled skills.
+Skills are meant to be an emergent property of a Workspace: write a
+`SKILL.md` into `/workspace/.agents/skills/<name>/` and the agent has a new
+skill on its next turn. There is no build step, no registry to update, and no
+copy to keep in sync. Other stores (R2, code) follow the same layout.
 
-The R2 MVP is intentionally read-only and is exposed as `skills.r2(bucket,
-options)`:
+## Parsing
 
-```ts
-skills.r2(this.env.SKILLS_BUCKET, {
-  prefix: "skills/",
-  skills: ["code-review"],
-  fingerprint: "metadata"
-});
-```
+`parseSkill(markdown, { directory })` in `agents/skills/markdown.ts` is the
+one parser (frontmatter rules live in `skill.ts`, which does not load
+`yaml`). It returns `{ ok: true, value, warnings }` or `{ ok: false, error }`;
+it never throws and never returns `null`.
 
-Options:
+Spec rules:
 
-- `prefix`: bucket prefix containing skill directories.
-- `skills`: optional allowlist of parsed skill names.
-- `id`: stable source identifier when multiple R2 sources are configured.
-- `fingerprint`: `"metadata"` by default, based on listed object keys, etags,
-  sizes, and uploaded timestamps. `"content"` reads object contents when a
-  stronger fingerprint is needed.
-- `refreshIntervalMs`: how often a live R2 source may re-list bucket metadata.
-  The default is 60 seconds; `0` checks on every turn.
+- `name`: 1-64 characters after NFKC normalization, lowercase letters, digits,
+  and hyphens; no leading, trailing, or consecutive hyphens; must equal the
+  directory name.
+- `description`: required, 1-1024 characters.
+- `compatibility`: 1-500 characters when present.
+- `license`: non-empty string when present.
+- `metadata`: a string-to-string map. Scalar values (`version: 1.0`) become
+  strings; nested values break the rule.
+- `allowed-tools`: a space-separated string (a YAML list is also accepted),
+  parsed into `allowedTools: string[]`.
 
-R2 indexing is intentionally progressive. The source reads `SKILL.md` files and
-object metadata to build the catalog and resource descriptors, but resource
-bodies are fetched only when `read_skill_resource` asks for a specific path.
+The parser follows the spec's
+[guide for agents](https://agentskills.io/client-implementation/adding-skills-support):
+skills written for other clients often break a rule, so a broken rule is a
+warning and the skill still loads. Invalid optional fields are dropped, a
+missing `name` falls back to the directory, and frontmatter that only fails
+because of an unquoted `: ` in a value is read again with those values
+quoted. Sources attach the warnings to the listed skill, and the catalog
+reports them as `SkillWarning` diagnostics (only for the copy it keeps), which
+Think logs.
 
-Write/delete helpers should come later for apps that build skill-management UIs.
-Writes must refresh the Session prompt or update the stored fingerprint so the
-catalog does not go stale.
+The parse fails only for a skill that cannot be used: no frontmatter, YAML
+that still does not parse, no `description`, or a `name` that is not a safe
+single path segment (no `/`, `\`, NUL, control characters, `.`, or `..`).
+Those skills are skipped and reported as `InvalidSkill` diagnostics; as the
+guide recommends, they are not shown to the model. Every `SkillName` is safe
+to use as a directory, an enum value, and the first segment of a qualified
+resource path. Because a name can differ from its directory, the Workspace
+and R2 sources remember which directory each name came from and read
+resources from there.
 
-## Git Skills
+There is no separate strict mode. A skill follows the spec when it parses
+with no warnings, so authoring tools (and the examples' "add skill"
+handlers) reject a skill whose `warnings` are not empty before storing it.
 
-Git should initially be a distribution and sync source, not the hot path at
-agent wake:
+Frontmatter keys the spec does not define are kept in `extraFields` rather
+than rejected. Clients add their own (`disable-model-invocation`,
+`user-invocable`), and rejecting them would break skills written for other
+agents. `disable-model-invocation: true` (top-level or in `metadata`) hides a
+skill from the model.
 
-- Build time: fetch or vendor a repo path into the bundled manifest.
-- Deploy time: sync `github.com/org/repo/path?ref=sha` into R2.
-- Runtime advanced: optional GitHub raw/tree API source with pinned refs and
-  caching.
+Resource paths are parsed with `parseSkillResourcePath`: relative, normalized,
+inside the skill, and never `SKILL.md`. A resource's `kind` comes from its
+top-level directory (`scripts/`, `references/`, `assets/`, else `file`) and its
+encoding from its extension.
 
-The default production recommendation should be pinned refs or R2 sync.
-Unpinned remote instructions are a trust and reproducibility risk.
-
-## Runtime Tools
-
-Think should expose skill-specific tools rather than relying only on generic
-Session context tools:
-
-- `activate_skill({ name })`: enum-constrained to available skills, returns
-  structured skill content and resource listing.
-- `read_skill_resource({ name?, path })`: loads bundled resources on demand.
-  Callers may pass `{ name, path }` or a qualified path such as
-  `other-skill/references/file.md`.
-- `run_skill_script({ name, path, input? })`: optional, only registered when a
-  script runner is configured. Script paths must live under `scripts/`; omitted
-  input defaults to `{}`.
-
-Skill content should be wrapped in identifiable tags with the skill name and
-version/fingerprint. This gives compaction and diagnostics something stable to
-recognize.
-
-Skill names are globally unique within a Think agent. Sources are applied in
-`getSkills()` order: the first source to register a name wins, and a later
-collision is skipped with a logged warning rather than throwing. Bundled
-duplicates are also reported by the Vite plugin at build time. A source that
-fails to list is skipped with a warning so one bad source cannot disable the
-rest — skill loading must never break `onStart` or a turn.
-
-## Deploy-To-Deploy Changes
-
-Every source reports a fingerprint. Think stores the last applied fingerprint in
-Session or Think config and compares it on startup.
-
-If the fingerprint changes:
-
-- The skill catalog is refreshed before the next turn.
-- Already loaded skills remain conversation snapshots.
-- New activations use the new skill version.
-
-This avoids silently rewriting old conversations while ensuring new deploys take
-effect for future skill activations.
-
-## Scripts And Permissions
-
-The Agent Skills spec defines `allowed-tools` as an optional experimental
-frontmatter field. It is a hint, not a full permission model. Think should
-define and enforce its own capability envelope.
-
-Scripts should receive explicit capabilities rather than ambient access to the
-agent. The first implementation keeps this concrete: runner options are the
-permission boundary.
-
-Script execution is experimental; `skills.runner` logs a one-time warning on
-first use and its capability shape may change.
+## Sources
 
 ```ts
-skills.runner({
-  loader: this.env.LOADER,
-  workspaceInstance: this.workspace,
-  tools: {
-    search_docs: this.getTools().search_docs
-  }
-});
-```
-
-The default is useful but not ambiently powerful: no network and no tools, with
-read-only workspace access when `workspaceInstance` is provided, and a 30 second
-script timeout. Tool access is explicit; Think does not expose the full turn
-toolset to a script by default. Workspace access is `"none"`, `"read"`, or
-`"read-write"`, with `workspace: "read-write"` required for mutating operations.
-
-A single host bridge (`SkillScriptHostBridge`) is the one source of truth for
-capabilities and permission enforcement; it is constructed fresh per `run()` so
-the per-invocation `/output` buffer never leaks between concurrent runs. Every
-runtime delegates to it: JavaScript/TypeScript through a codemode `ToolProvider`,
-Python through an RPC `RpcTarget`, and Bash through `just-bash` custom commands.
-
-JavaScript and TypeScript scripts are **function-style only**:
-
-```ts
-export default async function run(input, ctx) {
-  return input;
+interface SkillSource {
+  readonly id: string;
+  list(): Promise<SkillResult<SkillListing, SkillSourceError>>;
+  readResource(
+    skill: SkillName,
+    path: SkillResourcePath
+  ): Promise<
+    SkillResult<SkillResource, SkillResourceNotFoundError | SkillSourceError>
+  >;
 }
 ```
 
-`ctx` is `{ skill, files, workspace, tools, output }`. `ctx.files` holds bundled
-text resources by relative path (replacing the earlier `node:fs` shim, which was
-removed); `ctx.workspace` exposes async `readFile`/`listFiles`/`glob`/`stat`/
-`writeFile` gated by the workspace permission; `ctx.tools` exposes
-`tools.call(name, input)` and `tools.<name>(input)` for explicitly granted
-tools; and `ctx.output.writeFile(name, content)` records scratch artifacts
-returned by `run_skill_script` without mutating the workspace. TypeScript and
-multi-file scripts are compiled/bundled with `@cloudflare/worker-bundler`.
+`list()` returns every valid skill with its resource list, plus the skills
+that failed to parse (`invalid`). Sources are listed again whenever a catalog
+loads, so there is no separate fingerprint or refresh protocol on the source.
 
-Python (`.py`) and Bash (`.sh`/`.bash`) keep the path-based contract, matching
-CLI-oriented Agent Skills. The runner mounts:
+| Source                                | Store                                                   |
+| ------------------------------------- | ------------------------------------------------------- |
+| `workspace(ws, { root })`             | Computer Workspace, default `/workspace/.agents/skills` |
+| `r2(bucket, { prefix, skills, ... })` | R2; caches a listing for `refreshIntervalMs` (60 s)     |
+| `manifest({ id, skills })`            | Skills defined in code (tests, small fixed sets)        |
 
-- `/skill`: `SKILL.md` and bundled skill resources.
-- `/input.json`: the `run_skill_script` input, defaulting to `{}`.
-- `/context.json`: skill metadata.
-- `/output`: scratch artifacts returned by `run_skill_script`.
+`fromManifest` is a deprecated alias of `manifest`.
 
-Python runs as a Python Dynamic Worker with `python_workers`, supporting both
-`def run(input, ctx)` and CLI-style scripts; it exposes `tools.<name>(input)`,
-`tools.call(name, input)`, and `workspace.read_file()` / `list_files()` /
-`glob()` / `write_file()` per the workspace permission. Bash runs through
-`just-bash` and exposes `workspace-read` / `workspace-list` / `workspace-glob`
-(plus `workspace-write` with read-write access) and a `tool <name> <json>`
-command. Python Workers have slower cold starts than JavaScript, so JavaScript
-remains the preferred runtime for one-off generated code.
+Workspace and R2 share one directory indexer (`indexSkillTree`): every
+`<dir>/SKILL.md` one level below the root is a skill, every other file in
+`<dir>` is a resource, and `.git`, `node_modules`, and `.DS_Store` are
+ignored. Workspace skills also report their absolute `location`, so an agent
+with a shell can run their scripts in place.
 
-## MVP
+Seeding a Workspace from R2 or from the repo is Computer's job, not this
+module's. Examples write their starter skills on start, with a TODO to use
+Computer's loader once it exists.
 
-The first implementation stays narrow:
+## Catalog
 
-1. Define `SkillSource`, `SkillRegistry`, skill metadata, and fingerprint types.
-2. Implement bundled-manifest support and tests without requiring the Vite
-   transform.
-3. Add `getSkills()` to Think.
-4. Support on-demand skill activation.
-5. Add prompt fingerprint refresh for catalog changes.
-6. Add `activate_skill` and `read_skill_resource`.
-7. Add the `agents:skills` virtual specifier transform in `agents/vite`.
-8. Add a read-only R2-backed Agent Skills source.
-9. Add optional, experimental script execution for JavaScript/TypeScript,
-   Python, and Bash behind a single capability bridge.
+`loadSkillCatalog(sources)` merges sources in order. The first source to list
+a name wins. Failures are diagnostics, never errors:
 
-Git-backed sources should follow once the source story is proven.
+- `InvalidSkill`: a `SKILL.md` broke a spec rule.
+- `SourceFailed`: a source could not be listed (including one that threw).
+- `DuplicateSkill`: a later source listed a name already provided.
+
+The catalog renders the system-prompt text, activation output
+(`<skill_content name location>` plus the resource list), and resource output
+(`<skill_resource>`). Only files the source listed are readable. `fingerprint`
+is a hash of the prompt text, so hosts refresh the system prompt exactly when
+the catalog the model sees changes.
+
+Framework adapters wrap a catalog, so every framework shows the model the same
+tools and text:
+
+- `createSkillTools(catalog, { scriptRunner })` from
+  `agents/skills/tools/ai-sdk`: AI SDK `activate_skill`,
+  `read_skill_resource`, and `run_skill_script`. Used by Think.
+- `skills(sources)` in `agents/harness/pi`: the same tools as a pi-durable
+  extension.
+
+## Think
+
+`getSkills()` returns sources. Think loads the catalog on start and again
+before every turn, passing the previous catalog so a failing source keeps its
+last skills. The catalog renders in a `think_skills` context block declared
+`whenChanged: "remind"`: a changed catalog does not rebuild the frozen system
+prompt (which would invalidate the provider's prompt cache). It goes to the
+model as a reminder after the cached prefix, and is folded in at the next
+rebuild (compaction or clearing history). An overridden `getSystemPrompt()`
+renders above the context blocks, so registering skills never removes it.
+
+Think used to copy sources into the Workspace (`skillWorkspace`) and bundle
+skills at build time (`agents:skills` and the Vite plugin). Both are gone:
+skills in the Workspace are read directly, and Computer will own seeding.
+
+## Scripts
+
+With a Workspace, scripts are files and the model runs them with the
+Workspace's `exec` tool from the skill's `location`. That is the preferred
+path.
+
+For skills that live elsewhere (R2, a manifest), `runner()` from
+`agents/skills/runner` (re-exported by Think as `skills.runner`) enables
+`run_skill_script`. It is its own entry point because `just-bash` and
+`@cloudflare/codemode` do not tree-shake: kept in `agents/skills`, every
+import of the parser paid about 300 KiB gzipped. It is experimental and carries a TODO to move to
+Computer. Options are the permission boundary: no network and no tools by
+default, read-only workspace access when `workspaceInstance` is given, and a
+30 second timeout. One host bridge (`SkillScriptHostBridge`), built fresh per
+run, enforces capabilities for every runtime:
+
+- JavaScript: function-style `export default async function run(input, ctx)`
+  with `ctx = { skill, files, workspace, tools, output }`, run in a Dynamic
+  Worker through codemode. There is no in-Worker bundler, so TypeScript and
+  scripts that import sibling files must be compiled before they are stored.
+- Python (`.py`): a Python Dynamic Worker; `def run(input, ctx)` or CLI-style.
+- Bash (`.sh`, `.bash`): `just-bash`.
+
+Python and Bash use the path-based contract: `/skill`, `/input.json`,
+`/context.json`, and `/output`.
 
 ## Alternatives
 
-### Keep Skills Only In Session
+### Bundle skills at build time
 
-This preserves the existing architecture but leaves Think users with generic
-context tools, no Agent Skills parser, no bundled skill story, and no
-deploy-change handling.
+The `agents:skills` Vite import embedded skills in the Worker bundle. It made
+skills a build artifact: changing one meant a deploy, and the agent could not
+author its own. Removed in favor of Workspace files.
 
-### Make `skills.bundle(imported)` Required
+### Project sources into the Workspace
 
-This gives a place for runtime options, but it makes the flagship API noisier.
-The virtual specifier can return the correct type directly. Runtime helpers
-should remain optional for tests and non-import sources.
+`skillWorkspace` copied source skills into `/workspace/.agents/skills` and
+tracked a projection fingerprint. The sources stayed authoritative, so a skill
+written only in the Workspace was never discovered. Reading the Workspace
+directly removes the two-copy problem.
 
-### Live Git Provider First
+### Strict parsing on read
 
-This is attractive for sharing skills, but it introduces auth, caching, rate
-limits, and remote trust before the local runtime shape is settled. Git should
-start as build/deploy-time sync.
-
-### Execute Scripts As Shell Commands
-
-This matches local coding-agent expectations, but Think runs on Workers.
-Scripts need a sandbox/runtime abstraction and explicit capabilities. Direct
-ambient Bash/Python execution is not the right default.
-
-## Decision
-
-Use bundled skills plus Think-native activation tools as the primary skills API,
-with `skills.r2(...)` as the first runtime source. Keep R2 read-only for now.
-Git-backed sources remain a follow-up layer after the core source API is
-validated.
+Rejecting every skill that breaks a rule (and returning the validation error
+when the model activates it) makes mistakes loud, but skills written for
+other agents often have names that are not lowercase or do not match their
+folder, and they would stop working. We follow the spec's guide instead:
+load with warnings, and validate strictly (no warnings) when a skill is
+written.

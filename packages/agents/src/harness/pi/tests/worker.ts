@@ -3,20 +3,21 @@ import {
   fauxProvider,
   fauxText,
   fauxToolCall,
-  Type,
   type AssistantMessage,
   type Message,
   type TranscriptContext
 } from "@earendil-works/pi-ai";
+import { num, obj } from "@earendil-works/pi-schema";
 import {
   createRegistry,
   defineTask,
   ConversationBusy,
+  ConversationIdle,
   Harness,
-  type AgentEvent,
   type EntryRecord,
   type Extension,
   type InputEntry,
+  type LiveState,
   type ToolRegistration
 } from "@earendil-works/pi-durable";
 import type { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
@@ -31,7 +32,8 @@ import {
   PiHarness,
   type PiOperationResult,
   type PiReceipt,
-  type PiWhenBusy
+  type PiWhenBusy,
+  type PiWhenIdle
 } from "../index";
 
 const RELEASE_KEY = "test:gate:release";
@@ -81,7 +83,8 @@ const Reminder = defineTask<
  *
  * - `nowake:` opens pi without `onWake`.
  * - `retry:` retries a failed generation once, after two seconds.
- * - `park:` parks a task after its first restart.
+ * - `park:` ends a task cut off once (pi's `restartLimit` of 1).
+ * - `turns:` starts sessions with `maxTurns: 1`.
  */
 function variantSettings(name: string) {
   const plain = name.replace(/^nowake:/, "");
@@ -223,13 +226,16 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
             registry: this.registry,
             settings: variantSettings(name),
             ...(name.startsWith("nowake:") ? {} : { onWake }),
-            onReport: (error) => console.warn("pi report", error)
+            onReport: (report) => console.warn("pi report", report)
           },
           context
         )
       );
     },
-    defaults: { model: this.#faux.getModel() }
+    defaults: {
+      model: this.#faux.getModel(),
+      ...(this.ctx.id.name?.startsWith("turns:") ? { maxTurns: 1 } : {})
+    }
   });
   readonly lifecycle = Lifecycle.install(this).use(this.harness);
 
@@ -363,16 +369,30 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return this.harness.submit(text, options);
   }
 
+  continueSession(operationId?: string): Promise<PiReceipt> {
+    return this.harness.continue(operationId ? { operationId } : {});
+  }
+
   /**
    * `submit()`, with how it settled: a receipt, or the error's name and
-   * whether it is pi's `ConversationBusy`. Error classes do not survive RPC.
+   * whether it is pi's `ConversationBusy` or `ConversationIdle`. Error
+   * classes do not survive RPC.
    */
   async trySubmit(
     text: string,
-    options: { whenBusy?: PiWhenBusy; operationId?: string } = {}
+    options: {
+      whenBusy?: PiWhenBusy;
+      whenIdle?: PiWhenIdle;
+      operationId?: string;
+    } = {}
   ): Promise<
     | { receipt: PiReceipt }
-    | { error: string; conversationBusy: boolean; message: string }
+    | {
+        error: string;
+        conversationBusy: boolean;
+        conversationIdle: boolean;
+        message: string;
+      }
   > {
     try {
       return { receipt: await this.harness.submit(text, options) };
@@ -380,6 +400,7 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
       return {
         error: error instanceof Error ? error.name : String(error),
         conversationBusy: error instanceof ConversationBusy,
+        conversationIdle: error instanceof ConversationIdle,
         message: error instanceof Error ? error.message : String(error)
       };
     }
@@ -464,10 +485,6 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return this.harness.abort({ operationId });
   }
 
-  async retry(): Promise<boolean> {
-    return this.harness.retry();
-  }
-
   async createSession(): Promise<string> {
     return (await this.harness.sessions.create()).id;
   }
@@ -489,25 +506,52 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return (await this.ctx.storage.get<number>(GATE_RUNS_KEY)) ?? 0;
   }
 
-  /** Watch the root session's events until a run ends. */
-  async watch(): Promise<string[]> {
-    const stream = await this.harness.session().events();
-    const types: string[] = [stream.snapshot.type];
+  /**
+   * Watch the root session through one run: what the view showed on the way,
+   * and the transcript in its last value.
+   */
+  async watch(): Promise<{ sawRun: boolean; texts: string[] }> {
+    const watch = await this.harness.session().watch();
+    let sawRun = false;
+    let texts: string[] = [];
     await new Promise<void>((resolve) => {
-      stream.start(async (events: readonly AgentEvent[]) => {
-        types.push(...events.map((event) => event.type));
-        if (events.some((event) => event.type === "run_end")) resolve();
+      watch.start(async (call) => {
+        if (call.kind !== "value") return;
+        const { value } = call;
+        const live = value.docs["pi.live"] as LiveState | undefined;
+        if (live?.run !== undefined) sawRun = true;
+        if (sawRun && live?.run === undefined) {
+          texts = entryTexts(value.entries);
+          resolve();
+        }
       });
     });
-    await stream.stop();
-    return types;
+    await watch.stop();
+    return { sawRun, texts };
   }
 
-  /** The transcript in a fresh snapshot, as a client joining now sees it. */
-  async snapshotTexts(): Promise<string[]> {
-    const stream = await this.harness.session().events();
-    await stream.stop();
-    return entryTexts(stream.snapshot.entries);
+  /** The transcript in a new watch's first value, as a client joining now sees it. */
+  async watchTexts(): Promise<string[]> {
+    const watch = await this.harness.session().watch();
+    await watch.stop();
+    return entryTexts(watch.value.entries);
+  }
+
+  /** The root session's transcript, oldest first, paged `size` entries at a time. */
+  async pagedTexts(size: number): Promise<string[]> {
+    const session = this.harness.session();
+    const entries: EntryRecord[] = [];
+    let page = await session.entries({ order: "ascending" }, size);
+    entries.push(...page.items);
+    while (page.items.length === size) {
+      const last = page.items[page.items.length - 1];
+      page = await session.entries(
+        { order: "ascending", minEntryId: (last.id + 1) as EntryRecord["id"] },
+        size
+      );
+      entries.push(...page.items);
+    }
+    return entryTexts(entries);
   }
 
   async alarmTime(): Promise<number | null> {
@@ -645,8 +689,8 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
   }
 }
 
-const NoParameters = Type.Object({});
-const MultiplyParameters = Type.Object({ value: Type.Number() });
+const NoParameters = obj({});
+const MultiplyParameters = obj({ value: num() });
 
 /** Multiplies by three: no gating, no storage. */
 function multiplyTool(): ToolRegistration<typeof MultiplyParameters> {
@@ -717,10 +761,12 @@ export class PiNoDefaultsTestObject extends DurableObject<Cloudflare.Env> {
 export class PiStoreTestObject extends DurableObject<Cloudflare.Env> {}
 
 export { PiBrowserTestObject } from "./browser-fixture";
+export { PiWebTestObject } from "./web-fixture";
 export { CodemodeRuntime } from "@cloudflare/codemode";
 export {
   PiFactoryTestObject,
   PiFlakyFactoryTestObject
 } from "./factory-fixture";
+export { PiWireTestObject } from "./wire-fixture";
 
 export default { fetch: () => new Response("Not found", { status: 404 }) };

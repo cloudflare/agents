@@ -5950,6 +5950,12 @@ describe("useAgentChat client abort cancellation", () => {
     return { agent, target, sentMessages };
   }
 
+  function dispatch(target: EventTarget, data: Record<string, unknown>) {
+    target.dispatchEvent(
+      new MessageEvent("message", { data: JSON.stringify(data) })
+    );
+  }
+
   it("keeps explicit stop() as server cancellation by default", async () => {
     const { agent, sentMessages } = createAgentWithTarget({
       name: "explicit-stop",
@@ -6001,6 +6007,74 @@ describe("useAgentChat client abort cancellation", () => {
       type: "cf_agent_chat_request_cancel",
       id: requestId
     });
+  });
+
+  it("stop() cancels a server turn streamed without a resume handshake (#2803)", async () => {
+    const { agent, target, sentMessages } = createAgentWithTarget({
+      name: "direct-continuation-stop",
+      url: "ws://localhost:3000/agents/chat/direct-continuation-stop?_pk=abc"
+    });
+
+    let chatInstance: ReturnType<typeof useAgentChat> | null = null;
+
+    const TestComponent = () => {
+      const chat = useAgentChat({ agent, getInitialMessages: null });
+      chatInstance = chat;
+      return (
+        <div data-testid="server-streaming">
+          {String(chat.isServerStreaming)}
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    await act(async () => {
+      dispatch(target, { type: "cf_agent_stream_resume_none" });
+      await sleep(10);
+    });
+
+    await act(async () => {
+      for (const chunk of [
+        { type: "start", messageId: "assistant" },
+        { type: "text-start", id: "t1" },
+        { type: "text-delta", id: "t1", delta: "Still working" }
+      ]) {
+        dispatch(target, {
+          type: "cf_agent_use_chat_response",
+          id: "server-turn",
+          continuation: true,
+          body: JSON.stringify(chunk),
+          done: false
+        });
+      }
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("server-streaming"))
+      .toHaveTextContent("true");
+
+    await act(async () => {
+      await chatInstance!.stop();
+      await sleep(10);
+    });
+
+    const cancelIds = sentMessages
+      .map((message) => JSON.parse(message) as Record<string, unknown>)
+      .filter((message) => message.type === "cf_agent_chat_request_cancel")
+      .map((message) => message.id);
+    expect(cancelIds).toEqual(["server-turn"]);
   });
 });
 

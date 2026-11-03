@@ -34,6 +34,8 @@ export interface RunBrowserCodeOptions {
   functions: Record<string, BrowserFunction>;
   /** How long the code may run before it fails. */
   timeoutMs: number;
+  /** Stops waiting for the code, as the timeout does. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -254,9 +256,20 @@ async function evaluate(
         options.timeoutMs + Math.min(HOST_TIMEOUT_GRACE_MS, options.timeoutMs)
       );
     });
+    // Stopping works like the deadline: the run's later browser calls fail
+    // once its session closes.
+    const { signal } = options;
+    let onAbort: (() => void) | undefined;
+    const stopped = new Promise<BrowserCodeRun>((resolve) => {
+      onAbort = () =>
+        resolve({ error: "The run was stopped before it finished.", logs: [] });
+      if (signal?.aborted) onAbort();
+      else signal?.addEventListener("abort", onAbort, { once: true });
+    });
     try {
-      return await Promise.race([running, deadline]);
+      return await Promise.race([running, deadline, stopped]);
     } finally {
+      if (onAbort) signal?.removeEventListener("abort", onAbort);
       clearTimeout(timer);
       disposeQuietly(entrypoint);
     }

@@ -1,4 +1,6 @@
-import type { SkillWorkspace } from "../skills";
+import type { SkillScriptWorkspace, SkillWorkspace } from "../skills";
+
+type MemoryWorkspaceFs = SkillScriptWorkspace["fs"] & SkillWorkspace["fs"];
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -34,7 +36,9 @@ function globToRegExp(pattern: string): RegExp {
  * Relative paths in the test helpers resolve against `/workspace`, like
  * skill scripts.
  */
-export class MemorySkillWorkspace implements SkillWorkspace {
+export class MemorySkillWorkspace
+  implements SkillWorkspace, SkillScriptWorkspace
+{
   readonly files = new Map<string, Uint8Array>();
 
   constructor(initial: Record<string, string> = {}) {
@@ -43,7 +47,7 @@ export class MemorySkillWorkspace implements SkillWorkspace {
     }
   }
 
-  readonly fs: SkillWorkspace["fs"] = {
+  readonly fs: MemoryWorkspaceFs = {
     stat: async (path) => {
       const bytes = this.files.get(path);
       if (bytes) return { size: bytes.byteLength, isDirectory: false };
@@ -88,6 +92,9 @@ export class MemorySkillWorkspace implements SkillWorkspace {
     find: async (directory, pattern = "**") => {
       const prefix = directory.endsWith("/") ? directory : `${directory}/`;
       const matcher = globToRegExp(pattern);
+      if (![...this.files.keys()].some((key) => key.startsWith(prefix))) {
+        throw notFound(directory);
+      }
       return [...this.files.keys()]
         .filter(
           (key) =>
@@ -101,6 +108,11 @@ export class MemorySkillWorkspace implements SkillWorkspace {
   async readText(path: string): Promise<string | null> {
     const bytes = this.files.get(absolute(path));
     return bytes ? decoder.decode(bytes) : null;
+  }
+
+  /** Delete a file. */
+  delete(path: string): void {
+    this.files.delete(absolute(path));
   }
 
   /** Write a file as text. */

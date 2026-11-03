@@ -12,7 +12,7 @@
  * Configuration overrides:
  *   - getModel()            — return a model id string (resolved via the
  *                             built-in workers-ai-provider) or a LanguageModel
- *   - getSystemPrompt()     — return the legacy fallback system prompt
+ *   - getSystemPrompt()     — instructions at the top of the system prompt
  *   - getTools()            — return the ToolSet for the agentic loop
  *   - maxSteps              — max tool-call rounds per turn (default: 10)
  *   - configureSession()    — compaction and search policy
@@ -126,12 +126,13 @@ import { wrapAISDK } from "agents/observability/ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { anthropic } from "workers-ai-provider/anthropic";
 import { openai } from "workers-ai-provider/openai";
-import * as skills from "agents/skills";
-import { SkillRegistry } from "agents/skills";
+import * as skills from "./skills";
+import { formatSkillDiagnostic, loadSkillCatalog } from "agents/skills";
+import { createSkillTools } from "agents/skills/tools/ai-sdk";
 import type {
+  SkillCatalog,
   SkillScriptRunner,
-  SkillSource,
-  SkillWorkspaceSeedOptions
+  SkillSource
 } from "agents/skills";
 
 // Re-export AI SDK types that appear on Think's public lifecycle hooks
@@ -147,9 +148,10 @@ export type {
 } from "ai";
 export { skills };
 export type {
+  Skill,
+  SkillCatalog,
   SkillRunContext,
-  SkillSource,
-  SkillWorkspaceSeedOptions
+  SkillSource
 } from "agents/skills";
 import {
   Agent,
@@ -611,6 +613,9 @@ function isLocalWorkspace(
     typeof workspace.stub === "function"
   );
 }
+
+/** Context block label for the skills catalog. */
+const SKILLS_CONTEXT_LABEL = "think_skills";
 
 const ACTION_PENDING_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 const ACTION_PENDING_LAST_SWEPT_KEY =
@@ -2816,7 +2821,7 @@ export interface TurnInput {
  * Contains everything Think assembled — the hook can inspect and override.
  */
 export interface TurnContext {
-  /** Assembled system prompt (from context blocks or getSystemPrompt fallback). */
+  /** Assembled system prompt: an overridden `getSystemPrompt()`, then context blocks. */
   system: string;
   /**
    * Assembled model messages (truncated, pruned). When a `whenChanged:
@@ -3567,16 +3572,8 @@ export class Think<
   /** Store tool input/output on `execute_tool` spans. */
   storeTools = false;
 
-  /**
-   * Project `getSkills()` into the active workspace so the agent can read
-   * and edit skills as files under `/workspace/.agents/skills`.
-   * Existing edits are preserved. Off by default: skills load from their
-   * sources and nothing is written to the Workspace, as before. Set `{}` to
-   * project with the defaults.
-   */
-  skillWorkspace: false | SkillWorkspaceSeedOptions = false;
-
-  private _skillRegistry: SkillRegistry | null = null;
+  private _skillSources: readonly SkillSource[] = [];
+  private _skillCatalog: SkillCatalog | null = null;
   private _loggedSkillWarnings = new Set<string>();
   private _loggedProtocolWarnings = new Set<string>();
 
@@ -5308,9 +5305,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /**
-   * Return the fallback system prompt for the assistant.
-   * Ignored when context blocks are configured. Use `configureContext()` for
-   * always-on instructions that should coexist with context blocks or skills.
+   * Return the instructions at the top of the system prompt.
+   *
+   * An override always comes first, followed by the context blocks from
+   * `configureContext()`, skills, and extensions. Think's default text is
+   * used only when the agent overrides nothing and has no context blocks.
    */
   getSystemPrompt(): string {
     return [
@@ -5320,6 +5319,23 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       "When the task is complex, briefly state your approach and keep the user informed with concise progress updates. If you modify code, verify with the smallest relevant test, build, typecheck, lint, or runtime check available, and report any checks you could not run.",
       "Be direct and useful in your final response: summarize the outcome, mention important files or commands, and call out real blockers or risks."
     ].join("\n\n");
+  }
+
+  /**
+   * The base system prompt for a turn: an overridden `getSystemPrompt()`,
+   * then the frozen context blocks. Think's default `getSystemPrompt()` is
+   * only a fallback for an agent with no context blocks.
+   *
+   * @internal Exposed to subclasses for tests.
+   */
+  protected async _buildBaseSystemPrompt(): Promise<string> {
+    const blocks = await this.context.freezeSystemPrompt();
+    if (!isMethodOverridden(this, "getSystemPrompt")) {
+      return blocks || this.getSystemPrompt();
+    }
+    return [this.getSystemPrompt(), blocks]
+      .filter((part) => part.trim().length > 0)
+      .join("\n\n");
   }
 
   /** Return the tools available to the assistant. */
@@ -6439,14 +6455,20 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   /**
    * Return Agent Skills sources for this Think agent.
    *
-   * Bundled skills are typically imported with the Agents Vite plugin:
+   * A skill is a directory with a `SKILL.md` file, as defined by
+   * https://agentskills.io. Keep skills as files in the agent's Workspace
+   * and they become available as soon as they are written:
    *
    * ```typescript
-   * import productSkills from "agents:skills"; // -> ./skills next to this file
+   * getSkills() {
+   *   return [skills.workspace(this.workspace)]; // /workspace/.agents/skills
+   * }
    * ```
    *
-   * Sources are applied in order; the first source to register a skill name
-   * wins, and later collisions are skipped with a logged warning.
+   * `skills.r2()` reads skills from an R2 bucket and `skills.manifest()`
+   * defines them in code. Sources are applied in order; the first source to
+   * provide a skill name wins, and later collisions are skipped with a
+   * logged warning. Sources are listed again before every turn.
    */
   getSkills(): SkillSource[] | Promise<SkillSource[]> {
     return [];
@@ -6459,37 +6481,23 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       const sources = await this.getSkills();
       if (sources.length === 0) return;
 
-      if (isMethodOverridden(this, "getSystemPrompt")) {
-        const warning =
-          "getSystemPrompt() is only used as a fallback when no context blocks are configured. getSkills() registers a skills context block, so move always-on instructions into configureContext() instead.";
-        if (!this._loggedSkillWarnings.has(warning)) {
-          this._loggedSkillWarnings.add(warning);
-          console.warn(`[think] ${warning}`);
-        }
-      }
+      this._skillSources = sources;
+      await this._loadSkillCatalog();
 
-      const registry = new SkillRegistry(sources, this.getSkillScriptRunner());
-      await registry.load();
-      this._logSkillWarnings(registry);
-      this._skillRegistry = registry;
-
-      await this._configureSkillWorkspace(registry);
-
+      // `whenChanged: "remind"` keeps the frozen system prompt (and the
+      // provider's prefix cache) stable when skills change mid-conversation.
+      // The new catalog goes out as a reminder after the cached prefix, and
+      // is folded into the system prompt at the next rebuild (compaction or
+      // clearing history).
       await this.context.addBlock({
-        label: registry.contextLabel,
+        label: SKILLS_CONTEXT_LABEL,
         description: "Think skills: available skill catalog",
+        whenChanged: "remind",
         provider: {
-          get: () => registry.systemPrompt()
+          get: async () =>
+            this._skillCatalog?.prompt() ?? "No skills are available."
         }
       });
-
-      const previous = (this._skillsFingerprint ??=
-        this._configGet("skillsFingerprint") ?? null);
-      if (previous !== registry.fingerprint) {
-        await this.context.refreshSystemPrompt();
-        this._configSet("skillsFingerprint", registry.fingerprint);
-        this._skillsFingerprint = registry.fingerprint;
-      }
     } catch (error) {
       console.warn(
         `[think] Failed to initialize skills; continuing without them: ${error instanceof Error ? error.message : String(error)}`
@@ -6497,51 +6505,35 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     }
   }
 
-  private async _configureSkillWorkspace(
-    registry: SkillRegistry
-  ): Promise<void> {
-    if (this.skillWorkspace === false) return;
-    const workspace = this.workspace;
-    try {
-      const key = "skillsWorkspaceFingerprint";
-      if (this._configGet(key) === registry.fingerprint) {
-        await registry.useWorkspace(workspace, this.skillWorkspace);
-        return;
-      }
-      const seeded = await registry.seedWorkspace(
-        workspace,
-        this.skillWorkspace
-      );
-      for (const warning of seeded.warnings) {
-        if (this._loggedSkillWarnings.has(warning)) continue;
-        this._loggedSkillWarnings.add(warning);
-        console.warn(`[think] ${warning}`);
-      }
-      if (seeded.skipped === 0) {
-        this._configSet(key, registry.fingerprint);
-      }
-    } catch (error) {
-      console.warn(
-        `[think] Failed to seed skills into the workspace; source-backed skill tools remain available: ${error instanceof Error ? error.message : String(error)}`
-      );
+  /** Load the catalog from every source and log new diagnostics. */
+  private async _loadSkillCatalog(): Promise<SkillCatalog> {
+    // `previous` keeps a source's last skills when it fails to list, so a
+    // transient outage (an R2 blip) does not drop them for a turn.
+    const catalog = await loadSkillCatalog(this._skillSources, {
+      previous: this._skillCatalog ?? undefined
+    });
+    for (const diagnostic of catalog.diagnostics) {
+      this._warnSkillsOnce(formatSkillDiagnostic(diagnostic));
     }
+    this._skillCatalog = catalog;
+    return catalog;
   }
 
   /**
-   * Log registry diagnostics (duplicate names, sources that failed to list),
-   * deduped by message so a new collision after a deploy still surfaces while
-   * the same warning is not repeated on every turn.
+   * Log a skills warning once per object lifetime, so a new problem after a
+   * deploy still surfaces while the same warning is not repeated every turn.
    */
-  private _logSkillWarnings(registry: SkillRegistry): void {
-    for (const warning of registry.warnings) {
-      if (this._loggedSkillWarnings.has(warning)) continue;
-      this._loggedSkillWarnings.add(warning);
-      console.warn(`[think] ${warning}`);
-    }
+  private _warnSkillsOnce(warning: string): void {
+    if (this._loggedSkillWarnings.has(warning)) return;
+    this._loggedSkillWarnings.add(warning);
+    console.warn(`[think] ${warning}`);
   }
 
   /**
    * Return an optional runner that enables the `run_skill_script` tool.
+   *
+   * Prefer keeping skills in the Workspace and letting the agent run their
+   * scripts with its shell tools.
    *
    * @experimental Skill script execution is experimental and may change
    * before stabilizing.
@@ -6550,28 +6542,15 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     return null;
   }
 
-  /**
-   * The persisted skills fingerprint, read from `think_config` once per
-   * object lifetime; `null` once read and absent. Saves the per-turn probe.
-   */
-  private _skillsFingerprint: string | null | undefined;
-
   private async _refreshSkillsIfChanged(): Promise<void> {
-    if (!this._skillRegistry) return;
+    if (!this._skillCatalog) return;
 
-    // Refreshing pulls from live sources (e.g. R2); a transient failure must
-    // not break the turn. Keep the last good catalog on error.
+    // Sources are live (a Workspace, R2); a transient failure must not break
+    // the turn. Keep the last good catalog on error. The skills block is a
+    // reminder block, so a changed catalog reaches the model without
+    // rebuilding the frozen system prompt.
     try {
-      await this._skillRegistry.refresh();
-      this._logSkillWarnings(this._skillRegistry);
-      await this._configureSkillWorkspace(this._skillRegistry);
-      const previous = (this._skillsFingerprint ??=
-        this._configGet("skillsFingerprint") ?? null);
-      if (previous !== this._skillRegistry.fingerprint) {
-        await this.context.refreshSystemPrompt();
-        this._configSet("skillsFingerprint", this._skillRegistry.fingerprint);
-        this._skillsFingerprint = this._skillRegistry.fingerprint;
-      }
+      await this._loadSkillCatalog();
     } catch (error) {
       console.warn(
         `[think] Failed to refresh skills; using last known catalog: ${error instanceof Error ? error.message : String(error)}`
@@ -7472,7 +7451,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const extensionTools = this.extensionManager?.getTools() ?? {};
     await this._refreshSkillsIfChanged();
     const contextTools = await this.context.tools();
-    const skillTools = this._skillRegistry?.tools() ?? {};
+    const skillTools = this._skillCatalog
+      ? createSkillTools(this._skillCatalog, {
+          scriptRunner: this.getSkillScriptRunner()
+        })
+      : {};
     const clientToolSet = createToolsFromClientSchemas(
       input.clientTools,
       input.clientToolExecutor
@@ -7509,8 +7492,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           : channelDefinition.instructions
         : undefined;
 
-    const frozenPrompt = await this.context.freezeSystemPrompt();
-    const rawBaseSystem = frozenPrompt || this.getSystemPrompt();
+    const rawBaseSystem = await this._buildBaseSystemPrompt();
     const baseSystem = channelInstructions
       ? `${channelInstructions}\n\n${rawBaseSystem}`
       : rawBaseSystem;

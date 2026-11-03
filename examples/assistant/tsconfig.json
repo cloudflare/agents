@@ -1,4 +1,0 @@
-{
-  "extends": "agents/tsconfig",
-  "exclude": ["src/tests/**/*.ts"]
-}

@@ -119,7 +119,7 @@ export function createWorkspaceTools(
     return {
       name: tool.name,
       description: tool.description,
-      // Plain JSON Schema: pi validates with TypeBox, which accepts it, but
+      // Plain JSON Schema: pi validates it with pi-schema, but
       // computer's schema type is untyped, so `args` is too.
       parameters: tool.parameters,
       ...(tool.constrainedSampling

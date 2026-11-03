@@ -74,8 +74,7 @@ export interface AgentThinkSubmissionStatus {
 
 /**
  * agent-think's identity and operating contract as a durable, read-only
- * context block. Unlike getSystemPrompt(), this block remains present when
- * Think adds its own skills catalog context.
+ * context block, rendered next to Think's own skills catalog context.
  */
 export function agentThinkContext(
   getContext: () => RunContext | null
@@ -162,8 +161,6 @@ export class ThinkAgent extends ThinkBase {
   /** Capture full model/tool payloads while validating the tracing preview. */
   override storeMessages = true;
   override storeTools = true;
-
-  override skillWorkspace = { root: "/workspace/.agents/skills" };
 
   readonly #workspaceAgent: DurableObjectStub<WorkspaceAgent>;
   #workspaceReady: Promise<RemoteWorkspace> | null = null;

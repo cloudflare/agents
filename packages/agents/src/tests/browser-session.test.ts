@@ -2,11 +2,17 @@ import { describe, expect, it, vi } from "vitest";
 import {
   Browser,
   MAX_BROWSER_SCOPES,
-  namedBrowserSessionKey
+  namedBrowserSessionKey,
+  type BrowserInternalHosts
 } from "../browser/browser";
 import { browserFunctions } from "../browser/browser-functions";
 import { browserRun } from "../browser/providers/browser-run";
-import type { BrowserSession } from "../browser/session";
+import { conversationScope } from "../browser/scope";
+import {
+  BrowserSession,
+  lockedScopes,
+  type BrowserSource
+} from "../browser/session";
 import type {
   BrowserSessionLock,
   BrowserSessionStore,
@@ -254,7 +260,7 @@ type Call = [method: string, input: Record<string, unknown>];
 function call(session: BrowserSession, [method, input]: Call) {
   // SAFETY: The tests only name the session's own methods.
   const fn = (
-    session as unknown as Record<string, (input: unknown) => unknown>
+    session as unknown as Record<string, (input: unknown) => Promise<unknown>>
   )[method];
   return fn.call(session, input);
 }
@@ -331,6 +337,11 @@ const evaluateActive: Call = [
   }
 ];
 
+const createTabCall: Call = [
+  "send",
+  { method: "Target.createTarget", params: { url: "about:blank" } }
+];
+
 /** Make the active page open a popup tab. */
 const openPopup: Call = [
   "send",
@@ -357,7 +368,8 @@ describe("BrowserSession", () => {
       restarted: false,
       newTabs: [],
       tabClosed: false,
-      tabShared: false
+      tabShared: false,
+      notices: []
     });
     expect(t.activeTab()).toBe("target-2");
   });
@@ -949,5 +961,505 @@ describe("BrowserSession scopes", () => {
     expect(scopes.size).toBe(MAX_BROWSER_SCOPES);
     expect(scopes.has("browser:scope:4:work:s0")).toBe(true);
     expect(scopes.has("browser:scope:4:work:s1")).toBe(false);
+  });
+});
+
+describe("Browser.functionDocs", () => {
+  it("returns the browser functions in Markdown and the rules", () => {
+    const { browser } = setup();
+    const docs = browser.functionDocs();
+    for (const name of [
+      "cdp",
+      "attachToTarget",
+      "spec",
+      "getDebugLog",
+      "clearDebugLog"
+    ]) {
+      expect(docs.functions).toContain(`- \`browser.${name}(`);
+    }
+    // No internal hosts, so no hosts functions.
+    expect(docs.functions).not.toContain("listHosts");
+    expect(docs.functions).not.toContain("Internal sites");
+    expect(docs.rules.length).toBeGreaterThan(0);
+    for (const rule of docs.rules) {
+      expect(rule).toEqual(expect.any(String));
+      expect(rule.startsWith("-")).toBe(false);
+    }
+  });
+
+  it("says an oversized screenshot throws, for any code that runs it", () => {
+    const { rules } = setup().browser.functionDocs();
+    expect(rules.join("\n")).toContain(
+      "Page.captureScreenshot throws when its result is over 1 MB"
+    );
+    expect(rules.join("\n")).not.toContain("fails the run");
+  });
+
+  it("returns a fresh copy of the rules each time", () => {
+    const { browser } = setup();
+    browser.functionDocs().rules.push("changed");
+    expect(browser.functionDocs().rules).not.toContain("changed");
+  });
+});
+
+describe("BrowserSession.functions", () => {
+  it("are the browser functions, bound to the session", async () => {
+    const t = setup();
+    const session = t.browser.session();
+    const { functions } = session;
+    expect(Object.keys(functions)).toEqual([
+      "cdp",
+      "attachToTarget",
+      "spec",
+      "getDebugLog",
+      "clearDebugLog"
+    ]);
+    expect(session.functions).toBe(functions);
+    expect(Object.isFrozen(functions)).toBe(true);
+
+    const result = await functions.cdp({
+      method: "Runtime.evaluate",
+      params: { expression: "1" },
+      sessionId: "active"
+    });
+    expect(evaluatedIn(result)).toBe("target-2");
+    await session.close();
+    expect(t.activeTab()).toBe("target-2");
+  });
+
+  it("validate their input before touching the browser", async () => {
+    const t = setup();
+    const session = t.browser.session();
+    await expect(
+      session.functions.cdp({ sessionId: "active" })
+    ).rejects.toThrow("Invalid arguments for browser.cdp");
+    expect(t.sockets).toHaveLength(0);
+    await session.close();
+  });
+});
+
+describe("BrowserSessionReport.notices", () => {
+  it("is empty when nothing happened", async () => {
+    const t = setup();
+    const { report } = await t.run([evaluateActive]);
+    expect(report?.notices).toEqual([]);
+  });
+
+  it("tells the model the browser restarted", async () => {
+    const t = setup();
+    await t.run([evaluateActive]);
+    t.instances.clear();
+    const { report } = await t.run([evaluateActive]);
+    expect(report?.notices).toEqual([
+      expect.stringMatching(/^The browser was restarted before this run/)
+    ]);
+  });
+
+  it("tells the model its tab was closed, and lists new tabs", async () => {
+    const t = setup();
+    await t.run([evaluateActive]);
+    const instance = t.instance();
+    instance.tabs = instance.tabs.filter((tab) => tab.targetId !== "target-2");
+    const { report } = await t.run([evaluateActive, openPopup]);
+    expect(report?.notices).toEqual([
+      expect.stringMatching(/^The tab you were working in was closed/),
+      `New tabs opened by the page: ${JSON.stringify(report?.newTabs)}`
+    ]);
+    expect(report?.newTabs).toHaveLength(1);
+  });
+
+  it("tells the model another scope works in its tab", async () => {
+    const t = setup();
+    await t.scoped("a").run([evaluateActive]);
+    const b = t.scoped("b").session();
+    await call(b, ["attachToTarget", { targetId: "target-2" }]);
+    await b.close();
+    const { report } = await t.scoped("a").run([evaluateActive]);
+    expect(report?.notices).toEqual([
+      expect.stringMatching(/^Another conversation using this browser/)
+    ]);
+  });
+});
+
+describe("BrowserSession locks", () => {
+  /** Whether `promise` has settled, after letting pending work run. */
+  async function settled(promise: Promise<unknown>): Promise<boolean> {
+    let done = false;
+    void promise.then(
+      () => (done = true),
+      () => (done = true)
+    );
+    for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
+    return done;
+  }
+
+  it("waits at the first call until the scope's lock is free", async () => {
+    const t = setup();
+    const first = t.browser.session({ scope: "a", lock: true });
+    await call(first, createTabCall);
+    const second = t.browser.session({ scope: "a", lock: true });
+    const waiting = call(second, evaluateActive);
+    expect(await settled(waiting)).toBe(false);
+
+    await first.close();
+    // It lands in the tab the first session opened and left active.
+    expect(evaluatedIn(await waiting)).toBe("target-2");
+    await second.close();
+  });
+
+  it("counts the time it waited, across a given-up wait and a retry", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const t = setup();
+      vi.setSystemTime(1_000);
+      const holder = t.browser.session({ lock: true });
+      await holder.lock();
+      const waiter = t.browser.session({ lock: true });
+      const waiting = waiter.lock();
+      expect(await settled(waiting)).toBe(false);
+      vi.setSystemTime(1_250);
+      await holder.close();
+      await waiting;
+      expect(holder.waitedForLockMs).toBe(0);
+      expect(waiter.waitedForLockMs).toBe(250);
+
+      // Waiting for the lock again later counts from the new wait.
+      const next = t.browser.session({ lock: true });
+      const controller = new AbortController();
+      const givenUp = next.lock({ signal: controller.signal });
+      vi.setSystemTime(1_350);
+      controller.abort(new Error("deadline"));
+      await expect(givenUp).rejects.toThrow("deadline");
+      expect(next.waitedForLockMs).toBe(100);
+      const retry = next.lock();
+      vi.setSystemTime(1_650);
+      await waiter.close();
+      await retry;
+      expect(next.waitedForLockMs).toBe(400);
+
+      // Calls once the lock is held add nothing.
+      vi.setSystemTime(5_000);
+      await next.lock();
+      await call(next, evaluateActive);
+      expect(next.waitedForLockMs).toBe(400);
+      await next.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("goes in order, and leaves other scopes and plain sessions alone", async () => {
+    const t = setup();
+    await t.start();
+    const order: string[] = [];
+    const sessions = ["one", "two", "three"].map((name) => {
+      const session = t.browser.session({ scope: "a", lock: true });
+      const done = session.lock().then(() => order.push(name));
+      return { session, done };
+    });
+    await settled(sessions[0].done);
+    expect(order).toEqual(["one"]);
+
+    // Another scope, and a session that doesn't lock, don't wait.
+    const other = t.browser.session({ scope: "b", lock: true });
+    expect(await settled(other.lock())).toBe(true);
+    const plain = t.browser.session({ scope: "a" });
+    expect(await settled(call(plain, evaluateActive))).toBe(true);
+    await Promise.all([other.close(), plain.close()]);
+
+    for (const { session, done } of sessions) {
+      await done;
+      await session.close();
+    }
+    expect(order).toEqual(["one", "two", "three"]);
+  });
+
+  it("takes the lock once however often it's asked", async () => {
+    const t = setup();
+    const session = t.browser.session({ lock: true });
+    await session.lock();
+    await session.lock();
+    await call(session, evaluateActive);
+    await session.close();
+    // Free again: a new session doesn't wait.
+    const next = t.browser.session({ lock: true });
+    expect(await settled(next.lock())).toBe(true);
+    await next.close();
+  });
+
+  it("leaves the queue at once when the wait is aborted", async () => {
+    const t = setup();
+    const holder = t.browser.session({ lock: true });
+    await holder.lock();
+    const quitter = t.browser.session({ lock: true });
+    const controller = new AbortController();
+    const quitting = quitter.lock({ signal: controller.signal });
+    const behind = t.browser.session({ lock: true });
+    const behindLock = behind.lock();
+
+    const reason = new Error("gave up waiting for the browser");
+    controller.abort(reason);
+    await expect(quitting).rejects.toBe(reason);
+
+    await holder.close();
+    // Not stuck behind the session that gave up.
+    expect(await settled(behindLock)).toBe(true);
+    await behind.close();
+    // The quitter can wait again, and gets the lock now it's free.
+    await quitter.lock();
+    await quitter.close();
+  });
+
+  it("rejects at once with an already-aborted signal, leaving no queue", async () => {
+    const t = setup();
+    const reason = new Error("too late");
+    for (let i = 0; i < 10; i++) {
+      const session = t.browser.session({ scope: `s${i}`, lock: true });
+      await expect(
+        session.lock({ signal: AbortSignal.abort(reason) })
+      ).rejects.toBe(reason);
+      await session.close();
+    }
+    expect(lockedScopes(t.browser)).toEqual([]);
+  });
+
+  it("lets a later already-aborted signal reject only its own call", async () => {
+    const t = setup();
+    const holder = t.browser.session({ lock: true });
+    await holder.lock();
+    const waiter = t.browser.session({ lock: true });
+    const first = waiter.lock();
+    const reason = new Error("too late");
+    await expect(
+      waiter.lock({ signal: AbortSignal.abort(reason) })
+    ).rejects.toBe(reason);
+    expect(await settled(first)).toBe(false);
+    await holder.close();
+    await first;
+    await waiter.close();
+    expect(lockedScopes(t.browser)).toEqual([]);
+  });
+
+  it("lets a later signal bound its own wait while the others keep waiting", async () => {
+    const t = setup();
+    const holder = t.browser.session({ lock: true });
+    await holder.lock();
+    const waiter = t.browser.session({ lock: true });
+    const keep = new AbortController();
+    const quit = new AbortController();
+    const kept = waiter.lock({ signal: keep.signal });
+    const quitting = waiter.lock({ signal: quit.signal });
+    // The wait a function call makes never gives up either.
+    const working = call(waiter, evaluateActive);
+    const bounded = new AbortController();
+    const boundedLock = waiter.lock({ signal: bounded.signal });
+
+    const reason = new Error("deadline");
+    quit.abort(reason);
+    await expect(quitting).rejects.toBe(reason);
+    bounded.abort(reason);
+    await expect(boundedLock).rejects.toBe(reason);
+    keep.abort(reason);
+    await expect(kept).rejects.toBe(reason);
+
+    // Still queued behind the holder, for the function call.
+    expect(await settled(working)).toBe(false);
+    const behind = t.browser.session({ lock: true });
+    const behindLock = behind.lock();
+    await holder.close();
+    await working;
+    expect(await settled(behindLock)).toBe(false);
+    await waiter.close();
+    await behindLock;
+    await behind.close();
+  });
+
+  it("leaves the queue once every call has given up, and cleans up", async () => {
+    const t = setup();
+    const holder = t.browser.session({ lock: true });
+    await holder.lock();
+    const waiter = t.browser.session({ lock: true });
+    const one = new AbortController();
+    const two = new AbortController();
+    const first = waiter.lock({ signal: one.signal });
+    const second = waiter.lock({ signal: two.signal });
+    const behind = t.browser.session({ lock: true });
+    const behindLock = behind.lock();
+
+    one.abort(new Error("one"));
+    two.abort(new Error("two"));
+    await expect(first).rejects.toThrow("one");
+    await expect(second).rejects.toThrow("two");
+    await holder.close();
+    // Not stuck behind the session whose calls all gave up.
+    expect(await settled(behindLock)).toBe(true);
+    await behind.close();
+    await waiter.close();
+    expect(lockedScopes(t.browser)).toEqual([]);
+
+    // A call that gets the lock stops listening to its signal.
+    const third = t.browser.session({ lock: true });
+    const signal = new AbortController().signal;
+    const unlistened = vi.spyOn(signal, "removeEventListener");
+    await third.lock({ signal });
+    expect(unlistened).toHaveBeenCalledWith("abort", expect.any(Function));
+    await third.close();
+    expect(lockedScopes(t.browser)).toEqual([]);
+  });
+
+  it("stops waiting when the session closes", async () => {
+    const t = setup();
+    const holder = t.browser.session({ lock: true });
+    await holder.lock();
+    const closer = t.browser.session({ lock: true });
+    const waiting = call(closer, evaluateActive);
+    const behind = t.browser.session({ lock: true });
+    const behindLock = behind.lock();
+
+    expect(await closer.close()).toBeUndefined();
+    await expect(waiting).rejects.toThrow("closed");
+    await holder.close();
+    expect(await settled(behindLock)).toBe(true);
+    await behind.close();
+  });
+
+  it("releases the lock when the session closes without connecting", async () => {
+    const t = setup();
+    const idle = t.browser.session({ lock: true });
+    await idle.lock();
+    expect(await idle.close()).toBeUndefined();
+    const next = t.browser.session({ lock: true });
+    expect(await settled(next.lock())).toBe(true);
+    await next.close();
+  });
+
+  it('shares a queue between the default scope and "shared"', async () => {
+    const t = setup();
+    const unscoped = t.browser.session({ lock: true });
+    await unscoped.lock();
+    const shared = t.browser.session({ scope: "shared", lock: true });
+    expect(await settled(shared.lock())).toBe(false);
+    await unscoped.close();
+    await shared.lock();
+    await shared.close();
+  });
+
+  it("locks per source, so custom sources work", async () => {
+    const t = setup();
+    const source: BrowserSource = {
+      name: "custom",
+      connect: (options) => t.browser.connect(options)
+    };
+    const first = new BrowserSession(source, { lock: true });
+    await call(first, evaluateActive);
+    const second = new BrowserSession(source, { lock: true });
+    const waiting = call(second, evaluateActive);
+    // The Browser itself is another source, with its own queue.
+    const direct = t.browser.session({ lock: true });
+    expect(await settled(direct.lock())).toBe(true);
+    await direct.close();
+
+    expect(await settled(waiting)).toBe(false);
+    await first.close();
+    expect(evaluatedIn(await waiting)).toBe("target-2");
+    await second.close();
+  });
+
+  it("holds the hosts functions to the lock and the session's lifetime", async () => {
+    const t = setup();
+    const assigned: string[] = [];
+    const hosts: BrowserInternalHosts = {
+      describe: () => [
+        { host: "a.internal", url: "http://a.internal/", assignable: true }
+      ],
+      list: async () => [],
+      assign: async (host) => {
+        assigned.push(host);
+        return { url: `http://${host}/` };
+      },
+      clear: async () => true
+    };
+    const source: BrowserSource = {
+      name: "hosts",
+      connect: (options) => t.browser.connect(options),
+      internalHosts: hosts
+    };
+    const holder = new BrowserSession(source, { scope: "a", lock: true });
+    await holder.lock();
+    const session = new BrowserSession(source, { scope: "a", lock: true });
+    const { assignHost, clearHost, listHosts } = session.functions;
+
+    // Bad input fails before the wait.
+    await expect(assignHost({})).rejects.toThrow("needs { host }");
+    await expect(assignHost({ host: "a.internal" })).rejects.toThrow(
+      "needs a target"
+    );
+    const assigning = assignHost({ host: "a.internal", target: {} });
+    expect(await settled(assigning)).toBe(false);
+    expect(assigned).toEqual([]);
+    await holder.close();
+    await assigning;
+    expect(assigned).toEqual(["a.internal"]);
+
+    await session.close();
+    const connect = vi.spyOn(source, "connect");
+    const list = vi.spyOn(hosts, "list");
+    await expect(
+      assignHost({ host: "a.internal", target: {} })
+    ).rejects.toThrow("closed");
+    await expect(clearHost({ host: "a.internal" })).rejects.toThrow("closed");
+    await expect(listHosts({})).rejects.toThrow("closed");
+    expect(assigned).toEqual(["a.internal"]);
+    expect(list).not.toHaveBeenCalled();
+    expect(connect).not.toHaveBeenCalled();
+  });
+
+  it("closes the hosts functions of a session that doesn't lock", async () => {
+    const t = setup();
+    const clear = vi.fn(async () => true);
+    const source: BrowserSource = {
+      name: "hosts",
+      connect: (options) => t.browser.connect(options),
+      internalHosts: {
+        describe: () => [
+          { host: "a.internal", url: "http://a.internal/", assignable: true }
+        ],
+        list: async () => [],
+        assign: async (host) => ({ url: `http://${host}/` }),
+        clear
+      }
+    };
+    const session = new BrowserSession(source);
+    expect(await session.functions.clearHost({ host: "a.internal" })).toEqual({
+      cleared: true
+    });
+    await session.close();
+    await expect(
+      session.functions.clearHost({ host: "a.internal" })
+    ).rejects.toThrow("closed");
+    expect(clear).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses lock() on a session opened without lock", async () => {
+    const t = setup();
+    const session = t.browser.session();
+    await expect(session.lock()).rejects.toThrow("lock: true");
+    expect(session.waitedForLockMs).toBe(0);
+    await session.close();
+  });
+});
+
+describe("conversationScope", () => {
+  it("names a conversation's scope", () => {
+    expect(conversationScope("2")).toBe("conversation:2");
+    expect(conversationScope("abc")).toBe("conversation:abc");
+  });
+
+  it("throws on a missing id instead of sharing one scope", () => {
+    expect(() => conversationScope("")).toThrow("conversation id");
+    // SAFETY: Simulates a missing metadata key at runtime.
+    expect(() => conversationScope(undefined as unknown as string)).toThrow(
+      "conversation id"
+    );
   });
 });

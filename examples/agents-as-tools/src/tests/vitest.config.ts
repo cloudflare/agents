@@ -27,7 +27,7 @@ export default defineConfig({
         ssr: {
           // ajv ships its schema files via `require('./*.json')` which
           // vitest can't resolve without an explicit hint. Same fix
-          // packages/ai-chat and examples/assistant tests use.
+          // packages/ai-chat tests use.
           include: ["ajv"]
         }
       }

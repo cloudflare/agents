@@ -1,6 +1,7 @@
 import type { JsonValue } from "@earendil-works/pi-ai";
 import type {
-  AgentEventStream,
+  ConversationWatch,
+  ConversationWindow,
   RegistryReader
 } from "@earendil-works/pi-durable";
 import type { Connection, ConnectionContext } from "agents/lifecycle";
@@ -14,6 +15,12 @@ import type { PiClientMessage, PiServerMessage } from "./protocol";
 
 const SESSION_TAG_PREFIX = "pi-session:";
 const SESSION_QUERY = "session";
+/**
+ * How many entries a socket's view holds: the newest 200, up to 400. A
+ * longer transcript shows only its newest entries; a client that pages older
+ * ones merges the view into a `ConversationTranscript` instead.
+ */
+const WINDOW: ConversationWindow = { min: 200 };
 /** `WebSocket.OPEN`; the constant is not defined on every runtime's global. */
 const OPEN = 1;
 
@@ -51,17 +58,17 @@ function send(socket: WebSocket, message: PiServerMessage): void {
  * built only on the harness's public API.
  *
  * Each socket follows one session, picked by `?session=`, through its own
- * `session.events()` stream: a `snapshot`, then one batch of pi's agent
- * events per commit. Commands on the socket call `session.submit()`,
- * `abort()`, and `reset()`. Watches live in memory, so the host calls
- * `reattach()` from its `onStart` to give sockets that outlived the last
- * isolate a new watch and a fresh snapshot.
+ * `session.watch()`: the whole view, then pi's operations for each change.
+ * Commands on the socket call `session.submit()`, `abort()`, and `reset()`.
+ * Watches live in memory, so the host calls `reattach()` from its `onStart`
+ * to give sockets that outlived the last isolate a new watch and the whole
+ * view again.
  */
 export class PiSessionSockets {
   readonly #harness: PiHarness;
   readonly #registry: RegistryReader;
   readonly #getWebSockets: (tag?: string) => WebSocket[];
-  readonly #watches = new Map<WebSocket, AgentEventStream>();
+  readonly #watches = new Map<WebSocket, ConversationWatch>();
 
   constructor(
     harness: PiHarness,
@@ -122,15 +129,17 @@ export class PiSessionSockets {
 
   async #watch(socket: WebSocket, session: PiSessionId): Promise<void> {
     await this.#unwatch(socket);
-    const stream = await this.#harness.session(session).events();
-    this.#watches.set(socket, stream);
-    send(socket, { type: "events", session, events: [stream.snapshot] });
-    stream.start(async (events) => {
+    const watch = await this.#harness.session(session).watch(WINDOW);
+    this.#watches.set(socket, watch);
+    send(socket, { type: "view", session, view: watch.value });
+    watch.start(async (call) => {
+      // Pi ends a watch on failure instead of sending a `failed` call.
+      if (call.kind !== "value") return;
       if (socket.readyState !== OPEN) {
         void this.#unwatch(socket);
         return;
       }
-      send(socket, { type: "events", session, events });
+      send(socket, { type: "ops", session, ops: call.ops });
     });
   }
 

@@ -20,6 +20,7 @@ export {
 } from "./session-store";
 export { skills } from "./skills";
 export type {
+  PiContinueOptions,
   PiOperationResult,
   PiPendingOperation,
   PiPromptResponse,
@@ -28,5 +29,6 @@ export type {
   PiSessionInfo,
   PiSessionOptions,
   PiSubmitOptions,
-  PiWhenBusy
+  PiWhenBusy,
+  PiWhenIdle
 } from "./types";

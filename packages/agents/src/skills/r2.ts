@@ -1,27 +1,117 @@
-import { parseSkillMarkdown } from "./frontmatter";
-import type {
-  SkillContent,
-  SkillDescriptor,
-  SkillResource,
-  SkillResourceDescriptor,
-  SkillSource
-} from "./types";
-import { validateSkillResourcePath } from "./types";
+import { err, ok, type SkillResult } from "./result";
+import {
+  describeSkillResource,
+  encodeSkillResourceContent,
+  type SkillResource
+} from "./resource";
+import {
+  SkillResourceNotFoundError,
+  SkillSourceError,
+  type SkillListing,
+  type SkillSource
+} from "./source";
+import type { SkillName } from "./skill";
+import { indexSkillTree, type SkillTreeFile } from "./tree";
 
+/** Options for {@link r2}. */
 export interface R2SkillSourceOptions {
-  prefix?: string;
-  skills?: string[];
-  id?: string;
-  fingerprint?: "metadata" | "content";
-  refreshIntervalMs?: number;
+  /** Key prefix that holds the skill directories, such as `skills/`. */
+  readonly prefix?: string;
+  /** Source id for diagnostics. Defaults to `r2:<prefix>`. */
+  readonly id?: string;
+  /** Only serve these skill names. Serves every skill when omitted. */
+  readonly skills?: readonly string[];
+  /**
+   * How long a bucket listing is reused before the bucket is listed again.
+   * Defaults to 60 seconds; `0` lists on every call.
+   */
+  readonly refreshIntervalMs?: number;
 }
 
-type ListedObject = Pick<R2Object, "key" | "etag" | "size" | "uploaded">;
+/**
+ * Create a read-only source backed by an R2 bucket.
+ *
+ * The bucket holds the Agent Skills layout under `prefix`:
+ * `<prefix><skill-name>/SKILL.md`, plus any bundled files beside it.
+ *
+ * @param bucket - The R2 binding.
+ * @param options - Prefix, id, name allowlist, and listing cache interval.
+ * @returns A source that reads skills from the bucket.
+ */
+export function r2(
+  bucket: R2Bucket,
+  options: R2SkillSourceOptions = {}
+): SkillSource {
+  const prefix = normalizePrefix(options.prefix);
+  const id = options.id ?? `r2:${prefix || "/"}`;
+  const allowed = options.skills?.length ? new Set(options.skills) : null;
+  const refreshIntervalMs = options.refreshIntervalMs ?? 60_000;
+  let cached: {
+    listing: SkillListing;
+    directories: ReadonlyMap<SkillName, string>;
+    at: number;
+  } | null = null;
 
-interface IndexedSkill {
-  descriptor: SkillDescriptor;
-  content: SkillContent;
-  directory: string;
+  async function list(): Promise<SkillResult<SkillListing, SkillSourceError>> {
+    if (cached && Date.now() - cached.at < refreshIntervalMs) {
+      return ok(cached.listing);
+    }
+    try {
+      const files: SkillTreeFile[] = (await listAll(bucket, prefix)).map(
+        (object) => ({
+          path: object.key.slice(prefix.length),
+          size: object.size
+        })
+      );
+      const { listing, directories } = await indexSkillTree(
+        files,
+        async (path) => {
+          const object = await bucket.get(`${prefix}${path}`);
+          return object ? object.text() : null;
+        }
+      );
+      const filtered: SkillListing = allowed
+        ? {
+            skills: listing.skills.filter(({ skill }) =>
+              allowed.has(skill.name)
+            ),
+            invalid: listing.invalid
+          }
+        : listing;
+      cached = { listing: filtered, directories, at: Date.now() };
+      return ok(filtered);
+    } catch (cause) {
+      return err(new SkillSourceError(id, "list", cause));
+    }
+  }
+
+  return {
+    id,
+    list,
+    // Reads go straight to the object. Relisting the bucket here would
+    // cost a full scan per file, and `run_skill_script` reads every file
+    // of a skill.
+    async readResource(skill, path) {
+      if (allowed && !allowed.has(skill)) {
+        return err(new SkillResourceNotFoundError(skill, path));
+      }
+      try {
+        // Lenient names can differ from their directory.
+        const directory = cached?.directories.get(skill) ?? skill;
+        const object = await bucket.get(`${prefix}${directory}/${path}`);
+        if (!object) return err(new SkillResourceNotFoundError(skill, path));
+        const info = describeSkillResource(path, object.size);
+        const bytes = new Uint8Array(await object.arrayBuffer());
+        const resource: SkillResource = {
+          ...info,
+          content: encodeSkillResourceContent(bytes, info.encoding)
+        };
+        return ok(resource);
+      } catch (cause) {
+        return err(new SkillSourceError(id, "read-resource", cause));
+      }
+    }
+  };
 }
 
 function normalizePrefix(prefix: string | undefined): string {
@@ -29,312 +119,18 @@ function normalizePrefix(prefix: string | undefined): string {
   return prefix.endsWith("/") ? prefix : `${prefix}/`;
 }
 
-function resourceKind(path: string): SkillResourceDescriptor["kind"] {
-  if (path.startsWith("references/")) return "reference";
-  if (path.startsWith("scripts/")) return "script";
-  if (path.startsWith("assets/")) return "asset";
-  return "file";
-}
-
-const TEXT_EXTENSIONS = new Set([
-  ".bash",
-  ".css",
-  ".csv",
-  ".html",
-  ".js",
-  ".json",
-  ".jsx",
-  ".md",
-  ".mjs",
-  ".py",
-  ".sh",
-  ".svg",
-  ".ts",
-  ".tsx",
-  ".txt",
-  ".xml",
-  ".yaml",
-  ".yml"
-]);
-
-const MIME_TYPES = new Map([
-  [".css", "text/css"],
-  [".gif", "image/gif"],
-  [".html", "text/html"],
-  [".jpg", "image/jpeg"],
-  [".jpeg", "image/jpeg"],
-  [".js", "text/javascript"],
-  [".json", "application/json"],
-  [".md", "text/markdown"],
-  [".mjs", "text/javascript"],
-  [".pdf", "application/pdf"],
-  [".png", "image/png"],
-  [".py", "text/x-python"],
-  [".sh", "text/x-shellscript"],
-  [".svg", "image/svg+xml"],
-  [".ts", "text/typescript"],
-  [".tsx", "text/typescript"],
-  [".txt", "text/plain"],
-  [".webp", "image/webp"],
-  [".woff", "font/woff"],
-  [".woff2", "font/woff2"],
-  [".xml", "application/xml"],
-  [".yaml", "application/yaml"],
-  [".yml", "application/yaml"]
-]);
-
-function extensionOf(path: string): string {
-  const file = path.split("/").at(-1) ?? path;
-  const index = file.lastIndexOf(".");
-  return index === -1 ? "" : file.slice(index).toLowerCase();
-}
-
-function resourceEncoding(path: string): "text" | "base64" {
-  return TEXT_EXTENSIONS.has(extensionOf(path)) ? "text" : "base64";
-}
-
-function resourceMimeType(path: string): string | undefined {
-  return MIME_TYPES.get(extensionOf(path));
-}
-
-function base64Encode(bytes: ArrayBuffer): string {
-  let binary = "";
-  const view = new Uint8Array(bytes);
-  for (let i = 0; i < view.length; i++) {
-    binary += String.fromCharCode(view[i]!);
-  }
-  return btoa(binary);
-}
-
-async function readObjectFingerprint(
-  bucket: R2Bucket,
-  key: string,
-  path: string
-): Promise<string | null> {
-  const object = await bucket.get(key);
-  if (!object) return null;
-  const encoding = resourceEncoding(path);
-  const content =
-    encoding === "base64"
-      ? base64Encode(await object.arrayBuffer())
-      : await object.text();
-  return `${encoding}:${content}`;
-}
-
-function stableHash(parts: string[]): string {
-  let hash = 0x811c9dc5;
-  for (const part of parts) {
-    for (let i = 0; i < part.length; i++) {
-      hash ^= part.charCodeAt(i);
-      hash = Math.imul(hash, 0x01000193);
-    }
-    // Fold a boundary between parts so that, e.g., ["ab", "cd"] and ["abcd"]
-    // hash differently (otherwise the concatenated char stream is identical).
-    hash ^= 0xff;
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return (hash >>> 0).toString(36);
-}
-
-function objectFingerprintPart(object: ListedObject): string {
-  return [
-    object.key,
-    String(object.size),
-    object.etag,
-    object.uploaded?.toISOString() ?? ""
-  ].join(":");
-}
-
-async function listAllObjects(
+async function listAll(
   bucket: R2Bucket,
   prefix: string
-): Promise<ListedObject[]> {
-  const objects: ListedObject[] = [];
+): Promise<Array<{ key: string; size: number }>> {
+  const objects: Array<{ key: string; size: number }> = [];
   let cursor: string | undefined;
-  let truncated = true;
-
-  while (truncated) {
-    const listed = await bucket.list({ prefix, cursor });
-    objects.push(...listed.objects);
-    truncated = listed.truncated;
-    cursor = listed.truncated ? listed.cursor : undefined;
-  }
-
-  return objects.sort((a, b) => a.key.localeCompare(b.key));
-}
-
-async function readObject(
-  bucket: R2Bucket,
-  key: string
-): Promise<string | null> {
-  const object = await bucket.get(key);
-  return object ? object.text() : null;
-}
-
-async function readResourceObject(
-  bucket: R2Bucket,
-  key: string,
-  descriptor: SkillResourceDescriptor
-): Promise<SkillResource | null> {
-  const object = await bucket.get(key);
-  if (!object) return null;
-
-  const encoding = descriptor.encoding ?? resourceEncoding(descriptor.path);
-  const content =
-    encoding === "base64"
-      ? base64Encode(await object.arrayBuffer())
-      : await object.text();
-
-  return {
-    ...descriptor,
-    encoding,
-    content
-  };
-}
-
-export function r2(
-  bucket: R2Bucket,
-  options: R2SkillSourceOptions = {}
-): SkillSource {
-  const prefix = normalizePrefix(options.prefix);
-  const id = options.id ?? `r2:${prefix || "/"}`;
-  const allowedSkills = options.skills?.length ? new Set(options.skills) : null;
-  const fingerprintMode = options.fingerprint ?? "metadata";
-  const refreshIntervalMs = options.refreshIntervalMs ?? 60_000;
-  let fingerprint = id;
-  let loaded = false;
-  let indexedAt = 0;
-  let byName = new Map<string, IndexedSkill>();
-  let resourcesByName = new Map<string, SkillResourceDescriptor[]>();
-
-  async function refreshIndex(force = false): Promise<void> {
-    if (loaded && !force && Date.now() - indexedAt < refreshIntervalMs) {
-      return;
-    }
-
-    const objects = await listAllObjects(bucket, prefix);
-    const objectsByKey = new Map(objects.map((object) => [object.key, object]));
-    const skillDirectories = objects
-      .map((object) => object.key.slice(prefix.length))
-      .filter((key) => key.endsWith("/SKILL.md"))
-      .map((key) => key.slice(0, -"SKILL.md".length - 1))
-      .filter((directory) => directory && !directory.includes("/"));
-
-    const nextByName = new Map<string, IndexedSkill>();
-    const nextResourcesByName = new Map<string, SkillResourceDescriptor[]>();
-    const fingerprintParts: string[] = [];
-
-    for (const directory of skillDirectories) {
-      const skillKey = `${prefix}${directory}/SKILL.md`;
-      const rawContent = await readObject(bucket, skillKey);
-      if (!rawContent) continue;
-
-      const parsed = parseSkillMarkdown(rawContent);
-      if (!parsed || allowedSkills?.has(parsed.name) === false) continue;
-
-      const resourceKeys = objects
-        .map((object) => object.key)
-        .filter(
-          (key) => key.startsWith(`${prefix}${directory}/`) && key !== skillKey
-        )
-        .filter(
-          (key) =>
-            validateSkillResourcePath(
-              key.slice(`${prefix}${directory}/`.length)
-            ) === null
-        );
-      const resources: SkillResourceDescriptor[] = [];
-
-      for (const key of resourceKeys) {
-        const path = key.slice(`${prefix}${directory}/`.length);
-        const listedResource = objectsByKey.get(key);
-
-        resources.push({
-          path,
-          kind: resourceKind(path),
-          size: listedResource?.size,
-          encoding: resourceEncoding(path),
-          mimeType: resourceMimeType(path)
-        });
-      }
-
-      const descriptor: SkillDescriptor = {
-        name: parsed.name,
-        description: parsed.description,
-        compatibility: parsed.compatibility,
-        license: parsed.license,
-        allowedTools: parsed.allowedTools,
-        metadata: parsed.metadata,
-        sourceId: id
-      };
-      const content: SkillContent = {
-        ...descriptor,
-        body: parsed.body,
-        rawContent,
-        resources: resources.map((resource) => ({ ...resource }))
-      };
-
-      if (!nextByName.has(parsed.name)) {
-        nextByName.set(parsed.name, { descriptor, content, directory });
-        nextResourcesByName.set(parsed.name, resources);
-      }
-
-      const skillObjects = [skillKey, ...resourceKeys]
-        .map((key) => objectsByKey.get(key))
-        .filter((object): object is ListedObject => Boolean(object));
-      if (fingerprintMode === "content") {
-        fingerprintParts.push(rawContent);
-        for (const key of resourceKeys) {
-          const path = key.slice(`${prefix}${directory}/`.length);
-          fingerprintParts.push(
-            (await readObjectFingerprint(bucket, key, path)) ?? ""
-          );
-        }
-      } else {
-        fingerprintParts.push(...skillObjects.map(objectFingerprintPart));
-      }
-    }
-
-    byName = nextByName;
-    resourcesByName = nextResourcesByName;
-    fingerprint = `${id}:${stableHash(fingerprintParts)}`;
-    loaded = true;
-    indexedAt = Date.now();
-  }
-
-  return {
-    id,
-    get fingerprint() {
-      return fingerprint;
-    },
-    async list() {
-      await refreshIndex();
-      return [...byName.values()].map(({ descriptor }) => ({ ...descriptor }));
-    },
-    async load(name: string) {
-      await refreshIndex();
-      const skill = byName.get(name);
-      return skill ? { ...skill.content } : null;
-    },
-    async readResource(name: string, path: string) {
-      if (validateSkillResourcePath(path) !== null) return null;
-      await refreshIndex();
-      const skill = byName.get(name);
-      if (!skill) return null;
-
-      const resource = resourcesByName
-        .get(name)
-        ?.find((entry) => entry.path === path);
-      if (!resource) return null;
-
-      return readResourceObject(
-        bucket,
-        `${prefix}${skill.directory}/${path}`,
-        resource
-      );
-    },
-    async refresh() {
-      await refreshIndex();
-    }
-  };
+  do {
+    const page = await bucket.list({ prefix, cursor });
+    objects.push(
+      ...page.objects.map((object) => ({ key: object.key, size: object.size }))
+    );
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor);
+  return objects;
 }

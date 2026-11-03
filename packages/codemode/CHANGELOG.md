@@ -1,5 +1,11 @@
 # @cloudflare/codemode
 
+## 0.5.6
+
+### Patch Changes
+
+- [#2766](https://github.com/cloudflare/agents/pull/2766) [`b372289`](https://github.com/cloudflare/agents/commit/b372289fdee424366b6bd8a8ae9923afb3ac803f) Thanks [@github-actions](https://github.com/apps/github-actions)! - Allow `@tanstack/ai` 1.x in the optional peer dependency ranges, and type the TanStack AI tools so they compile against both 0.x and 1.x. See [TanStack AI](https://github.com/cloudflare/agents/blob/main/packages/codemode/README.md#tanstack-ai).
+
 ## 0.5.5
 
 ### Patch Changes

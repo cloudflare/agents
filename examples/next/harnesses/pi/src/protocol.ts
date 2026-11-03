@@ -1,10 +1,11 @@
+import type { Op } from "@earendil-works/chord/delta";
 import type { JsonValue } from "@earendil-works/pi-ai";
-import type { AgentEvent, UserInput } from "@earendil-works/pi-durable";
+import type { ConversationView, UserInput } from "@earendil-works/pi-durable";
 import type { PiSessionId, PiWhenBusy } from "agents/harness/pi";
 
 /**
  * This app's WebSocket protocol, served by `sockets.ts`. The harness knows
- * nothing about it: it is one way to put `session.events()` and
+ * nothing about it: it is one way to put `session.watch()` and
  * `session.submit()` on a socket.
  */
 
@@ -24,7 +25,7 @@ export type PiClientMessage =
     }
   | { readonly type: "abort"; readonly id?: string }
   | { readonly type: "reset"; readonly id?: string; readonly handoff?: string }
-  /** Ask for a fresh snapshot. */
+  /** Ask for the whole view again. */
   | { readonly type: "resync"; readonly id?: string };
 
 /** Server → client. */
@@ -35,14 +36,20 @@ export type PiServerMessage =
       readonly tools: readonly PiToolInfo[];
     }
   /**
-   * pi's own agent events for the connection's session. The first batch of a
-   * watch, and any batch after the server lost its watch, starts with a
-   * `snapshot` event that replaces the client's state.
+   * pi's conversation view for the connection's session, from
+   * `session.watch()`: sent whole when the watch starts, and again after
+   * the server lost its watch. It replaces the client's view.
    */
   | {
-      readonly type: "events";
+      readonly type: "view";
       readonly session: PiSessionId;
-      readonly events: readonly AgentEvent[];
+      readonly view: ConversationView;
+    }
+  /** pi's operations for one change of the view, to apply to the last one. */
+  | {
+      readonly type: "ops";
+      readonly session: PiSessionId;
+      readonly ops: readonly Op[];
     }
   | { readonly type: "result"; readonly id: string; readonly result: JsonValue }
   | { readonly type: "error"; readonly id?: string; readonly message: string };

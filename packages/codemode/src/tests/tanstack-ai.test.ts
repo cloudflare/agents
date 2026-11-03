@@ -6,7 +6,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { toolDefinition } from "@tanstack/ai";
-import type { Tool as TanStackTool, ServerTool } from "@tanstack/ai";
+import type { Tool as TanStackTool } from "@tanstack/ai";
 import { z } from "zod";
 import { createCodeTool, tanstackTools, resolveProvider } from "../tanstack-ai";
 import type {
@@ -187,7 +187,7 @@ describe("createCodeTool", () => {
     expect(codeTool.name).toBe("codemode_execute");
     expect(codeTool.description).toBeDefined();
     expect(codeTool.execute).toBeDefined();
-    expect((codeTool as ServerTool).__toolSide).toBe("server");
+    expect(codeTool.__toolSide).toBe("server");
   });
 
   it("should include tool names in the description", () => {

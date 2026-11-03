@@ -2,8 +2,10 @@ import { env } from "cloudflare:workers";
 import { evictDurableObject } from "cloudflare:test";
 import { routeAgentRequest } from "agents";
 import { describe, expect, it } from "vitest";
+import { applyImmutable } from "@earendil-works/chord/delta";
+import type { ConversationView } from "@earendil-works/pi-durable";
 import type { PiServerMessage } from "../protocol";
-import { EMPTY_VIEW, reduceEvents, type PiSessionView } from "../view";
+import { EMPTY_VIEW, projectView, type PiSessionView } from "../view";
 
 async function connect(name: string, query = ""): Promise<WebSocket> {
   const response = await routeAgentRequest(
@@ -18,8 +20,9 @@ async function connect(name: string, query = ""): Promise<WebSocket> {
   return socket;
 }
 
-/** Folds every `events` frame into a view, as the browser hook does. */
+/** Applies every `view` and `ops` frame and projects the view, as the browser hook does. */
 function follow(socket: WebSocket) {
+  let piView: ConversationView | null = null;
   let view: PiSessionView = EMPTY_VIEW;
   const frames: PiServerMessage[] = [];
   const waiters: Array<() => void> = [];
@@ -29,13 +32,13 @@ function follow(socket: WebSocket) {
       | PiServerMessage
       | { type: string };
     if (!("type" in message)) return;
-    frames.push(message as PiServerMessage);
-    if (message.type === "events") {
-      view = reduceEvents(
-        view,
-        (message as Extract<PiServerMessage, { type: "events" }>).events
-      );
+    const frame = message as PiServerMessage;
+    frames.push(frame);
+    if (frame.type === "view") piView = frame.view;
+    else if (frame.type === "ops" && piView !== null) {
+      piView = applyImmutable(piView, frame.ops);
     }
+    if (piView !== null) view = projectView(piView);
     for (const waiter of waiters.splice(0)) waiter();
   });
   const until = async (check: () => boolean) => {
@@ -51,12 +54,12 @@ function follow(socket: WebSocket) {
 }
 
 describe("the session WebSocket protocol", () => {
-  it("sends a snapshot, then pi's events for a run started over the socket", async () => {
+  it("sends the view, then pi's operations for a run started over the socket", async () => {
     const name = crypto.randomUUID();
     const socket = await connect(name);
     const client = follow(socket);
     await client.until(() =>
-      client.frames.some((frame) => frame.type === "events")
+      client.frames.some((frame) => frame.type === "view")
     );
     expect(client.frames.find((frame) => frame.type === "hello")).toMatchObject(
       {
@@ -88,6 +91,9 @@ describe("the session WebSocket protocol", () => {
       id: "c1",
       result: { session: "1", accepted: true }
     });
+    // The operations rebuilt the same view a client joining now gets.
+    const stub = env.PI_HARNESS_TEST.getByName(name);
+    expect(client.view()).toEqual(JSON.parse(await stub.snapshotView()));
     socket.close();
   });
 
@@ -119,15 +125,12 @@ describe("the session WebSocket protocol", () => {
     const socket = await connect(name);
     const client = follow(socket);
     await client.until(() =>
-      client.frames.some((frame) => frame.type === "events")
+      client.frames.some((frame) => frame.type === "view")
     );
 
     await evictDurableObject(stub);
     const snapshots = () =>
-      client.frames.filter(
-        (frame) =>
-          frame.type === "events" && frame.events[0]?.type === "snapshot"
-      ).length;
+      client.frames.filter((frame) => frame.type === "view").length;
     const before = snapshots();
     // The next call restarts the object; its start re-watches the socket.
     const result = await stub.prompt("after hibernation");

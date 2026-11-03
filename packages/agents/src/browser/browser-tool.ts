@@ -3,18 +3,10 @@
  * in `tools/` (`agents/browser/ai-sdk`, `agents/browser/tanstack-ai`,
  * `agents/browser/pi`). Internal — not an entry point.
  */
-import { DEFAULT_BROWSER_SCOPE } from "./browser";
-import {
-  BROWSER_RULES,
-  browserFunctionDocs,
-  browserFunctions
-} from "./browser-functions";
+import { browserFunctionDocs } from "./browser-functions";
 import { runBrowserCode } from "./sandbox";
-import {
-  BrowserSession,
-  type BrowserSessionReport,
-  type BrowserSource
-} from "./session";
+import { DEFAULT_BROWSER_SCOPE } from "./scope";
+import { BrowserSession, type BrowserSource } from "./session";
 import { transformBrowserResult } from "./tool-helpers";
 import { truncateResult } from "./truncate";
 
@@ -91,15 +83,6 @@ export type BrowserToolOutput = (
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 
-const RESTARTED_NOTICE =
-  "The browser was restarted before this run (it expired or was closed): earlier tabs, logins, and page state are gone. Your code ran in a fresh browser — navigate again before relying on page state.";
-
-const TAB_CLOSED_NOTICE =
-  'The tab you were working in was closed (by another conversation using this browser, or a person). `sessionId: "active"` now opens a blank tab — navigate again before relying on page state.';
-
-const TAB_SHARED_NOTICE =
-  "Another conversation using this browser is also working in your tab, so its page may change between your runs. Open a tab of your own with Target.createTarget if you need one.";
-
 /**
  * The model's input schema, as a Standard Schema with a JSON Schema view,
  * so the AI SDK and TanStack AI both accept it without zod.
@@ -147,52 +130,13 @@ const browserToolInputSchema = {
 };
 
 /**
- * The latest run queued per browser and scope, so runs in one scope go one
- * at a time, even from tools built separately (one per turn, say). Per
- * isolate, which is per Durable Object.
- */
-const runQueues = new WeakMap<BrowserSource, Map<string, Promise<unknown>>>();
-
-function queued<T>(
-  browser: BrowserSource,
-  scope: string,
-  run: () => Promise<T>
-): Promise<T> {
-  let queues = runQueues.get(browser);
-  if (!queues) runQueues.set(browser, (queues = new Map()));
-  const previous = queues.get(scope) ?? Promise.resolve();
-  const next = previous.then(run, run);
-  const settled = next.catch(() => undefined);
-  queues.set(scope, settled);
-  void settled.then(() => {
-    if (queues.get(scope) === settled) queues.delete(scope);
-  });
-  return next;
-}
-
-/** The report as a notice on the result, in sentences the model reads. */
-function reportFields(
-  report: BrowserSessionReport | undefined
-): BrowserReportFields {
-  if (!report) return {};
-  const notices = [
-    report.restarted && RESTARTED_NOTICE,
-    report.tabClosed && !report.restarted && TAB_CLOSED_NOTICE,
-    report.tabShared && TAB_SHARED_NOTICE,
-    report.newTabs.length > 0 &&
-      `New tabs opened by the page: ${JSON.stringify(report.newTabs)}`
-  ].filter((notice) => typeof notice === "string");
-  return notices.length > 0 ? { notice: notices.join(" ") } : {};
-}
-
-/**
  * Build the description and `execute` for one `browserTool`.
  *
  * Each run opens a session on the browser in its scope, runs the model's
  * code in a fresh Dynamic Worker with `browser` bound to that session, closes
- * the session, and adds its report to the result. Runs in one scope wait
- * for each other, since they drive one tab; runs in different scopes go in
- * parallel.
+ * the session, and adds its report's notices to the result. Runs in one
+ * scope lock it, since they drive one tab, so they wait for each other and
+ * for other locking sessions; runs in different scopes go in parallel.
  */
 export function createBrowserToolCore(
   options: BrowserToolOptions,
@@ -202,8 +146,11 @@ export function createBrowserToolCore(
   }
 ) {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  // The source's own hosts, so custom sources need nothing beyond
+  // `BrowserSource`; a `Browser`'s `functionDocs()` returns the same.
+  const docs = browserFunctionDocs(options.browser.internalHosts);
   const rules = [
-    ...BROWSER_RULES,
+    ...docs.rules,
     "Results over about 24,000 characters are cut short.",
     `Each run times out after ${Math.round(timeoutMs / 1000)}s, so split long jobs (crawling a site, say) across runs.`,
     adapter.screenshotHint,
@@ -218,7 +165,7 @@ export function createBrowserToolCore(
     "",
     "## browser",
     "",
-    browserFunctionDocs(options.browser.internalHosts),
+    docs.functions,
     "",
     "## Rules",
     "",
@@ -227,16 +174,32 @@ export function createBrowserToolCore(
 
   const defaultScope = options.scope ?? DEFAULT_BROWSER_SCOPE;
 
-  async function run(input: BrowserToolInput, scope: string) {
+  async function run(
+    input: BrowserToolInput,
+    scope: string,
+    signal: AbortSignal | undefined
+  ) {
+    const session = new BrowserSession(options.browser, {
+      scope,
+      lock: true
+    });
+    // Take the scope's lock before the timeout starts, so the
+    // wait doesn't count against the run.
+    try {
+      await session.lock({ signal });
+    } catch (error) {
+      await session.close();
+      throw error;
+    }
     const executionId = crypto.randomUUID();
-    const session = new BrowserSession(options.browser, { scope });
     let output: BrowserToolOutput;
     try {
       const ran = await runBrowserCode({
         loader: options.loader,
         code: input.code,
-        functions: browserFunctions(session, options.browser.internalHosts),
-        timeoutMs
+        functions: session.functions,
+        timeoutMs,
+        signal
       });
       const logs = ran.logs.length > 0 ? { logs: ran.logs } : {};
       output =
@@ -262,19 +225,25 @@ export function createBrowserToolCore(
         error: error instanceof Error ? error.message : String(error)
       };
     }
-    const report = reportFields(await session.close());
-    const notice = [output.notice, report.notice].filter(Boolean).join(" ");
-    return { ...output, ...report, ...(notice ? { notice } : {}) };
+    const report = await session.close();
+    const notice = [output.notice, ...(report?.notices ?? [])]
+      .filter(Boolean)
+      .join(" ");
+    return { ...output, ...(notice ? { notice } : {}) };
   }
 
   return {
     description,
     inputSchema: browserToolInputSchema,
-    /** Run `input` in `scope`, which defaults to the tool's `scope`. */
+    /**
+     * Run `input` in `scope`, which defaults to the tool's `scope`. When
+     * `signal` aborts, a run still waiting for the lock rejects with its
+     * reason, and a running one stops with an error result.
+     */
     execute: (
       input: BrowserToolInput,
-      scope: string = defaultScope
+      call: { scope?: string; signal?: AbortSignal } = {}
     ): Promise<BrowserToolOutput> =>
-      queued(options.browser, scope, () => run(input, scope))
+      run(input, call.scope ?? defaultScope, call.signal)
   };
 }

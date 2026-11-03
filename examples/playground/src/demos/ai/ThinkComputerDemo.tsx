@@ -219,7 +219,7 @@ export function ThinkComputerDemo() {
             </div>
             <div className="space-y-2">
               {[
-                ["Assistant product shell", "examples/assistant"],
+                ["Computer skills", "examples/computer-skills"],
                 ["Workspace chat", "examples/workspace-chat"],
                 ["Computer package", "github.com/cloudflare/computer"],
                 ["Think package", "packages/think"]

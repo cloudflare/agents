@@ -10,8 +10,8 @@ import type { EntryRecord } from "@earendil-works/pi-durable";
 
 /**
  * This app's display model for a transcript. The harness returns pi's own
- * entries; the UI folds them into these messages, on the server for a
- * snapshot and in the browser for streamed events.
+ * entries; the UI projects them into these messages, on the server and in
+ * the browser.
  */
 export type PiMessagePart =
   | TextContent

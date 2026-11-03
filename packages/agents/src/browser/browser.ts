@@ -16,6 +16,10 @@ import {
   LifecycleCapability,
   type LifecycleRouteContext
 } from "../lifecycle/capability";
+import {
+  browserFunctionDocs,
+  type BrowserFunctionDocs
+} from "./browser-functions";
 import { browserCapabilityId } from "./capability-id";
 import type { CdpConnection } from "./cdp-connection";
 import {
@@ -37,6 +41,7 @@ import {
   type BrowserProviderAdapter,
   type InternalHostOwner
 } from "./providers/provider-adapter";
+import { DEFAULT_BROWSER_SCOPE } from "./scope";
 import { BrowserSession, type BrowserSessionOptions } from "./session";
 import {
   DurableBrowserSessionStore,
@@ -55,10 +60,10 @@ export const SESSION_TOUCH_INTERVAL_MS = 60_000;
 export const DEFAULT_BROWSER_NAME = "default";
 
 /**
- * The scope used when a caller doesn't pick one: every caller that leaves
- * `scope` out shares this one active tab. See {@link BrowserConnectOptions}.
+ * The scope used when a caller doesn't pick one. Defined in `./scope`,
+ * re-exported here where it has always been.
  */
-export const DEFAULT_BROWSER_SCOPE = "shared";
+export { DEFAULT_BROWSER_SCOPE };
 
 /**
  * Scope records kept per browser. Writing a new one past the cap deletes the
@@ -358,6 +363,17 @@ export class Browser extends LifecycleCapability {
    */
   session(options?: BrowserSessionOptions): BrowserSession {
     return new BrowserSession(this, options);
+  }
+
+  /**
+   * What the model needs to know to use this browser's `browser.*`
+   * functions ({@link BrowserSession.functions}): the functions in Markdown,
+   * including the internal sites and hosts functions this browser has, and
+   * the rules for using them. For a tool or module description; add rules
+   * about how your code runs (timeouts, screenshots) yourself.
+   */
+  functionDocs(): BrowserFunctionDocs {
+    return browserFunctionDocs(this.internalHosts);
   }
 
   #connection(

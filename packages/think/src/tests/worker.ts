@@ -31,6 +31,7 @@ export {
   ThinkDefaultSystemPromptSkillsAgent,
   ThinkInheritedSystemPromptSkillsAgent,
   ThinkSystemPromptFieldSkillsAgent,
+  ThinkWorkspaceSkillsAgent,
   ThinkMissingClassifierWarningAgent,
   ThinkClassifierMethodAgent,
   ThinkInheritedClassifierAgent,
@@ -83,6 +84,7 @@ import type {
   ThinkDefaultSystemPromptSkillsAgent,
   ThinkInheritedSystemPromptSkillsAgent,
   ThinkSystemPromptFieldSkillsAgent,
+  ThinkWorkspaceSkillsAgent,
   ThinkMissingClassifierWarningAgent,
   ThinkClassifierMethodAgent,
   ThinkInheritedClassifierAgent,
@@ -239,6 +241,7 @@ export type Env = {
   ThinkDefaultSystemPromptSkillsAgent: DurableObjectNamespace<ThinkDefaultSystemPromptSkillsAgent>;
   ThinkInheritedSystemPromptSkillsAgent: DurableObjectNamespace<ThinkInheritedSystemPromptSkillsAgent>;
   ThinkSystemPromptFieldSkillsAgent: DurableObjectNamespace<ThinkSystemPromptFieldSkillsAgent>;
+  ThinkWorkspaceSkillsAgent: DurableObjectNamespace<ThinkWorkspaceSkillsAgent>;
   ThinkMissingClassifierWarningAgent: DurableObjectNamespace<ThinkMissingClassifierWarningAgent>;
   ThinkClassifierMethodAgent: DurableObjectNamespace<ThinkClassifierMethodAgent>;
   ThinkInheritedClassifierAgent: DurableObjectNamespace<ThinkInheritedClassifierAgent>;

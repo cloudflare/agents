@@ -227,6 +227,36 @@ describe("PiHarness on pi-durable", () => {
     ]);
   });
 
+  it("steers a whenIdle: reject input into a run, and refuses it when idle", async () => {
+    const stub = fresh();
+    const idle = await stub.trySubmit("late", {
+      whenBusy: "steer",
+      whenIdle: "reject",
+      operationId: "op-late"
+    });
+    expect(idle).toMatchObject({
+      error: "ConversationIdle",
+      conversationIdle: true
+    });
+    expect(await stub.pending()).toEqual([]);
+    expect(await stub.messages()).toEqual([]);
+
+    const gate = await stub.submit("gate");
+    await stub.gateStarted(1);
+    // Nothing was saved, so the same operation id is admitted while busy.
+    const steered = await stub.trySubmit("late", {
+      whenBusy: "steer",
+      whenIdle: "reject",
+      operationId: "op-late"
+    });
+    expect(steered).toMatchObject({ receipt: { accepted: true } });
+    await stub.release();
+    await stub.wait(gate.operationId);
+    expect(await stub.wait("op-late")).toMatchObject({ status: "done" });
+    expect(await stub.messages()).toContain("late");
+    expect(await alarmCleared(stub)).toBe(true);
+  });
+
   it("refuses a whenBusy: reject input while a run is going, saving nothing", async () => {
     const stub = fresh();
     // Idle: admitted like any other input.
@@ -350,22 +380,17 @@ describe("PiHarness on pi-durable", () => {
     expect(await stub.pending()).toEqual([]);
   });
 
-  it("streams pi's events, and a late snapshot carries the same transcript", async () => {
+  it("watches the session's view through a run, and a late watch shows the same transcript", async () => {
     const stub = fresh();
     const watching = stub.watch();
     const receipt = await stub.submit("multiply 5");
     await stub.wait(receipt.operationId);
-    const types = await watching;
-    for (const type of [
-      "snapshot",
-      "run_start",
-      "tool_execution_start",
-      "tool_execution_end",
-      "run_end"
-    ]) {
-      expect(types).toContain(type);
-    }
-    expect(await stub.snapshotTexts()).toEqual(await stub.messages());
+    const watched = await watching;
+    expect(watched.sawRun).toBe(true);
+    const messages = await stub.messages();
+    expect(watched.texts).toEqual(messages);
+    expect(await stub.watchTexts()).toEqual(messages);
+    expect(await stub.pagedTexts(2)).toEqual(messages);
   });
 
   it("completes the wake once pi is idle, leaving no alarm", async () => {
@@ -478,6 +503,56 @@ describe("PiHarness on pi-durable", () => {
     await stub.wait(receipt.operationId);
   });
 
+  it("continues a run that ended unanswered, without a new message", async () => {
+    const stub = fresh();
+    expect(await stub.prompt("flaky")).toMatchObject({
+      status: "unanswered",
+      reason: "model_error"
+    });
+
+    const receipt = await stub.continueSession("again");
+    expect(receipt).toEqual({
+      operationId: "again",
+      session: "1",
+      accepted: true
+    });
+    expect(await stub.continueSession("again")).toMatchObject({
+      accepted: false
+    });
+    expect(await stub.wait(receipt.operationId)).toMatchObject({
+      status: "done",
+      text: "echo: flaky"
+    });
+    // The failed answer stays in the transcript, empty; the model never sees it.
+    expect(await stub.messages()).toEqual(["flaky", "", "echo: flaky"]);
+  });
+
+  it("ends a run at the session's turn limit, and a continue answers it", async () => {
+    const stub = fresh(`turns:${crypto.randomUUID()}`);
+    // The round that reaches the limit still runs its tool.
+    expect(await stub.prompt("multiply 3")).toMatchObject({
+      status: "unanswered",
+      reason: "turn_limit",
+      messages: ["multiply 3", "", "9"]
+    });
+    const receipt = await stub.continueSession();
+    expect(await stub.wait(receipt.operationId)).toMatchObject({
+      status: "done",
+      text: "tool said: 9"
+    });
+  });
+
+  it("settles a continue with nothing to answer as unanswered", async () => {
+    const stub = fresh();
+    await stub.prompt("hello");
+    const receipt = await stub.continueSession();
+    expect(await stub.wait(receipt.operationId)).toMatchObject({
+      status: "unanswered",
+      reason: "nothing_to_answer"
+    });
+    expect(await stub.messages()).toEqual(["hello", "echo: hello"]);
+  });
+
   it("answers after a sleeping retry without onWake, on pi's own timer", async () => {
     const stub = fresh(`nowake:retry:${crypto.randomUUID()}`);
     const result = await stub.prompt("flaky");
@@ -485,68 +560,32 @@ describe("PiHarness on pi-durable", () => {
   });
 
   it.each(["park:", "nowake:park:"])(
-    "shows a task pi's restart limit parked, and retry() resumes it (%s)",
+    "ends a tool call pi's restart limit cut off, and the wake completes (%s)",
     async (variant) => {
       const name = `${variant}${crypto.randomUUID()}`;
       let stub = fresh(name);
       const receipt = await stub.submit("gate");
       await stub.gateStarted(1);
-      // Nothing is parked yet.
-      expect(await stub.retry()).toBe(false);
       await abortAllDurableObjects();
       stub = fresh(name);
+      // The alarm restarts the object. pi ends the cut-off tool call with an
+      // error result instead of running it again, and the run goes on.
       await runDurableObjectAlarm(stub);
-      let pending = await stub.pending();
-      for (let i = 0; i < 100 && pending[0]?.status !== "parked"; i++) {
-        await new Promise((resolve) => setTimeout(resolve, 20));
-        pending = await stub.pending();
-      }
-      expect(pending).toEqual([
-        { operationId: receipt.operationId, session: "1", status: "parked" }
-      ]);
+      const result = await stub.wait(receipt.operationId);
+      expect(result.status).toBe("done");
+      expect(result.text).toContain("Tool gate was interrupted once");
+      expect(await stub.gateRuns()).toBe(1);
+      expect(await stub.pending()).toEqual([]);
       let jobs = await stub.wakeJobs();
       for (let i = 0; i < 100 && jobs.length > 0; i++) {
         await new Promise((resolve) => setTimeout(resolve, 20));
         jobs = await stub.wakeJobs();
       }
       expect(jobs).toEqual([]);
-
-      expect(await stub.retry()).toBe(true);
-      // The retry wakes the harness again, so an eviction now recovers.
-      expect(await stub.wakeJobs()).toEqual(["pi-wake"]);
-      await stub.gateStarted(2);
-      expect(await stub.pending()).toEqual([
-        { operationId: receipt.operationId, session: "1", status: "running" }
-      ]);
-      await stub.release();
-      expect(await stub.wait(receipt.operationId)).toMatchObject({
-        status: "done",
-        text: "tool said: released after 2 runs"
-      });
-      expect(await stub.pending()).toEqual([]);
+      expect(await stub.alarmTime()).toBeNull();
+      expect(await stub.piWake()).toEqual({ active: false });
     }
   );
-
-  it("completes the wake, leaving no alarm, when pi's restart limit parks a task", async () => {
-    const name = `park:${crypto.randomUUID()}`;
-    let stub = fresh(name);
-    await stub.submit("gate");
-    await stub.gateStarted(1);
-    await abortAllDurableObjects();
-    stub = fresh(name);
-    // The alarm restarts the object. pi parks the cut-off task instead of
-    // running it again, so the wake has nothing to wait for.
-    await runDurableObjectAlarm(stub);
-    let jobs = await stub.wakeJobs();
-    for (let i = 0; i < 100 && jobs.length > 0; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      jobs = await stub.wakeJobs();
-    }
-    expect(jobs).toEqual([]);
-    expect(await stub.alarmTime()).toBeNull();
-    expect(await stub.piWake()).toEqual({ active: false });
-    expect(await stub.gateRuns()).toBe(1);
-  });
 
   it("hands a per-session wake job from before Pi 1.4 over to the one wake", async () => {
     const stub = fresh();

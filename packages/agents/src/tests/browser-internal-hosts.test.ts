@@ -404,6 +404,34 @@ describe("browserTool with internal hosts", () => {
     });
   });
 
+  it("documents and binds the hosts functions for a Workspace module too", async () => {
+    await runInDurableObject(agent(), async (instance: TestBrowserAgent) => {
+      const docs = instance.internalBrowser.functionDocs();
+      expect(docs.functions).toContain("## Internal sites");
+      expect(docs.functions).toContain("`browser.assignHost(");
+      // The same text browserTool's description is built from.
+      expect(instance.internalBrowserTool().description).toContain(
+        docs.functions
+      );
+
+      const session = instance.internalBrowser.session();
+      expect(Object.keys(session.functions)).toEqual([
+        "cdp",
+        "attachToTarget",
+        "spec",
+        "getDebugLog",
+        "clearDebugLog",
+        "listHosts",
+        "assignHost",
+        "clearHost"
+      ]);
+      expect(await session.functions.listHosts({})).toContainEqual(
+        expect.objectContaining({ host: "echo.internal" })
+      );
+      await session.close();
+    });
+  });
+
   it("leaves a browser without internal hosts without the hosts functions", async () => {
     await runInDurableObject(agent(), async (instance: TestBrowserAgent) => {
       const tool = instance.browserTool();

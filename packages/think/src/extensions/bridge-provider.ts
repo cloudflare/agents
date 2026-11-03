@@ -3,8 +3,8 @@
  * ContextProvider / WritableContextProvider interfaces.
  *
  * When an extension declares context blocks in its manifest, Think creates
- * a bridge provider for each block. The bridge delegates `get()`, `load()`,
- * and `set()` to the extension Worker's entrypoint via RPC.
+ * a bridge provider for each block. The bridge delegates `get()` and
+ * `set()` to the extension Worker's entrypoint via RPC.
  *
  * This allows extensions to contribute context blocks to the Session's
  * system prompt without Session knowing about the extension system.
@@ -12,7 +12,6 @@
 
 interface ExtensionContextEntrypoint {
   contextGet(label: string): Promise<string | null>;
-  contextLoad?(label: string, key: string): Promise<string | null>;
   contextSet?(
     label: string,
     key: string,
@@ -52,30 +51,14 @@ export class ExtensionWritableBridge extends ExtensionContextBridge {
 }
 
 /**
- * A skill provider backed by an extension Worker.
- * Delegates `get()`, `load()`, and optionally `set()` to the extension's RPC methods.
- */
-export class ExtensionSkillBridge extends ExtensionContextBridge {
-  async load(key: string): Promise<string | null> {
-    return (await this._entrypoint.contextLoad?.(this._label, key)) ?? null;
-  }
-
-  async set(key: string, content: string, description?: string): Promise<void> {
-    await this._entrypoint.contextSet?.(this._label, key, content, description);
-  }
-}
-
-/**
  * Create the appropriate bridge provider based on the context block type.
  */
 export function createBridgeProvider(
   label: string,
-  type: "readonly" | "writable" | "skill" | "searchable",
+  type: "readonly" | "writable" | "searchable",
   entrypoint: ExtensionContextEntrypoint
 ) {
   switch (type) {
-    case "skill":
-      return new ExtensionSkillBridge(label, entrypoint);
     case "writable":
       return new ExtensionWritableBridge(label, entrypoint);
     case "readonly":

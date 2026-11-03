@@ -57,5 +57,4 @@ See the [Think context-overflow recovery docs](../../docs/think/index.md#context
 
 ## Related examples
 
-- [`assistant`](../assistant) — full Think feature showcase
-- [`agent-skills`](../agent-skills) — Think + Agent Skills
+- [`computer-skills`](../computer-skills) — Think + Agent Skills stored in a Workspace

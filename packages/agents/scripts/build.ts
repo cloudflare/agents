@@ -1,6 +1,6 @@
 import { build } from "tsdown";
 import { globSync } from "glob";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { copyPackageDocs } from "../../../scripts/copy-package-docs";
 import { formatDeclarationFiles } from "../../../scripts/format-declarations";
 import { buildDaemon } from "./build-daemon";
@@ -9,7 +9,8 @@ const entries = [
   "src/*.ts",
   "src/*.tsx",
   "src/skills/index.ts",
-  "src/skills/compile.ts",
+  "src/skills/tools/ai-sdk.ts",
+  "src/skills/runner.ts",
   "src/lifecycle/index.ts",
   "src/harness/ai-sdk/index.ts",
   "src/harness/opencode/index.ts",
@@ -90,20 +91,6 @@ for (const entry of entries) {
   }
 }
 
-// The `agents:skills` virtual-module types live in a standalone ambient
-// declaration (skills-module.d.ts) so they survive d.ts bundling. Prepend a
-// reference to the main entry so importing `agents` (directly or transitively
-// via @cloudflare/think / @cloudflare/ai-chat) brings them into scope without a
-// per-project shim.
-function injectSkillsTypeReference(): void {
-  const dtsPath = "dist/index.d.ts";
-  const directive = '/// <reference path="../skills-module.d.ts" />\n';
-  const current = readFileSync(dtsPath, "utf8");
-  if (!current.startsWith(directive)) {
-    writeFileSync(dtsPath, directive + current);
-  }
-}
-
 async function main() {
   // Embedded in agents/harness/container, so it must exist first.
   await buildDaemon();
@@ -147,8 +134,6 @@ async function main() {
 
   // then run oxfmt on the generated .d.ts files
   formatDeclarationFiles();
-
-  injectSkillsTypeReference();
 
   copyPackageDocs(import.meta.url, "agents");
 

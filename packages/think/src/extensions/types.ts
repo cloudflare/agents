@@ -34,7 +34,7 @@ export interface ExtensionManifest {
     /** Block type determines which tools are generated.
      * Note: not yet enforced — all blocks use SQLite-backed storage
      * until bridge providers are implemented (Phase 4). */
-    type: "readonly" | "writable" | "skill" | "searchable";
+    type: "readonly" | "writable" | "searchable";
     /** Maximum token budget for this block. */
     maxTokens?: number;
   }>;

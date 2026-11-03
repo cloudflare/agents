@@ -5,8 +5,7 @@ export type { HostBridgeLoopbackProps } from "./host-bridge";
 export {
   createBridgeProvider,
   ExtensionContextBridge,
-  ExtensionWritableBridge,
-  ExtensionSkillBridge
+  ExtensionWritableBridge
 } from "./bridge-provider";
 export type {
   ExtensionManifest,

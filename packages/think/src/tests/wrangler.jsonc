@@ -88,6 +88,10 @@
         "name": "ThinkSystemPromptFieldSkillsAgent"
       },
       {
+        "class_name": "ThinkWorkspaceSkillsAgent",
+        "name": "ThinkWorkspaceSkillsAgent"
+      },
+      {
         "class_name": "ThinkMissingClassifierWarningAgent",
         "name": "ThinkMissingClassifierWarningAgent"
       },
@@ -256,6 +260,7 @@
         "ThinkDefaultSystemPromptSkillsAgent",
         "ThinkInheritedSystemPromptSkillsAgent",
         "ThinkSystemPromptFieldSkillsAgent",
+        "ThinkWorkspaceSkillsAgent",
         "ThinkMissingClassifierWarningAgent",
         "ThinkClassifierMethodAgent",
         "ThinkInheritedClassifierAgent",

@@ -242,6 +242,7 @@ import type {
 
 export type Env = {
   LOADER: WorkerLoader;
+  SKILLS_BUCKET: R2Bucket;
   CapabilityHarnessObject: DurableObjectNamespace<CapabilityHarnessObject>;
   PlainLifecycleObject: DurableObjectNamespace<PlainLifecycleObject>;
   RetryableStartObject: DurableObjectNamespace<RetryableStartObject>;
