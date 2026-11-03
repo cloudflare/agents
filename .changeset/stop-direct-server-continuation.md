@@ -2,4 +2,4 @@
 "agents": patch
 ---
 
-`useAgentChat().stop()` now cancels a server-started turn that streams to an open connection without a resume handshake, such as a `continueLastTurn()` continuation.
+`useAgentChat().stop()` now cancels server-started turns streamed without a resume handshake. See [Request cancellation](https://developers.cloudflare.com/agents/agent-class/communication-channels/chat/chat-agents/#request-cancellation).
