@@ -212,6 +212,8 @@ function App() {
   // Kept after closing, so the dialog has its image while it animates out.
   const [zoom, setZoom] = useState<ZoomImage | null>(null);
   const [zoomOpen, setZoomOpen] = useState(false);
+  // Messages this tab has sent; each one scrolls the chat down.
+  const [sent, setSent] = useState(0);
 
   const {
     status,
@@ -236,7 +238,6 @@ function App() {
   const transcript = live ? [...messages, live] : messages;
   const turns = groupTurns(transcript);
   const results = resultsById(transcript);
-  const userMessageCount = messages.filter((m) => m.role === "user").length;
   const empty = transcript.length === 0 && !earlier && !running;
   // Something is happening, but nothing on screen shows it yet.
   const waiting =
@@ -249,6 +250,7 @@ function App() {
     const trimmed = text.trim();
     if (!trimmed || !connected) return;
     setPrompt("");
+    setSent((count) => count + 1);
     submitPrompt(trimmed, whenBusy);
   };
 
@@ -367,7 +369,7 @@ function App() {
         <div className="flex min-h-0 flex-1">
           <main className="flex min-w-0 flex-1 flex-col" aria-label="Chat">
             <ChatFeed
-              userMessageCount={userMessageCount}
+              sent={sent}
               earlier={earlier ? { loading, onLoad: loadEarlier } : undefined}
               oldestId={messages[0]?.id}
             >

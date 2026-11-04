@@ -106,13 +106,17 @@ function useStickToBottom() {
  */
 export function ChatFeed({
   children,
-  userMessageCount,
+  sent,
   earlier,
   oldestId
 }: {
   children: ReactNode;
-  /** Increases when the user sends a message, which always scrolls down. */
-  userMessageCount: number;
+  /**
+   * Increases when the user sends a message from this tab, which always
+   * scrolls down. Messages from elsewhere, and earlier ones loading above,
+   * do not.
+   */
+  sent: number;
   /** The transcript continues above: offer to load the page before it. */
   earlier?: { readonly loading: boolean; readonly onLoad: () => void };
   /** The oldest message's id; it changes when earlier messages load. */
@@ -138,11 +142,11 @@ export function ChatFeed({
     earlier?.onLoad();
   };
 
-  const previousCount = useRef(userMessageCount);
+  const previousSent = useRef(sent);
   useEffect(() => {
-    if (userMessageCount > previousCount.current) scrollToBottom();
-    previousCount.current = userMessageCount;
-  }, [userMessageCount, scrollToBottom]);
+    if (sent > previousSent.current) scrollToBottom();
+    previousSent.current = sent;
+  }, [sent, scrollToBottom]);
 
   return (
     <div className="relative min-h-0 flex-1">
