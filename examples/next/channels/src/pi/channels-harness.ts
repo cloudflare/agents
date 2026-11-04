@@ -693,6 +693,8 @@ function toTranscript(
   const out: TranscriptMessage[] = [];
   const calls = new Map<string, ToolPart>();
   for (const message of messages) {
+    // Gaps come only from a client's paged transcript, never from entries.
+    if (message.role === "gap") continue;
     if (message.role === "tool") {
       for (const part of message.parts) {
         const call = part.type === "tool-result" && calls.get(part.id);
@@ -740,7 +742,8 @@ function toTranscript(
     if (message.error) {
       parts.push({ type: "text", text: `Error: ${message.error}` });
     }
-    if (message.role === "notice") {
+    // A reset notice, or a compaction summary.
+    if (message.role === "notice" || message.role === "summary") {
       if (parts.length) out.push({ id: message.id, role: "system", parts });
       continue;
     }

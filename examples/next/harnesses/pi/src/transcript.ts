@@ -170,3 +170,11 @@ export function projectEntry(entry: EntryRecord): PiMessage | undefined {
   if (entry.kind === "pi.system" || message === undefined) return undefined;
   return projectMessage(message, String(entry.id));
 }
+
+/** Project entries, such as `session.messages()`, the active context. */
+export function projectEntries(entries: readonly EntryRecord[]): PiMessage[] {
+  return entries.flatMap((entry) => {
+    const message = projectEntry(entry);
+    return message ? [message] : [];
+  });
+}
