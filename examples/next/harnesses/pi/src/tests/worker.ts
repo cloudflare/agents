@@ -107,8 +107,11 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     ]
   });
   readonly registry = createRegistry();
+  /** While set, pi does not open, as when its storage keeps failing. */
+  #failOpens = false;
   readonly harness = new PiHarness({
     harness: async ({ storage, context, onWake }) => {
+      if (this.#failOpens) throw new Error("pi failed to open");
       this.registry.install(this.#testTools());
       this.registry.install({
         name: "workspace",
@@ -255,6 +258,11 @@ export class PiHarnessTestObject extends DurableObject<Env> {
    */
   async closePi(): Promise<void> {
     await (await this.harness.pi()).close(BG);
+  }
+
+  /** Make pi fail to open, or open again. */
+  failOpens(fail: boolean): void {
+    this.#failOpens = fail;
   }
 
   /** Compact the root session and wait for the summary to be placed. */

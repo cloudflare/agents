@@ -19,6 +19,13 @@ async function connect(name: string, query = ""): Promise<WebSocket> {
   return socket;
 }
 
+/** The close code `socket` gets. */
+function closed(socket: WebSocket): Promise<number> {
+  return new Promise((resolve) =>
+    socket.addEventListener("close", (event) => resolve(event.code))
+  );
+}
+
 /**
  * Follows the session as the browser hook does: asks to watch it each time
  * a socket opens, and mirrors every frame into a `PiSessionMirror`.
@@ -185,6 +192,53 @@ describe("the session WebSocket protocol", () => {
     );
     expect(client.views()).toBe(2);
     socket.close();
+  });
+
+  it("closes the socket while pi does not reopen, so the client reconnects", async () => {
+    const name = crypto.randomUUID();
+    const stub = env.PI_HARNESS_TEST.getByName(name);
+    const socket = await connect(name);
+    const client = follow(socket);
+    await client.until(() => client.views() > 0);
+    await stub.prompt("before the failure");
+
+    await stub.failOpens(true);
+    const lost = closed(socket);
+    await stub.closePi();
+    expect(await lost).toBe(1011);
+
+    // A reconnect while pi still does not open is closed too, rather than
+    // left open without a watch.
+    const retry = await connect(name);
+    const retryLost = closed(retry);
+    client.reconnect(retry);
+    expect(await retryLost).toBe(1011);
+
+    await stub.failOpens(false);
+    const next = await connect(name);
+    client.reconnect(next);
+    await client.until(() => client.views() > 1);
+    const result = await stub.prompt("after the reopen");
+    expect(result.text).toBe("echo: after the reopen");
+    await client.until(() =>
+      client
+        .view()
+        .messages.some(
+          (message) => textOf(message) === "echo: after the reopen"
+        )
+    );
+    expect(
+      client
+        .view()
+        .messages.map(textOf)
+        .filter((text) => text.length > 0)
+    ).toEqual([
+      "before the failure",
+      "echo: before the failure",
+      "after the reopen",
+      "echo: after the reopen"
+    ]);
+    next.close();
   });
 
   it("keeps the messages a client saw after they leave the watch's window", async () => {
