@@ -123,12 +123,14 @@ export function ChatFeed({
 
   // Earlier messages loaded above: keep what was on screen in place.
   const keepFromBottom = useRef<number | null>(null);
+  const loading = earlier?.loading ?? false;
   useLayoutEffect(() => {
     const el = scrollRef.current;
-    if (!el || keepFromBottom.current === null) return;
-    el.scrollTop = el.scrollHeight - keepFromBottom.current;
-    keepFromBottom.current = null;
-  }, [oldestId, scrollRef]);
+    if (el && keepFromBottom.current !== null) {
+      el.scrollTop = el.scrollHeight - keepFromBottom.current;
+    }
+    if (!loading) keepFromBottom.current = null;
+  }, [oldestId, loading, scrollRef]);
 
   const loadEarlier = () => {
     const el = scrollRef.current;
