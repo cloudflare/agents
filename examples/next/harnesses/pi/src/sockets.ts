@@ -1,8 +1,11 @@
-import type { JsonValue } from "@earendil-works/pi-ai";
 import type {
+  ConversationView,
   ConversationWatch,
   ConversationWindow,
-  RegistryReader
+  EntryId,
+  EntryQuery,
+  RegistryReader,
+  WatchEnd
 } from "@earendil-works/pi-durable";
 import type { Connection, ConnectionContext } from "agents/lifecycle";
 import type { WebSocketMessage, WebSocketsOptions } from "agents/websockets";
@@ -11,16 +14,16 @@ import {
   type PiHarness,
   type PiSessionId
 } from "agents/harness/pi";
-import type { PiClientMessage, PiServerMessage } from "./protocol";
+import type {
+  PiClientMessage,
+  PiCommandResult,
+  PiServerMessage
+} from "./protocol";
 
 const SESSION_TAG_PREFIX = "pi-session:";
 const SESSION_QUERY = "session";
-/**
- * How many entries a socket's view holds: the newest 200, up to 400. A
- * longer transcript shows only its newest entries; a client that pages older
- * ones merges the view into a `ConversationTranscript` instead.
- */
-const WINDOW: ConversationWindow = { min: 200 };
+/** The most entries one `entries` request returns. */
+const MAX_PAGE = 100;
 /** `WebSocket.OPEN`; the constant is not defined on every runtime's global. */
 const OPEN = 1;
 
@@ -44,6 +47,41 @@ function sessionOf(tags: readonly string[]): string | undefined {
   return tag?.slice(SESSION_TAG_PREFIX.length);
 }
 
+function isEntryId(value: unknown): value is EntryId {
+  return typeof value === "number" && Number.isSafeInteger(value);
+}
+
+/** The client's entry query, checked: only ID bounds and an order. */
+function entryQuery(query: unknown): Omit<EntryQuery, "conversationId"> {
+  const { minEntryId, maxEntryId, order } = (query ?? {}) as Record<
+    string,
+    unknown
+  >;
+  if (minEntryId !== undefined && !isEntryId(minEntryId)) {
+    throw new Error("Invalid minEntryId");
+  }
+  if (maxEntryId !== undefined && !isEntryId(maxEntryId)) {
+    throw new Error("Invalid maxEntryId");
+  }
+  if (order !== undefined && order !== "ascending" && order !== "descending") {
+    throw new Error("Invalid order");
+  }
+  return {
+    ...(minEntryId === undefined ? {} : { minEntryId }),
+    ...(maxEntryId === undefined ? {} : { maxEntryId }),
+    ...(order === undefined ? {} : { order })
+  };
+}
+
+/**
+ * The window that continues what a watch last sent: right after its newest
+ * entry, as `ConversationTranscript.resume` is for the client.
+ */
+function resumeAfter(view: ConversationView): ConversationWindow {
+  const newest = view.entries.at(-1)?.id ?? view.before;
+  return newest === undefined ? {} : { from: (newest + 1) as EntryId };
+}
+
 function send(socket: WebSocket, message: PiServerMessage): void {
   if (socket.readyState !== OPEN) return;
   try {
@@ -57,18 +95,26 @@ function send(socket: WebSocket, message: PiServerMessage): void {
  * App glue: this app's session protocol over the `WebSockets` capability,
  * built only on the harness's public API.
  *
- * Each socket follows one session, picked by `?session=`, through its own
- * `session.watch()`: the whole view, then pi's operations for each change.
- * Commands on the socket call `session.submit()`, `abort()`, and `reset()`.
+ * Each socket follows one session, picked by `?session=`. The client asks
+ * to `watch` it each time the socket opens, and gets its own
+ * `session.watch()`: the view, then pi's operations for each change. The
+ * view's window holds only the newest entries (pi's default, 50 to 100);
+ * the client keeps the rest in a `ConversationTranscript`, which pages
+ * earlier entries with `entries` requests (`session.entries()`) and resumes
+ * after a reconnect from the newest entry it has. Commands on the socket
+ * call `session.submit()`, `abort()`, and `reset()`.
+ *
  * Watches live in memory, so the host calls `reattach()` from its `onStart`
- * to give sockets that outlived the last isolate a new watch and the whole
- * view again.
+ * to give sockets that outlived the last isolate a new watch. A watch also
+ * ends when pi closes, as the harness does to reopen a pi that failed; the
+ * socket then gets a new watch that continues where the last one stopped.
  */
 export class PiSessionSockets {
   readonly #harness: PiHarness;
   readonly #registry: RegistryReader;
   readonly #getWebSockets: (tag?: string) => WebSocket[];
   readonly #watches = new Map<WebSocket, ConversationWatch>();
+  #closed = false;
 
   constructor(
     harness: PiHarness,
@@ -109,6 +155,7 @@ export class PiSessionSockets {
   }
 
   async close(): Promise<void> {
+    this.#closed = true;
     const watches = [...this.#watches.values()];
     this.#watches.clear();
     await Promise.all(watches.map((watch) => watch.stop()));
@@ -124,14 +171,31 @@ export class PiSessionSockets {
         .tools()
         .map(({ tool }) => ({ name: tool.name, description: tool.description }))
     });
-    await this.#watch(connection, session);
+    // The client sends `watch` next, with where its transcript ends.
   }
 
-  async #watch(socket: WebSocket, session: PiSessionId): Promise<void> {
-    await this.#unwatch(socket);
-    const watch = await this.#harness.session(session).watch(WINDOW);
+  /**
+   * Give `socket` a new watch of `session`, ending the one it had: send the
+   * view, then pi's operations for each change.
+   */
+  async #watch(
+    socket: WebSocket,
+    session: PiSessionId,
+    window: ConversationWindow = {}
+  ): Promise<void> {
+    const watch = await this.#harness.session(session).watch(window);
+    if (this.#closed || socket.readyState !== OPEN) {
+      await watch.stop();
+      return;
+    }
+    // Stop the last watch before this one sends anything, so the client
+    // never gets its operations after this view. Two `#watch` calls for one
+    // socket can overlap, as `reattach()` and a client's `watch` do.
+    const previous = this.#watches.get(socket);
     this.#watches.set(socket, watch);
-    send(socket, { type: "view", session, view: watch.value });
+    void previous?.stop();
+    let last = watch.value;
+    send(socket, { type: "view", session, view: last });
     watch.start(async (call) => {
       // Pi ends a watch on failure instead of sending a `failed` call.
       if (call.kind !== "value") return;
@@ -139,8 +203,42 @@ export class PiSessionSockets {
         void this.#unwatch(socket);
         return;
       }
+      last = call.value;
       send(socket, { type: "ops", session, ops: call.ops });
     });
+    void watch.closed.then((end) =>
+      this.#ended(socket, session, watch, end, last)
+    );
+  }
+
+  /**
+   * A watch ended. Unless this class stopped it, pi closed (`ended`) or
+   * failed (`failed`), or the listener threw: watch again, from right after
+   * the last entry the socket got. Opening the session reopens pi.
+   */
+  async #ended(
+    socket: WebSocket,
+    session: PiSessionId,
+    watch: ConversationWatch,
+    end: WatchEnd,
+    last: ConversationView
+  ): Promise<void> {
+    if (end.kind === "stopped" || end.kind === "aborted") return;
+    if (this.#watches.get(socket) !== watch) return;
+    this.#watches.delete(socket);
+    if (this.#closed || socket.readyState !== OPEN) return;
+    try {
+      await this.#watch(socket, session, resumeAfter(last));
+    } catch (error) {
+      // pi did not reopen. Closing the socket makes the client reconnect,
+      // and its `watch` tries again.
+      console.warn("pi session watch lost", end.kind, error);
+      try {
+        socket.close(1011, "Lost the session's watch");
+      } catch {
+        // Already closed.
+      }
+    }
   }
 
   async #unwatch(socket: WebSocket): Promise<void> {
@@ -178,7 +276,7 @@ export class PiSessionSockets {
     connection: Connection,
     session: PiSessionId,
     message: PiClientMessage
-  ): Promise<JsonValue> {
+  ): Promise<PiCommandResult> {
     const handle = this.#harness.session(session);
     switch (message.type) {
       case "submit":
@@ -191,9 +289,25 @@ export class PiSessionSockets {
       case "reset":
         await handle.reset(message.handoff);
         return null;
-      case "resync":
-        await this.#watch(connection, session);
+      case "watch":
+        if (message.from !== undefined && !isEntryId(message.from)) {
+          throw new Error("Invalid from");
+        }
+        await this.#watch(
+          connection,
+          session,
+          message.from === undefined ? {} : { from: message.from }
+        );
         return null;
+      case "entries": {
+        if (!Number.isSafeInteger(message.limit) || message.limit < 1) {
+          throw new Error("Invalid limit");
+        }
+        return await handle.entries(
+          entryQuery(message.query),
+          Math.min(message.limit, MAX_PAGE)
+        );
+      }
       default:
         throw new Error(
           `Unknown pi message type ${JSON.stringify((message as { type: string }).type)}`

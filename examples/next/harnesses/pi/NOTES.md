@@ -211,9 +211,13 @@ check the signal. pi's abort has no grace period.
 ### Watches are per socket and in memory
 
 This is app glue in `sockets.ts`, not the harness. Each socket gets its own
-`session.watch()`. After hibernation or eviction, the host's
-`onStart` calls `sockets.reattach()`, which re-watches every socket and
-sends the whole view again, and the client replaces its state.
+`session.watch()`, with pi's default window, after the client asks with a
+`watch` message that carries where its transcript ends. The client merges
+every view into a `ConversationTranscript` (`mirror.ts`), so a new view
+never replaces what it has. After hibernation or eviction, the host's
+`onStart` calls `sockets.reattach()`, which re-watches every socket. A watch
+that ends because pi closed (the harness reopens a pi that failed) is
+re-watched from right after the last entry the socket got.
 `ctx.getWebSockets(tag)` finds sockets by tag, but nothing gives the tags of
 a socket, so the re-watch walks `sessions.list()` and looks up each
 session's tag.

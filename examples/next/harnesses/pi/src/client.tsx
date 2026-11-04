@@ -8,6 +8,7 @@ import {
   Text
 } from "@cloudflare/kumo";
 import {
+  ArrowUpIcon,
   BrainIcon,
   CheckCircleIcon,
   CodeIcon,
@@ -24,7 +25,7 @@ import {
   XIcon
 } from "@phosphor-icons/react";
 import { code } from "@streamdown/code";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { Streamdown } from "streamdown";
@@ -33,6 +34,9 @@ import { usePiSession } from "./use-pi-session";
 import "./styles.css";
 
 const SESSION_KEY = "pi-harness-session";
+
+/** A message projected from a pi entry: anything but a gap. */
+type EntryMessage = Exclude<TranscriptMessage, { role: "gap" }>;
 const MODEL = "@cf/zai-org/glm-5.3-flash";
 
 const SUGGESTIONS = [
@@ -226,7 +230,7 @@ function AssistantPart({
   }
 }
 
-function UserMessage({ message }: { message: TranscriptMessage }) {
+function UserMessage({ message }: { message: EntryMessage }) {
   const text = message.parts
     .map((part) => (part.type === "text" ? part.text : ""))
     .join("");
@@ -244,7 +248,7 @@ function AssistantMessage({
   streaming = false,
   runningTools
 }: {
-  message: TranscriptMessage;
+  message: EntryMessage;
   streaming?: boolean;
   runningTools: readonly string[];
 }) {
@@ -279,7 +283,7 @@ function AssistantMessage({
   );
 }
 
-function ToolMessage({ message }: { message: TranscriptMessage }) {
+function ToolMessage({ message }: { message: EntryMessage }) {
   return (
     <div className="ml-11 space-y-2">
       {message.parts.map((part, index) =>
@@ -291,14 +295,42 @@ function ToolMessage({ message }: { message: TranscriptMessage }) {
   );
 }
 
+/** A compaction: the model now reads this summary instead of what came before. */
+function SummaryNotice({ message }: { message: EntryMessage }) {
+  const summary = message.parts
+    .map((part) => (part.type === "text" ? part.text : ""))
+    .join("");
+  return (
+    <details className="group text-center text-xs text-kumo-inactive">
+      <summary className="cursor-pointer list-none hover:text-kumo-subtle">
+        Earlier messages summarized
+        <span className="group-open:hidden"> · Show summary</span>
+      </summary>
+      <div className="mt-2 rounded-xl border border-kumo-line bg-kumo-base px-4 py-3 text-left">
+        <Streamdown
+          className="sd-theme text-xs leading-5 text-kumo-subtle"
+          plugins={{ code }}
+          controls={false}
+        >
+          {summary}
+        </Streamdown>
+      </div>
+    </details>
+  );
+}
+
 function Message({
   message,
   streaming = false,
-  runningTools
+  runningTools,
+  loading = false,
+  onFillGap
 }: {
   message: TranscriptMessage;
   streaming?: boolean;
   runningTools: readonly string[];
+  loading?: boolean;
+  onFillGap?: (gap: Extract<TranscriptMessage, { role: "gap" }>) => void;
 }) {
   switch (message.role) {
     case "user":
@@ -320,6 +352,22 @@ function Message({
             .map((part) => (part.type === "text" ? part.text : ""))
             .join("")}
         </p>
+      );
+    case "summary":
+      return <SummaryNotice message={message} />;
+    case "gap":
+      // Entries this tab missed while it was away.
+      return (
+        <div className="flex justify-center">
+          <Button
+            variant="ghost"
+            size="sm"
+            loading={loading}
+            onClick={() => onFillGap?.(message)}
+          >
+            Load missing messages
+          </Button>
+        </div>
       );
   }
 }
@@ -379,9 +427,14 @@ function App() {
     () => window.matchMedia("(min-width: 1100px)").matches
   );
   const endRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLElement>(null);
+  // Distance from the bottom to keep while earlier messages load above.
+  const keepFromBottom = useRef<number | null>(null);
   const {
     status,
     messages,
+    earlier,
+    loading,
     live,
     running,
     tools: running_,
@@ -390,13 +443,34 @@ function App() {
     retry,
     error,
     submit: submitPrompt,
-    abort
+    abort,
+    loadEarlier,
+    fillGap
   } = usePiSession(session);
   const runningTools = running_.map((tool) => tool.name);
+  const newestId = messages.at(-1)?.id;
+  const oldestId = messages[0]?.id;
 
+  // Follow new messages, not the earlier ones loading above.
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, live, running]);
+  }, [newestId, live, running]);
+
+  // Earlier messages loaded above: keep what was on screen in place.
+  useLayoutEffect(() => {
+    const scroller = scrollRef.current;
+    if (scroller === null || keepFromBottom.current === null) return;
+    scroller.scrollTop = scroller.scrollHeight - keepFromBottom.current;
+    keepFromBottom.current = null;
+  }, [oldestId]);
+
+  const showEarlier = () => {
+    const scroller = scrollRef.current;
+    if (scroller !== null) {
+      keepFromBottom.current = scroller.scrollHeight - scroller.scrollTop;
+    }
+    loadEarlier();
+  };
 
   const connected = status === "open";
 
@@ -414,7 +488,7 @@ function App() {
     setSession(next);
   };
 
-  const empty = messages.length === 0 && !live && !running;
+  const empty = messages.length === 0 && !earlier && !live && !running;
 
   return (
     <div
@@ -469,7 +543,7 @@ function App() {
           </div>
         </header>
 
-        <main className="min-h-0 flex-1 overflow-y-auto">
+        <main ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
           <div className="mx-auto max-w-3xl space-y-5 px-5 py-6">
             {empty ? (
               <div className="py-10 sm:py-16">
@@ -495,11 +569,27 @@ function App() {
               </div>
             ) : null}
 
+            {earlier ? (
+              <div className="flex justify-center">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  icon={<ArrowUpIcon size={14} />}
+                  loading={loading}
+                  onClick={showEarlier}
+                >
+                  Load earlier messages
+                </Button>
+              </div>
+            ) : null}
+
             {messages.map((message) => (
               <Message
                 key={message.id}
                 message={message}
                 runningTools={runningTools}
+                loading={loading}
+                onFillGap={fillGap}
               />
             ))}
 
