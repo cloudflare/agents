@@ -27,9 +27,11 @@ import {
 } from "./chat-ui";
 import {
   AgentTurn,
+  GapNotice,
   groupTurns,
   messageText,
   resultsById,
+  SummaryNotice,
   TurnError,
   UserMessage,
   type ZoomImage
@@ -214,6 +216,8 @@ function App() {
   const {
     status,
     messages,
+    earlier,
+    loading,
     live,
     running,
     tools: runningTools,
@@ -222,7 +226,9 @@ function App() {
     retry,
     error,
     submit: submitPrompt,
-    abort
+    abort,
+    loadEarlier,
+    fillGap
   } = usePiSession(session);
   const browser = useBrowserState(session, running);
 
@@ -231,7 +237,7 @@ function App() {
   const turns = groupTurns(transcript);
   const results = resultsById(transcript);
   const userMessageCount = messages.filter((m) => m.role === "user").length;
-  const empty = transcript.length === 0 && !running;
+  const empty = transcript.length === 0 && !earlier && !running;
   // Something is happening, but nothing on screen shows it yet.
   const waiting =
     running &&
@@ -360,7 +366,11 @@ function App() {
 
         <div className="flex min-h-0 flex-1">
           <main className="flex min-w-0 flex-1 flex-col" aria-label="Chat">
-            <ChatFeed userMessageCount={userMessageCount}>
+            <ChatFeed
+              userMessageCount={userMessageCount}
+              earlier={earlier ? { loading, onLoad: loadEarlier } : undefined}
+              oldestId={messages[0]?.id}
+            >
               {empty ? (
                 <EmptyState disabled={!connected} onPick={send} />
               ) : (
@@ -381,6 +391,23 @@ function App() {
                           {messageText(turn.message)}
                         </p>
                       );
+                    case "summary":
+                      return (
+                        <SummaryNotice
+                          key={turn.message.id}
+                          message={turn.message}
+                        />
+                      );
+                    case "gap": {
+                      const gap = turn.message;
+                      return (
+                        <GapNotice
+                          key={gap.id}
+                          loading={loading}
+                          onLoad={() => fillGap(gap)}
+                        />
+                      );
+                    }
                     case "agent": {
                       const last = index === turns.length - 1;
                       return (
