@@ -34,10 +34,10 @@ import { usePiSession } from "./use-pi-session";
 import "./styles.css";
 
 const SESSION_KEY = "pi-harness-session";
+const MODEL = "@cf/zai-org/glm-5.3-flash";
 
 /** A message projected from a pi entry: anything but a gap. */
 type EntryMessage = Exclude<TranscriptMessage, { role: "gap" }>;
-const MODEL = "@cf/zai-org/glm-5.3-flash";
 
 const SUGGESTIONS = [
   {
@@ -459,10 +459,11 @@ function App() {
   // Earlier messages loaded above: keep what was on screen in place.
   useLayoutEffect(() => {
     const scroller = scrollRef.current;
-    if (scroller === null || keepFromBottom.current === null) return;
-    scroller.scrollTop = scroller.scrollHeight - keepFromBottom.current;
-    keepFromBottom.current = null;
-  }, [oldestId]);
+    if (scroller !== null && keepFromBottom.current !== null) {
+      scroller.scrollTop = scroller.scrollHeight - keepFromBottom.current;
+    }
+    if (!loading) keepFromBottom.current = null;
+  }, [oldestId, loading]);
 
   const showEarlier = () => {
     const scroller = scrollRef.current;
