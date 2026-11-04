@@ -15,7 +15,7 @@ here is in `agents`.
 | `Streams` log per operation, cursors, replay | pi's conversation view (`session.watch()`), with its operations  |
 | pi's 7 session tables namespaced by adapter  | pi's own `SqliteStorage` schema, prefixed `pi_` (session store)  |
 | own event and message projections            | pi's view and operations on the wire, one projection (`view.ts`) |
-| compaction config                            | none; pi-durable has no compaction yet                           |
+| compaction config                            | pi's own compaction, on by default; shown as a summary notice    |
 
 The harness went from about 3,600 lines to under 2,000, with no other SDK
 primitive besides Lifecycle jobs. It now lives in `packages/agents` as
@@ -116,7 +116,6 @@ against it:
 - **No requests or replies.** pi-durable has no approval or permission
   primitive yet. A tool could park on a pi document and a hook, but that is
   ours to invent.
-- **No compaction.** `session.reset(handoff)` is the stand-in.
 
 ## Hard or unresolved
 
@@ -211,9 +210,13 @@ check the signal. pi's abort has no grace period.
 ### Watches are per socket and in memory
 
 This is app glue in `sockets.ts`, not the harness. Each socket gets its own
-`session.watch()`. After hibernation or eviction, the host's
-`onStart` calls `sockets.reattach()`, which re-watches every socket and
-sends the whole view again, and the client replaces its state.
+`session.watch()`, with pi's default window, after the client asks with a
+`watch` message that carries where its transcript ends. The client merges
+every view into a `ConversationTranscript` (`mirror.ts`), so a new view
+never replaces what it has. After hibernation or eviction, the host's
+`onStart` calls `sockets.reattach()`, which re-watches every socket. A watch
+that ends because pi closed (the harness reopens a pi that failed) is
+re-watched from right after the last entry the socket got.
 `ctx.getWebSockets(tag)` finds sockets by tag, but nothing gives the tags of
 a socket, so the re-watch walks `sessions.list()` and looks up each
 session's tag.
@@ -282,9 +285,9 @@ example.
 - Subagents. pi-durable's subagent tools (examples 22 and 23) should work
   unchanged as registered tools. The background variant needs the "live work
   keep-alive" above.
-- Compaction. No longer pending upstream: 0.99.2 ships `CompactionPolicy`,
-  `CompactionHooks` and the rest, wired into `HarnessOptions`. Not yet used
-  or tested here.
+- Compaction. pi compacts on its own by default; the UI shows each
+  `pi.compaction` entry as an "Earlier messages summarized" notice. The
+  example sets no `CompactionPolicy` or hooks of its own.
 - `ExecutionEnv` for pi's own `read`/`bash`/`edit`/`write`. Unused here:
   the Workspace tools come from computer instead (see "Workspace tools").
 - Session deletion. pi has no conversation delete.

@@ -7,9 +7,11 @@ import {
   type Message,
   type TranscriptContext
 } from "@earendil-works/pi-ai";
+import { BACKGROUND_CONTEXT as BG } from "@earendil-works/chord/context";
 import { num, obj } from "@earendil-works/pi-schema";
 import { createModels } from "@earendil-works/pi-ai/models";
 import {
+  ConversationTranscript,
   createRegistry,
   Harness,
   type Extension,
@@ -105,8 +107,11 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     ]
   });
   readonly registry = createRegistry();
+  /** While set, pi does not open, as when its storage keeps failing. */
+  #failOpens = false;
   readonly harness = new PiHarness({
     harness: async ({ storage, context, onWake }) => {
+      if (this.#failOpens) throw new Error("pi failed to open");
       this.registry.install(this.#testTools());
       this.registry.install({
         name: "workspace",
@@ -121,7 +126,10 @@ export class PiHarnessTestObject extends DurableObject<Env> {
           registry: this.registry,
           onWake,
           settings: {
-            retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 }
+            retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 },
+            // Only `compact()` compacts, and it keeps little verbatim, so a
+            // short transcript has something to summarize.
+            compaction: { enabled: false, keepRecentTokens: 1 }
           },
           onReport: (report) => console.warn("pi report", report)
         },
@@ -196,12 +204,13 @@ export class PiHarnessTestObject extends DurableObject<Env> {
   /** Watch the root session through one run: the view projected from its last value. */
   async watch(): Promise<string> {
     const watch = await this.harness.session().watch();
+    const transcript = this.#transcript();
     let sawRun = false;
-    let view = projectView(watch.value);
+    let view = projectView(transcript.merge(watch.value));
     await new Promise<void>((resolve) => {
       watch.start(async (call) => {
         if (call.kind !== "value") return;
-        view = projectView(call.value);
+        view = projectView(transcript.merge(call.value));
         if (view.running) sawRun = true;
         if (sawRun && !view.running) resolve();
       });
@@ -215,7 +224,66 @@ export class PiHarnessTestObject extends DurableObject<Env> {
   async snapshotView(): Promise<string> {
     const watch = await this.harness.session().watch();
     await watch.stop();
-    return JSON.stringify(projectView(watch.value));
+    return JSON.stringify(projectView(this.#transcript().merge(watch.value)));
+  }
+
+  /**
+   * Append `count` user-message entries to the root session, `perCommit` to
+   * a commit, with the texts `${prefix} 1` to `${prefix} ${count}`.
+   */
+  async appendNotes(
+    prefix: string,
+    count: number,
+    perCommit = count
+  ): Promise<void> {
+    const root = await (await this.harness.pi()).root(BG);
+    for (let start = 1; start <= count; start += perCommit) {
+      const end = Math.min(start + perCommit - 1, count);
+      await root.commit(async (tx) => {
+        for (let n = start; n <= end; n++) {
+          await tx.appendEntry(root.id, {
+            kind: "test.note",
+            model: [
+              { role: "user", content: `${prefix} ${n}`, timestamp: Date.now() }
+            ]
+          });
+        }
+      }, BG);
+    }
+  }
+
+  /**
+   * Close pi, as a storage error does. The harness opens it again on the
+   * next call, and every watch of the closed pi has ended.
+   */
+  async closePi(): Promise<void> {
+    await (await this.harness.pi()).close(BG);
+  }
+
+  /** Make pi fail to open, or open again. */
+  failOpens(fail: boolean): void {
+    this.#failOpens = fail;
+  }
+
+  /** Compact the root session and wait for the summary to be placed. */
+  async compact(): Promise<void> {
+    const pi = await this.harness.pi();
+    const root = await pi.root(BG);
+    const task = await root.compact(undefined, BG);
+    const { state } = await pi.waitForTask(task, BG);
+    if (state.status !== "terminal" || state.outcome.status !== "completed") {
+      throw new Error(`Compaction did not complete: ${JSON.stringify(state)}`);
+    }
+    const { submissionId } = state.outcome.result;
+    if (submissionId === undefined) throw new Error("Nothing was compacted");
+    await (await pi.submission(submissionId, BG))?.wait(BG);
+  }
+
+  #transcript(): ConversationTranscript {
+    const session = this.harness.session();
+    return new ConversationTranscript((query, limit) =>
+      session.entries(query, limit)
+    );
   }
 
   /** The fixture's tools and preamble, as one pi extension. */

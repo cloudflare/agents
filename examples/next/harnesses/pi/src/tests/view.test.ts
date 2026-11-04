@@ -33,4 +33,28 @@ describe("the session view", () => {
     expect(texts).toContain("after the reset");
     expect(texts).not.toContain("before the reset");
   });
+
+  it("shows a compaction as a summary notice, not a user message", async () => {
+    const stub = env.PI_HARNESS_TEST.getByName(crypto.randomUUID());
+    await stub.wait((await stub.submit("first question")).operationId);
+    await stub.wait((await stub.submit("second question")).operationId);
+    await stub.compact();
+    const view = JSON.parse(await stub.snapshotView()) as PiSessionView;
+    const text = (message: PiSessionView["messages"][number]) =>
+      message.parts.map((part) => ("text" in part ? part.text : "")).join("");
+    const summaries = view.messages.filter(
+      (message) => message.role === "summary"
+    );
+    expect(summaries).toHaveLength(1);
+    // The faux model echoes the summarization prompt: the summary, unwrapped.
+    expect(text(summaries[0])).toMatch(/^echo: /);
+    expect(text(summaries[0])).not.toContain("<summary>");
+    // The messages it summarized still show, in place.
+    expect(view.messages.map(text)).toContain("first question");
+    for (const message of view.messages) {
+      if (message.role === "user") {
+        expect(text(message)).not.toContain("<summary>");
+      }
+    }
+  });
 });
