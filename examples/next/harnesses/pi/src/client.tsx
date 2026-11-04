@@ -35,6 +35,8 @@ import "./styles.css";
 
 const SESSION_KEY = "pi-harness-session";
 const MODEL = "@cf/zai-org/glm-5.3-flash";
+/** How close to the bottom (px) still counts as "at the bottom". */
+const BOTTOM_THRESHOLD = 32;
 
 /** A message projected from a pi entry: anything but a gap. */
 type EntryMessage = Exclude<TranscriptMessage, { role: "gap" }>;
@@ -430,6 +432,10 @@ function App() {
   const scrollRef = useRef<HTMLElement>(null);
   // Distance from the bottom to keep while earlier messages load above.
   const keepFromBottom = useRef<number | null>(null);
+  // Whether the reader is at the bottom: new messages scroll into view only
+  // then, not while they read earlier ones.
+  const following = useRef(true);
+  const lastScrollTop = useRef(0);
   const {
     status,
     messages,
@@ -453,8 +459,23 @@ function App() {
 
   // Follow new messages, not the earlier ones loading above.
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (following.current) {
+      endRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
   }, [newestId, live, running]);
+
+  // Scrolling up stops following; scrolling back to the bottom resumes it.
+  const onScroll = () => {
+    const scroller = scrollRef.current;
+    if (scroller === null) return;
+    const fromBottom =
+      scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+    if (fromBottom <= BOTTOM_THRESHOLD) following.current = true;
+    else if (scroller.scrollTop < lastScrollTop.current - 1) {
+      following.current = false;
+    }
+    lastScrollTop.current = scroller.scrollTop;
+  };
 
   // Earlier messages loaded above: keep what was on screen in place.
   useLayoutEffect(() => {
@@ -480,12 +501,15 @@ function App() {
     const text = prompt.trim();
     if (!text || !connected) return;
     setPrompt("");
+    // Sending a message always brings the conversation back to the bottom.
+    following.current = true;
     submitPrompt(text, whenBusy);
   };
 
   const newSession = () => {
     const next = crypto.randomUUID();
     localStorage.setItem(SESSION_KEY, next);
+    following.current = true;
     setSession(next);
   };
 
@@ -544,7 +568,11 @@ function App() {
           </div>
         </header>
 
-        <main ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
+        <main
+          ref={scrollRef}
+          onScroll={onScroll}
+          className="min-h-0 flex-1 overflow-y-auto"
+        >
           <div className="mx-auto max-w-3xl space-y-5 px-5 py-6">
             {empty ? (
               <div className="py-10 sm:py-16">
