@@ -149,7 +149,7 @@ export class PiSessionSockets {
     // and look up each one's tag.
     for (const { id } of await this.#harness.sessions.list()) {
       for (const socket of this.#getWebSockets(sessionTag(id))) {
-        await this.#watch(socket, id);
+        await this.#watchOrClose(socket, id);
       }
     }
   }
@@ -227,12 +227,23 @@ export class PiSessionSockets {
     if (this.#watches.get(socket) !== watch) return;
     this.#watches.delete(socket);
     if (this.#closed || socket.readyState !== OPEN) return;
+    await this.#watchOrClose(socket, session, resumeAfter(last));
+  }
+
+  /**
+   * `#watch`, or, when pi does not open, close the socket with 1011. The
+   * client reconnects, backing off, and its `watch` tries again. A socket
+   * left open without a watch would never see the session change.
+   */
+  async #watchOrClose(
+    socket: WebSocket,
+    session: PiSessionId,
+    window: ConversationWindow = {}
+  ): Promise<void> {
     try {
-      await this.#watch(socket, session, resumeAfter(last));
+      await this.#watch(socket, session, window);
     } catch (error) {
-      // pi did not reopen. Closing the socket makes the client reconnect,
-      // and its `watch` tries again.
-      console.warn("pi session watch lost", end.kind, error);
+      console.warn("pi session watch lost", error);
       try {
         socket.close(1011, "Lost the session's watch");
       } catch {
@@ -293,7 +304,7 @@ export class PiSessionSockets {
         if (message.from !== undefined && !isEntryId(message.from)) {
           throw new Error("Invalid from");
         }
-        await this.#watch(
+        await this.#watchOrClose(
           connection,
           session,
           message.from === undefined ? {} : { from: message.from }
