@@ -973,4 +973,71 @@ describe("AIChatAgent messageConcurrency", () => {
 
     ws.close(1000);
   });
+
+  it("queue: cancelling a queued request stops it from starting (#2701)", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/slow-stream-agent/${room}`);
+    const seenMessages = recordMessages(ws);
+    const agentStub = await getAgentByName(env.SlowStreamAgent, room);
+    const firstId = "req-queued-cancel-1";
+    const secondId = "req-queued-cancel-2";
+
+    try {
+      sendChatRequest(ws, firstId, [firstUserMessage], {
+        format: "plaintext",
+        useAbortSignal: true,
+        chunkCount: 100,
+        chunkDelayMs: 100
+      });
+      await waitForActiveRequest(agentStub, firstId);
+
+      const secondDone = waitForDone(ws, secondId);
+      sendChatRequest(ws, secondId, [firstUserMessage, secondUserMessage], {
+        format: "plaintext",
+        useAbortSignal: true,
+        chunkCount: 1,
+        chunkDelayMs: 10
+      });
+      await waitUntil(async () =>
+        ((await agentStub.getPersistedMessages()) as ChatMessage[]).some(
+          (message) => message.id === secondUserMessage.id
+        )
+      );
+      expect(await agentStub.getStartedRequestIds()).toEqual([firstId]);
+
+      // Cancel the queued request first, then the active one so the queued
+      // request reaches the front of the queue.
+      for (const id of [secondId, firstId]) {
+        ws.send(
+          JSON.stringify({ type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL, id })
+        );
+      }
+      await secondDone;
+      await agentStub.waitForIdleForTest();
+
+      expect(await agentStub.getStartedRequestIds()).toEqual([firstId]);
+
+      const secondTerminal = seenMessages.find(
+        (message) =>
+          isUseChatResponseMessage(message) &&
+          message.id === secondId &&
+          message.done
+      );
+      expect(secondTerminal).toMatchObject({ outcome: "aborted" });
+
+      const results =
+        (await agentStub.getChatResponseResults()) as ChatResponseResult[];
+      expect(results.map((r) => [r.requestId, r.status])).toEqual([
+        [firstId, "aborted"]
+      ]);
+
+      // The cancelled request never ran, so it must not replace the stored
+      // request context that tool continuations read.
+      expect(await agentStub.getLastBodyForTest()).toMatchObject({
+        chunkCount: 100
+      });
+    } finally {
+      ws.close(1000);
+    }
+  });
 });

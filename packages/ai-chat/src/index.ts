@@ -1323,6 +1323,13 @@ export class AIChatAgent<
           // flushed into STREAM_RESUMING on _startStream or released on settle.
           this._preStream.begin(chatMessageId);
 
+          // Register the abort controller as soon as the request is accepted, so
+          // a cancel that arrives while the turn waits in the queue (or for
+          // debounce, merge, or MCP connections) aborts this signal instead of
+          // finding no controller and being dropped (#2701). The outer finally
+          // removes it. Mirrors @cloudflare/think's _handleChatRequest.
+          const abortSignal = this._abortRegistry.getSignal(chatMessageId);
+
           // Outer finally so the accepted pre-stream turn ALWAYS settles
           // (#1784). begin() runs before the pre-turn-body steps below
           // (persistMessages, _mergeQueuedUserMessages, and inside the queued
@@ -1440,7 +1447,7 @@ export class AIChatAgent<
                   }
                 }
 
-                await withAgentSpan(
+                const cancelledBeforeStart = await withAgentSpan(
                   this,
                   "prepare_chat_context",
                   "turn",
@@ -1464,14 +1471,34 @@ export class AIChatAgent<
                       );
                     }
 
+                    // Cancelled before the turn started: leave the stored
+                    // request context alone, since tool continuations and
+                    // continueLastTurn read it and this request never ran.
+                    if (abortSignal?.aborted) {
+                      return true;
+                    }
+
                     this._setRequestContext(requestClientTools, requestBody);
+                    return false;
                   }
                 );
 
-                this._emit("message:request");
+                // Don't run onChatMessage for a request cancelled before its
+                // turn started. There is no assistant message, so
+                // onChatResponse doesn't fire; the terminal frame lets the
+                // client finish the request.
+                if (cancelledBeforeStart) {
+                  this._broadcastChatMessage({
+                    body: "",
+                    done: true,
+                    id: chatMessageId,
+                    type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+                    outcome: "aborted"
+                  });
+                  return;
+                }
 
-                const abortSignal =
-                  this._abortRegistry.getSignal(chatMessageId);
+                this._emit("message:request");
 
                 return this._tryCatchChat(async () => {
                   // Wrap in agentContext.run() to propagate connection context to onChatMessage
@@ -1582,6 +1609,7 @@ export class AIChatAgent<
             // _completeSkippedRequest already settled (idempotent here); this
             // covers a throw in a pre-turn-body step before chatTurnBody's
             // finally could run.
+            this._abortRegistry.remove(chatMessageId);
             this._settlePreStreamTurn(chatMessageId);
             this._requestOriginMessageIds.delete(chatMessageId);
           }
