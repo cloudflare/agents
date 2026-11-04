@@ -1030,6 +1030,12 @@ describe("AIChatAgent messageConcurrency", () => {
       expect(results.map((r) => [r.requestId, r.status])).toEqual([
         [firstId, "aborted"]
       ]);
+
+      // The cancelled request never ran, so it must not replace the stored
+      // request context that tool continuations read.
+      expect(await agentStub.getLastBodyForTest()).toMatchObject({
+        chunkCount: 100
+      });
     } finally {
       ws.close(1000);
     }

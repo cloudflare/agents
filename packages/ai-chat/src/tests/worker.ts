@@ -1482,6 +1482,10 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     this.resetTurnState();
   }
 
+  getLastBodyForTest(): Record<string, unknown> | undefined {
+    return this._lastBody;
+  }
+
   async saveSyntheticUserMessage(text: string): Promise<void> {
     const message: ChatMessage = {
       id: `saved-${crypto.randomUUID()}`,

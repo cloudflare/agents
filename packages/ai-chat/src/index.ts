@@ -1447,7 +1447,7 @@ export class AIChatAgent<
                   }
                 }
 
-                await withAgentSpan(
+                const cancelledBeforeStart = await withAgentSpan(
                   this,
                   "prepare_chat_context",
                   "turn",
@@ -1471,14 +1471,23 @@ export class AIChatAgent<
                       );
                     }
 
+                    // Cancelled before the turn started: leave the stored
+                    // request context alone, since tool continuations and
+                    // continueLastTurn read it and this request never ran.
+                    if (abortSignal?.aborted) {
+                      return true;
+                    }
+
                     this._setRequestContext(requestClientTools, requestBody);
+                    return false;
                   }
                 );
 
-                // Cancelled before the turn started: don't run onChatMessage.
-                // There is no assistant message, so onChatResponse doesn't fire;
-                // the terminal frame lets the client finish the request.
-                if (abortSignal?.aborted) {
+                // Don't run onChatMessage for a request cancelled before its
+                // turn started. There is no assistant message, so
+                // onChatResponse doesn't fire; the terminal frame lets the
+                // client finish the request.
+                if (cancelledBeforeStart) {
                   this._broadcastChatMessage({
                     body: "",
                     done: true,
