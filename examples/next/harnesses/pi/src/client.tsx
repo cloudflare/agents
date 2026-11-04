@@ -310,7 +310,7 @@ function SummaryNotice({ message }: { message: EntryMessage }) {
       </summary>
       <div className="mt-2 rounded-xl border border-kumo-line bg-kumo-base px-4 py-3 text-left">
         <Streamdown
-          className="sd-theme text-xs leading-5 text-kumo-subtle"
+          className="sd-theme sd-summary text-xs leading-5 text-kumo-subtle"
           plugins={{ code }}
           controls={false}
         >
