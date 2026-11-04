@@ -99,6 +99,27 @@ describe("PiHarness on pi-durable", () => {
     expect(second).toMatchObject({ status: "done", text: "echo: hello" });
   });
 
+  it("keeps long and unusual text exactly across eviction", async () => {
+    // pi's SqliteStorage writes rows of little text as JSON arrays and longer
+    // ones bound column by column; both must round-trip through Durable
+    // Object SQLite, emoji and lone surrogates included. (Long enough for a
+    // bound row, short enough not to start compaction.)
+    const stub = fresh();
+    const odd = 'big:emoji 🦊, lone \ud800 surrogate, quote " and \\';
+    const long = `big:${"long text 🦊 ".repeat(1_500)}\udfff`;
+    const short = await stub.prompt(odd);
+    const big = await stub.prompt(long);
+    expect(short).toMatchObject({ status: "done", text: `got ${odd.length}` });
+    expect(big).toMatchObject({ status: "done", text: `got ${long.length}` });
+
+    await evictDurableObject(stub);
+    // Compared as JSON, which escapes lone surrogates: a raw one in a
+    // failure report breaks the test pool's connection.
+    expect(JSON.stringify(await stub.messages())).toBe(
+      JSON.stringify([odd, `got ${odd.length}`, long, `got ${long.length}`])
+    );
+  });
+
   it("evicts an object with nothing in flight once its wake has completed", async () => {
     const stub = fresh();
     expect((await stub.prompt("hello")).text).toBe("echo: hello");

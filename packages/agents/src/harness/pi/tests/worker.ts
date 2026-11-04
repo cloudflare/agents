@@ -164,6 +164,10 @@ function script(
       { stopReason: "toolUse" }
     );
   }
+  // `big:` inputs are too long to echo at the faux provider's pace.
+  if (prompt.startsWith("big:")) {
+    return fauxAssistantMessage([fauxText(`got ${prompt.length}`)]);
+  }
   return fauxAssistantMessage([fauxText(`echo: ${prompt}`)]);
 }
 
