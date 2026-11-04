@@ -34,15 +34,13 @@ Think reads skills from the Workspace with `skills.workspace()`:
 
 ```ts
 import { Workspace } from "@cloudflare/computer";
-import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
+import { CodemodeBackend } from "@cloudflare/computer/backends/codemode";
 import { Think, skills } from "@cloudflare/think";
 
 export class SkillsAgent extends Think<Env> {
   override workspace = new Workspace({
     storage: this.ctx.storage,
-    backends: [
-      new WorkerJavaScriptBackend({ id: "js", loader: this.env.LOADER })
-    ]
+    backends: [new CodemodeBackend({ loader: this.env.LOADER })]
   });
 
   override getSkills() {

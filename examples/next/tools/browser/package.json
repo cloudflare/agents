@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "@cloudflare/codemode": "*",
-    "@cloudflare/computer": "^0.8.0",
+    "@cloudflare/computer": "^0.10.0",
     "@cloudflare/kumo": "^2.6.0",
     "@earendil-works/chord": "~1.5.0",
     "@earendil-works/pi-ai": "~1.5.0",
