@@ -84,6 +84,57 @@ describe("pi-ai: Anthropic Messages over the universal gateway", () => {
     expect(field(binding.native[0]?.query, "thread")).toBeUndefined();
   });
 
+  it("continues pi-ai's Anthropic message thread through the gateway", async () => {
+    // pi-ai threads a session on api.anthropic.com: the second turn sends only
+    // the new message and points at the last reply. AI Gateway forwards the
+    // `thread` field and the beta header, so the wire keeps pi-ai's default.
+    // The reply names the requested model; a different one reads as a
+    // fallback, which the server does not store.
+    const events = anthropicTextEvents().map((event) =>
+      event.event === "message_start"
+        ? {
+            ...event,
+            data: {
+              type: "message_start",
+              message: {
+                ...(event.data as { message: object }).message,
+                model: SONNET.id
+              }
+            }
+          }
+        : event
+    );
+    const binding = fakeBinding(() => sseEventResponse(events));
+    const ai = createAI({ binding: asAi(binding) });
+    const first = await collectEvents(
+      ai.stream(ai(SONNET), userContext("hi"), { sessionId: "conv-1" })
+    );
+    await collectEvents(
+      ai.stream(
+        ai(SONNET),
+        {
+          messages: [
+            { content: "hi", role: "user", timestamp: 1 },
+            first.message,
+            { content: "and again", role: "user", timestamp: 2 }
+          ]
+        },
+        { sessionId: "conv-1" }
+      )
+    );
+
+    const [create, next] = binding.native;
+    expect(field(create?.query, "thread")).toEqual({ type: "create" });
+    expect(field(next?.query, "thread")).toEqual({
+      previous_message_id: "msg_011CegXJ2PMnTsENC1z3qbFx",
+      type: "continue"
+    });
+    expect(field(next?.query, "messages")).toHaveLength(1);
+    expect(next?.headers?.["anthropic-beta"]).toContain(
+      "message-threads-2026-08-12"
+    );
+  });
+
   it("parses a text stream in the live event shape", async () => {
     const binding = fakeBinding(() =>
       sseEventResponse(anthropicTextEvents(), {
