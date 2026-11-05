@@ -17,6 +17,7 @@ import {
 } from "agents";
 import { MessageType, type OutgoingMessage } from "../types";
 import type {
+  Connection,
   AgentToolEventMessage,
   AgentToolLifecycleResult,
   AgentToolRunInfo,
@@ -178,6 +179,7 @@ export type Env = {
   OverridingPersistAgent: DurableObjectNamespace<OverridingPersistAgent>;
   AgentWithSuperCall: DurableObjectNamespace<AgentWithSuperCall>;
   AgentWithoutSuperCall: DurableObjectNamespace<AgentWithoutSuperCall>;
+  LogOnlyOnErrorAgent: DurableObjectNamespace<LogOnlyOnErrorAgent>;
   SlowStreamAgent: DurableObjectNamespace<SlowStreamAgent>;
   ResponseAgent: DurableObjectNamespace<ResponseAgent>;
   ResponseContinuationAgent: DurableObjectNamespace<ResponseContinuationAgent>;
@@ -2095,6 +2097,31 @@ export class AgentWithSuperCall extends AIChatAgent<Env> {
 export class AgentWithoutSuperCall extends AIChatAgent<Env> {
   async onRequest(_request: Request): Promise<Response> {
     return new Response("custom only");
+  }
+
+  async onChatMessage() {
+    return new Response("chat response");
+  }
+}
+
+// Test agent whose onRequest throws and whose onError only logs, as the docs
+// show. Its onFetchError answers with the error it received.
+export class LogOnlyOnErrorAgent extends AIChatAgent<Env> {
+  async onRequest(): Promise<Response> {
+    throw new Error("chat request failed");
+  }
+
+  override onError(connection: Connection, error: unknown): void;
+  override onError(error: unknown): void;
+  override onError(_connectionOrError: Connection | unknown, _error?: unknown) {
+    // Log only: return instead of rethrowing.
+  }
+
+  override onFetchError(_request: Request, error: unknown): Response {
+    return Response.json(
+      { error: error instanceof Error ? error.message : String(error) },
+      { status: 503 }
+    );
   }
 
   async onChatMessage() {
