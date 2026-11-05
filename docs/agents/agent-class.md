@@ -379,7 +379,8 @@ class MyAgent extends Agent {
       console.error("Server error:", connectionOrError);
     }
 
-    // Optionally throw to propagate the error
+    // Throw to replace the error. If onError returns, the original error
+    // continues, and for a request reaches onFetchError.
     throw connectionOrError;
   }
 }
@@ -399,7 +400,11 @@ class MyAgent extends Agent<Env> {
 }
 ```
 
-Errors from `onStart` and `onRequest` pass through `onError` first, so `onFetchError` receives whatever `onError` throws. The default `onError` rethrows the original error. See [Failed requests](./lifecycle.md#failed-requests) for the full behavior.
+Errors from `onStart`, `onRequest`, and `onConnect` pass through `onError` first. If `onError` throws, `onFetchError` receives what it threw; if `onError` returns, `onFetchError` receives the original error.
+
+For a [sub-agent](./sub-agents.md), the object that accepted the request answers it. A failed HTTP request reaches the child's `onFetchError`. A failed WebSocket upgrade reaches the parent's, because the parent accepts the socket, even when the child's `onConnect` threw. If `onBeforeSubAgent` throws, no `onFetchError` runs and the error reaches the caller of `fetch`.
+
+See [Failed requests](./lifecycle.md#failed-requests) for the full behavior.
 
 ### `this.destroy`
 

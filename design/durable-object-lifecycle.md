@@ -40,10 +40,13 @@ Choosing that response is a host hook, not a `LifecycleOptions` flag such as
 "expose errors in development". A flag covers one policy, while a hook covers
 every policy (dev-only stacks, error codes, a reporting ID, an upgrade that
 sends one frame before it closes) with no further API. Agent's `onError` was
-not reused: it is a notification hook that many callers invoke and whose
-return value is thrown, and capability failures never reach it. Capabilities
-do not get the hook yet. If one needs to shape failure responses, it can join
-the same dispatch the way `onRequest` does: first response wins, then the host.
+not reused: it observes errors from schedules, queues, and sockets as well as
+requests, where no response exists to choose, and capability failures never
+reach it. On an Agent, `onError` sees an `onStart`, `onRequest`, or
+`onConnect` failure first; if it returns, the original error continues to
+`onFetchError`. Capabilities do not get the hook yet. If one needs to shape
+failure responses, it can join the same dispatch the way `onRequest` does:
+first response wins, then the host.
 
 Native Durable Object RPC bypasses Lifecycle handlers, so a plain Lifecycle host
 calls `lifecycle.start()` from any RPC method that needs startup. Concurrent

@@ -1,11 +1,10 @@
 import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getAgentByName } from "../../index";
 import { LifecycleCapability } from "../../lifecycle";
 import { FETCH_ERROR_SECRET } from "../capabilities/lifecycle";
 import { withCapabilityHarness } from "../shared/capability-harness";
 
-const SECRET = "DATABASE_URL could not be resolved";
+const SECRET = FETCH_ERROR_SECRET;
 
 /** Fails startup with an error whose message must not reach the caller. */
 class FailingStart extends LifecycleCapability {
@@ -112,7 +111,7 @@ describe("onFetchError", () => {
     return env.FetchErrorObject.getByName(crypto.randomUUID());
   }
 
-  it("sends the hook's response, after logging the error", async () => {
+  it("sends the hook's response, and still logs the error", async () => {
     const errors = silenceErrors();
     const stub = fetchErrorObject();
     const url = "https://example.com/?fail=host&hook=respond";
@@ -229,28 +228,120 @@ describe("Agent onFetchError", () => {
     vi.restoreAllMocks();
   });
 
-  async function agent() {
-    return getAgentByName(env.TestFetchErrorAgent, crypto.randomUUID());
+  function agent(prefix = "") {
+    return env.TestFetchErrorAgent.getByName(prefix + crypto.randomUUID());
   }
 
-  it("receives the original error after onError has seen it", async () => {
+  it("receives a failed onRequest's error after onError, in Agent context", async () => {
     silenceErrors();
-    const response = await (
-      await agent()
-    ).fetch("https://example.com/?fail&hook");
+    const response = await agent().fetch("https://example.com/?fail&hook");
 
     expect(response.status).toBe(503);
     expect(await response.json()).toEqual({
+      name: expect.any(String),
+      error: "agent request failed",
+      hookOrder: ["onError", "onFetchError"],
+      inAgentContext: true
+    });
+  });
+
+  it("receives the original error when onError returns instead of rethrowing", async () => {
+    silenceErrors();
+    const response = await agent("log-only-").fetch(
+      "https://example.com/?fail&hook"
+    );
+
+    expect(await response.json()).toMatchObject({
       error: "agent request failed",
       hookOrder: ["onError", "onFetchError"]
     });
   });
 
-  it("sends the default when the override declines", async () => {
+  it("sends the default when onError returns and the override declines", async () => {
     silenceErrors();
-    const response = await (await agent()).fetch("https://example.com/?fail");
+    const response = await agent("log-only-").fetch(
+      "https://example.com/?fail"
+    );
 
     expect(response.status).toBe(500);
     expect(await response.text()).toBe("Internal Server Error");
+  });
+
+  it("receives a failed onStart's error", async () => {
+    silenceErrors();
+    const response = await agent("fail-start-").fetch(
+      "https://example.com/?hook"
+    );
+
+    expect(await response.json()).toMatchObject({
+      error: "agent startup failed",
+      hookOrder: ["onError", "onFetchError"]
+    });
+  });
+
+  it("receives a failed onConnect's error for an upgrade", async () => {
+    silenceErrors();
+    const response = await agent().fetch("https://example.com/?fail&hook", {
+      headers: { Upgrade: "websocket" }
+    });
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      error: "agent connect failed",
+      hookOrder: ["onError", "onFetchError"]
+    });
+  });
+
+  it("closes a failed upgrade with 1011 when the override declines", async () => {
+    silenceErrors();
+    const response = await agent().fetch("https://example.com/?fail", {
+      headers: { Upgrade: "websocket" }
+    });
+
+    expect(response.status).toBe(101);
+    expect(await drainSocket(response)).toEqual({
+      code: 1011,
+      reason: "Uncaught exception during session setup",
+      frames: []
+    });
+  });
+
+  describe("for a sub-agent", () => {
+    function subAgentUrl(parent: string, child: string, query: string) {
+      return `https://example.com/agents/test-fetch-error-agent/${parent}/sub/test-fetch-error-agent/${child}?${query}`;
+    }
+
+    it("lets the child answer a failed request", async () => {
+      silenceErrors();
+      const parent = crypto.randomUUID();
+      const child = crypto.randomUUID();
+      const response = await env.TestFetchErrorAgent.getByName(parent).fetch(
+        subAgentUrl(parent, child, "fail&hook")
+      );
+
+      expect(await response.json()).toMatchObject({
+        name: child,
+        error: "agent request failed"
+      });
+    });
+
+    it("lets the parent answer a failed upgrade, even when the child's onConnect threw", async () => {
+      silenceErrors();
+      const parent = crypto.randomUUID();
+      const child = crypto.randomUUID();
+      const response = await env.TestFetchErrorAgent.getByName(parent).fetch(
+        subAgentUrl(parent, child, "fail&hook"),
+        { headers: { Upgrade: "websocket" } }
+      );
+
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({
+        name: parent,
+        error: "agent connect failed",
+        // The parent forwards the connection without running its own
+        // onConnect, so its onError never ran: the error is the child's.
+        hookOrder: ["onFetchError"]
+      });
+    });
   });
 });

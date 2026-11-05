@@ -1204,10 +1204,11 @@ export class Agent<
    * socket that closes with 1011. For an upgrade, return either an HTTP
    * error response or a `101` response with your own `WebSocketPair`.
    *
-   * Errors from `onStart` and `onRequest` pass through `onError` first, so
-   * `error` is whatever `onError` threw: the original error by default.
-   * Avoid sending an error's message or stack to callers you do not trust.
-   * If this hook throws, the default is sent.
+   * Errors from `onStart`, `onRequest`, and `onConnect` pass through
+   * `onError` first. If `onError` throws, `error` is what it threw;
+   * otherwise it is the original error. Avoid sending an error's message or
+   * stack to callers you do not trust. If this hook throws, the default is
+   * sent.
    */
   onFetchError(
     _request: Request,
@@ -3019,7 +3020,10 @@ export class Agent<
     try {
       return await fn();
     } catch (e) {
-      throw this.onError(e);
+      // `onError` observes the error and may replace it by throwing. If it
+      // returns, the original error continues to the caller.
+      await this.onError(e);
+      throw e;
     }
   }
 
