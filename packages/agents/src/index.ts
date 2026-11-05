@@ -1195,6 +1195,25 @@ export class Agent<
     return new Response("Not implemented", { status: 404 });
   }
 
+  /**
+   * Choose the response for a request or WebSocket upgrade whose handling
+   * threw, including a failed `onStart`. The error is already logged.
+   *
+   * Return a `Response` to send it, or nothing to send the default, which
+   * never carries the error: `500 Internal Server Error`, or for an upgrade a
+   * socket that closes with 1011. For an upgrade, return either an HTTP
+   * error response or a `101` response with your own `WebSocketPair`.
+   *
+   * Errors from `onStart` and `onRequest` pass through `onError` first, so
+   * `error` is whatever `onError` threw: the original error by default.
+   * Avoid sending an error's message or stack to callers you do not trust.
+   * If this hook throws, the default is sent.
+   */
+  onFetchError(
+    _request: Request,
+    _error: unknown
+  ): Response | void | Promise<Response | void> {}
+
   /** Handle a newly accepted hibernating WebSocket connection. */
   onConnect(
     _connection: Connection,

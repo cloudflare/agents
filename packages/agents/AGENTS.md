@@ -285,7 +285,7 @@ Part of the shared workers project — there is no separate Lifecycle vitest
 project or wrangler config. `src/tests/lifecycle/` holds one test file per
 Lifecycle functionality: runtime handlers, startup (including failure retry),
 alarm arbitration, capability events, capability routing, host context,
-hibernating WebSockets, identity, and disposal. Capability contract tests
+hibernating WebSockets, identity, disposal, and fetch failures. Capability contract tests
 mirror their source module (`src/tests/schedules/capability.test.ts`,
 `src/tests/mcp/client-capability.test.ts`) and drive real harness Durable
 Objects defined one-per-capability in `src/tests/capabilities/` — see

@@ -93,6 +93,55 @@ A warm object skips startup but still offers every request to its middleware.
 There is no `next()` today: a capability either handles a request or declines
 it, and cannot wrap or observe a downstream response.
 
+## Failed requests
+
+When startup, a capability's request or upgrade hook, or `onRequest` throws,
+the lifecycle logs the error with `console.error` and sends a response that
+does not include it:
+
+- an HTTP request gets `500 Internal Server Error`;
+- a WebSocket upgrade gets a socket that closes at once with code `1011`.
+
+An error's message and stack can reveal internals, such as secret names or
+file paths, to callers who are not authenticated. To send something else,
+implement `onFetchError`. It runs after the error is logged, with the request
+and the thrown value:
+
+```ts
+export class MyObject extends DurableObject<Env> {
+  readonly lifecycle = Lifecycle.install(this);
+
+  onFetchError(request: Request, error: unknown): Response | undefined {
+    // Show details only in local development.
+    if (this.env.ENVIRONMENT !== "development") return;
+    const detail = error instanceof Error ? error.stack : String(error);
+    return new Response(detail, { status: 500 });
+  }
+}
+```
+
+Return nothing to send the default response. `error` is whatever was thrown,
+so narrow it before you read it. `request` may already have had its body read.
+If `onFetchError` throws, the lifecycle logs that error and sends the default.
+
+For a WebSocket upgrade, return either an HTTP error response or a `101`
+response with your own socket:
+
+```ts
+onFetchError(request: Request, error: unknown): Response | undefined {
+  if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") return;
+  const pair = new WebSocketPair();
+  pair[1].accept();
+  pair[1].send(JSON.stringify({ error: "unavailable" }));
+  pair[1].close(1011, "Startup failed");
+  return new Response(null, { status: 101, webSocket: pair[0] });
+}
+```
+
+`onFetchError` runs in the object's context, so `getCurrentAgent()` returns
+the object and the request. After a failed startup, `onStart` has not
+finished, so do not rely on state it sets up.
+
 ## Reusable capabilities
 
 A capability implements only the phases it needs:

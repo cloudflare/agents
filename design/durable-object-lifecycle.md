@@ -27,6 +27,24 @@ host's `onAlarm`.
 
 Failures stop the phase and propagate. Failed startup remains retryable.
 
+A failure that propagates out of `fetch` (startup, a capability's request or
+upgrade hook, or the host's `onRequest`) ends in one place. Lifecycle logs the
+error, then offers it to the host's optional `onFetchError(request, error)`.
+If the host returns no response, or the hook throws, Lifecycle sends a default
+that never carries the error: `500 Internal Server Error`, or for an upgrade an
+accepted socket closed with 1011. The defaults used to send `err.stack`, which
+leaked internals to callers who were not authenticated
+([#2828](https://github.com/cloudflare/agents/issues/2828)).
+
+Choosing that response is a host hook, not a `LifecycleOptions` flag such as
+"expose errors in development". A flag covers one policy, while a hook covers
+every policy (dev-only stacks, error codes, a reporting ID, an upgrade that
+sends one frame before it closes) with no further API. Agent's `onError` was
+not reused: it is a notification hook that many callers invoke and whose
+return value is thrown, and capability failures never reach it. Capabilities
+do not get the hook yet. If one needs to shape failure responses, it can join
+the same dispatch the way `onRequest` does: first response wins, then the host.
+
 Native Durable Object RPC bypasses Lifecycle handlers, so a plain Lifecycle host
 calls `lifecycle.start()` from any RPC method that needs startup. Concurrent
 `start()` callers share one in-flight startup and all see its result. A call

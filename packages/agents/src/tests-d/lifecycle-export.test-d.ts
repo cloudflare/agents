@@ -49,6 +49,13 @@ expectTypeOf<ProbeLifecycleObject["onStart"]>().toEqualTypeOf<
 expectTypeOf<ProbeLifecycleObject["onRequest"]>().toEqualTypeOf<
   ((request: Request) => Response | Promise<Response>) | undefined
 >();
+expectTypeOf<ProbeLifecycleObject["onFetchError"]>().toEqualTypeOf<
+  | ((
+      request: Request,
+      error: unknown
+    ) => Response | void | Promise<Response | void>)
+  | undefined
+>();
 expectTypeOf<ProbeLifecycleObject["onAlarm"]>().toEqualTypeOf<
   (() => void | Promise<void>) | undefined
 >();
@@ -144,3 +151,23 @@ const capability: DurableObjectCapability = {
 };
 
 expectTypeOf(capability).toMatchTypeOf<DurableObjectCapability>();
+
+// A host can answer a failed fetch synchronously, asynchronously, or decline.
+class FetchErrorTypeProbe extends DurableObject {
+  readonly lifecycle = Lifecycle.install(this);
+
+  async onFetchError(request: Request, error: unknown) {
+    if (request.headers.get("Upgrade")) return;
+    return new Response(error instanceof Error ? error.message : "error");
+  }
+}
+expectTypeOf<FetchErrorTypeProbe>().toMatchTypeOf<LifecycleObject>();
+
+// Agent declares the hook with Lifecycle's signature, so subclasses can
+// `override` it.
+expectTypeOf<FullAgent["onFetchError"]>().toEqualTypeOf<
+  (
+    request: Request,
+    error: unknown
+  ) => Response | void | Promise<Response | void>
+>();
