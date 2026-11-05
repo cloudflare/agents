@@ -99,13 +99,17 @@ export class PlainMcpClientObject extends DurableObject<Cloudflare.Env> {
   async addKeyedServer(
     id: string,
     url: string,
-    headers: Record<string, string>
+    headers: Record<string, string>,
+    shape: "record" | "Headers" = "record"
   ): Promise<{ state: string; error?: string }> {
     await this.lifecycle.start();
     await this.mcp.registerServer(id, {
       name: id,
       url,
-      transport: { type: "streamable-http", headers },
+      transport: {
+        type: "streamable-http",
+        headers: shape === "Headers" ? new Headers(headers) : headers
+      },
       retry: { maxAttempts: 1 }
     });
     const result = await this.mcp.connectToServer(id);

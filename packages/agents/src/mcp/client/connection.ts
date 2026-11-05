@@ -120,10 +120,10 @@ function withStaticHeaders<
       fetch: (url, init) =>
         streamFetch(url, {
           ...init,
-          headers: {
-            ...Object.fromEntries(new Headers(headers)),
-            ...init.headers
-          }
+          // The SDK's headers win, whatever shape they arrive in.
+          headers: Object.fromEntries(
+            merge(init.headers)
+          ) as typeof init.headers
         })
     }
   };
