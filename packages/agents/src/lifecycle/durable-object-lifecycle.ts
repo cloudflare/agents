@@ -581,12 +581,14 @@ export class Lifecycle<
         );
       }
     } catch (err) {
-      console.error(
-        `Error in ${this.#parentClassName}:${this.#ctx.id.name ?? "<unnamed>"} fetch:`,
-        err
-      );
+      console.error(this.#errorLogPrefix("fetch"), err);
       return this.#respondToFetchError(request, err);
     }
+  }
+
+  /** The prefix for an error logged from one of this object's handlers. */
+  #errorLogPrefix(handler: string): string {
+    return `Error in ${this.#parentClassName}:${this.#ctx.id.name ?? "<unnamed>"} ${handler}:`;
   }
 
   /**
@@ -603,12 +605,9 @@ export class Lifecycle<
           { host: this.#host, request },
           () => this.#host.onFetchError!(request, error)
         );
-        if (response) return response;
+        if (response instanceof Response) return response;
       } catch (hookError) {
-        console.error(
-          `Error in ${this.#parentClassName}:${this.#ctx.id.name ?? "<unnamed>"} onFetchError:`,
-          hookError
-        );
+        console.error(this.#errorLogPrefix("onFetchError"), hookError);
       }
     }
     if (!(error instanceof Error)) throw error;
@@ -628,10 +627,7 @@ export class Lifecycle<
         this.#capabilityRunner.webSocketMessage(ws, message)
       );
     } catch (e) {
-      console.error(
-        `Error in ${this.#parentClassName}:${this.#ctx.id.name ?? "<unnamed>"} webSocketMessage:`,
-        e
-      );
+      console.error(this.#errorLogPrefix("webSocketMessage"), e);
     }
   }
 
@@ -650,10 +646,7 @@ export class Lifecycle<
         this.#capabilityRunner.webSocketClose(ws, code, reason, wasClean)
       );
     } catch (e) {
-      console.error(
-        `Error in ${this.#parentClassName}:${this.#ctx.id.name ?? "<unnamed>"} webSocketClose:`,
-        e
-      );
+      console.error(this.#errorLogPrefix("webSocketClose"), e);
     }
   }
 
@@ -673,10 +666,7 @@ export class Lifecycle<
         this.#capabilityRunner.webSocketError(ws, error)
       );
     } catch (e) {
-      console.error(
-        `Error in ${this.#parentClassName}:${this.#ctx.id.name ?? "<unnamed>"} webSocketError:`,
-        e
-      );
+      console.error(this.#errorLogPrefix("webSocketError"), e);
     }
   }
 
