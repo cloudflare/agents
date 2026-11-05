@@ -13,7 +13,7 @@ describe("Lifecycle identity", () => {
     expect(await response.json()).toMatchObject({ name: "migrated-name" });
   });
 
-  it("explains unsupported identity and local runtime remedies", async () => {
+  it("does not send internal error details to the caller", async () => {
     const stub = env.PlainLifecycleObject.get(
       env.PlainLifecycleObject.newUniqueId()
     );
@@ -21,9 +21,6 @@ describe("Lifecycle identity", () => {
     const body = await response.text();
 
     expect(response.status).toBe(500);
-    expect(body).toContain("idFromName() or getByName()");
-    expect(body).toContain("update Wrangler/workerd");
-    expect(body).toContain("compatibility_date");
-    expect(body).toContain("2026-03-15");
+    expect(body).toBe("Internal Server Error");
   });
 });

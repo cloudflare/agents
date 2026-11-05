@@ -570,16 +570,16 @@ export class Lifecycle<
       );
       if (!(err instanceof Error)) throw err;
       if (request.headers.get("Upgrade") === "websocket") {
-        // Annoyingly, if we return an HTTP error in response to a WebSocket request, Chrome devtools
-        // won't show us the response body! So... let's send a WebSocket response with an error
-        // frame instead.
+        // Return an accepted socket that closes immediately, so the failure
+        // is visible to browsers (devtools hide bodies of failed upgrades).
+        // The error itself stays in the logs: its message and stack can leak
+        // internals to unauthenticated callers.
         const pair = new WebSocketPair();
         pair[1].accept();
-        pair[1].send(JSON.stringify({ error: err.stack }));
         pair[1].close(1011, "Uncaught exception during session setup");
         return new Response(null, { status: 101, webSocket: pair[0] });
       } else {
-        return new Response(err.stack, { status: 500 });
+        return new Response("Internal Server Error", { status: 500 });
       }
     }
   }
