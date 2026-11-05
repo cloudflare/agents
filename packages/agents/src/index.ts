@@ -3,7 +3,6 @@ import type {
   Prompt,
   Resource,
   ServerCapabilities,
-  SSEClientTransportOptions,
   Tool
 } from "@modelcontextprotocol/client";
 import {
@@ -9925,24 +9924,6 @@ export class Agent<
     const transportType: TransportType =
       resolvedOptions?.transport?.type ?? "auto";
 
-    // allows passing through transport headers if necessary
-    // this handles some non-standard bearer auth setups (i.e. MCP server behind CF access instead of OAuth)
-    let headerTransportOpts: SSEClientTransportOptions = {};
-    if (resolvedOptions?.transport?.headers) {
-      headerTransportOpts = {
-        eventSourceInit: {
-          fetch: (url, init) =>
-            fetch(url, {
-              ...init,
-              headers: resolvedOptions?.transport?.headers
-            })
-        },
-        requestInit: {
-          headers: resolvedOptions?.transport?.headers
-        }
-      };
-    }
-
     // Register server (also saves to storage)
     await this.mcp.registerServer(id, {
       url: normalizedUrl!,
@@ -9950,7 +9931,9 @@ export class Agent<
       callbackUrl,
       client: resolvedOptions?.client,
       transport: {
-        ...headerTransportOpts,
+        // Static credentials for servers without OAuth (an API key, or a
+        // server behind Cloudflare Access).
+        headers: resolvedOptions?.transport?.headers,
         authProvider,
         type: transportType,
         skipIssuerMetadataValidation:

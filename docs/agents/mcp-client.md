@@ -146,6 +146,8 @@ await this.addMcpServer("internal", "https://internal-mcp.example.com/mcp", {
 });
 ```
 
+The headers are sent with every request, including the SSE stream, and are stored with the server so a restored connection sends them too. They are stored as plain text in the Durable Object's SQLite storage. `registerServer()` on a standalone `MCPClientManager` takes the same `transport.headers`.
+
 ### Legacy OAuth metadata compatibility
 
 SDK v2 validates authorization-server metadata issuers by default. A trusted Legacy server with known mismatched RFC 8414 metadata can opt out explicitly:

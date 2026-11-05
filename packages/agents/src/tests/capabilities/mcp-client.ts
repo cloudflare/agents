@@ -93,6 +93,29 @@ export class PlainMcpClientObject extends DurableObject<Cloudflare.Env> {
   }
 
   /**
+   * Register a server that takes a static credential, with `headers` and no
+   * OAuth callback, and connect to it.
+   */
+  async addKeyedServer(
+    id: string,
+    url: string,
+    headers: Record<string, string>
+  ): Promise<{ state: string; error?: string }> {
+    await this.lifecycle.start();
+    await this.mcp.registerServer(id, {
+      name: id,
+      url,
+      transport: { type: "streamable-http", headers },
+      retry: { maxAttempts: 1 }
+    });
+    const result = await this.mcp.connectToServer(id);
+    if (result.state === "connected") await this.mcp.discoverIfConnected(id);
+    return result.state === "failed"
+      ? { state: result.state, error: result.error }
+      : { state: this.mcp.mcpConnections[id]?.connectionState ?? "missing" };
+  }
+
+  /**
    * Connect a registered server again, as a standalone manager does on
    * request: connect, then discover.
    */

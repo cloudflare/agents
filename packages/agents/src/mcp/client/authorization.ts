@@ -196,8 +196,11 @@ export class AuthorizationController {
     if (provider?.authUrl && this.isSpent(id, provider.authUrl)) {
       return "The server still answers 401 after a completed authorization";
     }
-    if (!provider?.redirectUrl) {
-      return "The server requires authorization, but no OAuth callback is configured to ask the user. Pass callbackHost to addMcpServer(), or a callbackUrl when registering the server.";
+    if (!provider) {
+      return "The server rejected the request (401 Unauthorized). Check the credentials sent with it, or, if the server uses OAuth, pass callbackHost to addMcpServer() (a callbackUrl to registerServer()) so the user can be asked.";
+    }
+    if (!provider.redirectUrl) {
+      return "The server requires authorization, but the OAuth provider has no redirect URL to send the user back to.";
     }
     return "The server rejected the credentials, and no new authorization link was produced";
   }

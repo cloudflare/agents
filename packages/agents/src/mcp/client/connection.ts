@@ -84,7 +84,50 @@ export type MCPTransportOptions = (
 ) & {
   authProvider?: AgentMcpOAuthProvider;
   type?: TransportType;
+  /**
+   * Headers sent with every HTTP request, for servers that take a static
+   * credential instead of OAuth. Stored with the server, so restored
+   * connections send them too.
+   */
+  headers?: HeadersInit;
 };
+
+/**
+ * Apply `headers` to an HTTP transport's options. The SDK transports only
+ * read `requestInit`, and the SSE stream only `eventSourceInit.fetch`.
+ * Headers already in `requestInit` win.
+ */
+function withStaticHeaders<
+  T extends StreamableHTTPClientTransportOptions | SSEClientTransportOptions
+>(options: T & { headers?: HeadersInit }): T {
+  const { headers } = options;
+  if (!headers) return options;
+  const merge = (overrides: HeadersInit | undefined) => {
+    const merged = new Headers(headers);
+    new Headers(overrides).forEach((value, key) => merged.set(key, value));
+    return merged;
+  };
+  const sse = options as SSEClientTransportOptions;
+  const streamFetch = sse.eventSourceInit?.fetch ?? fetch;
+  return {
+    ...options,
+    requestInit: {
+      ...options.requestInit,
+      headers: merge(options.requestInit?.headers)
+    },
+    eventSourceInit: {
+      ...sse.eventSourceInit,
+      fetch: (url, init) =>
+        streamFetch(url, {
+          ...init,
+          headers: {
+            ...Object.fromEntries(new Headers(headers)),
+            ...init.headers
+          }
+        })
+    }
+  };
+}
 
 export type MCPClientConnectionResult = {
   state: MCPConnectionState;
@@ -917,7 +960,9 @@ export class MCPClientConnection {
           new StreamableHTTPClientTransport(
             this.url,
             this.authorizationTurnOptions(
-              this.options.transport as StreamableHTTPClientTransportOptions
+              withStaticHeaders(
+                this.options.transport as StreamableHTTPClientTransportOptions
+              )
             )
           )
         );
@@ -926,7 +971,9 @@ export class MCPClientConnection {
           new SSEClientTransport(
             this.url,
             this.authorizationTurnOptions(
-              this.options.transport as SSEClientTransportOptions
+              withStaticHeaders(
+                this.options.transport as SSEClientTransportOptions
+              )
             )
           )
         );

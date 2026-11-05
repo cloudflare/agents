@@ -171,13 +171,25 @@ describe("A user who does not authorize", () => {
     expect((await agent.server(added.id))?.auth_url).toBe(added.authUrl);
   });
 
-  it("explains how to let the user authorize when no callback is configured", async () => {
+  it("says the server rejected the request, and how to let the user authorize, when no callback is configured", async () => {
     const agent = await newAgent();
     const added = await agent.connectServer(MCP_URL, {});
     expect(added.state).toBe("error");
     if (added.state !== "error") throw new Error("unreachable");
-    expect(added.message).toContain("requires authorization");
+    expect(added.message).toContain("rejected the request (401 Unauthorized)");
     expect(added.message).toContain("callbackHost");
+    expect(added.message).not.toContain("OAuth configuration incomplete");
+  });
+
+  it("says to check the credentials when a static key is wrong", async () => {
+    server.options.staticToken = "right";
+    const agent = await newAgent();
+    const added = await agent.connectServer(server.url, {
+      headers: { Authorization: "Bearer wrong" }
+    });
+    expect(added.state).toBe("error");
+    if (added.state !== "error") throw new Error("unreachable");
+    expect(added.message).toContain("Check the credentials");
   });
 });
 

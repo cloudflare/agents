@@ -130,6 +130,24 @@ describe("MCPClientManager capability", () => {
     });
   });
 
+  it("sends the headers a server was registered with, and again after a restart", async () => {
+    server.options.staticToken = "key-1";
+    const name = crypto.randomUUID();
+    const stub = env.PlainMcpClientObject.getByName(name);
+    expect(
+      await stub.addKeyedServer("keyed", server.url, {
+        Authorization: "Bearer key-1"
+      })
+    ).toEqual({ state: "ready" });
+
+    const restarted = await restart(stub, name);
+    await restarted.settle();
+    expect(await restarted.connectionStatus("keyed")).toEqual({
+      state: "ready",
+      error: null
+    });
+  });
+
   it("keeps the authorization link when a forgotten session restarts into OAuth", async () => {
     const name = crypto.randomUUID();
     const stub = env.PlainMcpClientObject.getByName(name);
