@@ -26,8 +26,9 @@ export interface LifecycleObject<
    * Lifecycle logs `error` before calling this hook. Return a `Response` to
    * send it, or nothing to send the default: `500 Internal Server Error` for
    * a request, and for an upgrade a socket that closes with 1011. Neither
-   * default carries the error. For an upgrade, return either an HTTP error
-   * response or a `101` response with your own `WebSocketPair`.
+   * default carries the error. If the thrown value is not an `Error`,
+   * returning nothing rethrows it instead. For an upgrade, return either an
+   * HTTP error response or a `101` response with your own `WebSocketPair`.
    *
    * `error` is whatever was thrown, so narrow it before reading it. Its
    * message and stack can reveal internals, so avoid sending them to callers
