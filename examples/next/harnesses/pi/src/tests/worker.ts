@@ -19,7 +19,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { DurableObject } from "cloudflare:workers";
 import { Workspace, type DurableObjectStorageLike } from "@cloudflare/computer";
-import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
+import { CodemodeBackend } from "@cloudflare/computer/backends/codemode";
 import {
   PiHarness,
   type PiOperationResult,
@@ -30,7 +30,7 @@ import { Lifecycle } from "agents/lifecycle";
 import { WebSockets } from "agents/websockets";
 import { PiSessionSockets } from "../sockets";
 import { projectView } from "../view";
-import { createWorkspaceTools, JAVASCRIPT_BACKEND } from "../workspace";
+import { createWorkspaceTools } from "../workspace";
 
 const RELEASE_KEY = "test:gate:release";
 const GATE_RUNS_KEY = "test:gate:runs";
@@ -98,8 +98,7 @@ export class PiHarnessTestObject extends DurableObject<Env> {
   readonly workspace = new Workspace({
     storage: this.ctx.storage as unknown as DurableObjectStorageLike,
     backends: [
-      new WorkerJavaScriptBackend({
-        id: JAVASCRIPT_BACKEND,
+      new CodemodeBackend({
         loader: this.env.LOADER,
         root: "/workspace",
         access: "read-write"

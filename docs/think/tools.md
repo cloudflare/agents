@@ -43,7 +43,7 @@ The default Workspace has no execution backends, so there is no `exec` tool unti
 ```typescript
 import { Think } from "@cloudflare/think";
 import { Workspace } from "@cloudflare/computer";
-import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
+import { CodemodeBackend } from "@cloudflare/computer/backends/codemode";
 import { createGitClient } from "@cloudflare/computer/git";
 import { createGitModule } from "@cloudflare/computer/modules/git";
 
@@ -52,11 +52,10 @@ export class MyAgent extends Think<Env> {
     storage: this.ctx.storage,
     git: createGitClient(),
     backends: [
-      new WorkerJavaScriptBackend({
-        id: "js",
+      new CodemodeBackend({
         loader: this.env.LOADER,
         access: "read-write",
-        modules: { "ws:git": createGitModule() }
+        modules: { "codemode:git": createGitModule() }
       })
     ]
   });
@@ -67,28 +66,27 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
-Computer ships a JavaScript backend and a just-bash shell backend that run in Dynamic Workers, and a container backend with a full Linux userland. See the [Computer README](https://github.com/cloudflare/computer/tree/main/packages/computer#choosing-a-backend) for each backend's bindings.
+Computer ships a codemode backend for JavaScript and a just-bash shell backend that run in Dynamic Workers, and a container backend with a full Linux userland. See the [Computer README](https://github.com/cloudflare/computer/tree/main/packages/computer#choosing-a-backend) for each backend's bindings.
 
 ### Calling the agent's tools from code
 
-Give a JavaScript backend a `ws:tools` module, and code the model runs with `exec` can import the agent's tools. Files come from `node:fs/promises`, so serve `getTools()` rather than the workspace tools:
+Give a codemode backend a `codemode:tools` module, and code the model runs with `exec` can import the agent's tools. Files come from `node:fs/promises`, so serve `getTools()` rather than the workspace tools:
 
 ```typescript
 import { createToolBindings } from "@cloudflare/computer/modules/tools";
 import { forAISDKTools } from "@cloudflare/computer/tools/ai-sdk";
 
-new WorkerJavaScriptBackend({
-  id: "js",
+new CodemodeBackend({
   loader: this.env.LOADER,
   modules: {
-    "ws:tools": createToolBindings(forAISDKTools(() => this.getTools()))
+    "codemode:tools": createToolBindings(forAISDKTools(() => this.getTools()))
   }
 });
 ```
 
 ```ts
 import { readFile } from "node:fs/promises";
-import { getWeather } from "ws:tools";
+import { getWeather } from "codemode:tools";
 
 export default async function () {
   const cities = JSON.parse(await readFile("/workspace/cities.json", "utf8"));
@@ -98,7 +96,7 @@ export default async function () {
 }
 ```
 
-Tools that need approval, and tools that run in the browser, are not exported: nothing can approve or run them from code. Calls from code do not go through `beforeToolCall`. See [`ws:tools`](https://github.com/cloudflare/computer/blob/main/docs/17_isolate_javascript.md#wstools) for how calls and results work.
+Tools that need approval, and tools that run in the browser, are not exported: nothing can approve or run them from code. Calls from code do not go through `beforeToolCall`. See [`codemode:tools`](https://github.com/cloudflare/computer/blob/main/docs/17_isolate_javascript.md#codemodetools) for how calls and results work.
 
 ### Changing the tools
 
@@ -257,7 +255,7 @@ See [Connecting to MCP Servers](https://github.com/cloudflare/agents/blob/main/d
 
 ## Code Execution Tool
 
-> **Deprecated.** Use `exec` on a JavaScript backend with `ws:tools` instead; see [Calling the agent's tools from code](#calling-the-agents-tools-from-code). `createExecuteTool` will be removed along with `@cloudflare/codemode`.
+> **Deprecated.** Use `exec` on a codemode backend with `codemode:tools` instead; see [Calling the agent's tools from code](#calling-the-agents-tools-from-code). `createExecuteTool` will be removed along with `@cloudflare/codemode`.
 
 Let the LLM write and run TypeScript in a sandboxed Worker, recorded on a durable codemode runtime (abort-and-replay, human approvals, audit trail, reusable snippets). Requires `@cloudflare/codemode` and a `worker_loaders` binding.
 

@@ -51,14 +51,14 @@ describe("Think workspace tools", () => {
 
   it("adds exec when the Workspace has a backend", async () => {
     const agent = await freshAgent();
-    await agent.addJavaScriptBackend();
+    await agent.addCodemodeBackend();
     const { toolNames } = await agent.captureTurn();
     expect(toolNames).toContain("exec");
   });
 
   it("runs code on the Workspace's backend through exec", async () => {
     const agent = await freshAgent();
-    await agent.addJavaScriptBackend();
+    await agent.addCodemodeBackend();
     await agent.captureTurn();
     const output = await agent.callTool("exec", {
       command: "export default async function () { return 6 * 7; }"
@@ -66,13 +66,13 @@ describe("Think workspace tools", () => {
     expect(output).toContain("42");
   });
 
-  it("lets code run with exec import the agent's tools from ws:tools", async () => {
+  it("lets code run with exec import the agent's tools from codemode:tools", async () => {
     const agent = await freshAgent();
-    await agent.addJavaScriptBackend();
+    await agent.addCodemodeBackend();
     await agent.captureTurn();
     const output = await agent.callTool("exec", {
       command: [
-        'import { shout } from "ws:tools";',
+        'import { shout } from "codemode:tools";',
         "export default async function () {",
         '  return (await shout({ text: "hello" })).text;',
         "}"
@@ -81,13 +81,13 @@ describe("Think workspace tools", () => {
     expect(output).toContain("HELLO");
   });
 
-  it("reads files through node:fs, not ws:tools", async () => {
+  it("reads files through node:fs, not codemode:tools", async () => {
     const agent = await freshAgent();
-    await agent.addJavaScriptBackend();
+    await agent.addCodemodeBackend();
     await agent.captureTurn();
     const withRead = await agent.callTool("exec", {
       command: [
-        'import { read } from "ws:tools";',
+        'import { read } from "codemode:tools";',
         "export default async () => read;"
       ].join("\n")
     });

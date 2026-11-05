@@ -187,17 +187,16 @@ Configure the backends, and the modules they offer, on the `Workspace`:
 
 ```ts
 import { Workspace } from "@cloudflare/computer";
-import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
+import { CodemodeBackend } from "@cloudflare/computer/backends/codemode";
 import { createGitModule } from "@cloudflare/computer/modules/git";
 
 export class MyAgent extends Think<Env> {
   override workspace = new Workspace({
     storage: this.ctx.storage,
     backends: [
-      new WorkerJavaScriptBackend({
-        id: "js",
+      new CodemodeBackend({
         loader: this.env.LOADER,
-        modules: { "ws:git": createGitModule() }
+        modules: { "codemode:git": createGitModule() }
       })
     ]
   });
@@ -207,24 +206,23 @@ export class MyAgent extends Think<Env> {
 To change a built-in tool, return a tool with the same name from `getTools()`.
 To hide tools for a turn, return `activeTools` from `beforeTurn`.
 
-Give a backend a `ws:tools` module, and code the model runs with `exec` can
-import the agent's tools; files come from `node:fs`:
+Give a backend a `codemode:tools` module, and code the model runs with `exec`
+can import the agent's tools; files come from `node:fs`:
 
 ```ts
 import { createToolBindings } from "@cloudflare/computer/modules/tools";
 import { forAISDKTools } from "@cloudflare/computer/tools/ai-sdk";
 
-new WorkerJavaScriptBackend({
-  id: "js",
+new CodemodeBackend({
   loader: this.env.LOADER,
   modules: {
-    "ws:tools": createToolBindings(forAISDKTools(() => this.getTools()))
+    "codemode:tools": createToolBindings(forAISDKTools(() => this.getTools()))
   }
 });
 ```
 
 ```ts
-import { getWeather } from "ws:tools";
+import { getWeather } from "codemode:tools";
 export default async () => (await getWeather({ city: "Lisbon" })).text;
 ```
 
@@ -1010,7 +1008,7 @@ For values you want broadcast to connected clients, use `state` / `setState` fro
 
 ## Code execution tool
 
-> **Deprecated.** Use `exec` with `ws:tools` (see [Built-in workspace](#built-in-workspace)).
+> **Deprecated.** Use `exec` with `codemode:tools` (see [Built-in workspace](#built-in-workspace)).
 
 Let the LLM write and run JavaScript in a sandboxed Worker:
 

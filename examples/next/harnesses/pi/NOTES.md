@@ -257,17 +257,17 @@ schemas, and its `exec` runs on a Workspace backend. What came up:
 - **`exec`'s description assumes shells.** It is built for a choice of
   backends and talks about `npm test`. With one JavaScript backend that
   misleads the model, so the adapter replaces the description and the
-  `command` parameter's text. It documents the typed `ws:git` interface
-  rather than its `cli()`, which gives the model return values it can use
-  directly. The model still sometimes tries `node:path` first; the error
+  `command` parameter's text. It documents the typed `codemode:git`
+  interface rather than its `cli()`, which gives the model return values it
+  can use directly. The model still sometimes tries `node:path` first; the error
   names the module and it recovers.
-- **Git is opt-in twice.** The backend gets `ws:git` from
+- **Git is opt-in twice.** The backend gets `codemode:git` from
   `createGitModule()`, but every call fails until the `Workspace` gets
   `git: createGitClient()`, which needs the optional `@platformatic/vfs`
   peer. Network operations also need `createGitModule({ allowNetwork: true })`.
-- **`ws:git` paths are not the client's.** The git client's types say `dir`
-  defaults to `/`. Through `ws:git` the host resolves `dir` against the
-  module's working directory and keeps it inside the backend root. The
+- **`codemode:git` paths are not the client's.** The git client's types say
+  `dir` defaults to `/`. Through `codemode:git` the host resolves `dir`
+  against the module's working directory and keeps it inside the backend root. The
   `exec` description follows the bridge.
 - **Tool calls run in parallel.** pi runs one round's tool calls at once by
   default. In testing the model sent a `clone` and a `log` in the same

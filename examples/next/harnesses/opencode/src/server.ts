@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { Workspace, type DurableObjectStorageLike } from "@cloudflare/computer";
-import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
+import { CodemodeBackend } from "@cloudflare/computer/backends/codemode";
 import { createGitClient } from "@cloudflare/computer/git";
 import { createGitModule } from "@cloudflare/computer/modules/git";
 import { OpenCodeWorkerd } from "@opencode/sdk/workerd";
@@ -10,7 +10,7 @@ import { Lifecycle } from "agents/lifecycle";
 import { createAI } from "agents/models/opencode";
 import { WebSockets } from "agents/websockets";
 import { OpenCodeSessionSockets } from "./sockets";
-import { JAVASCRIPT_BACKEND, workspacePlugin } from "./workspace";
+import { workspacePlugin } from "./workspace";
 
 export const MODEL_ID = "@cf/moonshotai/kimi-k2.7-code";
 
@@ -20,7 +20,7 @@ export class OpenCodeAgent extends DurableObject<Env> {
   readonly ai = createAI({ binding: this.env.AI });
   // Files in the object's own storage. `exec` runs JavaScript in a Worker
   // Loader isolate with no network of its own. `git` turns on
-  // `workspace.git`, which `ws:git` uses to clone over HTTPS from the host.
+  // `workspace.git`, which `codemode:git` uses to clone over HTTPS from the host.
   readonly workspace = new Workspace({
     // SAFETY: DurableObjectStorage has every member DurableObjectStorageLike
     // names; computer declares its own narrower type to avoid depending on
@@ -28,12 +28,11 @@ export class OpenCodeAgent extends DurableObject<Env> {
     storage: this.ctx.storage as unknown as DurableObjectStorageLike,
     git: createGitClient(),
     backends: [
-      new WorkerJavaScriptBackend({
-        id: JAVASCRIPT_BACKEND,
+      new CodemodeBackend({
         loader: this.env.LOADER,
         root: "/workspace",
         access: "read-write",
-        modules: { "ws:git": createGitModule({ allowNetwork: true }) }
+        modules: { "codemode:git": createGitModule({ allowNetwork: true }) }
       })
     ]
   });

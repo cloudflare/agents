@@ -102,10 +102,9 @@ export class PiAgent extends DurableObject<Env> {
     storage: this.ctx.storage,
     git: createGitClient(),
     backends: [
-      new WorkerJavaScriptBackend({
-        id: JAVASCRIPT_BACKEND,
+      new CodemodeBackend({
         loader: this.env.LOADER,
-        modules: { "ws:git": createGitModule({ allowNetwork: true }) }
+        modules: { "codemode:git": createGitModule({ allowNetwork: true }) }
       })
     ]
   });
@@ -197,17 +196,17 @@ loop the caller writes. pi-durable runs the loop itself, so
 `grep`, `write` and `delete` replay-safe. `edit` and `exec` are not: after
 an eviction the model gets an interrupted result rather than a second run.
 
-`exec` has one backend, `WorkerJavaScriptBackend`. Each call runs an ES
-module in a fresh Dynamic Worker, minted through the `LOADER` binding, with
-no network. The module can import `node:fs/promises`, which is the
-workspace, and `ws:git`. computer's own `exec` description is written for a
-choice of shell backends, so `src/workspace.ts` replaces it with one for
-JavaScript that includes the `ws:git` TypeScript interface (`clone`,
-`status`, `diff`, `log`).
+`exec` has one backend, `CodemodeBackend`. Each call runs an ES module in a
+fresh Dynamic Worker, minted through the `LOADER` binding, with no network.
+The module can import `node:fs/promises`, which is the workspace, and
+`codemode:git`. computer's own `exec` description is written for a choice of
+shell backends, so `src/workspace.ts` replaces it with one for JavaScript
+that includes the `codemode:git` TypeScript interface (`clone`, `status`,
+`diff`, `log`).
 
 Git needs two things besides the backend: `git: createGitClient()` from
 `@cloudflare/computer/git` on the `Workspace`, which needs the
-`@platformatic/vfs` peer, and the `ws:git` module from
+`@platformatic/vfs` peer, and the `codemode:git` module from
 `createGitModule({ allowNetwork: true })` (`@cloudflare/computer/modules/git`)
 on the backend, which `clone` needs. Git runs in the host, through isomorphic-git on the workspace
 files, so cloning works while the module itself has no network.
@@ -218,8 +217,9 @@ Pi comes from npm: `@earendil-works/pi-durable`, `pi-ai`, `chord` and
 `pi-telemetry` at `~1.4.0`. Pi is MIT licensed; see
 [`licenses/mit-earendil-pi.txt`](./licenses/mit-earendil-pi.txt).
 
-`@cloudflare/computer` comes from npm at `^0.8.0`, the version Think requires.
-It includes the `ws:git` module that `exec` uses for git (added in 0.5).
+`@cloudflare/computer` comes from npm at `^0.10.0`, the version Think requires.
+It includes the `codemode:git` module that `exec` uses for git (added in 0.5
+as `ws:git`, renamed in 0.9).
 
 Note that the repository sets `minimumReleaseAge: 1440` in
 `pnpm-workspace.yaml`, so a pi release less than 24 hours old will not
