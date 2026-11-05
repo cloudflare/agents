@@ -84,6 +84,33 @@ export type MCPTransportOptions = (
   type?: TransportType;
 };
 
+/**
+ * The v2 client transports have no top-level `headers` option, only
+ * `requestInit`. Fold `transport.headers` into `requestInit.headers` so
+ * headers registered directly with the manager are sent. Explicit
+ * `requestInit.headers` win over `headers` on conflict. The SSE transport
+ * also builds its event-stream request headers from `requestInit`, after
+ * which it adds its own `Authorization` and `Accept`, so no
+ * `eventSourceInit` wrapping is needed.
+ */
+function withTransportHeaders(
+  options: MCPTransportOptions
+): MCPTransportOptions {
+  const { headers, requestInit } = options as {
+    headers?: HeadersInit;
+    requestInit?: RequestInit;
+  };
+  if (!headers) return options;
+  const merged = new Headers(headers);
+  new Headers(requestInit?.headers).forEach((value, key) =>
+    merged.set(key, value)
+  );
+  return {
+    ...options,
+    requestInit: { ...requestInit, headers: Object.fromEntries(merged) }
+  } as MCPTransportOptions;
+}
+
 export type MCPClientConnectionResult = {
   state: MCPConnectionState;
   error?: Error;
@@ -900,12 +927,16 @@ export class MCPClientConnection {
       case "streamable-http":
         return new StreamableHTTPClientTransport(
           this.url,
-          this.options.transport as StreamableHTTPClientTransportOptions
+          withTransportHeaders(
+            this.options.transport
+          ) as StreamableHTTPClientTransportOptions
         );
       case "sse":
         return new SSEClientTransport(
           this.url,
-          this.options.transport as SSEClientTransportOptions
+          withTransportHeaders(
+            this.options.transport
+          ) as SSEClientTransportOptions
         );
       case "rpc":
         return new RPCClientTransport(

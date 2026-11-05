@@ -1110,4 +1110,55 @@ describe("MCP Client Connection Integration", () => {
       expect(connection.connectionState).toBe("failed");
     });
   });
+  describe("transport.headers", () => {
+    it("sends transport.headers on streamable-http requests", async () => {
+      const fetchMock = vi.fn(async () => new Response(null, { status: 202 }));
+      const connection = new MCPClientConnection(
+        new URL("http://localhost:3001/mcp"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: {
+            type: "streamable-http",
+            headers: { Authorization: "Bearer key" },
+            fetch: fetchMock
+          } as never,
+          client: {}
+        }
+      );
+      const transport = connection.getTransport("streamable-http");
+      await transport.send({ jsonrpc: "2.0", method: "notifications/x" });
+      const calls = fetchMock.mock.calls as unknown as [unknown, RequestInit][];
+      const init = calls[0][1];
+      expect(new Headers(init.headers).get("authorization")).toBe("Bearer key");
+    });
+
+    it("keeps explicit and SDK headers on the SSE event-stream request", async () => {
+      const fetchMock = vi.fn(async () => new Response(null, { status: 500 }));
+      const connection = new MCPClientConnection(
+        new URL("http://localhost:3001/sse"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: {
+            type: "sse",
+            headers: {
+              Authorization: "Bearer key",
+              "X-Key": "fallback",
+              Accept: "application/json"
+            },
+            requestInit: { headers: { "X-Key": "explicit" } },
+            eventSourceInit: { fetch: fetchMock }
+          } as never,
+          client: {}
+        }
+      );
+      const transport = connection.getTransport("sse");
+      await transport.start().catch(() => {});
+      await transport.close();
+      const calls = fetchMock.mock.calls as unknown as [unknown, RequestInit][];
+      const headers = new Headers(calls[0][1].headers);
+      expect(headers.get("authorization")).toBe("Bearer key");
+      expect(headers.get("x-key")).toBe("explicit");
+      expect(headers.get("accept")).toBe("text/event-stream");
+    });
+  });
 });
