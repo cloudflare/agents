@@ -569,7 +569,7 @@ export class Lifecycle<
         err
       );
       if (!(err instanceof Error)) throw err;
-      if (request.headers.get("Upgrade") === "websocket") {
+      if (request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
         // Return an accepted socket that closes immediately, so the failure
         // is visible to browsers (devtools hide bodies of failed upgrades).
         // The error itself stays in the logs: its message and stack can leak
