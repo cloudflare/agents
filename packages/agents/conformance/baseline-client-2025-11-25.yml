@@ -1,9 +1,0 @@
-# SDK v2 client against 2025-11-25 stateful servers.
-client:
-  # The default scope step-up budget produces four authorization attempts;
-  # the referee's SHOULD-level limit is three or fewer. Fixed by the
-  # step-up round limit in cloudflare/agents#2663; remove this entry with it.
-  # Impact if unchanged: a permanently unsatisfiable insufficient_scope
-  # challenge can send the user through one additional OAuth round-trip before
-  # the client stops retrying.
-  - auth/scope-retry-limit

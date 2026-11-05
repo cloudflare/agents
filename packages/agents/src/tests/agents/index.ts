@@ -40,6 +40,7 @@ export {
   TestAgentToolStubChild
 } from "./agent-tool-replay";
 export { TestOAuthAgent, TestCustomOAuthAgent } from "./oauth";
+export { McpIntegrationAgent } from "./mcp-integration";
 export { TestReadonlyAgent } from "./readonly";
 export { TestProtocolMessagesAgent } from "./protocol-messages";
 export { TestCallableAgent, TestParentAgent, TestChildAgent } from "./callable";

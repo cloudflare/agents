@@ -239,11 +239,12 @@ describe("MCP v2 client MRTR", () => {
       getPrompt: async (...args: unknown[]) => args,
       readResource: async (...args: unknown[]) => args
     };
-    const manager = Object.create(
-      MCPClientManager.prototype
-    ) as MCPClientManager;
+    const manager = new MCPClientManager("test-client", "1.0.0");
     manager.mcpConnections = {
-      server: { client } as unknown as MCPClientConnection
+      server: {
+        client,
+        options: { transport: {} }
+      } as unknown as MCPClientConnection
     };
     const options = { timeout: 123, maxTotalTimeout: 456 };
 
