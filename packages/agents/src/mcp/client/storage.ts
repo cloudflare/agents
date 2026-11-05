@@ -107,14 +107,30 @@ function persistClientOptions(
   };
 }
 
+/**
+ * `Headers` instances serialize to `{}` with `JSON.stringify`, so convert any
+ * `HeadersInit` to a plain object before it is persisted.
+ */
+function persistHeaders(
+  headers?: HeadersInit
+): Record<string, string> | undefined {
+  if (!headers) return undefined;
+  return Object.fromEntries(new Headers(headers));
+}
+
+function persistRequestInit(init?: RequestInit): RequestInit | undefined {
+  if (!init?.headers) return init;
+  return { ...init, headers: persistHeaders(init.headers) };
+}
+
 function persistTransportOptions(
   value?: PersistableTransportOptions
 ): PersistedMcpTransportOptions | undefined {
   if (!value) return undefined;
   return {
     type: value.type,
-    headers: value.headers,
-    requestInit: value.requestInit,
+    headers: persistHeaders(value.headers),
+    requestInit: persistRequestInit(value.requestInit),
     reconnectionOptions: value.reconnectionOptions,
     skipIssuerMetadataValidation: value.skipIssuerMetadataValidation,
     onInsufficientScope: value.onInsufficientScope,

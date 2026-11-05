@@ -47,6 +47,24 @@ describe("MCP client storage codec", () => {
     });
   });
 
+  it("persists Headers instances as plain header objects", () => {
+    const restored = decodeMcpServerOptions(
+      encodeMcpServerOptions({
+        transport: {
+          type: "streamable-http",
+          headers: new Headers({ Authorization: "Bearer key" }),
+          requestInit: { headers: new Headers({ "X-Custom": "value" }) }
+        }
+      })
+    );
+    expect(restored.transport?.headers).toEqual({
+      authorization: "Bearer key"
+    });
+    expect(restored.transport?.requestInit?.headers).toEqual({
+      "x-custom": "value"
+    });
+  });
+
   it("drops an unsafe Stateless session that has no discovery advertisement", () => {
     expect(
       decodeMcpServerOptions(

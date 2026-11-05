@@ -86,13 +86,15 @@ export type MCPTransportOptions = (
 
 /**
  * The v2 client transports have no top-level `headers` option, only
- * `requestInit` (and `eventSourceInit` for SSE). Fold `transport.headers`
- * into those so headers registered directly with the manager are sent.
- * Explicit `requestInit.headers` win over `headers` on conflict.
+ * `requestInit`. Fold `transport.headers` into `requestInit.headers` so
+ * headers registered directly with the manager are sent. Explicit
+ * `requestInit.headers` win over `headers` on conflict. The SSE transport
+ * also builds its event-stream request headers from `requestInit`, after
+ * which it adds its own `Authorization` and `Accept`, so no
+ * `eventSourceInit` wrapping is needed.
  */
 function withTransportHeaders(
-  options: MCPTransportOptions,
-  sse = false
+  options: MCPTransportOptions
 ): MCPTransportOptions {
   const { headers, requestInit } = options as {
     headers?: HeadersInit;
@@ -103,25 +105,10 @@ function withTransportHeaders(
   new Headers(requestInit?.headers).forEach((value, key) =>
     merged.set(key, value)
   );
-  const result = {
+  return {
     ...options,
     requestInit: { ...requestInit, headers: Object.fromEntries(merged) }
-  } as SSEClientTransportOptions;
-  if (sse) {
-    const baseFetch = result.eventSourceInit?.fetch;
-    result.eventSourceInit = {
-      ...result.eventSourceInit,
-      fetch: (url, init) => {
-        const h = new Headers(init?.headers);
-        new Headers(headers).forEach((value, key) => h.set(key, value));
-        return (baseFetch ?? fetch)(url, {
-          ...init,
-          headers: Object.fromEntries(h)
-        } as typeof init);
-      }
-    };
-  }
-  return result as MCPTransportOptions;
+  } as MCPTransportOptions;
 }
 
 export type MCPClientConnectionResult = {
@@ -948,8 +935,7 @@ export class MCPClientConnection {
         return new SSEClientTransport(
           this.url,
           withTransportHeaders(
-            this.options.transport,
-            true
+            this.options.transport
           ) as SSEClientTransportOptions
         );
       case "rpc":
