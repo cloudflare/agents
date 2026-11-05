@@ -1,5 +1,8 @@
+import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { getAgentByName } from "../../index";
 import { LifecycleCapability } from "../../lifecycle";
+import { FETCH_ERROR_SECRET } from "../capabilities/lifecycle";
 import { withCapabilityHarness } from "../shared/capability-harness";
 
 const SECRET = "DATABASE_URL could not be resolved";
@@ -98,4 +101,156 @@ describe("Lifecycle.fetch failure responses", () => {
       });
     });
   }
+});
+
+describe("onFetchError", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function fetchErrorObject() {
+    return env.FetchErrorObject.getByName(crypto.randomUUID());
+  }
+
+  it("sends the hook's response, after logging the error", async () => {
+    const errors = silenceErrors();
+    const stub = fetchErrorObject();
+    const url = "https://example.com/?fail=host&hook=respond";
+    const response = await stub.fetch(url);
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: FETCH_ERROR_SECRET });
+    expect(errors).toHaveBeenCalledWith(
+      expect.stringContaining("fetch:"),
+      expect.objectContaining({ message: FETCH_ERROR_SECRET })
+    );
+    expect(await stub.getHookCalls()).toEqual([
+      { error: FETCH_ERROR_SECRET, requestUrl: url, inHostContext: true }
+    ]);
+  });
+
+  it("is called for a failed capability request hook", async () => {
+    silenceErrors();
+    const response = await fetchErrorObject().fetch(
+      "https://example.com/?fail=capability&hook=respond"
+    );
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: FETCH_ERROR_SECRET });
+  });
+
+  it("is called for a failed startup", async () => {
+    silenceErrors();
+    const stub = fetchErrorObject();
+    await stub.failStartup();
+    const response = await stub.fetch("https://example.com/?hook=respond");
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      error: "intentional startup failure"
+    });
+  });
+
+  it("receives a thrown value that is not an Error", async () => {
+    silenceErrors();
+    const response = await fetchErrorObject().fetch(
+      "https://example.com/?fail=non-error&hook=respond"
+    );
+
+    expect(await response.json()).toEqual({ error: FETCH_ERROR_SECRET });
+  });
+
+  it("sends the default when the hook declines", async () => {
+    silenceErrors();
+    const stub = fetchErrorObject();
+    const response = await stub.fetch("https://example.com/?fail=host");
+
+    expect(response.status).toBe(500);
+    expect(await response.text()).toBe("Internal Server Error");
+    expect(await stub.getHookCalls()).toHaveLength(1);
+  });
+
+  it("rethrows a thrown value that is not an Error when the hook declines", async () => {
+    silenceErrors();
+    await expect(
+      fetchErrorObject().fetch("https://example.com/?fail=non-error")
+    ).rejects.toThrow(FETCH_ERROR_SECRET);
+  });
+
+  it("sends the default, and logs the hook's error, when the hook throws", async () => {
+    const errors = silenceErrors();
+    const response = await fetchErrorObject().fetch(
+      "https://example.com/?fail=host&hook=throw"
+    );
+
+    expect(response.status).toBe(500);
+    expect(await response.text()).toBe("Internal Server Error");
+    expect(errors).toHaveBeenCalledWith(
+      expect.stringContaining("onFetchError:"),
+      expect.objectContaining({ message: "onFetchError failed" })
+    );
+  });
+
+  it("can answer a failed upgrade with its own socket", async () => {
+    silenceErrors();
+    const stub = fetchErrorObject();
+    await stub.failStartup();
+    const response = await stub.fetch("https://example.com/?hook=socket", {
+      headers: { Upgrade: "websocket" }
+    });
+
+    expect(response.status).toBe(101);
+    expect(await drainSocket(response)).toEqual({
+      code: 4000,
+      reason: "startup failed",
+      frames: [JSON.stringify({ error: "intentional startup failure" })]
+    });
+  });
+
+  it("closes a failed upgrade with 1011 when the hook declines", async () => {
+    silenceErrors();
+    const stub = fetchErrorObject();
+    await stub.failStartup();
+    const response = await stub.fetch("https://example.com/", {
+      headers: { Upgrade: "websocket" }
+    });
+
+    expect(response.status).toBe(101);
+    expect(await drainSocket(response)).toEqual({
+      code: 1011,
+      reason: "Uncaught exception during session setup",
+      frames: []
+    });
+  });
+});
+
+describe("Agent onFetchError", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  async function agent() {
+    return getAgentByName(env.TestFetchErrorAgent, crypto.randomUUID());
+  }
+
+  it("receives the original error after onError has seen it", async () => {
+    silenceErrors();
+    const response = await (
+      await agent()
+    ).fetch("https://example.com/?fail&hook");
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      error: "agent request failed",
+      hookOrder: ["onError", "onFetchError"]
+    });
+  });
+
+  it("sends the default when the override declines", async () => {
+    silenceErrors();
+    const response = await (await agent()).fetch("https://example.com/?fail");
+
+    expect(response.status).toBe(500);
+    expect(await response.text()).toBe("Internal Server Error");
+  });
 });

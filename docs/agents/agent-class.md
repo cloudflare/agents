@@ -385,6 +385,22 @@ class MyAgent extends Agent {
 }
 ```
 
+### `this.onFetchError`
+
+When an HTTP request or WebSocket upgrade fails, including a failed `onStart`, the Agent logs the error and sends a response that does not include it: `500 Internal Server Error`, or for an upgrade a socket that closes with code `1011`. Override `onFetchError` to send something else, and return nothing to keep the default:
+
+```ts
+class MyAgent extends Agent<Env> {
+  onFetchError(request: Request, error: unknown) {
+    if (this.env.ENVIRONMENT !== "development") return;
+    const detail = error instanceof Error ? error.stack : String(error);
+    return new Response(detail, { status: 500 });
+  }
+}
+```
+
+Errors from `onStart` and `onRequest` pass through `onError` first, so `onFetchError` receives whatever `onError` throws. The default `onError` rethrows the original error. See [Failed requests](./lifecycle.md#failed-requests) for the full behavior.
+
 ### `this.destroy`
 
 `this.destroy()` drops all tables, deletes alarms, clears storage, and aborts the context. To ensure that the DO is fully evicted, `this.ctx.abort()` is called, which throws an uncatchable error that will show up in your logs (read more about it [here](https://developers.cloudflare.com/durable-objects/api/state/#abort)).

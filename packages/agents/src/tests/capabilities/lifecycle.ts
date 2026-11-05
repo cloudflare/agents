@@ -997,3 +997,81 @@ export class StatefulPlainObject extends DurableObject<Cloudflare.Env> {
     return this.#state.get()?.count;
   }
 }
+
+/** The message every {@link FetchErrorObject} failure throws. */
+export const FETCH_ERROR_SECRET = "DATABASE_URL could not be resolved";
+
+/** What a {@link FetchErrorObject}'s `onFetchError` hook observed. */
+export type FetchErrorHookCall = {
+  readonly error: string;
+  readonly requestUrl: string;
+  readonly inHostContext: boolean;
+};
+
+/** Where a {@link FetchErrorObject} request fails, from its `fail` query. */
+function fetchFailure(request: Request): string | null {
+  return new URL(request.url).searchParams.get("fail");
+}
+
+/**
+ * A Lifecycle host with an `onFetchError` hook. A request's `fail` query
+ * picks where handling throws (`capability`, `host`, or `non-error`), and
+ * its `hook` query picks the hook's answer (`respond`, `socket`, `throw`, or
+ * none, which declines). `failStartup()` makes startup throw instead.
+ */
+export class FetchErrorObject extends DurableObject<Cloudflare.Env> {
+  readonly #hookCalls: FetchErrorHookCall[] = [];
+
+  readonly lifecycle = Lifecycle.install(this)
+    .use(new StoredStartFailureProbe())
+    .use({
+      onRequest: ({ request }) => {
+        if (fetchFailure(request) === "capability") {
+          throw new Error(FETCH_ERROR_SECRET);
+        }
+      }
+    });
+
+  onRequest(request: Request): Response {
+    const failure = fetchFailure(request);
+    if (failure === "host") throw new Error(FETCH_ERROR_SECRET);
+    if (failure === "non-error") {
+      throw FETCH_ERROR_SECRET;
+    }
+    return new Response("ok");
+  }
+
+  onFetchError(request: Request, error: unknown): Response | undefined {
+    const message = error instanceof Error ? error.message : String(error);
+    this.#hookCalls.push({
+      error: message,
+      requestUrl: request.url,
+      inHostContext: getCurrentAgent().agent === this
+    });
+
+    switch (new URL(request.url).searchParams.get("hook")) {
+      case "respond":
+        return Response.json({ error: message }, { status: 503 });
+      case "socket": {
+        const pair = new WebSocketPair();
+        pair[1].accept();
+        pair[1].send(JSON.stringify({ error: message }));
+        pair[1].close(4000, "startup failed");
+        return new Response(null, { status: 101, webSocket: pair[0] });
+      }
+      case "throw":
+        throw new Error("onFetchError failed");
+      default:
+        return undefined;
+    }
+  }
+
+  /** Make every later startup throw {@link StoredStartFailureProbe}'s error. */
+  async failStartup(): Promise<void> {
+    await this.ctx.storage.put("fail-start", true);
+  }
+
+  getHookCalls(): FetchErrorHookCall[] {
+    return this.#hookCalls;
+  }
+}
