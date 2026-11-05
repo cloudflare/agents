@@ -84,6 +84,46 @@ export type MCPTransportOptions = (
   type?: TransportType;
 };
 
+/**
+ * The v2 client transports have no top-level `headers` option, only
+ * `requestInit` (and `eventSourceInit` for SSE). Fold `transport.headers`
+ * into those so headers registered directly with the manager are sent.
+ * Explicit `requestInit.headers` win over `headers` on conflict.
+ */
+function withTransportHeaders(
+  options: MCPTransportOptions,
+  sse = false
+): MCPTransportOptions {
+  const { headers, requestInit } = options as {
+    headers?: HeadersInit;
+    requestInit?: RequestInit;
+  };
+  if (!headers) return options;
+  const merged = new Headers(headers);
+  new Headers(requestInit?.headers).forEach((value, key) =>
+    merged.set(key, value)
+  );
+  const result = {
+    ...options,
+    requestInit: { ...requestInit, headers: Object.fromEntries(merged) }
+  } as SSEClientTransportOptions;
+  if (sse) {
+    const baseFetch = result.eventSourceInit?.fetch;
+    result.eventSourceInit = {
+      ...result.eventSourceInit,
+      fetch: (url, init) => {
+        const h = new Headers(init?.headers);
+        new Headers(headers).forEach((value, key) => h.set(key, value));
+        return (baseFetch ?? fetch)(url, {
+          ...init,
+          headers: Object.fromEntries(h)
+        } as typeof init);
+      }
+    };
+  }
+  return result as MCPTransportOptions;
+}
+
 export type MCPClientConnectionResult = {
   state: MCPConnectionState;
   error?: Error;
@@ -900,12 +940,17 @@ export class MCPClientConnection {
       case "streamable-http":
         return new StreamableHTTPClientTransport(
           this.url,
-          this.options.transport as StreamableHTTPClientTransportOptions
+          withTransportHeaders(
+            this.options.transport
+          ) as StreamableHTTPClientTransportOptions
         );
       case "sse":
         return new SSEClientTransport(
           this.url,
-          this.options.transport as SSEClientTransportOptions
+          withTransportHeaders(
+            this.options.transport,
+            true
+          ) as SSEClientTransportOptions
         );
       case "rpc":
         return new RPCClientTransport(
