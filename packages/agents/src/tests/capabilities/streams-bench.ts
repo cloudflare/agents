@@ -25,9 +25,6 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
     return JSON.stringify({ type: "text-delta", delta: `${index}:${filler}` });
   }
 
-  /** Durable-marker values the adapter reported through `onProgress`. */
-  readonly progressReports: number[] = [];
-
   #adapter(): ResumableStream {
     return new ResumableStream(
       this.streams,
@@ -43,8 +40,7 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
             ),
             ...values
           )
-        ] as T[],
-      { onProgress: (durable) => this.progressReports.push(durable) }
+        ] as T[]
     );
   }
 
@@ -53,7 +49,7 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
    * capability. A stream retired afterwards must count once, not once per
    * construction.
    */
-  async probeReconstruction(): Promise<{ marker: number; reports: number }> {
+  async probeReconstruction(): Promise<{ marker: number }> {
     await this.lifecycle.start();
     this.#adapter();
     this.#adapter();
@@ -62,10 +58,7 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
     for (let i = 0; i < 10; i++) adapter.storeChunk(id, this.#body(i, 60));
     adapter.finish(id);
     adapter.cutover(id, () => {});
-    return {
-      marker: adapter.progressMarker(),
-      reports: this.progressReports.length
-    };
+    return { marker: adapter.progressMarker() };
   }
 
   /**
@@ -136,34 +129,82 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
     adapter.clearAll();
     marker.cleared = adapter.progressMarker();
 
-    // Seeding takes the max, never lowering the marker.
-    adapter.seedProgress(2);
-    marker.seededLow = adapter.progressMarker();
-    adapter.seedProgress(marker.cleared + 40);
-    marker.seededHigh = adapter.progressMarker();
-
     return { marker, rowsWritten: this.#totalChanges() - before };
   }
 
+  /** Store and cut over one two-segment turn. */
+  #finishTurn(adapter: ResumableStream, requestId: string): void {
+    const id = adapter.start(requestId);
+    for (let i = 0; i < 20; i++) adapter.storeChunk(id, this.#body(i, 60));
+    adapter.finish(id);
+    adapter.cutover(id, () => {});
+  }
+
   /**
-   * The legacy-counter seed against segments retired before it: the seed
-   * must add to them, not replace them, and must be idempotent.
+   * Releases 0.23 to 0.28 mirrored the marker's durable part to the KV
+   * counter after every retire, and each new isolate seeded from it. Each
+   * new adapter here stands in for a new isolate seeding from that mirrored
+   * value. With no row-based guard the marker gained the whole retired total
+   * per isolate; it must count only the segments that landed.
    */
-  async probeSeedOrdering(): Promise<Record<string, number>> {
+  async probeMirroredSeed(): Promise<number[]> {
+    await this.lifecycle.start();
+    const markers: number[] = [];
+    const first = this.#adapter();
+    this.#finishTurn(first, "mirror-req-1");
+    let mirrored = first.progressMarker();
+    markers.push(mirrored);
+    for (let isolate = 2; isolate <= 4; isolate++) {
+      const adapter = this.#adapter();
+      adapter.seedProgress(mirrored);
+      markers.push(adapter.progressMarker());
+      this.#finishTurn(adapter, `mirror-req-${isolate}`);
+      mirrored = adapter.progressMarker();
+      markers.push(mirrored);
+    }
+    return markers;
+  }
+
+  /**
+   * An object upgraded directly from a release before 0.23 has no progress
+   * row yet, so its old KV counter is carried over once. A later isolate,
+   * which finds the row, does not seed again.
+   */
+  async probeDirectUpgradeSeed(): Promise<Record<string, number | boolean>> {
+    await this.lifecycle.start();
+    const upgraded = this.#adapter();
+    const marker: Record<string, number | boolean> = {
+      needsSeed: upgraded.needsLegacySeed
+    };
+    upgraded.seedProgress(500);
+    marker.seeded = upgraded.progressMarker();
+    this.#finishTurn(upgraded, "upgrade-req-1");
+    marker.retired = upgraded.progressMarker();
+    const later = this.#adapter();
+    marker.laterNeedsSeed = later.needsLegacySeed;
+    later.seedProgress(900);
+    marker.later = later.progressMarker();
+    return marker;
+  }
+
+  /**
+   * An object an `agents` release before 0.23 seeded from its KV counter
+   * keeps that value in the `legacy` column. It must still count toward the
+   * marker, with retired segments and credits added on top.
+   */
+  async probeLegacyColumn(): Promise<Record<string, number>> {
     await this.lifecycle.start();
     const adapter = this.#adapter();
     const marker: Record<string, number> = {};
-    const first = adapter.start("seed-req-1");
+    this.ctx.storage.sql.exec(
+      "INSERT INTO cf_agents_chat_progress (key, retired, legacy) VALUES ('chat', 0, 40)"
+    );
+    marker.seeded = adapter.progressMarker();
+    const first = adapter.start("legacy-req-1");
     for (let i = 0; i < 20; i++) adapter.storeChunk(first, this.#body(i, 60));
     adapter.finish(first);
     adapter.cutover(first, () => {});
-    marker.retiredBeforeSeed = adapter.progressMarker();
-    adapter.seedProgress(40);
-    marker.seeded = adapter.progressMarker();
-    adapter.seedProgress(40);
-    marker.seededAgain = adapter.progressMarker();
-    adapter.seedProgress(10);
-    marker.seededLower = adapter.progressMarker();
+    marker.retired = adapter.progressMarker();
     adapter.creditProgress();
     marker.credited = adapter.progressMarker();
     return marker;

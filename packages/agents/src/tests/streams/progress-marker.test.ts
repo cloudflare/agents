@@ -38,16 +38,10 @@ describe("ResumableStream.progressMarker", () => {
       // Clearing history retires the live stream's segment; nothing is lost.
       expect(marker.cleared).toBe(6);
 
-      // Seeding folds the legacy counter into its own column by max, beside
-      // the retired segments: a later, larger seed replaces a smaller one
-      // and neither touches what the log already counted.
-      expect(marker.seededLow).toBe(8);
-      expect(marker.seededHigh).toBe(52);
-
       // No per-chunk write exists: 36 chunks were stored along the way, and
       // the whole sequence — stream opens, block writes, settles, deletions
-      // with their retire rows, one credit, and the seeds — is a fixed count
-      // well under one row per chunk.
+      // with their retire rows, and one credit — is a fixed count well under
+      // one row per chunk.
       expect(rowsWritten).toBeLessThan(40);
     });
   });
@@ -61,39 +55,47 @@ describe("ResumableStream.progressMarker", () => {
     });
   });
 
-  it("reports the durable marker to the host per retire and per credit, never per chunk", async () => {
-    const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (instance: StreamBenchObject) => {
-      await instance.probeProgressMarker();
-      // Cutover, reclaim, credit, clear: four reports for 36 stored chunks,
-      // each carrying the durable total as it stood, never decreasing.
-      expect(instance.progressReports).toEqual([3, 4, 5, 6]);
-    });
-  });
-
   it("retires a stream once when the adapter was constructed more than once", async () => {
     const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: StreamBenchObject) => {
-      const { marker, reports } = await instance.probeReconstruction();
+      const { marker } = await instance.probeReconstruction();
       // Three constructions, one cutover of a one-segment stream: the
-      // earlier hooks were replaced, so the segment is retired once and the
-      // host hears about it once.
+      // earlier hooks were replaced, so the segment is retired once.
       expect(marker).toBe(1);
-      expect(reports).toBe(1);
     });
   });
 
-  it("seeds the legacy counter beside segments retired before it, idempotently", async () => {
+  it("does not re-seed an object that already has a progress row from the mirrored KV value", async () => {
     const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: StreamBenchObject) => {
-      const marker = await instance.probeSeedOrdering();
-      // Two segments were retired by a cutover before any seed landed.
-      expect(marker.retiredBeforeSeed).toBe(2);
-      // The seed adds the counter beside them; it does not replace them.
-      expect(marker.seeded).toBe(42);
-      // Another isolate seeding the same constant changes nothing.
-      expect(marker.seededAgain).toBe(42);
-      expect(marker.seededLower).toBe(42);
+      // Four two-segment turns across four isolates: the marker counts the
+      // eight segments that landed. The 0.23-0.28 seed read
+      // [2, 4, 6, 10, 12, 18, 20] here, adding the retired total once per
+      // isolate.
+      expect(await instance.probeMirroredSeed()).toEqual([2, 2, 4, 4, 6, 6, 8]);
+    });
+  });
+
+  it("seeds an object upgraded directly from before 0.23 once", async () => {
+    const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamBenchObject) => {
+      expect(await instance.probeDirectUpgradeSeed()).toEqual({
+        needsSeed: true,
+        seeded: 500,
+        retired: 502,
+        laterNeedsSeed: false,
+        later: 502
+      });
+    });
+  });
+
+  it("keeps counting a legacy value an older release seeded", async () => {
+    const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamBenchObject) => {
+      const marker = await instance.probeLegacyColumn();
+      expect(marker.seeded).toBe(40);
+      // Two segments retired by the cutover add to it.
+      expect(marker.retired).toBe(42);
       expect(marker.credited).toBe(43);
     });
   });

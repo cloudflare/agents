@@ -47,17 +47,13 @@ import {
   createChatStreams,
   ResumeHandshake,
   buildChatRecoveringFrame,
-  bumpChatRecoveryProgress,
   createChatFiberSnapshot,
   pendingChatTerminal,
-  readChatRecoveryProgress,
   recordChatTerminal,
   resolveChatRecoveryConfig,
   runChatRecoveryExhaustion,
   sendIfOpen,
   setChatRecovering,
-  shouldCreditStreamProgress,
-  StreamProgressCreditThrottle,
   sweepStaleChatRecoveryIncidents,
   unwrapChatFiberSnapshot,
   wrapChatFiberSnapshot,
@@ -162,9 +158,6 @@ export class TanStackAgent extends Agent<Env> {
 
   private readonly _resumableStream: ResumableStream;
   private readonly _codec = tanStackRecoveryCodec;
-  /** Per-isolate throttle for crediting progress from streaming-content deltas
-   *  (the shared `agents/chat` rule). */
-  private readonly _streamProgressCredit = new StreamProgressCreditThrottle();
   private readonly _faux: FauxTanStackModel;
   // The provider for the in-flight turn; re-read from durable storage on a
   // cold-wake recovery so the recovered turn runs under the SAME model.
@@ -430,19 +423,6 @@ export class TanStackAgent extends Agent<Env> {
             // Live broadcast to every connection EXCEPT those pending a resume
             // ACK (they get the full replay on ACK instead of duplicate chunks).
             this._broadcastChunk(requestId, body, false);
-            // Credit forward progress through the shared host-agnostic rule (the
-            // same one `AIChatAgent`/`Think` use): a milestone always credits, a
-            // streaming-content delta credits at most once per throttle window.
-            if (
-              shouldCreditStreamProgress({
-                codec: this._codec,
-                type: chunk.type,
-                throttle: this._streamProgressCredit,
-                now: Date.now()
-              })
-            ) {
-              await bumpChatRecoveryProgress(this.ctx.storage);
-            }
           }
         } finally {
           this._currentStreamId = null;
@@ -835,7 +815,7 @@ export class TanStackAgent extends Agent<Env> {
         this.ctx.storage
           .get<ChatRecoveryIncident>(key)
           .then((value) => value ?? null),
-      readProgress: () => readChatRecoveryProgress(this.ctx.storage),
+      readProgress: async () => this._resumableStream.progressMarker(),
       putIncident: (key, incident) => this.ctx.storage.put(key, incident),
       syncStorage: () => this.ctx.storage.sync(),
       deleteIncident: (key) => this.ctx.storage.delete(key).then(() => {}),
@@ -957,7 +937,7 @@ export class TanStackAgent extends Agent<Env> {
       fiberRows: fiberRows[0].count,
       incidentCount: incidents.size,
       recovering: recovering !== undefined,
-      progress: await readChatRecoveryProgress(this.ctx.storage),
+      progress: this._resumableStream.progressMarker(),
       recoveredVia: summary?.via ?? null,
       recoveryGeneratedChars: summary?.generatedChars ?? 0,
       partialPrefixChars: summary?.prefixChars ?? 0,

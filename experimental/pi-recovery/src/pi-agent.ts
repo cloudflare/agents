@@ -32,9 +32,7 @@ import {
   ChatRecoveryEngine,
   ResumableStream,
   createChatStreams,
-  bumpChatRecoveryProgress,
   createChatFiberSnapshot,
-  readChatRecoveryProgress,
   recordChatTerminal,
   resolveChatRecoveryConfig,
   runChatRecoveryExhaustion,
@@ -390,10 +388,9 @@ export class PiAgent extends Agent<Env> {
       // Fixture: flush every delta so the partial is reliably durable the
       // instant a SIGKILL lands (the engine reconstructs + continues from it).
       // A batching buffer would otherwise drop the last <10 chunks on crash.
+      // Each flushed event is a segment in the stream log, which is what the
+      // recovery progress marker counts.
       this._resumableStream.flushBuffer();
-      // Each durably-flushed streaming event is reconnect-immune forward
-      // progress for the no-progress recovery budget.
-      await bumpChatRecoveryProgress(this.ctx.storage);
     }
   }
 
@@ -624,7 +621,7 @@ export class PiAgent extends Agent<Env> {
         this.ctx.storage
           .get<ChatRecoveryIncident>(key)
           .then((value) => value ?? null),
-      readProgress: () => readChatRecoveryProgress(this.ctx.storage),
+      readProgress: async () => this._resumableStream.progressMarker(),
       // `isAwaitingClientInteraction` is omitted: pi has no client tools / HITL,
       // so the engine's default (`false`, never parked on a human) applies (#6).
       putIncident: (key, incident) => this.ctx.storage.put(key, incident),
@@ -733,7 +730,7 @@ export class PiAgent extends Agent<Env> {
       fiberRows: fiberRows[0].count,
       incidentCount: incidents.size,
       recovering: recovering !== undefined,
-      progress: await readChatRecoveryProgress(this.ctx.storage),
+      progress: this._resumableStream.progressMarker(),
       recoveredVia: summary?.via ?? null,
       recoveryGeneratedChars: summary?.generatedChars ?? 0,
       partialPrefixChars: summary?.prefixChars ?? 0

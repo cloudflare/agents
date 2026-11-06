@@ -2,8 +2,7 @@ import { describe, expect, it } from "vitest";
 import { unwrapChatFiberSnapshot } from "../recovery";
 import {
   evaluateChatRecoveryIncident,
-  resolveChatRecoveryConfig,
-  type ChatRecoveryIncident
+  resolveChatRecoveryConfig
 } from "../recovery-incident";
 import {
   AI_CHAT_SNAPSHOT_ENVELOPE,
@@ -102,13 +101,6 @@ describe("cutover: incident records", () => {
     expect(incident.workBaseline).toBe(0);
     // A missing lastProgressAt falls back to firstSeenAt for the no-progress clock.
     expect(incident.attempt).toBe(existing.attempt + 1);
-  });
-
-  it("tolerates the deprecated max_recovery_window_exceeded reason on read", () => {
-    const stored: ChatRecoveryIncident = LEGACY_INCIDENTS.deprecatedReason;
-    // The deprecated reason must remain a valid persisted value (open string).
-    expect(stored.reason).toBe("max_recovery_window_exceeded");
-    expect(stored.status).toBe("exhausted");
   });
 });
 

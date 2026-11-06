@@ -128,24 +128,4 @@ export class PiRecoveryCodec implements ChatRecoveryCodec {
     const { text } = this.decodePartial(bodies);
     return { text, parts: [], hasSettledToolResults: false };
   }
-
-  /**
-   * Pi's progress MILESTONE: the authoritative final assistant message
-   * (`message_end`). Pi is HTTP-only with no streaming no-progress window today,
-   * so nothing consults this; it conforms to {@link ChatRecoveryCodec} and shows
-   * the predicate is per-vocabulary (the codec, not the engine, owns "what counts
-   * as progress"). Disjoint from {@link isStreamingContentChunk}.
-   */
-  isProgressChunk(type: string | undefined): boolean {
-    return type === "message_end";
-  }
-
-  /**
-   * Pi's mid-segment streaming content: the incremental `message_update` (inner
-   * `text_delta`) events. Maps to the AI SDK codec's `text-delta` arm — credited
-   * through the host throttle rather than as a milestone.
-   */
-  isStreamingContentChunk(type: string | undefined): boolean {
-    return type === "message_update";
-  }
 }

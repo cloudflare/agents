@@ -91,6 +91,7 @@ interface ChatRecoveryTestStub {
   }): Promise<void>;
   setShouldKeepRecoveringForTest(keepRecovering: boolean): Promise<void>;
   getChatRecoveryIncidentsForTest(): Promise<unknown[]>;
+  setLegacyProgressCounterForTest(value: number): Promise<void>;
   addAssistantMessageForTest(id: string): Promise<void>;
   bumpRecoveryProgressForTest(): Promise<void>;
   forwardChildStreamProgressForTest(
@@ -457,6 +458,23 @@ describe("onChatRecovery", () => {
       interruptedAttempts: 5,
       status: "exhausted"
     });
+  });
+
+  it("carries the old KV progress counter into an object upgraded directly from before 0.23", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    await agentStub.setLegacyProgressCounterForTest(500);
+    await agentStub.beginIncidentForTest({
+      requestId: "req-legacy-progress",
+      recoveryKind: "continue"
+    });
+    const incidents =
+      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
+        progress?: number;
+      }>;
+    // An incident the old release opened recorded progress in counter
+    // units, so the marker must not read lower than the counter.
+    expect(incidents[0]?.progress).toBe(500);
   });
 
   it("resets the attempt budget when recovery makes forward progress", async () => {

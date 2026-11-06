@@ -148,14 +148,11 @@ export type ChatRecoveryIncident = {
 
 export const CHAT_RECOVERY_INCIDENT_KEY_PREFIX = "cf:chat-recovery:incident:";
 /**
- * The pre-derivation forward-progress counter: a KV integer bumped per
- * credited chunk. The marker is now derived from the stream log
- * (`ResumableStream.progressMarker`), and this key is only read — once per
- * isolate, to seed the derived marker so it never reads lower than the
- * high-water mark an incident recorded before the upgrade. Current code
- * writes it only as a mirror of the derived marker's durable part — one put
- * per stream retired, none per chunk — so a build rolled back to the
- * counter never reads a marker lower than an incident recorded here.
+ * The KV progress counter of releases before 0.23, bumped per credited
+ * chunk. The marker is now derived from the stream log
+ * (`ResumableStream.progressMarker`). Current code only reads this key, once,
+ * to seed an object that was upgraded directly from such a release; nothing
+ * writes it.
  */
 export const CHAT_RECOVERY_PROGRESS_KEY = "cf:chat-recovery:progress";
 /**
@@ -443,29 +440,13 @@ export async function classifyAgentToolChildRecovery(
 }
 
 /**
- * Read the durable monotonic recovery-progress counter (0 when unset). The value
- * feeds the no-progress budget decision; shared by `AIChatAgent` and `Think`.
+ * Read the KV progress counter of releases before 0.23 (0 when unset), for
+ * `ResumableStream.seedProgress`. Shared by `AIChatAgent` and `Think`.
  */
 export async function readChatRecoveryProgress(
   storage: Pick<DurableObjectStorage, "get">
 ): Promise<number> {
   return (await storage.get<number>(CHAT_RECOVERY_PROGRESS_KEY)) ?? 0;
-}
-
-/**
- * Advance the KV progress counter by one.
- *
- * @deprecated Hosts no longer bump a counter per credited chunk: the marker
- * is derived from the stream log (`ResumableStream.progressMarker`) and
- * explicit credits go through `ResumableStream.creditProgress`. Kept for
- * code that still maintains the KV counter; a value written here is folded
- * into the derived marker on the next seed.
- */
-export async function bumpChatRecoveryProgress(
-  storage: Pick<DurableObjectStorage, "get" | "put">
-): Promise<void> {
-  const current = (await storage.get<number>(CHAT_RECOVERY_PROGRESS_KEY)) ?? 0;
-  await storage.put(CHAT_RECOVERY_PROGRESS_KEY, current + 1);
 }
 
 /**
@@ -487,33 +468,6 @@ export class AgentToolStreamProgressThrottle {
   private _lastBumpAt = 0;
   shouldCredit(now: number): boolean {
     if (now - this._lastBumpAt < AGENT_TOOL_STREAM_PROGRESS_BUMP_THROTTLE_MS) {
-      return false;
-    }
-    this._lastBumpAt = now;
-    return true;
-  }
-}
-
-/**
- * Throttle window for crediting recovery progress from mid-segment streaming
- * content (text/reasoning/tool-input deltas). A milestone chunk credits
- * unconditionally; deltas credit at most once per window so a long single
- * segment registers forward progress across crashes without writing storage per
- * token. 5s is far finer than the 300s no-progress budget, so any crash gap
- * longer than this window over an actively-streaming segment still credits.
- */
-export const CHAT_STREAM_PROGRESS_CREDIT_THROTTLE_MS = 5_000;
-
-/**
- * Per-isolate throttle gate for crediting recovery progress from mid-segment
- * streaming-content chunks — the delta arm of {@link shouldCreditStreamProgress}.
- * The `_lastBumpAt` clock is in-memory, so it resets per isolate and the first
- * delta after a restart always credits. Shared by `AIChatAgent` and `Think`.
- */
-export class StreamProgressCreditThrottle {
-  private _lastBumpAt = 0;
-  shouldCredit(now: number): boolean {
-    if (now - this._lastBumpAt < CHAT_STREAM_PROGRESS_CREDIT_THROTTLE_MS) {
       return false;
     }
     this._lastBumpAt = now;

@@ -3,12 +3,10 @@ import type { ResolvedChatRecoveryConfig } from "../lifecycle";
 import {
   AGENT_TOOL_STREAM_PROGRESS_BUMP_THROTTLE_MS,
   AgentToolStreamProgressThrottle,
-  bumpChatRecoveryProgress,
   CHAT_RECOVERY_ALARM_DEBOUNCE_MS,
   classifyAgentToolChildRecovery,
   CHAT_RECOVERY_INCIDENT_KEY_PREFIX,
   CHAT_RECOVERY_INCIDENT_TTL_MS,
-  CHAT_RECOVERY_PROGRESS_KEY,
   chatRecoveryIncidentId,
   chatRecoveryIncidentKey,
   DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS,
@@ -21,7 +19,6 @@ import {
   finishChatRecoveryAttempt,
   KV_DELETE_MAX_KEYS,
   listActiveChatRecoveryIncidents,
-  readChatRecoveryProgress,
   resolveChatRecoveryConfig,
   selectStaleIncidentKeys,
   sweepStaleChatRecoveryIncidents,
@@ -473,29 +470,6 @@ describe("classifyAgentToolChildRecovery", () => {
     storage.data.set("cf:chat:last-terminal", { foo: 1 });
     await classify(storage);
     expect(storage.listPrefixes).toEqual([CHAT_RECOVERY_INCIDENT_KEY_PREFIX]);
-  });
-});
-
-describe("readChatRecoveryProgress / bumpChatRecoveryProgress", () => {
-  it("reads 0 when the counter is unset", async () => {
-    const storage = new FakeStorage();
-    expect(
-      await readChatRecoveryProgress(
-        storage as unknown as Pick<DurableObjectStorage, "get">
-      )
-    ).toBe(0);
-  });
-
-  it("monotonically increments the durable counter", async () => {
-    const storage = new FakeStorage();
-    const typed = storage as unknown as Pick<
-      DurableObjectStorage,
-      "get" | "put"
-    >;
-    await bumpChatRecoveryProgress(typed);
-    await bumpChatRecoveryProgress(typed);
-    expect(await readChatRecoveryProgress(typed)).toBe(2);
-    expect(storage.data.get(CHAT_RECOVERY_PROGRESS_KEY)).toBe(2);
   });
 });
 

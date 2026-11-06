@@ -3878,6 +3878,23 @@ describe("Think — onChatRecovery", () => {
     expect(incidents[0]?.reason).toBeUndefined();
   });
 
+  it("carries the old KV progress counter into an object upgraded directly from before 0.23", async () => {
+    const agent = await freshRecoveryAgent(
+      `recovery-legacy-progress-${crypto.randomUUID()}`
+    );
+    await agent.setLegacyProgressCounterForTest(500);
+    await agent.beginIncidentForTest({
+      requestId: "req-legacy-progress",
+      recoveryKind: "continue"
+    });
+    const incidents = (await agent.getChatRecoveryIncidentsForTest()) as Array<{
+      progress?: number;
+    }>;
+    // An incident the old release opened recorded progress in counter
+    // units, so the marker must not read lower than the counter.
+    expect(incidents[0]?.progress).toBe(500);
+  });
+
   it("seals a content-emitting runaway via the work budget", async () => {
     const agent = await freshRecoveryAgent("recovery-work-budget");
     // Tiny work budget so a turn that keeps producing content is sealed by

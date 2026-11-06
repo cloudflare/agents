@@ -223,9 +223,7 @@ export {
 export {
   aiSdkRecoveryCodec,
   partialHasSettledToolResults,
-  shouldCreditStreamProgress,
-  type ChatRecoveryCodec,
-  type ProgressCreditThrottle
+  type ChatRecoveryCodec
 } from "./recovery-codec";
 
 export {
@@ -240,7 +238,6 @@ export {
   listActiveChatRecoveryIncidents,
   classifyAgentToolChildRecovery,
   readChatRecoveryProgress,
-  bumpChatRecoveryProgress,
   recordChatTerminal,
   clearChatTerminal,
   pendingChatTerminal,
@@ -248,8 +245,6 @@ export {
   setChatRecovering,
   AgentToolStreamProgressThrottle,
   AGENT_TOOL_STREAM_PROGRESS_BUMP_THROTTLE_MS,
-  StreamProgressCreditThrottle,
-  CHAT_STREAM_PROGRESS_CREDIT_THROTTLE_MS,
   CHAT_RECOVERY_INCIDENT_KEY_PREFIX,
   CHAT_RECOVERY_PROGRESS_KEY,
   CHAT_RECOVERING_KEY,

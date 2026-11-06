@@ -173,19 +173,6 @@ export type SqlTaggedTemplate = {
   ): T[];
 };
 
-/** Host hooks for the chat stream adapter. */
-export type ResumableStreamOptions = {
-  /**
-   * Called with the durable part of the recovery progress marker (retired
-   * segments plus credits plus the seeded legacy counter) after it advances,
-   * outside any transaction. Hosts mirror it to the pre-derivation KV key so
-   * a build rolled back to the KV counter never reads a marker lower than
-   * an incident recorded under this one. Fires per stream retired and per
-   * credit, never per chunk.
-   */
-  onProgress?: (durableSegments: number) => void;
-};
-
 /**
  * The deletion hook each adapter holds on its Streams capability. One
  * adapter per capability: a host whose startup retried constructs the
@@ -233,16 +220,14 @@ export class ResumableStream {
 
   private readonly ops: StreamsSyncInternal;
 
-  constructor(
-    streams: Streams,
-    sql: SqlTaggedTemplate,
-    options: ResumableStreamOptions = {}
-  ) {
+  constructor(streams: Streams, sql: SqlTaggedTemplate) {
     this.ops = streams.__DO_NOT_USE_WILL_BREAK__sync();
     this.ops.ensureTables();
     this._sql = sql;
-    this._onProgress = options.onProgress;
     this._ensureProgressTable();
+    // Decided before the legacy migration and restore below, which can
+    // retire segments and create the row themselves.
+    this._needsLegacySeed = !this._hasProgressRow();
     // Every path that removes a chat row's log — this adapter's cutover,
     // reclaim and clear, and the capability's public `delete()` — folds the
     // row's segments into the retired total first. Registered before the
@@ -277,23 +262,23 @@ export class ResumableStream {
   // written per stream retired.
 
   private readonly _sql: SqlTaggedTemplate;
-  private readonly _onProgress: ResumableStreamOptions["onProgress"];
 
   /**
-   * Tell the host the durable part of the marker moved. Called after the
-   * write that moved it has left any transaction, never inside one: the
-   * host's mirror is an async KV put, which a synchronous transaction
-   * would reject.
+   * Whether this object had no progress row when the adapter was built.
+   * Only then can the KV counter still hold a value worth carrying over:
+   * one a release before 0.23 wrote. Releases 0.23 to 0.28 also wrote that
+   * key, mirroring this table's total after every retire, and a retire
+   * always creates the row. Seeding from the mirror added the retired
+   * segments to the marker again on every isolate start, so an object that
+   * already has a row is never seeded.
    */
-  private _notifyProgress(): void {
-    this._onProgress?.(this._retiredSegments());
-  }
+  private readonly _needsLegacySeed: boolean;
 
   /**
    * One row: `retired` accumulates the segments of deleted streams and
-   * explicit credits; `legacy` holds the pre-derivation KV counter, folded
-   * in once. They are separate columns so a seed can never swallow
-   * segments retired before it landed, and a repeated seed is idempotent.
+   * explicit credits; `legacy` holds the KV counter of a release before
+   * 0.23, carried over once by {@link seedProgress}. They are separate
+   * columns so a seed can never swallow segments retired before it landed.
    */
   private _ensureProgressTable(): void {
     this._sql`
@@ -303,6 +288,14 @@ export class ResumableStream {
         legacy INTEGER NOT NULL DEFAULT 0
       ) WITHOUT ROWID
     `;
+  }
+
+  private _hasProgressRow(): boolean {
+    return (
+      this._sql<{ key: string }>`
+        SELECT key FROM cf_agents_chat_progress WHERE key = 'chat'
+      `.length > 0
+    );
   }
 
   private _retiredSegments(): number {
@@ -362,26 +355,28 @@ export class ResumableStream {
    */
   creditProgress(): void {
     this._retire(1);
-    this._notifyProgress();
   }
 
   /**
-   * Carry the pre-derivation KV counter forward: the marker must not read
-   * lower after the upgrade than the high-water mark an in-flight incident
-   * already recorded, or a progressing turn would look stuck until the log
-   * caught up. The counter is never written again, so its value is a
-   * constant this folds into its own column by max — idempotent across
-   * isolates, and never touching segments retired before the seed landed.
-   * A no-op for zero, so a fresh object never writes.
-   *
-   * The counter already credited a stream that was in flight at the
-   * upgrade, and that stream's live segments count again here, so the
-   * first read after the upgrade can exceed the counter by those segments.
-   * That reads as progress once, and hands an in-flight incident one extra
-   * no-progress window; it cannot recur.
+   * Whether {@link seedProgress} would write: this object had no progress
+   * row when the adapter was built. Lets a host skip reading the KV counter
+   * when there is nothing to carry over.
+   */
+  get needsLegacySeed(): boolean {
+    return this._needsLegacySeed;
+  }
+
+  /**
+   * Carry the KV counter of a release before 0.23 forward, so an incident
+   * that release opened never sees the marker read lower after a direct
+   * upgrade: it would ignore new output until the log caught up, and could
+   * seal a turn that is still making progress. Folded into its own column by
+   * max, so a repeated seed in the same isolate changes nothing. A no-op for
+   * zero, and for an object that already had a progress row (see
+   * {@link needsLegacySeed}).
    */
   seedProgress(legacyTotal: number): void {
-    if (legacyTotal <= 0) return;
+    if (!this._needsLegacySeed || legacyTotal <= 0) return;
     this._sql`
       INSERT INTO cf_agents_chat_progress (key, retired, legacy)
       VALUES ('chat', 0, ${legacyTotal})
@@ -398,7 +393,6 @@ export class ResumableStream {
   private _deleteRetiring(rows: readonly StreamRow[]): void {
     if (rows.length === 0) return;
     this.ops.deleteMany(rows.map((row) => row.stream_id));
-    this._notifyProgress();
   }
 
   /**
@@ -728,7 +722,6 @@ export class ResumableStream {
       commit,
       discard
     });
-    if (settled && discard) this._notifyProgress();
     // The stream was settled (or deleted) by another path first, so the
     // settle was a no-op and `persist` did not run: the message must still
     // land, just not atomically with a settlement that already happened.
