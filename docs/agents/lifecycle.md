@@ -120,10 +120,11 @@ export class MyObject extends DurableObject<Env> {
 }
 ```
 
-Return nothing to send the default response. If the thrown value is not an
-`Error`, returning nothing rethrows it to the runtime instead. `error` is
-whatever was thrown, so narrow it before you read it. `request` may already have had its body read.
-If `onFetchError` throws, the lifecycle logs that error and sends the default.
+Return nothing to send the default response. If `onFetchError` throws, the
+lifecycle logs that error and also sends the default. In both cases, if the
+original thrown value is not an `Error`, the lifecycle rethrows it to the
+runtime instead. `error` is whatever was thrown, so narrow it before you read
+it. `request` may already have had its body read.
 
 For a WebSocket upgrade, return either an HTTP error response or a `101`
 response with your own socket:

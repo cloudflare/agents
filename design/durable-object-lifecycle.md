@@ -32,8 +32,8 @@ upgrade hook, or the host's `onRequest`) ends in one place. Lifecycle logs the
 error, then offers it to the host's optional `onFetchError(request, error)`.
 If the host returns no response, or the hook throws, Lifecycle sends a default
 that never carries the error: `500 Internal Server Error`, or for an upgrade an
-accepted socket closed with 1011. A thrown value that is not an `Error` is
-rethrown to the runtime instead, as before. The defaults used to send
+accepted socket closed with 1011. In both cases, an original thrown value
+that is not an `Error` is rethrown to the runtime instead, as before. The defaults used to send
 `err.stack`, which leaked internals to callers who were not authenticated
 ([#2828](https://github.com/cloudflare/agents/issues/2828)).
 
