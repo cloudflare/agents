@@ -5178,6 +5178,14 @@ export class Agent<
     await this._dynamicAgents.sendToConnection(connectionId, message);
   }
 
+  async _cf_sendManyToSubAgentConnection(
+    connectionId: string,
+    messages: ReadonlyArray<string | ArrayBuffer | ArrayBufferView>
+  ): Promise<void> {
+    await this.__unsafe_ensureInitialized();
+    await this._dynamicAgents.sendManyToConnection(connectionId, messages);
+  }
+
   async _cf_closeSubAgentConnection(
     connectionId: string,
     code?: number,
