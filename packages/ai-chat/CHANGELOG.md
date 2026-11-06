@@ -1,5 +1,11 @@
 # @cloudflare/ai-chat
 
+## 0.12.3
+
+### Patch Changes
+
+- [#2818](https://github.com/cloudflare/agents/pull/2818) [`a2f1216`](https://github.com/cloudflare/agents/commit/a2f1216993aa43982ef3550ec0a05e9a4d6d3175) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Cancelling a chat request while it waits in the queue now stops it from running, instead of the cancel being dropped. See [#2701](https://github.com/cloudflare/agents/issues/2701).
+
 ## 0.12.2
 
 ### Patch Changes
