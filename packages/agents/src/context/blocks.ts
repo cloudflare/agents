@@ -1,19 +1,15 @@
 /**
- * Context Block Management
- *
- * Persistent key-value blocks (MEMORY, USER, SOUL, etc.) that are:
- * - Loaded from their providers at init
- * - Frozen into a snapshot when toSystemPrompt() is called
- * - Updated via setBlock() which writes to the provider immediately
- *   but does NOT update the frozen snapshot (preserves LLM prefix cache)
- * - Re-snapshotted on next toSystemPrompt() call
- * - Reported by reminder(), when declared `whenChanged: "remind"`, while
- *   their current value differs from the frozen snapshot
+ * Context blocks: labelled sections of a system prompt (SOUL, MEMORY, and
+ * so on), each backed by a provider, and the tools a model uses to write and
+ * search them.
  *
  * Provider type determines behavior:
  * - ContextProvider (get only)        → readonly block in system prompt
  * - WritableContextProvider (get+set) → writable via set_context tool
  * - SearchProvider (get+search+set?)  → searchable via search_context tool
+ *
+ * Blocks hold no prompt state. `Context` binds them to a session, which
+ * records the prompt each turn was sent with.
  */
 
 import type { ToolSet } from "ai";
@@ -48,6 +44,12 @@ function contextEntryKey(metadataTitle: string | undefined, content: string) {
   return `${slug}-${stableHash(content)}`;
 }
 
+/** Name of the tool that writes a writable or searchable block. */
+export const SET_CONTEXT_TOOL = "set_context";
+
+/** Name of the tool that searches a searchable block. */
+export const SEARCH_CONTEXT_TOOL = "search_context";
+
 const SECTION_RULE = "═".repeat(46);
 
 const REMINDER_PREAMBLE =
@@ -57,11 +59,15 @@ const REMINDER_PREAMBLE =
 /**
  * Empty readonly blocks are left out of the prompt. Writable and searchable
  * blocks always render so the model knows which tools can address them.
- * Remind blocks always render so `promptRendersBlock` can match them exactly:
- * an absent section cannot be told apart from another label's by prefix.
+ * Remind blocks always render, so a later change has a section to replace.
  */
 function rendersInPrompt(block: ContextBlock, remind: boolean): boolean {
   return !!block.content || block.writable || block.isSearchable || remind;
+}
+
+/** The text that introduces changed blocks sent after the cached prefix. */
+export function renderReminder(sections: readonly string[]): string {
+  return [REMINDER_PREAMBLE, ...sections].join("\n\n");
 }
 
 function renderSection(block: ContextBlock): string {
@@ -75,18 +81,6 @@ function renderSection(block: ContextBlock): string {
   else if (!block.writable) header += " [readonly]";
   else header += " [writable]";
   return `${SECTION_RULE}\n${header}\n${SECTION_RULE}\n${block.content}`;
-}
-
-/**
- * Whether `prompt` renders `block` exactly as it stands now. Sections are
- * joined by a blank line and each opens with a rule, so padding the prompt
- * with a blank line in front and a rule behind lets one containment test
- * pin both ends of a section: content that only grew or shrank at the
- * edges does not pass for unchanged.
- */
-function promptRendersBlock(prompt: string, block: ContextBlock): boolean {
-  const padded = `\n\n${prompt}\n\n${SECTION_RULE}\n`;
-  return padded.includes(`\n\n${renderSection(block)}\n\n${SECTION_RULE}\n`);
 }
 
 /**
@@ -135,19 +129,18 @@ export interface ContextConfig {
    *  - ContextProvider (get only) → readonly
    *  - WritableContextProvider (get+set) → writable via set_context
    *  - SearchProvider (get+search+set?) → searchable via search_context
-   *  If omitted, auto-wired to writable SQLite when using builder. */
+   *  If omitted, the host's default provider supplies storage (with
+   *  `Context`, writable SQLite). */
   provider?: ContextProvider | WritableContextProvider | SearchProvider;
   /**
    * What the model sees when this block's value moves on after the system
-   * prompt was frozen.
+   * prompt was recorded (see `Context`).
    *
-   * - `"wait"` (default): nothing, until `refreshSystemPrompt()` rebuilds
-   *   the prompt.
-   * - `"remind"`: `reminder()` re-reads the block and, while it differs from
-   *   the frozen prompt, returns its current value for the host to send
-   *   after the cached prefix. The frozen prompt, and the provider's prefix
-   *   cache, stay intact until `refreshSystemPrompt()` promotes the value.
-   *   The block renders in the prompt even when empty.
+   * - `"wait"` (default): nothing, until a refresh records a new prompt.
+   * - `"remind"`: the next turn delivers the new value after the cached
+   *   prefix, next to that turn's user message, and records it there. The
+   *   prompt, and the provider's prefix cache, stay intact. The block
+   *   renders in the prompt even when empty.
    *
    * A change is any difference in what the provider returns, so return only
    * what should count: a date rather than a timestamp.
@@ -170,32 +163,31 @@ export interface ContextBlock {
   isSearchable: boolean;
 }
 
+/** Options for {@link ContextBlocks}. */
+export interface ContextBlocksOptions {
+  /**
+   * Supplies storage for blocks declared without a provider, so a host can
+   * offer durable writable blocks by label alone.
+   */
+  readonly defaultProvider?: (label: string) => ContextProvider;
+}
+
 /**
- * Manages context blocks with frozen snapshot support.
+ * A set of context blocks: their current values, the sections they render
+ * as, and the model's tools for them.
+ *
+ * @experimental The API surface may change before stabilizing.
  */
 export class ContextBlocks {
   private configs: ContextConfig[];
   private blocks = new Map<string, ContextBlock>();
-  private snapshot: string | null = null;
   private loaded = false;
-  private promptStore: WritableContextProvider | null;
   private defaultProvider: ((label: string) => ContextProvider) | null;
 
-  /**
-   * @param configs Blocks to load on first use.
-   * @param promptStore Persists the frozen system prompt, keeping the
-   *   provider's prefix cache warm across wakes.
-   * @param defaultProvider Supplies storage for blocks declared without a
-   *   provider, so a host can offer durable writable blocks by label alone.
-   */
-  constructor(
-    configs: ContextConfig[],
-    promptStore?: WritableContextProvider,
-    defaultProvider?: (label: string) => ContextProvider
-  ) {
+  /** @param configs Blocks to load on first use. */
+  constructor(configs: ContextConfig[], options: ContextBlocksOptions = {}) {
     this.configs = configs;
-    this.promptStore = promptStore ?? null;
-    this.defaultProvider = defaultProvider ?? null;
+    this.defaultProvider = options.defaultProvider ?? null;
   }
 
   /** Fill in the host's storage for a block declared without a provider. */
@@ -244,8 +236,7 @@ export class ContextBlocks {
    * Used by extensions to contribute context at runtime.
    *
    * If blocks have already been loaded, the new block's provider is
-   * initialized and loaded immediately. The snapshot is NOT updated
-   * automatically — call `refreshSystemPrompt()` to rebuild.
+   * initialized and loaded immediately.
    */
   async addBlock(input: ContextConfig): Promise<ContextBlock> {
     if (!this.loaded) await this.load();
@@ -266,8 +257,6 @@ export class ContextBlocks {
    * Used during extension unload cleanup.
    *
    * Returns true if the block existed and was removed.
-   * The snapshot is NOT updated automatically — call
-   * `refreshSystemPrompt()` to rebuild.
    */
   removeBlock(label: string): boolean {
     const idx = this.configs.findIndex((c) => c.label === label);
@@ -293,8 +282,7 @@ export class ContextBlocks {
   }
 
   /**
-   * Set block content. Writes to provider immediately.
-   * Does NOT update the frozen snapshot.
+   * Set block content. Writes to the provider immediately.
    */
   async setBlock(label: string, content: string): Promise<ContextBlock> {
     if (!this.loaded) await this.load();
@@ -398,80 +386,56 @@ export class ContextBlocks {
     );
   }
 
-  private renderPrompt(): string {
-    const remind = new Set(
-      this.configs
-        .filter((config) => config.whenChanged === "remind")
-        .map((config) => config.label)
-    );
-    return Array.from(this.blocks.values())
-      .filter((block) => rendersInPrompt(block, remind.has(block.label)))
-      .map(renderSection)
-      .join("\n\n");
-  }
-
-  // ── Public API ──────────────────────────────────────────────────
-
   /**
-   * The frozen system prompt. The first call renders the blocks and stores
-   * the result; every later call returns that same string, so the model
-   * provider's prefix cache stays warm. Block edits do not change it until
-   * `refreshSystemPrompt()` is called.
+   * @internal Every block's prompt section in declaration order, as
+   * `[label, section]` pairs; a block left out of the prompt has an empty
+   * section. Read from the loaded blocks.
    */
-  async freezeSystemPrompt(): Promise<string> {
-    if (this.promptStore) {
-      const stored = await this.promptStore.get();
-      if (stored !== null) return stored;
-    }
-    if (this.snapshot !== null) return this.snapshot;
-
+  async internal_sections(): Promise<Array<[string, string]>> {
     if (!this.loaded) await this.load();
-    this.snapshot = this.renderPrompt();
-    await this.promptStore?.set(this.snapshot);
-    return this.snapshot;
+    const remind = this.remindLabels();
+    return Array.from(this.blocks.values(), (block) => [
+      block.label,
+      rendersInPrompt(block, remind.has(block.label))
+        ? renderSection(block)
+        : ""
+    ]);
   }
 
   /**
-   * Reload every block from its provider, re-render the system prompt, and
-   * persist it. Use this after block content has changed.
+   * @internal Re-read the `whenChanged: "remind"` blocks from their
+   * providers and return their current sections.
    */
-  async refreshSystemPrompt(): Promise<string> {
-    this.loaded = false;
-    await this.load();
-    this.snapshot = this.renderPrompt();
-    await this.promptStore?.set(this.snapshot);
-    return this.snapshot;
-  }
-
-  /**
-   * Current values of the `whenChanged: "remind"` blocks that no longer
-   * match the frozen prompt, rendered for the host to send after the cached
-   * prefix: at the end of the conversation, not in the system prompt. `null`
-   * when nothing has changed or nothing is frozen yet.
-   *
-   * Each call re-reads those blocks from their providers. The comparison is
-   * against the frozen prompt itself, so it holds across restarts, and a
-   * reminder keeps appearing on every call until `refreshSystemPrompt()`
-   * folds the value in.
-   */
-  async reminder(): Promise<string | null> {
+  async internal_remindSections(): Promise<Array<[string, string]>> {
     if (!this.loaded) await this.load();
-    const frozen = this.promptStore
-      ? ((await this.promptStore.get()) ?? this.snapshot)
-      : this.snapshot;
-    if (frozen === null) return null;
-
-    const sections: string[] = [];
+    const sections: Array<[string, string]> = [];
     for (const config of this.configs) {
       if (config.whenChanged !== "remind") continue;
       const block = await this.readBlock(config);
       this.blocks.set(config.label, block);
-      if (!promptRendersBlock(frozen, block)) {
-        sections.push(renderSection(block));
-      }
+      sections.push([config.label, renderSection(block)]);
     }
-    if (sections.length === 0) return null;
-    return [REMINDER_PREAMBLE, ...sections].join("\n\n");
+    return sections;
+  }
+
+  private remindLabels(): Set<string> {
+    return new Set(
+      this.configs
+        .filter((config) => config.whenChanged === "remind")
+        .map((config) => config.label)
+    );
+  }
+
+  /**
+   * The blocks rendered as a system prompt, from their loaded values.
+   * Nothing is stored: a host that needs the prompt to stay the same across
+   * turns keeps it, as `Context` does in the session.
+   */
+  async renderSystemPrompt(): Promise<string> {
+    return (await this.internal_sections())
+      .map(([, section]) => section)
+      .filter((section) => section.length > 0)
+      .join("\n\n");
   }
 
   /**
@@ -549,7 +513,7 @@ export class ContextBlocks {
             "entries. Metadata is optional."
           : "";
 
-      toolSet.set_context = {
+      toolSet[SET_CONTEXT_TOOL] = {
         description: `Write to a context block. Available blocks:\n${blockDescriptions.join("\n")}\n\nWrites are durable and persist across sessions.${metadataHint}`,
         inputSchema: z.fromJSONSchema({
           type: "object" as const,
@@ -595,7 +559,7 @@ export class ContextBlocks {
     // ── search_context ────────────────────────────────────────────
 
     if (searchLabels.length > 0) {
-      toolSet.search_context = {
+      toolSet[SEARCH_CONTEXT_TOOL] = {
         description:
           "Search for information in a searchable context block. " +
           "ONLY these blocks are searchable: " +

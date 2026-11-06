@@ -25,8 +25,9 @@ const context = new ContextBlocks([
   { label: "soul", provider: soul },
   { label: "memory", maxTokens: 1_100, provider: soul }
 ]);
-context.freezeSystemPrompt() satisfies Promise<string>;
-context.refreshSystemPrompt() satisfies Promise<string>;
+context.renderSystemPrompt() satisfies Promise<string>;
+// @ts-expect-error The prompt is recorded by Context, not kept by the blocks.
+context.freezeSystemPrompt();
 context.tools() satisfies Promise<Record<string, unknown>>;
 context.getBlocks() satisfies Array<{
   label: string;

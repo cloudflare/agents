@@ -1631,14 +1631,16 @@ describe("Think — context blocks", () => {
     expect(await agent.getTurnToolNames()).not.toContain("activate_skill");
     await expect(agent.getContextReminder()).resolves.toBeNull();
 
-    // A new skill reaches the model as a reminder; the frozen prompt (and
-    // the provider's prefix cache) stays the same.
+    // A new skill reaches the model as a reminder after that turn's user
+    // message; the frozen prompt (and the provider's prefix cache) stays the
+    // same, and the change counts as delivered.
     await agent.writeSkill("map-reading", "How to read a map.");
     await agent.testChat("Hello again");
     await expect(agent.getAssembledSystemPrompt()).resolves.toBe(frozen);
-    await expect(agent.getContextReminder()).resolves.toContain(
+    expect(await agent.getTurnLastMessage()).toContain(
       "- map-reading: How to read a map."
     );
+    await expect(agent.getContextReminder()).resolves.toBeNull();
     expect(await agent.getTurnToolNames()).toEqual(
       expect.arrayContaining(["activate_skill", "read_skill_resource"])
     );
@@ -1646,13 +1648,16 @@ describe("Think — context blocks", () => {
     await agent.writeSkill("map-reading", "How to read a nautical chart.");
     await agent.testChat("And again");
     await expect(agent.getAssembledSystemPrompt()).resolves.toBe(frozen);
-    const edited = await agent.getContextReminder();
+    const edited = await agent.getTurnLastMessage();
     expect(edited).toContain("- map-reading: How to read a nautical chart.");
     expect(edited).not.toContain("How to read a map.");
 
-    // Deleting the skill brings the catalog back to what the prompt froze.
+    // Deleting the skill is a change too: the model last saw the chart.
     await agent.deleteSkill("map-reading");
     await agent.testChat("Last one");
+    expect(await agent.getTurnLastMessage()).toContain(
+      "No skills are available."
+    );
     await expect(agent.getContextReminder()).resolves.toBeNull();
     expect(await agent.getTurnToolNames()).not.toContain("activate_skill");
   });

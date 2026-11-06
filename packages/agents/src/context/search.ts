@@ -57,15 +57,22 @@ export function isSearchProvider(
  */
 export class AgentSearchProvider implements SearchProvider {
   private agent: SqlProvider;
-  private label = "";
+  private label: string;
   private initialized = false;
 
-  constructor(agent: SqlProvider) {
+  /**
+   * @param label Key the entries are stored under. Defaults to the block
+   *   label, which `init()` supplies.
+   */
+  constructor(agent: SqlProvider, label?: string) {
     this.agent = agent;
+    this.label = label ?? "";
   }
 
   init(label: string): void {
-    this.label = label;
+    if (!this.label) {
+      this.label = label;
+    }
   }
 
   private ensureTable(): void {
