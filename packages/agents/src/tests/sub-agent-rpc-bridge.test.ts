@@ -479,6 +479,29 @@ describe("facet connection operations after frame completion (issue #2055)", () 
     }
   });
 
+  it("starts a new root call rather than grow a batch past its size limit", async () => {
+    const parentName = uniqueName();
+    const ws = await connectWS(parentName, uniqueName());
+    try {
+      const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+      const before = await parent.subAgentConnectionSendCallCount();
+      const messages = ["a", "b"].map((prefix) =>
+        `${prefix}-${crypto.randomUUID()}-`.padEnd(600_000, "x")
+      );
+      const delivered = waitForTextMessages(ws, new Set(messages), 5000);
+
+      const response = await callRPC(ws, "sendConnectionMessagesAfterDelay", [
+        messages
+      ]);
+      expectSuccessfulResult(response, "scheduled");
+
+      await expect(delivered).resolves.toEqual(messages);
+      expect((await parent.subAgentConnectionSendCallCount()) - before).toBe(2);
+    } finally {
+      ws.close();
+    }
+  });
+
   it("reports a failed root-routed connection operation", async () => {
     const parentName = uniqueName();
     const ws = await connectWS(parentName, uniqueName());

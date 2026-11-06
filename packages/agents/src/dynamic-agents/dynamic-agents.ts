@@ -71,8 +71,9 @@ type PendingConnectionSends = {
 };
 
 /**
- * A batch stops taking sends at this size (string length or byte length), so
- * one root call stays far below the RPC message size limit.
+ * A batch takes no send that would grow it past this size (string length or
+ * byte length), so one root call stays far below the RPC message size limit.
+ * A larger send goes alone, as it did before batching.
  */
 const MAX_CONNECTION_SEND_BATCH_SIZE = 1_000_000;
 
@@ -1011,17 +1012,15 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     connectionId: string,
     message: string | ArrayBuffer | ArrayBufferView
   ): void {
+    const size = connectionSendSize(message);
     const open = this.#openConnectionSendBatches.get(connectionId);
-    if (open && open.size < MAX_CONNECTION_SEND_BATCH_SIZE) {
+    if (open && open.size + size <= MAX_CONNECTION_SEND_BATCH_SIZE) {
       open.messages.push(message);
-      open.size += connectionSendSize(message);
+      open.size += size;
       return;
     }
 
-    const batch: PendingConnectionSends = {
-      messages: [message],
-      size: connectionSendSize(message)
-    };
+    const batch: PendingConnectionSends = { messages: [message], size };
     let closed = false;
     const close = () => {
       closed = true;
