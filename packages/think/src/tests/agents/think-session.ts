@@ -722,12 +722,24 @@ export class ThinkTestAgent extends Think {
     connectionId: string,
     message: string | ArrayBuffer | ArrayBufferView
   ): Promise<void> {
+    await this._delayNextSubAgentConnectionSend();
+    await super._cf_sendToSubAgentConnection(connectionId, message);
+  }
+
+  override async _cf_sendManyToSubAgentConnection(
+    connectionId: string,
+    messages: ReadonlyArray<string | ArrayBuffer | ArrayBufferView>
+  ): Promise<void> {
+    await this._delayNextSubAgentConnectionSend();
+    await super._cf_sendManyToSubAgentConnection(connectionId, messages);
+  }
+
+  private async _delayNextSubAgentConnectionSend(): Promise<void> {
     if (this._nextSubAgentConnectionSendDelayMs > 0) {
       const delayMs = this._nextSubAgentConnectionSendDelayMs;
       this._nextSubAgentConnectionSendDelayMs = 0;
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
-    await super._cf_sendToSubAgentConnection(connectionId, message);
   }
 
   /** Slow the streamed turn so the parent tails it while it's still live. */

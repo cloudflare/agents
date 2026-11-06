@@ -151,6 +151,12 @@ export class DynamicAgentConnectionBridge
     this.#connection.send(message);
   }
 
+  sendMany(
+    messages: ReadonlyArray<string | ArrayBuffer | ArrayBufferView>
+  ): void {
+    for (const message of messages) this.#connection.send(message);
+  }
+
   close(code?: number, reason?: string): void {
     this.#connection.close(code, reason);
   }
@@ -183,6 +189,15 @@ export class RootDynamicAgentConnectionBridge implements DynamicAgentConnectionB
 
   send(message: string | ArrayBuffer | ArrayBufferView): Promise<void> {
     return this.#root._cf_sendToSubAgentConnection(this.#connectionId, message);
+  }
+
+  sendMany(
+    messages: ReadonlyArray<string | ArrayBuffer | ArrayBufferView>
+  ): Promise<void> {
+    return this.#root._cf_sendManyToSubAgentConnection(
+      this.#connectionId,
+      messages
+    );
   }
 
   close(code?: number, reason?: string): Promise<void> {

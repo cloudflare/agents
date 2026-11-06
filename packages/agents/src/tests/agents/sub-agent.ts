@@ -1248,6 +1248,7 @@ export class TestSubAgentParent extends Agent {
   }
 
   private _subAgentBroadcastCalls = 0;
+  private _subAgentConnectionSendCalls = 0;
   private _startsInThisInstance = 0;
 
   onStart(): void {
@@ -1261,6 +1262,27 @@ export class TestSubAgentParent extends Agent {
 
   subAgentBroadcastCallCount(): number {
     return this._subAgentBroadcastCalls;
+  }
+
+  /** Root calls a sub-agent has made to send on one of its connections. */
+  subAgentConnectionSendCallCount(): number {
+    return this._subAgentConnectionSendCalls;
+  }
+
+  override async _cf_sendToSubAgentConnection(
+    connectionId: string,
+    message: string | ArrayBuffer | ArrayBufferView
+  ): Promise<void> {
+    this._subAgentConnectionSendCalls += 1;
+    await super._cf_sendToSubAgentConnection(connectionId, message);
+  }
+
+  override async _cf_sendManyToSubAgentConnection(
+    connectionId: string,
+    messages: ReadonlyArray<string | ArrayBuffer | ArrayBufferView>
+  ): Promise<void> {
+    this._subAgentConnectionSendCalls += 1;
+    await super._cf_sendManyToSubAgentConnection(connectionId, messages);
   }
 
   async broadcastFromSubAgentDetached(
@@ -2707,6 +2729,20 @@ export class SlowReplySubAgent extends Agent {
     }
 
     connection.send(message);
+    return "sent";
+  }
+
+  /** Sends several direct connection messages during the current frame. */
+  @callable()
+  sendConnectionMessagesNow(messages: string[]): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.sendConnectionMessagesNow requires an active connection"
+      );
+    }
+
+    for (const message of messages) connection.send(message);
     return "sent";
   }
 
