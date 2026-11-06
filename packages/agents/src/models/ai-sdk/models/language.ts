@@ -145,10 +145,12 @@ function buildRequest(
   modelId: string,
   options: LanguageModelV4CallOptions,
   resolved: ResolvedOptions,
-  stream: boolean
+  stream: boolean,
+  workersAI: boolean | undefined
 ): BuiltRequest {
   return buildOpenAIRequest(options, {
     chatTemplateKwargs: resolved.chatTemplateKwargs,
+    workersAI,
     modelId,
     reasoningEffort: resolved.reasoningEffort,
     stream
@@ -307,7 +309,13 @@ export class CloudflareLanguageModel implements LanguageModelV4 {
       call,
       (model) => model.doGenerate(legOptions),
       async (modelId) => {
-        const request = buildRequest(modelId, options, resolved, false);
+        const request = buildRequest(
+          modelId,
+          options,
+          resolved,
+          false,
+          modelId === this.modelId ? this.#options?.workersAI : undefined
+        );
         const response = await this.#send(modelId, request, options, resolved);
         const raw = await this.#readBody(modelId, request, response);
         const generation = parseOpenAIGeneration(raw, modelId);
@@ -344,7 +352,13 @@ export class CloudflareLanguageModel implements LanguageModelV4 {
       call,
       (model) => model.doStream(legOptions),
       async (modelId) => {
-        const request = buildRequest(modelId, options, resolved, true);
+        const request = buildRequest(
+          modelId,
+          options,
+          resolved,
+          true,
+          modelId === this.modelId ? this.#options?.workersAI : undefined
+        );
         const response = await this.#send(modelId, request, options, resolved);
         const providerMetadata = cloudflareMetadata(
           modelId,

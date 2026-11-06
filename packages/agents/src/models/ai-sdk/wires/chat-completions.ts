@@ -50,6 +50,7 @@ import {
 export interface OpenAIWireContext {
   /** The catalog id; the compat layer keys its quirks off it. */
   modelId: string;
+  workersAI?: boolean;
   stream: boolean;
   reasoningEffort: "low" | "medium" | "high" | null | undefined;
   chatTemplateKwargs: Record<string, unknown> | undefined;
@@ -448,7 +449,9 @@ export function buildOpenAIRequest(
       ? { stream: true, stream_options: { include_usage: true } }
       : {})
   };
-  const prepared = prepareChatCompletionsRequest(strict, context.modelId);
+  const prepared = prepareChatCompletionsRequest(strict, context.modelId, {
+    workersAI: context.workersAI
+  });
   return {
     body: prepared.body,
     reasoningOff: prepared.reasoningOff,

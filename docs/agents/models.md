@@ -276,6 +276,30 @@ warning, because the route may not land on Workers AI. A dynamic route is a
 language model only, and the modality methods refuse it, including as a
 fallback leg.
 
+For the AI SDK provider, if **every target** of a route is Workers AI, opt in
+per model with `workersAI: true`:
+
+```ts
+const model = ai("dynamic/query-rewrite", {
+  workersAI: true,
+  reasoningEffort: null
+});
+await generateText({ model, prompt: "Rewrite this search query: ..." });
+```
+
+This applies the generic Workers AI request profile: `chatTemplateKwargs` is
+forwarded, and `reasoningEffort: null` becomes
+`chat_template_kwargs: { enable_thinking: false }`. You can also set
+`chatTemplateKwargs: { enable_thinking: false }` directly. The underlying
+model must support turning thinking off; the route name does not reveal
+model-family-specific quirks. Do not enable this for mixed-provider routes.
+
+`workersAI` is a model-construction option, not a
+`providerOptions.cloudflare` option. It is ignored on non-route ids and is
+not inherited by fallback legs. To opt in a fallback route, pass a model
+object built with `ai("dynamic/route", { workersAI: true })`. Without the
+opt-in, the strict OpenAI behavior is unchanged.
+
 ## Other modalities
 
 Images, speech, transcription and reranking come off the same provider, the
@@ -394,7 +418,8 @@ run path, which resolves a leg by id and nothing else.
 `reasoningEffort` maps onto `reasoning_effort` for every model, and the AI
 SDK's unified `reasoning` call option maps onto it when it is not set.
 `chatTemplateKwargs` is a Workers AI setting: a catalog model or a dynamic
-route drops it with a warning.
+route drops it with a warning, unless the AI SDK route opts in with
+`workersAI: true` as described in [Dynamic routes](#dynamic-routes).
 
 ### `providerOptions.cloudflare`
 

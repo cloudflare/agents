@@ -156,9 +156,15 @@ function rewriteToolCallIds(
  */
 export function prepareChatCompletionsRequest(
   input: Record<string, unknown>,
-  modelId: string
+  modelId: string,
+  options: { workersAI?: boolean } = {}
 ): PreparedRequest {
-  const quirks = quirksFor(modelId);
+  // A route hides the actual model id. Only an explicit assertion that all
+  // targets are Workers AI can select the generic profile; family-specific
+  // overrides cannot be inferred from a route name.
+  const quirks = quirksFor(
+    options.workersAI && modelId.startsWith("dynamic/") ? "@cf/" : modelId
+  );
   const warnings: CompatWarning[] = [];
   const body: Record<string, unknown> = { ...input };
 
