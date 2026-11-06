@@ -1,5 +1,19 @@
 # @cloudflare/agents
 
+## 0.34.0
+
+### Minor Changes
+
+- [#2782](https://github.com/cloudflare/agents/pull/2782) [`d6b4441`](https://github.com/cloudflare/agents/commit/d6b4441fbc2cf6909d61480a9c182181a924a7ff) Thanks [@mattzcarey](https://github.com/mattzcarey)! - MCP client: requests that need the user to authorize again throw `MCPAuthorizationRequiredError` with a link, and failed servers stay `failed` until the new `reconnectMcpServer(id)`. See [MCP client](https://github.com/cloudflare/agents/blob/main/docs/agents/mcp-client.md#failures-and-reconnecting).
+
+### Patch Changes
+
+- [#2835](https://github.com/cloudflare/agents/pull/2835) [`5c33d89`](https://github.com/cloudflare/agents/commit/5c33d89791d6a00c6ea64cf7790fa753e3e5cbfd) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Send a burst of messages on a sub-agent connection in one call to the parent, so resuming a sub-agent chat stream shows the partial reply at once instead of replaying it frame by frame ([#2820](https://github.com/cloudflare/agents/issues/2820)).
+
+- [#2827](https://github.com/cloudflare/agents/pull/2827) [`e0f95e5`](https://github.com/cloudflare/agents/commit/e0f95e587078db5b1f53575b8494e3979a519ff3) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Type `LifecycleCapability.onStart()` as returning `MaybePromise<void>` to match the runner, which awaits it. See [Agents](https://developers.cloudflare.com/agents/).
+
+- [#2807](https://github.com/cloudflare/agents/pull/2807) [`1f3bd92`](https://github.com/cloudflare/agents/commit/1f3bd9215239ccd973da87506d4771ac13a20bd2) Thanks [@ben-reitz](https://github.com/ben-reitz)! - The pi `web_search` and `web_fetch` tools give code mode scripts their results as objects.
+
 ## 0.33.0
 
 This release adds support for [Pi 1.5](https://github.com/earendil-works/pi/blob/v1.5.0/packages/durable/CHANGELOG.md#150---2026-11-02), which makes `PiHarness` much faster and lighter on memory, and lets you continue a run that ended without an answer.
