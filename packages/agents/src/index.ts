@@ -1208,7 +1208,8 @@ export class Agent<
    * `onError` first. If `onError` throws, `error` is what it threw;
    * otherwise it is the original error. Avoid sending an error's message or
    * stack to callers you do not trust. If this hook throws, the default is
-   * sent.
+   * sent. Whether it returns nothing or throws, an original thrown value
+   * that is not an `Error` is rethrown instead.
    */
   onFetchError(
     _request: Request,

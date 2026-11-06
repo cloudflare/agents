@@ -176,6 +176,13 @@ describe("onFetchError", () => {
     ).rejects.toThrow(FETCH_ERROR_SECRET);
   });
 
+  it("rethrows a thrown value that is not an Error when the hook throws", async () => {
+    silenceErrors();
+    await expect(
+      fetchErrorObject().fetch("https://example.com/?fail=non-error&hook=throw")
+    ).rejects.toThrow(FETCH_ERROR_SECRET);
+  });
+
   it("sends the default, and logs the hook's error, when the hook throws", async () => {
     const errors = silenceErrors();
     const response = await fetchErrorObject().fetch(
