@@ -94,6 +94,23 @@ export type LifecycleRouteTransport = {
   ) => Promise<unknown>;
 };
 
+/**
+ * The response to a failed `fetch` when the host's `onFetchError` gives none.
+ * It never carries the error: its message and stack can reveal internals to
+ * callers that are not authenticated.
+ */
+function defaultFetchErrorResponse(request: Request): Response {
+  if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+    return new Response("Internal Server Error", { status: 500 });
+  }
+  // Accept the socket and close it at once: browsers show a failed upgrade's
+  // close code, but devtools hide the body of an HTTP error response to one.
+  const pair = new WebSocketPair();
+  pair[1].accept();
+  pair[1].close(1011, "Uncaught exception during session setup");
+  return new Response(null, { status: 101, webSocket: pair[0] });
+}
+
 type LifecycleHost<Env extends object, Props extends object> = LifecycleObject<
   Env,
   Props
@@ -564,24 +581,37 @@ export class Lifecycle<
         );
       }
     } catch (err) {
-      console.error(
-        `Error in ${this.#parentClassName}:${this.#ctx.id.name ?? "<unnamed>"} fetch:`,
-        err
-      );
-      if (!(err instanceof Error)) throw err;
-      if (request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
-        // Return an accepted socket that closes immediately, so the failure
-        // is visible to browsers (devtools hide bodies of failed upgrades).
-        // The error itself stays in the logs: its message and stack can leak
-        // internals to unauthenticated callers.
-        const pair = new WebSocketPair();
-        pair[1].accept();
-        pair[1].close(1011, "Uncaught exception during session setup");
-        return new Response(null, { status: 101, webSocket: pair[0] });
-      } else {
-        return new Response("Internal Server Error", { status: 500 });
+      console.error(this.#errorLogPrefix("fetch"), err);
+      return this.#respondToFetchError(request, err);
+    }
+  }
+
+  /** The prefix for an error logged from one of this object's handlers. */
+  #errorLogPrefix(handler: string): string {
+    return `Error in ${this.#parentClassName}:${this.#ctx.id.name ?? "<unnamed>"} ${handler}:`;
+  }
+
+  /**
+   * Answer a failed `fetch`: the host's `onFetchError` response if it gives
+   * one, otherwise a default that never carries the error.
+   */
+  async #respondToFetchError(
+    request: Request,
+    error: unknown
+  ): Promise<Response> {
+    if (this.#host.onFetchError) {
+      try {
+        const response = await runInLifecycleHostContext(
+          { host: this.#host, request },
+          () => this.#host.onFetchError!(request, error)
+        );
+        if (response instanceof Response) return response;
+      } catch (hookError) {
+        console.error(this.#errorLogPrefix("onFetchError"), hookError);
       }
     }
+    if (!(error instanceof Error)) throw error;
+    return defaultFetchErrorResponse(request);
   }
 
   /** @internal Dispatch a hibernating WebSocket message. */
@@ -597,10 +627,7 @@ export class Lifecycle<
         this.#capabilityRunner.webSocketMessage(ws, message)
       );
     } catch (e) {
-      console.error(
-        `Error in ${this.#parentClassName}:${this.#ctx.id.name ?? "<unnamed>"} webSocketMessage:`,
-        e
-      );
+      console.error(this.#errorLogPrefix("webSocketMessage"), e);
     }
   }
 
@@ -619,10 +646,7 @@ export class Lifecycle<
         this.#capabilityRunner.webSocketClose(ws, code, reason, wasClean)
       );
     } catch (e) {
-      console.error(
-        `Error in ${this.#parentClassName}:${this.#ctx.id.name ?? "<unnamed>"} webSocketClose:`,
-        e
-      );
+      console.error(this.#errorLogPrefix("webSocketClose"), e);
     }
   }
 
@@ -642,10 +666,7 @@ export class Lifecycle<
         this.#capabilityRunner.webSocketError(ws, error)
       );
     } catch (e) {
-      console.error(
-        `Error in ${this.#parentClassName}:${this.#ctx.id.name ?? "<unnamed>"} webSocketError:`,
-        e
-      );
+      console.error(this.#errorLogPrefix("webSocketError"), e);
     }
   }
 

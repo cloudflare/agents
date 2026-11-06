@@ -29,6 +29,10 @@
         "name": "AgentWithoutSuperCall"
       },
       {
+        "class_name": "LogOnlyOnErrorAgent",
+        "name": "LogOnlyOnErrorAgent"
+      },
+      {
         "class_name": "SlowStreamAgent",
         "name": "SlowStreamAgent"
       },
@@ -200,6 +204,10 @@
     {
       "new_sqlite_classes": ["OverridingPersistAgent"],
       "tag": "v15"
+    },
+    {
+      "new_sqlite_classes": ["LogOnlyOnErrorAgent"],
+      "tag": "v16"
     }
   ]
 }

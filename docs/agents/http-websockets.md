@@ -43,6 +43,7 @@ Agents have several lifecycle hooks that are called at different points:
 | `onClose(connection, code, reason, wasClean)` | When a WebSocket connection closes                        |
 | `onError(connection, error)`                  | When a WebSocket error occurs                             |
 | `onError(error)`                              | When a server error occurs (overloaded)                   |
+| `onFetchError(request, error)`                | When an HTTP request or WebSocket upgrade fails           |
 
 ### Lifecycle Flow
 
@@ -405,6 +406,8 @@ export class MyAgent extends Agent {
   }
 }
 ```
+
+`onError` observes errors. To choose what the client receives when a request or upgrade fails, override `onFetchError`. By default the client gets `500 Internal Server Error`, or for an upgrade a socket that closes with code `1011`, without the error's details. See [`this.onFetchError`](./agent-class.md#thisonfetcherror).
 
 ## Hibernation
 
