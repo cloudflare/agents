@@ -213,8 +213,8 @@ files, so cloning works while the module itself has no network.
 
 ## Package sources
 
-Pi comes from npm: `@earendil-works/pi-durable`, `pi-ai`, `chord` and
-`pi-telemetry` at `~1.4.0`. Pi is MIT licensed; see
+Pi comes from npm: `@earendil-works/pi-durable`, `pi-ai`, `pi-schema`,
+`chord` and `pi-telemetry` at `~1.5.0`. Pi is MIT licensed; see
 [`licenses/mit-earendil-pi.txt`](./licenses/mit-earendil-pi.txt).
 
 `@cloudflare/computer` comes from npm at `^0.10.0`, the version Think requires.
