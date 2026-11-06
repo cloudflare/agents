@@ -117,6 +117,21 @@ against it:
   primitive yet. A tool could park on a pi document and a hook, but that is
   ours to invent.
 
+## Decision: table prefixing belongs to pi
+
+pi's SQLite schema uses names such as `tasks`, `entries`, `conversations`,
+and `documents`, which can collide with other state in the same object.
+The old session store rewrote SQL identifiers using names from pi's
+exported `SQLITE_MIGRATIONS`. That rewrite was replaced in #2616.
+
+The current `openPiSessionStore()` in
+`packages/agents/src/harness/pi/session-store.ts` delegates to pi's
+`openDurableObjectSqliteStorage(storage, { prefix })` adapter from
+`@earendil-works/pi-durable/storage/sqlite/cloudflare`. The prefix defaults
+to `pi_`; the wrapper rejects prefixes starting with `_cf_` (case-insensitive),
+which Durable Objects reserve. Pi owns the schema and prefixing, so a
+storage prefix option is no longer an unresolved upstream request.
+
 ## Hard or unresolved
 
 ### pi's timers were in memory
@@ -190,16 +205,6 @@ commits:
 
 Both read committed state only, so they are safe here. **Ask for:**
 `harness.submissionByRequest()` and `harness.conversations()`.
-
-### Table prefix is a SQL rewrite
-
-pi's SQLite schema uses bare names such as `tasks`, `entries`,
-`conversations`, and `documents`, which easily collide in an object that
-also hosts other state. The session store rewrites identifiers outside
-string literals, using the names it reads from pi's exported
-`SQLITE_MIGRATIONS`. pi's conformance suite passes against it. It breaks if
-a future pi statement puts a table name in a string literal or builds SQL
-dynamically. **Ask for:** a `tablePrefix` option on `SqliteStorage`.
 
 ### Abort needs tools that honor their signal
 
