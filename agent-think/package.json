@@ -26,7 +26,7 @@
     "agents": "workspace:*",
     "ai": "^7.0.0",
     "diff": "^9.0.0",
-    "isomorphic-git": "^1.38.5",
+    "isomorphic-git": "^1.38.6",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "workers-ai-provider": "^4.0.0",
