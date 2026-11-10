@@ -1147,6 +1147,9 @@ export class Tasks<
     // root dispatch that later returns a stale outcome past its own
     // budget (job-queue's own "newer pushes win" guard on that marker).
     await this.#syncWake(runId);
+    // A cancel() that ran during that await found no live attempt and
+    // settled the run itself. The claim is void then: start no handler.
+    if (this.#store.getRun(runId)?.generation !== generation) return;
 
     const controller = new AbortController();
     // Emitted before the handler starts: invocation is synchronous up to the
