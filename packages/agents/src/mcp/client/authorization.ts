@@ -220,6 +220,35 @@ export class AuthorizationController {
     this.liveStepUps.delete(id);
   }
 
+  /**
+   * The server was renamed from `oldId` to `newId` (migrateServerId). Move
+   * what is kept by id. A link it was waiting on names the old id in its
+   * state, so that link's callback can never reach the server: abandon the
+   * flow. A step-up goes back to the session's state, and anything else
+   * connects again under the new id when it is settled.
+   */
+  renamed(
+    oldId: string,
+    newId: string,
+    conn: MCPClientConnection | undefined
+  ): void {
+    const spent = this.spentStates.get(oldId);
+    this.spentStates.delete(oldId);
+    if (spent !== undefined) this.spentStates.set(newId, spent);
+    const stepUp = this.liveStepUps.get(oldId);
+    this.liveStepUps.delete(oldId);
+
+    const waiting = conn?.connectionState === MCPConnectionState.AUTHENTICATING;
+    if (!waiting && !this.ctx.store.get(newId)?.auth_url) return;
+    this.ctx.store.clearAuthUrl(newId);
+    if (conn && waiting) {
+      conn.connectionState =
+        stepUp?.conn === conn
+          ? stepUp.stateBefore
+          : MCPConnectionState.CONNECTING;
+    }
+  }
+
   private isLiveStepUp(id: string, conn: MCPClientConnection): boolean {
     return this.liveStepUps.get(id)?.conn === conn;
   }

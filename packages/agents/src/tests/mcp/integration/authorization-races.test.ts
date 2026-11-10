@@ -197,3 +197,66 @@ describe("a step-up link after a token refresh", () => {
     });
   });
 });
+
+describe("a server given a stable id while it waits for the user", () => {
+  // McpServerRename.tla, rules HandedLinkReachesServer and
+  // SavedLinkReachesServer. Path: the server waits on a link under its
+  // generated id; addMcpServer with { id } migrates it and hands back the
+  // link it waits on; the user opens that link.
+  it("hands back a link whose callback reaches the server", async () => {
+    const agent = await newAgent();
+    const first = await agent.connectServer(MCP_URL, {
+      callbackHost: CLIENT_ORIGIN
+    });
+    if (first.state !== "authenticating") throw new Error("expected a link");
+
+    const again = await agent.connectServer(MCP_URL, {
+      callbackHost: CLIENT_ORIGIN,
+      id: "files"
+    });
+    if (again.state !== "authenticating") throw new Error("expected a link");
+    expect(await agent.server("files")).toMatchObject({
+      state: "authenticating",
+      auth_url: again.authUrl
+    });
+
+    expect(await followCallback(server.authorize(again.authUrl))).toEqual({
+      authorized: true
+    });
+    await agent.settle();
+    expect((await agent.server("files"))?.state).toBe("ready");
+  });
+
+  // Same rules, rule NothingLeftUnderOldId. Path: a step-up is pending on
+  // the live session under the generated id; the server is migrated.
+  it("keeps the session working and asks again under the new id after a pending step-up", async () => {
+    const agent = await newAgent();
+    const generated = await connectAuthorized(agent, server, {
+      scope: READ_SCOPE
+    });
+    const asked = await agent.callServerTool(generated, "write");
+    if (asked.ok || !asked.authUrl) throw new Error("expected a link");
+
+    expect(
+      await agent.connectServer(MCP_URL, {
+        callbackHost: CLIENT_ORIGIN,
+        id: "files"
+      })
+    ).toEqual({ id: "files", state: "ready" });
+    expect(await agent.callServerTool("files", "read")).toEqual({
+      ok: true,
+      text: "read it"
+    });
+
+    const again = await agent.callServerTool("files", "write");
+    if (again.ok || !again.authUrl) throw new Error("expected a link");
+    expect(await followCallback(server.authorize(again.authUrl))).toEqual({
+      authorized: true
+    });
+    await agent.settle();
+    expect(await agent.callServerTool("files", "write")).toEqual({
+      ok: true,
+      text: "wrote it"
+    });
+  });
+});

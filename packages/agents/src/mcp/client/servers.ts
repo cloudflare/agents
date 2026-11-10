@@ -819,6 +819,9 @@ export class ServerController {
         `Cannot migrate MCP server id "${oldId}" → "${newId}": new id is already in use.`
       );
     }
+    // A pending link names the old id in its state, so its callback can
+    // never reach the renamed server: abandon it before anything awaits.
+    this.authorization.renamed(oldId, newId, this.ctx.connections[oldId]);
     await this.renameOAuthKeys(
       `/${clientName}/${oldId}/`,
       `/${clientName}/${newId}/`
