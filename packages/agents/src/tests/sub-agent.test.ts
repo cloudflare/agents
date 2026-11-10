@@ -536,6 +536,21 @@ describe("SubAgent", () => {
     ).toBe(false);
   });
 
+  it("does not retry a sub-agent schedule cancelled while it waits to retry", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const scheduleId = await agent.subAgentScheduleFlaky("flaky-child", "x");
+    await agent.backdateSchedule(scheduleId);
+
+    expect(
+      await agent.runAlarmCancellingDuringRetry("flaky-child", scheduleId)
+    ).toBe(1);
+    expect(
+      (await agent.rootScheduleRows()).some((r) => r.id === scheduleId)
+    ).toBe(false);
+  });
+
   it("should read sub-agent schedules through the async APIs", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);

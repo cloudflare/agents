@@ -359,6 +359,10 @@ export class Queue<
       await tryN(
         maxAttempts,
         async (attempt) => {
+          // The root keeps the item while this facet waits to retry. A
+          // cancel or same-id push made meanwhile is newer intent: do not
+          // run this item again.
+          if (attempt > 1 && !(await this.#stillQueued(item))) return;
           if (attempt > 1) {
             this.#emit("queue:retry", {
               callback: item.callback,
@@ -397,6 +401,16 @@ export class Queue<
         // swallow onError errors
       }
     }
+  }
+
+  /** Whether the root still holds this exact item, not a replacement. */
+  async #stillQueued(item: QueueItem<unknown>): Promise<boolean> {
+    const current = await this.get(item.id);
+    return (
+      current !== undefined &&
+      current.callback === item.callback &&
+      JSON.stringify(current.payload) === JSON.stringify(item.payload)
+    );
   }
 
   // ── Queue API ────────────────────────────────────────────────────────────

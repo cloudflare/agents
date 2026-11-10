@@ -155,6 +155,14 @@ export class JobDriver {
    * flag back at its default; there is no cross-isolate state to reset.
    */
   #strikeRecordedThisIsolate = false;
+  /**
+   * The dispatch that last claimed each job in this isolate. The row's
+   * `running` bit says some dispatch holds the job; this says which one.
+   * Overlapping alarm invocations can claim a same-id replacement while an
+   * older dispatch of the job waits to retry, and the older one must then
+   * neither run again nor apply its drive result.
+   */
+  readonly #claims = new Map<string, object>();
 
   constructor(options: JobDriverOptions) {
     this.#options = options;
@@ -352,15 +360,26 @@ export class JobDriver {
       // Every dispatch is marked, not just single-flight: the marker is
       // what lets a same-id push made mid-dispatch supersede the returned
       // drive result (see JobQueue.applyOutcome).
+      const claim = {};
+      this.#claims.set(row.id, claim);
       this.#options.queue.markRunning(row.id, nowMs);
 
-      await this.#driveJob(row);
+      try {
+        await this.#driveJob(row, claim);
+      } finally {
+        if (this.#claims.get(row.id) === claim) this.#claims.delete(row.id);
+      }
     }
   }
 
   /** Dispatch one due row to its owner with retry and failure policy. */
-  async #driveJob(row: JobStorageRow): Promise<void> {
+  async #driveJob(row: JobStorageRow, claim: object): Promise<void> {
     const { queue, resolveDispatch, disabled } = this.#options;
+    // Whether this dispatch still holds the job: no cancel deleted it, no
+    // push or reschedule cleared its marker, and no later dispatch claimed
+    // it since.
+    const owned = () =>
+      this.#claims.get(row.id) === claim && queue.isDispatching(row.id);
     const job = jobFromRow(row);
     const dispatch = await resolveDispatch(row.capability);
     if (!dispatch) {
@@ -407,7 +426,7 @@ export class JobDriver {
             // A retry waits in tryN's backoff, and requests run meanwhile.
             // A cancel or same-id push made then is newer intent: do not
             // run the job this dispatch captured again.
-            if (attempt > 1 && !queue.isDispatching(row.id)) return SUPERSEDED;
+            if (attempt > 1 && !owned()) return SUPERSEDED;
             return dispatch.onJob({ job, attempt });
           },
           {
@@ -434,7 +453,7 @@ export class JobDriver {
         // so the preserved job is not mistaken for one still in flight (and
         // a single-flight job does not wait out its hung timeout first).
         try {
-          queue.clearRunning(row.id);
+          if (owned()) queue.clearRunning(row.id);
         } catch {
           // the hung timeout eventually recovers the flag
         }
@@ -463,8 +482,8 @@ export class JobDriver {
     }
 
     if (disabled()) return;
-    // Superseded mid-retry: the newer intent owns the row now.
-    if (outcome === SUPERSEDED) return;
+    // A cancel, push, reschedule or later claim owns the row now.
+    if (outcome === SUPERSEDED || !owned()) return;
     queue.applyOutcome(row.id, outcome ?? undefined);
   }
 

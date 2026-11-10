@@ -110,4 +110,56 @@ describe("job retry after newer intent", () => {
       expect(await queue.list()).toEqual([]);
     });
   });
+
+  it("does not run the old payload when an overlapping alarm claims the replacement", async () => {
+    await withCapabilityHarness(async ({ install }) => {
+      const calls: unknown[] = [];
+      let resolveFailed!: () => void;
+      const failed = new Promise<void>((resolve) => {
+        resolveFailed = resolve;
+      });
+      let resolveNewStarted!: () => void;
+      const newStarted = new Promise<void>((resolve) => {
+        resolveNewStarted = resolve;
+      });
+      let releaseNew!: () => void;
+      const newGate = new Promise<void>((resolve) => {
+        releaseNew = resolve;
+      });
+      const queue = new Queue({
+        callbacks: {
+          work: async (payload: unknown) => {
+            calls.push(payload);
+            if (payload === "old" && calls.length === 1) {
+              resolveFailed();
+              throw new Error("first attempt fails");
+            }
+            if (payload === "new") {
+              resolveNewStarted();
+              await newGate;
+            }
+          }
+        },
+        retry: RETRY
+      });
+      const { lifecycle } = install(queue);
+      await lifecycle.start();
+      await queue.push("work", "old", { id: "item" });
+
+      // Alarm A: attempt 1 of "old" throws and A waits to retry.
+      const alarmA = lifecycle.alarm();
+      await failed;
+      // The item is replaced, and alarm B claims the replacement.
+      await queue.push("work", "new", { id: "item" });
+      const alarmB = lifecycle.alarm();
+      await newStarted;
+      // A's retry timer fires while B still runs "new".
+      await alarmA;
+      releaseNew();
+      await alarmB;
+
+      expect(calls).toEqual(["old", "new"]);
+      expect(await queue.list()).toEqual([]);
+    });
+  });
 });
