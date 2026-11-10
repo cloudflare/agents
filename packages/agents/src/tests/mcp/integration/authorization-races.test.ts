@@ -8,7 +8,7 @@ import {
   waitingAtServer,
   useOAuthMcpServer
 } from "./harness";
-import { READ_SCOPE } from "./oauth-mcp-server";
+import { CLIENT_ORIGIN, MCP_URL, READ_SCOPE } from "./oauth-mcp-server";
 
 const server = useOAuthMcpServer();
 
@@ -76,6 +76,37 @@ describe("a server's OAuth storage after it is removed", () => {
     await pause();
 
     expect(await agent.oauthKeys("files")).toEqual([]);
+  });
+});
+
+describe("an OAuth callback while the connection is closed", () => {
+  // McpOAuthCallback.tla, rules SignInSurvivesClose and
+  // RemovedMeansRemoved. Path: the user approves; the code exchange waits
+  // at the token endpoint; closeConnection drops the connection (the server
+  // stays stored); the exchange returns.
+  it("keeps the sign-in and does not say the server was removed", async () => {
+    const before = await newAgent();
+    const added = await before.connectServer(MCP_URL, {
+      callbackHost: CLIENT_ORIGIN,
+      id: "files"
+    });
+    if (added.state !== "authenticating") throw new Error("expected a link");
+    const release = server.holdRequests("token");
+    const callback = followCallback(server.authorize(added.authUrl));
+    await waitingAtServer(server);
+
+    await before.closeNow("files");
+    release();
+    const outcome = await callback;
+    if (!outcome.authorized) expect(outcome.error).not.toContain("removed");
+
+    // The next wake connects on the grant the user gave, without asking.
+    const agent = await restartAgent(before);
+    await agent.settle();
+    expect(await agent.server("files")).toMatchObject({
+      state: "ready",
+      auth_url: null
+    });
   });
 });
 

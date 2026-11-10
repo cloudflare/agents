@@ -760,6 +760,15 @@ export class ServerController {
 
   /** Close a server's connection and delete it with its OAuth state. */
   async remove(id: string): Promise<void> {
+    this.ctx.removing.add(id);
+    try {
+      await this.removeServer(id);
+    } finally {
+      this.ctx.removing.delete(id);
+    }
+  }
+
+  private async removeServer(id: string): Promise<void> {
     const conn = this.ctx.connections[id];
     let authProvider =
       conn?.options.transport.authProvider ?? this.closedProviders.get(id);

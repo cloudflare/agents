@@ -376,9 +376,9 @@ export class AuthorizationController {
     return this.ctx.lanes
       .run(serverId, () => this.completeCallback(request))
       .catch((error) => {
-        // Removed while this callback waited for earlier work.
+        // Removed or closed while this callback waited for earlier work.
         if (error instanceof ServerLaneCancelledError) {
-          return removedDuringAuthorization(serverId);
+          return this.gone(serverId);
         }
         throw error;
       });
@@ -420,7 +420,7 @@ export class AuthorizationController {
         return ignoreUnverified(callback.serverId, callback.error);
       }
       if (this.ctx.connections[callback.serverId] !== conn) {
-        return removedDuringAuthorization(callback.serverId);
+        return this.gone(callback.serverId);
       }
       return this.fail(callback.serverId, callback.error);
     }
@@ -497,14 +497,29 @@ export class AuthorizationController {
       await provider.consumeState(state);
       await exchangeAuthorizationCode(serverId, conn, provider, state, params);
       if (this.ctx.connections[serverId] !== conn) {
-        // Removed while the code was exchanged: the tokens just saved
-        // outlived removeServer's cleanup, so clear them again. A server
-        // added again under the same id keeps its own pending flow.
+        // A server added again under the same id keeps its own pending
+        // flow; the tokens just saved were for the old connection.
         if (this.ctx.connections[serverId]) {
           await provider.invalidateCredentials?.("tokens");
-        } else {
-          await this.clearStorage(serverId, provider);
+          return this.gone(serverId);
         }
+        // Closed, still stored: the user's sign-in stands, and the server
+        // uses it when it connects again.
+        if (this.isClosed(serverId)) {
+          this.ctx.store.setAuthorizationRounds(
+            serverId,
+            completeRound(
+              parseAuthorizationRounds(
+                this.ctx.store.authorizationRounds(serverId)
+              )
+            )
+          );
+          this.ctx.store.clearAuthUrl(serverId);
+          return { serverId, authSuccess: true };
+        }
+        // Removed while the code was exchanged: the tokens just saved
+        // outlived removeServer's cleanup, so clear them again.
+        await this.clearStorage(serverId, provider);
         return removedDuringAuthorization(serverId);
       }
       this.status.saveSession(serverId, conn);
@@ -521,7 +536,7 @@ export class AuthorizationController {
       // A server removed (and maybe re-registered) meanwhile is not ours to
       // fail: the replacement keeps its own state and pending link.
       if (this.ctx.connections[serverId] !== conn) {
-        return removedDuringAuthorization(serverId);
+        return this.gone(serverId);
       }
       return this.fail(serverId, toErrorMessage(error));
     }
@@ -553,9 +568,39 @@ export class AuthorizationController {
     conn: MCPClientConnection
   ): MCPOAuthCallbackResult {
     if (this.ctx.connections[serverId] !== conn) {
-      return removedDuringAuthorization(serverId);
+      return this.gone(serverId);
     }
     return this.success(serverId, conn);
+  }
+
+  /**
+   * Whether a server whose connection is gone is still stored and not being
+   * removed: its connection was closed (closeConnection), or closed and
+   * registered again.
+   */
+  private isClosed(serverId: string): boolean {
+    return (
+      this.ctx.store.get(serverId) !== undefined &&
+      !this.ctx.removing.has(serverId)
+    );
+  }
+
+  /**
+   * Result for a callback whose connection went away while it was handled:
+   * the server was registered again, closed, or removed.
+   */
+  private gone(serverId: string): MCPOAuthCallbackResult {
+    const what = this.ctx.connections[serverId]
+      ? "replaced"
+      : this.isClosed(serverId)
+        ? "closed"
+        : undefined;
+    if (!what) return removedDuringAuthorization(serverId);
+    return {
+      serverId,
+      authSuccess: false,
+      authError: `The connection to server ${serverId} was ${what} during authorization`
+    };
   }
 
   private success(

@@ -24,6 +24,8 @@ export type McpClientContext = {
   readonly storage: DurableObjectStorage;
   /** One queue of connection work per server. */
   readonly lanes: ServerLanes;
+  /** Servers a removeServer() call is removing right now. */
+  readonly removing: Set<string>;
   /** Runtime bindings for restoring RPC servers. */
   readonly env: Cloudflare.Env | undefined;
   /** A caller-supplied OAuth provider factory, when configured. */
