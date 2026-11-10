@@ -357,6 +357,20 @@ export class JobQueue {
     );
   }
 
+  /**
+   * Whether a driven job still carries the dispatch marker its claim set.
+   * A cancel deletes the row and a same-id push or reschedule clears the
+   * marker; either is newer intent the dispatch must not override.
+   */
+  isDispatching(id: string): boolean {
+    return (
+      this.#sql(
+        "SELECT id FROM cf_agents_jobs WHERE id = ? AND running = 1",
+        id
+      ).length > 0
+    );
+  }
+
   clearRunning(id: string): void {
     this.#sql(
       `UPDATE cf_agents_jobs

@@ -51,6 +51,9 @@ const JOB_BACKLOG_WARNING_THRESHOLD = 10;
  */
 const DEADMAN_ALARM_DELAY_MS = 30_000;
 
+/** A retry found its job cancelled or replaced, so it did not run. */
+const SUPERSEDED = Symbol("superseded");
+
 /** The dispatch hooks one job owner exposes to the driver. */
 export type JobDispatch = {
   readonly onJob: (
@@ -395,21 +398,32 @@ export class JobDriver {
       }
     }, hungTimeoutMs(row));
 
-    let outcome: LifecycleJobOutcome | void;
+    let outcome: LifecycleJobOutcome | void | typeof SUPERSEDED;
     try {
       outcome = await this.#alarmScope.run({ executing: row }, () =>
-        tryN(maxAttempts, (attempt) => dispatch.onJob({ job, attempt }), {
-          baseDelayMs: job.retry?.baseDelayMs ?? DEFAULT_JOB_RETRY.baseDelayMs,
-          maxDelayMs: job.retry?.maxDelayMs ?? DEFAULT_JOB_RETRY.maxDelayMs,
-          // In-process retries are futile on a superseded isolate (code
-          // never reloads mid-invocation) and on a memory-limit reset (the
-          // isolate is condemned, and a retry can read half-claimed state
-          // as "nothing to do", converting the reset into a silent success
-          // that the breaker never sees). Defer both to the alarm boundary.
-          shouldRetry: (error) =>
-            !isDurableObjectCodeUpdateReset(error) &&
-            !isDurableObjectMemoryLimitReset(error)
-        })
+        tryN(
+          maxAttempts,
+          async (attempt) => {
+            // A retry waits in tryN's backoff, and requests run meanwhile.
+            // A cancel or same-id push made then is newer intent: do not
+            // run the job this dispatch captured again.
+            if (attempt > 1 && !queue.isDispatching(row.id)) return SUPERSEDED;
+            return dispatch.onJob({ job, attempt });
+          },
+          {
+            baseDelayMs:
+              job.retry?.baseDelayMs ?? DEFAULT_JOB_RETRY.baseDelayMs,
+            maxDelayMs: job.retry?.maxDelayMs ?? DEFAULT_JOB_RETRY.maxDelayMs,
+            // In-process retries are futile on a superseded isolate (code
+            // never reloads mid-invocation) and on a memory-limit reset (the
+            // isolate is condemned, and a retry can read half-claimed state
+            // as "nothing to do", converting the reset into a silent success
+            // that the breaker never sees). Defer both to the alarm boundary.
+            shouldRetry: (error) =>
+              !isDurableObjectCodeUpdateReset(error) &&
+              !isDurableObjectMemoryLimitReset(error)
+          }
+        )
       );
     } catch (error) {
       if (disabled()) return;
@@ -449,6 +463,8 @@ export class JobDriver {
     }
 
     if (disabled()) return;
+    // Superseded mid-retry: the newer intent owns the row now.
+    if (outcome === SUPERSEDED) return;
     queue.applyOutcome(row.id, outcome ?? undefined);
   }
 
