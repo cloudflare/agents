@@ -220,6 +220,7 @@ describe("chat turn races", () => {
       chunkDelayMs: 30
     });
     await waitUntil(() => responses(seen, "req-1").some((m) => m.body));
+    const beforeRegenerate = seen.length;
     send(tabB, {
       type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
       id: "req-2",
@@ -234,7 +235,12 @@ describe("chat turn races", () => {
         })
       }
     });
-    await delay(50);
+    // Tab B's request is admitted once its messages are broadcast to tab A.
+    await waitUntil(() =>
+      seen
+        .slice(beforeRegenerate)
+        .some((m) => m.type === MessageType.CF_AGENT_CHAT_MESSAGES)
+    );
     // Tab C sends a new question while the regenerate waits.
     sendChatRequest(tabC, "req-3", [user1, user2], {
       format: "plaintext",
