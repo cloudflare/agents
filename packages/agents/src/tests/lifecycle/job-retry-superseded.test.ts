@@ -212,4 +212,63 @@ describe("job retry after newer intent", () => {
       expect(probe.queue.get("job")).toBeUndefined();
     });
   });
+
+  it("keeps the wake a hung-job takeover rescheduled when the original dispatch finishes later", async () => {
+    // Alarm A runs a single-flight job and stalls past its hung timeout.
+    // Alarm B takes the job over and reschedules it. A then finishes: its
+    // result is stale and must not delete B's wake.
+    class Probe extends LifecycleCapability {
+      dispatches = 0;
+      releaseFirst!: () => void;
+      readonly firstStarted: Promise<void>;
+      #firstStarted!: () => void;
+      constructor(readonly later: number) {
+        super("probe");
+        this.firstStarted = new Promise((resolve) => {
+          this.#firstStarted = resolve;
+        });
+      }
+      get queue(): LifecycleJobs {
+        return this.lifecycle.jobs;
+      }
+      async onJob(): Promise<LifecycleJobOutcome> {
+        this.dispatches += 1;
+        if (this.dispatches > 1) return { rescheduleAt: this.later };
+        this.#firstStarted();
+        await new Promise<void>((resolve) => {
+          this.releaseFirst = resolve;
+        });
+        return undefined;
+      }
+    }
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const later = Date.now() + 86_400_000;
+      const probe = new Probe(later);
+      const { lifecycle } = install(probe);
+      await lifecycle.start();
+      await probe.queue.push({
+        id: "job",
+        fn: "run",
+        time: Date.now() - 1000,
+        singleflight: true,
+        hungTimeoutSeconds: 1
+      });
+
+      const alarmA = lifecycle.alarm();
+      await probe.firstStarted;
+      // A has now been running past its hung timeout.
+      storage.sql.exec(
+        "UPDATE cf_agents_jobs SET execution_started_at = ? WHERE id = ?",
+        Date.now() - 5_000,
+        "job"
+      );
+      await lifecycle.alarm();
+      expect(probe.queue.get("job")?.time).toBe(later);
+      probe.releaseFirst();
+      await alarmA;
+
+      expect(probe.dispatches).toBe(2);
+      expect(probe.queue.get("job")?.time).toBe(later);
+    });
+  });
 });

@@ -113,9 +113,11 @@ Four named rules define what a job owner can and cannot rely on:
    `trackAlarmWork()` so it remains part of the current alarm's breaker domain.
 3. **Newer pushes win over drive results.** Every change of a job's
    durable intent (`push()`, `reschedule()`, `cancel()`, the breaker's
-   retimes) bumps its in-memory revision. A dispatch records the revision
-   when it claims the job; a retry runs, and `applyOutcome` applies a drive
-   result, only while the revision is unchanged. Another dispatch of the
+   retimes), and a takeover of a hung single-flight job, bumps its
+   in-memory revision, which exists only while a dispatch of that job is
+   in flight. A dispatch records the revision when it claims the job; a
+   retry runs, and `applyOutcome` applies a drive result, only while the
+   revision is unchanged. Another dispatch of the
    same unchanged job (overlapping alarms) does not bump it. Each dispatch
    still sets the durable `running` marker, which single-flight skipping
    and hung recovery read. The drive loop also refetches each

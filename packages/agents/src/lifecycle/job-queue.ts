@@ -175,6 +175,15 @@ export function isHungRow(row: JobStorageRow, nowMs: number): boolean {
   return nowMs - (row.execution_started_at ?? 0) >= hungTimeoutMs(row);
 }
 
+type RevisionEntry = { revision: number; dispatches: number };
+
+/** @internal One dispatch's claim on a job (see {@link JobQueue.claim}). */
+export type JobClaim = {
+  readonly id: string;
+  readonly entry: RevisionEntry;
+  readonly revision: number;
+};
+
 /**
  * @internal SQL-backed job queue. Lifecycle owns the single instance; the
  * scoped `LifecycleJobs` surfaces delegate here with a fixed capability id.
@@ -183,13 +192,14 @@ export class JobQueue {
   readonly #storage: DurableObjectStorage;
   #tableEnsured = false;
   /**
-   * A revision per job id, bumped by every change of durable intent: push,
-   * reschedule, cancel, and the breaker's retimes and deletes. A dispatch
-   * records the revision when it claims a job and acts on the job only
-   * while the revision is unchanged. In memory only: a dispatch never
-   * outlives its isolate, so a fresh isolate starts every id at 0.
+   * The revision of each job a dispatch is driving, bumped by every change
+   * of durable intent (push, reschedule, cancel, the breaker's retimes and
+   * deletes) and by a hung takeover. A dispatch acts on its job only while
+   * the revision it claimed is unchanged. An entry lives while dispatches
+   * of that id are in flight, so the map stays as small as the dispatches;
+   * a dispatch never outlives its isolate, so nothing needs persisting.
    */
-  readonly #revisions = new Map<string, number>();
+  readonly #inFlight = new Map<string, RevisionEntry>();
 
   constructor(storage: DurableObjectStorage) {
     this.#storage = storage;
@@ -229,22 +239,49 @@ export class JobQueue {
   }
 
   #revise(id: string): void {
-    this.#revisions.set(id, (this.#revisions.get(id) ?? 0) + 1);
-  }
-
-  /** The job's current revision, recorded by a dispatch when it claims it. */
-  revision(id: string): number {
-    return this.#revisions.get(id) ?? 0;
+    const entry = this.#inFlight.get(id);
+    if (entry) entry.revision += 1;
   }
 
   /**
-   * Whether the job still exists at the revision a dispatch claimed it at:
-   * no cancel, push, reschedule or breaker retime touched it since.
+   * Claim a due job for one dispatch: mark it running and record its
+   * revision. A takeover of a hung job first invalidates the dispatches
+   * still holding it. Release the claim when the dispatch ends.
    */
-  isCurrent(id: string, revision: number): boolean {
+  claim(id: string, nowMs: number, takeover = false): JobClaim {
+    let entry = this.#inFlight.get(id);
+    if (!entry) {
+      entry = { revision: 0, dispatches: 0 };
+      this.#inFlight.set(id, entry);
+    } else if (takeover) {
+      entry.revision += 1;
+    }
+    entry.dispatches += 1;
+    this.markRunning(id, nowMs);
+    return { id, entry, revision: entry.revision };
+  }
+
+  /** End one dispatch's claim. */
+  release(claim: JobClaim): void {
+    claim.entry.dispatches -= 1;
+    if (
+      claim.entry.dispatches === 0 &&
+      this.#inFlight.get(claim.id) === claim.entry
+    ) {
+      this.#inFlight.delete(claim.id);
+    }
+  }
+
+  /**
+   * Whether the job still exists as the dispatch claimed it: no cancel,
+   * push, reschedule, breaker retime or hung takeover touched it since.
+   */
+  isCurrent(claim: JobClaim): boolean {
     return (
-      this.revision(id) === revision &&
-      this.#sql("SELECT id FROM cf_agents_jobs WHERE id = ?", id).length > 0
+      this.#inFlight.get(claim.id) === claim.entry &&
+      claim.entry.revision === claim.revision &&
+      this.#sql("SELECT id FROM cf_agents_jobs WHERE id = ?", claim.id).length >
+        0
     );
   }
 
@@ -472,12 +509,9 @@ export class JobQueue {
    * the same unchanged job (overlapping alarms) does not bump it, so either
    * dispatch's result applies.
    */
-  applyOutcome(
-    id: string,
-    outcome: LifecycleJobOutcome,
-    revision: number
-  ): void {
-    if (!this.isCurrent(id, revision)) return;
+  applyOutcome(claim: JobClaim, outcome: LifecycleJobOutcome): void {
+    if (!this.isCurrent(claim)) return;
+    const { id } = claim;
     if (outcome === undefined) {
       this.#sql("DELETE FROM cf_agents_jobs WHERE id = ?", id);
       return;

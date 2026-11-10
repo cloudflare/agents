@@ -22,6 +22,7 @@ import {
   hungTimeoutMs,
   isHungRow,
   jobFromRow,
+  type JobClaim,
   type JobQueue,
   type JobStorageRow,
   type LifecycleJob,
@@ -336,6 +337,7 @@ export class JobDriver {
       const row = this.#options.queue.dueRow(stale.id, nowMs);
       if (!row) continue;
 
+      let takeover = false;
       if (row.singleflight === 1 && row.running === 1) {
         if (!isHungRow(row, nowMs)) {
           console.warn(
@@ -348,24 +350,27 @@ export class JobDriver {
             (nowMs - (row.execution_started_at ?? 0)) / 1000
           )}s ago)`
         );
+        takeover = true;
       }
-      // The revision lets a cancel, push or reschedule made mid-dispatch
-      // supersede this dispatch's retries and drive result (see
-      // JobQueue.applyOutcome). The running marker feeds single-flight
-      // skipping and hung recovery.
-      const revision = this.#options.queue.revision(row.id);
-      this.#options.queue.markRunning(row.id, nowMs);
-
-      await this.#driveJob(row, revision);
+      // The claim's revision lets a cancel, push, reschedule or hung
+      // takeover made mid-dispatch supersede this dispatch's retries and
+      // drive result (see JobQueue.applyOutcome). The running marker it
+      // sets feeds single-flight skipping and hung recovery.
+      const claim = this.#options.queue.claim(row.id, nowMs, takeover);
+      try {
+        await this.#driveJob(row, claim);
+      } finally {
+        this.#options.queue.release(claim);
+      }
     }
   }
 
   /** Dispatch one due row to its owner with retry and failure policy. */
-  async #driveJob(row: JobStorageRow, revision: number): Promise<void> {
+  async #driveJob(row: JobStorageRow, claim: JobClaim): Promise<void> {
     const { queue, resolveDispatch, disabled } = this.#options;
     // Whether the job is still the one this dispatch claimed: no cancel,
-    // push or reschedule changed it since.
-    const owned = () => queue.isCurrent(row.id, revision);
+    // push, reschedule or hung takeover changed it since.
+    const owned = () => queue.isCurrent(claim);
     const job = jobFromRow(row);
     const dispatch = await resolveDispatch(row.capability);
     if (!dispatch) {
@@ -469,7 +474,7 @@ export class JobDriver {
 
     if (disabled()) return;
     if (outcome === SUPERSEDED) return;
-    queue.applyOutcome(row.id, outcome ?? undefined, revision);
+    queue.applyOutcome(claim, outcome ?? undefined);
   }
 
   #warnBacklog(due: ReadonlyArray<JobStorageRow>): void {
