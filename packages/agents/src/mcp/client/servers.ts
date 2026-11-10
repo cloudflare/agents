@@ -55,16 +55,13 @@ export type ConnectionEntryPoints = {
 export class ServerController {
   private readonly disposables = new Map<string, DisposableStore>();
   /**
-   * The providers of a server's closed connections, kept until the server is
-   * removed. Work a closed connection started may still be running with its
-   * provider (a token refresh, say), also after the server was registered
-   * again, so removeServer clears storage through each of them, and they
-   * store nothing more.
+   * The provider of a server's closed connection. Work the connection
+   * started may still be running with it (a token refresh, say). Once the
+   * server has a new connection, or is removed, that work must not store
+   * anything more: createConnection retires the provider, and removeServer
+   * clears storage through it.
    */
-  private readonly closedProviders = new Map<
-    string,
-    Set<AgentMcpOAuthProvider>
-  >();
+  private readonly closedProviders = new Map<string, AgentMcpOAuthProvider>();
 
   constructor(
     private readonly ctx: McpClientContext,
@@ -138,6 +135,10 @@ export class ServerController {
   ): MCPClientConnection {
     const existing = this.ctx.connections[id];
     if (existing) return existing;
+    // The new connection owns the server's grant now.
+    const closed = this.closedProviders.get(id);
+    this.closedProviders.delete(id);
+    if (closed) this.authorization.retire(closed);
 
     // Stored servers re-advertise the capabilities saved on their row;
     // fresh registrations rely on the handlers. The stamp is read without
@@ -775,10 +776,8 @@ export class ServerController {
 
   private async removeServer(id: string): Promise<void> {
     const conn = this.ctx.connections[id];
-    const closed = this.closedProviders.get(id) ?? new Set();
-    this.closedProviders.delete(id);
     let authProvider =
-      conn?.options.transport.authProvider ?? [...closed].at(-1);
+      conn?.options.transport.authProvider ?? this.closedProviders.get(id);
     if (!authProvider) {
       // A user-supplied provider factory can throw; that must not stop the
       // server from being removed.
@@ -795,15 +794,7 @@ export class ServerController {
     }
     if (conn) await this.close(id).catch(() => {});
     if (authProvider) await this.authorization.clearStorage(id, authProvider);
-    for (const provider of closed) {
-      if (provider !== authProvider) {
-        await this.authorization.clearStorage(id, provider);
-      }
-    }
-    // close() kept the connection's provider; it is retired now.
-    const kept = this.closedProviders.get(id);
-    if (kept && authProvider) kept.delete(authProvider);
-    if (kept?.size === 0) this.closedProviders.delete(id);
+    this.closedProviders.delete(id);
     // Registered again while the credentials were cleared: keep the new row.
     if (this.ctx.connections[id]) return;
     this.ctx.store.remove(id);
@@ -890,7 +881,7 @@ export class ServerController {
     }
     const closed = this.closedProviders.get(oldId);
     if (closed) {
-      for (const provider of closed) provider.serverId = newId;
+      closed.serverId = newId;
       this.closedProviders.set(newId, closed);
       this.closedProviders.delete(oldId);
     }
@@ -900,11 +891,7 @@ export class ServerController {
   private forgetConnection(id: string): void {
     const authProvider =
       this.ctx.connections[id]?.options.transport.authProvider;
-    if (authProvider) {
-      const closed = this.closedProviders.get(id) ?? new Set();
-      closed.add(authProvider);
-      this.closedProviders.set(id, closed);
-    }
+    if (authProvider) this.closedProviders.set(id, authProvider);
     this.ctx.store.setSession(id);
     this.disposables.get(id)?.dispose();
     this.disposables.delete(id);

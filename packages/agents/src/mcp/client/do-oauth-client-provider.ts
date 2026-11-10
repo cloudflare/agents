@@ -111,9 +111,11 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
   private _serverId_: string | undefined;
   private _clientId_: string | undefined;
   /**
-   * Set once this provider's server was removed (clearServerStorage). Work
-   * it started may still be running, such as a token refresh: what it would
-   * save afterwards is dropped, so nothing outlives the removal.
+   * Set once this provider's server was removed (clearServerStorage), or
+   * its connection replaced by a new one (retire). Work it started may
+   * still be running, such as a token refresh: what it would save
+   * afterwards is dropped, so it neither outlives the removal nor writes
+   * over the new connection's grant.
    */
   private _retired_ = false;
   /** Tokens saved after retiring: kept in memory only, for work in flight. */
@@ -442,7 +444,7 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
    * From then on, this provider stores nothing.
    */
   async clearServerStorage(): Promise<void> {
-    this._retired_ = true;
+    this.retire();
     const keys = [
       ...(
         await this.storage.list({
@@ -454,6 +456,14 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
     for (let i = 0; i < keys.length; i += 128) {
       await this.storage.delete(keys.slice(i, i + 128));
     }
+  }
+
+  /**
+   * @internal Store nothing more: the connection using this provider was
+   * replaced or its server removed, while its work may still be running.
+   */
+  retire(): void {
+    this._retired_ = true;
   }
 
   codeVerifierKey(clientId: string) {

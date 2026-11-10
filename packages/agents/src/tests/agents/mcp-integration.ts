@@ -147,6 +147,14 @@ export class McpIntegrationAgent extends Agent {
     return [...keys.keys()];
   }
 
+  /** The OAuth storage the default provider holds for a server, by key. */
+  async oauthStorage(serverId: string): Promise<Record<string, unknown>> {
+    const entries = await this.ctx.storage.list({
+      prefix: `/${this.name}/${serverId}/`
+    });
+    return Object.fromEntries(entries);
+  }
+
   /** Every state a server was broadcast in, as a UI listening saw it. */
   serverHistory(serverId: string): ServerView[] {
     return this.#history.get(serverId) ?? [];

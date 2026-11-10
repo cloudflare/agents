@@ -136,6 +136,14 @@ export class AuthorizationController {
     }
   }
 
+  /**
+   * Stop a provider from storing anything more, for work still running on a
+   * connection that was replaced. Only the default provider can be retired.
+   */
+  retire(provider: AgentMcpOAuthProvider): void {
+    if (provider instanceof DurableObjectOAuthClientProvider) provider.retire();
+  }
+
   // Links
 
   /**

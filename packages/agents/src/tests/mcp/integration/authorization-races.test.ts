@@ -101,6 +101,32 @@ describe("a server's OAuth storage after it is removed", () => {
 
     expect(await agent.oauthKeys("files")).toEqual([]);
   });
+
+  // Same rule. Path: a tool call's refresh waits at the token endpoint; the
+  // connection is closed; addMcpServer with { id } migrates the server and
+  // gives it a new connection; the refresh returns.
+  it("keeps a closed connection's late refresh out of a migrated server's storage", async () => {
+    const agent = await newAgent();
+    const generated = await connectAuthorized(agent, server);
+    server.revokeAccessTokens();
+    const release = server.holdRequests("refresh");
+    const call = agent.callServerTool(generated, "read");
+    await waitingAtServer(server);
+
+    await agent.closeNow(generated);
+    await agent.connectServer(MCP_URL, {
+      callbackHost: CLIENT_ORIGIN,
+      id: "files"
+    });
+    await agent.settle();
+    const before = await agent.oauthStorage("files");
+    release();
+    await call;
+    await pause();
+
+    expect(await agent.oauthStorage("files")).toEqual(before);
+    expect(await agent.oauthKeys(generated)).toEqual([]);
+  });
 });
 
 describe("an OAuth callback while the connection is closed", () => {
