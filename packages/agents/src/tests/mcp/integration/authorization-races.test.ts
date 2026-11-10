@@ -108,6 +108,39 @@ describe("an OAuth callback while the connection is closed", () => {
       auth_url: null
     });
   });
+
+  // Same model, rule StaleCallbackLeavesServerAlone. Path: the server waits
+  // on a link; its connection is closed and the server added again, which
+  // registers a new client and issues a new link; the user completes the
+  // first link.
+  it("leaves a server added again alone when the closed connection's link completes", async () => {
+    const agent = await newAgent();
+    const first = await agent.connectServer(MCP_URL, {
+      callbackHost: CLIENT_ORIGIN,
+      id: "files"
+    });
+    if (first.state !== "authenticating") throw new Error("expected a link");
+    await agent.closeNow("files");
+    const second = await agent.connectServer(MCP_URL, {
+      callbackHost: CLIENT_ORIGIN,
+      id: "files"
+    });
+    if (second.state !== "authenticating") throw new Error("expected a link");
+
+    await followCallback(server.authorize(first.authUrl));
+    await agent.settle();
+
+    expect(await agent.server("files")).toMatchObject({
+      state: "authenticating",
+      auth_url: second.authUrl,
+      error: null
+    });
+    expect(await followCallback(server.authorize(second.authUrl))).toEqual({
+      authorized: true
+    });
+    await agent.settle();
+    expect((await agent.server("files"))?.state).toBe("ready");
+  });
 });
 
 describe("a step-up callback while a token refresh runs", () => {

@@ -20,6 +20,8 @@ const codeVerifierStateStorage = new AsyncLocalStorage<{
 interface StoredState {
   nonce: string;
   serverId: string;
+  /** The client the link was issued for; absent on states stored before. */
+  clientId?: string;
   createdAt: number;
 }
 
@@ -299,6 +301,7 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
     const storedState: StoredState = {
       nonce,
       serverId: this.serverId,
+      clientId: this._clientId_,
       createdAt: Date.now()
     };
     if (!this._retired_) {
@@ -326,6 +329,16 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
     if (storedState.serverId !== serverId) {
       await this.storage.delete(key);
       return { valid: false, error: "State serverId mismatch" };
+    }
+
+    // Issued for another client: a connection this one replaced (closed and
+    // registered again). Its verifier belongs to that client, so the code
+    // could never be exchanged here.
+    if (
+      storedState.clientId !== undefined &&
+      storedState.clientId !== this._clientId_
+    ) {
+      return { valid: false, error: "State was issued for another client" };
     }
 
     if (isExpired(storedState.createdAt)) {
