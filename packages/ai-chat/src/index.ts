@@ -416,6 +416,9 @@ const agentToolChunkEncoder = new TextEncoder();
 const LEGACY_LIFT_WINDOW_ROWS = 25;
 const LEGACY_LIFT_WINDOW_BYTES = 4 * 1024 * 1024;
 
+/** What applying a client tool result or approval did to its tool part. */
+type ToolPartApplyOutcome = "changed" | "unchanged" | "missing";
+
 export class AIChatAgent<
   Env extends Cloudflare.Env = Cloudflare.Env,
   State = unknown,
@@ -1369,10 +1372,16 @@ export class AIChatAgent<
                     [connection.id]
                   );
 
+                  // A regenerate deletes the replies it replaces once its
+                  // turn starts (below), so a reply still streaming or
+                  // queued now is deleted too instead of surviving next to
+                  // the regenerated one.
                   await this.persistMessages(
                     transformedMessages,
                     [connection.id],
-                    { _deleteStaleRows: true }
+                    {
+                      _deleteStaleRows: requestTrigger !== "regenerate-message"
+                    }
                   );
 
                   if (concurrencyDecision.strategy === "merge") {
@@ -1498,6 +1507,20 @@ export class AIChatAgent<
                   return;
                 }
 
+                // Regenerate: drop every reply after the messages the client
+                // sent, including one that landed while this request waited
+                // in the queue (another tab's turn was still streaming).
+                if (requestTrigger === "regenerate-message") {
+                  const keep = new Set(
+                    transformedMessages.map((message) => message.id)
+                  );
+                  if (this.messages.some((message) => !keep.has(message.id))) {
+                    await this.persistMessages(transformedMessages, [], {
+                      _deleteStaleRows: true
+                    });
+                  }
+                }
+
                 this._emit("message:request");
 
                 return this._tryCatchChat(async () => {
@@ -1512,6 +1535,7 @@ export class AIChatAgent<
                     },
                     async () => {
                       const chatTurnBody = async () => {
+                        let replying = false;
                         try {
                           await withAgentSpan(
                             this,
@@ -1563,7 +1587,12 @@ export class AIChatAgent<
                                   chatMessageId,
                                   response,
                                   [connection.id],
-                                  { chatMessageId }
+                                  {
+                                    chatMessageId,
+                                    onStreamStart: () => {
+                                      replying = true;
+                                    }
+                                  }
                                 )
                             );
                           } else {
@@ -1578,6 +1607,19 @@ export class AIChatAgent<
                               outcome: "completed"
                             });
                           }
+                        } catch (error) {
+                          // onChatMessage (or _reply before its stream was
+                          // set up) threw: no frame reached the client yet,
+                          // so report the failure the way a stream error is
+                          // reported instead of leaving the request open.
+                          if (
+                            !replying &&
+                            !abortSignal?.aborted &&
+                            !isDurableObjectResetError(error)
+                          ) {
+                            await this._reportTurnFailure(chatMessageId, error);
+                          }
+                          throw error;
                         } finally {
                           this._abortRegistry.remove(chatMessageId);
                           // Settle the pre-stream turn on the normal path (#1784):
@@ -1697,25 +1739,31 @@ export class AIChatAgent<
 
           this._emit("tool:result", { toolCallId, toolName });
 
-          this._enqueueInteractionApply(() =>
-            this._applyToolResult(
+          this._enqueueInteractionApply(async () => {
+            const outcome = await this._settleToolResult(
               toolCallId,
               toolName,
               output,
               overrideState,
               errorText
-            )
-          );
-
-          if (autoContinue) {
-            this._scheduleAutoContinuation(
-              connection,
-              (clientTools as ClientToolSchema[] | undefined) ??
-                this._lastClientTools,
-              this._lastBody,
-              "[AIChatAgent] Tool continuation failed:"
             );
-          } else {
+            // Continue only for a result that settled the tool call. A
+            // second tab's result for an answered call, or one for a call
+            // that no longer exists (cleared, regenerated), has nothing new
+            // for the model.
+            if (autoContinue && outcome === "changed") {
+              this._scheduleAutoContinuation(
+                connection,
+                (clientTools as ClientToolSchema[] | undefined) ??
+                  this._lastClientTools,
+                this._lastBody,
+                "[AIChatAgent] Tool continuation failed:"
+              );
+            }
+            return outcome !== "missing";
+          });
+
+          if (!autoContinue) {
             // A result that arrived WITHOUT autoContinue (e.g. a standalone
             // errored tool) can still be the one that completes a parallel batch
             // a sibling already opted to continue — re-arm the barrier so that
@@ -1730,18 +1778,23 @@ export class AIChatAgent<
         if (event.type === "tool-approval") {
           const { toolCallId, approved, autoContinue } = event;
           this._emit("tool:approval", { toolCallId, approved });
-          this._enqueueInteractionApply(() =>
-            this._applyToolApproval(toolCallId, approved)
-          );
-
-          if (autoContinue) {
-            this._scheduleAutoContinuation(
-              connection,
-              this._lastClientTools,
-              this._lastBody,
-              "[AIChatAgent] Tool approval continuation failed:"
+          this._enqueueInteractionApply(async () => {
+            const outcome = await this._settleToolApproval(
+              toolCallId,
+              approved
             );
-          } else {
+            if (autoContinue && outcome === "changed") {
+              this._scheduleAutoContinuation(
+                connection,
+                this._lastClientTools,
+                this._lastBody,
+                "[AIChatAgent] Tool approval continuation failed:"
+              );
+            }
+            return outcome !== "missing";
+          });
+
+          if (!autoContinue) {
             this._rearmPendingAutoContinuationForBatch();
           }
           return;
@@ -3545,6 +3598,27 @@ export class AIChatAgent<
       this._clearAllAutoContinuationState(true);
       console.error(errorPrefix, error);
     });
+  }
+
+  /**
+   * Report a chat request whose turn failed before it streamed: an error
+   * frame for the request and a durable terminal record, so a client that
+   * reconnects learns the outcome too.
+   */
+  private async _reportTurnFailure(
+    requestId: string,
+    error: unknown
+  ): Promise<void> {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    this._broadcastChatMessage({
+      body: errorMessage,
+      done: true,
+      error: true,
+      id: requestId,
+      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+    });
+    this._emit("message:error", { error: errorMessage });
+    await this._recordChatTerminal(requestId, errorMessage);
   }
 
   /**
@@ -6560,6 +6634,26 @@ export class AIChatAgent<
     matchStates: string[],
     applyUpdate: (part: Record<string, unknown>) => Record<string, unknown>
   ): Promise<boolean> {
+    return (
+      (await this._updateToolPart(
+        toolCallId,
+        callerName,
+        matchStates,
+        applyUpdate
+      )) !== "missing"
+    );
+  }
+
+  /**
+   * {@link _findAndUpdateToolPart}, reporting whether the update changed the
+   * part, was an idempotent no-op, or found no part to update.
+   */
+  private async _updateToolPart(
+    toolCallId: string,
+    callerName: string,
+    matchStates: string[],
+    applyUpdate: (part: Record<string, unknown>) => Record<string, unknown>
+  ): Promise<ToolPartApplyOutcome> {
     // Find the message containing this tool call.
     // Check streaming message first (in-memory, not yet persisted), then
     // retry persisted messages with backoff.
@@ -6586,7 +6680,7 @@ export class AIChatAgent<
       console.warn(
         `[AIChatAgent] ${callerName}: Could not find message with toolCallId ${toolCallId} after retries`
       );
-      return false;
+      return "missing";
     }
 
     const isStreamingMessage = message === this._streamingMessage;
@@ -6671,7 +6765,7 @@ export class AIChatAgent<
       console.warn(
         `[AIChatAgent] ${callerName}: Tool part with toolCallId ${toolCallId} not in expected state (expected: ${matchStates.join("|")})`
       );
-      return false;
+      return "missing";
     }
 
     // Idempotent no-op: caller asked us to apply something we'd already
@@ -6679,7 +6773,7 @@ export class AIChatAgent<
     // re-delivery). Skip the broadcast — clients are already in the
     // correct state and a redundant MESSAGE_UPDATED would just churn UI.
     if (!hasRealChange) {
-      return true;
+      return "unchanged";
     }
 
     // Broadcast the update to all clients.
@@ -6701,7 +6795,7 @@ export class AIChatAgent<
       }
     }
 
-    return true;
+    return "changed";
   }
 
   /**
@@ -6811,7 +6905,26 @@ export class AIChatAgent<
     overrideState?: "output-error",
     errorText?: string
   ): Promise<boolean> {
-    return this._findAndUpdateToolPart(
+    return (
+      (await this._settleToolResult(
+        toolCallId,
+        _toolName,
+        output,
+        overrideState,
+        errorText
+      )) !== "missing"
+    );
+  }
+
+  /** {@link _applyToolResult}, reporting what the apply did to the part. */
+  private async _settleToolResult(
+    toolCallId: string,
+    _toolName: string,
+    output: unknown,
+    overrideState?: "output-error",
+    errorText?: string
+  ): Promise<ToolPartApplyOutcome> {
+    return this._updateToolPart(
       toolCallId,
       "_applyToolResult",
       [
@@ -7493,13 +7606,21 @@ export class AIChatAgent<
     toolCallId: string,
     approved: boolean
   ): Promise<boolean> {
+    return (await this._settleToolApproval(toolCallId, approved)) !== "missing";
+  }
+
+  /** {@link _applyToolApproval}, reporting what the apply did to the part. */
+  private async _settleToolApproval(
+    toolCallId: string,
+    approved: boolean
+  ): Promise<ToolPartApplyOutcome> {
     // Use the shared `agents/chat` builder so the approval merge — including
     // the fallback that synthesizes `approval.id` from `toolCallId` when an
     // older / hand-seeded transcript lacks one — stays identical to Think.
     // convertToModelMessages needs `approval.id` to produce a valid
     // tool-approval-request content part with `approvalId`.
     const update = toolApprovalUpdate(toolCallId, approved);
-    return this._findAndUpdateToolPart(
+    return this._updateToolPart(
       toolCallId,
       "_applyToolApproval",
       update.matchStates,
@@ -7528,10 +7649,29 @@ export class AIChatAgent<
     const abortSignal = chatMessageId
       ? this._abortRegistry.getExistingSignal(chatMessageId)
       : undefined;
+    // A chat clear (resetTurnState) bumps the queue generation and empties
+    // the abort registry. A turn admitted before it must neither stream into
+    // the cleared chat nor persist its reply there, even when its controller
+    // is gone from the registry.
+    const turnGeneration = this._turnQueue.activeGeneration;
+    const resetSinceTurnStarted = () =>
+      turnGeneration !== null && this._turnQueue.generation !== turnGeneration;
 
     // Keep the DO alive during streaming to prevent idle eviction
     return this.keepAliveWhile(() =>
       this._tryCatchChat(async () => {
+        if (resetSinceTurnStarted()) {
+          response.body?.cancel().catch(() => {});
+          this._broadcastChatMessage({
+            body: "",
+            done: true,
+            id,
+            type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+            outcome: "aborted",
+            ...(continuation && { continuation: true })
+          });
+          return { status: "aborted" };
+        }
         if (!response.body) {
           // Send empty response if no body
           this._clearPendingAutoContinuation(true);
@@ -7758,7 +7898,11 @@ export class AIChatAgent<
                   discard: !this._agentToolRunsByRequestId.get(id)
                 }
               : null;
-          if (message.parts.length > 0 && !discardPartial) {
+          if (
+            message.parts.length > 0 &&
+            !discardPartial &&
+            !resetSinceTurnStarted()
+          ) {
             if (earlyPersistedId) {
               // Message already exists in this.messages from the early persist.
               // Update it in place with the final streaming state.
