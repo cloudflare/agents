@@ -232,7 +232,16 @@ export class ResumeHandshake {
   ): Promise<void> {
     const { resumableStream, pendingResumeConnections, responseMessageType } =
       this.host;
-    pendingResumeConnections.delete(connection.id);
+    // An ACK for a stream other than the active one (a notice from before
+    // that stream finished) leaves the connection waiting for the active
+    // stream's ACK: it was told to resume that stream and gets its chunks
+    // from the replay, not from the middle of the live broadcast.
+    if (
+      !resumableStream.hasActiveStream() ||
+      resumableStream.activeRequestId === requestId
+    ) {
+      pendingResumeConnections.delete(connection.id);
+    }
 
     if (
       resumableStream.hasActiveStream() &&
