@@ -182,6 +182,14 @@ export function isHungRow(row: JobStorageRow, nowMs: number): boolean {
 export class JobQueue {
   readonly #storage: DurableObjectStorage;
   #tableEnsured = false;
+  /**
+   * A revision per job id, bumped by every change of durable intent: push,
+   * reschedule, cancel, and the breaker's retimes and deletes. A dispatch
+   * records the revision when it claims a job and acts on the job only
+   * while the revision is unchanged. In memory only: a dispatch never
+   * outlives its isolate, so a fresh isolate starts every id at 0.
+   */
+  readonly #revisions = new Map<string, number>();
 
   constructor(storage: DurableObjectStorage) {
     this.#storage = storage;
@@ -220,6 +228,26 @@ export class JobQueue {
     this.#tableEnsured = true;
   }
 
+  #revise(id: string): void {
+    this.#revisions.set(id, (this.#revisions.get(id) ?? 0) + 1);
+  }
+
+  /** The job's current revision, recorded by a dispatch when it claims it. */
+  revision(id: string): number {
+    return this.#revisions.get(id) ?? 0;
+  }
+
+  /**
+   * Whether the job still exists at the revision a dispatch claimed it at:
+   * no cancel, push, reschedule or breaker retime touched it since.
+   */
+  isCurrent(id: string, revision: number): boolean {
+    return (
+      this.revision(id) === revision &&
+      this.#sql("SELECT id FROM cf_agents_jobs WHERE id = ?", id).length > 0
+    );
+  }
+
   push(capability: string, options: LifecycleJobPushOptions): LifecycleJob {
     if (!Number.isFinite(options.time) || options.time < 0) {
       throw new Error(`Invalid job time: ${String(options.time)}`);
@@ -231,8 +259,8 @@ export class JobQueue {
     // Job ids are scoped to their owner, like every other queue verb: a
     // same-id push replaces only the pusher's own job (the conflict update
     // is a no-op against another owner's row, surfaced as the ownership
-    // error below), and it clears any in-flight dispatch marker so this
-    // newer durable intent wins over a concurrently returned drive result.
+    // error below), and it bumps the job's revision so this newer durable
+    // intent wins over a concurrently returned drive result.
     this.#sql(
       `INSERT INTO cf_agents_jobs
         (id, capability, fn, time, payload, retry_options, singleflight,
@@ -263,6 +291,7 @@ export class JobQueue {
       options.recoveryLoop ? 1 : 0
     );
     const job = this.get(capability, id);
+    if (job) this.#revise(id);
     if (!job) {
       const owner = this.#sql<{ capability: string }>(
         "SELECT capability FROM cf_agents_jobs WHERE id = ?",
@@ -285,6 +314,7 @@ export class JobQueue {
       capability
     );
     if (existing.length === 0) return false;
+    this.#revise(id);
     this.#sql(
       "DELETE FROM cf_agents_jobs WHERE id = ? AND capability = ?",
       id,
@@ -303,6 +333,7 @@ export class JobQueue {
       capability
     );
     if (existing.length === 0) return false;
+    this.#revise(id);
     this.#sql(
       `UPDATE cf_agents_jobs
        SET time = ?, running = 0, execution_started_at = NULL
@@ -357,20 +388,6 @@ export class JobQueue {
     );
   }
 
-  /**
-   * Whether a driven job still carries the dispatch marker its claim set.
-   * A cancel deletes the row and a same-id push or reschedule clears the
-   * marker; either is newer intent the dispatch must not override.
-   */
-  isDispatching(id: string): boolean {
-    return (
-      this.#sql(
-        "SELECT id FROM cf_agents_jobs WHERE id = ? AND running = 1",
-        id
-      ).length > 0
-    );
-  }
-
   clearRunning(id: string): void {
     this.#sql(
       `UPDATE cf_agents_jobs
@@ -381,16 +398,17 @@ export class JobQueue {
   }
 
   delete(id: string): void {
+    this.#revise(id);
     this.#sql("DELETE FROM cf_agents_jobs WHERE id = ?", id);
   }
 
   /**
-   * Unguarded retime for the alarm memory-limit breaker's backoff: the
-   * platform-failure path clears the dispatch marker before the breaker
-   * runs, so the guarded {@link applyOutcome} would no-op — and the
-   * breaker's backoff must land regardless, it is protecting the object.
+   * Unguarded retime for the alarm memory-limit breaker's backoff, which
+   * must land regardless of any dispatch: it is protecting the object. It
+   * bumps the revision, so no dispatch's drive result overrides it.
    */
   retime(id: string, time: number): void {
+    this.#revise(id);
     this.#sql(
       `UPDATE cf_agents_jobs
        SET time = ?, running = 0, execution_started_at = NULL
@@ -404,9 +422,15 @@ export class JobQueue {
    * Back off every pending recovery-loop job that would fire before the
    * breaker's backoff time (#1825), so a doomed loop's sibling rows cannot
    * re-trigger it on the next wake. Unguarded like {@link retime}: the
-   * breaker's backoff must land regardless of dispatch markers.
+   * breaker's backoff must land regardless of any dispatch.
    */
   delayRecoveryLoopJobs(time: number): void {
+    for (const { id } of this.#sql<{ id: string }>(
+      "SELECT id FROM cf_agents_jobs WHERE recovery_loop = 1 AND time <= ?",
+      Math.floor(time)
+    )) {
+      this.#revise(id);
+    }
     this.#sql(
       `UPDATE cf_agents_jobs
        SET time = ?, running = 0, execution_started_at = NULL
@@ -432,19 +456,30 @@ export class JobQueue {
    * budget (#1825). Unrelated jobs are untouched.
    */
   purgeRecoveryLoopJobs(): void {
+    for (const { id } of this.#sql<{ id: string }>(
+      "SELECT id FROM cf_agents_jobs WHERE recovery_loop = 1"
+    )) {
+      this.#revise(id);
+    }
     this.#sql("DELETE FROM cf_agents_jobs WHERE recovery_loop = 1");
   }
 
   /**
-   * Apply one drive result, guarded on the dispatch marker: every driven
-   * job carries `running = 1` for the duration of its dispatch, and a
-   * same-id `push()` or `reschedule()` made meanwhile clears it. A cleared
-   * marker means newer durable intent exists, so the outcome quietly
-   * defers to it instead of deleting or retiming the fresher job.
+   * Apply one drive result, guarded on the revision the dispatch claimed
+   * the job at. A cancel, same-id push or reschedule made meanwhile bumped
+   * it: newer durable intent exists, so the outcome quietly defers to it
+   * instead of deleting or retiming the fresher job. Another dispatch of
+   * the same unchanged job (overlapping alarms) does not bump it, so either
+   * dispatch's result applies.
    */
-  applyOutcome(id: string, outcome: LifecycleJobOutcome): void {
+  applyOutcome(
+    id: string,
+    outcome: LifecycleJobOutcome,
+    revision: number
+  ): void {
+    if (!this.isCurrent(id, revision)) return;
     if (outcome === undefined) {
-      this.#sql("DELETE FROM cf_agents_jobs WHERE id = ? AND running = 1", id);
+      this.#sql("DELETE FROM cf_agents_jobs WHERE id = ?", id);
       return;
     }
     if (outcome === "yield") {
@@ -459,7 +494,7 @@ export class JobQueue {
       this.#sql(
         `UPDATE cf_agents_jobs
          SET time = ?, running = 0, execution_started_at = NULL
-         WHERE id = ? AND running = 1`,
+         WHERE id = ?`,
         Math.floor(outcome.rescheduleAt),
         id
       );

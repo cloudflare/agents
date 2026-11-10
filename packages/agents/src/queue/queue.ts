@@ -7,6 +7,7 @@
  * payload and owner.
  */
 
+import { nanoid } from "nanoid";
 import {
   LifecycleCapability,
   type LifecycleRouteAddress,
@@ -76,6 +77,12 @@ type QueueJobPayload = {
   readonly payload: unknown;
   readonly owner_path: string | null;
   readonly owner_path_key: string | null;
+  /**
+   * Unique per push of a routed item. A facet waiting to retry compares it
+   * with the root's current job, so a same-id push stops the old retry even
+   * when it carries the same callback and payload.
+   */
+  readonly push_id?: string;
 };
 
 type QueueRouteMessage =
@@ -88,9 +95,11 @@ type QueueRouteMessage =
   | { readonly type: "get" | "cancel"; readonly id: string }
   | { readonly type: "list"; readonly criteria?: QueueCriteria }
   | { readonly type: "cancelAll"; readonly callback?: string }
+  | { readonly type: "pending"; readonly id: string; readonly pushId?: string }
   | {
       readonly type: "dispatch";
       readonly item: QueueItem<unknown>;
+      readonly pushId?: string;
     };
 
 function isQueueJobPayload(value: unknown): value is QueueJobPayload {
@@ -249,7 +258,11 @@ export class Queue<
             key: job.payload.owner_path_key ?? job.payload.owner_path,
             data: job.payload.owner_path
           },
-          { type: "dispatch", item } satisfies QueueRouteMessage
+          {
+            type: "dispatch",
+            item,
+            pushId: job.payload.push_id
+          } satisfies QueueRouteMessage
         );
       } catch (error) {
         if (isPlatformFailure(error)) {
@@ -330,8 +343,10 @@ export class Queue<
         return this.#cancelForOwner(owner, message.id);
       case "cancelAll":
         return this.#cancelAllForOwner(owner, message.callback);
+      case "pending":
+        return this.#pendingForOwner(owner, message.id, message.pushId);
       case "dispatch":
-        await this.#executeRouted(message.item);
+        await this.#executeRouted(message.item, message.pushId);
         return true;
       default:
         throw new Error("Unknown routed Queue message");
@@ -345,7 +360,10 @@ export class Queue<
    * root preserves the item and the durable alarm retries on a fresh
    * invocation.
    */
-  async #executeRouted(item: QueueItem<unknown>): Promise<void> {
+  async #executeRouted(
+    item: QueueItem<unknown>,
+    pushId: string | undefined
+  ): Promise<void> {
     const handler = this.#resolveCallback(item.callback);
     if (!handler) {
       console.error(`callback ${item.callback} not found`);
@@ -362,7 +380,9 @@ export class Queue<
           // The root keeps the item while this facet waits to retry. A
           // cancel or same-id push made meanwhile is newer intent: do not
           // run this item again.
-          if (attempt > 1 && !(await this.#stillQueued(item))) return;
+          if (attempt > 1 && !(await this.#stillQueued(item.id, pushId))) {
+            return;
+          }
           if (attempt > 1) {
             this.#emit("queue:retry", {
               callback: item.callback,
@@ -403,14 +423,13 @@ export class Queue<
     }
   }
 
-  /** Whether the root still holds this exact item, not a replacement. */
-  async #stillQueued(item: QueueItem<unknown>): Promise<boolean> {
-    const current = await this.get(item.id);
-    return (
-      current !== undefined &&
-      current.callback === item.callback &&
-      JSON.stringify(current.payload) === JSON.stringify(item.payload)
-    );
+  /** Whether the root still holds this push of the item, not a replacement. */
+  async #stillQueued(id: string, pushId: string | undefined): Promise<boolean> {
+    return (await this.lifecycle.routes.toRoot({
+      type: "pending",
+      id,
+      pushId
+    } satisfies QueueRouteMessage)) as boolean;
   }
 
   // ── Queue API ────────────────────────────────────────────────────────────
@@ -569,7 +588,8 @@ export class Queue<
       payload: {
         payload,
         owner_path: owner?.data ?? null,
-        owner_path_key: owner?.key ?? null
+        owner_path_key: owner?.key ?? null,
+        push_id: owner ? nanoid(9) : undefined
       } satisfies QueueJobPayload,
       retry: resolveRetryConfig(options?.retry, this.#retryDefaults)
     });
@@ -620,6 +640,19 @@ export class Queue<
       items.push(this.#jobToItem<T>(job, envelope));
     }
     return items;
+  }
+
+  #pendingForOwner(
+    owner: LifecycleRouteAddress | null,
+    id: string,
+    pushId: string | undefined
+  ): boolean {
+    const job = this.lifecycle.jobs.get(id);
+    if (!job || !isQueueJobPayload(job.payload)) return false;
+    if ((job.payload.owner_path_key ?? null) !== (owner?.key ?? null)) {
+      return false;
+    }
+    return job.payload.push_id === pushId;
   }
 
   async #cancelForOwner(

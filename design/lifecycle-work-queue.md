@@ -111,10 +111,14 @@ Four named rules define what a job owner can and cannot rely on:
    (default 30s) logs a warning and emits `job:slow_dispatch`. Work that must
    continue after a bounded handoff registers its promise with
    `trackAlarmWork()` so it remains part of the current alarm's breaker domain.
-3. **Newer pushes win over drive results.** Every dispatched job carries
-   a durable in-flight marker; a same-id `push()` or `reschedule()` made
-   while the job executes clears it, and `applyOutcome` only applies a
-   drive result to a still-marked job. The drive loop also refetches each
+3. **Newer pushes win over drive results.** Every change of a job's
+   durable intent (`push()`, `reschedule()`, `cancel()`, the breaker's
+   retimes) bumps its in-memory revision. A dispatch records the revision
+   when it claims the job; a retry runs, and `applyOutcome` applies a drive
+   result, only while the revision is unchanged. Another dispatch of the
+   same unchanged job (overlapping alarms) does not bump it. Each dispatch
+   still sets the durable `running` marker, which single-flight skipping
+   and hung recovery read. The drive loop also refetches each
    due job before claiming it, so a job replaced earlier in the same
    alarm cycle dispatches with fresh data — or, if no longer due, is
    skipped. An owner can therefore never lose a wake it explicitly

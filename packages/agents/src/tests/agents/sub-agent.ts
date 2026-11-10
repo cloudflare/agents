@@ -184,6 +184,23 @@ export class CounterSubAgent extends Agent {
     return schedule.id;
   }
 
+  /** Queue an item whose callback throws on its first attempt. */
+  async queueFlakyCallback(id: string, value: string): Promise<string> {
+    return this.queue(
+      "flakyQueuedCallback",
+      { value },
+      { id, retry: { maxAttempts: 2, baseDelayMs: 300, maxDelayMs: 300 } }
+    );
+  }
+
+  /** Logs every call; the first call for an item id throws. */
+  flakyQueuedCallback(
+    payload: { value: string },
+    item: { id: string; callback: string }
+  ) {
+    this.flakyScheduledCallback(payload, item);
+  }
+
   /** Logs every attempt; the first one for a schedule throws. */
   flakyScheduledCallback(
     payload: { value: string },
@@ -1617,6 +1634,31 @@ export class TestSubAgentParent extends Agent {
       // teardown actually happened, asserted by the caller.
       return e instanceof Error ? e.message : String(e);
     }
+  }
+
+  /**
+   * Queue a flaky item from the facet; once its first attempt failed and
+   * the facet waits to retry, push the same id with the same payload.
+   * Returns how many callback calls the facet logged once the queue drains.
+   */
+  async subAgentQueueReplacedDuringRetry(
+    subAgentName: string
+  ): Promise<number> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    await child.queueFlakyCallback("flaky-item", "same");
+    const waitFor = async (done: () => Promise<boolean>) => {
+      const deadline = Date.now() + 5_000;
+      while (!(await done()) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    };
+    await waitFor(
+      async () => (await this.subAgentScheduleLog(subAgentName)).length > 0
+    );
+    await child.queueFlakyCallback("flaky-item", "same");
+    await waitFor(async () => (await this.rootQueueRows()).length === 0);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    return (await this.subAgentScheduleLog(subAgentName)).length;
   }
 
   async subAgentScheduleFlaky(

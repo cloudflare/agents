@@ -155,14 +155,6 @@ export class JobDriver {
    * flag back at its default; there is no cross-isolate state to reset.
    */
   #strikeRecordedThisIsolate = false;
-  /**
-   * The dispatch that last claimed each job in this isolate. The row's
-   * `running` bit says some dispatch holds the job; this says which one.
-   * Overlapping alarm invocations can claim a same-id replacement while an
-   * older dispatch of the job waits to retry, and the older one must then
-   * neither run again nor apply its drive result.
-   */
-  readonly #claims = new Map<string, object>();
 
   constructor(options: JobDriverOptions) {
     this.#options = options;
@@ -357,29 +349,23 @@ export class JobDriver {
           )}s ago)`
         );
       }
-      // Every dispatch is marked, not just single-flight: the marker is
-      // what lets a same-id push made mid-dispatch supersede the returned
-      // drive result (see JobQueue.applyOutcome).
-      const claim = {};
-      this.#claims.set(row.id, claim);
+      // The revision lets a cancel, push or reschedule made mid-dispatch
+      // supersede this dispatch's retries and drive result (see
+      // JobQueue.applyOutcome). The running marker feeds single-flight
+      // skipping and hung recovery.
+      const revision = this.#options.queue.revision(row.id);
       this.#options.queue.markRunning(row.id, nowMs);
 
-      try {
-        await this.#driveJob(row, claim);
-      } finally {
-        if (this.#claims.get(row.id) === claim) this.#claims.delete(row.id);
-      }
+      await this.#driveJob(row, revision);
     }
   }
 
   /** Dispatch one due row to its owner with retry and failure policy. */
-  async #driveJob(row: JobStorageRow, claim: object): Promise<void> {
+  async #driveJob(row: JobStorageRow, revision: number): Promise<void> {
     const { queue, resolveDispatch, disabled } = this.#options;
-    // Whether this dispatch still holds the job: no cancel deleted it, no
-    // push or reschedule cleared its marker, and no later dispatch claimed
-    // it since.
-    const owned = () =>
-      this.#claims.get(row.id) === claim && queue.isDispatching(row.id);
+    // Whether the job is still the one this dispatch claimed: no cancel,
+    // push or reschedule changed it since.
+    const owned = () => queue.isCurrent(row.id, revision);
     const job = jobFromRow(row);
     const dispatch = await resolveDispatch(row.capability);
     if (!dispatch) {
@@ -482,9 +468,8 @@ export class JobDriver {
     }
 
     if (disabled()) return;
-    // A cancel, push, reschedule or later claim owns the row now.
-    if (outcome === SUPERSEDED || !owned()) return;
-    queue.applyOutcome(row.id, outcome ?? undefined);
+    if (outcome === SUPERSEDED) return;
+    queue.applyOutcome(row.id, outcome ?? undefined, revision);
   }
 
   #warnBacklog(due: ReadonlyArray<JobStorageRow>): void {

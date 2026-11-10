@@ -1,4 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { LifecycleCapability } from "../../lifecycle/capability";
+import type {
+  LifecycleJobOutcome,
+  LifecycleJobs
+} from "../../lifecycle/job-queue";
 import { Queue } from "../../queue";
 import { Scheduler } from "../../schedules";
 import { withCapabilityHarness } from "../shared/capability-harness";
@@ -160,6 +165,51 @@ describe("job retry after newer intent", () => {
 
       expect(calls).toEqual(["old", "new"]);
       expect(await queue.list()).toEqual([]);
+    });
+  });
+
+  it("keeps a completed job completed when an overlapping alarm's dispatch of it yields", async () => {
+    // Alarm A runs the job and holds; alarm B dispatches the same unchanged
+    // job and yields (as a routed dispatch does when its owner is
+    // unreachable). A then completes: the job is done and must not stay due.
+    class Probe extends LifecycleCapability {
+      dispatches = 0;
+      releaseFirst!: () => void;
+      readonly firstStarted: Promise<void>;
+      #firstStarted!: () => void;
+      constructor() {
+        super("probe");
+        this.firstStarted = new Promise((resolve) => {
+          this.#firstStarted = resolve;
+        });
+      }
+      get queue(): LifecycleJobs {
+        return this.lifecycle.jobs;
+      }
+      async onJob(): Promise<LifecycleJobOutcome> {
+        this.dispatches += 1;
+        if (this.dispatches > 1) return "yield";
+        this.#firstStarted();
+        await new Promise<void>((resolve) => {
+          this.releaseFirst = resolve;
+        });
+        return undefined;
+      }
+    }
+    await withCapabilityHarness(async ({ install }) => {
+      const probe = new Probe();
+      const { lifecycle } = install(probe);
+      await lifecycle.start();
+      await probe.queue.push({ id: "job", fn: "run", time: Date.now() - 1000 });
+
+      const alarmA = lifecycle.alarm();
+      await probe.firstStarted;
+      await lifecycle.alarm();
+      probe.releaseFirst();
+      await alarmA;
+
+      expect(probe.dispatches).toBe(2);
+      expect(probe.queue.get("job")).toBeUndefined();
     });
   });
 });
