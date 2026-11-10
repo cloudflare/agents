@@ -300,6 +300,15 @@ export class Streams extends LifecycleCapability {
   ): AsyncGenerator<StreamChunk[], void, undefined> {
     await this.lifecycle.ready();
     const signal = options.signal;
+    if (
+      options.batchSize !== undefined &&
+      !Number.isFinite(options.batchSize)
+    ) {
+      throw new RangeError("batchSize must be a finite number");
+    }
+    if (options.from !== undefined && !Number.isInteger(options.from)) {
+      throw new RangeError("from must be an integer");
+    }
     const batchSize = Math.max(
       1,
       Math.floor(options.batchSize ?? READ_BATCH_SIZE)
@@ -385,7 +394,7 @@ export class Streams extends LifecycleCapability {
       query += " AND tag = ?";
       params.push(options.tag);
     }
-    query += " ORDER BY created_at DESC, stream_id DESC LIMIT ?";
+    query += " ORDER BY created_at DESC, rowid DESC LIMIT ?";
     params.push(options.limit ?? DEFAULT_LIST_LIMIT);
     let rows: unknown[];
     try {
@@ -703,7 +712,18 @@ export class Streams extends LifecycleCapability {
       this.lifecycle.storage.transactionSync(() => {
         settled = this.#settleRow(streamId, state, reason);
         if (!settled) return;
-        options.commit?.();
+        const result: unknown = options.commit?.();
+        if (
+          result !== null &&
+          (typeof result === "object" || typeof result === "function") &&
+          typeof (result as PromiseLike<unknown>).then === "function"
+        ) {
+          // Swallow a later rejection; the throw below rolls back.
+          Promise.resolve(result).catch(() => {});
+          throw new TypeError(
+            "Stream close `commit` must be synchronous; it returned a promise."
+          );
+        }
         if (options.discard) deleted = this.#deleteRows(streamId) > 0;
       });
     } finally {
