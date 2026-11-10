@@ -96,6 +96,13 @@ function thinkingOptions(
   };
 }
 
+/** Whether the model's own compat profile opts into message threads. */
+function messageThreadsRequested(model: Model<Api>): boolean {
+  const compat = (model as { compat?: { supportsMessageThreads?: boolean } })
+    .compat;
+  return compat?.supportsMessageThreads === true;
+}
+
 /** Streams an Anthropic request through pi-ai's implementation. */
 export function streamAnthropic(
   request: WireRequest,
@@ -154,6 +161,13 @@ export function streamAnthropic(
   const anthropicOptions: AnthropicOptions = {
     ...options,
     ...(request.simple ? thinkingOptions(model, options) : {}),
+    // pi-ai turns Anthropic message threads on for a model whose `baseUrl` is
+    // api.anthropic.com, because only that endpoint is known to keep the
+    // `thread` field. This wire sends such a model through AI Gateway, so
+    // threads stay off, as for pi-ai's own gateway catalog, unless the model's
+    // `compat.supportsMessageThreads` or the caller asks for them.
+    disableContinuation:
+      options.disableContinuation ?? !messageThreadsRequested(model),
     client,
     ...(request.toolChoice !== undefined
       ? {

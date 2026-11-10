@@ -234,6 +234,11 @@ thinking level) is remapped through the model's own `thinkingLevelMap` — as fa
 can carry it; see [thinking shapes](#thinking-shapes) for the one limit. Precedence is call,
 then model, then `createAI` settings.
 
+`sessionId` does not start Anthropic message threads here. pi-ai turns them on only for a model
+whose `baseUrl` is `api.anthropic.com`, and this package sends that model through AI Gateway, so
+each request carries the whole conversation. To thread anyway, set
+`compat.supportsMessageThreads: true` on the model or `disableContinuation: false` on the call.
+
 ## How a request travels
 
 | Model                                   | `api`                | Through the binding                                       | With an account id and token                           |
