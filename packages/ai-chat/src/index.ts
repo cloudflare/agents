@@ -72,7 +72,10 @@ import {
   dispatchChatRecoveryToHandoff,
   type ChatRecoveryTaskReason
 } from "agents/chat";
-import { CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS } from "agents/chat";
+import {
+  CHAT_RECOVERY_CANCELLED_REASON,
+  CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS
+} from "agents/chat";
 import {
   ContinuationState,
   PreStreamTurns,
@@ -425,6 +428,11 @@ export class AIChatAgent<
   Props extends object = object
 > extends Agent<Env, State, Props> {
   private _activeChatRecoveryRootRequestId: string | undefined;
+  /**
+   * The stop signal of each running recovery attempt, keyed by the original
+   * request id a client cancels it with.
+   */
+  private readonly _recoveryAttemptStops = new Map<string, AbortController>();
   /**
    * The originating user message ids of the active recovery chain (#2280),
    * carried in the recovery payload because the successor turn runs under a
@@ -1714,6 +1722,10 @@ export class AIChatAgent<
         // Handle request cancellation
         if (event.type === "cancel") {
           this._abortRegistry.cancel(event.id);
+          // A recovery attempt already running for this request: the client
+          // only knows the original request id until the continuation
+          // streams, so stop the attempt by that id too.
+          this._recoveryAttemptStops.get(event.id)?.abort();
           await this._cancelScheduledRecovery(event.id);
           this._emit("message:cancel", { requestId: event.id });
           return;
@@ -5704,6 +5716,7 @@ export class AIChatAgent<
     const previousRootRequestId = this._activeChatRecoveryRootRequestId;
     this._activeChatRecoveryRootRequestId =
       data?.originalRequestId ?? previousRootRequestId;
+    const stop = this._beginRecoveryAttempt(data?.originalRequestId);
     try {
       const recoveryConfig = this._resolveChatRecoveryConfig();
       const ready = await this.waitUntilStable({
@@ -5714,6 +5727,12 @@ export class AIChatAgent<
         // keeps it unstable and parks via the `!ready` branch.
         pendingInteraction: () => this.hasPendingClientInteraction()
       });
+      // A stop that landed while the attempt waited wins over the
+      // stable-state timeout's park, reschedule or exhaustion.
+      if (await this._recoveryAttemptStopped(stop, data?.incidentId)) {
+        return;
+      }
+
       if (!ready) {
         // PARK, don't burn the budget: a stable-state timeout while a CLIENT
         // interaction is pending is not churn — the turn is correctly waiting
@@ -5754,8 +5773,11 @@ export class AIChatAgent<
       }
 
       const targetId = data?.targetAssistantId;
-      if (targetId && this._findLastAssistantMessage()?.id !== targetId) {
-        // The leaf moved, so this continuation is superseded — skip it.
+      if (targetId && this.messages.at(-1)?.id !== targetId) {
+        // The leaf moved, so this continuation is superseded — skip it. The
+        // leaf is the last message, not the last assistant message: a newer
+        // question that got no reply (stopped, or failed) also moved it, and
+        // continuing would answer that question inside the old reply.
         // NOTE: unlike `@cloudflare/think`, AIChatAgent does NOT distinguish an
         // assistant leaf (recovery's own forward progress) from a newer user
         // turn here, because AIChatAgent has no durable-submission layer to
@@ -5777,7 +5799,12 @@ export class AIChatAgent<
       // doesn't 400 with `AI_MissingToolResultsError`.
       onTurnStarted?.();
       this._takeRecoveryReschedule(data?.incidentId);
-      const result = await this.continueLastTurn();
+      const result = await this.continueLastTurn(undefined, {
+        signal: stop.signal
+      });
+      if (await this._recoveryAttemptStopped(stop, data?.incidentId)) {
+        return;
+      }
       if (
         result.status !== "completed" &&
         this._takeRecoveryReschedule(data?.incidentId)
@@ -5795,6 +5822,7 @@ export class AIChatAgent<
         result.error
       );
     } finally {
+      this._endRecoveryAttempt(data?.originalRequestId, stop);
       this._activeChatRecoveryRootRequestId = previousRootRequestId;
       // If this facet is an agent-tool child, its recovered turn just settled
       // outside `startAgentToolRun`'s finalizer — eagerly close the run so a
@@ -5802,6 +5830,47 @@ export class AIChatAgent<
       // waiting out a no-progress window.
       await this._reconcileOwnStaleAgentToolChildRuns();
     }
+  }
+
+  /** Register a running recovery attempt so a cancel by `rootRequestId` stops it. */
+  private _beginRecoveryAttempt(
+    rootRequestId: string | undefined
+  ): AbortController {
+    const stop = new AbortController();
+    if (rootRequestId) this._recoveryAttemptStops.set(rootRequestId, stop);
+    return stop;
+  }
+
+  private _endRecoveryAttempt(
+    rootRequestId: string | undefined,
+    stop: AbortController
+  ): void {
+    if (
+      rootRequestId &&
+      this._recoveryAttemptStops.get(rootRequestId) === stop
+    ) {
+      this._recoveryAttemptStops.delete(rootRequestId);
+    }
+  }
+
+  /**
+   * Whether a client stopped this attempt. The cancel already marked the
+   * incident when it was still scheduled; record it here otherwise, so the
+   * attempt's own outcome does not overwrite the user's stop.
+   */
+  private async _recoveryAttemptStopped(
+    stop: AbortController,
+    incidentId: string | undefined
+  ): Promise<boolean> {
+    if (!stop.signal.aborted) return false;
+    if (!(await this._chatRecoveryEngine().isRecoveryCancelled(incidentId))) {
+      await this._updateChatRecoveryIncident(
+        incidentId,
+        "skipped",
+        CHAT_RECOVERY_CANCELLED_REASON
+      );
+    }
+    return true;
   }
 
   private _applyRecoveredRequestContext(
@@ -6219,6 +6288,7 @@ export class AIChatAgent<
     const previousRootRequestId = this._activeChatRecoveryRootRequestId;
     this._activeChatRecoveryRootRequestId =
       data?.originalRequestId ?? previousRootRequestId;
+    const stop = this._beginRecoveryAttempt(data?.originalRequestId);
     try {
       const recoveryConfig = this._resolveChatRecoveryConfig();
       const ready = await this.waitUntilStable({
@@ -6228,6 +6298,12 @@ export class AIChatAgent<
         // interaction still parks via the `!ready` branch.
         pendingInteraction: () => this.hasPendingClientInteraction()
       });
+      // A stop that landed while the attempt waited wins over the
+      // stable-state timeout's park, reschedule or exhaustion.
+      if (await this._recoveryAttemptStopped(stop, data?.incidentId)) {
+        return;
+      }
+
       if (!ready) {
         // PARK while a CLIENT interaction is pending — the turn is waiting for
         // the human, not churning; see `_chatRecoveryContinue` for the full
@@ -6290,8 +6366,12 @@ export class AIChatAgent<
       this._takeRecoveryReschedule(data?.incidentId);
       const result = await this._retryLastUserTurn(
         this._lastClientTools,
-        this._lastBody
+        this._lastBody,
+        { signal: stop.signal }
       );
+      if (await this._recoveryAttemptStopped(stop, data?.incidentId)) {
+        return;
+      }
       if (
         result.status !== "completed" &&
         this._takeRecoveryReschedule(data?.incidentId)
@@ -6309,6 +6389,7 @@ export class AIChatAgent<
         result.error
       );
     } finally {
+      this._endRecoveryAttempt(data?.originalRequestId, stop);
       this._activeChatRecoveryRootRequestId = previousRootRequestId;
       // If this facet is an agent-tool child, its recovered turn just settled
       // outside `startAgentToolRun`'s finalizer — eagerly close the run so a

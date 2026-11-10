@@ -2126,6 +2126,12 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     this.onChatMessageBodies.push(ctx?.body);
     this.onChatMessageClientTools.push(ctx?.clientTools);
 
+    const hold = this._turnHold;
+    if (hold && !hold.waiting) {
+      hold.waiting = true;
+      await hold.released;
+    }
+
     if (this._hangTurnsRemaining > 0) {
       this._hangTurnsRemaining--;
       return makeHangingSSEResponse();
@@ -2178,6 +2184,30 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   }
 
   private _emitStreamError: string | null = null;
+
+  /** Holds the next onChatMessage call until released: the model is slow. */
+  private _turnHold: {
+    waiting: boolean;
+    released: Promise<void>;
+    release: () => void;
+  } | null = null;
+
+  holdNextTurnForTest(): void {
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this._turnHold = { waiting: false, released, release };
+  }
+
+  isTurnHeldForTest(): boolean {
+    return this._turnHold?.waiting ?? false;
+  }
+
+  releaseHeldTurnForTest(): void {
+    this._turnHold?.release();
+    this._turnHold = null;
+  }
 
   setStashData(data: unknown): void {
     this._stashData = data;
@@ -2790,11 +2820,41 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     this._forceStableTimeout = value;
   }
 
+  /** Holds the next waitUntilStable until released, then times it out. */
+  private _stableHold: {
+    waiting: boolean;
+    released: Promise<void>;
+    release: () => void;
+  } | null = null;
+
+  holdStableWaitForTest(): void {
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this._stableHold = { waiting: false, released, release };
+  }
+
+  isStableWaitHeldForTest(): boolean {
+    return this._stableHold?.waiting ?? false;
+  }
+
+  releaseStableWaitForTest(): void {
+    this._stableHold?.release();
+    this._stableHold = null;
+  }
+
   override async waitUntilStable(options?: {
     timeout?: number;
     pendingInteraction?: () => boolean;
   }): Promise<boolean> {
     if (this._forceStableTimeout) return false;
+    const hold = this._stableHold;
+    if (hold && !hold.waiting) {
+      hold.waiting = true;
+      await hold.released;
+      return false;
+    }
     return super.waitUntilStable(options);
   }
 
