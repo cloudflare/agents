@@ -69,11 +69,28 @@ function firstText(result: unknown): string {
  * Workers test pool.
  */
 export class McpIntegrationAgent extends Agent {
+  /** Every state each server was broadcast in since this instance started. */
+  readonly #history = new Map<string, ServerView[]>();
+
   async onStart(): Promise<void> {
     this.mcp.configureOAuthCallback({
       successRedirect: OAUTH_SUCCESS_PATH,
       errorRedirect: OAUTH_ERROR_PATH
     });
+    this.mcp.onServerStateChanged(() => {
+      for (const id of this.serverIds()) {
+        const view = this.server(id);
+        if (!view) continue;
+        const seen = this.#history.get(id) ?? [];
+        seen.push(view);
+        this.#history.set(id, seen);
+      }
+    });
+  }
+
+  /** Every state a server was broadcast in, as a UI listening saw it. */
+  serverHistory(serverId: string): ServerView[] {
+    return this.#history.get(serverId) ?? [];
   }
 
   /** Add an MCP server with a single quick attempt per connect. */

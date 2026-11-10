@@ -357,11 +357,16 @@ export class ServerController {
   private bringUp(id: string): Promise<MCPServerSettlement> {
     return this.ctx.lanes.run(id, async (): Promise<MCPServerSettlement> => {
       const retry = this.ctx.store.options(id)?.retry;
+      // The connection this work brings up. A server removed and added again
+      // meanwhile has a new one, which its own work brings up.
+      const owner = this.ctx.connections[id];
+      const replaced = () => this.ctx.connections[id] !== owner;
       let settlement: MCPServerSettlement;
       try {
         settlement = await tryN(
           retry?.maxAttempts ?? 3,
           async () => {
+            if (replaced()) return { state: "removed" };
             const attempt = await this.attempt(id);
             if (
               attempt.state === MCPConnectionState.FAILED &&
@@ -384,6 +389,7 @@ export class ServerController {
         if (!(error instanceof AttemptFailedError)) throw error;
         settlement = error.settlement;
       }
+      if (replaced()) return { state: "removed" };
       if (settlement.state === MCPConnectionState.FAILED) {
         this.afterFailure(id, settlement);
       }
@@ -764,6 +770,8 @@ export class ServerController {
     }
     if (conn) await this.close(id).catch(() => {});
     if (authProvider) await this.authorization.clearStorage(id, authProvider);
+    // Registered again while the credentials were cleared: keep the new row.
+    if (this.ctx.connections[id]) return;
     this.ctx.store.remove(id);
     this.ctx.stateChanged();
   }
