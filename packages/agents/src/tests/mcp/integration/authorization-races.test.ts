@@ -78,6 +78,29 @@ describe("a server's OAuth storage after it is removed", () => {
 
     expect(await agent.oauthKeys("files")).toEqual([]);
   });
+
+  // Same rule. Path: as above, but the server is added again after the
+  // close, which creates a new connection and provider, and then removed.
+  it("keeps no token that a closed connection's refresh saved after the server was added again and removed", async () => {
+    const agent = await newAgent();
+    await connectAuthorized(agent, server, undefined, { id: "files" });
+    server.revokeAccessTokens();
+    const release = server.holdRequests("token");
+    const call = agent.callServerTool("files", "read");
+    await waitingAtServer(server);
+
+    await agent.closeNow("files");
+    await agent.connectServer(MCP_URL, {
+      callbackHost: CLIENT_ORIGIN,
+      id: "files"
+    });
+    await agent.remove("files");
+    release();
+    await call;
+    await pause();
+
+    expect(await agent.oauthKeys("files")).toEqual([]);
+  });
 });
 
 describe("an OAuth callback while the connection is closed", () => {
