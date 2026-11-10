@@ -73,6 +73,26 @@ describe("streams contract gaps", () => {
     });
   });
 
+  it("ignores an async commit on an already settled stream", async () => {
+    const stub = env.StreamHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamHarnessObject) => {
+      await instance.lifecycle.start();
+      const stream = await instance.streams.open("s5");
+      stream.close();
+      let started = false;
+      expect(() =>
+        stream.close({
+          commit: (async () => {
+            started = true;
+          }) as unknown as () => void,
+          discard: true
+        })
+      ).not.toThrow();
+      expect(started).toBe(false);
+      expect((await instance.streams.status("s5"))?.state).toBe("completed");
+    });
+  });
+
   it("rejects a promise-returning commit and rolls back", async () => {
     const stub = env.StreamHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: StreamHarnessObject) => {
