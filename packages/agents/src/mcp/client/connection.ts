@@ -473,7 +473,12 @@ export class MCPClientConnection {
         typeof callback === "string"
           ? new URLSearchParams({ code: callback })
           : callback;
-      await this.finishAuthProbe(callbackParams);
+      // In a turn of its own: a 401's refresh that started before the
+      // exchange finishes first, and one that starts after it finds the
+      // newer token.
+      await this._authorizationTurns.run(() =>
+        this.finishAuthProbe(callbackParams)
+      );
     } catch (error) {
       this.connectionState = MCPConnectionState.FAILED;
       throw error;
