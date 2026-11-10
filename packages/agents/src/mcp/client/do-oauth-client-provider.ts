@@ -251,7 +251,23 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
     // it must not pin later re-authorization to this AS: a subsequent 401 must
     // re-read PRM so an authorization-server migration can be observed.
     await this.storage.put(this.tokenKey(this.clientId), tokens);
+    // A link still waiting for its callback (a step-up while the session
+    // refreshes its token) needs the discovery state on the callback leg:
+    // the SDK refuses to exchange its code without it.
+    if (await this.hasPendingLink()) return;
     await this.storage.delete(this.discoveryStateKey());
+  }
+
+  /** Whether a link other than the one being redeemed awaits its callback. */
+  private async hasPendingLink(): Promise<boolean> {
+    const served = codeVerifierStateStorage.getStore()?.servedKey;
+    const pending = await this.storage.list<StoredCodeVerifier>({
+      prefix: this.stateCodeVerifierPrefix(this.clientId)
+    });
+    for (const [key, verifier] of pending) {
+      if (key !== served && !isExpired(verifier.createdAt)) return true;
+    }
+    return false;
   }
 
   get authUrl() {
