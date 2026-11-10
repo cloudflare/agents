@@ -98,7 +98,12 @@ export interface StreamWriter {
  * @experimental The API surface may change before stabilizing.
  */
 export interface StreamSettleOptions {
-  /** Synchronous writes to commit with the settlement. */
+  /**
+   * Synchronous writes to commit with the settlement. An `async` function
+   * is rejected with a `TypeError` before it runs. Any other function that
+   * returns a promise also throws and rolls back, but work it scheduled
+   * after its first `await` has already started and is not undone.
+   */
   readonly commit?: () => void;
   /**
    * Delete the stream's rows in the same transaction. The stream ceases

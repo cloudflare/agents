@@ -49,6 +49,46 @@ describe("streams contract gaps", () => {
     });
   });
 
+  it("rejects an async commit before it runs", async () => {
+    const stub = env.StreamHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamHarnessObject) => {
+      await instance.lifecycle.start();
+      const stream = await instance.streams.open("s3");
+      let started = false;
+      let continued = false;
+      expect(() =>
+        stream.close({
+          commit: (async () => {
+            started = true;
+            await Promise.resolve();
+            continued = true;
+          }) as unknown as () => void,
+          discard: true
+        })
+      ).toThrow(TypeError);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(started).toBe(false);
+      expect(continued).toBe(false);
+      expect((await instance.streams.status("s3"))?.state).toBe("streaming");
+    });
+  });
+
+  it("rejects a promise-returning commit and rolls back", async () => {
+    const stub = env.StreamHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamHarnessObject) => {
+      await instance.lifecycle.start();
+      const stream = await instance.streams.open("s4");
+      expect(() =>
+        stream.close({
+          commit: (() =>
+            Promise.reject(new Error("late"))) as unknown as () => void,
+          discard: true
+        })
+      ).toThrow(TypeError);
+      expect((await instance.streams.status("s4"))?.state).toBe("streaming");
+    });
+  });
+
   it("validates from and batchSize", async () => {
     const stub = env.StreamHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: StreamHarnessObject) => {

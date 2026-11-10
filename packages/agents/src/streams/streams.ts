@@ -705,6 +705,18 @@ export class Streams extends LifecycleCapability {
     // throwing `commit` rolls everything back and leaves the stream live.
     // Events and wakeups are side effects outside SQLite, so they fire only
     // once the transaction has returned.
+    // Reject a native async `commit` before calling it: once started, its
+    // code after the first `await` runs outside the transaction and cannot
+    // be rolled back, so it must never start.
+    if (
+      options.commit &&
+      Object.prototype.toString.call(options.commit) ===
+        "[object AsyncFunction]"
+    ) {
+      throw new TypeError(
+        "Stream close `commit` must be synchronous; it is an async function."
+      );
+    }
     let settled = false;
     let deleted = false;
     const hadLegacy = this.#legacyChunkTable;
@@ -718,7 +730,9 @@ export class Streams extends LifecycleCapability {
           (typeof result === "object" || typeof result === "function") &&
           typeof (result as PromiseLike<unknown>).then === "function"
         ) {
-          // Swallow a later rejection; the throw below rolls back.
+          // A non-async function that returns a promise is only caught
+          // after it ran: the throw below rolls back its synchronous writes,
+          // but not work it scheduled for later. Swallow a later rejection.
           Promise.resolve(result).catch(() => {});
           throw new TypeError(
             "Stream close `commit` must be synchronous; it returned a promise."
