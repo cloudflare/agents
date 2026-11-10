@@ -92,6 +92,9 @@ interface ChatRecoveryTestStub {
   setShouldKeepRecoveringForTest(keepRecovering: boolean): Promise<void>;
   getChatRecoveryIncidentsForTest(): Promise<unknown[]>;
   holdNextTurnForTest(): Promise<void>;
+  holdStableWaitForTest(): Promise<void>;
+  isStableWaitHeldForTest(): Promise<boolean>;
+  releaseStableWaitForTest(): Promise<void>;
   isTurnHeldForTest(): Promise<boolean>;
   releaseHeldTurnForTest(): Promise<void>;
   addAssistantMessageForTest(id: string): Promise<void>;
@@ -3174,6 +3177,48 @@ describe("platform-transient reader errors (#1964)", () => {
       .map((p) => p.text ?? "")
       .join("");
     expect(texts).not.toContain("Continued response.");
+    expect(
+      (await agentStub.getChatRecoveryIncidentsForTest()) as unknown[]
+    ).toMatchObject([{ status: "skipped", reason: "user_cancelled" }]);
+  }, 10_000);
+
+  it("honors a stop that lands while the recovery waits for a stable chat", async () => {
+    const room = `transient-cancel-stable-${crypto.randomUUID()}`;
+    const agentStub = await getTestAgent(room);
+
+    // Turn 1 is cut off and its recovery is scheduled.
+    expect(
+      await agentStub.driveFailingReaderTurnForTest("Network connection lost.")
+    ).toBe("aborted");
+    const [incident] =
+      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
+        requestId: string;
+        recoveryRootRequestId?: string;
+      }>;
+
+    // The recovery task fires and waits for the chat to settle.
+    await agentStub.holdStableWaitForTest();
+    await expect
+      .poll(() => agentStub.isStableWaitHeldForTest(), { timeout: 5000 })
+      .toBe(true);
+
+    // A tab presses stop; then the wait times out.
+    const { ws } = await connectChatWS(
+      `/agents/chat-recovery-test-agent/${room}`
+    );
+    ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
+        id: incident.recoveryRootRequestId ?? incident.requestId
+      })
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await agentStub.releaseStableWaitForTest();
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    ws.close(1000);
+
+    // No further attempt ran, and the stop is what the incident records.
+    expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
     expect(
       (await agentStub.getChatRecoveryIncidentsForTest()) as unknown[]
     ).toMatchObject([{ status: "skipped", reason: "user_cancelled" }]);

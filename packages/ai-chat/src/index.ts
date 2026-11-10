@@ -5632,6 +5632,12 @@ export class AIChatAgent<
         // keeps it unstable and parks via the `!ready` branch.
         pendingInteraction: () => this.hasPendingClientInteraction()
       });
+      // A stop that landed while the attempt waited wins over the
+      // stable-state timeout's park, reschedule or exhaustion.
+      if (await this._recoveryAttemptStopped(stop, data?.incidentId)) {
+        return;
+      }
+
       if (!ready) {
         // PARK, don't burn the budget: a stable-state timeout while a CLIENT
         // interaction is pending is not churn — the turn is correctly waiting
@@ -5668,10 +5674,6 @@ export class AIChatAgent<
           "_chatRecoveryContinue",
           data
         );
-        return;
-      }
-
-      if (await this._recoveryAttemptStopped(stop, data?.incidentId)) {
         return;
       }
 
@@ -6201,6 +6203,12 @@ export class AIChatAgent<
         // interaction still parks via the `!ready` branch.
         pendingInteraction: () => this.hasPendingClientInteraction()
       });
+      // A stop that landed while the attempt waited wins over the
+      // stable-state timeout's park, reschedule or exhaustion.
+      if (await this._recoveryAttemptStopped(stop, data?.incidentId)) {
+        return;
+      }
+
       if (!ready) {
         // PARK while a CLIENT interaction is pending — the turn is waiting for
         // the human, not churning; see `_chatRecoveryContinue` for the full
@@ -6228,10 +6236,6 @@ export class AIChatAgent<
           "_chatRecoveryRetry",
           data
         );
-        return;
-      }
-
-      if (await this._recoveryAttemptStopped(stop, data?.incidentId)) {
         return;
       }
 

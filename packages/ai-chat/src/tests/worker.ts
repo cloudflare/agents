@@ -2820,11 +2820,41 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     this._forceStableTimeout = value;
   }
 
+  /** Holds the next waitUntilStable until released, then times it out. */
+  private _stableHold: {
+    waiting: boolean;
+    released: Promise<void>;
+    release: () => void;
+  } | null = null;
+
+  holdStableWaitForTest(): void {
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this._stableHold = { waiting: false, released, release };
+  }
+
+  isStableWaitHeldForTest(): boolean {
+    return this._stableHold?.waiting ?? false;
+  }
+
+  releaseStableWaitForTest(): void {
+    this._stableHold?.release();
+    this._stableHold = null;
+  }
+
   override async waitUntilStable(options?: {
     timeout?: number;
     pendingInteraction?: () => boolean;
   }): Promise<boolean> {
     if (this._forceStableTimeout) return false;
+    const hold = this._stableHold;
+    if (hold && !hold.waiting) {
+      hold.waiting = true;
+      await hold.released;
+      return false;
+    }
     return super.waitUntilStable(options);
   }
 
