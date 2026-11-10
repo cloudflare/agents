@@ -2,157 +2,124 @@
 
 > **Experimental.** Everything exported from `agents/context` may change between releases while the API stabilizes.
 
-`agents/context` assembles an agent's system prompt from labelled blocks. A block is a piece of prompt text with a storage provider behind it. What the provider can do decides how the block behaves and which tools the model gets for it.
+`agents/context` gives an agent labelled blocks of context: instructions, notes the agent keeps for itself, and knowledge it can search. `Context` binds those blocks to a [session](./sessions.md). The session's transcript records the system prompt each stretch of the conversation was sent with and every change delivered after it, and each model request is a projection of that record. Nothing the model has already been sent is rewritten, so the provider's prefix cache holds.
 
-Context is prompt assembly. It is not conversation storage. It composes with [`agents/sessions`](./sessions.md) rather than living inside it, so an agent can have a prompt without a transcript, or a transcript without a prompt.
-
-## Blocks
+## Bind blocks to a session
 
 ```ts
-import { ContextBlocks } from "agents/context";
+import { DurableObject } from "cloudflare:workers";
+import { convertToModelMessages, streamText } from "ai";
+import { Context } from "agents/context";
+import { Lifecycle } from "agents/lifecycle";
+import { Sessions } from "agents/sessions";
+import { createWorkersAI } from "workers-ai-provider";
 
-const context = new ContextBlocks([
-  {
-    label: "soul",
-    provider: { get: async () => "You are a helpful assistant." }
-  },
-  {
-    label: "memory",
-    description: "Facts learned about the user",
-    maxTokens: 1_100,
-    provider: memoryProvider
-  }
-]);
-
-const system = await context.freezeSystemPrompt();
-const tools = await context.tools();
-```
-
-Each block renders as a labelled section of the system prompt. The header carries the label, the description, a token-usage percentage when `maxTokens` is set, and a capability marker (`[readonly]`, `[writable]`, `[loadable]`, or `[searchable]`).
-
-An empty read-only block is skipped. Writable, loadable, and searchable blocks always render so the model knows which tools can address them.
-
-## Providers
-
-The provider decides the block's behavior. The checks are structural, not nominal.
-
-| Provider shape          | Block behavior                               |
-| ----------------------- | -------------------------------------------- |
-| `get()`                 | Read-only text in the prompt                 |
-| `get()` + `set()`       | Writable through the `set_context` tool      |
-| `get()` + `search(key)` | Summary in the prompt, `search_context` tool |
-
-`get()` returns the block's current content, or `null` when it has none. An optional `init(label)` receives the block label before first use, so one provider class can serve several labels.
-
-`ContextBlocks` also accepts a `defaultProvider` factory. A block declared without a `provider` is then wired to whatever that factory returns for its label, which is how a host offers durable writable blocks by label alone.
-
-### Durable SQLite blocks
-
-`AgentContextProvider` stores one block per row in `cf_agents_context_blocks` in the Durable Object's own SQLite database:
-
-```ts
-import { AgentContextProvider } from "agents/context";
-
-const context = new ContextBlocks([
-  { label: "memory", provider: new AgentContextProvider(this, "memory") }
-]);
-```
-
-The constructor takes anything with a tagged-template `sql` method, which an `Agent` already has. The label argument is optional: `init()` fills it in from the block declaration.
-
-### Searchable blocks
-
-`AgentSearchProvider` backs a block with a Durable Object FTS5 table:
-
-```ts
-import { AgentSearchProvider } from "agents/context";
-
-const context = new ContextBlocks([
-  { label: "knowledge", provider: new AgentSearchProvider(this) }
-]);
-```
-
-`get()` renders a count of indexed entries rather than the entries themselves. `search(query)` returns up to 10 ranked matches through the `search_context` tool. `set(key, content)` replaces one keyed entry.
-
-The FTS5 table is the only store for these entries. A mirror row table would double the billed writes of every indexed entry to serve a count and a lookup the index already answers. Entries live in `cf_agents_search_fts`, namespaced by label, separate from the Sessions message index.
-
-## Frozen prompts
-
-`freezeSystemPrompt()` renders once and returns the same string on every later call, so the provider's prefix cache stays warm across turns. `setBlock()` writes to the provider immediately but deliberately does not change the frozen prompt; call `refreshSystemPrompt()` to re-render from current block state.
-
-Pass a `promptStore` (any writable provider) as the second constructor argument and the frozen prompt is persisted:
-
-```ts
-const context = new ContextBlocks(
-  configs,
-  new AgentContextProvider(this, "_system_prompt"),
-  (label) => new AgentContextProvider(this, label)
-);
-
-const system = await context.freezeSystemPrompt();
-```
-
-`freezeSystemPrompt()` returns the stored prompt when one exists, and otherwise loads providers, renders, and persists. So a cold wake reuses the exact prompt string the model already cached instead of re-rendering a subtly different one.
-
-`refreshSystemPrompt()` reloads every provider, re-renders, and overwrites the stored prompt.
-
-### Reminders for changing blocks
-
-Some blocks go stale while the prompt is frozen: the current date, workspace state, project instructions. Refreshing the prompt keeps them current but throws away the cached prefix. Mark such a block `whenChanged: "remind"` to keep both:
-
-```ts
-const context = new ContextBlocks([
-  {
-    label: "environment",
-    provider: {
-      get: async () => `Today is ${new Date().toISOString().slice(0, 10)}.`
-    },
-    whenChanged: "remind"
-  }
-]);
-
-const system = await context.freezeSystemPrompt();
-const reminder = await context.reminder(); // null until the date changes
-```
-
-`reminder()` re-reads each such block and, for every one whose current rendering no longer appears in the frozen prompt, returns its current value under a short note saying it replaces the prompt's copy. Send that text after the cached prefix, for example at the end of the latest user message, and do not persist it. The frozen prompt does not change, and the reminder keeps coming back on every call until `refreshSystemPrompt()` promotes the value into the prompt. That refresh is the one deliberate cache bust.
-
-The comparison is against the stored prompt, not against in-memory state, so a reminder survives a restart. A remind block always has a section in the prompt, even when it is empty, so the model knows it exists and a later value has a copy to replace. Any difference in what the provider returns counts as a change, so return only what should count: a date rather than a timestamp.
-
-A standing reminder still costs a little cache: it moves to each new user message, so the previous user message falls out of the cached prefix. The system prompt and everything before that message stay cached.
-
-## Tools
-
-`tools()` returns an AI SDK `ToolSet` wired from what the blocks can do:
-
-- `set_context` when any block is writable
-- `search_context` when any block is backed by a search provider
-
-An agent with only read-only blocks gets no tools at all.
-
-## Think
-
-`Think` builds its `ContextBlocks` from `configureContext()` during startup:
-
-```ts
-import type { ContextConfig } from "agents/context";
-
-class MyAgent extends Think<Env> {
-  configureContext(): ContextConfig[] {
-    return [
+export class Assistant extends DurableObject<Env> {
+  readonly sessions = new Sessions({
+    // Context keeps its record in message metadata; clients must not write it.
+    reservedMetadataKeys: ["cf_agents_context"]
+  });
+  readonly lifecycle = Lifecycle.install(this).use(this.sessions);
+  readonly session = this.sessions.session();
+  readonly context = new Context(this.session, {
+    storage: this.ctx.storage,
+    blocks: [
       { label: "soul", provider: { get: async () => "You are helpful." } },
-      { label: "memory", description: "Learned facts", maxTokens: 2_000 }
-    ];
+      { label: "memory", description: "Learned facts", maxTokens: 1_100 },
+      {
+        label: "environment",
+        provider: {
+          get: async () => `Today is ${new Date().toISOString().slice(0, 10)}.`
+        },
+        whenChanged: "remind"
+      }
+    ]
+  });
+
+  async onRequest(request: Request): Promise<Response> {
+    await this.session.appendMessage(await request.json(), {
+      source: "client"
+    });
+
+    const { system, messages } = await this.context.build();
+    const workersai = createWorkersAI({ binding: this.env.AI });
+    const result = streamText({
+      model: workersai("@cf/moonshotai/kimi-k2.7-code"),
+      system,
+      messages: await convertToModelMessages(messages),
+      tools: await this.context.tools()
+    });
+    return result.toUIMessageStreamResponse();
   }
 }
 ```
 
-A block declared without a provider is auto-wired to durable per-agent SQLite. The frozen system prompt is always persisted, in `_system_prompt`, so there is nothing to opt into.
+Call `build()` once a turn's user message is stored. It returns:
 
-The assembled blocks are available as `this.context` after `onStart()`.
+- `system`: the system prompt the conversation was sent with.
+- `messages`: the history as the model is sent it, with each recorded change in place.
+- `reminder`: changes it could not record, because the history does not end with a user message. Send them after the cached prefix yourself; the next turn that ends with a user message records them. `null` otherwise.
 
-Think sends reminders itself. Each turn it calls `reminder()` and adds the result to the last user message of the model request, or, when the request continues a partial reply, to the user message that asks the model to continue (`TurnContext.messages` in `beforeTurn` already includes it). Nothing is written to the transcript. Think refreshes the prompt after a compaction, which promotes any pending values.
+`build()` is `prepare()` followed by `project()`. Use `project(history)` for any later model call in the same turn: it is pure, and the same history always projects to the same messages.
+
+## What the transcript records
+
+`Context` writes one small record to the metadata of the user message that ends a turn, under `CONTEXT_METADATA_KEY` (`"cf_agents_context"`):
+
+- **A snapshot.** The first turn renders every block into the system prompt and records the sections. Every later request opens with that same text.
+- **Changes.** A block declared `whenChanged: "remind"` whose value moved on since the model last saw it is delivered as a reminder after that user message, and recorded there. Later requests render it in the same place, so it is sent once and never moves.
+
+Block values themselves stay in their providers. A host that accepts messages from clients should treat the metadata key as server-owned, for example by listing it in `Sessions` `reservedMetadataKeys`.
+
+## Refreshing the prompt
+
+`refreshSystemPrompt()` reloads every block and returns the new prompt. The next turn that ends with a user message records it as the new snapshot. That is the one deliberate cache bust, so refresh where the cache is already gone, such as after compaction.
+
+Every turn's user message carries a record: a snapshot, the changes it delivered, or, when nothing changed, a pointer to the record in force. Context finds what the model had been shown by walking back along the stored path, compacted messages included, to the nearest user message that carries one. So a host that passes a bounded window of history sees exactly what the full history would, a regenerated earlier turn gets the prompt its own branch was sent with, and compaction does not change the prompt: refresh after compacting to fold changes into it, as Think does.
+
+Beside the transcript, `Context` keeps one small state row in the block storage (label `_context_state`, which a block cannot use) for a pending refresh, so it survives eviction. Without `storage` or `defaultProvider` it lives in memory.
+
+A user message that already has an answer is a branch point, for example when a reply is regenerated. `Context` never records on it, because that would change what its earlier answers were sent; the change comes back as `reminder` for that request instead.
+
+`freezeSystemPrompt()` returns the prompt the history was sent with, and `reminder()` returns the pending changes. Both only read.
+
+## Blocks
+
+Each block renders as a labelled section of the system prompt. The header carries the label, the description, a token-usage percentage when `maxTokens` is set, and a capability marker (`[readonly]`, `[writable]`, or `[searchable]`). An empty read-only block is left out; writable, searchable, and remind blocks always render.
+
+The provider decides what a block can do. The checks are structural, not nominal.
+
+| Provider             | Block behavior                               |
+| -------------------- | -------------------------------------------- |
+| None                 | Writable, stored in SQLite                   |
+| `get()`              | Read-only text in the prompt                 |
+| `get()` + `set()`    | Writable through the `set_context` tool      |
+| `get()` + `search()` | Summary in the prompt, `search_context` tool |
+
+A block without a provider is stored in `cf_agents_context_blocks`, keyed by its label (suffixed with the session id outside the default session). Pass `storage` for that, or `defaultProvider` to store it elsewhere.
+
+`AgentSearchProvider` backs a searchable block with FTS5 in the Durable Object's SQLite.
+
+`setBlock()`, `appendToBlock()`, `addBlock()`, and `removeBlock()` change blocks from code. Writes are saved at once. The model sees them as a reminder for a remind block, or at the next refresh.
+
+## Tools
+
+`tools()` returns an AI SDK `ToolSet` built from what the blocks can do:
+
+- `set_context` (`SET_CONTEXT_TOOL`) when any block is writable
+- `search_context` (`SEARCH_CONTEXT_TOOL`) when any block is searchable
+
+A model write needs no reminder: the tool call that made it is in the transcript.
+
+## Without a session
+
+`ContextBlocks` is the blocks and their tools with no session and no prompt state: `renderSystemPrompt()` renders the blocks as they stand now and stores nothing. `Context` is built on it. A host that needs the prompt to stay the same across turns should use `Context`, which records it in the session.
+
+## Harnesses
+
+- **Think** builds a `Context` on its default session from `configureContext()` and the `withContext()` chain in `configureSession()`, records each turn, and refreshes after compaction. `this.context` is that `Context`.
+- **`ThinkHarness`** takes a `context` option: a function from a session's handle to a `Context`. Its prompt follows the `system` option, its tools join `tools`, and every model call prepares it: the call that starts a turn records, and a change that cannot be recorded, during a continuation or a regeneration, rides on that request alone. The harness treats `cf_agents_context` as server-owned, so client input cannot carry a record.
 
 ## Related
 
-- [Sessions](./sessions.md) - durable message trees, streamed history, compaction, and attachment offload
+- [Sessions](./sessions.md): durable message trees, streamed history, compaction, and attachment offload

@@ -282,7 +282,8 @@ import {
 import { ThinkSession } from "./session";
 import {
   AgentContextProvider,
-  ContextBlocks,
+  CONTEXT_METADATA_KEY,
+  Context,
   type ContextConfig,
   type WritableContextProvider
 } from "agents/context";
@@ -1531,7 +1532,7 @@ function ensureValidContinueCheckpoint(
 }
 
 /**
- * Carry a context reminder (`ContextBlocks.reminder()`) after the cached
+ * Carry a context reminder (`Context.prepare()`) after the cached
  * prefix without persisting it. It joins the final user message when there is
  * one, since not every provider accepts two user messages in a row. A request
  * ending in a partial assistant message gets the continue checkpoint here,
@@ -2505,7 +2506,12 @@ function submissionRunItemId(submissionId: string): string {
  * `_stampChannel`) and trusted by hooks and recovery. They are stripped from
  * client-supplied messages at intake so a client can never forge them.
  */
-const RESERVED_MESSAGE_METADATA_KEYS = ["channel", "turnMetadata"] as const;
+const RESERVED_MESSAGE_METADATA_KEYS = [
+  "channel",
+  "turnMetadata",
+  // The prompt record context keeps on a message.
+  CONTEXT_METADATA_KEY
+] as const;
 
 const cachedMessageEncoder = new TextEncoder();
 
@@ -3692,12 +3698,14 @@ export class Think<
   session!: ThinkSession;
 
   /** Prompt context blocks for this agent, built from `configureContext()`. */
-  #contextBlocks: ContextBlocks | undefined;
+  #contextBlocks: Context | undefined;
 
   /**
-   * The agent's context blocks. Available once the Lifecycle has started.
+   * The agent's context blocks, bound to the default session: the
+   * transcript records the prompt each turn was sent with. Available once
+   * the Lifecycle has started.
    */
-  protected get context(): ContextBlocks {
+  protected get context(): Context {
     if (!this.#contextBlocks) {
       throw new Error(
         "Context is not initialized yet; it is available after onStart()."
@@ -3863,14 +3871,17 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           this.session = await this.configureSession(
             new ThinkSession(this.sessions.session(), () => this.context)
           );
-          this.#contextBlocks = new ContextBlocks(
-            [
-              ...(await this.configureContext()),
-              ...this.session.internal_takePendingContext()
-            ],
-            this.session.internal_promptStore() ??
-              this.#contextProvider("_system_prompt"),
-            (label) => this.#contextProvider(label)
+          // The prompt is recorded in the transcript now, so a custom
+          // prompt store from `withCachedPrompt()` has nothing to hold.
+          this.#contextBlocks = new Context(
+            this.sessions.session(this.session.sessionId),
+            {
+              blocks: [
+                ...(await this.configureContext()),
+                ...this.session.internal_takePendingContext()
+              ],
+              defaultProvider: (label) => this.#contextProvider(label)
+            }
           );
           // Load blocks now rather than on the first turn, as Think always
           // has: the synchronous accessors (`this.context.getBlock()` and the
@@ -5328,8 +5339,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    *
    * @internal Exposed to subclasses for tests.
    */
-  protected async _buildBaseSystemPrompt(): Promise<string> {
-    const blocks = await this.context.freezeSystemPrompt();
+  protected async _buildBaseSystemPrompt(
+    blocksPrompt?: string
+  ): Promise<string> {
+    const blocks = blocksPrompt ?? (await this.context.freezeSystemPrompt());
     if (!isMethodOverridden(this, "getSystemPrompt")) {
       return blocks || this.getSystemPrompt();
     }
@@ -7102,7 +7115,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   private async _assembleModelMessages(
     tools: ToolSet
   ): Promise<Awaited<ReturnType<typeof convertToModelMessages>>> {
-    const history = await this._turnHistory();
+    // The projection renders each recorded context change after the user
+    // message it was delivered with, so earlier turns are sent unchanged.
+    // SAFETY: the projection only adds text parts to stored UI messages.
+    const history = this.context.project(
+      await this._turnHistory()
+    ) as UIMessage[];
     const providerSafeHistory = history.map(
       toProviderSafeExecutionOutcomeMessage
     );
@@ -7492,13 +7510,20 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           : channelDefinition.instructions
         : undefined;
 
-    const rawBaseSystem = await this._buildBaseSystemPrompt();
+    // Start the turn's context: the prompt the transcript was sent with,
+    // and, recorded on the user message that ends the history, any remind
+    // block that changed since. `_assembleModelMessages` projects that
+    // record; a reminder comes back only when it could not be recorded.
+    const prepared = await this.context.prepare({
+      messages: await this._turnHistory()
+    });
+    const rawBaseSystem = await this._buildBaseSystemPrompt(prepared.system);
     const baseSystem = channelInstructions
       ? `${channelInstructions}\n\n${rawBaseSystem}`
       : rawBaseSystem;
     const system = this._systemPromptForTurn(baseSystem, tools);
 
-    this._turnContextReminder = await this.context.reminder();
+    this._turnContextReminder = prepared.reminder;
     const messages = withContextReminder(
       await this._assembleModelMessages(tools),
       this._turnContextReminder
