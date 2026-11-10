@@ -838,6 +838,14 @@ export class MCPClientConnection {
     );
   }
 
+  /**
+   * @internal The transport of the open session, if any. Each connect opens
+   * a new one, and init() drops it before reconnecting.
+   */
+  get session(): object | undefined {
+    return this._transport;
+  }
+
   get sessionId(): string | undefined {
     if (this._transport instanceof StreamableHTTPClientTransport) {
       return this._transport.sessionId;

@@ -1,4 +1,8 @@
 import { Agent } from "../../index.ts";
+import {
+  type AgentMcpOAuthProvider,
+  DurableObjectOAuthClientProvider
+} from "../../mcp/client/do-oauth-client-provider";
 import { MCPAuthorizationRequiredError } from "../../mcp/client/errors";
 import {
   ageAuthorizationRounds,
@@ -71,6 +75,46 @@ function firstText(result: unknown): string {
 export class McpIntegrationAgent extends Agent {
   /** Every state each server was broadcast in since this instance started. */
   readonly #history = new Map<string, ServerView[]>();
+  /** While set, the provider's next state check waits for it, as I/O would. */
+  private _stateCheckGate: Promise<void> | undefined;
+  private _openStateCheck = () => {};
+  private _stateChecksWaiting = 0;
+
+  /**
+   * The default provider, except that a state check can be made to wait,
+   * like a provider whose storage does I/O (`holdStateCheck`).
+   */
+  override createMcpOAuthProvider(callbackUrl: string): AgentMcpOAuthProvider {
+    const agent = this;
+    return new (class extends DurableObjectOAuthClientProvider {
+      override async checkState(state: string) {
+        const gate = agent._stateCheckGate;
+        if (gate) {
+          agent._stateCheckGate = undefined;
+          agent._stateChecksWaiting += 1;
+          await gate;
+          agent._stateChecksWaiting -= 1;
+        }
+        return super.checkState(state);
+      }
+    })(this.ctx.storage, this.name, callbackUrl);
+  }
+
+  /** Make the provider's next state check wait until `releaseStateCheck`. */
+  holdStateCheck(): void {
+    this._stateCheckGate = new Promise((resolve) => {
+      this._openStateCheck = resolve;
+    });
+  }
+
+  releaseStateCheck(): void {
+    this._stateCheckGate = undefined;
+    this._openStateCheck();
+  }
+
+  stateChecksWaiting(): number {
+    return this._stateChecksWaiting;
+  }
 
   async onStart(): Promise<void> {
     this.mcp.configureOAuthCallback({

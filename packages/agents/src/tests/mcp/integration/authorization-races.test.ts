@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   connectAuthorized,
+  eventually,
   followCallback,
   newAgent,
   pause,
@@ -140,6 +141,36 @@ describe("an OAuth callback while the connection is closed", () => {
     });
     await agent.settle();
     expect((await agent.server("files"))?.state).toBe("ready");
+  });
+});
+
+describe("a step-up while the server reconnects", () => {
+  // McpStepUp.tla, rules SavedLinkIsWaitedOn and ShownReadyHasSession, with
+  // a provider whose state check waits on I/O. Path: a tool call hits a
+  // step-up and its link is built; authorizationRequired waits on the state
+  // check; Reconnect closes the session and connects again; the check
+  // returns.
+  it("does not save a step-up link for the session the reconnect closed", async () => {
+    const agent = await newAgent();
+    const id = await connectAuthorized(agent, server, { scope: READ_SCOPE });
+    await agent.holdStateCheck();
+    const call = agent.callServerTool(id, "write");
+    await eventually(async () => (await agent.stateChecksWaiting()) === 1);
+
+    const release = server.holdRequests();
+    const reconnecting = agent.reconnect(id);
+    await waitingAtServer(server);
+    await agent.releaseStateCheck();
+    await call;
+    release();
+    expect(await reconnecting).toMatchObject({ state: "ready" });
+    await agent.settle();
+
+    expect(await agent.server(id)).toEqual({
+      state: "ready",
+      auth_url: null,
+      error: null
+    });
   });
 });
 

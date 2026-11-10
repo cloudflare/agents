@@ -310,6 +310,7 @@ export class AuthorizationController {
       }
     }
     const authUrlBefore = conn.options.transport.authProvider?.authUrl;
+    const sessionBefore = conn.session;
     try {
       return await request(conn);
     } catch (error) {
@@ -318,7 +319,8 @@ export class AuthorizationController {
           serverId,
           conn,
           error,
-          authUrlBefore
+          authUrlBefore,
+          sessionBefore
         )) ?? error
       );
     }
@@ -328,13 +330,17 @@ export class AuthorizationController {
     serverId: string,
     conn: MCPClientConnection,
     error: unknown,
-    authUrlBefore: string | undefined
+    authUrlBefore: string | undefined,
+    sessionBefore: object | undefined
   ): Promise<MCPAuthorizationRequiredError | undefined> {
-    // Only take over an established connection. While a callback is being
+    // Only take over an established connection, still on the session the
+    // request ran on: a connect in the lane closes that session first and
+    // leaves the state as it was until it settles. While a callback is being
     // processed (`connecting`, `discovering`) or after a failure, leave the
     // state machine alone and rethrow.
     const canTakeOver = () => {
       if (this.ctx.connections[serverId] !== conn) return false;
+      if (conn.session !== sessionBefore) return false;
       const state = conn.connectionState;
       return (
         state === MCPConnectionState.READY ||

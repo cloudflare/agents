@@ -577,10 +577,12 @@ export class ServerController {
         });
         return;
       }
-      // Already discovering or ready: nothing to do.
+      // Already discovering or ready: nothing to do. Waiting for the user
+      // again (a step-up started since the callback): leave it waiting.
       if (
         conn.connectionState !== MCPConnectionState.DISCOVERING &&
-        conn.connectionState !== MCPConnectionState.READY
+        conn.connectionState !== MCPConnectionState.READY &&
+        conn.connectionState !== MCPConnectionState.AUTHENTICATING
       ) {
         await this.bringUp(id);
         this.ctx.stateChanged();
