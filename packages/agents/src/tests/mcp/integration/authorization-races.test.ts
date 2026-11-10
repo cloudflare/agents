@@ -260,3 +260,26 @@ describe("a server given a stable id while it waits for the user", () => {
     });
   });
 });
+
+describe("elicitation handlers configured while a server connects", () => {
+  // McpElicitationHandlers.tla, rule ConfigureNeverFailsServer. Path: the
+  // wake's restore connects; the app configures its handlers, as onStart
+  // does, while the handshake is in flight; the handshake returns.
+  it("keeps the server's connection working", async () => {
+    const before = await newAgent();
+    const id = await connectAuthorized(before, server);
+    const release = server.holdRequests();
+    const agent = await restartAgent(before);
+    await waitingAtServer(server);
+
+    await agent.configureElicitation();
+    release();
+    await agent.settle();
+
+    expect((await agent.server(id))?.state).toBe("ready");
+    expect(await agent.callServerTool(id, "read")).toEqual({
+      ok: true,
+      text: "read it"
+    });
+  });
+});

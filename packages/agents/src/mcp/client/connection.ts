@@ -197,6 +197,9 @@ export class MCPClientConnection {
   /** True when resuming a streamable-http session without cached capabilities */
   private _probingCapabilities = false;
 
+  /** Whether init() is connecting: its client must not be replaced. */
+  private _connecting = false;
+
   /** Tracks in-flight discovery to allow cancellation */
   private _discoveryAbortController: AbortController | undefined;
 
@@ -282,7 +285,10 @@ export class MCPClientConnection {
     // clearing the handlers un-advertises the capability on rebuild.
     this.options.capabilitySeed = undefined;
 
-    if (!this._transport) {
+    // A connect in flight runs on the current client: replacing it would
+    // leave the connection on a client that never connected. Its handshake
+    // keeps what it advertised, as an active connection does.
+    if (!this._transport && !this._connecting) {
       this.client = this.createClient();
     }
   }
@@ -315,7 +321,13 @@ export class MCPClientConnection {
       this.client = this.createClient();
     }
 
-    const res = await this.tryConnect(transportType);
+    let res: MCPClientConnectionResult;
+    this._connecting = true;
+    try {
+      res = await this.tryConnect(transportType);
+    } finally {
+      this._connecting = false;
+    }
 
     // Set the connection state
     this.connectionState = res.state;

@@ -88,6 +88,13 @@ export class McpIntegrationAgent extends Agent {
     });
   }
 
+  /** Configure elicitation handlers, as an app's onStart does. */
+  configureElicitation(): void {
+    this.mcp.configureElicitationHandlers({
+      form: async () => ({ action: "cancel" })
+    });
+  }
+
   /** The OAuth storage keys the default provider holds for a server. */
   async oauthKeys(serverId: string): Promise<string[]> {
     const keys = await this.ctx.storage.list({
