@@ -108,6 +108,14 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
   private _authUrl_: string | undefined;
   private _serverId_: string | undefined;
   private _clientId_: string | undefined;
+  /**
+   * Set once this provider's server was removed (clearServerStorage). Work
+   * it started may still be running, such as a token refresh: what it would
+   * save afterwards is dropped, so nothing outlives the removal.
+   */
+  private _retired_ = false;
+  /** Tokens saved after retiring: kept in memory only, for work in flight. */
+  private _retiredTokens_: StoredOAuthTokens | undefined;
   readonly clientMetadataUrl: string | undefined;
 
   constructor(
@@ -192,6 +200,7 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
   }
 
   async saveDiscoveryState(state: OAuthDiscoveryState): Promise<void> {
+    if (this._retired_) return;
     await this.storage.put(this.discoveryStateKey(), state);
   }
 
@@ -218,6 +227,7 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
     _context?: OAuthClientInformationContext
   ): Promise<void> {
     this.clientId = clientInformation.client_id;
+    if (this._retired_) return;
     // Round-trip the SDK's issuer stamp verbatim. The SDK treats a credential
     // stamped for another issuer as absent, so one durable slot per MCP server
     // is both sufficient and safer than maintaining our own issuer index.
@@ -234,6 +244,7 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
   async tokens(
     _context?: OAuthClientInformationContext
   ): Promise<StoredOAuthTokens | undefined> {
+    if (this._retired_) return this._retiredTokens_;
     if (!this._clientId_) return undefined;
     return (
       (await this.storage.get<StoredOAuthTokens>(
@@ -250,6 +261,10 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
     // is needed across the browser redirect, but once token issuance succeeds
     // it must not pin later re-authorization to this AS: a subsequent 401 must
     // re-read PRM so an authorization-server migration can be observed.
+    if (this._retired_) {
+      this._retiredTokens_ = tokens;
+      return;
+    }
     await this.storage.put(this.tokenKey(this.clientId), tokens);
     // A link still waiting for its callback (a step-up while the session
     // refreshes its token) needs the discovery state on the callback leg:
@@ -286,7 +301,9 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
       serverId: this.serverId,
       createdAt: Date.now()
     };
-    await this.storage.put(this.stateKey(nonce), storedState);
+    if (!this._retired_) {
+      await this.storage.put(this.stateKey(nonce), storedState);
+    }
     return state;
   }
 
@@ -336,6 +353,7 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
 
   async redirectToAuthorization(authUrl: URL): Promise<void> {
     this._authUrl_ = authUrl.toString();
+    if (this._retired_) return;
 
     const clientId = this._clientId_;
     const serverId = this._serverId_;
@@ -408,8 +426,10 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
    * Delete every key this provider stores for its server: tokens and client
    * info for any client ID, verifiers, pending states and discovery state.
    * Used when the server is removed. Other servers' keys are untouched.
+   * From then on, this provider stores nothing.
    */
   async clearServerStorage(): Promise<void> {
+    this._retired_ = true;
     const keys = [
       ...(
         await this.storage.list({
@@ -470,6 +490,7 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
   }
 
   async saveCodeVerifier(verifier: string): Promise<void> {
+    if (this._retired_) return;
     await this.deleteExpiredChallengeCodeVerifiers(this.clientId);
 
     const codeChallenge = await createCodeChallenge(verifier);

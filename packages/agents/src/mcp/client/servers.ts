@@ -54,6 +54,13 @@ export type ConnectionEntryPoints = {
  */
 export class ServerController {
   private readonly disposables = new Map<string, DisposableStore>();
+  /**
+   * The provider of each server whose connection was closed but not removed.
+   * Work the closed connection started may still be running with it, so
+   * removeServer clears storage through this provider, which then stores
+   * nothing more.
+   */
+  private readonly closedProviders = new Map<string, AgentMcpOAuthProvider>();
 
   constructor(
     private readonly ctx: McpClientContext,
@@ -127,6 +134,7 @@ export class ServerController {
   ): MCPClientConnection {
     const existing = this.ctx.connections[id];
     if (existing) return existing;
+    this.closedProviders.delete(id);
 
     // Stored servers re-advertise the capabilities saved on their row;
     // fresh registrations rely on the handlers. The stamp is read without
@@ -753,7 +761,8 @@ export class ServerController {
   /** Close a server's connection and delete it with its OAuth state. */
   async remove(id: string): Promise<void> {
     const conn = this.ctx.connections[id];
-    let authProvider = conn?.options.transport.authProvider;
+    let authProvider =
+      conn?.options.transport.authProvider ?? this.closedProviders.get(id);
     if (!authProvider) {
       // A user-supplied provider factory can throw; that must not stop the
       // server from being removed.
@@ -770,6 +779,7 @@ export class ServerController {
     }
     if (conn) await this.close(id).catch(() => {});
     if (authProvider) await this.authorization.clearStorage(id, authProvider);
+    this.closedProviders.delete(id);
     // Registered again while the credentials were cleared: keep the new row.
     if (this.ctx.connections[id]) return;
     this.ctx.store.remove(id);
@@ -855,6 +865,9 @@ export class ServerController {
 
   /** Drop a closed connection and its session; the server stays stored. */
   private forgetConnection(id: string): void {
+    const authProvider =
+      this.ctx.connections[id]?.options.transport.authProvider;
+    if (authProvider) this.closedProviders.set(id, authProvider);
     this.ctx.store.setSession(id);
     this.disposables.get(id)?.dispose();
     this.disposables.delete(id);

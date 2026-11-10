@@ -88,6 +88,14 @@ export class McpIntegrationAgent extends Agent {
     });
   }
 
+  /** The OAuth storage keys the default provider holds for a server. */
+  async oauthKeys(serverId: string): Promise<string[]> {
+    const keys = await this.ctx.storage.list({
+      prefix: `/${this.name}/${serverId}/`
+    });
+    return [...keys.keys()];
+  }
+
   /** Every state a server was broadcast in, as a UI listening saw it. */
   serverHistory(serverId: string): ServerView[] {
     return this.#history.get(serverId) ?? [];
@@ -241,6 +249,11 @@ export class McpIntegrationAgent extends Agent {
   /** Wait for connection work started by callbacks and restores. */
   settle(): Promise<void> {
     return this.mcp.waitForConnections();
+  }
+
+  /** `MCPClientManager.closeConnection`: the server stays stored. */
+  closeNow(serverId: string): Promise<void> {
+    return this.mcp.closeConnection(serverId);
   }
 
   remove(serverId: string): Promise<void> {

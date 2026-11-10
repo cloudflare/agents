@@ -4,6 +4,7 @@ import {
   followCallback,
   newAgent,
   pause,
+  restartAgent,
   waitingAtServer,
   useOAuthMcpServer
 } from "./harness";
@@ -15,6 +16,68 @@ const server = useOAuthMcpServer();
  * Replays of the bug paths TLA+ models of the MCP client module found, step
  * for step. Each names the rule it checks and the model it comes from.
  */
+
+describe("a server's OAuth storage after it is removed", () => {
+  // McpOAuthCallback.tla, rule TokensDieWithServer. Path: the wake's
+  // connect refreshes an expired token; the server is removed while the
+  // refresh waits at the token endpoint; the refresh returns and saves the
+  // new token.
+  it("keeps no token that a connect's refresh saved after the removal", async () => {
+    const before = await newAgent();
+    await connectAuthorized(before, server, undefined, { id: "files" });
+    server.revokeAccessTokens();
+    const release = server.holdRequests("token");
+    const agent = await restartAgent(before);
+    await waitingAtServer(server);
+
+    await agent.remove("files");
+    expect(await agent.oauthKeys("files")).toEqual([]);
+    release();
+    await agent.settle();
+    await pause();
+
+    expect(await agent.serverIds()).toEqual([]);
+    expect(await agent.oauthKeys("files")).toEqual([]);
+  });
+
+  // Same rule. Path: a tool call's 401 refreshes the token outside the
+  // lane; the server is removed meanwhile; the refresh returns.
+  it("keeps no token that a request's refresh saved after the removal", async () => {
+    const agent = await newAgent();
+    await connectAuthorized(agent, server, undefined, { id: "files" });
+    server.revokeAccessTokens();
+    const release = server.holdRequests("token");
+    const call = agent.callServerTool("files", "read");
+    await waitingAtServer(server);
+
+    await agent.remove("files");
+    release();
+    await call;
+    await pause();
+
+    expect(await agent.oauthKeys("files")).toEqual([]);
+  });
+
+  // Same rule. Path: as above, but the connection is closed first and the
+  // server removed afterwards, so removeServer has no connection to take
+  // the provider from.
+  it("keeps no token that a closed connection's refresh saved after the removal", async () => {
+    const agent = await newAgent();
+    await connectAuthorized(agent, server, undefined, { id: "files" });
+    server.revokeAccessTokens();
+    const release = server.holdRequests("token");
+    const call = agent.callServerTool("files", "read");
+    await waitingAtServer(server);
+
+    await agent.closeNow("files");
+    await agent.remove("files");
+    release();
+    await call;
+    await pause();
+
+    expect(await agent.oauthKeys("files")).toEqual([]);
+  });
+});
 
 describe("a step-up callback while a token refresh runs", () => {
   // McpAuthorizationTurns.tla, rule StepUpGrantKept. Path: a step-up link is
