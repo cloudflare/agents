@@ -1292,6 +1292,12 @@ export class AIChatAgent<
             Object.keys(customBody).length > 0 ? customBody : undefined;
           const epoch = this._turnQueue.generation;
           const requestOriginIds = originMessageIds(messages);
+          // What was stored when a regenerate arrived: its turn may delete
+          // these, but never a question another tab sent after it.
+          const storedAtAdmission =
+            requestTrigger === "regenerate-message"
+              ? new Set(this.messages.map((message) => message.id))
+              : null;
           if (requestOriginIds) {
             this._requestOriginMessageIds.set(chatMessageId, requestOriginIds);
           }
@@ -1509,12 +1515,27 @@ export class AIChatAgent<
 
                 // Regenerate: drop every reply after the messages the client
                 // sent, including one that landed while this request waited
-                // in the queue (another tab's turn was still streaming).
-                if (requestTrigger === "regenerate-message") {
+                // in the queue (another tab's turn was still streaming). A
+                // question another tab sent meanwhile has moved the chat on:
+                // skip the regenerate rather than delete that question.
+                if (storedAtAdmission) {
                   const keep = new Set(
                     transformedMessages.map((message) => message.id)
                   );
-                  if (this.messages.some((message) => !keep.has(message.id))) {
+                  const stale = this.messages.filter(
+                    (message) => !keep.has(message.id)
+                  );
+                  if (
+                    stale.some(
+                      (message) =>
+                        message.role === "user" &&
+                        !storedAtAdmission.has(message.id)
+                    )
+                  ) {
+                    this._completeSkippedRequest(connection, chatMessageId);
+                    return;
+                  }
+                  if (stale.length > 0) {
                     await this.persistMessages(transformedMessages, [], {
                       _deleteStaleRows: true
                     });

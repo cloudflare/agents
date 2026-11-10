@@ -198,6 +198,67 @@ describe("chat turn races", () => {
     tabB.close(1000);
   });
 
+  it("a regenerate waiting behind a reply never deletes a question sent after it", async () => {
+    const room = crypto.randomUUID();
+    const { ws: tabA } = await connectChatWS(
+      `/agents/slow-stream-agent/${room}`
+    );
+    const { ws: tabB } = await connectChatWS(
+      `/agents/slow-stream-agent/${room}`
+    );
+    const { ws: tabC } = await connectChatWS(
+      `/agents/slow-stream-agent/${room}`
+    );
+    const seen = record(tabA);
+    const seenB = record(tabB);
+    const agent = await getAgentByName(env.SlowStreamAgent, room);
+
+    // Tab A's reply streams; tab B regenerates it, so B waits in the queue.
+    sendChatRequest(tabA, "req-1", [user1], {
+      format: "plaintext",
+      chunkCount: 10,
+      chunkDelayMs: 30
+    });
+    await waitUntil(() => responses(seen, "req-1").some((m) => m.body));
+    send(tabB, {
+      type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
+      id: "req-2",
+      init: {
+        method: "POST",
+        body: JSON.stringify({
+          messages: [user1],
+          trigger: "regenerate-message",
+          format: "plaintext",
+          chunkCount: 2,
+          chunkDelayMs: 10
+        })
+      }
+    });
+    await delay(50);
+    // Tab C sends a new question while the regenerate waits.
+    sendChatRequest(tabC, "req-3", [user1, user2], {
+      format: "plaintext",
+      chunkCount: 2,
+      chunkDelayMs: 10
+    });
+    await waitUntil(() => responses(seen, "req-3").some((m) => m.done), 6000);
+    await agent.waitForIdleForTest();
+
+    const stored = (await agent.getPersistedMessages()) as ChatMessage[];
+    // Both questions stay, each with one reply; the regenerate is skipped.
+    expect(stored.filter((m) => m.role === "user").map((m) => m.id)).toEqual([
+      "user-1",
+      "user-2"
+    ]);
+    expect(stored.filter((m) => m.role === "assistant")).toHaveLength(2);
+    expect(responses(seenB, "req-2").filter((m) => m.done)).toEqual([
+      expect.objectContaining({ outcome: "skipped" })
+    ]);
+    tabA.close(1000);
+    tabB.close(1000);
+    tabC.close(1000);
+  });
+
   it("a request whose onChatMessage throws gets an error frame", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(
