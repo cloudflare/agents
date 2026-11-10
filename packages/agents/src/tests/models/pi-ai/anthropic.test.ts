@@ -45,6 +45,33 @@ describe("pi-ai: Anthropic Messages over the universal gateway", () => {
     expect(field(call?.query, "messages.0.role")).toBe("user");
   });
 
+  it("keeps Anthropic message threads off through the gateway", async () => {
+    const binding = fakeBinding(() => sseEventResponse(anthropicTextEvents()));
+    const ai = createAI({ binding: asAi(binding) });
+    await collectEvents(
+      ai.stream(ai(SONNET), userContext("hi"), { sessionId: "session-a" })
+    );
+    // pi-ai threads requests for a model on api.anthropic.com; this one goes
+    // through AI Gateway, so it is sent in full, as before.
+    expect(field(binding.native[0]?.query, "thread")).toBeUndefined();
+    expect(field(binding.native[0]?.query, "messages.0.role")).toBe("user");
+  });
+
+  it("threads requests when the model's compat asks for it", async () => {
+    const binding = fakeBinding(() => sseEventResponse(anthropicTextEvents()));
+    const ai = createAI({ binding: asAi(binding) });
+    const threaded = {
+      ...SONNET,
+      compat: { ...SONNET.compat, supportsMessageThreads: true }
+    } as Model<Api>;
+    await collectEvents(
+      ai.stream(ai(threaded), userContext("hi"), { sessionId: "session-b" })
+    );
+    expect(field(binding.native[0]?.query, "thread")).toEqual({
+      type: "create"
+    });
+  });
+
   it("parses a text stream in the live event shape", async () => {
     const binding = fakeBinding(() =>
       sseEventResponse(anthropicTextEvents(), {
