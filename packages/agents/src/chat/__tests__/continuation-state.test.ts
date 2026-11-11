@@ -350,23 +350,33 @@ describe("continuationTargetIsLatest", () => {
 
   it("is true while the target message is the last message", () => {
     expect(
-      continuationTargetIsLatest(messages, { targetMessageId: "assistant-1" })
+      continuationTargetIsLatest(messages, {
+        targetMessageIds: ["assistant-1"]
+      })
     ).toBe(true);
   });
 
   it("is false once a newer message follows the target, or the target is gone", () => {
     expect(
       continuationTargetIsLatest([...messages, { id: "user-2" }], {
-        targetMessageId: "assistant-1"
+        targetMessageIds: ["assistant-1"]
       })
     ).toBe(false);
     expect(
-      continuationTargetIsLatest([], { targetMessageId: "assistant-1" })
+      continuationTargetIsLatest([], { targetMessageIds: ["assistant-1"] })
     ).toBe(false);
   });
 
+  it("is true while any of several targets is the last message", () => {
+    expect(
+      continuationTargetIsLatest(messages, {
+        targetMessageIds: ["assistant-2", "assistant-1"]
+      })
+    ).toBe(true);
+  });
+
   it("is true for a continuation with no target", () => {
-    expect(continuationTargetIsLatest([], { targetMessageId: null })).toBe(
+    expect(continuationTargetIsLatest([], { targetMessageIds: null })).toBe(
       true
     );
     expect(continuationTargetIsLatest([], null)).toBe(true);
