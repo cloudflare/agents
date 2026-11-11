@@ -14,7 +14,7 @@ WebSockets are not HTTP, so the handshake is limited when making cross-domain co
 **What works**
 
 - Put a signed, short-lived token in the connection URL as query parameters
-- Verify the token in your server’s connect path
+- Verify the token in your Worker's `onBeforeConnect` hook, before `routeAgentRequest()` forwards the upgrade. For an example, refer to [Authentication](./http-websockets.md#authentication).
 
 > Tip: never place raw secrets in URLs. Prefer a JWT or a signed token that expires quickly and is scoped to the user or room.
 
