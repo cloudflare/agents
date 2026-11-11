@@ -819,17 +819,20 @@ export class ServerController {
     // Restore work closes over oldId; drain it before renaming.
     await this.ctx.lanes.idle(oldId);
 
-    // Read the OAuth keys first, then write everything without awaiting in
-    // between: the row, the keys and the connection move as one step, and
-    // the storage writes commit together. If the object dies here, the
-    // server is under one id or the other, never split between them.
-    const oldPrefix = `/${clientName}/${oldId}/`;
-    const newPrefix = `/${clientName}/${newId}/`;
-    const keys = this.ctx.store.get(oldId)
-      ? await this.oauthKeys(oldPrefix)
-      : new Map<string, unknown>();
-
-    const renamed = this.ctx.store.rename(oldId, newId);
+    // From here on nothing awaits. The row and the OAuth keys move in one
+    // transaction, and the connection moves in the same step: nothing else
+    // can write under the old id in between, and if a write fails or the
+    // object dies, the server stays whole under the old id.
+    const renamed = this.ctx.storage.transactionSync(() => {
+      const result = this.ctx.store.rename(oldId, newId);
+      if (result === "renamed") {
+        this.moveOAuthKeys(
+          `/${clientName}/${oldId}/`,
+          `/${clientName}/${newId}/`
+        );
+      }
+      return result;
+    });
     if (renamed === "missing") {
       this.renameConnection(oldId, newId);
       return;
@@ -842,64 +845,16 @@ export class ServerController {
     // A pending link names the old id in its state, so its callback can
     // never reach the renamed server: abandon it.
     this.authorization.renamed(oldId, newId, this.ctx.connections[oldId]);
-    const moved = this.moveOAuthKeys(keys, oldPrefix, newPrefix);
     this.renameConnection(oldId, newId);
     this.ctx.stateChanged();
-    await moved;
   }
 
-  /** A server's OAuth storage keys. Best-effort: a failure is logged. */
-  private async oauthKeys(prefix: string): Promise<Map<string, unknown>> {
-    try {
-      return await this.ctx.storage.list({ prefix });
-    } catch (error) {
-      console.warn(
-        `[MCPClientManager] Listing OAuth keys under ${prefix} failed:`,
-        error
-      );
-      return new Map();
-    }
-  }
-
-  /**
-   * Move the provider's storage keys to the new id, issuing every write
-   * before the first `await`. Best-effort: the row is already renamed, so a
-   * failure here is logged, not thrown.
-   */
-  private async moveOAuthKeys(
-    keys: Map<string, unknown>,
-    oldPrefix: string,
-    newPrefix: string
-  ): Promise<void> {
-    const writes: Promise<unknown>[] = [];
-    const entries = [...keys];
-    try {
-      // DO storage caps a multi-key put or delete at 128 keys.
-      for (let i = 0; i < entries.length; i += 128) {
-        const batch = entries.slice(i, i + 128);
-        writes.push(
-          this.ctx.storage.put(
-            Object.fromEntries(
-              batch.map(([key, value]) => [
-                newPrefix + key.slice(oldPrefix.length),
-                value
-              ])
-            )
-          ),
-          this.ctx.storage.delete(batch.map(([key]) => key))
-        );
-      }
-    } catch (error) {
-      writes.push(Promise.reject(error));
-    }
-    const failed = (await Promise.allSettled(writes)).find(
-      (result) => result.status === "rejected"
-    );
-    if (failed) {
-      console.warn(
-        `[MCPClientManager] OAuth key migration ${oldPrefix} → ${newPrefix} failed:`,
-        failed.reason
-      );
+  /** Move the provider's storage keys to the new id. Throws on failure. */
+  private moveOAuthKeys(oldPrefix: string, newPrefix: string): void {
+    const { kv } = this.ctx.storage;
+    for (const [key, value] of [...kv.list({ prefix: oldPrefix })]) {
+      kv.put(newPrefix + key.slice(oldPrefix.length), value);
+      kv.delete(key);
     }
   }
 
