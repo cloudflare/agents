@@ -3946,6 +3946,38 @@ describe("Think — messageConcurrency", () => {
     await closeWS(ws);
   });
 
+  it("never runs a request cancelled while it waited in the queue", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setSlowStreamMode(true, 100, 10);
+    const request1 = sendChatRequest(ws, [makeUserMessage("First")]);
+    const done1 = waitForDoneId(ws, request1, 10000);
+    await waitForActiveTurn(agent);
+
+    // The second request queues behind the first; the user stops it there.
+    const request2 = sendChatRequest(ws, [makeUserMessage("Second")]);
+    const done2 = waitForDoneId(ws, request2, 10000);
+    await delay(100);
+    ws.send(
+      JSON.stringify({ type: "cf_agent_chat_request_cancel", id: request2 })
+    );
+
+    expect((await done1).at(-1)?.outcome).toBe("completed");
+    expect((await done2).at(-1)?.outcome).toBe("aborted");
+    await delay(200);
+
+    // Only the first request reached the model.
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log.map((entry) => entry.requestId)).toEqual([request1]);
+    const messages = (await agent.getMessages()) as UIMessage[];
+    expect(messages.filter((m) => m.role === "assistant")).toHaveLength(1);
+
+    await closeWS(ws);
+  });
+
   it("merge: all user messages preserved, single model turn for overlapping", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);

@@ -264,7 +264,6 @@ import type {
   ClientToolSchema,
   ClientToolExecutor,
   MessagePart,
-  SubmitConcurrencyDecision,
   ChatFiberSnapshot,
   ChatTurnOutcome,
   OrphanPersistStore
@@ -13803,314 +13802,292 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const isRegeneration = rawTrigger === "regenerate-message";
     const isSubmitMessage = !isRegeneration;
     const requestId = event.id;
-    let messagesPersisted = false;
-    let failureStage: ChatErrorContext["stage"] = "persist";
     const requestOriginIds = originMessageIds(incomingMessages);
     if (requestOriginIds) {
       this._requestOriginMessageIds.set(requestId, requestOriginIds);
     }
 
-    // ── Concurrency decision (before persisting anything) ────────
-    const concurrencyDecision =
-      this._getSubmitConcurrencyDecision(isSubmitMessage);
-
-    if (concurrencyDecision.action === "drop") {
-      this._rollbackDroppedSubmit(connection);
-      this._completeSkippedRequest(connection, requestId);
-      this._requestOriginMessageIds.delete(requestId);
-      return;
-    }
-
-    // A genuinely-new turn supersedes any pending terminal record (#1645) so a
-    // stale exhaustion can't replay over the resume handshake to a client that
-    // reconnects in the window between accepting this submit and the new turn
-    // streaming. Mirrors `@cloudflare/ai-chat`; without it a reconnect in that
-    // gap would surface the previous failed turn's error even though the user
-    // has already moved on. Completion clears it too, but only once the turn
-    // resolves — which leaves the gap open.
-    await withAgentSpan(
-      this,
-      "clear_previous_chat_state",
-      "interaction",
-      {
-        "cloudflare.agents.component": "think",
-        "cloudflare.agents.turn.request_id": requestId,
-        "cloudflare.agents.turn.trigger": "ws-chat"
-      },
-      () => this._clearChatTerminal()
-    );
-
-    // Mark this turn as accepted-but-not-yet-streamed (#1784) so a client that
-    // reconnects/re-mounts before the stream starts is parked and told to keep
-    // waiting (see _resumeHandshake / onConnect), then flushed into
-    // STREAM_RESUMING on _startResumableStream or released on settle.
-    this._preStream.begin(requestId);
-
-    const releasePendingEnqueue = this._submitConcurrency.beginEnqueue();
-    let pendingEnqueue = true;
-    const epoch = this._turnQueue.generation;
-    const releaseIfPending = () => {
-      if (!pendingEnqueue) return;
-      pendingEnqueue = false;
-      releasePendingEnqueue();
-    };
-
+    // The turn core runs the request: decide, accept (pre-stream mark and
+    // abort controller, so a cancel while it waits in the queue is not lost),
+    // persist, queue, the queued checks, then the turn. It always settles the
+    // pre-stream turn (#1784) and drops the abort controller.
     try {
-      // ── Persist client tools and body (only for accepted requests) ──
-      const requestClientTools =
-        rawClientTools && rawClientTools.length > 0
-          ? rawClientTools
-          : undefined;
-      const requestBody =
-        Object.keys(customBody).length > 0 ? customBody : undefined;
-      withAgentSpan(
-        this,
-        "persist_chat_request_context",
-        "interaction",
-        {
-          "cloudflare.agents.component": "think",
-          "cloudflare.agents.turn.request_id": requestId,
-          "cloudflare.agents.turn.trigger": "ws-chat"
+      await this._turns.runClientRequest<{
+        branchParentId: string | undefined;
+        clientTools: ClientToolSchema[] | undefined;
+        body: Record<string, unknown> | undefined;
+        generation: number;
+      }>({
+        requestId,
+        isSubmitMessage,
+        concurrency: this.messageConcurrency,
+        onDropped: () => {
+          this._rollbackDroppedSubmit(connection);
+          this._completeSkippedRequest(connection, requestId);
         },
-        () => {
-          if (requestClientTools) {
-            this._lastClientTools = requestClientTools;
-            this._persistClientTools();
-          } else if (rawClientTools !== undefined) {
-            this._lastClientTools = undefined;
-            this._persistClientTools();
-          }
-
-          this._lastBody = requestBody;
-          this._persistBody();
-        }
-      );
-
-      // ── Reconcile, persist, and broadcast user messages ──────────
-      //
-      // The client may post an in-flight assistant snapshot it minted
-      // optimistically (e.g. while a previous tool call is still
-      // streaming). Reconcile against the server's current active path
-      // so client IDs map onto server IDs and stale client states pick
-      // up the server's tool outputs. Without this, Session's
-      // INSERT-OR-IGNORE-by-ID would persist a duplicate orphan
-      // assistant row alongside the real server-generated one.
-      const clientToolsForTurn = this._lastClientTools;
-      const bodyForTurn = this._lastBody;
-
-      const reconciledTurn = await this._reconcileAndPersistIncoming(
-        incomingMessages,
-        {
-          requestId,
-          isRegeneration,
-          isCurrent: () => this._turnQueue.generation === epoch,
-          channel: "web"
-        }
-      );
-      if (!reconciledTurn) {
-        this._completeSkippedRequest(connection, requestId);
-        return;
-      }
-      const { branchParentId } = reconciledTurn;
-
-      this._broadcastMessages([connection.id]);
-      messagesPersisted = true;
-
-      // ── Enter turn queue ────────────────────────────────────────
-      failureStage = "turn";
-      const abortSignal = this._aborts.getSignal(requestId);
-
-      await this.keepAliveWhile(async () => {
-        const turnPromise = this._admitTurn({
-          admission: "queue",
-          trigger: "ws-chat",
-          requestId,
-          generation: epoch,
-          continuation: false,
-          channel: "web",
-          onQueued: releaseIfPending,
-          execute: async () => {
-            // Superseded by a newer overlapping submit, or overtaken (reset,
-            // newer submit) during its debounce quiet period.
-            if (
-              !(await this._turns.awaitSubmitTurn(concurrencyDecision, epoch))
-            ) {
-              this._completeSkippedRequest(connection, requestId);
-              return;
-            }
-
-            const chatTurnBody = async () => {
-              // Bounded compact-and-retry loop (opt-in via
-              // `contextOverflow.reactive`). A turn that overflows the
-              // context window mid-flight is compacted and re-run from the
-              // persisted partial instead of dying terminally. Each attempt
-              // re-runs the same turn (`continuation: false`) — not an
-              // auto-continuation.
-              for (let attempt = 0; ; attempt++) {
-                const result = await agentContext.run(
-                  {
-                    agent: this,
-                    connection,
-                    request: undefined,
-                    email: undefined
-                  },
-                  () =>
-                    this._runInferenceLoop(
-                      {
-                        signal: abortSignal,
-                        clientTools: clientToolsForTurn,
-                        body: bodyForTurn,
-                        continuation: false
-                      },
-                      branchParentId
-                    )
-                );
-
-                if (!result) {
-                  this._broadcastChat({
-                    type: MSG_CHAT_RESPONSE,
-                    id: requestId,
-                    body: "No response was generated.",
-                    done: true
-                  });
-                  return;
-                }
-
-                // The consumer suppresses a classified overflow whenever
-                // recovery is enabled; the driver (here) owns the
-                // retry-vs-terminal call so every overflow terminal is reported
-                // identically.
-                let overflowError: string | undefined;
-                let overflowRequested = false;
-                const overflowRecovery = this._overflowReactiveEnabled
-                  ? {
-                      onRetry: (error?: string) => {
-                        overflowRequested = true;
-                        overflowError = error;
-                      }
-                    }
-                  : undefined;
-
-                await withAgentSpan(
-                  this,
-                  "persist_chat_result",
-                  "turn",
-                  {
-                    "cloudflare.agents.component": "think",
-                    "cloudflare.agents.turn.request_id": requestId,
-                    "cloudflare.agents.turn.trigger": "ws-chat",
-                    "cloudflare.agents.turn.admission": "queue",
-                    "cloudflare.agents.turn.generation": epoch,
-                    "cloudflare.agents.turn.continuation": false
-                  },
-                  () =>
-                    this._streamResult(requestId, result, abortSignal, {
-                      parentId: branchParentId,
-                      overflowRecovery
-                    })
-                );
-
-                if (overflowRequested) {
-                  if (
-                    attempt < this._overflowMaxRetries &&
-                    !abortSignal?.aborted
-                  ) {
-                    const shortened = await withAgentSpan(
-                      this,
-                      "compact_chat_history",
-                      "turn",
-                      {
-                        "cloudflare.agents.component": "think",
-                        "cloudflare.agents.turn.request_id": requestId,
-                        "cloudflare.agents.turn.trigger": "ws-chat",
-                        "cloudflare.agents.turn.admission": "queue",
-                        "cloudflare.agents.turn.generation": epoch,
-                        "cloudflare.agents.turn.continuation": false
-                      },
-                      () =>
-                        this._compactForContextOverflow("reactive", {
-                          requestId,
-                          attempt: attempt + 1
-                        })
-                    );
-                    // Compaction shortened history → retry. A no-op compaction
-                    // can't fix the overflow, so fall through to terminal.
-                    if (shortened) continue;
-                  }
-                  // Budget spent, aborted, or compaction no-op: deliver
-                  // terminally (through onChatError, classified) so the turn
-                  // never loops or ends silently with no answer.
-                  const message = this._finalizeContextOverflowError(
-                    requestId,
-                    overflowError
-                  );
-                  this._broadcastChat({
-                    type: MSG_CHAT_RESPONSE,
-                    id: requestId,
-                    body: message,
-                    done: true,
-                    error: true
-                  });
-                }
-                return;
+        // A genuinely-new turn supersedes any pending terminal record (#1645)
+        // so a stale exhaustion can't replay over the resume handshake to a
+        // client that reconnects between this submit being accepted and the
+        // new turn streaming.
+        onAccepted: () =>
+          withAgentSpan(
+            this,
+            "clear_previous_chat_state",
+            "interaction",
+            {
+              "cloudflare.agents.component": "think",
+              "cloudflare.agents.turn.request_id": requestId,
+              "cloudflare.agents.turn.trigger": "ws-chat"
+            },
+            () => this._clearChatTerminal()
+          ),
+        persist: async ({ generation, isCurrent }) => {
+          // ── Persist client tools and body (only for accepted requests) ──
+          const requestClientTools =
+            rawClientTools && rawClientTools.length > 0
+              ? rawClientTools
+              : undefined;
+          const requestBody =
+            Object.keys(customBody).length > 0 ? customBody : undefined;
+          withAgentSpan(
+            this,
+            "persist_chat_request_context",
+            "interaction",
+            {
+              "cloudflare.agents.component": "think",
+              "cloudflare.agents.turn.request_id": requestId,
+              "cloudflare.agents.turn.trigger": "ws-chat"
+            },
+            () => {
+              if (requestClientTools) {
+                this._lastClientTools = requestClientTools;
+                this._persistClientTools();
+              } else if (rawClientTools !== undefined) {
+                this._lastClientTools = undefined;
+                this._persistClientTools();
               }
-            };
 
-            await this._runChatRecoveryFiber(
+              this._lastBody = requestBody;
+              this._persistBody();
+            }
+          );
+
+          // ── Reconcile, persist, and broadcast user messages ──────────
+          //
+          // The client may post an in-flight assistant snapshot it minted
+          // optimistically (e.g. while a previous tool call is still
+          // streaming). Reconcile against the server's current active path
+          // so client IDs map onto server IDs and stale client states pick
+          // up the server's tool outputs. Without this, Session's
+          // INSERT-OR-IGNORE-by-ID would persist a duplicate orphan
+          // assistant row alongside the real server-generated one.
+          const clientToolsForTurn = this._lastClientTools;
+          const bodyForTurn = this._lastBody;
+          const reconciledTurn = await this._reconcileAndPersistIncoming(
+            incomingMessages,
+            { requestId, isRegeneration, isCurrent, channel: "web" }
+          );
+          if (!reconciledTurn) return null;
+
+          this._broadcastMessages([connection.id]);
+          return {
+            branchParentId: reconciledTurn.branchParentId,
+            clientTools: clientToolsForTurn,
+            body: bodyForTurn,
+            generation
+          };
+        },
+        enqueue: (turn, generation, onQueued) =>
+          this.keepAliveWhile(async () => {
+            const result = await this._admitTurn({
+              admission: "queue",
+              trigger: "ws-chat",
               requestId,
-              false,
-              chatTurnBody,
-              branchParentId
-            );
-          }
-        });
-
-        const turnResult = await turnPromise;
-
-        if (turnResult.status === "stale") {
+              generation,
+              continuation: false,
+              channel: "web",
+              onQueued,
+              execute: turn
+            });
+            return result.status;
+          }),
+        onSkipped: () => this._completeSkippedRequest(connection, requestId),
+        // Cancelled before its turn started: the model is never called.
+        onCancelledBeforeStart: () =>
           this._broadcastChat({
             type: MSG_CHAT_RESPONSE,
             id: requestId,
             body: "",
             done: true,
-            outcome: "skipped"
+            outcome: "aborted"
+          }),
+        run: async (
+          {
+            branchParentId,
+            clientTools: clientToolsForTurn,
+            body: bodyForTurn,
+            generation
+          },
+          abortSignal
+        ) => {
+          const chatTurnBody = async () => {
+            // Bounded compact-and-retry loop (opt-in via
+            // `contextOverflow.reactive`). A turn that overflows the
+            // context window mid-flight is compacted and re-run from the
+            // persisted partial instead of dying terminally. Each attempt
+            // re-runs the same turn (`continuation: false`) — not an
+            // auto-continuation.
+            for (let attempt = 0; ; attempt++) {
+              const result = await agentContext.run(
+                {
+                  agent: this,
+                  connection,
+                  request: undefined,
+                  email: undefined
+                },
+                () =>
+                  this._runInferenceLoop(
+                    {
+                      signal: abortSignal,
+                      clientTools: clientToolsForTurn,
+                      body: bodyForTurn,
+                      continuation: false
+                    },
+                    branchParentId
+                  )
+              );
+
+              if (!result) {
+                this._broadcastChat({
+                  type: MSG_CHAT_RESPONSE,
+                  id: requestId,
+                  body: "No response was generated.",
+                  done: true
+                });
+                return;
+              }
+
+              // The consumer suppresses a classified overflow whenever
+              // recovery is enabled; the driver (here) owns the
+              // retry-vs-terminal call so every overflow terminal is reported
+              // identically.
+              let overflowError: string | undefined;
+              let overflowRequested = false;
+              const overflowRecovery = this._overflowReactiveEnabled
+                ? {
+                    onRetry: (error?: string) => {
+                      overflowRequested = true;
+                      overflowError = error;
+                    }
+                  }
+                : undefined;
+
+              await withAgentSpan(
+                this,
+                "persist_chat_result",
+                "turn",
+                {
+                  "cloudflare.agents.component": "think",
+                  "cloudflare.agents.turn.request_id": requestId,
+                  "cloudflare.agents.turn.trigger": "ws-chat",
+                  "cloudflare.agents.turn.admission": "queue",
+                  "cloudflare.agents.turn.generation": generation,
+                  "cloudflare.agents.turn.continuation": false
+                },
+                () =>
+                  this._streamResult(requestId, result, abortSignal, {
+                    parentId: branchParentId,
+                    overflowRecovery
+                  })
+              );
+
+              if (overflowRequested) {
+                if (
+                  attempt < this._overflowMaxRetries &&
+                  !abortSignal?.aborted
+                ) {
+                  const shortened = await withAgentSpan(
+                    this,
+                    "compact_chat_history",
+                    "turn",
+                    {
+                      "cloudflare.agents.component": "think",
+                      "cloudflare.agents.turn.request_id": requestId,
+                      "cloudflare.agents.turn.trigger": "ws-chat",
+                      "cloudflare.agents.turn.admission": "queue",
+                      "cloudflare.agents.turn.generation": generation,
+                      "cloudflare.agents.turn.continuation": false
+                    },
+                    () =>
+                      this._compactForContextOverflow("reactive", {
+                        requestId,
+                        attempt: attempt + 1
+                      })
+                  );
+                  // Compaction shortened history → retry. A no-op compaction
+                  // can't fix the overflow, so fall through to terminal.
+                  if (shortened) continue;
+                }
+                // Budget spent, aborted, or compaction no-op: deliver
+                // terminally (through onChatError, classified) so the turn
+                // never loops or ends silently with no answer.
+                const message = this._finalizeContextOverflowError(
+                  requestId,
+                  overflowError
+                );
+                this._broadcastChat({
+                  type: MSG_CHAT_RESPONSE,
+                  id: requestId,
+                  body: message,
+                  done: true,
+                  error: true
+                });
+              }
+              return;
+            }
+          };
+
+          await this._runChatRecoveryFiber(
+            requestId,
+            false,
+            chatTurnBody,
+            branchParentId
+          );
+        },
+        onError: async (error, stage) => {
+          const wrapped = this.onChatError(error, {
+            requestId,
+            stage,
+            messagesPersisted: stage === "turn"
+          });
+          const errorMessage =
+            wrapped instanceof Error ? wrapped.message : String(wrapped);
+          this._emit("chat:request:failed", {
+            requestId,
+            stage,
+            messagesPersisted: stage === "turn",
+            error: errorMessage
+          });
+          // Persist the terminal error before broadcasting it: the broadcast is
+          // transient, so a client disconnected at this moment (a pre-stream
+          // failure like message reconciliation) would otherwise never learn the
+          // turn failed and stay frozen on reconnect (see `_buildIdleConnectMessages`).
+          await this._recordTerminalChatStatus(
+            "error",
+            requestId,
+            errorMessage
+          );
+          this._broadcastChat({
+            type: MSG_CHAT_RESPONSE,
+            id: requestId,
+            body: errorMessage,
+            done: true,
+            error: true
           });
         }
       });
-    } catch (error) {
-      const wrapped = this.onChatError(error, {
-        requestId,
-        stage: failureStage,
-        messagesPersisted
-      });
-      const errorMessage =
-        wrapped instanceof Error ? wrapped.message : String(wrapped);
-      this._emit("chat:request:failed", {
-        requestId,
-        stage: failureStage,
-        messagesPersisted,
-        error: errorMessage
-      });
-      // Persist the terminal error before broadcasting it: the broadcast is
-      // transient, so a client disconnected at this moment (a pre-stream
-      // failure like message reconciliation) would otherwise never learn the
-      // turn failed and stay frozen on reconnect (see `_buildIdleConnectMessages`).
-      await this._recordTerminalChatStatus("error", requestId, errorMessage);
-      this._broadcastChat({
-        type: MSG_CHAT_RESPONSE,
-        id: requestId,
-        body: errorMessage,
-        done: true,
-        error: true
-      });
     } finally {
-      releaseIfPending();
-      this._aborts.remove(requestId);
       this._requestOriginMessageIds.delete(requestId);
-      // Release any pre-stream parked connections (#1784). No-op when the turn
-      // streamed (flushed on _startResumableStream); covers the no-response /
-      // pre-stream-failure paths.
-      this._settlePreStreamTurn(requestId);
     }
   }
 
@@ -15060,7 +15037,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       extendLeafAssistant?: boolean;
     }
   ): Promise<StreamResultStatus> {
-    const clearGen = this._turnQueue.generation;
+    // Whether the chat was reset (cleared) since this turn was admitted. A
+    // reset before the stream started counts too.
+    const resetSinceTurnStarted = this._turns.turnResetGuard();
     const continuation = options?.continuation ?? false;
     const parentId = options?.parentId;
     const streamId = this._startResumableStream(requestId, {
@@ -15380,10 +15359,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           partialParts: partialMsg.parts,
           branchParentId: parentId,
           persistPartial: async () => {
-            if (
-              this._turnQueue.generation !== clearGen ||
-              accumulator.parts.length === 0
-            ) {
+            if (resetSinceTurnStarted() || accumulator.parts.length === 0) {
               return undefined;
             }
             if (!(await this._persistAssistantMessage(partialMsg, parentId))) {
@@ -15494,7 +15470,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       const submissionResult: SubmissionTurnResult = streamAborted
         ? { status: "aborted" }
         : { status: "completed", output };
-      if (this._turnQueue.generation === clearGen) {
+      if (!resetSinceTurnStarted()) {
         try {
           const assistantMsg = accumulator.toMessage();
           const response: ChatResponseResult = {
@@ -18682,12 +18658,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
   // ── Concurrency strategies ──────────────────────────────────────
 
-  private _getSubmitConcurrencyDecision(
-    isSubmitMessage: boolean
-  ): SubmitConcurrencyDecision {
-    return this._turns.decideSubmit(this.messageConcurrency, isSubmitMessage);
-  }
-
   private _completeSkippedRequest(
     connection: Connection,
     requestId: string
@@ -18807,7 +18777,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const pending = this._continuation.pending;
     if (!pending) return;
 
-    const { connection, requestId, clientTools } = pending;
+    const { requestId } = pending;
+    // Created when the continuation fires, so a cancel reaches it while it
+    // waits in the queue.
     const abortSignal = this._aborts.getSignal(requestId);
 
     let reported = false;
@@ -18819,13 +18791,17 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       inheritChannel: true,
       allowNested: true,
       execute: async () => {
-        // The conversation moved on since the tool result (a newer question
-        // or reply, a clear): nothing left to continue.
-        if (this._continuation.pending && !this._turns.takeContinuation()) {
+        // Read the continuation when its turn starts, so it runs with the
+        // connection and tools of the latest result. Nothing to continue when
+        // it was cleared, or when the conversation moved on since its tool
+        // result (a newer question or reply, a clear).
+        const continuation = this._turns.takeContinuation();
+        if (!continuation) {
           this._aborts.remove(requestId);
           this._settleContinuationTurn(requestId, false);
           return;
         }
+        const { connection, clientTools } = continuation;
         let streamed = false;
         try {
           const continuationBody = async () => {

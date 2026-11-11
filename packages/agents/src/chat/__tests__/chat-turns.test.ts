@@ -413,4 +413,183 @@ describe("ChatTurns", () => {
     await vi.advanceTimersByTimeAsync(400);
     await expect(timedOut).resolves.toBe(false);
   });
+
+  // ── Client requests ─────────────────────────────────────────────────
+
+  describe("runClientRequest", () => {
+    type Log = string[];
+
+    /** A request whose steps record themselves; override any of them. */
+    function request(
+      id: string,
+      log: Log,
+      overrides: Partial<
+        Parameters<typeof turns.runClientRequest<string>>[0]
+      > = {}
+    ) {
+      return turns.runClientRequest<string>({
+        requestId: id,
+        isSubmitMessage: true,
+        concurrency: "queue",
+        onDropped: () => void log.push(`${id}:dropped`),
+        onAccepted: () => void log.push(`${id}:accepted`),
+        persist: async () => {
+          log.push(`${id}:persist`);
+          return "prepared";
+        },
+        enqueue: async (turn, generation, onQueued) => {
+          const result = turns.queue.enqueue(id, turn, { generation });
+          onQueued();
+          return (await result).status;
+        },
+        run: async (prepared, signal) => {
+          log.push(`${id}:run:${prepared}:${signal.aborted}`);
+        },
+        onSkipped: () => void log.push(`${id}:skipped`),
+        onCancelledBeforeStart: () => void log.push(`${id}:aborted`),
+        ...overrides
+      });
+    }
+
+    it("accepts, persists, queues and runs a request, then settles it", async () => {
+      const log: Log = [];
+      let registeredDuringRun = false;
+      let preStreamDuringRun = false;
+      await request("r1", log, {
+        run: async () => {
+          registeredDuringRun = turns.aborts.has("r1");
+          preStreamDuringRun = turns.preStream.hasInFlight();
+          log.push("r1:run");
+        }
+      });
+      expect(log).toEqual(["r1:accepted", "r1:persist", "r1:run"]);
+      expect(registeredDuringRun).toBe(true);
+      expect(preStreamDuringRun).toBe(true);
+      expect(turns.aborts.has("r1")).toBe(false);
+      expect(turns.preStream.hasInFlight()).toBe(false);
+      expect(turns.submits.pendingEnqueueCount).toBe(0);
+    });
+
+    it("drops an overlapping submit before accepting it", async () => {
+      const log: Log = [];
+      let release!: () => void;
+      const first = request("r1", log, {
+        run: () => new Promise<void>((resolve) => (release = resolve))
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      await request("r2", log, { concurrency: "drop" });
+      expect(log).toEqual(["r1:accepted", "r1:persist", "r2:dropped"]);
+      expect(turns.aborts.has("r2")).toBe(false);
+      release();
+      await first;
+    });
+
+    it("ends a request cancelled while it waited in the queue without running it", async () => {
+      const log: Log = [];
+      let release!: () => void;
+      const first = request("r1", log, {
+        run: () => new Promise<void>((resolve) => (release = resolve))
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      const second = request("r2", log);
+      await vi.advanceTimersByTimeAsync(0);
+
+      // The controller exists from acceptance, so this cancel is not lost.
+      turns.cancel("r2");
+      release();
+      await Promise.all([first, second]);
+
+      expect(log).toEqual([
+        "r1:accepted",
+        "r1:persist",
+        "r2:accepted",
+        "r2:persist",
+        "r2:aborted"
+      ]);
+    });
+
+    it("skips a queued request when the chat is reset", async () => {
+      const log: Log = [];
+      let release!: () => void;
+      const first = request("r1", log, {
+        run: () => new Promise<void>((resolve) => (release = resolve))
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      const second = request("r2", log);
+      await vi.advanceTimersByTimeAsync(0);
+
+      turns.reset();
+      release();
+      await Promise.all([first, second]);
+
+      expect(log.filter((entry) => entry.startsWith("r2"))).toEqual([
+        "r2:accepted",
+        "r2:persist",
+        "r2:skipped"
+      ]);
+    });
+
+    it("skips a request superseded by a newer one under latest", async () => {
+      const log: Log = [];
+      let release!: () => void;
+      const first = request("r1", log, {
+        run: () => new Promise<void>((resolve) => (release = resolve))
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      const second = request("r2", log, { concurrency: "latest" });
+      const third = request("r3", log, { concurrency: "latest" });
+      await vi.advanceTimersByTimeAsync(0);
+      release();
+      await Promise.all([first, second, third]);
+
+      expect(log).toContain("r2:skipped");
+      expect(log).toContain("r3:run:prepared:false");
+      expect(log).not.toContain("r2:run:prepared:false");
+    });
+
+    it("skips a request its persist declines or its host check rejects", async () => {
+      const log: Log = [];
+      await request("r1", log, { persist: async () => null });
+      await request("r2", log, { beforeStart: async () => false });
+      expect(log).toEqual([
+        "r1:accepted",
+        "r1:skipped",
+        "r2:accepted",
+        "r2:persist",
+        "r2:skipped"
+      ]);
+      expect(turns.preStream.hasInFlight()).toBe(false);
+    });
+
+    it("reports a failing step with its stage and still settles the request", async () => {
+      const errors: string[] = [];
+      const onError = (error: unknown, stage: string) =>
+        void errors.push(`${stage}:${(error as Error).message}`);
+      await request("r1", [], {
+        persist: async () => {
+          throw new Error("store down");
+        },
+        onError
+      });
+      await request("r2", [], {
+        run: async () => {
+          throw new Error("model down");
+        },
+        onError
+      });
+      expect(errors).toEqual(["persist:store down", "turn:model down"]);
+      expect(turns.aborts.size).toBe(0);
+      expect(turns.preStream.hasInFlight()).toBe(false);
+      expect(turns.submits.pendingEnqueueCount).toBe(0);
+
+      await expect(
+        request("r3", [], {
+          run: async () => {
+            throw new Error("unreported");
+          }
+        })
+      ).rejects.toThrow("unreported");
+      expect(turns.aborts.size).toBe(0);
+    });
+  });
 });
