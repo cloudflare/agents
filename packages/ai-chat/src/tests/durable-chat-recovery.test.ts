@@ -153,7 +153,8 @@ interface ChatRecoveryTestStub {
   ): Promise<void>;
   persistPendingToolCallForTest(
     messageId: string,
-    toolName: string
+    toolName: string,
+    options?: { cutOff?: boolean }
   ): Promise<void>;
   runChatRecoveryContinueDirectForTest(
     data: Record<string, unknown>
@@ -805,15 +806,17 @@ describe("onChatRecovery", () => {
       noProgressTimeoutMs: 60_000
     });
 
-    // `previewTool` is NOT registered as a client tool — its `input-available`
-    // orphan is dead (its execute() died with the isolate), so it must NOT get
-    // the HITL exemption; it seals normally on no-progress.
+    // `previewTool` is NOT registered as a client tool, and the reply it is
+    // in was cut off: its execute() died with the isolate. The call is
+    // settled when that reply is stored, so it does NOT get the HITL
+    // exemption; the turn seals normally on no-progress.
     await agentStub.setRequestContextForTest(undefined, [
       { name: "chooseOption" }
     ]);
     await agentStub.persistPendingToolCallForTest(
       "assistant-server",
-      "previewTool"
+      "previewTool",
+      { cutOff: true }
     );
 
     const base = {

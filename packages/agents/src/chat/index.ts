@@ -179,6 +179,7 @@ export {
   toolApprovalUpdate,
   pausedExecutionUpdate,
   hasIncompleteToolBatch,
+  hasPendingToolInteraction,
   partAwaitsClientInteraction,
   clientResolvableToolNames,
   type ToolPartUpdate
@@ -200,6 +201,8 @@ export {
  */
 export {
   repairInterruptedToolParts,
+  settleInterruptedReply,
+  streamChunksFinished,
   toolPartHasSettledResult,
   type RepairInterruptedToolPartsOptions,
   type RepairInterruptedToolPartsResult
