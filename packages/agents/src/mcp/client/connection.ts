@@ -28,7 +28,11 @@ import {
 } from "./catalog";
 import type { AgentMcpOAuthProvider } from "./do-oauth-client-provider";
 import { AuthorizationTurns } from "./authorization-turns";
-import { createMcpSdkClient, normalizeMcpClientOptions } from "./runtime";
+import {
+  advertisedElicitation,
+  createMcpSdkClient,
+  normalizeMcpClientOptions
+} from "./runtime";
 export { elicitationCapabilitiesFromHandlers } from "./runtime";
 import {
   isTransportNotImplemented,
@@ -199,6 +203,8 @@ export class MCPClientConnection {
 
   /** Whether init() is connecting: its client must not be replaced. */
   private _connecting = false;
+  /** The elicitation capability `client` was built to advertise, as JSON. */
+  private _advertisedElicitation = "null";
 
   /** Tracks in-flight discovery to allow cancellation */
   private _discoveryAbortController: AbortController | undefined;
@@ -266,6 +272,7 @@ export class MCPClientConnection {
       }
     );
     this._elicitationEnabled = created.elicitationEnabled;
+    this._advertisedElicitation = this.elicitationToAdvertise();
     return created.client;
   }
 
@@ -286,10 +293,52 @@ export class MCPClientConnection {
     this.options.capabilitySeed = undefined;
 
     // A connect in flight runs on the current client: replacing it would
-    // leave the connection on a client that never connected. Its handshake
-    // keeps what it advertised, as an active connection does.
+    // leave the connection on a client that never connected. init() connects
+    // again when the handshake it made advertised something else.
     if (!this._transport && !this._connecting) {
       this.client = this.createClient();
+    }
+  }
+
+  /** What a client built now would advertise for elicitation, as JSON. */
+  private elicitationToAdvertise(): string {
+    return JSON.stringify(
+      advertisedElicitation(
+        this.options.client,
+        this.options.capabilitySeed,
+        this.options.elicitationHandlers
+      ) ?? null
+    );
+  }
+
+  /**
+   * Connect, and connect again when the elicitation handlers changed during
+   * the handshake: apps configure them in `onStart`, while a restored
+   * server is already connecting.
+   */
+  private async connectWithCurrentHandlers(
+    transportType: TransportType
+  ): Promise<MCPClientConnectionResult> {
+    this._connecting = true;
+    try {
+      let res = await this.tryConnect(transportType);
+      // Bounded, so handlers that keep changing cannot hold the connect.
+      for (let again = 0; again < 3; again++) {
+        if (this._advertisedElicitation === this.elicitationToAdvertise()) {
+          break;
+        }
+        // A 401 keeps its transport for the callback, which builds a new
+        // client once the user has authorized.
+        if (res.state === MCPConnectionState.AUTHENTICATING) break;
+        this._transport = undefined;
+        await this.client.close().catch(() => {});
+        this.client = this.createClient();
+        if (res.state !== MCPConnectionState.CONNECTED) break;
+        res = await this.tryConnect(transportType);
+      }
+      return res;
+    } finally {
+      this._connecting = false;
     }
   }
 
@@ -321,13 +370,7 @@ export class MCPClientConnection {
       this.client = this.createClient();
     }
 
-    let res: MCPClientConnectionResult;
-    this._connecting = true;
-    try {
-      res = await this.tryConnect(transportType);
-    } finally {
-      this._connecting = false;
-    }
+    const res = await this.connectWithCurrentHandlers(transportType);
 
     // Set the connection state
     this.connectionState = res.state;

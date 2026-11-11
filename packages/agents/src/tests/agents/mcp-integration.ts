@@ -147,6 +147,14 @@ export class McpIntegrationAgent extends Agent {
     return [...keys.keys()];
   }
 
+  /** The elicitation capability a server's connection advertises. */
+  advertisedElicitation(serverId: string): unknown {
+    const client = this.mcp.mcpConnections[serverId]?.client as unknown as
+      | { _capabilities?: { elicitation?: unknown } }
+      | undefined;
+    return client?._capabilities?.elicitation ?? null;
+  }
+
   /** The OAuth storage the default provider holds for a server, by key. */
   async oauthStorage(serverId: string): Promise<Record<string, unknown>> {
     const entries = await this.ctx.storage.list({

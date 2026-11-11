@@ -362,4 +362,22 @@ describe("elicitation handlers configured while a server connects", () => {
       text: "read it"
     });
   });
+
+  // Same model, rule ConnectedAdvertisesHandlers. Path: as above, on the
+  // first wake after the app started configuring handlers, so the row
+  // carries no stamp and the handshake in flight advertises nothing.
+  it("advertises them once the server is connected", async () => {
+    const before = await newAgent();
+    const id = await connectAuthorized(before, server);
+    const release = server.holdRequests();
+    const agent = await restartAgent(before);
+    await waitingAtServer(server);
+
+    await agent.configureElicitation();
+    release();
+    await agent.settle();
+
+    expect((await agent.server(id))?.state).toBe("ready");
+    expect(await agent.advertisedElicitation(id)).toEqual({ form: {} });
+  });
 });
