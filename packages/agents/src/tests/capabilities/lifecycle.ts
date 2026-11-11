@@ -227,6 +227,14 @@ function currentWebSocketContext(
  */
 class PlainHostCallables extends RpcTarget {
   readonly #greeting = "host";
+  /** How many times `bump()` ran, for the closed-connection tests. */
+  bumps = 0;
+
+  /** A callable with a side effect, for the closed-connection tests. */
+  bump(): number {
+    this.bumps += 1;
+    return this.bumps;
+  }
 
   add(a: number, b: number): number {
     return a + b;
@@ -293,11 +301,18 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
   readonly #startupEvent = new StartupEventProbe();
   readonly #routedCapability = new RoutedCapabilityProbe();
   readonly #hostBoundary = new HostBoundaryProbe();
+  readonly #callables = new PlainHostCallables();
   readonly #webSockets = new WebSockets({
     handlers: {
-      onConnect: (connection) => {
+      onConnect: async (connection, { request }) => {
         this.#webSocketContexts.push(currentWebSocketContext("connect"));
         connection.send(`connected:${this.lifecycle.name}`);
+        // `?rejectAfterMs=N` stands in for async auth in onConnect: wait
+        // N ms, then reject the connection with 4001.
+        const delay = new URL(request.url).searchParams.get("rejectAfterMs");
+        if (delay === null) return;
+        await new Promise((resolve) => setTimeout(resolve, Number(delay)));
+        connection.close(4001, "Unauthorized");
       },
       onMessage: (connection, message) => {
         this.#webSocketContexts.push(currentWebSocketContext("message"));
@@ -312,7 +327,7 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
       const count = Number(new URL(request.url).searchParams.get("tags") ?? 0);
       return Array.from({ length: count }, (_, i) => `t${i}`);
     },
-    callables: new PlainHostCallables()
+    callables: this.#callables
   });
   readonly #hostContexts: HostContextEvent[] = [];
   readonly #webSocketContexts: WebSocketContextEvent[] = [];
@@ -354,6 +369,11 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
   /** Open connections on either wire, for transport tests. */
   connectionCount(): number {
     return [...this.#webSockets.getConnections()].length;
+  }
+
+  /** How many times the `bump` callable ran, for closed-connection tests. */
+  bumpCount(): number {
+    return this.#callables.bumps;
   }
 
   /** Tags of one connection, for transport tests. */

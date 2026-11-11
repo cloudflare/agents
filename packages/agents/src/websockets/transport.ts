@@ -132,6 +132,9 @@ export async function openCapnWebSession(
 
   let client: RpcStub<TransportClientEvents> | undefined;
   let closed = false;
+  // Set when the host closes the session, not when the client does: calls
+  // the client made before its own close must still run.
+  let hostClosed = false;
   let close = { code: 1000, reason: "", wasClean: true };
 
   const connection = new CapnWebConnection(connectionId, request.url, {
@@ -145,6 +148,7 @@ export async function openCapnWebSession(
       // reason throws before anything changes, and the socket stays open
       // and tracked. Only a started handshake finishes the session.
       server.close(code, reason);
+      hostClosed = true;
       close = { code, reason, wasClean: true };
       void finish();
     }
@@ -168,11 +172,24 @@ export async function openCapnWebSession(
     await options.onClose(connection, close.code, close.reason, close.wasClean);
   };
 
-  const rootMethods = new Map<string, CallableInvoker>(
-    options.callables(connection)
-  );
-  rootMethods.set(CAPNWEB_TRANSPORT_SEND, (message) =>
-    options.onMessage(connection, message as TransportMessage)
+  // A session the host closed runs no more client calls. A client that
+  // `onConnect` rejected has every call arrive after the close, since the
+  // close happens before the client has the upgrade response.
+  const unlessHostClosed =
+    (invoke: CallableInvoker): CallableInvoker =>
+    (...args) => {
+      if (hostClosed) throw new Error("Connection closed");
+      return invoke(...args);
+    };
+  const rootMethods = new Map<string, CallableInvoker>();
+  for (const [name, invoke] of options.callables(connection)) {
+    rootMethods.set(name, unlessHostClosed(invoke));
+  }
+  rootMethods.set(
+    CAPNWEB_TRANSPORT_SEND,
+    unlessHostClosed((message) =>
+      options.onMessage(connection, message as TransportMessage)
+    )
   );
   client = newWebSocketRpcSession<TransportClientEvents>(
     server,

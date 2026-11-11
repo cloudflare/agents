@@ -448,33 +448,37 @@ export class MyAgent extends Agent<Env, { counter: number }> {
 
 ## Common Patterns
 
-### Authentication on Connect
+### Authentication
 
-Validate users when they connect:
+Check the caller in your Worker, before `routeAgentRequest()` forwards the upgrade. A client you reject there never reaches the agent, and the agent does not wake up for it.
 
 ```typescript
-export class SecureAgent extends Agent {
-  async onConnect(connection: Connection, ctx: ConnectionContext) {
-    const url = new URL(ctx.request.url);
-    const token = url.searchParams.get("token");
+import { routeAgentRequest } from "agents";
 
-    if (!token || !(await this.validateToken(token))) {
-      connection.close(4001, "Unauthorized");
-      return;
-    }
-
-    const user = await this.getUserFromToken(token);
-    connection.setState({ userId: user.id, role: user.role });
-
-    connection.send(JSON.stringify({ type: "authenticated", user }));
+export default {
+  async fetch(request: Request, env: Env) {
+    return (
+      (await routeAgentRequest(request, env, {
+        onBeforeConnect: async (req) => {
+          const token = new URL(req.url).searchParams.get("token");
+          const user = token ? await verifyToken(token, env) : null;
+          if (!user) {
+            return new Response("Unauthorized", { status: 401 });
+          }
+          // `set` replaces any value the client sent.
+          const forwarded = new Request(req);
+          forwarded.headers.set("x-user-id", user.id);
+          return forwarded;
+        }
+      })) ?? new Response("Not found", { status: 404 })
+    );
   }
-
-  private async validateToken(token: string): Promise<boolean> {
-    // Validate JWT, check database, etc.
-    return true;
-  }
-}
+};
 ```
+
+In `onConnect`, read the checked identity from `ctx.request.headers.get("x-user-id")` and keep it with `connection.setState()`.
+
+You can also reject a connection from `onConnect` by calling `connection.close()`. The agent runs no message, callable, or state update the client sends after that close. That includes frames the client sends as soon as it connects, before it has received the Close frame. Prefer the Worker check anyway: `onConnect` runs inside the agent, so every rejected client still wakes it.
 
 ### Chat Room with Broadcast
 

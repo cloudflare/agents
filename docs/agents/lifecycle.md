@@ -466,6 +466,11 @@ Handlers are wire-agnostic. Both kinds of connection dispatch the same
 `onConnect`/`onMessage`/`onClose`/`onError`, appear in `getConnections()`,
 and honour `connection.close(code, reason)`.
 
+Once the host closes a connection, neither wire runs another message or
+callable from it. This holds for frames the client sent before it received
+the Close frame, so a client that `onConnect` rejects cannot run anything.
+Messages the client sent before closing the connection itself still run.
+
 ## Native RPC
 
 Native Durable Object RPC does not pass through `fetch`. An RPC method that
