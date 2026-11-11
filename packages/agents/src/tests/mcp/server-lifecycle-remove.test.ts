@@ -103,3 +103,40 @@ describe("registerServer with a provider used before", () => {
       expect(await storesState(provider)).toBe(true);
     }));
 });
+
+/**
+ * A closed connection's provider once the server has a new connection. Work
+ * it started may still call it: a refresh the authorization server refuses
+ * invalidates the tokens.
+ */
+describe("a closed connection's provider after the server is registered again", () => {
+  it("neither stores nor deletes the new connection's tokens", () =>
+    withMcpHarness(async (harness) => {
+      const manager = harness.createManager();
+      // The same OAuth client both times, as with a client id metadata
+      // document or a pre-registered client.
+      const options = { ...SERVER, clientId: "client-1" };
+      const tokens = (access_token: string) => ({
+        access_token,
+        token_type: "Bearer"
+      });
+      const providerOf = () => {
+        const provider =
+          manager.mcpConnections.files.options.transport.authProvider;
+        if (!provider) throw new Error("expected a provider");
+        return provider;
+      };
+
+      await manager.registerServer("files", options);
+      const closed = providerOf();
+      await manager.closeConnection("files");
+      await manager.registerServer("files", options);
+      const current = providerOf();
+      await current.saveTokens(tokens("new"));
+
+      await closed.saveTokens(tokens("late"));
+      expect(await current.tokens()).toMatchObject({ access_token: "new" });
+      await closed.invalidateCredentials?.("tokens");
+      expect(await current.tokens()).toMatchObject({ access_token: "new" });
+    }));
+});

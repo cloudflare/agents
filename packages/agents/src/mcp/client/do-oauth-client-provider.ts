@@ -114,8 +114,8 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
    * Set once this provider's server was removed (clearServerStorage), or
    * its connection replaced by a new one (retire). Work it started may
    * still be running, such as a token refresh: what it would save
-   * afterwards is dropped, so it neither outlives the removal nor writes
-   * over the new connection's grant.
+   * afterwards is dropped, and it deletes nothing, so it neither outlives
+   * the removal nor touches the new connection's grant.
    */
   private _retired_ = false;
   /** Tokens saved after retiring: kept in memory only, for work in flight. */
@@ -363,6 +363,7 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
       console.warn(`[OAuth] consumeState called with invalid state format`);
       return;
     }
+    if (this._retired_) return;
     await this.storage.delete(this.stateKey(parsed.nonce));
   }
 
@@ -409,6 +410,13 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
   async invalidateCredentials(
     scope: "all" | "client" | "tokens" | "verifier" | "discovery"
   ): Promise<void> {
+    // Storage belongs to the connection that replaced this one, or is gone.
+    if (this._retired_) {
+      if (scope === "all" || scope === "tokens") {
+        this._retiredTokens_ = undefined;
+      }
+      return;
+    }
     const deleteKeys: string[] = [];
 
     if (scope === "all" || scope === "discovery") {
@@ -629,6 +637,7 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
   }
 
   async deleteCodeVerifier(): Promise<void> {
+    if (this._retired_) return;
     const context = codeVerifierStateStorage.getStore();
     if (context?.servedKey) {
       await this.storage.delete(context.servedKey);
