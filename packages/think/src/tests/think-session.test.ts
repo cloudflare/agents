@@ -2878,6 +2878,52 @@ describe("Think — saveMessages with external AbortSignal", () => {
     expect(messages[0].role).toBe("user");
   });
 
+  it("never calls the model for a pre-aborted signal, and still stores the message", async () => {
+    const agent = await freshProgrammaticAgent("ext-abort-pre-no-model");
+
+    const result = await agent.testSaveMessagesWithSignal("Cancel before run", {
+      preAbort: true
+    });
+
+    expect(result.status).toBe("aborted");
+    // No turn reached the model.
+    expect(await agent.getCapturedOptions()).toEqual([]);
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages.map((message) => message.role)).toEqual(["user"]);
+    expect(await agent.getAbortControllerCount()).toBe(0);
+  });
+
+  it("a pre-aborted turn still clears the terminal record of an earlier failure (#1645)", async () => {
+    const agent = await freshProgrammaticAgent("ext-abort-pre-terminal");
+
+    const { before, status, after } =
+      await agent.testPreAbortedTurnAfterTerminalError();
+
+    expect(before).not.toBeNull();
+    expect(status).toBe("aborted");
+    expect(after).toBeNull();
+  });
+
+  it("abortAllRequests() stops a saveMessages turn still waiting in the queue", async () => {
+    const agent = await freshProgrammaticAgent("ext-abort-queued");
+    await agent.setDelayedChunkResponse(["a ", "b ", "c ", "d ", "e "], 50);
+
+    const { running, queued } =
+      await agent.testQueuedSaveMessagesStoppedByAbortAllRequests(100);
+
+    expect(running.status).toBe("aborted");
+    // The queued turn had not started. Its controller exists from the
+    // moment saveMessages is called, so the stop reaches it: its message is
+    // stored and the model is never called for it.
+    expect(queued.status).toBe("aborted");
+    expect(await agent.getCapturedOptions()).toHaveLength(1);
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages.filter((message) => message.role === "user")).toHaveLength(
+      2
+    );
+    expect(await agent.getAbortControllerCount()).toBe(0);
+  });
+
   it("returns status: 'aborted' when aborted mid-stream", async () => {
     const agent = await freshProgrammaticAgent("ext-abort-mid");
     await agent.setDelayedChunkResponse(

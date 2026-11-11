@@ -8736,6 +8736,55 @@ export class ThinkProgrammaticTestAgent extends Think {
     ]);
   }
 
+  /**
+   * Queue a second saveMessages turn behind a running one, then call
+   * `abortAllRequests()` while the second still waits in the queue.
+   */
+  async testQueuedSaveMessagesStoppedByAbortAllRequests(
+    cancelAfterMs: number
+  ): Promise<{ running: SaveMessagesResult; queued: SaveMessagesResult }> {
+    const turn = (text: string) =>
+      this.saveMessages([
+        {
+          id: crypto.randomUUID(),
+          role: "user" as const,
+          parts: [{ type: "text" as const, text }]
+        }
+      ]);
+    setTimeout(() => this.abortAllRequests(), cancelAfterMs);
+    const [running, queued] = await Promise.all([
+      turn("Running"),
+      turn("Queued")
+    ]);
+    return { running, queued };
+  }
+
+  /**
+   * Leave the terminal record of an earlier failure (#1645), then drive a
+   * saveMessages turn with a pre-aborted signal. Returns the record left
+   * afterwards.
+   */
+  async testPreAbortedTurnAfterTerminalError(): Promise<{
+    before: unknown;
+    status: SaveMessagesResult["status"];
+    after: unknown;
+  }> {
+    const key = "cf:chat:last-terminal";
+    await this.ctx.storage.put(key, {
+      requestId: "earlier-failure",
+      body: "The assistant encountered an error."
+    });
+    const before = (await this.ctx.storage.get(key)) ?? null;
+    const result = await this.testSaveMessagesWithSignal("Cancel before run", {
+      preAbort: true
+    });
+    return {
+      before,
+      status: result.status,
+      after: (await this.ctx.storage.get(key)) ?? null
+    };
+  }
+
   /** Drive continueLastTurn with an external signal. */
   async testContinueLastTurnWithSignal(options: {
     preAbort?: boolean;

@@ -189,6 +189,8 @@ import {
   ResumableStream,
   createChatStreams,
   ChatTurns,
+  type ServerTurnOutcome,
+  type ServerTurnStatus,
   type ToolInteractionOutcome,
   interceptAgentToolBroadcast,
   isPositionlessAgentToolChunk,
@@ -743,12 +745,6 @@ const MSG_CHAT_RESPONSE = CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE;
 const MSG_CHAT_CLEAR = CHAT_MESSAGE_TYPES.CHAT_CLEAR;
 const MSG_MESSAGE_UPDATED = CHAT_MESSAGE_TYPES.MESSAGE_UPDATED;
 const MSG_CHAT_RECOVERING = CHAT_MESSAGE_TYPES.CHAT_RECOVERING;
-
-function shouldMarkSkippedAfterGenerationChange(
-  status: SaveMessagesResult["status"]
-): boolean {
-  return status === "completed";
-}
 
 function stableStringify(value: unknown): string {
   if (value === undefined) return "undefined";
@@ -13125,7 +13121,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   ): Promise<ProgrammaticMessagesResult> {
     const clientTools = this._lastClientTools;
     const body = options?.body ?? this._lastBody;
-    const epoch = this._turnQueue.generation;
     // Explicit channel wins; otherwise re-resolve from persisted user-message
     // metadata (covers the submission drain replaying stamped messages).
     const channel =
@@ -13133,31 +13128,25 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       (Array.isArray(messages)
         ? this._channelFromMessages(messages)
         : undefined);
-    let status: SaveMessagesResult["status"] = "completed";
-    let error: string | undefined;
     let output: unknown;
-    let wasAborted = false;
 
-    await this._admitTurn({
-      admission: "queue",
-      trigger: options?.trigger ?? "programmatic",
+    const outcome = await this._turns.runServerTurn<UIMessage[]>({
       requestId,
-      continuation: false,
-      allowNested: options?.allowNested,
-      channel,
-      getStatus: () => status,
-      execute: async () => {
-        if (this._turnQueue.generation !== epoch) {
-          status = "skipped";
-          return;
-        }
-
+      signal: options?.signal,
+      enqueue: (turn) =>
+        this._enqueueServerTurn(turn, {
+          trigger: options?.trigger ?? "programmatic",
+          requestId,
+          continuation: false,
+          allowNested: options?.allowNested,
+          channel
+        }),
+      prepare: async () => {
         if (
           options?.shouldApplyMessages &&
           !(await options.shouldApplyMessages())
         ) {
-          status = "aborted";
-          return;
+          return { declined: "aborted" };
         }
 
         const resolved =
@@ -13165,140 +13154,148 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             ? await messages(this.messages)
             : messages;
 
-        if (this._turnQueue.generation !== epoch) {
-          status = "skipped";
-          return;
-        }
-
         if (
           options?.shouldApplyMessages &&
           !(await options.shouldApplyMessages())
         ) {
-          status = "aborted";
-          return;
+          return { declined: "aborted" };
         }
-
+        return { input: resolved };
+      },
+      persist: async (resolved) => {
         options?.onApplyingMessages?.();
         for (const msg of this._stampChannel(resolved, channel)) {
           await this._appendMessageToHistory(msg);
         }
         options?.onMessagesApplied?.();
         this._broadcastMessages();
+      },
+      run: async (abortSignal) => {
+        let ran: ServerTurnOutcome | undefined;
+        const programmaticBody = async () => {
+          // Bounded compact-and-retry loop (opt-in via
+          // `contextOverflow.reactive`), mirroring the WebSocket and chat()
+          // paths so programmatic turns (saveMessages / submitMessages /
+          // scheduled prompts) recover from a mid-turn overflow too. Each
+          // attempt re-runs the same turn (`continuation: false`).
+          for (let attempt = 0; ; attempt++) {
+            const result = await agentContext.run(
+              {
+                agent: this,
+                connection: undefined,
+                request: undefined,
+                email: undefined
+              },
+              () =>
+                this._runInferenceLoop({
+                  signal: abortSignal,
+                  clientTools,
+                  body,
+                  workflowPrompt: options?.workflowPrompt,
+                  continuation: false
+                })
+            );
 
-        if (this._turnQueue.generation !== epoch) {
-          status = "skipped";
-          return;
-        }
+            if (!result) return;
 
-        const abortSignal = this._aborts.getSignal(requestId);
-        // Wire the optional external signal to the registry's controller
-        // for this request. Detacher MUST run in `finally` to avoid
-        // leaking listeners on a long-lived parent signal that drives
-        // many helper turns.
-        const detachExternal = this._aborts.linkExternal(
-          requestId,
-          options?.signal
-        );
-        try {
-          const programmaticBody = async () => {
-            // Bounded compact-and-retry loop (opt-in via
-            // `contextOverflow.reactive`), mirroring the WebSocket and chat()
-            // paths so programmatic turns (saveMessages / submitMessages /
-            // scheduled prompts) recover from a mid-turn overflow too. Each
-            // attempt re-runs the same turn (`continuation: false`).
-            for (let attempt = 0; ; attempt++) {
-              const result = await agentContext.run(
-                {
-                  agent: this,
-                  connection: undefined,
-                  request: undefined,
-                  email: undefined
-                },
-                () =>
-                  this._runInferenceLoop({
-                    signal: abortSignal,
-                    clientTools,
-                    body,
-                    workflowPrompt: options?.workflowPrompt,
-                    continuation: false
-                  })
-              );
-
-              if (!result) return;
-
-              let overflowError: string | undefined;
-              let overflowRequested = false;
-              const overflowRecovery = this._overflowReactiveEnabled
-                ? {
-                    onRetry: (err?: string) => {
-                      overflowRequested = true;
-                      overflowError = err;
-                    }
+            let overflowError: string | undefined;
+            let overflowRequested = false;
+            const overflowRecovery = this._overflowReactiveEnabled
+              ? {
+                  onRetry: (err?: string) => {
+                    overflowRequested = true;
+                    overflowError = err;
                   }
-                : undefined;
-
-              const streamResult = await this._streamResult(
-                requestId,
-                result,
-                abortSignal,
-                {
-                  captureProgrammaticStreamError:
-                    options?.captureProgrammaticStreamError,
-                  captureOutput: options?.captureOutput,
-                  overflowRecovery
                 }
-              );
+              : undefined;
 
-              if (overflowRequested) {
-                if (
-                  attempt < this._overflowMaxRetries &&
-                  !abortSignal?.aborted
-                ) {
-                  const shortened = await this._compactForContextOverflow(
-                    "reactive",
-                    { requestId, attempt: attempt + 1 }
-                  );
-                  if (shortened) continue;
-                }
-                // Budget spent, aborted, or compaction no-op: surface terminally
-                // through onChatError (classified). The caller reads status/error.
-                error = this._finalizeContextOverflowError(
+            const streamResult = await this._streamResult(
+              requestId,
+              result,
+              abortSignal,
+              {
+                captureProgrammaticStreamError:
+                  options?.captureProgrammaticStreamError,
+                captureOutput: options?.captureOutput,
+                overflowRecovery
+              }
+            );
+
+            if (overflowRequested) {
+              if (attempt < this._overflowMaxRetries && !abortSignal.aborted) {
+                const shortened = await this._compactForContextOverflow(
+                  "reactive",
+                  { requestId, attempt: attempt + 1 }
+                );
+                if (shortened) continue;
+              }
+              // Budget spent, aborted, or compaction no-op: surface terminally
+              // through onChatError (classified). The caller reads status/error.
+              ran = {
+                status: "error",
+                error: this._finalizeContextOverflowError(
                   requestId,
                   overflowError
-                );
-                status = "error";
-                return;
-              }
-
-              status = streamResult.status;
-              error = streamResult.error;
-              output = streamResult.output;
+                )
+              };
               return;
             }
-          };
 
-          await this._runChatRecoveryFiber(requestId, false, programmaticBody);
-        } finally {
-          if (abortSignal?.aborted) wasAborted = true;
-          detachExternal();
-          this._aborts.remove(requestId);
-        }
-      }
+            ran = { status: streamResult.status, error: streamResult.error };
+            output = streamResult.output;
+            return;
+          }
+        };
+
+        await this._runChatRecoveryFiber(requestId, false, programmaticBody);
+        return ran;
+      },
+      onAborted: () => this._onServerTurnAborted(requestId)
     });
 
-    if (
-      this._turnQueue.generation !== epoch &&
-      shouldMarkSkippedAfterGenerationChange(status)
-    ) {
-      status = "skipped";
-    } else if (wasAborted && status === "completed") {
-      status = "aborted";
-    }
+    return this._serverTurnResult(requestId, outcome, output);
+  }
 
+  /**
+   * Admit a server-started turn through `_admitTurn`, for
+   * {@link ChatTurns.runServerTurn}. The turn's status feeds the
+   * `chat:turn:finish` event.
+   */
+  private async _enqueueServerTurn(
+    turn: () => Promise<ServerTurnStatus>,
+    spec: Omit<QueueTurnSpec<void>, "admission" | "getStatus" | "execute">
+  ): Promise<"completed" | "stale"> {
+    let status: ServerTurnStatus = "completed";
+    const admitted = await this._admitTurn({
+      ...spec,
+      admission: "queue",
+      getStatus: () => status,
+      execute: async () => {
+        status = await turn();
+      }
+    });
+    return admitted.status;
+  }
+
+  /**
+   * A server-started turn ended `aborted` without a reply: it was stopped
+   * before its model call. The reply path records every aborted outcome
+   * (clearing the terminal record of an earlier failure and the recovering
+   * indicator); with no reply, that happens here.
+   */
+  private _onServerTurnAborted(requestId: string): Promise<void> {
+    return this._recordTerminalChatStatus("aborted", requestId, "");
+  }
+
+  private _serverTurnResult(
+    requestId: string,
+    outcome: ServerTurnOutcome,
+    output?: unknown
+  ): ProgrammaticMessagesResult {
     return {
       requestId,
-      status,
-      ...(error !== undefined && { error }),
+      status: outcome.status,
+      ...(outcome.error !== undefined && { error: outcome.error }),
       ...(output !== undefined && { output })
     };
   }
@@ -13362,93 +13359,64 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const workflowPrompt = this._recoveredWorkflowPrompt();
     const captureOutput =
       options?.captureOutput || Boolean(workflowPrompt?.output);
-    const epoch = this._turnQueue.generation;
-    let status: SaveMessagesResult["status"] = "completed";
-    let error: string | undefined;
     let output: unknown;
-    let wasAborted = false;
 
-    await this._admitTurn({
-      admission: "queue",
-      trigger,
+    const outcome = await this._turns.runServerTurn({
       requestId,
-      continuation: true,
-      // Without an explicit channel, a continued/recovered turn re-applies the
-      // per-channel policy of the turn it extends.
-      channel: options?.channel,
-      inheritChannel: options?.channel === undefined,
-      getStatus: () => status,
-      execute: async () => {
-        if (this._turnQueue.generation !== epoch) {
-          status = "skipped";
-          return;
-        }
-
-        const abortSignal = this._aborts.getSignal(requestId);
-        const detachExternal = this._aborts.linkExternal(
+      signal: options?.signal,
+      enqueue: (turn) =>
+        this._enqueueServerTurn(turn, {
+          trigger,
           requestId,
-          options?.signal
-        );
-        try {
-          const continueTurnBody = async () => {
-            const result = await agentContext.run(
+          continuation: true,
+          // Without an explicit channel, a continued/recovered turn re-applies
+          // the per-channel policy of the turn it extends.
+          channel: options?.channel,
+          inheritChannel: options?.channel === undefined
+        }),
+      run: async (abortSignal) => {
+        let ran: ServerTurnOutcome | undefined;
+        const continueTurnBody = async () => {
+          const result = await agentContext.run(
+            {
+              agent: this,
+              connection: undefined,
+              request: undefined,
+              email: undefined
+            },
+            () =>
+              this._runInferenceLoop({
+                signal: abortSignal,
+                clientTools,
+                body: resolvedBody,
+                workflowPrompt,
+                continuation: true
+              })
+          );
+
+          if (result) {
+            const streamResult = await this._streamResult(
+              requestId,
+              result,
+              abortSignal,
               {
-                agent: this,
-                connection: undefined,
-                request: undefined,
-                email: undefined
-              },
-              () =>
-                this._runInferenceLoop({
-                  signal: abortSignal,
-                  clientTools,
-                  body: resolvedBody,
-                  workflowPrompt,
-                  continuation: true
-                })
+                continuation: true,
+                extendLeafAssistant: trigger === "recovery-continue",
+                captureOutput
+              }
             );
+            ran = { status: streamResult.status, error: streamResult.error };
+            output = streamResult.output;
+          }
+        };
 
-            if (result) {
-              const streamResult = await this._streamResult(
-                requestId,
-                result,
-                abortSignal,
-                {
-                  continuation: true,
-                  extendLeafAssistant: trigger === "recovery-continue",
-                  captureOutput
-                }
-              );
-              status = streamResult.status;
-              error = streamResult.error;
-              output = streamResult.output;
-            }
-          };
-
-          await this._runChatRecoveryFiber(requestId, true, continueTurnBody);
-        } finally {
-          if (abortSignal?.aborted) wasAborted = true;
-          detachExternal();
-          this._aborts.remove(requestId);
-        }
-      }
+        await this._runChatRecoveryFiber(requestId, true, continueTurnBody);
+        return ran;
+      },
+      onAborted: () => this._onServerTurnAborted(requestId)
     });
 
-    if (
-      this._turnQueue.generation !== epoch &&
-      shouldMarkSkippedAfterGenerationChange(status)
-    ) {
-      status = "skipped";
-    } else if (wasAborted && status === "completed") {
-      status = "aborted";
-    }
-
-    return {
-      requestId,
-      status,
-      ...(error !== undefined && { error }),
-      ...(output !== undefined && { output })
-    };
+    return this._serverTurnResult(requestId, outcome, output);
   }
 
   private async _retryLastUserTurn(
@@ -13477,96 +13445,76 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // run row to this turn's request id so the parent's re-attach tail keeps
     // attributing the retried turn's frames (no-op otherwise).
     this._rebindAgentToolChildRunRequestId(requestId);
-    const epoch = this._turnQueue.generation;
     // Re-resolve the channel from the persisted user message so a recovered
     // retry re-applies per-channel policy, exactly like `continueLastTurn`. The
     // `metadata.channel` stamp survives the interruption; without this the
     // retried turn would silently fall back to the default policy.
     const channel = options?.channel ?? this._channelFromLatestUserMessage();
     const workflowPrompt = this._recoveredWorkflowPrompt();
-    let status: SaveMessagesResult["status"] = "completed";
-    let error: string | undefined;
-    let wasAborted = false;
 
-    await this._admitTurn({
-      admission: "queue",
-      trigger,
+    const outcome = await this._turns.runServerTurn({
       requestId,
-      continuation: false,
-      channel,
-      getStatus: () => status,
-      execute: async () => {
-        if (this._turnQueue.generation !== epoch) {
-          status = "skipped";
-          return;
-        }
-
-        const abortSignal = this._aborts.getSignal(requestId);
-        const detachExternal = this._aborts.linkExternal(
+      signal: options?.signal,
+      enqueue: (turn) =>
+        this._enqueueServerTurn(turn, {
+          trigger,
           requestId,
-          options?.signal
-        );
-        try {
-          const retryTurnBody = async () => {
-            const result = await agentContext.run(
-              {
-                agent: this,
-                connection: undefined,
-                request: undefined,
-                email: undefined
-              },
-              () =>
-                this._runInferenceLoop(
-                  {
-                    signal: abortSignal,
-                    clientTools,
-                    body,
-                    workflowPrompt,
-                    continuation: false
-                  },
-                  branchParentId
-                )
-            );
-
-            if (result) {
-              const streamResult = await this._streamResult(
-                requestId,
-                result,
-                abortSignal,
+          continuation: false,
+          channel
+        }),
+      run: async (abortSignal) => {
+        let ran: ServerTurnOutcome | undefined;
+        const retryTurnBody = async () => {
+          const result = await agentContext.run(
+            {
+              agent: this,
+              connection: undefined,
+              request: undefined,
+              email: undefined
+            },
+            () =>
+              this._runInferenceLoop(
                 {
-                  captureOutput: Boolean(workflowPrompt?.output),
-                  parentId: branchParentId
-                }
-              );
-              status = streamResult.status;
-              error = streamResult.error;
-            }
-          };
-
-          await this._runChatRecoveryFiber(
-            requestId,
-            false,
-            retryTurnBody,
-            branchParentId
+                  signal: abortSignal,
+                  clientTools,
+                  body,
+                  workflowPrompt,
+                  continuation: false
+                },
+                branchParentId
+              )
           );
-        } finally {
-          if (abortSignal?.aborted) wasAborted = true;
-          detachExternal();
-          this._aborts.remove(requestId);
-        }
-      }
+
+          if (result) {
+            const streamResult = await this._streamResult(
+              requestId,
+              result,
+              abortSignal,
+              {
+                captureOutput: Boolean(workflowPrompt?.output),
+                parentId: branchParentId
+              }
+            );
+            ran = { status: streamResult.status, error: streamResult.error };
+          }
+        };
+
+        await this._runChatRecoveryFiber(
+          requestId,
+          false,
+          retryTurnBody,
+          branchParentId
+        );
+        return ran;
+      },
+      onAborted: () => this._onServerTurnAborted(requestId)
     });
 
-    if (
-      this._turnQueue.generation !== epoch &&
-      shouldMarkSkippedAfterGenerationChange(status)
-    ) {
-      status = "skipped";
-    } else if (wasAborted && status === "completed") {
-      status = "aborted";
-    }
-
-    return { requestId, status, ...(error !== undefined && { error }) };
+    const { output: _output, ...result } = this._serverTurnResult(
+      requestId,
+      outcome
+    );
+    return result;
   }
 
   // ── WebSocket protocol ──────────────────────────────────────────
@@ -14219,7 +14167,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * helper that runs one turn at a time over RPC) and want a coarse
    * "cancel whatever is running" handle without tracking request ids.
    *
-   * Does NOT reset queued turns, continuation timers, or submit
+   * A turn still waiting in the queue is aborted too: it ends `aborted`
+   * when it reaches the front, without calling the model.
+   *
+   * Does NOT invalidate queued turns, continuation timers, or submit
    * concurrency state — use {@link resetTurnState} for the full
    * teardown that runs on `chat-clear`.
    */

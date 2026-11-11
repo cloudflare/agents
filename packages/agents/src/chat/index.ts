@@ -159,6 +159,21 @@ export {
   type RecoveryAttemptHandle
 } from "./chat-turns";
 
+/**
+ * @internal A turn the server starts itself (`saveMessages`,
+ * `continueLastTurn`, a retry), run through `ChatTurns.runServerTurn`. Not a
+ * public API. See `server-turn.ts`.
+ */
+export {
+  runServerTurn,
+  mapServerTurnOutcome,
+  type ServerChatTurn,
+  type ServerTurnOutcome,
+  type ServerTurnParts,
+  type ServerTurnPrepared,
+  type ServerTurnStatus
+} from "./server-turn";
+
 export { AbortRegistry } from "./abort-registry";
 
 /**

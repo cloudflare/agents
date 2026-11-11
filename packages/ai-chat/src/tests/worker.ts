@@ -1650,6 +1650,34 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     ]);
   }
 
+  /**
+   * Queue a second `saveMessages` turn behind a running one, then call
+   * `abortAllRequests()` while the second still waits in the queue.
+   */
+  async testQueuedSaveMessagesStoppedByAbortAllRequests(
+    cancelAfterMs: number,
+    body: Record<string, unknown>
+  ): Promise<{ running: SaveMessagesResult; queued: SaveMessagesResult }> {
+    this.setTestBody(body);
+    const turn = (text: string) =>
+      this.saveMessages((messages) => [
+        ...messages,
+        {
+          id: `queued-abort-${crypto.randomUUID()}`,
+          role: "user",
+          parts: [{ type: "text", text }]
+        }
+      ]);
+    setTimeout(() => {
+      (this as unknown as { abortAllRequests(): void }).abortAllRequests();
+    }, cancelAfterMs);
+    const [running, queued] = await Promise.all([
+      turn("Running"),
+      turn("Queued")
+    ]);
+    return { running, queued };
+  }
+
   async getPersistedUserTexts(): Promise<string[]> {
     return (await this.getPersistedMessages())
       .filter((message) => message.role === "user")

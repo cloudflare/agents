@@ -49,6 +49,11 @@ import {
 import type { MessageConcurrency } from "./lifecycle";
 import { PreStreamTurns } from "./pre-stream-turns";
 import {
+  runServerTurn,
+  type ServerChatTurn,
+  type ServerTurnOutcome
+} from "./server-turn";
+import {
   SubmitConcurrencyController,
   type SubmitConcurrencyDecision
 } from "./submit-concurrency";
@@ -351,6 +356,17 @@ export class ChatTurns<
       this.aborts.remove(requestId);
       this.settlePreStreamTurn(requestId);
     }
+  }
+
+  /**
+   * Run one turn the server starts itself (`saveMessages`,
+   * `continueLastTurn`, a retry), start to finish. The counterpart of
+   * {@link runClientRequest}; see {@link runServerTurn} for the steps.
+   */
+  runServerTurn<TInput = undefined>(
+    turn: ServerChatTurn<TInput>
+  ): Promise<ServerTurnOutcome> {
+    return runServerTurn({ queue: this.queue, aborts: this.aborts }, turn);
   }
 
   /**
