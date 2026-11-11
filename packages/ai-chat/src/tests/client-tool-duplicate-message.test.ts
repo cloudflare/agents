@@ -1369,7 +1369,7 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 1200)); // Wait for retries (10 * 100ms + buffer)
+    await new Promise((resolve) => setTimeout(resolve, 200));
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
 

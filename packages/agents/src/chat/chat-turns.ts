@@ -89,6 +89,84 @@ export interface ChatTurnsOptions {
   defaultDebounceMs: number;
 }
 
+/**
+ * One chat request from a client, as {@link ChatTurns.runClientRequest} runs
+ * it. The core owns the order of the steps; the host supplies what each step
+ * does. `TPrepared` is whatever the host's `persist` hands to its `run`.
+ */
+export interface ClientChatRequest<TPrepared> {
+  requestId: string;
+  /** `true` for a new message, `false` for a regenerate. */
+  isSubmitMessage: boolean;
+  /** The host's `messageConcurrency` setting. */
+  concurrency: MessageConcurrency;
+  /** Called with the concurrency decision, before any step that can wait. */
+  onDecision?(decision: SubmitConcurrencyDecision): void;
+  /**
+   * An overlapping submit was dropped (`"drop"` concurrency): roll the
+   * client back and send its terminal frame. Nothing was accepted.
+   */
+  onDropped(): void;
+  /**
+   * The request is accepted. Clear state a new turn supersedes, such as the
+   * terminal record of an earlier failure.
+   */
+  onAccepted?(): void | Promise<void>;
+  /**
+   * Store the request's messages and show them to other clients. Runs before
+   * the turn queue, so they are visible while the request waits. Return
+   * `null` to skip the request.
+   *
+   * @param context.isCurrent - `false` once the chat was reset since the
+   *   request arrived.
+   */
+  persist(context: {
+    decision: SubmitConcurrencyDecision;
+    generation: number;
+    isCurrent: () => boolean;
+  }): Promise<TPrepared | null>;
+  /**
+   * Admit the turn through the host's own queue wrapper (tracing, hooks,
+   * keep-alive). It must enqueue `turn` on the core's queue under
+   * `generation`, call `onQueued` once it has, and report whether the turn
+   * ran or was skipped as stale.
+   */
+  enqueue(
+    turn: () => Promise<void>,
+    generation: number,
+    onQueued: () => void
+  ): Promise<"completed" | "stale">;
+  /**
+   * Host checks at the front of the queue, after the core's superseded and
+   * debounce checks: merging queued messages, waiting for MCP connections.
+   * Return `false` to skip the request.
+   */
+  beforeStart?(prepared: TPrepared): Promise<boolean>;
+  /**
+   * Run the turn: call the model and stream the reply. `signal` aborts when
+   * the request is cancelled or the chat is reset.
+   */
+  run(prepared: TPrepared, signal: AbortSignal): Promise<void>;
+  /**
+   * The request was skipped without running: superseded, overtaken during
+   * its debounce, reset while queued, or `persist` declined it. Send the
+   * `skipped` terminal frame.
+   */
+  onSkipped(): void;
+  /**
+   * The request was cancelled before its turn started. Send the `aborted`
+   * terminal frame. The model is never called.
+   */
+  onCancelledBeforeStart(): void;
+  /**
+   * A step threw. Report it to the client. When absent the error propagates
+   * to the caller.
+   *
+   * @param stage - `"persist"` until the messages are stored, then `"turn"`.
+   */
+  onError?(error: unknown, stage: "persist" | "turn"): void | Promise<void>;
+}
+
 /** A running recovery attempt a client can stop by its original request id. */
 export interface RecoveryAttemptHandle {
   /** Aborts when a client cancels the request the attempt recovers. */
@@ -180,6 +258,87 @@ export class ChatTurns<
     await this.submits.waitForTimestamp(decision.debounceUntilMs);
     if (this.queue.generation !== generation) return false;
     return !this.submits.isSuperseded(decision.submitSequence);
+  }
+
+  /**
+   * Run one chat request from a client, start to finish. This is the one
+   * order both hosts follow:
+   *
+   * 1. Decide what the request does under the concurrency policy. A dropped
+   *    request ends here.
+   * 2. Accept it: mark it pre-stream (so a reconnecting client waits for its
+   *    stream) and create its abort controller, so a cancel that arrives at
+   *    any later point, including while it waits in the queue, is not lost
+   *    (#2701).
+   * 3. Store its messages, then queue the turn.
+   * 4. At the front of the queue: skip it if a newer submit superseded it or
+   *    the chat was reset, end it with `aborted` if it was cancelled
+   *    meanwhile (the model is never called), otherwise run it.
+   * 5. Whatever happened, drop the abort controller and settle the
+   *    pre-stream turn.
+   */
+  async runClientRequest<TPrepared>(
+    request: ClientChatRequest<TPrepared>
+  ): Promise<void> {
+    const { requestId } = request;
+    const generation = this.queue.generation;
+    const decision = this.decideSubmit(
+      request.concurrency,
+      request.isSubmitMessage
+    );
+    request.onDecision?.(decision);
+    if (decision.action === "drop") {
+      request.onDropped();
+      return;
+    }
+
+    await request.onAccepted?.();
+    this.preStream.begin(requestId);
+    const signal = this.aborts.getSignal(requestId);
+    const releasePendingEnqueue = this.submits.beginEnqueue();
+    let stage: "persist" | "turn" = "persist";
+    try {
+      const prepared = await request.persist({
+        decision,
+        generation,
+        isCurrent: () => this.queue.generation === generation
+      });
+      if (prepared === null) {
+        request.onSkipped();
+        return;
+      }
+      stage = "turn";
+
+      const outcome = await request.enqueue(
+        async () => {
+          if (!(await this.awaitSubmitTurn(decision, generation))) {
+            request.onSkipped();
+            return;
+          }
+          if (request.beforeStart && !(await request.beforeStart(prepared))) {
+            request.onSkipped();
+            return;
+          }
+          if (signal?.aborted) {
+            request.onCancelledBeforeStart();
+            return;
+          }
+          // The registry always has a controller here: only a reset removes
+          // it, and a reset makes the turn stale before it reaches this point.
+          await request.run(prepared, signal ?? new AbortController().signal);
+        },
+        generation,
+        releasePendingEnqueue
+      );
+      if (outcome === "stale") request.onSkipped();
+    } catch (error) {
+      if (!request.onError) throw error;
+      await request.onError(error, stage);
+    } finally {
+      releasePendingEnqueue();
+      this.aborts.remove(requestId);
+      this.settlePreStreamTurn(requestId);
+    }
   }
 
   /**
