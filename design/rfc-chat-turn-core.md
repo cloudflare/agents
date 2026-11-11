@@ -1,6 +1,6 @@
 # RFC: one turn core for `AIChatAgent` and `Think`
 
-Status: proposed. Phase 1 is implemented with this RFC. Phases 2 to 5 are the plan.
+Status: accepted. Phase 1 and the client-request part of Phase 2 are implemented. The rest of Phase 2 and Phases 3 to 5 are the plan.
 
 Related:
 
@@ -54,15 +54,17 @@ Both hosts construct one `ChatTurns` with a small `ChatTurnsHost` (the transcrip
 
 `AIChatAgent` is about 220 lines shorter and `Think` about 110, counting the recovery stop `Think` gained. No public API changes.
 
-### Phase 2: one admission path
+### Phase 2: one admission path (client requests implemented)
 
 Every way a turn starts should go through one function in the core: a client request, `saveMessages`, `continueLastTurn`, an auto-continuation, a recovery continue or retry, an agent-tool run.
 
 `Think` is most of the way there. `_admitTurn(spec)` takes a `TurnSpec` and every entry path builds one. `AIChatAgent` has `_runExclusiveChatTurn` plus five call sites that each repeat the setup around it. Phase 2 moves `TurnSpec` and `admit()` into `ChatTurns`, with the host supplying `execute`.
 
-The client request handler is the largest piece. Both hosts run the same sequence: parse, decide concurrency, clear the terminal record, mark the turn pre-stream, persist the incoming messages, enqueue, run the queued checks, run the body inside a recovery fiber, send an error frame if it throws, and clean up. The core should own that sequence and call the host for "persist these messages" and "run the turn".
+The client request handler was the largest piece, and it is done. `ChatTurns.runClientRequest()` owns the sequence both hosts ran: decide concurrency, accept (clear the terminal record, mark the turn pre-stream, create the abort controller), persist the incoming messages, enqueue, run the queued checks, end a request cancelled meanwhile without calling the model, run the turn, and settle. The host passes a `ClientChatRequest` with the steps that differ: how to persist, how to enqueue through its own tracing wrapper, what to run, and which frames to send.
 
-The continuation turn goes here too. Both hosts have a `_fireAutoContinuation` that differs in when it reads the pending continuation (see D4).
+Both continuation turns now start with `takeContinuation()`, which reads the pending continuation when the turn starts.
+
+Still to do in this phase: `saveMessages`, `continueLastTurn`, the retry turn, recovery turns and agent-tool runs each build their own turn around the queue. They should go through one `admit()` in the core, with `TurnSpec` as its input.
 
 ### Phase 3: the reply pump
 
@@ -88,28 +90,40 @@ After Phases 2 to 4 the core has one admission function, one pump and one recove
 
 I have not designed this phase in detail. It depends on what Phases 2 to 4 turn up.
 
-## Differences the phases have to settle
+## Differences between the hosts, and what we chose
 
-The two hosts disagree in places where nobody decided they should. A shared core has to pick one behavior for each. These are the ones I found while doing Phase 1:
+The two hosts disagreed in places where nobody decided they should. The rule for choosing was the behavior that is hardest to get wrong at the edges, whichever host had it.
 
-| #   | Topic                             | `AIChatAgent`                                                                 | `Think`                                                                                  |
-| --- | --------------------------------- | ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| D1  | When the abort signal exists      | From the moment the request is accepted, before its messages persist (#2701). | After the incoming messages persist, just before the queue.                              |
-| D2  | Cancel while queued               | Sends an `aborted` terminal frame and never calls the model.                  | Starts the turn with an aborted signal and relies on the model call to stop.             |
-| D3  | Clear while a turn runs           | `_reply` checks the generation the turn was admitted with.                    | `_streamResult` reads the generation when the stream starts, after a clear may have run. |
-| D4  | Continuation context              | Reads connection, tools and body when the continuation turn starts.           | Captures them when the continuation fires, before it queues.                             |
-| D5  | `onChatResponse`                  | Drained after the turn leaves the queue.                                      | Fired inside the turn, with a durable marker so a restart replays it.                    |
-| D6  | Stable wait during recovery       | Ignores a dead server-tool call (`hasPendingClientInteraction`).              | One predicate, already client-only.                                                      |
-| D7  | Regenerate                        | Deletes the old reply.                                                        | Branches. The old reply stays in the tree.                                               |
-| D8  | Tool result with no matching call | Retries the lookup for up to a second.                                        | Looks once.                                                                              |
+| #   | Topic                             | `AIChatAgent` did                                                                | `Think` did                                                           | Chosen                                                                                                    | State                                 |
+| --- | --------------------------------- | -------------------------------------------------------------------------------- | --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------- |
+| D1  | When the abort signal exists      | From the moment the request is accepted (#2701).                                 | After the incoming messages persist.                                  | From acceptance. No window where a cancel finds nothing to abort.                                         | Done, in `runClientRequest`.          |
+| D2  | Cancel while queued               | Sends an `aborted` frame and never calls the model.                              | Started the turn with an aborted signal.                              | Never call the model. It does not depend on the model honoring the abort.                                 | Done, in `runClientRequest`.          |
+| D3  | Clear while a turn runs           | The reply checks the generation the turn was admitted with.                      | The reply read the generation when the stream started.                | The admission generation.                                                                                 | Done. Both call `turnResetGuard()`.   |
+| D4  | Continuation context              | Reads connection and tools when the continuation turn starts.                    | Captured them when the continuation fired.                            | At turn start. It uses the latest result's tools.                                                         | Done. Both call `takeContinuation()`. |
+| D5  | `onChatResponse`                  | Drained after the turn leaves the queue. Lost on a restart.                      | Fired inside the turn, with a durable marker so a restart replays it. | The durable marker, fired after the turn leaves the queue, which is what both classes' docs promise.      | Phase 3. Changes what apps observe.   |
+| D6  | Stable wait and dead tool calls   | Recovery ignores a server tool call that died with its isolate. Others count it. | One predicate that ignores them.                                      | One predicate.                                                                                            | Open. See below.                      |
+| D7  | Regenerate                        | Deletes the old reply.                                                           | Branches. The old reply stays in the tree.                            | Branch. A regenerate that deletes nothing cannot race a streaming reply or delete another tab's question. | Its own change. See below.            |
+| D8  | Tool result with no matching call | Retried the lookup for up to a second.                                           | Looks once.                                                           | Look once. Applies run one at a time, so the retry stalled every result behind it.                        | Done.                                 |
 
-D7 is a product difference and stays. D3 is a bug risk in `Think` only if the model call ignores its abort signal, because the clear aborts it. The rest are open, and Phase 2 or 3 should settle each with a test.
+Two more turned up while doing the client request:
+
+| #   | Topic                      | `AIChatAgent` does                                        | `Think` does                                                | Chosen                        | State |
+| --- | -------------------------- | --------------------------------------------------------- | ----------------------------------------------------------- | ----------------------------- | ----- |
+| D9  | Request context            | Stores the request's tools and body when its turn starts. | Stores them when the request is accepted, before it queues. | At turn start, like D4.       | Open. |
+| D10 | `skipped` for a stale turn | Sent to the connection that made the request.             | Was broadcast to every connection.                          | To the requesting connection. | Done. |
+
+Notes on the open ones:
+
+- **D5.** `Think` fires the hook inside the turn. Both classes document that the turn lock is released first, so `saveMessages` is safe inside the hook. From the code, `Think` would reject that call with its "cannot be called from inside an active turn" error. No test covers it. The chosen behavior fixes that and keeps the replay after a restart.
+- **D6.** `AIChatAgent` keeps the broad predicate as the default for one reason I could not rule out: an app can define a client tool on the server with no `execute` and answer it from `onToolCall` without ever sending a tool schema. The narrow predicate reads client tools from the schemas the client sent, so it would treat that call as dead and stop waiting for the user. Narrowing the default needs a way to know those tools first.
+- **D7.** Three things to settle when `AIChatAgent` branches: `maxPersistedMessages` counts stored rows, so hidden branches would count against the limit. Storage grows because old replies are kept. And apps can overwrite the whole transcript (`persistMessages(array)`, assigning `this.messages`), which has no obvious meaning on a tree.
+- **D9.** In `Think`, a request waiting in the queue already changed the tools and body that a continuation of the running turn will use.
 
 ## Verification
 
 The TLA+ models that found the races describe the tying code, which is now `ChatTurns`. `ChatTurns.tla` maps to `chat-turns.ts` and the two hosts' handlers. Each guard in the core has a variant of the model with the guard removed, and the variant must break its rule. The models are not in the repo yet. If this RFC is accepted I would like to check them in next to the core, so a change to `chat-turns.ts` can be checked the same way a test is run.
 
-Phase 1 is covered by unit tests for `ChatTurns` (`__tests__/chat-turns.test.ts`) and by the existing host suites, which pass unchanged except for one test helper that called a removed private method.
+The implemented parts are covered by unit tests for `ChatTurns` (`__tests__/chat-turns.test.ts`) and by the host suites. Each behavior `Think` gained has a test that failed first: a stop during a running recovery, and a request cancelled while it waited in the queue. The existing host tests pass unchanged except for one helper that called a removed private method and one that waited out the removed retry.
 
 ## The alternatives
 
@@ -121,4 +135,4 @@ Phase 1 is covered by unit tests for `ChatTurns` (`__tests__/chat-turns.test.ts`
 
 ## The decision
 
-Pending review.
+Accepted. Move the turn loop into `agents/chat` in the phases above, and where the hosts differ pick the behavior that is hardest to get wrong, as recorded in the table. D5 and D7 change what `AIChatAgent` apps can observe, so each ships as its own change with a changeset.
