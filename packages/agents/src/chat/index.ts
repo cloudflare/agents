@@ -143,6 +143,21 @@ export {
   type ToolInteractionOutcome
 } from "./auto-continuation-controller";
 
+/**
+ * @internal The turn core shared by `@cloudflare/ai-chat` and
+ * `@cloudflare/think`: the turn queue, abort registry, submit concurrency,
+ * continuation slots and barrier, pre-stream set and tool-result apply chain,
+ * with the rules that tie them together. Not a public API. See
+ * `chat-turns.ts` and `design/rfc-chat-turn-core.md`.
+ */
+export {
+  ChatTurns,
+  type ChatTurnsHost,
+  type ChatTurnsOptions,
+  type ChatTurnMessage,
+  type RecoveryAttemptHandle
+} from "./chat-turns";
+
 export { AbortRegistry } from "./abort-registry";
 
 /**
