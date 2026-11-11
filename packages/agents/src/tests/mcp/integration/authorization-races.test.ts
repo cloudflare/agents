@@ -417,3 +417,53 @@ describe("step-up rounds for two scope sets", () => {
     expect((await agent.server(id))?.state).toBe("authenticating");
   });
 });
+
+describe("a sign-in asked for mid-session", () => {
+  // McpStepUp.tla, rule ReadyHoldsGrant. Path: the token expires and the
+  // refresh is refused, so the tokens are dropped and a tool call is
+  // answered with a sign-in link; the user declines it.
+  it("is recorded as declined, not shown ready without a grant", async () => {
+    const agent = await newAgent();
+    const id = await connectAuthorized(agent, server);
+    server.revokeAccessTokens();
+    server.options.refuseRefresh = true;
+    const asked = await agent.callServerTool(id, "read");
+    if (asked.ok || !asked.authUrl) throw new Error("expected a link");
+
+    // Nothing works until the user signs in: requests get the same link.
+    expect(await agent.callServerTool(id, "read")).toMatchObject({
+      authorizationRequired: true,
+      authUrl: asked.authUrl
+    });
+
+    expect(await followCallback(server.deny(asked.authUrl))).toEqual({
+      authorized: false,
+      error: "access_denied"
+    });
+    await agent.settle();
+    expect(await agent.server(id)).toMatchObject({
+      state: "failed",
+      auth_url: null,
+      error: "access_denied"
+    });
+  });
+
+  // Same path, approved: the server is ready on the new grant.
+  it("connects again once the user signs in", async () => {
+    const agent = await newAgent();
+    const id = await connectAuthorized(agent, server);
+    server.revokeAccessTokens();
+    server.options.refuseRefresh = true;
+    const asked = await agent.callServerTool(id, "read");
+    if (asked.ok || !asked.authUrl) throw new Error("expected a link");
+
+    expect(await followCallback(server.authorize(asked.authUrl))).toEqual({
+      authorized: true
+    });
+    await agent.settle();
+    expect(await agent.callServerTool(id, "read")).toEqual({
+      ok: true,
+      text: "read it"
+    });
+  });
+});

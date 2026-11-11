@@ -373,6 +373,11 @@ export class AuthorizationController {
     if (!provider || !authUrl || authUrl === authUrlBefore) return undefined;
     const stateBefore = conn.connectionState;
     if (!(await isLive(serverId, authUrl, provider))) return undefined;
+    // With a grant still stored, this asks for more than it holds (a scope
+    // step-up), and the session keeps working while the user decides. With
+    // none (the refresh was refused and the tokens dropped), nothing works
+    // until the user signs in again: wait for that, as a connect does.
+    const stepUp = await holdsGrant(provider);
     // Nothing may have moved while the check ran.
     if (
       !canTakeOver() ||
@@ -382,12 +387,12 @@ export class AuthorizationController {
       return undefined;
     }
 
-    // A request only runs on a live session, so this asks for more than the
-    // grant it already holds.
-    const auth = this.enterAuthenticating(serverId, conn, { stepUp: true });
+    const auth = this.enterAuthenticating(serverId, conn, { stepUp });
     // An exhausted server is now failed; the caller gets the original error.
     if (auth._tag !== "authenticating") return undefined;
-    if (stateBefore !== MCPConnectionState.AUTHENTICATING) {
+    if (!stepUp) {
+      this.liveStepUps.delete(serverId);
+    } else if (stateBefore !== MCPConnectionState.AUTHENTICATING) {
       this.liveStepUps.set(serverId, { conn, stateBefore });
     }
     return new MCPAuthorizationRequiredError(serverId, auth.authUrl, {
@@ -703,6 +708,15 @@ async function isLive(
 ): Promise<boolean> {
   const state = stateOf(authUrl);
   return state ? isRedeemableState(serverId, provider, state) : false;
+}
+
+/** Whether the provider still has tokens stored. */
+async function holdsGrant(provider: AgentMcpOAuthProvider): Promise<boolean> {
+  try {
+    return (await provider.tokens()) !== undefined;
+  } catch {
+    return false;
+  }
 }
 
 function stateOf(authUrl: string): string | null {
