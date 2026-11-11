@@ -358,6 +358,8 @@ A request can need authorization again after the server is `ready`: a tool call 
 
 During a scope step-up the session keeps its current grant, so requests it already covers keep working while the user decides. If the user declines, the server goes back to `ready` on that grant, and the next request that needs the scope asks again.
 
+When the token refresh was refused, no grant is left to keep working on. The server then waits for the sign-in as it does at connect time: every request throws `MCPAuthorizationRequiredError` with the same link, and if the user declines, the server is marked `failed`.
+
 A request to a server that is waiting for its first authorization throws `MCPAuthorizationRequiredError` with the link it is waiting on.
 
 Calls for a `serverId` with no connection (never registered, removed, or still being restored) throw `MCPConnectionNotFoundError`.
