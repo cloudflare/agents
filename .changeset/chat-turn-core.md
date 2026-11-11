@@ -4,4 +4,4 @@
 "agents": patch
 ---
 
-`AIChatAgent` and `Think` now run on one shared turn core. `Think` stops a recovery the user cancels while it is running and no longer runs a request cancelled while it waited in the queue, and `AIChatAgent` no longer waits a second for a tool result whose tool call does not exist.
+`AIChatAgent` and `Think` now run on one shared turn core and follow the same rules: a reply that was cut off is stored with its unanswered tool calls settled, so the chat never waits on a tool call nothing will answer; a request's tools apply when its turn starts; and a request cancelled in the queue never runs.
