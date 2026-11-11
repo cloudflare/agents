@@ -443,6 +443,20 @@ describe("AutoContinuationController", () => {
     ]);
   });
 
+  it("hasPendingDecision is true while a result is being applied or a continuation is armed", async () => {
+    expect(controller.hasPendingDecision()).toBe(false);
+
+    host.pendingInteraction = true;
+    expect(controller.hasPendingDecision()).toBe(true);
+    host.pendingInteraction = false;
+
+    schedule();
+    expect(controller.hasPendingDecision()).toBe(true);
+    await vi.advanceTimersByTimeAsync(COALESCE);
+    expect(host.fireCount).toBe(1);
+    expect(controller.hasPendingDecision()).toBe(false);
+  });
+
   it("a result with no target turns the latest-message check off", () => {
     controller.afterInteraction(
       { status: "changed", messageId: "assistant-1" },

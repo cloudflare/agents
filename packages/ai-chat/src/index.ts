@@ -2786,11 +2786,7 @@ export class AIChatAgent<
    * here.
    */
   private _hasArmedContinuation(): boolean {
-    return (
-      this._continuation.pending !== null &&
-      !this._continuation.pending.pastCoalesce &&
-      this._autoContinuation.isArmed()
-    );
+    return this._autoContinuation.hasPendingDecision();
   }
 
   private _getSubmitConcurrencyDecision(

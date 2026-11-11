@@ -335,6 +335,20 @@ export class AutoContinuationController<
   }
 
   /**
+   * `true` while a continuation decision is still to come, so the host is not
+   * idle or stable yet: a tool result or approval is being applied (it may
+   * schedule a continuation once it lands), or a pending continuation that
+   * has not entered its turn is armed ({@link isArmed}). A continuation that
+   * already entered its turn is covered by the host's turn queue, and one
+   * parked on an unanswered sibling by its pending-interaction check.
+   */
+  hasPendingDecision(): boolean {
+    if (this.host.hasPendingInteraction()) return true;
+    const pending = this.host.continuation.pending;
+    return pending !== null && !pending.pastCoalesce && this.isArmed();
+  }
+
+  /**
    * Tear down the controller-owned barrier state (timer + double-fire guard).
    * Scoped to ONLY this controller's fields — the host clears the rest of its
    * turn state (stream gate, interaction tail, continuation data) separately.
