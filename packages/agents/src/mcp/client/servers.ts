@@ -135,10 +135,14 @@ export class ServerController {
   ): MCPClientConnection {
     const existing = this.ctx.connections[id];
     if (existing) return existing;
-    // The new connection owns the server's grant now.
+    // The new connection owns the server's grant now. A caller may hand in
+    // the provider it used before (transport.authProvider): that one is the
+    // new connection's, so it is kept, and stores again if it was retired.
+    const incoming = options.transport.authProvider;
     const closed = this.closedProviders.get(id);
     this.closedProviders.delete(id);
-    if (closed) this.authorization.retire(closed);
+    if (closed && closed !== incoming) this.authorization.retire(closed);
+    if (incoming) this.authorization.revive(incoming);
 
     // Stored servers re-advertise the capabilities saved on their row;
     // fresh registrations rely on the handlers. The stamp is read without

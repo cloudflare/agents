@@ -144,6 +144,11 @@ export class AuthorizationController {
     if (provider instanceof DurableObjectOAuthClientProvider) provider.retire();
   }
 
+  /** Let a retired provider store again: a new connection uses it. */
+  revive(provider: AgentMcpOAuthProvider): void {
+    if (provider instanceof DurableObjectOAuthClientProvider) provider.revive();
+  }
+
   // Links
 
   /**

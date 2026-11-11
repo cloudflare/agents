@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import type { AgentMcpOAuthProvider } from "../../mcp/client/do-oauth-client-provider";
+import {
+  type AgentMcpOAuthProvider,
+  DurableObjectOAuthClientProvider
+} from "../../mcp/client/do-oauth-client-provider";
 import { withMcpHarness } from "../shared/mcp-harness";
 
 const SERVER = {
@@ -55,5 +58,48 @@ describe("removeServer with a custom OAuth provider", () => {
       expect(manager.listServers().map((server) => server.id)).toEqual([
         "files"
       ]);
+    }));
+});
+
+/**
+ * A caller that hands registerServer its own DurableObjectOAuthClientProvider
+ * and registers the server again with that same provider.
+ */
+describe("registerServer with a provider used before", () => {
+  async function storesState(provider: DurableObjectOAuthClientProvider) {
+    const state = await provider.state();
+    return (await provider.checkState(state)).valid;
+  }
+
+  it("keeps storing after the connection was closed", () =>
+    withMcpHarness(async (harness) => {
+      const manager = harness.createManager();
+      const provider = new DurableObjectOAuthClientProvider(
+        harness.storage,
+        "test-client",
+        SERVER.callbackUrl
+      );
+      const options = { ...SERVER, transport: { authProvider: provider } };
+      await manager.registerServer("files", options);
+      await manager.closeConnection("files");
+      await manager.registerServer("files", options);
+
+      expect(await storesState(provider)).toBe(true);
+    }));
+
+  it("keeps storing after the server was removed", () =>
+    withMcpHarness(async (harness) => {
+      const manager = harness.createManager();
+      const provider = new DurableObjectOAuthClientProvider(
+        harness.storage,
+        "test-client",
+        SERVER.callbackUrl
+      );
+      const options = { ...SERVER, transport: { authProvider: provider } };
+      await manager.registerServer("files", options);
+      await manager.removeServer("files");
+      await manager.registerServer("files", options);
+
+      expect(await storesState(provider)).toBe(true);
     }));
 });

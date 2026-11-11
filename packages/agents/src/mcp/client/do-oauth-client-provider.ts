@@ -466,6 +466,12 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
     this._retired_ = true;
   }
 
+  /** @internal Store again: a new connection was registered with this provider. */
+  revive(): void {
+    this._retired_ = false;
+    this._retiredTokens_ = undefined;
+  }
+
   codeVerifierKey(clientId: string) {
     return `${this.keyPrefix(clientId)}/code_verifier`;
   }
