@@ -364,4 +364,58 @@ describe("AutoContinuationController", () => {
     expect(host.continuation.pending?.connection.id).toBe("c2");
     expect(controller.isArmed()).toBe(false);
   });
+
+  // ── afterInteraction() ──────────────────────────────────────────────
+
+  const spec = () => ({
+    connection: makeConnection("c1"),
+    clientTools: undefined,
+    body: undefined,
+    errorPrefix: "[test] continuation failed:"
+  });
+
+  it("afterInteraction() schedules a continuation targeted at the settled part's message", () => {
+    controller.afterInteraction(
+      { status: "changed", messageId: "assistant-1" },
+      true,
+      spec
+    );
+    expect(host.continuation.pending?.targetMessageId).toBe("assistant-1");
+    expect(controller.isArmed()).toBe(true);
+  });
+
+  it("afterInteraction() schedules nothing for a result that changed nothing", () => {
+    controller.afterInteraction({ status: "unchanged" }, true, spec);
+    controller.afterInteraction({ status: "missing" }, true, spec);
+    expect(host.continuation.pending).toBeNull();
+    expect(controller.isArmed()).toBe(false);
+  });
+
+  it("afterInteraction() without autoContinue only re-arms an existing pending continuation", () => {
+    controller.afterInteraction(
+      { status: "changed", messageId: "assistant-1" },
+      false,
+      spec
+    );
+    expect(host.continuation.pending).toBeNull();
+
+    schedule();
+    controller.cancelTimer();
+    controller.afterInteraction({ status: "unchanged" }, false, spec);
+    expect(controller.isArmed()).toBe(true);
+  });
+
+  it("a deferred follow-up keeps its target message when it becomes pending", () => {
+    schedule();
+    host.continuation.pending!.pastCoalesce = true;
+    controller.afterInteraction(
+      { status: "changed", messageId: "assistant-2" },
+      true,
+      spec
+    );
+    expect(host.continuation.deferred?.targetMessageId).toBe("assistant-2");
+    host.continuation.pending = null;
+    controller.activateDeferredAndReschedule();
+    expect(host.continuation.pending?.targetMessageId).toBe("assistant-2");
+  });
 });

@@ -58,6 +58,14 @@ function createClientToolMockModel(): LanguageModel {
               type: "tool-input-end",
               id: "tc-client-1"
             });
+            // Finalize the call so the part is `input-available`: a result
+            // only applies (and continues) for a call awaiting one.
+            controller.enqueue({
+              type: "tool-call",
+              toolCallId: "tc-client-1",
+              toolName: "client_action",
+              input: JSON.stringify({ action: "do_thing" })
+            });
             controller.enqueue({
               type: "finish",
               finishReason: "tool-calls",

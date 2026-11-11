@@ -116,6 +116,7 @@ export {
 
 export {
   ContinuationState,
+  continuationTargetIsLatest,
   type ContinuationConnection,
   type ContinuationPending,
   type ContinuationDeferred
@@ -138,7 +139,8 @@ export { PreStreamTurns } from "./pre-stream-turns";
 export {
   AutoContinuationController,
   type AutoContinuationHost,
-  type ContinuationSpec
+  type ContinuationSpec,
+  type ToolInteractionOutcome
 } from "./auto-continuation-controller";
 
 export { AbortRegistry } from "./abort-registry";
