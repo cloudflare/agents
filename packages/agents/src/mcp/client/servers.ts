@@ -819,6 +819,16 @@ export class ServerController {
     // Restore work closes over oldId; drain it before renaming.
     await this.ctx.lanes.idle(oldId);
 
+    // Read the OAuth keys first, then write everything without awaiting in
+    // between: the row, the keys and the connection move as one step, and
+    // the storage writes commit together. If the object dies here, the
+    // server is under one id or the other, never split between them.
+    const oldPrefix = `/${clientName}/${oldId}/`;
+    const newPrefix = `/${clientName}/${newId}/`;
+    const keys = this.ctx.store.get(oldId)
+      ? await this.oauthKeys(oldPrefix)
+      : new Map<string, unknown>();
+
     const renamed = this.ctx.store.rename(oldId, newId);
     if (renamed === "missing") {
       this.renameConnection(oldId, newId);
@@ -830,37 +840,65 @@ export class ServerController {
       );
     }
     // A pending link names the old id in its state, so its callback can
-    // never reach the renamed server: abandon it before anything awaits.
+    // never reach the renamed server: abandon it.
     this.authorization.renamed(oldId, newId, this.ctx.connections[oldId]);
-    await this.renameOAuthKeys(
-      `/${clientName}/${oldId}/`,
-      `/${clientName}/${newId}/`
-    );
+    const moved = this.moveOAuthKeys(keys, oldPrefix, newPrefix);
     this.renameConnection(oldId, newId);
     this.ctx.stateChanged();
+    await moved;
+  }
+
+  /** A server's OAuth storage keys. Best-effort: a failure is logged. */
+  private async oauthKeys(prefix: string): Promise<Map<string, unknown>> {
+    try {
+      return await this.ctx.storage.list({ prefix });
+    } catch (error) {
+      console.warn(
+        `[MCPClientManager] Listing OAuth keys under ${prefix} failed:`,
+        error
+      );
+      return new Map();
+    }
   }
 
   /**
-   * Move the provider's storage keys to the new id. Best-effort: the row is
-   * already renamed, so a failure here is logged, not thrown.
+   * Move the provider's storage keys to the new id, issuing every write
+   * before the first `await`. Best-effort: the row is already renamed, so a
+   * failure here is logged, not thrown.
    */
-  private async renameOAuthKeys(
+  private async moveOAuthKeys(
+    keys: Map<string, unknown>,
     oldPrefix: string,
     newPrefix: string
   ): Promise<void> {
+    const writes: Promise<unknown>[] = [];
+    const entries = [...keys];
     try {
-      const keys = await this.ctx.storage.list({ prefix: oldPrefix });
-      if (keys.size === 0) return;
-      const writes: Record<string, unknown> = {};
-      for (const [oldKey, value] of keys) {
-        writes[newPrefix + oldKey.slice(oldPrefix.length)] = value;
+      // DO storage caps a multi-key put or delete at 128 keys.
+      for (let i = 0; i < entries.length; i += 128) {
+        const batch = entries.slice(i, i + 128);
+        writes.push(
+          this.ctx.storage.put(
+            Object.fromEntries(
+              batch.map(([key, value]) => [
+                newPrefix + key.slice(oldPrefix.length),
+                value
+              ])
+            )
+          ),
+          this.ctx.storage.delete(batch.map(([key]) => key))
+        );
       }
-      await this.ctx.storage.put(writes);
-      await this.ctx.storage.delete([...keys.keys()]);
     } catch (error) {
+      writes.push(Promise.reject(error));
+    }
+    const failed = (await Promise.allSettled(writes)).find(
+      (result) => result.status === "rejected"
+    );
+    if (failed) {
       console.warn(
         `[MCPClientManager] OAuth key migration ${oldPrefix} → ${newPrefix} failed:`,
-        error
+        failed.reason
       );
     }
   }
