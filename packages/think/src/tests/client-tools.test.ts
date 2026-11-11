@@ -3294,29 +3294,119 @@ describe("Think — chained client tools across continuations (#2443)", () => {
     await closeWS(ws);
   }, 30000);
 
-  it("runs one continuation, not two, when a result was also deferred before the stream", async () => {
+  it("runs one continuation, not two, when a result repeats before the stream", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);
     const ws = await startChain(agent, room);
 
     // A second result for `tc-chain-1` lands after the first continuation
-    // took its pending but before its stream starts, so it is deferred.
+    // took its pending but before its stream starts. The call is already
+    // answered, so it defers nothing.
     await agent.holdContinuationStartForTest();
     sendToolResult(ws, "tc-chain-1", "step one");
     await waitUntil(() => agent.isContinuationStartHeldForTest(), 8000);
     sendToolResult(ws, "tc-chain-1", "step one (retried)");
-    await waitUntil(
-      async () => (await agent.getContinuationSlotsForTest()).deferred
-    );
+    await delay(100);
+    expect((await agent.getContinuationSlotsForTest()).deferred).toBe(false);
     await agent.releaseContinuationStartForTest();
 
     await answerMidStreamThenSettle(agent, ws);
 
-    // The next continuation covers the deferred result; running it too
-    // would call the model again with a transcript ending in text.
+    // Running a second continuation would call the model again with a
+    // transcript ending in text.
     await expectOneContinuationPerStep(agent);
     await closeWS(ws);
   }, 30000);
+});
+
+// ── Tool results that have nothing left to continue ──────────────
+
+describe("Think — tool results with nothing to continue", () => {
+  it("a second tab's result for an answered call does not continue again", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws: tabA } = await connectWS(room);
+    const { ws: tabB } = await connectWS(room);
+    await collectMessages(tabA, 3);
+
+    // Turn 1 ends on a client tool call; both tabs run the tool.
+    const done = waitForDone(tabA);
+    sendChatRequest(tabA, [makeUserMessage("use client tool")], {
+      clientTools: [{ name: "client_action", description: "A client tool" }]
+    });
+    await done;
+    await delay(200);
+
+    // Tab A's result continues the reply.
+    const continued = waitForDone(tabA, 15000);
+    tabA.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId: "tc-client-1",
+        toolName: "client_action",
+        output: "tool output",
+        autoContinue: true
+      })
+    );
+    await continued;
+    await delay(200);
+    const afterFirst = (await agent.getMessages()) as UIMessage[];
+
+    // Tab B's result for the same call arrives.
+    tabB.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId: "tc-client-1",
+        toolName: "client_action",
+        output: "tool output",
+        autoContinue: true
+      })
+    );
+    await delay(500);
+
+    expect(await agent.getMessages()).toEqual(afterFirst);
+    await closeWS(tabA);
+    await closeWS(tabB);
+  });
+
+  it("a result for an older reply does not continue the newer reply", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    // Turn 1 ended on a client tool call; a second question was answered
+    // before the tool's result came back.
+    const toolCallId = "tc-older-reply";
+    const reply2: UIMessage = {
+      id: crypto.randomUUID(),
+      role: "assistant",
+      parts: [{ type: "text", text: "Answer to the second question" }]
+    };
+    await agent.persistToolCallMessage([
+      makeUserMessage("first"),
+      makeToolMessage(toolCallId, "client_action", "input-available"),
+      makeUserMessage("second"),
+      reply2
+    ]);
+
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId,
+        toolName: "client_action",
+        output: "late result",
+        autoContinue: true
+      })
+    );
+    await delay(500);
+
+    const messages = (await agent.getMessages()) as UIMessage[];
+    expect(messages).toHaveLength(4);
+    expect(messages[1].parts[0]).toMatchObject({ state: "output-available" });
+    expect(messages[3]).toEqual(reply2);
+    await closeWS(ws);
+  });
 });
 
 // ── onChatResponse from WebSocket path ───────────────────────────

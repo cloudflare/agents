@@ -34,6 +34,12 @@ export interface ContinuationPending<
   errorPrefix: string | null;
   prerequisite: Promise<boolean> | null;
   pastCoalesce: boolean;
+  /**
+   * The assistant message whose tool result or approval this continuation
+   * answers. The continuation runs only while that message is still the last
+   * message ({@link continuationTargetIsLatest}); `null` skips the check.
+   */
+  targetMessageId?: string | null;
 }
 
 export interface ContinuationDeferred<
@@ -45,6 +51,7 @@ export interface ContinuationDeferred<
   body?: Record<string, unknown>;
   errorPrefix: string;
   prerequisite: Promise<boolean> | null;
+  targetMessageId?: string | null;
 }
 
 export class ContinuationState<
@@ -150,7 +157,8 @@ export class ContinuationState<
       body: d.body,
       errorPrefix: d.errorPrefix,
       prerequisite: d.prerequisite,
-      pastCoalesce: false
+      pastCoalesce: false,
+      targetMessageId: d.targetMessageId ?? null
     };
 
     if (d.connectionId !== null) {
@@ -158,4 +166,21 @@ export class ContinuationState<
     }
     return this.pending;
   }
+}
+
+/**
+ * Whether a pending continuation still has something to answer: the message
+ * whose tool result scheduled it is the last message. A newer question, a
+ * newer reply, a regenerate or a clear moved the conversation on, and
+ * continuing would make the model append to a reply that did not ask for it.
+ * Mirrors pi's `continue()`, which settles a transcript that already ends in
+ * an answer as `nothing_to_answer`.
+ */
+export function continuationTargetIsLatest(
+  messages: ReadonlyArray<{ id: string }>,
+  pending: Pick<ContinuationPending, "targetMessageId"> | null
+): boolean {
+  const target = pending?.targetMessageId;
+  if (target == null) return true;
+  return messages.at(-1)?.id === target;
 }

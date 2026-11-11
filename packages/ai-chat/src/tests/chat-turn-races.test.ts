@@ -317,11 +317,7 @@ describe("chat turn races", () => {
     tabB.close(1000);
   });
 
-  // Not fixed: today the result continues the newest reply (reply 2), so
-  // the model appends to an answer that had nothing to do with the tool.
-  // Existing tests rely on a result for an earlier message continuing after
-  // a later turn; see the report before changing it.
-  it.fails("a tool result for an older reply does not continue the newer reply", async () => {
+  it("a tool result for an older reply does not continue the newer reply", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
     const agent = await getAgentByName(env.TestChatAgent, room);
