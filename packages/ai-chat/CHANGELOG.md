@@ -1,5 +1,15 @@
 # @cloudflare/ai-chat
 
+## 0.12.3
+
+### Patch Changes
+
+- [#2818](https://github.com/cloudflare/agents/pull/2818) [`a2f1216`](https://github.com/cloudflare/agents/commit/a2f1216993aa43982ef3550ec0a05e9a4d6d3175) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Cancelling a chat request while it waits in the queue now stops it from running, instead of the cancel being dropped. See [#2701](https://github.com/cloudflare/agents/issues/2701).
+
+- [#2861](https://github.com/cloudflare/agents/pull/2861) [`f0f4ed9`](https://github.com/cloudflare/agents/commit/f0f4ed98f6733b1f09b615efe8de0b626b722691) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Fix chat recovery and resume races: stop now ends a running recovery, recovery yields to a newer question, and a stale resume ACK keeps the tab waiting for the active stream's replay.
+
+- [#2860](https://github.com/cloudflare/agents/pull/2860) [`7e2e11e`](https://github.com/cloudflare/agents/commit/7e2e11e55825e7298ce3e0690b47414c2fcd71a9) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Fix chat turn races across tabs: clear stops pending replies, regenerate replaces a reply still streaming, a throwing `onChatMessage` sends an error frame, and repeated tool results no longer re-run the model.
+
 ## 0.12.2
 
 ### Patch Changes
