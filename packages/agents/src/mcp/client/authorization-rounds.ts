@@ -44,8 +44,11 @@ type AuthorizationRounds = {
   readonly byState?: Readonly<Record<string, string>>;
 };
 
-/** Links remembered per server; older ones fall back to the latest round. */
-const MAX_REMEMBERED_LINKS = 16;
+/**
+ * Links remembered per server. A link older than these completes no round:
+ * its scope set is unknown, and guessing could use up another's budget.
+ */
+const MAX_REMEMBERED_LINKS = 64;
 
 /** Whether the next authorization link may be shown. */
 type RoundDecision =
@@ -112,9 +115,9 @@ export function startRound(
 
 /**
  * Record that a callback exchanged a code: the round of the link it belongs
- * to is complete. Links for other scope sets keep waiting. A link that is
- * not remembered (stored before links were recorded) counts for the latest
- * round.
+ * to is complete. Links for other scope sets keep waiting. Rounds stored
+ * before links were recorded count the callback for the latest round; with
+ * links recorded, a link that is not among them completes nothing.
  *
  * @param previous - The server's recorded rounds, when any.
  * @param state - The OAuth state of the callback.
@@ -124,15 +127,18 @@ export function completeRound(
   state?: string | null
 ): AuthorizationRounds | undefined {
   if (!previous) return undefined;
-  const links = previous.byState ?? {};
-  const remembered =
-    state && Object.hasOwn(links, state) ? links[state] : undefined;
-  const scope = remembered ?? previous.latest;
+  const links = previous.byState;
+  const scope = !links
+    ? previous.latest
+    : state && Object.hasOwn(links, state)
+      ? links[state]
+      : undefined;
   const byState = Object.fromEntries(
-    Object.entries(links).filter(([link]) => link !== state)
+    Object.entries(links ?? {}).filter(([link]) => link !== state)
   );
-  const current = entryFor(previous.byScope, scope);
-  if (!current) return { ...previous, byState };
+  const current =
+    scope === undefined ? undefined : entryFor(previous.byScope, scope);
+  if (scope === undefined || !current) return { ...previous, byState };
   return {
     latest: previous.latest,
     byScope: { ...previous.byScope, [scope]: { ...current, completed: true } },
