@@ -76,3 +76,25 @@ describe("a server removed and added again under the same id", () => {
     expect(server.unauthorizedMethods).toEqual(["server/discover"]);
   });
 });
+
+/**
+ * The deprecated `connect()` (still how RPC servers are added) keeps working
+ * on its connection across `await`s, while removeServer runs outside the
+ * lane.
+ */
+describe("connect() while the server is removed", () => {
+  it("says the server was removed", async () => {
+    const agent = await newAgent();
+    // The handshake waits at the server.
+    const release = server.holdRequests();
+    const connecting = agent.connectLegacy(MCP_URL, "files");
+    await waitingAtServer(server);
+
+    await agent.remove("files");
+    release();
+
+    expect(await connecting).toBe(
+      "MCP server files was removed while connecting"
+    );
+  });
+});

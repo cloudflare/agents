@@ -235,6 +235,19 @@ export class McpIntegrationAgent extends Agent {
     }
   }
 
+  /** The deprecated `MCPClientManager.connect`, as RPC servers still use. */
+  async connectLegacy(url: string, id: string): Promise<string> {
+    try {
+      await this.mcp.connect(url, {
+        reconnect: { id },
+        transport: { type: "streamable-http" }
+      });
+      return "connected";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
   async callServerTool(
     serverId: string,
     name: string

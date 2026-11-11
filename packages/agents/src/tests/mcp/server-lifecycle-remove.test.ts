@@ -206,7 +206,9 @@ describe("removeServer overlapping a close", () => {
       await manager.registerServer("files", SERVER);
       const provider =
         manager.mcpConnections.files.options.transport.authProvider;
-      if (!provider) throw new Error("expected a provider");
+      if (!(provider instanceof DurableObjectOAuthClientProvider)) {
+        throw new Error("expected the default provider");
+      }
       // The new server's sign-in is under way: its state is stored.
       const state = await provider.state();
 
@@ -249,48 +251,5 @@ describe("removeServer overlapping a close", () => {
 
       const state = await provider.state();
       expect((await provider.checkState(state)).valid).toBe(true);
-    }));
-});
-
-/**
- * The deprecated `connect()` (still how RPC servers are added) keeps working
- * on its connection across `await`s, while removeServer runs outside the
- * lane.
- */
-describe("connect() while the server is removed", () => {
-  it("says the server was removed", () =>
-    withMcpHarness(async (harness) => {
-      const manager = harness.createManager();
-      // The handshake waits on the network until released.
-      let answer!: (response: Response) => void;
-      const waiting = new Promise<Response>((resolve) => {
-        answer = resolve;
-      });
-      let started!: () => void;
-      const sent = new Promise<void>((resolve) => {
-        started = resolve;
-      });
-      const connecting = manager.connect(SERVER.url, {
-        reconnect: { id: "files" },
-        transport: {
-          type: "streamable-http",
-          fetch: () => {
-            started();
-            return waiting;
-          }
-        }
-      });
-      const outcome = connecting.then(
-        () => "connected",
-        (error: unknown) => (error instanceof Error ? error.message : "")
-      );
-      await sent;
-
-      await manager.removeServer("files");
-      answer(new Response("unavailable", { status: 503 }));
-
-      expect(await outcome).toBe(
-        "MCP server files was removed while connecting"
-      );
     }));
 });
