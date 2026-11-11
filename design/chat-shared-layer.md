@@ -149,6 +149,7 @@ class StreamAccumulator {
 - `cancel(id)` aborts the request's turn, queued or running, and a recovery attempt registered for it with `beginRecoveryAttempt(rootId)`.
 - `reset()` tears all of it down in one synchronous step for a chat clear.
 - `waitForIdle()` and `waitUntilStable()` define idle and stable: no turn, no submit in flight, no tool result being applied, no continuation about to fire.
+- `runClientRequest()` runs one client chat request in the order both hosts follow: decide concurrency, accept (pre-stream mark and abort controller), persist, queue, the superseded and debounce checks, end a request cancelled meanwhile without calling the model, run the turn, settle. The host supplies the steps as a `ClientChatRequest`.
 - `decideSubmit()`, `awaitSubmitTurn()` and `settlePreStreamTurn()` cover the overlapping-submit checks.
 
 The host passes a `ChatTurnsHost`: the transcript, whether a reply is streaming, whether a resumable stream is active, `keepAliveWhile`, an id generator, and `fireContinuation`. What a turn does (the model call, streaming and persisting the reply) is still host code. [rfc-chat-turn-core.md](./rfc-chat-turn-core.md) has the plan for moving that too.
