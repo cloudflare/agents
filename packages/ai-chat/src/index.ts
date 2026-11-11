@@ -2174,23 +2174,38 @@ export class AIChatAgent<
   }
 
   /**
-   * Settle and store the reply a recovery attempt is about to continue. It
-   * was cut off by definition. A reply stored by this version is settled
-   * already; one stored by an older version may not be, and recovery would
-   * otherwise wait on its dead tool call as if a client could answer it.
+   * Settle the transcript a recovery attempt is about to work from, before
+   * the attempt waits for the chat to be stable.
+   *
+   * The attempt continues a reply that was cut off (`continueReplyId`), or
+   * answers a question again (no id). Either way every earlier reply is one
+   * the conversation has moved past. A reply this version stored cut off is
+   * settled already; one an older version stored may hold a server tool call
+   * nothing will answer, and the attempt would otherwise wait on it as if a
+   * client could. Calls a client is known to own, and approvals, are kept:
+   * the attempt still waits for those.
+   *
+   * Does nothing when the transcript no longer ends where the attempt
+   * expects, so a newer reply that finished on a client tool call is left
+   * alone.
    */
-  private async _settleRecoveredReply(
-    messageId: string | undefined
+  private async _settleBeforeRecovery(
+    continueReplyId: string | undefined
   ): Promise<void> {
     const last = this.messages.at(-1);
-    if (!messageId || last?.id !== messageId || last.role !== "assistant") {
+    const expected = continueReplyId
+      ? last?.id === continueReplyId && last.role === "assistant"
+      : last?.role === "user";
+    if (!expected) return;
+    const settled = this.messages.map((message) =>
+      message.role === "assistant"
+        ? this._settleInterruptedReply(message)
+        : message
+    );
+    if (settled.every((message, index) => message === this.messages[index])) {
       return;
     }
-    const settled = this._settleInterruptedReply(last);
-    if (settled === last) return;
-    await this.persistMessages(
-      this.messages.map((message) => (message === last ? settled : message))
-    );
+    await this.persistMessages(settled);
   }
 
   /**
@@ -5464,7 +5479,9 @@ export class AIChatAgent<
       data?.originalRequestId ?? previousRootRequestId;
     const stop = this._turns.beginRecoveryAttempt(data?.originalRequestId);
     try {
-      await this._settleRecoveredReply(data?.targetAssistantId);
+      if (data?.targetAssistantId) {
+        await this._settleBeforeRecovery(data.targetAssistantId);
+      }
       const recoveryConfig = this._resolveChatRecoveryConfig();
       // The reply was settled above, so anything still pending is a call a
       // client can answer, and the `!ready` branch parks on it.
@@ -6013,6 +6030,7 @@ export class AIChatAgent<
       data?.originalRequestId ?? previousRootRequestId;
     const stop = this._turns.beginRecoveryAttempt(data?.originalRequestId);
     try {
+      await this._settleBeforeRecovery(undefined);
       const recoveryConfig = this._resolveChatRecoveryConfig();
       const ready = await this.waitUntilStable({
         timeout: recoveryConfig.stableTimeoutMs

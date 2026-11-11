@@ -615,7 +615,17 @@ describe("ChatTurns", () => {
         },
         onError
       });
-      expect(errors).toEqual(["persist:store down", "turn:model down"]);
+      await request("r0", [], {
+        onAccepted: async () => {
+          throw new Error("accept failed");
+        },
+        onError
+      });
+      expect(errors).toEqual([
+        "persist:store down",
+        "turn:model down",
+        "persist:accept failed"
+      ]);
       expect(turns.aborts.size).toBe(0);
       expect(turns.preStream.hasInFlight()).toBe(false);
       expect(turns.submits.pendingEnqueueCount).toBe(0);

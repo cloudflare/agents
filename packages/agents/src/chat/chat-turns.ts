@@ -302,12 +302,14 @@ export class ChatTurns<
       return;
     }
 
-    await request.onAccepted?.();
     this.preStream.begin(requestId);
     const signal = this.aborts.getSignal(requestId);
     const releasePendingEnqueue = this.submits.beginEnqueue();
     let stage: "persist" | "turn" = "persist";
     try {
+      // Inside the try, so a failure here is reported and settled like any
+      // other step's.
+      await request.onAccepted?.();
       const prepared = await request.persist({
         decision,
         generation,
