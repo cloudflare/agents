@@ -699,7 +699,7 @@ export class ServerController {
             error
           );
         } finally {
-          this.forgetConnection(id);
+          this.forgetConnection(existing);
         }
         return true;
       default:
@@ -738,7 +738,7 @@ export class ServerController {
     try {
       await conn.close();
     } finally {
-      this.forgetConnection(id);
+      this.forgetConnection(conn);
     }
   }
 
@@ -749,10 +749,11 @@ export class ServerController {
     for (const id of ids) this.ctx.connections[id].cancelDiscovery();
     const results = await Promise.allSettled(
       ids.map(async (id) => {
+        const conn = this.ctx.connections[id];
         try {
-          await this.ctx.connections[id].close();
+          await conn.close();
         } finally {
-          this.forgetConnection(id);
+          this.forgetConnection(conn);
         }
       })
     );
@@ -884,10 +885,16 @@ export class ServerController {
     }
   }
 
-  /** Drop a closed connection and its session; the server stays stored. */
-  private forgetConnection(id: string): void {
-    const authProvider =
-      this.ctx.connections[id]?.options.transport.authProvider;
+  /**
+   * Drop a closed connection and its session; the server stays stored. Only
+   * this connection: while it was closing, an overlapping close may have
+   * dropped it already and the server may have a new connection, or the
+   * server may have been renamed.
+   */
+  private forgetConnection(conn: MCPClientConnection): void {
+    const id = this.idOf(conn);
+    if (id === undefined) return;
+    const authProvider = conn.options.transport.authProvider;
     if (authProvider) this.closedProviders.set(id, authProvider);
     this.ctx.store.setSession(id);
     this.disposables.get(id)?.dispose();

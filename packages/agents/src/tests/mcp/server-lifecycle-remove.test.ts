@@ -140,3 +140,40 @@ describe("a closed connection's provider after the server is registered again", 
       expect(await current.tokens()).toMatchObject({ access_token: "new" });
     }));
 });
+
+/**
+ * Replay of a path the lifecycle model found (rule NewServerKeepsConnection):
+ * two closes of one connection overlap, the quicker one finishes, the server
+ * is registered again, and then the slower close finishes.
+ */
+describe("closeConnection overlapping another close", () => {
+  it("does not drop the connection of the server registered again", () =>
+    withMcpHarness(async (harness) => {
+      const manager = harness.createManager();
+      await manager.registerServer("files", SERVER);
+      const first = manager.mcpConnections.files;
+
+      // The first close waits on the network, as terminating a session does.
+      let finishClose!: () => void;
+      const closing = new Promise<void>((resolve) => {
+        finishClose = resolve;
+      });
+      const close = first.close.bind(first);
+      let calls = 0;
+      first.close = async () => {
+        if (calls++ === 0) await closing;
+        return close();
+      };
+
+      const slow = manager.closeConnection("files");
+      await manager.closeConnection("files");
+      await manager.registerServer("files", SERVER);
+      const second = manager.mcpConnections.files;
+      expect(second).not.toBe(first);
+
+      finishClose();
+      await slow;
+
+      expect(manager.mcpConnections.files).toBe(second);
+    }));
+});
