@@ -155,6 +155,7 @@ export {
   type ChatTurnsHost,
   type ChatTurnsOptions,
   type ChatTurnMessage,
+  type ClientChatRequest,
   type RecoveryAttemptHandle
 } from "./chat-turns";
 
