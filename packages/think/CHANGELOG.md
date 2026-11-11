@@ -1,5 +1,11 @@
 # @cloudflare/think
 
+## 0.24.0
+
+### Minor Changes
+
+- [#2819](https://github.com/cloudflare/agents/pull/2819) [`9b54e51`](https://github.com/cloudflare/agents/commit/9b54e51a2f68b8aa7b5e42ad4635351c889670c0) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Think's `@cloudflare/computer` peer is now `^0.10.0`, so upgrade Computer to 0.10 alongside Think. Its JavaScript backend is now `CodemodeBackend` from `@cloudflare/computer/backends/codemode`, and host modules such as `ws:tools` are now `codemode:tools`. See [Running code with `exec`](https://github.com/cloudflare/agents/blob/main/docs/think/tools.md#running-code-with-exec).
+
 ## 0.23.0
 
 ### Minor Changes

@@ -1,5 +1,33 @@
 # @cloudflare/agents
 
+## 0.34.0
+
+### Minor Changes
+
+- [#2782](https://github.com/cloudflare/agents/pull/2782) [`d6b4441`](https://github.com/cloudflare/agents/commit/d6b4441fbc2cf6909d61480a9c182181a924a7ff) Thanks [@mattzcarey](https://github.com/mattzcarey)! - MCP client: requests that need the user to authorize again throw `MCPAuthorizationRequiredError` with a link, and failed servers stay `failed` until the new `reconnectMcpServer(id)`. See [MCP client](https://github.com/cloudflare/agents/blob/main/docs/agents/mcp-client.md#failures-and-reconnecting).
+
+### Patch Changes
+
+- [#2861](https://github.com/cloudflare/agents/pull/2861) [`f0f4ed9`](https://github.com/cloudflare/agents/commit/f0f4ed98f6733b1f09b615efe8de0b626b722691) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Fix chat recovery and resume races: stop now ends a running recovery, recovery yields to a newer question, and a stale resume ACK keeps the tab waiting for the active stream's replay.
+
+- [#2860](https://github.com/cloudflare/agents/pull/2860) [`7e2e11e`](https://github.com/cloudflare/agents/commit/7e2e11e55825e7298ce3e0690b47414c2fcd71a9) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Fix chat turn races across tabs: clear stops pending replies, regenerate replaces a reply still streaming, a throwing `onChatMessage` sends an error frame, and repeated tool results no longer re-run the model.
+
+- [#2835](https://github.com/cloudflare/agents/pull/2835) [`5c33d89`](https://github.com/cloudflare/agents/commit/5c33d89791d6a00c6ea64cf7790fa753e3e5cbfd) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Send a burst of messages on a sub-agent connection in one call to the parent, so resuming a sub-agent chat stream shows the partial reply at once instead of replaying it frame by frame ([#2820](https://github.com/cloudflare/agents/issues/2820)).
+
+- [#2858](https://github.com/cloudflare/agents/pull/2858) [`5071d3c`](https://github.com/cloudflare/agents/commit/5071d3cda939972fb532c93e9b46942b36d8f5d7) Thanks [@mattzcarey](https://github.com/mattzcarey)! - A schedule or queue item that is cancelled or replaced while its callback waits to retry no longer runs again with the old job. This also holds for sub-agent schedules and queue items, and when a second alarm invocation picks up the replacement.
+
+- [#2827](https://github.com/cloudflare/agents/pull/2827) [`e0f95e5`](https://github.com/cloudflare/agents/commit/e0f95e587078db5b1f53575b8494e3979a519ff3) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Type `LifecycleCapability.onStart()` as returning `MaybePromise<void>` to match the runner, which awaits it. See [Agents](https://developers.cloudflare.com/agents/).
+
+- [#2863](https://github.com/cloudflare/agents/pull/2863) [`46daba4`](https://github.com/cloudflare/agents/commit/46daba47a5f675aae42aa0514ce96437c804f3cd) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Fix MCP client races found by TLA+ model checking: a pending step-up link survives a token refresh, a refresh no longer overwrites a step-up grant, a removed server's tokens stay deleted, a sign-in survives `closeConnection()`, an old link no longer fails a server added again, overlapping closes and removals leave a server added again alone, `addMcpServer(..., { id })` returns a link that works and renames the server in one transaction, configuring elicitation handlers while a server connects no longer fails it and is advertised, step-up rounds count for the scope set of the link that was completed, and a declined sign-in after a refused refresh is recorded as failed (see [re-authorization during a session](https://github.com/cloudflare/agents/blob/main/docs/agents/mcp-client.md#re-authorization-during-a-session)).
+
+- [#2856](https://github.com/cloudflare/agents/pull/2856) [`cff5dd1`](https://github.com/cloudflare/agents/commit/cff5dd1cfdd1f404bff09200f5132087750c1883) Thanks [@mattzcarey](https://github.com/mattzcarey)! - An MCP server removed and added again under the same id while it was still connecting now starts clean. The removed server's connect no longer marks the new one failed ("was removed while connecting"), and its retries no longer connect the new one a second time. With a custom `createAuthProvider`, `removeMcpServer()` no longer deletes the stored row of a server added again while it cleared credentials.
+
+- [#2807](https://github.com/cloudflare/agents/pull/2807) [`1f3bd92`](https://github.com/cloudflare/agents/commit/1f3bd9215239ccd973da87506d4771ac13a20bd2) Thanks [@ben-reitz](https://github.com/ben-reitz)! - The pi `web_search` and `web_fetch` tools give code mode scripts their results as objects.
+
+- [#2859](https://github.com/cloudflare/agents/pull/2859) [`f41f395`](https://github.com/cloudflare/agents/commit/f41f3956bfc6cf7c95dde6e28f7992531895e73f) Thanks [@mattzcarey](https://github.com/mattzcarey)! - A Task run cancelled while its attempt is still being claimed no longer starts its handler.
+
+- [#2867](https://github.com/cloudflare/agents/pull/2867) [`0f2727a`](https://github.com/cloudflare/agents/commit/0f2727a2da0c6a6ffb0e54a8207e29120f7ca093) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Stop running client messages on a WebSocket the host has closed. A connection rejected from `onConnect` with `connection.close()` could still run one `@callable` method, state update, or `onMessage` call. The close happens before the client has the upgrade response, so anything the client sent as soon as it connected arrived after the close, and the platform still delivered it. `Connection.close()` now records the close in the socket attachment, so the record survives hibernation, and the `WebSockets` capability drops every later message on both the hibernating and Cap'n Web wires. Messages the client sent before closing the connection itself still run.
+
 ## 0.33.0
 
 This release adds support for [Pi 1.5](https://github.com/earendil-works/pi/blob/v1.5.0/packages/durable/CHANGELOG.md#150---2026-11-02), which makes `PiHarness` much faster and lighter on memory, and lets you continue a run that ended without an answer.
