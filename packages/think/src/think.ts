@@ -15589,44 +15589,31 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /**
-   * Settle the transcript a recovery attempt is about to work from, before
-   * the attempt waits for the chat to be stable.
+   * Settle and store the reply a recovery attempt is about to continue,
+   * before the attempt waits for the chat to be stable. That reply was cut
+   * off by definition. One this version stored is settled already; one an
+   * older version stored may hold a server tool call nothing will answer,
+   * and the attempt would otherwise wait on it as if a client could.
    *
-   * The attempt continues a reply that was cut off (`continueReplyId`), or
-   * answers a question again (no id). Either way every earlier reply is one
-   * the conversation has moved past. A reply this version stored cut off is
-   * settled already; one an older version stored may hold a server tool call
-   * nothing will answer, and the attempt would otherwise wait on it as if a
-   * client could. Calls a client is known to own, and approvals, are kept:
-   * the attempt still waits for those.
-   *
-   * Does nothing when the transcript no longer ends where the attempt
-   * expects, so a newer reply that finished on a client tool call is left
-   * alone.
+   * Earlier replies are left alone. The conversation has moved past them, so
+   * nothing waits on them, and the turn that follows settles what they left
+   * unanswered.
    */
-  private async _settleBeforeRecovery(
-    continueReplyId: string | undefined
-  ): Promise<void> {
+  private async _settleBeforeRecovery(continueReplyId: string): Promise<void> {
     const leaf = this.messages.at(-1);
-    const expected = continueReplyId
-      ? leaf?.id === continueReplyId && leaf.role === "assistant"
-      : leaf?.role === "user";
-    if (!expected) return;
-    const toolCallIds: string[] = [];
-    for (const message of this.messages) {
-      if (message.role !== "assistant") continue;
-      const settled = this._settleInterruptedReply(message);
-      if (settled === message) continue;
-      settled.parts.forEach((part, index) => {
-        const id = (part as { toolCallId?: unknown }).toolCallId;
-        if (part !== message.parts[index] && typeof id === "string") {
-          toolCallIds.push(id);
-        }
-      });
-      this._patchCachedMessage(await this._updateMessageInHistory(settled));
-    }
-    if (toolCallIds.length === 0) return;
+    if (leaf?.id !== continueReplyId || leaf.role !== "assistant") return;
+    const settled = this._settleInterruptedReply(leaf);
+    if (settled === leaf) return;
+    this._patchCachedMessage(await this._updateMessageInHistory(settled));
+    // Broadcast whatever the repair made of the calls: a host can turn one
+    // into a text part, which carries no tool call id.
     this._broadcastMessages();
+    const toolCallIds = leaf.parts.flatMap((part, index) => {
+      const id = (part as { toolCallId?: unknown }).toolCallId;
+      return part !== settled.parts[index] && typeof id === "string"
+        ? [id]
+        : [];
+    });
     this._emit("chat:transcript:repaired", {
       removedToolCalls: toolCallIds.length,
       normalizedInputs: 0,
@@ -18216,7 +18203,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       : stop.signal;
 
     try {
-      await this._settleBeforeRecovery(undefined);
       const recoveryConfig = this._resolveChatRecoveryConfig();
       const ready = await this.waitUntilStable({
         timeout: recoveryConfig.stableTimeoutMs
