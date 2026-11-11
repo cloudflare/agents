@@ -16741,7 +16741,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         // reconcile it here to reflect the tool update just written.
         this._patchCachedMessage(safe);
         broadcastMessage = safe;
-        changedMessageId = owner.id;
+        // The live reply, when it also holds the call, is the one a
+        // continuation answers: keep it as the changed message.
+        if (typeof changedMessageId !== "string") changedMessageId = owner.id;
       }
     }
 
@@ -16860,12 +16862,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * controller's `isArmed()`.
    */
   private _hasArmedContinuation(): boolean {
-    const pending = this._continuation.pending;
-    return (
-      pending !== null &&
-      !pending.pastCoalesce &&
-      this._autoContinuation.isArmed()
-    );
+    return this._autoContinuation.hasPendingDecision();
   }
 
   protected async waitUntilStable(options?: {
