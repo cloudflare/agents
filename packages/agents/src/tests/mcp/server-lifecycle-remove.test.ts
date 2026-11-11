@@ -217,6 +217,39 @@ describe("removeServer overlapping a close", () => {
       expect(manager.mcpConnections.files).toBeDefined();
       expect((await provider.checkState(state)).valid).toBe(true);
     }));
+
+  it("keeps a provider the server was registered again with", () =>
+    withMcpHarness(async (harness) => {
+      const manager = harness.createManager();
+      const provider = new DurableObjectOAuthClientProvider(
+        harness.storage,
+        "test-client",
+        SERVER.callbackUrl
+      );
+      const options = { ...SERVER, transport: { authProvider: provider } };
+      await manager.registerServer("files", options);
+      const first = manager.mcpConnections.files;
+
+      let finishClose!: () => void;
+      const closing = new Promise<void>((resolve) => {
+        finishClose = resolve;
+      });
+      const close = first.close.bind(first);
+      let calls = 0;
+      first.close = async () => {
+        if (calls++ === 0) await closing;
+        return close();
+      };
+
+      const removing = manager.removeServer("files");
+      await manager.closeConnection("files");
+      await manager.registerServer("files", options);
+      finishClose();
+      await removing;
+
+      const state = await provider.state();
+      expect((await provider.checkState(state)).valid).toBe(true);
+    }));
 });
 
 /**

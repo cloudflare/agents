@@ -811,7 +811,11 @@ export class ServerController {
     // The old provider only stops storing.
     const registeredAgain = () => this.registrations.get(id) !== registration;
     if (registeredAgain()) {
-      if (authProvider) this.authorization.retire(authProvider);
+      const current = this.ctx.connections[id]?.options.transport.authProvider;
+      // Unless the new registration was handed the same provider.
+      if (authProvider && authProvider !== current) {
+        this.authorization.retire(authProvider);
+      }
       return;
     }
     if (authProvider) await this.authorization.clearStorage(id, authProvider);
