@@ -181,7 +181,8 @@ export class AuthorizationController {
     const round = startRound(
       parseAuthorizationRounds(this.ctx.store.authorizationRounds(id)),
       requestedScope(authUrl),
-      Date.now()
+      Date.now(),
+      stateOf(authUrl)
     );
     if (round._tag === "exhausted") {
       const error = authorizationExhaustedMessage(round.rounds, round.scope);
@@ -559,7 +560,8 @@ export class AuthorizationController {
             completeRound(
               parseAuthorizationRounds(
                 this.ctx.store.authorizationRounds(serverId)
-              )
+              ),
+              state
             )
           );
           this.ctx.store.clearAuthUrl(serverId);
@@ -574,7 +576,10 @@ export class AuthorizationController {
       this.ctx.store.setAuthorizationRounds(
         serverId,
         completeRound(
-          parseAuthorizationRounds(this.ctx.store.authorizationRounds(serverId))
+          parseAuthorizationRounds(
+            this.ctx.store.authorizationRounds(serverId)
+          ),
+          state
         )
       );
       const result = this.success(serverId, conn);

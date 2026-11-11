@@ -381,3 +381,39 @@ describe("elicitation handlers configured while a server connects", () => {
     expect(await agent.advertisedElicitation(id)).toEqual({ form: {} });
   });
 });
+
+describe("step-up rounds for two scope sets", () => {
+  // McpAuthorizationRounds.tla, rules ExhaustedOnlyAfterLimit and
+  // CompletionIsOwn. Path: a step-up link for one scope set is pending; the
+  // server asks for another scope set, whose link becomes the latest; the
+  // user completes the first link. After three such authorizations the
+  // second scope set must not have used up its budget: nobody completed a
+  // link of its own.
+  it("counts a completed authorization for the scope set of its own link", async () => {
+    const agent = await newAgent();
+    const id = await connectAuthorized(agent, server, { scope: READ_SCOPE });
+
+    // The authorization server grants the write scope only the third time.
+    for (const grant of [
+      { scope: READ_SCOPE },
+      { scope: READ_SCOPE },
+      undefined
+    ]) {
+      const write = await agent.callServerTool(id, "write");
+      const admin = await agent.callServerTool(id, "admin");
+      if (write.ok || !write.authUrl) throw new Error("expected a link");
+      expect(admin).toMatchObject({ authorizationRequired: true });
+      expect(
+        await followCallback(server.authorize(write.authUrl, grant))
+      ).toEqual({ authorized: true });
+      await agent.settle();
+    }
+    expect(await agent.callServerTool(id, "write")).toMatchObject({ ok: true });
+
+    // The admin scope was asked for three times and never authorized.
+    expect(await agent.callServerTool(id, "admin")).toMatchObject({
+      authorizationRequired: true
+    });
+    expect((await agent.server(id))?.state).toBe("authenticating");
+  });
+});

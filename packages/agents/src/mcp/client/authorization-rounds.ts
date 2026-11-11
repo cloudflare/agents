@@ -36,7 +36,16 @@ type AuthorizationRounds = {
   readonly latest: string;
   /** Rounds per normalized scope set; `""` when no scope was requested. */
   readonly byScope: Readonly<Record<string, ScopeRounds>>;
+  /**
+   * The scope set of each link not yet exchanged, by its OAuth state, so a
+   * callback completes the round of the link it belongs to. Absent on rounds
+   * stored before this was recorded.
+   */
+  readonly byState?: Readonly<Record<string, string>>;
 };
+
+/** Links remembered per server; older ones fall back to the latest round. */
+const MAX_REMEMBERED_LINKS = 16;
 
 /** Whether the next authorization link may be shown. */
 type RoundDecision =
@@ -68,12 +77,14 @@ export function requestedScope(authUrl: string): string {
  * @param previous - The server's recorded rounds, when any.
  * @param scope - The requested scope set of the new link.
  * @param now - The current time in epoch milliseconds.
+ * @param state - The OAuth state of the new link, when it has one.
  * @returns The rounds to record, or that the limit is reached.
  */
 export function startRound(
   previous: AuthorizationRounds | undefined,
   scope: string,
-  now: number
+  now: number,
+  state?: string | null
 ): RoundDecision {
   const byScope = live(previous?.byScope ?? {}, now);
   const current = entryFor(byScope, scope);
@@ -88,25 +99,44 @@ export function startRound(
   } else {
     next = { rounds: current.rounds + 1, completed: false, at: now };
   }
+  const scopes = { ...byScope, [scope]: next };
   return {
     _tag: "start",
-    rounds: { latest: scope, byScope: { ...byScope, [scope]: next } }
+    rounds: {
+      latest: scope,
+      byScope: scopes,
+      byState: rememberLink(previous?.byState ?? {}, scopes, state, scope)
+    }
   };
 }
 
-/** Record that the latest round's callback exchanged a code. */
+/**
+ * Record that a callback exchanged a code: the round of the link it belongs
+ * to is complete. Links for other scope sets keep waiting. A link that is
+ * not remembered (stored before links were recorded) counts for the latest
+ * round.
+ *
+ * @param previous - The server's recorded rounds, when any.
+ * @param state - The OAuth state of the callback.
+ */
 export function completeRound(
-  previous: AuthorizationRounds | undefined
+  previous: AuthorizationRounds | undefined,
+  state?: string | null
 ): AuthorizationRounds | undefined {
   if (!previous) return undefined;
-  const current = entryFor(previous.byScope, previous.latest);
-  if (!current) return previous;
+  const links = previous.byState ?? {};
+  const remembered =
+    state && Object.hasOwn(links, state) ? links[state] : undefined;
+  const scope = remembered ?? previous.latest;
+  const byState = Object.fromEntries(
+    Object.entries(links).filter(([link]) => link !== state)
+  );
+  const current = entryFor(previous.byScope, scope);
+  if (!current) return { ...previous, byState };
   return {
     latest: previous.latest,
-    byScope: {
-      ...previous.byScope,
-      [previous.latest]: { ...current, completed: true }
-    }
+    byScope: { ...previous.byScope, [scope]: { ...current, completed: true } },
+    byState
   };
 }
 
@@ -142,7 +172,14 @@ export function parseAuthorizationRounds(
         : []
     )
   );
-  return { latest: value.latest, byScope };
+  const byState = isRecord(value.byState)
+    ? Object.fromEntries(
+        Object.entries(value.byState).filter(
+          (entry): entry is [string, string] => typeof entry[1] === "string"
+        )
+      )
+    : undefined;
+  return { latest: value.latest, byScope, ...(byState && { byState }) };
 }
 
 /** Message for a server that hit the limit. */
@@ -152,6 +189,20 @@ export function authorizationExhaustedMessage(
 ): string {
   const scopes = scope ? ` for scope "${scope}"` : "";
   return `The server still requires authorization${scopes} after ${rounds} completed authorizations. Stopped to avoid an authorization loop; reconnect the server to try again.`;
+}
+
+/** Remember a new link's scope set, dropping links whose round is gone. */
+function rememberLink(
+  links: Readonly<Record<string, string>>,
+  byScope: Readonly<Record<string, ScopeRounds>>,
+  state: string | null | undefined,
+  scope: string
+): Record<string, string> {
+  const kept = Object.entries(links).filter(
+    ([link, linkScope]) => link !== state && Object.hasOwn(byScope, linkScope)
+  );
+  if (state) kept.push([state, scope]);
+  return Object.fromEntries(kept.slice(-MAX_REMEMBERED_LINKS));
 }
 
 /** A scope set's own entry; never an inherited `Object` member. */
