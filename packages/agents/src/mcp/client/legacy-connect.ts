@@ -1,6 +1,10 @@
 import { nanoid } from "nanoid";
 import type { McpClientOptions } from "../types";
-import { MCPConnectionState, type MCPTransportOptions } from "./connection";
+import {
+  type MCPClientConnection,
+  MCPConnectionState,
+  type MCPTransportOptions
+} from "./connection";
 import type { McpClientContext } from "./context";
 import { toErrorMessage } from "./errors";
 import type { ConnectionEntryPoints, ServerController } from "./servers";
@@ -60,19 +64,31 @@ export function legacyConnect(
       });
     }
 
-    await ctx.connections[id].init();
+    // The connection this call works on. removeServer and closeConnection
+    // run outside the lane and can drop it at any `await`.
+    const conn = ctx.connections[id];
+    const stillRegistered = () => {
+      if (ctx.connections[id] !== conn) {
+        throw new Error(`MCP server ${id} was removed while connecting`);
+      }
+    };
+
+    await conn.init();
+    stillRegistered();
 
     if (options.reconnect?.oauthCode) {
       try {
-        await completeAuthorization(ctx, id, options.reconnect.oauthCode);
-        await ctx.connections[id].init();
+        await completeAuthorization(conn, id, options.reconnect.oauthCode);
+        stillRegistered();
+        await conn.init();
+        stillRegistered();
       } catch (error) {
         ctx.observability.fire({
           type: "mcp:client:connect",
           payload: {
             url,
             transport: options.transport?.type ?? "auto",
-            state: ctx.connections[id].connectionState,
+            state: conn.connectionState,
             error: toErrorMessage(error)
           },
           timestamp: Date.now()
@@ -83,8 +99,7 @@ export function legacyConnect(
 
     const authUrl = provider?.authUrl;
     if (
-      ctx.connections[id].connectionState ===
-        MCPConnectionState.AUTHENTICATING &&
+      conn.connectionState === MCPConnectionState.AUTHENTICATING &&
       authUrl &&
       provider?.redirectUrl
     ) {
@@ -92,6 +107,7 @@ export function legacyConnect(
     }
 
     const discovered = await entry.discoverIfConnected(id);
+    stillRegistered();
     if (discovered && !discovered.success) {
       throw new Error(
         `Failed to discover server capabilities: ${discovered.error}`
@@ -103,11 +119,10 @@ export function legacyConnect(
 
 /** Exchange the code, always cleaning up the code verifier afterwards. */
 async function completeAuthorization(
-  ctx: McpClientContext,
+  conn: MCPClientConnection,
   id: string,
   code: string
 ): Promise<void> {
-  const conn = ctx.connections[id];
   let completeError: unknown;
   try {
     await conn.completeAuthorization(code);

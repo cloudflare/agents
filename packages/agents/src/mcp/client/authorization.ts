@@ -136,6 +136,19 @@ export class AuthorizationController {
     }
   }
 
+  /**
+   * Stop a provider from storing anything more, for work still running on a
+   * connection that was replaced. Only the default provider can be retired.
+   */
+  retire(provider: AgentMcpOAuthProvider): void {
+    if (provider instanceof DurableObjectOAuthClientProvider) provider.retire();
+  }
+
+  /** Let a retired provider store again: a new connection uses it. */
+  revive(provider: AgentMcpOAuthProvider): void {
+    if (provider instanceof DurableObjectOAuthClientProvider) provider.revive();
+  }
+
   // Links
 
   /**
@@ -168,7 +181,8 @@ export class AuthorizationController {
     const round = startRound(
       parseAuthorizationRounds(this.ctx.store.authorizationRounds(id)),
       requestedScope(authUrl),
-      Date.now()
+      Date.now(),
+      stateOf(authUrl)
     );
     if (round._tag === "exhausted") {
       const error = authorizationExhaustedMessage(round.rounds, round.scope);
@@ -218,6 +232,35 @@ export class AuthorizationController {
     this.ctx.store.clearAuthUrl(id);
     this.ctx.store.setAuthorizationRounds(id, undefined);
     this.liveStepUps.delete(id);
+  }
+
+  /**
+   * The server was renamed from `oldId` to `newId` (migrateServerId). Move
+   * what is kept by id. A link it was waiting on names the old id in its
+   * state, so that link's callback can never reach the server: abandon the
+   * flow. A step-up goes back to the session's state, and anything else
+   * connects again under the new id when it is settled.
+   */
+  renamed(
+    oldId: string,
+    newId: string,
+    conn: MCPClientConnection | undefined
+  ): void {
+    const spent = this.spentStates.get(oldId);
+    this.spentStates.delete(oldId);
+    if (spent !== undefined) this.spentStates.set(newId, spent);
+    const stepUp = this.liveStepUps.get(oldId);
+    this.liveStepUps.delete(oldId);
+
+    const waiting = conn?.connectionState === MCPConnectionState.AUTHENTICATING;
+    if (!waiting && !this.ctx.store.get(newId)?.auth_url) return;
+    this.ctx.store.clearAuthUrl(newId);
+    if (conn && waiting) {
+      conn.connectionState =
+        stepUp?.conn === conn
+          ? stepUp.stateBefore
+          : MCPConnectionState.CONNECTING;
+    }
   }
 
   private isLiveStepUp(id: string, conn: MCPClientConnection): boolean {
@@ -281,6 +324,7 @@ export class AuthorizationController {
       }
     }
     const authUrlBefore = conn.options.transport.authProvider?.authUrl;
+    const sessionBefore = conn.session;
     try {
       return await request(conn);
     } catch (error) {
@@ -289,7 +333,8 @@ export class AuthorizationController {
           serverId,
           conn,
           error,
-          authUrlBefore
+          authUrlBefore,
+          sessionBefore
         )) ?? error
       );
     }
@@ -299,13 +344,17 @@ export class AuthorizationController {
     serverId: string,
     conn: MCPClientConnection,
     error: unknown,
-    authUrlBefore: string | undefined
+    authUrlBefore: string | undefined,
+    sessionBefore: object | undefined
   ): Promise<MCPAuthorizationRequiredError | undefined> {
-    // Only take over an established connection. While a callback is being
+    // Only take over an established connection, still on the session the
+    // request ran on: a connect in the lane closes that session first and
+    // leaves the state as it was until it settles. While a callback is being
     // processed (`connecting`, `discovering`) or after a failure, leave the
     // state machine alone and rethrow.
     const canTakeOver = () => {
       if (this.ctx.connections[serverId] !== conn) return false;
+      if (conn.session !== sessionBefore) return false;
       const state = conn.connectionState;
       return (
         state === MCPConnectionState.READY ||
@@ -324,6 +373,11 @@ export class AuthorizationController {
     if (!provider || !authUrl || authUrl === authUrlBefore) return undefined;
     const stateBefore = conn.connectionState;
     if (!(await isLive(serverId, authUrl, provider))) return undefined;
+    // With a grant still stored, this asks for more than it holds (a scope
+    // step-up), and the session keeps working while the user decides. With
+    // none (the refresh was refused and the tokens dropped), nothing works
+    // until the user signs in again: wait for that, as a connect does.
+    const stepUp = await holdsGrant(provider);
     // Nothing may have moved while the check ran.
     if (
       !canTakeOver() ||
@@ -333,12 +387,12 @@ export class AuthorizationController {
       return undefined;
     }
 
-    // A request only runs on a live session, so this asks for more than the
-    // grant it already holds.
-    const auth = this.enterAuthenticating(serverId, conn, { stepUp: true });
+    const auth = this.enterAuthenticating(serverId, conn, { stepUp });
     // An exhausted server is now failed; the caller gets the original error.
     if (auth._tag !== "authenticating") return undefined;
-    if (stateBefore !== MCPConnectionState.AUTHENTICATING) {
+    if (!stepUp) {
+      this.liveStepUps.delete(serverId);
+    } else if (stateBefore !== MCPConnectionState.AUTHENTICATING) {
       this.liveStepUps.set(serverId, { conn, stateBefore });
     }
     return new MCPAuthorizationRequiredError(serverId, auth.authUrl, {
@@ -376,9 +430,9 @@ export class AuthorizationController {
     return this.ctx.lanes
       .run(serverId, () => this.completeCallback(request))
       .catch((error) => {
-        // Removed while this callback waited for earlier work.
+        // Removed or closed while this callback waited for earlier work.
         if (error instanceof ServerLaneCancelledError) {
-          return removedDuringAuthorization(serverId);
+          return this.gone(serverId);
         }
         throw error;
       });
@@ -420,7 +474,7 @@ export class AuthorizationController {
         return ignoreUnverified(callback.serverId, callback.error);
       }
       if (this.ctx.connections[callback.serverId] !== conn) {
-        return removedDuringAuthorization(callback.serverId);
+        return this.gone(callback.serverId);
       }
       return this.fail(callback.serverId, callback.error);
     }
@@ -497,21 +551,40 @@ export class AuthorizationController {
       await provider.consumeState(state);
       await exchangeAuthorizationCode(serverId, conn, provider, state, params);
       if (this.ctx.connections[serverId] !== conn) {
-        // Removed while the code was exchanged: the tokens just saved
-        // outlived removeServer's cleanup, so clear them again. A server
-        // added again under the same id keeps its own pending flow.
+        // A server added again under the same id keeps its own pending
+        // flow; the tokens just saved were for the old connection.
         if (this.ctx.connections[serverId]) {
           await provider.invalidateCredentials?.("tokens");
-        } else {
-          await this.clearStorage(serverId, provider);
+          return this.gone(serverId);
         }
+        // Closed, still stored: the user's sign-in stands, and the server
+        // uses it when it connects again.
+        if (this.isClosed(serverId)) {
+          this.ctx.store.setAuthorizationRounds(
+            serverId,
+            completeRound(
+              parseAuthorizationRounds(
+                this.ctx.store.authorizationRounds(serverId)
+              ),
+              state
+            )
+          );
+          this.ctx.store.clearAuthUrl(serverId);
+          return { serverId, authSuccess: true };
+        }
+        // Removed while the code was exchanged: the tokens just saved
+        // outlived removeServer's cleanup, so clear them again.
+        await this.clearStorage(serverId, provider);
         return removedDuringAuthorization(serverId);
       }
       this.status.saveSession(serverId, conn);
       this.ctx.store.setAuthorizationRounds(
         serverId,
         completeRound(
-          parseAuthorizationRounds(this.ctx.store.authorizationRounds(serverId))
+          parseAuthorizationRounds(
+            this.ctx.store.authorizationRounds(serverId)
+          ),
+          state
         )
       );
       const result = this.success(serverId, conn);
@@ -521,7 +594,7 @@ export class AuthorizationController {
       // A server removed (and maybe re-registered) meanwhile is not ours to
       // fail: the replacement keeps its own state and pending link.
       if (this.ctx.connections[serverId] !== conn) {
-        return removedDuringAuthorization(serverId);
+        return this.gone(serverId);
       }
       return this.fail(serverId, toErrorMessage(error));
     }
@@ -553,9 +626,39 @@ export class AuthorizationController {
     conn: MCPClientConnection
   ): MCPOAuthCallbackResult {
     if (this.ctx.connections[serverId] !== conn) {
-      return removedDuringAuthorization(serverId);
+      return this.gone(serverId);
     }
     return this.success(serverId, conn);
+  }
+
+  /**
+   * Whether a server whose connection is gone is still stored and not being
+   * removed: its connection was closed (closeConnection), or closed and
+   * registered again.
+   */
+  private isClosed(serverId: string): boolean {
+    return (
+      this.ctx.store.get(serverId) !== undefined &&
+      !this.ctx.removing.has(serverId)
+    );
+  }
+
+  /**
+   * Result for a callback whose connection went away while it was handled:
+   * the server was registered again, closed, or removed.
+   */
+  private gone(serverId: string): MCPOAuthCallbackResult {
+    const what = this.ctx.connections[serverId]
+      ? "replaced"
+      : this.isClosed(serverId)
+        ? "closed"
+        : undefined;
+    if (!what) return removedDuringAuthorization(serverId);
+    return {
+      serverId,
+      authSuccess: false,
+      authError: `The connection to server ${serverId} was ${what} during authorization`
+    };
   }
 
   private success(
@@ -605,6 +708,15 @@ async function isLive(
 ): Promise<boolean> {
   const state = stateOf(authUrl);
   return state ? isRedeemableState(serverId, provider, state) : false;
+}
+
+/** Whether the provider still has tokens stored. */
+async function holdsGrant(provider: AgentMcpOAuthProvider): Promise<boolean> {
+  try {
+    return (await provider.tokens()) !== undefined;
+  } catch {
+    return false;
+  }
 }
 
 function stateOf(authUrl: string): string | null {

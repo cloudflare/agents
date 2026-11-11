@@ -54,6 +54,20 @@ export type ConnectionEntryPoints = {
  */
 export class ServerController {
   private readonly disposables = new Map<string, DisposableStore>();
+  /**
+   * The provider of a server's closed connection. Work the connection
+   * started may still be running with it (a token refresh, say). Once the
+   * server has a new connection, or is removed, that work must not store
+   * anything more: createConnection retires the provider, and removeServer
+   * clears storage through it.
+   */
+  private readonly closedProviders = new Map<string, AgentMcpOAuthProvider>();
+  /**
+   * How many times each id was registered since this object woke.
+   * removeServer deletes the row only if the id was not registered again
+   * while it closed the connection and cleared the credentials.
+   */
+  private readonly registrations = new Map<string, number>();
 
   constructor(
     private readonly ctx: McpClientContext,
@@ -106,6 +120,7 @@ export class ServerController {
         capabilities: this.elicitation.capabilities()
       })
     });
+    this.registrations.set(id, (this.registrations.get(id) ?? 0) + 1);
     // Registering again is a fresh start for the server.
     this.ctx.store.clearFailure(id);
     this.ctx.store.setAuthorizationRounds(id, undefined);
@@ -127,6 +142,14 @@ export class ServerController {
   ): MCPClientConnection {
     const existing = this.ctx.connections[id];
     if (existing) return existing;
+    // The new connection owns the server's grant now. A caller may hand in
+    // the provider it used before (transport.authProvider): that one is the
+    // new connection's, so it is kept, and stores again if it was retired.
+    const incoming = options.transport.authProvider;
+    const closed = this.closedProviders.get(id);
+    this.closedProviders.delete(id);
+    if (closed && closed !== incoming) this.authorization.retire(closed);
+    if (incoming) this.authorization.revive(incoming);
 
     // Stored servers re-advertise the capabilities saved on their row;
     // fresh registrations rely on the handlers. The stamp is read without
@@ -569,10 +592,12 @@ export class ServerController {
         });
         return;
       }
-      // Already discovering or ready: nothing to do.
+      // Already discovering or ready: nothing to do. Waiting for the user
+      // again (a step-up started since the callback): leave it waiting.
       if (
         conn.connectionState !== MCPConnectionState.DISCOVERING &&
-        conn.connectionState !== MCPConnectionState.READY
+        conn.connectionState !== MCPConnectionState.READY &&
+        conn.connectionState !== MCPConnectionState.AUTHENTICATING
       ) {
         await this.bringUp(id);
         this.ctx.stateChanged();
@@ -681,7 +706,7 @@ export class ServerController {
             error
           );
         } finally {
-          this.forgetConnection(id);
+          this.forgetConnection(existing);
         }
         return true;
       default:
@@ -720,7 +745,7 @@ export class ServerController {
     try {
       await conn.close();
     } finally {
-      this.forgetConnection(id);
+      this.forgetConnection(conn);
     }
   }
 
@@ -731,10 +756,11 @@ export class ServerController {
     for (const id of ids) this.ctx.connections[id].cancelDiscovery();
     const results = await Promise.allSettled(
       ids.map(async (id) => {
+        const conn = this.ctx.connections[id];
         try {
-          await this.ctx.connections[id].close();
+          await conn.close();
         } finally {
-          this.forgetConnection(id);
+          this.forgetConnection(conn);
         }
       })
     );
@@ -752,8 +778,19 @@ export class ServerController {
 
   /** Close a server's connection and delete it with its OAuth state. */
   async remove(id: string): Promise<void> {
+    this.ctx.removing.add(id);
+    try {
+      await this.removeServer(id);
+    } finally {
+      this.ctx.removing.delete(id);
+    }
+  }
+
+  private async removeServer(id: string): Promise<void> {
+    const registration = this.registrations.get(id);
     const conn = this.ctx.connections[id];
-    let authProvider = conn?.options.transport.authProvider;
+    let authProvider =
+      conn?.options.transport.authProvider ?? this.closedProviders.get(id);
     if (!authProvider) {
       // A user-supplied provider factory can throw; that must not stop the
       // server from being removed.
@@ -769,9 +806,24 @@ export class ServerController {
       }
     }
     if (conn) await this.close(id).catch(() => {});
+    // Registered again while the connection closed (an overlapping close let
+    // it): the row and the OAuth storage under this id are the new server's.
+    // The old provider only stops storing.
+    const registeredAgain = () => this.registrations.get(id) !== registration;
+    if (registeredAgain()) {
+      const current = this.ctx.connections[id]?.options.transport.authProvider;
+      // Unless the new registration was handed the same provider.
+      if (authProvider && authProvider !== current) {
+        this.authorization.retire(authProvider);
+      }
+      return;
+    }
     if (authProvider) await this.authorization.clearStorage(id, authProvider);
+    if (this.closedProviders.get(id) === authProvider) {
+      this.closedProviders.delete(id);
+    }
     // Registered again while the credentials were cleared: keep the new row.
-    if (this.ctx.connections[id]) return;
+    if (registeredAgain() || this.ctx.connections[id]) return;
     this.ctx.store.remove(id);
     this.ctx.stateChanged();
   }
@@ -790,7 +842,20 @@ export class ServerController {
     // Restore work closes over oldId; drain it before renaming.
     await this.ctx.lanes.idle(oldId);
 
-    const renamed = this.ctx.store.rename(oldId, newId);
+    // From here on nothing awaits. The row and the OAuth keys move in one
+    // transaction, and the connection moves in the same step: nothing else
+    // can write under the old id in between, and if a write fails or the
+    // object dies, the server stays whole under the old id.
+    const renamed = this.ctx.storage.transactionSync(() => {
+      const result = this.ctx.store.rename(oldId, newId);
+      if (result === "renamed") {
+        this.moveOAuthKeys(
+          `/${clientName}/${oldId}/`,
+          `/${clientName}/${newId}/`
+        );
+      }
+      return result;
+    });
     if (renamed === "missing") {
       this.renameConnection(oldId, newId);
       return;
@@ -800,36 +865,19 @@ export class ServerController {
         `Cannot migrate MCP server id "${oldId}" → "${newId}": new id is already in use.`
       );
     }
-    await this.renameOAuthKeys(
-      `/${clientName}/${oldId}/`,
-      `/${clientName}/${newId}/`
-    );
+    // A pending link names the old id in its state, so its callback can
+    // never reach the renamed server: abandon it.
+    this.authorization.renamed(oldId, newId, this.ctx.connections[oldId]);
     this.renameConnection(oldId, newId);
     this.ctx.stateChanged();
   }
 
-  /**
-   * Move the provider's storage keys to the new id. Best-effort: the row is
-   * already renamed, so a failure here is logged, not thrown.
-   */
-  private async renameOAuthKeys(
-    oldPrefix: string,
-    newPrefix: string
-  ): Promise<void> {
-    try {
-      const keys = await this.ctx.storage.list({ prefix: oldPrefix });
-      if (keys.size === 0) return;
-      const writes: Record<string, unknown> = {};
-      for (const [oldKey, value] of keys) {
-        writes[newPrefix + oldKey.slice(oldPrefix.length)] = value;
-      }
-      await this.ctx.storage.put(writes);
-      await this.ctx.storage.delete([...keys.keys()]);
-    } catch (error) {
-      console.warn(
-        `[MCPClientManager] OAuth key migration ${oldPrefix} → ${newPrefix} failed:`,
-        error
-      );
+  /** Move the provider's storage keys to the new id. Throws on failure. */
+  private moveOAuthKeys(oldPrefix: string, newPrefix: string): void {
+    const { kv } = this.ctx.storage;
+    for (const [key, value] of [...kv.list({ prefix: oldPrefix })]) {
+      kv.put(newPrefix + key.slice(oldPrefix.length), value);
+      kv.delete(key);
     }
   }
 
@@ -851,10 +899,30 @@ export class ServerController {
       this.disposables.set(newId, disposables);
       this.disposables.delete(oldId);
     }
+    const registration = this.registrations.get(oldId);
+    if (registration !== undefined) {
+      this.registrations.set(newId, registration);
+      this.registrations.delete(oldId);
+    }
+    const closed = this.closedProviders.get(oldId);
+    if (closed) {
+      closed.serverId = newId;
+      this.closedProviders.set(newId, closed);
+      this.closedProviders.delete(oldId);
+    }
   }
 
-  /** Drop a closed connection and its session; the server stays stored. */
-  private forgetConnection(id: string): void {
+  /**
+   * Drop a closed connection and its session; the server stays stored. Only
+   * this connection: while it was closing, an overlapping close may have
+   * dropped it already and the server may have a new connection, or the
+   * server may have been renamed.
+   */
+  private forgetConnection(conn: MCPClientConnection): void {
+    const id = this.idOf(conn);
+    if (id === undefined) return;
+    const authProvider = conn.options.transport.authProvider;
+    if (authProvider) this.closedProviders.set(id, authProvider);
     this.ctx.store.setSession(id);
     this.disposables.get(id)?.dispose();
     this.disposables.delete(id);

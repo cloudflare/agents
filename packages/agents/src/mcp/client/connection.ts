@@ -28,7 +28,11 @@ import {
 } from "./catalog";
 import type { AgentMcpOAuthProvider } from "./do-oauth-client-provider";
 import { AuthorizationTurns } from "./authorization-turns";
-import { createMcpSdkClient, normalizeMcpClientOptions } from "./runtime";
+import {
+  advertisedElicitation,
+  createMcpSdkClient,
+  normalizeMcpClientOptions
+} from "./runtime";
 export { elicitationCapabilitiesFromHandlers } from "./runtime";
 import {
   isTransportNotImplemented,
@@ -197,6 +201,11 @@ export class MCPClientConnection {
   /** True when resuming a streamable-http session without cached capabilities */
   private _probingCapabilities = false;
 
+  /** Whether init() is connecting: its client must not be replaced. */
+  private _connecting = false;
+  /** The elicitation capability `client` was built to advertise, as JSON. */
+  private _advertisedElicitation = "null";
+
   /** Tracks in-flight discovery to allow cancellation */
   private _discoveryAbortController: AbortController | undefined;
 
@@ -263,6 +272,7 @@ export class MCPClientConnection {
       }
     );
     this._elicitationEnabled = created.elicitationEnabled;
+    this._advertisedElicitation = this.elicitationToAdvertise();
     return created.client;
   }
 
@@ -282,8 +292,53 @@ export class MCPClientConnection {
     // clearing the handlers un-advertises the capability on rebuild.
     this.options.capabilitySeed = undefined;
 
-    if (!this._transport) {
+    // A connect in flight runs on the current client: replacing it would
+    // leave the connection on a client that never connected. init() connects
+    // again when the handshake it made advertised something else.
+    if (!this._transport && !this._connecting) {
       this.client = this.createClient();
+    }
+  }
+
+  /** What a client built now would advertise for elicitation, as JSON. */
+  private elicitationToAdvertise(): string {
+    return JSON.stringify(
+      advertisedElicitation(
+        this.options.client,
+        this.options.capabilitySeed,
+        this.options.elicitationHandlers
+      ) ?? null
+    );
+  }
+
+  /**
+   * Connect, and connect again when the elicitation handlers changed during
+   * the handshake: apps configure them in `onStart`, while a restored
+   * server is already connecting.
+   */
+  private async connectWithCurrentHandlers(
+    transportType: TransportType
+  ): Promise<MCPClientConnectionResult> {
+    this._connecting = true;
+    try {
+      let res = await this.tryConnect(transportType);
+      // Bounded, so handlers that keep changing cannot hold the connect.
+      for (let again = 0; again < 3; again++) {
+        if (this._advertisedElicitation === this.elicitationToAdvertise()) {
+          break;
+        }
+        // A 401 keeps its transport for the callback, which builds a new
+        // client once the user has authorized.
+        if (res.state === MCPConnectionState.AUTHENTICATING) break;
+        this._transport = undefined;
+        await this.client.close().catch(() => {});
+        this.client = this.createClient();
+        if (res.state !== MCPConnectionState.CONNECTED) break;
+        res = await this.tryConnect(transportType);
+      }
+      return res;
+    } finally {
+      this._connecting = false;
     }
   }
 
@@ -315,7 +370,7 @@ export class MCPClientConnection {
       this.client = this.createClient();
     }
 
-    const res = await this.tryConnect(transportType);
+    const res = await this.connectWithCurrentHandlers(transportType);
 
     // Set the connection state
     this.connectionState = res.state;
@@ -473,7 +528,12 @@ export class MCPClientConnection {
         typeof callback === "string"
           ? new URLSearchParams({ code: callback })
           : callback;
-      await this.finishAuthProbe(callbackParams);
+      // In a turn of its own: a 401's refresh that started before the
+      // exchange finishes first, and one that starts after it finds the
+      // newer token.
+      await this._authorizationTurns.run(() =>
+        this.finishAuthProbe(callbackParams)
+      );
     } catch (error) {
       this.connectionState = MCPConnectionState.FAILED;
       throw error;
@@ -819,6 +879,14 @@ export class MCPClientConnection {
       this._transport instanceof StreamableHTTPClientTransport &&
       typeof this._transport.sessionId === "string"
     );
+  }
+
+  /**
+   * @internal The transport of the open session, if any. Each connect opens
+   * a new one, and init() drops it before reconnecting.
+   */
+  get session(): object | undefined {
+    return this._transport;
   }
 
   get sessionId(): string | undefined {

@@ -94,6 +94,22 @@ function listChangedHandlers(
   };
 }
 
+/**
+ * The elicitation capability a client built now would advertise: explicit
+ * client capabilities, else the handlers' modes, else the restore seed.
+ */
+export function advertisedElicitation(
+  options: NonNullable<McpClientOptions>,
+  capabilitySeed: ClientCapabilities | undefined,
+  handlerModes: { form?: unknown; url?: unknown } | undefined
+): ClientCapabilities["elicitation"] | undefined {
+  return (
+    options.capabilities?.elicitation ??
+    elicitationCapabilitiesFromHandlers(handlerModes) ??
+    capabilitySeed?.elicitation
+  );
+}
+
 export function createMcpSdkClient(
   info: ConstructorParameters<typeof Client>[0],
   options: NonNullable<McpClientOptions>,
@@ -101,10 +117,11 @@ export function createMcpSdkClient(
   handlerModes: { form?: unknown; url?: unknown } | undefined,
   callbacks: CatalogCallbacks
 ): { client: Client; elicitationEnabled: boolean } {
-  const elicitation =
-    options.capabilities?.elicitation ??
-    elicitationCapabilitiesFromHandlers(handlerModes) ??
-    capabilitySeed?.elicitation;
+  const elicitation = advertisedElicitation(
+    options,
+    capabilitySeed,
+    handlerModes
+  );
   const client = new Client(info, {
     ...options,
     capabilities: {

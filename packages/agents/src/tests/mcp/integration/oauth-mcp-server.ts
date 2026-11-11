@@ -75,6 +75,8 @@ const STEP_UPS: Array<{
 ];
 
 type Grant = { scope: string };
+/** What {@link OAuthMcpServer.holdRequests} can hold. */
+type HeldEndpoint = "mcp" | "token" | "refresh";
 type PendingCode = Grant & {
   codeChallenge: string;
   redirectUri: string;
@@ -176,13 +178,13 @@ export function createOAuthMcpServer({
 
   /** While set, requests to the held endpoint wait before they are answered. */
   let held: Promise<void> | undefined;
-  let heldEndpoint: "mcp" | "token" = "mcp";
+  let heldEndpoint: HeldEndpoint = "mcp";
   let releaseHeld = () => {};
   /** How many requests are waiting at the hold right now. */
   let waiting = 0;
 
-  async function waitIfHeld(endpoint: "mcp" | "token"): Promise<void> {
-    if (!held || heldEndpoint !== endpoint) return;
+  async function waitIfHeld(...endpoints: HeldEndpoint[]): Promise<void> {
+    if (!held || !endpoints.includes(heldEndpoint)) return;
     waiting += 1;
     try {
       await held;
@@ -490,8 +492,13 @@ export function createOAuthMcpServer({
       );
     }
     if (pathname === "/token" && request.method === "POST") {
-      await waitIfHeld("token");
       const params = new URLSearchParams(await request.text());
+      await waitIfHeld(
+        "token",
+        ...(params.get("grant_type") === "refresh_token"
+          ? (["refresh"] as const)
+          : [])
+      );
       tokenRequests.push(params);
       if (options.tokenError) {
         return Response.json({ error: options.tokenError }, { status: 400 });
@@ -612,11 +619,12 @@ export function createOAuthMcpServer({
     },
 
     /**
-     * Hold requests to the MCP endpoint, or to the token endpoint, until the
-     * returned function is called, so a test can act while a connection
-     * attempt or a code exchange is in flight.
+     * Hold requests to the MCP endpoint, to the token endpoint, or only the
+     * token endpoint's refreshes, until the returned function is called, so
+     * a test can act while a connection attempt, a code exchange or a
+     * refresh is in flight.
      */
-    holdRequests(endpoint: "mcp" | "token" = "mcp"): () => void {
+    holdRequests(endpoint: HeldEndpoint = "mcp"): () => void {
       heldEndpoint = endpoint;
       let resolve!: () => void;
       held = new Promise((r) => {

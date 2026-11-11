@@ -79,7 +79,7 @@ export class AuthorizationTurns {
         response && this.#sentTokens.has(response)
           ? this.#sentTokens.get(response)
           : await accessToken(provider);
-      await this.#run(async () => {
+      await this.run(async () => {
         const tokenNow = await accessToken(provider);
         if (tokenNow && tokenNow !== tokenSent) return;
         await onUnauthorized(context);
@@ -87,10 +87,18 @@ export class AuthorizationTurns {
     };
   }
 
-  /** Run `flow` once every flow started before it has finished. */
-  #run(flow: () => Promise<void>): Promise<void> {
+  /**
+   * Run `flow` once every flow started before it has finished, and hold
+   * later flows until it has. A callback's code exchange runs here too, so
+   * a refresh that started before it cannot save its older grant over the
+   * one the exchange saves.
+   */
+  run<T>(flow: () => Promise<T>): Promise<T> {
     const result = this.#tail.then(flow);
-    this.#tail = result.catch(() => {});
+    this.#tail = result.then(
+      () => {},
+      () => {}
+    );
     return result;
   }
 }

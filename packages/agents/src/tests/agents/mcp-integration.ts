@@ -1,4 +1,8 @@
 import { Agent } from "../../index.ts";
+import {
+  type AgentMcpOAuthProvider,
+  DurableObjectOAuthClientProvider
+} from "../../mcp/client/do-oauth-client-provider";
 import { MCPAuthorizationRequiredError } from "../../mcp/client/errors";
 import {
   ageAuthorizationRounds,
@@ -71,6 +75,46 @@ function firstText(result: unknown): string {
 export class McpIntegrationAgent extends Agent {
   /** Every state each server was broadcast in since this instance started. */
   readonly #history = new Map<string, ServerView[]>();
+  /** While set, the provider's next state check waits for it, as I/O would. */
+  private _stateCheckGate: Promise<void> | undefined;
+  private _openStateCheck = () => {};
+  private _stateChecksWaiting = 0;
+
+  /**
+   * The default provider, except that a state check can be made to wait,
+   * like a provider whose storage does I/O (`holdStateCheck`).
+   */
+  override createMcpOAuthProvider(callbackUrl: string): AgentMcpOAuthProvider {
+    const agent = this;
+    return new (class extends DurableObjectOAuthClientProvider {
+      override async checkState(state: string) {
+        const gate = agent._stateCheckGate;
+        if (gate) {
+          agent._stateCheckGate = undefined;
+          agent._stateChecksWaiting += 1;
+          await gate;
+          agent._stateChecksWaiting -= 1;
+        }
+        return super.checkState(state);
+      }
+    })(this.ctx.storage, this.name, callbackUrl);
+  }
+
+  /** Make the provider's next state check wait until `releaseStateCheck`. */
+  holdStateCheck(): void {
+    this._stateCheckGate = new Promise((resolve) => {
+      this._openStateCheck = resolve;
+    });
+  }
+
+  releaseStateCheck(): void {
+    this._stateCheckGate = undefined;
+    this._openStateCheck();
+  }
+
+  stateChecksWaiting(): number {
+    return this._stateChecksWaiting;
+  }
 
   async onStart(): Promise<void> {
     this.mcp.configureOAuthCallback({
@@ -86,6 +130,37 @@ export class McpIntegrationAgent extends Agent {
         this.#history.set(id, seen);
       }
     });
+  }
+
+  /** Configure elicitation handlers, as an app's onStart does. */
+  configureElicitation(): void {
+    this.mcp.configureElicitationHandlers({
+      form: async () => ({ action: "cancel" })
+    });
+  }
+
+  /** The OAuth storage keys the default provider holds for a server. */
+  async oauthKeys(serverId: string): Promise<string[]> {
+    const keys = await this.ctx.storage.list({
+      prefix: `/${this.name}/${serverId}/`
+    });
+    return [...keys.keys()];
+  }
+
+  /** The elicitation capability a server's connection advertises. */
+  advertisedElicitation(serverId: string): unknown {
+    const client = this.mcp.mcpConnections[serverId]?.client as unknown as
+      | { _capabilities?: { elicitation?: unknown } }
+      | undefined;
+    return client?._capabilities?.elicitation ?? null;
+  }
+
+  /** The OAuth storage the default provider holds for a server, by key. */
+  async oauthStorage(serverId: string): Promise<Record<string, unknown>> {
+    const entries = await this.ctx.storage.list({
+      prefix: `/${this.name}/${serverId}/`
+    });
+    return Object.fromEntries(entries);
   }
 
   /** Every state a server was broadcast in, as a UI listening saw it. */
@@ -157,6 +232,19 @@ export class McpIntegrationAgent extends Agent {
         state: "rejected",
         error: error instanceof Error ? error.message : String(error)
       };
+    }
+  }
+
+  /** The deprecated `MCPClientManager.connect`, as RPC servers still use. */
+  async connectLegacy(url: string, id: string): Promise<string> {
+    try {
+      await this.mcp.connect(url, {
+        reconnect: { id },
+        transport: { type: "streamable-http" }
+      });
+      return "connected";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
     }
   }
 
@@ -241,6 +329,11 @@ export class McpIntegrationAgent extends Agent {
   /** Wait for connection work started by callbacks and restores. */
   settle(): Promise<void> {
     return this.mcp.waitForConnections();
+  }
+
+  /** `MCPClientManager.closeConnection`: the server stays stored. */
+  closeNow(serverId: string): Promise<void> {
+    return this.mcp.closeConnection(serverId);
   }
 
   remove(serverId: string): Promise<void> {

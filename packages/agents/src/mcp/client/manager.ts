@@ -122,6 +122,7 @@ export class MCPClientManager extends LifecycleCapability {
         return manager.lifecycle.storage;
       },
       lanes: this._lanes,
+      removing: new Set(),
       env: options.env,
       createAuthProvider: options.createAuthProvider,
       observability: this._onObservabilityEvent,
