@@ -26,9 +26,10 @@
  */
 
 import type { ClientToolSchema } from "./client-tools";
-import type {
-  ContinuationConnection,
-  ContinuationState
+import {
+  addContinuationTarget,
+  type ContinuationConnection,
+  type ContinuationState
 } from "./continuation-state";
 
 /**
@@ -147,7 +148,13 @@ export class AutoContinuationController<
         body: spec.body,
         errorPrefix: spec.errorPrefix,
         prerequisite: null,
-        targetMessageId: spec.targetMessageId ?? null
+        // Results coalesced into one follow-up: keep every message they target.
+        targetMessageIds: c.deferred
+          ? addContinuationTarget(
+              c.deferred.targetMessageIds,
+              spec.targetMessageId
+            )
+          : addContinuationTarget(undefined, spec.targetMessageId)
       };
       return;
     }
@@ -158,7 +165,12 @@ export class AutoContinuationController<
       c.pending.clientTools = spec.clientTools;
       c.pending.body = spec.body;
       c.pending.errorPrefix = spec.errorPrefix;
-      c.pending.targetMessageId = spec.targetMessageId ?? null;
+      // Keep the targets of results already coalesced into this continuation:
+      // a later result for an older reply must not drop a newer one's.
+      c.pending.targetMessageIds = addContinuationTarget(
+        c.pending.targetMessageIds,
+        spec.targetMessageId
+      );
       c.awaitingConnections.set(spec.connection.id, spec.connection);
       this.armTimer();
       return;
@@ -173,7 +185,7 @@ export class AutoContinuationController<
       errorPrefix: spec.errorPrefix,
       prerequisite: null,
       pastCoalesce: false,
-      targetMessageId: spec.targetMessageId ?? null
+      targetMessageIds: addContinuationTarget(undefined, spec.targetMessageId)
     };
     c.awaitingConnections.set(spec.connection.id, spec.connection);
     this.armTimer();

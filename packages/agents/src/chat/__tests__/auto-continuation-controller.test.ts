@@ -380,7 +380,9 @@ describe("AutoContinuationController", () => {
       true,
       spec
     );
-    expect(host.continuation.pending?.targetMessageId).toBe("assistant-1");
+    expect(host.continuation.pending?.targetMessageIds).toEqual([
+      "assistant-1"
+    ]);
     expect(controller.isArmed()).toBe(true);
   });
 
@@ -413,9 +415,41 @@ describe("AutoContinuationController", () => {
       true,
       spec
     );
-    expect(host.continuation.deferred?.targetMessageId).toBe("assistant-2");
+    expect(host.continuation.deferred?.targetMessageIds).toEqual([
+      "assistant-2"
+    ]);
     host.continuation.pending = null;
     controller.activateDeferredAndReschedule();
-    expect(host.continuation.pending?.targetMessageId).toBe("assistant-2");
+    const activated = host.continuation.pending as {
+      targetMessageIds?: readonly string[] | null;
+    } | null;
+    expect(activated?.targetMessageIds).toEqual(["assistant-2"]);
+  });
+
+  it("a later result for an older reply keeps the newer reply's target", () => {
+    controller.afterInteraction(
+      { status: "changed", messageId: "assistant-2" },
+      true,
+      spec
+    );
+    controller.afterInteraction(
+      { status: "changed", messageId: "assistant-1" },
+      true,
+      spec
+    );
+    expect(host.continuation.pending?.targetMessageIds).toEqual([
+      "assistant-2",
+      "assistant-1"
+    ]);
+  });
+
+  it("a result with no target turns the latest-message check off", () => {
+    controller.afterInteraction(
+      { status: "changed", messageId: "assistant-1" },
+      true,
+      spec
+    );
+    schedule();
+    expect(host.continuation.pending?.targetMessageIds).toBeNull();
   });
 });
