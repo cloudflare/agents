@@ -7093,6 +7093,20 @@ export class ThinkToolsTestAgent extends Think {
     return this.hasPendingInteraction();
   }
 
+  /**
+   * Store a reply whose stream was cut off, the way `_streamResult` and the
+   * orphan path store one: with the tool calls it left unanswered settled.
+   */
+  async persistCutOffReplyForTest(msg: UIMessage): Promise<void> {
+    await this.session.appendMessage(
+      (
+        this as unknown as {
+          _settleInterruptedReply(message: UIMessage): UIMessage;
+        }
+      )._settleInterruptedReply(msg)
+    );
+  }
+
   async insertInterruptedFiber(
     name: string,
     snapshot?: unknown
@@ -10757,6 +10771,20 @@ export class ThinkRecoveryTestAgent extends Think {
 
   async hasPendingInteractionForTest(): Promise<boolean> {
     return this.hasPendingInteraction();
+  }
+
+  /**
+   * Store a reply whose stream was cut off, the way `_streamResult` and the
+   * orphan path store one: with the tool calls it left unanswered settled.
+   */
+  async persistCutOffReplyForTest(msg: UIMessage): Promise<void> {
+    await this.session.appendMessage(
+      (
+        this as unknown as {
+          _settleInterruptedReply(message: UIMessage): UIMessage;
+        }
+      )._settleInterruptedReply(msg)
+    );
   }
 
   /**

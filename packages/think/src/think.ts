@@ -208,6 +208,8 @@ import {
   isLateToolInputChunk,
   lateToolInputForwardChunks,
   repairInterruptedToolParts,
+  settleInterruptedReply,
+  streamChunksFinished,
   toolPartHasSettledResult,
   persistReconstructedOrphan,
   reconcileMessages,
@@ -4784,6 +4786,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     {
       messages: () => this.messages,
       isReplyStreaming: () => this._streamingAssistant !== null,
+      streamingReply: () => this._streamingAssistant?.toMessage() ?? null,
+      clientToolNames: () => this._clientResolvableToolNames(),
       hasActiveStream: () => this._resumableStream.hasActiveStream(),
       generateRequestId: () => crypto.randomUUID(),
       keepAliveWhile: (fn) => this.keepAliveWhile(fn),
@@ -14726,7 +14730,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       }
       streamFinalized = true;
 
-      assistantMsg = accumulator.toMessage();
+      assistantMsg =
+        streamError || aborted
+          ? this._settleInterruptedReply(accumulator.toMessage())
+          : accumulator.toMessage();
       const response: ChatResponseResult = {
         message: assistantMsg,
         requestId,
@@ -14791,7 +14798,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           persistPartial: async () => {
             if (persistedAssistantId) return persistedAssistantId;
             if (accumulator.parts.length === 0) return undefined;
-            const partial = accumulator.toMessage();
+            const partial = this._settleInterruptedReply(
+              accumulator.toMessage()
+            );
             if (!(await this._persistAssistantMessage(partial))) {
               return undefined;
             }
@@ -14858,7 +14867,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       }
       try {
         if (!assistantMsg && accumulator.parts.length > 0) {
-          assistantMsg = accumulator.toMessage();
+          assistantMsg = this._settleInterruptedReply(accumulator.toMessage());
           await this._persistAssistantMessage(assistantMsg);
           this._broadcastMessages();
         }
@@ -15347,7 +15356,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             if (resetSinceTurnStarted() || accumulator.parts.length === 0) {
               return undefined;
             }
-            if (!(await this._persistAssistantMessage(partialMsg, parentId))) {
+            // The stream was cut off: settle the calls it left unanswered.
+            if (
+              !(await this._persistAssistantMessage(
+                this._settleInterruptedReply(partialMsg),
+                parentId
+              ))
+            ) {
               return undefined;
             }
             this._broadcastMessages();
@@ -15457,7 +15472,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         : { status: "completed", output };
       if (!resetSinceTurnStarted()) {
         try {
-          const assistantMsg = accumulator.toMessage();
+          // A stream that was stopped or errored is cut off: settle the tool
+          // calls it left unanswered before the reply is stored.
+          const assistantMsg =
+            streamError || streamAborted
+              ? this._settleInterruptedReply(accumulator.toMessage())
+              : accumulator.toMessage();
           const response: ChatResponseResult = {
             message: assistantMsg,
             requestId,
@@ -15553,6 +15573,48 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       (part) => (part as { type?: string }).type !== "step-start"
     );
     return hasMeaningfulParts ? stripped : null;
+  }
+
+  /**
+   * Settle the tool calls a cut-off reply left unanswered (the shared
+   * `settleInterruptedReply`): a call no client is known to own becomes an
+   * errored result through {@link repairInterruptedToolPart}. Call it on a
+   * reply whose stream did not finish, before it is stored.
+   */
+  private _settleInterruptedReply(message: UIMessage): UIMessage {
+    return settleInterruptedReply(message, {
+      repairPart: (part) => this.repairInterruptedToolPart(part),
+      clientToolNames: this._clientResolvableToolNames()
+    });
+  }
+
+  /**
+   * Settle and store the reply a recovery attempt is about to continue. It
+   * was cut off by definition. A reply stored by this version is settled
+   * already; one stored by an older version may not be, and recovery would
+   * otherwise wait on its dead tool call as if a client could answer it.
+   */
+  private async _settleRecoveredReply(
+    messageId: string | undefined
+  ): Promise<void> {
+    if (!messageId) return;
+    const leaf = await this.session.getLatestLeaf();
+    if (leaf?.id !== messageId || leaf.role !== "assistant") return;
+    const reply = leaf as UIMessage;
+    const settled = this._settleInterruptedReply(reply);
+    if (settled === reply) return;
+    const stored = await this._updateMessageInHistory(settled);
+    this._patchCachedMessage(stored);
+    this._broadcastMessages();
+    const toolCallIds = settled.parts.flatMap((part, index) => {
+      const id = (part as { toolCallId?: unknown }).toolCallId;
+      return part !== reply.parts[index] && typeof id === "string" ? [id] : [];
+    });
+    this._emit("chat:transcript:repaired", {
+      removedToolCalls: toolCallIds.length,
+      normalizedInputs: 0,
+      toolCallIds
+    });
   }
 
   /** Resolves to `false` when stripping left nothing to persist. */
@@ -16768,34 +16830,19 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
   // ── Stability + pending interactions ─────────────────────────────
 
+  /**
+   * `true` when the chat is waiting on a client: a tool call a client still
+   * has to answer, or an approval it still has to give.
+   *
+   * Every unanswered call in the stored transcript counts, whatever its tool.
+   * A reply is stored unanswered only when its stream finished on that call,
+   * which is what a client tool does; a reply that was cut off has its dead
+   * calls settled before it is stored. In the reply streaming now, only a
+   * tool the client sent a schema for counts, because a server tool sits at
+   * `input-available` while it runs. The same check as `@cloudflare/ai-chat`.
+   */
   protected hasPendingInteraction(): boolean {
-    const clientResolvable = this._clientResolvableToolNames();
-    // Scan the in-flight accumulator first, mirroring `@cloudflare/ai-chat`'s
-    // `_streamingMessage` check. A parallel-batch client tool can stream a
-    // pending `input-available`/`approval-requested` part into
-    // `_streamingAssistant` before the end-of-stream persist writes it to
-    // `this.messages`. The hot `waitUntilStable` loop only consults this after
-    // `waitForIdle()` (when the streaming turn has drained and the accumulator
-    // is null), so the scan is a no-op there. It matters on the same-isolate
-    // stall route, where the incident-eval callback runs mid-stream: without
-    // it Think would budget a stall that ai-chat treats as "awaiting client"
-    // (budget-free) — a self-correcting drift once the continuation re-reads
-    // persisted state, but a real asymmetry the stall watchdog would expose.
-    const streaming = this._streamingAssistant;
-    if (
-      streaming &&
-      this._messageHasPendingInteraction(
-        streaming.toMessage(),
-        clientResolvable
-      )
-    ) {
-      return true;
-    }
-    return this.messages.some(
-      (message) =>
-        message.role === "assistant" &&
-        this._messageHasPendingInteraction(message, clientResolvable)
-    );
+    return this._turns.hasPendingInteraction();
   }
 
   protected async waitUntilStable(options?: {
@@ -16805,15 +16852,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       timeout: options?.timeout,
       hasPendingInteraction: () => this.hasPendingInteraction()
     });
-  }
-
-  private _messageHasPendingInteraction(
-    message: UIMessage,
-    clientResolvable: Set<string>
-  ): boolean {
-    return message.parts.some((part) =>
-      this._partAwaitsClientInteraction(part, clientResolvable)
-    );
   }
 
   /**
@@ -18480,6 +18518,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       : stop.signal;
 
     try {
+      await this._settleRecoveredReply(data?.targetAssistantId);
       const recoveryConfig = this._resolveChatRecoveryConfig();
       const ready = await this.waitUntilStable({
         timeout: recoveryConfig.stableTimeoutMs
@@ -19779,7 +19818,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             },
       fallbackId: crypto.randomUUID(),
       prepare: (message) => {
-        const prepared = this._strippedForPersist(message);
+        // A stream with no `finish` chunk was cut off: settle the calls it
+        // left unanswered. One that finished and only missed its persist
+        // keeps them: those wait for a client.
+        const prepared = this._strippedForPersist(
+          streamChunksFinished(chunks)
+            ? message
+            : this._settleInterruptedReply(message)
+        );
         persistedId = prepared?.id;
         return prepared;
       },

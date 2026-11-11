@@ -4165,7 +4165,9 @@ describe("Think — onChatRecovery", () => {
       role: "user",
       parts: [{ type: "text", text: "Render a preview" }]
     } as UIMessage);
-    await agent.persistTestMessage({
+    // The reply was cut off mid-execute(), so it is stored with that call
+    // settled.
+    await agent.persistCutOffReplyForTest({
       id: "assistant-1",
       role: "assistant",
       parts: [
@@ -6392,7 +6394,9 @@ describe("Think — waitUntilStable", () => {
       parts: [{ type: "text", text: "Render a preview" }]
     } as UIMessage);
 
-    await agent.persistTestMessage({
+    // The reply was cut off mid-execute(), so it is stored with that call
+    // settled.
+    await agent.persistCutOffReplyForTest({
       id: "assistant-1",
       role: "assistant",
       parts: [

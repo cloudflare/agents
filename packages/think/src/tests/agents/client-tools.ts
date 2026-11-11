@@ -1326,6 +1326,7 @@ export class ThinkClientToolsAgent extends Think {
     const internal = this as unknown as {
       _lastClientTools: ClientToolSchema[] | undefined;
       _persistAssistantMessage: (msg: UIMessage) => Promise<void>;
+      _settleInterruptedReply: (msg: UIMessage) => UIMessage;
       hasPendingInteraction: () => boolean;
     };
 
@@ -1337,19 +1338,23 @@ export class ThinkClientToolsAgent extends Think {
       internal._lastClientTools = undefined;
     }
 
-    await internal._persistAssistantMessage({
-      id: crypto.randomUUID(),
-      role: "assistant",
-      parts: [
-        {
-          type: "tool-client_action",
-          toolCallId: "tc-orphan-1",
-          toolName: "client_action",
-          state: "input-available",
-          input: { action: "do_thing" }
-        } as unknown as UIMessage["parts"][number]
-      ]
-    });
+    // The reply was cut off, so it is stored the way a cut-off reply is:
+    // with the calls no client is known to own settled.
+    await internal._persistAssistantMessage(
+      internal._settleInterruptedReply({
+        id: crypto.randomUUID(),
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-client_action",
+            toolCallId: "tc-orphan-1",
+            toolName: "client_action",
+            state: "input-available",
+            input: { action: "do_thing" }
+          } as unknown as UIMessage["parts"][number]
+        ]
+      })
+    );
 
     return internal.hasPendingInteraction();
   }
