@@ -177,3 +177,44 @@ describe("closeConnection overlapping another close", () => {
       expect(manager.mcpConnections.files).toBe(second);
     }));
 });
+
+/**
+ * Replay of a path the lifecycle model found (rule RemovalLeavesNewServer):
+ * a removal's close is slow, an overlapping close finishes first, the server
+ * is registered again and starts a sign-in, and then the removal carries on.
+ */
+describe("removeServer overlapping a close", () => {
+  it("leaves the row and the OAuth storage of the server registered again", () =>
+    withMcpHarness(async (harness) => {
+      const manager = harness.createManager();
+      await manager.registerServer("files", SERVER);
+      const first = manager.mcpConnections.files;
+
+      let finishClose!: () => void;
+      const closing = new Promise<void>((resolve) => {
+        finishClose = resolve;
+      });
+      const close = first.close.bind(first);
+      let calls = 0;
+      first.close = async () => {
+        if (calls++ === 0) await closing;
+        return close();
+      };
+
+      const removing = manager.removeServer("files");
+      await manager.closeConnection("files");
+      await manager.registerServer("files", SERVER);
+      const provider =
+        manager.mcpConnections.files.options.transport.authProvider;
+      if (!provider) throw new Error("expected a provider");
+      // The new server's sign-in is under way: its state is stored.
+      const state = await provider.state();
+
+      finishClose();
+      await removing;
+
+      expect(harness.serverRows().map((row) => row.id)).toEqual(["files"]);
+      expect(manager.mcpConnections.files).toBeDefined();
+      expect((await provider.checkState(state)).valid).toBe(true);
+    }));
+});

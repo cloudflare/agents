@@ -62,6 +62,12 @@ export class ServerController {
    * clears storage through it.
    */
   private readonly closedProviders = new Map<string, AgentMcpOAuthProvider>();
+  /**
+   * How many times each id was registered since this object woke.
+   * removeServer deletes the row only if the id was not registered again
+   * while it closed the connection and cleared the credentials.
+   */
+  private readonly registrations = new Map<string, number>();
 
   constructor(
     private readonly ctx: McpClientContext,
@@ -114,6 +120,7 @@ export class ServerController {
         capabilities: this.elicitation.capabilities()
       })
     });
+    this.registrations.set(id, (this.registrations.get(id) ?? 0) + 1);
     // Registering again is a fresh start for the server.
     this.ctx.store.clearFailure(id);
     this.ctx.store.setAuthorizationRounds(id, undefined);
@@ -780,6 +787,7 @@ export class ServerController {
   }
 
   private async removeServer(id: string): Promise<void> {
+    const registration = this.registrations.get(id);
     const conn = this.ctx.connections[id];
     let authProvider =
       conn?.options.transport.authProvider ?? this.closedProviders.get(id);
@@ -798,10 +806,20 @@ export class ServerController {
       }
     }
     if (conn) await this.close(id).catch(() => {});
+    // Registered again while the connection closed (an overlapping close let
+    // it): the row and the OAuth storage under this id are the new server's.
+    // The old provider only stops storing.
+    const registeredAgain = () => this.registrations.get(id) !== registration;
+    if (registeredAgain()) {
+      if (authProvider) this.authorization.retire(authProvider);
+      return;
+    }
     if (authProvider) await this.authorization.clearStorage(id, authProvider);
-    this.closedProviders.delete(id);
+    if (this.closedProviders.get(id) === authProvider) {
+      this.closedProviders.delete(id);
+    }
     // Registered again while the credentials were cleared: keep the new row.
-    if (this.ctx.connections[id]) return;
+    if (registeredAgain() || this.ctx.connections[id]) return;
     this.ctx.store.remove(id);
     this.ctx.stateChanged();
   }
@@ -876,6 +894,11 @@ export class ServerController {
     if (disposables) {
       this.disposables.set(newId, disposables);
       this.disposables.delete(oldId);
+    }
+    const registration = this.registrations.get(oldId);
+    if (registration !== undefined) {
+      this.registrations.set(newId, registration);
+      this.registrations.delete(oldId);
     }
     const closed = this.closedProviders.get(oldId);
     if (closed) {
