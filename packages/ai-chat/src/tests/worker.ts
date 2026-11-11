@@ -301,6 +301,33 @@ export class TestChatAgent extends AIChatAgent<Env> {
       return new Response(null);
     }
 
+    // A server tool starts running and its stream never finishes: only a
+    // stop, a stall or an eviction ends it.
+    if (options?.body?.serverToolThenHang === true) {
+      const encoder = new TextEncoder();
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            for (const chunk of [
+              { type: "start" },
+              {
+                type: "tool-input-available",
+                toolCallId: "call-server-hang",
+                toolName: "slowServerTool",
+                input: {}
+              }
+            ]) {
+              controller.enqueue(
+                encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`)
+              );
+            }
+          },
+          cancel() {}
+        }),
+        { headers: { "Content-Type": "text/event-stream" } }
+      );
+    }
+
     if (options?.body?.sseWithMessageId === true) {
       return makeSSEChunkResponse([
         { type: "start", messageId: `fresh-msg-${Date.now()}` },
@@ -720,6 +747,10 @@ export class TestChatAgent extends AIChatAgent<Env> {
 
   getChatMessageCallCountForTest(): number {
     return this._chatMessageCallCount;
+  }
+
+  hasPendingInteractionForTest(): boolean {
+    return this.hasPendingInteraction();
   }
 
   getContinuationStateForTest(): {
@@ -3231,21 +3262,31 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
    *  `setRequestContextForTest`. */
   async persistPendingToolCallForTest(
     messageId: string,
-    toolName: string
+    toolName: string,
+    options: { cutOff?: boolean } = {}
   ): Promise<void> {
+    const reply: ChatMessage = {
+      id: messageId,
+      role: "assistant" as const,
+      parts: [
+        {
+          type: `tool-${toolName}`,
+          toolCallId: `call_${messageId}`,
+          state: "input-available",
+          input: {}
+        }
+      ] as ChatMessage["parts"]
+    };
+    // A reply whose stream was cut off is settled before it is stored, the
+    // way `_reply` and the orphan path store one.
     await this.persistMessages([
-      {
-        id: messageId,
-        role: "assistant" as const,
-        parts: [
-          {
-            type: `tool-${toolName}`,
-            toolCallId: `call_${messageId}`,
-            state: "input-available",
-            input: {}
-          }
-        ] as ChatMessage["parts"]
-      }
+      options.cutOff
+        ? (
+            this as unknown as {
+              _settleInterruptedReply(message: ChatMessage): ChatMessage;
+            }
+          )._settleInterruptedReply(reply)
+        : reply
     ]);
   }
 

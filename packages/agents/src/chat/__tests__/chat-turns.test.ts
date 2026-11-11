@@ -30,6 +30,14 @@ class FakeHost implements ChatTurnsHost {
   isReplyStreaming() {
     return this.replyStreaming;
   }
+  streaming: ChatTurnMessage | null = null;
+  clientTools = new Set<string>();
+  streamingReply() {
+    return this.streaming;
+  }
+  clientToolNames() {
+    return this.clientTools;
+  }
   hasActiveStream() {
     return this.activeStream;
   }
@@ -353,6 +361,36 @@ describe("ChatTurns", () => {
     host.activeStream = false;
     turns.settlePreStreamTurn("r4");
     expect(parked.sent.at(-1)).toContain("cf_agent_stream_resume_none");
+  });
+
+  // ── Waiting on a client ─────────────────────────────────────────────
+
+  it("counts every unanswered call in the stored transcript as waiting on a client", () => {
+    host.transcript = [user("u1"), toolReply("a1", "input-available")];
+    // No client sent a schema for the tool: it still counts, because a reply
+    // is only stored unanswered when its stream finished on that call.
+    expect(turns.hasPendingInteraction()).toBe(true);
+
+    host.transcript = [user("u1"), toolReply("a1", "approval-requested")];
+    expect(turns.hasPendingInteraction()).toBe(true);
+
+    host.transcript = [user("u1"), toolReply("a1", "output-error")];
+    expect(turns.hasPendingInteraction()).toBe(false);
+  });
+
+  it("counts only a known client tool in the reply that is streaming", () => {
+    host.transcript = [user("u1")];
+    host.streaming = toolReply("a1", "input-available");
+    // A server tool sits at input-available while it runs.
+    expect(turns.hasPendingInteraction()).toBe(false);
+
+    host.clientTools = new Set(["x"]);
+    expect(turns.hasPendingInteraction()).toBe(true);
+
+    // A stored snapshot of the streaming reply defers to the live copy.
+    host.clientTools = new Set();
+    host.transcript = [user("u1"), toolReply("a1", "input-available")];
+    expect(turns.hasPendingInteraction()).toBe(false);
   });
 
   // ── Idle and stable ─────────────────────────────────────────────────

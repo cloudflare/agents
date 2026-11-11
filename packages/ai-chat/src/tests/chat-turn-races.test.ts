@@ -329,6 +329,31 @@ describe("chat turn races", () => {
     ws.close(1000);
   });
 
+  it("a stopped reply's running server tool is stored as failed, and the chat does not wait on it", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const seen = record(ws);
+    const agent = await getAgentByName(env.TestChatAgent, room);
+
+    // The reply starts a server tool, which is still running when the user
+    // presses stop.
+    sendChatRequest(ws, "req-1", [user1], { serverToolThenHang: true });
+    await waitUntil(() => responses(seen, "req-1").some((m) => m.body));
+    send(ws, { type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL, id: "req-1" });
+    await waitUntil(() => responses(seen, "req-1").some((m) => m.done));
+    await agent.waitForIdleForTest();
+
+    // Nothing will ever answer that call: it is stored with an error, not
+    // left looking like it is running, and the chat is not waiting on anyone.
+    const stored = (await agent.getPersistedMessages()) as ChatMessage[];
+    expect(stored.at(-1)?.parts.at(-1)).toMatchObject({
+      toolCallId: "call-server-hang",
+      state: "output-error"
+    });
+    expect(await agent.hasPendingInteractionForTest()).toBe(false);
+    ws.close(1000);
+  });
+
   it("a second tab's result for an answered tool call does not continue the reply again", async () => {
     const room = crypto.randomUUID();
     const { ws: tabA } = await connectChatWS(`/agents/test-chat-agent/${room}`);

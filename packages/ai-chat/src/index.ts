@@ -32,6 +32,8 @@ import {
   reconcileMessages,
   reconcileOrphanPartial,
   repairInterruptedToolParts,
+  settleInterruptedReply,
+  streamChunksFinished,
   persistReconstructedOrphan,
   createChatFiberSnapshot,
   unwrapChatFiberSnapshot,
@@ -443,6 +445,8 @@ export class AIChatAgent<
     {
       messages: () => this.messages,
       isReplyStreaming: () => this._streamingTurnActive,
+      streamingReply: () => this._streamingMessage,
+      clientToolNames: () => this._clientResolvableToolNames(),
       hasActiveStream: () => this._resumableStream.hasActiveStream(),
       generateRequestId: () => nanoid(),
       keepAliveWhile: (fn) => this.keepAliveWhile(fn),
@@ -2133,6 +2137,13 @@ export class AIChatAgent<
     // NOTE: progress is bumped at production/flush time in `_storeStreamChunk`
     // (#1637), NOT here — persisting on recovery or a client reconnect must not
     // be miscounted as new forward progress.
+    // A stream with no `finish` chunk was cut off: settle the tool calls it
+    // left unanswered, so the stored reply never shows a server tool as
+    // running after its `execute()` died. A stream that finished and only
+    // missed its persist keeps its unanswered calls: those wait for a client.
+    const settle = streamChunksFinished(chunks)
+      ? (message: UIMessage) => message
+      : (message: UIMessage) => this._settleInterruptedReply(message);
     const fallbackId = `assistant_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
     await persistReconstructedOrphan(chunks, {
       store: this._orphanStore(),
@@ -2143,10 +2154,43 @@ export class AIChatAgent<
           message.id,
           fallbackId
         );
-        return message;
+        return settle(message);
       },
-      merge: (existing, incoming) => reconcileOrphanPartial(existing, incoming)
+      merge: (existing, incoming) =>
+        settle(reconcileOrphanPartial(existing, incoming))
     });
+  }
+
+  /**
+   * Settle the tool calls a cut-off reply left unanswered (the shared
+   * `settleInterruptedReply`): a call no client is known to own becomes an
+   * errored result through {@link repairInterruptedToolPart}.
+   */
+  private _settleInterruptedReply(message: UIMessage): UIMessage {
+    return settleInterruptedReply(message, {
+      repairPart: (part) => this.repairInterruptedToolPart(part),
+      clientToolNames: this._clientResolvableToolNames()
+    });
+  }
+
+  /**
+   * Settle and store the reply a recovery attempt is about to continue. It
+   * was cut off by definition. A reply stored by this version is settled
+   * already; one stored by an older version may not be, and recovery would
+   * otherwise wait on its dead tool call as if a client could answer it.
+   */
+  private async _settleRecoveredReply(
+    messageId: string | undefined
+  ): Promise<void> {
+    const last = this.messages.at(-1);
+    if (!messageId || last?.id !== messageId || last.role !== "assistant") {
+      return;
+    }
+    const settled = this._settleInterruptedReply(last);
+    if (settled === last) return;
+    await this.persistMessages(
+      this.messages.map((message) => (message === last ? settled : message))
+    );
   }
 
   /**
@@ -2919,20 +2963,19 @@ export class AIChatAgent<
     });
   }
 
-  /** `true` when an assistant message is waiting on a client tool result or approval. */
+  /**
+   * `true` when the chat is waiting on a client: a tool call a client still
+   * has to answer, or an approval it still has to give.
+   *
+   * Every unanswered call in the stored transcript counts, whatever its tool.
+   * A reply is stored unanswered only when its stream finished on that call,
+   * which is what a client tool does; a reply that was cut off has its dead
+   * calls settled before it is stored. In the reply streaming now, only a
+   * tool the client sent a schema for counts, because a server tool sits at
+   * `input-available` while it runs.
+   */
   protected hasPendingInteraction(): boolean {
-    if (
-      this._streamingMessage &&
-      this._messageHasPendingInteraction(this._streamingMessage)
-    ) {
-      return true;
-    }
-
-    return this.messages.some(
-      (message) =>
-        message.role === "assistant" &&
-        this._messageHasPendingInteraction(message)
-    );
+    return this._turns.hasPendingInteraction();
   }
 
   /**
@@ -3038,56 +3081,15 @@ export class AIChatAgent<
     this._abortRegistry.destroyAll(reason);
   }
 
-  private _messageHasPendingInteraction(message: UIMessage): boolean {
-    return message.parts.some(
-      (part) =>
-        "state" in part &&
-        (part.state === "input-available" ||
-          part.state === "approval-requested")
-    );
-  }
-
   /**
-   * `true` when the turn is parked on a pending interaction that the CLIENT can
-   * still resolve after a restart — an `approval-requested` part, or an
-   * `input-available` part for a CLIENT tool (no server `execute`) whose
-   * `tool-result` the SPA replays over the WebSocket on reconnect.
+   * Same check as {@link hasPendingInteraction}. The two used to differ: this
+   * one ignored a server tool call that died with its isolate. Such a call is
+   * now settled when its cut-off reply is stored, so neither sees one.
    *
-   * This is intentionally NARROWER than `hasPendingInteraction()` (which
-   * `waitUntilStable` uses): a SERVER tool's `input-available` orphan is
-   * excluded, because its `execute()` promise died with the evicted isolate and
-   * nothing will ever post its result — so it must NOT be treated as a healthy
-   * "waiting on the human" wait. Used to make a HITL turn budget-free during
-   * recovery so a slow human can't trip the no-progress / attempt / stable-
-   * timeout budgets; see `_beginChatRecoveryIncident` and
-   * `_parkRecoveryForPendingInteraction`. Mirrors `@cloudflare/think`'s
-   * `hasPendingInteraction`, which is already client-only by construction.
+   * @deprecated Use {@link hasPendingInteraction}.
    */
   protected hasPendingClientInteraction(): boolean {
-    const clientResolvable = this._clientResolvableToolNames();
-    if (
-      this._streamingMessage &&
-      this._messageAwaitsClientInteraction(
-        this._streamingMessage,
-        clientResolvable
-      )
-    ) {
-      return true;
-    }
-    return this.messages.some(
-      (message) =>
-        message.role === "assistant" &&
-        this._messageAwaitsClientInteraction(message, clientResolvable)
-    );
-  }
-
-  private _messageAwaitsClientInteraction(
-    message: UIMessage,
-    clientResolvable: Set<string>
-  ): boolean {
-    return message.parts.some((part) =>
-      this._partAwaitsClientInteraction(part, clientResolvable)
-    );
+    return this.hasPendingInteraction();
   }
 
   /**
@@ -4978,7 +4980,7 @@ export class AIChatAgent<
       readProgress: () => this._chatRecoveryProgressMarker(),
       // A turn parked on a pending CLIENT interaction is waiting on the human,
       // not stuck, so the engine keeps it budget-free.
-      isAwaitingClientInteraction: () => this.hasPendingClientInteraction(),
+      isAwaitingClientInteraction: () => this.hasPendingInteraction(),
       putIncident: (key, incident) => this.ctx.storage.put(key, incident),
       syncStorage: () => this.ctx.storage.sync(),
       deleteIncident: async (key) => {
@@ -5462,14 +5464,12 @@ export class AIChatAgent<
       data?.originalRequestId ?? previousRootRequestId;
     const stop = this._turns.beginRecoveryAttempt(data?.originalRequestId);
     try {
+      await this._settleRecoveredReply(data?.targetAssistantId);
       const recoveryConfig = this._resolveChatRecoveryConfig();
+      // The reply was settled above, so anything still pending is a call a
+      // client can answer, and the `!ready` branch parks on it.
       const ready = await this.waitUntilStable({
-        timeout: recoveryConfig.stableTimeoutMs,
-        // Recovery-scoped: a DEAD server-tool `input-available` orphan must not
-        // block stability (A.2 repairs it below), so gate on the client-
-        // resolvable predicate. A genuinely-pending CLIENT interaction still
-        // keeps it unstable and parks via the `!ready` branch.
-        pendingInteraction: () => this.hasPendingClientInteraction()
+        timeout: recoveryConfig.stableTimeoutMs
       });
       // A stop that landed while the attempt waited wins over the
       // stable-state timeout's park, reschedule or exhaustion.
@@ -5867,7 +5867,7 @@ export class AIChatAgent<
   private async _parkRecoveryForPendingInteraction(
     data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined
   ): Promise<boolean> {
-    if (!this.hasPendingClientInteraction()) return false;
+    if (!this.hasPendingInteraction()) return false;
     await this._updateChatRecoveryIncident(
       data?.incidentId,
       "skipped",
@@ -6015,11 +6015,7 @@ export class AIChatAgent<
     try {
       const recoveryConfig = this._resolveChatRecoveryConfig();
       const ready = await this.waitUntilStable({
-        timeout: recoveryConfig.stableTimeoutMs,
-        // Recovery-scoped narrow predicate (see `_chatRecoveryContinue`): a dead
-        // server-tool orphan must not block stability; a real client
-        // interaction still parks via the `!ready` branch.
-        pendingInteraction: () => this.hasPendingClientInteraction()
+        timeout: recoveryConfig.stableTimeoutMs
       });
       // A stop that landed while the attempt waited wins over the
       // stable-state timeout's park, reschedule or exhaustion.
@@ -7708,6 +7704,11 @@ export class AIChatAgent<
                   discard: !this._agentToolRunsByRequestId.get(id)
                 }
               : null;
+          // The stream was cut off (stopped, stalled, errored): settle the
+          // tool calls it left unanswered before the reply is stored.
+          if (streamResult.status !== "completed") {
+            message = this._settleInterruptedReply(message);
+          }
           if (
             message.parts.length > 0 &&
             !discardPartial &&

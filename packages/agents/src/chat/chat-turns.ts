@@ -52,7 +52,10 @@ import {
   SubmitConcurrencyController,
   type SubmitConcurrencyDecision
 } from "./submit-concurrency";
-import { hasIncompleteToolBatch } from "./tool-state";
+import {
+  hasIncompleteToolBatch,
+  hasPendingToolInteraction
+} from "./tool-state";
 import { TurnQueue } from "./turn-queue";
 
 /** The transcript shape the core reads: ids for targets, parts for batches. */
@@ -71,6 +74,13 @@ export interface ChatTurnsHost {
    * still grow, so a continuation must hold until the stream is finalized.
    */
   isReplyStreaming(): boolean;
+  /** The reply being streamed now, before it is stored, or `null`. */
+  streamingReply(): ChatTurnMessage | null;
+  /**
+   * Names of the tools a client is known to run: the schemas the client sent
+   * with the request whose turn last started.
+   */
+  clientToolNames(): Set<string>;
   /** `true` while a resumable stream is active (clients can resume it). */
   hasActiveStream(): boolean;
   /** Mint the request id of a new continuation turn. */
@@ -508,6 +518,19 @@ export class ChatTurns<
 
   // ── Idle and stable ────────────────────────────────────────────────
 
+  /**
+   * `true` while the chat waits on a client: a tool call a client still has
+   * to answer, or an approval. See {@link hasPendingToolInteraction} for the
+   * one definition.
+   */
+  hasPendingInteraction(): boolean {
+    return hasPendingToolInteraction({
+      messages: this.host.messages(),
+      streaming: this.host.streamingReply(),
+      clientToolNames: this.host.clientToolNames()
+    });
+  }
+
   /** `true` while a continuation decision is still to come. */
   hasPendingDecision(): boolean {
     return this.autoContinuation.hasPendingDecision();
@@ -530,15 +553,20 @@ export class ChatTurns<
    * waiting on a client (`hasPendingInteraction`), or `false` when `timeout`
    * milliseconds pass first.
    *
-   * @param options.hasPendingInteraction - The host's scan for a tool call or
-   *   approval a client still has to answer.
+   * @param options.hasPendingInteraction - Replaces
+   *   {@link hasPendingInteraction} as the check for a client still having
+   *   something to answer.
    */
-  async waitUntilStable(options: {
-    timeout?: number;
-    hasPendingInteraction: () => boolean;
-  }): Promise<boolean> {
+  async waitUntilStable(
+    options: {
+      timeout?: number;
+      hasPendingInteraction?: () => boolean;
+    } = {}
+  ): Promise<boolean> {
     const deadline =
       options.timeout != null ? Date.now() + options.timeout : null;
+    const hasPendingInteraction =
+      options.hasPendingInteraction ?? (() => this.hasPendingInteraction());
 
     for (;;) {
       if (
@@ -550,7 +578,7 @@ export class ChatTurns<
         return false;
       }
 
-      if (!options.hasPendingInteraction()) {
+      if (!hasPendingInteraction()) {
         if (!this.hasPendingDecision()) return true;
         // A continuation is armed (#1650): wait for it to fire (the turn it
         // enqueues drains at the loop top) or to park.

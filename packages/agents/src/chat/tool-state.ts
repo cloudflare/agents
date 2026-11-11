@@ -330,3 +330,50 @@ export function hasIncompleteToolBatch(
   }
   return false;
 }
+
+/**
+ * Whether the chat is waiting on a client: a tool call a client still has to
+ * answer, or an approval it still has to give. The one definition both
+ * `@cloudflare/ai-chat` and `@cloudflare/think` use.
+ *
+ * - In the stored transcript every `input-available` call counts, whatever
+ *   its tool. A reply is stored unanswered only when its stream finished on
+ *   that call, which is what a client tool does. A cut-off reply has its
+ *   dead calls settled before it is stored (`settleInterruptedReply`), so a
+ *   stored `input-available` call is never a server tool whose `execute()`
+ *   died.
+ * - In the reply that is streaming now, a server tool sits at
+ *   `input-available` while it runs, so only a call a client is known to own
+ *   counts there (`clientToolNames`, from the schemas the client sent).
+ * - `approval-requested` counts everywhere.
+ *
+ * @param input.streaming - The reply being streamed, if any. A stored copy
+ *   of the same message is skipped in favor of it.
+ */
+export function hasPendingToolInteraction(input: {
+  messages: ReadonlyArray<ToolBatchMessage & { id?: string }>;
+  streaming: (ToolBatchMessage & { id?: string }) | null | undefined;
+  clientToolNames: Set<string>;
+}): boolean {
+  const { messages, streaming, clientToolNames } = input;
+  if (
+    streaming?.parts.some((part) =>
+      partAwaitsClientInteraction(part, clientToolNames)
+    )
+  ) {
+    return true;
+  }
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    if (streaming && message.id !== undefined && message.id === streaming.id) {
+      continue;
+    }
+    for (const part of message.parts) {
+      const state = (part as { state?: unknown } | null)?.state;
+      if (state === "input-available" || state === "approval-requested") {
+        return true;
+      }
+    }
+  }
+  return false;
+}
