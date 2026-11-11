@@ -78,8 +78,6 @@ import {
   CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS
 } from "agents/chat";
 import {
-  TIMED_OUT,
-  awaitWithDeadline,
   interceptAgentToolBroadcast,
   isPositionlessAgentToolChunk,
   type ClientToolSchema
@@ -2733,21 +2731,6 @@ export class AIChatAgent<
     return this._turns.waitForIdle();
   }
 
-  /**
-   * `true` when an auto-continuation is armed and going to fire on its own —
-   * its coalesce timer is still pending or its completeness barrier is
-   * mid-drain (#1650). Such an agent is NOT idle/stable: a continuation turn is
-   * imminent, so idle observers (recovery, idle-eviction, tests) must keep
-   * waiting until it either enqueues a turn or parks on an incomplete batch.
-   * A continuation that has already entered its turn (`pastCoalesce`) is
-   * covered by the turn queue, and a parked one (waiting on an unanswered
-   * sibling) is covered by `hasPendingInteraction()`, so neither is reported
-   * here.
-   */
-  private _hasArmedContinuation(): boolean {
-    return this._turns.hasPendingDecision();
-  }
-
   private _getSubmitConcurrencyDecision(
     trigger: ChatRequestTrigger
   ): SubmitConcurrencyDecision {
@@ -3093,13 +3076,6 @@ export class AIChatAgent<
    */
   protected abortAllRequests(reason?: unknown): void {
     this._abortRegistry.destroyAll(reason);
-  }
-
-  private _awaitWithDeadline<T>(
-    promise: Promise<T>,
-    deadline: number | null
-  ): Promise<T | typeof TIMED_OUT> {
-    return awaitWithDeadline(promise, deadline);
   }
 
   private _messageHasPendingInteraction(message: UIMessage): boolean {

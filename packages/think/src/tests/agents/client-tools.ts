@@ -1686,7 +1686,7 @@ export class ThinkClientToolsAgent extends Think {
       _autoContinuation: { fireWhenStable(): void; reset(): void };
       _pendingInteractionPromise: Promise<boolean> | null;
       _interactionApplyTail: Promise<void>;
-      _hasArmedContinuation(): boolean;
+      _turns: { hasPendingDecision(): boolean };
     };
 
     // Seed an unfired pending continuation (no message-level interaction, so the
@@ -1716,7 +1716,7 @@ export class ThinkClientToolsAgent extends Think {
     internal._autoContinuation.fireWhenStable();
 
     try {
-      const hasArmedContinuation = internal._hasArmedContinuation();
+      const hasArmedContinuation = internal._turns.hasPendingDecision();
       const messageInteractionPending = this.hasPendingInteraction();
       const stable = await this.waitUntilStable({ timeout: timeoutMs });
       return { hasArmedContinuation, messageInteractionPending, stable };

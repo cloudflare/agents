@@ -186,29 +186,19 @@ import {
   enforceRowSizeLimit,
   StreamAccumulator,
   CHAT_MESSAGE_TYPES,
-  TurnQueue,
   ResumableStream,
   createChatStreams,
-  ContinuationState,
-  PreStreamTurns,
-  AutoContinuationController,
-  continuationTargetIsLatest,
+  ChatTurns,
   type ToolInteractionOutcome,
-  TIMED_OUT,
-  awaitWithDeadline,
-  drainInteractionApplies,
   interceptAgentToolBroadcast,
   isPositionlessAgentToolChunk,
   AgentToolProgressEmitter,
-  SubmitConcurrencyController,
   createToolsFromClientSchemas,
-  AbortRegistry,
   applyToolUpdate,
   toolResultUpdate,
   crossMessageToolResultUpdate,
   toolApprovalUpdate,
   pausedExecutionUpdate,
-  hasIncompleteToolBatch,
   partAwaitsClientInteraction,
   clientResolvableToolNames,
   parseProtocolMessage,
@@ -4781,8 +4771,25 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     return (await this._syncMessages()).slice();
   }
 
-  private _aborts = new AbortRegistry();
-  private _turnQueue = new TurnQueue();
+  /**
+   * The turn core shared with `@cloudflare/ai-chat`: the turn queue, abort
+   * registry, submit concurrency, continuation slots and barrier, pre-stream
+   * set and tool-result apply chain, with the rules that tie them together.
+   * The fields below that alias its parts are the same objects.
+   */
+  private readonly _turns = new ChatTurns<Connection>(
+    {
+      messages: () => this.messages,
+      isReplyStreaming: () => this._streamingAssistant !== null,
+      hasActiveStream: () => this._resumableStream.hasActiveStream(),
+      generateRequestId: () => crypto.randomUUID(),
+      keepAliveWhile: (fn) => this.keepAliveWhile(fn),
+      fireContinuation: () => this._fireAutoContinuation()
+    },
+    { defaultDebounceMs: Think.MESSAGE_DEBOUNCE_MS }
+  );
+  private readonly _aborts = this._turns.aborts;
+  private readonly _turnQueue = this._turns.queue;
   /**
    * The Streams capability backing `_resumableStream`: chat's in-flight
    * output lives in the shared durable chunk log, readable by any
@@ -4796,7 +4803,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   private _resumeHandshakeInstance: ResumeHandshake | null = null;
   private _lastClientTools: ClientToolSchema[] | undefined;
   private _lastBody: Record<string, unknown> | undefined;
-  private _continuation = new ContinuationState<Connection>();
+  private readonly _continuation = this._turns.continuation;
   /**
    * Accepted-but-not-yet-streamed turns and the connections parked waiting for
    * one (#1784). See {@link ResumeHandshake} `preStream`.
@@ -4808,29 +4815,29 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * `ResumableStream`) or the turn finished. Breaks if a pre-stream wait is ever
    * moved onto a durable alarm that releases the DO; if so, persist this state.
    */
-  private _preStream = new PreStreamTurns<Connection>();
+  private readonly _preStream = this._turns.preStream;
   // Shared auto-continuation barrier (#1649 / #1650): owns the coalesce timer
-  // and the double-fire guard. Parameterized by this agent's stream-active
-  // signal, apply-drain, and continuation-turn pipeline (`_fireAutoContinuation`).
-  private _autoContinuation = new AutoContinuationController<Connection>({
-    continuation: this._continuation,
-    generateRequestId: () => crypto.randomUUID(),
-    isStreamActive: () => this._streamingAssistant !== null,
-    hasPendingInteraction: () => this._pendingInteractionPromise !== null,
-    hasIncompleteToolBatch: () => this._hasIncompleteToolBatch(),
-    drainInteractionApplies: () => this._drainInteractionApplies(),
-    keepAliveWhile: <T>(fn: () => Promise<T>) => this.keepAliveWhile(fn),
-    fire: () => this._fireAutoContinuation()
-  });
+  // and the double-fire guard.
+  private readonly _autoContinuation = this._turns.autoContinuation;
   private _insideResponseHook = false;
   private _insideInferenceLoop = false;
-  private _pendingInteractionPromise: Promise<boolean> | null = null;
+  private get _pendingInteractionPromise(): Promise<boolean> | null {
+    return this._turns.pendingInteraction;
+  }
+  private set _pendingInteractionPromise(value: Promise<boolean> | null) {
+    this._turns.pendingInteraction = value;
+  }
   // Serialization tail for client-tool result/approval applies (#1649). Each
   // apply is a read-modify-write of the full message; running siblings from a
   // parallel tool batch concurrently lets last-write-wins clobber the others
   // back to `input-available`. Chaining every apply off this tail makes them
   // commit atomically in arrival order.
-  private _interactionApplyTail: Promise<void> = Promise.resolve();
+  private get _interactionApplyTail(): Promise<void> {
+    return this._turns.interactionTail;
+  }
+  private set _interactionApplyTail(value: Promise<void>) {
+    this._turns.interactionTail = value;
+  }
   // The in-flight assistant message for the active streaming turn. Until
   // `_persistAssistantMessage` writes it at a turn boundary, the message lives
   // ONLY in this accumulator — not in storage and not in `this.messages`. A
@@ -4849,9 +4856,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   // loaded once per isolate.
   private _deferredResolvedPauses = new Map<string, ResolvedPauseOutcome>();
   private _deferredResolvedPausesLoad: Promise<void> | undefined;
-  private _submitConcurrency = new SubmitConcurrencyController({
-    defaultDebounceMs: Think.MESSAGE_DEBOUNCE_MS
-  });
+  private readonly _submitConcurrency = this._turns.submits;
   private static MESSAGE_DEBOUNCE_MS = 750;
   private _agentToolForwarders = new Map<
     string,
@@ -13689,36 +13694,28 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           this._lastClientTools = event.clientTools as ClientToolSchema[];
           this._persistClientTools();
         }
-        this._enqueueInteractionApply(async () => {
-          const outcome = await this._applyToolResult(
-            event.toolCallId,
-            event.output,
-            event.state as "output-error" | undefined,
-            event.errorText
-          );
-          // Only a result that settled its call continues, targeted at that
-          // call's message; without autoContinue it re-arms a batch (#1650).
-          this._autoContinuation.afterInteraction(
-            outcome,
-            event.autoContinue === true,
-            () => this._continuationSpec(connection)
-          );
-        });
+        // Only a result that settled its call continues, targeted at that
+        // call's message; without autoContinue it re-arms a batch (#1650).
+        this._turns.applyInteraction(
+          () =>
+            this._applyToolResult(
+              event.toolCallId,
+              event.output,
+              event.state as "output-error" | undefined,
+              event.errorText
+            ),
+          event.autoContinue === true,
+          () => this._continuationSpec(connection)
+        );
         break;
       }
 
       case "tool-approval": {
-        this._enqueueInteractionApply(async () => {
-          const outcome = await this._applyToolApproval(
-            event.toolCallId,
-            event.approved
-          );
-          this._autoContinuation.afterInteraction(
-            outcome,
-            event.autoContinue === true,
-            () => this._continuationSpec(connection)
-          );
-        });
+        this._turns.applyInteraction(
+          () => this._applyToolApproval(event.toolCallId, event.approved),
+          event.autoContinue === true,
+          () => this._continuationSpec(connection)
+        );
         break;
       }
 
@@ -13929,34 +13926,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           channel: "web",
           onQueued: releaseIfPending,
           execute: async () => {
-            // Superseded by a later overlapping submit (latest/merge/debounce)
+            // Superseded by a newer overlapping submit, or overtaken (reset,
+            // newer submit) during its debounce quiet period.
             if (
-              this._submitConcurrency.isSuperseded(
-                concurrencyDecision.submitSequence
-              )
+              !(await this._turns.awaitSubmitTurn(concurrencyDecision, epoch))
             ) {
               this._completeSkippedRequest(connection, requestId);
               return;
-            }
-
-            // Debounce: wait for quiet period
-            if (concurrencyDecision.debounceUntilMs !== null) {
-              await this._submitConcurrency.waitForTimestamp(
-                concurrencyDecision.debounceUntilMs
-              );
-
-              if (this._turnQueue.generation !== epoch) {
-                this._completeSkippedRequest(connection, requestId);
-                return;
-              }
-              if (
-                this._submitConcurrency.isSuperseded(
-                  concurrencyDecision.submitSequence
-                )
-              ) {
-                this._completeSkippedRequest(connection, requestId);
-                return;
-              }
             }
 
             const chatTurnBody = async () => {
@@ -14143,8 +14119,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * only turn execution state.
    */
   protected resetTurnState(): void {
-    this._turnQueue.reset();
-    this._aborts.destroyAll();
+    // Queue generation, abort controllers, submit concurrency, the tool-result
+    // apply chain, the continuation slots and barrier, and parked connections.
+    this._turns.reset();
     for (const controller of this._submissionAbortControllers.values()) {
       controller.abort(new Error("Turn state reset"));
     }
@@ -14155,23 +14132,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     ).catch((error) => {
       console.error("[Think] Failed to skip pending submissions", error);
     });
-    // Tear down the event-driven auto-continuation barrier (#1650): cancel the
-    // coalesce timer and clear the double-fire guard so a reset mid-park can't
-    // leave a stale flag pinning future continuations.
-    this._autoContinuation.reset();
-    this._submitConcurrency.reset();
     this._lastTurnChannel = undefined;
-    this._pendingInteractionPromise = null;
-    // Drop the apply chain so new interactions don't serialize behind a stale
-    // (possibly hung) apply from the turn we just reset (#1649).
-    this._interactionApplyTail = Promise.resolve();
     // The streaming turn (if any) is being torn down; stop exposing its
     // accumulator so a late tool result doesn't apply to an abandoned message.
     this._streamingAssistant = null;
-    this._continuation.sendResumeNone();
-    this._continuation.clearAll();
-    this._preStream.releaseAwaiting();
-    this._preStream.reset();
   }
 
   /**
@@ -14195,7 +14159,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * without requiring the caller to know the id.
    */
   cancelChat(requestId: string, reason?: string): void {
-    this._aborts.cancel(requestId, reason);
+    this._turns.cancel(requestId, reason);
     void this.keepAliveWhile(() => this._cancelScheduledRecovery(requestId));
   }
 
@@ -14243,7 +14207,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   protected abortRequest(requestId: string, reason?: unknown): void {
-    this._aborts.cancel(requestId, reason);
+    this._turns.cancel(requestId, reason);
   }
 
   /**
@@ -16001,26 +15965,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   protected _enqueueInteractionApply(
     apply: () => Promise<void>
   ): Promise<boolean> {
-    const run = async (): Promise<boolean> => {
+    return this._turns.enqueueInteraction(async () => {
       await apply();
       return true;
-    };
-    // `.then(run, run)` runs regardless of a predecessor's outcome so one
-    // rejected apply can't poison the rest of the batch.
-    const resultPromise = this._interactionApplyTail.then(run, run);
-    this._interactionApplyTail = resultPromise.then(
-      () => undefined,
-      () => undefined
-    );
-    this._pendingInteractionPromise = resultPromise;
-    resultPromise
-      .finally(() => {
-        if (this._pendingInteractionPromise === resultPromise) {
-          this._pendingInteractionPromise = null;
-        }
-      })
-      .catch(() => {});
-    return resultPromise;
+    });
   }
 
   private async _applyToolResult(
@@ -16854,86 +16802,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     );
   }
 
-  /**
-   * `true` when an auto-continuation is armed but has not yet fired (#1650): a
-   * pending continuation that has not entered its turn (`!pastCoalesce`) whose
-   * coalesce timer is still pending or whose completeness drain is in progress.
-   * Mirrors `@cloudflare/ai-chat`'s `_hasArmedContinuation`, consuming the shared
-   * controller's `isArmed()`.
-   */
-  private _hasArmedContinuation(): boolean {
-    return this._autoContinuation.hasPendingDecision();
-  }
-
   protected async waitUntilStable(options?: {
     timeout?: number;
   }): Promise<boolean> {
-    const deadline =
-      options?.timeout != null ? Date.now() + options.timeout : null;
-
-    while (true) {
-      if (
-        (await this._awaitWithDeadline(
-          this._submitConcurrency.waitForIdle(() =>
-            this._turnQueue.waitForIdle()
-          ),
-          deadline
-        )) === TIMED_OUT
-      ) {
-        return false;
-      }
-
-      if (!this.hasPendingInteraction()) {
-        // An auto-continuation may be armed (#1650): the coalesce timer is
-        // still pending or its drain is in flight. Report not-stable and wait
-        // it out, mirroring `@cloudflare/ai-chat` — otherwise idle eviction /
-        // recovery could act in the ~50ms window before the held continuation
-        // fires (and the turn it enqueues then drains via the loop top).
-        if (!this._hasArmedContinuation()) {
-          return true;
-        }
-        if (
-          (await this._awaitWithDeadline(
-            new Promise<void>((resolve) =>
-              setTimeout(resolve, AutoContinuationController.COALESCE_MS)
-            ),
-            deadline
-          )) === TIMED_OUT
-        ) {
-          return false;
-        }
-        continue;
-      }
-
-      const pending = this._pendingInteractionPromise;
-      if (pending) {
-        let result: boolean | typeof TIMED_OUT;
-        try {
-          result = await this._awaitWithDeadline(pending, deadline);
-        } catch {
-          continue;
-        }
-        if (result === TIMED_OUT) {
-          return false;
-        }
-      } else {
-        if (
-          (await this._awaitWithDeadline(
-            new Promise<void>((resolve) => setTimeout(resolve, 100)),
-            deadline
-          )) === TIMED_OUT
-        ) {
-          return false;
-        }
-      }
-    }
-  }
-
-  private _awaitWithDeadline<T>(
-    promise: Promise<T>,
-    deadline: number | null
-  ): Promise<T | typeof TIMED_OUT> {
-    return awaitWithDeadline(promise, deadline);
+    return this._turns.waitUntilStable({
+      timeout: options?.timeout,
+      hasPendingInteraction: () => this.hasPendingInteraction()
+    });
   }
 
   private _messageHasPendingInteraction(
@@ -18755,11 +18630,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   private _getSubmitConcurrencyDecision(
     isSubmitMessage: boolean
   ): SubmitConcurrencyDecision {
-    return this._submitConcurrency.decide({
-      concurrency: this.messageConcurrency,
-      isSubmitMessage,
-      queuedTurns: this._turnQueue.queuedCount()
-    });
+    return this._turns.decideSubmit(this.messageConcurrency, isSubmitMessage);
   }
 
   private _completeSkippedRequest(
@@ -18801,11 +18672,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     requestId: string,
     options: { releaseParked?: boolean } = {}
   ): void {
-    const idle = this._preStream.settle(requestId);
-    const releaseParked = options.releaseParked ?? true;
-    if (releaseParked && idle && !this._resumableStream.hasActiveStream()) {
-      this._preStream.releaseAwaiting();
-    }
+    this._turns.settlePreStreamTurn(requestId, options);
   }
 
   private _rollbackDroppedSubmit(connection: Connection): void {
@@ -18881,34 +18748,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    */
   private _flushResolvedPausesOnFinalize = false;
 
-  /**
-   * Drain every in-flight tool-result/approval apply, including any enqueued
-   * while we wait, so the subsequent `_hasIncompleteToolBatch()` re-check sees
-   * every result that has ALREADY arrived. Bounded by real apply activity (a
-   * storage write each), never by a fixed timer: a batch with no further
-   * results drains in the time its pending applies take and then returns. The
-   * loop re-reads `_interactionApplyTail` after each await because a sibling can
-   * extend the tail mid-drain; we stop once the tail stops advancing.
-   */
-  private _drainInteractionApplies(): Promise<void> {
-    return drainInteractionApplies(
-      () => this._continuation.pending !== null,
-      () => this._interactionApplyTail
-    );
-  }
-
-  /**
-   * `true` when the latest assistant message is mid-batch: it carries at least
-   * one settled tool result AND at least one tool call/approval still awaiting a
-   * client result. That is the #1649 signature — the model fanned out parallel
-   * tool calls and only some have been answered. Scoped to the leaf (the step
-   * the continuation answers) so an unrelated dangling tool in an earlier
-   * message doesn't block a legitimate follow-up continuation.
-   */
-  private _hasIncompleteToolBatch(): boolean {
-    return hasIncompleteToolBatch(this.messages);
-  }
-
   private _fireAutoContinuation(): void {
     const pending = this._continuation.pending;
     if (!pending) return;
@@ -18927,15 +18766,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       execute: async () => {
         // The conversation moved on since the tool result (a newer question
         // or reply, a clear): nothing left to continue.
-        if (
-          !continuationTargetIsLatest(this.messages, this._continuation.pending)
-        ) {
+        if (this._continuation.pending && !this._turns.takeContinuation()) {
           this._aborts.remove(requestId);
           this._settleContinuationTurn(requestId, false);
           return;
-        }
-        if (this._continuation.pending) {
-          this._continuation.pending.pastCoalesce = true;
         }
         let streamed = false;
         try {
