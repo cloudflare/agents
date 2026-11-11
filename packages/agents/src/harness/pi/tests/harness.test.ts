@@ -227,6 +227,37 @@ describe("PiHarness on pi-durable", () => {
     ]);
   });
 
+  it("lets a tool parked on a signal hibernate, then finish when it arrives", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    const op = await stub.submit("approval");
+    for (let i = 0; i < 200 && (await stub.parkedTask()) === null; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(await stub.parkedTask()).not.toBeNull();
+    // Parked on a signal only: no work and no time, so no wake job or alarm.
+    for (let i = 0; i < 200 && (await stub.wakeJobTime()) !== null; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(await stub.piWake()).toEqual({ active: false });
+    expect(await stub.wakeJobTime()).toBeNull();
+    expect(await stub.alarmTime()).toBeNull();
+
+    await abortAllDurableObjects();
+    stub = fresh(name);
+    expect(await stub.approve("approved")).toBe("delivered");
+    expect((await stub.wait(op.operationId)).text).toBe("tool said: approved");
+  });
+
+  it("hands pi the task to notify when an input settles", async () => {
+    const stub = fresh();
+    const notify = { taskId: 999_999, key: "answered" };
+    const receipt = await stub.submit("hello", { notify });
+    expect(await stub.storedNotify(receipt.operationId)).toEqual(notify);
+    // A task that is not there to notify fails nothing.
+    expect((await stub.wait(receipt.operationId)).text).toBe("echo: hello");
+  });
+
   it("answers follow-ups queued while a run is going, in order", async () => {
     const stub = fresh();
     const gate = await stub.submit("gate");

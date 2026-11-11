@@ -7,9 +7,10 @@ import {
   type Message,
   type TranscriptContext
 } from "@earendil-works/pi-ai";
-import { num, obj } from "@earendil-works/pi-schema";
+import { num, obj, str } from "@earendil-works/pi-schema";
 import {
   createRegistry,
+  defineSignal,
   defineTask,
   ConversationBusy,
   ConversationIdle,
@@ -18,6 +19,8 @@ import {
   type Extension,
   type InputEntry,
   type LiveState,
+  type SubmissionNotify,
+  type TaskId,
   type ToolRegistration
 } from "@earendil-works/pi-durable";
 import type { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
@@ -115,6 +118,16 @@ function textOf(content: Message["content"] | undefined): string {
  * - `gate-fail` calls `gate`, then fails with a model error.
  * - After a tool result it answers `tool said: <result>`.
  */
+/** The answer the `await_approval` tool parks on, delivered by the test. */
+const Approval = defineSignal({
+  name: "test.approval",
+  version: 1,
+  schema: obj({ text: str() })
+});
+
+/** Where `await_approval` records the task id of its parked call. */
+const PARKED_TASK_KEY = "pi-test-parked-task";
+
 function script(
   context: TranscriptContext,
   storage: DurableObjectStorage
@@ -152,6 +165,11 @@ function script(
       [fauxToolCall("multiply", { value: Number(multiply[1]) })],
       { stopReason: "toolUse" }
     );
+  }
+  if (prompt === "approval") {
+    return fauxAssistantMessage([fauxToolCall("await_approval", {})], {
+      stopReason: "toolUse"
+    });
   }
   if (prompt === "hold") {
     return fauxAssistantMessage([fauxToolCall("hold", {})], {
@@ -368,9 +386,33 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
       session?: string;
       operationId?: string;
       entry?: InputEntry;
+      notify?: { taskId: number; key: string };
     } = {}
   ): Promise<PiReceipt> {
-    return this.harness.submit(text, options);
+    const { notify, ...rest } = options;
+    return this.harness.submit(text, {
+      ...rest,
+      ...(notify
+        ? {
+            notify: {
+              key: notify.key,
+              taskId: notify.taskId as SubmissionNotify["taskId"]
+            }
+          }
+        : {})
+    });
+  }
+
+  /** The `notify` pi stored with the root session's submission. */
+  async storedNotify(operationId: string) {
+    const storage = await this.harness.storage();
+    const conversation = await this.harness.conversation("1");
+    const record = await storage.submissionByRequest(
+      conversation.id,
+      operationId,
+      BACKGROUND_CONTEXT
+    );
+    return record?.notify ?? null;
   }
 
   continueSession(operationId?: string): Promise<PiReceipt> {
@@ -562,6 +604,25 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return this.ctx.storage.getAlarm();
   }
 
+  /** The task id of the parked `await_approval` call, once it parked. */
+  async parkedTask(): Promise<number | null> {
+    return (await this.ctx.storage.get<number>(PARKED_TASK_KEY)) ?? null;
+  }
+
+  /** Deliver the approval the parked call waits for, as a host would. */
+  async approve(text: string): Promise<string> {
+    const taskId = (await this.parkedTask()) as TaskId | null;
+    if (taskId === null) throw new Error("no parked call");
+    const pi = await this.harness.pi();
+    return pi.signal(
+      taskId,
+      Approval,
+      "approval",
+      { text },
+      BACKGROUND_CONTEXT
+    );
+  }
+
   /** Random per instance, so a test can tell the object was evicted. */
   readonly #instance = crypto.randomUUID();
   #releaseHold: (() => void) | undefined;
@@ -673,6 +734,22 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
         };
       }
     });
+    // Parks on the Approval signal instead of returning, holding no
+    // invocation, and runs again with the answer once it is delivered.
+    const awaitApproval: ToolRegistration<typeof NoParameters> = {
+      name: "await_approval",
+      description: "Wait for a person's approval.",
+      parameters: NoParameters,
+      replay: "safe",
+      async execute(_args, api, context) {
+        const answer = await api.readSignal(Approval, "approval", context);
+        if (answer !== undefined && "value" in answer) {
+          return { output: [{ type: "text", text: answer.value.text }] };
+        }
+        await storage.put(PARKED_TASK_KEY, api.taskId);
+        return { sleep: { signals: [Approval.key("approval")] } };
+      }
+    };
     return {
       name: "test-tools",
       sections: [
@@ -687,7 +764,8 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
         holdTool(),
         multiplyTool(),
         gate("gate", "safe"),
-        gate("gate_unsafe", "unsafe")
+        gate("gate_unsafe", "unsafe"),
+        awaitApproval
       ]
     };
   }

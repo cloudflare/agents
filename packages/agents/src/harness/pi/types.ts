@@ -1,4 +1,8 @@
-import type { EntryRecord, InputEntry } from "@earendil-works/pi-durable";
+import type {
+  EntryRecord,
+  InputEntry,
+  SubmissionNotify
+} from "@earendil-works/pi-durable";
 
 /**
  * `PiHarness`'s own types: how the harness addresses sessions and reports
@@ -46,6 +50,13 @@ export type PiSubmitOptions = {
    * start with `pi.`.
    */
   readonly entry?: InputEntry;
+  /**
+   * A pi task to signal when this input settles: pi delivers its
+   * `SubmissionSettled` signal, the settled record, to `taskId` under `key`.
+   * For a tool that parks until another session answers. A task that is gone
+   * or no longer listening is skipped; the input settles as usual.
+   */
+  readonly notify?: SubmissionNotify;
 };
 
 export type PiContinueOptions = {
