@@ -393,6 +393,27 @@ describe("ChatTurns", () => {
     expect(turns.hasPendingInteraction()).toBe(false);
   });
 
+  it("in a reply the conversation moved past, counts only a known client's call or an approval", () => {
+    // A dead call an older version stored looks exactly like this one.
+    host.transcript = [
+      user("u1"),
+      toolReply("a1", "input-available"),
+      user("u2")
+    ];
+    expect(turns.hasPendingInteraction()).toBe(false);
+
+    host.clientTools = new Set(["x"]);
+    expect(turns.hasPendingInteraction()).toBe(true);
+
+    host.clientTools = new Set();
+    host.transcript = [
+      user("u1"),
+      toolReply("a1", "approval-requested"),
+      user("u2")
+    ];
+    expect(turns.hasPendingInteraction()).toBe(true);
+  });
+
   // ── Idle and stable ─────────────────────────────────────────────────
 
   it("is not idle while a turn runs, a result is applied, or a continuation is armed", async () => {
