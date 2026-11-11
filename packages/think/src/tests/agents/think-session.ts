@@ -3204,6 +3204,62 @@ export class ThinkTestAgent extends Think {
   }
 
   /**
+   * A turn is cut off and its recovery scheduled. The recovery continuation
+   * runs and streams slowly; the user stops the turn by the request id they
+   * know (the original one) while it streams.
+   */
+  async testCancelDuringRunningRecoveryForTest(): Promise<{
+    textBeforeCancel: string;
+    finalText: string;
+    incident: { status: string; reason?: string } | undefined;
+  }> {
+    await this.armTransientErrorForTest({
+      classification: "transient",
+      inStream: true
+    });
+    const assistantText = async () =>
+      (
+        (await this.getMessages()).filter((m) => m.role === "assistant").at(-1)
+          ?.parts ?? []
+      )
+        .map((p) => (p.type === "text" ? p.text : ""))
+        .join("");
+    try {
+      await this.testChat("trigger transient error");
+      const textBeforeCancel = await assistantText();
+      const [scheduled] = await this._recoveryIncidentsForTest();
+      this._errorConfig = null;
+      this._errorAttemptsRemaining = null;
+      this._streamChunkDelayMs = 150;
+      const queue = (this as unknown as { _turnQueue: { isActive: boolean } })
+        ._turnQueue;
+      const recovery = runRecoveryWorkForTest(this, "_chatRecoveryContinue");
+      const deadline = Date.now() + 5_000;
+      while (!queue.isActive && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      this.cancelChat(
+        scheduled?.recoveryRootRequestId ?? scheduled?.requestId ?? ""
+      );
+      await recovery;
+      const [incident] = await this._recoveryIncidentsForTest();
+      return {
+        textBeforeCancel,
+        finalText: await assistantText(),
+        incident: incident && {
+          status: incident.status,
+          reason: incident.reason
+        }
+      };
+    } finally {
+      this._streamChunkDelayMs = null;
+      this._errorConfig = null;
+      this._errorAttemptsRemaining = null;
+      Reflect.deleteProperty(this, "classifyChatError");
+    }
+  }
+
+  /**
    * Every inference streams a little, then stalls. Each attempt makes
    * progress, so only the transient counter bounds the loop. Returns how many
    * recoveries ran before nothing more was scheduled.

@@ -254,7 +254,11 @@ import {
   type ChatRecoveryKind
 } from "agents/chat";
 import type { Streams } from "agents/streams";
-import { CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS } from "agents/chat";
+import {
+  CHAT_RECOVERY_CANCELLED_REASON,
+  CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
+  type RecoveryAttemptHandle
+} from "agents/chat";
 import type {
   StreamChunkData,
   ClientToolSchema,
@@ -14201,6 +14205,37 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     return true;
   }
 
+  /**
+   * Whether a client stopped this running recovery attempt. The cancel marked
+   * the incident when it was still scheduled; record it here otherwise, so
+   * the attempt's own outcome does not overwrite the user's stop. A
+   * submission the recovery owned settles as `aborted`.
+   */
+  private async _recoveryAttemptStopped(
+    stop: RecoveryAttemptHandle,
+    data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined
+  ): Promise<boolean> {
+    if (!stop.signal.aborted) return false;
+    if (
+      !(await this._chatRecoveryEngine().isRecoveryCancelled(data?.incidentId))
+    ) {
+      await this._updateChatRecoveryIncident(
+        data?.incidentId,
+        "skipped",
+        CHAT_RECOVERY_CANCELLED_REASON
+      );
+    }
+    if (data?.recoveredRequestId) {
+      await this._completeRecoveredSubmission(
+        data.recoveredRequestId,
+        "aborted",
+        null,
+        null
+      );
+    }
+    return true;
+  }
+
   /** Abort every in-flight chat turn on this agent. */
   cancelAllChats(): void {
     this._aborts.destroyAll();
@@ -18157,12 +18192,21 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         controller
       );
     }
+    // A client stops this attempt by the original request id: the only id it
+    // knows until the recovered turn streams.
+    const stop = this._turns.beginRecoveryAttempt(data?.originalRequestId);
+    const turnSignal = controller
+      ? AbortSignal.any([controller.signal, stop.signal])
+      : stop.signal;
 
     try {
       const recoveryConfig = this._resolveChatRecoveryConfig();
       const ready = await this.waitUntilStable({
         timeout: recoveryConfig.stableTimeoutMs
       });
+      // A stop that landed while the attempt waited wins over the
+      // stable-state timeout's park, reschedule or exhaustion.
+      if (await this._recoveryAttemptStopped(stop, data)) return;
       if (!ready) {
         // PARK while a CLIENT interaction is pending — the turn is waiting for
         // the human, not churning; see `_chatRecoveryContinue` for the full
@@ -18246,13 +18290,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         onTurnStarted,
         () =>
           this._retryLastUserTurn(this._lastClientTools, this._lastBody, {
-            ...(controller && { signal: controller.signal }),
+            signal: turnSignal,
             trigger: "recovery-retry",
             ...(regeneratedLeafId !== undefined && {
               branchParentId: data?.targetUserId
             })
           })
       );
+      if (await this._recoveryAttemptStopped(stop, data)) return;
       if (
         result.status !== "completed" &&
         this._takeRecoveryReschedule(data?.incidentId)
@@ -18287,6 +18332,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         error
       );
     } finally {
+      stop.end();
       this._activeChatRecoveryRootRequestId = previousRootRequestId;
       if (recoveredSubmission) {
         this._submissionAbortControllers.delete(
@@ -18465,12 +18511,21 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         controller
       );
     }
+    // A client stops this attempt by the original request id: the only id it
+    // knows until the recovered turn streams.
+    const stop = this._turns.beginRecoveryAttempt(data?.originalRequestId);
+    const turnSignal = controller
+      ? AbortSignal.any([controller.signal, stop.signal])
+      : stop.signal;
 
     try {
       const recoveryConfig = this._resolveChatRecoveryConfig();
       const ready = await this.waitUntilStable({
         timeout: recoveryConfig.stableTimeoutMs
       });
+      // A stop that landed while the attempt waited wins over the
+      // stable-state timeout's park, reschedule or exhaustion.
+      if (await this._recoveryAttemptStopped(stop, data)) return;
       if (!ready) {
         // PARK, don't burn the budget: a stable-state timeout while a CLIENT
         // interaction is pending is not churn — the turn is correctly waiting
@@ -18546,13 +18601,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         recoveredSubmission,
         onTurnStarted,
         () =>
-          this.continueLastTurn(
-            undefined,
-            controller
-              ? { signal: controller.signal, trigger: "recovery-continue" }
-              : { trigger: "recovery-continue" }
-          )
+          this.continueLastTurn(undefined, {
+            signal: turnSignal,
+            trigger: "recovery-continue"
+          })
       );
+      if (await this._recoveryAttemptStopped(stop, data)) return;
       if (
         result.status !== "completed" &&
         this._takeRecoveryReschedule(data?.incidentId)
@@ -18587,6 +18641,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         error
       );
     } finally {
+      stop.end();
       this._activeChatRecoveryRootRequestId = previousRootRequestId;
       if (recoveredSubmission) {
         this._submissionAbortControllers.delete(

@@ -939,6 +939,19 @@ describe("Think — error handling", () => {
     expect(result.finalText).toBe(result.textBeforeCancel);
   });
 
+  it("stops a recovery the user cancels while its continuation streams", async () => {
+    const agent = await freshAgent(
+      `transient-cancel-run-${crypto.randomUUID()}`
+    );
+    const result = await agent.testCancelDuringRunningRecoveryForTest();
+
+    expect(result.incident).toMatchObject({
+      status: "skipped",
+      reason: "user_cancelled"
+    });
+    expect(result.finalText).toBe(result.textBeforeCancel);
+  });
+
   it("bounds a turn that streams a chunk and stalls on every attempt", async () => {
     const agent = await freshAgent(`stall-progress-${crypto.randomUUID()}`);
     const result = await agent.testRepeatedStallAfterProgressForTest(40);
