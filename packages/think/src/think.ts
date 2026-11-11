@@ -13814,8 +13814,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     try {
       await this._turns.runClientRequest<{
         branchParentId: string | undefined;
-        clientTools: ClientToolSchema[] | undefined;
-        body: Record<string, unknown> | undefined;
         generation: number;
       }>({
         requestId,
@@ -13842,7 +13840,50 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             () => this._clearChatTerminal()
           ),
         persist: async ({ generation, isCurrent }) => {
-          // ── Persist client tools and body (only for accepted requests) ──
+          // ── Reconcile, persist, and broadcast user messages ──────────
+          //
+          // The client may post an in-flight assistant snapshot it minted
+          // optimistically (e.g. while a previous tool call is still
+          // streaming). Reconcile against the server's current active path
+          // so client IDs map onto server IDs and stale client states pick
+          // up the server's tool outputs. Without this, Session's
+          // INSERT-OR-IGNORE-by-ID would persist a duplicate orphan
+          // assistant row alongside the real server-generated one.
+          const reconciledTurn = await this._reconcileAndPersistIncoming(
+            incomingMessages,
+            { requestId, isRegeneration, isCurrent, channel: "web" }
+          );
+          if (!reconciledTurn) return null;
+
+          this._broadcastMessages([connection.id]);
+          return { branchParentId: reconciledTurn.branchParentId, generation };
+        },
+        enqueue: (turn, generation, onQueued) =>
+          this.keepAliveWhile(async () => {
+            const result = await this._admitTurn({
+              admission: "queue",
+              trigger: "ws-chat",
+              requestId,
+              generation,
+              continuation: false,
+              channel: "web",
+              onQueued,
+              execute: turn
+            });
+            return result.status;
+          }),
+        onSkipped: () => this._completeSkippedRequest(connection, requestId),
+        // Cancelled before its turn started: the model is never called. Like
+        // a skipped request it never streamed, so only the tab that sent it
+        // was ever shown it.
+        onCancelledBeforeStart: () =>
+          this._endUnstartedRequest(connection, requestId, "aborted"),
+        run: async ({ branchParentId, generation }, abortSignal) => {
+          // The request's tools and body become the stored request context
+          // now that its turn runs. Storing them when the request was
+          // accepted would change what a continuation of the turn still
+          // running uses, and a request cancelled or skipped in the queue
+          // would leave its context behind.
           const requestClientTools =
             rawClientTools && rawClientTools.length > 0
               ? rawClientTools
@@ -13852,7 +13893,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           withAgentSpan(
             this,
             "persist_chat_request_context",
-            "interaction",
+            "turn",
             {
               "cloudflare.agents.component": "think",
               "cloudflare.agents.turn.request_id": requestId,
@@ -13871,65 +13912,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               this._persistBody();
             }
           );
-
-          // ── Reconcile, persist, and broadcast user messages ──────────
-          //
-          // The client may post an in-flight assistant snapshot it minted
-          // optimistically (e.g. while a previous tool call is still
-          // streaming). Reconcile against the server's current active path
-          // so client IDs map onto server IDs and stale client states pick
-          // up the server's tool outputs. Without this, Session's
-          // INSERT-OR-IGNORE-by-ID would persist a duplicate orphan
-          // assistant row alongside the real server-generated one.
           const clientToolsForTurn = this._lastClientTools;
           const bodyForTurn = this._lastBody;
-          const reconciledTurn = await this._reconcileAndPersistIncoming(
-            incomingMessages,
-            { requestId, isRegeneration, isCurrent, channel: "web" }
-          );
-          if (!reconciledTurn) return null;
 
-          this._broadcastMessages([connection.id]);
-          return {
-            branchParentId: reconciledTurn.branchParentId,
-            clientTools: clientToolsForTurn,
-            body: bodyForTurn,
-            generation
-          };
-        },
-        enqueue: (turn, generation, onQueued) =>
-          this.keepAliveWhile(async () => {
-            const result = await this._admitTurn({
-              admission: "queue",
-              trigger: "ws-chat",
-              requestId,
-              generation,
-              continuation: false,
-              channel: "web",
-              onQueued,
-              execute: turn
-            });
-            return result.status;
-          }),
-        onSkipped: () => this._completeSkippedRequest(connection, requestId),
-        // Cancelled before its turn started: the model is never called.
-        onCancelledBeforeStart: () =>
-          this._broadcastChat({
-            type: MSG_CHAT_RESPONSE,
-            id: requestId,
-            body: "",
-            done: true,
-            outcome: "aborted"
-          }),
-        run: async (
-          {
-            branchParentId,
-            clientTools: clientToolsForTurn,
-            body: bodyForTurn,
-            generation
-          },
-          abortSignal
-        ) => {
           const chatTurnBody = async () => {
             // Bounded compact-and-retry loop (opt-in via
             // `contextOverflow.reactive`). A turn that overflows the
@@ -18658,21 +18643,38 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
   // ── Concurrency strategies ──────────────────────────────────────
 
+  /**
+   * Send the terminal frame of a request that ended before its turn started
+   * (skipped or cancelled in the queue) to the connection that sent it. No
+   * other connection was shown the request.
+   */
+  private _endUnstartedRequest(
+    connection: Connection,
+    requestId: string,
+    outcome: "skipped" | "aborted"
+  ): void {
+    try {
+      connection.send(
+        JSON.stringify(
+          this._withOriginMessageIds({
+            type: MSG_CHAT_RESPONSE,
+            id: requestId,
+            body: "",
+            done: true,
+            outcome
+          })
+        )
+      );
+    } catch {
+      // The connection closed before the server could answer.
+    }
+  }
+
   private _completeSkippedRequest(
     connection: Connection,
     requestId: string
   ): void {
-    connection.send(
-      JSON.stringify(
-        this._withOriginMessageIds({
-          type: MSG_CHAT_RESPONSE,
-          id: requestId,
-          body: "",
-          done: true,
-          outcome: "skipped"
-        })
-      )
-    );
+    this._endUnstartedRequest(connection, requestId, "skipped");
     // A skipped turn settles out of the pre-stream set, but must NOT release
     // parked connections (#1784): a skip happens because a NEWER turn was
     // admitted (latest/merge supersede) or the queue generation advanced. The

@@ -1465,15 +1465,11 @@ export class AIChatAgent<
               // The request was cancelled before its turn started. There is
               // no assistant message, so onChatResponse doesn't fire, and the
               // stored request context is left alone: tool continuations and
-              // continueLastTurn read it and this request never ran.
+              // continueLastTurn read it and this request never ran. Like a
+              // skipped request it never streamed, so only the tab that sent
+              // it was ever shown it.
               onCancelledBeforeStart: () =>
-                this._broadcastChatMessage({
-                  body: "",
-                  done: true,
-                  id: chatMessageId,
-                  type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
-                  outcome: "aborted"
-                }),
+                this._endUnstartedRequest(connection, chatMessageId, "aborted"),
               run: async (_prepared, signal) => {
                 this._setRequestContext(requestClientTools, requestBody);
 
@@ -2860,7 +2856,16 @@ export class AIChatAgent<
     }
   }
 
-  private _completeSkippedRequest(connection: Connection, requestId: string) {
+  /**
+   * Send the terminal frame of a request that ended before its turn started
+   * (skipped or cancelled in the queue) to the connection that sent it. No
+   * other connection was shown the request.
+   */
+  private _endUnstartedRequest(
+    connection: Connection,
+    requestId: string,
+    outcome: "skipped" | "aborted"
+  ): void {
     this._sendDirectMessage(
       connection,
       this._withOriginMessageIds({
@@ -2868,9 +2873,13 @@ export class AIChatAgent<
         done: true,
         id: requestId,
         type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
-        outcome: "skipped"
+        outcome
       })
     );
+  }
+
+  private _completeSkippedRequest(connection: Connection, requestId: string) {
+    this._endUnstartedRequest(connection, requestId, "skipped");
     // A skipped turn settles out of the pre-stream set, but must NOT release
     // parked connections (#1784): a skip happens because a NEWER turn was
     // admitted (latest/merge supersede) or the queue generation advanced. The
