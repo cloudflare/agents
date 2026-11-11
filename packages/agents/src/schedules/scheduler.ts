@@ -465,6 +465,9 @@ export class Scheduler<
       await tryN(
         maxAttempts,
         async (attempt) => {
+          // The root keeps the job while this facet waits to retry. A cancel
+          // made meanwhile deletes it there: do not run the callback again.
+          if (attempt > 1 && !(await this.get(id))) return;
           if (attempt > 1) {
             this.#emit("schedule:retry", {
               callback: fn,
