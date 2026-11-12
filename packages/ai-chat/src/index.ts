@@ -50,7 +50,6 @@ import {
   isReplayChunk,
   parseProtocolMessage,
   sendIfOpen,
-  hasIncompleteToolBatch,
   ChatTurns,
   type RecoveryAttemptHandle,
   type ToolInteractionOutcome,
@@ -1898,36 +1897,6 @@ export class AIChatAgent<
     }));
   }
 
-  private _flushAwaitingStreamStartConnections() {
-    if (!this._resumableStream.hasActiveStream()) {
-      return;
-    }
-
-    this._continuation.flushAwaitingConnections((c) =>
-      this._notifyStreamResuming(c)
-    );
-  }
-
-  private _activateDeferredAutoContinuation() {
-    // Run the freshly-activated continuation through the event-driven barrier
-    // (#1650) rather than enqueuing it directly — its batch may still be
-    // incomplete (or a stream may be active), in which case it parks and
-    // re-arms instead of firing inference against a half-complete transcript.
-    this._autoContinuation.activateDeferredAndReschedule();
-  }
-
-  private _clearAllAutoContinuationState(sendNone = false) {
-    this._clearPendingAutoContinuation(sendNone);
-    this._continuation.clearDeferred();
-  }
-
-  private _clearPendingAutoContinuation(sendNone = false) {
-    if (sendNone) {
-      this._continuation.sendResumeNone();
-    }
-    this._continuation.clearPending();
-  }
-
   /**
    * The shared resume-handshake driver (Tier-2). Lazily built; the
    * `ResumableStream` / `ContinuationState` / pending set are stable after the
@@ -1987,17 +1956,10 @@ export class AIChatAgent<
       ...options,
       ...(originIds && { originMessageIds: originIds })
     });
-    // Flush connections parked during this turn's pre-stream window (#1784)
-    // into the normal STREAM_RESUMING path now that a stream exists. Safe for
-    // every turn — the awaiting set is empty unless a client reconnected before
-    // the first chunk. (Continuation-turn parks live in `_continuation` and are
-    // flushed below.)
-    this._preStream.flushOnStreamStart((c) => this._notifyStreamResuming(c));
-    if (this._continuation.pending?.requestId === requestId) {
-      this._continuation.activatePending();
-      this._flushAwaitingStreamStartConnections();
-      this._activateDeferredAutoContinuation();
-    }
+    // Connections parked on this turn's pre-stream window (#1784) or on the
+    // continuation it runs go into the normal STREAM_RESUMING path now that
+    // a stream exists.
+    this._turns.streamStarted(requestId, (c) => this._notifyStreamResuming(c));
     // Arm on START as well as finish so cleanup still has a belt-and-suspenders
     // wake if fiber recovery cannot finalize a stream. The last-activity sweep
     // threshold keeps an actively streaming run from being reclaimed before it
@@ -2025,10 +1987,7 @@ export class AIChatAgent<
 
   private _afterStreamFinished(requestId: string | null) {
     this._pendingResumeConnections.clear();
-    if (requestId === this._continuation.activeRequestId) {
-      this._continuation.activeRequestId = null;
-      this._continuation.activeConnectionId = null;
-    }
+    this._turns.streamEnded(requestId);
   }
 
   /**
@@ -2089,11 +2048,7 @@ export class AIChatAgent<
   protected _markStreamError(streamId: string) {
     const erroredRequestId = this._resumableStream.activeRequestId;
     this._resumableStream.markError(streamId);
-    this._pendingResumeConnections.clear();
-    if (erroredRequestId === this._continuation.activeRequestId) {
-      this._continuation.activeRequestId = null;
-      this._continuation.activeConnectionId = null;
-    }
+    this._afterStreamFinished(erroredRequestId);
   }
 
   /**
@@ -3230,153 +3185,88 @@ export class AIChatAgent<
    * continuation would never fire. A slow batch is re-checked here and simply
    * keeps holding (event-driven) until its remaining siblings answer.
    */
-  private _onStreamingTurnFinalized(finishReason?: string): void {
+  private _onStreamingTurnFinalized(): void {
     this._streamingTurnActive = false;
-
-    // A tool result or approval can leave an auto-continuation pending while the
-    // original AI SDK stream is still active. If that stream then finishes with
-    // a normal assistant response, the continuation is stale: firing it would
-    // replay a transcript ending in assistant text. Modern Anthropic models
-    // reject that request as an unsupported assistant prefill (#1618, #2171).
-    // A sibling tool call still awaiting its result keeps the continuation:
-    // the stream's text did not answer it, and the continuation is the only
-    // record of the batch's opt-in.
-    if (
-      finishReason === "stop" &&
-      this._continuation.pending &&
-      !this._hasIncompleteToolBatch()
-    ) {
-      this._clearPendingAutoContinuation(true);
-      return;
-    }
-
-    this._autoContinuation.rearmForBatch();
+    // Whether the held continuation still has something to answer (#1618,
+    // #2171) is decided when its turn starts.
+    this._turns.replyFinalized();
   }
 
   /**
-   * `true` when the latest assistant message is mid-batch: it carries at least
-   * one settled tool result AND at least one tool call/approval still awaiting a
-   * client result. That is the #1649 signature — the model fanned out parallel
-   * tool calls and only some have been answered. Scoped to the leaf (the step
-   * the continuation answers) so an unrelated dangling tool in an earlier
-   * message doesn't block a legitimate follow-up continuation.
+   * Run the continuation turn for the pending continuation. The turn core
+   * owns it (`ChatTurns.runContinuationTurn`): the abort signal, the claim
+   * when the turn starts, the order of the steps, the failure report and
+   * the settle. This supplies what each step does here: the queue wrapper,
+   * the recovery fiber, `onChatMessage` with `continuation: true`, `_reply`,
+   * and how a failure reaches clients and `onChatResponse`.
    */
-  private _hasIncompleteToolBatch(): boolean {
-    return hasIncompleteToolBatch(this.messages);
-  }
-
   private _fireAutoContinuation() {
-    const pending = this._continuation.pending;
-    if (!pending) return;
-    const requestId = pending.requestId;
-
     const epoch = this._turnQueue.generation;
-    // _runExclusiveChatTurn must be called synchronously so the chat turn
-    // queue is set up immediately — otherwise waitForIdle() can resolve
-    // before the continuation starts.  keepAlive() is called inside the
-    // turn to prevent hibernation while streaming, without deferring the queue
-    // registration.
-    this._runExclusiveChatTurn(
-      requestId,
-      async () => {
-        const dispose = await this.keepAlive();
-        try {
-          // Nothing to continue: the continuation was cleared, or the
-          // conversation moved on since its tool result (a newer question or
-          // reply, a regenerate, a clear).
-          const continuation = this._turns.takeContinuation();
-          if (!continuation) {
-            this._clearAllAutoContinuationState(true);
-            return;
-          }
-          const { connection, clientTools, body } = continuation;
-
-          const abortSignal = this._abortRegistry.getSignal(requestId);
-
-          return this._tryCatchChat(async () => {
-            return agentContext.run(
-              {
-                agent: this,
-                connection,
-                request: undefined,
-                email: undefined
-              },
-              async () => {
-                const autoContinuationBody = async () => {
-                  let replying = false;
-                  try {
-                    await this._repairInterruptedToolsBeforeTurn({
-                      continuation: true
-                    });
-                    const response = await this.onChatMessage(
-                      async (_finishResult) => {},
-                      {
-                        requestId,
-                        abortSignal,
-                        clientTools,
-                        body,
-                        continuation: true
-                      }
-                    );
-
-                    if (response) {
-                      const replyResult = await this._reply(
-                        requestId,
-                        response,
-                        [],
-                        {
-                          continuation: true,
-                          chatMessageId: requestId,
-                          onStreamStart: () => {
-                            replying = true;
-                          }
-                        }
-                      );
-                      if (replyResult.status === "error") {
-                        this._clearAllAutoContinuationState(true);
-                        return;
-                      }
-                      this._activateDeferredAutoContinuation();
-                    } else {
-                      this._clearPendingAutoContinuation(true);
-                      this._activateDeferredAutoContinuation();
-                    }
-                  } catch (error) {
-                    if (
-                      !replying &&
-                      !abortSignal?.aborted &&
-                      !isDurableObjectResetError(error)
-                    ) {
-                      await this._reportContinuationFailure(requestId, error);
-                    }
-                    throw error;
-                  } finally {
-                    this._abortRegistry.remove(requestId);
-                  }
-                };
-
-                await this._runChatRecoveryFiber(
-                  requestId,
-                  true,
-                  autoContinuationBody
-                );
-              }
-            );
-          });
-        } finally {
-          dispose();
+    void this._turns.runContinuationTurn({
+      // _runExclusiveChatTurn must be called synchronously so the chat turn
+      // queue is set up immediately, otherwise waitForIdle() can resolve
+      // before the continuation starts. keepAlive() is called inside the
+      // turn to prevent hibernation while streaming, without deferring the
+      // queue registration.
+      enqueue: (requestId, turn) =>
+        this._runExclusiveChatTurn(
+          requestId,
+          async () => {
+            const dispose = await this.keepAlive();
+            try {
+              await this._tryCatchChat(turn);
+            } finally {
+              dispose();
+            }
+          },
+          { epoch }
+        ),
+      agent: this,
+      // The turn core runs these in order, inside this recovery fiber and
+      // the agent context of the continuation's connection, and reports a
+      // failure before the stream to clients.
+      recover: (requestId, body) =>
+        this._runChatRecoveryFiber(requestId, true, body),
+      model: async ({ requestId, clientTools, body }, abortSignal) => {
+        await this._repairInterruptedToolsBeforeTurn({ continuation: true });
+        return this.onChatMessage(async (_finishResult) => {}, {
+          requestId,
+          abortSignal,
+          clientTools,
+          body,
+          continuation: true
+        });
+      },
+      stream: ({ requestId }, response) =>
+        this._reply(requestId, response, [], {
+          continuation: true,
+          chatMessageId: requestId
+        }),
+      failure: {
+        describe: (error) => {
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+          this._emit("message:error", { error: errorMessage });
+          return errorMessage;
+        },
+        recordTerminal: (requestId, errorMessage) =>
+          this._recordChatTerminal(requestId, errorMessage),
+        broadcast: (frame) =>
+          this._broadcastChatMessage({
+            ...frame,
+            type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+          }),
+        // Queued, so the hook runs once the turn has left the queue.
+        respond: (result: ChatResponseResult) => {
+          this._pendingChatResponseResults.push(result);
         }
       },
-      {
-        epoch,
-        onStale: () => this._clearAllAutoContinuationState(true)
+      onError: (error, { errorPrefix }) => {
+        console.error(
+          errorPrefix ?? "[AIChatAgent] Auto-continuation failed:",
+          error
+        );
       }
-    ).catch((error) => {
-      const errorPrefix =
-        this._continuation.pending?.errorPrefix ??
-        "[AIChatAgent] Auto-continuation failed:";
-      this._clearAllAutoContinuationState(true);
-      console.error(errorPrefix, error);
     });
   }
 
@@ -3399,42 +3289,6 @@ export class AIChatAgent<
     });
     this._emit("message:error", { error: errorMessage });
     await this._recordChatTerminal(requestId, errorMessage);
-  }
-
-  /**
-   * Report an auto-continuation that failed before it produced a response,
-   * the way a stream error is reported: an error frame, a durable terminal
-   * record, and `onChatResponse` with `status: "error"` for the assistant
-   * message the continuation would have extended. Called inside the turn so
-   * the response hook drains when the turn settles.
-   */
-  private async _reportContinuationFailure(
-    requestId: string,
-    error: unknown
-  ): Promise<void> {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    this._broadcastChatMessage({
-      body: errorMessage,
-      done: true,
-      error: true,
-      id: requestId,
-      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
-      continuation: true
-    });
-    const message = [...this.messages]
-      .reverse()
-      .find((candidate) => candidate.role === "assistant");
-    if (message) {
-      this._pendingChatResponseResults.push({
-        message,
-        requestId,
-        continuation: true,
-        status: "error",
-        error: errorMessage
-      });
-    } else {
-      await this._recordChatTerminal(requestId, errorMessage);
-    }
   }
 
   /**
@@ -7482,8 +7336,8 @@ export class AIChatAgent<
           return { status: "aborted" };
         }
         if (!response.body) {
-          // Send empty response if no body
-          this._clearPendingAutoContinuation(true);
+          // Send empty response if no body. A continuation turn that gets
+          // here never streamed, and settles as such.
           this._broadcastChatMessage({
             body: "",
             done: true,
@@ -7491,7 +7345,6 @@ export class AIChatAgent<
             type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
             ...(continuation && { continuation: true })
           });
-          this._activateDeferredAutoContinuation();
           return { status: "completed" };
         }
 
@@ -7794,7 +7647,7 @@ export class AIChatAgent<
           // TODO(phase-5): the Tier-2 streaming-codec extraction touches this
           // same region — fold this finalize hook into the extracted codec
           // rather than leaving a second seam here.
-          this._onStreamingTurnFinalized(streamResult.finishReason);
+          this._onStreamingTurnFinalized();
         }
       })
     );

@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import type { UIMessage as ChatMessage } from "ai";
 import { getAgentByName } from "agents";
+import { subscribe } from "agents/observability";
 import { MessageType, type OutgoingMessage } from "../types";
 import { connectChatWS, isUseChatResponseMessage } from "./test-utils";
 
@@ -410,6 +411,234 @@ describe("chat turn races", () => {
     expect(stored[1].parts[0]).toMatchObject({ state: "output-available" });
     expect(stored[3]).toEqual(reply2);
     expect(await agent.getChatMessageCallCountForTest()).toBe(0);
+    ws.close(1000);
+  });
+
+  it("a continuation stopped while it waits in the queue never calls the model", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const seen = record(ws);
+    const agent = await getAgentByName(env.TestChatAgent, room);
+    await agent.persistMessages([user1, toolReply("assistant-1", "call-1")]);
+
+    // Another turn holds the queue, so the continuation the tool result
+    // fires has to wait behind it.
+    await agent.holdTurnQueueForTest();
+    send(ws, toolResult("call-1"));
+    await waitUntil(
+      async () => (await agent.pendingContinuationRequestIdForTest()) !== null
+    );
+    await delay(150);
+    const continuationId = await agent.pendingContinuationRequestIdForTest();
+    expect(continuationId).not.toBeNull();
+
+    // A stop for the continuation arrives while it waits.
+    send(ws, {
+      type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
+      id: continuationId
+    });
+    await delay(50);
+    await agent.releaseTurnQueueForTest();
+    await agent.waitForIdleForTest();
+
+    expect(await agent.getChatMessageCallCountForTest()).toBe(0);
+    expect(await agent.getContinuationStateForTest()).toMatchObject({
+      hasPending: false,
+      hasDeferred: false
+    });
+    // The tab that was waiting on the continuation is told there is none.
+    expect(
+      seen.some((m) => m.type === MessageType.CF_AGENT_STREAM_RESUME_NONE)
+    ).toBe(true);
+    ws.close(1000);
+  });
+
+  it("a result that arrives while a continuation fails still reaches the model", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const agent = await getAgentByName(env.TestChatAgent, room);
+    // The reply ended on a client tool call, next to an approved call the
+    // server has not run yet.
+    const reply: ChatMessage = {
+      id: "assistant-1",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-testTool",
+          toolCallId: "call-1",
+          state: "input-available",
+          input: {}
+        },
+        {
+          type: "tool-otherTool",
+          toolCallId: "call-2",
+          state: "approval-responded",
+          input: {},
+          approval: { id: "approval-2", approved: true }
+        }
+      ] as ChatMessage["parts"]
+    };
+    await agent.persistMessages([user1, reply]);
+    await agent.setTestBody({ delayMs: 300, failFirstContinuation: true });
+
+    // The first result starts a continuation, which waits on the model.
+    send(ws, toolResult("call-1"));
+    await waitUntil(
+      async () => (await agent.getChatMessageCallCountForTest()) === 1
+    );
+    // A second result lands meanwhile. Then the model call fails.
+    send(ws, toolResult("call-2"));
+    await waitUntil(
+      async () =>
+        (await agent.getContinuationStateForTest()).hasDeferred === true
+    );
+
+    // The second result gets its own continuation.
+    await waitUntil(
+      async () => (await agent.getChatMessageCallCountForTest()) === 2
+    );
+    await delay(400);
+    await agent.waitForIdleForTest();
+    expect(await agent.getChatMessageCallCountForTest()).toBe(2);
+    expect(await agent.getContinuationStateForTest()).toMatchObject({
+      hasPending: false,
+      hasDeferred: false
+    });
+    ws.close(1000);
+  });
+
+  it("a continuation that fails before it streams is reported like any failed reply", async () => {
+    const room = crypto.randomUUID();
+    const observed: string[] = [];
+    const unsubscribe = subscribe("message", (event) => {
+      if (event.agent === "TestChatAgent" && event.name === room) {
+        observed.push(event.type);
+      }
+    });
+    try {
+      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+      const seen = record(ws);
+      const agent = await getAgentByName(env.TestChatAgent, room);
+      await agent.persistMessages([user1, toolReply("assistant-1", "call-1")]);
+      await agent.setTestBody({ failContinuations: true });
+
+      send(ws, toolResult("call-1"));
+      await waitUntil(() =>
+        seen.some(
+          (m) =>
+            isUseChatResponseMessage(m) && m.error === true && m.done === true
+        )
+      );
+      await agent.waitForIdleForTest();
+
+      // The error frame carries the failure and marks the continuation.
+      const frame = seen.find(
+        (m) => isUseChatResponseMessage(m) && m.error === true
+      );
+      expect(frame).toMatchObject({
+        body: "The model is unavailable",
+        continuation: true
+      });
+      // Observers see it, as they see a failed request or a stream error.
+      expect(observed).toContain("message:error");
+      ws.close(1000);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it("continuations that keep failing stop once every result had its attempt", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const seen = record(ws);
+    const agent = await getAgentByName(env.TestChatAgent, room);
+    const reply: ChatMessage = {
+      id: "assistant-1",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-testTool",
+          toolCallId: "call-1",
+          state: "input-available",
+          input: {}
+        },
+        {
+          type: "tool-otherTool",
+          toolCallId: "call-2",
+          state: "approval-responded",
+          input: {},
+          approval: { id: "approval-2", approved: true }
+        }
+      ] as ChatMessage["parts"]
+    };
+    await agent.persistMessages([user1, reply]);
+    await agent.setTestBody({ delayMs: 300, failContinuations: true });
+
+    // The second result lands while the first one's continuation waits on
+    // the model. Both continuations fail.
+    send(ws, toolResult("call-1"));
+    await waitUntil(
+      async () => (await agent.getChatMessageCallCountForTest()) === 1
+    );
+    send(ws, toolResult("call-2"));
+    await waitUntil(
+      async () => (await agent.getChatMessageCallCountForTest()) === 2
+    );
+    await delay(500);
+    await agent.waitForIdleForTest();
+
+    // A resent result changes nothing, so it starts nothing.
+    send(ws, toolResult("call-2"));
+    await delay(300);
+    await agent.waitForIdleForTest();
+
+    expect(await agent.getChatMessageCallCountForTest()).toBe(2);
+    const errorFrames = seen.filter(
+      (m) => isUseChatResponseMessage(m) && m.error === true && m.done === true
+    );
+    expect(errorFrames).toHaveLength(2);
+    expect(await agent.getContinuationStateForTest()).toMatchObject({
+      hasPending: false,
+      hasDeferred: false
+    });
+    ws.close(1000);
+  });
+
+  it("a result for a call the reply already answered past does not continue it", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const seen = record(ws);
+    const agent = await getAgentByName(env.TestChatAgent, room);
+    // The reply called a client tool and then went on to its answer in a
+    // later step. Continuing it would send a transcript that ends in
+    // assistant text.
+    const reply: ChatMessage = {
+      id: "assistant-1",
+      role: "assistant",
+      parts: [
+        { type: "step-start" },
+        {
+          type: "tool-testTool",
+          toolCallId: "call-1",
+          state: "input-available",
+          input: {}
+        },
+        { type: "step-start" },
+        { type: "text", text: "Here is the answer." }
+      ] as ChatMessage["parts"]
+    };
+    await agent.persistMessages([user1, reply]);
+
+    send(ws, toolResult("call-1"));
+    await waitUntil(() =>
+      seen.some((m) => m.type === MessageType.CF_AGENT_STREAM_RESUME_NONE)
+    );
+    await agent.waitForIdleForTest();
+
+    expect(await agent.getChatMessageCallCountForTest()).toBe(0);
+    const stored = (await agent.getPersistedMessages()) as ChatMessage[];
+    expect(stored[1].parts[1]).toMatchObject({ state: "output-available" });
+    expect(stored[1].parts).toHaveLength(4);
     ws.close(1000);
   });
 });

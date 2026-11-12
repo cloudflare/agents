@@ -259,6 +259,7 @@ import type { Streams } from "agents/streams";
 import {
   CHAT_RECOVERY_CANCELLED_REASON,
   CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
+  type ContinuationTurn,
   type RecoveryAttemptHandle
 } from "agents/chat";
 import type {
@@ -15041,13 +15042,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       ...(parentId !== undefined && { parentMessageId: parentId })
     });
 
-    if (this._continuation.pending?.requestId === requestId) {
-      this._continuation.activatePending();
-      this._continuation.flushAwaitingConnections((c) =>
-        this._notifyStreamResuming(c)
-      );
-    }
-
     const leaf = this.messages.at(-1);
     const continuationAssistant =
       continuation && options?.extendLeafAssistant && leaf?.role === "assistant"
@@ -18810,7 +18804,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         console.error("[Think] Failed to apply resolved pauses", error);
       });
     }
-    this._autoContinuation.rearmForBatch();
+    this._turns.replyFinalized();
   }
 
   /**
@@ -18820,180 +18814,83 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    */
   private _flushResolvedPausesOnFinalize = false;
 
+  /**
+   * Run the continuation turn for the pending continuation. The turn core
+   * owns it (`ChatTurns.runContinuationTurn`): the abort signal, the claim
+   * when the turn starts, the order of the steps, the failure report and
+   * the settle.
+   */
   private _fireAutoContinuation(): void {
-    const pending = this._continuation.pending;
-    if (!pending) return;
-
-    const { requestId } = pending;
-    // Created when the continuation fires, so a cancel reaches it while it
-    // waits in the queue.
-    const abortSignal = this._aborts.getSignal(requestId);
-
-    let reported = false;
-    this._admitTurn({
-      admission: "queue",
-      trigger: "auto-continuation",
-      requestId,
-      continuation: true,
-      inheritChannel: true,
-      allowNested: true,
-      execute: async () => {
-        // Read the continuation when its turn starts, so it runs with the
-        // connection and tools of the latest result. Nothing to continue when
-        // it was cleared, or when the conversation moved on since its tool
-        // result (a newer question or reply, a clear).
-        const continuation = this._turns.takeContinuation();
-        if (!continuation) {
-          this._aborts.remove(requestId);
-          this._settleContinuationTurn(requestId, false);
-          return;
-        }
-        const { connection, clientTools } = continuation;
-        let streamed = false;
-        try {
-          const continuationBody = async () => {
-            const result = await agentContext.run(
-              {
-                agent: this,
-                connection,
-                request: undefined,
-                email: undefined
-              },
-              () =>
-                this._runInferenceLoop({
-                  signal: abortSignal,
-                  clientTools,
-                  body: this._lastBody,
-                  continuation: true
-                })
-            );
-            if (result) {
-              await this._streamResult(requestId, result, abortSignal, {
-                continuation: true
-              });
-              streamed = true;
-            }
-          };
-
-          await this._runChatRecoveryFiber(requestId, true, continuationBody);
-        } catch (error) {
-          if (!streamed) {
-            reported = await this._reportContinuationFailure(
-              requestId,
-              error,
-              abortSignal
-            );
-          }
-          throw error;
-        } finally {
-          this._aborts.remove(requestId);
-          this._settleContinuationTurn(requestId, streamed);
-        }
-      }
-    }).catch((error) => {
-      if (!reported) {
-        console.error("[Think] Auto-continuation failed:", error);
-      }
-      this._aborts.remove(requestId);
-    });
+    void this._turns.runContinuationTurn(this._continuationTurn());
   }
 
   /**
-   * Report a continuation turn that failed before it streamed, the way a
-   * failed client turn is reported: `onChatError`, `chat:request:failed`, a
-   * recorded terminal status, `onChatResponse` for the assistant message it
-   * would have extended, and an error frame. Aborts and Durable Object resets
-   * are left to their own paths.
-   *
-   * @returns Whether the failure was reported.
+   * What each step of a continuation turn does here: the admission, the
+   * recovery fiber, the inference loop with `continuation: true`, the
+   * stream, and how a failure before the stream reaches clients and the
+   * app (`onChatError`, `chat:request:failed`, the terminal status, the
+   * error frame, `onChatResponse`).
    */
-  private async _reportContinuationFailure(
-    requestId: string,
-    error: unknown,
-    abortSignal: AbortSignal | undefined
-  ): Promise<boolean> {
-    if (abortSignal?.aborted || isDurableObjectResetError(error)) return false;
-    const wrapped = this.onChatError(error, {
-      requestId,
-      stage: "turn",
-      messagesPersisted: true,
-      continuation: true
-    });
-    const errorMessage =
-      wrapped instanceof Error ? wrapped.message : String(wrapped);
-    this._emit("chat:request:failed", {
-      requestId,
-      stage: "turn",
-      messagesPersisted: true,
-      error: errorMessage
-    });
-    // Clients learn the turn failed before `onChatResponse` runs: a slow
-    // hook must not hold the error frame.
-    await this._recordTerminalChatStatus(
-      "error",
-      requestId,
-      errorMessage
-    ).catch((recordError: unknown) => {
-      console.error(
-        "[Think] failed to record a continuation failure:",
-        recordError
-      );
-    });
-    this._broadcastChat({
-      type: MSG_CHAT_RESPONSE,
-      id: requestId,
-      body: errorMessage,
-      done: true,
-      error: true,
-      continuation: true
-    });
-    const message = [...this.messages]
-      .reverse()
-      .find((candidate) => candidate.role === "assistant");
-    if (message) {
-      await this._fireLiveResponseHook({
-        message,
-        requestId,
-        continuation: true,
-        status: "error",
-        error: errorMessage
-      });
-    }
-    return true;
-  }
-
-  /**
-   * Settle the continuation state when an auto-continuation turn ends (#2443).
-   *
-   * A turn only owns `pending` until its stream starts: `_streamResult` moves
-   * that pending to the active slot, freeing `pending` for the NEXT
-   * continuation. A client tool result that lands while this turn is still
-   * streaming (a fast client tool chained across steps) creates that next
-   * pending, and the stream-finalize re-arm fires it. So `pending` is cleared
-   * here only while it still holds this turn's request — a turn that never
-   * streamed (failed, aborted, or produced nothing before its stream started).
-   * Clearing unconditionally would drop the newer pending and stall the chat.
-   *
-   * A newer pending that has not started also covers any `deferred` follow-up:
-   * that result arrived before this turn's stream and the newer continuation
-   * runs after it, so firing the deferred too would run a redundant turn that
-   * replays a transcript ending in assistant text.
-   */
-  private _settleContinuationTurn(requestId: string, streamed: boolean): void {
-    const pending = this._continuation.pending;
-    if (pending?.requestId === requestId) {
-      if (!streamed) {
-        this._continuation.sendResumeNone();
+  private _continuationTurn(): ContinuationTurn<
+    Connection,
+    StreamableResult,
+    UIMessage
+  > {
+    return {
+      agent: this,
+      enqueue: (requestId, turn) =>
+        this._admitTurn({
+          admission: "queue",
+          trigger: "auto-continuation",
+          requestId,
+          continuation: true,
+          inheritChannel: true,
+          allowNested: true,
+          execute: turn
+        }),
+      recover: (requestId, body) =>
+        this._runChatRecoveryFiber(requestId, true, body),
+      model: ({ clientTools }, signal) =>
+        this._runInferenceLoop({
+          signal,
+          clientTools,
+          body: this._lastBody,
+          continuation: true
+        }),
+      stream: ({ requestId }, result, signal) =>
+        this._streamResult(requestId, result, signal, { continuation: true }),
+      failure: {
+        describe: (error, requestId) => {
+          const wrapped = this.onChatError(error, {
+            requestId,
+            stage: "turn",
+            messagesPersisted: true,
+            continuation: true
+          });
+          const errorMessage =
+            wrapped instanceof Error ? wrapped.message : String(wrapped);
+          this._emit("chat:request:failed", {
+            requestId,
+            stage: "turn",
+            messagesPersisted: true,
+            error: errorMessage
+          });
+          return errorMessage;
+        },
+        recordTerminal: (requestId, errorMessage) =>
+          this._recordTerminalChatStatus("error", requestId, errorMessage),
+        broadcast: (frame) => this._broadcastChat({ ...frame }),
+        respond: (result) => this._fireLiveResponseHook(result)
+      },
+      onError: (error, { errorPrefix, reported }) => {
+        if (!reported) {
+          console.error(
+            errorPrefix ?? "[Think] Auto-continuation failed:",
+            error
+          );
+        }
       }
-      this._continuation.clearPending();
-    } else if (pending && !pending.pastCoalesce) {
-      this._continuation.clearDeferred();
-    }
-    this._activateDeferredContinuation();
-  }
-
-  private _activateDeferredContinuation(): void {
-    this._autoContinuation.activateDeferredAndReschedule();
+    };
   }
 
   /**
@@ -19014,71 +18911,23 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /**
-   * Run one connection-less continuation turn. Mirrors the connection-bound
-   * auto-continuation turn body but streams via `broadcast` (a no-op when
-   * nobody is attached) and always persists, so a client that reconnects
-   * later resumes the continued turn from history.
+   * Run one connection-less continuation turn: the same turn as a
+   * connection-bound continuation (`ChatTurns.runUnscheduledContinuationTurn`),
+   * with no connection and the stored client tools. It streams via
+   * `broadcast` (a no-op when nobody is attached) and always persists, so a
+   * client that reconnects later resumes the continued turn from history.
    * @internal Queue callback.
    */
   async _cfRunConnectionlessContinuation(): Promise<void> {
-    const requestId = crypto.randomUUID();
-    const abortSignal = this._aborts.getSignal(requestId);
-    let streamed = false;
-    let reported = false;
-    try {
-      await this._admitTurn({
-        admission: "queue",
-        trigger: "auto-continuation",
-        requestId,
-        continuation: true,
-        inheritChannel: true,
-        allowNested: true,
-        execute: async () => {
-          const continuationBody = async () => {
-            const result = await agentContext.run(
-              {
-                agent: this,
-                connection: undefined,
-                request: undefined,
-                email: undefined
-              },
-              () =>
-                this._runInferenceLoop({
-                  signal: abortSignal,
-                  clientTools: this._lastClientTools,
-                  body: this._lastBody,
-                  continuation: true
-                })
-            );
-            if (result) {
-              await this._streamResult(requestId, result, abortSignal, {
-                continuation: true
-              });
-              streamed = true;
-            }
-          };
-
-          try {
-            await this._runChatRecoveryFiber(requestId, true, continuationBody);
-          } catch (error) {
-            if (!streamed) {
-              reported = await this._reportContinuationFailure(
-                requestId,
-                error,
-                abortSignal
-              );
-            }
-            throw error;
-          }
-        }
-      });
-    } catch (error) {
-      if (!reported) {
-        console.error("[Think] Connection-less continuation failed:", error);
-      }
-    } finally {
-      this._aborts.remove(requestId);
-    }
+    await this._turns.runUnscheduledContinuationTurn(
+      this._continuationTurn(),
+      {
+        requestId: crypto.randomUUID(),
+        connection: undefined,
+        clientTools: this._lastClientTools
+      },
+      "[Think] Connection-less continuation failed:"
+    );
   }
 
   // ── Response hook ──────────────────────────────────────────────
@@ -19720,11 +19569,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       ...options,
       ...(originIds && { originMessageIds: originIds })
     });
-    // Flush connections parked during this turn's pre-stream window (#1784)
-    // into STREAM_RESUMING now that a stream exists. No-op unless a client
-    // reconnected before the first chunk. (Continuation-turn parks live in
-    // `_continuation` and are flushed by the caller.)
-    this._preStream.flushOnStreamStart((c) => this._notifyStreamResuming(c));
+    // Connections parked on this turn's pre-stream window (#1784) or on the
+    // continuation it runs go into STREAM_RESUMING now that a stream exists.
+    this._turns.streamStarted(requestId, (c) => this._notifyStreamResuming(c));
     return streamId;
   }
 
@@ -19733,16 +19580,18 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     streamId: string,
     outcome?: ChatTurnOutcome
   ): void {
+    const requestId = this._resumableStream.activeRequestId;
     this._resumableStream.complete(streamId, outcome);
-    this._afterResumableStreamEnded();
+    this._afterResumableStreamEnded(requestId);
   }
 
   /**
    * A connection offered the stream that never ACKed (`resume: false`, or
    * gone quiet) must still get the terminal frame and every later broadcast.
    */
-  private _afterResumableStreamEnded(): void {
+  private _afterResumableStreamEnded(requestId: string | null): void {
     this._pendingResumeConnections.clear();
+    this._turns.streamEnded(requestId);
   }
 
   /**
@@ -19754,13 +19603,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     streamId: string,
     outcome?: ChatTurnOutcome
   ): void {
+    const requestId = this._resumableStream.activeRequestId;
     this._resumableStream.finish(streamId, outcome);
-    this._afterResumableStreamEnded();
+    this._afterResumableStreamEnded(requestId);
   }
 
   /** Mark a resumable stream errored. */
   protected _errorResumableStream(streamId: string, requestId?: string): void {
-    this._afterResumableStreamEnded();
+    this._afterResumableStreamEnded(this._resumableStream.activeRequestId);
     this.ctx.storage.transactionSync(() => {
       this._resumableStream.markError(streamId);
       // An error stamp is not necessarily terminal — recovery may retry the

@@ -3409,6 +3409,102 @@ describe("Think — tool results with nothing to continue", () => {
   });
 });
 
+describe("Think — the continuation turn", () => {
+  it("a continuation stopped while it waits in the queue never calls the model", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+    const toolCallId = "tc-stopped-in-queue";
+    await agent.persistToolCallMessage([
+      makeUserMessage("first"),
+      makeToolMessage(toolCallId, "client_action", "input-available")
+    ]);
+
+    // Another turn holds the queue, so the continuation the tool result
+    // fires has to wait behind it.
+    await agent.holdTurnQueueForTest();
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId,
+        toolName: "client_action",
+        output: "result",
+        autoContinue: true
+      })
+    );
+    await waitUntil(
+      async () => (await agent.pendingContinuationRequestIdForTest()) !== null
+    );
+    await delay(150);
+    const continuationId = await agent.pendingContinuationRequestIdForTest();
+    expect(continuationId).not.toBeNull();
+
+    // A stop for the continuation arrives while it waits.
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_chat_request_cancel",
+        id: continuationId
+      })
+    );
+    await delay(50);
+    await agent.releaseTurnQueueForTest();
+    await delay(400);
+
+    expect(await agent.continuationTurnCountForTest()).toBe(0);
+    expect(await agent.pendingContinuationRequestIdForTest()).toBeNull();
+    expect(await agent.getMessages()).toHaveLength(2);
+    await closeWS(ws);
+  });
+
+  it("a result for a call the reply already answered past does not continue it", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    // The reply called a client tool and then went on to its answer in a
+    // later step. Continuing it would send a transcript that ends in
+    // assistant text.
+    const toolCallId = "tc-answered-past";
+    const reply: UIMessage = {
+      id: crypto.randomUUID(),
+      role: "assistant",
+      parts: [
+        { type: "step-start" },
+        {
+          type: "tool-client_action",
+          toolCallId,
+          state: "input-available",
+          input: { action: "test" }
+        },
+        { type: "step-start" },
+        { type: "text", text: "Here is the answer." }
+      ] as UIMessage["parts"]
+    };
+    await agent.persistToolCallMessage([makeUserMessage("first"), reply]);
+
+    const released = waitForMessageOfType(ws, "cf_agent_stream_resume_none");
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId,
+        toolName: "client_action",
+        output: "late result",
+        autoContinue: true
+      })
+    );
+    await released;
+    await delay(300);
+
+    expect(await agent.continuationTurnCountForTest()).toBe(0);
+    const messages = (await agent.getMessages()) as UIMessage[];
+    expect(messages).toHaveLength(2);
+    expect(messages[1].parts[1]).toMatchObject({ state: "output-available" });
+    await closeWS(ws);
+  });
+});
+
 // ── onChatResponse from WebSocket path ───────────────────────────
 
 describe("Think — onChatResponse via WebSocket", () => {

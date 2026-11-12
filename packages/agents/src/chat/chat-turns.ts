@@ -14,7 +14,8 @@
  * - tool results and approvals apply one at a time, and only one that settled
  *   its call schedules a continuation ({@link applyInteraction});
  * - a continuation runs only while the message it answers is still the latest
- *   ({@link takeContinuation});
+ *   ({@link takeContinuation}), and its turn runs and settles one way
+ *   ({@link runContinuationTurn}, `continuation-turn.ts`);
  * - a cancel reaches a queued turn, a running turn, and a running recovery
  *   attempt ({@link cancel});
  * - a reset tears all of it down together ({@link reset});
@@ -42,10 +43,21 @@ import {
 } from "./auto-continuation-controller";
 import {
   ContinuationState,
-  continuationTargetIsLatest,
   type ContinuationConnection,
   type ContinuationPending
 } from "./continuation-state";
+import {
+  claimContinuation,
+  continuationStreamEnded,
+  continuationStreamStarted,
+  replyFinalized,
+  runContinuationTurn,
+  runUnscheduledContinuationTurn,
+  settleContinuationTurn,
+  type ContinuationContext,
+  type ContinuationTurn,
+  type ContinuationTurnParts
+} from "./continuation-turn";
 import type { MessageConcurrency } from "./lifecycle";
 import { PreStreamTurns } from "./pre-stream-turns";
 import {
@@ -213,6 +225,9 @@ export class ChatTurns<
    */
   interactionTail: Promise<void> = Promise.resolve();
 
+  /** What the continuation lifecycle (continuation-turn.ts) works on. */
+  readonly #continuationParts: ContinuationTurnParts<TConnection>;
+
   /** Stop signals of running recovery attempts, by original request id. */
   readonly #recoveryAttempts = new Map<string, AbortController>();
 
@@ -233,6 +248,13 @@ export class ChatTurns<
       keepAliveWhile: (fn) => host.keepAliveWhile(fn),
       fire: () => host.fireContinuation()
     });
+    this.#continuationParts = {
+      continuation: this.continuation,
+      autoContinuation: this.autoContinuation,
+      aborts: this.aborts,
+      messages: () => host.messages(),
+      streamed: new Map()
+    };
   }
 
   // ── Submits ────────────────────────────────────────────────────────
@@ -448,17 +470,87 @@ export class ChatTurns<
 
   /**
    * Claim the pending continuation at the start of its turn. Returns `null`
-   * when there is nothing to continue: no continuation is pending, or the
-   * conversation moved on since its tool result (a newer question or reply, a
-   * regenerate, a clear), so the message it answers is no longer the latest.
-   * The caller then releases the continuation's state and runs no model call.
+   * when there is nothing to continue: no continuation is pending, it was
+   * fired for another turn than `requestId`, or the conversation moved on
+   * since its tool result (a newer question or reply, a regenerate, a clear),
+   * so the message it answers is no longer the latest. See
+   * {@link claimContinuation}.
    */
-  takeContinuation(): ContinuationPending<TConnection> | null {
-    const pending = this.continuation.pending;
-    if (!pending) return null;
-    if (!continuationTargetIsLatest(this.host.messages(), pending)) return null;
-    pending.pastCoalesce = true;
-    return pending;
+  takeContinuation(
+    requestId?: string
+  ): ContinuationPending<TConnection> | null {
+    return claimContinuation(this.#continuationParts, requestId);
+  }
+
+  /**
+   * Run the continuation turn for the pending continuation, from its abort
+   * signal to its settle. The host supplies how to enqueue and what each
+   * step does. See {@link runContinuationTurn}.
+   */
+  runContinuationTurn<TReply, TMessage>(
+    turn: ContinuationTurn<TConnection, TReply, TMessage>
+  ): Promise<void> {
+    return runContinuationTurn(this.#continuationParts, turn);
+  }
+
+  /**
+   * Run a continuation turn nothing scheduled on a connection. See
+   * {@link runUnscheduledContinuationTurn}.
+   */
+  runUnscheduledContinuationTurn<TReply, TMessage>(
+    turn: ContinuationTurn<TConnection, TReply, TMessage>,
+    continuation: ContinuationContext<TConnection>,
+    errorPrefix?: string
+  ): Promise<void> {
+    return runUnscheduledContinuationTurn(
+      this.#continuationParts,
+      turn,
+      continuation,
+      errorPrefix
+    );
+  }
+
+  /**
+   * The resumable stream of the turn running `requestId` started. Every
+   * connection that was waiting for it is told to resume it
+   * (`notifyResuming` sends `STREAM_RESUMING`): those parked on the turn's
+   * pre-stream window (#1784), and those waiting on the continuation the
+   * turn runs ({@link continuationStreamStarted}). Call it for every stream.
+   */
+  streamStarted(
+    requestId: string,
+    notifyResuming: (connection: TConnection) => void
+  ): void {
+    this.preStream.flushOnStreamStart(notifyResuming);
+    continuationStreamStarted(
+      this.#continuationParts,
+      requestId,
+      notifyResuming
+    );
+  }
+
+  /**
+   * The resumable stream of the turn running `requestId` ended (finished,
+   * completed or errored). See {@link continuationStreamEnded}.
+   */
+  streamEnded(requestId: string | null): void {
+    continuationStreamEnded(this.#continuationParts, requestId);
+  }
+
+  /**
+   * A streamed reply was finalized and the host cleared its stream-active
+   * gate. See {@link replyFinalized}.
+   */
+  replyFinalized(): void {
+    replyFinalized(this.#continuationParts);
+  }
+
+  /**
+   * Settle the continuation slots for a continuation turn that ended.
+   * {@link runContinuationTurn} calls it. See {@link settleContinuationTurn}.
+   */
+  settleContinuationTurn(requestId: string): void {
+    settleContinuationTurn(this.#continuationParts, requestId);
   }
 
   // ── Cancel and reset ───────────────────────────────────────────────
