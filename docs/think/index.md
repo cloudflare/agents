@@ -650,6 +650,8 @@ The same recovery events are available through `agents/observability` on the `ch
 
 When a turn is interrupted mid-flight, the transcript can contain a tool call with no settled result. Before the next provider call, Think repairs each such call so the model does not silently re-run it and the provider does not reject the transcript with `AI_MissingToolResultsError`. The default flips the interrupted call to an errored tool result, so the record survives and conversion still has a tool result for it.
 
+This covers a client tool call or approval request the user never answered before sending a new message, and a call the user approved that never ran. A continuation turn keeps the calls in the message it continues that a client can still answer. While there is one, `continueLastTurn()` returns `{ status: "skipped" }` without calling the model, and the client's answer starts the continuation.
+
 Override `repairInterruptedToolPart` to customize the repaired shape. The common case is a client-resolved tool — for example an `ask_user` question that has no server `execute` and is normally answered by the user's next message. Converting it to a plain text part lets the model treat it as ordinary conversation rather than a tool error, and keeps the question verbatim through compaction:
 
 ```typescript

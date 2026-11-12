@@ -31,8 +31,10 @@ import { autoTransformMessages } from "./ai-chat-v5-migration";
 import {
   reconcileMessages,
   reconcileOrphanPartial,
-  repairInterruptedToolParts,
-  settleInterruptedReply,
+  ChatRequestContext,
+  clientRequestContext,
+  interruptedToolPartAsError,
+  type RepairedTranscriptSink,
   streamChunksFinished,
   persistReconstructedOrphan,
   createChatFiberSnapshot,
@@ -54,8 +56,6 @@ import {
   ChatTurns,
   type RecoveryAttemptHandle,
   type ToolInteractionOutcome,
-  partAwaitsClientInteraction,
-  clientResolvableToolNames,
   toolApprovalUpdate,
   type TurnResult,
   type MessagePart,
@@ -446,7 +446,7 @@ export class AIChatAgent<
       messages: () => this.messages,
       isReplyStreaming: () => this._streamingTurnActive,
       streamingReply: () => this._streamingMessage,
-      clientToolNames: () => this._clientResolvableToolNames(),
+      clientToolNames: () => this._requestContext.clientToolNames(),
       hasActiveStream: () => this._resumableStream.hasActiveStream(),
       generateRequestId: () => nanoid(),
       keepAliveWhile: (fn) => this.keepAliveWhile(fn),
@@ -652,18 +652,48 @@ export class AIChatAgent<
   private _agentToolRunsByRequestId = new Map<string, string | null>();
 
   /**
+   * The stored request context (the shared `ChatRequestContext`): the client
+   * tools and custom body of the most recent chat request, which tool
+   * continuations and `continueLastTurn` pass to `onChatMessage`. It owns
+   * when they change and writes them to SQLite so they survive hibernation.
+   */
+  private readonly _requestContext = new ChatRequestContext({
+    get: (key) =>
+      this.sql<{ value: string }>`
+        select value from cf_ai_chat_request_context where key = ${key}
+      `[0]?.value,
+    set: (key, json) => {
+      this.sql`
+        insert or replace into cf_ai_chat_request_context (key, value)
+        values (${key}, ${json})
+      `;
+    },
+    delete: (key) => {
+      this.sql`delete from cf_ai_chat_request_context where key = ${key}`;
+    }
+  });
+
+  /**
    * Client tool schemas from the most recent chat request.
-   * Stored so they can be passed to onChatMessage during tool continuations.
    * @internal
    */
-  protected _lastClientTools: ClientToolSchema[] | undefined;
+  protected get _lastClientTools(): ClientToolSchema[] | undefined {
+    return this._requestContext.clientTools;
+  }
+  protected set _lastClientTools(clientTools: ClientToolSchema[] | undefined) {
+    this._requestContext.clientTools = clientTools;
+  }
 
   /**
    * Custom body data from the most recent chat request.
-   * Stored so it can be passed to onChatMessage during tool continuations.
    * @internal
    */
-  protected _lastBody: Record<string, unknown> | undefined;
+  protected get _lastBody(): Record<string, unknown> | undefined {
+    return this._requestContext.body;
+  }
+  protected set _lastBody(body: Record<string, unknown> | undefined) {
+    this._requestContext.body = body;
+  }
 
   /**
    * Shared auto-continuation barrier (#1649 / #1650): owns the coalesce timer
@@ -1136,7 +1166,7 @@ export class AIChatAgent<
           "restore_chat_request_context",
           "initialization",
           { "cloudflare.agents.component": "ai_chat" },
-          () => this._restoreRequestContext()
+          () => this._requestContext.restore()
         );
 
         // Initialize resumable stream manager (creates its own tables + restores state)
@@ -1299,11 +1329,8 @@ export class AIChatAgent<
             _trigger === "regenerate-message"
               ? "regenerate-message"
               : "submit-message";
-          const requestClientTools = clientTools?.length
-            ? clientTools
-            : undefined;
-          const requestBody =
-            Object.keys(customBody).length > 0 ? customBody : undefined;
+          const { clientTools: requestClientTools, body: requestBody } =
+            clientRequestContext({ clientTools, body: customBody });
           const requestOriginIds = originMessageIds(messages);
           // What was stored when a regenerate arrived: its turn may delete
           // these, but never a question another tab sent after it.
@@ -1644,9 +1671,7 @@ export class AIChatAgent<
           this._pendingResumeConnections.clear();
           this._preStream.releaseAwaiting();
           this._preStream.reset();
-          this._lastClientTools = undefined;
-          this._lastBody = undefined;
-          this._persistRequestContext();
+          this._requestContext.clear();
           // `clearMessages()` above emptied `this.messages` through the
           // change feed.
           this._broadcastChatMessage(
@@ -1704,20 +1729,15 @@ export class AIChatAgent<
             clientTools
           } = event;
 
-          // Update cached client tools so subsequent continuations use the latest schemas
-          if (clientTools?.length) {
-            this._lastClientTools = clientTools as ClientToolSchema[];
-            this._persistRequestContext();
-          }
+          // A result that lists client tools replaces the stored ones, so
+          // the continuation runs with the latest schemas.
+          this._requestContext.replaceClientTools(clientTools);
 
           const overrideState =
             state === "output-error" ? "output-error" : undefined;
 
           this._emit("tool:result", { toolCallId, toolName });
 
-          const continuationClientTools =
-            (clientTools as ClientToolSchema[] | undefined) ??
-            this._lastClientTools;
           // Only a result that settled its call continues, targeted at that
           // call's message. Without autoContinue it re-arms a batch a sibling
           // opted in for (#1650).
@@ -1733,7 +1753,7 @@ export class AIChatAgent<
             autoContinue === true,
             () => ({
               connection,
-              clientTools: continuationClientTools,
+              clientTools: this._lastClientTools,
               body: this._lastBody,
               errorPrefix: "[AIChatAgent] Tool continuation failed:"
             })
@@ -2167,10 +2187,23 @@ export class AIChatAgent<
    * errored result through {@link repairInterruptedToolPart}.
    */
   private _settleInterruptedReply(message: UIMessage): UIMessage {
-    return settleInterruptedReply(message, {
-      repairPart: (part) => this.repairInterruptedToolPart(part),
-      clientToolNames: this._clientResolvableToolNames()
-    });
+    return this._turns.settleInterruptedReply(message, (part) =>
+      this.repairInterruptedToolPart(part)
+    );
+  }
+
+  /**
+   * How a repaired transcript is stored and reported: one write and one
+   * broadcast through `persistMessages`, which also refreshes
+   * `this.messages`, then the `chat:transcript:repaired` event.
+   */
+  private _repairedTranscriptSink(): RepairedTranscriptSink {
+    return {
+      persist: async (_changed, repaired) => {
+        await this.persistMessages(repaired);
+      },
+      emitRepaired: (event) => this._emit("chat:transcript:repaired", event)
+    };
   }
 
   /**
@@ -2184,13 +2217,12 @@ export class AIChatAgent<
    * nothing waits on them, and the turn that follows settles what they left
    * unanswered.
    */
-  private async _settleBeforeRecovery(continueReplyId: string): Promise<void> {
-    const last = this.messages.at(-1);
-    if (last?.id !== continueReplyId || last.role !== "assistant") return;
-    const settled = this._settleInterruptedReply(last);
-    if (settled === last) return;
-    await this.persistMessages(
-      this.messages.map((message) => (message === last ? settled : message))
+  private _settleBeforeRecovery(continueReplyId: string): Promise<void> {
+    return this._turns.settleBeforeRecovery(
+      this.messages,
+      continueReplyId,
+      (part) => this.repairInterruptedToolPart(part),
+      this._repairedTranscriptSink()
     );
   }
 
@@ -2276,14 +2308,7 @@ export class AIChatAgent<
   protected repairInterruptedToolPart(
     part: UIMessage["parts"][number]
   ): UIMessage["parts"][number] {
-    return {
-      ...part,
-      state: "output-error",
-      errorText:
-        (part as { state?: string }).state === "approval-responded"
-          ? "The tool call was approved but did not run before the next turn started."
-          : "The tool call was interrupted before a result was recorded."
-    } as UIMessage["parts"][number];
+    return interruptedToolPartAsError(part);
   }
 
   /**
@@ -2291,7 +2316,7 @@ export class AIChatAgent<
    * auto-continuation, `continueLastTurn`, `saveMessages`/retry, and the chat
    * recovery callbacks). An interrupted server-tool orphan is flipped to a
    * settled (errored) result — via the shared `agents/chat`
-   * `repairInterruptedToolParts` primitive, the SAME logic `@cloudflare/think`
+   * `ChatTurns.repairBeforeTurn`, the SAME logic `@cloudflare/think`
    * runs before its own inference (`_assembleModelMessages`) — so the app's next
    * `convertToModelMessages(this.messages)` doesn't 400 with
    * `AI_MissingToolResultsError`. Because the app owns the inference call, the
@@ -2301,14 +2326,15 @@ export class AIChatAgent<
    * missed, including a mixed client+server orphan whose client replay drives
    * an auto-continuation.
    *
-   * Scope: repair only ever flips a DEAD SERVER orphan (an interrupted tool with
-   * no settled result whose `execute()` died with the evicted isolate). A part
-   * still legitimately awaiting a CLIENT interaction — an `input-available`
-   * client tool the SPA replays, or an `approval-requested` part the user may
-   * still answer — is left verbatim via the shared `shouldRepair` skip, so it is
-   * never clobbered with an error. This is per-part (not a whole-transcript
-   * guard), so a fresh dead-server orphan at the leaf is still repaired even if
-   * an unrelated abandoned client orphan sits earlier in history.
+   * Scope (the shared `repairTranscriptBeforeTurn` rule, one for both hosts):
+   * in a reply the conversation has moved past, every unanswered call is
+   * settled, whoever owns it, because the provider rejects a request that holds
+   * a call with no result. A turn that starts a new reply treats the last
+   * message the same way. A continuation turn keeps, in the message it
+   * continues, what a client is known to still answer: an `input-available`
+   * call for a tool the client sent a schema for, and an `approval-requested`
+   * call. The rule is per part, so a dead server orphan at the leaf is repaired
+   * whatever sits earlier in history.
    *
    * Repair only ever reshapes ASSISTANT tool parts; it never touches user
    * messages, so per-channel policy carried on the user message's
@@ -2317,78 +2343,32 @@ export class AIChatAgent<
    * for a healthy transcript. When anything changes, the corrected transcript is
    * persisted and broadcast through the normal `persistMessages` write path (one
    * write, one broadcast), which also refreshes `this.messages`.
+   *
+   * @returns `waitsOnClient`: a continuation turn kept a call a client still
+   *   has to answer. The turn has nothing to continue yet and must not call
+   *   `onChatMessage`.
    * @internal
    */
   private async _repairInterruptedToolsBeforeTurn(options: {
     continuation: boolean;
-  }): Promise<void> {
-    const clientResolvable = this._clientResolvableToolNames();
-    const repaired = repairInterruptedToolParts(this.messages, {
-      repairPart: (part) => this.repairInterruptedToolPart(part),
-      shouldRepair: (part) =>
-        !this._partAwaitsClientInteraction(part, clientResolvable),
-      // An approval a continuation will still execute must survive; one the
-      // conversation moved past without running would 400 at the provider.
-      repairApprovalResponded:
-        !options.continuation &&
-        !this._continuation.pending &&
-        !this._continuation.deferred
-    });
-    if (repaired.removedToolCalls === 0 && repaired.normalizedInputs === 0) {
-      return;
-    }
-    await this.persistMessages(repaired.messages);
+  }): Promise<{ waitsOnClient: boolean }> {
+    const repaired = await this._turns.settleBeforeTurn(
+      this.messages,
+      {
+        continuation: options.continuation,
+        repairPart: (part) => this.repairInterruptedToolPart(part)
+      },
+      this._repairedTranscriptSink()
+    );
+    return { waitsOnClient: repaired.keptToolCallIds.length > 0 };
   }
 
   /**
-   * Restore _lastBody and _lastClientTools from SQLite.
-   * Called in the constructor so these values survive DO hibernation.
-   * @internal
-   */
-  private _restoreRequestContext() {
-    const rows =
-      this.sql<{ key: string; value: string }>`
-        select key, value from cf_ai_chat_request_context
-      ` || [];
-
-    for (const row of rows) {
-      try {
-        if (row.key === "lastBody") {
-          this._lastBody = JSON.parse(row.value);
-        } else if (row.key === "lastClientTools") {
-          this._lastClientTools = JSON.parse(row.value);
-        }
-      } catch {
-        // Corrupted row — ignore and let the next request overwrite it
-      }
-    }
-  }
-
-  /**
-   * Persist _lastBody and _lastClientTools to SQLite so they survive hibernation.
-   * Uses upsert (INSERT OR REPLACE) so repeated calls are safe.
+   * Write the request context to SQLite (the shared `ChatRequestContext`).
    * @internal
    */
   private _persistRequestContext() {
-    // Persist or delete body
-    if (this._lastBody) {
-      this.sql`
-        insert or replace into cf_ai_chat_request_context (key, value)
-        values ('lastBody', ${JSON.stringify(this._lastBody)})
-      `;
-    } else {
-      this.sql`delete from cf_ai_chat_request_context where key = 'lastBody'`;
-    }
-    // Persist or delete client tools
-    if (this._lastClientTools) {
-      this.sql`
-        insert or replace into cf_ai_chat_request_context (key, value)
-        values ('lastClientTools', ${JSON.stringify(this._lastClientTools)})
-      `;
-    } else {
-      this
-        .sql`delete from cf_ai_chat_request_context where key = 'lastClientTools'`;
-    }
+    this._requestContext.persist();
   }
 
   /**
@@ -2865,9 +2845,7 @@ export class AIChatAgent<
     clientTools?: ClientToolSchema[],
     body?: Record<string, unknown>
   ) {
-    this._lastClientTools = clientTools?.length ? clientTools : undefined;
-    this._lastBody = body && Object.keys(body).length > 0 ? body : undefined;
-    this._persistRequestContext();
+    this._requestContext.set({ clientTools, body });
   }
 
   private _messagesForClientSync(): readonly UIMessage[] {
@@ -3094,28 +3072,6 @@ export class AIChatAgent<
   }
 
   /**
-   * Whether a part is still awaiting a CLIENT interaction that can genuinely
-   * arrive after a restart: an `approval-requested` part (a reconnecting client
-   * replays the approval) or an `input-available` part for a CLIENT tool (the
-   * SPA replays the `tool-result`). A SERVER tool's `input-available` is NOT
-   * pending — its `execute()` died with the isolate. Mirrors `@cloudflare/think`.
-   */
-  private _partAwaitsClientInteraction(
-    part: UIMessage["parts"][number],
-    clientResolvable: Set<string>
-  ): boolean {
-    return partAwaitsClientInteraction(part, clientResolvable);
-  }
-
-  /**
-   * Names of the CLIENT-resolvable tools (the client-provided schemas from the
-   * last request, which have no server `execute`). Mirrors `@cloudflare/think`.
-   */
-  private _clientResolvableToolNames(): Set<string> {
-    return clientResolvableToolNames(this._lastClientTools);
-  }
-
-  /**
    * Run a chat turn exclusively so `_reply()` never overlaps with another
    * streaming turn.
    */
@@ -3305,9 +3261,18 @@ export class AIChatAgent<
                 const autoContinuationBody = async () => {
                   let replying = false;
                   try {
-                    await this._repairInterruptedToolsBeforeTurn({
-                      continuation: true
-                    });
+                    const { waitsOnClient } =
+                      await this._repairInterruptedToolsBeforeTurn({
+                        continuation: true
+                      });
+                    // The reply still waits on a client: nothing to continue
+                    // yet. The barrier holds a continuation until its batch
+                    // is answered, so this does not happen; if it did, the
+                    // answer schedules a new continuation.
+                    if (waitsOnClient) {
+                      this._clearAllAutoContinuationState(true);
+                      return;
+                    }
                     const response = await this.onChatMessage(
                       async (_finishResult) => {},
                       {
@@ -4786,9 +4751,16 @@ export class AIChatAgent<
                   options?.signal
                 );
                 try {
-                  await this._repairInterruptedToolsBeforeTurn({
-                    continuation: true
-                  });
+                  const { waitsOnClient } =
+                    await this._repairInterruptedToolsBeforeTurn({
+                      continuation: true
+                    });
+                  // The reply still waits on a client: nothing to continue
+                  // yet. Its answer starts the continuation.
+                  if (waitsOnClient) {
+                    status = "skipped";
+                    return;
+                  }
                   const response = await this.onChatMessage(() => {}, {
                     requestId,
                     abortSignal,
@@ -5602,16 +5574,7 @@ export class AIChatAgent<
   private _applyRecoveredRequestContext(
     data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined
   ): void {
-    if (!data) return;
-    if ("lastClientTools" in data) {
-      this._lastClientTools = data.lastClientTools ?? undefined;
-    }
-    if ("lastBody" in data) {
-      this._lastBody = data.lastBody ?? undefined;
-    }
-    if ("lastClientTools" in data || "lastBody" in data) {
-      this._persistRequestContext();
-    }
+    this._requestContext.applyRecovered(data);
   }
 
   /**

@@ -15,6 +15,8 @@
  *   its call schedules a continuation ({@link applyInteraction});
  * - a continuation runs only while the message it answers is still the latest
  *   ({@link takeContinuation});
+ * - before a turn calls the model, every tool call nothing will answer in
+ *   time is settled ({@link repairBeforeTurn});
  * - a cancel reaches a queued turn, a running turn, and a running recovery
  *   attempt ({@link cancel});
  * - a reset tears all of it down together ({@link reset});
@@ -29,6 +31,7 @@
  * `@cloudflare/think`, not a public API.
  */
 
+import type { UIMessage } from "ai";
 import { AbortRegistry } from "./abort-registry";
 import {
   TIMED_OUT,
@@ -41,6 +44,11 @@ import {
   type ToolInteractionOutcome
 } from "./auto-continuation-controller";
 import {
+  repairTranscriptBeforeTurn,
+  type BeforeTurnRepairOptions,
+  type BeforeTurnRepairResult
+} from "./before-turn";
+import {
   ContinuationState,
   continuationTargetIsLatest,
   type ContinuationConnection,
@@ -48,6 +56,13 @@ import {
 } from "./continuation-state";
 import type { MessageConcurrency } from "./lifecycle";
 import { PreStreamTurns } from "./pre-stream-turns";
+import {
+  persistRepairedTranscript,
+  settleInterruptedReply,
+  settleReplyBeforeRecovery,
+  type RepairedTranscriptSink,
+  type RepairInterruptedToolPartsOptions
+} from "./repair-transcript";
 import {
   SubmitConcurrencyController,
   type SubmitConcurrencyDecision
@@ -459,6 +474,78 @@ export class ChatTurns<
     if (!continuationTargetIsLatest(this.host.messages(), pending)) return null;
     pending.pastCoalesce = true;
     return pending;
+  }
+
+  // ── Before a turn ──────────────────────────────────────────────────
+
+  /**
+   * Settle the tool calls `messages` leaves unanswered, before a turn calls
+   * the model. See {@link repairTranscriptBeforeTurn} for the rule: a reply
+   * the conversation moved past keeps no unanswered call, and a continuation
+   * turn keeps, in the message it continues, what a client is known to still
+   * answer.
+   *
+   * @param messages - The history the turn's model request is built from.
+   *   Its last message is the one a continuation turn continues.
+   * @returns The repaired messages and what changed. The host persists
+   *   them. When `keptToolCallIds` is not empty, the turn must not call the
+   *   model.
+   */
+  repairBeforeTurn(
+    messages: UIMessage[],
+    options: Omit<BeforeTurnRepairOptions, "clientToolNames">
+  ): BeforeTurnRepairResult {
+    return repairTranscriptBeforeTurn(messages, {
+      ...options,
+      clientToolNames: this.host.clientToolNames()
+    });
+  }
+
+  /**
+   * {@link repairBeforeTurn}, then store what it changed and report it
+   * through `sink`. The one before-turn step both hosts run.
+   */
+  async settleBeforeTurn(
+    messages: UIMessage[],
+    options: Omit<BeforeTurnRepairOptions, "clientToolNames">,
+    sink: RepairedTranscriptSink
+  ): Promise<BeforeTurnRepairResult> {
+    const result = this.repairBeforeTurn(messages, options);
+    await persistRepairedTranscript(messages, result, sink);
+    return result;
+  }
+
+  /**
+   * Settle the tool calls a cut-off reply left unanswered, before it is
+   * stored. A call the host's client is known to own is kept. See
+   * {@link settleInterruptedReply}.
+   */
+  settleInterruptedReply<TMessage extends UIMessage>(
+    message: TMessage,
+    repairPart: RepairInterruptedToolPartsOptions["repairPart"]
+  ): TMessage {
+    return settleInterruptedReply(message, {
+      repairPart,
+      clientToolNames: this.host.clientToolNames()
+    });
+  }
+
+  /**
+   * Settle and store the reply a recovery attempt is about to continue. See
+   * {@link settleReplyBeforeRecovery}.
+   */
+  settleBeforeRecovery(
+    messages: ReadonlyArray<UIMessage>,
+    continueReplyId: string,
+    repairPart: RepairInterruptedToolPartsOptions["repairPart"],
+    sink: RepairedTranscriptSink
+  ): Promise<void> {
+    return settleReplyBeforeRecovery(
+      messages,
+      continueReplyId,
+      { repairPart, clientToolNames: this.host.clientToolNames() },
+      sink
+    );
   }
 
   // ── Cancel and reset ───────────────────────────────────────────────

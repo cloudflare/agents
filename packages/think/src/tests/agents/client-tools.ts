@@ -1386,6 +1386,22 @@ export class ThinkClientToolsAgent extends Think {
     )._repairToolTranscriptParts(messages).messages;
   }
 
+  /** The stored state of a tool call, or `missing`. */
+  async probeToolPartStateForTest(opts: {
+    toolCallId: string;
+  }): Promise<{ state: string }> {
+    const messages = (await this.getMessages()) as UIMessage[];
+    const part = messages
+      .flatMap((m) => m.parts as Array<Record<string, unknown>>)
+      .find((p) => p.toolCallId === opts.toolCallId);
+    return { state: (part?.state as string) ?? "missing" };
+  }
+
+  /** Run `continueLastTurn` and wait for the continuation turn to end. */
+  async continueLastTurnForTest(): Promise<string> {
+    return (await this.continueLastTurn()).status;
+  }
+
   async persistToolCallMessage(messages: UIMessage[]): Promise<void> {
     for (const msg of messages) {
       await this.session.appendMessage(msg);

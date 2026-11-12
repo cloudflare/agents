@@ -651,7 +651,7 @@ describe("continueLastTurn", () => {
     expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
   });
 
-  it("does NOT repair a pending CLIENT-tool interaction on continue (per-part skip)", async () => {
+  it("does NOT repair a pending CLIENT-tool interaction on continue, and does not call the model over it", async () => {
     const room = crypto.randomUUID();
     const agentStub = await getTestAgent(room);
 
@@ -683,8 +683,13 @@ describe("continueLastTurn", () => {
       }
     ] as ChatMessage[]);
 
-    await agentStub.callContinueLastTurn();
+    // The reply still waits on the client, so there is nothing to continue
+    // yet: the turn is skipped and the model is never called. A request built
+    // from this transcript would hold a tool call with no result.
+    const result = await agentStub.callContinueLastTurn();
+    expect(result.status).toBe("skipped");
     await agentStub.waitForIdleForTest();
+    expect(await agentStub.getOnChatMessageCallCount()).toBe(0);
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
     const assistant = messages.find((m) => m.id === "assistant-client")!;
@@ -697,17 +702,69 @@ describe("continueLastTurn", () => {
     expect(toolPart?.state).toBe("input-available");
   });
 
-  it("repairs a leaf server orphan even when an abandoned client orphan sits earlier (per-part, not whole-transcript)", async () => {
+  it("settles an approved call that never ran in a reply the chat moved past", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+
+    // The user approved a call, then the conversation moved on without a
+    // continuation running it. The AI SDK runs an approval only in the last
+    // message, so a continuation of the later reply can never run it, and
+    // the provider would get a tool call with no result.
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Delete it" }]
+      },
+      {
+        id: "assistant-approved",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-deleteFile",
+            toolCallId: "call_approved",
+            state: "approval-responded",
+            input: {},
+            approval: { id: "approval-1", approved: true }
+          }
+        ] as ChatMessage["parts"]
+      },
+      {
+        id: "user-2",
+        role: "user",
+        parts: [{ type: "text", text: "Something else" }]
+      },
+      {
+        id: "assistant-leaf",
+        role: "assistant",
+        parts: [{ type: "text", text: "Partial answer" }]
+      }
+    ] as ChatMessage[]);
+
+    const result = await agentStub.callContinueLastTurn();
+    expect(result.status).toBe("completed");
+    await agentStub.waitForIdleForTest();
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    expect(
+      messages.find((m) => m.id === "assistant-approved")?.parts[0]
+    ).toMatchObject({
+      state: "output-error",
+      errorText:
+        "The tool call was approved but did not run before the next turn started."
+    });
+  });
+
+  it("settles an abandoned client orphan in a reply the chat moved past, and the leaf server orphan", async () => {
     const room = crypto.randomUUID();
     const agentStub = await getTestAgent(room);
 
     // `chooseOption` is a registered client tool; `previewTool` is not (server).
     // An EARLIER assistant message holds an abandoned client orphan
     // (`input-available` chooseOption), and the LEAF assistant holds a fresh dead
-    // SERVER orphan. A whole-transcript guard would skip ALL repair because a
-    // client interaction is "pending" somewhere; the per-part `shouldRepair` skip
-    // must instead leave the buried client orphan alone AND still repair the leaf
-    // server orphan so the next inference doesn't 400.
+    // SERVER orphan. The conversation moved past the earlier reply, so its call
+    // is settled too: the provider rejects a request that holds a call with no
+    // result, whoever owns it.
     await agentStub.setRequestContextForTest(undefined, [
       { name: "chooseOption" }
     ]);
@@ -762,9 +819,9 @@ describe("continueLastTurn", () => {
       return p?.state;
     };
 
-    // Buried client orphan untouched; leaf server orphan repaired.
+    // Both are settled.
     expect(partState("assistant-buried-client", "call_buried-client")).toBe(
-      "input-available"
+      "output-error"
     );
     expect(partState("assistant-leaf-server", "call_leaf-server")).toBe(
       "output-error"
