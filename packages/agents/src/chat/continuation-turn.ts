@@ -263,7 +263,8 @@ export function settleContinuationTurn<
 
 /**
  * Whether the transcript ends in the model's answer: the latest message is
- * an assistant message whose last step has content and no tool part. The
+ * an assistant message whose last step has text (or a file) and no tool
+ * part. The
  * model wrote that step after every tool result it was given, so there is
  * nothing left for a continuation to answer. Running one would send the
  * provider a request that ends in assistant text, which current Anthropic
@@ -274,6 +275,12 @@ export function settleContinuationTurn<
  * messages. A last step that holds a tool part ends in that tool's result,
  * whatever text sits beside it, so it is not an answer. A message with no
  * `step-start` at all (a plain-text reply, a hand-built message) is one step.
+ *
+ * Reasoning is not an answer. A last step that holds only reasoning sends
+ * an assistant message with no text, and every model tried (Claude Opus and
+ * Sonnet, DeepSeek, Kimi, GLM, through `generateText` with a gateway model
+ * string) accepts that request and answers from the tool result. Not tried:
+ * a signed Anthropic thinking block on the provider's own API.
  *
  * This assumes the host turns the transcript into model messages with
  * `convertToModelMessages`. An app that builds them another way can end a
@@ -296,9 +303,7 @@ export function transcriptEndsInAnswer(
     if (type.startsWith("tool-") || type === "dynamic-tool") return false;
     if (
       type === "file" ||
-      ((type === "text" || type === "reasoning") &&
-        typeof part.text === "string" &&
-        part.text.length > 0)
+      (type === "text" && typeof part.text === "string" && part.text.length > 0)
     ) {
       hasContent = true;
     }

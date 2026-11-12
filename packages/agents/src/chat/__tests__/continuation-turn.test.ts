@@ -484,11 +484,6 @@ describe("transcriptEndsInAnswer", () => {
     expect(transcriptEndsInAnswer([assistant(step, tool, step, text)])).toBe(
       true
     );
-    expect(
-      transcriptEndsInAnswer([
-        assistant(step, tool, step, { type: "reasoning", text: "Thinking." })
-      ])
-    ).toBe(true);
   });
 
   it("is false when the last step holds a tool part", () => {
@@ -525,14 +520,15 @@ describe("transcriptEndsInAnswer", () => {
     ).toBe(false);
   });
 
-  it("counts a last step of reasoning alone as an answer", () => {
-    // The request would end in an assistant message. Kept as an answer
-    // until it is known what providers do with one that holds only
-    // reasoning.
+  it("does not count a last step of reasoning alone as an answer", () => {
+    // Providers accept a request that ends this way and answer from the
+    // tool result, so the continuation runs.
+    const reasoning = { type: "reasoning", text: "Thinking." };
     expect(
-      transcriptEndsInAnswer([
-        assistant(step, tool, step, { type: "reasoning", text: "Thinking." })
-      ])
+      transcriptEndsInAnswer([assistant(step, tool, step, reasoning)])
+    ).toBe(false);
+    expect(
+      transcriptEndsInAnswer([assistant(step, tool, step, reasoning, text)])
     ).toBe(true);
   });
 
