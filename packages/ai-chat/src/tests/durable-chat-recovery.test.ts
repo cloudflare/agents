@@ -94,6 +94,7 @@ interface ChatRecoveryTestStub {
   holdNextTurnForTest(): Promise<void>;
   holdStableWaitForTest(): Promise<void>;
   isStableWaitHeldForTest(): Promise<boolean>;
+  setStableWaitErrorForTest(message: string | null): Promise<void>;
   releaseStableWaitForTest(): Promise<void>;
   isTurnHeldForTest(): Promise<boolean>;
   releaseHeldTurnForTest(): Promise<void>;
