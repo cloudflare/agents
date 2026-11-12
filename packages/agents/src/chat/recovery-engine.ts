@@ -1194,21 +1194,61 @@ export class ChatRecoveryEngine {
     );
   }
 
+  /** The incident whose recovery attempt is running its turn right now. */
+  #incidentInTurn: string | undefined;
+
   /**
-   * A client's answer started a turn that continues the latest reply. Any
-   * recovery still scheduled is for that same reply (a recovery for an older
-   * message skips itself at its leaf check), so hand the reply to this turn:
-   * mark each scheduled incident `skipped` with
-   * {@link CHAT_RECOVERY_CONTINUED_REASON}. The recovery attempt, queued or
-   * already waiting for the chat to settle, then ends without asking the
-   * model to continue the reply a second time (see `runRecoveredTurn`).
-   * Returns whether any incident was marked.
+   * Run a recovery attempt's own turn. While it runs, the continuation turn
+   * it starts does not count as someone else continuing the reply.
+   */
+  async runAttemptTurn<T>(
+    incidentId: string | undefined,
+    turn: () => Promise<T>
+  ): Promise<T> {
+    const previous = this.#incidentInTurn;
+    this.#incidentInTurn = incidentId;
+    try {
+      return await turn();
+    } finally {
+      this.#incidentInTurn = previous;
+    }
+  }
+
+  /**
+   * Run the body of a turn that continues the latest reply (a client's
+   * answer to a tool call, the app calling `continueLastTurn`), once the
+   * turn is durably registered. A recovery still scheduled is for that same
+   * reply (one for an older message skips itself at its leaf check), so the
+   * reply now belongs to this turn: see {@link supersedeScheduledRecovery}.
+   *
+   * Call this inside the turn's durable fiber, not before it. A restart
+   * between the two would otherwise leave the reply with no turn at all: the
+   * recovery would see itself superseded and this turn would have no record
+   * to replay.
+   */
+  async runContinuationTurn<T>(turn: () => Promise<T>): Promise<T> {
+    await this.supersedeScheduledRecovery();
+    return turn();
+  }
+
+  /**
+   * Mark each scheduled incident `skipped` with
+   * {@link CHAT_RECOVERY_CONTINUED_REASON}, except the one whose own attempt
+   * is running its turn. The recovery attempt, queued or already waiting for
+   * the chat to settle, then ends without asking the model to continue the
+   * reply a second time (see `runRecoveredTurn`). Returns whether any
+   * incident was marked.
    */
   async supersedeScheduledRecovery(): Promise<boolean> {
     const incidents = (await this.adapter.listActiveIncidents?.()) ?? [];
     let superseded = false;
     for (const incident of incidents) {
-      if (incident.status !== "scheduled") continue;
+      if (
+        incident.status !== "scheduled" ||
+        incident.incidentId === this.#incidentInTurn
+      ) {
+        continue;
+      }
       await this.updateIncident(
         incident.incidentId,
         "skipped",

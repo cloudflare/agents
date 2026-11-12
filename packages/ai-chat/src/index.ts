@@ -889,7 +889,11 @@ export class AIChatAgent<
         requestId,
         continuation,
         wrap,
-        fn
+        // Inside the fiber, so the turn is durably registered before it
+        // takes the reply over from a scheduled recovery.
+        continuation
+          ? () => this._chatRecoveryEngine().runContinuationTurn(fn)
+          : fn
       );
     } finally {
       if (this._liveChatRecoveryTurns.get(requestId) === liveTurn) {
@@ -3303,9 +3307,6 @@ export class AIChatAgent<
             this._clearAllAutoContinuationState(true);
             return;
           }
-          // This turn continues the latest reply. A recovery still scheduled
-          // for that reply must not continue it a second time.
-          await this._chatRecoveryEngine().supersedeScheduledRecovery();
           const { connection, clientTools, body } = continuation;
           // The reply that asked for the tool is extended while it is the
           // last message. When a message was appended after it, the answer

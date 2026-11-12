@@ -6040,7 +6040,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         requestId,
         continuation,
         wrap,
-        fn
+        // Inside the fiber, so the turn is durably registered before it
+        // takes the reply over from a scheduled recovery.
+        continuation
+          ? () => this._chatRecoveryEngine().runContinuationTurn(fn)
+          : fn
       );
     } finally {
       if (this._liveChatRecoveryTurns.get(requestId) === liveTurn) {
@@ -18352,9 +18356,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           this._settleContinuationTurn(requestId, false);
           return;
         }
-        // This turn continues the latest reply. A recovery still scheduled
-        // for that reply must not continue it a second time.
-        await this._chatRecoveryEngine().supersedeScheduledRecovery();
         const { connection, clientTools } = continuation;
         let streamed = false;
         try {
