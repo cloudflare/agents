@@ -389,6 +389,46 @@ describe("applyChunkToParts", () => {
     });
   });
 
+  describe("steering-message chunks", () => {
+    const steering = {
+      type: "steering-message",
+      id: "steer-1",
+      parts: [{ type: "text", text: "Use Paris, Texas instead." }]
+    };
+
+    it("keeps the steering message where it was delivered", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, { type: "text-start", id: "t1" });
+      applyChunkToParts(parts, { type: "text-delta", id: "t1", delta: "Hi" });
+      applyChunkToParts(parts, { type: "text-end", id: "t1" });
+      const handled = applyChunkToParts(parts, steering);
+      applyChunkToParts(parts, { type: "start-step" });
+
+      expect(handled).toBe(true);
+      expect(parts).toEqual([
+        { type: "text", text: "Hi", state: "done" },
+        {
+          type: "steering-message",
+          id: "steer-1",
+          parts: [{ type: "text", text: "Use Paris, Texas instead." }]
+        },
+        { type: "step-start" }
+      ]);
+    });
+
+    it("does not add a replayed steering message twice", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, steering);
+      applyChunkToParts(parts, steering);
+      applyChunkToParts(parts, { ...steering, id: "steer-2" });
+
+      expect(parts.map((part) => (part as { id?: string }).id)).toEqual([
+        "steer-1",
+        "steer-2"
+      ]);
+    });
+  });
+
   describe("data-* chunks", () => {
     it("appends a new data part", () => {
       const parts = makeParts();

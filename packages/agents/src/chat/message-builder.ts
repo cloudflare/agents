@@ -55,6 +55,8 @@ export type StreamChunkData = {
   messageId?: string;
   /** Per-message metadata attached by start/finish/message-metadata chunks */
   messageMetadata?: unknown;
+  /** Content of a `steering-message` chunk: the parts of the user message */
+  parts?: unknown;
   [key: string]: unknown;
 };
 
@@ -234,6 +236,7 @@ export function lateToolInputForwardChunks(
  * - tool-input-start / tool-input-delta / tool-input-available / tool-input-error
  * - tool-output-available / tool-output-error
  * - step-start (aliased from start-step)
+ * - steering-message (a user message added to the run with AI SDK steering)
  * - data-* (developer-defined typed JSON blobs)
  *
  * @param parts - The mutable parts array to update
@@ -585,6 +588,26 @@ export function applyChunkToParts(
     case "step-start":
     case "start-step": {
       parts.push({ type: "step-start" } as MessagePart);
+      return true;
+    }
+
+    // AI SDK steering (`experimental_steering`) adds a user message to a
+    // running generation and emits it as a chunk between steps. It has to be
+    // persisted, or the message disappears from the transcript on reload and
+    // resume. The id is the steering message id, unique per message, so a
+    // replayed chunk never adds it twice.
+    case "steering-message": {
+      if (
+        chunk.id != null &&
+        findDataPartByTypeAndId(parts, chunk.type, chunk.id)
+      ) {
+        return true;
+      }
+      parts.push({
+        type: "steering-message",
+        id: chunk.id,
+        parts: chunk.parts
+      } as unknown as MessagePart);
       return true;
     }
 
