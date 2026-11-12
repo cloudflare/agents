@@ -3260,6 +3260,56 @@ export class ThinkTestAgent extends Think {
   }
 
   /**
+   * A recovery attempt the user stops while it waits for a stable chat, and
+   * which then throws. The stop is the outcome, not a give-up.
+   */
+  async testStopThenThrowDuringRecoveryForTest(): Promise<{
+    incident: { status: string; reason?: string } | undefined;
+    exhaustedReasons: string[];
+  }> {
+    await this.armTransientErrorForTest({
+      classification: "transient",
+      inStream: true
+    });
+    const exhaustedReasons: string[] = [];
+    const host = this as unknown as {
+      waitUntilStable: (options?: { timeout?: number }) => Promise<boolean>;
+      onChatRecoveryExhausted?: unknown;
+    };
+    try {
+      await this.testChat("trigger transient error");
+      const [scheduled] = await this._recoveryIncidentsForTest();
+      this._errorConfig = null;
+      this._errorAttemptsRemaining = null;
+      this.chatRecovery = {
+        onExhausted: (ctx) => {
+          exhaustedReasons.push(ctx.reason ?? "");
+        }
+      };
+      host.waitUntilStable = async () => {
+        this.cancelChat(
+          scheduled?.recoveryRootRequestId ?? scheduled?.requestId ?? ""
+        );
+        throw new Error("application bug");
+      };
+      await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
+      const [incident] = await this._recoveryIncidentsForTest();
+      return {
+        incident: incident && {
+          status: incident.status,
+          reason: incident.reason
+        },
+        exhaustedReasons
+      };
+    } finally {
+      Reflect.deleteProperty(this, "waitUntilStable");
+      this._errorConfig = null;
+      this._errorAttemptsRemaining = null;
+      Reflect.deleteProperty(this, "classifyChatError");
+    }
+  }
+
+  /**
    * Every inference streams a little, then stalls. Each attempt makes
    * progress, so only the transient counter bounds the loop. Returns how many
    * recoveries ran before nothing more was scheduled.

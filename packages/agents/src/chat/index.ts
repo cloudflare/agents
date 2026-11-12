@@ -318,6 +318,15 @@ export {
 } from "./recovery-engine";
 
 export {
+  runRecoveredTurn,
+  handleRecoveryAttemptError,
+  type RecoveredTurnHost,
+  type RecoveredTurnResult,
+  type RecoveryAttemptData,
+  type RecoveryLeafCheck
+} from "./recovery-attempt";
+
+export {
   ChatStreamStalledError,
   iterateWithStallWatchdog
 } from "./stall-watchdog";

@@ -2298,6 +2298,40 @@ describe("onChatRecovery", () => {
     expect(exhausted[0].terminalMessage).toBe("retry gave up");
   });
 
+  it("gives up with the terminal message when a recovery attempt throws", async () => {
+    const agentStub = await getTestAgent(
+      `recovery-throws-${crypto.randomUUID()}`
+    );
+    await agentStub.enableExhaustedCaptureForTest(6, "the assistant gave up");
+    await agentStub.setStableWaitErrorForTest("application bug");
+    await agentStub.seedIncidentForTest({
+      incidentId: "inc-throws",
+      requestId: "root-throws",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+
+    // The attempt does not throw into the Task, which would retry it and
+    // then drop it with the incident still "scheduled".
+    await agentStub.runChatRecoveryContinueDirectForTest({
+      incidentId: "inc-throws",
+      originalRequestId: "root-throws",
+      targetAssistantId: "a-x"
+    });
+
+    const incident = await agentStub.getIncidentForTest("inc-throws");
+    expect(incident?.status).toBe("exhausted");
+    expect(incident?.reason).toBe("recovery_error");
+    const exhausted = await agentStub.getExhaustedContextsForTest();
+    expect(exhausted).toHaveLength(1);
+    expect(exhausted[0].reason).toBe("recovery_error");
+    expect(exhausted[0].terminalMessage).toBe("the assistant gave up");
+  });
+
   it("terminalizes a stable-state give-up even when the incident record is missing (silent-drop guard)", async () => {
     const agentStub = await getTestAgent(
       `stable-silent-drop-${crypto.randomUUID()}`
@@ -2813,6 +2847,34 @@ describe("stall watchdog (chatStreamStallTimeoutMs)", () => {
       )
       .toBe("max_attempts_exceeded");
     expect(await agentStub.getOnChatMessageCallCount()).toBeLessThanOrEqual(3);
+  }, 15_000);
+
+  it("keeps an incident given up when the recovered turn that gave up returns", async () => {
+    const agentStub = await getTestAgent(`stall-sealed-${crypto.randomUUID()}`);
+    await agentStub.setChatRecoveryConfigForTest({ maxAttempts: 2 });
+
+    expect(
+      await agentStub.driveStallingTurnForTest({
+        timeoutMs: 100,
+        hangTurns: 20
+      })
+    ).toBe("aborted");
+
+    const incidents = async () =>
+      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
+        status: string;
+        reason?: string;
+      }>;
+    await expect
+      .poll(async () => (await incidents())[0]?.reason, {
+        timeout: 10_000,
+        interval: 100
+      })
+      .toBe("max_attempts_exceeded");
+    // The last recovery attempt's turn stalled with the budget spent and
+    // gave up. The attempt then returns, and must not mark it "failed".
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect((await incidents())[0]?.status).toBe("exhausted");
   }, 15_000);
 
   it("passes a healthy (non-stalling) stream through unchanged when the watchdog is armed", async () => {

@@ -2871,11 +2871,19 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     this._stableHold = null;
   }
 
+  /** Makes waitUntilStable throw, as a bug inside a recovery attempt would. */
+  private _stableWaitError: string | null = null;
+
+  setStableWaitErrorForTest(message: string | null): void {
+    this._stableWaitError = message;
+  }
+
   override async waitUntilStable(options?: {
     timeout?: number;
     pendingInteraction?: () => boolean;
   }): Promise<boolean> {
     if (this._forceStableTimeout) return false;
+    if (this._stableWaitError) throw new Error(this._stableWaitError);
     const hold = this._stableHold;
     if (hold && !hold.waiting) {
       hold.waiting = true;
