@@ -590,6 +590,43 @@ describe("the continuation turn", () => {
       expect(host.ran).toEqual(["cont-2"]);
     });
 
+    it("drops the continuation when a recovered reply is stopped by its original request id", async () => {
+      // The reply "req-1" is the recovered turn of a recovery attempt for
+      // "original": its abort signal is linked to the attempt's.
+      const attempt = turns.beginRecoveryAttempt("original");
+      await startReply();
+      turns.aborts.getSignal("req-1");
+      turns.aborts.linkExternal("req-1", attempt.signal);
+      await result("a1");
+
+      // The client only knows the original id.
+      turns.cancel("original");
+      expect(turns.aborts.getExistingSignal("req-1")?.aborted).toBe(true);
+      expect(connection.sent).toEqual([RESUME_NONE]);
+
+      await endReply();
+      await fire();
+      await drain();
+      expect(host.ran).toEqual([]);
+      attempt.end();
+    });
+
+    it("keeps the continuation when a recovery attempt that is not the running turn is stopped", async () => {
+      // The attempt still waits for the chat to be stable. Another reply
+      // runs, and its continuation is not the attempt's to drop.
+      const attempt = turns.beginRecoveryAttempt("original");
+      await startReply();
+      turns.aborts.getSignal("req-1");
+      await result("a1");
+      turns.cancel("original");
+
+      await endReply();
+      await fire();
+      await drain();
+      expect(host.ran).toEqual(["cont-1"]);
+      attempt.end();
+    });
+
     it("keeps the continuation when another request is stopped", async () => {
       await startReply();
       await result("a1");
