@@ -253,7 +253,7 @@ export class ChatTurns<
       autoContinuation: this.autoContinuation,
       aborts: this.aborts,
       messages: () => host.messages(),
-      streamed: new Set()
+      streamed: new Map()
     };
   }
 

@@ -10,7 +10,9 @@ import type {
   ContinuationPending
 } from "../continuation-state";
 import { getCurrentAgent } from "../../lifecycle/current-agent";
+import { ContinuationState } from "../continuation-state";
 import {
+  continuationStreamStarted,
   transcriptEndsInAnswer,
   type ContinuationTurn
 } from "../continuation-turn";
@@ -636,6 +638,22 @@ describe("what a continuation turn runs", () => {
     turns.streamStarted("req-1", (c) => resumed.push(c.id));
 
     expect(resumed).toEqual(["parked"]);
+  });
+
+  it("the stream of an ordinary turn leaves no record behind", () => {
+    const state = new ContinuationState<TestConnection>();
+    const parts = {
+      continuation: state,
+      autoContinuation: turns.autoContinuation,
+      aborts: turns.aborts,
+      messages: () => host.transcript,
+      streamed: new Map<string, boolean>()
+    };
+    for (let i = 0; i < 100; i++) {
+      continuationStreamStarted(parts, `req-${i}`, () => {});
+    }
+
+    expect(parts.streamed.size).toBe(0);
   });
 
   it("the stream's end clears the continuation it made active", async () => {
