@@ -214,10 +214,13 @@ import {
   persistReconstructedOrphan,
   reconcileMessages,
   CHAT_RECOVERY_TASK_NAME,
-  chatRecoveryTaskRunOptions,
+  chatRecoveryProgressReader,
+  chatRecoveryStorageAdapter,
   createChatRecoveryTaskDefinition,
   createChatTurnTaskDefinition,
-  dispatchChatRecoveryToHandoff,
+  cutOffReplyToSettle,
+  enqueueChatRecoveryTask,
+  type StreamInterruptionOutcome,
   createChatFiberSnapshot,
   unwrapChatFiberSnapshot,
   wrapChatFiberSnapshot,
@@ -226,14 +229,10 @@ import {
   resolveChatRecoveryConfig,
   ChatRecoveryEngine,
   runChatRecoveryExhaustion,
-  chatRecoveryBackoffSeconds,
   retryAfterSeconds,
   isDurableObjectResetError,
   ChatStreamStalledError,
   iterateWithStallWatchdog,
-  sweepStaleChatRecoveryIncidents,
-  listActiveChatRecoveryIncidents,
-  readChatRecoveryProgress,
   CHAT_RECOVERY_PROGRESS_KEY,
   recordChatTerminal,
   clearChatTerminal,
@@ -256,11 +255,6 @@ import {
   type ChatRecoveryKind
 } from "agents/chat";
 import type { Streams } from "agents/streams";
-import {
-  CHAT_RECOVERY_CANCELLED_REASON,
-  CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
-  type RecoveryAttemptHandle
-} from "agents/chat";
 import type {
   StreamChunkData,
   ClientToolSchema,
@@ -3519,7 +3513,10 @@ export class Think<
   // restore in `_chatRecoveryRetry` / `_chatRecoveryContinue` returns it to the
   // prior value once a continuation settles. If turns ever run concurrently,
   // this must move to per-incident storage.
-  private _activeChatRecoveryRootRequestId: string | undefined;
+  /** The engine keeps the root request id of the recovery work now running. */
+  private get _activeChatRecoveryRootRequestId(): string | undefined {
+    return this._chatRecoveryEngine().activeRootRequestId;
+  }
   /**
    * The originating user message ids of the active recovery chain (#2280),
    * carried in the recovery payload because the successor turn runs under a
@@ -5871,58 +5868,19 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     );
   }
 
-  /**
-   * Run a queue-driven recovery callback to its model handoff and return;
-   * the turn continues as tracked alarm work, and a detached platform
-   * failure enqueues one replacement attempt through the same transport.
-   */
-  private _dispatchChatRecovery(
-    callback: ChatRecoveryScheduleCallback,
-    data: Record<string, unknown> | undefined,
-    detached: (onTurnStarted: () => void) => Promise<void>
-  ): Promise<void> {
-    return dispatchChatRecoveryToHandoff({
-      // Each run is one attempt under the interruption budget: it counts an
-      // earlier attempt that died and records itself before any heavy work.
-      detached: (onTurnStarted) =>
-        this._chatRecoveryEngine().runRecoveryAttempt({
-          callback,
-          data,
-          run: () => detached(onTurnStarted)
-        }),
-      track: (turn) => this.lifecycle.trackAlarmWork(turn),
-      redefer: (dedupeKey) =>
-        this._enqueueChatRecovery(
-          callback,
-          data ?? {},
-          "redefer",
-          CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
-          dedupeKey
-        ),
-      onDetachedError: (error) =>
-        console.error(`[Think] ${callback} dispatch failed`, error)
-    });
-  }
-
-  /**
-   * Enqueue one recovery attempt on the shared Tasks transport. Tasks
-   * mirrors a routed dynamic agent's wake to the root's alarm; the run
-   * itself, and this continuation's replay, still execute here. `dedupeKey`
-   * keys a retried enqueue so it joins its own prior attempt instead of
-   * duplicating it — see {@link chatRecoveryTaskRunOptions}.
-   */
-  private async _enqueueChatRecovery(
+  /** Enqueue one recovery attempt on the shared Tasks transport. */
+  private _enqueueChatRecovery(
     callback: ChatRecoveryScheduleCallback,
     data: Record<string, unknown>,
     reason: ChatRecoveryTaskReason,
     delaySeconds: number,
     dedupeKey?: string
   ): Promise<void> {
-    const input = { callback, data, delaySeconds };
-    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-      CHAT_RECOVERY_TASK_NAME,
-      input,
-      chatRecoveryTaskRunOptions(input, reason, dedupeKey)
+    return enqueueChatRecoveryTask(
+      this.tasks,
+      { callback, data, delaySeconds },
+      reason,
+      dedupeKey
     );
   }
 
@@ -6066,7 +6024,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         requestId,
         continuation,
         wrap,
-        fn
+        // A turn that continues the latest reply takes it over from a
+        // scheduled recovery, once its fiber is durably registered.
+        continuation ? this._chatRecoveryEngine().continuationTurn(fn) : fn
       );
     } finally {
       if (this._liveChatRecoveryTurns.get(requestId) === liveTurn) {
@@ -13732,7 +13692,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
       case "cancel":
         this._aborts.cancel(event.id);
-        await this._cancelScheduledRecovery(event.id);
+        await this._chatRecoveryEngine().tryCancelScheduledRecovery(event.id);
         break;
 
       case "messages":
@@ -14130,7 +14090,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    */
   cancelChat(requestId: string, reason?: string): void {
     this._turns.cancel(requestId, reason);
-    void this.keepAliveWhile(() => this._cancelScheduledRecovery(requestId));
+    void this.keepAliveWhile(() =>
+      this._chatRecoveryEngine().tryCancelScheduledRecovery(requestId)
+    );
   }
 
   /**
@@ -14138,69 +14100,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * with nothing in flight to abort: cancel the scheduled recovery instead,
    * so the queued callback bails when it fires.
    */
-  private async _cancelScheduledRecovery(requestId: string): Promise<void> {
-    try {
-      await this._chatRecoveryEngine().cancelScheduledRecovery(requestId);
-    } catch (error) {
-      console.error(
-        "[Think] failed to cancel a scheduled chat recovery",
-        error
-      );
-    }
-  }
-
-  /**
-   * Whether the user cancelled this recovery while it was scheduled. A
-   * submission the recovery owned settles as `aborted`.
-   */
-  private async _recoveryCancelled(
-    data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined
-  ): Promise<boolean> {
-    if (
-      !(await this._chatRecoveryEngine().isRecoveryCancelled(data?.incidentId))
-    )
-      return false;
-    if (data?.recoveredRequestId) {
-      await this._completeRecoveredSubmission(
-        data.recoveredRequestId,
-        "aborted",
-        null,
-        null
-      );
-    }
-    return true;
-  }
-
-  /**
-   * Whether a client stopped this running recovery attempt. The cancel marked
-   * the incident when it was still scheduled; record it here otherwise, so
-   * the attempt's own outcome does not overwrite the user's stop. A
-   * submission the recovery owned settles as `aborted`.
-   */
-  private async _recoveryAttemptStopped(
-    stop: RecoveryAttemptHandle,
-    data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined
-  ): Promise<boolean> {
-    if (!stop.signal.aborted) return false;
-    if (
-      !(await this._chatRecoveryEngine().isRecoveryCancelled(data?.incidentId))
-    ) {
-      await this._updateChatRecoveryIncident(
-        data?.incidentId,
-        "skipped",
-        CHAT_RECOVERY_CANCELLED_REASON
-      );
-    }
-    if (data?.recoveredRequestId) {
-      await this._completeRecoveredSubmission(
-        data.recoveredRequestId,
-        "aborted",
-        null,
-        null
-      );
-    }
-    return true;
-  }
 
   /** Abort every in-flight chat turn on this agent. */
   cancelAllChats(): void {
@@ -14838,7 +14737,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           return { status: "aborted" };
         }
         if (outcome === "exhausted" || outcome === "declined") {
-          // `_routeStallToBoundedRecovery` already delivered the terminal UX
+          // `routeStreamInterruption` already delivered the terminal UX
           // (exhaustion: configured `terminalMessage` + `onExhausted`; declined:
           // the declined message), with the done/error frame and the submission
           // marked interrupted. Finalize the stream and return WITHOUT the
@@ -15396,7 +15295,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           return { status: "aborted" };
         }
         if (outcome === "exhausted" || outcome === "declined") {
-          // `_routeStallToBoundedRecovery` already delivered the terminal UX
+          // `routeStreamInterruption` already delivered the terminal UX
           // (exhaustion: configured `terminalMessage` + `onExhausted`; declined:
           // the declined message), with the done/error frame and the submission
           // marked interrupted. Finalize the stream and report `aborted` (not
@@ -15600,10 +15499,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * unanswered.
    */
   private async _settleBeforeRecovery(continueReplyId: string): Promise<void> {
-    const leaf = this.messages.at(-1);
-    if (leaf?.id !== continueReplyId || leaf.role !== "assistant") return;
-    const settled = this._settleInterruptedReply(leaf);
-    if (settled === leaf) return;
+    const change = cutOffReplyToSettle(
+      this.messages,
+      continueReplyId,
+      (reply) => this._settleInterruptedReply(reply)
+    );
+    if (!change) return;
+    const { stored: leaf, settled } = change;
     this._patchCachedMessage(await this._updateMessageInHistory(settled));
     // Broadcast whatever the repair made of the calls: a host can turn one
     // into a text part, which carries no tool call id.
@@ -16924,24 +16826,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * an in-flight incident already recorded is never read lower after the
    * upgrade.
    */
-  private async _chatRecoveryProgressMarker(): Promise<number> {
-    // Memoized as the promise, not a flag: two concurrent readers both wait
-    // for the seed to land, so neither can hand the engine an unseeded
-    // marker as an incident's work baseline. A failed read is not cached:
-    // the next evaluation retries it instead of failing for the isolate's
-    // life on a transient storage error.
-    this._progressSeed ??= readChatRecoveryProgress(this.ctx.storage).then(
-      (legacy) => this._resumableStream.seedProgress(legacy),
-      (error: unknown) => {
-        this._progressSeed = null;
-        throw error;
-      }
-    );
-    await this._progressSeed;
-    return this._resumableStream.progressMarker();
-  }
-
-  private _progressSeed: Promise<void> | null = null;
+  private readonly _chatRecoveryProgressMarker = chatRecoveryProgressReader(
+    this.ctx.storage,
+    () => this._resumableStream
+  );
 
   /** Per-isolate N9 throttle gate (shared `agents/chat` helper); reset per
    *  isolate so the first forwarded chunk after a restart always credits. */
@@ -16964,40 +16852,35 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     }
   }
 
-  private async _beginChatRecoveryIncident(input: {
-    requestId: string;
-    recoveryRootRequestId?: string | null;
-    latestUserMessageId?: string | null;
-    recoveryKind: ChatRecoveryKind;
-    trigger: "interrupted" | "stalled";
-    /** Test-only clock injection for deterministic debounce/window timing. */
-    nowMs?: number;
-  }): Promise<{
-    incident: ChatRecoveryIncident;
-    config: ResolvedChatRecoveryConfig;
-    exhausted: boolean;
-  }> {
-    // Incident orchestration (sweep -> read -> rehydrate interaction state ->
-    // budget eval -> persist -> emit, with its ordering invariants) lives in the
-    // shared ChatRecoveryEngine; this method is the package's adapter binding.
-    // See design/rfc-chat-recovery-foundation.md.
-    return this._chatRecoveryEngine().beginIncident(input);
-  }
-
   /**
    * Lazily-built shared recovery engine. The adapter arrows capture `this`, so a
-   * single cached instance is correct across calls (and across future engine
-   * methods).
+   * single cached instance is correct across calls.
    */
   private _chatRecoveryEngineInstance?: ChatRecoveryEngine;
   private _chatRecoveryEngine(): ChatRecoveryEngine {
     return (this._chatRecoveryEngineInstance ??= new ChatRecoveryEngine({
       resolveConfig: () => this._resolveChatRecoveryConfig(),
-      now: () => Date.now(),
-      sweepStaleIncidents: (now) =>
-        sweepStaleChatRecoveryIncidents(this.ctx.storage, now),
-      getIncident: async (key) =>
-        (await this.ctx.storage.get<ChatRecoveryIncident>(key)) ?? null,
+      ...chatRecoveryStorageAdapter(this.ctx.storage),
+      turns: {
+        label: "[Think]",
+        beginRecoveryAttempt: (rootRequestId) =>
+          this._turns.beginRecoveryAttempt(rootRequestId),
+        waitUntilStable: (timeout) => this.waitUntilStable({ timeout }),
+        restoreRequestContext: (context) => {
+          if ("lastClientTools" in context) {
+            this._lastClientTools = context.lastClientTools;
+            this._persistClientTools();
+          }
+          if ("lastBody" in context) {
+            this._lastBody = context.lastBody;
+            this._persistBody();
+          }
+        },
+        reconcileAgentToolChildRuns: () =>
+          this._reconcileOwnStaleAgentToolChildRuns(),
+        trackAlarmWork: (turn) => this.lifecycle.trackAlarmWork(turn),
+        attemptScope: new AsyncLocalStorage<string>()
+      },
       // Hibernation ordering guard. The budget decision consults
       // `hasPendingInteraction()` -> `_clientResolvableToolNames()` ->
       // `_lastClientTools` to keep a HITL turn (parked on a client-tool
@@ -17029,15 +16912,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       // not stuck, so the engine keeps it budget-free. SERVER-tool orphans are
       // excluded by `hasPendingInteraction` and still recover normally.
       isAwaitingClientInteraction: () => this.hasPendingInteraction(),
-      listActiveIncidents: async () =>
-        (await listActiveChatRecoveryIncidents(this.ctx.storage)).map(
-          ({ incident }) => incident
-        ),
-      putIncident: (key, incident) => this.ctx.storage.put(key, incident),
-      syncStorage: () => this.ctx.storage.sync(),
-      deleteIncident: async (key) => {
-        await this.ctx.storage.delete(key);
-      },
       emitRecoveryEvent: (event) => {
         this._emit(event.type, {
           incidentId: event.incidentId,
@@ -17057,8 +16931,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           this._settleMessengerRecovery(event.incidentId, "interrupted");
         }
       },
-      scheduleRecovery: (callback, data, reason, delaySeconds) =>
-        this._enqueueChatRecovery(callback, data, reason, delaySeconds),
+      scheduleRecovery: (callback, data, reason, delaySeconds, dedupeKey) =>
+        this._enqueueChatRecovery(
+          callback,
+          data,
+          reason,
+          delaySeconds,
+          dedupeKey
+        ),
       setRecovering: (active, requestId) =>
         this._setChatRecovering(active, requestId),
       onShouldKeepRecoveringError: (error) =>
@@ -17085,8 +16965,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       resolveRecoveryStream: (requestId) =>
         this._resolveThinkRecoveryStream(requestId),
       getPartialStreamText: (streamId) => this._getPartialStreamText(streamId),
-      activeChatRecoveryRootRequestId: () =>
-        this._activeChatRecoveryRootRequestId,
       onGiveUpBookkeepingError: (phase, error) =>
         console.error(
           phase === "read"
@@ -17095,25 +16973,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           error
         )
     } satisfies ChatRecoveryAdapter));
-  }
-
-  private async _updateChatRecoveryIncident(
-    incidentId: string | undefined,
-    status: ChatRecoveryIncident["status"],
-    reason?: string
-  ): Promise<void> {
-    // Incident state-machine transitions (delete-on-completed vs persist, the
-    // completed/skipped/failed event emit, and the #1620 recovering-flag) live
-    // in the shared ChatRecoveryEngine; this method is the package's adapter
-    // binding, symmetric with `AIChatAgent`. The recovering-flag clear here
-    // covers the benign-skip / failed paths that never reach a turn-level
-    // terminal (exhaustion + normal completion also clear via
-    // `_recordTerminalChatStatus`). See design/rfc-chat-recovery-foundation.md.
-    return this._chatRecoveryEngine().updateIncident(
-      incidentId,
-      status,
-      reason
-    );
   }
 
   private async _exhaustChatRecovery(
@@ -17194,246 +17053,88 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /**
-   * Route a stream-stall watchdog abort into bounded recovery instead of a
-   * terminal error (#1626). A stall happens inside a LIVE isolate (no DO
-   * restart), so the normal restart-detected recovery path never runs — we
-   * open/advance a recovery incident here and schedule recovery, reusing the
-   * SAME budget (`maxAttempts` + wall-clock window + progress-aware reset) and
-   * the same `onChatRecovery` decision as deploy/eviction recovery (#2042). A
-   * transient hang recovers; a persistently hanging provider exhausts the
-   * budget. Idempotency matches deploy recovery: settled tool results are
-   * durable and won't re-run, but a tool that was mid-execution when the stall
-   * fired re-runs on the continuation.
+   * Route a live stream interruption (the stall watchdog fired, or the
+   * provider failed with a transient error) into the bounded recovery a
+   * deploy or eviction interruption uses (#1626). The shared engine owns the
+   * sequence. This supplies what is `Think`'s: the partial is stored through
+   * `persistPartial`, a durable submission the turn belongs to is handed to
+   * the recovery, and a declined continuation is reported on the submission
+   * and to the client.
    *
-   * A stall before the first assistant chunk leaves the user's message as the
-   * leaf, so there is nothing to continue: it schedules a retry of that user
-   * turn instead (#1941).
-   *
-   * `persistPartial` saves the settled partial and resolves to its message id
-   * (or `undefined` when nothing was saved). It runs unless `onChatRecovery`
-   * returns `persist: false` and the partial holds no settled tool results.
-   *
-   * Returns:
-   * - `"scheduled"` — recovery was scheduled; the caller suppresses the
-   *   terminal error and closes the stream cleanly.
-   * - `"exhausted"` — the budget is spent; this routes through the SAME
-   *   `_exhaustChatRecovery` path as deploy recovery (fires `onExhausted`,
-   *   emits `chat:recovery:exhausted`, marks the submission interrupted, and
-   *   delivers the configured `terminalMessage`).
-   * - `"declined"` — `onChatRecovery` returned `continue: false`; the turn is
-   *   marked interrupted and the declined message is delivered.
-   * - `"failed"` — `onChatRecovery` threw; the incident is marked `failed` and
-   *   the caller runs its generic terminal error path.
-   *
-   * For `"exhausted"` and `"declined"` the terminal UX is already delivered, so
-   * the caller must NOT run the generic terminal path.
+   * For `"exhausted"` and `"declined"` the terminal message is already
+   * delivered, so the caller must not run its generic terminal path.
    */
-  private async _routeStallToBoundedRecovery(
+  private _routeStreamInterruption(
     input: StreamInterruptionRoute
-  ): Promise<"scheduled" | "exhausted" | "declined" | "failed"> {
+  ): Promise<StreamInterruptionOutcome> {
     const recoveryRootRequestId =
       this._activeChatRecoveryRootRequestId ?? input.requestId;
-    const originIds = this._originMessageIdsFor(input.requestId);
-    const latestUserMessageId =
-      [...this.messages].reverse().find((m) => m.role === "user")?.id ?? null;
-    const retryTargetUserId =
-      input.partialParts.length === 0
-        ? (input.branchParentId ?? (await this._latestUserLeafId()))
-        : null;
-    const recoveryKind: ChatRecoveryKind = retryTargetUserId
-      ? "retry"
-      : "continue";
-    const { incident, config, exhausted } =
-      await this._beginChatRecoveryIncident({
-        requestId: input.requestId,
-        recoveryRootRequestId,
-        latestUserMessageId,
-        recoveryKind,
-        trigger: "stalled"
-      });
-    const partialText = input.partialParts
-      .filter(
-        (p): p is { type: "text"; text: string } =>
-          (p as { type?: string }).type === "text"
-      )
-      .map((p) => p.text)
-      .join("");
-    if (exhausted) {
-      // Budget spent: deliver the SAME terminal UX as deploy-recovery
-      // exhaustion (terminalMessage + onExhausted + chat:recovery:exhausted +
-      // submission interrupted) instead of letting the raw stall error leak
-      // out. `firstSeenAt` is the closest available turn-start proxy here.
-      await input.persistPartial();
-      await this._exhaustChatRecovery(
-        incident,
-        config,
-        { text: partialText, parts: input.partialParts },
-        input.streamId,
-        incident.firstSeenAt
-      );
-      return "exhausted";
-    }
-
     const liveTurn = this._liveChatRecoveryTurns.get(input.requestId);
-    let options: ChatRecoveryOptions;
-    try {
-      options =
-        (await this.onChatRecovery({
-          incidentId: incident.incidentId,
-          recoveryRootRequestId,
-          attempt: incident.attempt,
-          maxAttempts: incident.maxAttempts,
-          recoveryKind,
-          streamId: input.streamId,
-          requestId: input.requestId,
-          partialText,
-          partialParts: input.partialParts,
+    // If a durable submission is running for this turn, the recovery must
+    // complete it, or the submission hangs.
+    const recoveredRequestId = () =>
+      this._readRunningSubmissionForRecovery(recoveryRootRequestId)
+        ?.submission_id;
+    return this._chatRecoveryEngine().routeStreamInterruption({
+      requestId: input.requestId,
+      streamId: input.streamId,
+      partialParts: input.partialParts,
+      backoff: input.backoff,
+      retryAfterSeconds: input.retryAfterSeconds,
+      latestUserMessageId:
+        [...this.messages].reverse().find((m) => m.role === "user")?.id ?? null,
+      originMessageIds: this._originMessageIdsFor(input.requestId),
+      // A stall before the first chunk leaves the user's message as the
+      // leaf (#1941). A regeneration retries the message it branches from.
+      retryTargetUserId: async () =>
+        input.branchParentId ?? (await this._latestUserLeafId()),
+      onChatRecovery: (context) =>
+        this.onChatRecovery({
+          incidentId: context.incidentId,
+          recoveryRootRequestId: context.recoveryRootRequestId,
+          attempt: context.attempt,
+          maxAttempts: context.maxAttempts,
+          recoveryKind: context.recoveryKind,
+          streamId: context.streamId,
+          requestId: context.requestId,
+          partialText: context.partialText,
+          partialParts: context.partialParts,
           recoveryData: liveTurn?.recoveryData ?? null,
           messages: [...this.messages],
           lastBody: this._lastBody,
           lastClientTools: this._lastClientTools,
-          createdAt: liveTurn?.createdAt ?? incident.firstSeenAt
-        })) ?? {};
-    } catch (error) {
-      console.error(
-        "[Think] onChatRecovery threw during stall recovery:",
-        error
-      );
-      await input.persistPartial();
-      await this._updateChatRecoveryIncident(
-        incident.incidentId,
-        "failed",
-        error instanceof Error ? error.message : String(error)
-      );
-      return "failed";
-    }
-
-    const targetAssistantId =
-      options.persist !== false ||
-      this._getPartialStreamText(input.streamId).hasSettledToolResults
-        ? await input.persistPartial()
-        : undefined;
-
-    // If a durable submission is running for this turn, the recovery must
-    // complete it (otherwise the submission hangs) — same as deploy recovery.
-    const recoveredRequestId = this._readRunningSubmissionForRecovery(
-      recoveryRootRequestId
-    )?.submission_id;
-
-    if (options.continue === false) {
-      await this._updateChatRecoveryIncident(
-        incident.incidentId,
-        "skipped",
-        "continue_disabled"
-      );
-      const declinedMessage =
-        "Submission was interrupted and automatic continuation was declined.";
-      await this._markRecoveredSubmissionInterrupted(
-        recoveryRootRequestId,
-        declinedMessage
-      );
-      await this._recordTerminalChatStatus(
-        "interrupted",
-        input.requestId,
-        declinedMessage
-      );
-      this._broadcastChat({
-        type: MSG_CHAT_RESPONSE,
-        id: input.requestId,
-        body: declinedMessage,
-        done: true,
-        error: true
-      });
-      return "declined";
-    }
-
-    // Re-read the leaf: `persist: false` can leave the user's message as the
-    // leaf even when the stall produced a partial.
-    const unansweredUserId = targetAssistantId
-      ? null
-      : input.partialParts.length === 0
-        ? retryTargetUserId
-        : (input.branchParentId ?? (await this._latestUserLeafId()));
-    await this._claimMessengerRecoveryDelivery(
-      input.requestId,
-      incident.incidentId,
-      partialText
-    );
-    // Stalls count too: a turn that streams a little and then stalls resets
-    // the progress-keyed attempt cap every time, so this is its only bound.
-    const retries = await this._chatRecoveryEngine().recordTransientRetry(
-      incident.incidentId
-    );
-    const delaySeconds = input.backoff
-      ? chatRecoveryBackoffSeconds(retries, input.retryAfterSeconds)
-      : undefined;
-    const reason =
-      this._activeChatRecoveryRootRequestId !== undefined
-        ? "chained_retry"
-        : undefined;
-    if (unansweredUserId) {
-      await this._chatRecoveryEngine().scheduleRecovery({
-        incident,
-        delaySeconds,
-        reason,
-        recoveryKind: "retry",
-        callback: "_chatRecoveryRetry",
-        data: {
-          targetUserId: unansweredUserId,
-          ...(input.branchParentId !== undefined && {
-            regeneratedLeafId: (await this.session.getLatestLeaf())?.id
-          }),
-          originalRequestId: recoveryRootRequestId,
-          incidentId: incident.incidentId,
-          lastBody: this._lastBody ?? null,
-          lastClientTools: this._lastClientTools ?? null,
-          ...(originIds ? { originMessageIds: originIds } : {}),
-          ...(recoveredRequestId ? { recoveredRequestId } : {})
-        }
-      });
-      this._rescheduledRecoveryIncidents.add(incident.incidentId);
-      this._claimSubmissionForRecovery(recoveredRequestId, reason);
-      return "scheduled";
-    }
-
-    await this._chatRecoveryEngine().scheduleRecovery({
-      incident,
-      delaySeconds,
-      reason,
-      recoveryKind: "continue",
-      callback: "_chatRecoveryContinue",
-      data: {
-        ...(targetAssistantId ? { targetAssistantId } : {}),
-        originalRequestId: recoveryRootRequestId,
-        incidentId: incident.incidentId,
-        lastBody: this._lastBody ?? null,
-        lastClientTools: this._lastClientTools ?? null,
-        ...(originIds ? { originMessageIds: originIds } : {}),
-        ...(recoveredRequestId ? { recoveredRequestId } : {})
-      }
+          createdAt: liveTurn?.createdAt ?? context.firstSeenAt
+        }),
+      resolvePartial: async (keep) =>
+        keep ? input.persistPartial() : undefined,
+      requestContext: () => ({
+        lastBody: this._lastBody,
+        lastClientTools: this._lastClientTools
+      }),
+      onDeclined: () =>
+        this._declineRecoveredTurn(recoveryRootRequestId, input.requestId),
+      beforeSchedule: (incidentId, partialText) =>
+        this._claimMessengerRecoveryDelivery(
+          input.requestId,
+          incidentId,
+          partialText
+        ),
+      scheduleData: async (kind) => {
+        const submissionId = recoveredRequestId();
+        return {
+          ...(kind === "retry" &&
+            input.branchParentId !== undefined && {
+              regeneratedLeafId: (await this.session.getLatestLeaf())?.id
+            }),
+          ...(submissionId ? { recoveredRequestId: submissionId } : {})
+        };
+      },
+      afterSchedule: (chained) =>
+        this._claimSubmissionForRecovery(
+          recoveredRequestId(),
+          chained ? "chained_retry" : undefined
+        )
     });
-    this._rescheduledRecoveryIncidents.add(incident.incidentId);
-    this._claimSubmissionForRecovery(recoveredRequestId, reason);
-    return "scheduled";
-  }
-
-  /**
-   * {@link _routeStallToBoundedRecovery} for a stream consumer's `catch`: a
-   * routing failure (e.g. a rejected incident write) degrades to `"failed"`,
-   * so the caller still delivers its terminal error frame.
-   */
-  private async _routeStreamInterruption(
-    input: StreamInterruptionRoute
-  ): Promise<"scheduled" | "exhausted" | "declined" | "failed"> {
-    try {
-      return await this._routeStallToBoundedRecovery(input);
-    } catch (error) {
-      console.error(
-        "[Think] routing a stream interruption into recovery failed; delivering the terminal error",
-        error
-      );
-      return "failed";
-    }
   }
 
   /**
@@ -17457,16 +17158,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * re-runs the same recovery attempt; their messenger reply stays pending.
    */
   private _deferringRecoveryIncidents = new Set<string>();
-
-  /** Incidents whose running recovery attempt scheduled the next attempt. */
-  private _rescheduledRecoveryIncidents = new Set<string>();
-
-  private _takeRecoveryReschedule(incidentId: string | undefined): boolean {
-    return (
-      incidentId !== undefined &&
-      this._rescheduledRecoveryIncidents.delete(incidentId)
-    );
-  }
 
   private async _latestUserLeafId(): Promise<string | null> {
     const leaf = await this.session.getLatestLeaf();
@@ -17690,80 +17381,71 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         ? recoveredSubmission.submission_id
         : undefined;
 
-    if (shouldRetry) {
-      await this._chatRecoveryEngine().scheduleRecovery({
+    if (shouldRetry || canContinue) {
+      await this._chatRecoveryEngine().scheduleRecoveredTurn({
         incident,
         recoveryKind: input.recoveryKind,
-        callback: "_chatRecoveryRetry",
-        data: {
-          targetUserId: retryTargetUserId,
-          ...(regenerationParentOf(snapshot) !== undefined &&
+        recoveryRootRequestId,
+        retryUserId: shouldRetry ? retryTargetUserId : null,
+        targetAssistantId: targetId,
+        requestContext: snapshot,
+        originMessageIds: originIds,
+        extra: {
+          ...(shouldRetry &&
+            regenerationParentOf(snapshot) !== undefined &&
             snapshot?.latestMessageId && {
               regeneratedLeafId: snapshot.latestMessageId
             }),
-          originalRequestId: recoveryRootRequestId,
-          incidentId: incident.incidentId,
-          lastBody: snapshot?.lastBody ?? null,
-          lastClientTools: snapshot?.lastClientTools ?? null,
-          ...(originIds ? { originMessageIds: originIds } : {}),
-          ...(recoveredRequestId ? { recoveredRequestId } : {})
-        }
-      });
-    } else if (canContinue) {
-      await this._chatRecoveryEngine().scheduleRecovery({
-        incident,
-        recoveryKind: input.recoveryKind,
-        callback: "_chatRecoveryContinue",
-        data: {
-          ...(targetId ? { targetAssistantId: targetId } : {}),
-          originalRequestId: recoveryRootRequestId,
-          incidentId: incident.incidentId,
-          ...(snapshot
-            ? {
-                lastBody: snapshot.lastBody ?? null,
-                lastClientTools: snapshot.lastClientTools ?? null
-              }
-            : {}),
-          ...(originIds ? { originMessageIds: originIds } : {}),
+          // The payload keeps the stable submission identity. `request_id`
+          // follows the accepted successor, and the recovery lookup accepts
+          // either.
           ...(recoveredRequestId ? { recoveredRequestId } : {})
         }
       });
     } else if (options.continue === false && !streamIsTerminal) {
-      await this._updateChatRecoveryIncident(
+      await this._chatRecoveryEngine().updateIncident(
         incident.incidentId,
         "skipped",
         "continue_disabled"
       );
-      const declinedMessage =
-        "Submission was interrupted and automatic continuation was declined.";
-      // The recovery root still locates the submission after request_id has
-      // moved to a successor turn.
-      await this._markRecoveredSubmissionInterrupted(
-        recoveryRootRequestId,
-        declinedMessage
-      );
-      // Unlike `conversation_changed` (a newer turn owns the UI, so silence is
-      // correct), declining continuation abandons the turn with no superseding
-      // turn. Surface it like exhaustion so a reconnecting client isn't frozen.
-      await this._recordTerminalChatStatus(
-        "interrupted",
-        requestId,
-        declinedMessage
-      );
-      this._broadcastChat({
-        type: MSG_CHAT_RESPONSE,
-        id: requestId,
-        body: declinedMessage,
-        done: true,
-        error: true
-      });
+      await this._declineRecoveredTurn(recoveryRootRequestId, requestId);
     } else {
-      await this._updateChatRecoveryIncident(
+      await this._chatRecoveryEngine().updateIncident(
         incident.incidentId,
         "skipped",
         streamIsTerminal ? "stream_terminal" : "not_recoverable"
       );
     }
+  }
+
+  /**
+   * The app declined to continue an interrupted turn (`continue: false`).
+   * Mark its submission interrupted, so it does not wait on a turn nobody
+   * will finish, and tell the client. The recovery root still locates the
+   * submission after `request_id` has moved to a successor turn.
+   */
+  private async _declineRecoveredTurn(
+    recoveryRootRequestId: string,
+    requestId: string
+  ): Promise<void> {
+    const declinedMessage =
+      "Submission was interrupted and automatic continuation was declined.";
+    await this._markRecoveredSubmissionInterrupted(
+      recoveryRootRequestId,
+      declinedMessage
+    );
+    await this._recordTerminalChatStatus(
+      "interrupted",
+      requestId,
+      declinedMessage
+    );
+    this._broadcastChat({
+      type: MSG_CHAT_RESPONSE,
+      id: requestId,
+      body: declinedMessage,
+      done: true,
+      error: true
+    });
   }
 
   private async _recoverablePreStreamUserId(
@@ -17837,91 +17519,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /**
-   * Reschedule a recovery callback that timed out waiting for stable state,
-   * consuming one attempt. Returns `true` if rescheduled, `false` if the
-   * attempt budget is exhausted (the caller then fails the turn terminally).
-   *
-   * Shared by `_chatRecoveryRetry` and `_chatRecoveryContinue` so the
-   * non-idempotent scheduling invariant lives in exactly one place — a fix to
-   * one path can't silently diverge from the other. Mirrors the same helper in
-   * `@cloudflare/ai-chat`.
-   */
-  private async _rescheduleRecoveryAfterStableTimeout(
-    callback: ChatRecoveryScheduleCallback,
-    data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined,
-    maxAttempts: number
-  ): Promise<boolean> {
-    // The attempt-bump + scheduled/stable_timeout_retry persist + delayed
-    // non-idempotent reschedule live in the shared ChatRecoveryEngine; this
-    // method is the package's adapter binding, symmetric with `AIChatAgent`.
-    // See design/rfc-chat-recovery-foundation.md.
-    return this._chatRecoveryEngine().rescheduleAfterStableTimeout({
-      incidentId: data?.incidentId,
-      callback,
-      data,
-      fallbackMaxAttempts: maxAttempts
-    });
-  }
-
-  /**
-   * Park a recovery continuation that timed out waiting for stable state
-   * because the turn is holding a pending CLIENT interaction (an
-   * `input-available` client-tool part or an `approval-requested` part — see
-   * `hasPendingInteraction`). Such a turn is WAITING ON THE HUMAN, not stuck:
-   * the SPA replays the interrupted tool-result / approval after reconnect,
-   * which drives a fresh continuation via the auto-continuation barrier
-   * independently of the recovery retry loop. Burning the attempt budget on
-   * that wait (each `waitUntilStable` times out because the human hasn't
-   * answered) would seal a perfectly healthy turn on `stable_timeout` — the
-   * exact symptom behind HITL "session recovery errors" under deploy churn.
-   *
-   * So instead of rescheduling or exhausting, we stop the loop and mark the
-   * incident `skipped` (reason `awaiting_client_interaction`). That retains the
-   * incident record (a later genuine interruption re-evaluates it) while
-   * resolving the live "recovering…" indicator via `_updateChatRecoveryIncident`
-   * so the client sees the parked tool-call UI rather than an eternal spinner.
-   * A client that never returns is reclaimed by the incident TTL sweep and DO
-   * idle-eviction. SERVER-tool orphans are excluded by `hasPendingInteraction`
-   * (their `execute` died with the isolate), so they still recover normally.
-   *
-   * For a SUBMISSION-backed turn (`recoveredRequestId` present) the recovery
-   * loop is the submission row's SOLE completion driver after a restart, and the
-   * client's replay resumes the conversation as an independent auto-continuation
-   * that never touches the submission. Parking would therefore leave the row
-   * `running` until `_recoverSubmissionsOnStart` swept it to `error` on the next
-   * restart. We instead complete it `completed` here: the park condition is a
-   * fully-materialized client tool call in the leaf, which is exactly the
-   * terminal state a non-interrupted submission reaches when its step emits a
-   * client tool call (the model does not block on client tools — see
-   * `_runProgrammaticMessagesTurn`, which marks such a step `completed`). The
-   * human round-trip then proceeds via the normal auto-continuation, identical
-   * to the non-crash flow.
-   *
-   * Returns `true` when the recovery was parked (caller must return), `false`
-   * when there is no pending client interaction (caller proceeds to the normal
-   * reschedule / exhaustion path).
-   */
-  private async _parkRecoveryForPendingInteraction(
-    data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined
-  ): Promise<boolean> {
-    if (!this.hasPendingInteraction()) return false;
-    await this._updateChatRecoveryIncident(
-      data?.incidentId,
-      "skipped",
-      "awaiting_client_interaction"
-    );
-    if (data?.recoveredRequestId) {
-      await this._completeRecoveredSubmission(
-        data.recoveredRequestId,
-        "completed",
-        null,
-        null
-      );
-    }
-    return true;
-  }
-
-  /**
    * Terminalize a recovery turn that is giving up — whether because the
    * stable-state-timeout retry budget drained, or because the recovery
    * continuation threw a non-recoverable error — by routing through the SAME
@@ -17974,140 +17571,27 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * root recovery runs; the routed dynamic-agent fallback applies it to
    * `recoveryLoop` schedule rows (see `RecoveryLoopScheduleOptions`). At the
    * strike budget this hook seals active incidents via
-   * {@link _cf_sealMemoryLimitedRecovery}.
+   * `ChatRecoveryEngine.sealMemoryLimitedRecovery`.
    */
   protected async onAlarmMemoryLimit(context: { readonly sealed: boolean }) {
     if (!context.sealed) return;
-    await this._cf_sealMemoryLimitedRecovery();
+    await this._chatRecoveryEngine().sealMemoryLimitedRecovery();
   }
 
   /**
-   * Seal any still-live recovery incident as an out-of-memory exhaustion
-   * when the alarm circuit breaker trips at its strike budget (#1825). Runs
-   * at the outermost alarm frame (post-unwind), so the terminal banner /
-   * `onExhausted` and the sealed-incident write can land where the mid-turn
-   * give-up's writes OOMed. Reuses the shared give-up spine via
-   * `_exhaustRecoveryGiveUp`.
+   * Run the "failed" incident write made before a platform transient is
+   * rethrown. The mark tells the messenger path that the reply stays pending.
    */
-  private async _cf_sealMemoryLimitedRecovery(): Promise<void> {
-    const active = await listActiveChatRecoveryIncidents(this.ctx.storage);
-    for (const { incident } of active) {
-      const callback: ChatRecoveryScheduleCallback =
-        incident.recoveryKind === "retry"
-          ? "_chatRecoveryRetry"
-          : "_chatRecoveryContinue";
-      await this._exhaustRecoveryGiveUp(
-        callback,
-        { incidentId: incident.incidentId },
-        "out_of_memory"
-      );
+  private async _whileDeferringRecovery(
+    incidentId: string,
+    write: () => Promise<void>
+  ): Promise<void> {
+    this._deferringRecoveryIncidents.add(incidentId);
+    try {
+      await write();
+    } finally {
+      this._deferringRecoveryIncidents.delete(incidentId);
     }
-  }
-
-  private _exhaustRecoveryGiveUp(
-    callback: ChatRecoveryScheduleCallback,
-    data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined,
-    reason: string
-  ): Promise<void> {
-    // The give-up spine (read → re-entry-guard → build-exhausted-incident →
-    // terminalize-before-seal → best-effort seal) lives in the shared
-    // ChatRecoveryEngine; this is the package binding, symmetric with
-    // `AIChatAgent`. Think keeps the `reason` parameter (its callers pass
-    // `stable_timeout` | `recovery_error`) and the `recoveredRequestId` link in
-    // the engine's root-id chain (supplied via the schedule payload). The
-    // terminalize + stream/partial hooks are wired on the adapter above. See
-    // design/rfc-chat-recovery-foundation.md.
-    return this._chatRecoveryEngine().exhaustRecoveryGiveUp({
-      callback,
-      data,
-      reason
-    });
-  }
-
-  /**
-   * Give-up after the stable-state-timeout retry budget drained. Thin wrapper
-   * over `_exhaustRecoveryGiveUp` so the give-up cause is recorded as
-   * `stable_timeout`.
-   */
-  private _exhaustRecoveryAfterStableTimeout(
-    callback: ChatRecoveryScheduleCallback,
-    data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined
-  ): Promise<void> {
-    return this._exhaustRecoveryGiveUp(callback, data, "stable_timeout");
-  }
-
-  /**
-   * Handle an error thrown by `_chatRecoveryContinue` / `_chatRecoveryRetry`
-   * after the incident was opened.
-   *
-   * - A Durable Object memory-limit reset is re-thrown with no bookkeeping.
-   *   The isolate is condemned: its storage calls reject and unconfirmed
-   *   writes are discarded, so nothing written here would survive (#2613).
-   *   The attempt's `attemptsInFlight` entry stays behind, and the next
-   *   attempt counts it against `maxInterruptedAttempts` before running
-   *   anything heavy.
-   * - A platform transient (`isPlatformTransientError` from `agents` — a
-   *   deploy code-update reset / script supersede, a `retryable`-flagged
-   *   platform error, or "Network connection lost.", looking through wrappers
-   *   like `SqlError` via the `cause` chain) is re-thrown (after best-effort
-   *   marking the incident `failed` for observability) so the current
-   *   attempt (the driving Task run, or the routed one-shot schedule row) is
-   *   preserved and the platform re-runs recovery once it is healthy again — the turn can
-   *   still recover, so it must NOT terminalize. Terminalizing here was the
-   *   #1730 freeze: the give-up's own seal needs the very storage that is
-   *   down, so it throws too, burns the in-process retry budget inside the
-   *   same reset window, and the row is consumed milliseconds before storage
-   *   recovers. The submission is deliberately left `running` — the deferred
-   *   re-run reads it via `_readRunningSubmissionForRecovery`, so marking it
-   *   terminal here would turn the preserved row into a guaranteed
-   *   `submission_not_running` no-op skip (a self-defeating defer).
-   * - Any OTHER (application) error is terminalized through the give-up path
-   *   (`onExhausted` + the `terminalMessage` banner) and NOT re-thrown. This is
-   *   the fix for the silent-seal failure mode: the driving attempt swallows
-   *   a non-transient throw and settles without terminalizing, so without
-   *   terminalizing here the half-finished turn is dropped with no terminal
-   *   event and no banner (the user stares at a frozen message until they
-   *   send something new).
-   */
-  private async _handleRecoveryCallbackError(
-    callback: ChatRecoveryScheduleCallback,
-    data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined,
-    error: unknown
-  ): Promise<void> {
-    // Classified before the transient check: a memory-limit reset is not a
-    // transient, and the generic path below would try to terminalize through
-    // storage that is already gone.
-    if (isDurableObjectMemoryLimitReset(error)) throw error;
-    if (isPlatformTransientError(error)) {
-      const message = error instanceof Error ? error.message : String(error);
-      const incidentId = data?.incidentId;
-      if (incidentId) this._deferringRecoveryIncidents.add(incidentId);
-      try {
-        await this._updateChatRecoveryIncident(incidentId, "failed", message);
-      } catch (bookkeepingError) {
-        // Best-effort observability only — in the exact window this branch
-        // fires (deploy reset / storage outage) the incident write itself can
-        // reject; that must not replace the deferral with its own error.
-        console.error(
-          "[Think] failed to mark recovery incident failed before deferring",
-          bookkeepingError
-        );
-      } finally {
-        if (incidentId) this._deferringRecoveryIncidents.delete(incidentId);
-      }
-      throw error;
-    }
-    // Preserve the underlying error for operators — the give-up path records
-    // only the `recovery_error` category on the incident / `onExhausted` ctx,
-    // so without this log the actual cause would be lost.
-    console.error(
-      `[Think] ${callback} threw during recovery; terminalizing instead of leaving the turn wedged`,
-      error
-    );
-    // `_exhaustRecoveryGiveUp` marks the submission interrupted + records the
-    // terminal chat status itself (via `_exhaustChatRecovery`), so it fully
-    // replaces the old mark-failed + complete-as-error bookkeeping here.
-    await this._exhaustRecoveryGiveUp(callback, data, "recovery_error");
   }
 
   /**
@@ -18158,7 +17642,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   async _chatRecoveryRetry(data?: ChatRecoveryRetryData): Promise<void> {
-    await this._dispatchChatRecovery(
+    await this._chatRecoveryEngine().dispatchRecovery(
       "_chatRecoveryRetry",
       data,
       (onTurnStarted) =>
@@ -18172,184 +17656,127 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     data?: ChatRecoveryRetryData,
     onTurnStarted?: () => void
   ): Promise<void> {
-    if (await this._recoveryCancelled(data)) return;
-    const recoveredSubmission = data?.recoveredRequestId
-      ? this._readRunningSubmissionForRecovery(data.recoveredRequestId)
-      : null;
-    if (data?.recoveredRequestId && !recoveredSubmission) {
-      await this._updateChatRecoveryIncident(
-        data.incidentId,
-        "skipped",
-        "submission_not_running"
-      );
-      return;
-    }
-
-    const previousRootRequestId = this._activeChatRecoveryRootRequestId;
-    this._activeChatRecoveryRootRequestId =
-      data?.originalRequestId ?? previousRootRequestId;
-    const controller = recoveredSubmission ? new AbortController() : null;
-    if (recoveredSubmission && controller) {
-      this._submissionAbortControllers.set(
-        recoveredSubmission.submission_id,
-        controller
-      );
-    }
-    // A client stops this attempt by the original request id: the only id it
-    // knows until the recovered turn streams.
-    const stop = this._turns.beginRecoveryAttempt(data?.originalRequestId);
-    const turnSignal = controller
-      ? AbortSignal.any([controller.signal, stop.signal])
-      : stop.signal;
-
-    try {
-      const recoveryConfig = this._resolveChatRecoveryConfig();
-      const ready = await this.waitUntilStable({
-        timeout: recoveryConfig.stableTimeoutMs
-      });
-      // A stop that landed while the attempt waited wins over the
-      // stable-state timeout's park, reschedule or exhaustion.
-      if (await this._recoveryAttemptStopped(stop, data)) return;
-      if (!ready) {
-        // PARK while a CLIENT interaction is pending — the turn is waiting for
-        // the human, not churning; see `_chatRecoveryContinue` for the full
-        // rationale.
-        if (await this._parkRecoveryForPendingInteraction(data)) {
-          return;
-        }
-        // Transient under churn — reschedule within the attempt budget rather
-        // than terminally failing the turn (see _chatRecoveryContinue).
+    const regeneratedLeafId = data?.regeneratedLeafId;
+    const host = this._recoveredTurnHost("_chatRecoveryRetry", data);
+    await this._chatRecoveryEngine().runRecoveredTurn({
+      ...host,
+      checkLeaf: async () => {
+        const lastLeaf = await this.session.getLatestLeaf();
         if (
-          await this._rescheduleRecoveryAfterStableTimeout(
-            "_chatRecoveryRetry",
-            data,
-            recoveryConfig.maxAttempts
-          )
+          !lastLeaf ||
+          (regeneratedLeafId === undefined && lastLeaf.role !== "user")
         ) {
-          return;
+          // The user turn is no longer the leaf: it was answered, or the
+          // conversation moved on.
+          return { moved: true, reason: "no_unanswered_user_message" };
         }
-        // Budget spent: terminalize through the SAME exhaustion path as deploy
-        // recovery (fires `onExhausted`, delivers the `terminalMessage` banner,
-        // marks the submission interrupted) instead of silently dropping the
-        // turn — otherwise an app relying on `onExhausted` sees an eternal
-        // spinner.
-        await this._exhaustRecoveryAfterStableTimeout(
-          "_chatRecoveryRetry",
-          data
-        );
-        return;
-      }
-
-      const lastLeaf = await this.session.getLatestLeaf();
-      const regeneratedLeafId = data?.regeneratedLeafId;
-      if (
-        !lastLeaf ||
-        (regeneratedLeafId === undefined && lastLeaf.role !== "user")
-      ) {
-        // The user turn is no longer the leaf — it was already answered (an
-        // assistant message now follows) or the conversation moved on. This is
-        // a benign skip, not an error: a completing turn marks the submission
-        // `completed`; otherwise it is terminally `skipped`, never `error`.
-        await this._updateChatRecoveryIncident(
-          data?.incidentId,
-          "skipped",
-          "no_unanswered_user_message"
-        );
-        if (data?.recoveredRequestId) {
-          await this._completeRecoveredSubmission(
-            data.recoveredRequestId,
-            "skipped",
-            null,
-            null
-          );
+        const expectedLeafId = regeneratedLeafId ?? data?.targetUserId;
+        if (expectedLeafId && lastLeaf.id !== expectedLeafId) {
+          return { moved: true, reason: "conversation_changed" };
         }
-        return;
-      }
-
-      const expectedLeafId = regeneratedLeafId ?? data?.targetUserId;
-      if (expectedLeafId && lastLeaf.id !== expectedLeafId) {
-        // Superseded by a genuinely newer user turn — terminal `skipped`, not an
-        // error (recovery being superseded is benign).
-        await this._updateChatRecoveryIncident(
-          data?.incidentId,
-          "skipped",
-          "conversation_changed"
-        );
-        if (data?.recoveredRequestId) {
-          await this._completeRecoveredSubmission(
-            data.recoveredRequestId,
-            "skipped",
-            null,
-            null
-          );
-        }
-        return;
-      }
-
-      this._applyRecoveredRequestContext(data);
-      this._takeRecoveryReschedule(data?.incidentId);
-      const result = await this._runRecoveredTurnAfterAcceptance(
-        recoveredSubmission,
-        onTurnStarted,
-        () =>
-          this._retryLastUserTurn(this._lastClientTools, this._lastBody, {
-            signal: turnSignal,
-            trigger: "recovery-retry",
-            ...(regeneratedLeafId !== undefined && {
-              branchParentId: data?.targetUserId
+        return { moved: false };
+      },
+      // Being superseded is benign: the submission ends `skipped`, never
+      // `error`.
+      onSkipped: () => host.completeSubmission("skipped", null, null),
+      runTurn: (signal) =>
+        this._runRecoveredTurnAfterAcceptance(
+          host.submission(),
+          onTurnStarted,
+          () =>
+            this._retryLastUserTurn(this._lastClientTools, this._lastBody, {
+              signal: host.turnSignal(signal),
+              trigger: "recovery-retry",
+              ...(regeneratedLeafId !== undefined && {
+                branchParentId: data?.targetUserId
+              })
             })
-          })
-      );
-      if (await this._recoveryAttemptStopped(stop, data)) return;
-      if (
-        result.status !== "completed" &&
-        this._takeRecoveryReschedule(data?.incidentId)
-      ) {
-        // Interrupted again: the attempt it scheduled owns the outcome.
-        return;
-      }
-      await this._stageMessengerRecoveryOutcome(data, result.status);
-      await this._updateChatRecoveryIncident(
-        data?.incidentId,
-        result.status === "completed"
-          ? "completed"
-          : result.status === "skipped"
-            ? "skipped"
-            : "failed",
-        result.error
-      );
-      if (data?.recoveredRequestId) {
-        await this._completeRecoveredSubmission(
-          recoveredSubmission ?? data.recoveredRequestId,
+        ),
+      afterOutcome: (result) =>
+        host.completeSubmission(
           result.status,
           result.requestId || null,
           result.status === "completed"
             ? null
-            : (result.error ?? `Recovery retry ${result.status}.`)
-        );
-      }
-    } catch (error) {
-      await this._handleRecoveryCallbackError(
-        "_chatRecoveryRetry",
-        data,
-        error
+            : (result.error ?? `Recovery retry ${result.status}.`),
+          true
+        )
+    });
+  }
+
+  /**
+   * The steps of a recovery attempt that are the same for a continue and a
+   * retry: the shared plumbing, and the durable submission the attempt may
+   * own. `ChatRecoveryEngine.runRecoveredTurn` owns their order.
+   */
+  private _recoveredTurnHost<
+    TData extends ChatRecoveryContinueData | ChatRecoveryRetryData
+  >(callback: ChatRecoveryScheduleCallback, data: TData | undefined) {
+    const recoveredRequestId = data?.recoveredRequestId;
+    let submission: ThinkSubmissionRow | null = null;
+    let controller: AbortController | null = null;
+    const completeSubmission = async (
+      status: ThinkSubmissionStatus,
+      requestId: string | null,
+      errorMessage: string | null,
+      // After the turn ran, complete the row read at admission: the accepted
+      // turn moved its `request_id` to its own.
+      afterTurn = false
+    ): Promise<void> => {
+      if (!recoveredRequestId) return;
+      await this._completeRecoveredSubmission(
+        afterTurn ? (submission ?? recoveredRequestId) : recoveredRequestId,
+        status,
+        requestId,
+        errorMessage
       );
-    } finally {
-      stop.end();
-      this._activeChatRecoveryRootRequestId = previousRootRequestId;
-      if (recoveredSubmission) {
-        this._submissionAbortControllers.delete(
-          recoveredSubmission.submission_id
+    };
+    return {
+      callback,
+      data,
+      /** The running submission this attempt completes, if it has one. */
+      submission: () => submission,
+      completeSubmission,
+      /** The stop signal joined with the submission's own abort. */
+      turnSignal: (stop: AbortSignal) =>
+        controller ? AbortSignal.any([controller.signal, stop]) : stop,
+      admit: async () => {
+        if (!recoveredRequestId) return true;
+        submission = this._readRunningSubmissionForRecovery(recoveredRequestId);
+        if (!submission) {
+          await this._chatRecoveryEngine().updateIncident(
+            data?.incidentId,
+            "skipped",
+            "submission_not_running"
+          );
+          return false;
+        }
+        controller = new AbortController();
+        this._submissionAbortControllers.set(
+          submission.submission_id,
+          controller
         );
-      }
-      // If this facet is an agent-tool child, its recovered turn just settled
-      // outside `startAgentToolRun`'s finalizer — eagerly close the run so a
-      // re-attached parent collects the terminal immediately rather than
-      // waiting out a no-progress window. The pre-stream retry path settles a
-      // fresh user turn that (like `continueLastTurn`) never hits the
-      // finalizer, so it needs the same reconcile as `_chatRecoveryContinue`.
-      await this._reconcileOwnStaleAgentToolChildRuns();
-    }
+        return true;
+      },
+      release: () => {
+        if (submission) {
+          this._submissionAbortControllers.delete(submission.submission_id);
+        }
+      },
+      // A submission the recovery owned settles as `aborted`.
+      onStopped: () => completeSubmission("aborted", null, null),
+      // The recovery loop is the submission's only completion driver after a
+      // restart, and the client's answer continues the conversation as its
+      // own turn. A reply that ended on a client tool call is what a
+      // submission that was never interrupted completes on, so complete it.
+      onClientContinued: () => completeSubmission("completed", null, null),
+      // Before the incident settles: once it is terminal, nothing re-emits
+      // the event that would settle a messenger reply after a reset.
+      beforeOutcome: (result: SaveMessagesResult) =>
+        this._stageMessengerRecoveryOutcome(data, result.status),
+      whileDeferring: (incidentId: string, write: () => Promise<void>) =>
+        this._whileDeferringRecovery(incidentId, write)
+    };
   }
 
   /**
@@ -18477,7 +17904,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   async _chatRecoveryContinue(data?: ChatRecoveryContinueData): Promise<void> {
-    await this._dispatchChatRecovery(
+    await this._chatRecoveryEngine().dispatchRecovery(
       "_chatRecoveryContinue",
       data,
       (onTurnStarted) =>
@@ -18491,189 +17918,52 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     data?: ChatRecoveryContinueData,
     onTurnStarted?: () => void
   ): Promise<void> {
-    if (await this._recoveryCancelled(data)) return;
-    const recoveredSubmission = data?.recoveredRequestId
-      ? this._readRunningSubmissionForRecovery(data.recoveredRequestId)
-      : null;
-    if (data?.recoveredRequestId && !recoveredSubmission) {
-      await this._updateChatRecoveryIncident(
-        data.incidentId,
-        "skipped",
-        "submission_not_running"
-      );
-      return;
-    }
-
-    const previousRootRequestId = this._activeChatRecoveryRootRequestId;
-    this._activeChatRecoveryRootRequestId =
-      data?.originalRequestId ?? previousRootRequestId;
-    const controller = recoveredSubmission ? new AbortController() : null;
-    if (recoveredSubmission && controller) {
-      this._submissionAbortControllers.set(
-        recoveredSubmission.submission_id,
-        controller
-      );
-    }
-    // A client stops this attempt by the original request id: the only id it
-    // knows until the recovered turn streams.
-    const stop = this._turns.beginRecoveryAttempt(data?.originalRequestId);
-    const turnSignal = controller
-      ? AbortSignal.any([controller.signal, stop.signal])
-      : stop.signal;
-
-    try {
-      if (data?.targetAssistantId) {
-        await this._settleBeforeRecovery(data.targetAssistantId);
-      }
-      const recoveryConfig = this._resolveChatRecoveryConfig();
-      const ready = await this.waitUntilStable({
-        timeout: recoveryConfig.stableTimeoutMs
-      });
-      // A stop that landed while the attempt waited wins over the
-      // stable-state timeout's park, reschedule or exhaustion.
-      if (await this._recoveryAttemptStopped(stop, data)) return;
-      if (!ready) {
-        // PARK, don't burn the budget: a stable-state timeout while a CLIENT
-        // interaction is pending is not churn — the turn is correctly waiting
-        // for the SPA to replay an interrupted tool-result / approval after
-        // reconnect, which drives a fresh continuation via the auto-continuation
-        // barrier independently of this retry loop. Retrying here would just
-        // time out again (the human hasn't answered) and eventually seal a
-        // healthy turn on `stable_timeout`. So stop the loop, resolve the live
-        // "recovering…" indicator, and let the client's replay resume the turn.
-        if (await this._parkRecoveryForPendingInteraction(data)) {
-          return;
+    const targetId = data?.targetAssistantId;
+    const host = this._recoveredTurnHost("_chatRecoveryContinue", data);
+    // Whether a newer user turn, not recovery's own later continuation, is
+    // what moved the leaf.
+    let supersededByNewerUserTurn = false;
+    await this._chatRecoveryEngine().runRecoveredTurn({
+      ...host,
+      settleCutOffReply: async () => {
+        if (targetId) await this._settleBeforeRecovery(targetId);
+      },
+      checkLeaf: async () => {
+        const lastLeaf = await this.session.getLatestLeaf();
+        if (!targetId || lastLeaf?.id === targetId) return { moved: false };
+        supersededByNewerUserTurn = lastLeaf?.role === "user";
+        return { moved: true, reason: "conversation_changed" };
+      },
+      // The target is no longer the leaf. Never an error for the submission:
+      //  - an assistant leaf means recovery's own later continuation advanced
+      //    this turn. Leave the submission to that continuation.
+      //  - a user leaf means a newer turn superseded this one. Mark the
+      //    submission `skipped` so it does not wait on a turn nobody finishes.
+      onSkipped: async () => {
+        if (supersededByNewerUserTurn) {
+          await host.completeSubmission("skipped", null, null);
         }
-        console.warn(
-          "[Think] _chatRecoveryContinue timed out waiting for stable state"
-        );
-        // A stable-state timeout under deploy churn is usually transient (the
-        // isolate is still settling / another deploy is in flight). Reschedule
-        // within the attempt budget instead of terminally failing the turn at
-        // attempt 1; only give up once the budget is genuinely exhausted.
-        if (
-          await this._rescheduleRecoveryAfterStableTimeout(
-            "_chatRecoveryContinue",
-            data,
-            recoveryConfig.maxAttempts
-          )
-        ) {
-          return;
-        }
-        // Budget spent: terminalize through the SAME exhaustion path as deploy
-        // recovery (fires `onExhausted`, delivers the `terminalMessage` banner,
-        // marks the submission interrupted) instead of silently dropping the
-        // turn — otherwise an app relying on `onExhausted` sees an eternal
-        // spinner.
-        await this._exhaustRecoveryAfterStableTimeout(
-          "_chatRecoveryContinue",
-          data
-        );
-        return;
-      }
-
-      const targetId = data?.targetAssistantId;
-      const lastLeaf = await this.session.getLatestLeaf();
-      if (targetId && lastLeaf?.id !== targetId) {
-        // The target assistant message is no longer the leaf. This is NOT an
-        // error and must never clobber the submission to `error`:
-        //  - leaf is an ASSISTANT message → recovery's OWN later continuation
-        //    advanced (or already completed) this turn. This continuation is
-        //    stale/superseded; skip benignly and leave the submission alone so
-        //    the active continuation marks the real outcome (`completed`).
-        //  - leaf is a USER message → a genuinely newer turn superseded this
-        //    one; mark the submission `skipped` (terminal, non-error) so it
-        //    doesn't hang waiting on a turn nobody will finish.
-        const supersededByNewerUserTurn = lastLeaf?.role === "user";
-        await this._updateChatRecoveryIncident(
-          data?.incidentId,
-          "skipped",
-          "conversation_changed"
-        );
-        if (data?.recoveredRequestId && supersededByNewerUserTurn) {
-          await this._completeRecoveredSubmission(
-            data.recoveredRequestId,
-            "skipped",
-            null,
-            null
-          );
-        }
-        return;
-      }
-
-      this._applyRecoveredRequestContext(data);
-      this._takeRecoveryReschedule(data?.incidentId);
-      const result = await this._runRecoveredTurnAfterAcceptance(
-        recoveredSubmission,
-        onTurnStarted,
-        () =>
-          this.continueLastTurn(undefined, {
-            signal: turnSignal,
-            trigger: "recovery-continue"
-          })
-      );
-      if (await this._recoveryAttemptStopped(stop, data)) return;
-      if (
-        result.status !== "completed" &&
-        this._takeRecoveryReschedule(data?.incidentId)
-      ) {
-        // Interrupted again: the attempt it scheduled owns the outcome.
-        return;
-      }
-      await this._stageMessengerRecoveryOutcome(data, result.status);
-      await this._updateChatRecoveryIncident(
-        data?.incidentId,
-        result.status === "completed"
-          ? "completed"
-          : result.status === "skipped"
-            ? "skipped"
-            : "failed",
-        result.error
-      );
-      if (data?.recoveredRequestId) {
-        await this._completeRecoveredSubmission(
-          recoveredSubmission ?? data.recoveredRequestId,
+      },
+      runTurn: (signal) =>
+        this._runRecoveredTurnAfterAcceptance(
+          host.submission(),
+          onTurnStarted,
+          () =>
+            this.continueLastTurn(undefined, {
+              signal: host.turnSignal(signal),
+              trigger: "recovery-continue"
+            })
+        ),
+      afterOutcome: (result) =>
+        host.completeSubmission(
           result.status,
           result.requestId || null,
           result.status === "completed"
             ? null
-            : (result.error ?? `Recovery ${result.status}.`)
-        );
-      }
-    } catch (error) {
-      await this._handleRecoveryCallbackError(
-        "_chatRecoveryContinue",
-        data,
-        error
-      );
-    } finally {
-      stop.end();
-      this._activeChatRecoveryRootRequestId = previousRootRequestId;
-      if (recoveredSubmission) {
-        this._submissionAbortControllers.delete(
-          recoveredSubmission.submission_id
-        );
-      }
-      // If this facet is an agent-tool child, its recovered turn just settled
-      // outside `startAgentToolRun`'s finalizer — eagerly close the run so a
-      // re-attached parent collects the terminal immediately rather than
-      // waiting out a no-progress window.
-      await this._reconcileOwnStaleAgentToolChildRuns();
-    }
-  }
-
-  private _applyRecoveredRequestContext(
-    data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined
-  ): void {
-    if (!data) return;
-    if ("lastClientTools" in data) {
-      this._lastClientTools = data.lastClientTools ?? undefined;
-      this._persistClientTools();
-    }
-    if ("lastBody" in data) {
-      this._lastBody = data.lastBody ?? undefined;
-      this._persistBody();
-    }
+            : (result.error ?? `Recovery ${result.status}.`),
+          true
+        )
+    });
   }
 
   private _getPartialStreamText(streamId: string): {

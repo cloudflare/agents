@@ -2145,6 +2145,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   async onChatMessage(
     _onFinish?: unknown,
     ctx?: {
+      requestId?: string;
       body?: Record<string, unknown>;
       clientTools?: ClientToolSchema[];
     }
@@ -2156,6 +2157,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     const hold = this._turnHold;
     if (hold && !hold.waiting) {
       hold.waiting = true;
+      this._heldTurnRequestId = ctx?.requestId ?? null;
       await hold.released;
     }
 
@@ -2225,6 +2227,13 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       release = resolve;
     });
     this._turnHold = { waiting: false, released, release };
+  }
+
+  private _heldTurnRequestId: string | null = null;
+
+  /** The request id of the turn held in onChatMessage. */
+  heldTurnRequestIdForTest(): string | null {
+    return this._heldTurnRequestId;
   }
 
   isTurnHeldForTest(): boolean {
@@ -2438,8 +2447,10 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     interruptedAttempts?: number;
   }> {
     const { trigger = "stalled", ...identity } = input;
-    const self = this as unknown as {
-      _beginChatRecoveryIncident(
+    const engine = (
+      this as unknown as { _chatRecoveryEngine(): unknown }
+    )._chatRecoveryEngine() as {
+      beginIncident(
         i: typeof identity & { trigger: "interrupted" | "stalled" }
       ): Promise<{
         incident: {
@@ -2451,7 +2462,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
         exhausted: boolean;
       }>;
     };
-    const { incident, exhausted } = await self._beginChatRecoveryIncident({
+    const { incident, exhausted } = await engine.beginIncident({
       ...identity,
       trigger
     });
@@ -2480,14 +2491,16 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     reason?: string
   ): Promise<void> {
     await (
-      this as unknown as {
-        _updateChatRecoveryIncident(
+      (
+        this as unknown as { _chatRecoveryEngine(): unknown }
+      )._chatRecoveryEngine() as {
+        updateIncident(
           id: string,
           status: string,
           reason?: string
         ): Promise<void>;
       }
-    )._updateChatRecoveryIncident(incidentId, status, reason);
+    ).updateIncident(incidentId, status, reason);
   }
 
   async seedIncidentForTest(incident: {
@@ -2547,8 +2560,36 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   }
 
   /**
-   * #1730 layer 3: drive the stable-timeout give-up
-   * (`_exhaustRecoveryAfterStableTimeout`) while the durable terminal write
+   * Run a recovery continue attempt that gives up on a stable-state timeout:
+   * the wait times out and the incident's attempt budget is spent. This is
+   * the path production takes to the give-up.
+   */
+  private async _giveUpOnStableTimeoutForTest(data: {
+    incidentId: string;
+    originalRequestId: string;
+  }): Promise<void> {
+    const key = `cf:chat-recovery:incident:${encodeURIComponent(data.incidentId)}`;
+    const incident = await this.ctx.storage.get<{
+      attempt: number;
+      maxAttempts: number;
+    }>(key);
+    if (incident) {
+      await this.ctx.storage.put(key, {
+        ...incident,
+        attempt: incident.maxAttempts
+      });
+    }
+    const forced = this._forceStableTimeout;
+    this._forceStableTimeout = true;
+    try {
+      await super._chatRecoveryContinueDetached(data);
+    } finally {
+      this._forceStableTimeout = forced;
+    }
+  }
+
+  /**
+   * #1730 layer 3: drive the stable-timeout give-up while the durable terminal write
    * (`_recordChatTerminal`, #1645) rejects with a platform transient — the
    * exact window a give-up tends to run in. The FIRST give-up must re-throw
    * (so `Agent._executeScheduleCallback` preserves the one-shot row) and must
@@ -2591,10 +2632,6 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
         exclude?: string[]
       ): void;
       _recordChatTerminal(requestId: string, body: string): Promise<void>;
-      _exhaustRecoveryAfterStableTimeout(
-        callback: string,
-        data: unknown
-      ): Promise<void>;
     };
     const realBroadcast = self._broadcastChatMessage.bind(this);
     self._broadcastChatMessage = (m, exclude) => {
@@ -2626,10 +2663,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
     let firstThrew = false;
     try {
-      await self._exhaustRecoveryAfterStableTimeout(
-        "_chatRecoveryContinue",
-        data
-      );
+      await this._giveUpOnStableTimeoutForTest(data);
     } catch {
       firstThrew = true;
     }
@@ -2637,10 +2671,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
     let secondThrew = false;
     try {
-      await self._exhaustRecoveryAfterStableTimeout(
-        "_chatRecoveryContinue",
-        data
-      );
+      await this._giveUpOnStableTimeoutForTest(data);
     } catch {
       secondThrew = true;
     } finally {
@@ -2697,10 +2728,6 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
         msg: { body?: string; error?: boolean; done?: boolean },
         exclude?: string[]
       ): void;
-      _exhaustRecoveryAfterStableTimeout(
-        callback: string,
-        data: unknown
-      ): Promise<void>;
     };
     const realBroadcast = self._broadcastChatMessage.bind(this);
     self._broadcastChatMessage = (m, exclude) => {
@@ -2725,10 +2752,28 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
     let threw = false;
     try {
-      await self._exhaustRecoveryAfterStableTimeout("_chatRecoveryContinue", {
-        incidentId: begun.incidentId,
-        originalRequestId: requestId
-      });
+      // The give-up alone, through its production entry: on the full
+      // attempt path the failing read would be the cancelled check's.
+      await (
+        this as unknown as {
+          _chatRecoveryEngine(): {
+            exhaustRecoveryGiveUp(input: {
+              callback: string;
+              data: unknown;
+              reason: string;
+            }): Promise<void>;
+          };
+        }
+      )
+        ._chatRecoveryEngine()
+        .exhaustRecoveryGiveUp({
+          callback: "_chatRecoveryContinue",
+          data: {
+            incidentId: begun.incidentId,
+            originalRequestId: requestId
+          },
+          reason: "stable_timeout"
+        });
     } catch {
       threw = true;
     } finally {
@@ -2785,10 +2830,6 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
         msg: { body?: string; error?: boolean; done?: boolean },
         exclude?: string[]
       ): void;
-      _exhaustRecoveryAfterStableTimeout(
-        callback: string,
-        data: unknown
-      ): Promise<void>;
     };
     const realBroadcast = self._broadcastChatMessage.bind(this);
     self._broadcastChatMessage = (m, exclude) => {
@@ -2819,7 +2860,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
     let threw = false;
     try {
-      await self._exhaustRecoveryAfterStableTimeout("_chatRecoveryContinue", {
+      await this._giveUpOnStableTimeoutForTest({
         incidentId: begun.incidentId,
         originalRequestId: requestId
       });
@@ -2871,11 +2912,19 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     this._stableHold = null;
   }
 
+  /** Makes waitUntilStable throw, as a bug inside a recovery attempt would. */
+  private _stableWaitError: string | null = null;
+
+  setStableWaitErrorForTest(message: string | null): void {
+    this._stableWaitError = message;
+  }
+
   override async waitUntilStable(options?: {
     timeout?: number;
     pendingInteraction?: () => boolean;
   }): Promise<boolean> {
     if (this._forceStableTimeout) return false;
+    if (this._stableWaitError) throw new Error(this._stableWaitError);
     const hold = this._stableHold;
     if (hold && !hold.waiting) {
       hold.waiting = true;
@@ -3565,11 +3614,13 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
   /** Make the next routing into recovery throw (an incident write failure). */
   failNextIncidentBeginForTest(): void {
-    const self = this as unknown as {
-      _beginChatRecoveryIncident(...args: unknown[]): Promise<unknown>;
+    const engine = (
+      this as unknown as { _chatRecoveryEngine(): unknown }
+    )._chatRecoveryEngine() as {
+      beginIncident(...args: unknown[]): Promise<unknown>;
     };
-    self._beginChatRecoveryIncident = async () => {
-      Reflect.deleteProperty(self, "_beginChatRecoveryIncident");
+    engine.beginIncident = async () => {
+      Reflect.deleteProperty(engine, "beginIncident");
       throw new Error("incident write failed");
     };
   }

@@ -66,6 +66,7 @@ export {
   chatRecoveryTaskRunOptions,
   createChatRecoveryTaskDefinition,
   dispatchChatRecoveryToHandoff,
+  enqueueChatRecoveryTask,
   type ChatRecoveryHandoff,
   type ChatRecoveryTaskHooks,
   type ChatRecoveryTaskInput,
@@ -302,6 +303,10 @@ export {
   chatRecoveryBackoffSeconds,
   retryAfterSeconds,
   CHAT_RECOVERY_CANCELLED_REASON,
+  CHAT_RECOVERY_CONTINUED_REASON,
+  chatRecoveryProgressReader,
+  chatRecoveryStorageAdapter,
+  type ChatRecoveryTurnBindings,
   type ChatRecoveryScheduleReason,
   type ChatRecoveryScheduleCallback,
   type ChatRecoveryAdapter,
@@ -316,6 +321,25 @@ export {
   type BeginChatRecoveryIncidentInput,
   type BeginChatRecoveryIncidentResult
 } from "./recovery-engine";
+
+export {
+  routeStreamInterruption,
+  scheduleRecoveredTurn,
+  type RecoveredTurnSchedule,
+  type StreamInterruptionHost,
+  type StreamInterruptionOutcome,
+  type StreamInterruptionRecoveryContext
+} from "./recovery-route";
+
+export {
+  runRecoveredTurn,
+  handleRecoveryAttemptError,
+  cutOffReplyToSettle,
+  type RecoveredTurnHost,
+  type RecoveredTurnResult,
+  type RecoveryAttemptData,
+  type RecoveryLeafCheck
+} from "./recovery-attempt";
 
 export {
   ChatStreamStalledError,

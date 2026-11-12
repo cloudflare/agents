@@ -3369,6 +3369,48 @@ describe("Think — tool results with nothing to continue", () => {
     await closeWS(tabB);
   });
 
+  it("a recovery waiting on the client does not continue the reply the answer continued", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    // Turn 1 ends on a client tool call.
+    const done = waitForDone(ws);
+    sendChatRequest(ws, [makeUserMessage("use client tool")], {
+      clientTools: [{ name: "client_action", description: "A client tool" }]
+    });
+    await done;
+    await delay(200);
+
+    // A recovery continue for that reply starts and waits for the client.
+    await agent.startRecoveryContinueForTest();
+    await delay(300);
+
+    // The client answers. The answer's turn continues the reply.
+    const continued = waitForDone(ws, 15000);
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId: "tc-client-1",
+        toolName: "client_action",
+        output: "tool output",
+        autoContinue: true
+      })
+    );
+    await continued;
+    await delay(200);
+    const afterAnswer = (await agent.getMessages()) as UIMessage[];
+
+    // The chat settles and the attempt ends without asking the model again.
+    expect(await agent.finishRecoveryContinueForTest()).toEqual({
+      status: "skipped",
+      reason: "continued_by_interaction"
+    });
+    expect(await agent.getMessages()).toEqual(afterAnswer);
+    await closeWS(ws);
+  });
+
   it("a result for an older reply does not continue the newer reply", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);

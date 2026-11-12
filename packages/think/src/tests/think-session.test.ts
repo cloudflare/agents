@@ -952,12 +952,33 @@ describe("Think — error handling", () => {
     expect(result.finalText).toBe(result.textBeforeCancel);
   });
 
+  it("records the stop, not a give-up, when a stopped recovery attempt throws", async () => {
+    const agent = await freshAgent(
+      `transient-cancel-throw-${crypto.randomUUID()}`
+    );
+    const result = await agent.testStopThenThrowDuringRecoveryForTest();
+
+    expect(result.exhaustedReasons).toEqual([]);
+    expect(result.incident).toMatchObject({
+      status: "skipped",
+      reason: "user_cancelled"
+    });
+  });
+
   it("bounds a turn that streams a chunk and stalls on every attempt", async () => {
     const agent = await freshAgent(`stall-progress-${crypto.randomUUID()}`);
     const result = await agent.testRepeatedStallAfterProgressForTest(40);
 
     expect(result.scheduledAtEnd).toBe(0);
     expect(result.rounds).toBeLessThanOrEqual(10);
+  });
+
+  it("keeps an incident given up when the recovered turn that gave up returns", async () => {
+    const agent = await freshAgent(`stall-sealed-${crypto.randomUUID()}`);
+    const result = await agent.testRepeatedStallAfterProgressForTest(40);
+
+    expect(result.scheduledAtEnd).toBe(0);
+    expect(result.statuses).toEqual(["exhausted"]);
   });
 
   it("routes a transient WebSocket stream error into bounded recovery (#2085)", async () => {
