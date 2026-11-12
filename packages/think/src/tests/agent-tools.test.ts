@@ -18,6 +18,12 @@ type AgentToolInspection = Awaited<
 >;
 
 type ThinkAgentToolTestStub = {
+  chunksOfRunningRunForTest(): Promise<number>;
+  staleRunForTest(action: "tail" | "start"): Promise<{
+    tailClosed: boolean | null;
+    reported: string | null;
+    stored: string | null;
+  }>;
   cancelQueuedAgentToolRunForTest(): Promise<{
     status: string | null;
     userTexts: string[];
@@ -424,6 +430,29 @@ describe("Think agent tools", () => {
       });
     });
   }
+
+  it("reads the stored chunks of a run that is still running", async () => {
+    const agent = await freshAgent();
+    await expect(agent.chunksOfRunningRunForTest()).resolves.toBe(3);
+  });
+
+  it("settles and closes the tail of a stale run nothing is recovering", async () => {
+    const agent = await freshAgent();
+    await expect(agent.staleRunForTest("tail")).resolves.toEqual({
+      tailClosed: true,
+      reported: null,
+      stored: "error"
+    });
+  });
+
+  it("reconciles a stale run before reporting it to a parent that starts it again", async () => {
+    const agent = await freshAgent();
+    await expect(agent.staleRunForTest("start")).resolves.toEqual({
+      tailClosed: null,
+      reported: "error",
+      stored: "error"
+    });
+  });
 
   it("cleans in-memory agent-tool bookkeeping after a run completes", async () => {
     const agent = await freshAgent();

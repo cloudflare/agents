@@ -259,6 +259,10 @@ type ParentStub = DurableObjectStub & {
     withAssistantTurn: boolean
   ): Promise<{ before: string | null; after: string | null }>;
   childRunWithDateInputForTest(): Promise<unknown>;
+  childRunWithCircularOutputForTest(): Promise<{
+    status: string | undefined;
+    output: unknown;
+  }>;
   childResetWhileRunStreamsForTest(): Promise<AgentToolRunInspection | null>;
   childCancelQueuedRunForTest(thenReset: boolean): Promise<{
     queued: AgentToolRunInspection | null;
@@ -1323,6 +1327,12 @@ describe("AIChatAgent as an agent-tool child", () => {
     await expect(
       (await getParent()).childRunWithDateInputForTest()
     ).resolves.toEqual({ inputIsDate: true });
+  });
+
+  it("completes a run whose output JSON cannot hold, storing it as its string", async () => {
+    await expect(
+      (await getParent()).childRunWithCircularOutputForTest()
+    ).resolves.toEqual({ status: "completed", output: "[object Object]" });
   });
 
   it("records a chat reset while the run streams as an error, like a reset in the queue", async () => {

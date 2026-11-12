@@ -174,14 +174,21 @@ export { runRpcRequest, type RpcChatRequest } from "./rpc-request";
  */
 export {
   AgentToolRuns,
+  abortReasonText,
   agentToolRunOutcome,
   isAgentToolRunOpen,
+  type AgentToolRunsHost,
+  type AgentToolStreams,
+  type AgentToolTurnResult
+} from "./agent-tool-runs";
+export {
+  createAgentToolRunStore,
   type AgentToolRunRecord,
   type AgentToolRunStore,
   type AgentToolRunTerminal,
-  type AgentToolRunsHost,
-  type AgentToolTurnResult
-} from "./agent-tool-runs";
+  type AgentToolSql,
+  type AgentToolTableNames
+} from "./agent-tool-run-store";
 
 export { AbortRegistry } from "./abort-registry";
 

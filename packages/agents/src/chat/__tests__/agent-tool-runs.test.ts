@@ -1,97 +1,105 @@
+import { DatabaseSync } from "node:sqlite";
 import { describe, it, expect } from "vitest";
+import {
+  createAgentToolRunStore,
+  type AgentToolRunTerminal
+} from "../agent-tool-run-store";
 import {
   AgentToolRuns,
   agentToolRunOutcome,
-  type AgentToolRunRecord,
-  type AgentToolRunStore,
-  type AgentToolRunTerminal,
+  type AgentToolStreams,
   type AgentToolTurnResult
 } from "../agent-tool-runs";
 import { TurnQueue } from "../turn-queue";
 
-type Row = AgentToolRunRecord & {
-  startedAt: number;
-  terminal?: AgentToolRunTerminal;
-  writes: number;
-};
+type SqlValue = string | number | null;
 
-/** A run table in memory. It has no guards of its own: the core decides. */
-class FakeStore implements AgentToolRunStore {
-  rows = new Map<string, Row>();
-  private open(row: Row) {
-    return row.status === "running";
-  }
-  read(runId: string) {
-    return this.rows.get(runId) ?? null;
-  }
-  newestOpen() {
-    return (
-      [...this.rows.values()]
-        .filter((row) => this.open(row))
-        .sort((a, b) => b.startedAt - a.startedAt)[0] ?? null
-    );
-  }
-  openForRequest(requestId: string) {
-    return (
-      [...this.rows.values()].find(
-        (row) => this.open(row) && row.requestId === requestId
-      ) ?? null
-    );
-  }
-  forRequest(requestId: string) {
-    return (
-      [...this.rows.values()].find(
-        (row) => row.requestId === requestId || row.rootRequestId === requestId
-      ) ?? null
-    );
-  }
-  listOpen() {
-    return [...this.rows.values()]
-      .filter((row) => this.open(row))
-      .map((row) => row.runId);
-  }
-  insert(runId: string, run: { startedAt: number; terminalOnly: boolean }) {
-    this.rows.set(runId, {
-      runId,
-      requestId: null,
-      rootRequestId: null,
-      status: "running",
-      error: null,
-      terminalOnly: run.terminalOnly,
-      startedAt: run.startedAt,
-      writes: 0
-    });
-  }
-  bindRequest(runId: string, requestId: string) {
-    const row = this.rows.get(runId);
-    if (!row) return;
-    row.requestId = requestId;
-    row.rootRequestId ??= requestId;
-  }
-  recordStreamError(runId: string, error: string) {
-    const row = this.rows.get(runId);
-    if (row) row.error = error;
-  }
-  writeTerminal(runId: string, terminal: AgentToolRunTerminal) {
-    const row = this.rows.get(runId);
-    if (!row) return;
-    row.status = terminal.status;
-    row.terminal = terminal;
-    row.writes++;
-  }
+/**
+ * The real run store on an in-memory SQLite database, plus what the tests
+ * read back: the terminal a row holds and how often one was written.
+ */
+function makeStore() {
+  const db = new DatabaseSync(":memory:");
+  const store = createAgentToolRunStore(
+    () => ({
+      exec: (query: string, ...bindings: unknown[]) => {
+        const rows = db.prepare(query).all(...(bindings as SqlValue[]));
+        return { toArray: () => rows as Record<string, unknown>[] };
+      }
+    }),
+    { runs: "runs", milestones: "milestones", requestIndex: "runs_request" }
+  );
+  const writes = new Map<string, number>();
+  const writeTerminal = store.writeTerminal;
+  store.writeTerminal = (runId, terminal, turn) => {
+    writes.set(runId, (writes.get(runId) ?? 0) + 1);
+    writeTerminal(runId, terminal, turn);
+  };
+  return Object.assign(store, {
+    /** Insert an open row, as an earlier isolate would have left it. */
+    seed: (runId: string, terminalOnly = false) =>
+      store.insert(runId, { input: "go", startedAt: 1, terminalOnly }),
+    writes: (runId: string) => writes.get(runId) ?? 0,
+    terminal: (runId: string): AgentToolRunTerminal | undefined => {
+      const run = store.read(runId);
+      if (!run) return undefined;
+      if (run.status === "completed") {
+        return {
+          status: "completed",
+          output: run.output,
+          summary: run.summary
+        };
+      }
+      if (run.status === "error") {
+        return { status: "error", error: run.error ?? "" };
+      }
+      if (run.status === "aborted") {
+        return { status: "aborted", error: run.error };
+      }
+      return undefined;
+    }
+  });
 }
 
+type Incident = { status: string };
+
 function setup() {
-  const store = new FakeStore();
+  const store = makeStore();
   const queue = new TurnQueue();
   const recovered: Array<{ requestId: string; reason: unknown }> = [];
-  let recovery: "in-progress" | "failed" | "none" = "none";
+  const broadcasts: Array<{ requestId: string; body: string }> = [];
+  const incidents = new Map<string, Incident>();
+  const stored = new Map<string, string[]>();
+  const streamOf = new Map<string, string>();
   let reply = false;
-  let resolveRecovery: (() => void) | undefined;
+  let activeRequestId: string | null = null;
+  let activeStream = false;
+  let holdList: Promise<void> | undefined;
   const lifecycles: Promise<unknown>[] = [];
+  const streams: AgentToolStreams = {
+    flushBuffer: () => {},
+    latestStreamInfoForRequest: (requestId) => {
+      const id = streamOf.get(requestId);
+      return id ? { id } : null;
+    },
+    getStreamChunks: (streamId) =>
+      (stored.get(streamId) ?? []).map((body, chunk_index) => ({
+        body,
+        chunk_index
+      })),
+    hasActiveStream: () => activeStream
+  };
+  const collected: unknown[] = [];
   const runs = new AgentToolRuns({
     store,
     queue,
+    streams: () => streams,
+    storage: () => ({
+      list: (async () => {
+        await holdList;
+        return incidents;
+      }) as unknown as DurableObjectStorage["list"]
+    }),
     responseType: "response",
     resetError: "cleared",
     keepAliveWhile: (fn) => {
@@ -99,38 +107,55 @@ function setup() {
       lifecycles.push(running);
       return running;
     },
-    collectResult: () => ({ output: { ok: true }, summary: "done" }),
-    hasAssistantReply: () => reply,
+    activeRequestId: () => activeRequestId,
+    broadcastChunk: (requestId, body) =>
+      void broadcasts.push({ requestId, body }),
+    collectResult: (_runId, input) => {
+      collected.push(input);
+      return { output: { ok: true }, summary: "done" };
+    },
+    messages: () => (reply ? [{ id: "reply", role: "assistant" }] : []),
     cancelRequest: (requestId, reason) =>
-      void recovered.push({ requestId, reason }),
-    classifyRecovery: () =>
-      resolveRecovery
-        ? new Promise((resolve) => {
-            const release = resolveRecovery;
-            resolveRecovery = () => {
-              release?.();
-              resolve(recovery);
-            };
-          })
-        : Promise.resolve(recovery),
-    hasActiveStream: () => false
+      void recovered.push({ requestId, reason })
   });
   return {
     store,
     queue,
     runs,
     recovered,
+    broadcasts,
+    collected,
     settled: () => Promise.all(lifecycles),
-    setRecovery: (state: typeof recovery) => {
-      recovery = state;
+    setRecovery: (state: "in-progress" | "failed" | "none") => {
+      incidents.clear();
+      if (state === "in-progress") incidents.set("i", { status: "scheduled" });
+      if (state === "failed") incidents.set("i", { status: "exhausted" });
     },
     setReply: (value: boolean) => {
       reply = value;
     },
+    setActiveRequest: (requestId: string | null) => {
+      activeRequestId = requestId;
+    },
+    setActiveStream: (value: boolean) => {
+      activeStream = value;
+    },
+    /** Give `requestId` a stream holding `bodies`. */
+    storeChunks: (requestId: string, bodies: string[]) => {
+      const streamId = `stream-${requestId}`;
+      streamOf.set(requestId, streamId);
+      stored.set(streamId, bodies);
+    },
     /** Make the next reconcile wait until the returned function is called. */
     holdRecoveryRead: () => {
-      resolveRecovery = () => {};
-      return () => resolveRecovery?.();
+      let release!: () => void;
+      holdList = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return () => {
+        holdList = undefined;
+        release();
+      };
     }
   };
 }
@@ -155,11 +180,7 @@ function heldTurn() {
   };
 }
 
-const START = {
-  input: "go",
-  terminalOnly: false,
-  assistantIds: new Set<string>()
-};
+const START = { input: "go", terminalOnly: false };
 
 describe("agentToolRunOutcome", () => {
   const base = { resetSinceStart: false, resetError: "cleared" };
@@ -218,14 +239,13 @@ describe("AgentToolRuns", () => {
   it("runs the turn and writes its outcome once, then forgets the run", async () => {
     const { runs, store, settled } = setup();
     const turn = heldTurn();
-    runs.start("run-1", START, turn.run);
-    await Promise.resolve();
+    await runs.start("run-1", START, turn.run);
     expect(runs.isLive("run-1")).toBe(true);
     expect(store.read("run-1")?.status).toBe("running");
 
     turn.end({ requestId: "req-1", status: "completed" });
     await settled();
-    expect(store.rows.get("run-1")?.terminal).toEqual({
+    expect(store.terminal("run-1")).toEqual({
       status: "completed",
       output: { ok: true },
       summary: "done"
@@ -238,13 +258,12 @@ describe("AgentToolRuns", () => {
   it("a cancel aborts the run's signal and its aborted status stands when the turn ends", async () => {
     const { runs, store, settled, recovered } = setup();
     const turn = heldTurn();
-    runs.start("run-1", START, turn.run);
-    await Promise.resolve();
+    await runs.start("run-1", START, turn.run);
 
     runs.cancel("run-1", "stop");
     expect(turn.signal()?.aborted).toBe(true);
     expect(runs.isCancelled("run-1")).toBe(true);
-    expect(store.rows.get("run-1")?.terminal).toEqual({
+    expect(store.terminal("run-1")).toEqual({
       status: "aborted",
       error: "stop"
     });
@@ -255,7 +274,7 @@ describe("AgentToolRuns", () => {
     turn.end({ requestId: "req-1", status: "error", error: "late failure" });
     await settled();
     expect(store.read("run-1")?.status).toBe("aborted");
-    expect(store.rows.get("run-1")?.writes).toBe(1);
+    expect(store.writes("run-1")).toBe(1);
   });
 
   it("a cancel of a run that is unknown or has ended does nothing", async () => {
@@ -263,8 +282,7 @@ describe("AgentToolRuns", () => {
     runs.cancel("no-such-run", "stop");
 
     const turn = heldTurn();
-    runs.start("run-1", START, turn.run);
-    await Promise.resolve();
+    await runs.start("run-1", START, turn.run);
     turn.end({ requestId: "req-1", status: "completed" });
     await settled();
 
@@ -276,7 +294,7 @@ describe("AgentToolRuns", () => {
   it("a cancel of a run with no controller here cancels the request ids on its row, and only those", () => {
     const { runs, store, recovered } = setup();
     // A row an earlier isolate left open, recovered once already.
-    store.insert("run-1", { startedAt: 1, terminalOnly: false });
+    store.seed("run-1");
     store.bindRequest("run-1", "req-1");
     runs.rebind("req-2");
 
@@ -290,7 +308,7 @@ describe("AgentToolRuns", () => {
 
   it("a cancel of a run that never bound a request cancels no request", () => {
     const { runs, store, recovered } = setup();
-    store.insert("run-1", { startedAt: 1, terminalOnly: false });
+    store.seed("run-1");
     runs.cancel("run-1", "parent gave up");
     expect(recovered).toEqual([]);
     expect(store.read("run-1")?.status).toBe("aborted");
@@ -298,7 +316,7 @@ describe("AgentToolRuns", () => {
 
   it("records a stream error only on an open row, and never throws", () => {
     const { runs, store } = setup();
-    store.insert("run-1", { startedAt: 1, terminalOnly: false });
+    store.seed("run-1");
     store.bindRequest("run-1", "req-1");
     runs.liveSequences.set("run-1", 0);
     const frame = (body: string) =>
@@ -310,7 +328,8 @@ describe("AgentToolRuns", () => {
     runs.runsByRequestId.set("req-1", "run-1");
     runs.liveSequences.set("run-1", 0);
     runs.intercept(frame("late failure"));
-    expect(store.read("run-1")?.error).toBe("first failure");
+    // The row holds the cancel's reason, not an error that came after it.
+    expect(store.read("run-1")?.error).toBe("stop");
 
     store.read = () => {
       throw new Error("sql failed");
@@ -322,12 +341,11 @@ describe("AgentToolRuns", () => {
     for (const status of ["skipped", "aborted"] as const) {
       const { runs, store, queue, settled } = setup();
       const turn = heldTurn();
-      runs.start("run-1", START, turn.run);
-      await Promise.resolve();
+      await runs.start("run-1", START, turn.run);
       queue.reset();
       turn.end({ requestId: "req-1", status });
       await settled();
-      expect(store.rows.get("run-1")?.terminal).toEqual({
+      expect(store.terminal("run-1")).toEqual({
         status: "error",
         error: "cleared"
       });
@@ -337,11 +355,10 @@ describe("AgentToolRuns", () => {
   it("records a turn that threw as an error, or as aborted when the run was aborted", async () => {
     const failed = setup();
     const turn = heldTurn();
-    failed.runs.start("run-1", START, turn.run);
-    await Promise.resolve();
+    await failed.runs.start("run-1", START, turn.run);
     turn.fail(new Error("boom"));
     await failed.settled();
-    expect(failed.store.rows.get("run-1")?.terminal).toEqual({
+    expect(failed.store.terminal("run-1")).toEqual({
       status: "error",
       error: "boom"
     });
@@ -349,17 +366,16 @@ describe("AgentToolRuns", () => {
     const aborted = setup();
     const parent = new AbortController();
     const abortedTurn = heldTurn();
-    aborted.runs.start(
+    await aborted.runs.start(
       "run-1",
       { ...START, signal: parent.signal },
       abortedTurn.run
     );
-    await Promise.resolve();
     parent.abort(new Error("parent stopped"));
     expect(abortedTurn.signal()?.aborted).toBe(true);
     abortedTurn.fail(new Error("aborted"));
     await aborted.settled();
-    expect(aborted.store.rows.get("run-1")?.terminal).toEqual({
+    expect(aborted.store.terminal("run-1")).toEqual({
       status: "aborted",
       error: "parent stopped"
     });
@@ -368,8 +384,7 @@ describe("AgentToolRuns", () => {
   it("binds the turn's request id and rebinds a recovered turn's", async () => {
     const { runs, store } = setup();
     const turn = heldTurn();
-    runs.start("run-1", START, turn.run);
-    await Promise.resolve();
+    await runs.start("run-1", START, turn.run);
     runs.bindTurn("run-1", "req-1");
     expect(runs.runForRequest("req-1")).toBe("run-1");
     expect(runs.runForRequest("other")).toBe(null);
@@ -382,7 +397,7 @@ describe("AgentToolRuns", () => {
 
   it("resolves a request id from the row after a restart", () => {
     const { runs, store } = setup();
-    store.insert("run-1", { startedAt: 1, terminalOnly: true });
+    store.seed("run-1", true);
     store.bindRequest("run-1", "req-1");
     expect(runs.runForRequest("req-1")).toBe("run-1");
     expect(runs.terminalOnlyRuns.has("run-1")).toBe(true);
@@ -392,7 +407,7 @@ describe("AgentToolRuns", () => {
     const { runs, store } = setup();
     expect(runs.isRecoveredRunCancelled("req-8")).toBe(false);
 
-    store.insert("run-1", { startedAt: 1, terminalOnly: false });
+    store.seed("run-1");
     store.bindRequest("run-1", "req-1");
     // An open run's turn is recovered.
     expect(runs.isRecoveredRunCancelled("req-1")).toBe(false);
@@ -407,7 +422,7 @@ describe("AgentToolRuns", () => {
 
   it("reports a cancelled run to a second recovery, which still names the first request id", () => {
     const { runs, store } = setup();
-    store.insert("run-1", { startedAt: 1, terminalOnly: false });
+    store.seed("run-1");
     store.bindRequest("run-1", "req-1");
     // The first recovery re-runs the turn under a new request id.
     runs.rebind("req-2");
@@ -419,7 +434,7 @@ describe("AgentToolRuns", () => {
 
   it("a run that completed or failed does not stop the recovery of its turn", async () => {
     const { runs, store, setReply } = setup();
-    store.insert("run-1", { startedAt: 1, terminalOnly: false });
+    store.seed("run-1");
     store.bindRequest("run-1", "req-1");
     setReply(true);
     await runs.reconcileStale("run-1");
@@ -429,25 +444,25 @@ describe("AgentToolRuns", () => {
 
   it("settles a stale run from recovery: completed with a reply, error without", async () => {
     const withReply = setup();
-    withReply.store.insert("run-1", { startedAt: 1, terminalOnly: false });
+    withReply.store.seed("run-1");
     withReply.setReply(true);
     await withReply.runs.reconcileStale("run-1");
     expect(withReply.store.read("run-1")?.status).toBe("completed");
 
     const without = setup();
-    without.store.insert("run-1", { startedAt: 1, terminalOnly: false });
+    without.store.seed("run-1");
     await without.runs.reconcileStale("run-1");
-    expect(without.store.rows.get("run-1")?.terminal).toEqual({
+    expect(without.store.terminal("run-1")).toEqual({
       status: "error",
       error: "Agent tool run was interrupted before the child could finish."
     });
 
     const errored = setup();
-    errored.store.insert("run-1", { startedAt: 1, terminalOnly: false });
+    errored.store.seed("run-1");
     errored.store.recordStreamError("run-1", "provider failed");
     errored.setReply(true);
     await errored.runs.reconcileStale("run-1");
-    expect(errored.store.rows.get("run-1")?.terminal).toEqual({
+    expect(errored.store.terminal("run-1")).toEqual({
       status: "error",
       error: "provider failed"
     });
@@ -455,7 +470,7 @@ describe("AgentToolRuns", () => {
 
   it("leaves a stale run open while recovery is still working", async () => {
     const { runs, store, setRecovery } = setup();
-    store.insert("run-1", { startedAt: 1, terminalOnly: false });
+    store.seed("run-1");
     setRecovery("in-progress");
     await runs.reconcileOwn();
     expect(store.read("run-1")?.status).toBe("running");
@@ -463,17 +478,17 @@ describe("AgentToolRuns", () => {
 
   it("a reconcile does not replace a cancel that landed while it read recovery state", async () => {
     const { runs, store, holdRecoveryRead } = setup();
-    store.insert("run-1", { startedAt: 1, terminalOnly: false });
+    store.seed("run-1");
     const release = holdRecoveryRead();
     const reconciling = runs.reconcileStale("run-1");
     runs.cancel("run-1", "stop");
     release();
     await reconciling;
-    expect(store.rows.get("run-1")?.terminal).toEqual({
+    expect(store.terminal("run-1")).toEqual({
       status: "aborted",
       error: "stop"
     });
-    expect(store.rows.get("run-1")?.writes).toBe(1);
+    expect(store.writes("run-1")).toBe(1);
   });
 
   it("closing the tails of a run with no controller here drops its streaming state", () => {
@@ -488,5 +503,367 @@ describe("AgentToolRuns", () => {
     expect(runs.forwarders.size).toBe(0);
     expect(runs.liveSequences.size).toBe(0);
     expect(runs.terminalOnlyRuns.size).toBe(0);
+  });
+
+  it("starting a run id that already has a row starts nothing and reports that run", async () => {
+    const { runs, store, settled } = setup();
+    const first = heldTurn();
+    await runs.start("run-1", START, first.run);
+    first.end({ requestId: "req-1", status: "completed" });
+    await settled();
+
+    let started = false;
+    const again = await runs.start("run-1", START, async () => {
+      started = true;
+      return { requestId: "req-2", status: "completed" };
+    });
+    expect(started).toBe(false);
+    expect(again).toMatchObject({ status: "completed", summary: "done" });
+    expect(store.writes("run-1")).toBe(1);
+  });
+
+  it("starting over a stale run reconciles it first", async () => {
+    const { runs, store } = setup();
+    store.seed("run-1");
+    const inspection = await runs.start("run-1", START, async () => {
+      throw new Error("must not start");
+    });
+    expect(inspection).toMatchObject({
+      status: "error",
+      error: "Agent tool run was interrupted before the child could finish."
+    });
+  });
+
+  it("hands the output hook a live run's input as it was passed, a stored copy otherwise", async () => {
+    const { runs, store, collected, settled, setReply } = setup();
+    const input = { when: new Date(0) };
+    const turn = heldTurn();
+    await runs.start("run-1", { ...START, input }, turn.run);
+    turn.end({ requestId: "req-1", status: "completed" });
+    await settled();
+    expect(collected[0]).toBe(input);
+
+    store.seed("run-2");
+    setReply(true);
+    await runs.reconcileStale("run-2");
+    expect(collected[1]).toBe("go");
+  });
+
+  it("reports a run as the parent reads it", async () => {
+    const { runs, store, settled, storeChunks } = setup();
+    expect(await runs.inspect("run-1")).toBe(null);
+
+    const turn = heldTurn();
+    await runs.start("run-1", START, turn.run);
+    runs.bindTurn("run-1", "req-1");
+    storeChunks("req-1", ["a"]);
+    expect(await runs.inspect("run-1")).toMatchObject({
+      runId: "run-1",
+      status: "running",
+      requestId: "req-1",
+      streamId: "stream-req-1",
+      output: undefined,
+      summary: undefined,
+      error: undefined
+    });
+
+    turn.end({ requestId: "req-1", status: "completed" });
+    await settled();
+    const done = await runs.inspect("run-1");
+    expect(done).toMatchObject({
+      status: "completed",
+      output: { ok: true },
+      summary: "done",
+      streamId: "stream-req-1"
+    });
+    expect(done?.completedAt).toBeTypeOf("number");
+
+    store.seed("run-2");
+    runs.cancel("run-2", "stop");
+    expect(await runs.inspect("run-2")).toMatchObject({
+      status: "aborted",
+      error: "stop",
+      output: undefined
+    });
+  });
+
+  it("inspects a stale run without reconciling it when asked not to", async () => {
+    const { runs, store } = setup();
+    store.seed("run-1");
+    expect(await runs.inspect("run-1", { reconcile: false })).toMatchObject({
+      status: "running"
+    });
+    expect(store.read("run-1")?.status).toBe("running");
+  });
+
+  it("stores output JSON cannot hold as its string, and keeps the run completed", async () => {
+    const { runs, store, setReply } = setup();
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    store.seed("run-1");
+    store.writeTerminal("run-1", {
+      status: "completed",
+      output: circular,
+      summary: "done"
+    });
+    setReply(true);
+    expect(await runs.inspect("run-1")).toMatchObject({
+      status: "completed",
+      output: "[object Object]"
+    });
+  });
+
+  it("reads a running run's stored chunks by its turn's request id", async () => {
+    const { runs, storeChunks } = setup();
+    const turn = heldTurn();
+    await runs.start("run-1", START, turn.run);
+    expect(runs.chunks("run-1")).toEqual([]);
+    runs.bindTurn("run-1", "req-1");
+    storeChunks("req-1", ["a", "b", "c"]);
+    expect(runs.chunks("run-1")).toEqual([
+      { sequence: 0, body: "a" },
+      { sequence: 1, body: "b" },
+      { sequence: 2, body: "c" }
+    ]);
+    expect(runs.chunks("run-1", { afterSequence: 1 })).toEqual([
+      { sequence: 2, body: "c" }
+    ]);
+  });
+
+  describe("tail", () => {
+    const decoder = new TextDecoder();
+    async function readAll(stream: ReadableStream<Uint8Array>) {
+      const reader = stream.getReader();
+      let text = "";
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) break;
+        text += decoder.decode(next.value, { stream: true });
+      }
+      return text
+        .split("\n")
+        .filter((line) => line.length > 0)
+        .map((line) => JSON.parse(line) as { sequence: number; body: string });
+    }
+    const frame = (requestId: string, body: string) =>
+      JSON.stringify({ type: "response", id: requestId, body });
+
+    it("replays the stored chunks, forwards the live ones once and in order, and closes when the run ends", async () => {
+      const { runs, settled, storeChunks } = setup();
+      const turn = heldTurn();
+      await runs.start("run-1", START, turn.run);
+      runs.bindTurn("run-1", "req-1");
+      storeChunks("req-1", ["a", "b"]);
+      runs.liveSequences.set("run-1", 2);
+
+      const reading = readAll(runs.tail("run-1", { afterSequence: -1 }));
+      // Let the tail drain its backlog and attach.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      runs.intercept(frame("req-1", "c"));
+      runs.intercept(frame("another-request", "not this run"));
+      turn.end({ requestId: "req-1", status: "completed" });
+      await settled();
+
+      expect(await reading).toEqual([
+        { sequence: 0, body: "a" },
+        { sequence: 1, body: "b" },
+        { sequence: 2, body: "c" }
+      ]);
+      expect(runs.forwarders.size).toBe(0);
+    });
+
+    it("emits a chunk that is both in the backlog and broadcast during the drain once", async () => {
+      const { runs, settled, storeChunks } = setup();
+      const turn = heldTurn();
+      await runs.start("run-1", START, turn.run);
+      runs.bindTurn("run-1", "req-1");
+      storeChunks("req-1", ["a"]);
+      runs.liveSequences.set("run-1", 1);
+
+      const reading = readAll(
+        runs.tail("run-1", undefined, {
+          chunks: async (runId, options) => {
+            // Stored and broadcast while the backlog is being read.
+            storeChunks("req-1", ["a", "b"]);
+            runs.intercept(frame("req-1", "b"));
+            return runs.chunks(runId, options);
+          }
+        })
+      );
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      turn.end({ requestId: "req-1", status: "completed" });
+      await settled();
+      expect(await reading).toEqual([
+        { sequence: 0, body: "a" },
+        { sequence: 1, body: "b" }
+      ]);
+    });
+
+    it("seeds a cold live counter from the stored backlog, so a recovered turn's chunks continue the numbering", async () => {
+      const { runs, store, storeChunks, setRecovery } = setup();
+      // A run an earlier isolate started; its turn is being recovered, so
+      // the tail's inspect leaves the row open.
+      store.seed("run-1");
+      store.bindRequest("run-1", "req-1");
+      storeChunks("req-1", ["a", "b", "c"]);
+      setRecovery("in-progress");
+
+      const abort = new AbortController();
+      const stream = runs.tail("run-1", {
+        afterSequence: 2,
+        signal: abort.signal
+      });
+      const reader = stream.getReader();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(runs.liveSequences.get("run-1")).toBe(3);
+      abort.abort();
+      expect((await reader.read()).done).toBe(true);
+    });
+
+    it("closes at once for a run that has ended, and leaves no state behind", async () => {
+      const { runs, store } = setup();
+      store.seed("run-1");
+      runs.cancel("run-1", "stop");
+      expect(await readAll(runs.tail("run-1"))).toEqual([]);
+      expect(runs.forwarders.size).toBe(0);
+      expect(runs.liveSequences.size).toBe(0);
+    });
+
+    it("reconciles a stale run it is asked to follow, and closes", async () => {
+      const { runs, store } = setup();
+      store.seed("run-1");
+      expect(await readAll(runs.tail("run-1"))).toEqual([]);
+      expect(store.read("run-1")?.status).toBe("error");
+    });
+
+    it("a consumer that cancels the stream detaches and does not cancel the run", async () => {
+      const { runs, store } = setup();
+      const turn = heldTurn();
+      await runs.start("run-1", START, turn.run);
+      const reader = runs.tail("run-1").getReader();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(runs.forwarders.get("run-1")?.size).toBe(1);
+      await reader.cancel();
+      expect(runs.forwarders.size).toBe(0);
+      expect(store.read("run-1")?.status).toBe("running");
+      expect(turn.signal()?.aborted).toBe(false);
+    });
+  });
+
+  describe("progress", () => {
+    it("is inactive outside a run's turn", () => {
+      const { runs } = setup();
+      expect(runs.reportProgress({ fraction: 0.5 })).toBe("inactive");
+    });
+
+    it("broadcasts progress for the run whose turn is active and stores the latest snapshot", async () => {
+      const { runs, broadcasts, setActiveRequest } = setup();
+      const turn = heldTurn();
+      await runs.start("run-1", START, turn.run);
+      runs.bindTurn("run-1", "req-1");
+      setActiveRequest("req-1");
+
+      expect(runs.reportProgress({ fraction: 0.5, phase: "reading" })).toBe(
+        "emitted"
+      );
+      expect(broadcasts).toHaveLength(1);
+      expect(broadcasts[0]?.requestId).toBe("req-1");
+      expect((await runs.inspect("run-1"))?.progress).toMatchObject({
+        fraction: 0.5,
+        phase: "reading"
+      });
+    });
+
+    it("stores milestones in order and reports them with the run", async () => {
+      const { runs, setActiveRequest } = setup();
+      const turn = heldTurn();
+      await runs.start("run-1", START, turn.run);
+      runs.bindTurn("run-1", "req-1");
+      setActiveRequest("req-1");
+      runs.reportProgress({ milestone: "sources", data: { count: 3 } });
+      runs.reportProgress({ milestone: "draft" });
+      expect((await runs.inspect("run-1"))?.milestones).toMatchObject([
+        { name: "sources", sequence: 0, data: { count: 3 } },
+        { name: "draft", sequence: 1 }
+      ]);
+    });
+  });
+
+  it("counts only the replies a run added as its own", async () => {
+    const { runs, setReply } = setup();
+    // A reply that was there before the run started.
+    setReply(true);
+    const turn = heldTurn();
+    await runs.start("run-1", START, turn.run);
+    const transcript = [
+      { id: "reply", role: "assistant" },
+      { id: "question", role: "user" },
+      { id: "answer", role: "assistant" }
+    ];
+    expect(
+      runs.messagesSinceStart("run-1", transcript).map((m) => m.id)
+    ).toEqual(["question", "answer"]);
+    // With no record of the start, every reply counts.
+    expect(
+      runs.messagesSinceStart("unknown", transcript).map((m) => m.id)
+    ).toEqual(["reply", "question", "answer"]);
+  });
+
+  it("admits a recovery unless its run was cancelled, and records why it did not", async () => {
+    const { runs, store } = setup();
+    const writes: unknown[] = [];
+    const update = async (...args: unknown[]) => void writes.push(args);
+    store.seed("run-1");
+    store.bindRequest("run-1", "req-1");
+    const attempt = { incidentId: "incident", originalRequestId: "req-1" };
+    expect(await runs.admitRecoveredTurn(attempt, update)).toBe(true);
+    expect(await runs.admitRecoveredTurn(undefined, update)).toBe(true);
+    runs.cancel("run-1", "stop");
+    expect(await runs.admitRecoveredTurn(attempt, update)).toBe(false);
+    expect(writes).toEqual([["incident", "skipped", "user_cancelled"]]);
+  });
+
+  describe("the run table", () => {
+    it("is not created by the lookups every recovered turn makes", () => {
+      const { runs, store } = setup();
+      let created = false;
+      const ensure = store.ensure;
+      store.ensure = () => {
+        created = true;
+        ensure();
+      };
+      runs.rebind("req-1");
+      expect(runs.isRecoveredRunCancelled("req-1")).toBe(false);
+      expect(store.listOpen()).toEqual([]);
+      expect(created).toBe(false);
+    });
+
+    it("adds the columns a table from an older version lacks", () => {
+      const db = new DatabaseSync(":memory:");
+      db.exec(
+        "create table runs (run_id text primary key, request_id text, status text not null, started_at integer not null)"
+      );
+      db.exec(
+        "insert into runs (run_id, request_id, status, started_at) values ('old', 'req-1', 'running', 1)"
+      );
+      const store = createAgentToolRunStore(
+        () => ({
+          exec: (query: string, ...bindings: unknown[]) => {
+            const rows = db.prepare(query).all(...(bindings as SqlValue[]));
+            return { toArray: () => rows as Record<string, unknown>[] };
+          }
+        }),
+        { runs: "runs", milestones: "milestones", requestIndex: "runs_request" }
+      );
+      expect(store.newestOpen()).toMatchObject({
+        runId: "old",
+        requestId: "req-1",
+        rootRequestId: null,
+        streamId: null
+      });
+      store.bindRequest("old", "req-2");
+      // A row from before the column existed takes its next bind as root.
+      expect(store.read("old")?.rootRequestId).toBe("req-2");
+    });
   });
 });

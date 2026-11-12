@@ -11,7 +11,7 @@ async function freshRecoveryAgent(name: string) {
 }
 
 /**
- * Safety net for `_rebindAgentToolChildRunRequestId` (the re-attach budget fix):
+ * Safety net for `AgentToolRuns.rebind` (the re-attach budget fix):
  * it runs on EVERY recovery continuation, so it must be an unambiguous no-op
  * whenever this recovery is NOT for a live agent-tool child run. These lock the
  * three no-op cases the docstring promises, plus the defensive newest-row

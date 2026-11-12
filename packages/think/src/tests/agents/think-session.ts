@@ -781,16 +781,12 @@ export class ThinkTestAgent extends Think {
     name: string,
     data: unknown
   ): number {
-    return (
-      this as unknown as {
-        _persistAgentToolMilestone(
-          runId: string,
-          name: string,
-          data: unknown,
-          at: number
-        ): number;
-      }
-    )._persistAgentToolMilestone(runId, name, data, Date.now());
+    return this["_agentToolRuns"].store.addMilestone(
+      runId,
+      name,
+      data,
+      Date.now()
+    );
   }
 
   /**
@@ -804,8 +800,8 @@ export class ThinkTestAgent extends Think {
   ): Promise<{ requestId: string; streamId: string } | null> {
     const deadline = Date.now() + 2000;
     while (Date.now() < deadline) {
-      const row = this["_readAgentToolChildRun"](runId);
-      const requestId = row?.request_id ?? undefined;
+      const requestId =
+        this["_agentToolRuns"].store.read(runId)?.requestId ?? undefined;
       if (requestId) {
         const streamId =
           this["_resumableStream"]
@@ -910,7 +906,7 @@ export class ThinkTestAgent extends Think {
   /**
    * #1575: simulate a DO restart mid-run — the in-memory request-id map is
    * empty (wiped by the restart), but the child-run row persisted its
-   * `request_id` at turn start. `_agentToolRunForRequest` must still attribute
+   * `request_id` at turn start. `AgentToolRuns.runForRequest` must still attribute
    * a frame to the run via the SQL fallback, and an unknown request resolves
    * to null.
    */
@@ -918,16 +914,16 @@ export class ThinkTestAgent extends Think {
     runId: string,
     requestId: string
   ): { running: string | null; unknown: string | null } {
-    this["_ensureAgentToolChildRunTable"]();
+    this["_agentToolRuns"].store.ensure();
     this.sql`
       INSERT INTO cf_agent_tool_child_runs (run_id, request_id, status, started_at)
       VALUES (${runId}, ${requestId}, 'running', ${Date.now()})
     `;
     // Cold in-memory map, as after a restart.
-    this["_agentToolRunsByRequestId"].clear();
+    this["_agentToolRuns"].runsByRequestId.clear();
     return {
-      running: this["_agentToolRunForRequest"](requestId),
-      unknown: this["_agentToolRunForRequest"]("no-such-request")
+      running: this["_agentToolRuns"].runForRequest(requestId),
+      unknown: this["_agentToolRuns"].runForRequest("no-such-request")
     };
   }
 
@@ -940,7 +936,7 @@ export class ThinkTestAgent extends Think {
     stored: string | undefined;
   }> {
     const runId = crypto.randomUUID();
-    this["_ensureAgentToolChildRunTable"]();
+    this["_agentToolRuns"].store.ensure();
     this.sql`
       INSERT INTO cf_agent_tool_child_runs (run_id, status, started_at)
       VALUES (${runId}, 'running', ${Date.now()})
@@ -950,7 +946,7 @@ export class ThinkTestAgent extends Think {
     });
     return {
       reported: inspection?.status,
-      stored: this["_readAgentToolChildRun"](runId)?.status
+      stored: this["_agentToolRuns"].store.read(runId)?.status
     };
   }
 
@@ -993,12 +989,12 @@ export class ThinkTestAgent extends Think {
     try {
       await this.startAgentToolRun("fail midway", { runId });
       await reachedGate;
-      this["_agentToolAbortControllers"].delete(runId);
-      this["_agentToolLastErrors"].delete(runId);
-      this["_agentToolLiveSequences"].delete(runId);
-      this["_agentToolPreTurnAssistantIds"].delete(runId);
-      this["_agentToolRunsByRequestId"].clear();
-      const before = this["_readAgentToolChildRun"](runId)?.status ?? null;
+      this["_agentToolRuns"].controllers.delete(runId);
+      this["_agentToolRuns"].lastErrors.delete(runId);
+      this["_agentToolRuns"].liveSequences.delete(runId);
+      this["_agentToolRuns"].preTurnAssistantIds.delete(runId);
+      this["_agentToolRuns"].runsByRequestId.clear();
+      const before = this["_agentToolRuns"].store.read(runId)?.status ?? null;
       const assistantText = this.messages
         .filter((message) => message.role === "assistant")
         .flatMap((message) => message.parts)
@@ -1024,7 +1020,7 @@ export class ThinkTestAgent extends Think {
   }> {
     const runId = crypto.randomUUID();
     const requestId = crypto.randomUUID();
-    this["_ensureAgentToolChildRunTable"]();
+    this["_agentToolRuns"].store.ensure();
     const streamId = this["_resumableStream"].start(requestId);
     const backlog = ["a", "b", "c"].map((delta) =>
       JSON.stringify({ type: "text-delta", id: "t", delta })
@@ -1038,7 +1034,7 @@ export class ThinkTestAgent extends Think {
         (run_id, request_id, stream_id, status, started_at)
       VALUES (${runId}, ${requestId}, ${streamId}, 'running', ${Date.now()})
     `;
-    this["_agentToolLiveSequences"].delete(runId);
+    this["_agentToolRuns"].liveSequences.delete(runId);
 
     const stream = (await this.tailAgentToolRun(runId, {
       afterSequence
@@ -1073,12 +1069,13 @@ export class ThinkTestAgent extends Think {
     }
     const deadline = Date.now() + 500;
     while (
-      this["_agentToolLiveSequences"].get(runId) !== backlog.length &&
+      this["_agentToolRuns"].liveSequences.get(runId) !== backlog.length &&
       Date.now() < deadline
     ) {
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
-    const liveSequenceAfterDrain = this["_agentToolLiveSequences"].get(runId);
+    const liveSequenceAfterDrain =
+      this["_agentToolRuns"].liveSequences.get(runId);
 
     const postBody = JSON.stringify({
       type: "text-delta",
@@ -1115,14 +1112,14 @@ export class ThinkTestAgent extends Think {
   > {
     const runId = crypto.randomUUID();
     const requestId = crypto.randomUUID();
-    this["_ensureAgentToolChildRunTable"]();
+    this["_agentToolRuns"].store.ensure();
     const streamId = this["_resumableStream"].start(requestId);
     this.sql`
       INSERT INTO cf_agent_tool_child_runs
         (run_id, request_id, stream_id, status, started_at)
       VALUES (${runId}, ${requestId}, ${streamId}, 'running', ${Date.now()})
     `;
-    this["_agentToolLiveSequences"].set(runId, 0);
+    this["_agentToolRuns"].liveSequences.set(runId, 0);
     const broadcast = (body: string) =>
       this.broadcast(
         JSON.stringify({
@@ -1170,7 +1167,7 @@ export class ThinkTestAgent extends Think {
       buffer += decoder.decode(next.value, { stream: true });
     }
     await reader.cancel();
-    this["_agentToolLiveSequences"].delete(runId);
+    this["_agentToolRuns"].liveSequences.delete(runId);
     return buffer
       .split("\n")
       .filter(Boolean)
@@ -1197,7 +1194,7 @@ export class ThinkTestAgent extends Think {
   }> {
     const runId = crypto.randomUUID();
     const requestId = crypto.randomUUID();
-    this["_ensureAgentToolChildRunTable"]();
+    this["_agentToolRuns"].store.ensure();
     const streamId = this["_resumableStream"].start(requestId);
     const backlog = ["a", "b", "c"].map((delta) =>
       JSON.stringify({ type: "text-delta", id: "t", delta })
@@ -1211,7 +1208,7 @@ export class ThinkTestAgent extends Think {
         (run_id, request_id, stream_id, status, started_at)
       VALUES (${runId}, ${requestId}, ${streamId}, 'running', ${Date.now()})
     `;
-    this["_agentToolLiveSequences"].delete(runId);
+    this["_agentToolRuns"].liveSequences.delete(runId);
 
     const self = this as unknown as {
       getAgentToolChunks: (
@@ -1286,7 +1283,7 @@ export class ThinkTestAgent extends Think {
     } finally {
       release();
       self.getAgentToolChunks = original;
-      this["_agentToolLiveSequences"].delete(runId);
+      this["_agentToolRuns"].liveSequences.delete(runId);
     }
   }
 
@@ -1298,14 +1295,14 @@ export class ThinkTestAgent extends Think {
   async progressDuringDrainForTest(): Promise<string[]> {
     const runId = crypto.randomUUID();
     const requestId = crypto.randomUUID();
-    this["_ensureAgentToolChildRunTable"]();
+    this["_agentToolRuns"].store.ensure();
     const streamId = this["_resumableStream"].start(requestId);
     this.sql`
       INSERT INTO cf_agent_tool_child_runs
         (run_id, request_id, stream_id, status, started_at)
       VALUES (${runId}, ${requestId}, ${streamId}, 'running', ${Date.now()})
     `;
-    this["_agentToolLiveSequences"].set(runId, 0);
+    this["_agentToolRuns"].liveSequences.set(runId, 0);
     const broadcast = (body: string) =>
       this.broadcast(
         JSON.stringify({
@@ -1356,7 +1353,7 @@ export class ThinkTestAgent extends Think {
       buffer += decoder.decode(next.value, { stream: true });
     }
     await reader.cancel();
-    this["_agentToolLiveSequences"].delete(runId);
+    this["_agentToolRuns"].liveSequences.delete(runId);
     return buffer
       .split("\n")
       .filter(Boolean)
@@ -2285,18 +2282,14 @@ export class ThinkTestAgent extends Think {
   async broadcastRecoveredAgentToolChunkForTest(
     eventDelivery: "full" | "terminal"
   ): Promise<void> {
-    const internals = this as unknown as {
-      _ensureAgentToolChildRunTable(): void;
-      _rebindAgentToolChildRunRequestId(requestId: string): void;
-    };
-    internals._ensureAgentToolChildRunTable();
+    this["_agentToolRuns"].store.ensure();
     this.sql`
       INSERT INTO cf_agent_tool_child_runs
         (run_id, request_id, status, started_at, event_delivery)
       VALUES (${crypto.randomUUID()}, 'pre-restart', 'running', ${Date.now()},
         ${eventDelivery === "terminal" ? "terminal" : null})
     `;
-    internals._rebindAgentToolChildRunRequestId("recovered-request");
+    this["_agentToolRuns"].rebind("recovered-request");
     this.broadcast(
       JSON.stringify({
         type: "cf_agent_use_chat_response",
@@ -2450,9 +2443,7 @@ export class ThinkTestAgent extends Think {
     await this.cancelAgentToolRun(runId, "stop");
     await this.releaseBeforeStepForTest();
     await active.turn;
-    const controllers = (
-      this as unknown as { _agentToolAbortControllers: Map<string, unknown> }
-    )._agentToolAbortControllers;
+    const controllers = this["_agentToolRuns"].controllers;
     const deadline = Date.now() + 5000;
     while (controllers.size > 0 && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 5));
@@ -2580,6 +2571,72 @@ export class ThinkTestAgent extends Think {
         ? { status: incident.status, reason: incident.reason }
         : null,
       steps: this._beforeStepLog.length - steps
+    };
+  }
+
+  /**
+   * The stored chunks of a run that is still running are read by its
+   * turn's request id: the row records a stream only when the run ends.
+   */
+  async chunksOfRunningRunForTest(): Promise<number> {
+    const runId = crypto.randomUUID();
+    const requestId = crypto.randomUUID();
+    // Any read creates the run table.
+    await this.inspectAgentToolRun(runId);
+    const streamId = this["_resumableStream"].start(requestId);
+    for (const delta of ["a", "b", "c"]) {
+      this["_resumableStream"].storeChunk(
+        streamId,
+        JSON.stringify({ type: "text-delta", id: "t", delta })
+      );
+    }
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs
+        (run_id, request_id, status, started_at)
+      VALUES (${runId}, ${requestId}, 'running', ${Date.now()})
+    `;
+    return (await this.getAgentToolChunks(runId)).length;
+  }
+
+  /**
+   * A parent follows, or starts over, a run an earlier isolate left open
+   * with nothing recovering it.
+   */
+  async staleRunForTest(action: "tail" | "start"): Promise<{
+    tailClosed: boolean | null;
+    reported: string | null;
+    stored: string | null;
+  }> {
+    const runId = crypto.randomUUID();
+    // Any read creates the run table.
+    await this.inspectAgentToolRun(runId);
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs (run_id, status, started_at)
+      VALUES (${runId}, 'running', ${Date.now()})
+    `;
+    let tailClosed: boolean | null = null;
+    let reported: string | null = null;
+    if (action === "tail") {
+      const reader = (
+        (await this.tailAgentToolRun(
+          runId
+        )) as unknown as ReadableStream<Uint8Array>
+      ).getReader();
+      const next = await Promise.race([
+        reader.read(),
+        new Promise<"timeout">((resolve) =>
+          setTimeout(() => resolve("timeout"), 500)
+        )
+      ]);
+      tailClosed = next !== "timeout" && next.done;
+      if (!tailClosed) await reader.cancel();
+    } else {
+      reported = (await this.startAgentToolRun("again", { runId })).status;
+    }
+    return {
+      tailClosed,
+      reported,
+      stored: this._readChildRunStatusForTest(runId)
     };
   }
 
@@ -4121,22 +4178,16 @@ export class ThinkTestAgent extends Think {
     runId: string,
     error: string
   ): Promise<void> {
-    (
-      this as unknown as { _agentToolLastErrors: Map<string, string> }
-    )._agentToolLastErrors.set(runId, error);
+    this["_agentToolRuns"].lastErrors.set(runId, error);
   }
 
   async getAgentToolCleanupMapSizesForTest(): Promise<{
     lastErrors: number;
     preTurnAssistantIds: number;
   }> {
-    const self = this as unknown as {
-      _agentToolLastErrors: Map<string, string>;
-      _agentToolPreTurnAssistantIds: Map<string, Set<string>>;
-    };
     return {
-      lastErrors: self._agentToolLastErrors.size,
-      preTurnAssistantIds: self._agentToolPreTurnAssistantIds.size
+      lastErrors: this["_agentToolRuns"].lastErrors.size,
+      preTurnAssistantIds: this["_agentToolRuns"].preTurnAssistantIds.size
     };
   }
 
@@ -11050,9 +11101,7 @@ export class ThinkRecoveryTestAgent extends Think {
     requestId: string,
     startedAt: number = Date.now()
   ): Promise<void> {
-    (
-      this as unknown as { _ensureAgentToolChildRunTable(): void }
-    )._ensureAgentToolChildRunTable();
+    this["_agentToolRuns"].store.ensure();
     this.sql`
       INSERT INTO cf_agent_tool_child_runs (run_id, request_id, status, started_at)
       VALUES (${runId}, ${requestId}, 'running', ${startedAt})
@@ -11067,9 +11116,7 @@ export class ThinkRecoveryTestAgent extends Think {
     runId: string,
     requestId: string
   ): Promise<void> {
-    (
-      this as unknown as { _ensureAgentToolChildRunTable(): void }
-    )._ensureAgentToolChildRunTable();
+    this["_agentToolRuns"].store.ensure();
     const now = Date.now();
     this.sql`
       INSERT INTO cf_agent_tool_child_runs
@@ -11082,11 +11129,7 @@ export class ThinkRecoveryTestAgent extends Think {
   async rebindAgentToolChildRunRequestIdForTest(
     requestId: string
   ): Promise<void> {
-    (
-      this as unknown as {
-        _rebindAgentToolChildRunRequestId(requestId: string): void;
-      }
-    )._rebindAgentToolChildRunRequestId(requestId);
+    this["_agentToolRuns"].rebind(requestId);
   }
 
   /**
@@ -11156,24 +11199,19 @@ export class ThinkRecoveryTestAgent extends Think {
     runId: string,
     requestId: string
   ): Promise<{ afterRebind: boolean; afterFinalize: boolean }> {
-    const self = this as unknown as {
-      _ensureAgentToolChildRunTable(): void;
-      _rebindAgentToolChildRunRequestId(requestId: string): void;
-      _finalizeAgentToolChildRunTailers(runId: string): void;
-      _agentToolTerminalOnlyRuns: Set<string>;
-    };
-    self._ensureAgentToolChildRunTable();
+    const runs = this["_agentToolRuns"];
+    runs.store.ensure();
     this.sql`
       INSERT INTO cf_agent_tool_child_runs
         (run_id, request_id, status, started_at, event_delivery)
       VALUES (${runId}, 'old-req', 'running', ${Date.now()}, 'terminal')
     `;
-    self._rebindAgentToolChildRunRequestId(requestId);
-    const afterRebind = self._agentToolTerminalOnlyRuns.has(runId);
-    self._finalizeAgentToolChildRunTailers(runId);
+    runs.rebind(requestId);
+    const afterRebind = runs.terminalOnlyRuns.has(runId);
+    runs.closeTailers(runId);
     return {
       afterRebind,
-      afterFinalize: self._agentToolTerminalOnlyRuns.has(runId)
+      afterFinalize: runs.terminalOnlyRuns.has(runId)
     };
   }
 
@@ -11200,11 +11238,7 @@ export class ThinkRecoveryTestAgent extends Think {
   async resolveAgentToolRunForRequestForTest(
     requestId: string
   ): Promise<string | null> {
-    return (
-      this as unknown as {
-        _agentToolRunForRequest(requestId: string): string | null;
-      }
-    )._agentToolRunForRequest(requestId);
+    return this["_agentToolRuns"].runForRequest(requestId);
   }
 
   /**
