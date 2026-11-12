@@ -62,6 +62,7 @@ type AgentToolInternals = {
     options?: { sequence?: number; serialize?: boolean },
     completedAt?: number
   ): Promise<void>;
+  _hasOutstandingDetachedRuns(): boolean;
   _armDetachedBackbone(options?: { resetCadence?: boolean }): Promise<void>;
 };
 
@@ -200,6 +201,21 @@ export class TestAgentToolReplayAgent extends Agent {
     if (!this.detachedFailOnceRuns.has(run.runId)) {
       this.detachedFailOnceRuns.add(run.runId);
       throw new Error("detached callback failed once");
+    }
+    await this.onDetachedDone(run, result);
+  }
+
+  /** Delivers a give-up normally, but fails the first real finish once. */
+  async onDetachedFinishFailsOnce(
+    run: AgentToolRunInfo,
+    result: AgentToolLifecycleResult
+  ): Promise<void> {
+    if (
+      result.status !== "interrupted" &&
+      !this.detachedFailOnceRuns.has(run.runId)
+    ) {
+      this.detachedFailOnceRuns.add(run.runId);
+      throw new Error("detached finish callback failed once");
     }
     await this.onDetachedDone(run, result);
   }
@@ -386,15 +402,71 @@ export class TestAgentToolReplayAgent extends Agent {
     }
   }
 
-  async deliverGiveUpForTest(runId: string): Promise<void> {
+  hasOutstandingDetachedRunsForTest(): boolean {
+    return this._agentTool._hasOutstandingDetachedRuns();
+  }
+
+  async deliverGiveUpForTest(
+    runId: string,
+    childStillRunning = true
+  ): Promise<void> {
     await this._agentTool._deliverDetachedTerminal(runId, "give_up", {
       runId,
       agentType: "Child",
       status: "interrupted",
       error: "detached run exceeded its budget before completing",
       reason: "budget-exceeded",
-      childStillRunning: true
+      childStillRunning
     });
+  }
+
+  /**
+   * A detached run past its budget whose child (a real
+   * {@link TestAgentToolStubChild}) completes just after the backbone inspects
+   * it as `running` but before its cancel lands (#2768 review). Runs one
+   * backbone tick and reports what was delivered.
+   */
+  async giveUpRacingChildCompletionForTest(runId: string): Promise<{
+    log: DetachedDeliveryLogEntry[];
+    outstanding: boolean;
+    status: string | null;
+  }> {
+    const child = await this.subAgent(TestAgentToolStubChild, runId);
+    await child.startAgentToolRun(
+      { chunkBodies: [], pendingChunkBodies: [], summary: "real result" },
+      { runId }
+    );
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, parent_tool_call_id, agent_type, status, display_order,
+        started_at, detached, detached_on_finish, detached_max_budget_at
+      ) VALUES (
+        ${runId}, ${null}, 'TestAgentToolStubChild', 'running', 0,
+        ${Date.now()}, 1, 'onDetachedDone', ${Date.now() - 1000}
+      )
+    `;
+    const self = this as unknown as {
+      _cf_resolveSubAgent(className: string, name: string): Promise<unknown>;
+    };
+    const original = self._cf_resolveSubAgent.bind(this);
+    let resolves = 0;
+    self._cf_resolveSubAgent = async (className, name) => {
+      // The second resolve is the cancel: the child finishes right before it.
+      if (name === runId && ++resolves === 2) {
+        await child.completeRunForTest(runId);
+      }
+      return original(className, name);
+    };
+    try {
+      await this._cfDetachedReconcileTick();
+    } finally {
+      self._cf_resolveSubAgent = original;
+    }
+    return {
+      log: this.detachedDeliveryLog.filter((entry) => entry.runId === runId),
+      outstanding: this._agentTool._hasOutstandingDetachedRuns(),
+      status: this.readRunStatusForTest(runId)
+    };
   }
 
   readRunStatusForTest(runId: string): string | null {
@@ -725,10 +797,21 @@ export class TestAgentToolStubChild extends Agent {
 
   async cancelAgentToolRun(runId: string): Promise<void> {
     this._ensureTables();
+    // Like Think / AIChat, cancelling an already-finished run is a no-op.
     this.sql`
       UPDATE cf_test_stub_runs
       SET status = 'aborted', completed_at = ${Date.now()}
-      WHERE run_id = ${runId}
+      WHERE run_id = ${runId} AND completed_at IS NULL
+    `;
+  }
+
+  /** Finish a still-running stub run with its stored summary. */
+  completeRunForTest(runId: string): void {
+    this._ensureTables();
+    this.sql`
+      UPDATE cf_test_stub_runs
+      SET status = 'completed', completed_at = ${Date.now()}
+      WHERE run_id = ${runId} AND completed_at IS NULL
     `;
   }
 
