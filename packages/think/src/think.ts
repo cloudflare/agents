@@ -17873,59 +17873,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /**
-   * Handle an error thrown by `_chatRecoveryContinue` / `_chatRecoveryRetry`
-   * after the incident was opened.
-   *
-   * - A Durable Object memory-limit reset is re-thrown with no bookkeeping.
-   *   The isolate is condemned: its storage calls reject and unconfirmed
-   *   writes are discarded, so nothing written here would survive (#2613).
-   *   The attempt's `attemptsInFlight` entry stays behind, and the next
-   *   attempt counts it against `maxInterruptedAttempts` before running
-   *   anything heavy.
-   * - A platform transient (`isPlatformTransientError` from `agents` — a
-   *   deploy code-update reset / script supersede, a `retryable`-flagged
-   *   platform error, or "Network connection lost.", looking through wrappers
-   *   like `SqlError` via the `cause` chain) is re-thrown (after best-effort
-   *   marking the incident `failed` for observability) so the current
-   *   attempt (the driving Task run, or the routed one-shot schedule row) is
-   *   preserved and the platform re-runs recovery once it is healthy again — the turn can
-   *   still recover, so it must NOT terminalize. Terminalizing here was the
-   *   #1730 freeze: the give-up's own seal needs the very storage that is
-   *   down, so it throws too, burns the in-process retry budget inside the
-   *   same reset window, and the row is consumed milliseconds before storage
-   *   recovers. The submission is deliberately left `running` — the deferred
-   *   re-run reads it via `_readRunningSubmissionForRecovery`, so marking it
-   *   terminal here would turn the preserved row into a guaranteed
-   *   `submission_not_running` no-op skip (a self-defeating defer).
-   * - Any OTHER (application) error is terminalized through the give-up path
-   *   (`onExhausted` + the `terminalMessage` banner) and NOT re-thrown. This is
-   *   the fix for the silent-seal failure mode: the driving attempt swallows
-   *   a non-transient throw and settles without terminalizing, so without
-   *   terminalizing here the half-finished turn is dropped with no terminal
-   *   event and no banner (the user stares at a frozen message until they
-   *   send something new).
-   */
-  private async _handleRecoveryCallbackError(
-    callback: ChatRecoveryScheduleCallback,
-    data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined,
-    error: unknown
-  ): Promise<void> {
-    // Shared with `AIChatAgent`: see `handleRecoveryAttemptError` in
-    // `agents/chat`. The give-up marks the submission interrupted and records
-    // the terminal chat status itself (via `_exhaustChatRecovery`).
-    return this._chatRecoveryEngine().handleRecoveryAttemptError({
-      callback,
-      data,
-      error,
-      logPrefix: "[Think]",
-      updateIncident: (incidentId, status, reason) =>
-        this._updateChatRecoveryIncident(incidentId, status, reason),
-      whileDeferring: (incidentId, write) =>
-        this._whileDeferringRecovery(incidentId, write)
-    });
-  }
-
-  /**
    * Run the "failed" incident write made before a platform transient is
    * rethrown. The mark tells the messenger path that the reply stays pending.
    */
@@ -18129,10 +18076,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       // A submission the recovery owned settles as `aborted`.
       onStopped: () => completeSubmission("aborted", null, null),
       // The recovery loop is the submission's only completion driver after a
-      // restart, and the client's answer resumes the conversation as its own
-      // continuation. A reply that ended on a client tool call is what a
+      // restart, and the client's answer continues the conversation as its
+      // own turn. A reply that ended on a client tool call is what a
       // submission that was never interrupted completes on, so complete it.
-      onParked: () => completeSubmission("completed", null, null),
+      onClientContinued: () => completeSubmission("completed", null, null),
       // Before the incident settles: once it is terminal, nothing re-emits
       // the event that would settle a messenger reply after a reset.
       beforeOutcome: (result: SaveMessagesResult) =>
@@ -18515,6 +18462,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           this._settleContinuationTurn(requestId, false);
           return;
         }
+        // This turn continues the latest reply. A recovery still scheduled
+        // for that reply must not continue it a second time.
+        await this._chatRecoveryEngine().supersedeScheduledRecovery();
         const { connection, clientTools } = continuation;
         let streamed = false;
         try {

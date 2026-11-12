@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   CHAT_RECOVERY_CANCELLED_REASON,
+  CHAT_RECOVERY_CONTINUED_REASON,
   ChatRecoveryEngine,
   type ChatRecoveryAdapter
 } from "../recovery-engine";
@@ -72,6 +73,7 @@ function setup(scenario: Scenario = {}) {
     now: () => 1_000,
     sweepStaleIncidents: () => Promise.resolve(),
     getIncident: (k) => Promise.resolve(storage.get(k) ?? null),
+    listActiveIncidents: () => Promise.resolve([...storage.values()]),
     readProgress: () => Promise.resolve(0),
     putIncident: (k, incident) => {
       storage.set(k, incident);
@@ -156,8 +158,8 @@ function setup(scenario: Scenario = {}) {
     onStopped: async () => {
       log.push("stopped");
     },
-    onParked: async () => {
-      log.push("parked");
+    onClientContinued: async () => {
+      log.push("client-continued");
     },
     onSkipped: async () => {
       log.push("skipped");
@@ -213,8 +215,8 @@ describe("runRecoveredTurn", () => {
       "before-outcome",
       "after-outcome",
       "end",
-      "release",
-      "reconcile"
+      "reconcile",
+      "release"
     ]);
     // A completed incident is dropped.
     expect(t.incident()).toBeUndefined();
@@ -244,7 +246,67 @@ describe("runRecoveredTurn", () => {
     const t = setup();
     t.host.admit = async () => false;
     await t.run();
-    expect(t.log).toEqual([]);
+    expect(t.log).toEqual(["release"]);
+  });
+
+  it("releases what the host admitted when the attempt cannot start", async () => {
+    const t = setup();
+    t.host.admit = async () => true;
+    t.host.beginAttempt = () => {
+      throw new Error("cannot register");
+    };
+    await expect(t.run()).rejects.toThrow("cannot register");
+    expect(t.log).toEqual(["release"]);
+  });
+
+  it("ends without a turn when a client's answer continued the reply during the wait", async () => {
+    const t = setup({
+      duringWait: async ({ engine }) => {
+        await engine.supersedeScheduledRecovery();
+      }
+    });
+    await t.run();
+    expect(t.log).not.toContain("turn");
+    expect(t.log).toContain("client-continued");
+    expect(t.incident()).toMatchObject({
+      status: "skipped",
+      reason: CHAT_RECOVERY_CONTINUED_REASON
+    });
+  });
+
+  it("a client's answer that continued the reply wins over a timeout that would reschedule", async () => {
+    const t = setup({
+      ready: false,
+      duringWait: async ({ engine }) => {
+        await engine.supersedeScheduledRecovery();
+      }
+    });
+    await t.run();
+    expect(t.scheduled).toEqual([]);
+    expect(t.exhausted).toEqual([]);
+    expect(t.incident()).toMatchObject({
+      status: "skipped",
+      reason: CHAT_RECOVERY_CONTINUED_REASON
+    });
+  });
+
+  it("a stop wins over a client's answer that continued the reply", async () => {
+    const t = setup({
+      duringWait: async ({ engine, stop }) => {
+        await engine.supersedeScheduledRecovery();
+        stop();
+      }
+    });
+    await t.run();
+    expect(t.incident()).toMatchObject(cancelled);
+  });
+
+  it("records a turn stopped by its own request id as stopped, not failed", async () => {
+    // The attempt's own signal never fired: the stop reached the turn only.
+    const t = setup({ result: { status: "aborted" } });
+    await t.run();
+    expect(t.incident()).toMatchObject(cancelled);
+    expect(t.log).toContain("after-outcome");
   });
 
   it("a stop during the wait wins over a timeout that would reschedule", async () => {
@@ -259,8 +321,8 @@ describe("runRecoveredTurn", () => {
       "wait",
       "stopped",
       "end",
-      "release",
-      "reconcile"
+      "reconcile",
+      "release"
     ]);
   });
 
@@ -282,7 +344,7 @@ describe("runRecoveredTurn", () => {
       duringWait: ({ stop }) => stop()
     });
     await t.run();
-    expect(t.log).not.toContain("parked");
+    expect(t.log).not.toContain("client-continued");
     expect(t.incident()).toMatchObject(cancelled);
   });
 
@@ -301,7 +363,7 @@ describe("runRecoveredTurn", () => {
       status: "skipped",
       reason: "awaiting_client_interaction"
     });
-    expect(t.log).toContain("parked");
+    expect(t.log).toContain("client-continued");
     expect(t.log).not.toContain("turn");
   });
 
@@ -411,7 +473,7 @@ describe("runRecoveredTurn", () => {
 
     expect(t.exhausted).toEqual(["recovery_error"]);
     expect(t.incident()).toMatchObject({ status: "exhausted" });
-    expect(t.log.slice(-3)).toEqual(["end", "release", "reconcile"]);
+    expect(t.log.slice(-3)).toEqual(["end", "reconcile", "release"]);
   });
 
   it("records the stop when a stopped attempt throws", async () => {
@@ -439,7 +501,26 @@ describe("runRecoveredTurn", () => {
     };
     await expect(t.run()).rejects.toThrow("submission write failed");
     expect(t.exhausted).toEqual([]);
-    expect(t.log.slice(-3)).toEqual(["end", "release", "reconcile"]);
+    expect(t.log.slice(-3)).toEqual(["end", "reconcile", "release"]);
+  });
+
+  it("records the stop and resolves when a stopped attempt hits a platform transient", async () => {
+    const t = setup({
+      duringWait: ({ stop }) => {
+        stop();
+        throw new Error("Network connection lost.");
+      }
+    });
+    const statuses: string[] = [];
+    const update = t.host.updateIncident;
+    t.host.updateIncident = (incidentId, status, reason) => {
+      statuses.push(status);
+      return update(incidentId, status, reason);
+    };
+    // No rerun is needed: a rerun would return at the cancelled check.
+    await expect(t.run()).resolves.toBeUndefined();
+    expect(statuses).toEqual(["skipped"]);
+    expect(t.incident()).toMatchObject(cancelled);
   });
 
   it("rethrows a platform transient without giving up", async () => {
@@ -460,7 +541,7 @@ describe("runRecoveredTurn", () => {
     expect(t.exhausted).toEqual([]);
     expect(deferred).toEqual([INCIDENT]);
     expect(t.incident()).toMatchObject({ status: "failed" });
-    expect(t.log.slice(-3)).toEqual(["end", "release", "reconcile"]);
+    expect(t.log.slice(-3)).toEqual(["end", "reconcile", "release"]);
   });
 
   it("rethrows a memory-limit reset with no bookkeeping", async () => {

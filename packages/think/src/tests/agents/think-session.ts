@@ -10218,8 +10218,8 @@ export class ThinkRecoveryTestAgent extends Think {
   }
 
   /**
-   * Drive `_handleRecoveryCallbackError` (the catch path of
-   * `_chatRecoveryContinue` / `_chatRecoveryRetry`) and report the outcome.
+   * Make a recovery attempt throw (the catch path of `_chatRecoveryContinue`
+   * / `_chatRecoveryRetry`) and report the outcome.
    *
    * - A non-transient (application) throw must terminalize (fire `onExhausted`
    *   + broadcast the terminal banner, seal the incident `exhausted`) and NOT
@@ -10340,16 +10340,7 @@ export class ThinkRecoveryTestAgent extends Think {
 
     let threw = false;
     try {
-      await (
-        this as unknown as {
-          _handleRecoveryCallbackError(
-            callback: string,
-            data: unknown,
-            error: unknown
-          ): Promise<void>;
-        }
-      )._handleRecoveryCallbackError(
-        "_chatRecoveryContinue",
+      await this._runThrowingRecoveryAttemptForTest(
         {
           incidentId: begun.incidentId,
           originalRequestId: requestId,
@@ -10447,11 +10438,6 @@ export class ThinkRecoveryTestAgent extends Think {
         requestId: string,
         body: string
       ): Promise<void>;
-      _handleRecoveryCallbackError(
-        callback: string,
-        data: unknown,
-        error: unknown
-      ): Promise<void>;
     };
     const realBroadcast = self._broadcastChat.bind(this);
     self._broadcastChat = (m) => {
@@ -10482,11 +10468,7 @@ export class ThinkRecoveryTestAgent extends Think {
 
     let firstThrew = false;
     try {
-      await self._handleRecoveryCallbackError(
-        "_chatRecoveryContinue",
-        data,
-        appError
-      );
+      await this._runThrowingRecoveryAttemptForTest(data, appError);
     } catch {
       firstThrew = true;
     }
@@ -10494,11 +10476,7 @@ export class ThinkRecoveryTestAgent extends Think {
 
     let secondThrew = false;
     try {
-      await self._handleRecoveryCallbackError(
-        "_chatRecoveryContinue",
-        data,
-        appError
-      );
+      await this._runThrowingRecoveryAttemptForTest(data, appError);
     } catch {
       secondThrew = true;
     } finally {
@@ -11037,10 +11015,29 @@ export class ThinkRecoveryTestAgent extends Think {
     this._forceStableTimeout = value;
   }
 
+  private _stableWaitError: unknown = null;
+
+  /**
+   * Run a recovery continue attempt whose wait for a stable chat throws
+   * `error`: the path production takes when an attempt throws.
+   */
+  private async _runThrowingRecoveryAttemptForTest(
+    data: Parameters<Think["_chatRecoveryContinueDetached"]>[0],
+    error: unknown
+  ): Promise<void> {
+    this._stableWaitError = error;
+    try {
+      await this._chatRecoveryContinueDetached(data);
+    } finally {
+      this._stableWaitError = null;
+    }
+  }
+
   protected override async waitUntilStable(options?: {
     timeout?: number;
   }): Promise<boolean> {
     if (this._forceStableTimeout) return false;
+    if (this._stableWaitError) throw this._stableWaitError;
     return super.waitUntilStable(options);
   }
 

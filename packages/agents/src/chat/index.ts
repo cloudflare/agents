@@ -302,6 +302,7 @@ export {
   chatRecoveryBackoffSeconds,
   retryAfterSeconds,
   CHAT_RECOVERY_CANCELLED_REASON,
+  CHAT_RECOVERY_CONTINUED_REASON,
   type ChatRecoveryScheduleReason,
   type ChatRecoveryScheduleCallback,
   type ChatRecoveryAdapter,

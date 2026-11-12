@@ -3285,6 +3285,9 @@ export class AIChatAgent<
             this._clearAllAutoContinuationState(true);
             return;
           }
+          // This turn continues the latest reply. A recovery still scheduled
+          // for that reply must not continue it a second time.
+          await this._chatRecoveryEngine().supersedeScheduledRecovery();
           const { connection, clientTools, body } = continuation;
 
           const abortSignal = this._abortRegistry.getSignal(requestId);
@@ -5779,25 +5782,6 @@ export class AIChatAgent<
         reason: "out_of_memory"
       });
     }
-  }
-
-  private _exhaustRecoveryAfterStableTimeout(
-    callback: ChatRecoveryScheduleCallback,
-    data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined
-  ): Promise<void> {
-    // The give-up spine (read → re-entry-guard → build-exhausted-incident →
-    // terminalize-before-seal → best-effort seal) lives in the shared
-    // ChatRecoveryEngine; this is the package binding, symmetric with `Think`.
-    // `AIChatAgent` always gives up with `stable_timeout` (its only give-up
-    // trigger) and never sets `recoveredRequestId`, so the engine's unified
-    // root-id chain collapses to `originalRequestId ?? activeRoot ?? stored…`
-    // exactly as before. The terminalize + stream/partial hooks are wired on
-    // the adapter above. See design/rfc-chat-recovery-foundation.md.
-    return this._chatRecoveryEngine().exhaustRecoveryGiveUp({
-      callback,
-      data,
-      reason: "stable_timeout"
-    });
   }
 
   private _shouldRetryRecoveredPreStreamTurn(
