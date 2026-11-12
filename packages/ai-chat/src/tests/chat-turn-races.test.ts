@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import type { UIMessage as ChatMessage } from "ai";
 import { getAgentByName } from "agents";
+import { subscribe } from "agents/observability";
 import { MessageType, type OutgoingMessage } from "../types";
 import { connectChatWS, isUseChatResponseMessage } from "./test-utils";
 
@@ -504,6 +505,46 @@ describe("chat turn races", () => {
       hasDeferred: false
     });
     ws.close(1000);
+  });
+
+  it("a continuation that fails before it streams is reported like any failed reply", async () => {
+    const room = crypto.randomUUID();
+    const observed: string[] = [];
+    const unsubscribe = subscribe("message", (event) => {
+      if (event.agent === "TestChatAgent" && event.name === room) {
+        observed.push(event.type);
+      }
+    });
+    try {
+      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+      const seen = record(ws);
+      const agent = await getAgentByName(env.TestChatAgent, room);
+      await agent.persistMessages([user1, toolReply("assistant-1", "call-1")]);
+      await agent.setTestBody({ failContinuations: true });
+
+      send(ws, toolResult("call-1"));
+      await waitUntil(() =>
+        seen.some(
+          (m) =>
+            isUseChatResponseMessage(m) && m.error === true && m.done === true
+        )
+      );
+      await agent.waitForIdleForTest();
+
+      // The error frame carries the failure and marks the continuation.
+      const frame = seen.find(
+        (m) => isUseChatResponseMessage(m) && m.error === true
+      );
+      expect(frame).toMatchObject({
+        body: "The model is unavailable",
+        continuation: true
+      });
+      // Observers see it, as they see a failed request or a stream error.
+      expect(observed).toContain("message:error");
+      ws.close(1000);
+    } finally {
+      unsubscribe();
+    }
   });
 
   it("continuations that keep failing stop once every result had its attempt", async () => {

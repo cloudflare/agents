@@ -48,10 +48,13 @@ import {
 } from "./continuation-state";
 import {
   claimContinuation,
+  continuationStreamEnded,
   continuationStreamStarted,
   replyFinalized,
   runContinuationTurn,
+  runUnscheduledContinuationTurn,
   settleContinuationTurn,
+  type ContinuationContext,
   type ContinuationTurn,
   type ContinuationTurnParts
 } from "./continuation-turn";
@@ -249,7 +252,8 @@ export class ChatTurns<
       continuation: this.continuation,
       autoContinuation: this.autoContinuation,
       aborts: this.aborts,
-      messages: () => host.messages()
+      messages: () => host.messages(),
+      streamed: new Set()
     };
   }
 
@@ -480,26 +484,57 @@ export class ChatTurns<
 
   /**
    * Run the continuation turn for the pending continuation, from its abort
-   * signal to its settle. The host supplies how to enqueue and what to run.
-   * See {@link runContinuationTurn}.
+   * signal to its settle. The host supplies how to enqueue and what each
+   * step does. See {@link runContinuationTurn}.
    */
-  runContinuationTurn(turn: ContinuationTurn<TConnection>): Promise<void> {
+  runContinuationTurn<TReply, TMessage>(
+    turn: ContinuationTurn<TConnection, TReply, TMessage>
+  ): Promise<void> {
     return runContinuationTurn(this.#continuationParts, turn);
   }
 
   /**
-   * The stream of the turn running `requestId` started. See
-   * {@link continuationStreamStarted}.
+   * Run a continuation turn nothing scheduled on a connection. See
+   * {@link runUnscheduledContinuationTurn}.
    */
-  continuationStreamStarted(
+  runUnscheduledContinuationTurn<TReply, TMessage>(
+    turn: ContinuationTurn<TConnection, TReply, TMessage>,
+    continuation: ContinuationContext<TConnection>,
+    errorPrefix?: string
+  ): Promise<void> {
+    return runUnscheduledContinuationTurn(
+      this.#continuationParts,
+      turn,
+      continuation,
+      errorPrefix
+    );
+  }
+
+  /**
+   * The resumable stream of the turn running `requestId` started. Every
+   * connection that was waiting for it is told to resume it
+   * (`notifyResuming` sends `STREAM_RESUMING`): those parked on the turn's
+   * pre-stream window (#1784), and those waiting on the continuation the
+   * turn runs ({@link continuationStreamStarted}). Call it for every stream.
+   */
+  streamStarted(
     requestId: string,
     notifyResuming: (connection: TConnection) => void
   ): void {
+    this.preStream.flushOnStreamStart(notifyResuming);
     continuationStreamStarted(
       this.#continuationParts,
       requestId,
       notifyResuming
     );
+  }
+
+  /**
+   * The resumable stream of the turn running `requestId` ended (finished,
+   * completed or errored). See {@link continuationStreamEnded}.
+   */
+  streamEnded(requestId: string | null): void {
+    continuationStreamEnded(this.#continuationParts, requestId);
   }
 
   /**

@@ -150,11 +150,18 @@ export {
  */
 export {
   claimContinuation,
+  continuationStreamEnded,
   continuationStreamStarted,
   replyFinalized,
+  reportContinuationFailure,
   runContinuationTurn,
+  runUnscheduledContinuationTurn,
   settleContinuationTurn,
   transcriptEndsInAnswer,
+  type ContinuationContext,
+  type ContinuationErrorFrame,
+  type ContinuationFailureHost,
+  type ContinuationFailureResult,
   type ContinuationTurn,
   type ContinuationTurnParts
 } from "./continuation-turn";

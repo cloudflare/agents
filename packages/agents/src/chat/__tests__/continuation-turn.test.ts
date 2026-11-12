@@ -9,7 +9,11 @@ import type {
   ContinuationConnection,
   ContinuationPending
 } from "../continuation-state";
-import { transcriptEndsInAnswer } from "../continuation-turn";
+import { getCurrentAgent } from "../../lifecycle/current-agent";
+import {
+  transcriptEndsInAnswer,
+  type ContinuationTurn
+} from "../continuation-turn";
 import { CHAT_MESSAGE_TYPES } from "../protocol";
 
 const COALESCE = AutoContinuationController.COALESCE_MS;
@@ -66,7 +70,11 @@ class FakeHost implements ChatTurnsHost {
   replyStreaming = false;
   /** Request ids of the continuation turns that reached the model. */
   ran: string[] = [];
-  errors: unknown[] = [];
+  errors: Array<{
+    error: unknown;
+    errorPrefix: string | null;
+    reported: boolean;
+  }> = [];
   resumed: string[] = [];
   model: (
     continuation: ContinuationPending<TestConnection>,
@@ -96,14 +104,63 @@ class FakeHost implements ChatTurnsHost {
     return fn();
   }
   fireContinuation() {
-    void this.turns.runContinuationTurn({
+    void this.turns.runContinuationTurn(this.turn());
+  }
+
+  /** What the reply pipeline reported, in order. */
+  reports: string[] = [];
+  /** Set to make the recovery scope fail before it runs the body. */
+  recoveryFails = false;
+  /** `getCurrentAgent()` as each step saw it. */
+  contexts: Array<{ step: string; agent: unknown; connection: unknown }> = [];
+
+  private see(step: string) {
+    const { agent, connection } = getCurrentAgent();
+    this.contexts.push({ step, agent, connection });
+  }
+
+  /**
+   * The turn a host supplies. `model` stands for both the model call and
+   * the stream, so one function drives a test.
+   */
+  turn(): ContinuationTurn<TestConnection, true, ChatTurnMessage> {
+    return {
+      agent: this,
       enqueue: (requestId, turn) => this.turns.queue.enqueue(requestId, turn),
-      run: async (continuation, signal) => {
-        this.ran.push(continuation.requestId);
-        await this.model(continuation, signal);
+      recover: async (_requestId, body) => {
+        if (this.recoveryFails) throw new Error("recovery scope failed");
+        await body();
       },
-      onError: (error) => void this.errors.push(error)
-    });
+      model: async (continuation, signal) => {
+        this.see("model");
+        this.ran.push(continuation.requestId);
+        await this.model(
+          continuation as ContinuationPending<TestConnection>,
+          signal
+        );
+        return true;
+      },
+      stream: async () => {
+        this.see("stream");
+      },
+      failure: {
+        describe: (error) => {
+          const message = error instanceof Error ? error.message : "failed";
+          this.reports.push(`describe:${message}`);
+          return message;
+        },
+        recordTerminal: async (requestId) => {
+          this.reports.push(`terminal:${requestId}`);
+        },
+        broadcast: (frame) => {
+          this.reports.push(`frame:${frame.id}:${frame.body}`);
+        },
+        respond: (result) => {
+          this.reports.push(`respond:${result.message.id}:${result.status}`);
+        }
+      },
+      onError: (error, context) => void this.errors.push({ error, ...context })
+    };
   }
 
   /**
@@ -112,7 +169,7 @@ class FakeHost implements ChatTurnsHost {
    */
   async stream(requestId: string, answer = false) {
     this.replyStreaming = true;
-    this.turns.continuationStreamStarted(requestId, (connection) =>
+    this.turns.streamStarted(requestId, (connection) =>
       this.resumed.push(connection.id)
     );
     await Promise.resolve();
@@ -274,7 +331,7 @@ describe("the continuation turn", () => {
       if (continuation.requestId !== "cont-1") return;
       await result("a1", second);
       host.replyStreaming = true;
-      turns.continuationStreamStarted("cont-1", () => {});
+      turns.streamStarted("cont-1", () => {});
       deferredAtStreamStart = turns.continuation.deferred;
       expect(turns.continuation.pending).toBeNull();
       host.replyStreaming = false;
@@ -426,7 +483,7 @@ describe("the continuation turn", () => {
       // the model.
       await result("a1", second);
       host.replyStreaming = true;
-      turns.continuationStreamStarted("cont-1", () => {});
+      turns.streamStarted("cont-1", () => {});
       // A newer pending one, for an older reply: arrives while it streams.
       await result("a0", third);
       host.replyStreaming = false;
@@ -450,7 +507,7 @@ describe("the continuation turn", () => {
       // Deferred: arrives while the turn waits on the model.
       await result("a1", second);
       host.replyStreaming = true;
-      turns.continuationStreamStarted("cont-1", () => {});
+      turns.streamStarted("cont-1", () => {});
       // A newer pending one: arrives while the turn streams.
       await result("a1", third);
       host.replyStreaming = false;
@@ -466,6 +523,191 @@ describe("the continuation turn", () => {
     expect(host.ran).toEqual(["cont-1", "cont-2"]);
     expect(turns.continuation.deferred).toBeNull();
     expect(third.sent).toEqual([RESUME_NONE]);
+  });
+});
+
+describe("what a continuation turn runs", () => {
+  let host: FakeHost;
+  let turns: ChatTurns<TestConnection>;
+  let connection: TestConnection;
+
+  const result = (messageId: string) =>
+    turns.applyInteraction(
+      async () => ({ status: "changed", messageId }),
+      true,
+      () => ({
+        connection,
+        clientTools: undefined,
+        body: undefined,
+        errorPrefix: "[test]"
+      })
+    );
+  const fire = () => vi.advanceTimersByTimeAsync(COALESCE);
+  const drain = () => vi.advanceTimersByTimeAsync(0);
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    host = new FakeHost();
+    turns = new ChatTurns<TestConnection>(host, { defaultDebounceMs: 750 });
+    host.turns = turns;
+    connection = makeConnection("c1");
+    host.transcript = [user("u1"), toolReply("a1", "output-available")];
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("runs the model call and the stream in the agent context of the continuation's connection", async () => {
+    await result("a1");
+    await fire();
+    await drain();
+
+    expect(host.contexts).toEqual([
+      { step: "model", agent: host, connection },
+      { step: "stream", agent: host, connection }
+    ]);
+  });
+
+  it("reports a failure before the stream: terminal record, then the frame, then the response hook", async () => {
+    host.model = async () => {
+      throw new Error("model down");
+    };
+    await result("a1");
+    await fire();
+    await drain();
+
+    expect(host.reports).toEqual([
+      "describe:model down",
+      "terminal:cont-1",
+      "frame:cont-1:model down",
+      "respond:a1:error"
+    ]);
+    expect(host.errors).toMatchObject([
+      { errorPrefix: "[test]", reported: true }
+    ]);
+  });
+
+  it("reports a recovery scope that fails before the model is called", async () => {
+    host.recoveryFails = true;
+    await result("a1");
+    await fire();
+    await drain();
+
+    expect(host.ran).toEqual([]);
+    expect(host.reports).toEqual([
+      "describe:recovery scope failed",
+      "terminal:cont-1",
+      "frame:cont-1:recovery scope failed",
+      "respond:a1:error"
+    ]);
+  });
+
+  it("leaves a failure after the stream started to the reply pipeline", async () => {
+    host.model = async (continuation) => {
+      turns.streamStarted(continuation.requestId, () => {});
+      throw new Error("persist failed");
+    };
+    await result("a1");
+    await fire();
+    await drain();
+
+    expect(host.reports).toEqual([]);
+    expect(host.errors).toMatchObject([{ reported: false }]);
+  });
+
+  it("does not report a turn that was stopped", async () => {
+    host.model = async (continuation) => {
+      turns.cancel(continuation.requestId);
+      throw new Error("aborted");
+    };
+    await result("a1");
+    await fire();
+    await drain();
+
+    expect(host.reports).toEqual([]);
+  });
+
+  it("the stream's start resumes connections parked on the turn's pre-stream window too", async () => {
+    const parked = makeConnection("parked");
+    const resumed: string[] = [];
+    turns.preStream.begin("req-1");
+    turns.preStream.park(parked);
+    turns.streamStarted("req-1", (c) => resumed.push(c.id));
+
+    expect(resumed).toEqual(["parked"]);
+  });
+
+  it("the stream's end clears the continuation it made active", async () => {
+    await result("a1");
+    turns.takeContinuation("cont-1");
+    turns.streamStarted("cont-1", () => {});
+    expect(turns.continuation.activeRequestId).toBe("cont-1");
+
+    turns.streamEnded("other");
+    expect(turns.continuation.activeRequestId).toBe("cont-1");
+    turns.streamEnded("cont-1");
+    expect(turns.continuation.activeRequestId).toBeNull();
+    expect(turns.continuation.activeConnectionId).toBeNull();
+  });
+
+  describe("with no pending continuation", () => {
+    const unscheduled = (requestId = "free-1") =>
+      turns.runUnscheduledContinuationTurn(
+        host.turn(),
+        { requestId, connection: undefined },
+        "[free]"
+      );
+
+    it("runs the same turn with no connection, and settles nothing", async () => {
+      // A pending continuation of a connection is not this turn's.
+      await result("a1");
+      await unscheduled();
+
+      expect(host.ran).toEqual(["free-1"]);
+      expect(host.contexts).toEqual([
+        { step: "model", agent: host, connection: undefined },
+        { step: "stream", agent: host, connection: undefined }
+      ]);
+      expect(turns.aborts.has("free-1")).toBe(false);
+      expect(turns.continuation.pending?.requestId).toBe("cont-1");
+      expect(turns.continuation.pending?.pastCoalesce).toBe(false);
+    });
+
+    it("never calls the model when it was stopped while it waited in the queue", async () => {
+      let release!: () => void;
+      const blocker = turns.queue.enqueue(
+        "other",
+        () => new Promise<void>((resolve) => (release = resolve))
+      );
+      const done = unscheduled();
+      expect(turns.aborts.has("free-1")).toBe(true);
+      turns.cancel("free-1");
+      await drain();
+      release();
+      await blocker;
+      await done;
+
+      expect(host.ran).toEqual([]);
+      expect(turns.aborts.has("free-1")).toBe(false);
+    });
+
+    it("reports a failure before the stream", async () => {
+      host.model = async () => {
+        throw new Error("model down");
+      };
+      await unscheduled();
+
+      expect(host.reports).toEqual([
+        "describe:model down",
+        "terminal:free-1",
+        "frame:free-1:model down",
+        "respond:a1:error"
+      ]);
+      expect(host.errors).toMatchObject([
+        { errorPrefix: "[free]", reported: true }
+      ]);
+    });
   });
 });
 

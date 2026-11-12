@@ -1956,15 +1956,10 @@ export class AIChatAgent<
       ...options,
       ...(originIds && { originMessageIds: originIds })
     });
-    // Flush connections parked during this turn's pre-stream window (#1784)
-    // into the normal STREAM_RESUMING path now that a stream exists. Safe for
-    // every turn — the awaiting set is empty unless a client reconnected before
-    // the first chunk. (Continuation-turn parks live in `_continuation` and are
-    // flushed below.)
-    this._preStream.flushOnStreamStart((c) => this._notifyStreamResuming(c));
-    this._turns.continuationStreamStarted(requestId, (c) =>
-      this._notifyStreamResuming(c)
-    );
+    // Connections parked on this turn's pre-stream window (#1784) or on the
+    // continuation it runs go into the normal STREAM_RESUMING path now that
+    // a stream exists.
+    this._turns.streamStarted(requestId, (c) => this._notifyStreamResuming(c));
     // Arm on START as well as finish so cleanup still has a belt-and-suspenders
     // wake if fiber recovery cannot finalize a stream. The last-activity sweep
     // threshold keeps an actively streaming run from being reclaimed before it
@@ -1992,10 +1987,7 @@ export class AIChatAgent<
 
   private _afterStreamFinished(requestId: string | null) {
     this._pendingResumeConnections.clear();
-    if (requestId === this._continuation.activeRequestId) {
-      this._continuation.activeRequestId = null;
-      this._continuation.activeConnectionId = null;
-    }
+    this._turns.streamEnded(requestId);
   }
 
   /**
@@ -2056,11 +2048,7 @@ export class AIChatAgent<
   protected _markStreamError(streamId: string) {
     const erroredRequestId = this._resumableStream.activeRequestId;
     this._resumableStream.markError(streamId);
-    this._pendingResumeConnections.clear();
-    if (erroredRequestId === this._continuation.activeRequestId) {
-      this._continuation.activeRequestId = null;
-      this._continuation.activeConnectionId = null;
-    }
+    this._afterStreamFinished(erroredRequestId);
   }
 
   /**
@@ -3206,9 +3194,11 @@ export class AIChatAgent<
 
   /**
    * Run the continuation turn for the pending continuation. The turn core
-   * owns its lifecycle (`ChatTurns.runContinuationTurn`): the abort signal,
-   * the claim when the turn starts, and the settle. This supplies the turn
-   * itself: `onChatMessage` with `continuation: true`, then `_reply`.
+   * owns it (`ChatTurns.runContinuationTurn`): the abort signal, the claim
+   * when the turn starts, the order of the steps, the failure report and
+   * the settle. This supplies what each step does here: the queue wrapper,
+   * the recovery fiber, `onChatMessage` with `continuation: true`, `_reply`,
+   * and how a failure reaches clients and `onChatResponse`.
    */
   private _fireAutoContinuation() {
     const epoch = this._turnQueue.generation;
@@ -3224,70 +3214,54 @@ export class AIChatAgent<
           async () => {
             const dispose = await this.keepAlive();
             try {
-              await turn();
+              await this._tryCatchChat(turn);
             } finally {
               dispose();
             }
           },
           { epoch }
         ),
-      run: ({ requestId, connection, clientTools, body }, abortSignal) =>
-        this._tryCatchChat(() =>
-          agentContext.run(
-            {
-              agent: this,
-              connection,
-              request: undefined,
-              email: undefined
-            },
-            async () => {
-              const autoContinuationBody = async () => {
-                let replying = false;
-                try {
-                  await this._repairInterruptedToolsBeforeTurn({
-                    continuation: true
-                  });
-                  const response = await this.onChatMessage(
-                    async (_finishResult) => {},
-                    {
-                      requestId,
-                      abortSignal,
-                      clientTools,
-                      body,
-                      continuation: true
-                    }
-                  );
-
-                  if (response) {
-                    await this._reply(requestId, response, [], {
-                      continuation: true,
-                      chatMessageId: requestId,
-                      onStreamStart: () => {
-                        replying = true;
-                      }
-                    });
-                  }
-                } catch (error) {
-                  if (
-                    !replying &&
-                    !abortSignal.aborted &&
-                    !isDurableObjectResetError(error)
-                  ) {
-                    await this._reportContinuationFailure(requestId, error);
-                  }
-                  throw error;
-                }
-              };
-
-              await this._runChatRecoveryFiber(
-                requestId,
-                true,
-                autoContinuationBody
-              );
-            }
-          )
-        ),
-      onError: (error, errorPrefix) => {
+      agent: this,
+      // The turn core runs these in order, inside this recovery fiber and
+      // the agent context of the continuation's connection, and reports a
+      // failure before the stream to clients.
+      recover: (requestId, body) =>
+        this._runChatRecoveryFiber(requestId, true, body),
+      model: async ({ requestId, clientTools, body }, abortSignal) => {
+        await this._repairInterruptedToolsBeforeTurn({ continuation: true });
+        return this.onChatMessage(async (_finishResult) => {}, {
+          requestId,
+          abortSignal,
+          clientTools,
+          body,
+          continuation: true
+        });
+      },
+      stream: ({ requestId }, response) =>
+        this._reply(requestId, response, [], {
+          continuation: true,
+          chatMessageId: requestId
+        }),
+      failure: {
+        describe: (error) => {
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+          this._emit("message:error", { error: errorMessage });
+          return errorMessage;
+        },
+        recordTerminal: (requestId, errorMessage) =>
+          this._recordChatTerminal(requestId, errorMessage),
+        broadcast: (frame) =>
+          this._broadcastChatMessage({
+            ...frame,
+            type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+          }),
+        // Queued, so the hook runs once the turn has left the queue.
+        respond: (result: ChatResponseResult) => {
+          this._pendingChatResponseResults.push(result);
+        }
+      },
+      onError: (error, { errorPrefix }) => {
         console.error(
           errorPrefix ?? "[AIChatAgent] Auto-continuation failed:",
           error
@@ -3315,42 +3289,6 @@ export class AIChatAgent<
     });
     this._emit("message:error", { error: errorMessage });
     await this._recordChatTerminal(requestId, errorMessage);
-  }
-
-  /**
-   * Report an auto-continuation that failed before it produced a response,
-   * the way a stream error is reported: an error frame, a durable terminal
-   * record, and `onChatResponse` with `status: "error"` for the assistant
-   * message the continuation would have extended. Called inside the turn so
-   * the response hook drains when the turn settles.
-   */
-  private async _reportContinuationFailure(
-    requestId: string,
-    error: unknown
-  ): Promise<void> {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    this._broadcastChatMessage({
-      body: errorMessage,
-      done: true,
-      error: true,
-      id: requestId,
-      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
-      continuation: true
-    });
-    const message = [...this.messages]
-      .reverse()
-      .find((candidate) => candidate.role === "assistant");
-    if (message) {
-      this._pendingChatResponseResults.push({
-        message,
-        requestId,
-        continuation: true,
-        status: "error",
-        error: errorMessage
-      });
-    } else {
-      await this._recordChatTerminal(requestId, errorMessage);
-    }
   }
 
   /**

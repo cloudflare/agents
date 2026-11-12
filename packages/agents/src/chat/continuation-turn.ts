@@ -5,8 +5,16 @@
  * `@cloudflare/ai-chat` and `@cloudflare/think`, and lives here:
  *
  * - {@link runContinuationTurn}: create the abort signal, enqueue the turn,
- *   claim the continuation when the turn starts, run the host's model call,
- *   and settle whatever happened.
+ *   claim the continuation when the turn starts, run it, and settle whatever
+ *   happened.
+ * - {@link runUnscheduledContinuationTurn}: the same turn for a continuation
+ *   nothing scheduled on a connection (an approval that arrives over RPC
+ *   with no client attached).
+ * - What "run it" means, for both: inside the host's recovery scope and the
+ *   agent context of the continuation's connection, call the model, then
+ *   stream the reply. A failure before the stream starts is reported to
+ *   clients here ({@link reportContinuationFailure}). From the stream's
+ *   start on, the reply pipeline reports its own.
  * - {@link continuationStreamStarted}: the turn's stream started, so its
  *   continuation is the active one and the connections waiting on it resume.
  * - {@link replyFinalized}: any reply finished, so a continuation its
@@ -21,7 +29,8 @@
  * - a continuation never runs against a transcript that ends in an answer;
  * - a result that arrives while a continuation runs is never lost;
  * - a connection waiting on a continuation always gets `STREAM_RESUMING` or
- *   `STREAM_RESUME_NONE`.
+ *   `STREAM_RESUME_NONE`;
+ * - a continuation that fails before it streams sends one error frame.
  *
  * `ChatTurns` exposes each function as a method. Hosts call those.
  *
@@ -29,14 +38,21 @@
  * `@cloudflare/think`, not a public API.
  */
 
+import {
+  __DO_NOT_USE_WILL_BREAK__agentContext as agentContext,
+  type AgentContextStore
+} from "../lifecycle/current-agent";
+import { isDurableObjectResetError } from "../retries";
 import type { AbortRegistry } from "./abort-registry";
 import type { AutoContinuationController } from "./auto-continuation-controller";
+import type { ClientToolSchema } from "./client-tools";
 import {
   continuationTargetIsLatest,
   type ContinuationConnection,
   type ContinuationPending,
   type ContinuationState
 } from "./continuation-state";
+import { CHAT_MESSAGE_TYPES } from "./protocol";
 
 /** The parts of the turn core the continuation lifecycle works on. */
 export interface ContinuationTurnParts<
@@ -51,15 +67,78 @@ export interface ContinuationTurnParts<
     role: string;
     parts: ReadonlyArray<unknown>;
   }>;
+  /**
+   * Request ids of the continuation turns running now whose stream has
+   * started. {@link continuationStreamStarted} adds to it.
+   */
+  readonly streamed: Set<string>;
+}
+
+/**
+ * What a continuation turn runs with: its request id, and the connection
+ * and tools of the latest result that scheduled it. `connection` is
+ * `undefined` for a continuation no connection scheduled.
+ */
+export interface ContinuationContext<
+  TConnection extends ContinuationConnection = ContinuationConnection
+> {
+  requestId: string;
+  connection: TConnection | undefined;
+  clientTools?: ClientToolSchema[];
+  body?: Record<string, unknown>;
+}
+
+/** The error frame of a continuation that failed before it streamed. */
+export interface ContinuationErrorFrame {
+  type: typeof CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE;
+  id: string;
+  body: string;
+  done: true;
+  error: true;
+  continuation: true;
+}
+
+/** The `onChatResponse` result of a continuation that failed. */
+export interface ContinuationFailureResult<TMessage> {
+  message: TMessage;
+  requestId: string;
+  continuation: true;
+  status: "error";
+  error: string;
+}
+
+/**
+ * How a host tells its clients and its app that a continuation failed
+ * before it streamed. {@link reportContinuationFailure} owns the order.
+ */
+export interface ContinuationFailureHost<TMessage> {
+  /**
+   * Observe the failure (the host's error hook and events) and return the
+   * message clients see.
+   */
+  describe(error: unknown, requestId: string): string;
+  /** Store the terminal record a reconnecting client replays. */
+  recordTerminal(requestId: string, message: string): Promise<void>;
+  /** Send `frame` to every client. */
+  broadcast(frame: ContinuationErrorFrame): void;
+  /**
+   * Deliver `onChatResponse` for the assistant message the continuation
+   * would have extended.
+   */
+  respond(result: ContinuationFailureResult<TMessage>): void | Promise<void>;
 }
 
 /**
  * What a host supplies to run one continuation turn. The core owns the order
- * of the steps. The host owns what a turn does.
+ * of the steps. The host owns what each step does.
  */
 export interface ContinuationTurn<
-  TConnection extends ContinuationConnection = ContinuationConnection
+  TConnection extends ContinuationConnection = ContinuationConnection,
+  TReply = unknown,
+  TMessage = unknown
 > {
+  /** The agent hosting the turn, for `getCurrentAgent()` inside it. */
+  agent: unknown;
   /**
    * Admit the turn through the host's own queue wrapper (tracing, hooks,
    * keep-alive). It must enqueue `turn` on the core's queue synchronously,
@@ -67,18 +146,40 @@ export interface ContinuationTurn<
    */
   enqueue(requestId: string, turn: () => Promise<void>): Promise<unknown>;
   /**
-   * Run the model with `continuation: true` and stream the reply, for the
-   * connection and tools of `continuation`. `signal` aborts when the request
-   * is cancelled or the chat is reset. Call
-   * {@link continuationStreamStarted} when the stream starts, and report a
-   * failure before that to clients here.
+   * Run `body` so that an eviction during it is recovered: the host's
+   * recovery fiber for a continuation turn.
    */
-  run(
-    continuation: ContinuationPending<TConnection>,
+  recover(requestId: string, body: () => Promise<void>): Promise<void>;
+  /**
+   * Call the model with `continuation: true`. Return nothing when there is
+   * no reply to stream.
+   */
+  model(
+    continuation: ContinuationContext<TConnection>,
     signal: AbortSignal
-  ): Promise<void>;
-  /** The turn rejected. Log it. Clients were told by `run`. */
-  onError(error: unknown, errorPrefix: string | null): void;
+  ): Promise<TReply | null | undefined>;
+  /**
+   * Stream and store the reply. It must call
+   * {@link continuationStreamStarted} when the stream starts, and from then
+   * on tell clients about its own failures.
+   */
+  stream(
+    continuation: ContinuationContext<TConnection>,
+    reply: TReply,
+    signal: AbortSignal
+  ): Promise<unknown>;
+  /** How a failure before the stream is reported. */
+  failure: ContinuationFailureHost<TMessage>;
+  /**
+   * The turn rejected. Log it.
+   *
+   * @param context.reported - Whether clients were told
+   *   ({@link reportContinuationFailure} ran).
+   */
+  onError(
+    error: unknown,
+    context: { errorPrefix: string | null; reported: boolean }
+  ): void;
 }
 
 /**
@@ -123,7 +224,7 @@ export function claimContinuation<TConnection extends ContinuationConnection>(
  * 3. When the turn starts, claim the continuation ({@link claimContinuation}).
  *    With nothing to claim, or when it was cancelled meanwhile, the model is
  *    never called.
- * 4. Run the host's model call and stream.
+ * 4. Call the model and stream the reply ({@link runContinuationBody}).
  * 5. However the turn ended (ran, failed, or skipped), drop the abort signal
  *    and settle ({@link settleContinuationTurn}), inside the turn. A turn a
  *    chat reset dropped from the queue never started: it only drops its
@@ -132,10 +233,12 @@ export function claimContinuation<TConnection extends ContinuationConnection>(
  * Never rejects: a failure goes to `turn.onError`.
  */
 export async function runContinuationTurn<
-  TConnection extends ContinuationConnection
+  TConnection extends ContinuationConnection,
+  TReply,
+  TMessage
 >(
   parts: ContinuationTurnParts<TConnection>,
-  turn: ContinuationTurn<TConnection>
+  turn: ContinuationTurn<TConnection, TReply, TMessage>
 ): Promise<void> {
   const pending = parts.continuation.pending;
   if (!pending) return;
@@ -143,6 +246,7 @@ export async function runContinuationTurn<
   const signal = parts.aborts.getSignal(requestId);
 
   let started = false;
+  const outcome = { reported: false };
 
   try {
     await turn.enqueue(requestId, async () => {
@@ -150,7 +254,7 @@ export async function runContinuationTurn<
       try {
         const continuation = claimContinuation(parts, requestId);
         if (!continuation || !signal || signal.aborted) return;
-        await turn.run(continuation, signal);
+        await runContinuationBody(parts, turn, continuation, signal, outcome);
       } finally {
         // Inside the turn, so the next turn in the queue sees settled slots.
         parts.aborts.remove(requestId);
@@ -158,9 +262,157 @@ export async function runContinuationTurn<
       }
     });
   } catch (error) {
-    turn.onError(error, errorPrefix);
+    turn.onError(error, { errorPrefix, reported: outcome.reported });
   } finally {
     if (!started) releaseUnstartedContinuationTurn(parts, requestId);
+  }
+}
+
+/**
+ * Run a continuation turn that no pending continuation stands for: nothing
+ * was scheduled on a connection, so there is nothing to claim and nothing to
+ * settle. `Think` uses it when an approval arrives over RPC with no client
+ * attached. Otherwise it is the same turn: the abort signal exists before
+ * the queue, a turn cancelled there never calls the model, and the model
+ * call, the stream and the failure report are {@link runContinuationBody}.
+ *
+ * Never rejects: a failure goes to `turn.onError`.
+ */
+export async function runUnscheduledContinuationTurn<
+  TConnection extends ContinuationConnection,
+  TReply,
+  TMessage
+>(
+  parts: ContinuationTurnParts<TConnection>,
+  turn: ContinuationTurn<TConnection, TReply, TMessage>,
+  continuation: ContinuationContext<TConnection>,
+  errorPrefix: string | null = null
+): Promise<void> {
+  const { requestId } = continuation;
+  const signal = parts.aborts.getSignal(requestId);
+  const outcome = { reported: false };
+  try {
+    await turn.enqueue(requestId, async () => {
+      if (!signal || signal.aborted) return;
+      await runContinuationBody(parts, turn, continuation, signal, outcome);
+    });
+  } catch (error) {
+    turn.onError(error, { errorPrefix, reported: outcome.reported });
+  } finally {
+    parts.aborts.remove(requestId);
+  }
+}
+
+/**
+ * What a continuation turn does once it has something to continue, in the
+ * one order both hosts follow:
+ *
+ * 1. Enter the host's recovery scope, so an eviction from here on is
+ *    recovered.
+ * 2. Enter the agent context of the continuation's connection. It covers
+ *    the model call and the stream, so `getCurrentAgent()` answers the same
+ *    in a tool, a hook and the reply pipeline.
+ * 3. Call the model. With no reply, stop.
+ * 4. Stream the reply.
+ *
+ * A failure before the stream started (a throw from the recovery scope, the
+ * model call, or the stream's setup) is reported to clients, unless the turn
+ * was cancelled or the Durable Object is resetting. After the stream started
+ * the reply pipeline has told them already. The error is rethrown either
+ * way.
+ */
+async function runContinuationBody<
+  TConnection extends ContinuationConnection,
+  TReply,
+  TMessage
+>(
+  parts: ContinuationTurnParts<TConnection>,
+  turn: ContinuationTurn<TConnection, TReply, TMessage>,
+  continuation: ContinuationContext<TConnection>,
+  signal: AbortSignal,
+  outcome: { reported: boolean }
+): Promise<void> {
+  const { requestId } = continuation;
+  parts.streamed.delete(requestId);
+  try {
+    await turn.recover(requestId, () =>
+      agentContext.run(
+        {
+          agent: turn.agent,
+          connection:
+            continuation.connection as AgentContextStore["connection"],
+          request: undefined,
+          email: undefined
+        },
+        async () => {
+          const reply = await turn.model(continuation, signal);
+          if (reply === null || reply === undefined) return;
+          await turn.stream(continuation, reply, signal);
+        }
+      )
+    );
+  } catch (error) {
+    if (
+      !parts.streamed.has(requestId) &&
+      !signal.aborted &&
+      !isDurableObjectResetError(error)
+    ) {
+      await reportContinuationFailure(parts, turn.failure, requestId, error);
+      outcome.reported = true;
+    }
+    throw error;
+  } finally {
+    parts.streamed.delete(requestId);
+  }
+}
+
+/**
+ * Tell clients and the app that a continuation failed before it streamed,
+ * the way a failed reply is reported:
+ *
+ * 1. the host's error hook and events, which give the message;
+ * 2. the terminal record, before any frame, so a client that is not
+ *    connected right now learns the outcome when it comes back;
+ * 3. the error frame, before `onChatResponse`, so a slow hook does not hold
+ *    it;
+ * 4. `onChatResponse` with `status: "error"` for the assistant message the
+ *    continuation would have extended.
+ */
+export async function reportContinuationFailure<
+  TConnection extends ContinuationConnection,
+  TMessage
+>(
+  parts: ContinuationTurnParts<TConnection>,
+  host: ContinuationFailureHost<TMessage>,
+  requestId: string,
+  error: unknown
+): Promise<void> {
+  const message = host.describe(error, requestId);
+  await host.recordTerminal(requestId, message).catch((recordError) => {
+    console.error(
+      "[chat] failed to record a continuation failure:",
+      recordError
+    );
+  });
+  host.broadcast({
+    type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
+    id: requestId,
+    body: message,
+    done: true,
+    error: true,
+    continuation: true
+  });
+  const messages = parts.messages();
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role !== "assistant") continue;
+    await host.respond({
+      message: messages[i] as TMessage,
+      requestId,
+      continuation: true,
+      status: "error",
+      error: message
+    });
+    return;
   }
 }
 
@@ -185,7 +437,8 @@ function releaseUnstartedContinuationTurn<
  * The stream of the turn running `requestId` started. When that turn owns
  * the pending continuation, it becomes the active one and every connection
  * waiting on it is told to resume the stream (`notifyResuming`, which sends
- * `STREAM_RESUMING`).
+ * `STREAM_RESUMING`). From here on the reply pipeline reports the turn's
+ * failures.
  *
  * A result deferred while the turn ran stays deferred until the turn
  * settles: only then is it known whether the reply answered it.
@@ -198,9 +451,23 @@ export function continuationStreamStarted<
   notifyResuming: (connection: TConnection) => void
 ): void {
   const { continuation } = parts;
+  parts.streamed.add(requestId);
   if (continuation.pending?.requestId !== requestId) return;
   continuation.activatePending();
   continuation.flushAwaitingConnections(notifyResuming);
+}
+
+/**
+ * The stream of the turn running `requestId` ended. A continuation it made
+ * active is no longer the active one.
+ */
+export function continuationStreamEnded<
+  TConnection extends ContinuationConnection
+>(parts: ContinuationTurnParts<TConnection>, requestId: string | null): void {
+  const { continuation } = parts;
+  if (requestId === null || continuation.activeRequestId !== requestId) return;
+  continuation.activeRequestId = null;
+  continuation.activeConnectionId = null;
 }
 
 /**
