@@ -2335,6 +2335,208 @@ export class ThinkTestAgent extends Think {
     };
   }
 
+  private _userTextsForTest(): string[] {
+    return this.messages
+      .filter((message) => message.role === "user")
+      .map((message) =>
+        message.parts
+          .map((part) => (part.type === "text" ? part.text : ""))
+          .join("")
+      );
+  }
+
+  private _waitForTurnQueueIdleForTest(): Promise<void> {
+    return (
+      this as unknown as { _turnQueue: { waitForIdle(): Promise<void> } }
+    )._turnQueue.waitForIdle();
+  }
+
+  /** Start an RPC turn and park it inside `beforeStep`. */
+  private async _holdActiveRpcTurnForTest(): Promise<{
+    turn: Promise<void>;
+    callback: TestCollectingCallback;
+  }> {
+    await this.holdBeforeStepForTest();
+    const callback = new TestCollectingCallback();
+    const turn = this.chat("active turn", callback);
+    const deadline = Date.now() + 5000;
+    while (!this._beforeStepGateEntered) {
+      if (Date.now() > deadline) throw new Error("active turn never started");
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    return { turn, callback };
+  }
+
+  /**
+   * An RPC `chat()` waits in the queue behind a running turn. The caller
+   * cancels it, or the chat is cleared, before its turn starts.
+   */
+  async rpcChatWhileQueuedForTest(action: "cancel" | "clear"): Promise<{
+    userTexts: string[];
+    steps: number;
+    done: boolean;
+    error: string | null;
+    events: number;
+  }> {
+    const active = await this._holdActiveRpcTurnForTest();
+    const callback = new TestCollectingCallback();
+    const caller = new AbortController();
+    const queued = this.chat("queued turn", callback, {
+      signal: caller.signal
+    });
+    const deadline = Date.now() + 5000;
+    while (!callback.requestId) {
+      if (Date.now() > deadline) throw new Error("queued turn never accepted");
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    if (action === "cancel") {
+      caller.abort(new Error("caller cancelled"));
+    } else {
+      await this.clearMessages();
+    }
+    await this.releaseBeforeStepForTest();
+    await active.turn;
+    await queued;
+    await this._waitForTurnQueueIdleForTest();
+    return {
+      userTexts: this._userTextsForTest(),
+      steps: this._beforeStepLog.length,
+      done: callback.doneCalled,
+      error: callback.errorMessage ?? null,
+      events: callback.events.length
+    };
+  }
+
+  /** The chat is cleared while an RPC `chat()` streams its reply. */
+  async rpcChatClearedWhileStreamingForTest(): Promise<{
+    messages: number;
+    done: boolean;
+    error: string | null;
+  }> {
+    let events = 0;
+    let done = false;
+    let error: string | null = null;
+    let clearing: Promise<void> | undefined;
+    await this.chat("streaming turn", {
+      onStart() {},
+      onEvent: () => {
+        events++;
+        if (events === 2) clearing = this.clearMessages();
+      },
+      onDone() {
+        done = true;
+      },
+      onError(message: string) {
+        error = message;
+      }
+    });
+    if (!clearing) throw new Error("the reply ended before the clear");
+    await clearing;
+    return { messages: this.messages.length, done, error };
+  }
+
+  /**
+   * An agent-tool run is cancelled while its turn waits in the queue behind
+   * a running turn.
+   */
+  async cancelQueuedAgentToolRunForTest(): Promise<{
+    status: string | null;
+    userTexts: string[];
+    steps: number;
+  }> {
+    const active = await this._holdActiveRpcTurnForTest();
+    const runId = crypto.randomUUID();
+    await this.startAgentToolRun("queued run", { runId });
+    await this.cancelAgentToolRun(runId, "stop");
+    await this.releaseBeforeStepForTest();
+    await active.turn;
+    const controllers = (
+      this as unknown as { _agentToolAbortControllers: Map<string, unknown> }
+    )._agentToolAbortControllers;
+    const deadline = Date.now() + 5000;
+    while (controllers.size > 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    await this._waitForTurnQueueIdleForTest();
+    return {
+      status: this._readChildRunStatusForTest(runId),
+      userTexts: this._userTextsForTest(),
+      steps: this._beforeStepLog.length
+    };
+  }
+
+  /**
+   * A cancel of a run being recovered stops the recovered turn (by the
+   * request id on the row) and a running recovery attempt.
+   */
+  async cancelRunStopsRecoveredTurnForTest(): Promise<{
+    turnAborted: boolean;
+    attemptAborted: boolean;
+  }> {
+    const runId = crypto.randomUUID();
+    await this.inspectAgentToolRun(runId);
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs (run_id, request_id, status, started_at)
+      VALUES (${runId}, 'recovered-request', 'running', ${Date.now()})
+    `;
+    const internals = this as unknown as {
+      _aborts: {
+        getSignal(id: string): AbortSignal | undefined;
+        remove(id: string): void;
+      };
+      _turns: {
+        beginRecoveryAttempt(id: string): {
+          signal: AbortSignal;
+          end(): void;
+        };
+      };
+    };
+    const signal = internals._aborts.getSignal("recovered-request");
+    const attempt = internals._turns.beginRecoveryAttempt("root-request");
+    try {
+      await this.cancelAgentToolRun(runId, "parent gave up");
+      return {
+        turnAborted: signal?.aborted ?? false,
+        attemptAborted: attempt.signal.aborted
+      };
+    } finally {
+      attempt.end();
+      internals._aborts.remove("recovered-request");
+    }
+  }
+
+  /**
+   * The run was cancelled, then the isolate died before the run's turn
+   * unwound, so chat recovery wakes for that turn. It must not run.
+   */
+  async recoverCancelledAgentToolRunForTest(): Promise<{
+    status: string;
+    steps: number;
+  }> {
+    await this.chat("question", new TestCollectingCallback());
+    const steps = this._beforeStepLog.length;
+    const runId = crypto.randomUUID();
+    await this.inspectAgentToolRun(runId);
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs
+        (run_id, request_id, status, started_at, completed_at)
+      VALUES (${runId}, 'interrupted-request', 'aborted', ${Date.now()}, ${Date.now()})
+    `;
+    const self = this as unknown as {
+      _activeChatRecoveryRootRequestId: string | undefined;
+    };
+    self._activeChatRecoveryRootRequestId = "interrupted-request";
+    try {
+      const result = await this.continueLastTurn();
+      return {
+        status: result.status,
+        steps: this._beforeStepLog.length - steps
+      };
+    } finally {
+      self._activeChatRecoveryRootRequestId = undefined;
+    }
+  }
+
   private _readChildRunStatusForTest(runId: string): string | null {
     const rows = this.sql<{ status: string }>`
       SELECT status FROM cf_agent_tool_child_runs WHERE run_id = ${runId}

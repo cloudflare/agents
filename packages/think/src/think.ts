@@ -190,7 +190,6 @@ import {
   createChatStreams,
   ChatTurns,
   type ToolInteractionOutcome,
-  interceptAgentToolBroadcast,
   isPositionlessAgentToolChunk,
   AgentToolProgressEmitter,
   createToolsFromClientSchemas,
@@ -243,6 +242,9 @@ import {
   buildChatRecoveringFrame,
   setChatRecovering,
   AgentToolStreamProgressThrottle,
+  AgentToolRuns,
+  type AgentToolRunRecord,
+  type AgentToolRunStore,
   classifyAgentToolChildRecovery,
   type ChatRecoveryAdapter,
   type ChatFiberWakeHooks,
@@ -2021,6 +2023,14 @@ type NonQueueTurnSpec<T> = {
 };
 
 type TurnSpec<T> = QueueTurnSpec<T> | NonQueueTurnSpec<T>;
+
+/** What an RPC `chat()` caller is told when the chat is cleared under it. */
+const CHAT_CLEARED_ERROR = "The chat was cleared before the turn finished.";
+
+function reasonText(reason: unknown): string | undefined {
+  if (reason === undefined || reason === null) return undefined;
+  return reason instanceof Error ? reason.message : String(reason);
+}
 
 const admittedTurnContext = new AsyncLocalStorage<{
   agent: unknown;
@@ -4865,26 +4875,51 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   private _deferredResolvedPausesLoad: Promise<void> | undefined;
   private readonly _submitConcurrency = this._turns.submits;
   private static MESSAGE_DEBOUNCE_MS = 750;
-  private _agentToolForwarders = new Map<
-    string,
-    Set<(chunk: AgentToolStoredChunk) => void>
-  >();
-  private _agentToolClosers = new Map<string, Set<() => void>>();
-  private _agentToolAbortControllers = new Map<string, AbortController>();
-  private _agentToolLastErrors = new Map<string, string>();
-  private _agentToolPreTurnAssistantIds = new Map<string, Set<string>>();
-  private _agentToolLiveSequences = new Map<string, number>();
-  /** Runs started with `eventDelivery: "terminal"`: their chunks are not broadcast. */
-  private _agentToolTerminalOnlyRuns = new Set<string>();
   /**
-   * Request id → run id for in-flight agent-tool turns (null = resolved as
-   * not an agent-tool turn, cached so unrelated turns don't re-query SQLite
-   * per frame). Drives frame attribution in {@link broadcast}: a frame
-   * belongs to a run iff it carries that run's turn request id, so an error
-   * in an unrelated turn or a concurrent run can never leak into another
-   * run's state (#1575).
+   * The life of the agent-tool runs this agent executes for a parent: the
+   * run's controller, the request id its turn is bound to, cancel, and the
+   * terminal status. Shared with `@cloudflare/ai-chat`. The fields below are
+   * aliases of its parts.
    */
-  private _agentToolRunsByRequestId = new Map<string, string | null>();
+  private readonly _agentToolRuns = new AgentToolRuns({
+    store: this._agentToolRunStore(),
+    queue: this._turns.queue,
+    responseType: MSG_CHAT_RESPONSE,
+    resetError: "Agent tool run was skipped before the child could finish.",
+    keepAliveWhile: (fn) => this.keepAliveWhile(fn),
+    collectResult: (runId) => {
+      const output = this.getAgentToolOutput(runId);
+      return { output, summary: this.getAgentToolSummary(runId, output) };
+    },
+    hasAssistantReply: (runId) =>
+      this._hasRecoveredAgentToolAssistantTurn(runId),
+    cancelRecoveredTurn: (run, reason) => {
+      // A recovered turn runs outside `startAgentToolRun`. Stop it by the
+      // request id the row names (the turn, its recovery attempt, its
+      // scheduled recovery), and stop every recovery attempt and recovered
+      // submission: a child facet is dedicated to one agent-tool run, so
+      // whatever recovery is running is that run's (#1630).
+      if (run.requestId) this.cancelChat(run.requestId, reasonText(reason));
+      this._turns.cancelRecoveryAttempts(reason);
+      for (const controller of this._submissionAbortControllers.values()) {
+        controller.abort(reason);
+      }
+    },
+    classifyRecovery: () => this._classifyAgentToolChildRecovery(),
+    hasActiveStream: () => this._resumableStream.hasActiveStream(),
+    onForget: (runId) => this._agentToolProgressEmitterInstance?.forget(runId)
+  });
+  private readonly _agentToolForwarders = this._agentToolRuns.forwarders;
+  private readonly _agentToolClosers = this._agentToolRuns.closers;
+  private readonly _agentToolAbortControllers = this._agentToolRuns.controllers;
+  private readonly _agentToolLastErrors = this._agentToolRuns.lastErrors;
+  private readonly _agentToolPreTurnAssistantIds =
+    this._agentToolRuns.preTurnAssistantIds;
+  private readonly _agentToolLiveSequences = this._agentToolRuns.liveSequences;
+  private readonly _agentToolTerminalOnlyRuns =
+    this._agentToolRuns.terminalOnlyRuns;
+  private readonly _agentToolRunsByRequestId =
+    this._agentToolRuns.runsByRequestId;
   private _submissionTableEnsured = false;
   private _declaredScheduledTasksTableEnsured = false;
   private _warnedFacetScheduledTasksDisarmed = false;
@@ -4899,133 +4934,197 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     msg: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): void {
-    // Cheap idle guard so the common (no agent-tool child) broadcast path stays
-    // allocation-free — only build the snoop hooks while a run is in flight.
-    if (
-      this._agentToolForwarders.size > 0 ||
-      this._agentToolLiveSequences.size > 0 ||
-      this._agentToolTerminalOnlyRuns.size > 0
-    ) {
-      const chunkRunId = interceptAgentToolBroadcast(msg, {
-        forwarders: this._agentToolForwarders,
-        liveSequences: this._agentToolLiveSequences,
-        lastErrors: this._agentToolLastErrors,
-        onError: (runId, body) => this._recordAgentToolStreamError(runId, body),
-        responseType: MSG_CHAT_RESPONSE,
-        runForRequest: (requestId) => this._agentToolRunForRequest(requestId),
-        terminalOnlyRuns: this._agentToolTerminalOnlyRuns
-      });
-      if (
-        chunkRunId !== null &&
-        this._agentToolTerminalOnlyRuns.has(chunkRunId)
-      ) {
-        return;
-      }
-    }
+    // A chunk of a terminal-only agent-tool run is forwarded to the run's
+    // tailers, not broadcast.
+    if (this._agentToolRuns.intercept(msg)) return;
     super.broadcast(msg, without);
   }
 
   /**
-   * Durably record a run's stream error on its still-open child-run row, so a
-   * stale-row reconcile after an eviction (before the finalizer seals `error`)
-   * still sees the failure. Leaves `status` to the finalizer / reconcile.
+   * This agent's run table, as the shared {@link AgentToolRuns} reads and
+   * writes it. A facet that never ran as an agent tool has no table, and
+   * the lookups a recovered turn makes must not create one.
    */
-  private _recordAgentToolStreamError(runId: string, body: string): void {
-    try {
-      this.sql`
-        UPDATE cf_agent_tool_child_runs
-        SET error_message = ${body}
-        WHERE run_id = ${runId} AND completed_at IS NULL
+  private _agentToolRunStore(): AgentToolRunStore {
+    type Row = {
+      run_id: string;
+      request_id: string | null;
+      status: string;
+      error_message: string | null;
+      event_delivery: string | null;
+    };
+    const record = (row: Row | undefined): AgentToolRunRecord | null =>
+      row
+        ? {
+            runId: row.run_id,
+            requestId: row.request_id,
+            status: row.status,
+            error: row.error_message,
+            terminalOnly: row.event_delivery === "terminal"
+          }
+        : null;
+    // An existing table may predate newer columns (a fresh isolate after an
+    // upgrade recovers before any other child-run access), so migrate it.
+    const tableExists = (): boolean => {
+      const tables = this.sql<{ name: string }>`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name = 'cf_agent_tool_child_runs'
       `;
-    } catch {
-      // Best-effort: broadcast must never throw; the in-memory capture remains.
-    }
+      if (tables.length === 0) return false;
+      this._ensureAgentToolChildRunTable();
+      return true;
+    };
+    return {
+      read: (runId) => {
+        this._ensureAgentToolChildRunTable();
+        return record(
+          this.sql<Row>`
+            SELECT run_id, request_id, status, error_message, event_delivery
+            FROM cf_agent_tool_child_runs
+            WHERE run_id = ${runId}
+            LIMIT 1
+          `[0]
+        );
+      },
+      // A child DO is addressed by its run id, so it owns at most one run
+      // row; the ORDER BY is defensive.
+      newestOpen: () =>
+        tableExists()
+          ? record(
+              this.sql<Row>`
+                SELECT run_id, request_id, status, error_message, event_delivery
+                FROM cf_agent_tool_child_runs
+                WHERE status IN ('starting', 'running')
+                ORDER BY started_at DESC
+                LIMIT 1
+              `[0]
+            )
+          : null,
+      openForRequest: (requestId) =>
+        tableExists()
+          ? record(
+              this.sql<Row>`
+                SELECT run_id, request_id, status, error_message, event_delivery
+                FROM cf_agent_tool_child_runs
+                WHERE request_id = ${requestId}
+                  AND status IN ('starting', 'running')
+                LIMIT 1
+              `[0]
+            )
+          : null,
+      forRequest: (requestId) =>
+        tableExists()
+          ? record(
+              this.sql<Row>`
+                SELECT run_id, request_id, status, error_message, event_delivery
+                FROM cf_agent_tool_child_runs
+                WHERE request_id = ${requestId}
+                LIMIT 1
+              `[0]
+            )
+          : null,
+      listOpen: () =>
+        tableExists()
+          ? this.sql<{ run_id: string }>`
+              SELECT run_id FROM cf_agent_tool_child_runs
+              WHERE completed_at IS NULL
+            `.map((row) => row.run_id)
+          : [],
+      insert: (runId, run) => {
+        this._ensureAgentToolChildRunTable();
+        this.sql`
+          INSERT INTO cf_agent_tool_child_runs
+            (run_id, status, started_at, event_delivery)
+          VALUES (
+            ${runId}, 'running', ${run.startedAt},
+            ${run.terminalOnly ? "terminal" : null}
+          )
+        `;
+      },
+      bindRequest: (runId, requestId) => {
+        this.sql`
+          UPDATE cf_agent_tool_child_runs
+          SET request_id = ${requestId}
+          WHERE run_id = ${runId}
+        `;
+      },
+      recordStreamError: (runId, error) => {
+        try {
+          this.sql`
+            UPDATE cf_agent_tool_child_runs
+            SET error_message = ${error}
+            WHERE run_id = ${runId} AND completed_at IS NULL
+          `;
+        } catch {
+          // Best-effort: broadcast must never throw; the in-memory capture
+          // remains.
+        }
+      },
+      settle: (runId, terminal, turnRequestId) => {
+        const open = this.sql<{ run_id: string }>`
+          SELECT run_id FROM cf_agent_tool_child_runs
+          WHERE run_id = ${runId} AND completed_at IS NULL
+        `;
+        if (open.length === 0) return false;
+        if (turnRequestId) {
+          const streamId =
+            this._resumableStream
+              .getAllStreamMetadata()
+              .find((m) => m.request_id === turnRequestId)?.id ?? null;
+          this.sql`
+            UPDATE cf_agent_tool_child_runs
+            SET request_id = ${turnRequestId}, stream_id = ${streamId}
+            WHERE run_id = ${runId}
+          `;
+        }
+        if (terminal.status === "completed") {
+          this.sql`
+            UPDATE cf_agent_tool_child_runs
+            SET status = 'completed',
+                summary = ${terminal.summary},
+                output_json = ${Think._stringifyAgentToolOutput(terminal.output)},
+                error_message = null,
+                completed_at = ${Date.now()}
+            WHERE run_id = ${runId}
+          `;
+        } else {
+          this.sql`
+            UPDATE cf_agent_tool_child_runs
+            SET status = ${terminal.status},
+                error_message = ${terminal.error},
+                completed_at = ${Date.now()}
+            WHERE run_id = ${runId}
+          `;
+        }
+        return true;
+      }
+    };
   }
 
   /**
-   * Resolve the agent-tool run whose turn owns a request id, or null when the
-   * request is not an agent-tool turn. Falls back to the persisted child-run
-   * row (whose `request_id` is written when the run's turn is bound, see
-   * `startAgentToolRun`) so attribution survives a DO restart mid-run; either
-   * outcome is cached.
+   * The agent-tool run whose turn owns a request id, or null. Falls back to
+   * the run row, so attribution survives a DO restart mid-run.
    */
   private _agentToolRunForRequest(requestId: string): string | null {
-    const cached = this._agentToolRunsByRequestId.get(requestId);
-    if (cached !== undefined) return cached;
-    // Active-run predicate: a child run is in flight while `status` is
-    // `starting`/`running`; terminal rows set `status` AND `completed_at`
-    // together (the lifecycle invariant), so this is equivalent to
-    // `completed_at IS NULL` but states the intent. Kept consistent with
-    // `_rebindAgentToolChildRunRequestId` and the ai-chat counterpart.
-    const rows = this.sql<{ run_id: string; event_delivery: string | null }>`
-      SELECT run_id, event_delivery FROM cf_agent_tool_child_runs
-      WHERE request_id = ${requestId} AND status IN ('starting', 'running')
-      LIMIT 1
-    `;
-    const runId = rows[0]?.run_id ?? null;
-    if (runId && rows[0]?.event_delivery === "terminal") {
-      this._agentToolTerminalOnlyRuns.add(runId);
-    }
-    this._agentToolRunsByRequestId.set(requestId, runId);
-    return runId;
+    return this._agentToolRuns.runForRequest(requestId);
   }
 
   /**
-   * Re-bind this facet's in-flight agent-tool child run to the CURRENT turn's
-   * request id.
+   * A recovered turn is about to start under `requestId`. When this facet is
+   * an agent-tool child with an open run, put the new request id on the run
+   * row, so the parent's re-attach tail keeps receiving the run's frames and
+   * does not give up on a healthy child. A no-op for any other agent.
    *
-   * When this facet is itself running as an agent-tool child and its turn is
-   * interrupted (e.g. a deploy evicts it mid-run), the recovery continuation
-   * (`continueLastTurn` / `_retryLastUserTurn`) mints a NEW request id. The
-   * `cf_agent_tool_child_runs.request_id` column — and the in-memory attribution
-   * map — still point at the pre-eviction turn, so `broadcast` can no longer
-   * attribute the recovered turn's frames to the run. The parent's re-attach
-   * tail then sees no forwarded chunks, its no-progress budget elapses, and it
-   * abandons a healthy, still-advancing child as `interrupted`
-   * (`agentToolReattachNoProgressTimeoutMs`). Re-binding the row to the recovery
-   * turn's request id keeps frame attribution alive across recovery so the
-   * parent re-attaches and follows the child to its real terminal.
-   *
-   * Safe to call on EVERY recovery continuation:
-   *   - Facets that never ran as an agent-tool child have no
-   *     `cf_agent_tool_child_runs` table → no-op (the table is not created).
-   *   - A facet whose run already settled has no `starting`/`running` row → no-op.
-   *   - A child DO is addressed by its `runId` (`subAgent(cls, runId)`), so it
-   *     owns AT MOST ONE child-run row for its whole lifetime and is never reused
-   *     as a top-level chat agent — the single active row is unambiguously this
-   *     recovery's run. The `ORDER BY started_at DESC LIMIT 1` is defensive
-   *     belt-and-suspenders for that invariant.
-   *
-   * Uses the same `status IN ('starting','running')` active-run predicate as
-   * `_agentToolRunForRequest` and the ai-chat counterpart (see the lifecycle
-   * invariant note there).
+   * @returns `"cancelled"` when the turn being recovered belonged to a run
+   *   its parent cancelled. The recovered turn must not run.
    */
-  private _rebindAgentToolChildRunRequestId(requestId: string): void {
-    // No child-run table on facets that never ran as an agent tool; don't
-    // create one. An existing table may predate newer columns (a fresh isolate
-    // after upgrade recovers before any other child-run access), so migrate it.
-    const tables = this.sql<{ name: string }>`
-      SELECT name FROM sqlite_master
-      WHERE type = 'table' AND name = 'cf_agent_tool_child_runs'
-    `;
-    if (tables.length === 0) return;
-    this._ensureAgentToolChildRunTable();
-    const rows = this.sql<{ run_id: string; event_delivery: string | null }>`
-      SELECT run_id, event_delivery FROM cf_agent_tool_child_runs
-      WHERE status IN ('starting', 'running')
-      ORDER BY started_at DESC
-      LIMIT 1
-    `;
-    const runId = rows[0]?.run_id;
-    const terminalOnly = rows[0]?.event_delivery === "terminal";
-    if (!runId) return;
-    if (terminalOnly) this._agentToolTerminalOnlyRuns.add(runId);
-    this._agentToolRunsByRequestId.set(requestId, runId);
-    this.sql`
-      UPDATE cf_agent_tool_child_runs
-      SET request_id = ${requestId}
-      WHERE run_id = ${runId}
-    `;
+  private _rebindAgentToolChildRunRequestId(
+    requestId: string
+  ): "bound" | "cancelled" | "none" {
+    return this._agentToolRuns.rebind(
+      requestId,
+      this._activeChatRecoveryRootRequestId
+    );
   }
 
   // ── Dynamic config ──────────────────────────────────────────────
@@ -9235,11 +9334,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     options?: ChatOptions
   ): Promise<void> {
     const requestId = crypto.randomUUID();
-    const abortSignal = this._aborts.getSignal(requestId);
-    const detachExternal = this._aborts.linkExternal(
-      requestId,
-      options?.signal
-    );
     const ignoredTools = (options as { tools?: unknown } | undefined)?.tools;
     if (
       ignoredTools != null &&
@@ -9268,115 +9362,151 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       : undefined;
     const clientToolExecutor = options?.onClientToolCall;
 
-    try {
-      await callback.onStart({ requestId });
-      await this._admitTurn({
-        admission: "queue",
-        trigger: "rpc",
-        requestId,
-        continuation: false,
-        channel: options?.channel,
-        execute: async () => {
-          const resolved =
-            typeof userMessage === "function"
-              ? await userMessage(this.messages)
-              : this._normalizeChatMessages(userMessage);
+    // Whether the callback already got its terminal call, so a reset that
+    // lands after the turn's answer does not report a second one.
+    let terminalSent = false;
+    const sink: StreamCallback = {
+      onStart: (event) => callback.onStart(event),
+      onEvent: (json) => callback.onEvent(json),
+      onDone: () => {
+        terminalSent = true;
+        return callback.onDone();
+      },
+      onError: (error) => {
+        terminalSent = true;
+        return callback.onError(error);
+      },
+      onInterrupted: (info) => {
+        terminalSent = true;
+        return callback.onInterrupted?.(info);
+      }
+    };
 
-          for (const msg of this._stampChannel(
-            resolved,
-            options?.channel,
-            options?.metadata
-          )) {
-            await this._appendMessageToHistory(msg);
-          }
-          this._broadcastMessages();
+    // The turn core runs the request: accept (generation, abort controller,
+    // the caller's signal), tell the caller the request id, queue, then the
+    // turn. A request cancelled while it waited never stores its message or
+    // calls the model, and a chat reset at any point is reported.
+    await this._turns.runRpcRequest({
+      requestId,
+      signal: options?.signal,
+      onStart: () => callback.onStart({ requestId }),
+      enqueue: async (turn, generation) => {
+        const result = await this._admitTurn({
+          admission: "queue",
+          trigger: "rpc",
+          requestId,
+          generation,
+          continuation: false,
+          channel: options?.channel,
+          execute: turn
+        });
+        return result.status;
+      },
+      // The chat was cleared under the request. The caller did not cancel
+      // it, so a silent resolve would read as an answer.
+      onReset: async () => {
+        if (terminalSent) return;
+        terminalSent = true;
+        await callback.onError(CHAT_CLEARED_ERROR);
+      },
+      run: async (abortSignal, { isCurrent }) => {
+        const resolved =
+          typeof userMessage === "function"
+            ? await userMessage(this.messages)
+            : this._normalizeChatMessages(userMessage);
+        // A reset while the message resolved: the chat it was meant for
+        // is gone.
+        if (!isCurrent()) return;
 
-          const chatBody = async () => {
-            // Bounded compact-and-retry loop (opt-in via
-            // `contextOverflow.reactive`). A turn that overflows the context
-            // window mid-flight is compacted and re-run from the persisted
-            // partial instead of dying terminally. Every attempt re-runs the
-            // SAME user turn from the now-compacted history, so it stays
-            // `continuation: false` — an overflow retry is not an
-            // auto-continuation, and `beforeTurn` should not treat it as one.
-            for (let attempt = 0; ; attempt++) {
-              let result: StreamableResult;
-              try {
-                result = await agentContext.run(
-                  {
-                    agent: this,
-                    connection: undefined,
-                    request: undefined,
-                    email: undefined
-                  },
-                  () =>
-                    this._runInferenceLoop({
-                      signal: abortSignal,
-                      clientTools,
-                      clientToolExecutor,
-                      continuation: false
-                    })
-                );
-              } catch (error) {
-                const wrapped = this.onChatError(error, {
-                  stage: "turn",
-                  messagesPersisted: true
-                });
-                const errorMessage =
-                  wrapped instanceof Error ? wrapped.message : String(wrapped);
-                this._emit("chat:request:failed", {
-                  stage: "turn",
-                  messagesPersisted: true,
-                  error: errorMessage
-                });
-                await callback.onError(errorMessage);
-                return;
-              }
+        for (const msg of this._stampChannel(
+          resolved,
+          options?.channel,
+          options?.metadata
+        )) {
+          await this._appendMessageToHistory(msg);
+        }
+        if (!isCurrent()) return;
+        this._broadcastMessages();
 
-              // The consumer suppresses a classified overflow whenever recovery
-              // is enabled; the driver (here) owns the retry-vs-terminal call so
-              // every overflow terminal is reported identically.
-              const { status, error } = await this._streamResultToRpcCallback(
-                requestId,
-                result,
-                callback,
-                abortSignal,
-                { overflowRecovery: this._overflowReactiveEnabled }
+        const chatBody = async () => {
+          // Bounded compact-and-retry loop (opt-in via
+          // `contextOverflow.reactive`). A turn that overflows the context
+          // window mid-flight is compacted and re-run from the persisted
+          // partial instead of dying terminally. Every attempt re-runs the
+          // SAME user turn from the now-compacted history, so it stays
+          // `continuation: false` — an overflow retry is not an
+          // auto-continuation, and `beforeTurn` should not treat it as one.
+          for (let attempt = 0; ; attempt++) {
+            let result: StreamableResult;
+            try {
+              result = await agentContext.run(
+                {
+                  agent: this,
+                  connection: undefined,
+                  request: undefined,
+                  email: undefined
+                },
+                () =>
+                  this._runInferenceLoop({
+                    signal: abortSignal,
+                    clientTools,
+                    clientToolExecutor,
+                    continuation: false
+                  })
               );
-
-              if (status === "overflow_retry") {
-                if (
-                  attempt < this._overflowMaxRetries &&
-                  !abortSignal?.aborted
-                ) {
-                  const shortened = await this._compactForContextOverflow(
-                    "reactive",
-                    { requestId, attempt: attempt + 1 }
-                  );
-                  // Compaction shortened history → retry. A no-op compaction
-                  // can't fix the overflow, so fall through to terminal.
-                  if (shortened) continue;
-                }
-                // Budget spent, aborted, or compaction no-op: deliver terminally
-                // (through onChatError, classified) so the turn never loops or ends
-                // silently with no answer.
-                const message = this._finalizeContextOverflowError(
-                  requestId,
-                  error
-                );
-                await callback.onError(message);
-              }
+            } catch (error) {
+              const wrapped = this.onChatError(error, {
+                stage: "turn",
+                messagesPersisted: true
+              });
+              const errorMessage =
+                wrapped instanceof Error ? wrapped.message : String(wrapped);
+              this._emit("chat:request:failed", {
+                stage: "turn",
+                messagesPersisted: true,
+                error: errorMessage
+              });
+              await sink.onError(errorMessage);
               return;
             }
-          };
 
-          await this._runChatRecoveryFiber(requestId, false, chatBody);
-        }
-      });
-    } finally {
-      detachExternal();
-      this._aborts.remove(requestId);
-    }
+            // The consumer suppresses a classified overflow whenever recovery
+            // is enabled; the driver (here) owns the retry-vs-terminal call so
+            // every overflow terminal is reported identically.
+            const { status, error } = await this._streamResultToRpcCallback(
+              requestId,
+              result,
+              sink,
+              abortSignal,
+              { overflowRecovery: this._overflowReactiveEnabled }
+            );
+
+            if (status === "overflow_retry") {
+              if (attempt < this._overflowMaxRetries && !abortSignal?.aborted) {
+                const shortened = await this._compactForContextOverflow(
+                  "reactive",
+                  { requestId, attempt: attempt + 1 }
+                );
+                // Compaction shortened history → retry. A no-op compaction
+                // can't fix the overflow, so fall through to terminal.
+                if (shortened) continue;
+              }
+              // Budget spent, aborted, or compaction no-op: deliver terminally
+              // (through onChatError, classified) so the turn never loops or ends
+              // silently with no answer.
+              const message = this._finalizeContextOverflowError(
+                requestId,
+                error
+              );
+              await sink.onError(message);
+            }
+            return;
+          }
+        };
+
+        await this._runChatRecoveryFiber(requestId, false, chatBody);
+      }
+    });
   }
 
   /**
@@ -10109,127 +10239,35 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const existing = this._readAgentToolChildRun(options.runId);
     if (existing) return this._inspectionFromChildRow(existing);
 
-    const startedAt = Date.now();
-    const eventDelivery =
-      options.eventDelivery === "terminal" ? "terminal" : null;
-    this.sql`
-      INSERT INTO cf_agent_tool_child_runs
-        (run_id, status, started_at, event_delivery)
-      VALUES (${options.runId}, 'starting', ${startedAt}, ${eventDelivery})
-    `;
-
-    const controller = new AbortController();
-    this._agentToolAbortControllers.set(options.runId, controller);
-    this._agentToolLiveSequences.set(options.runId, 0);
-    if (eventDelivery === "terminal") {
-      this._agentToolTerminalOnlyRuns.add(options.runId);
-    }
-    this._agentToolPreTurnAssistantIds.set(
+    const startedAt = this._agentToolRuns.start(
       options.runId,
-      new Set(
-        this.messages.filter((m) => m.role === "assistant").map((m) => m.id)
-      )
-    );
-
-    const epoch = this._turnQueue.generation;
-    void this.keepAliveWhile(async () => {
-      try {
-        this.sql`
-          UPDATE cf_agent_tool_child_runs
-          SET status = 'running'
-          WHERE run_id = ${options.runId} AND status = 'starting'
-        `;
-        // Bind the run to its turn's request id BEFORE the turn starts —
-        // in memory for live frame attribution in `broadcast`, and on the
-        // child-run row so attribution survives a DO restart mid-run
-        // (#1575). `saveMessages` would generate the id internally, so call
-        // the inner turn runner with a pre-generated one instead.
+      {
+        input,
+        terminalOnly: options.eventDelivery === "terminal",
+        assistantIds: new Set(
+          this.messages.filter((m) => m.role === "assistant").map((m) => m.id)
+        )
+      },
+      (signal) => {
+        // Bind the run to its turn's request id before the turn is queued.
+        // `saveMessages` would mint the id internally, so call the inner
+        // turn runner with one minted here (#1575).
         const requestId = crypto.randomUUID();
-        this._agentToolRunsByRequestId.set(requestId, options.runId);
-        this.sql`
-          UPDATE cf_agent_tool_child_runs
-          SET request_id = ${requestId}
-          WHERE run_id = ${options.runId}
-        `;
-        const result = await this._runProgrammaticMessagesTurn(
+        this._agentToolRuns.bindTurn(options.runId, requestId);
+        return this._runProgrammaticMessagesTurn(
           requestId,
           [this.formatAgentToolInput(input)],
           {
-            signal: controller.signal,
-            trigger: "agent-tool"
+            signal,
+            trigger: "agent-tool",
+            // A run cancelled while its turn waited in the queue stores
+            // nothing and never calls the model.
+            shouldApplyMessages: () =>
+              !this._agentToolRuns.isCancelled(options.runId)
           }
         );
-        const streamId =
-          this._resumableStream
-            .getAllStreamMetadata()
-            .find((m) => m.request_id === result.requestId)?.id ?? null;
-        const output = this.getAgentToolOutput(options.runId);
-        const summary = this.getAgentToolSummary(options.runId, output);
-        const streamError =
-          result.error ?? this._agentToolLastErrors.get(options.runId);
-        const skipped =
-          result.status === "skipped" ||
-          (result.status === "aborted" && this._turnQueue.generation !== epoch);
-        const status: AgentToolChildRunStatus =
-          result.status === "error" || skipped || streamError
-            ? "error"
-            : result.status === "aborted"
-              ? "aborted"
-              : "completed";
-        const error: string | null =
-          status === "error"
-            ? (streamError ??
-              "Agent tool run was skipped before the child could finish.")
-            : null;
-        this.sql`
-          UPDATE cf_agent_tool_child_runs
-          SET request_id = ${result.requestId},
-              stream_id = ${streamId},
-              status = ${status},
-              summary = ${summary},
-              output_json = ${Think._stringifyAgentToolOutput(output)},
-              error_message = ${error},
-              completed_at = ${Date.now()}
-          WHERE run_id = ${options.runId}
-            AND completed_at IS NULL
-        `;
-      } catch (error) {
-        this.sql`
-          UPDATE cf_agent_tool_child_runs
-          SET status = 'error',
-              error_message = ${error instanceof Error ? error.message : String(error)},
-              completed_at = ${Date.now()}
-          WHERE run_id = ${options.runId}
-            AND completed_at IS NULL
-        `;
-      } finally {
-        this._agentToolAbortControllers.delete(options.runId);
-        this._agentToolForwarders.delete(options.runId);
-        this._agentToolLiveSequences.delete(options.runId);
-        this._agentToolTerminalOnlyRuns.delete(options.runId);
-        // Drop the progress emitter's per-run coalescing state.
-        this._agentToolProgressEmitterInstance?.forget(options.runId);
-        // Drop this run's request-id mappings. When no runs remain in flight
-        // clear the whole map, so negatively-cached (null) entries for
-        // unrelated turns can't accumulate for the DO's lifetime — the map is
-        // only consulted while a run is active (#1575).
-        if (this._agentToolAbortControllers.size === 0) {
-          this._agentToolRunsByRequestId.clear();
-        } else {
-          for (const [reqId, runId] of this._agentToolRunsByRequestId) {
-            if (runId === options.runId) {
-              this._agentToolRunsByRequestId.delete(reqId);
-            }
-          }
-        }
-        this._agentToolLastErrors.delete(options.runId);
-        this._agentToolPreTurnAssistantIds.delete(options.runId);
-        for (const close of this._agentToolClosers.get(options.runId) ?? []) {
-          close();
-        }
-        this._agentToolClosers.delete(options.runId);
       }
-    });
+    );
 
     return {
       runId: options.runId,
@@ -10239,30 +10277,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   async cancelAgentToolRun(runId: string, reason?: unknown): Promise<void> {
-    const row = this._readAgentToolChildRun(runId);
-    if (!row || row.completed_at !== null) return;
-    // Stop the original in-isolate run if it's still live...
-    this._agentToolAbortControllers.get(runId)?.abort(reason);
-    // ...and any in-flight chat-recovery turn driving this child facet after an
-    // eviction. A recovered turn re-runs via `_chatRecoveryContinue` outside
-    // `startAgentToolRun`, so it has no entry in `_agentToolAbortControllers`; a
-    // child facet is dedicated to a single agent-tool run, so aborting its
-    // active submissions tears the recovery down instead of letting it keep
-    // grinding (and holding a fiber / keep-alive) after the parent gave up on
-    // it and sealed `interrupted` (#1630 follow-up).
-    for (const controller of this._submissionAbortControllers.values()) {
-      controller.abort(reason);
-    }
-    this.sql`
-      UPDATE cf_agent_tool_child_runs
-      SET status = 'aborted',
-          error_message = ${reason instanceof Error ? reason.message : reason === undefined ? null : String(reason)},
-          completed_at = ${Date.now()}
-      WHERE run_id = ${runId}
-        AND status NOT IN ('completed', 'error', 'aborted')
-    `;
-    // Release any parent live-tail so it stops waiting on this run immediately.
-    this._finalizeAgentToolChildRunTailers(runId);
+    this._agentToolRuns.cancel(runId, reason);
   }
 
   /**
@@ -10297,129 +10312,37 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
   private _isStaleAgentToolChildRun(row: AgentToolChildRunRow): boolean {
     return (
-      (row.status === "running" || row.status === "starting") &&
       row.completed_at === null &&
-      !this._agentToolAbortControllers.has(row.run_id)
+      this._agentToolRuns.isStale({
+        runId: row.run_id,
+        requestId: row.request_id,
+        status: row.status,
+        error: row.error_message,
+        terminalOnly: false
+      })
     );
   }
 
   /**
-   * Reconcile a stale (post-eviction) child run row from the child's own
-   * durable recovery (#1630). The child facet self-heals its interrupted turn
-   * via `chatRecovery`, but that path never writes the run row, so without this
-   * the row strands `running` and the parent can only collect `interrupted`.
-   *
-   * Persisting the terminal here (rather than only computing it) is intentional:
-   * it's a lazy materialization of the run's true terminal that also lets a
-   * tailing parent's stream close promptly and makes subsequent inspects cheap.
-   * While recovery is still resolving (active stream or in-progress incident)
-   * the row is left `running` so the parent's bounded re-attach keeps waiting.
+   * Settle a stale (post-eviction) child run row from the child's own
+   * durable recovery (#1630). See {@link AgentToolRuns.reconcileStale}.
    */
-  private async _reconcileStaleAgentToolChildRun(runId: string): Promise<void> {
-    const recovery = await this._classifyAgentToolChildRecovery();
-    if (recovery === "in-progress" || this._resumableStream.hasActiveStream()) {
-      return;
-    }
-    // A stream error recorded on the open row means the turn failed even if it
-    // persisted an assistant reply — matching the live finalizer, which fails a
-    // run whenever a stream error was captured.
-    const recordedError = this._readAgentToolChildRun(runId)?.error_message;
-    if (recordedError != null) {
-      this.sql`
-        UPDATE cf_agent_tool_child_runs
-        SET status = 'error',
-            error_message = ${recordedError},
-            completed_at = ${Date.now()}
-        WHERE run_id = ${runId} AND completed_at IS NULL
-      `;
-      this._finalizeAgentToolChildRunTailers(runId);
-      return;
-    }
-    // A settled recovery that produced an assistant turn is `completed`, even if
-    // that turn ended on a tool result with no final text — keying off text
-    // alone would mis-seal a legitimately-finished (but text-less) run as
-    // `error`. `getAgentToolSummary` already falls back to "" when there is no
-    // final text.
-    const recoveredTurn =
-      recovery !== "failed" && this._hasRecoveredAgentToolAssistantTurn(runId);
-    if (recoveredTurn) {
-      const output = this.getAgentToolOutput(runId);
-      const summary = this.getAgentToolSummary(runId, output);
-      this.sql`
-        UPDATE cf_agent_tool_child_runs
-        SET status = 'completed',
-            summary = ${summary},
-            output_json = ${Think._stringifyAgentToolOutput(output)},
-            error_message = null,
-            completed_at = ${Date.now()}
-        WHERE run_id = ${runId} AND completed_at IS NULL
-      `;
-    } else {
-      const error =
-        "Agent tool run was interrupted before the child could finish.";
-      this.sql`
-        UPDATE cf_agent_tool_child_runs
-        SET status = 'error',
-            error_message = ${error},
-            completed_at = ${Date.now()}
-        WHERE run_id = ${runId} AND completed_at IS NULL
-      `;
-    }
-    this._finalizeAgentToolChildRunTailers(runId);
+  private _reconcileStaleAgentToolChildRun(runId: string): Promise<void> {
+    return this._agentToolRuns.reconcileStale(runId);
   }
 
   /** Release a re-attached run's live tail + per-run streaming bookkeeping. */
   private _finalizeAgentToolChildRunTailers(runId: string): void {
-    for (const close of this._agentToolClosers.get(runId) ?? []) {
-      close();
-    }
-    this._agentToolClosers.delete(runId);
-    this._agentToolForwarders.delete(runId);
-    this._agentToolLiveSequences.delete(runId);
-    this._agentToolLastErrors.delete(runId);
-    this._agentToolPreTurnAssistantIds.delete(runId);
-    // A live in-isolate run keeps suppressing until `startAgentToolRun`'s
-    // finally; a recovered turn never reaches that finally.
-    if (!this._agentToolAbortControllers.has(runId)) {
-      this._agentToolTerminalOnlyRuns.delete(runId);
-    }
+    this._agentToolRuns.closeTailers(runId);
   }
 
   /**
-   * Eagerly terminalize this child facet's OWN agent-tool run row(s) once a
-   * recovered turn has settled. A recovered turn re-runs via either
-   * `_chatRecoveryContinue` → `continueLastTurn` or, for a pre-stream eviction,
-   * `_chatRecoveryRetry` (a fresh user turn) — neither flows through
-   * `startAgentToolRun`'s finalizer, so without this the run row strands
-   * `running` and its tailers stay open until a parent inspect lazily
-   * reconciles it — forcing a re-attached parent to wait out a full no-progress
-   * window before collecting an already-finished result (#1630 follow-up).
-   * Reconciling here closes the tail promptly so the parent collects the
-   * terminal immediately. No-op on non-child facets (their
-   * `cf_agent_tool_child_runs` table is empty) and on rows whose in-memory run
-   * is still live (those are finalized by `startAgentToolRun`); the underlying
-   * reconcile leaves a row `running` while its recovery is still in progress.
+   * Settle this child facet's own run row once a recovered turn has settled:
+   * a recovered turn never reaches `startAgentToolRun`'s lifecycle. See
+   * {@link AgentToolRuns.reconcileOwn}.
    */
-  private async _reconcileOwnStaleAgentToolChildRuns(): Promise<void> {
-    let rows: Array<{ run_id: string }>;
-    try {
-      rows = this.sql<{ run_id: string }>`
-        SELECT run_id FROM cf_agent_tool_child_runs
-        WHERE completed_at IS NULL
-      `;
-    } catch {
-      // No child-run table on this facet (it never ran as a child) — nothing
-      // to reconcile.
-      return;
-    }
-    for (const { run_id } of rows) {
-      if (this._agentToolAbortControllers.has(run_id)) continue;
-      try {
-        await this._reconcileStaleAgentToolChildRun(run_id);
-      } catch {
-        // Best-effort: a parent inspect still reconciles lazily.
-      }
-    }
+  private _reconcileOwnStaleAgentToolChildRuns(): Promise<void> {
+    return this._agentToolRuns.reconcileOwn();
   }
 
   async getAgentToolChunks(
@@ -13355,8 +13278,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const requestId = crypto.randomUUID();
     // If this facet is itself an agent-tool child being recovered, re-bind its
     // run row to this turn's request id so the parent's re-attach tail keeps
-    // attributing the continued turn's frames (no-op otherwise).
-    this._rebindAgentToolChildRunRequestId(requestId);
+    // attributing the continued turn's frames (no-op otherwise). A run its
+    // parent cancelled before the interrupted turn could unwind is not
+    // re-run.
+    if (this._rebindAgentToolChildRunRequestId(requestId) === "cancelled") {
+      return { requestId: "", status: "skipped" };
+    }
     const clientTools = this._lastClientTools;
     const resolvedBody = body ?? this._lastBody;
     const workflowPrompt = this._recoveredWorkflowPrompt();
@@ -13475,8 +13402,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const requestId = crypto.randomUUID();
     // If this facet is itself an agent-tool child being recovered, re-bind its
     // run row to this turn's request id so the parent's re-attach tail keeps
-    // attributing the retried turn's frames (no-op otherwise).
-    this._rebindAgentToolChildRunRequestId(requestId);
+    // attributing the retried turn's frames (no-op otherwise). A run its
+    // parent cancelled before the interrupted turn could unwind is not
+    // re-run.
+    if (this._rebindAgentToolChildRunRequestId(requestId) === "cancelled") {
+      return { requestId: "", status: "skipped" };
+    }
     const epoch = this._turnQueue.generation;
     // Re-resolve the channel from the persisted user message so a recovered
     // retry re-applies per-channel policy, exactly like `continueLastTurn`. The
@@ -14497,6 +14428,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     status: "completed" | "error" | "aborted" | "overflow_retry";
     error?: string;
   }> {
+    // Whether the chat was reset (cleared) since this turn was admitted. A
+    // turn admitted before a reset must not store its reply in the cleared
+    // chat. `chat()` reports the reset to the caller.
+    const resetSinceTurnStarted = this._turns.turnResetGuard();
     const streamId = this._startResumableStream(requestId);
     const accumulator = new StreamAccumulator({
       messageId: crypto.randomUUID()
@@ -14741,7 +14676,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         status: streamError ? "error" : aborted ? "aborted" : "completed",
         ...(streamError && { error: streamError })
       };
-      if (accumulator.parts.length > 0) {
+      const wasReset = resetSinceTurnStarted();
+      if (accumulator.parts.length > 0 && !wasReset) {
         await this._rememberPendingResponseHook(response);
         persistedAssistantId = await this._persistAssistantMessageWithCutover(
           streamId,
@@ -14767,6 +14703,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         status: aborted ? "aborted" : "completed"
       });
 
+      if (wasReset) {
+        // Nothing was stored and no response hook fires: the reply belongs
+        // to a chat that no longer exists.
+        return { status: "aborted" };
+      }
       if (streamError) {
         pendingRpcError = streamError;
       } else if (!aborted) {
@@ -14797,7 +14738,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           partialParts: accumulator.toMessage().parts,
           persistPartial: async () => {
             if (persistedAssistantId) return persistedAssistantId;
-            if (accumulator.parts.length === 0) return undefined;
+            if (resetSinceTurnStarted() || accumulator.parts.length === 0) {
+              return undefined;
+            }
             const partial = this._settleInterruptedReply(
               accumulator.toMessage()
             );
@@ -14866,7 +14809,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         streamFinalized = true;
       }
       try {
-        if (!assistantMsg && accumulator.parts.length > 0) {
+        if (
+          !assistantMsg &&
+          accumulator.parts.length > 0 &&
+          !resetSinceTurnStarted()
+        ) {
           assistantMsg = this._settleInterruptedReply(accumulator.toMessage());
           await this._persistAssistantMessage(assistantMsg);
           this._broadcastMessages();

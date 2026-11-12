@@ -4275,6 +4275,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
         .map((part) => part.text)
         .join("") ?? "";
 
+    this._chatCallsForTest.push(prompt);
     const bodyText = `AIChat child handled: ${prompt}`;
     await delayWithAbort(Number(input?.delayMs ?? 0), options?.abortSignal);
     if (input?.streamError) {
@@ -4309,6 +4310,161 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
 
   listMessagesForTest(): ChatMessage[] {
     return this.messages;
+  }
+
+  /** The prompt of every `onChatMessage` call, in order. */
+  private _chatCallsForTest: string[] = [];
+
+  private async _waitForRunTerminalForTest(
+    runId: string
+  ): Promise<AgentToolRunInspection | null> {
+    const deadline = Date.now() + 5000;
+    for (;;) {
+      const inspection = await this.inspectAgentToolRun(runId);
+      if (
+        (inspection && inspection.status !== "running") ||
+        Date.now() > deadline
+      ) {
+        return inspection;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
+  /** Resolve once no run's lifecycle is left in this isolate. */
+  private async _waitForRunsSettledForTest(): Promise<void> {
+    const deadline = Date.now() + 5000;
+    while (
+      this["_agentToolAbortControllers"].size > 0 &&
+      Date.now() < deadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    await this["_turnQueue"].waitForIdle();
+  }
+
+  private _userTextsForTest(): string[] {
+    return this.messages
+      .filter((message) => message.role === "user")
+      .map((message) =>
+        message.parts
+          .map((part) => (part.type === "text" ? part.text : ""))
+          .join("")
+      );
+  }
+
+  /** A chat reset lands while the run's reply streams. */
+  async resetWhileRunStreamsForTest(): Promise<AgentToolRunInspection | null> {
+    const runId = crypto.randomUUID();
+    await this.startAgentToolRun(
+      { prompt: "reset probe", chunkDelayMs: 60 },
+      { runId }
+    );
+    if (!(await this._waitForLiveTurnForTest(runId))) {
+      throw new Error("the run's turn never started streaming");
+    }
+    this.resetTurnState();
+    return this._waitForRunTerminalForTest(runId);
+  }
+
+  /**
+   * A run is cancelled while its turn waits in the queue behind another
+   * run's turn, optionally followed by a chat reset.
+   */
+  async cancelQueuedRunForTest(thenReset: boolean): Promise<{
+    queued: AgentToolRunInspection | null;
+    userTexts: string[];
+    chatCalls: string[];
+  }> {
+    const first = crypto.randomUUID();
+    const queued = crypto.randomUUID();
+    await this.startAgentToolRun(
+      { prompt: "first run", delayMs: 150 },
+      { runId: first }
+    );
+    const deadline = Date.now() + 2000;
+    while (!this._chatCallsForTest.includes("first run")) {
+      if (Date.now() > deadline) throw new Error("first run never started");
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    await this.startAgentToolRun({ prompt: "queued run" }, { runId: queued });
+    await this.cancelAgentToolRun(queued, "stop");
+    if (thenReset) this.resetTurnState();
+    await this._waitForRunsSettledForTest();
+    return {
+      queued: await this.inspectAgentToolRun(queued),
+      userTexts: this._userTextsForTest(),
+      chatCalls: [...this._chatCallsForTest]
+    };
+  }
+
+  /** A cancel for a run that already finished must not touch other turns. */
+  async cancelFinishedRunForTest(): Promise<{
+    status: string | undefined;
+    otherTurnAborted: boolean;
+  }> {
+    const runId = crypto.randomUUID();
+    await this.startAgentToolRun({ prompt: "quick run" }, { runId });
+    const finished = await this._waitForRunTerminalForTest(runId);
+    await this._waitForRunsSettledForTest();
+    const signal = this["_abortRegistry"].getSignal("another-turn");
+    await this.cancelAgentToolRun(runId, "late cancel");
+    const otherTurnAborted = signal?.aborted ?? false;
+    this["_abortRegistry"].remove("another-turn");
+    return { status: finished?.status, otherTurnAborted };
+  }
+
+  /** A cancel of a run being recovered stops a running recovery attempt. */
+  async cancelRunStopsRecoveryAttemptForTest(): Promise<boolean> {
+    const runId = crypto.randomUUID();
+    this.sql`
+      INSERT INTO cf_ai_chat_agent_tool_runs (run_id, request_id, status, started_at)
+      VALUES (${runId}, 'interrupted-request', 'running', ${Date.now()})
+    `;
+    const attempt = this["_turns"].beginRecoveryAttempt("root-request");
+    try {
+      await this.cancelAgentToolRun(runId, "parent gave up");
+      return attempt.signal.aborted;
+    } finally {
+      attempt.end();
+    }
+  }
+
+  /**
+   * The run was cancelled, then the isolate died before the run's turn
+   * unwound, so chat recovery wakes for that turn. It must not run.
+   */
+  async recoverCancelledRunForTest(): Promise<{
+    status: string;
+    chatCalls: number;
+  }> {
+    await this.persistMessages([
+      { id: "u1", role: "user", parts: [{ type: "text", text: "question" }] },
+      {
+        id: "a1",
+        role: "assistant",
+        parts: [{ type: "text", text: "partial answer" }]
+      }
+    ]);
+    const runId = crypto.randomUUID();
+    this.sql`
+      INSERT INTO cf_ai_chat_agent_tool_runs
+        (run_id, request_id, status, started_at, completed_at)
+      VALUES (${runId}, 'interrupted-request', 'aborted', ${Date.now()}, ${Date.now()})
+    `;
+    const self = this as unknown as {
+      _activeChatRecoveryRootRequestId: string | undefined;
+    };
+    self._activeChatRecoveryRootRequestId = "interrupted-request";
+    try {
+      const result = await this.continueLastTurn();
+      return {
+        status: result.status,
+        chatCalls: this._chatCallsForTest.length
+      };
+    } finally {
+      self._activeChatRecoveryRootRequestId = undefined;
+    }
   }
 
   private _attachRaceInjection: { runId: string; body: string } | null = null;
@@ -6130,6 +6286,32 @@ export class AIChatAgentToolParent extends Agent<Env> {
       path,
       withAssistantTurn
     );
+  }
+
+  private async _freshChildForTest() {
+    return this.subAgent(AIChatAgentToolChild, crypto.randomUUID());
+  }
+
+  async childResetWhileRunStreamsForTest() {
+    return (await this._freshChildForTest()).resetWhileRunStreamsForTest();
+  }
+
+  async childCancelQueuedRunForTest(thenReset: boolean) {
+    return (await this._freshChildForTest()).cancelQueuedRunForTest(thenReset);
+  }
+
+  async childCancelFinishedRunForTest() {
+    return (await this._freshChildForTest()).cancelFinishedRunForTest();
+  }
+
+  async childCancelRunStopsRecoveryAttemptForTest() {
+    return (
+      await this._freshChildForTest()
+    ).cancelRunStopsRecoveryAttemptForTest();
+  }
+
+  async childRecoverCancelledRunForTest() {
+    return (await this._freshChildForTest()).recoverCancelledRunForTest();
   }
 
   async childCancelAgentToolRunAbortsRecoveryForTest(): Promise<{

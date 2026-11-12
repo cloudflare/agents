@@ -18,6 +18,19 @@ type AgentToolInspection = Awaited<
 >;
 
 type ThinkAgentToolTestStub = {
+  cancelQueuedAgentToolRunForTest(): Promise<{
+    status: string | null;
+    userTexts: string[];
+    steps: number;
+  }>;
+  cancelRunStopsRecoveredTurnForTest(): Promise<{
+    turnAborted: boolean;
+    attemptAborted: boolean;
+  }>;
+  recoverCancelledAgentToolRunForTest(): Promise<{
+    status: string;
+    steps: number;
+  }>;
   inspectAgentToolRun(runId: string): Promise<AgentToolInspection>;
   broadcastRecoveredAgentToolChunkForTest(
     eventDelivery: "full" | "terminal"
@@ -374,6 +387,31 @@ describe("Think agent tools", () => {
       runId,
       status: "aborted",
       error: "stop"
+    });
+  });
+
+  it("never starts a run cancelled while its turn waited in the queue", async () => {
+    const agent = await freshAgent();
+    const result = await agent.cancelQueuedAgentToolRunForTest();
+    expect(result.status).toBe("aborted");
+    // Its input was not stored and the model ran for the first turn only.
+    expect(result.userTexts).toEqual(["active turn"]);
+    expect(result.steps).toBe(1);
+  });
+
+  it("a cancel of a run being recovered stops the recovered turn and a running recovery attempt", async () => {
+    const agent = await freshAgent();
+    await expect(agent.cancelRunStopsRecoveredTurnForTest()).resolves.toEqual({
+      turnAborted: true,
+      attemptAborted: true
+    });
+  });
+
+  it("does not re-run the turn of a run cancelled before the isolate died", async () => {
+    const agent = await freshAgent();
+    await expect(agent.recoverCancelledAgentToolRunForTest()).resolves.toEqual({
+      status: "skipped",
+      steps: 0
     });
   });
 

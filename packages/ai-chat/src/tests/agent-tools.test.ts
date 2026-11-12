@@ -258,6 +258,21 @@ type ParentStub = DurableObjectStub & {
     path: "continue" | "retry",
     withAssistantTurn: boolean
   ): Promise<{ before: string | null; after: string | null }>;
+  childResetWhileRunStreamsForTest(): Promise<AgentToolRunInspection | null>;
+  childCancelQueuedRunForTest(thenReset: boolean): Promise<{
+    queued: AgentToolRunInspection | null;
+    userTexts: string[];
+    chatCalls: string[];
+  }>;
+  childCancelFinishedRunForTest(): Promise<{
+    status: string | undefined;
+    otherTurnAborted: boolean;
+  }>;
+  childCancelRunStopsRecoveryAttemptForTest(): Promise<boolean>;
+  childRecoverCancelledRunForTest(): Promise<{
+    status: string;
+    chatCalls: number;
+  }>;
   childCancelAgentToolRunAbortsRecoveryForTest(): Promise<{
     abortedBefore: boolean;
     abortedAfter: boolean;
@@ -1294,6 +1309,46 @@ describe("AIChatAgent as an agent-tool child", () => {
     expect(result.abortedBefore).toBe(false);
     expect(result.abortedAfter).toBe(true);
     expect(result.childStatus).toBe("aborted");
+  });
+
+  it("records a chat reset while the run streams as an error, like a reset in the queue", async () => {
+    const inspection = await (
+      await getParent()
+    ).childResetWhileRunStreamsForTest();
+    expect(inspection).toMatchObject({
+      status: "error",
+      error: "Agent tool run was skipped because the chat was cleared."
+    });
+  });
+
+  it("never starts a run cancelled while its turn waited in the queue", async () => {
+    const result = await (await getParent()).childCancelQueuedRunForTest(false);
+    expect(result.queued).toMatchObject({ status: "aborted", error: "stop" });
+    // Its input was not stored and the model was not called for it.
+    expect(result.userTexts).toEqual(["first run"]);
+    expect(result.chatCalls).toEqual(["first run"]);
+  });
+
+  it("keeps a cancelled run aborted when a chat reset then skips its queued turn", async () => {
+    const result = await (await getParent()).childCancelQueuedRunForTest(true);
+    expect(result.queued).toMatchObject({ status: "aborted", error: "stop" });
+  });
+
+  it("a cancel for a run that already finished aborts no other turn", async () => {
+    const result = await (await getParent()).childCancelFinishedRunForTest();
+    expect(result.status).toBe("completed");
+    expect(result.otherTurnAborted).toBe(false);
+  });
+
+  it("a cancel of a run being recovered stops a running recovery attempt", async () => {
+    await expect(
+      (await getParent()).childCancelRunStopsRecoveryAttemptForTest()
+    ).resolves.toBe(true);
+  });
+
+  it("does not re-run the turn of a run cancelled before the isolate died", async () => {
+    const result = await (await getParent()).childRecoverCancelledRunForTest();
+    expect(result).toEqual({ status: "skipped", chatCalls: 0 });
   });
 
   it("keeps suppressing a recovered terminal-only child's chunks after a restart (#2298)", async () => {

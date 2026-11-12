@@ -48,6 +48,7 @@ import {
 } from "./continuation-state";
 import type { MessageConcurrency } from "./lifecycle";
 import { PreStreamTurns } from "./pre-stream-turns";
+import { runRpcRequest, type RpcChatRequest } from "./rpc-request";
 import {
   SubmitConcurrencyController,
   type SubmitConcurrencyDecision
@@ -354,6 +355,14 @@ export class ChatTurns<
   }
 
   /**
+   * Run one chat request a caller started over RPC and follows through a
+   * callback. See {@link runRpcRequest} for the order of its steps.
+   */
+  runRpcRequest(request: RpcChatRequest): Promise<void> {
+    return runRpcRequest(this, request);
+  }
+
+  /**
    * Mark an accepted turn (#1784) as settled. With `releaseParked` (the
    * default), once no accepted turn is in flight and no stream is active,
    * connections parked on the pre-stream window get `STREAM_RESUME_NONE`. A
@@ -494,6 +503,17 @@ export class ChatTurns<
         }
       }
     };
+  }
+
+  /**
+   * Stop every running recovery attempt, whatever request it recovers. For a
+   * caller that knows the agent's recovered work must stop but not which
+   * request id started it: an agent-tool run cancelled by its parent.
+   */
+  cancelRecoveryAttempts(reason?: unknown): void {
+    for (const controller of this.#recoveryAttempts.values()) {
+      controller.abort(reason);
+    }
   }
 
   /**

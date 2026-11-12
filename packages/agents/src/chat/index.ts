@@ -159,6 +159,30 @@ export {
   type RecoveryAttemptHandle
 } from "./chat-turns";
 
+/**
+ * @internal One chat turn a caller starts over RPC and follows through a
+ * callback (`Think.chat()`), run by the turn core. Not a public API. See
+ * `rpc-request.ts`.
+ */
+export { runRpcRequest, type RpcChatRequest } from "./rpc-request";
+
+/**
+ * @internal The life of an agent-tool run on the child agent, shared by
+ * `@cloudflare/ai-chat` and `@cloudflare/think`: start, the bound request
+ * id, cancel, the terminal status, and the reconcile of a run an earlier
+ * isolate started. Not a public API. See `agent-tool-runs.ts`.
+ */
+export {
+  AgentToolRuns,
+  agentToolRunOutcome,
+  isAgentToolRunOpen,
+  type AgentToolRunRecord,
+  type AgentToolRunStore,
+  type AgentToolRunTerminal,
+  type AgentToolRunsHost,
+  type AgentToolTurnResult
+} from "./agent-tool-runs";
+
 export { AbortRegistry } from "./abort-registry";
 
 /**
