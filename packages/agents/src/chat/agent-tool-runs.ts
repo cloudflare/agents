@@ -35,6 +35,12 @@ export interface AgentToolRunRecord {
   runId: string;
   /** The request id of the turn bound to the run, if one was bound. */
   requestId: string | null;
+  /**
+   * The first request id bound to the run. A rebind replaces
+   * {@link requestId} but never this one, and chat recovery keeps naming a
+   * turn by it however many times the turn is recovered.
+   */
+  rootRequestId: string | null;
   /** `starting` and `running` are open; anything else is terminal. */
   status: string;
   /** A stream error recorded on the row, terminal or not. */
@@ -60,7 +66,10 @@ export interface AgentToolRunStore {
   newestOpen(): AgentToolRunRecord | null;
   /** The open run whose row names `requestId`, or `null`. */
   openForRequest(requestId: string): AgentToolRunRecord | null;
-  /** The run whose row names `requestId`, open or not, or `null`. */
+  /**
+   * The run whose row names `requestId` as its current or its first request
+   * id, open or not, or `null`.
+   */
   forRequest(requestId: string): AgentToolRunRecord | null;
   /** The ids of every open run. Empty when there is no table. */
   listOpen(): string[];
@@ -69,7 +78,10 @@ export interface AgentToolRunStore {
     runId: string,
     run: { input: unknown; startedAt: number; terminalOnly: boolean }
   ): void;
-  /** Put the request id of the run's turn on its row. */
+  /**
+   * Put the request id of the run's turn on its row. The first one bound
+   * also becomes the run's root request id, which later binds leave alone.
+   */
   bindRequest(runId: string, requestId: string): void;
   /** Record a stream error on a row that is still open. Must not throw. */
   recordStreamError(runId: string, error: string): void;
@@ -111,8 +123,8 @@ export interface AgentToolRunsHost {
   /**
    * Stop the turn of a run that has no controller in this isolate: the run
    * was interrupted and chat recovery is re-running its turn, or is about
-   * to. Cancel the request the row names, its scheduled recovery, and every
-   * recovery attempt that is running.
+   * to. Cancel the requests the row names (current and root), their
+   * scheduled recovery, and every recovery attempt that is running.
    */
   cancelRecoveredTurn(run: AgentToolRunRecord, reason: unknown): void;
   /** The state of chat recovery on this agent. */
@@ -268,10 +280,11 @@ export class AgentToolRuns {
    * Safe to call for every recovered turn. An agent that never ran as an
    * agent tool, or whose run has ended, has no open run.
    *
-   * @param recoveredRequestId - The request id of the turn being recovered.
+   * @param recoveredRequestId - The request id chat recovery names the
+   *   turn by: the id it first ran under.
    * @returns `"cancelled"` when that turn belonged to a run that was
-   *   cancelled before the turn could unwind. The recovered turn must not
-   *   run.
+   *   cancelled before the turn could unwind, whether it was the run's first
+   *   turn or an earlier recovery of it. The recovered turn must not run.
    */
   rebind(
     requestId: string,

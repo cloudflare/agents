@@ -2517,10 +2517,13 @@ export class ThinkTestAgent extends Think {
     const steps = this._beforeStepLog.length;
     const runId = crypto.randomUUID();
     await this.inspectAgentToolRun(runId);
+    // The run's turn was recovered once already, so the row names the
+    // recovered turn. Recovery still names the turn by its first request id.
     this.sql`
       INSERT INTO cf_agent_tool_child_runs
-        (run_id, request_id, status, started_at, completed_at)
-      VALUES (${runId}, 'interrupted-request', 'aborted', ${Date.now()}, ${Date.now()})
+        (run_id, request_id, root_request_id, status, started_at, completed_at)
+      VALUES (${runId}, 'recovered-request', 'interrupted-request', 'aborted',
+        ${Date.now()}, ${Date.now()})
     `;
     const self = this as unknown as {
       _activeChatRecoveryRootRequestId: string | undefined;

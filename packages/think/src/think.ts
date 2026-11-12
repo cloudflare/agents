@@ -4895,11 +4895,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       this._hasRecoveredAgentToolAssistantTurn(runId),
     cancelRecoveredTurn: (run, reason) => {
       // A recovered turn runs outside `startAgentToolRun`. Stop it by the
-      // request id the row names (the turn, its recovery attempt, its
+      // request ids the row names (the turn, its recovery attempt, its
       // scheduled recovery), and stop every recovery attempt and recovered
       // submission: a child facet is dedicated to one agent-tool run, so
       // whatever recovery is running is that run's (#1630).
-      if (run.requestId) this.cancelChat(run.requestId, reasonText(reason));
+      for (const requestId of new Set([run.requestId, run.rootRequestId])) {
+        if (requestId) this.cancelChat(requestId, reasonText(reason));
+      }
       this._turns.cancelRecoveryAttempts(reason);
       for (const controller of this._submissionAbortControllers.values()) {
         controller.abort(reason);
@@ -4949,6 +4951,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     type Row = {
       run_id: string;
       request_id: string | null;
+      root_request_id: string | null;
       status: string;
       error_message: string | null;
       event_delivery: string | null;
@@ -4958,6 +4961,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         ? {
             runId: row.run_id,
             requestId: row.request_id,
+            rootRequestId: row.root_request_id,
             status: row.status,
             error: row.error_message,
             terminalOnly: row.event_delivery === "terminal"
@@ -4979,7 +4983,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         this._ensureAgentToolChildRunTable();
         return record(
           this.sql<Row>`
-            SELECT run_id, request_id, status, error_message, event_delivery
+            SELECT run_id, request_id, root_request_id, status, error_message,
+                   event_delivery
             FROM cf_agent_tool_child_runs
             WHERE run_id = ${runId}
             LIMIT 1
@@ -4992,7 +4997,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         tableExists()
           ? record(
               this.sql<Row>`
-                SELECT run_id, request_id, status, error_message, event_delivery
+                SELECT run_id, request_id, root_request_id, status, error_message,
+                   event_delivery
                 FROM cf_agent_tool_child_runs
                 WHERE status IN ('starting', 'running')
                 ORDER BY started_at DESC
@@ -5004,7 +5010,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         tableExists()
           ? record(
               this.sql<Row>`
-                SELECT run_id, request_id, status, error_message, event_delivery
+                SELECT run_id, request_id, root_request_id, status, error_message,
+                   event_delivery
                 FROM cf_agent_tool_child_runs
                 WHERE request_id = ${requestId}
                   AND status IN ('starting', 'running')
@@ -5016,9 +5023,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         tableExists()
           ? record(
               this.sql<Row>`
-                SELECT run_id, request_id, status, error_message, event_delivery
+                SELECT run_id, request_id, root_request_id, status, error_message,
+                   event_delivery
                 FROM cf_agent_tool_child_runs
                 WHERE request_id = ${requestId}
+                   OR root_request_id = ${requestId}
                 LIMIT 1
               `[0]
             )
@@ -5044,7 +5053,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       bindRequest: (runId, requestId) => {
         this.sql`
           UPDATE cf_agent_tool_child_runs
-          SET request_id = ${requestId}
+          SET request_id = ${requestId},
+              root_request_id = COALESCE(root_request_id, ${requestId})
           WHERE run_id = ${runId}
         `;
       },
@@ -9424,8 +9434,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           options?.metadata
         )) {
           await this._appendMessageToHistory(msg);
+          if (!isCurrent()) return;
         }
-        if (!isCurrent()) return;
         this._broadcastMessages();
 
         const chatBody = async () => {
@@ -9838,6 +9848,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     );
     this._addAgentToolChildRunColumnIfMissing(
       "ALTER TABLE cf_agent_tool_child_runs ADD COLUMN event_delivery TEXT"
+    );
+    // The first request id bound to the run. `request_id` follows the turn
+    // that is streaming (a recovery rebinds it); chat recovery keeps naming
+    // the turn by this one.
+    this._addAgentToolChildRunColumnIfMissing(
+      "ALTER TABLE cf_agent_tool_child_runs ADD COLUMN root_request_id TEXT"
     );
     // Durable milestones (rfc-detached-agent-tools §progress, 4b). One row per
     // milestone; `sequence` is monotonic per run so replay/live races dedupe.
@@ -10316,6 +10332,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       this._agentToolRuns.isStale({
         runId: row.run_id,
         requestId: row.request_id,
+        rootRequestId: null,
         status: row.status,
         error: row.error_message,
         terminalOnly: false

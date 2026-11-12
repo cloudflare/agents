@@ -4074,6 +4074,8 @@ type AgentToolInput = {
   delayMs?: number;
   chunkDelayMs?: number;
   structured?: boolean;
+  /** Echoed by `getAgentToolOutput` as whether it is still a `Date`. */
+  probeDate?: Date;
   streamError?: string;
   /** Text streamed (and persisted) before `streamError`'s error chunk. */
   streamErrorText?: string;
@@ -4239,6 +4241,9 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     request: { runId: string; input: AgentToolInput },
     messagesAfterStart: readonly ChatMessage[]
   ): unknown {
+    if (request.input.probeDate !== undefined) {
+      return { inputIsDate: request.input.probeDate instanceof Date };
+    }
     if (request.input.structured) {
       return {
         handledPrompt: request.input.prompt,
@@ -4353,6 +4358,16 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       );
   }
 
+  /** The output hook of a run started here gets the input as it was passed. */
+  async runWithDateInputForTest(): Promise<unknown> {
+    const runId = crypto.randomUUID();
+    await this.startAgentToolRun(
+      { prompt: "typed input", probeDate: new Date(0) },
+      { runId }
+    );
+    return (await this._waitForRunTerminalForTest(runId))?.output;
+  }
+
   /** A chat reset lands while the run's reply streams. */
   async resetWhileRunStreamsForTest(): Promise<AgentToolRunInspection | null> {
     const runId = crypto.randomUUID();
@@ -4447,10 +4462,13 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       }
     ]);
     const runId = crypto.randomUUID();
+    // The run's turn was recovered once already, so the row names the
+    // recovered turn. Recovery still names the turn by its first request id.
     this.sql`
       INSERT INTO cf_ai_chat_agent_tool_runs
-        (run_id, request_id, status, started_at, completed_at)
-      VALUES (${runId}, 'interrupted-request', 'aborted', ${Date.now()}, ${Date.now()})
+        (run_id, request_id, root_request_id, status, started_at, completed_at)
+      VALUES (${runId}, 'recovered-request', 'interrupted-request', 'aborted',
+        ${Date.now()}, ${Date.now()})
     `;
     const self = this as unknown as {
       _activeChatRecoveryRootRequestId: string | undefined;
@@ -6290,6 +6308,10 @@ export class AIChatAgentToolParent extends Agent<Env> {
 
   private async _freshChildForTest() {
     return this.subAgent(AIChatAgentToolChild, crypto.randomUUID());
+  }
+
+  async childRunWithDateInputForTest() {
+    return (await this._freshChildForTest()).runWithDateInputForTest();
   }
 
   async childResetWhileRunStreamsForTest() {

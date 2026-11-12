@@ -645,9 +645,13 @@ export class AIChatAgent<
     resetError: "Agent tool run was skipped because the chat was cleared.",
     keepAliveWhile: (fn) => this.keepAliveWhile(fn),
     collectResult: (runId) => {
-      const input = AIChatAgent._parseAgentToolValue(
-        this._getAgentToolRunRow(runId)?.input_json ?? null
-      );
+      // A run started in this isolate hands its hooks the input it was
+      // given. One an earlier isolate started has only the stored copy.
+      const input = this._agentToolLiveInputs.has(runId)
+        ? this._agentToolLiveInputs.get(runId)
+        : AIChatAgent._parseAgentToolValue(
+            this._getAgentToolRunRow(runId)?.input_json ?? null
+          );
       const messagesAfterStart = this._getAgentToolMessagesAfterStart(runId);
       const output = this.getAgentToolOutput(
         { runId, input },
@@ -670,11 +674,11 @@ export class AIChatAgent<
       // A recovered turn runs outside `startAgentToolRun`. A child facet is
       // dedicated to one agent-tool run, so whatever turn or recovery
       // attempt is running is that run's: stop them all, and the recovery
-      // scheduled for the request the row names (#1630).
+      // scheduled for the requests the row names (#1630).
       this.abortAllRequests(reason);
       this._turns.cancelRecoveryAttempts(reason);
-      const requestId = run.requestId;
-      if (requestId) {
+      for (const requestId of new Set([run.requestId, run.rootRequestId])) {
+        if (!requestId) continue;
         void this.keepAliveWhile(() =>
           this._cancelScheduledRecovery(requestId)
         );
@@ -682,8 +686,13 @@ export class AIChatAgent<
     },
     classifyRecovery: () => this._classifyAgentToolChildRecovery(),
     hasActiveStream: () => this._resumableStream.hasActiveStream(),
-    onForget: (runId) => this._agentToolProgressEmitterInstance?.forget(runId)
+    onForget: (runId) => {
+      this._agentToolLiveInputs.delete(runId);
+      this._agentToolProgressEmitterInstance?.forget(runId);
+    }
   });
+  /** The input of each run started in this isolate, as it was passed in. */
+  private readonly _agentToolLiveInputs = new Map<string, unknown>();
   private readonly _agentToolForwarders = this._agentToolRuns.forwarders;
   private readonly _agentToolClosers = this._agentToolRuns.closers;
   private readonly _agentToolAbortControllers = this._agentToolRuns.controllers;
@@ -1033,6 +1042,7 @@ export class AIChatAgent<
     type Row = {
       run_id: string;
       request_id: string | null;
+      root_request_id: string | null;
       status: string;
       error_message: string | null;
       event_delivery: string | null;
@@ -1042,6 +1052,7 @@ export class AIChatAgent<
         ? {
             runId: row.run_id,
             requestId: row.request_id,
+            rootRequestId: row.root_request_id,
             status: row.status,
             error: row.error_message,
             terminalOnly: row.event_delivery === "terminal"
@@ -1061,7 +1072,8 @@ export class AIChatAgent<
           () =>
             record(
               this.sql<Row>`
-                select run_id, request_id, status, error_message, event_delivery
+                select run_id, request_id, root_request_id, status, error_message,
+                       event_delivery
                 from cf_ai_chat_agent_tool_runs
                 where run_id = ${runId}
               `[0]
@@ -1076,7 +1088,8 @@ export class AIChatAgent<
           () =>
             record(
               this.sql<Row>`
-                select run_id, request_id, status, error_message, event_delivery
+                select run_id, request_id, root_request_id, status, error_message,
+                       event_delivery
                 from cf_ai_chat_agent_tool_runs
                 where status in ('starting', 'running')
                 order by started_at desc
@@ -1090,7 +1103,8 @@ export class AIChatAgent<
           () =>
             record(
               this.sql<Row>`
-                select run_id, request_id, status, error_message, event_delivery
+                select run_id, request_id, root_request_id, status, error_message,
+                       event_delivery
                 from cf_ai_chat_agent_tool_runs
                 where request_id = ${requestId}
                   and status in ('starting', 'running')
@@ -1104,9 +1118,11 @@ export class AIChatAgent<
           () =>
             record(
               this.sql<Row>`
-                select run_id, request_id, status, error_message, event_delivery
+                select run_id, request_id, root_request_id, status, error_message,
+                       event_delivery
                 from cf_ai_chat_agent_tool_runs
                 where request_id = ${requestId}
+                   or root_request_id = ${requestId}
                 limit 1
               `[0]
             ),
@@ -1135,7 +1151,8 @@ export class AIChatAgent<
       bindRequest: (runId, requestId) => {
         this.sql`
           update cf_ai_chat_agent_tool_runs
-          set request_id = ${requestId}
+          set request_id = ${requestId},
+              root_request_id = coalesce(root_request_id, ${requestId})
           where run_id = ${runId}
         `;
       },
@@ -1951,6 +1968,12 @@ export class AIChatAgent<
     );
     addColumnIfNotExists(
       "alter table cf_ai_chat_agent_tool_runs add column event_delivery text"
+    );
+    // The first request id bound to the run. `request_id` follows the turn
+    // that is streaming (a recovery rebinds it); chat recovery keeps naming
+    // the turn by this one.
+    addColumnIfNotExists(
+      "alter table cf_ai_chat_agent_tool_runs add column root_request_id text"
     );
     this.sql`create index if not exists idx_ai_chat_agent_tool_request_id
       on cf_ai_chat_agent_tool_runs(request_id)`;
@@ -4085,6 +4108,7 @@ export class AIChatAgent<
     const existing = await this.inspectAgentToolRun(options.runId);
     if (existing) return existing;
 
+    this._agentToolLiveInputs.set(options.runId, input);
     const startedAt = this._agentToolRuns.start(
       options.runId,
       {

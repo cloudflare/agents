@@ -40,7 +40,9 @@ class FakeStore implements AgentToolRunStore {
   }
   forRequest(requestId: string) {
     return (
-      [...this.rows.values()].find((row) => row.requestId === requestId) ?? null
+      [...this.rows.values()].find(
+        (row) => row.requestId === requestId || row.rootRequestId === requestId
+      ) ?? null
     );
   }
   listOpen() {
@@ -52,6 +54,7 @@ class FakeStore implements AgentToolRunStore {
     this.rows.set(runId, {
       runId,
       requestId: null,
+      rootRequestId: null,
       status: "running",
       error: null,
       terminalOnly: run.terminalOnly,
@@ -61,7 +64,9 @@ class FakeStore implements AgentToolRunStore {
   }
   bindRequest(runId: string, requestId: string) {
     const row = this.rows.get(runId);
-    if (row) row.requestId = requestId;
+    if (!row) return;
+    row.requestId = requestId;
+    row.rootRequestId ??= requestId;
   }
   recordStreamError(runId: string, error: string) {
     const row = this.rows.get(runId);
@@ -362,6 +367,18 @@ describe("AgentToolRuns", () => {
     expect(runs.rebind("req-2", "req-7")).toBe("none");
     // Nor is a turn that is not a recovery.
     expect(runs.rebind("req-2")).toBe("none");
+  });
+
+  it("reports a cancelled run to a second recovery, which still names the first request id", () => {
+    const { runs, store } = setup();
+    store.insert("run-1", { startedAt: 1, terminalOnly: false });
+    store.bindRequest("run-1", "req-1");
+    // The first recovery re-runs the turn under a new request id.
+    expect(runs.rebind("req-2", "req-1")).toBe("bound");
+    expect(store.read("run-1")?.requestId).toBe("req-2");
+    runs.cancel("run-1", "stop");
+    // The isolate dies again; recovery wakes for the turn it knows as req-1.
+    expect(runs.rebind("req-3", "req-1")).toBe("cancelled");
   });
 
   it("settles a stale run from recovery: completed with a reply, error without", async () => {
