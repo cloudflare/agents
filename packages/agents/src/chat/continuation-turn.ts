@@ -30,7 +30,9 @@
  * - a result that arrives while a continuation runs is never lost;
  * - a connection waiting on a continuation always gets `STREAM_RESUMING` or
  *   `STREAM_RESUME_NONE`;
- * - a continuation that fails before it streams sends one error frame.
+ * - a continuation that fails before it streams sends one error frame;
+ * - a continuation that was waiting when a stop landed on the running turn
+ *   never runs ({@link dropWaitingContinuations}).
  *
  * `ChatTurns` exposes each function as a method. Hosts call those.
  *
@@ -489,6 +491,36 @@ export function replyFinalized<TConnection extends ContinuationConnection>(
 }
 
 /**
+ * The turn that is running was stopped. Stop means stop: every continuation
+ * that was waiting when the stop landed is dropped, so the model does not
+ * start again by itself once the stopped turn ends.
+ *
+ * - A pending continuation that has not started: a tool result answered
+ *   while the reply streamed scheduled it, and the stream gate held it. The
+ *   connections waiting on it get `STREAM_RESUME_NONE`.
+ * - The deferred result: it arrived while the stopped continuation ran.
+ *
+ * The results stay in the transcript, and the model reads them on the next
+ * turn. This runs when the stop lands, not when the stopped turn ends: a
+ * result that arrives after the stop is a new action, and it schedules a
+ * continuation as usual even while the stopped turn is still winding down.
+ *
+ * A continuation whose own turn is the one running is left to that turn's
+ * settle.
+ */
+export function dropWaitingContinuations<
+  TConnection extends ContinuationConnection
+>(parts: ContinuationTurnParts<TConnection>): void {
+  const { continuation } = parts;
+  const pending = continuation.pending;
+  if (pending && !pending.pastCoalesce) {
+    continuation.sendResumeNone();
+    continuation.clearPending();
+  }
+  continuation.clearDeferred();
+}
+
+/**
  * Settle the continuation slots when the continuation turn `requestId`
  * ends, however it ended. A turn touches only what it owns:
  *
@@ -504,6 +536,10 @@ export function replyFinalized<TConnection extends ContinuationConnection>(
  * - Otherwise the deferred result becomes the next continuation, through
  *   the barrier. This holds for a turn that failed too: the result it
  *   deferred has not been read by any model call.
+ *
+ * A stop of the turn already dropped what was deferred when it landed
+ * ({@link dropWaitingContinuations}). A result deferred after the stop is a
+ * new action and runs as the next continuation like any other.
  */
 export function settleContinuationTurn<
   TConnection extends ContinuationConnection

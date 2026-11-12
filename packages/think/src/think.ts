@@ -13732,7 +13732,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         break;
 
       case "cancel":
-        this._aborts.cancel(event.id);
+        // A user's stop: it also drops the continuations waiting on the
+        // turn it stops.
+        this._turns.cancel(event.id);
         await this._cancelScheduledRecovery(event.id);
         break;
 
@@ -14559,7 +14561,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               requestId,
               timeoutMs: stallTimeoutMs
             });
-            this.abortRequest(
+            // The runtime's own abort, not a stop: recovery continues
+            // the turn, so the continuations waiting on it are kept.
+            this._aborts.cancel(
               requestId,
               new Error("chat stream stalled: inactivity watchdog fired")
             );
@@ -15104,7 +15108,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             });
             // Tear down the upstream model stream so a hung provider/transport
             // is released; the watchdog's throw drives the terminal error below.
-            this.abortRequest(
+            // The runtime's own abort, not a stop: recovery continues
+            // the turn, so the continuations waiting on it are kept.
+            this._aborts.cancel(
               requestId,
               new Error("chat stream stalled: inactivity watchdog fired")
             );

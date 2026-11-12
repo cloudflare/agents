@@ -50,6 +50,7 @@ import {
   claimContinuation,
   continuationStreamEnded,
   continuationStreamStarted,
+  dropWaitingContinuations,
   replyFinalized,
   runContinuationTurn,
   runUnscheduledContinuationTurn,
@@ -556,14 +557,41 @@ export class ChatTurns<
   // ── Cancel and reset ───────────────────────────────────────────────
 
   /**
-   * Cancel a request: abort its turn (queued or running) and any recovery
+   * Stop a request: abort its turn (queued or running) and any recovery
    * attempt running for it. A client only learns a continuation's own request
    * id from its first frame, so until then it cancels a recovered turn by the
    * original id, which is the id recovery attempts are registered under.
+   *
+   * Stop means stop. When this stops the turn running now (the request
+   * itself, or the recovered reply of a recovery attempt registered under
+   * it), every continuation that was waiting when the stop landed is
+   * dropped, so the model does not start again by itself once the turn ends
+   * ({@link dropWaitingContinuations}). A tool result that arrives after the
+   * stop is a new action and continues as usual.
+   *
+   * This is for a stop a user or an app asked for. An abort the runtime
+   * does for its own reasons (a stall watchdog, a superseded submit) goes to
+   * {@link aborts} directly and drops nothing.
    */
   cancel(requestId: string, reason?: unknown): void {
+    const active = this.queue.activeRequestId;
+    const activeSignal =
+      active === null ? undefined : this.aborts.getExistingSignal(active);
+    const wasAborted = activeSignal?.aborted ?? false;
+
     this.aborts.cancel(requestId, reason);
     this.#recoveryAttempts.get(requestId)?.abort(reason);
+
+    // The running turn was stopped when it is the request itself, or when
+    // this stop is what aborted it: a recovered reply runs under a fresh id
+    // with its abort signal linked to the recovery attempt, which is
+    // registered under the original id the client stops it by.
+    const stoppedRunningTurn =
+      active !== null &&
+      (active === requestId || (!wasAborted && activeSignal?.aborted === true));
+    if (stoppedRunningTurn) {
+      dropWaitingContinuations(this.#continuationParts);
+    }
   }
 
   /**

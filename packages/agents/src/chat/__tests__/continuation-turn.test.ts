@@ -501,6 +501,159 @@ describe("the continuation turn", () => {
     expect(host.ran).toEqual(["cont-1", "cont-2"]);
   });
 
+  it("a stopped continuation drops the result deferred while it ran", async () => {
+    const second = makeConnection("c2");
+    host.model = async (continuation) => {
+      if (continuation.requestId !== "cont-1") return;
+      // Deferred: arrives while the turn waits on the model. Then the user
+      // stops the continuation.
+      await result("a1", second);
+      turns.cancel(continuation.requestId);
+      expect(turns.continuation.deferred).toBeNull();
+      // Its own continuation is left to its settle.
+      expect(turns.continuation.pending?.requestId).toBe("cont-1");
+    };
+    await result("a1");
+    await fire();
+    await drain();
+    await fire();
+    await drain();
+
+    expect(host.ran).toEqual(["cont-1"]);
+    expect(turns.continuation.deferred).toBeNull();
+    expect(turns.continuation.pending).toBeNull();
+    expect(turns.hasPendingDecision()).toBe(false);
+  });
+
+  it("a result that arrives after a continuation was stopped still runs", async () => {
+    const second = makeConnection("c2");
+    host.model = async (continuation) => {
+      if (continuation.requestId !== "cont-1") return;
+      // The stop lands first. The stopped turn is still winding down when
+      // a new result arrives: that is a new action.
+      turns.cancel(continuation.requestId);
+      await result("a1", second);
+    };
+    await result("a1");
+    await fire();
+    await drain();
+    await fire();
+    await drain();
+
+    expect(host.ran).toEqual(["cont-1", "cont-2"]);
+  });
+
+  describe("a reply that is streaming", () => {
+    let finishReply!: () => void;
+    let reply: Promise<unknown>;
+
+    /** A turn "req-1" runs and its reply streams until `finishReply()`. */
+    const startReply = async () => {
+      reply = turns.queue.enqueue(
+        "req-1",
+        () => new Promise<void>((resolve) => (finishReply = resolve))
+      );
+      await drain();
+      host.replyStreaming = true;
+    };
+    const endReply = async () => {
+      host.replyStreaming = false;
+      turns.replyFinalized();
+      finishReply();
+      await reply;
+    };
+
+    it("drops the continuation its stream held when it is stopped", async () => {
+      await startReply();
+      // The result lands while the reply streams. Then the user stops it.
+      await result("a1");
+      turns.cancel("req-1");
+      expect(connection.sent).toEqual([RESUME_NONE]);
+      expect(turns.continuation.pending).toBeNull();
+
+      await endReply();
+      await fire();
+      await drain();
+      expect(host.ran).toEqual([]);
+    });
+
+    it("continues for a result that arrives after the stop", async () => {
+      await startReply();
+      await result("a1");
+      turns.cancel("req-1");
+      // Still streaming its last chunks: a new result is a new action.
+      await result("a1");
+
+      await endReply();
+      await fire();
+      await drain();
+      expect(host.ran).toEqual(["cont-2"]);
+    });
+
+    it("drops the continuation when a recovered reply is stopped by its original request id", async () => {
+      // The reply "req-1" is the recovered turn of a recovery attempt for
+      // "original": its abort signal is linked to the attempt's.
+      const attempt = turns.beginRecoveryAttempt("original");
+      await startReply();
+      turns.aborts.getSignal("req-1");
+      turns.aborts.linkExternal("req-1", attempt.signal);
+      await result("a1");
+
+      // The client only knows the original id.
+      turns.cancel("original");
+      expect(turns.aborts.getExistingSignal("req-1")?.aborted).toBe(true);
+      expect(connection.sent).toEqual([RESUME_NONE]);
+
+      await endReply();
+      await fire();
+      await drain();
+      expect(host.ran).toEqual([]);
+      attempt.end();
+    });
+
+    it("keeps the continuation when a recovery attempt that is not the running turn is stopped", async () => {
+      // The attempt still waits for the chat to be stable. Another reply
+      // runs, and its continuation is not the attempt's to drop.
+      const attempt = turns.beginRecoveryAttempt("original");
+      await startReply();
+      turns.aborts.getSignal("req-1");
+      await result("a1");
+      turns.cancel("original");
+
+      await endReply();
+      await fire();
+      await drain();
+      expect(host.ran).toEqual(["cont-1"]);
+      attempt.end();
+    });
+
+    it("keeps the continuation when another request is stopped", async () => {
+      await startReply();
+      await result("a1");
+      // A request waiting in the queue is stopped, not the reply.
+      turns.cancel("req-2");
+
+      await endReply();
+      await fire();
+      await drain();
+      expect(host.ran).toEqual(["cont-1"]);
+    });
+
+    it("keeps the continuation when the runtime aborts the reply for its own reasons", async () => {
+      await startReply();
+      await result("a1");
+      // A stall watchdog or a superseded submit aborts through the
+      // registry. That is not a stop.
+      turns.aborts.getSignal("req-1");
+      turns.aborts.cancel("req-1");
+
+      await endReply();
+      await fire();
+      await drain();
+      expect(host.ran).toEqual(["cont-1"]);
+    });
+  });
+
   it("leaves a newer pending continuation alone, and lets it cover the deferred result", async () => {
     const second = makeConnection("c2");
     const third = makeConnection("c3");
