@@ -395,8 +395,13 @@ export class AgentToolRuns {
     options: { input: unknown; terminalOnly: boolean; signal?: AbortSignal },
     runTurn: (signal: AbortSignal) => Promise<AgentToolTurnResult>
   ): Promise<AgentToolRunInspection> {
-    const existing = await this.inspect(runId);
-    if (existing) return existing;
+    // The check and the insert are one synchronous step: two starts of the
+    // same run id, the second sent before the first returned, must not both
+    // find no row.
+    if (this.host.store.read(runId)) {
+      const existing = await this.inspect(runId);
+      if (existing) return existing;
+    }
 
     const startedAt = Date.now();
     this.host.store.insert(runId, {

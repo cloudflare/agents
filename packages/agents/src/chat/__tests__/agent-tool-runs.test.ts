@@ -522,6 +522,25 @@ describe("AgentToolRuns", () => {
     expect(store.writes("run-1")).toBe(1);
   });
 
+  it("two starts of one run id sent together start one run", async () => {
+    const { runs, settled } = setup();
+    let turns = 0;
+    const turn = heldTurn();
+    const runTurn = (signal: AbortSignal) => {
+      turns++;
+      return turn.run(signal);
+    };
+    const [first, second] = await Promise.all([
+      runs.start("run-1", START, runTurn),
+      runs.start("run-1", START, runTurn)
+    ]);
+    expect(first.status).toBe("running");
+    expect(second.status).toBe("running");
+    turn.end({ requestId: "req-1", status: "completed" });
+    await settled();
+    expect(turns).toBe(1);
+  });
+
   it("starting over a stale run reconciles it first", async () => {
     const { runs, store } = setup();
     store.seed("run-1");
