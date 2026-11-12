@@ -1006,6 +1006,43 @@ export class ChatRecoveryEngine {
     await update(incidentId, "skipped", CHAT_RECOVERY_CANCELLED_REASON);
   }
 
+  /**
+   * A client's answer started a turn that continues the latest reply. Any
+   * recovery still scheduled is for that same reply (a recovery for an older
+   * message skips itself at its leaf check), so hand the reply to this turn:
+   * mark each scheduled incident `skipped` with
+   * {@link CHAT_RECOVERY_CONTINUED_REASON}. The recovery attempt, queued or
+   * already waiting for the chat to settle, then ends without asking the
+   * model to continue the reply a second time (see `runRecoveredTurn`).
+   * Returns whether any incident was marked.
+   */
+  async supersedeScheduledRecovery(): Promise<boolean> {
+    const incidents = (await this.adapter.listActiveIncidents?.()) ?? [];
+    let superseded = false;
+    for (const incident of incidents) {
+      if (incident.status !== "scheduled") continue;
+      await this.updateIncident(
+        incident.incidentId,
+        "skipped",
+        CHAT_RECOVERY_CONTINUED_REASON
+      );
+      superseded = true;
+    }
+    return superseded;
+  }
+
+  /** Whether a client's answer took over this incident's reply. */
+  async isRecoverySuperseded(incidentId: string | undefined): Promise<boolean> {
+    if (!incidentId) return false;
+    const incident = await this.adapter.getIncident(
+      chatRecoveryIncidentKey(incidentId)
+    );
+    return (
+      incident?.status === "skipped" &&
+      incident.reason === CHAT_RECOVERY_CONTINUED_REASON
+    );
+  }
+
   /** Whether recovery already gave up on this incident. */
   async isRecoverySealed(incidentId: string | undefined): Promise<boolean> {
     if (!incidentId) return false;
@@ -1218,6 +1255,12 @@ export class ChatRecoveryEngine {
 
 /** `incident.reason` for a scheduled recovery the user cancelled. */
 export const CHAT_RECOVERY_CANCELLED_REASON = "user_cancelled";
+
+/**
+ * `incident.reason` for a recovery whose reply a client's answer continued
+ * first.
+ */
+export const CHAT_RECOVERY_CONTINUED_REASON = "continued_by_interaction";
 
 /** Cap on the exponential backoff between transient-error recoveries. */
 export const CHAT_RECOVERY_MAX_BACKOFF_SECONDS = 30;

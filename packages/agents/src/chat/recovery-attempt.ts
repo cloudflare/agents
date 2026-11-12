@@ -9,8 +9,9 @@
  * 2. Register the attempt, so a cancel by the original request id stops it.
  * 3. Settle the cut-off reply (continue only).
  * 4. Wait until the chat is stable.
- * 5. A stop that landed meanwhile ends the attempt. This comes before the
- *    timeout branch: a stopped attempt must not reschedule, park or give up.
+ * 5. A stop that landed meanwhile ends the attempt. So does a client's
+ *    answer whose own turn continued the reply. Both come before the timeout
+ *    branch: such an attempt must not reschedule, park or give up.
  * 6. On timeout: park if a client still has something to answer, else
  *    reschedule, else give up.
  * 7. Skip if the conversation moved.
@@ -35,6 +36,7 @@ import {
 import type { RecoveryAttemptHandle } from "./chat-turns";
 import type { SaveMessagesResult } from "./lifecycle";
 import type { ChatRecoveryIncident } from "./recovery-incident";
+import { CHAT_RECOVERY_CANCELLED_REASON } from "./recovery-engine";
 import type {
   ChatRecoveryEngine,
   ChatRecoveryScheduleCallback
@@ -111,8 +113,11 @@ export interface RecoveredTurnHost<
   settleCutOffReply?(): Promise<void>;
   /** The user stopped the attempt, or cancelled it while it was scheduled. */
   onStopped?(): Promise<void>;
-  /** The attempt parked on a pending client interaction. */
-  onParked?(): Promise<void>;
+  /**
+   * The reply is the client's to continue: the attempt parked on a pending
+   * client interaction, or the client's answer already continued the reply.
+   */
+  onClientContinued?(): Promise<void>;
   /** The attempt was skipped because the conversation moved. */
   onSkipped?(check: RecoveryLeafCheck & { moved: true }): Promise<void>;
   /** Runs before the turn's result is recorded on the incident. */
@@ -127,7 +132,7 @@ export interface RecoveredTurnHost<
     incidentId: string,
     write: () => Promise<void>
   ): Promise<void>;
-  /** Runs in the `finally`, after the attempt ends. */
+  /** Always runs last, whether or not the attempt was admitted. */
   release?(): void;
 }
 
@@ -144,15 +149,29 @@ export async function runRecoveredTurn<
   engine: ChatRecoveryEngine,
   host: RecoveredTurnHost<TData, TResult>
 ): Promise<void> {
-  const { callback, data } = host;
-  const incidentId = data?.incidentId;
-
-  if (await engine.isRecoveryCancelled(incidentId)) {
+  if (await engine.isRecoveryCancelled(host.data?.incidentId)) {
     await host.onStopped?.();
     return;
   }
-  if (host.admit && !(await host.admit())) return;
+  try {
+    if (host.admit && !(await host.admit())) return;
+    await runAdmittedAttempt(engine, host);
+  } finally {
+    // Outside the attempt's own `finally`, so what `admit` registered is
+    // released even when the attempt never got as far as its `try`.
+    host.release?.();
+  }
+}
 
+async function runAdmittedAttempt<
+  TData extends RecoveryAttemptData,
+  TResult extends RecoveredTurnResult
+>(
+  engine: ChatRecoveryEngine,
+  host: RecoveredTurnHost<TData, TResult>
+): Promise<void> {
+  const { callback, data } = host;
+  const incidentId = data?.incidentId;
   const previousRootRequestId = host.getActiveRootRequestId();
   host.setActiveRootRequestId(data?.originalRequestId ?? previousRootRequestId);
   // A client stops this attempt by the original request id: the only id it
@@ -176,6 +195,13 @@ export async function runRecoveredTurn<
       await recordStop();
       return;
     }
+    // Also before the timeout branch, which would reschedule over the mark:
+    // a client answered the reply's tool call while this attempt was queued
+    // or waiting, and the answer's own turn continued the reply.
+    if (await engine.isRecoverySuperseded(incidentId)) {
+      await host.onClientContinued?.();
+      return;
+    }
 
     if (!ready) {
       // A turn waiting on a client is not stuck. The client's answer starts
@@ -187,7 +213,7 @@ export async function runRecoveredTurn<
           "skipped",
           "awaiting_client_interaction"
         );
-        await host.onParked?.();
+        await host.onClientContinued?.();
         return;
       }
       console.warn(
@@ -244,14 +270,18 @@ export async function runRecoveredTurn<
       result.status === "completed" ||
       !(await engine.isRecoverySealed(incidentId))
     ) {
+      // A turn that returns "aborted" here was stopped: by its own request
+      // id, a clear, or the host cancelling every chat. (A turn cut off again
+      // returned above.) The stop is the outcome, not a failure.
+      const stopped = result.status === "aborted";
       await host.updateIncident(
         incidentId,
         result.status === "completed"
           ? "completed"
-          : result.status === "skipped"
+          : result.status === "skipped" || stopped
             ? "skipped"
             : "failed",
-        result.error
+        stopped ? CHAT_RECOVERY_CANCELLED_REASON : result.error
       );
     }
     await host.afterOutcome?.(result);
@@ -274,7 +304,6 @@ export async function runRecoveredTurn<
   } finally {
     stop.end();
     host.setActiveRootRequestId(previousRootRequestId);
-    host.release?.();
     // If this facet is an agent-tool child, its recovered turn settled
     // outside `startAgentToolRun`'s finalizer. Close the run now so a
     // re-attached parent collects the terminal at once.
