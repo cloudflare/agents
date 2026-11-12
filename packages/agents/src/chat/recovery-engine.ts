@@ -318,6 +318,15 @@ export interface ChatRecoveryTurnBindings {
   reconcileAgentToolChildRuns(): Promise<void>;
   /** Keep a detached recovered turn inside the current alarm's domain. */
   trackAlarmWork(turn: Promise<void>): void;
+  /**
+   * An async-context scope (an `AsyncLocalStorage<string>`) the engine runs
+   * a recovery attempt's turn in, holding the attempt's incident id. The
+   * host creates it, so this module needs no Node import.
+   */
+  attemptScope: {
+    run<T>(incidentId: string, fn: () => T): T;
+    getStore(): string | undefined;
+  };
 }
 
 /** Resolved orphaned-stream identity for a recovered chat turn. */
@@ -1194,58 +1203,91 @@ export class ChatRecoveryEngine {
     );
   }
 
-  /** The incident whose recovery attempt is running its turn right now. */
-  #incidentInTurn: string | undefined;
+  /**
+   * The recovery attempts running in this isolate, by incident: each one's
+   * signal that another turn took its reply over.
+   */
+  readonly #runningAttempts = new Map<string, AbortController>();
 
   /**
-   * Run a recovery attempt's own turn. While it runs, the continuation turn
-   * it starts does not count as someone else continuing the reply.
+   * Register a running recovery attempt. The returned signal aborts when
+   * another turn continues the attempt's reply (see
+   * {@link supersedeScheduledRecovery}), so the attempt stands down even if
+   * it is past its own checks and its turn is waiting in the queue.
    */
-  async runAttemptTurn<T>(
-    incidentId: string | undefined,
-    turn: () => Promise<T>
-  ): Promise<T> {
-    const previous = this.#incidentInTurn;
-    this.#incidentInTurn = incidentId;
-    try {
-      return await turn();
-    } finally {
-      this.#incidentInTurn = previous;
-    }
+  beginAttempt(incidentId: string | undefined): {
+    superseded: AbortSignal;
+    end(): void;
+  } {
+    const controller = new AbortController();
+    if (incidentId) this.#runningAttempts.set(incidentId, controller);
+    return {
+      superseded: controller.signal,
+      end: () => {
+        if (
+          incidentId &&
+          this.#runningAttempts.get(incidentId) === controller
+        ) {
+          this.#runningAttempts.delete(incidentId);
+        }
+      }
+    };
   }
 
   /**
-   * Run the body of a turn that continues the latest reply (a client's
-   * answer to a tool call, the app calling `continueLastTurn`), once the
-   * turn is durably registered. A recovery still scheduled is for that same
-   * reply (one for an older message skips itself at its leaf check), so the
-   * reply now belongs to this turn: see {@link supersedeScheduledRecovery}.
-   *
-   * Call this inside the turn's durable fiber, not before it. A restart
-   * between the two would otherwise leave the reply with no turn at all: the
-   * recovery would see itself superseded and this turn would have no record
-   * to replay.
+   * Run a recovery attempt's own turn, inside the host's attempt scope, so
+   * the continuation turn it starts is known to be the attempt's and does
+   * not count as someone else continuing the reply.
    */
-  async runContinuationTurn<T>(turn: () => Promise<T>): Promise<T> {
-    await this.supersedeScheduledRecovery();
-    return turn();
+  runAttemptTurn<T>(
+    incidentId: string | undefined,
+    turn: () => Promise<T>
+  ): Promise<T> {
+    return this.turns.attemptScope.run(incidentId ?? "", turn);
+  }
+
+  /**
+   * Wrap the body of a turn that continues the latest reply (a client's
+   * answer to a tool call, the app calling `continueLastTurn`, a recovery
+   * attempt's own turn). A recovery still scheduled is for that same reply
+   * (one for an older message skips itself at its leaf check), so when the
+   * body runs the reply belongs to this turn: every other scheduled recovery
+   * is superseded. See {@link supersedeScheduledRecovery}.
+   *
+   * Call this where the turn's durable fiber is set up, and run the returned
+   * body inside the fiber. Setting up reads which attempt, if any, the turn
+   * belongs to. Running inside the fiber means the turn is durably
+   * registered before it takes the reply: a restart between the two would
+   * otherwise leave the reply with no turn at all.
+   */
+  continuationTurn<T>(body: () => Promise<T>): () => Promise<T> {
+    const ownIncidentId = this.adapter.turns?.attemptScope.getStore();
+    return async () => {
+      await this.supersedeScheduledRecovery(ownIncidentId);
+      return body();
+    };
   }
 
   /**
    * Mark each scheduled incident `skipped` with
-   * {@link CHAT_RECOVERY_CONTINUED_REASON}, except the one whose own attempt
-   * is running its turn. The recovery attempt, queued or already waiting for
-   * the chat to settle, then ends without asking the model to continue the
-   * reply a second time (see `runRecoveredTurn`). Returns whether any
-   * incident was marked.
+   * {@link CHAT_RECOVERY_CONTINUED_REASON}, and tell its attempt, if one is
+   * running here. The attempt, queued or already waiting for the chat to
+   * settle, then ends without asking the model to continue the reply a
+   * second time (see `runRecoveredTurn`).
+   *
+   * @param exceptIncidentId - The incident of the attempt the superseding
+   *   turn belongs to, which is left alone.
+   * @returns Whether any incident was marked.
    */
-  async supersedeScheduledRecovery(): Promise<boolean> {
+  async supersedeScheduledRecovery(
+    exceptIncidentId?: string
+  ): Promise<boolean> {
     const incidents = (await this.adapter.listActiveIncidents?.()) ?? [];
     let superseded = false;
     for (const incident of incidents) {
       if (
         incident.status !== "scheduled" ||
-        incident.incidentId === this.#incidentInTurn
+        incident.incidentId === exceptIncidentId
       ) {
         continue;
       }
@@ -1254,6 +1296,7 @@ export class ChatRecoveryEngine {
         "skipped",
         CHAT_RECOVERY_CONTINUED_REASON
       );
+      this.#runningAttempts.get(incident.incidentId)?.abort();
       superseded = true;
     }
     return superseded;
