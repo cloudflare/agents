@@ -305,6 +305,26 @@ describe("runRecoveredTurn", () => {
     });
   });
 
+  it("does not give up when its turn throws after another turn continued the reply", async () => {
+    let other: (() => Promise<void>) | undefined;
+    const t = setup({
+      duringTurn: async () => {
+        await other?.();
+        // A turn that throws on its aborted signal.
+        throw new Error("aborted");
+      }
+    });
+    other = t.engine.continuationTurn(async () => {});
+    await expect(t.run()).resolves.toBeUndefined();
+
+    expect(t.exhausted).toEqual([]);
+    expect(t.log).toContain("client-continued");
+    expect(t.incident()).toMatchObject({
+      status: "skipped",
+      reason: CHAT_RECOVERY_CONTINUED_REASON
+    });
+  });
+
   it("the attempt's own continuation turn does not supersede its incident", async () => {
     let superseded: boolean | undefined;
     const t = setup({
