@@ -33,9 +33,8 @@ import {
   isDurableObjectMemoryLimitReset,
   isPlatformTransientError
 } from "../retries";
-import type { RecoveryAttemptHandle } from "./chat-turns";
+import type { ClientToolSchema } from "./client-tools";
 import type { SaveMessagesResult } from "./lifecycle";
-import type { ChatRecoveryIncident } from "./recovery-incident";
 import { CHAT_RECOVERY_CANCELLED_REASON } from "./recovery-engine";
 import type {
   ChatRecoveryEngine,
@@ -47,6 +46,10 @@ export type RecoveryAttemptData = {
   incidentId?: string;
   originalRequestId?: string;
   recoveredRequestId?: string;
+  /** The body the interrupted request ran with. `null` when it had none. */
+  lastBody?: Record<string, unknown> | null;
+  /** The client tools it ran with. `null` when it had none. */
+  lastClientTools?: ClientToolSchema[] | null;
 };
 
 /** What the recovered turn returned. */
@@ -62,9 +65,11 @@ export type RecoveryLeafCheck =
     };
 
 /**
- * What a host supplies for one attempt. The required members are the steps
- * both hosts have. The optional ones are `Think`'s submission and messenger
- * steps, and the continue-only settle.
+ * What a host supplies for one attempt: the steps that differ between
+ * `AIChatAgent` and `Think`, and between a continue and a retry. Everything
+ * both hosts do the same way comes from the engine and its adapter's
+ * `turns` bindings. The optional members are `Think`'s submission and
+ * messenger steps, and the continue-only settle.
  */
 export interface RecoveredTurnHost<
   TData extends RecoveryAttemptData,
@@ -74,35 +79,11 @@ export interface RecoveredTurnHost<
   callback: ChatRecoveryScheduleCallback;
   /** The schedule payload. */
   data: TData | undefined;
-  /** Prefix for log lines, such as `[Think]`. */
-  logPrefix: string;
 
-  /** `ChatTurns.beginRecoveryAttempt`. */
-  beginAttempt(rootRequestId: string | undefined): RecoveryAttemptHandle;
-  /** The root request id recovery work runs under. */
-  getActiveRootRequestId(): string | undefined;
-  setActiveRootRequestId(rootRequestId: string | undefined): void;
-  /** The host's `waitUntilStable`. Resolves `false` on timeout. */
-  waitUntilStable(timeoutMs: number): Promise<boolean>;
-  /** Whether a client still has a tool call or approval to answer. */
-  hasPendingInteraction(): boolean;
-  /**
-   * Write a status to the incident. The host's binding of
-   * `ChatRecoveryEngine.updateIncident`.
-   */
-  updateIncident(
-    incidentId: string | undefined,
-    status: ChatRecoveryIncident["status"],
-    reason?: string
-  ): Promise<void>;
   /** Whether the message this attempt recovers is still the latest. */
   checkLeaf(): Promise<RecoveryLeafCheck>;
-  /** Restore the tools and body the interrupted request ran with. */
-  applyRequestContext(): void;
   /** Run the turn. `signal` aborts when a client stops the attempt. */
   runTurn(signal: AbortSignal): Promise<TResult>;
-  /** Close agent-tool child runs the recovered turn settled. */
-  reconcile(): Promise<void>;
 
   /**
    * Runs after the cancelled check and before the attempt is registered.
@@ -134,6 +115,31 @@ export interface RecoveredTurnHost<
   ): Promise<void>;
   /** Always runs last, whether or not the attempt was admitted. */
   release?(): void;
+}
+
+/**
+ * The cut-off reply a recovery continue should settle before it waits: the
+ * reply it targets, only while that reply is the latest message, and only
+ * when settling changes it. A reply that finished, or one the conversation
+ * moved past, is left alone.
+ *
+ * @param messages - The transcript.
+ * @param replyId - The reply the recovery continues.
+ * @param settle - Settles a cut-off reply's dead tool calls. Returns its
+ *   argument when there is nothing to settle.
+ * @returns The reply as stored and as settled, or `null`.
+ */
+export function cutOffReplyToSettle<
+  TMessage extends { id: string; role: string }
+>(
+  messages: readonly TMessage[],
+  replyId: string,
+  settle: (reply: TMessage) => TMessage
+): { stored: TMessage; settled: TMessage } | null {
+  const stored = messages.at(-1);
+  if (stored?.id !== replyId || stored.role !== "assistant") return null;
+  const settled = settle(stored);
+  return settled === stored ? null : { stored, settled };
 }
 
 /**
@@ -172,13 +178,14 @@ async function runAdmittedAttempt<
 ): Promise<void> {
   const { callback, data } = host;
   const incidentId = data?.incidentId;
-  const previousRootRequestId = host.getActiveRootRequestId();
-  host.setActiveRootRequestId(data?.originalRequestId ?? previousRootRequestId);
+  const turns = engine.turns;
+  const previousRootRequestId = engine.activeRootRequestId;
+  engine.activeRootRequestId = data?.originalRequestId ?? previousRootRequestId;
   // A client stops this attempt by the original request id: the only id it
   // knows until the recovered turn streams.
-  const stop = host.beginAttempt(data?.originalRequestId);
+  const stop = turns.beginRecoveryAttempt(data?.originalRequestId);
   const recordStop = async (): Promise<void> => {
-    await engine.recordRecoveryStop(incidentId, host.updateIncident);
+    await engine.recordRecoveryStop(incidentId);
     await host.onStopped?.();
   };
 
@@ -187,7 +194,7 @@ async function runAdmittedAttempt<
     const config = engine.resolveConfig();
     // The reply was settled above, so anything still pending is a call a
     // client can answer, and the timeout branch parks on it.
-    const ready = await host.waitUntilStable(config.stableTimeoutMs);
+    const ready = await turns.waitUntilStable(config.stableTimeoutMs);
 
     // Before the timeout branch: a stopped attempt must not reschedule,
     // park or give up.
@@ -207,8 +214,8 @@ async function runAdmittedAttempt<
       // A turn waiting on a client is not stuck. The client's answer starts
       // its own continuation, so spending the attempt budget on the wait
       // would give up on a healthy turn.
-      if (host.hasPendingInteraction()) {
-        await host.updateIncident(
+      if (engine.isAwaitingClientInteraction()) {
+        await engine.updateIncident(
           incidentId,
           "skipped",
           "awaiting_client_interaction"
@@ -217,7 +224,7 @@ async function runAdmittedAttempt<
         return;
       }
       console.warn(
-        `${host.logPrefix} ${callback} timed out waiting for stable state`
+        `${turns.label} ${callback} timed out waiting for stable state`
       );
       // Usually transient under deploy churn, so try again within the
       // attempt budget.
@@ -243,12 +250,22 @@ async function runAdmittedAttempt<
 
     const leaf = await host.checkLeaf();
     if (leaf.moved) {
-      await host.updateIncident(incidentId, "skipped", leaf.reason);
+      await engine.updateIncident(incidentId, "skipped", leaf.reason);
       await host.onSkipped?.(leaf);
       return;
     }
 
-    host.applyRequestContext();
+    // The recovered turn runs with the tools and body of the request that
+    // was interrupted. A payload that does not name them leaves the stored
+    // ones.
+    if (data && ("lastClientTools" in data || "lastBody" in data)) {
+      turns.restoreRequestContext({
+        ...("lastClientTools" in data && {
+          lastClientTools: data.lastClientTools ?? undefined
+        }),
+        ...("lastBody" in data && { lastBody: data.lastBody ?? undefined })
+      });
+    }
     // Drop a mark an earlier interruption left, so only this turn's own
     // reschedule counts below.
     engine.takeReschedule(incidentId);
@@ -274,7 +291,7 @@ async function runAdmittedAttempt<
       // id, a clear, or the host cancelling every chat. (A turn cut off again
       // returned above.) The stop is the outcome, not a failure.
       const stopped = result.status === "aborted";
-      await host.updateIncident(
+      await engine.updateIncident(
         incidentId,
         result.status === "completed"
           ? "completed"
@@ -297,17 +314,15 @@ async function runAdmittedAttempt<
       callback,
       data,
       error,
-      logPrefix: host.logPrefix,
-      updateIncident: host.updateIncident,
       whileDeferring: host.whileDeferring
     });
   } finally {
     stop.end();
-    host.setActiveRootRequestId(previousRootRequestId);
+    engine.activeRootRequestId = previousRootRequestId;
     // If this facet is an agent-tool child, its recovered turn settled
     // outside `startAgentToolRun`'s finalizer. Close the run now so a
     // re-attached parent collects the terminal at once.
-    await host.reconcile();
+    await turns.reconcileAgentToolChildRuns();
   }
 }
 
@@ -333,19 +348,14 @@ export async function handleRecoveryAttemptError(
     callback: ChatRecoveryScheduleCallback;
     data: RecoveryAttemptData | undefined;
     error: unknown;
-    logPrefix: string;
-    /** The host's incident write. Defaults to the engine's. */
-    updateIncident?: RecoveredTurnHost<
-      RecoveryAttemptData,
-      RecoveredTurnResult
-    >["updateIncident"];
     whileDeferring?: (
       incidentId: string,
       write: () => Promise<void>
     ) => Promise<void>;
   }
 ): Promise<void> {
-  const { callback, data, error, logPrefix } = input;
+  const { callback, data, error } = input;
+  const logPrefix = engine.turns.label;
   // Classified before the transient check: a memory-limit reset is not a
   // transient, and the give-up below would write through storage that is
   // already gone.
@@ -353,9 +363,7 @@ export async function handleRecoveryAttemptError(
   if (isPlatformTransientError(error)) {
     const message = error instanceof Error ? error.message : String(error);
     const incidentId = data?.incidentId;
-    const update =
-      input.updateIncident ?? ((...args) => engine.updateIncident(...args));
-    const write = () => update(incidentId, "failed", message);
+    const write = () => engine.updateIncident(incidentId, "failed", message);
     try {
       if (incidentId && input.whileDeferring) {
         await input.whileDeferring(incidentId, write);

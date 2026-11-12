@@ -3,7 +3,8 @@ import {
   CHAT_RECOVERY_CANCELLED_REASON,
   CHAT_RECOVERY_CONTINUED_REASON,
   ChatRecoveryEngine,
-  type ChatRecoveryAdapter
+  type ChatRecoveryAdapter,
+  type ChatRecoveryTurnBindings
 } from "../recovery-engine";
 import type {
   RecoveredTurnHost,
@@ -68,6 +69,35 @@ function setup(scenario: Scenario = {}) {
   const log: string[] = [];
   const scheduled: string[] = [];
   const exhausted: string[] = [];
+  const restored: unknown[] = [];
+  let controller: AbortController | undefined;
+  // The host's turn machinery, as its adapter binds it.
+  const turns: ChatRecoveryTurnBindings = {
+    label: "[test]",
+    beginRecoveryAttempt: () => {
+      log.push("begin");
+      controller = new AbortController();
+      return {
+        signal: controller.signal,
+        end: () => {
+          log.push("end");
+        }
+      };
+    },
+    waitUntilStable: async () => {
+      log.push("wait");
+      await scenario.duringWait?.(harness);
+      return scenario.ready ?? true;
+    },
+    restoreRequestContext: (context) => {
+      log.push("context");
+      restored.push(context);
+    },
+    reconcileAgentToolChildRuns: async () => {
+      log.push("reconcile");
+    },
+    trackAlarmWork: () => {}
+  };
   const adapter: ChatRecoveryAdapter = {
     resolveConfig: () => resolveChatRecoveryConfig(undefined),
     now: () => 1_000,
@@ -101,13 +131,11 @@ function setup(scenario: Scenario = {}) {
       parts: [],
       hasSettledToolResults: false
     }),
-    activeChatRecoveryRootRequestId: () => undefined,
+    isAwaitingClientInteraction: () => scenario.pendingInteraction ?? false,
+    turns,
     onGiveUpBookkeepingError: () => {}
   };
   const engine = new ChatRecoveryEngine(adapter);
-
-  let controller: AbortController | undefined;
-  let activeRoot: string | undefined;
   const harness: Harness = {
     engine,
     stop: () => controller?.abort(),
@@ -116,44 +144,21 @@ function setup(scenario: Scenario = {}) {
   const turnSignals: AbortSignal[] = [];
   const host: RecoveredTurnHost<RecoveryAttemptData, RecoveredTurnResult> = {
     callback: "_chatRecoveryContinue",
-    data: { incidentId: INCIDENT, originalRequestId: ROOT },
-    logPrefix: "[test]",
-    beginAttempt: () => {
-      log.push("begin");
-      controller = new AbortController();
-      return {
-        signal: controller.signal,
-        end: () => {
-          log.push("end");
-        }
-      };
+    data: {
+      incidentId: INCIDENT,
+      originalRequestId: ROOT,
+      lastBody: { model: "m" },
+      lastClientTools: null
     },
-    getActiveRootRequestId: () => activeRoot,
-    setActiveRootRequestId: (rootRequestId) => {
-      activeRoot = rootRequestId;
-    },
-    waitUntilStable: async () => {
-      log.push("wait");
-      await scenario.duringWait?.(harness);
-      return scenario.ready ?? true;
-    },
-    hasPendingInteraction: () => scenario.pendingInteraction ?? false,
-    updateIncident: (...args) => engine.updateIncident(...args),
     checkLeaf: async () => {
       log.push("leaf");
       return scenario.leaf ?? { moved: false };
-    },
-    applyRequestContext: () => {
-      log.push("context");
     },
     runTurn: async (signal) => {
       log.push("turn");
       turnSignals.push(signal);
       await scenario.duringTurn?.(harness);
       return scenario.result ?? { status: "completed" };
-    },
-    reconcile: async () => {
-      log.push("reconcile");
     },
     onStopped: async () => {
       log.push("stopped");
@@ -190,7 +195,9 @@ function setup(scenario: Scenario = {}) {
     exhausted,
     turnSignals,
     incident: () => storage.get(key),
-    activeRoot: () => activeRoot,
+    turns,
+    activeRoot: () => engine.activeRootRequestId,
+    restored,
     run: () => engine.runRecoveredTurn(host)
   };
 }
@@ -223,6 +230,28 @@ describe("runRecoveredTurn", () => {
     expect(t.activeRoot()).toBeUndefined();
   });
 
+  it("restores the interrupted request's tools and body before the turn", async () => {
+    const t = setup();
+    await t.run();
+    // `null` in the payload means the request had none: the key is present
+    // and cleared, not left as it was.
+    expect(t.restored).toEqual([
+      { lastBody: { model: "m" }, lastClientTools: undefined }
+    ]);
+    expect(Object.keys(t.restored[0] as object).sort()).toEqual([
+      "lastBody",
+      "lastClientTools"
+    ]);
+  });
+
+  it("leaves the stored tools and body when the payload names neither", async () => {
+    const t = setup();
+    t.host.data = { incidentId: INCIDENT, originalRequestId: ROOT };
+    await t.run();
+    expect(t.restored).toEqual([]);
+    expect(t.log).not.toContain("context");
+  });
+
   it("sets the root request id for the attempt and restores it after", async () => {
     let during: string | undefined;
     const t = setup({
@@ -252,7 +281,7 @@ describe("runRecoveredTurn", () => {
   it("releases what the host admitted when the attempt cannot start", async () => {
     const t = setup();
     t.host.admit = async () => true;
-    t.host.beginAttempt = () => {
+    t.turns.beginRecoveryAttempt = () => {
       throw new Error("cannot register");
     };
     await expect(t.run()).rejects.toThrow("cannot register");
@@ -512,8 +541,8 @@ describe("runRecoveredTurn", () => {
       }
     });
     const statuses: string[] = [];
-    const update = t.host.updateIncident;
-    t.host.updateIncident = (incidentId, status, reason) => {
+    const update = t.engine.updateIncident.bind(t.engine);
+    t.engine.updateIncident = (incidentId, status, reason) => {
       statuses.push(status);
       return update(incidentId, status, reason);
     };
