@@ -2,9 +2,8 @@ import { describe, it, expect } from "vitest";
 import type { UIMessage } from "ai";
 import {
   clientRequestContext,
-  keptByContinuationRepair,
-  repairTranscriptBeforeTurn,
-  type BeforeTurnRepairMode
+  interruptedToolPartAsError,
+  repairTranscriptBeforeTurn
 } from "../before-turn";
 
 type Part = UIMessage["parts"][number];
@@ -35,7 +34,7 @@ const call = (
 
 const clientToolNames = new Set(["pick"]);
 
-function repair(messages: UIMessage[], mode: BeforeTurnRepairMode) {
+function repair(messages: UIMessage[], mode: { continuation: boolean }) {
   return repairTranscriptBeforeTurn(messages, {
     ...mode,
     clientToolNames,
@@ -54,8 +53,8 @@ function states(messages: UIMessage[]): Record<string, string> {
   return out;
 }
 
-const newReply = { continuation: false, continuationWaiting: false };
-const continuation = { continuation: true, continuationWaiting: false };
+const newReply = { continuation: false };
+const continuation = { continuation: true };
 
 describe("repairTranscriptBeforeTurn", () => {
   // A reply the conversation moved past: a later message follows it.
@@ -135,57 +134,67 @@ describe("repairTranscriptBeforeTurn", () => {
       server: "output-error"
     });
     expect(result.toolCallIds).toEqual(["server"]);
+    // The kept calls are reported: the turn must not call the model.
+    expect(result.keptToolCallIds).toEqual(["client", "approval"]);
+  });
+
+  it("reports no kept call when the turn can call the model", () => {
+    expect(repair(movedPast, newReply).keptToolCallIds).toEqual([]);
+    expect(repair(movedPast, continuation).keptToolCallIds).toEqual([]);
+    const answered = [
+      user("u1"),
+      reply("a1", call("pick", "client", "output-available", { output: 1 }))
+    ];
+    expect(repair(answered, continuation).keptToolCallIds).toEqual([]);
   });
 
   it("a continuation turn keeps the approved call it is about to run", () => {
-    const approved = call("deploy", "approved", "approval-responded", {
-      approval: { id: "ap", approved: true }
-    });
-    const earlier = call("deploy", "earlier", "approval-responded", {
-      approval: { id: "ap0", approved: true }
-    });
-    const messages = [
-      user("u0"),
-      reply("a0", earlier),
-      user("u1"),
-      reply("a1", approved)
-    ];
-    const result = repair(messages, continuation);
-    expect(states(result.messages)).toEqual({
-      earlier: "approval-responded",
-      approved: "approval-responded"
-    });
-    expect(result.removedToolCalls).toBe(0);
-  });
-
-  it("a new reply settles an approved call in an earlier message, unless a continuation waits", () => {
     const messages = [
       user("u1"),
       reply(
         "a1",
         call("deploy", "approved", "approval-responded", {
           approval: { id: "ap", approved: true }
-        }),
-        call("deploy", "denied", "approval-responded", {
-          approval: { id: "ap2", approved: false }
         })
-      ),
-      user("u2")
-    ];
-    expect(states(repair(messages, newReply).messages)).toEqual({
-      approved: "output-error",
-      denied: "output-denied"
-    });
-    expect(
-      states(
-        repair(messages, { continuation: false, continuationWaiting: true })
-          .messages
       )
-    ).toEqual({
-      approved: "approval-responded",
-      denied: "approval-responded"
+    ];
+    const result = repair(messages, continuation);
+    expect(states(result.messages)).toEqual({ approved: "approval-responded" });
+    expect(result.removedToolCalls).toBe(0);
+    expect(result.keptToolCallIds).toEqual([]);
+    // A turn that starts a new reply keeps it too: the AI SDK runs it.
+    expect(states(repair(messages, newReply).messages)).toEqual({
+      approved: "approval-responded"
     });
   });
+
+  it.each([
+    ["a new reply", newReply],
+    ["a continuation", continuation]
+  ])(
+    "%s settles an approved call in a message the conversation moved past",
+    (_name, mode) => {
+      const messages = [
+        user("u1"),
+        reply(
+          "a1",
+          call("deploy", "approved", "approval-responded", {
+            approval: { id: "ap", approved: true }
+          }),
+          call("deploy", "denied", "approval-responded", {
+            approval: { id: "ap2", approved: false }
+          })
+        ),
+        user("u2"),
+        reply("a2", call("search", "done", "output-available", { output: 1 }))
+      ];
+      const result = repair(messages, mode);
+      expect(states(result.messages)).toMatchObject({
+        approved: "output-error",
+        denied: "output-denied"
+      });
+    }
+  );
 
   it("returns the same message objects when nothing changed", () => {
     const messages = [
@@ -199,24 +208,29 @@ describe("repairTranscriptBeforeTurn", () => {
   });
 });
 
-describe("keptByContinuationRepair", () => {
-  const part = call("pick", "client", "input-available");
-
-  it("is true only for a continuation turn's last message and a call a client owns", () => {
-    const base = { continuation: true, isLastMessage: true, clientToolNames };
-    expect(keptByContinuationRepair(part, base)).toBe(true);
+describe("interruptedToolPartAsError", () => {
+  it("turns an unanswered call into an errored result", () => {
     expect(
-      keptByContinuationRepair(part, { ...base, continuation: false })
-    ).toBe(false);
-    expect(
-      keptByContinuationRepair(part, { ...base, isLastMessage: false })
-    ).toBe(false);
-    expect(
-      keptByContinuationRepair(
-        call("search", "server", "input-available"),
-        base
+      interruptedToolPartAsError(
+        call("search", "server", "input-available") as unknown as Part
       )
-    ).toBe(false);
+    ).toMatchObject({
+      toolCallId: "server",
+      state: "output-error",
+      errorText: "The tool call was interrupted before a result was recorded."
+    });
+  });
+
+  it("says so when the call was approved and never ran", () => {
+    expect(
+      interruptedToolPartAsError(
+        call("deploy", "approved", "approval-responded") as unknown as Part
+      )
+    ).toMatchObject({
+      state: "output-error",
+      errorText:
+        "The tool call was approved but did not run before the next turn started."
+    });
   });
 });
 

@@ -651,7 +651,7 @@ describe("continueLastTurn", () => {
     expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
   });
 
-  it("does NOT repair a pending CLIENT-tool interaction on continue (per-part skip)", async () => {
+  it("does NOT repair a pending CLIENT-tool interaction on continue, and does not call the model over it", async () => {
     const room = crypto.randomUUID();
     const agentStub = await getTestAgent(room);
 
@@ -683,8 +683,13 @@ describe("continueLastTurn", () => {
       }
     ] as ChatMessage[]);
 
-    await agentStub.callContinueLastTurn();
+    // The reply still waits on the client, so there is nothing to continue
+    // yet: the turn is skipped and the model is never called. A request built
+    // from this transcript would hold a tool call with no result.
+    const result = await agentStub.callContinueLastTurn();
+    expect(result.status).toBe("skipped");
     await agentStub.waitForIdleForTest();
+    expect(await agentStub.getOnChatMessageCallCount()).toBe(0);
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
     const assistant = messages.find((m) => m.id === "assistant-client")!;
@@ -695,6 +700,59 @@ describe("continueLastTurn", () => {
     ) as { state?: string } | undefined;
     // Still pending — the per-part skip left the client interaction untouched.
     expect(toolPart?.state).toBe("input-available");
+  });
+
+  it("settles an approved call that never ran in a reply the chat moved past", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+
+    // The user approved a call, then the conversation moved on without a
+    // continuation running it. The AI SDK runs an approval only in the last
+    // message, so a continuation of the later reply can never run it, and
+    // the provider would get a tool call with no result.
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Delete it" }]
+      },
+      {
+        id: "assistant-approved",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-deleteFile",
+            toolCallId: "call_approved",
+            state: "approval-responded",
+            input: {},
+            approval: { id: "approval-1", approved: true }
+          }
+        ] as ChatMessage["parts"]
+      },
+      {
+        id: "user-2",
+        role: "user",
+        parts: [{ type: "text", text: "Something else" }]
+      },
+      {
+        id: "assistant-leaf",
+        role: "assistant",
+        parts: [{ type: "text", text: "Partial answer" }]
+      }
+    ] as ChatMessage[]);
+
+    const result = await agentStub.callContinueLastTurn();
+    expect(result.status).toBe("completed");
+    await agentStub.waitForIdleForTest();
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    expect(
+      messages.find((m) => m.id === "assistant-approved")?.parts[0]
+    ).toMatchObject({
+      state: "output-error",
+      errorText:
+        "The tool call was approved but did not run before the next turn started."
+    });
   });
 
   it("settles an abandoned client orphan in a reply the chat moved past, and the leaf server orphan", async () => {

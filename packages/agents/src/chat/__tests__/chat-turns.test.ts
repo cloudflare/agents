@@ -528,31 +528,49 @@ describe("ChatTurns", () => {
       ).toBe("output-error");
     });
 
-    it("keeps an approved call in an earlier message while a continuation waits", async () => {
+    it("reports the calls a continuation turn kept for a client", () => {
+      host.clientTools = new Set(["x"]);
+      const messages = [
+        user("u1"),
+        toolReply("a1", "input-available")
+      ] as UIMessage[];
+
+      expect(
+        turns.repairBeforeTurn(messages, {
+          continuation: true,
+          repairPart: flip
+        }).keptToolCallIds
+      ).toEqual(["call-a1"]);
+      expect(
+        turns.repairBeforeTurn(messages, {
+          continuation: false,
+          repairPart: flip
+        }).keptToolCallIds
+      ).toEqual([]);
+    });
+
+    it("settles an approved call in an earlier message even while a continuation is scheduled", async () => {
       const messages = [
         user("u1"),
         toolReply("a1", "approval-responded"),
         user("u2")
       ] as UIMessage[];
-      const repaired = () =>
-        stateOf(
-          turns.repairBeforeTurn(messages, {
-            continuation: false,
-            repairPart: flip
-          }).messages[1]
-        );
-
-      expect(turns.continuationWaiting()).toBe(false);
-      expect(repaired()).toBe("output-error");
-
       host.transcript = [user("u1"), toolReply("a1", "output-available")];
       await turns.applyInteraction(
         async () => ({ status: "changed", messageId: "a1" }),
         true,
         spec
       );
-      expect(turns.continuationWaiting()).toBe(true);
-      expect(repaired()).toBe("approval-responded");
+      expect(turns.continuation.pending).not.toBeNull();
+
+      expect(
+        stateOf(
+          turns.repairBeforeTurn(messages, {
+            continuation: false,
+            repairPart: flip
+          }).messages[1]
+        )
+      ).toBe("output-error");
     });
   });
 

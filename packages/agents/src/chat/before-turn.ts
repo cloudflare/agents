@@ -45,30 +45,29 @@ export function clientRequestContext(request: {
   };
 }
 
-/** Which turn the before-turn repair runs for. */
-export interface BeforeTurnRepairMode {
+export interface BeforeTurnRepairOptions extends Pick<
+  RepairInterruptedToolPartsOptions,
+  "repairPart" | "isSettled" | "normalizeInput"
+> {
   /**
    * `true` when the turn continues the last message (an auto-continuation
    * after a tool result or approval, `continueLastTurn`, a recovery
    * continue). `false` when it starts a new reply.
    */
   continuation: boolean;
-  /**
-   * `true` while a continuation is scheduled and has not started. An
-   * approved call it may still run is kept.
-   */
-  continuationWaiting: boolean;
-}
-
-export interface BeforeTurnRepairOptions
-  extends
-    BeforeTurnRepairMode,
-    Pick<
-      RepairInterruptedToolPartsOptions,
-      "repairPart" | "isSettled" | "normalizeInput"
-    > {
   /** Names of the tools a client is known to run (the schemas it sent). */
   clientToolNames: ReadonlySet<string>;
+}
+
+export interface BeforeTurnRepairResult extends RepairInterruptedToolPartsResult {
+  /**
+   * The calls a continuation turn left unanswered on purpose, because a
+   * client is known to still answer them. When this is not empty the turn
+   * has nothing to continue yet and must not call the model: the request
+   * would hold a call with no result. The client's answer starts the
+   * continuation.
+   */
+  keptToolCallIds: string[];
 }
 
 /**
@@ -80,60 +79,66 @@ export interface BeforeTurnRepairOptions
  * - In a reply the conversation has moved past (any message a later message
  *   follows), every unanswered call is settled, whoever owns it: a server
  *   tool whose `execute()` died, a client tool the user never answered, an
- *   approval the user never gave. The turn cannot succeed otherwise, and a
- *   late answer has no continuation to run (`ChatTurns.takeContinuation`).
- * - A turn that starts a new reply treats the last message the same way. Its
- *   reply follows that message, so it moves past it.
+ *   approval the user never gave, an approved call that never ran. The turn
+ *   cannot succeed otherwise, a late answer has no continuation to run
+ *   (`ChatTurns.takeContinuation`), and the AI SDK runs an approved call
+ *   only in the last message.
+ * - A turn that starts a new reply treats the last message the same way,
+ *   except for an approved call, which the AI SDK runs. Its reply follows
+ *   that message, so it moves past it.
  * - A continuation turn continues the last message. There it keeps what a
  *   client is known to still answer: an `input-available` call for a tool
- *   the client sent a schema for, and an `approval-requested` call. Any
- *   other unanswered call there is dead and is settled.
- * - An approved call that has not run (`approval-responded`) is kept in the
- *   last message, where the AI SDK runs it. In an earlier message it is
- *   settled only by a turn that starts a new reply while no continuation is
- *   waiting.
+ *   the client sent a schema for, and an `approval-requested` call. They are
+ *   reported as `keptToolCallIds`, and the turn does not call the model
+ *   while there are any. Any other unanswered call there is dead and is
+ *   settled. An approved call is kept: the turn is about to run it.
  *
  * A settled call goes through `repairPart`, the host's
  * `repairInterruptedToolPart` hook, which by default turns it into an errored
- * result.
+ * result ({@link interruptedToolPartAsError}).
  *
  * Pure. The host persists and broadcasts what changed.
  */
 export function repairTranscriptBeforeTurn(
   messages: UIMessage[],
   options: BeforeTurnRepairOptions
-): RepairInterruptedToolPartsResult {
+): BeforeTurnRepairResult {
   const { continuation, clientToolNames } = options;
-  return repairInterruptedToolParts(messages, {
+  const keptToolCallIds: string[] = [];
+  const result = repairInterruptedToolParts(messages, {
     repairPart: options.repairPart,
     isSettled: options.isSettled,
     normalizeInput: options.normalizeInput,
-    shouldRepair: (part, { isLastMessage }) =>
-      !(
+    shouldRepair: (part, { isLastMessage }) => {
+      const kept =
         continuation &&
         isLastMessage &&
-        partAwaitsClientInteraction(part, clientToolNames)
-      ),
-    repairApprovalResponded: !continuation && !options.continuationWaiting
+        partAwaitsClientInteraction(part, clientToolNames);
+      if (kept) {
+        keptToolCallIds.push((part as { toolCallId: string }).toolCallId);
+      }
+      return !kept;
+    },
+    // The last message's approved calls are always kept.
+    repairApprovalResponded: true
   });
+  return { ...result, keptToolCallIds };
 }
 
 /**
- * Whether the before-turn repair left `part` unanswered on purpose: a
- * continuation turn keeps, in the message it continues, a call a client is
- * known to still answer.
+ * The default for the hosts' `repairInterruptedToolPart` hook: the call
+ * becomes an errored result, so the record survives and the provider gets a
+ * result for it.
  */
-export function keptByContinuationRepair(
-  part: unknown,
-  context: {
-    continuation: boolean;
-    isLastMessage: boolean;
-    clientToolNames: ReadonlySet<string>;
-  }
-): boolean {
-  return (
-    context.continuation &&
-    context.isLastMessage &&
-    partAwaitsClientInteraction(part, context.clientToolNames)
-  );
+export function interruptedToolPartAsError(
+  part: UIMessage["parts"][number]
+): UIMessage["parts"][number] {
+  return {
+    ...part,
+    state: "output-error",
+    errorText:
+      (part as { state?: string }).state === "approval-responded"
+        ? "The tool call was approved but did not run before the next turn started."
+        : "The tool call was interrupted before a result was recorded."
+  } as UIMessage["parts"][number];
 }

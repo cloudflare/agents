@@ -215,10 +215,10 @@ export {
  */
 export {
   clientRequestContext,
-  keptByContinuationRepair,
+  interruptedToolPartAsError,
   repairTranscriptBeforeTurn,
-  type BeforeTurnRepairMode,
   type BeforeTurnRepairOptions,
+  type BeforeTurnRepairResult,
   type ClientRequestContext
 } from "./before-turn";
 

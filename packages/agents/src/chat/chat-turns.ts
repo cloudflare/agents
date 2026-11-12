@@ -45,7 +45,8 @@ import {
 } from "./auto-continuation-controller";
 import {
   repairTranscriptBeforeTurn,
-  type BeforeTurnRepairOptions
+  type BeforeTurnRepairOptions,
+  type BeforeTurnRepairResult
 } from "./before-turn";
 import {
   ContinuationState,
@@ -55,7 +56,6 @@ import {
 } from "./continuation-state";
 import type { MessageConcurrency } from "./lifecycle";
 import { PreStreamTurns } from "./pre-stream-turns";
-import type { RepairInterruptedToolPartsResult } from "./repair-transcript";
 import {
   SubmitConcurrencyController,
   type SubmitConcurrencyDecision
@@ -469,17 +469,6 @@ export class ChatTurns<
     return pending;
   }
 
-  /**
-   * `true` while a continuation is scheduled, waiting to fire or running.
-   * A turn that starts a new reply meanwhile keeps the approved call that
-   * continuation may still run.
-   */
-  continuationWaiting(): boolean {
-    return (
-      this.continuation.pending !== null || this.continuation.deferred !== null
-    );
-  }
-
   // ── Before a turn ──────────────────────────────────────────────────
 
   /**
@@ -491,21 +480,16 @@ export class ChatTurns<
    *
    * @param messages - The history the turn's model request is built from.
    *   Its last message is the one a continuation turn continues.
-   * @param options.continuationWaiting - Defaults to
-   *   {@link continuationWaiting}.
-   * @returns The repaired messages and what changed. The host persists them.
+   * @returns The repaired messages and what changed. The host persists
+   *   them. When `keptToolCallIds` is not empty, the turn must not call the
+   *   model.
    */
   repairBeforeTurn(
     messages: UIMessage[],
-    options: Omit<
-      BeforeTurnRepairOptions,
-      "clientToolNames" | "continuationWaiting"
-    > & { continuationWaiting?: boolean }
-  ): RepairInterruptedToolPartsResult {
+    options: Omit<BeforeTurnRepairOptions, "clientToolNames">
+  ): BeforeTurnRepairResult {
     return repairTranscriptBeforeTurn(messages, {
       ...options,
-      continuationWaiting:
-        options.continuationWaiting ?? this.continuationWaiting(),
       clientToolNames: this.host.clientToolNames()
     });
   }

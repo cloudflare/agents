@@ -2314,19 +2314,23 @@ export class AIChatAgent<
    * for a healthy transcript. When anything changes, the corrected transcript is
    * persisted and broadcast through the normal `persistMessages` write path (one
    * write, one broadcast), which also refreshes `this.messages`.
+   *
+   * @returns `waitsOnClient`: a continuation turn kept a call a client still
+   *   has to answer. The turn has nothing to continue yet and must not call
+   *   `onChatMessage`.
    * @internal
    */
   private async _repairInterruptedToolsBeforeTurn(options: {
     continuation: boolean;
-  }): Promise<void> {
+  }): Promise<{ waitsOnClient: boolean }> {
     const repaired = this._turns.repairBeforeTurn(this.messages, {
       continuation: options.continuation,
       repairPart: (part) => this.repairInterruptedToolPart(part)
     });
-    if (repaired.removedToolCalls === 0 && repaired.normalizedInputs === 0) {
-      return;
+    if (repaired.removedToolCalls > 0 || repaired.normalizedInputs > 0) {
+      await this.persistMessages(repaired.messages);
     }
-    await this.persistMessages(repaired.messages);
+    return { waitsOnClient: repaired.keptToolCallIds.length > 0 };
   }
 
   /**
@@ -3281,9 +3285,18 @@ export class AIChatAgent<
                 const autoContinuationBody = async () => {
                   let replying = false;
                   try {
-                    await this._repairInterruptedToolsBeforeTurn({
-                      continuation: true
-                    });
+                    const { waitsOnClient } =
+                      await this._repairInterruptedToolsBeforeTurn({
+                        continuation: true
+                      });
+                    // The reply still waits on a client: nothing to continue
+                    // yet. The barrier holds a continuation until its batch
+                    // is answered, so this does not happen; if it did, the
+                    // answer schedules a new continuation.
+                    if (waitsOnClient) {
+                      this._clearAllAutoContinuationState(true);
+                      return;
+                    }
                     const response = await this.onChatMessage(
                       async (_finishResult) => {},
                       {
@@ -4762,9 +4775,16 @@ export class AIChatAgent<
                   options?.signal
                 );
                 try {
-                  await this._repairInterruptedToolsBeforeTurn({
-                    continuation: true
-                  });
+                  const { waitsOnClient } =
+                    await this._repairInterruptedToolsBeforeTurn({
+                      continuation: true
+                    });
+                  // The reply still waits on a client: nothing to continue
+                  // yet. Its answer starts the continuation.
+                  if (waitsOnClient) {
+                    status = "skipped";
+                    return;
+                  }
                   const response = await this.onChatMessage(() => {}, {
                     requestId,
                     abortSignal,

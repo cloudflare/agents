@@ -173,9 +173,9 @@ addToolOutput({
 
 ## When the user moves on without answering
 
-A client tool call or an approval request stays pending until a client answers it. If the user sends a new message first, the next turn settles every unanswered call in the earlier replies as an error before it calls the model. A provider rejects a request that holds a tool call with no result (`AI_MissingToolResultsError`), so the new message could not be answered otherwise. A result that arrives for a settled call is ignored.
+A client tool call or an approval request stays pending until a client answers it. If the user sends a new message first, the next turn settles every unanswered call in the earlier replies as an error before it calls the model. That includes a call the user approved that never ran. A provider rejects a request that holds a tool call with no result (`AI_MissingToolResultsError`), so the new message could not be answered otherwise. A result that arrives for a settled call is ignored.
 
-A continuation turn (after a tool result, or `continueLastTurn()`) keeps the calls in the message it continues that a client can still answer: a call to a tool the client sent with `clientTools`, and an approval request.
+A continuation turn keeps the calls in the message it continues that a client can still answer: a call to a tool the client sent with `clientTools`, and an approval request. While there is one, `continueLastTurn()` returns `{ status: "skipped" }` and `onChatMessage` is not called, because there is nothing to continue yet. The client's answer starts the continuation.
 
 Override `repairInterruptedToolPart` to change what a settled call becomes, for example a text part that carries the question.
 

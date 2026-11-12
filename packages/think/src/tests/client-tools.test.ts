@@ -2693,7 +2693,7 @@ describe("Think — client tool schemas", () => {
 });
 
 describe("Think — before-turn repair", () => {
-  it("a continuation turn keeps the client tool call its reply still waits on", async () => {
+  it("a continuation turn keeps the client tool call its reply still waits on, and does not call the model", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);
     const { ws } = await connectWS(room);
@@ -2712,13 +2712,43 @@ describe("Think — before-turn repair", () => {
       makeToolMessage("tc-keep", "client_action", "input-available")
     ]);
 
+    const modelCalls = (await agent.getTextOnlyPromptsForTest()).length;
+
     // The app continues that reply. The call is still the client's to
-    // answer, so the turn leaves it as it is.
-    expect(await agent.continueLastTurnForTest()).toBe("completed");
+    // answer, so there is nothing to continue yet: the turn leaves the call
+    // as it is and never calls the model.
+    expect(await agent.continueLastTurnForTest()).toBe("skipped");
+    expect((await agent.getTextOnlyPromptsForTest()).length).toBe(modelCalls);
 
     expect(
       await agent.probeToolPartStateForTest({ toolCallId: "tc-keep" })
     ).toEqual({ state: "input-available" });
+
+    await closeWS(ws);
+  });
+
+  it("a repair after a continuation turn ended does not run as a continuation", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setTextOnlyMode(true);
+    const donePromise = waitForDone(ws);
+    sendChatRequest(ws, [makeUserMessage("hello")], {
+      clientTools: [{ name: "client_action", description: "A client tool" }]
+    });
+    await donePromise;
+    // A continuation turn runs to its end.
+    expect(await agent.continueLastTurnForTest()).toBe("completed");
+
+    // Outside a turn the repair settles everything. It must not remember
+    // that the last turn was a continuation and keep the client's call.
+    const repaired = await agent.repairToolTranscriptPartsForTest([
+      makeUserMessage("do it"),
+      makeToolMessage("tc-after", "client_action", "input-available")
+    ]);
+    expect(repaired[1].parts[0]).toMatchObject({ state: "output-error" });
 
     await closeWS(ws);
   });
