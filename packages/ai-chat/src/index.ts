@@ -3185,11 +3185,11 @@ export class AIChatAgent<
    * continuation would never fire. A slow batch is re-checked here and simply
    * keeps holding (event-driven) until its remaining siblings answer.
    */
-  private _onStreamingTurnFinalized(stopped = false): void {
+  private _onStreamingTurnFinalized(): void {
     this._streamingTurnActive = false;
     // Whether the held continuation still has something to answer (#1618,
-    // #2171) is decided when its turn starts. A stopped reply drops it.
-    this._turns.replyFinalized({ stopped });
+    // #2171) is decided when its turn starts.
+    this._turns.replyFinalized();
   }
 
   /**
@@ -7647,11 +7647,7 @@ export class AIChatAgent<
           // TODO(phase-5): the Tier-2 streaming-codec extraction touches this
           // same region — fold this finalize hook into the extracted codec
           // rather than leaving a second seam here.
-          // A stop (not a stall routed into recovery, which continues the
-          // turn) drops the continuation the stream held.
-          this._onStreamingTurnFinalized(
-            streamResult.status === "aborted" && !stallRouted
-          );
+          this._onStreamingTurnFinalized();
         }
       })
     );

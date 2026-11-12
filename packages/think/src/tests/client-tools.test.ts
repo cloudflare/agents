@@ -3622,6 +3622,72 @@ describe("Think — stop means stop for continuations", () => {
     expect(await agent.pendingContinuationRequestIdForTest()).toBeNull();
     await closeWS(ws);
   }, 25000);
+
+  it("a result that arrives after a continuation was stopped still continues", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+    const reply: UIMessage = {
+      id: crypto.randomUUID(),
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-client_action",
+          toolCallId: "tc-first",
+          state: "input-available",
+          input: { action: "test" }
+        },
+        {
+          type: "tool-other_action",
+          toolCallId: "tc-second",
+          state: "approval-responded",
+          input: { action: "test" },
+          approval: { id: "approval-second", approved: true }
+        }
+      ] as UIMessage["parts"]
+    };
+    await agent.persistToolCallMessage([makeUserMessage("first"), reply]);
+    await agent.holdContinuationStartForTest();
+
+    const sendResult = (toolCallId: string) =>
+      ws.send(
+        JSON.stringify({
+          type: MSG_TOOL_RESULT,
+          toolCallId,
+          toolName: "client_action",
+          output: "result",
+          autoContinue: true
+        })
+      );
+    // The first result's continuation waits before the model, and the user
+    // stops it. The stopped turn is still winding down when a second result
+    // arrives: that is a new action.
+    sendResult("tc-first");
+    await waitUntil(() => agent.isContinuationStartHeldForTest(), 8000);
+    const continuationId = await agent.pendingContinuationRequestIdForTest();
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_chat_request_cancel",
+        id: continuationId
+      })
+    );
+    await delay(50);
+    sendResult("tc-second");
+    await waitUntil(async () => {
+      const messages = (await agent.getMessages()) as UIMessage[];
+      return messages[1].parts.every(
+        (part) => "state" in part && part.state === "output-available"
+      );
+    }, 8000);
+    await agent.releaseContinuationStartForTest();
+
+    await waitUntil(
+      async () => (await agent.continuationTurnCountForTest()) === 2,
+      8000
+    );
+    await closeWS(ws);
+  }, 25000);
 });
 
 // ── onChatResponse from WebSocket path ───────────────────────────

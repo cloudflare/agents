@@ -50,6 +50,7 @@ import {
   claimContinuation,
   continuationStreamEnded,
   continuationStreamStarted,
+  dropWaitingContinuations,
   replyFinalized,
   runContinuationTurn,
   runUnscheduledContinuationTurn,
@@ -541,32 +542,41 @@ export class ChatTurns<
    * A streamed reply was finalized and the host cleared its stream-active
    * gate. See {@link replyFinalized}.
    */
-  replyFinalized(options?: { stopped?: boolean }): void {
-    replyFinalized(this.#continuationParts, options);
+  replyFinalized(): void {
+    replyFinalized(this.#continuationParts);
   }
 
   /**
    * Settle the continuation slots for a continuation turn that ended.
    * {@link runContinuationTurn} calls it. See {@link settleContinuationTurn}.
    */
-  settleContinuationTurn(
-    requestId: string,
-    options?: { stopped?: boolean }
-  ): void {
-    settleContinuationTurn(this.#continuationParts, requestId, options);
+  settleContinuationTurn(requestId: string): void {
+    settleContinuationTurn(this.#continuationParts, requestId);
   }
 
   // ── Cancel and reset ───────────────────────────────────────────────
 
   /**
-   * Cancel a request: abort its turn (queued or running) and any recovery
+   * Stop a request: abort its turn (queued or running) and any recovery
    * attempt running for it. A client only learns a continuation's own request
    * id from its first frame, so until then it cancels a recovered turn by the
    * original id, which is the id recovery attempts are registered under.
+   *
+   * Stop means stop. When the request is the turn running now, every
+   * continuation that was waiting when the stop landed is dropped, so the
+   * model does not start again by itself once the turn ends
+   * ({@link dropWaitingContinuations}). A tool result that arrives after the
+   * stop is a new action and continues as usual.
+   *
+   * This is for a stop a user or an app asked for. An abort the runtime
+   * does for its own reasons (a stall watchdog, a superseded submit) goes to
+   * {@link aborts} directly and drops nothing.
    */
   cancel(requestId: string, reason?: unknown): void {
+    const running = this.queue.activeRequestId === requestId;
     this.aborts.cancel(requestId, reason);
     this.#recoveryAttempts.get(requestId)?.abort(reason);
+    if (running) dropWaitingContinuations(this.#continuationParts);
   }
 
   /**

@@ -507,6 +507,9 @@ describe("the continuation turn", () => {
       // stops the continuation.
       await result("a1", second);
       turns.cancel(continuation.requestId);
+      expect(turns.continuation.deferred).toBeNull();
+      // Its own continuation is left to its settle.
+      expect(turns.continuation.pending?.requestId).toBe("cont-1");
     };
     await result("a1");
     await fire();
@@ -520,38 +523,96 @@ describe("the continuation turn", () => {
     expect(turns.hasPendingDecision()).toBe(false);
   });
 
-  it("a stopped reply drops the continuation its stream held", async () => {
-    // The result lands while the reply streams. The user stops the reply.
-    host.replyStreaming = true;
-    await result("a1");
-    host.replyStreaming = false;
-    turns.replyFinalized({ stopped: true });
-    await fire();
-    await drain();
-
-    expect(host.ran).toEqual([]);
-    expect(connection.sent).toEqual([RESUME_NONE]);
-    expect(turns.continuation.pending).toBeNull();
-  });
-
-  it("a result that arrives after the stop continues as usual", async () => {
-    host.replyStreaming = true;
-    await result("a1");
-    host.replyStreaming = false;
-    turns.replyFinalized({ stopped: true });
+  it("a result that arrives after a continuation was stopped still runs", async () => {
+    const second = makeConnection("c2");
+    host.model = async (continuation) => {
+      if (continuation.requestId !== "cont-1") return;
+      // The stop lands first. The stopped turn is still winding down when
+      // a new result arrives: that is a new action.
+      turns.cancel(continuation.requestId);
+      await result("a1", second);
+    };
     await result("a1");
     await fire();
     await drain();
+    await fire();
+    await drain();
 
-    expect(host.ran).toEqual(["cont-2"]);
+    expect(host.ran).toEqual(["cont-1", "cont-2"]);
   });
 
-  it("a stopped reply leaves a continuation whose turn is running alone", async () => {
-    await result("a1");
-    turns.takeContinuation("cont-1");
-    turns.replyFinalized({ stopped: true });
+  describe("a reply that is streaming", () => {
+    let finishReply!: () => void;
+    let reply: Promise<unknown>;
 
-    expect(turns.continuation.pending?.requestId).toBe("cont-1");
+    /** A turn "req-1" runs and its reply streams until `finishReply()`. */
+    const startReply = async () => {
+      reply = turns.queue.enqueue(
+        "req-1",
+        () => new Promise<void>((resolve) => (finishReply = resolve))
+      );
+      await drain();
+      host.replyStreaming = true;
+    };
+    const endReply = async () => {
+      host.replyStreaming = false;
+      turns.replyFinalized();
+      finishReply();
+      await reply;
+    };
+
+    it("drops the continuation its stream held when it is stopped", async () => {
+      await startReply();
+      // The result lands while the reply streams. Then the user stops it.
+      await result("a1");
+      turns.cancel("req-1");
+      expect(connection.sent).toEqual([RESUME_NONE]);
+      expect(turns.continuation.pending).toBeNull();
+
+      await endReply();
+      await fire();
+      await drain();
+      expect(host.ran).toEqual([]);
+    });
+
+    it("continues for a result that arrives after the stop", async () => {
+      await startReply();
+      await result("a1");
+      turns.cancel("req-1");
+      // Still streaming its last chunks: a new result is a new action.
+      await result("a1");
+
+      await endReply();
+      await fire();
+      await drain();
+      expect(host.ran).toEqual(["cont-2"]);
+    });
+
+    it("keeps the continuation when another request is stopped", async () => {
+      await startReply();
+      await result("a1");
+      // A request waiting in the queue is stopped, not the reply.
+      turns.cancel("req-2");
+
+      await endReply();
+      await fire();
+      await drain();
+      expect(host.ran).toEqual(["cont-1"]);
+    });
+
+    it("keeps the continuation when the runtime aborts the reply for its own reasons", async () => {
+      await startReply();
+      await result("a1");
+      // A stall watchdog or a superseded submit aborts through the
+      // registry. That is not a stop.
+      turns.aborts.getSignal("req-1");
+      turns.aborts.cancel("req-1");
+
+      await endReply();
+      await fire();
+      await drain();
+      expect(host.ran).toEqual(["cont-1"]);
+    });
   });
 
   it("leaves a newer pending continuation alone, and lets it cover the deferred result", async () => {

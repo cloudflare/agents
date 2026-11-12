@@ -13732,7 +13732,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         break;
 
       case "cancel":
-        this._aborts.cancel(event.id);
+        // A user's stop: it also drops the continuations waiting on the
+        // turn it stops.
+        this._turns.cancel(event.id);
         await this._cancelScheduledRecovery(event.id);
         break;
 
@@ -14559,7 +14561,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               requestId,
               timeoutMs: stallTimeoutMs
             });
-            this.abortRequest(
+            // The runtime's own abort, not a stop: recovery continues
+            // the turn, so the continuations waiting on it are kept.
+            this._aborts.cancel(
               requestId,
               new Error("chat stream stalled: inactivity watchdog fired")
             );
@@ -14926,7 +14930,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       if (skipFinalizeRearm) {
         this._streamingAssistant = null;
       } else {
-        this._onStreamingTurnFinalized(aborted && !streamError);
+        this._onStreamingTurnFinalized();
       }
     }
 
@@ -15104,7 +15108,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             });
             // Tear down the upstream model stream so a hung provider/transport
             // is released; the watchdog's throw drives the terminal error below.
-            this.abortRequest(
+            // The runtime's own abort, not a stop: recovery continues
+            // the turn, so the continuations waiting on it are kept.
+            this._aborts.cancel(
               requestId,
               new Error("chat stream stalled: inactivity watchdog fired")
             );
@@ -15538,7 +15544,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // The message is now persisted (or the turn was cleared), so subsequent
     // tool results resolve against storage; stop exposing the accumulator and
     // re-check any continuation the stream-active barrier held (#1650).
-    this._onStreamingTurnFinalized(streamAborted && !streamError);
+    this._onStreamingTurnFinalized();
 
     return streamError
       ? { status: "error", error: streamError }
@@ -18794,7 +18800,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * would never fire. A slow batch is also re-checked here and simply continues
    * to hold (event-driven) until its remaining siblings answer.
    */
-  private _onStreamingTurnFinalized(stopped = false): void {
+  private _onStreamingTurnFinalized(): void {
     this._streamingAssistant = null;
     if (this._flushResolvedPausesOnFinalize) {
       this._flushResolvedPausesOnFinalize = false;
@@ -18804,8 +18810,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         console.error("[Think] Failed to apply resolved pauses", error);
       });
     }
-    // A stopped reply drops the continuation its stream held.
-    this._turns.replyFinalized({ stopped });
+    this._turns.replyFinalized();
   }
 
   /**

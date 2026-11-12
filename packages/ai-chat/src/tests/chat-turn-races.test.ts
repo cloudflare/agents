@@ -746,4 +746,54 @@ describe("chat turn races", () => {
     expect(stored[1].parts[1]).toMatchObject({ state: "output-available" });
     ws.close(1000);
   });
+
+  it("a result that arrives after a continuation was stopped still continues", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const agent = await getAgentByName(env.TestChatAgent, room);
+    const reply: ChatMessage = {
+      id: "assistant-1",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-testTool",
+          toolCallId: "call-1",
+          state: "input-available",
+          input: {}
+        },
+        {
+          type: "tool-otherTool",
+          toolCallId: "call-2",
+          state: "approval-responded",
+          input: {},
+          approval: { id: "approval-2", approved: true }
+        }
+      ] as ChatMessage["parts"]
+    };
+    await agent.persistMessages([user1, reply]);
+    await agent.setTestBody({ delayMs: 400 });
+
+    // The first result's continuation waits on the model, and the user
+    // stops it. The stopped turn is still winding down when a second
+    // result arrives: that is a new action.
+    send(ws, toolResult("call-1"));
+    await waitUntil(
+      async () => (await agent.getChatMessageCallCountForTest()) === 1
+    );
+    const continuationId = await agent.pendingContinuationRequestIdForTest();
+    send(ws, {
+      type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
+      id: continuationId
+    });
+    await delay(50);
+    send(ws, toolResult("call-2"));
+
+    await waitUntil(
+      async () => (await agent.getChatMessageCallCountForTest()) === 2
+    );
+    await delay(600);
+    await agent.waitForIdleForTest();
+    expect(await agent.getChatMessageCallCountForTest()).toBe(2);
+    ws.close(1000);
+  });
 });

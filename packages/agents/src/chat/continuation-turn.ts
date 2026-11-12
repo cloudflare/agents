@@ -31,7 +31,8 @@
  * - a connection waiting on a continuation always gets `STREAM_RESUMING` or
  *   `STREAM_RESUME_NONE`;
  * - a continuation that fails before it streams sends one error frame;
- * - a continuation that was waiting when a stop landed never runs.
+ * - a continuation that was waiting when a stop landed on the running turn
+ *   never runs ({@link dropWaitingContinuations}).
  *
  * `ChatTurns` exposes each function as a method. Hosts call those.
  *
@@ -258,9 +259,8 @@ export async function runContinuationTurn<
         await runContinuationBody(parts, turn, continuation, signal, outcome);
       } finally {
         // Inside the turn, so the next turn in the queue sees settled slots.
-        const stopped = signal?.aborted ?? false;
         parts.aborts.remove(requestId);
-        settleContinuationTurn(parts, requestId, { stopped });
+        settleContinuationTurn(parts, requestId);
       }
     });
   } catch (error) {
@@ -475,37 +475,47 @@ export function continuationStreamEnded<
 /**
  * A streamed reply was finalized: its message, with every tool part, is
  * stored, and the host cleared its stream-active gate. Call it for every
- * reply, not only a continuation's.
+ * reply, not only a continuation's. It re-runs the barrier for a
+ * continuation the gate held (#1650): once the stream ends no further tool
+ * result arrives to do it.
  *
- * It re-runs the barrier for a continuation the gate held (#1650): once the
- * stream ends no further tool result arrives to do it. Whether that
- * continuation still has something to answer is decided when its turn
- * starts ({@link claimContinuation}), not here.
- *
- * A reply that was stopped drops that continuation instead. Stop means
- * stop: a tool result answered while the reply streamed must not start the
- * model again once the user stopped it. The connections waiting on the
- * continuation get `STREAM_RESUME_NONE`, and the result stays in the
- * transcript for the next turn. A result that arrives after the stop is a
- * new action and schedules a continuation as usual.
- *
- * @param options.stopped - The reply's stream was cut off by a stop (its
- *   abort signal), not by the model finishing or by an error.
+ * Whether that continuation still has something to answer is decided when
+ * its turn starts ({@link claimContinuation}), not here.
  */
 export function replyFinalized<TConnection extends ContinuationConnection>(
-  parts: ContinuationTurnParts<TConnection>,
-  options: { stopped?: boolean } = {}
+  parts: ContinuationTurnParts<TConnection>
 ): void {
-  const { continuation } = parts;
-  if (options.stopped) {
-    const pending = continuation.pending;
-    if (pending && !pending.pastCoalesce) {
-      continuation.sendResumeNone();
-      continuation.clearPending();
-    }
-    return;
-  }
   parts.autoContinuation.rearmForBatch();
+}
+
+/**
+ * The turn that is running was stopped. Stop means stop: every continuation
+ * that was waiting when the stop landed is dropped, so the model does not
+ * start again by itself once the stopped turn ends.
+ *
+ * - A pending continuation that has not started: a tool result answered
+ *   while the reply streamed scheduled it, and the stream gate held it. The
+ *   connections waiting on it get `STREAM_RESUME_NONE`.
+ * - The deferred result: it arrived while the stopped continuation ran.
+ *
+ * The results stay in the transcript, and the model reads them on the next
+ * turn. This runs when the stop lands, not when the stopped turn ends: a
+ * result that arrives after the stop is a new action, and it schedules a
+ * continuation as usual even while the stopped turn is still winding down.
+ *
+ * A continuation whose own turn is the one running is left to that turn's
+ * settle.
+ */
+export function dropWaitingContinuations<
+  TConnection extends ContinuationConnection
+>(parts: ContinuationTurnParts<TConnection>): void {
+  const { continuation } = parts;
+  const pending = continuation.pending;
+  if (pending && !pending.pastCoalesce) {
+    continuation.sendResumeNone();
+    continuation.clearPending();
+  }
+  continuation.clearDeferred();
 }
 
 /**
@@ -524,20 +534,14 @@ export function replyFinalized<TConnection extends ContinuationConnection>(
  * - Otherwise the deferred result becomes the next continuation, through
  *   the barrier. This holds for a turn that failed too: the result it
  *   deferred has not been read by any model call.
- * - A turn that was stopped drops the deferred result instead. Stop means
- *   stop: a result that arrived while the turn ran must not start the model
- *   again once the user stopped it. It stays in the transcript for the next
- *   turn.
  *
- * @param options.stopped - The turn's abort signal fired.
+ * A stop of the turn already dropped what was deferred when it landed
+ * ({@link dropWaitingContinuations}). A result deferred after the stop is a
+ * new action and runs as the next continuation like any other.
  */
 export function settleContinuationTurn<
   TConnection extends ContinuationConnection
->(
-  parts: ContinuationTurnParts<TConnection>,
-  requestId: string,
-  options: { stopped?: boolean } = {}
-): void {
+>(parts: ContinuationTurnParts<TConnection>, requestId: string): void {
   const { continuation } = parts;
   const pending = continuation.pending;
   if (pending?.requestId === requestId) {
@@ -556,10 +560,6 @@ export function settleContinuationTurn<
       );
       continuation.clearDeferred();
     }
-  }
-  if (options.stopped) {
-    continuation.clearDeferred();
-    return;
   }
   parts.autoContinuation.activateDeferredAndReschedule();
 }

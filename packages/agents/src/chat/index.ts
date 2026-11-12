@@ -152,6 +152,7 @@ export {
   claimContinuation,
   continuationStreamEnded,
   continuationStreamStarted,
+  dropWaitingContinuations,
   replyFinalized,
   reportContinuationFailure,
   runContinuationTurn,
