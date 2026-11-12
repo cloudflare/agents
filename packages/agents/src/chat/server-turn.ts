@@ -225,6 +225,18 @@ export function mapServerTurnOutcome(
   return outcome;
 }
 
+/** The value `saveMessages` and `continueLastTurn` return for a turn. */
+export function toSaveMessagesResult(
+  requestId: string,
+  outcome: ServerTurnOutcome
+): SaveMessagesResult {
+  return {
+    requestId,
+    status: outcome.status,
+    ...(outcome.error !== undefined && { error: outcome.error })
+  };
+}
+
 /**
  * The `prepare` step of a turn that stores messages (`saveMessages`): work
  * out the messages, asking the app whether the turn should still apply.

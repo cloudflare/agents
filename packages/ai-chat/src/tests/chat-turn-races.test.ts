@@ -102,6 +102,15 @@ function toolResult(toolCallId: string) {
   };
 }
 
+/** The text of every stored assistant message. */
+function replyText(messages: unknown): string {
+  return (messages as ChatMessage[])
+    .filter((message) => message.role === "assistant")
+    .flatMap((message) => message.parts)
+    .map((part) => (part.type === "text" ? part.text : ""))
+    .join("");
+}
+
 describe("chat turn races", () => {
   it("a clear while the turn waits on the model keeps its reply out of the cleared chat", async () => {
     const room = crypto.randomUUID();
@@ -304,6 +313,93 @@ describe("chat turn races", () => {
     expect(await agent.getStartedRequestIds()).toEqual(["req-1"]);
     tabA.close(1000);
     tabB.close(1000);
+  });
+
+  // abortAllRequests() empties the abort registry. A reply that looked its
+  // signal up there found none and streamed to the end.
+  it("abortAllRequests() while a request waits on the model stops a reply that ignores its signal", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/slow-stream-agent/${room}`);
+    const seen = record(ws);
+    const agent = await getAgentByName(env.SlowStreamAgent, room);
+
+    sendChatRequest(ws, "req-1", [user1], {
+      format: "plaintext",
+      responseDelayMs: 300,
+      chunkCount: 5,
+      chunkDelayMs: 10
+    });
+    await waitUntil(
+      async () => (await agent.getStartedRequestIds()).length === 1
+    );
+    await agent.abortAllRequestsForTest();
+    await waitUntil(() => responses(seen, "req-1").some((m) => m.done));
+    await agent.waitForIdleForTest();
+
+    expect(replyText(await agent.getPersistedMessages())).toBe("");
+    ws.close(1000);
+  });
+
+  it("abortAllRequests() while a continuation waits on the model stops a reply that ignores its signal", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/slow-stream-agent/${room}`);
+    const agent = await getAgentByName(env.SlowStreamAgent, room);
+    await agent.persistMessages([user1, toolReply("assistant-1", "call-1")]);
+    await agent.setTestBody({
+      format: "plaintext",
+      responseDelayMs: 300,
+      chunkCount: 5,
+      chunkDelayMs: 10
+    });
+
+    send(ws, toolResult("call-1"));
+    await waitUntil(
+      async () => (await agent.getStartedRequestIds()).length === 1
+    );
+    await agent.abortAllRequestsForTest();
+    await delay(500);
+    await agent.waitForIdleForTest();
+
+    expect(replyText(await agent.getPersistedMessages())).toBe("");
+    ws.close(1000);
+  });
+
+  // A server-started turn runs with the tools and body stored when it
+  // starts, like a continuation, not the ones stored when it was queued.
+  it("a saveMessages turn queued behind a request runs with that request's body", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/slow-stream-agent/${room}`);
+    const seen = record(ws);
+    const agent = await getAgentByName(env.SlowStreamAgent, room);
+
+    sendChatRequest(ws, "req-1", [user1], {
+      format: "plaintext",
+      chunkCount: 6,
+      chunkDelayMs: 50,
+      marker: "first"
+    });
+    await waitUntil(
+      async () => (await agent.getStartedRequestIds()).length === 1
+    );
+    // Queued behind req-1. Its body becomes the stored body when its turn
+    // starts.
+    sendChatRequest(ws, "req-2", [user1, user2], {
+      format: "plaintext",
+      chunkCount: 1,
+      chunkDelayMs: 5,
+      marker: "second"
+    });
+    await delay(50);
+    // Called while the stored body is still req-1's.
+    const queued = await agent.enqueueSyntheticUserMessage("Server follow-up");
+    await waitUntil(() => responses(seen, "req-2").some((m) => m.done));
+    await agent.waitForIdleForTest();
+
+    expect(queued.status).toBe("completed");
+    expect(await agent.getRequestBodyForTest(queued.requestId)).toMatchObject({
+      marker: "second"
+    });
+    ws.close(1000);
   });
 
   it("a request whose onChatMessage throws gets an error frame", async () => {

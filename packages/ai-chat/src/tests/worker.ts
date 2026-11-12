@@ -1339,6 +1339,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     if (options?.requestId) {
       this._startedRequestIds.push(options.requestId);
       this._requestStartTimes.set(options.requestId, Date.now());
+      this._requestBodies.set(options.requestId, options.body);
     }
 
     const body = options?.body as
@@ -1447,6 +1448,20 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
 
   getStartedRequestIds(): string[] {
     return [...this._startedRequestIds];
+  }
+
+  private _requestBodies = new Map<
+    string,
+    Record<string, unknown> | undefined
+  >();
+
+  /** The body `onChatMessage` got for a request. */
+  getRequestBodyForTest(requestId: string): Record<string, unknown> | null {
+    return this._requestBodies.get(requestId) ?? null;
+  }
+
+  abortAllRequestsForTest(): void {
+    this.abortAllRequests();
   }
 
   getPersistedMessages(): Promise<ChatMessage[]> {

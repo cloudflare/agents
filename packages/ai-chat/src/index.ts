@@ -53,6 +53,7 @@ import {
   hasIncompleteToolBatch,
   ChatTurns,
   prepareTurnMessages,
+  toSaveMessagesResult,
   type RecoveryAttemptHandle,
   type ToolInteractionOutcome,
   partAwaitsClientInteraction,
@@ -61,7 +62,7 @@ import {
   type TurnResult,
   type MessagePart,
   type StreamChunkData,
-  type ServerTurnOutcome,
+  type ServerChatTurn,
   type SubmitConcurrencyDecision,
   type ChatFiberSnapshot,
   type ChatTurnOutcome
@@ -1576,6 +1577,7 @@ export class AIChatAgent<
                                   [connection.id],
                                   {
                                     chatMessageId,
+                                    abortSignal: signal,
                                     onStreamStart: () => {
                                       replying = true;
                                     }
@@ -3332,6 +3334,7 @@ export class AIChatAgent<
                         {
                           continuation: true,
                           chatMessageId: requestId,
+                          abortSignal,
                           onStreamStart: () => {
                             replying = true;
                           }
@@ -3462,9 +3465,54 @@ export class AIChatAgent<
   }
 
   /**
+   * Run one server-started turn through {@link ChatTurns.runServerTurn}.
+   * `saveMessages`, `continueLastTurn`, the recovery retry and the inline
+   * reaction to a detached notification all come through here; they differ
+   * only in what they store first and whether the reply continues the last
+   * assistant message.
+   */
+  private async _runServerTurn(
+    requestId: string,
+    turn: {
+      signal?: AbortSignal;
+      continuation: boolean;
+      /** A body for this turn. Without one, the stored body is used. */
+      body?: Record<string, unknown>;
+      /** The caller already holds the queue slot: run without waiting. */
+      inline?: boolean;
+      prepare?: ServerChatTurn<UIMessage[]>["prepare"];
+      persist?: ServerChatTurn<UIMessage[]>["persist"];
+    }
+  ): Promise<SaveMessagesResult> {
+    const outcome = await this._turns.runServerTurn<UIMessage[]>({
+      requestId,
+      signal: turn.signal,
+      enqueue: turn.inline
+        ? async (run) => {
+            await run();
+            return "completed";
+          }
+        : (run, epoch) => this._enqueueServerTurn(requestId, run, epoch),
+      prepare: turn.prepare,
+      persist: turn.persist,
+      run: (signal) =>
+        this._runServerTurnBody(requestId, signal, {
+          body: turn.body,
+          continuation: turn.continuation
+        }),
+      onAborted: () => this._clearChatTerminal()
+    });
+    return toSaveMessagesResult(requestId, outcome);
+  }
+
+  /**
    * The model call and reply of a server-started turn: what
    * {@link ChatTurns.runServerTurn} runs once the turn is at the front of the
    * queue and has not been stopped.
+   *
+   * The stored tools and body are read here, when the turn starts, so a turn
+   * that waited in the queue runs with the context of the request that ran
+   * before it, like a continuation does.
    *
    * @returns The reply's outcome, or nothing when `onChatMessage` returned no
    *   response.
@@ -3473,12 +3521,13 @@ export class AIChatAgent<
     requestId: string,
     abortSignal: AbortSignal,
     turn: {
-      clientTools: ClientToolSchema[] | undefined;
       body: Record<string, unknown> | undefined;
       continuation: boolean;
     }
   ): Promise<StreamResultStatus | undefined> {
-    const { clientTools, body, continuation } = turn;
+    const { continuation } = turn;
+    const clientTools = this._lastClientTools;
+    const body = turn.body ?? this._lastBody;
     this._setRequestContext(clientTools, body);
     let outcome: StreamResultStatus | undefined;
 
@@ -3513,37 +3562,6 @@ export class AIChatAgent<
     });
 
     return outcome;
-  }
-
-  /**
-   * Run a server-started turn in the queue slot the caller already holds.
-   * `saveMessages` and the other queued entry points go through
-   * {@link ChatTurns.runServerTurn} with the queue; this is the same turn
-   * without the wait.
-   *
-   * @returns Terminal status for the turn.
-   */
-  private async _runProgrammaticChatTurn(
-    requestId: string,
-    clientTools?: ClientToolSchema[],
-    body?: Record<string, unknown>,
-    externalSignal?: AbortSignal
-  ): Promise<ServerTurnOutcome> {
-    return this._turns.runServerTurn({
-      requestId,
-      signal: externalSignal,
-      enqueue: async (turn) => {
-        await turn();
-        return "completed";
-      },
-      run: (signal) =>
-        this._runServerTurnBody(requestId, signal, {
-          clientTools,
-          body,
-          continuation: false
-        }),
-      onAborted: () => this._clearChatTerminal()
-    });
   }
 
   /**
@@ -3836,13 +3854,9 @@ export class AIChatAgent<
         { id, role, parts: [{ type: "text", text }], metadata } as UIMessage
       ]);
       if (!options.react) return;
+      // The caller holds the queue slot in every branch below.
       const runReply = (requestId: string) =>
-        this._runProgrammaticChatTurn(
-          requestId,
-          this._lastClientTools,
-          this._lastBody,
-          undefined
-        );
+        this._runServerTurn(requestId, { continuation: false, inline: true });
       if (this._inSerializedDetachedDeliverySlot) {
         // We own the active turn slot (a `serialize: true` finish delivery), so
         // run inline + awaited, reusing the slot's request id (keeps the
@@ -4741,13 +4755,9 @@ export class AIChatAgent<
       shouldApplyMessages?: () => boolean | Promise<boolean>;
     }
   ): Promise<SaveMessagesResult> {
-    const clientTools = this._lastClientTools;
-    const body = this._lastBody;
-
-    const outcome = await this._turns.runServerTurn<UIMessage[]>({
-      requestId,
+    return this._runServerTurn(requestId, {
       signal: options?.signal,
-      enqueue: (turn, epoch) => this._enqueueServerTurn(requestId, turn, epoch),
+      continuation: false,
       prepare: ({ isCurrent }) =>
         prepareTurnMessages<UIMessage>({
           messages,
@@ -4755,28 +4765,8 @@ export class AIChatAgent<
           shouldApply: options?.shouldApplyMessages,
           isCurrent
         }),
-      persist: (resolvedMessages) => this.persistMessages(resolvedMessages),
-      run: (signal) =>
-        this._runServerTurnBody(requestId, signal, {
-          clientTools,
-          body,
-          continuation: false
-        }),
-      onAborted: () => this._clearChatTerminal()
+      persist: (resolvedMessages) => this.persistMessages(resolvedMessages)
     });
-
-    return this._serverTurnResult(requestId, outcome);
-  }
-
-  private _serverTurnResult(
-    requestId: string,
-    outcome: ServerTurnOutcome
-  ): SaveMessagesResult {
-    return {
-      requestId,
-      status: outcome.status,
-      ...(outcome.error !== undefined && { error: outcome.error })
-    };
   }
 
   /**
@@ -4807,28 +4797,14 @@ export class AIChatAgent<
     // to this turn's request id so the parent's re-attach tail keeps attributing
     // the continued turn's frames (no-op otherwise).
     this._rebindAgentToolChildRunRequestId(requestId);
-    const clientTools = this._lastClientTools;
-    const resolvedBody = body ?? this._lastBody;
-
-    const outcome = await this._turns.runServerTurn({
-      requestId,
+    return this._runServerTurn(requestId, {
       signal: options?.signal,
-      enqueue: (turn, epoch) => this._enqueueServerTurn(requestId, turn, epoch),
-      run: (signal) =>
-        this._runServerTurnBody(requestId, signal, {
-          clientTools,
-          body: resolvedBody,
-          continuation: true
-        }),
-      onAborted: () => this._clearChatTerminal()
+      body,
+      continuation: true
     });
-
-    return this._serverTurnResult(requestId, outcome);
   }
 
   private async _retryLastUserTurn(
-    clientTools?: ClientToolSchema[],
-    body?: Record<string, unknown>,
     options?: SaveMessagesOptions
   ): Promise<SaveMessagesResult> {
     const lastMessage =
@@ -4842,20 +4818,10 @@ export class AIChatAgent<
     // to this turn's request id so the parent's re-attach tail keeps attributing
     // the retried turn's frames (no-op otherwise).
     this._rebindAgentToolChildRunRequestId(requestId);
-    const outcome = await this._turns.runServerTurn({
-      requestId,
+    return this._runServerTurn(requestId, {
       signal: options?.signal,
-      enqueue: (turn, epoch) => this._enqueueServerTurn(requestId, turn, epoch),
-      run: (signal) =>
-        this._runServerTurnBody(requestId, signal, {
-          clientTools,
-          body,
-          continuation: false
-        }),
-      onAborted: () => this._clearChatTerminal()
+      continuation: false
     });
-
-    return this._serverTurnResult(requestId, outcome);
   }
 
   // ── Chat recovery via fibers ──────────────────────────────────────
@@ -6056,18 +6022,14 @@ export class AIChatAgent<
       }
 
       this._applyRecoveredRequestContext(data);
-      // The retry runs through `_runProgrammaticChatTurn`, which repairs any
+      // The retry runs through `_runServerTurnBody`, which repairs any
       // interrupted tool orphan before re-entering inference
       // (`_repairInterruptedToolsBeforeTurn`). The retry path normally re-runs
       // an unanswered user-message tail (no assistant orphan to repair), so that
       // is a defensive no-op here, but keeps both recovery entrypoints converged.
       onTurnStarted?.();
       this._takeRecoveryReschedule(data?.incidentId);
-      const result = await this._retryLastUserTurn(
-        this._lastClientTools,
-        this._lastBody,
-        { signal: stop.signal }
-      );
+      const result = await this._retryLastUserTurn({ signal: stop.signal });
       if (await this._recoveryAttemptStopped(stop, data?.incidentId)) {
         return;
       }
@@ -7429,22 +7391,21 @@ export class AIChatAgent<
        */
       onStreamStart?: () => void;
       /**
-       * The turn's own abort signal. A caller that holds it passes it, so
-       * the reader loop still stops when `abortAllRequests()` emptied the
-       * registry while the turn waited on `onChatMessage`.
+       * The turn's own abort signal: it cancels the reader loop when the
+       * turn is stopped. Every turn hands it over. Looking it up in the
+       * registry would find none once `abortAllRequests()` emptied it while
+       * the turn waited on `onChatMessage`. This is a safety net — users
+       * should also pass abortSignal to streamText for proper cancellation.
        */
       abortSignal?: AbortSignal;
     } = {}
   ): Promise<StreamResultStatus> {
-    const { continuation = false, chatMessageId, onStreamStart } = options;
-    // The abort signal for this request cancels the reader loop if the
-    // client sends a cancel message. This is a safety net — users should
-    // also pass abortSignal to streamText for proper cancellation.
-    const abortSignal =
-      options.abortSignal ??
-      (chatMessageId
-        ? this._abortRegistry.getExistingSignal(chatMessageId)
-        : undefined);
+    const {
+      continuation = false,
+      chatMessageId,
+      onStreamStart,
+      abortSignal
+    } = options;
     // A chat clear (resetTurnState) bumps the queue generation and empties
     // the abort registry. A turn admitted before it must neither stream into
     // the cleared chat nor persist its reply there, even when its controller
