@@ -17,6 +17,15 @@ import type {
 } from "./lifecycle";
 import type { ChatFiberSnapshot } from "./recovery";
 import {
+  handleRecoveryAttemptError,
+  runRecoveredTurn
+} from "./recovery-attempt";
+import type {
+  RecoveredTurnHost,
+  RecoveredTurnResult,
+  RecoveryAttemptData
+} from "./recovery-attempt";
+import {
   CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
   admitChatRecoveryAttempt,
   chatRecoveryIncidentId,
@@ -939,6 +948,71 @@ export class ChatRecoveryEngine {
       }
     }
     return cancelled;
+  }
+
+  /**
+   * Run the body of one recovery attempt: the checks around a recovered turn,
+   * in the one order both hosts use. See `recovery-attempt.ts`.
+   */
+  runRecoveredTurn<
+    TData extends RecoveryAttemptData,
+    TResult extends RecoveredTurnResult
+  >(host: RecoveredTurnHost<TData, TResult>): Promise<void> {
+    return runRecoveredTurn(this, host);
+  }
+
+  /** Handle an error a recovery attempt threw. See `recovery-attempt.ts`. */
+  handleRecoveryAttemptError(
+    input: Parameters<typeof handleRecoveryAttemptError>[1]
+  ): Promise<void> {
+    return handleRecoveryAttemptError(this, input);
+  }
+
+  /** The host's resolved recovery config. */
+  resolveConfig(): ResolvedChatRecoveryConfig {
+    return this.adapter.resolveConfig();
+  }
+
+  /** Incidents whose running recovery attempt scheduled the next attempt. */
+  readonly #rescheduled = new Set<string>();
+
+  /**
+   * Mark that an interrupted turn scheduled the next attempt for
+   * `incidentId`, so the attempt running that turn leaves the incident's
+   * outcome to it.
+   */
+  markRescheduled(incidentId: string): void {
+    this.#rescheduled.add(incidentId);
+  }
+
+  /** Take the {@link markRescheduled} mark. Returns whether it was set. */
+  takeReschedule(incidentId: string | undefined): boolean {
+    return incidentId !== undefined && this.#rescheduled.delete(incidentId);
+  }
+
+  /**
+   * Record that a client stopped a running attempt. The cancel already marked
+   * the incident when it was still scheduled. Record it here otherwise, so
+   * the attempt's own outcome does not overwrite the user's stop.
+   */
+  async recordRecoveryStop(
+    incidentId: string | undefined,
+    update: RecoveredTurnHost<
+      RecoveryAttemptData,
+      RecoveredTurnResult
+    >["updateIncident"] = (...args) => this.updateIncident(...args)
+  ): Promise<void> {
+    if (await this.isRecoveryCancelled(incidentId)) return;
+    await update(incidentId, "skipped", CHAT_RECOVERY_CANCELLED_REASON);
+  }
+
+  /** Whether recovery already gave up on this incident. */
+  async isRecoverySealed(incidentId: string | undefined): Promise<boolean> {
+    if (!incidentId) return false;
+    const incident = await this.adapter.getIncident(
+      chatRecoveryIncidentKey(incidentId)
+    );
+    return incident?.status === "exhausted";
   }
 
   /** Whether the user cancelled this incident's scheduled recovery. */
