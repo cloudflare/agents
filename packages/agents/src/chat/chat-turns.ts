@@ -506,17 +506,6 @@ export class ChatTurns<
   }
 
   /**
-   * Stop every running recovery attempt, whatever request it recovers. For a
-   * caller that knows the agent's recovered work must stop but not which
-   * request id started it: an agent-tool run cancelled by its parent.
-   */
-  cancelRecoveryAttempts(reason?: unknown): void {
-    for (const controller of this.#recoveryAttempts.values()) {
-      controller.abort(reason);
-    }
-  }
-
-  /**
    * Tear down turn state for a chat reset (clear): invalidate queued turns,
    * abort every request, drop the apply chain and the continuation slots and
    * barrier, and release every waiting connection. Synchronous, so no event

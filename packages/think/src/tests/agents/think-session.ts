@@ -2466,18 +2466,24 @@ export class ThinkTestAgent extends Think {
   }
 
   /**
-   * A cancel of a run being recovered stops the recovered turn (by the
-   * request id on the row) and a running recovery attempt.
+   * A cancel of a run being recovered stops what runs under the request ids
+   * on its row (the recovered turn, a recovery attempt registered under the
+   * first id) and nothing else on the agent.
    */
-  async cancelRunStopsRecoveredTurnForTest(): Promise<{
-    turnAborted: boolean;
+  async cancelRecoveredRunForTest(): Promise<{
+    recoveredTurnAborted: boolean;
     attemptAborted: boolean;
+    otherTurnAborted: boolean;
+    otherAttemptAborted: boolean;
+    otherSubmissionAborted: boolean;
   }> {
     const runId = crypto.randomUUID();
     await this.inspectAgentToolRun(runId);
     this.sql`
-      INSERT INTO cf_agent_tool_child_runs (run_id, request_id, status, started_at)
-      VALUES (${runId}, 'recovered-request', 'running', ${Date.now()})
+      INSERT INTO cf_agent_tool_child_runs
+        (run_id, request_id, root_request_id, status, started_at)
+      VALUES (${runId}, 'recovered-request', 'first-request', 'running',
+        ${Date.now()})
     `;
     const internals = this as unknown as {
       _aborts: {
@@ -2490,27 +2496,44 @@ export class ThinkTestAgent extends Think {
           end(): void;
         };
       };
+      _submissionAbortControllers: Map<string, AbortController>;
     };
-    const signal = internals._aborts.getSignal("recovered-request");
-    const attempt = internals._turns.beginRecoveryAttempt("root-request");
+    const recoveredTurn = internals._aborts.getSignal("recovered-request");
+    const otherTurn = internals._aborts.getSignal("a-users-turn");
+    const attempt = internals._turns.beginRecoveryAttempt("first-request");
+    const otherAttempt = internals._turns.beginRecoveryAttempt("a-users-root");
+    const otherSubmission = new AbortController();
+    internals._submissionAbortControllers.set(
+      "a-users-submission",
+      otherSubmission
+    );
     try {
       await this.cancelAgentToolRun(runId, "parent gave up");
       return {
-        turnAborted: signal?.aborted ?? false,
-        attemptAborted: attempt.signal.aborted
+        recoveredTurnAborted: recoveredTurn?.aborted ?? false,
+        attemptAborted: attempt.signal.aborted,
+        otherTurnAborted: otherTurn?.aborted ?? false,
+        otherAttemptAborted: otherAttempt.signal.aborted,
+        otherSubmissionAborted: otherSubmission.signal.aborted
       };
     } finally {
       attempt.end();
+      otherAttempt.end();
       internals._aborts.remove("recovered-request");
+      internals._aborts.remove("a-users-turn");
+      internals._submissionAbortControllers.delete("a-users-submission");
     }
   }
 
   /**
    * The run was cancelled, then the isolate died before the run's turn
-   * unwound, so chat recovery wakes for that turn. It must not run.
+   * unwound, so chat recovery wakes for that turn. It must not run, and the
+   * incident must say the run was cancelled.
    */
-  async recoverCancelledAgentToolRunForTest(): Promise<{
-    status: string;
+  async recoverCancelledAgentToolRunForTest(
+    path: "continue" | "retry"
+  ): Promise<{
+    incident: { status: string; reason?: string } | null;
     steps: number;
   }> {
     await this.chat("question", new TestCollectingCallback());
@@ -2525,19 +2548,39 @@ export class ThinkTestAgent extends Think {
       VALUES (${runId}, 'recovered-request', 'interrupted-request', 'aborted',
         ${Date.now()}, ${Date.now()})
     `;
-    const self = this as unknown as {
-      _activeChatRecoveryRootRequestId: string | undefined;
+    const incidentId = crypto.randomUUID();
+    const key = `cf:chat-recovery:incident:${encodeURIComponent(incidentId)}`;
+    const now = Date.now();
+    await this.ctx.storage.put(key, {
+      incidentId,
+      requestId: "recovered-request",
+      recoveryRootRequestId: "interrupted-request",
+      recoveryKind: path,
+      attempt: 1,
+      maxAttempts: 10,
+      status: "scheduled",
+      firstSeenAt: now,
+      lastAttemptAt: now
+    });
+    const recovery = this as unknown as {
+      _chatRecoveryContinueDetached(d: object): Promise<void>;
+      _chatRecoveryRetryDetached(d: object): Promise<void>;
     };
-    self._activeChatRecoveryRootRequestId = "interrupted-request";
-    try {
-      const result = await this.continueLastTurn();
-      return {
-        status: result.status,
-        steps: this._beforeStepLog.length - steps
-      };
-    } finally {
-      self._activeChatRecoveryRootRequestId = undefined;
+    const data = { incidentId, originalRequestId: "interrupted-request" };
+    if (path === "continue") {
+      await recovery._chatRecoveryContinueDetached(data);
+    } else {
+      await recovery._chatRecoveryRetryDetached(data);
     }
+    const incident =
+      (await this.ctx.storage.get<{ status: string; reason?: string }>(key)) ??
+      null;
+    return {
+      incident: incident
+        ? { status: incident.status, reason: incident.reason }
+        : null,
+      steps: this._beforeStepLog.length - steps
+    };
   }
 
   private _readChildRunStatusForTest(runId: string): string | null {
@@ -2634,17 +2677,21 @@ export class ThinkTestAgent extends Think {
       INSERT INTO cf_agent_tool_child_runs (run_id, status, started_at)
       VALUES (${runId}, 'running', ${Date.now()})
     `;
-    const controller = new AbortController();
-    (
+    // The recovered turn runs under the request id the row names.
+    this.sql`
+      UPDATE cf_agent_tool_child_runs SET request_id = 'recovered-request'
+      WHERE run_id = ${runId}
+    `;
+    const signal = (
       this as unknown as {
-        _submissionAbortControllers: Map<string, AbortController>;
+        _aborts: { getSignal(id: string): AbortSignal | undefined };
       }
-    )._submissionAbortControllers.set("recovered-submission", controller);
-    const abortedBefore = controller.signal.aborted;
+    )._aborts.getSignal("recovered-request");
+    const abortedBefore = signal?.aborted ?? false;
     await this.cancelAgentToolRun(runId, "parent gave up re-attaching");
     return {
       abortedBefore,
-      abortedAfter: controller.signal.aborted,
+      abortedAfter: signal?.aborted ?? false,
       childStatus: this._readChildRunStatusForTest(runId)
     };
   }

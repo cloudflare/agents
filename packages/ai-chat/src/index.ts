@@ -670,19 +670,10 @@ export class AIChatAgent<
       this._getAgentToolMessagesAfterStart(runId).some(
         (message) => message.role === "assistant"
       ),
-    cancelRecoveredTurn: (run, reason) => {
-      // A recovered turn runs outside `startAgentToolRun`. A child facet is
-      // dedicated to one agent-tool run, so whatever turn or recovery
-      // attempt is running is that run's: stop them all, and the recovery
-      // scheduled for the requests the row names (#1630).
-      this.abortAllRequests(reason);
-      this._turns.cancelRecoveryAttempts(reason);
-      for (const requestId of new Set([run.requestId, run.rootRequestId])) {
-        if (!requestId) continue;
-        void this.keepAliveWhile(() =>
-          this._cancelScheduledRecovery(requestId)
-        );
-      }
+    // The same as a client's stop for the request (#1630).
+    cancelRequest: (requestId, reason) => {
+      this._turns.cancel(requestId, reason);
+      void this.keepAliveWhile(() => this._cancelScheduledRecovery(requestId));
     },
     classifyRecovery: () => this._classifyAgentToolChildRecovery(),
     hasActiveStream: () => this._resumableStream.hasActiveStream(),
@@ -1035,8 +1026,8 @@ export class AIChatAgent<
 
   /**
    * This agent's run table, as the shared {@link AgentToolRuns} reads and
-   * writes it. The lookups tolerate a missing table: a recovered turn on a
-   * facet that never ran as an agent tool reads as "no run".
+   * writes it. The constructor creates the table, so a query that fails is
+   * a real error and is not hidden.
    */
   private _agentToolRunStore(): AgentToolRunStore {
     type Row = {
@@ -1058,36 +1049,21 @@ export class AIChatAgent<
             terminalOnly: row.event_delivery === "terminal"
           }
         : null;
-    const lookup = <T>(query: () => T, missing: T): T => {
-      try {
-        return query();
-      } catch {
-        // No run table on this facet (it never ran as a child).
-        return missing;
-      }
-    };
     return {
       read: (runId) =>
-        lookup(
-          () =>
-            record(
-              this.sql<Row>`
+        record(
+          this.sql<Row>`
                 select run_id, request_id, root_request_id, status, error_message,
                        event_delivery
                 from cf_ai_chat_agent_tool_runs
                 where run_id = ${runId}
               `[0]
-            ),
-          null
         ),
       // A child DO is addressed by its run id, so it owns at most one run
-      // row; the order by is defensive. Rows are inserted `running`;
-      // `starting` is matched for parity with `@cloudflare/think`.
+      // row; the order by is defensive.
       newestOpen: () =>
-        lookup(
-          () =>
-            record(
-              this.sql<Row>`
+        record(
+          this.sql<Row>`
                 select run_id, request_id, root_request_id, status, error_message,
                        event_delivery
                 from cf_ai_chat_agent_tool_runs
@@ -1095,14 +1071,10 @@ export class AIChatAgent<
                 order by started_at desc
                 limit 1
               `[0]
-            ),
-          null
         ),
       openForRequest: (requestId) =>
-        lookup(
-          () =>
-            record(
-              this.sql<Row>`
+        record(
+          this.sql<Row>`
                 select run_id, request_id, root_request_id, status, error_message,
                        event_delivery
                 from cf_ai_chat_agent_tool_runs
@@ -1110,14 +1082,10 @@ export class AIChatAgent<
                   and status in ('starting', 'running')
                 limit 1
               `[0]
-            ),
-          null
         ),
       forRequest: (requestId) =>
-        lookup(
-          () =>
-            record(
-              this.sql<Row>`
+        record(
+          this.sql<Row>`
                 select run_id, request_id, root_request_id, status, error_message,
                        event_delivery
                 from cf_ai_chat_agent_tool_runs
@@ -1125,18 +1093,12 @@ export class AIChatAgent<
                    or root_request_id = ${requestId}
                 limit 1
               `[0]
-            ),
-          null
         ),
       listOpen: () =>
-        lookup(
-          () =>
-            this.sql<{ run_id: string }>`
+        this.sql<{ run_id: string }>`
               select run_id from cf_ai_chat_agent_tool_runs
-              where status = 'running'
+              where status in ('starting', 'running')
             `.map((row) => row.run_id),
-          []
-        ),
       insert: (runId, run) => {
         this.sql`
           insert into cf_ai_chat_agent_tool_runs
@@ -1157,23 +1119,13 @@ export class AIChatAgent<
         `;
       },
       recordStreamError: (runId, error) => {
-        try {
-          this.sql`
-            update cf_ai_chat_agent_tool_runs
-            set error_message = ${error}
-            where run_id = ${runId} and status = 'running'
-          `;
-        } catch {
-          // Best-effort: broadcast must never throw; the in-memory capture
-          // remains.
-        }
-      },
-      settle: (runId, terminal, turnRequestId) => {
-        const open = this.sql<{ run_id: string }>`
-          select run_id from cf_ai_chat_agent_tool_runs
-          where run_id = ${runId} and status = 'running'
+        this.sql`
+          update cf_ai_chat_agent_tool_runs
+          set error_message = ${error}
+          where run_id = ${runId}
         `;
-        if (open.length === 0) return false;
+      },
+      writeTerminal: (runId, terminal, turnRequestId) => {
         if (turnRequestId) {
           this.sql`
             update cf_ai_chat_agent_tool_runs
@@ -1198,7 +1150,6 @@ export class AIChatAgent<
             where run_id = ${runId}
           `;
         }
-        return true;
       }
     };
   }
@@ -1216,17 +1167,30 @@ export class AIChatAgent<
    * an agent-tool child with an open run, put the new request id on the run
    * row, so the parent's re-attach tail keeps receiving the run's frames and
    * does not give up on a healthy child. A no-op for any other agent.
-   *
-   * @returns `"cancelled"` when the turn being recovered belonged to a run
-   *   its parent cancelled. The recovered turn must not run.
    */
-  private _rebindAgentToolChildRunRequestId(
-    requestId: string
-  ): "bound" | "cancelled" | "none" {
-    return this._agentToolRuns.rebind(
-      requestId,
-      this._activeChatRecoveryRootRequestId
+  private _rebindAgentToolChildRunRequestId(requestId: string): void {
+    this._agentToolRuns.rebind(requestId);
+  }
+
+  /**
+   * Whether a recovery attempt may run, checked right after the attempt's
+   * own cancelled check. A turn that belonged to an agent-tool run its
+   * parent cancelled is not recovered: the cancel wrote the run row, but the
+   * isolate died before the aborted turn could unwind. The incident records
+   * it as cancelled, like a client's stop.
+   */
+  private async _admitRecoveredAgentToolTurn(
+    data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined
+  ): Promise<boolean> {
+    if (!this._agentToolRuns.isRecoveredRunCancelled(data?.originalRequestId)) {
+      return true;
+    }
+    await this._updateChatRecoveryIncident(
+      data?.incidentId,
+      "skipped",
+      CHAT_RECOVERY_CANCELLED_REASON
     );
+    return false;
   }
 
   constructor(ctx: AgentContext, env: Env) {
@@ -4641,11 +4605,8 @@ export class AIChatAgent<
     const requestId = nanoid();
     // If this facet is an agent-tool child being recovered, re-bind its run row
     // to this turn's request id so the parent's re-attach tail keeps attributing
-    // the continued turn's frames (no-op otherwise). A run its parent cancelled
-    // before the interrupted turn could unwind is not re-run.
-    if (this._rebindAgentToolChildRunRequestId(requestId) === "cancelled") {
-      return { requestId: "", status: "skipped" };
-    }
+    // the continued turn's frames (no-op otherwise).
+    this._rebindAgentToolChildRunRequestId(requestId);
     const clientTools = this._lastClientTools;
     const resolvedBody = body ?? this._lastBody;
     const epoch = this._turnQueue.generation;
@@ -4741,11 +4702,8 @@ export class AIChatAgent<
     const requestId = nanoid();
     // If this facet is an agent-tool child being recovered, re-bind its run row
     // to this turn's request id so the parent's re-attach tail keeps attributing
-    // the retried turn's frames (no-op otherwise). A run its parent cancelled
-    // before the interrupted turn could unwind is not re-run.
-    if (this._rebindAgentToolChildRunRequestId(requestId) === "cancelled") {
-      return { requestId: "", status: "skipped" };
-    }
+    // the retried turn's frames (no-op otherwise).
+    this._rebindAgentToolChildRunRequestId(requestId);
     const epoch = this._turnQueue.generation;
     let status: SaveMessagesResult["status"] = "completed";
     let error: string | undefined;
@@ -5356,6 +5314,7 @@ export class AIChatAgent<
     ) {
       return;
     }
+    if (!(await this._admitRecoveredAgentToolTurn(data))) return;
     const previousRootRequestId = this._activeChatRecoveryRootRequestId;
     this._activeChatRecoveryRootRequestId =
       data?.originalRequestId ?? previousRootRequestId;
@@ -5907,6 +5866,7 @@ export class AIChatAgent<
     ) {
       return;
     }
+    if (!(await this._admitRecoveredAgentToolTurn(data))) return;
     const previousRootRequestId = this._activeChatRecoveryRootRequestId;
     this._activeChatRecoveryRootRequestId =
       data?.originalRequestId ?? previousRootRequestId;

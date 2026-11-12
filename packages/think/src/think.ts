@@ -1596,6 +1596,20 @@ export interface ChatStartEvent {
   requestId: string;
 }
 
+/**
+ * The sink of a `chat()` turn. The calls are `onStart`, then `onEvent` for
+ * each chunk, then one terminal call: `onDone`, `onError` or
+ * `onInterrupted`.
+ *
+ * A turn the caller cancels itself (its `signal`, or `cancelChat()` with the
+ * id from `onStart`) gets no terminal call. The promise `chat()` returns
+ * resolves, and that is the signal the turn is over. This holds whether the
+ * cancel lands while the reply streams (the partial reply is stored) or
+ * while the turn still waits behind another turn (nothing is stored and the
+ * model is never called).
+ *
+ * A chat cleared under the turn is reported through `onError`.
+ */
 export interface StreamCallback {
   onStart(event: ChatStartEvent): void | Promise<void>;
   onEvent(json: string): void | Promise<void>;
@@ -4893,20 +4907,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     },
     hasAssistantReply: (runId) =>
       this._hasRecoveredAgentToolAssistantTurn(runId),
-    cancelRecoveredTurn: (run, reason) => {
-      // A recovered turn runs outside `startAgentToolRun`. Stop it by the
-      // request ids the row names (the turn, its recovery attempt, its
-      // scheduled recovery), and stop every recovery attempt and recovered
-      // submission: a child facet is dedicated to one agent-tool run, so
-      // whatever recovery is running is that run's (#1630).
-      for (const requestId of new Set([run.requestId, run.rootRequestId])) {
-        if (requestId) this.cancelChat(requestId, reasonText(reason));
-      }
-      this._turns.cancelRecoveryAttempts(reason);
-      for (const controller of this._submissionAbortControllers.values()) {
-        controller.abort(reason);
-      }
-    },
+    // The same as a client's stop for the request (#1630).
+    cancelRequest: (requestId, reason) =>
+      this.cancelChat(requestId, reasonText(reason)),
     classifyRecovery: () => this._classifyAgentToolChildRecovery(),
     hasActiveStream: () => this._resumableStream.hasActiveStream(),
     onForget: (runId) => this._agentToolProgressEmitterInstance?.forget(runId)
@@ -5036,7 +5039,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         tableExists()
           ? this.sql<{ run_id: string }>`
               SELECT run_id FROM cf_agent_tool_child_runs
-              WHERE completed_at IS NULL
+              WHERE status IN ('starting', 'running')
             `.map((row) => row.run_id)
           : [],
       insert: (runId, run) => {
@@ -5059,23 +5062,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         `;
       },
       recordStreamError: (runId, error) => {
-        try {
-          this.sql`
-            UPDATE cf_agent_tool_child_runs
-            SET error_message = ${error}
-            WHERE run_id = ${runId} AND completed_at IS NULL
-          `;
-        } catch {
-          // Best-effort: broadcast must never throw; the in-memory capture
-          // remains.
-        }
-      },
-      settle: (runId, terminal, turnRequestId) => {
-        const open = this.sql<{ run_id: string }>`
-          SELECT run_id FROM cf_agent_tool_child_runs
-          WHERE run_id = ${runId} AND completed_at IS NULL
+        this.sql`
+          UPDATE cf_agent_tool_child_runs
+          SET error_message = ${error}
+          WHERE run_id = ${runId}
         `;
-        if (open.length === 0) return false;
+      },
+      writeTerminal: (runId, terminal, turnRequestId) => {
         if (turnRequestId) {
           const streamId =
             this._resumableStream
@@ -5106,7 +5099,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             WHERE run_id = ${runId}
           `;
         }
-        return true;
       }
     };
   }
@@ -5124,17 +5116,39 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * an agent-tool child with an open run, put the new request id on the run
    * row, so the parent's re-attach tail keeps receiving the run's frames and
    * does not give up on a healthy child. A no-op for any other agent.
-   *
-   * @returns `"cancelled"` when the turn being recovered belonged to a run
-   *   its parent cancelled. The recovered turn must not run.
    */
-  private _rebindAgentToolChildRunRequestId(
-    requestId: string
-  ): "bound" | "cancelled" | "none" {
-    return this._agentToolRuns.rebind(
-      requestId,
-      this._activeChatRecoveryRootRequestId
+  private _rebindAgentToolChildRunRequestId(requestId: string): void {
+    this._agentToolRuns.rebind(requestId);
+  }
+
+  /**
+   * Whether a recovery attempt may run, checked right after the attempt's
+   * own cancelled check. A turn that belonged to an agent-tool run its
+   * parent cancelled is not recovered: the cancel wrote the run row, but the
+   * isolate died before the aborted turn could unwind. The incident records
+   * it as cancelled, like a client's stop, and a submission the recovery
+   * owned settles as `aborted`.
+   */
+  private async _admitRecoveredAgentToolTurn(
+    data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined
+  ): Promise<boolean> {
+    if (!this._agentToolRuns.isRecoveredRunCancelled(data?.originalRequestId)) {
+      return true;
+    }
+    await this._updateChatRecoveryIncident(
+      data?.incidentId,
+      "skipped",
+      CHAT_RECOVERY_CANCELLED_REASON
     );
+    if (data?.recoveredRequestId) {
+      await this._completeRecoveredSubmission(
+        data.recoveredRequestId,
+        "aborted",
+        null,
+        null
+      );
+    }
+    return false;
   }
 
   // ── Dynamic config ──────────────────────────────────────────────
@@ -10327,17 +10341,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   private _isStaleAgentToolChildRun(row: AgentToolChildRunRow): boolean {
-    return (
-      row.completed_at === null &&
-      this._agentToolRuns.isStale({
-        runId: row.run_id,
-        requestId: row.request_id,
-        rootRequestId: null,
-        status: row.status,
-        error: row.error_message,
-        terminalOnly: false
-      })
-    );
+    return this._agentToolRuns.isStale({
+      runId: row.run_id,
+      requestId: row.request_id,
+      rootRequestId: null,
+      status: row.status,
+      error: row.error_message,
+      terminalOnly: false
+    });
   }
 
   /**
@@ -13295,12 +13306,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const requestId = crypto.randomUUID();
     // If this facet is itself an agent-tool child being recovered, re-bind its
     // run row to this turn's request id so the parent's re-attach tail keeps
-    // attributing the continued turn's frames (no-op otherwise). A run its
-    // parent cancelled before the interrupted turn could unwind is not
-    // re-run.
-    if (this._rebindAgentToolChildRunRequestId(requestId) === "cancelled") {
-      return { requestId: "", status: "skipped" };
-    }
+    // attributing the continued turn's frames (no-op otherwise).
+    this._rebindAgentToolChildRunRequestId(requestId);
     const clientTools = this._lastClientTools;
     const resolvedBody = body ?? this._lastBody;
     const workflowPrompt = this._recoveredWorkflowPrompt();
@@ -13419,12 +13426,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const requestId = crypto.randomUUID();
     // If this facet is itself an agent-tool child being recovered, re-bind its
     // run row to this turn's request id so the parent's re-attach tail keeps
-    // attributing the retried turn's frames (no-op otherwise). A run its
-    // parent cancelled before the interrupted turn could unwind is not
-    // re-run.
-    if (this._rebindAgentToolChildRunRequestId(requestId) === "cancelled") {
-      return { requestId: "", status: "skipped" };
-    }
+    // attributing the retried turn's frames (no-op otherwise).
+    this._rebindAgentToolChildRunRequestId(requestId);
     const epoch = this._turnQueue.generation;
     // Re-resolve the channel from the persisted user message so a recovered
     // retry re-applies per-channel policy, exactly like `continueLastTurn`. The
@@ -18137,6 +18140,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     onTurnStarted?: () => void
   ): Promise<void> {
     if (await this._recoveryCancelled(data)) return;
+    if (!(await this._admitRecoveredAgentToolTurn(data))) return;
     const recoveredSubmission = data?.recoveredRequestId
       ? this._readRunningSubmissionForRecovery(data.recoveredRequestId)
       : null;
@@ -18456,6 +18460,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     onTurnStarted?: () => void
   ): Promise<void> {
     if (await this._recoveryCancelled(data)) return;
+    if (!(await this._admitRecoveredAgentToolTurn(data))) return;
     const recoveredSubmission = data?.recoveredRequestId
       ? this._readRunningSubmissionForRecovery(data.recoveredRequestId)
       : null;

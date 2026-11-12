@@ -269,11 +269,18 @@ type ParentStub = DurableObjectStub & {
     status: string | undefined;
     otherTurnAborted: boolean;
   }>;
-  childCancelRunStopsRecoveryAttemptForTest(): Promise<boolean>;
-  childRecoverCancelledRunForTest(): Promise<{
-    status: string;
+  childCancelRecoveredRunForTest(): Promise<{
+    recoveredTurnAborted: boolean;
+    attemptAborted: boolean;
+    otherTurnAborted: boolean;
+    otherAttemptAborted: boolean;
+  }>;
+  childRecoverCancelledRunForTest(path: "continue" | "retry"): Promise<{
+    incident: { status: string; reason?: string } | null;
     chatCalls: number;
   }>;
+  childCancelStartingRunForTest(): Promise<string | null>;
+  childCancelWithBrokenRunTableForTest(): Promise<string>;
   childCancelAgentToolRunAbortsRecoveryForTest(): Promise<{
     abortedBefore: boolean;
     abortedAfter: boolean;
@@ -1347,15 +1354,39 @@ describe("AIChatAgent as an agent-tool child", () => {
     expect(result.otherTurnAborted).toBe(false);
   });
 
-  it("a cancel of a run being recovered stops a running recovery attempt", async () => {
+  it("a cancel of a run being recovered stops the requests on its row and nothing else", async () => {
     await expect(
-      (await getParent()).childCancelRunStopsRecoveryAttemptForTest()
-    ).resolves.toBe(true);
+      (await getParent()).childCancelRecoveredRunForTest()
+    ).resolves.toEqual({
+      recoveredTurnAborted: true,
+      attemptAborted: true,
+      otherTurnAborted: false,
+      otherAttemptAborted: false
+    });
   });
 
-  it("does not re-run the turn of a run cancelled before the isolate died", async () => {
-    const result = await (await getParent()).childRecoverCancelledRunForTest();
-    expect(result).toEqual({ status: "skipped", chatCalls: 0 });
+  for (const path of ["continue", "retry"] as const) {
+    it(`does not ${path} the turn of a run cancelled before the isolate died, and says why`, async () => {
+      const result = await (
+        await getParent()
+      ).childRecoverCancelledRunForTest(path);
+      expect(result).toEqual({
+        incident: { status: "skipped", reason: "user_cancelled" },
+        chatCalls: 0
+      });
+    });
+  }
+
+  it("treats a starting run as open: a cancel settles it", async () => {
+    await expect(
+      (await getParent()).childCancelStartingRunForTest()
+    ).resolves.toBe("aborted");
+  });
+
+  it("does not hide a failing run-table query as an unknown run", async () => {
+    await expect(
+      (await getParent()).childCancelWithBrokenRunTableForTest()
+    ).resolves.toBe("rejected");
   });
 
   it("keeps suppressing a recovered terminal-only child's chunks after a restart (#2298)", async () => {

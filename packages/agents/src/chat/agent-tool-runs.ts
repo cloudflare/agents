@@ -11,8 +11,11 @@
  *   turn, a cancel, and a stale-row reconcile wins ({@link finish},
  *   {@link cancel}, {@link reconcileStale});
  * - a cancel is a no-op unless the run is open. It stops the run's own turn
- *   through the run's controller, and a turn chat recovery is re-running
- *   through the host ({@link cancel});
+ *   through the run's controller, and a turn chat recovery is re-running by
+ *   the request ids on the run row, and nothing else ({@link cancel});
+ * - a run is open while its status is `starting` or `running`
+ *   ({@link isAgentToolRunOpen}), and this class is the only place that
+ *   decides whether a row may still be written;
  * - the row names the request id of the turn that is streaming for the run,
  *   across a recovery too, so the turn's frames are attributed to the run
  *   ({@link bindTurn}, {@link rebind}, {@link intercept});
@@ -83,19 +86,19 @@ export interface AgentToolRunStore {
    * also becomes the run's root request id, which later binds leave alone.
    */
   bindRequest(runId: string, requestId: string): void;
-  /** Record a stream error on a row that is still open. Must not throw. */
+  /** Record a stream error on the row. */
   recordStreamError(runId: string, error: string): void;
   /**
-   * Write `terminal` to the row, only while the row is open.
+   * Write `terminal` to the row. {@link AgentToolRuns} calls it only for an
+   * open row.
    *
    * @param turnRequestId - The request id of the turn that produced it.
-   * @returns Whether the row was written.
    */
-  settle(
+  writeTerminal(
     runId: string,
     terminal: AgentToolRunTerminal,
     turnRequestId?: string
-  ): boolean;
+  ): void;
 }
 
 /** The result of the turn a run queued. */
@@ -121,12 +124,12 @@ export interface AgentToolRunsHost {
   /** Whether the run produced an assistant reply, with or without text. */
   hasAssistantReply(runId: string): boolean;
   /**
-   * Stop the turn of a run that has no controller in this isolate: the run
-   * was interrupted and chat recovery is re-running its turn, or is about
-   * to. Cancel the requests the row names (current and root), their
-   * scheduled recovery, and every recovery attempt that is running.
+   * Cancel one request the way a client's stop does: its turn, queued or
+   * running, a recovery attempt running for it, and a recovery scheduled
+   * for it. Used for a run that has no controller in this isolate, whose
+   * turn chat recovery is re-running or is about to.
    */
-  cancelRecoveredTurn(run: AgentToolRunRecord, reason: unknown): void;
+  cancelRequest(requestId: string, reason: unknown): void;
   /** The state of chat recovery on this agent. */
   classifyRecovery(): Promise<"in-progress" | "failed" | "none">;
   /** `true` while a resumable stream is active. */
@@ -139,6 +142,10 @@ const FAILED_ERROR = "Agent tool run failed during streaming.";
 const INTERRUPTED_ERROR =
   "Agent tool run was interrupted before the child could finish.";
 
+/**
+ * The one definition of an open run: its status is `starting` or `running`.
+ * The stores' selects filter on the same two statuses.
+ */
 export function isAgentToolRunOpen(status: string): boolean {
   return status === "starting" || status === "running";
 }
@@ -240,7 +247,7 @@ export class AgentToolRuns {
       forwarders: this.forwarders,
       liveSequences: this.liveSequences,
       lastErrors: this.lastErrors,
-      onError: (runId, body) => this.host.store.recordStreamError(runId, body),
+      onError: (runId, body) => this.#recordStreamError(runId, body),
       responseType: this.host.responseType,
       runForRequest: (requestId) => this.runForRequest(requestId),
       terminalOnlyRuns: this.terminalOnlyRuns
@@ -279,28 +286,27 @@ export class AgentToolRuns {
    *
    * Safe to call for every recovered turn. An agent that never ran as an
    * agent tool, or whose run has ended, has no open run.
-   *
-   * @param recoveredRequestId - The request id chat recovery names the
-   *   turn by: the id it first ran under.
-   * @returns `"cancelled"` when that turn belonged to a run that was
-   *   cancelled before the turn could unwind, whether it was the run's first
-   *   turn or an earlier recovery of it. The recovered turn must not run.
    */
-  rebind(
-    requestId: string,
-    recoveredRequestId?: string
-  ): "bound" | "cancelled" | "none" {
+  rebind(requestId: string): void {
     const open = this.host.store.newestOpen();
-    if (open) {
-      if (open.terminalOnly) this.terminalOnlyRuns.add(open.runId);
-      this.bindTurn(open.runId, requestId);
-      return "bound";
-    }
-    if (recoveredRequestId !== undefined) {
-      const run = this.host.store.forRequest(recoveredRequestId);
-      if (run?.status === "aborted") return "cancelled";
-    }
-    return "none";
+    if (!open) return;
+    if (open.terminalOnly) this.terminalOnlyRuns.add(open.runId);
+    this.bindTurn(open.runId, requestId);
+  }
+
+  /**
+   * Whether the turn chat recovery is about to re-run belonged to a run its
+   * parent cancelled. The cancel wrote the row, but the isolate died before
+   * the aborted turn could unwind, so recovery woke for it. That turn must
+   * not run. Recovery entry points check this right after their own
+   * cancelled check and record the incident as cancelled.
+   *
+   * @param rootRequestId - The request id recovery names the turn by: the
+   *   id it first ran under, however often it was recovered since.
+   */
+  isRecoveredRunCancelled(rootRequestId: string | undefined): boolean {
+    if (rootRequestId === undefined) return false;
+    return this.host.store.forRequest(rootRequestId)?.status === "aborted";
   }
 
   // ── The run's life ─────────────────────────────────────────────────
@@ -370,17 +376,17 @@ export class AgentToolRuns {
           resetError: this.host.resetError,
           abortReason: controller.signal.reason
         });
-        this.host.store.settle(
+        this.#settle(
           runId,
-          outcome.status === "completed"
-            ? { status: "completed", ...this.host.collectResult(runId) }
-            : outcome,
+          () =>
+            outcome.status === "completed"
+              ? { status: "completed", ...this.host.collectResult(runId) }
+              : outcome,
           turn.requestId
         );
       } catch (error) {
         // A turn that threw because the run was aborted is `aborted`.
-        this.host.store.settle(
-          runId,
+        this.#settle(runId, () =>
           controller.signal.aborted
             ? {
                 status: "aborted",
@@ -419,9 +425,12 @@ export class AgentToolRuns {
    * A run whose lifecycle is in this isolate is stopped through its own
    * controller, which reaches its turn whether the turn is queued or
    * running, and no other turn. A run with no controller here was
-   * interrupted: the host stops whatever chat recovery is doing for it.
-   * Either way the row records `aborted` now, and no later outcome replaces
-   * it.
+   * interrupted, and chat recovery owns its turn: cancel the request ids
+   * the row names, the current one (the recovered turn runs under it) and
+   * the first one (recovery attempts are registered under it). Nothing else
+   * on the agent is touched: an agent can serve a parent's run and its own
+   * users at once. Either way the row records `aborted` now, and no later
+   * outcome replaces it.
    */
   cancel(runId: string, reason?: unknown): void {
     const run = this.host.store.read(runId);
@@ -430,12 +439,14 @@ export class AgentToolRuns {
     if (controller) {
       controller.abort(reason);
     } else {
-      this.host.cancelRecoveredTurn(run, reason);
+      for (const requestId of new Set([run.requestId, run.rootRequestId])) {
+        if (requestId) this.host.cancelRequest(requestId, reason);
+      }
     }
-    this.host.store.settle(runId, {
+    this.#settle(runId, () => ({
       status: "aborted",
       error: reasonText(reason)
-    });
+    }));
     // Release any parent live-tail so it stops waiting on this run.
     this.closeTailers(runId);
   }
@@ -482,24 +493,56 @@ export class AgentToolRuns {
     if (recovery === "in-progress" || this.host.hasActiveStream()) return;
     const run = this.host.store.read(runId);
     if (!run || !this.isStale(run)) return;
-    if (run.error !== null) {
+    const error = run.error;
+    this.#settle(runId, () => {
       // A recorded stream error means the turn failed even if it stored a
       // reply, as in the live lifecycle.
-      this.host.store.settle(runId, { status: "error", error: run.error });
-    } else if (recovery !== "failed" && this.host.hasAssistantReply(runId)) {
+      if (error !== null) return { status: "error", error };
       // A reply with no final text (it ended on a tool result) still
       // completed the run.
-      this.host.store.settle(runId, {
-        status: "completed",
-        ...this.host.collectResult(runId)
-      });
-    } else {
-      this.host.store.settle(runId, {
-        status: "error",
-        error: INTERRUPTED_ERROR
-      });
-    }
+      if (recovery !== "failed" && this.host.hasAssistantReply(runId)) {
+        return { status: "completed", ...this.host.collectResult(runId) };
+      }
+      return { status: "error", error: INTERRUPTED_ERROR };
+    });
     this.closeTailers(runId);
+  }
+
+  // ── Writes ─────────────────────────────────────────────────────────
+
+  /**
+   * Write a terminal status, only while the run is open. This is the one
+   * guard behind "a terminal status is written once": the read and the
+   * write are synchronous SQL, so nothing runs between them.
+   *
+   * @param terminal - Built only when the row will be written.
+   */
+  #settle(
+    runId: string,
+    terminal: () => AgentToolRunTerminal,
+    turnRequestId?: string
+  ): void {
+    const run = this.host.store.read(runId);
+    if (!run || !isAgentToolRunOpen(run.status)) return;
+    this.host.store.writeTerminal(runId, terminal(), turnRequestId);
+  }
+
+  /**
+   * Record a run's stream error on its open row, so a reconcile after an
+   * eviction still sees the failure. Runs inside `broadcast`, which must
+   * never throw: the in-memory capture remains if the write fails.
+   */
+  #recordStreamError(runId: string, error: string): void {
+    try {
+      const run = this.host.store.read(runId);
+      if (!run || !isAgentToolRunOpen(run.status)) return;
+      this.host.store.recordStreamError(runId, error);
+    } catch (cause) {
+      console.error(
+        `[agent-tool] failed to record a stream error for run ${runId}`,
+        cause
+      );
+    }
   }
 
   /**

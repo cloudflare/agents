@@ -15,7 +15,7 @@ type Row = AgentToolRunRecord & {
   writes: number;
 };
 
-/** A run table in memory. `settle` writes only an open row, like the hosts'. */
+/** A run table in memory. It has no guards of its own: the core decides. */
 class FakeStore implements AgentToolRunStore {
   rows = new Map<string, Row>();
   private open(row: Row) {
@@ -70,22 +70,21 @@ class FakeStore implements AgentToolRunStore {
   }
   recordStreamError(runId: string, error: string) {
     const row = this.rows.get(runId);
-    if (row && this.open(row)) row.error = error;
+    if (row) row.error = error;
   }
-  settle(runId: string, terminal: AgentToolRunTerminal) {
+  writeTerminal(runId: string, terminal: AgentToolRunTerminal) {
     const row = this.rows.get(runId);
-    if (!row || !this.open(row)) return false;
+    if (!row) return;
     row.status = terminal.status;
     row.terminal = terminal;
     row.writes++;
-    return true;
   }
 }
 
 function setup() {
   const store = new FakeStore();
   const queue = new TurnQueue();
-  const recovered: Array<{ runId: string; reason: unknown }> = [];
+  const recovered: Array<{ requestId: string; reason: unknown }> = [];
   let recovery: "in-progress" | "failed" | "none" = "none";
   let reply = false;
   let resolveRecovery: (() => void) | undefined;
@@ -102,8 +101,8 @@ function setup() {
     },
     collectResult: () => ({ output: { ok: true }, summary: "done" }),
     hasAssistantReply: () => reply,
-    cancelRecoveredTurn: (run, reason) =>
-      void recovered.push({ runId: run.runId, reason }),
+    cancelRequest: (requestId, reason) =>
+      void recovered.push({ requestId, reason }),
     classifyRecovery: () =>
       resolveRecovery
         ? new Promise((resolve) => {
@@ -274,15 +273,49 @@ describe("AgentToolRuns", () => {
     expect(recovered).toEqual([]);
   });
 
-  it("a cancel of a run with no controller here stops the recovered turn through the host", () => {
+  it("a cancel of a run with no controller here cancels the request ids on its row, and only those", () => {
     const { runs, store, recovered } = setup();
-    // A row an earlier isolate left open.
+    // A row an earlier isolate left open, recovered once already.
     store.insert("run-1", { startedAt: 1, terminalOnly: false });
     store.bindRequest("run-1", "req-1");
+    runs.rebind("req-2");
 
     runs.cancel("run-1", "parent gave up");
-    expect(recovered).toEqual([{ runId: "run-1", reason: "parent gave up" }]);
+    expect(recovered).toEqual([
+      { requestId: "req-2", reason: "parent gave up" },
+      { requestId: "req-1", reason: "parent gave up" }
+    ]);
     expect(store.read("run-1")?.status).toBe("aborted");
+  });
+
+  it("a cancel of a run that never bound a request cancels no request", () => {
+    const { runs, store, recovered } = setup();
+    store.insert("run-1", { startedAt: 1, terminalOnly: false });
+    runs.cancel("run-1", "parent gave up");
+    expect(recovered).toEqual([]);
+    expect(store.read("run-1")?.status).toBe("aborted");
+  });
+
+  it("records a stream error only on an open row, and never throws", () => {
+    const { runs, store } = setup();
+    store.insert("run-1", { startedAt: 1, terminalOnly: false });
+    store.bindRequest("run-1", "req-1");
+    runs.liveSequences.set("run-1", 0);
+    const frame = (body: string) =>
+      JSON.stringify({ type: "response", id: "req-1", body, error: true });
+    runs.intercept(frame("first failure"));
+    expect(store.read("run-1")?.error).toBe("first failure");
+
+    runs.cancel("run-1", "stop");
+    runs.runsByRequestId.set("req-1", "run-1");
+    runs.liveSequences.set("run-1", 0);
+    runs.intercept(frame("late failure"));
+    expect(store.read("run-1")?.error).toBe("first failure");
+
+    store.read = () => {
+      throw new Error("sql failed");
+    };
+    expect(() => runs.intercept(frame("unrecorded"))).not.toThrow();
   });
 
   it("records a reset as an error whether the turn was queued or running", async () => {
@@ -341,8 +374,9 @@ describe("AgentToolRuns", () => {
     expect(runs.runForRequest("req-1")).toBe("run-1");
     expect(runs.runForRequest("other")).toBe(null);
 
-    expect(runs.rebind("req-2")).toBe("bound");
+    runs.rebind("req-2");
     expect(store.read("run-1")?.requestId).toBe("req-2");
+    expect(store.read("run-1")?.rootRequestId).toBe("req-1");
     expect(runs.runForRequest("req-2")).toBe("run-1");
   });
 
@@ -356,17 +390,19 @@ describe("AgentToolRuns", () => {
 
   it("reports a recovered turn whose run was cancelled, and leaves unrelated turns alone", () => {
     const { runs, store } = setup();
-    expect(runs.rebind("req-9", "req-8")).toBe("none");
+    expect(runs.isRecoveredRunCancelled("req-8")).toBe(false);
 
     store.insert("run-1", { startedAt: 1, terminalOnly: false });
     store.bindRequest("run-1", "req-1");
+    // An open run's turn is recovered.
+    expect(runs.isRecoveredRunCancelled("req-1")).toBe(false);
     runs.cancel("run-1", "stop");
 
-    expect(runs.rebind("req-2", "req-1")).toBe("cancelled");
+    expect(runs.isRecoveredRunCancelled("req-1")).toBe(true);
     // A recovered turn of some other request is not this run's.
-    expect(runs.rebind("req-2", "req-7")).toBe("none");
+    expect(runs.isRecoveredRunCancelled("req-7")).toBe(false);
     // Nor is a turn that is not a recovery.
-    expect(runs.rebind("req-2")).toBe("none");
+    expect(runs.isRecoveredRunCancelled(undefined)).toBe(false);
   });
 
   it("reports a cancelled run to a second recovery, which still names the first request id", () => {
@@ -374,11 +410,21 @@ describe("AgentToolRuns", () => {
     store.insert("run-1", { startedAt: 1, terminalOnly: false });
     store.bindRequest("run-1", "req-1");
     // The first recovery re-runs the turn under a new request id.
-    expect(runs.rebind("req-2", "req-1")).toBe("bound");
+    runs.rebind("req-2");
     expect(store.read("run-1")?.requestId).toBe("req-2");
     runs.cancel("run-1", "stop");
     // The isolate dies again; recovery wakes for the turn it knows as req-1.
-    expect(runs.rebind("req-3", "req-1")).toBe("cancelled");
+    expect(runs.isRecoveredRunCancelled("req-1")).toBe(true);
+  });
+
+  it("a run that completed or failed does not stop the recovery of its turn", async () => {
+    const { runs, store, setReply } = setup();
+    store.insert("run-1", { startedAt: 1, terminalOnly: false });
+    store.bindRequest("run-1", "req-1");
+    setReply(true);
+    await runs.reconcileStale("run-1");
+    expect(store.read("run-1")?.status).toBe("completed");
+    expect(runs.isRecoveredRunCancelled("req-1")).toBe(false);
   });
 
   it("settles a stale run from recovery: completed with a reply, error without", async () => {

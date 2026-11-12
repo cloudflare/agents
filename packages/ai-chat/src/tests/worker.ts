@@ -4429,37 +4429,65 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     return { status: finished?.status, otherTurnAborted };
   }
 
-  /** A cancel of a run being recovered stops a running recovery attempt. */
-  async cancelRunStopsRecoveryAttemptForTest(): Promise<boolean> {
+  /**
+   * A cancel of a run being recovered stops what runs under the request ids
+   * on its row (the recovered turn, a recovery attempt registered under the
+   * first id) and nothing else on the agent.
+   */
+  async cancelRecoveredRunForTest(): Promise<{
+    recoveredTurnAborted: boolean;
+    attemptAborted: boolean;
+    otherTurnAborted: boolean;
+    otherAttemptAborted: boolean;
+  }> {
     const runId = crypto.randomUUID();
     this.sql`
-      INSERT INTO cf_ai_chat_agent_tool_runs (run_id, request_id, status, started_at)
-      VALUES (${runId}, 'interrupted-request', 'running', ${Date.now()})
+      INSERT INTO cf_ai_chat_agent_tool_runs
+        (run_id, request_id, root_request_id, status, started_at)
+      VALUES (${runId}, 'recovered-request', 'first-request', 'running',
+        ${Date.now()})
     `;
-    const attempt = this["_turns"].beginRecoveryAttempt("root-request");
+    const registry = this["_abortRegistry"];
+    const recoveredTurn = registry.getSignal("recovered-request");
+    const otherTurn = registry.getSignal("a-users-turn");
+    const attempt = this["_turns"].beginRecoveryAttempt("first-request");
+    const otherAttempt = this["_turns"].beginRecoveryAttempt("a-users-root");
     try {
       await this.cancelAgentToolRun(runId, "parent gave up");
-      return attempt.signal.aborted;
+      return {
+        recoveredTurnAborted: recoveredTurn?.aborted ?? false,
+        attemptAborted: attempt.signal.aborted,
+        otherTurnAborted: otherTurn?.aborted ?? false,
+        otherAttemptAborted: otherAttempt.signal.aborted
+      };
     } finally {
       attempt.end();
+      otherAttempt.end();
+      registry.remove("recovered-request");
+      registry.remove("a-users-turn");
     }
   }
 
   /**
    * The run was cancelled, then the isolate died before the run's turn
-   * unwound, so chat recovery wakes for that turn. It must not run.
+   * unwound, so chat recovery wakes for that turn. It must not run, and the
+   * incident must say the run was cancelled.
    */
-  async recoverCancelledRunForTest(): Promise<{
-    status: string;
+  async recoverCancelledRunForTest(path: "continue" | "retry"): Promise<{
+    incident: { status: string; reason?: string } | null;
     chatCalls: number;
   }> {
     await this.persistMessages([
       { id: "u1", role: "user", parts: [{ type: "text", text: "question" }] },
-      {
-        id: "a1",
-        role: "assistant",
-        parts: [{ type: "text", text: "partial answer" }]
-      }
+      ...(path === "continue"
+        ? [
+            {
+              id: "a1",
+              role: "assistant" as const,
+              parts: [{ type: "text" as const, text: "partial answer" }]
+            }
+          ]
+        : [])
     ]);
     const runId = crypto.randomUUID();
     // The run's turn was recovered once already, so the row names the
@@ -4470,18 +4498,69 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       VALUES (${runId}, 'recovered-request', 'interrupted-request', 'aborted',
         ${Date.now()}, ${Date.now()})
     `;
-    const self = this as unknown as {
-      _activeChatRecoveryRootRequestId: string | undefined;
+    const incidentId = crypto.randomUUID();
+    const key = `cf:chat-recovery:incident:${encodeURIComponent(incidentId)}`;
+    const now = Date.now();
+    await this.ctx.storage.put(key, {
+      incidentId,
+      requestId: "recovered-request",
+      recoveryRootRequestId: "interrupted-request",
+      recoveryKind: path,
+      attempt: 1,
+      maxAttempts: 10,
+      status: "scheduled",
+      firstSeenAt: now,
+      lastAttemptAt: now
+    });
+    const recovery = this as unknown as {
+      _chatRecoveryContinueDetached(d: object): Promise<void>;
+      _chatRecoveryRetryDetached(d: object): Promise<void>;
     };
-    self._activeChatRecoveryRootRequestId = "interrupted-request";
+    if (path === "continue") {
+      await recovery._chatRecoveryContinueDetached({
+        incidentId,
+        originalRequestId: "interrupted-request",
+        targetAssistantId: "a1"
+      });
+    } else {
+      await recovery._chatRecoveryRetryDetached({
+        incidentId,
+        originalRequestId: "interrupted-request",
+        targetUserId: "u1"
+      });
+    }
+    const incident =
+      (await this.ctx.storage.get<{ status: string; reason?: string }>(key)) ??
+      null;
+    return {
+      incident: incident
+        ? { status: incident.status, reason: incident.reason }
+        : null,
+      chatCalls: this._chatCallsForTest.length
+    };
+  }
+
+  /** `starting` is an open status too: a cancel settles such a row. */
+  async cancelStartingRunForTest(): Promise<string | null> {
+    const runId = crypto.randomUUID();
+    this.sql`
+      INSERT INTO cf_ai_chat_agent_tool_runs (run_id, status, started_at)
+      VALUES (${runId}, 'starting', ${Date.now()})
+    `;
+    await this.cancelAgentToolRun(runId, "stop");
+    return this._readChildRunStatusForTest(runId);
+  }
+
+  /** A failing run-table query is an error, not "no such run". */
+  async cancelWithBrokenRunTableForTest(): Promise<string> {
+    this.sql`ALTER TABLE cf_ai_chat_agent_tool_runs RENAME TO moved_away`;
     try {
-      const result = await this.continueLastTurn();
-      return {
-        status: result.status,
-        chatCalls: this._chatCallsForTest.length
-      };
+      await this.cancelAgentToolRun("any-run", "stop");
+      return "resolved";
+    } catch (error) {
+      return error instanceof Error ? "rejected" : "rejected";
     } finally {
-      self._activeChatRecoveryRootRequestId = undefined;
+      this.sql`ALTER TABLE moved_away RENAME TO cf_ai_chat_agent_tool_runs`;
     }
   }
 
@@ -5320,8 +5399,8 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
   }> {
     const runId = crypto.randomUUID();
     this.sql`
-      INSERT INTO cf_ai_chat_agent_tool_runs (run_id, status, started_at)
-      VALUES (${runId}, 'running', ${Date.now()})
+      INSERT INTO cf_ai_chat_agent_tool_runs (run_id, request_id, status, started_at)
+      VALUES (${runId}, 'recovered-request', 'running', ${Date.now()})
     `;
     const signal = (
       this as unknown as {
@@ -6326,14 +6405,20 @@ export class AIChatAgentToolParent extends Agent<Env> {
     return (await this._freshChildForTest()).cancelFinishedRunForTest();
   }
 
-  async childCancelRunStopsRecoveryAttemptForTest() {
-    return (
-      await this._freshChildForTest()
-    ).cancelRunStopsRecoveryAttemptForTest();
+  async childCancelRecoveredRunForTest() {
+    return (await this._freshChildForTest()).cancelRecoveredRunForTest();
   }
 
-  async childRecoverCancelledRunForTest() {
-    return (await this._freshChildForTest()).recoverCancelledRunForTest();
+  async childRecoverCancelledRunForTest(path: "continue" | "retry") {
+    return (await this._freshChildForTest()).recoverCancelledRunForTest(path);
+  }
+
+  async childCancelStartingRunForTest() {
+    return (await this._freshChildForTest()).cancelStartingRunForTest();
+  }
+
+  async childCancelWithBrokenRunTableForTest() {
+    return (await this._freshChildForTest()).cancelWithBrokenRunTableForTest();
   }
 
   async childCancelAgentToolRunAbortsRecoveryForTest(): Promise<{

@@ -23,12 +23,15 @@ type ThinkAgentToolTestStub = {
     userTexts: string[];
     steps: number;
   }>;
-  cancelRunStopsRecoveredTurnForTest(): Promise<{
-    turnAborted: boolean;
+  cancelRecoveredRunForTest(): Promise<{
+    recoveredTurnAborted: boolean;
     attemptAborted: boolean;
+    otherTurnAborted: boolean;
+    otherAttemptAborted: boolean;
+    otherSubmissionAborted: boolean;
   }>;
-  recoverCancelledAgentToolRunForTest(): Promise<{
-    status: string;
+  recoverCancelledAgentToolRunForTest(path: "continue" | "retry"): Promise<{
+    incident: { status: string; reason?: string } | null;
     steps: number;
   }>;
   inspectAgentToolRun(runId: string): Promise<AgentToolInspection>;
@@ -399,21 +402,28 @@ describe("Think agent tools", () => {
     expect(result.steps).toBe(1);
   });
 
-  it("a cancel of a run being recovered stops the recovered turn and a running recovery attempt", async () => {
+  it("a cancel of a run being recovered stops the requests on its row and nothing else", async () => {
     const agent = await freshAgent();
-    await expect(agent.cancelRunStopsRecoveredTurnForTest()).resolves.toEqual({
-      turnAborted: true,
-      attemptAborted: true
+    await expect(agent.cancelRecoveredRunForTest()).resolves.toEqual({
+      recoveredTurnAborted: true,
+      attemptAborted: true,
+      otherTurnAborted: false,
+      otherAttemptAborted: false,
+      otherSubmissionAborted: false
     });
   });
 
-  it("does not re-run the turn of a run cancelled before the isolate died", async () => {
-    const agent = await freshAgent();
-    await expect(agent.recoverCancelledAgentToolRunForTest()).resolves.toEqual({
-      status: "skipped",
-      steps: 0
+  for (const path of ["continue", "retry"] as const) {
+    it(`does not ${path} the turn of a run cancelled before the isolate died, and says why`, async () => {
+      const agent = await freshAgent();
+      await expect(
+        agent.recoverCancelledAgentToolRunForTest(path)
+      ).resolves.toEqual({
+        incident: { status: "skipped", reason: "user_cancelled" },
+        steps: 0
+      });
     });
-  });
+  }
 
   it("cleans in-memory agent-tool bookkeeping after a run completes", async () => {
     const agent = await freshAgent();
