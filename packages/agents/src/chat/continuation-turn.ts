@@ -30,7 +30,8 @@
  * - a result that arrives while a continuation runs is never lost;
  * - a connection waiting on a continuation always gets `STREAM_RESUMING` or
  *   `STREAM_RESUME_NONE`;
- * - a continuation that fails before it streams sends one error frame.
+ * - a continuation that fails before it streams sends one error frame;
+ * - a continuation that was waiting when a stop landed never runs.
  *
  * `ChatTurns` exposes each function as a method. Hosts call those.
  *
@@ -257,8 +258,9 @@ export async function runContinuationTurn<
         await runContinuationBody(parts, turn, continuation, signal, outcome);
       } finally {
         // Inside the turn, so the next turn in the queue sees settled slots.
+        const stopped = signal?.aborted ?? false;
         parts.aborts.remove(requestId);
-        settleContinuationTurn(parts, requestId);
+        settleContinuationTurn(parts, requestId, { stopped });
       }
     });
   } catch (error) {
@@ -473,16 +475,36 @@ export function continuationStreamEnded<
 /**
  * A streamed reply was finalized: its message, with every tool part, is
  * stored, and the host cleared its stream-active gate. Call it for every
- * reply, not only a continuation's. It re-runs the barrier for a
- * continuation the gate held (#1650): once the stream ends no further tool
- * result arrives to do it.
+ * reply, not only a continuation's.
  *
- * Whether that continuation still has something to answer is decided when
- * its turn starts ({@link claimContinuation}), not here.
+ * It re-runs the barrier for a continuation the gate held (#1650): once the
+ * stream ends no further tool result arrives to do it. Whether that
+ * continuation still has something to answer is decided when its turn
+ * starts ({@link claimContinuation}), not here.
+ *
+ * A reply that was stopped drops that continuation instead. Stop means
+ * stop: a tool result answered while the reply streamed must not start the
+ * model again once the user stopped it. The connections waiting on the
+ * continuation get `STREAM_RESUME_NONE`, and the result stays in the
+ * transcript for the next turn. A result that arrives after the stop is a
+ * new action and schedules a continuation as usual.
+ *
+ * @param options.stopped - The reply's stream was cut off by a stop (its
+ *   abort signal), not by the model finishing or by an error.
  */
 export function replyFinalized<TConnection extends ContinuationConnection>(
-  parts: ContinuationTurnParts<TConnection>
+  parts: ContinuationTurnParts<TConnection>,
+  options: { stopped?: boolean } = {}
 ): void {
+  const { continuation } = parts;
+  if (options.stopped) {
+    const pending = continuation.pending;
+    if (pending && !pending.pastCoalesce) {
+      continuation.sendResumeNone();
+      continuation.clearPending();
+    }
+    return;
+  }
   parts.autoContinuation.rearmForBatch();
 }
 
@@ -502,10 +524,20 @@ export function replyFinalized<TConnection extends ContinuationConnection>(
  * - Otherwise the deferred result becomes the next continuation, through
  *   the barrier. This holds for a turn that failed too: the result it
  *   deferred has not been read by any model call.
+ * - A turn that was stopped drops the deferred result instead. Stop means
+ *   stop: a result that arrived while the turn ran must not start the model
+ *   again once the user stopped it. It stays in the transcript for the next
+ *   turn.
+ *
+ * @param options.stopped - The turn's abort signal fired.
  */
 export function settleContinuationTurn<
   TConnection extends ContinuationConnection
->(parts: ContinuationTurnParts<TConnection>, requestId: string): void {
+>(
+  parts: ContinuationTurnParts<TConnection>,
+  requestId: string,
+  options: { stopped?: boolean } = {}
+): void {
   const { continuation } = parts;
   const pending = continuation.pending;
   if (pending?.requestId === requestId) {
@@ -524,6 +556,10 @@ export function settleContinuationTurn<
       );
       continuation.clearDeferred();
     }
+  }
+  if (options.stopped) {
+    continuation.clearDeferred();
+    return;
   }
   parts.autoContinuation.activateDeferredAndReschedule();
 }

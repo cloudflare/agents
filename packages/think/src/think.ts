@@ -14926,7 +14926,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       if (skipFinalizeRearm) {
         this._streamingAssistant = null;
       } else {
-        this._onStreamingTurnFinalized();
+        this._onStreamingTurnFinalized(aborted && !streamError);
       }
     }
 
@@ -15538,7 +15538,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // The message is now persisted (or the turn was cleared), so subsequent
     // tool results resolve against storage; stop exposing the accumulator and
     // re-check any continuation the stream-active barrier held (#1650).
-    this._onStreamingTurnFinalized();
+    this._onStreamingTurnFinalized(streamAborted && !streamError);
 
     return streamError
       ? { status: "error", error: streamError }
@@ -18794,7 +18794,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * would never fire. A slow batch is also re-checked here and simply continues
    * to hold (event-driven) until its remaining siblings answer.
    */
-  private _onStreamingTurnFinalized(): void {
+  private _onStreamingTurnFinalized(stopped = false): void {
     this._streamingAssistant = null;
     if (this._flushResolvedPausesOnFinalize) {
       this._flushResolvedPausesOnFinalize = false;
@@ -18804,7 +18804,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         console.error("[Think] Failed to apply resolved pauses", error);
       });
     }
-    this._turns.replyFinalized();
+    // A stopped reply drops the continuation its stream held.
+    this._turns.replyFinalized({ stopped });
   }
 
   /**

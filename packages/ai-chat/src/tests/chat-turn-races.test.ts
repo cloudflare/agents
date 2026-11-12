@@ -641,4 +641,109 @@ describe("chat turn races", () => {
     expect(stored[1].parts).toHaveLength(4);
     ws.close(1000);
   });
+
+  it("a stopped reply does not continue for a tool result answered while it streamed", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const seen = record(ws);
+    const agent = await getAgentByName(env.TestChatAgent, room);
+
+    // The reply streams a client tool call and keeps streaming.
+    sendChatRequest(ws, "req-1", [user1], {
+      consumeClientToolResultWithinStream: true
+    });
+    await waitUntil(() =>
+      responses(seen, "req-1").some((m) =>
+        m.body.includes("call_consumed_within_stream")
+      )
+    );
+    // The tab answers the call while the reply streams, then the user stops
+    // the reply.
+    send(ws, {
+      type: MessageType.CF_AGENT_TOOL_RESULT,
+      toolCallId: "call_consumed_within_stream",
+      toolName: "fastClientTool",
+      output: { ok: true },
+      autoContinue: true
+    });
+    send(ws, { type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL, id: "req-1" });
+    await waitUntil(() => responses(seen, "req-1").some((m) => m.done));
+    await delay(300);
+    await agent.waitForIdleForTest();
+
+    // Stop means stop: the model is not called again.
+    expect(await agent.getChatMessageCallCountForTest()).toBe(1);
+    expect(await agent.getContinuationStateForTest()).toMatchObject({
+      hasPending: false,
+      hasDeferred: false
+    });
+    // The answer is kept for the next turn.
+    const stored = (await agent.getPersistedMessages()) as ChatMessage[];
+    const call = stored
+      .flatMap((m) => m.parts)
+      .find(
+        (part) =>
+          "toolCallId" in part &&
+          part.toolCallId === "call_consumed_within_stream"
+      );
+    expect(call).toMatchObject({ state: "output-available" });
+    ws.close(1000);
+  });
+
+  it("a stopped continuation does not run the result that arrived while it ran", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const agent = await getAgentByName(env.TestChatAgent, room);
+    const reply: ChatMessage = {
+      id: "assistant-1",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-testTool",
+          toolCallId: "call-1",
+          state: "input-available",
+          input: {}
+        },
+        {
+          type: "tool-otherTool",
+          toolCallId: "call-2",
+          state: "approval-responded",
+          input: {},
+          approval: { id: "approval-2", approved: true }
+        }
+      ] as ChatMessage["parts"]
+    };
+    await agent.persistMessages([user1, reply]);
+    await agent.setTestBody({ delayMs: 400 });
+
+    // The first result's continuation waits on the model. A second result
+    // lands meanwhile, and then the user stops the continuation.
+    send(ws, toolResult("call-1"));
+    await waitUntil(
+      async () => (await agent.getChatMessageCallCountForTest()) === 1
+    );
+    const continuationId = await agent.pendingContinuationRequestIdForTest();
+    expect(continuationId).not.toBeNull();
+    send(ws, toolResult("call-2"));
+    await waitUntil(
+      async () =>
+        (await agent.getContinuationStateForTest()).hasDeferred === true
+    );
+    send(ws, {
+      type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
+      id: continuationId
+    });
+    await delay(900);
+    await agent.waitForIdleForTest();
+
+    // Stop means stop: the second result does not start the model again.
+    expect(await agent.getChatMessageCallCountForTest()).toBe(1);
+    expect(await agent.getContinuationStateForTest()).toMatchObject({
+      hasPending: false,
+      hasDeferred: false
+    });
+    const stored = (await agent.getPersistedMessages()) as ChatMessage[];
+    expect(stored[1].parts[1]).toMatchObject({ state: "output-available" });
+    ws.close(1000);
+  });
 });

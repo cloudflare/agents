@@ -499,6 +499,61 @@ describe("the continuation turn", () => {
     expect(host.ran).toEqual(["cont-1", "cont-2"]);
   });
 
+  it("a stopped continuation drops the result deferred while it ran", async () => {
+    const second = makeConnection("c2");
+    host.model = async (continuation) => {
+      if (continuation.requestId !== "cont-1") return;
+      // Deferred: arrives while the turn waits on the model. Then the user
+      // stops the continuation.
+      await result("a1", second);
+      turns.cancel(continuation.requestId);
+    };
+    await result("a1");
+    await fire();
+    await drain();
+    await fire();
+    await drain();
+
+    expect(host.ran).toEqual(["cont-1"]);
+    expect(turns.continuation.deferred).toBeNull();
+    expect(turns.continuation.pending).toBeNull();
+    expect(turns.hasPendingDecision()).toBe(false);
+  });
+
+  it("a stopped reply drops the continuation its stream held", async () => {
+    // The result lands while the reply streams. The user stops the reply.
+    host.replyStreaming = true;
+    await result("a1");
+    host.replyStreaming = false;
+    turns.replyFinalized({ stopped: true });
+    await fire();
+    await drain();
+
+    expect(host.ran).toEqual([]);
+    expect(connection.sent).toEqual([RESUME_NONE]);
+    expect(turns.continuation.pending).toBeNull();
+  });
+
+  it("a result that arrives after the stop continues as usual", async () => {
+    host.replyStreaming = true;
+    await result("a1");
+    host.replyStreaming = false;
+    turns.replyFinalized({ stopped: true });
+    await result("a1");
+    await fire();
+    await drain();
+
+    expect(host.ran).toEqual(["cont-2"]);
+  });
+
+  it("a stopped reply leaves a continuation whose turn is running alone", async () => {
+    await result("a1");
+    turns.takeContinuation("cont-1");
+    turns.replyFinalized({ stopped: true });
+
+    expect(turns.continuation.pending?.requestId).toBe("cont-1");
+  });
+
   it("leaves a newer pending continuation alone, and lets it cover the deferred result", async () => {
     const second = makeConnection("c2");
     const third = makeConnection("c3");

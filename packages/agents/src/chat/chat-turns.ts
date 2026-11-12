@@ -541,16 +541,19 @@ export class ChatTurns<
    * A streamed reply was finalized and the host cleared its stream-active
    * gate. See {@link replyFinalized}.
    */
-  replyFinalized(): void {
-    replyFinalized(this.#continuationParts);
+  replyFinalized(options?: { stopped?: boolean }): void {
+    replyFinalized(this.#continuationParts, options);
   }
 
   /**
    * Settle the continuation slots for a continuation turn that ended.
    * {@link runContinuationTurn} calls it. See {@link settleContinuationTurn}.
    */
-  settleContinuationTurn(requestId: string): void {
-    settleContinuationTurn(this.#continuationParts, requestId);
+  settleContinuationTurn(
+    requestId: string,
+    options?: { stopped?: boolean }
+  ): void {
+    settleContinuationTurn(this.#continuationParts, requestId, options);
   }
 
   // ── Cancel and reset ───────────────────────────────────────────────
