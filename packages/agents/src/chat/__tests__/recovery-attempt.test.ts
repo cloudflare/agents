@@ -303,6 +303,31 @@ describe("runRecoveredTurn", () => {
     });
   });
 
+  it("the attempt's own continuation turn does not supersede its incident", async () => {
+    let superseded: boolean | undefined;
+    const t = setup({
+      // What the host's fiber wrapper does for every continuation turn.
+      duringTurn: async ({ engine }) => {
+        superseded = await engine.runContinuationTurn(async () =>
+          engine.isRecoverySuperseded(INCIDENT)
+        );
+      }
+    });
+    await t.run();
+    expect(superseded).toBe(false);
+    // The attempt recorded its own outcome: a completed incident is dropped.
+    expect(t.incident()).toBeUndefined();
+  });
+
+  it("a continuation turn that is not the attempt's supersedes the scheduled incident", async () => {
+    const t = setup();
+    expect(
+      await t.engine.runContinuationTurn(async () =>
+        t.engine.isRecoverySuperseded(INCIDENT)
+      )
+    ).toBe(true);
+  });
+
   it("a client's answer that continued the reply wins over a timeout that would reschedule", async () => {
     const t = setup({
       ready: false,

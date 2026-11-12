@@ -269,7 +269,9 @@ async function runAdmittedAttempt<
     // Drop a mark an earlier interruption left, so only this turn's own
     // reschedule counts below.
     engine.takeReschedule(incidentId);
-    const result = await host.runTurn(stop.signal);
+    const result = await engine.runAttemptTurn(incidentId, () =>
+      host.runTurn(stop.signal)
+    );
 
     if (stop.signal.aborted) {
       await recordStop();
