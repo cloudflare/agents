@@ -549,6 +549,72 @@ describe("ChatTurns", () => {
       ).toEqual([]);
     });
 
+    it("settleBeforeTurn stores what the repair changed and reports it", async () => {
+      host.clientTools = new Set(["x"]);
+      const messages = [
+        user("u1"),
+        toolReply("a1", "input-available"),
+        user("u2")
+      ] as UIMessage[];
+      const stored: string[][] = [];
+      const events: unknown[] = [];
+      const sink = {
+        persist: async (changed: UIMessage[]) => {
+          stored.push(changed.map((message) => message.id));
+        },
+        emitRepaired: (event: unknown) => void events.push(event)
+      };
+
+      const result = await turns.settleBeforeTurn(
+        messages,
+        { continuation: false, repairPart: flip },
+        sink
+      );
+
+      expect(stateOf(result.messages[1])).toBe("output-error");
+      expect(stored).toEqual([["a1"]]);
+      expect(events).toMatchObject([
+        { removedToolCalls: 1, toolCallIds: ["call-a1"] }
+      ]);
+
+      // Nothing to repair: no write and no event.
+      await turns.settleBeforeTurn(
+        result.messages,
+        { continuation: false, repairPart: flip },
+        sink
+      );
+      expect(stored).toHaveLength(1);
+      expect(events).toHaveLength(1);
+    });
+
+    it("settleInterruptedReply keeps the host's known client call", () => {
+      const reply = toolReply("a1", "input-available") as UIMessage;
+      expect(stateOf(turns.settleInterruptedReply(reply, flip))).toBe(
+        "output-error"
+      );
+      host.clientTools = new Set(["x"]);
+      expect(turns.settleInterruptedReply(reply, flip)).toBe(reply);
+    });
+
+    it("settleBeforeRecovery settles only the latest reply it is given", async () => {
+      const messages = [
+        user("u1"),
+        toolReply("a1", "input-available")
+      ] as UIMessage[];
+      const stored: string[][] = [];
+      const sink = {
+        persist: async (changed: UIMessage[]) => {
+          stored.push(changed.map((message) => message.id));
+        },
+        emitRepaired: () => {}
+      };
+
+      await turns.settleBeforeRecovery(messages, "other", flip, sink);
+      expect(stored).toEqual([]);
+      await turns.settleBeforeRecovery(messages, "a1", flip, sink);
+      expect(stored).toEqual([["a1"]]);
+    });
+
     it("settles an approved call in an earlier message even while a continuation is scheduled", async () => {
       const messages = [
         user("u1"),

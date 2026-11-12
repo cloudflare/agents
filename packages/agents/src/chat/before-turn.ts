@@ -1,49 +1,19 @@
 /**
- * What a turn settles before the model is called: the stored request context
- * and the unanswered tool calls in the transcript. One rule for
- * `@cloudflare/ai-chat` and `@cloudflare/think`.
+ * What a turn settles before the model is called: the unanswered tool calls
+ * in the transcript. One rule for `@cloudflare/ai-chat` and
+ * `@cloudflare/think`.
  *
  * @internal Sibling-package support for `@cloudflare/ai-chat` and
  * `@cloudflare/think`, not a public API.
  */
 
 import type { UIMessage } from "ai";
-import type { ClientToolSchema } from "./client-tools";
 import {
   repairInterruptedToolParts,
   type RepairInterruptedToolPartsOptions,
   type RepairInterruptedToolPartsResult
 } from "./repair-transcript";
 import { partAwaitsClientInteraction } from "./tool-state";
-
-/** The tools and body a chat request leaves stored for later turns. */
-export interface ClientRequestContext {
-  clientTools: ClientToolSchema[] | undefined;
-  body: Record<string, unknown> | undefined;
-}
-
-/**
- * The request context a client's chat request stores when its turn starts.
- *
- * The request replaces the stored context whole. One that sends no client
- * tools (no `clientTools` key, or an empty list) clears the stored tools: the
- * tools a turn offers the model are the ones the client that sent the request
- * can run, never the ones an earlier request from another client left behind.
- * The same goes for the body.
- */
-export function clientRequestContext(request: {
-  clientTools?: ClientToolSchema[] | null;
-  body?: Record<string, unknown> | null;
-}): ClientRequestContext {
-  const { clientTools, body } = request;
-  return {
-    clientTools:
-      Array.isArray(clientTools) && clientTools.length > 0
-        ? clientTools
-        : undefined,
-    body: body && Object.keys(body).length > 0 ? body : undefined
-  };
-}
 
 export interface BeforeTurnRepairOptions extends Pick<
   RepairInterruptedToolPartsOptions,

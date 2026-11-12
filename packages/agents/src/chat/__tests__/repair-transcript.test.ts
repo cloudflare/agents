@@ -1,10 +1,14 @@
 import { describe, it, expect } from "vitest";
 import type { UIMessage } from "ai";
 import {
+  persistRepairedTranscript,
   repairInterruptedToolParts,
   settleInterruptedReply,
+  settleReplyBeforeRecovery,
   streamChunksFinished,
-  toolPartHasSettledResult
+  toolPartHasSettledResult,
+  unsettledToolCallIds,
+  type RepairedTranscriptSink
 } from "../repair-transcript";
 
 type ChatMessage = UIMessage;
@@ -413,5 +417,133 @@ describe("streamChunksFinished", () => {
         { body: "not json" }
       ])
     ).toBe(false);
+  });
+});
+
+/** A sink that records what it was asked to store and report. */
+function recordingSink() {
+  const persisted: Array<{ changed: string[]; repaired: string[] }> = [];
+  const events: Array<Parameters<RepairedTranscriptSink["emitRepaired"]>[0]> =
+    [];
+  const sink: RepairedTranscriptSink = {
+    persist: async (changed, repaired) => {
+      persisted.push({
+        changed: changed.map((m) => m.id),
+        repaired: repaired.map((m) => m.id)
+      });
+    },
+    emitRepaired: (event) => void events.push(event)
+  };
+  return { sink, persisted, events };
+}
+
+const pendingCall = (id: string, tool = "search") =>
+  toolMsg(id, {
+    type: `tool-${tool}`,
+    toolCallId: `call-${id}`,
+    state: "input-available",
+    input: {}
+  });
+const textMsg = (id: string, role: "assistant" | "user" = "user") =>
+  ({ id, role, parts: [{ type: "text", text: id }] }) as ChatMessage;
+
+describe("persistRepairedTranscript", () => {
+  it("stores the changed messages and reports the repair once", async () => {
+    const messages = [textMsg("u1"), pendingCall("a1"), textMsg("u2")];
+    const { sink, persisted, events } = recordingSink();
+
+    await persistRepairedTranscript(messages, repair(messages), sink);
+
+    expect(persisted).toEqual([
+      { changed: ["a1"], repaired: ["u1", "a1", "u2"] }
+    ]);
+    expect(events).toEqual([
+      { removedToolCalls: 1, normalizedInputs: 0, toolCallIds: ["call-a1"] }
+    ]);
+  });
+
+  it("does nothing when the repair changed nothing", async () => {
+    const messages = [textMsg("u1"), textMsg("a1", "assistant")];
+    const { sink, persisted, events } = recordingSink();
+
+    await persistRepairedTranscript(messages, repair(messages), sink);
+
+    expect(persisted).toEqual([]);
+    expect(events).toEqual([]);
+  });
+});
+
+describe("settleReplyBeforeRecovery", () => {
+  const options = {
+    repairPart: flipToError,
+    clientToolNames: new Set(["pick"])
+  };
+
+  it("settles the reply a recovery continues, stores it and reports it", async () => {
+    const messages = [textMsg("u1"), pendingCall("a1")];
+    const { sink, persisted, events } = recordingSink();
+
+    await settleReplyBeforeRecovery(messages, "a1", options, sink);
+
+    expect(persisted).toEqual([{ changed: ["a1"], repaired: ["u1", "a1"] }]);
+    expect(events).toEqual([
+      { removedToolCalls: 1, normalizedInputs: 0, toolCallIds: ["call-a1"] }
+    ]);
+  });
+
+  it("keeps a call a client is known to own", async () => {
+    const messages = [textMsg("u1"), pendingCall("a1", "pick")];
+    const { sink, persisted, events } = recordingSink();
+
+    await settleReplyBeforeRecovery(messages, "a1", options, sink);
+
+    expect(persisted).toEqual([]);
+    expect(events).toEqual([]);
+  });
+
+  it("leaves the transcript alone when the reply is not the latest message", async () => {
+    const { sink, persisted } = recordingSink();
+
+    await settleReplyBeforeRecovery(
+      [textMsg("u1"), pendingCall("a1"), textMsg("u2")],
+      "a1",
+      options,
+      sink
+    );
+    await settleReplyBeforeRecovery(
+      [textMsg("u1"), pendingCall("a1")],
+      "another-reply",
+      options,
+      sink
+    );
+
+    expect(persisted).toEqual([]);
+  });
+});
+
+describe("unsettledToolCallIds", () => {
+  it("lists calls with no result, and not an approved call waiting to run", () => {
+    const messages = [
+      pendingCall("a1"),
+      toolMsg("a2", {
+        type: "dynamic-tool",
+        toolName: "x",
+        toolCallId: "requested",
+        state: "approval-requested"
+      }),
+      toolMsg("a3", {
+        type: "tool-search",
+        toolCallId: "approved",
+        state: "approval-responded"
+      }),
+      toolMsg("a4", {
+        type: "tool-search",
+        toolCallId: "done",
+        state: "output-available",
+        output: 1
+      }),
+      textMsg("u1")
+    ];
+    expect(unsettledToolCallIds(messages)).toEqual(["call-a1", "requested"]);
   });
 });

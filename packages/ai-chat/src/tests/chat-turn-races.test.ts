@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import type { UIMessage as ChatMessage } from "ai";
 import { getAgentByName } from "agents";
+import { subscribe } from "agents/observability";
 import { MessageType, type OutgoingMessage } from "../types";
 import { connectChatWS, isUseChatResponseMessage } from "./test-utils";
 
@@ -424,6 +425,55 @@ describe("chat turn races", () => {
     expect(
       ((await agent.getPersistedMessages()) as ChatMessage[])[1].parts[0]
     ).toMatchObject({ state: "output-error" });
+    ws.close(1000);
+  });
+
+  it("reports the calls a turn settles on the transcript channel", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const seen = record(ws);
+    const agent = await getAgentByName(env.TestChatAgent, room);
+    await agent.persistMessages([user1, toolReply("assistant-1", "call-1")]);
+
+    const repaired: Array<string[] | undefined> = [];
+    const unsubscribe = subscribe("transcript", (event) => {
+      if (event.type === "chat:transcript:repaired" && event.name === room) {
+        repaired.push(event.payload.toolCallIds);
+      }
+    });
+    try {
+      sendChatRequest(ws, "req-2", [
+        user1,
+        toolReply("assistant-1", "call-1"),
+        user2
+      ]);
+      await waitUntil(() => responses(seen, "req-2").some((m) => m.done));
+      await agent.waitForIdleForTest();
+    } finally {
+      unsubscribe();
+    }
+
+    expect(repaired).toEqual([["call-1"]]);
+    ws.close(1000);
+  });
+
+  it("a tool result that lists no client tools continues with the stored ones", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const agent = await getAgentByName(env.TestChatAgent, room);
+    const clientTools = [{ name: "testTool", description: "A client tool" }];
+    await agent.setClientToolsForTest(clientTools);
+    await agent.persistMessages([user1, toolReply("assistant-1", "call-1")]);
+
+    // The answering tab lists no tools of its own. The continuation still
+    // belongs to the turn whose request stored the tools.
+    send(ws, { ...toolResult("call-1"), clientTools: [] });
+    await waitUntil(
+      async () => (await agent.getChatMessageCallCountForTest()) === 1
+    );
+    await agent.waitForIdleForTest();
+
+    expect(await agent.getCapturedClientTools()).toEqual(clientTools);
     ws.close(1000);
   });
 

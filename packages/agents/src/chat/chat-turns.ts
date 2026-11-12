@@ -57,6 +57,13 @@ import {
 import type { MessageConcurrency } from "./lifecycle";
 import { PreStreamTurns } from "./pre-stream-turns";
 import {
+  persistRepairedTranscript,
+  settleInterruptedReply,
+  settleReplyBeforeRecovery,
+  type RepairedTranscriptSink,
+  type RepairInterruptedToolPartsOptions
+} from "./repair-transcript";
+import {
   SubmitConcurrencyController,
   type SubmitConcurrencyDecision
 } from "./submit-concurrency";
@@ -492,6 +499,53 @@ export class ChatTurns<
       ...options,
       clientToolNames: this.host.clientToolNames()
     });
+  }
+
+  /**
+   * {@link repairBeforeTurn}, then store what it changed and report it
+   * through `sink`. The one before-turn step both hosts run.
+   */
+  async settleBeforeTurn(
+    messages: UIMessage[],
+    options: Omit<BeforeTurnRepairOptions, "clientToolNames">,
+    sink: RepairedTranscriptSink
+  ): Promise<BeforeTurnRepairResult> {
+    const result = this.repairBeforeTurn(messages, options);
+    await persistRepairedTranscript(messages, result, sink);
+    return result;
+  }
+
+  /**
+   * Settle the tool calls a cut-off reply left unanswered, before it is
+   * stored. A call the host's client is known to own is kept. See
+   * {@link settleInterruptedReply}.
+   */
+  settleInterruptedReply<TMessage extends UIMessage>(
+    message: TMessage,
+    repairPart: RepairInterruptedToolPartsOptions["repairPart"]
+  ): TMessage {
+    return settleInterruptedReply(message, {
+      repairPart,
+      clientToolNames: this.host.clientToolNames()
+    });
+  }
+
+  /**
+   * Settle and store the reply a recovery attempt is about to continue. See
+   * {@link settleReplyBeforeRecovery}.
+   */
+  settleBeforeRecovery(
+    messages: ReadonlyArray<UIMessage>,
+    continueReplyId: string,
+    repairPart: RepairInterruptedToolPartsOptions["repairPart"],
+    sink: RepairedTranscriptSink
+  ): Promise<void> {
+    return settleReplyBeforeRecovery(
+      messages,
+      continueReplyId,
+      { repairPart, clientToolNames: this.host.clientToolNames() },
+      sink
+    );
   }
 
   // ── Cancel and reset ───────────────────────────────────────────────

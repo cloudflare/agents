@@ -265,19 +265,133 @@ export function repairInterruptedToolParts(
  */
 export function settleInterruptedReply<TMessage extends UIMessage>(
   message: TMessage,
-  options: {
-    repairPart: RepairInterruptedToolPartsOptions["repairPart"];
-    clientToolNames: ReadonlySet<string>;
-  }
+  options: SettleInterruptedReplyOptions
 ): TMessage {
-  const { messages } = repairInterruptedToolParts([message], {
+  // SAFETY: repairInterruptedToolParts returns the message it was given, or a
+  // copy of it with repaired parts.
+  return settleInterruptedReplyParts(message, options).messages[0] as TMessage;
+}
+
+export interface SettleInterruptedReplyOptions {
+  repairPart: RepairInterruptedToolPartsOptions["repairPart"];
+  clientToolNames: ReadonlySet<string>;
+}
+
+function settleInterruptedReplyParts(
+  message: UIMessage,
+  options: SettleInterruptedReplyOptions
+): RepairInterruptedToolPartsResult {
+  return repairInterruptedToolParts([message], {
     repairPart: options.repairPart,
     shouldRepair: (part) => !awaitsKnownClient(part, options.clientToolNames),
     repairApprovalResponded: false
   });
-  // SAFETY: repairInterruptedToolParts returns the message it was given, or a
-  // copy of it with repaired parts.
-  return messages[0] as TMessage;
+}
+
+/**
+ * What a host does with a repaired transcript. The repair itself is the
+ * same for every host; where messages are stored is not.
+ */
+export interface RepairedTranscriptSink {
+  /**
+   * Store the repaired messages and show them to clients.
+   *
+   * @param changed - The messages whose parts the repair changed.
+   * @param repaired - The whole list the repair ran on, repaired.
+   */
+  persist(changed: UIMessage[], repaired: UIMessage[]): Promise<void>;
+  /** Emit the `chat:transcript:repaired` observability event. */
+  emitRepaired(event: {
+    removedToolCalls: number;
+    normalizedInputs: number;
+    toolCallIds: string[];
+  }): void;
+}
+
+/**
+ * Store what a repair changed and report it, once. Does nothing when the
+ * repair changed nothing, which is the common case.
+ */
+export async function persistRepairedTranscript(
+  original: ReadonlyArray<UIMessage>,
+  result: RepairInterruptedToolPartsResult,
+  sink: RepairedTranscriptSink
+): Promise<void> {
+  if (result.removedToolCalls === 0 && result.normalizedInputs === 0) return;
+  const changed = result.messages.filter(
+    (message, index) => message !== original[index]
+  );
+  await sink.persist(changed, result.messages);
+  sink.emitRepaired({
+    removedToolCalls: result.removedToolCalls,
+    normalizedInputs: result.normalizedInputs,
+    toolCallIds: result.toolCallIds
+  });
+}
+
+/**
+ * Settle and store the reply a recovery attempt is about to continue, before
+ * the attempt waits for the chat to be stable. That reply was cut off by
+ * definition. One this version stored is settled already; one an older
+ * version stored may hold a server tool call nothing will answer, and the
+ * attempt would otherwise wait on it as if a client could.
+ *
+ * Only the latest message is touched, and only when it is the reply the
+ * attempt continues. Earlier replies are left alone: the conversation has
+ * moved past them, nothing waits on them, and the turn that follows settles
+ * what they left unanswered.
+ */
+export async function settleReplyBeforeRecovery(
+  messages: ReadonlyArray<UIMessage>,
+  continueReplyId: string,
+  options: SettleInterruptedReplyOptions,
+  sink: RepairedTranscriptSink
+): Promise<void> {
+  const last = messages.at(-1);
+  if (last?.id !== continueReplyId || last.role !== "assistant") return;
+  const result = settleInterruptedReplyParts(last, options);
+  const settled = result.messages[0];
+  if (settled === last) return;
+  await persistRepairedTranscript(
+    messages,
+    {
+      ...result,
+      messages: messages.map((message) =>
+        message === last ? settled : message
+      )
+    },
+    sink
+  );
+}
+
+/**
+ * Ids of the tool calls that still have no result. After the before-turn
+ * repair this holds only what the repair kept on purpose; anything else is a
+ * shape the repair missed. An `approval-responded` call is not counted: it
+ * is waiting for its turn to run it, and the AI SDK keeps it.
+ */
+export function unsettledToolCallIds(
+  messages: ReadonlyArray<UIMessage>,
+  isSettled: (
+    record: Record<string, unknown>
+  ) => boolean = toolPartHasSettledResult
+): string[] {
+  const ids: string[] = [];
+  for (const message of messages) {
+    for (const part of message.parts) {
+      const record = part as Record<string, unknown>;
+      const toolCallId =
+        typeof record.toolCallId === "string" ? record.toolCallId : undefined;
+      const isToolPart =
+        typeof record.type === "string" &&
+        (record.type.startsWith("tool-") || record.type === "dynamic-tool") &&
+        toolCallId;
+      if (!isToolPart) continue;
+      if (record.state === "approval-responded") continue;
+      if (!isSettled(record)) ids.push(toolCallId);
+    }
+  }
+  return ids;
 }
 
 function awaitsKnownClient(

@@ -1,10 +1,10 @@
 import { describe, it, expect } from "vitest";
 import type { UIMessage } from "ai";
 import {
-  clientRequestContext,
   interruptedToolPartAsError,
   repairTranscriptBeforeTurn
 } from "../before-turn";
+import { clientRequestContext } from "../request-context";
 
 type Part = UIMessage["parts"][number];
 

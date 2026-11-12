@@ -200,12 +200,17 @@ export {
  * and `@cloudflare/ai-chat`, not a public API. See `repair-transcript.ts`.
  */
 export {
+  persistRepairedTranscript,
   repairInterruptedToolParts,
   settleInterruptedReply,
+  settleReplyBeforeRecovery,
   streamChunksFinished,
   toolPartHasSettledResult,
+  unsettledToolCallIds,
+  type RepairedTranscriptSink,
   type RepairInterruptedToolPartsOptions,
-  type RepairInterruptedToolPartsResult
+  type RepairInterruptedToolPartsResult,
+  type SettleInterruptedReplyOptions
 } from "./repair-transcript";
 
 /**
@@ -214,13 +219,24 @@ export {
  * Sibling-package support, not a public API. See `before-turn.ts`.
  */
 export {
-  clientRequestContext,
   interruptedToolPartAsError,
   repairTranscriptBeforeTurn,
   type BeforeTurnRepairOptions,
-  type BeforeTurnRepairResult,
-  type ClientRequestContext
+  type BeforeTurnRepairResult
 } from "./before-turn";
+
+/**
+ * @internal The one owner of a chat's stored request context (client tools
+ * and body). Sibling-package support, not a public API. See
+ * `request-context.ts`.
+ */
+export {
+  ChatRequestContext,
+  clientRequestContext,
+  type ClientRequestContext,
+  type RequestContextKey,
+  type RequestContextStore
+} from "./request-context";
 
 export type { OrphanPersistStore } from "./orphan-store";
 
