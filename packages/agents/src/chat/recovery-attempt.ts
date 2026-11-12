@@ -257,18 +257,11 @@ export async function runRecoveredTurn<
     await host.afterOutcome?.(result);
   } catch (error) {
     if (stop.signal.aborted && !isDurableObjectMemoryLimitReset(error)) {
-      // The user's stop is the outcome, whatever threw after it.
-      try {
-        await recordStop();
-        return;
-      } catch (stopError) {
-        if (isPlatformTransientError(error)) throw error;
-        console.error(
-          `${host.logPrefix} ${callback} could not record the user's stop`,
-          stopError
-        );
-        return;
-      }
+      // The user's stop is the outcome, whatever threw after it. A stop
+      // that cannot be recorded rethrows, so the driving Task runs the
+      // callback again instead of leaving the incident and a submission open.
+      await recordStop();
+      return;
     }
     await handleRecoveryAttemptError(engine, {
       callback,

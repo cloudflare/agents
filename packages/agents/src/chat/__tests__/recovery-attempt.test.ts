@@ -427,6 +427,21 @@ describe("runRecoveredTurn", () => {
     expect(t.log).toContain("stopped");
   });
 
+  it("rethrows when a stopped attempt that threw cannot record the stop", async () => {
+    const t = setup({
+      duringWait: ({ stop }) => {
+        stop();
+        throw new Error("application bug");
+      }
+    });
+    t.host.onStopped = async () => {
+      throw new Error("submission write failed");
+    };
+    await expect(t.run()).rejects.toThrow("submission write failed");
+    expect(t.exhausted).toEqual([]);
+    expect(t.log.slice(-3)).toEqual(["end", "release", "reconcile"]);
+  });
+
   it("rethrows a platform transient without giving up", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const deferred: string[] = [];
