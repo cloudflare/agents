@@ -931,6 +931,7 @@ export class ThinkClientToolsAgent extends Think {
   private _chainedModelCalls: number[] = [];
   private _chainedStreamLatch = new LatchForTest();
   private _continuationStartLatch: LatchForTest | null = null;
+  private _continuationTurnCount = 0;
   private _coalesceArmHeld: { requested: boolean } | null = null;
 
   override onChatError(error: unknown, ctx: ChatErrorContext): unknown {
@@ -948,6 +949,7 @@ export class ThinkClientToolsAgent extends Think {
 
   override async beforeTurn(ctx: TurnContext): Promise<TurnConfig | void> {
     this._lastTurnToolNames = Object.keys(ctx.tools);
+    if (ctx.continuation) this._continuationTurnCount++;
     if (ctx.continuation) await this._continuationStartLatch?.wait();
     if (ctx.continuation && this._failContinuationBeforeStream) {
       throw new Error("continuation failed before streaming");
@@ -1573,6 +1575,43 @@ export class ThinkClientToolsAgent extends Think {
   }
 
   /** Park continuation turns in `beforeTurn`, before their stream starts. */
+  private _releaseHeldTurnQueue: (() => void) | null = null;
+
+  /** Put a turn that does nothing at the front of the queue until released. */
+  async holdTurnQueueForTest(): Promise<void> {
+    const held = new Promise<void>((resolve) => {
+      this._releaseHeldTurnQueue = resolve;
+    });
+    void (
+      this as unknown as {
+        _turnQueue: {
+          enqueue(id: string, fn: () => Promise<void>): Promise<unknown>;
+        };
+      }
+    )._turnQueue.enqueue("held-for-test", () => held);
+  }
+
+  async releaseTurnQueueForTest(): Promise<void> {
+    this._releaseHeldTurnQueue?.();
+    this._releaseHeldTurnQueue = null;
+  }
+
+  /** The request id of the continuation waiting to run, if any. */
+  async pendingContinuationRequestIdForTest(): Promise<string | null> {
+    return (
+      (
+        this as unknown as {
+          _continuation: { pending: { requestId: string } | null };
+        }
+      )._continuation.pending?.requestId ?? null
+    );
+  }
+
+  /** How many continuation turns reached `beforeTurn`. */
+  async continuationTurnCountForTest(): Promise<number> {
+    return this._continuationTurnCount;
+  }
+
   async holdContinuationStartForTest(): Promise<void> {
     this._continuationStartLatch = new LatchForTest();
   }

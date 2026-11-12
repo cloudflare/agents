@@ -249,6 +249,38 @@ export class TestChatAgent extends AIChatAgent<Env> {
   // Store captured requestId from onChatMessage options for testing
   private _capturedRequestId: string | undefined = undefined;
   private _chatMessageCallCount = 0;
+  private _failedFirstContinuation = false;
+  private _releaseHeldTurnQueue: (() => void) | null = null;
+
+  /** Put a turn that does nothing at the front of the queue until released. */
+  holdTurnQueueForTest(): void {
+    const held = new Promise<void>((resolve) => {
+      this._releaseHeldTurnQueue = resolve;
+    });
+    void (
+      this as unknown as {
+        _turnQueue: {
+          enqueue(id: string, fn: () => Promise<void>): Promise<unknown>;
+        };
+      }
+    )._turnQueue.enqueue("held-for-test", () => held);
+  }
+
+  releaseTurnQueueForTest(): void {
+    this._releaseHeldTurnQueue?.();
+    this._releaseHeldTurnQueue = null;
+  }
+
+  /** The request id of the continuation waiting to run, if any. */
+  pendingContinuationRequestIdForTest(): string | null {
+    return (
+      (
+        this as unknown as {
+          _continuation: { pending: { requestId: string } | null };
+        }
+      )._continuation.pending?.requestId ?? null
+    );
+  }
 
   async onChatMessage(
     _onFinish: GenerateTextOnFinishCallback<ToolSet>,
@@ -277,6 +309,16 @@ export class TestChatAgent extends AIChatAgent<Env> {
 
     if (delayMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+
+    // The first continuation fails before it produces a response.
+    if (
+      options?.continuation === true &&
+      options.body?.failFirstContinuation === true &&
+      !this._failedFirstContinuation
+    ) {
+      this._failedFirstContinuation = true;
+      throw new Error("The model is unavailable");
     }
 
     const chainedContinuationResponse =

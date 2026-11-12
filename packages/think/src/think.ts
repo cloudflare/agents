@@ -15041,12 +15041,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       ...(parentId !== undefined && { parentMessageId: parentId })
     });
 
-    if (this._continuation.pending?.requestId === requestId) {
-      this._continuation.activatePending();
-      this._continuation.flushAwaitingConnections((c) =>
-        this._notifyStreamResuming(c)
-      );
-    }
+    this._turns.continuationStreamStarted(requestId, (c) =>
+      this._notifyStreamResuming(c)
+    );
 
     const leaf = this.messages.at(-1);
     const continuationAssistant =
@@ -18810,7 +18807,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         console.error("[Think] Failed to apply resolved pauses", error);
       });
     }
-    this._autoContinuation.rearmForBatch();
+    this._turns.replyFinalized();
   }
 
   /**
@@ -18820,35 +18817,26 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    */
   private _flushResolvedPausesOnFinalize = false;
 
+  /**
+   * Run the continuation turn for the pending continuation. The turn core
+   * owns its lifecycle (`ChatTurns.runContinuationTurn`): the abort signal,
+   * the claim when the turn starts, and the settle. This supplies the turn
+   * itself: the inference loop with `continuation: true`, then the stream.
+   */
   private _fireAutoContinuation(): void {
-    const pending = this._continuation.pending;
-    if (!pending) return;
-
-    const { requestId } = pending;
-    // Created when the continuation fires, so a cancel reaches it while it
-    // waits in the queue.
-    const abortSignal = this._aborts.getSignal(requestId);
-
     let reported = false;
-    this._admitTurn({
-      admission: "queue",
-      trigger: "auto-continuation",
-      requestId,
-      continuation: true,
-      inheritChannel: true,
-      allowNested: true,
-      execute: async () => {
-        // Read the continuation when its turn starts, so it runs with the
-        // connection and tools of the latest result. Nothing to continue when
-        // it was cleared, or when the conversation moved on since its tool
-        // result (a newer question or reply, a clear).
-        const continuation = this._turns.takeContinuation();
-        if (!continuation) {
-          this._aborts.remove(requestId);
-          this._settleContinuationTurn(requestId, false);
-          return;
-        }
-        const { connection, clientTools } = continuation;
+    void this._turns.runContinuationTurn({
+      enqueue: (requestId, turn) =>
+        this._admitTurn({
+          admission: "queue",
+          trigger: "auto-continuation",
+          requestId,
+          continuation: true,
+          inheritChannel: true,
+          allowNested: true,
+          execute: turn
+        }),
+      run: async ({ requestId, connection, clientTools }, abortSignal) => {
         let streamed = false;
         try {
           const continuationBody = async () => {
@@ -18885,16 +18873,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             );
           }
           throw error;
-        } finally {
-          this._aborts.remove(requestId);
-          this._settleContinuationTurn(requestId, streamed);
+        }
+      },
+      onError: (error) => {
+        if (!reported) {
+          console.error("[Think] Auto-continuation failed:", error);
         }
       }
-    }).catch((error) => {
-      if (!reported) {
-        console.error("[Think] Auto-continuation failed:", error);
-      }
-      this._aborts.remove(requestId);
     });
   }
 
@@ -18960,40 +18945,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       });
     }
     return true;
-  }
-
-  /**
-   * Settle the continuation state when an auto-continuation turn ends (#2443).
-   *
-   * A turn only owns `pending` until its stream starts: `_streamResult` moves
-   * that pending to the active slot, freeing `pending` for the NEXT
-   * continuation. A client tool result that lands while this turn is still
-   * streaming (a fast client tool chained across steps) creates that next
-   * pending, and the stream-finalize re-arm fires it. So `pending` is cleared
-   * here only while it still holds this turn's request — a turn that never
-   * streamed (failed, aborted, or produced nothing before its stream started).
-   * Clearing unconditionally would drop the newer pending and stall the chat.
-   *
-   * A newer pending that has not started also covers any `deferred` follow-up:
-   * that result arrived before this turn's stream and the newer continuation
-   * runs after it, so firing the deferred too would run a redundant turn that
-   * replays a transcript ending in assistant text.
-   */
-  private _settleContinuationTurn(requestId: string, streamed: boolean): void {
-    const pending = this._continuation.pending;
-    if (pending?.requestId === requestId) {
-      if (!streamed) {
-        this._continuation.sendResumeNone();
-      }
-      this._continuation.clearPending();
-    } else if (pending && !pending.pastCoalesce) {
-      this._continuation.clearDeferred();
-    }
-    this._activateDeferredContinuation();
-  }
-
-  private _activateDeferredContinuation(): void {
-    this._autoContinuation.activateDeferredAndReschedule();
   }
 
   /**

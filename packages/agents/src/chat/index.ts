@@ -144,6 +144,22 @@ export {
 } from "./auto-continuation-controller";
 
 /**
+ * @internal The auto-continuation turn's lifecycle, from fire to settle.
+ * `ChatTurns` exposes each function as a method. Not a public API. See
+ * `continuation-turn.ts`.
+ */
+export {
+  claimContinuation,
+  continuationStreamStarted,
+  replyFinalized,
+  runContinuationTurn,
+  settleContinuationTurn,
+  transcriptEndsInAnswer,
+  type ContinuationTurn,
+  type ContinuationTurnParts
+} from "./continuation-turn";
+
+/**
  * @internal The turn core shared by `@cloudflare/ai-chat` and
  * `@cloudflare/think`: the turn queue, abort registry, submit concurrency,
  * continuation slots and barrier, pre-stream set and tool-result apply chain,
