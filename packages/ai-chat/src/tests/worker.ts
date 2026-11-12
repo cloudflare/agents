@@ -2447,8 +2447,10 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     interruptedAttempts?: number;
   }> {
     const { trigger = "stalled", ...identity } = input;
-    const self = this as unknown as {
-      _beginChatRecoveryIncident(
+    const engine = (
+      this as unknown as { _chatRecoveryEngine(): unknown }
+    )._chatRecoveryEngine() as {
+      beginIncident(
         i: typeof identity & { trigger: "interrupted" | "stalled" }
       ): Promise<{
         incident: {
@@ -2460,7 +2462,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
         exhausted: boolean;
       }>;
     };
-    const { incident, exhausted } = await self._beginChatRecoveryIncident({
+    const { incident, exhausted } = await engine.beginIncident({
       ...identity,
       trigger
     });
@@ -2489,14 +2491,16 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     reason?: string
   ): Promise<void> {
     await (
-      this as unknown as {
-        _updateChatRecoveryIncident(
+      (
+        this as unknown as { _chatRecoveryEngine(): unknown }
+      )._chatRecoveryEngine() as {
+        updateIncident(
           id: string,
           status: string,
           reason?: string
         ): Promise<void>;
       }
-    )._updateChatRecoveryIncident(incidentId, status, reason);
+    ).updateIncident(incidentId, status, reason);
   }
 
   async seedIncidentForTest(incident: {
@@ -3610,11 +3614,13 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
   /** Make the next routing into recovery throw (an incident write failure). */
   failNextIncidentBeginForTest(): void {
-    const self = this as unknown as {
-      _beginChatRecoveryIncident(...args: unknown[]): Promise<unknown>;
+    const engine = (
+      this as unknown as { _chatRecoveryEngine(): unknown }
+    )._chatRecoveryEngine() as {
+      beginIncident(...args: unknown[]): Promise<unknown>;
     };
-    self._beginChatRecoveryIncident = async () => {
-      Reflect.deleteProperty(self, "_beginChatRecoveryIncident");
+    engine.beginIncident = async () => {
+      Reflect.deleteProperty(engine, "beginIncident");
       throw new Error("incident write failed");
     };
   }

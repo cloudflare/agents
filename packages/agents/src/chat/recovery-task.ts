@@ -183,6 +183,34 @@ export function chatRecoveryTaskRunOptions(
   };
 }
 
+/**
+ * Enqueue one recovery attempt on the Tasks transport. Tasks mirrors a routed
+ * dynamic agent's wake to the root's alarm. The run itself, and the
+ * continuation's replay, still execute on the host.
+ *
+ * @param tasks - The host's Tasks capability.
+ * @param dedupeKey - Keys a retried enqueue so it joins its own earlier try.
+ *   See {@link chatRecoveryTaskRunOptions}.
+ */
+export async function enqueueChatRecoveryTask(
+  tasks: {
+    __DO_NOT_USE_WILL_BREAK__enqueue(
+      name: string,
+      input: ChatRecoveryTaskInput,
+      options: TaskRunOptions
+    ): Promise<unknown>;
+  },
+  input: ChatRecoveryTaskInput,
+  reason: ChatRecoveryTaskReason,
+  dedupeKey?: string
+): Promise<void> {
+  await tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+    CHAT_RECOVERY_TASK_NAME,
+    input,
+    chatRecoveryTaskRunOptions(input, reason, dedupeKey)
+  );
+}
+
 /** Build the shared recovery Task handler for one chat host. */
 export function createChatRecoveryTaskDefinition(
   hooks: ChatRecoveryTaskHooks

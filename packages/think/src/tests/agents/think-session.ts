@@ -3119,11 +3119,13 @@ export class ThinkTestAgent extends Think {
         ? "transient"
         : "fatal";
     };
-    const self = this as unknown as {
-      _beginChatRecoveryIncident(...args: unknown[]): Promise<unknown>;
+    const engine = (
+      this as unknown as { _chatRecoveryEngine(): unknown }
+    )._chatRecoveryEngine() as {
+      beginIncident(...args: unknown[]): Promise<unknown>;
     };
     if (options.failIncidentBegin) {
-      self._beginChatRecoveryIncident = async () => {
+      engine.beginIncident = async () => {
         throw new Error("incident write failed");
       };
     }
@@ -3146,7 +3148,7 @@ export class ThinkTestAgent extends Think {
         classified
       };
     } finally {
-      Reflect.deleteProperty(this, "_beginChatRecoveryIncident");
+      Reflect.deleteProperty(engine, "beginIncident");
       this._errorConfig = null;
       this._errorAttemptsRemaining = null;
       Reflect.deleteProperty(this, "classifyChatError");
@@ -10011,8 +10013,10 @@ export class ThinkRecoveryTestAgent extends Think {
     interruptedAttempts?: number;
   }> {
     const { trigger = "stalled", ...identity } = input;
-    const self = this as unknown as {
-      _beginChatRecoveryIncident(
+    const engine = (
+      this as unknown as { _chatRecoveryEngine(): unknown }
+    )._chatRecoveryEngine() as {
+      beginIncident(
         i: typeof identity & { trigger: "interrupted" | "stalled" }
       ): Promise<{
         incident: {
@@ -10024,7 +10028,7 @@ export class ThinkRecoveryTestAgent extends Think {
         exhausted: boolean;
       }>;
     };
-    const { incident, exhausted } = await self._beginChatRecoveryIncident({
+    const { incident, exhausted } = await engine.beginIncident({
       ...identity,
       trigger
     });
@@ -10054,14 +10058,16 @@ export class ThinkRecoveryTestAgent extends Think {
     reason?: string
   ): Promise<void> {
     await (
-      this as unknown as {
-        _updateChatRecoveryIncident(
+      (
+        this as unknown as { _chatRecoveryEngine(): unknown }
+      )._chatRecoveryEngine() as {
+        updateIncident(
           id: string,
           status: string,
           reason?: string
         ): Promise<void>;
       }
-    )._updateChatRecoveryIncident(incidentId, status, reason);
+    ).updateIncident(incidentId, status, reason);
   }
 
   async seedIncidentForTest(incident: {
@@ -10102,7 +10108,7 @@ export class ThinkRecoveryTestAgent extends Think {
   }
 
   /**
-   * #1626: directly exercise the exhausted branch of `_routeStallToBoundedRecovery`.
+   * #1626: directly exercise the exhausted branch of `_routeStreamInterruption`.
    * Seeds an incident at the budget edge (attempt = maxAttempts, aged past the
    * 30s debounce), then routes one more stall. The route must advance the
    * incident past the budget and deliver the SAME terminal UX as deploy-recovery
@@ -10186,14 +10192,14 @@ export class ThinkRecoveryTestAgent extends Think {
     try {
       outcome = await (
         this as unknown as {
-          _routeStallToBoundedRecovery(i: {
+          _routeStreamInterruption(i: {
             requestId: string;
             streamId: string;
             partialParts: unknown[];
             persistPartial: () => Promise<string | undefined>;
           }): Promise<string>;
         }
-      )._routeStallToBoundedRecovery({
+      )._routeStreamInterruption({
         requestId,
         streamId: "stall-stream",
         partialParts: [],
@@ -11099,7 +11105,11 @@ export class ThinkRecoveryTestAgent extends Think {
     const internals = this as unknown as {
       _turnQueue: TurnQueue;
       _ensureSubmissionTable(): void;
-      _updateChatRecoveryIncident(
+      _chatRecoveryEngine(): unknown;
+    };
+    // The recovery engine writes the incident's outcome.
+    const recoveryEngine = internals._chatRecoveryEngine() as {
+      updateIncident(
         incidentId: string | undefined,
         status: string,
         reason?: string
@@ -11159,7 +11169,7 @@ export class ThinkRecoveryTestAgent extends Think {
     const session = this.session;
     const getLatestLeaf = session.getLatestLeaf.bind(session);
     const beforeStep = this.beforeStep.bind(this);
-    const updateIncident = internals._updateChatRecoveryIncident.bind(this);
+    const updateIncident = recoveryEngine.updateIncident.bind(recoveryEngine);
     const onSubmissionStatus = this.onSubmissionStatus.bind(this);
     const onChatResponse = this.onChatResponse.bind(this);
     const getModel = this.getModel.bind(this);
@@ -11194,7 +11204,7 @@ export class ThinkRecoveryTestAgent extends Think {
       }
       return beforeStep(ctx);
     };
-    internals._updateChatRecoveryIncident = async (id, status, reason) => {
+    recoveryEngine.updateIncident = async (id, status, reason) => {
       // The successor Task has been removed, but ledger completion has not
       // started. This is the exact terminal-stream / ledger handoff window.
       if (
@@ -11365,7 +11375,7 @@ export class ThinkRecoveryTestAgent extends Think {
       queue.enqueue = enqueue;
       session.getLatestLeaf = getLatestLeaf;
       this.beforeStep = beforeStep;
-      internals._updateChatRecoveryIncident = updateIncident;
+      Reflect.deleteProperty(recoveryEngine, "updateIncident");
       this.onSubmissionStatus = onSubmissionStatus;
       this.onChatResponse = onChatResponse;
       this.getModel = getModel;
