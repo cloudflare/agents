@@ -383,6 +383,83 @@ describe("chat turn races", () => {
     tabB.close(1000);
   });
 
+  it("a new question settles the client tool call the earlier reply still waits on", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const seen = record(ws);
+    const agent = await getAgentByName(env.TestChatAgent, room);
+    const clientTools = [{ name: "testTool", description: "A client tool" }];
+    // Turn 1 ended on a call to a tool the client sent a schema for. Nobody
+    // has answered it.
+    await agent.setClientToolsForTest(clientTools);
+    await agent.persistMessages([user1, toolReply("assistant-1", "call-1")]);
+    expect(await agent.hasPendingInteractionForTest()).toBe(true);
+
+    // The user sends a new question instead of answering.
+    sendChatRequest(
+      ws,
+      "req-2",
+      [user1, toolReply("assistant-1", "call-1"), user2],
+      { clientTools }
+    );
+    await waitUntil(() => responses(seen, "req-2").some((m) => m.done));
+    await agent.waitForIdleForTest();
+
+    // The model request held no call without a result (a provider rejects
+    // one), and the call is stored as failed.
+    expect(await agent.getChatMessageCallCountForTest()).toBe(1);
+    expect(await agent.getUnansweredAtModelCallForTest()).toEqual([]);
+    const stored = (await agent.getPersistedMessages()) as ChatMessage[];
+    expect(stored[1].parts[0]).toMatchObject({
+      toolCallId: "call-1",
+      state: "output-error"
+    });
+    expect(await agent.hasPendingInteractionForTest()).toBe(false);
+
+    // A late answer changes nothing and continues nothing.
+    send(ws, toolResult("call-1"));
+    await delay(300);
+    await agent.waitForIdleForTest();
+    expect(await agent.getChatMessageCallCountForTest()).toBe(1);
+    expect(
+      ((await agent.getPersistedMessages()) as ChatMessage[])[1].parts[0]
+    ).toMatchObject({ state: "output-error" });
+    ws.close(1000);
+  });
+
+  it("a new question settles an approval the user never gave", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const seen = record(ws);
+    const agent = await getAgentByName(env.TestChatAgent, room);
+    const approval: ChatMessage = {
+      id: "assistant-1",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-testTool",
+          toolCallId: "call-1",
+          state: "approval-requested",
+          input: {},
+          approval: { id: "approval-1" }
+        }
+      ] as ChatMessage["parts"]
+    };
+    await agent.persistMessages([user1, approval]);
+
+    sendChatRequest(ws, "req-2", [user1, approval, user2]);
+    await waitUntil(() => responses(seen, "req-2").some((m) => m.done));
+    await agent.waitForIdleForTest();
+
+    expect(await agent.getUnansweredAtModelCallForTest()).toEqual([]);
+    const stored = (await agent.getPersistedMessages()) as ChatMessage[];
+    expect(stored[1].parts[0]).toMatchObject({
+      toolCallId: "call-1",
+      state: "output-error"
+    });
+    ws.close(1000);
+  });
+
   it("a tool result for an older reply does not continue the newer reply", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);

@@ -31,7 +31,7 @@ import { autoTransformMessages } from "./ai-chat-v5-migration";
 import {
   reconcileMessages,
   reconcileOrphanPartial,
-  repairInterruptedToolParts,
+  clientRequestContext,
   settleInterruptedReply,
   streamChunksFinished,
   persistReconstructedOrphan,
@@ -54,7 +54,6 @@ import {
   ChatTurns,
   type RecoveryAttemptHandle,
   type ToolInteractionOutcome,
-  partAwaitsClientInteraction,
   clientResolvableToolNames,
   toolApprovalUpdate,
   type TurnResult,
@@ -1299,11 +1298,8 @@ export class AIChatAgent<
             _trigger === "regenerate-message"
               ? "regenerate-message"
               : "submit-message";
-          const requestClientTools = clientTools?.length
-            ? clientTools
-            : undefined;
-          const requestBody =
-            Object.keys(customBody).length > 0 ? customBody : undefined;
+          const { clientTools: requestClientTools, body: requestBody } =
+            clientRequestContext({ clientTools, body: customBody });
           const requestOriginIds = originMessageIds(messages);
           // What was stored when a regenerate arrived: its turn may delete
           // these, but never a question another tab sent after it.
@@ -2291,7 +2287,7 @@ export class AIChatAgent<
    * auto-continuation, `continueLastTurn`, `saveMessages`/retry, and the chat
    * recovery callbacks). An interrupted server-tool orphan is flipped to a
    * settled (errored) result — via the shared `agents/chat`
-   * `repairInterruptedToolParts` primitive, the SAME logic `@cloudflare/think`
+   * `ChatTurns.repairBeforeTurn`, the SAME logic `@cloudflare/think`
    * runs before its own inference (`_assembleModelMessages`) — so the app's next
    * `convertToModelMessages(this.messages)` doesn't 400 with
    * `AI_MissingToolResultsError`. Because the app owns the inference call, the
@@ -2301,14 +2297,15 @@ export class AIChatAgent<
    * missed, including a mixed client+server orphan whose client replay drives
    * an auto-continuation.
    *
-   * Scope: repair only ever flips a DEAD SERVER orphan (an interrupted tool with
-   * no settled result whose `execute()` died with the evicted isolate). A part
-   * still legitimately awaiting a CLIENT interaction — an `input-available`
-   * client tool the SPA replays, or an `approval-requested` part the user may
-   * still answer — is left verbatim via the shared `shouldRepair` skip, so it is
-   * never clobbered with an error. This is per-part (not a whole-transcript
-   * guard), so a fresh dead-server orphan at the leaf is still repaired even if
-   * an unrelated abandoned client orphan sits earlier in history.
+   * Scope (the shared `repairTranscriptBeforeTurn` rule, one for both hosts):
+   * in a reply the conversation has moved past, every unanswered call is
+   * settled, whoever owns it, because the provider rejects a request that holds
+   * a call with no result. A turn that starts a new reply treats the last
+   * message the same way. A continuation turn keeps, in the message it
+   * continues, what a client is known to still answer: an `input-available`
+   * call for a tool the client sent a schema for, and an `approval-requested`
+   * call. The rule is per part, so a dead server orphan at the leaf is repaired
+   * whatever sits earlier in history.
    *
    * Repair only ever reshapes ASSISTANT tool parts; it never touches user
    * messages, so per-channel policy carried on the user message's
@@ -2322,17 +2319,9 @@ export class AIChatAgent<
   private async _repairInterruptedToolsBeforeTurn(options: {
     continuation: boolean;
   }): Promise<void> {
-    const clientResolvable = this._clientResolvableToolNames();
-    const repaired = repairInterruptedToolParts(this.messages, {
-      repairPart: (part) => this.repairInterruptedToolPart(part),
-      shouldRepair: (part) =>
-        !this._partAwaitsClientInteraction(part, clientResolvable),
-      // An approval a continuation will still execute must survive; one the
-      // conversation moved past without running would 400 at the provider.
-      repairApprovalResponded:
-        !options.continuation &&
-        !this._continuation.pending &&
-        !this._continuation.deferred
+    const repaired = this._turns.repairBeforeTurn(this.messages, {
+      continuation: options.continuation,
+      repairPart: (part) => this.repairInterruptedToolPart(part)
     });
     if (repaired.removedToolCalls === 0 && repaired.normalizedInputs === 0) {
       return;
@@ -2865,8 +2854,9 @@ export class AIChatAgent<
     clientTools?: ClientToolSchema[],
     body?: Record<string, unknown>
   ) {
-    this._lastClientTools = clientTools?.length ? clientTools : undefined;
-    this._lastBody = body && Object.keys(body).length > 0 ? body : undefined;
+    const context = clientRequestContext({ clientTools, body });
+    this._lastClientTools = context.clientTools;
+    this._lastBody = context.body;
     this._persistRequestContext();
   }
 
@@ -3091,20 +3081,6 @@ export class AIChatAgent<
    */
   protected hasPendingClientInteraction(): boolean {
     return this.hasPendingInteraction();
-  }
-
-  /**
-   * Whether a part is still awaiting a CLIENT interaction that can genuinely
-   * arrive after a restart: an `approval-requested` part (a reconnecting client
-   * replays the approval) or an `input-available` part for a CLIENT tool (the
-   * SPA replays the `tool-result`). A SERVER tool's `input-available` is NOT
-   * pending — its `execute()` died with the isolate. Mirrors `@cloudflare/think`.
-   */
-  private _partAwaitsClientInteraction(
-    part: UIMessage["parts"][number],
-    clientResolvable: Set<string>
-  ): boolean {
-    return partAwaitsClientInteraction(part, clientResolvable);
   }
 
   /**

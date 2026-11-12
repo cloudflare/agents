@@ -15,6 +15,8 @@
  *   its call schedules a continuation ({@link applyInteraction});
  * - a continuation runs only while the message it answers is still the latest
  *   ({@link takeContinuation});
+ * - before a turn calls the model, every tool call nothing will answer in
+ *   time is settled ({@link repairBeforeTurn});
  * - a cancel reaches a queued turn, a running turn, and a running recovery
  *   attempt ({@link cancel});
  * - a reset tears all of it down together ({@link reset});
@@ -29,6 +31,7 @@
  * `@cloudflare/think`, not a public API.
  */
 
+import type { UIMessage } from "ai";
 import { AbortRegistry } from "./abort-registry";
 import {
   TIMED_OUT,
@@ -41,6 +44,10 @@ import {
   type ToolInteractionOutcome
 } from "./auto-continuation-controller";
 import {
+  repairTranscriptBeforeTurn,
+  type BeforeTurnRepairOptions
+} from "./before-turn";
+import {
   ContinuationState,
   continuationTargetIsLatest,
   type ContinuationConnection,
@@ -48,6 +55,7 @@ import {
 } from "./continuation-state";
 import type { MessageConcurrency } from "./lifecycle";
 import { PreStreamTurns } from "./pre-stream-turns";
+import type { RepairInterruptedToolPartsResult } from "./repair-transcript";
 import {
   SubmitConcurrencyController,
   type SubmitConcurrencyDecision
@@ -459,6 +467,47 @@ export class ChatTurns<
     if (!continuationTargetIsLatest(this.host.messages(), pending)) return null;
     pending.pastCoalesce = true;
     return pending;
+  }
+
+  /**
+   * `true` while a continuation is scheduled, waiting to fire or running.
+   * A turn that starts a new reply meanwhile keeps the approved call that
+   * continuation may still run.
+   */
+  continuationWaiting(): boolean {
+    return (
+      this.continuation.pending !== null || this.continuation.deferred !== null
+    );
+  }
+
+  // ── Before a turn ──────────────────────────────────────────────────
+
+  /**
+   * Settle the tool calls `messages` leaves unanswered, before a turn calls
+   * the model. See {@link repairTranscriptBeforeTurn} for the rule: a reply
+   * the conversation moved past keeps no unanswered call, and a continuation
+   * turn keeps, in the message it continues, what a client is known to still
+   * answer.
+   *
+   * @param messages - The history the turn's model request is built from.
+   *   Its last message is the one a continuation turn continues.
+   * @param options.continuationWaiting - Defaults to
+   *   {@link continuationWaiting}.
+   * @returns The repaired messages and what changed. The host persists them.
+   */
+  repairBeforeTurn(
+    messages: UIMessage[],
+    options: Omit<
+      BeforeTurnRepairOptions,
+      "clientToolNames" | "continuationWaiting"
+    > & { continuationWaiting?: boolean }
+  ): RepairInterruptedToolPartsResult {
+    return repairTranscriptBeforeTurn(messages, {
+      ...options,
+      continuationWaiting:
+        options.continuationWaiting ?? this.continuationWaiting(),
+      clientToolNames: this.host.clientToolNames()
+    });
   }
 
   // ── Cancel and reset ───────────────────────────────────────────────

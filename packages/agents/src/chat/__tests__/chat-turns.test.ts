@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import type { UIMessage } from "ai";
 import { AutoContinuationController } from "../auto-continuation-controller";
 import {
   ChatTurns,
@@ -474,6 +475,86 @@ describe("ChatTurns", () => {
   });
 
   // ── Client requests ─────────────────────────────────────────────────
+
+  // ── Before a turn ───────────────────────────────────────────────────
+
+  describe("repairBeforeTurn", () => {
+    const flip = (part: UIMessage["parts"][number]) =>
+      ({ ...part, state: "output-error" }) as UIMessage["parts"][number];
+    const stateOf = (message: UIMessage) =>
+      (message.parts[0] as { state?: string }).state;
+
+    it("settles a known client's call in a reply the conversation moved past", () => {
+      host.clientTools = new Set(["x"]);
+      const messages = [
+        user("u1"),
+        toolReply("a1", "input-available"),
+        user("u2")
+      ] as UIMessage[];
+
+      const result = turns.repairBeforeTurn(messages, {
+        continuation: false,
+        repairPart: flip
+      });
+
+      expect(stateOf(result.messages[1])).toBe("output-error");
+      expect(result.toolCallIds).toEqual(["call-a1"]);
+    });
+
+    it("a continuation turn keeps the host's known client call in the message it continues", () => {
+      host.clientTools = new Set(["x"]);
+      const messages = [
+        user("u1"),
+        toolReply("a1", "input-available")
+      ] as UIMessage[];
+
+      expect(
+        stateOf(
+          turns.repairBeforeTurn(messages, {
+            continuation: true,
+            repairPart: flip
+          }).messages[1]
+        )
+      ).toBe("input-available");
+      // The same call for a tool no client sent a schema for is dead.
+      host.clientTools = new Set();
+      expect(
+        stateOf(
+          turns.repairBeforeTurn(messages, {
+            continuation: true,
+            repairPart: flip
+          }).messages[1]
+        )
+      ).toBe("output-error");
+    });
+
+    it("keeps an approved call in an earlier message while a continuation waits", async () => {
+      const messages = [
+        user("u1"),
+        toolReply("a1", "approval-responded"),
+        user("u2")
+      ] as UIMessage[];
+      const repaired = () =>
+        stateOf(
+          turns.repairBeforeTurn(messages, {
+            continuation: false,
+            repairPart: flip
+          }).messages[1]
+        );
+
+      expect(turns.continuationWaiting()).toBe(false);
+      expect(repaired()).toBe("output-error");
+
+      host.transcript = [user("u1"), toolReply("a1", "output-available")];
+      await turns.applyInteraction(
+        async () => ({ status: "changed", messageId: "a1" }),
+        true,
+        spec
+      );
+      expect(turns.continuationWaiting()).toBe(true);
+      expect(repaired()).toBe("approval-responded");
+    });
+  });
 
   describe("runClientRequest", () => {
     type Log = string[];

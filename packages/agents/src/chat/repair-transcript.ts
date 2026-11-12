@@ -72,8 +72,14 @@ export interface RepairInterruptedToolPartsOptions {
    * interaction (an `input-available` client tool or an `approval-requested`
    * part the user may still answer) so it is left verbatim rather than clobbered
    * with an error. Skipped parts are not counted in `removedToolCalls`.
+   *
+   * `context.isLastMessage` is `true` for a part of the last message, the one
+   * no later message follows.
    */
-  shouldRepair?: (part: UIMessage["parts"][number]) => boolean;
+  shouldRepair?: (
+    part: UIMessage["parts"][number],
+    context: { isLastMessage: boolean }
+  ) => boolean;
   /**
    * Also repair `approval-responded` parts in any message a later message
    * follows. Pass `true` only when no continuation will execute them: a turn
@@ -182,7 +188,7 @@ export function repairInterruptedToolParts(
         // clobber a tool-result / approval the client may still replay. Only
         // hosts whose default repair ERRORS the part opt into this; Think keeps
         // the default (repair everything, converting client tools via its hook).
-        if (!shouldRepair(part)) {
+        if (!shouldRepair(part, { isLastMessage })) {
           parts.push(part);
           continue;
         }

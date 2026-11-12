@@ -697,17 +697,16 @@ describe("continueLastTurn", () => {
     expect(toolPart?.state).toBe("input-available");
   });
 
-  it("repairs a leaf server orphan even when an abandoned client orphan sits earlier (per-part, not whole-transcript)", async () => {
+  it("settles an abandoned client orphan in a reply the chat moved past, and the leaf server orphan", async () => {
     const room = crypto.randomUUID();
     const agentStub = await getTestAgent(room);
 
     // `chooseOption` is a registered client tool; `previewTool` is not (server).
     // An EARLIER assistant message holds an abandoned client orphan
     // (`input-available` chooseOption), and the LEAF assistant holds a fresh dead
-    // SERVER orphan. A whole-transcript guard would skip ALL repair because a
-    // client interaction is "pending" somewhere; the per-part `shouldRepair` skip
-    // must instead leave the buried client orphan alone AND still repair the leaf
-    // server orphan so the next inference doesn't 400.
+    // SERVER orphan. The conversation moved past the earlier reply, so its call
+    // is settled too: the provider rejects a request that holds a call with no
+    // result, whoever owns it.
     await agentStub.setRequestContextForTest(undefined, [
       { name: "chooseOption" }
     ]);
@@ -762,9 +761,9 @@ describe("continueLastTurn", () => {
       return p?.state;
     };
 
-    // Buried client orphan untouched; leaf server orphan repaired.
+    // Both are settled.
     expect(partState("assistant-buried-client", "call_buried-client")).toBe(
-      "input-available"
+      "output-error"
     );
     expect(partState("assistant-leaf-server", "call_leaf-server")).toBe(
       "output-error"

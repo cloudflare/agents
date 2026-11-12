@@ -208,6 +208,20 @@ export {
   type RepairInterruptedToolPartsResult
 } from "./repair-transcript";
 
+/**
+ * @internal What a turn settles before the model is called: the request
+ * context a client request stores, and the before-turn transcript repair.
+ * Sibling-package support, not a public API. See `before-turn.ts`.
+ */
+export {
+  clientRequestContext,
+  keptByContinuationRepair,
+  repairTranscriptBeforeTurn,
+  type BeforeTurnRepairMode,
+  type BeforeTurnRepairOptions,
+  type ClientRequestContext
+} from "./before-turn";
+
 export type { OrphanPersistStore } from "./orphan-store";
 
 /**

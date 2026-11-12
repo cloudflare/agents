@@ -255,6 +255,17 @@ export class TestChatAgent extends AIChatAgent<Env> {
     options?: OnChatMessageOptions
   ) {
     this._chatMessageCallCount++;
+    // What the model request would hold: tool calls with no result.
+    this._unansweredAtModelCall = this.messages.flatMap((message) =>
+      message.parts.flatMap((part) => {
+        const record = part as { toolCallId?: string; state?: string };
+        return record.toolCallId &&
+          (record.state === "input-available" ||
+            record.state === "approval-requested")
+          ? [record.toolCallId]
+          : [];
+      })
+    );
     // Capture the body, clientTools, and requestId from options for testing
     this._capturedBody = options?.body;
     this._capturedClientTools = options?.clientTools;
@@ -743,6 +754,18 @@ export class TestChatAgent extends AIChatAgent<Env> {
 
   getChatMessageCallCountForTest(): number {
     return this._chatMessageCallCount;
+  }
+
+  private _unansweredAtModelCall: string[] = [];
+
+  /** Store client tools as a request that sent them would. */
+  setClientToolsForTest(clientTools: ClientToolSchema[]): void {
+    this._lastClientTools = clientTools;
+  }
+
+  /** Tool calls with no result in the transcript the last turn's model saw. */
+  getUnansweredAtModelCallForTest(): string[] {
+    return this._unansweredAtModelCall;
   }
 
   hasPendingInteractionForTest(): boolean {
