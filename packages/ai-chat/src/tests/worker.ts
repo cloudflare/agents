@@ -311,6 +311,14 @@ export class TestChatAgent extends AIChatAgent<Env> {
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
 
+    // Every continuation fails before it produces a response.
+    if (
+      options?.continuation === true &&
+      options.body?.failContinuations === true
+    ) {
+      throw new Error("The model is unavailable");
+    }
+
     // The first continuation fails before it produces a response.
     if (
       options?.continuation === true &&

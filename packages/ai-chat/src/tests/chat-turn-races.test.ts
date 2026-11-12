@@ -506,6 +506,63 @@ describe("chat turn races", () => {
     ws.close(1000);
   });
 
+  it("continuations that keep failing stop once every result had its attempt", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const seen = record(ws);
+    const agent = await getAgentByName(env.TestChatAgent, room);
+    const reply: ChatMessage = {
+      id: "assistant-1",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-testTool",
+          toolCallId: "call-1",
+          state: "input-available",
+          input: {}
+        },
+        {
+          type: "tool-otherTool",
+          toolCallId: "call-2",
+          state: "approval-responded",
+          input: {},
+          approval: { id: "approval-2", approved: true }
+        }
+      ] as ChatMessage["parts"]
+    };
+    await agent.persistMessages([user1, reply]);
+    await agent.setTestBody({ delayMs: 300, failContinuations: true });
+
+    // The second result lands while the first one's continuation waits on
+    // the model. Both continuations fail.
+    send(ws, toolResult("call-1"));
+    await waitUntil(
+      async () => (await agent.getChatMessageCallCountForTest()) === 1
+    );
+    send(ws, toolResult("call-2"));
+    await waitUntil(
+      async () => (await agent.getChatMessageCallCountForTest()) === 2
+    );
+    await delay(500);
+    await agent.waitForIdleForTest();
+
+    // A resent result changes nothing, so it starts nothing.
+    send(ws, toolResult("call-2"));
+    await delay(300);
+    await agent.waitForIdleForTest();
+
+    expect(await agent.getChatMessageCallCountForTest()).toBe(2);
+    const errorFrames = seen.filter(
+      (m) => isUseChatResponseMessage(m) && m.error === true && m.done === true
+    );
+    expect(errorFrames).toHaveLength(2);
+    expect(await agent.getContinuationStateForTest()).toMatchObject({
+      hasPending: false,
+      hasDeferred: false
+    });
+    ws.close(1000);
+  });
+
   it("a result for a call the reply already answered past does not continue it", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);

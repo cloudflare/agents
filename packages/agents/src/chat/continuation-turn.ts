@@ -124,9 +124,10 @@ export function claimContinuation<TConnection extends ContinuationConnection>(
  *    With nothing to claim, or when it was cancelled meanwhile, the model is
  *    never called.
  * 4. Run the host's model call and stream.
- * 5. However the turn ended (ran, failed, skipped, or dropped from the queue
- *    by a chat reset), drop the abort signal and settle
- *    ({@link settleContinuationTurn}), exactly once.
+ * 5. However the turn ended (ran, failed, or skipped), drop the abort signal
+ *    and settle ({@link settleContinuationTurn}), inside the turn. A turn a
+ *    chat reset dropped from the queue never started: it only drops its
+ *    abort signal and releases the pending continuation if it still owns it.
  *
  * Never rejects: a failure goes to `turn.onError`.
  */
@@ -141,31 +142,43 @@ export async function runContinuationTurn<
   const { requestId, errorPrefix } = pending;
   const signal = parts.aborts.getSignal(requestId);
 
-  let settled = false;
-  const settle = () => {
-    if (settled) return;
-    settled = true;
-    parts.aborts.remove(requestId);
-    settleContinuationTurn(parts, requestId);
-  };
+  let started = false;
 
   try {
     await turn.enqueue(requestId, async () => {
+      started = true;
       try {
         const continuation = claimContinuation(parts, requestId);
         if (!continuation || !signal || signal.aborted) return;
         await turn.run(continuation, signal);
       } finally {
         // Inside the turn, so the next turn in the queue sees settled slots.
-        settle();
+        parts.aborts.remove(requestId);
+        settleContinuationTurn(parts, requestId);
       }
     });
   } catch (error) {
     turn.onError(error, errorPrefix);
   } finally {
-    // A turn dropped from the queue by a chat reset never ran the above.
-    settle();
+    if (!started) releaseUnstartedContinuationTurn(parts, requestId);
   }
+}
+
+/**
+ * A continuation turn that never started: a chat reset dropped it from the
+ * queue, or the host's `enqueue` failed. It removes its abort controller and
+ * releases the pending continuation if it still owns it. It does not settle:
+ * by the time this runs, later turns may have started, and after a reset the
+ * deferred slot belongs to the chat that came after it.
+ */
+function releaseUnstartedContinuationTurn<
+  TConnection extends ContinuationConnection
+>(parts: ContinuationTurnParts<TConnection>, requestId: string): void {
+  parts.aborts.remove(requestId);
+  const { continuation } = parts;
+  if (continuation.pending?.requestId !== requestId) return;
+  continuation.sendResumeNone();
+  continuation.clearPending();
 }
 
 /**
@@ -216,8 +229,9 @@ export function replyFinalized<TConnection extends ContinuationConnection>(
  *   The connections waiting on it get `STREAM_RESUME_NONE`.
  * - A pending continuation it does not own is left alone (#2443): a result
  *   that landed while this turn streamed created it, and it fires on its
- *   own. It also covers the deferred result, which arrived before it, so
- *   the deferred one is dropped and the model is asked once, not twice.
+ *   own. It also covers the deferred result, which arrived before it: it
+ *   takes over the deferred result's targets, the deferred slot is emptied,
+ *   and the model is asked once, not twice.
  * - Otherwise the deferred result becomes the next continuation, through
  *   the barrier. This holds for a turn that failed too: the result it
  *   deferred has not been read by any model call.
@@ -231,7 +245,18 @@ export function settleContinuationTurn<
     continuation.sendResumeNone();
     continuation.clearPending();
   } else if (pending && !pending.pastCoalesce) {
-    continuation.clearDeferred();
+    const deferred = continuation.deferred;
+    if (deferred) {
+      // The newer one answers for the deferred result too, so it takes over
+      // the messages that result targets. Without them, a deferred result
+      // for the latest reply is lost when the newer continuation was
+      // scheduled for an older one.
+      pending.targetMessageIds = mergeContinuationTargets(
+        pending.targetMessageIds,
+        deferred.targetMessageIds
+      );
+      continuation.clearDeferred();
+    }
   }
   parts.autoContinuation.activateDeferredAndReschedule();
 }
@@ -245,9 +270,14 @@ export function settleContinuationTurn<
  * models reject as a prefill (#1618, #2171).
  *
  * A step is the run of parts after a `step-start` part, which is how the AI
- * SDK splits an assistant message into model messages. A last step that
- * holds a tool part ends in that tool's result, whatever text sits beside
- * it, so it is not an answer.
+ * SDK's `convertToModelMessages` splits an assistant message into model
+ * messages. A last step that holds a tool part ends in that tool's result,
+ * whatever text sits beside it, so it is not an answer. A message with no
+ * `step-start` at all (a plain-text reply, a hand-built message) is one step.
+ *
+ * This assumes the host turns the transcript into model messages with
+ * `convertToModelMessages`. An app that builds them another way can end a
+ * request in assistant text where this returns `false`.
  */
 export function transcriptEndsInAnswer(
   messages: ReadonlyArray<{ role: string; parts: ReadonlyArray<unknown> }>
@@ -274,4 +304,17 @@ export function transcriptEndsInAnswer(
     }
   }
   return hasContent;
+}
+
+/**
+ * The targets of two continuations folded into one. `null` means "run
+ * whatever the transcript" and wins. `undefined` is a continuation that
+ * recorded no target, which is treated the same way when it is read.
+ */
+function mergeContinuationTargets(
+  a: readonly string[] | null | undefined,
+  b: readonly string[] | null | undefined
+): readonly string[] | null {
+  if (a == null || b == null) return null;
+  return [...a, ...b.filter((id) => !a.includes(id))];
 }

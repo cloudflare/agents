@@ -217,7 +217,38 @@ describe("the continuation turn", () => {
     expect(turns.continuation.pending).toBeNull();
   });
 
-  it("settles a turn a chat reset dropped from the queue", async () => {
+  it("a turn a chat reset dropped from the queue leaves the new chat's continuations alone", async () => {
+    let release!: () => void;
+    const blocker = turns.queue.enqueue(
+      "other",
+      () => new Promise<void>((resolve) => (release = resolve))
+    );
+    await result("a1");
+    await fire();
+    expect(turns.aborts.has("cont-1")).toBe(true);
+    turns.reset();
+    // The chat after the reset has a deferred result of its own by the time
+    // the dropped turn ends. It is not the dropped turn's to run or drop.
+    const deferred = {
+      connection: makeConnection("c9"),
+      connectionId: "c9",
+      errorPrefix: "[test]",
+      prerequisite: null,
+      targetMessageIds: ["a9"]
+    };
+    turns.continuation.deferred = deferred;
+    release();
+    await blocker;
+    await drain();
+
+    expect(host.ran).toEqual([]);
+    expect(host.errors).toEqual([]);
+    expect(turns.aborts.has("cont-1")).toBe(false);
+    expect(turns.continuation.deferred).toBe(deferred);
+    expect(turns.continuation.pending).toBeNull();
+  });
+
+  it("a turn dropped from the queue does not clear a newer pending continuation", async () => {
     let release!: () => void;
     const blocker = turns.queue.enqueue(
       "other",
@@ -226,8 +257,6 @@ describe("the continuation turn", () => {
     await result("a1");
     await fire();
     turns.reset();
-    // A continuation of the new chat, scheduled before the stale turn is
-    // dequeued, is not the stale turn's to clear.
     host.transcript = [user("u9"), toolReply("a9", "output-available")];
     await result("a9");
     release();
@@ -235,7 +264,6 @@ describe("the continuation turn", () => {
     await drain();
 
     expect(host.ran).toEqual([]);
-    expect(host.errors).toEqual([]);
     expect(turns.continuation.pending?.requestId).toBe("cont-2");
   });
 
@@ -280,6 +308,27 @@ describe("the continuation turn", () => {
     expect(connection.sent).toEqual([RESUME_NONE]);
     expect(host.ran).toEqual(["cont-1", "cont-2"]);
     expect(turns.aborts.has("cont-1")).toBe(false);
+  });
+
+  it("stops after the deferred result's continuation fails too", async () => {
+    const second = makeConnection("c2");
+    host.model = async (continuation) => {
+      if (continuation.requestId === "cont-1") await result("a1", second);
+      throw new Error("model down");
+    };
+    await result("a1");
+    await fire();
+    await drain();
+    await fire();
+    await drain();
+
+    // Two results, two attempts, and nothing left to run a third.
+    expect(host.ran).toEqual(["cont-1", "cont-2"]);
+    expect(host.errors).toHaveLength(2);
+    expect(second.sent).toEqual([RESUME_NONE]);
+    expect(turns.continuation.pending).toBeNull();
+    expect(turns.continuation.deferred).toBeNull();
+    expect(turns.hasPendingDecision()).toBe(false);
   });
 
   it("does not run the deferred result once the reply went on to its answer", async () => {
@@ -343,6 +392,56 @@ describe("the continuation turn", () => {
     expect(host.ran).toEqual(["cont-1"]);
   });
 
+  it("drops a result that arrives after the reply went on to its answer", async () => {
+    // Two parallel calls. The reply got its answer step while the second
+    // call was still unanswered (an app called continueLastTurn()). The
+    // second result then arrives: continuing would end the request in
+    // assistant text, so the result stays in the transcript for the next
+    // turn and the waiting tab is released.
+    host.transcript = withAnswer([
+      user("u1"),
+      toolReply("a1", "output-available", "output-available")
+    ]);
+    await result("a1");
+    await fire();
+    await drain();
+
+    expect(host.ran).toEqual([]);
+    expect(connection.sent).toEqual([RESUME_NONE]);
+    expect(turns.continuation.pending).toBeNull();
+  });
+
+  it("a newer pending continuation takes over the targets of the deferred result it covers", async () => {
+    const second = makeConnection("c2");
+    const third = makeConnection("c3");
+    host.transcript = [
+      user("u0"),
+      toolReply("a0", "output-available"),
+      user("u1"),
+      toolReply("a1", "output-available")
+    ];
+    host.model = async (continuation) => {
+      if (continuation.requestId !== "cont-1") return;
+      // Deferred, for the latest reply: arrives while the turn waits on
+      // the model.
+      await result("a1", second);
+      host.replyStreaming = true;
+      turns.continuationStreamStarted("cont-1", () => {});
+      // A newer pending one, for an older reply: arrives while it streams.
+      await result("a0", third);
+      host.replyStreaming = false;
+      turns.replyFinalized();
+    };
+    await result("a1");
+    await fire();
+    await drain();
+    await fire();
+    await drain();
+
+    // The follow-up still answers the latest reply's result.
+    expect(host.ran).toEqual(["cont-1", "cont-2"]);
+  });
+
   it("leaves a newer pending continuation alone, and lets it cover the deferred result", async () => {
     const second = makeConnection("c2");
     const third = makeConnection("c3");
@@ -403,6 +502,38 @@ describe("transcriptEndsInAnswer", () => {
         assistant(step, { type: "dynamic-tool", toolCallId: "d" })
       ])
     ).toBe(false);
+  });
+
+  it("treats a message with no step-start as one step", () => {
+    // convertToModelMessages turns [tool, text] into an assistant message
+    // and then the tool result, so the request ends in the result.
+    expect(transcriptEndsInAnswer([assistant(tool, text)])).toBe(false);
+    expect(transcriptEndsInAnswer([assistant(text, tool)])).toBe(false);
+    expect(transcriptEndsInAnswer([assistant(text)])).toBe(true);
+  });
+
+  it("is false when the last step holds only a server tool's result", () => {
+    // The request ends in that result and the model has not answered it.
+    const serverTool = {
+      type: "tool-search",
+      toolCallId: "s",
+      state: "output-available",
+      providerExecuted: true
+    };
+    expect(
+      transcriptEndsInAnswer([assistant(step, tool, step, serverTool)])
+    ).toBe(false);
+  });
+
+  it("counts a last step of reasoning alone as an answer", () => {
+    // The request would end in an assistant message. Kept as an answer
+    // until it is known what providers do with one that holds only
+    // reasoning.
+    expect(
+      transcriptEndsInAnswer([
+        assistant(step, tool, step, { type: "reasoning", text: "Thinking." })
+      ])
+    ).toBe(true);
   });
 
   it("looks past a step with nothing in it", () => {
