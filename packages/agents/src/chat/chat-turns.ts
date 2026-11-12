@@ -48,6 +48,7 @@ import {
 } from "./continuation-state";
 import type { MessageConcurrency } from "./lifecycle";
 import { PreStreamTurns } from "./pre-stream-turns";
+import { runRpcRequest, type RpcChatRequest } from "./rpc-request";
 import {
   SubmitConcurrencyController,
   type SubmitConcurrencyDecision
@@ -351,6 +352,14 @@ export class ChatTurns<
       this.aborts.remove(requestId);
       this.settlePreStreamTurn(requestId);
     }
+  }
+
+  /**
+   * Run one chat request a caller started over RPC and follows through a
+   * callback. See {@link runRpcRequest} for the order of its steps.
+   */
+  runRpcRequest(request: RpcChatRequest): Promise<void> {
+    return runRpcRequest(this, request);
   }
 
   /**

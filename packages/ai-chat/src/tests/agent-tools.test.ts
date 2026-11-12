@@ -258,6 +258,33 @@ type ParentStub = DurableObjectStub & {
     path: "continue" | "retry",
     withAssistantTurn: boolean
   ): Promise<{ before: string | null; after: string | null }>;
+  childRunWithDateInputForTest(): Promise<unknown>;
+  childRunWithCircularOutputForTest(): Promise<{
+    status: string | undefined;
+    output: unknown;
+  }>;
+  childResetWhileRunStreamsForTest(): Promise<AgentToolRunInspection | null>;
+  childCancelQueuedRunForTest(thenReset: boolean): Promise<{
+    queued: AgentToolRunInspection | null;
+    userTexts: string[];
+    chatCalls: string[];
+  }>;
+  childCancelFinishedRunForTest(): Promise<{
+    status: string | undefined;
+    otherTurnAborted: boolean;
+  }>;
+  childCancelRecoveredRunForTest(): Promise<{
+    recoveredTurnAborted: boolean;
+    attemptAborted: boolean;
+    otherTurnAborted: boolean;
+    otherAttemptAborted: boolean;
+  }>;
+  childRecoverCancelledRunForTest(path: "continue" | "retry"): Promise<{
+    incident: { status: string; reason?: string } | null;
+    chatCalls: number;
+  }>;
+  childCancelStartingRunForTest(): Promise<string | null>;
+  childCancelWithBrokenRunTableForTest(): Promise<string>;
   childCancelAgentToolRunAbortsRecoveryForTest(): Promise<{
     abortedBefore: boolean;
     abortedAfter: boolean;
@@ -1294,6 +1321,82 @@ describe("AIChatAgent as an agent-tool child", () => {
     expect(result.abortedBefore).toBe(false);
     expect(result.abortedAfter).toBe(true);
     expect(result.childStatus).toBe("aborted");
+  });
+
+  it("hands a live run's output hook the input as it was passed, not its stored copy", async () => {
+    await expect(
+      (await getParent()).childRunWithDateInputForTest()
+    ).resolves.toEqual({ inputIsDate: true });
+  });
+
+  it("completes a run whose output JSON cannot hold, storing it as its string", async () => {
+    await expect(
+      (await getParent()).childRunWithCircularOutputForTest()
+    ).resolves.toEqual({ status: "completed", output: "[object Object]" });
+  });
+
+  it("records a chat reset while the run streams as an error, like a reset in the queue", async () => {
+    const inspection = await (
+      await getParent()
+    ).childResetWhileRunStreamsForTest();
+    expect(inspection).toMatchObject({
+      status: "error",
+      error: "Agent tool run was skipped because the chat was cleared."
+    });
+  });
+
+  it("never starts a run cancelled while its turn waited in the queue", async () => {
+    const result = await (await getParent()).childCancelQueuedRunForTest(false);
+    expect(result.queued).toMatchObject({ status: "aborted", error: "stop" });
+    // Its input was not stored and the model was not called for it.
+    expect(result.userTexts).toEqual(["first run"]);
+    expect(result.chatCalls).toEqual(["first run"]);
+  });
+
+  it("keeps a cancelled run aborted when a chat reset then skips its queued turn", async () => {
+    const result = await (await getParent()).childCancelQueuedRunForTest(true);
+    expect(result.queued).toMatchObject({ status: "aborted", error: "stop" });
+  });
+
+  it("a cancel for a run that already finished aborts no other turn", async () => {
+    const result = await (await getParent()).childCancelFinishedRunForTest();
+    expect(result.status).toBe("completed");
+    expect(result.otherTurnAborted).toBe(false);
+  });
+
+  it("a cancel of a run being recovered stops the requests on its row and nothing else", async () => {
+    await expect(
+      (await getParent()).childCancelRecoveredRunForTest()
+    ).resolves.toEqual({
+      recoveredTurnAborted: true,
+      attemptAborted: true,
+      otherTurnAborted: false,
+      otherAttemptAborted: false
+    });
+  });
+
+  for (const path of ["continue", "retry"] as const) {
+    it(`does not ${path} the turn of a run cancelled before the isolate died, and says why`, async () => {
+      const result = await (
+        await getParent()
+      ).childRecoverCancelledRunForTest(path);
+      expect(result).toEqual({
+        incident: { status: "skipped", reason: "user_cancelled" },
+        chatCalls: 0
+      });
+    });
+  }
+
+  it("treats a starting run as open: a cancel settles it", async () => {
+    await expect(
+      (await getParent()).childCancelStartingRunForTest()
+    ).resolves.toBe("aborted");
+  });
+
+  it("does not hide a failing run-table query as an unknown run", async () => {
+    await expect(
+      (await getParent()).childCancelWithBrokenRunTableForTest()
+    ).resolves.toBe("rejected");
   });
 
   it("keeps suppressing a recovered terminal-only child's chunks after a restart (#2298)", async () => {
