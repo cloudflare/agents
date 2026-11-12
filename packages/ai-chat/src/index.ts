@@ -857,11 +857,9 @@ export class AIChatAgent<
         requestId,
         continuation,
         wrap,
-        // Inside the fiber, so the turn is durably registered before it
-        // takes the reply over from a scheduled recovery.
-        continuation
-          ? () => this._chatRecoveryEngine().runContinuationTurn(fn)
-          : fn
+        // A turn that continues the latest reply takes it over from a
+        // scheduled recovery, once its fiber is durably registered.
+        continuation ? this._chatRecoveryEngine().continuationTurn(fn) : fn
       );
     } finally {
       if (this._liveChatRecoveryTurns.get(requestId) === liveTurn) {
@@ -4924,7 +4922,8 @@ export class AIChatAgent<
         },
         reconcileAgentToolChildRuns: () =>
           this._reconcileOwnStaleAgentToolChildRuns(),
-        trackAlarmWork: (turn) => this.lifecycle.trackAlarmWork(turn)
+        trackAlarmWork: (turn) => this.lifecycle.trackAlarmWork(turn),
+        attemptScope: new AsyncLocalStorage<string>()
       },
       readProgress: () => this._chatRecoveryProgressMarker(),
       // A turn parked on a pending CLIENT interaction is waiting on the human,

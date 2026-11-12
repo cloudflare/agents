@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { describe, expect, it, vi } from "vitest";
 import {
   ChatRecoveryEngine,
@@ -97,7 +98,8 @@ function setup(scenario: Scenario = {}) {
       waitUntilStable: () => Promise.resolve(true),
       restoreRequestContext: () => {},
       reconcileAgentToolChildRuns: () => Promise.resolve(),
-      trackAlarmWork: () => {}
+      trackAlarmWork: () => {},
+      attemptScope: new AsyncLocalStorage<string>()
     },
     onGiveUpBookkeepingError: () => {}
   };

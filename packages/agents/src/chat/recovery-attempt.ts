@@ -184,6 +184,8 @@ async function runAdmittedAttempt<
   // A client stops this attempt by the original request id: the only id it
   // knows until the recovered turn streams.
   const stop = turns.beginRecoveryAttempt(data?.originalRequestId);
+  // Aborts when another turn continues this attempt's reply.
+  const attempt = engine.beginAttempt(incidentId);
   const recordStop = async (): Promise<void> => {
     await engine.recordRecoveryStop(incidentId);
     await host.onStopped?.();
@@ -205,7 +207,10 @@ async function runAdmittedAttempt<
     // Also before the timeout branch, which would reschedule over the mark:
     // a client answered the reply's tool call while this attempt was queued
     // or waiting, and the answer's own turn continued the reply.
-    if (await engine.isRecoverySuperseded(incidentId)) {
+    if (
+      attempt.superseded.aborted ||
+      (await engine.isRecoverySuperseded(incidentId))
+    ) {
       await host.onClientContinued?.();
       return;
     }
@@ -269,12 +274,20 @@ async function runAdmittedAttempt<
     // Drop a mark an earlier interruption left, so only this turn's own
     // reschedule counts below.
     engine.takeReschedule(incidentId);
+    // The turn stops for a user's stop, and for another turn that got to
+    // continue the reply while this one waited in the queue.
+    const turnSignal = AbortSignal.any([stop.signal, attempt.superseded]);
     const result = await engine.runAttemptTurn(incidentId, () =>
-      host.runTurn(stop.signal)
+      host.runTurn(turnSignal)
     );
 
     if (stop.signal.aborted) {
       await recordStop();
+      return;
+    }
+    if (attempt.superseded.aborted) {
+      // The incident already says who continued the reply.
+      await host.onClientContinued?.();
       return;
     }
     if (result.status !== "completed" && engine.takeReschedule(incidentId)) {
@@ -320,6 +333,7 @@ async function runAdmittedAttempt<
     });
   } finally {
     stop.end();
+    attempt.end();
     engine.activeRootRequestId = previousRootRequestId;
     // If this facet is an agent-tool child, its recovered turn settled
     // outside `startAgentToolRun`'s finalizer. Close the run now so a

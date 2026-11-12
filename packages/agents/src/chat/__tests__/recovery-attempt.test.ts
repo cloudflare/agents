@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { describe, expect, it, vi } from "vitest";
 import {
   CHAT_RECOVERY_CANCELLED_REASON,
@@ -96,7 +97,8 @@ function setup(scenario: Scenario = {}) {
     reconcileAgentToolChildRuns: async () => {
       log.push("reconcile");
     },
-    trackAlarmWork: () => {}
+    trackAlarmWork: () => {},
+    attemptScope: new AsyncLocalStorage<string>()
   };
   const adapter: ChatRecoveryAdapter = {
     resolveConfig: () => resolveChatRecoveryConfig(undefined),
@@ -306,26 +308,52 @@ describe("runRecoveredTurn", () => {
   it("the attempt's own continuation turn does not supersede its incident", async () => {
     let superseded: boolean | undefined;
     const t = setup({
-      // What the host's fiber wrapper does for every continuation turn.
+      // What the host's fiber wrapper does for every continuation turn: it
+      // wraps the body where the fiber is set up and runs it inside.
       duringTurn: async ({ engine }) => {
-        superseded = await engine.runContinuationTurn(async () =>
+        const body = engine.continuationTurn(async () =>
           engine.isRecoverySuperseded(INCIDENT)
         );
+        superseded = await body();
       }
     });
     await t.run();
     expect(superseded).toBe(false);
+    expect(t.turnSignals[0]?.aborted).toBe(false);
     // The attempt recorded its own outcome: a completed incident is dropped.
     expect(t.incident()).toBeUndefined();
   });
 
   it("a continuation turn that is not the attempt's supersedes the scheduled incident", async () => {
     const t = setup();
-    expect(
-      await t.engine.runContinuationTurn(async () =>
-        t.engine.isRecoverySuperseded(INCIDENT)
-      )
-    ).toBe(true);
+    const body = t.engine.continuationTurn(async () =>
+      t.engine.isRecoverySuperseded(INCIDENT)
+    );
+    expect(await body()).toBe(true);
+  });
+
+  it("stands down when another turn continues the reply while its own turn is queued", async () => {
+    // Set up outside the attempt, as an app's `continueLastTurn()` would be.
+    let other: (() => Promise<void>) | undefined;
+    const t = setup({
+      result: { status: "aborted" },
+      // The attempt is past its checks. The other turn reaches the front of
+      // the queue first and runs.
+      duringTurn: async () => {
+        await other?.();
+      }
+    });
+    other = t.engine.continuationTurn(async () => {});
+    await t.run();
+
+    // The attempt's turn was told to stop, and the incident says why.
+    expect(t.turnSignals[0]?.aborted).toBe(true);
+    expect(t.log).toContain("client-continued");
+    expect(t.log).not.toContain("before-outcome");
+    expect(t.incident()).toMatchObject({
+      status: "skipped",
+      reason: CHAT_RECOVERY_CONTINUED_REASON
+    });
   });
 
   it("a client's answer that continued the reply wins over a timeout that would reschedule", async () => {
