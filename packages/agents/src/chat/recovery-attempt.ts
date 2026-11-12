@@ -325,6 +325,14 @@ async function runAdmittedAttempt<
       await recordStop();
       return;
     }
+    if (attempt.superseded.aborted && !isDurableObjectMemoryLimitReset(error)) {
+      // Another turn continued the reply and told this attempt to stop.
+      // Whatever its turn threw on the way out, the incident already has
+      // its outcome, and giving up would put the terminal message over a
+      // reply that is being continued.
+      await host.onClientContinued?.();
+      return;
+    }
     await handleRecoveryAttemptError(engine, {
       callback,
       data,
