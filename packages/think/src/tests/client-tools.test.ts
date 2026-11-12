@@ -2712,13 +2712,16 @@ describe("Think — before-turn repair", () => {
       makeToolMessage("tc-keep", "client_action", "input-available")
     ]);
 
-    const modelCalls = (await agent.getTextOnlyPromptsForTest()).length;
+    const modelCalls = ((await agent.getTextOnlyPromptsForTest()) as unknown[])
+      .length;
 
     // The app continues that reply. The call is still the client's to
     // answer, so there is nothing to continue yet: the turn leaves the call
     // as it is and never calls the model.
     expect(await agent.continueLastTurnForTest()).toBe("skipped");
-    expect((await agent.getTextOnlyPromptsForTest()).length).toBe(modelCalls);
+    expect(
+      ((await agent.getTextOnlyPromptsForTest()) as unknown[]).length
+    ).toBe(modelCalls);
 
     expect(
       await agent.probeToolPartStateForTest({ toolCallId: "tc-keep" })
@@ -2744,10 +2747,10 @@ describe("Think — before-turn repair", () => {
 
     // Outside a turn the repair settles everything. It must not remember
     // that the last turn was a continuation and keep the client's call.
-    const repaired = await agent.repairToolTranscriptPartsForTest([
+    const repaired = (await agent.repairToolTranscriptPartsForTest([
       makeUserMessage("do it"),
       makeToolMessage("tc-after", "client_action", "input-available")
-    ]);
+    ])) as UIMessage[];
     expect(repaired[1].parts[0]).toMatchObject({ state: "output-error" });
 
     await closeWS(ws);
