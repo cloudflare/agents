@@ -52,6 +52,8 @@ import {
   sendIfOpen,
   hasIncompleteToolBatch,
   ChatTurns,
+  prepareTurnMessages,
+  toSaveMessagesResult,
   type RecoveryAttemptHandle,
   type ToolInteractionOutcome,
   partAwaitsClientInteraction,
@@ -60,6 +62,7 @@ import {
   type TurnResult,
   type MessagePart,
   type StreamChunkData,
+  type ServerChatTurn,
   type SubmitConcurrencyDecision,
   type ChatFiberSnapshot,
   type ChatTurnOutcome
@@ -1574,6 +1577,7 @@ export class AIChatAgent<
                                   [connection.id],
                                   {
                                     chatMessageId,
+                                    abortSignal: signal,
                                     onStreamStart: () => {
                                       replying = true;
                                     }
@@ -3074,7 +3078,10 @@ export class AIChatAgent<
    * sub-agent helper that runs one turn at a time) and want a coarse
    * "cancel whatever is running" handle without tracking request ids.
    *
-   * Does NOT reset queued turns, continuation timers, or submit
+   * A turn still waiting in the queue is aborted too: it ends `aborted`
+   * when it reaches the front, stores nothing and does not call the model.
+   *
+   * Does NOT invalidate queued turns, continuation timers, or submit
    * concurrency state — use {@link resetTurnState} for the full
    * teardown that runs on `chat-clear`.
    */
@@ -3327,6 +3334,7 @@ export class AIChatAgent<
                         {
                           continuation: true,
                           chatMessageId: requestId,
+                          abortSignal,
                           onStreamStart: () => {
                             replying = true;
                           }
@@ -3438,17 +3446,90 @@ export class AIChatAgent<
   }
 
   /**
-   * @returns Terminal status for the turn.
+   * Admit a server-started turn through the queue wrapper every chat turn
+   * uses, for {@link ChatTurns.runServerTurn}.
    */
-  private async _runProgrammaticChatTurn(
+  private async _enqueueServerTurn(
     requestId: string,
-    clientTools?: ClientToolSchema[],
-    body?: Record<string, unknown>,
-    externalSignal?: AbortSignal
-  ): Promise<StreamResultStatus> {
+    turn: () => Promise<unknown>,
+    epoch: number
+  ): Promise<"completed" | "stale"> {
+    let stale = false;
+    await this._runExclusiveChatTurn(requestId, turn, {
+      epoch,
+      onStale: () => {
+        stale = true;
+      }
+    });
+    return stale ? "stale" : "completed";
+  }
+
+  /**
+   * Run one server-started turn through {@link ChatTurns.runServerTurn}.
+   * `saveMessages`, `continueLastTurn`, the recovery retry and the inline
+   * reaction to a detached notification all come through here; they differ
+   * only in what they store first and whether the reply continues the last
+   * assistant message.
+   */
+  private async _runServerTurn(
+    requestId: string,
+    turn: {
+      signal?: AbortSignal;
+      continuation: boolean;
+      /** A body for this turn. Without one, the stored body is used. */
+      body?: Record<string, unknown>;
+      /** The caller already holds the queue slot: run without waiting. */
+      inline?: boolean;
+      prepare?: ServerChatTurn<UIMessage[]>["prepare"];
+      persist?: ServerChatTurn<UIMessage[]>["persist"];
+    }
+  ): Promise<SaveMessagesResult> {
+    const outcome = await this._turns.runServerTurn<UIMessage[]>({
+      requestId,
+      signal: turn.signal,
+      enqueue: turn.inline
+        ? async (run) => {
+            await run();
+            return "completed";
+          }
+        : (run, epoch) => this._enqueueServerTurn(requestId, run, epoch),
+      prepare: turn.prepare,
+      persist: turn.persist,
+      run: (signal) =>
+        this._runServerTurnBody(requestId, signal, {
+          body: turn.body,
+          continuation: turn.continuation
+        }),
+      onAborted: () => this._clearChatTerminal()
+    });
+    return toSaveMessagesResult(requestId, outcome);
+  }
+
+  /**
+   * The model call and reply of a server-started turn: what
+   * {@link ChatTurns.runServerTurn} runs once the turn is at the front of the
+   * queue and has not been stopped.
+   *
+   * The stored tools and body are read here, when the turn starts, so a turn
+   * that waited in the queue runs with the context of the request that ran
+   * before it, like a continuation does.
+   *
+   * @returns The reply's outcome, or nothing when `onChatMessage` returned no
+   *   response.
+   */
+  private async _runServerTurnBody(
+    requestId: string,
+    abortSignal: AbortSignal,
+    turn: {
+      body: Record<string, unknown> | undefined;
+      continuation: boolean;
+    }
+  ): Promise<StreamResultStatus | undefined> {
+    const { continuation } = turn;
+    const clientTools = this._lastClientTools;
+    const body = turn.body ?? this._lastBody;
     this._setRequestContext(clientTools, body);
-    let wasAborted = false;
-    let status: StreamResultStatus = { status: "completed" };
+    let outcome: StreamResultStatus | undefined;
 
     await this._tryCatchChat(async () => {
       return agentContext.run(
@@ -3458,55 +3539,29 @@ export class AIChatAgent<
           request: undefined,
           email: undefined
         },
-        async () => {
-          const abortSignal = this._abortRegistry.getSignal(requestId);
-          // Wire the optional external signal to the registry's
-          // controller. Detacher MUST run in `finally` to avoid leaking
-          // listeners on long-lived parent signals — including the case
-          // where `runFiber` itself throws (e.g. SQLite error inserting
-          // the fiber row) before `programmaticBody` is ever invoked.
-          const detachExternal = this._abortRegistry.linkExternal(
-            requestId,
-            externalSignal
-          );
-          try {
-            const programmaticBody = async () => {
-              await this._repairInterruptedToolsBeforeTurn({
-                continuation: false
-              });
-              const response = await this.onChatMessage(() => {}, {
-                requestId,
-                abortSignal,
-                clientTools,
-                body,
-                continuation: false
-              });
-
-              if (response) {
-                status = await this._reply(requestId, response, [], {
-                  chatMessageId: requestId
-                });
-              }
-            };
-
-            await this._runChatRecoveryFiber(
+        () =>
+          this._runChatRecoveryFiber(requestId, continuation, async () => {
+            await this._repairInterruptedToolsBeforeTurn({ continuation });
+            const response = await this.onChatMessage(() => {}, {
               requestId,
-              false,
-              programmaticBody
-            );
-          } finally {
-            if (abortSignal?.aborted) wasAborted = true;
-            detachExternal();
-            this._abortRegistry.remove(requestId);
-          }
-        }
+              abortSignal,
+              clientTools,
+              body,
+              continuation
+            });
+
+            if (response) {
+              outcome = await this._reply(requestId, response, [], {
+                continuation,
+                chatMessageId: requestId,
+                abortSignal
+              });
+            }
+          })
       );
     });
 
-    if (status.status === "completed" && wasAborted) {
-      return { status: "aborted" };
-    }
-    return status;
+    return outcome;
   }
 
   /**
@@ -3799,13 +3854,9 @@ export class AIChatAgent<
         { id, role, parts: [{ type: "text", text }], metadata } as UIMessage
       ]);
       if (!options.react) return;
+      // The caller holds the queue slot in every branch below.
       const runReply = (requestId: string) =>
-        this._runProgrammaticChatTurn(
-          requestId,
-          this._lastClientTools,
-          this._lastBody,
-          undefined
-        );
+        this._runServerTurn(requestId, { continuation: false, inline: true });
       if (this._inSerializedDetachedDeliverySlot) {
         // We own the active turn slot (a `serialize: true` finish delivery), so
         // run inline + awaited, reusing the slot's request id (keeps the
@@ -4664,7 +4715,10 @@ export class AIChatAgent<
    * the internally-generated request id. The signal is linked to the
    * registry's controller for this turn — when it aborts, the inference
    * loop's signal aborts and the result reports `status: "aborted"`.
-   * Pre-aborted signals short-circuit before any model work runs.
+   * A signal already aborted, or one that aborts while the turn waits in the
+   * queue, stops the turn before it starts: nothing is stored, `onChatMessage`
+   * and `onChatResponse` are not called, and the result reports
+   * `status: "aborted"`.
    *
    * Returns `{ requestId, status, error? }` where `status` is `"completed"`
    * when the turn ran, `"error"` when the stream reported an error,
@@ -4679,50 +4733,40 @@ export class AIChatAgent<
         ) => UIMessage[] | Promise<UIMessage[]>),
     options?: SaveMessagesOptions
   ): Promise<SaveMessagesResult> {
-    const requestId = nanoid();
-    const clientTools = this._lastClientTools;
-    const body = this._lastBody;
-    const epoch = this._turnQueue.generation;
-    let status: SaveMessagesResult["status"] = "completed";
-    let error: string | undefined;
+    return this._runProgrammaticMessagesTurn(nanoid(), messages, options);
+  }
 
-    await this._runExclusiveChatTurn(
-      requestId,
-      async () => {
-        const resolvedMessages =
-          typeof messages === "function"
-            ? await messages(this.messages)
-            : messages;
-
-        if (this._turnQueue.generation !== epoch) {
-          status = "skipped";
-          return;
-        }
-
-        await this.persistMessages(resolvedMessages);
-
-        if (this._turnQueue.generation !== epoch) {
-          status = "skipped";
-          return;
-        }
-
-        const turnResult = await this._runProgrammaticChatTurn(
-          requestId,
-          clientTools,
-          body,
-          options?.signal
-        );
-        status = turnResult.status;
-        error = turnResult.error;
-      },
-      { epoch }
-    );
-
-    if (this._turnQueue.generation !== epoch && status === "completed") {
-      status = "skipped";
+  /**
+   * The turn behind {@link saveMessages}, with the options framework callers
+   * need on top of the public ones.
+   *
+   * @param options.shouldApplyMessages - Asked when the turn reaches the
+   *   front of the queue, before and after the messages are worked out.
+   *   `false` ends the turn `aborted` with nothing stored and no model call.
+   */
+  private async _runProgrammaticMessagesTurn(
+    requestId: string,
+    messages:
+      | UIMessage[]
+      | ((
+          currentMessages: readonly UIMessage[]
+        ) => UIMessage[] | Promise<UIMessage[]>),
+    options?: SaveMessagesOptions & {
+      shouldApplyMessages?: () => boolean | Promise<boolean>;
     }
-
-    return { requestId, status, ...(error !== undefined && { error }) };
+  ): Promise<SaveMessagesResult> {
+    return this._runServerTurn(requestId, {
+      signal: options?.signal,
+      continuation: false,
+      prepare: ({ isCurrent }) =>
+        prepareTurnMessages<UIMessage>({
+          messages,
+          current: () => this.messages,
+          shouldApply: options?.shouldApplyMessages,
+          isCurrent
+        }),
+      persist: (resolvedMessages) => this.persistMessages(resolvedMessages)
+    });
   }
 
   /**
@@ -4753,90 +4797,14 @@ export class AIChatAgent<
     // to this turn's request id so the parent's re-attach tail keeps attributing
     // the continued turn's frames (no-op otherwise).
     this._rebindAgentToolChildRunRequestId(requestId);
-    const clientTools = this._lastClientTools;
-    const resolvedBody = body ?? this._lastBody;
-    const epoch = this._turnQueue.generation;
-    let status: SaveMessagesResult["status"] = "completed";
-    let error: string | undefined;
-    let wasAborted = false;
-
-    await this._runExclusiveChatTurn(
-      requestId,
-      async () => {
-        if (this._turnQueue.generation !== epoch) {
-          status = "skipped";
-          return;
-        }
-
-        this._setRequestContext(clientTools, resolvedBody);
-
-        const turnBody = async () => {
-          await this._tryCatchChat(async () => {
-            return agentContext.run(
-              {
-                agent: this,
-                connection: undefined,
-                request: undefined,
-                email: undefined
-              },
-              async () => {
-                const abortSignal = this._abortRegistry.getSignal(requestId);
-                const detachExternal = this._abortRegistry.linkExternal(
-                  requestId,
-                  options?.signal
-                );
-                try {
-                  await this._repairInterruptedToolsBeforeTurn({
-                    continuation: true
-                  });
-                  const response = await this.onChatMessage(() => {}, {
-                    requestId,
-                    abortSignal,
-                    clientTools,
-                    body: resolvedBody,
-                    continuation: true
-                  });
-
-                  if (response) {
-                    const replyResult = await this._reply(
-                      requestId,
-                      response,
-                      [],
-                      {
-                        continuation: true,
-                        chatMessageId: requestId
-                      }
-                    );
-                    status = replyResult.status;
-                    error = replyResult.error;
-                  }
-                } finally {
-                  if (abortSignal?.aborted) wasAborted = true;
-                  detachExternal();
-                  this._abortRegistry.remove(requestId);
-                }
-              }
-            );
-          });
-        };
-
-        await this._runChatRecoveryFiber(requestId, true, turnBody);
-      },
-      { epoch }
-    );
-
-    if (this._turnQueue.generation !== epoch && status === "completed") {
-      status = "skipped";
-    } else if (wasAborted && status === "completed") {
-      status = "aborted";
-    }
-
-    return { requestId, status, ...(error !== undefined && { error }) };
+    return this._runServerTurn(requestId, {
+      signal: options?.signal,
+      body,
+      continuation: true
+    });
   }
 
   private async _retryLastUserTurn(
-    clientTools?: ClientToolSchema[],
-    body?: Record<string, unknown>,
     options?: SaveMessagesOptions
   ): Promise<SaveMessagesResult> {
     const lastMessage =
@@ -4850,35 +4818,10 @@ export class AIChatAgent<
     // to this turn's request id so the parent's re-attach tail keeps attributing
     // the retried turn's frames (no-op otherwise).
     this._rebindAgentToolChildRunRequestId(requestId);
-    const epoch = this._turnQueue.generation;
-    let status: SaveMessagesResult["status"] = "completed";
-    let error: string | undefined;
-
-    await this._runExclusiveChatTurn(
-      requestId,
-      async () => {
-        if (this._turnQueue.generation !== epoch) {
-          status = "skipped";
-          return;
-        }
-
-        const turnResult = await this._runProgrammaticChatTurn(
-          requestId,
-          clientTools,
-          body,
-          options?.signal
-        );
-        status = turnResult.status;
-        error = turnResult.error;
-      },
-      { epoch }
-    );
-
-    if (this._turnQueue.generation !== epoch && status === "completed") {
-      status = "skipped";
-    }
-
-    return { requestId, status, ...(error !== undefined && { error }) };
+    return this._runServerTurn(requestId, {
+      signal: options?.signal,
+      continuation: false
+    });
   }
 
   // ── Chat recovery via fibers ──────────────────────────────────────
@@ -6079,18 +6022,14 @@ export class AIChatAgent<
       }
 
       this._applyRecoveredRequestContext(data);
-      // The retry runs through `_runProgrammaticChatTurn`, which repairs any
+      // The retry runs through `_runServerTurnBody`, which repairs any
       // interrupted tool orphan before re-entering inference
       // (`_repairInterruptedToolsBeforeTurn`). The retry path normally re-runs
       // an unanswered user-message tail (no assistant orphan to repair), so that
       // is a defensive no-op here, but keeps both recovery entrypoints converged.
       onTurnStarted?.();
       this._takeRecoveryReschedule(data?.incidentId);
-      const result = await this._retryLastUserTurn(
-        this._lastClientTools,
-        this._lastBody,
-        { signal: stop.signal }
-      );
+      const result = await this._retryLastUserTurn({ signal: stop.signal });
       if (await this._recoveryAttemptStopped(stop, data?.incidentId)) {
         return;
       }
@@ -7451,15 +7390,22 @@ export class AIChatAgent<
        * own failures to clients; a throw before it is the caller's to report.
        */
       onStreamStart?: () => void;
+      /**
+       * The turn's own abort signal: it cancels the reader loop when the
+       * turn is stopped. Every turn hands it over. Looking it up in the
+       * registry would find none once `abortAllRequests()` emptied it while
+       * the turn waited on `onChatMessage`. This is a safety net — users
+       * should also pass abortSignal to streamText for proper cancellation.
+       */
+      abortSignal?: AbortSignal;
     } = {}
   ): Promise<StreamResultStatus> {
-    const { continuation = false, chatMessageId, onStreamStart } = options;
-    // Look up the abort signal for this request so we can cancel the reader
-    // loop if the client sends a cancel message. This is a safety net —
-    // users should also pass abortSignal to streamText for proper cancellation.
-    const abortSignal = chatMessageId
-      ? this._abortRegistry.getExistingSignal(chatMessageId)
-      : undefined;
+    const {
+      continuation = false,
+      chatMessageId,
+      onStreamStart,
+      abortSignal
+    } = options;
     // A chat clear (resetTurnState) bumps the queue generation and empties
     // the abort registry. A turn admitted before it must neither stream into
     // the cleared chat nor persist its reply there, even when its controller

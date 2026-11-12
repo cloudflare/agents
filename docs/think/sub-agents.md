@@ -385,7 +385,7 @@ protected abortAllRequests(): void
 ```
 
 - **`abortRequest(id, reason?)`** — abort a specific in-flight turn by id. No-op if no controller exists for that id. Equivalent to a client `chat-request-cancel`.
-- **`abortAllRequests()`** — abort every in-flight controller in the registry. Used by single-purpose sub-agents that don't track ids.
+- **`abortAllRequests()`** — abort every turn, running or waiting in the queue. A turn that had not started ends `aborted`: it stores nothing and does not call the model. Used by single-purpose sub-agents that don't track ids.
 
 Both methods produce the same end state as `chat-request-cancel`: inference loop terminates, partial chunks persist, the turn's `ChatResponseResult` reports `status: "aborted"`. Prefer `options.signal` on `saveMessages` / `continueLastTurn` when driving a turn programmatically — it threads the abort intent in from turn start without requiring the caller to know the id.
 

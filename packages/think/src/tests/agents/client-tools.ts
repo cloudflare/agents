@@ -946,7 +946,22 @@ export class ThinkClientToolsAgent extends Think {
     return this._chatErrorLog;
   }
 
+  private _turnBodies: Array<Record<string, unknown> | null> = [];
+
+  /** The body each turn ran with, in the order the turns started. */
+  async getTurnBodiesForTest(): Promise<Array<Record<string, unknown> | null>> {
+    return this._turnBodies;
+  }
+
+  async saveMessagesForTest(text: string): Promise<string> {
+    const result = await this.saveMessages([
+      { id: crypto.randomUUID(), role: "user", parts: [{ type: "text", text }] }
+    ]);
+    return result.status;
+  }
+
   override async beforeTurn(ctx: TurnContext): Promise<TurnConfig | void> {
+    this._turnBodies.push(ctx.body ?? null);
     this._lastTurnToolNames = Object.keys(ctx.tools);
     if (ctx.continuation) await this._continuationStartLatch?.wait();
     if (ctx.continuation && this._failContinuationBeforeStream) {

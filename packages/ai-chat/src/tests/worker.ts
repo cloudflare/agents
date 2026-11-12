@@ -1339,6 +1339,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     if (options?.requestId) {
       this._startedRequestIds.push(options.requestId);
       this._requestStartTimes.set(options.requestId, Date.now());
+      this._requestBodies.set(options.requestId, options.body);
     }
 
     const body = options?.body as
@@ -1447,6 +1448,20 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
 
   getStartedRequestIds(): string[] {
     return [...this._startedRequestIds];
+  }
+
+  private _requestBodies = new Map<
+    string,
+    Record<string, unknown> | undefined
+  >();
+
+  /** The body `onChatMessage` got for a request. */
+  getRequestBodyForTest(requestId: string): Record<string, unknown> | null {
+    return this._requestBodies.get(requestId) ?? null;
+  }
+
+  abortAllRequestsForTest(): void {
+    this.abortAllRequests();
   }
 
   getPersistedMessages(): Promise<ChatMessage[]> {
@@ -1648,6 +1663,67 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
         parts: [{ type: "text", text }]
       }
     ]);
+  }
+
+  /**
+   * Drive the private turn behind `saveMessages` with a
+   * `shouldApplyMessages` that answers from `answers`, one per call.
+   */
+  async testProgrammaticTurnWithShouldApply(
+    text: string,
+    answers: boolean[]
+  ): Promise<{ result: SaveMessagesResult; asked: number }> {
+    this.setTestBody({ format: "plaintext", chunkCount: 2, chunkDelayMs: 5 });
+    let asked = 0;
+    const result = await (
+      this as unknown as {
+        _runProgrammaticMessagesTurn(
+          requestId: string,
+          messages: ChatMessage[],
+          options: { shouldApplyMessages: () => boolean }
+        ): Promise<SaveMessagesResult>;
+      }
+    )._runProgrammaticMessagesTurn(
+      `should-apply-${crypto.randomUUID()}`,
+      [
+        ...this.messages,
+        {
+          id: `should-apply-${crypto.randomUUID()}`,
+          role: "user",
+          parts: [{ type: "text", text }]
+        }
+      ],
+      { shouldApplyMessages: () => answers[asked++] ?? true }
+    );
+    return { result, asked };
+  }
+
+  /**
+   * Queue a second `saveMessages` turn behind a running one, then call
+   * `abortAllRequests()` while the second still waits in the queue.
+   */
+  async testQueuedSaveMessagesStoppedByAbortAllRequests(
+    cancelAfterMs: number,
+    body: Record<string, unknown>
+  ): Promise<{ running: SaveMessagesResult; queued: SaveMessagesResult }> {
+    this.setTestBody(body);
+    const turn = (text: string) =>
+      this.saveMessages((messages) => [
+        ...messages,
+        {
+          id: `queued-abort-${crypto.randomUUID()}`,
+          role: "user",
+          parts: [{ type: "text", text }]
+        }
+      ]);
+    setTimeout(() => {
+      (this as unknown as { abortAllRequests(): void }).abortAllRequests();
+    }, cancelAfterMs);
+    const [running, queued] = await Promise.all([
+      turn("Running"),
+      turn("Queued")
+    ]);
+    return { running, queued };
   }
 
   async getPersistedUserTexts(): Promise<string[]> {
@@ -3877,6 +3953,63 @@ export class RecoveryThrowingAgent extends AIChatAgent<Env> {
 
   setShouldThrow(value: boolean): void {
     this._shouldThrow = value;
+  }
+
+  private _onErrorSeen: string[] = [];
+
+  override onError(connectionOrError: unknown, error?: unknown): void {
+    const cause = error ?? connectionOrError;
+    const message = cause instanceof Error ? cause.message : String(cause);
+    this._onErrorSeen.push(message);
+    throw new Error(`onError(${message})`);
+  }
+
+  async callContinueLastTurn(): Promise<{ requestId: string; status: string }> {
+    return this.continueLastTurn();
+  }
+
+  /**
+   * Drive `continueLastTurn` while `onChatMessage` throws, and report what
+   * the caller sees and what the turn left behind.
+   */
+  async testContinueLastTurnWhileThrowing(): Promise<{
+    thrown: string | null;
+    onErrorSeen: string[];
+    liveRecoveryTurns: number;
+    liveClosures: number;
+    fibers: number;
+    abortControllers: number;
+    queueIdle: boolean;
+  }> {
+    await this.persistMessages([
+      { id: "u1", role: "user", parts: [{ type: "text", text: "Hello" }] },
+      { id: "a1", role: "assistant", parts: [{ type: "text", text: "Hi" }] }
+    ]);
+    this._shouldThrow = true;
+    this._onErrorSeen = [];
+    let thrown: string | null = null;
+    try {
+      await this.continueLastTurn();
+    } catch (error) {
+      thrown = error instanceof Error ? error.message : String(error);
+    } finally {
+      this._shouldThrow = false;
+    }
+    const internals = this as unknown as {
+      _liveChatRecoveryTurns: Map<string, unknown>;
+      _liveChatTurnClosures: Map<string, unknown>;
+      _abortRegistry: { size: number };
+      _turnQueue: { isActive: boolean };
+    };
+    return {
+      thrown,
+      onErrorSeen: [...this._onErrorSeen],
+      liveRecoveryTurns: internals._liveChatRecoveryTurns.size,
+      liveClosures: internals._liveChatTurnClosures.size,
+      fibers: this.getActiveFibers().length,
+      abortControllers: internals._abortRegistry.size,
+      queueIdle: !internals._turnQueue.isActive
+    };
   }
 
   getOnChatMessageCallCount(): number {

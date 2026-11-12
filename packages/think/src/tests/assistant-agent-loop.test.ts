@@ -271,6 +271,11 @@ describe("Think — agentic loop", () => {
       testCombinedProactiveReactive(message: string): Promise<OverflowResult>;
       testChatThrowingOverflow(message: string): Promise<OverflowResult>;
       testProgrammatic(message: string): Promise<OverflowResult>;
+      testContinueOverflow(): Promise<OverflowResult>;
+      testRetryOverflow(message: string): Promise<OverflowResult>;
+      testProgrammaticAbortDuringCompaction(
+        message: string
+      ): Promise<OverflowResult>;
       enableOverflowRecoveryForWsTest(opts?: {
         abortDuringRecovery?: boolean;
       }): Promise<void>;
@@ -456,6 +461,55 @@ describe("Think — agentic loop", () => {
       expect(result.compactionCount).toBe(0);
       expect(result.compactionEvents).toBe(0);
       expect(result.modelCalls).toBe(1);
+    });
+
+    it("does not run the model again for a turn stopped while its history was compacted", async () => {
+      const room = crypto.randomUUID();
+      const agent = (await getAgentByName(
+        env.OverflowRecoveryTestAgent,
+        room
+      )) as unknown as OverflowAgent;
+
+      const result =
+        await agent.testProgrammaticAbortDuringCompaction("trigger overflow");
+
+      // The compaction ran, the stop landed during it, and the turn ended
+      // with the overflow error without a second model call.
+      expect(result.compactionCount).toBe(1);
+      expect(result.modelCalls).toBe(1);
+      expect(result.error).toBeDefined();
+    });
+
+    it("recovers a context overflow during continueLastTurn", async () => {
+      const room = crypto.randomUUID();
+      const agent = (await getAgentByName(
+        env.OverflowRecoveryTestAgent,
+        room
+      )) as unknown as OverflowAgent;
+
+      const result = await agent.testContinueOverflow();
+
+      expect(result.error).toBeUndefined();
+      expect(result.done).toBe(true);
+      expect(result.compactionCount).toBe(1);
+      expect(result.modelCalls).toBe(2);
+      expect(result.promptIncludedSeedMarker).toEqual([true, false]);
+    });
+
+    it("recovers a context overflow during the recovery retry", async () => {
+      const room = crypto.randomUUID();
+      const agent = (await getAgentByName(
+        env.OverflowRecoveryTestAgent,
+        room
+      )) as unknown as OverflowAgent;
+
+      const result = await agent.testRetryOverflow("trigger overflow");
+
+      expect(result.error).toBeUndefined();
+      expect(result.done).toBe(true);
+      expect(result.compactionCount).toBe(1);
+      expect(result.modelCalls).toBe(2);
+      expect(result.promptIncludedSeedMarker).toEqual([true, false]);
     });
 
     it("recovers when the provider rejects doStream (top-level throw, not an in-stream error part)", async () => {

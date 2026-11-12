@@ -4024,6 +4024,43 @@ describe("Think — messageConcurrency", () => {
     await closeWS(otherTab);
   });
 
+  it("a saveMessages turn queued behind a request runs with that request's body", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setSlowStreamMode(true, 100, 10);
+    const request1 = sendChatRequest(ws, [makeUserMessage("First")], {
+      marker: "first"
+    });
+    const done1 = waitForDoneId(ws, request1, 10000);
+    await waitForActiveTurn(agent);
+
+    // Queued behind the first request. Its body becomes the stored body
+    // when its turn starts.
+    const request2 = sendChatRequest(ws, [makeUserMessage("Second")], {
+      marker: "second"
+    });
+    const done2 = waitForDoneId(ws, request2, 10000);
+    await delay(100);
+
+    // Called while the stored body is still the first request's. The turn
+    // runs after the second request and reads the stored body then.
+    const status = await agent.saveMessagesForTest("Server follow-up");
+    await done1;
+    await done2;
+
+    expect(status).toBe("completed");
+    expect(await agent.getTurnBodiesForTest()).toEqual([
+      { marker: "first" },
+      { marker: "second" },
+      { marker: "second" }
+    ]);
+
+    await closeWS(ws);
+  });
+
   it("merge: all user messages preserved, single model turn for overlapping", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);
