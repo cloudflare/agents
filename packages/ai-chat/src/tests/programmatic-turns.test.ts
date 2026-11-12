@@ -249,7 +249,7 @@ describe("AIChatAgent saveMessages — external AbortSignal", () => {
     expect(count).toBe(0);
   });
 
-  it("never calls onChatMessage for a pre-aborted signal, and still stores the message", async () => {
+  it("stores nothing and never calls onChatMessage for a pre-aborted signal", async () => {
     const room = crypto.randomUUID();
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
@@ -265,9 +265,8 @@ describe("AIChatAgent saveMessages — external AbortSignal", () => {
 
     expect(result.status).toBe("aborted");
     expect(await agentStub.getStartedRequestIds()).toEqual([]);
-    expect(await agentStub.getPersistedUserTexts()).toEqual([
-      "Cancel before run"
-    ]);
+    expect(await agentStub.getPersistedUserTexts()).toEqual([]);
+    expect(await agentStub.getChatResponseResults()).toEqual([]);
   });
 
   it("abortAllRequests() stops a saveMessages turn still waiting in the queue", async () => {
@@ -284,14 +283,11 @@ describe("AIChatAgent saveMessages — external AbortSignal", () => {
 
     expect(running.status).toBe("aborted");
     // The queued turn had not started. Its controller exists from the
-    // moment saveMessages is called, so the stop reaches it: its message is
-    // stored and the model is never called for it.
+    // moment saveMessages is called, so the stop reaches it: it stores
+    // nothing and the model is never called for it.
     expect(queued.status).toBe("aborted");
     expect(await agentStub.getStartedRequestIds()).toEqual([running.requestId]);
-    expect(await agentStub.getPersistedUserTexts()).toEqual([
-      "Running",
-      "Queued"
-    ]);
+    expect(await agentStub.getPersistedUserTexts()).toEqual(["Running"]);
     expect(await agentStub.getAbortControllerCount()).toBe(0);
   });
 
@@ -380,6 +376,29 @@ describe("AIChatAgent saveMessages — external AbortSignal", () => {
     );
 
     expect(result.status).toBe("aborted");
+  });
+
+  it("a turn its shouldApplyMessages declines stores nothing and never runs", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getAgentByName(env.SlowStreamAgent, room);
+
+    const declined = await agentStub.testProgrammaticTurnWithShouldApply(
+      "Declined",
+      [false]
+    );
+    expect(declined.result.status).toBe("aborted");
+    expect(declined.asked).toBe(1);
+    expect(await agentStub.getStartedRequestIds()).toEqual([]);
+    expect(await agentStub.getPersistedUserTexts()).toEqual([]);
+
+    // Asked before and after the messages are worked out; two yeses run it.
+    const applied = await agentStub.testProgrammaticTurnWithShouldApply(
+      "Applied",
+      [true, true]
+    );
+    expect(applied.result.status).toBe("completed");
+    expect(applied.asked).toBe(2);
+    expect(await agentStub.getPersistedUserTexts()).toEqual(["Applied"]);
   });
 
   // Regression for issue #1406: if `runFiber` itself throws (e.g. SQLite

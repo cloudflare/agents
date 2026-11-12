@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { AbortRegistry } from "../abort-registry";
 import {
   mapServerTurnOutcome,
+  prepareTurnMessages,
   runServerTurn,
   type ServerChatTurn,
   type ServerTurnParts
@@ -107,12 +108,48 @@ describe("runServerTurn", () => {
     release();
 
     expect(await pending).toEqual({ status: "aborted" });
-    // Its messages are stored; the model is never called.
-    expect(log).toEqual(["s1:prepare", "s1:persist:messages", "s1:onAborted"]);
+    // Nothing of the turn runs: no prepare, nothing stored, no model call.
+    expect(log).toEqual(["s1:onAborted"]);
     expect(parts.aborts.size).toBe(0);
   });
 
-  it("never calls the model for a caller signal aborted before the call", async () => {
+  it("stores nothing for a turn stopped while prepare waited", async () => {
+    const result = await runServerTurn(
+      parts,
+      turn("s1", {
+        prepare: async () => {
+          parts.aborts.cancel("s1");
+          return { input: "messages" };
+        }
+      })
+    );
+    expect(result).toEqual({ status: "aborted" });
+    expect(log).toEqual(["s1:onAborted"]);
+  });
+
+  it("never calls the model for a turn stopped while persist waited", async () => {
+    const result = await runServerTurn(
+      parts,
+      turn("s1", {
+        persist: async () => {
+          log.push("s1:persist");
+          parts.aborts.cancel("s1");
+        }
+      })
+    );
+    expect(result).toEqual({ status: "aborted" });
+    expect(log).toEqual(["s1:prepare", "s1:persist", "s1:onAborted"]);
+  });
+
+  it("rejects a request id the registry cannot key a controller by", async () => {
+    await expect(
+      runServerTurn(parts, turn(undefined as unknown as string))
+    ).rejects.toThrow(TypeError);
+    expect(log).toEqual([]);
+    expect(parts.queue.queuedCount()).toBe(0);
+  });
+
+  it("stores nothing for a caller signal aborted before the call", async () => {
     const controller = new AbortController();
     controller.abort();
     const result = await runServerTurn(
@@ -120,11 +157,11 @@ describe("runServerTurn", () => {
       turn("s1", { signal: controller.signal })
     );
     expect(result).toEqual({ status: "aborted" });
-    expect(log).toEqual(["s1:prepare", "s1:persist:messages", "s1:onAborted"]);
+    expect(log).toEqual(["s1:onAborted"]);
     expect(parts.aborts.size).toBe(0);
   });
 
-  it("never calls the model for a caller signal aborted while the turn is queued", async () => {
+  it("stores nothing for a caller signal aborted while the turn is queued", async () => {
     const release = holdQueue();
     const controller = new AbortController();
     const pending = runServerTurn(
@@ -135,8 +172,7 @@ describe("runServerTurn", () => {
     controller.abort();
     release();
     expect(await pending).toEqual({ status: "aborted" });
-    expect(log).not.toContain("s1:run:messages:true");
-    expect(log).toContain("s1:onAborted");
+    expect(log).toEqual(["s1:onAborted"]);
   });
 
   it("aborts the running turn's signal when the caller's signal aborts", async () => {
@@ -236,7 +272,39 @@ describe("runServerTurn", () => {
       turn("s1", { prepare: async () => ({ declined: "aborted" }) })
     );
     expect(result).toEqual({ status: "aborted" });
+    // No onAborted: the host declined the turn itself.
     expect(log).toEqual([]);
+  });
+
+  it("lets a decline stand when the chat was reset while prepare waited", async () => {
+    const result = await runServerTurn(
+      parts,
+      turn("s1", {
+        prepare: async () => {
+          parts.queue.reset();
+          parts.aborts.destroyAll();
+          return { declined: "aborted" };
+        }
+      })
+    );
+    expect(result).toEqual({ status: "aborted" });
+    expect(log).toEqual([]);
+  });
+
+  it("tells prepare whether the chat was reset since admission", async () => {
+    const seen: boolean[] = [];
+    await runServerTurn(
+      parts,
+      turn("s1", {
+        prepare: async ({ isCurrent }) => {
+          seen.push(isCurrent());
+          parts.queue.reset();
+          seen.push(isCurrent());
+          return { input: "messages" };
+        }
+      })
+    );
+    expect(seen).toEqual([true, false]);
   });
 
   // ── Resets ──────────────────────────────────────────────────────────
@@ -352,5 +420,76 @@ describe("mapServerTurnOutcome", () => {
         { reset: false, aborted: true }
       )
     ).toEqual({ status: "aborted" });
+  });
+});
+
+describe("prepareTurnMessages", () => {
+  const stored = ["stored"];
+  const prepare = (
+    overrides: Partial<Parameters<typeof prepareTurnMessages<string>>[0]> = {}
+  ) =>
+    prepareTurnMessages<string>({
+      messages: (current) => [...current, "new"],
+      current: () => stored,
+      isCurrent: () => true,
+      ...overrides
+    });
+
+  it("hands the messages function the transcript at turn start", async () => {
+    expect(await prepare()).toEqual({ input: ["stored", "new"] });
+    expect(await prepare({ messages: ["given"] })).toEqual({
+      input: ["given"]
+    });
+  });
+
+  it("declines before working out the messages when the app says no", async () => {
+    let resolved = false;
+    const result = await prepare({
+      shouldApply: () => false,
+      messages: () => {
+        resolved = true;
+        return [];
+      }
+    });
+    expect(result).toEqual({ declined: "aborted" });
+    expect(resolved).toBe(false);
+  });
+
+  it("declines when the app says no after the messages function waited", async () => {
+    const answers = [true, false];
+    const result = await prepare({ shouldApply: () => answers.shift()! });
+    expect(result).toEqual({ declined: "aborted" });
+    expect(answers).toEqual([]);
+  });
+
+  it("does not ask the app again once the chat was reset", async () => {
+    let asked = 0;
+    let current = true;
+    const result = await prepare({
+      shouldApply: () => {
+        asked++;
+        return asked === 1;
+      },
+      isCurrent: () => current,
+      messages: async () => {
+        current = false;
+        return ["new"];
+      }
+    });
+    // Not a decline: the core reports the reset as `skipped`.
+    expect(result).toEqual({ input: ["new"] });
+    expect(asked).toBe(1);
+  });
+
+  it("asks twice and applies when the app says yes both times", async () => {
+    let asked = 0;
+    const result = await prepare({
+      shouldApply: async () => {
+        asked++;
+        return true;
+      }
+    });
+    expect(result).toEqual({ input: ["stored", "new"] });
+    expect(asked).toBe(2);
   });
 });

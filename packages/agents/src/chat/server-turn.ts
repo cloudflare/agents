@@ -12,7 +12,8 @@
  * - its abort controller exists from admission, with the caller's signal
  *   linked to it, so a stop that lands while the turn waits in the queue is
  *   not lost;
- * - a turn already stopped when its model call is due never calls the model;
+ * - a turn stopped before its messages are stored stores nothing, and a turn
+ *   stopped before its model call never calls the model;
  * - however the turn ends, the controller leaves the registry and the
  *   listener leaves the caller's signal;
  * - the status the caller gets says what happened: a reset turns `completed`
@@ -67,9 +68,16 @@ export interface ServerChatTurn<TInput = undefined> {
   /**
    * Work out what the turn stores, at the front of the queue. This step may
    * wait (a messages function, an app callback) and must store nothing: the
-   * chat can be reset while it waits.
+   * chat can be reset or the turn stopped while it waits.
+   *
+   * @param context.isCurrent - `false` once the chat was reset since the
+   *   turn was admitted. Check it after a wait, before asking the app
+   *   anything more; the core ends the turn `skipped` whatever is returned,
+   *   unless the host declined.
    */
-  prepare?(): Promise<ServerTurnPrepared<TInput>>;
+  prepare?(context: {
+    isCurrent: () => boolean;
+  }): Promise<ServerTurnPrepared<TInput>>;
   /** Store the turn's messages and show them to clients. */
   persist?(input: TInput): Promise<void>;
   /**
@@ -82,7 +90,7 @@ export interface ServerChatTurn<TInput = undefined> {
    * before the model call, so `run` was not called, or `run` finished
    * without a reply. The host's reply path saw no aborted outcome, so do
    * here what it does for one, such as clearing the terminal record of an
-   * earlier failure.
+   * earlier failure. Not called for a turn `prepare` declined.
    */
   onAborted?(): void | Promise<void>;
 }
@@ -99,10 +107,13 @@ export interface ServerTurnParts {
  * 1. Capture the queue generation, create the turn's abort controller and
  *    link the caller's signal to it. A stop from here on reaches the turn.
  * 2. Queue the turn.
- * 3. At the front of the queue: `prepare`, then `persist`. A reset before
- *    either ends the turn `skipped` with nothing stored.
- * 4. If the turn was stopped meanwhile, end it `aborted`. Its messages are
- *    stored, the model is never called. Otherwise `run` it.
+ * 3. At the front of the queue: `prepare`, then `persist`, then `run`. Before
+ *    each one, a reset ends the turn `skipped` and a stop ends it `aborted`.
+ *    So a turn stopped while it waited, or while `prepare` waited, stores
+ *    nothing, and a turn stopped at any point before `run` never calls the
+ *    model.
+ * 4. A turn the host's `prepare` declined ends with the status it gave,
+ *    reset or not.
  * 5. Whatever happened, drop the controller and detach the caller's signal,
  *    then map the status.
  */
@@ -115,9 +126,12 @@ export async function runServerTurn<TInput = undefined>(
   const generation = queue.generation;
   const isCurrent = () => queue.generation === generation;
 
-  // The registry hands out a signal for every string id. The fallback keeps
-  // the turn runnable if a host ever passes something else.
-  const signal = aborts.getSignal(requestId) ?? new AbortController().signal;
+  // The registry hands out a signal for every string id. Anything else
+  // would give a turn no stop can reach.
+  const signal = aborts.getSignal(requestId);
+  if (!signal) {
+    throw new TypeError("runServerTurn: requestId must be a string");
+  }
   const detachExternal = aborts.linkExternal(requestId, turn.signal);
   let released = false;
   // Runs when the turn's work ends, and again after the queue for a turn
@@ -135,33 +149,34 @@ export async function runServerTurn<TInput = undefined>(
   // reported one, or its `prepare` declined the turn.
   let hostSawAbort = false;
 
-  const body = async (): Promise<void> => {
+  /** `true` when the turn must end here: reset since admission, or stopped. */
+  const endsHere = (): boolean => {
     if (!isCurrent()) {
       outcome = { status: "skipped" };
-      return;
+      return true;
     }
+    // The outcome stays `completed`; the mapping below turns it into
+    // `aborted` and the host hears of it through `onAborted`.
+    return signal.aborted;
+  };
+
+  const body = async (): Promise<void> => {
+    if (endsHere()) return;
     let input = undefined as TInput;
     if (turn.prepare) {
-      const prepared = await turn.prepare();
-      if (!isCurrent()) {
-        outcome = { status: "skipped" };
-        return;
-      }
+      const prepared = await turn.prepare({ isCurrent });
       if ("declined" in prepared) {
         outcome = { status: prepared.declined };
         hostSawAbort = true;
         return;
       }
+      if (endsHere()) return;
       input = prepared.input;
     }
     if (turn.persist) {
       await turn.persist(input);
-      if (!isCurrent()) {
-        outcome = { status: "skipped" };
-        return;
-      }
+      if (endsHere()) return;
     }
-    if (signal.aborted) return;
     const ran = await turn.run(signal, input);
     if (ran) {
       outcome = ran;
@@ -208,4 +223,36 @@ export function mapServerTurnOutcome(
   if (state.reset) return { status: "skipped" };
   if (state.aborted) return { status: "aborted" };
   return outcome;
+}
+
+/**
+ * The `prepare` step of a turn that stores messages (`saveMessages`): work
+ * out the messages, asking the app whether the turn should still apply.
+ *
+ * `shouldApply` is asked before the messages are worked out and again after,
+ * because a messages function can wait. `false` declines the turn as
+ * `aborted` with nothing stored. After a reset the app is not asked again:
+ * the turn is over, and the core ends it `skipped`.
+ */
+export async function prepareTurnMessages<TMessage>(options: {
+  /** The messages to store, or a function of the transcript at turn start. */
+  messages:
+    | TMessage[]
+    | ((current: TMessage[]) => TMessage[] | Promise<TMessage[]>);
+  /** The stored transcript, read when the turn starts. */
+  current: () => TMessage[];
+  /** Whether the turn should still store its messages and run. */
+  shouldApply?: () => boolean | Promise<boolean>;
+  /** `false` once the chat was reset since the turn was admitted. */
+  isCurrent: () => boolean;
+}): Promise<ServerTurnPrepared<TMessage[]>> {
+  const { messages, shouldApply, isCurrent } = options;
+  if (shouldApply && !(await shouldApply())) return { declined: "aborted" };
+  const input =
+    typeof messages === "function"
+      ? await messages(options.current())
+      : messages;
+  if (!isCurrent()) return { input };
+  if (shouldApply && !(await shouldApply())) return { declined: "aborted" };
+  return { input };
 }

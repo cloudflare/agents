@@ -8737,6 +8737,49 @@ export class ThinkProgrammaticTestAgent extends Think {
   }
 
   /**
+   * Drive the private turn behind saveMessages with a shouldApplyMessages
+   * that answers from `answers`, while the chat is reset (as a clear does)
+   * during the first shouldApplyMessages call or during the messages
+   * function.
+   */
+  async testShouldApplyAcrossReset(
+    answers: boolean[],
+    resetDuring: "first-ask" | "messages"
+  ): Promise<{ status: SaveMessagesResult["status"]; asked: number }> {
+    let asked = 0;
+    const self = this as unknown as {
+      _runProgrammaticMessagesTurn(
+        requestId: string,
+        messages: (current: UIMessage[]) => UIMessage[],
+        options: { shouldApplyMessages: () => boolean }
+      ): Promise<SaveMessagesResult>;
+      resetTurnState(): void;
+    };
+    const result = await self._runProgrammaticMessagesTurn(
+      crypto.randomUUID(),
+      () => {
+        if (resetDuring === "messages") self.resetTurnState();
+        return [
+          {
+            id: crypto.randomUUID(),
+            role: "user" as const,
+            parts: [{ type: "text" as const, text: "Across a reset" }]
+          }
+        ];
+      },
+      {
+        shouldApplyMessages: () => {
+          if (asked === 0 && resetDuring === "first-ask") {
+            self.resetTurnState();
+          }
+          return answers[asked++] ?? true;
+        }
+      }
+    );
+    return { status: result.status, asked };
+  }
+
+  /**
    * Queue a second saveMessages turn behind a running one, then call
    * `abortAllRequests()` while the second still waits in the queue.
    */

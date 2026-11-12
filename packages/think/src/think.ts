@@ -189,6 +189,7 @@ import {
   ResumableStream,
   createChatStreams,
   ChatTurns,
+  prepareTurnMessages,
   type ServerTurnOutcome,
   type ServerTurnStatus,
   type ToolInteractionOutcome,
@@ -12980,7 +12981,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * the internally-generated request id. The signal is linked to the
    * registry's controller for this turn — when it aborts, the inference
    * loop's signal aborts and the result reports `status: "aborted"`.
-   * Pre-aborted signals short-circuit before any model work runs. See
+   * A signal already aborted, or one that aborts while the turn waits in the
+   * queue, stops the turn before it starts: nothing is stored and the model
+   * is not called. See
    * {@link SaveMessagesOptions} for the integration point.
    *
    * @example Scheduled follow-up
@@ -13141,27 +13144,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           allowNested: options?.allowNested,
           channel
         }),
-      prepare: async () => {
-        if (
-          options?.shouldApplyMessages &&
-          !(await options.shouldApplyMessages())
-        ) {
-          return { declined: "aborted" };
-        }
-
-        const resolved =
-          typeof messages === "function"
-            ? await messages(this.messages)
-            : messages;
-
-        if (
-          options?.shouldApplyMessages &&
-          !(await options.shouldApplyMessages())
-        ) {
-          return { declined: "aborted" };
-        }
-        return { input: resolved };
-      },
+      prepare: ({ isCurrent }) =>
+        prepareTurnMessages({
+          messages,
+          current: () => this.messages,
+          shouldApply: options?.shouldApplyMessages,
+          isCurrent
+        }),
       persist: async (resolved) => {
         options?.onApplyingMessages?.();
         for (const msg of this._stampChannel(resolved, channel)) {
@@ -14168,7 +14157,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * "cancel whatever is running" handle without tracking request ids.
    *
    * A turn still waiting in the queue is aborted too: it ends `aborted`
-   * when it reaches the front, without calling the model.
+   * when it reaches the front, stores nothing and does not call the model.
    *
    * Does NOT invalidate queued turns, continuation timers, or submit
    * concurrency state — use {@link resetTurnState} for the full

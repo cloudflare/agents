@@ -167,6 +167,7 @@ export {
 export {
   runServerTurn,
   mapServerTurnOutcome,
+  prepareTurnMessages,
   type ServerChatTurn,
   type ServerTurnOutcome,
   type ServerTurnParts,

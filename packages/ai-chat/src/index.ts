@@ -52,6 +52,7 @@ import {
   sendIfOpen,
   hasIncompleteToolBatch,
   ChatTurns,
+  prepareTurnMessages,
   type RecoveryAttemptHandle,
   type ToolInteractionOutcome,
   partAwaitsClientInteraction,
@@ -3076,7 +3077,7 @@ export class AIChatAgent<
    * "cancel whatever is running" handle without tracking request ids.
    *
    * A turn still waiting in the queue is aborted too: it ends `aborted`
-   * when it reaches the front, without calling the model.
+   * when it reaches the front, stores nothing and does not call the model.
    *
    * Does NOT invalidate queued turns, continuation timers, or submit
    * concurrency state — use {@link resetTurnState} for the full
@@ -4701,8 +4702,9 @@ export class AIChatAgent<
    * registry's controller for this turn — when it aborts, the inference
    * loop's signal aborts and the result reports `status: "aborted"`.
    * A signal already aborted, or one that aborts while the turn waits in the
-   * queue, stops the turn before `onChatMessage` is called: the messages are
-   * stored and the result reports `status: "aborted"`.
+   * queue, stops the turn before it starts: nothing is stored, `onChatMessage`
+   * and `onChatResponse` are not called, and the result reports
+   * `status: "aborted"`.
    *
    * Returns `{ requestId, status, error? }` where `status` is `"completed"`
    * when the turn ran, `"error"` when the stream reported an error,
@@ -4717,7 +4719,28 @@ export class AIChatAgent<
         ) => UIMessage[] | Promise<UIMessage[]>),
     options?: SaveMessagesOptions
   ): Promise<SaveMessagesResult> {
-    const requestId = nanoid();
+    return this._runProgrammaticMessagesTurn(nanoid(), messages, options);
+  }
+
+  /**
+   * The turn behind {@link saveMessages}, with the options framework callers
+   * need on top of the public ones.
+   *
+   * @param options.shouldApplyMessages - Asked when the turn reaches the
+   *   front of the queue, before and after the messages are worked out.
+   *   `false` ends the turn `aborted` with nothing stored and no model call.
+   */
+  private async _runProgrammaticMessagesTurn(
+    requestId: string,
+    messages:
+      | UIMessage[]
+      | ((
+          currentMessages: readonly UIMessage[]
+        ) => UIMessage[] | Promise<UIMessage[]>),
+    options?: SaveMessagesOptions & {
+      shouldApplyMessages?: () => boolean | Promise<boolean>;
+    }
+  ): Promise<SaveMessagesResult> {
     const clientTools = this._lastClientTools;
     const body = this._lastBody;
 
@@ -4725,12 +4748,13 @@ export class AIChatAgent<
       requestId,
       signal: options?.signal,
       enqueue: (turn, epoch) => this._enqueueServerTurn(requestId, turn, epoch),
-      prepare: async () => ({
-        input:
-          typeof messages === "function"
-            ? await messages(this.messages)
-            : messages
-      }),
+      prepare: ({ isCurrent }) =>
+        prepareTurnMessages<UIMessage>({
+          messages,
+          current: () => this.messages,
+          shouldApply: options?.shouldApplyMessages,
+          isCurrent
+        }),
       persist: (resolvedMessages) => this.persistMessages(resolvedMessages),
       run: (signal) =>
         this._runServerTurnBody(requestId, signal, {
