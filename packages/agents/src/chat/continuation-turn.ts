@@ -70,10 +70,12 @@ export interface ContinuationTurnParts<
     parts: ReadonlyArray<unknown>;
   }>;
   /**
-   * Request ids of the continuation turns running now whose stream has
-   * started. {@link continuationStreamStarted} adds to it.
+   * The continuation turns running now, by request id, and whether each
+   * one's stream has started. {@link runContinuationBody} adds and removes
+   * the entry. {@link continuationStreamStarted} only flips it, so a stream
+   * of any other turn leaves nothing behind.
    */
-  readonly streamed: Set<string>;
+  readonly streamed: Map<string, boolean>;
 }
 
 /**
@@ -335,7 +337,7 @@ async function runContinuationBody<
   outcome: { reported: boolean }
 ): Promise<void> {
   const { requestId } = continuation;
-  parts.streamed.delete(requestId);
+  parts.streamed.set(requestId, false);
   try {
     await turn.recover(requestId, () =>
       agentContext.run(
@@ -355,7 +357,7 @@ async function runContinuationBody<
     );
   } catch (error) {
     if (
-      !parts.streamed.has(requestId) &&
+      parts.streamed.get(requestId) !== true &&
       !signal.aborted &&
       !isDurableObjectResetError(error)
     ) {
@@ -453,7 +455,7 @@ export function continuationStreamStarted<
   notifyResuming: (connection: TConnection) => void
 ): void {
   const { continuation } = parts;
-  parts.streamed.add(requestId);
+  if (parts.streamed.has(requestId)) parts.streamed.set(requestId, true);
   if (continuation.pending?.requestId !== requestId) return;
   continuation.activatePending();
   continuation.flushAwaitingConnections(notifyResuming);
