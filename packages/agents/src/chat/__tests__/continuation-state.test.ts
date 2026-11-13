@@ -1,5 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
-import { ContinuationState } from "../continuation-state";
+import {
+  ContinuationState,
+  continuationTargetIsLatest
+} from "../continuation-state";
 import type { ContinuationConnection } from "../continuation-state";
 
 function makeConnection(id: string): ContinuationConnection {
@@ -339,5 +342,43 @@ describe("ContinuationState", () => {
     const result = state.activateDeferred(() => "id");
 
     expect(result!.prerequisite).toBe(prereq);
+  });
+});
+
+describe("continuationTargetIsLatest", () => {
+  const messages = [{ id: "user-1" }, { id: "assistant-1" }];
+
+  it("is true while the target message is the last message", () => {
+    expect(
+      continuationTargetIsLatest(messages, {
+        targetMessageIds: ["assistant-1"]
+      })
+    ).toBe(true);
+  });
+
+  it("is false once a newer message follows the target, or the target is gone", () => {
+    expect(
+      continuationTargetIsLatest([...messages, { id: "user-2" }], {
+        targetMessageIds: ["assistant-1"]
+      })
+    ).toBe(false);
+    expect(
+      continuationTargetIsLatest([], { targetMessageIds: ["assistant-1"] })
+    ).toBe(false);
+  });
+
+  it("is true while any of several targets is the last message", () => {
+    expect(
+      continuationTargetIsLatest(messages, {
+        targetMessageIds: ["assistant-2", "assistant-1"]
+      })
+    ).toBe(true);
+  });
+
+  it("is true for a continuation with no target", () => {
+    expect(continuationTargetIsLatest([], { targetMessageIds: null })).toBe(
+      true
+    );
+    expect(continuationTargetIsLatest([], null)).toBe(true);
   });
 });

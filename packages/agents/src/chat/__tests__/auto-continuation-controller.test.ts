@@ -364,4 +364,106 @@ describe("AutoContinuationController", () => {
     expect(host.continuation.pending?.connection.id).toBe("c2");
     expect(controller.isArmed()).toBe(false);
   });
+
+  // ── afterInteraction() ──────────────────────────────────────────────
+
+  const spec = () => ({
+    connection: makeConnection("c1"),
+    clientTools: undefined,
+    body: undefined,
+    errorPrefix: "[test] continuation failed:"
+  });
+
+  it("afterInteraction() schedules a continuation targeted at the settled part's message", () => {
+    controller.afterInteraction(
+      { status: "changed", messageId: "assistant-1" },
+      true,
+      spec
+    );
+    expect(host.continuation.pending?.targetMessageIds).toEqual([
+      "assistant-1"
+    ]);
+    expect(controller.isArmed()).toBe(true);
+  });
+
+  it("afterInteraction() schedules nothing for a result that changed nothing", () => {
+    controller.afterInteraction({ status: "unchanged" }, true, spec);
+    controller.afterInteraction({ status: "missing" }, true, spec);
+    expect(host.continuation.pending).toBeNull();
+    expect(controller.isArmed()).toBe(false);
+  });
+
+  it("afterInteraction() without autoContinue only re-arms an existing pending continuation", () => {
+    controller.afterInteraction(
+      { status: "changed", messageId: "assistant-1" },
+      false,
+      spec
+    );
+    expect(host.continuation.pending).toBeNull();
+
+    schedule();
+    controller.cancelTimer();
+    controller.afterInteraction({ status: "unchanged" }, false, spec);
+    expect(controller.isArmed()).toBe(true);
+  });
+
+  it("a deferred follow-up keeps its target message when it becomes pending", () => {
+    schedule();
+    host.continuation.pending!.pastCoalesce = true;
+    controller.afterInteraction(
+      { status: "changed", messageId: "assistant-2" },
+      true,
+      spec
+    );
+    expect(host.continuation.deferred?.targetMessageIds).toEqual([
+      "assistant-2"
+    ]);
+    host.continuation.pending = null;
+    controller.activateDeferredAndReschedule();
+    const activated = host.continuation.pending as {
+      targetMessageIds?: readonly string[] | null;
+    } | null;
+    expect(activated?.targetMessageIds).toEqual(["assistant-2"]);
+  });
+
+  it("a later result for an older reply keeps the newer reply's target", () => {
+    controller.afterInteraction(
+      { status: "changed", messageId: "assistant-2" },
+      true,
+      spec
+    );
+    controller.afterInteraction(
+      { status: "changed", messageId: "assistant-1" },
+      true,
+      spec
+    );
+    expect(host.continuation.pending?.targetMessageIds).toEqual([
+      "assistant-2",
+      "assistant-1"
+    ]);
+  });
+
+  it("hasPendingDecision is true while a result is being applied or a continuation is armed", async () => {
+    expect(controller.hasPendingDecision()).toBe(false);
+
+    host.pendingInteraction = true;
+    expect(controller.hasPendingDecision()).toBe(true);
+    host.pendingInteraction = false;
+
+    schedule();
+    expect(controller.hasPendingDecision()).toBe(true);
+    await vi.advanceTimersByTimeAsync(COALESCE);
+    expect(host.fireCount).toBe(1);
+    expect(controller.hasPendingDecision()).toBe(false);
+  });
+
+  it("a result with no target turns the latest-message check off", () => {
+    controller.afterInteraction(
+      { status: "changed", messageId: "assistant-1" },
+      true,
+      spec
+    );
+    schedule();
+    expect(host.continuation.pending?.targetMessageIds).toBeNull();
+  });
 });
