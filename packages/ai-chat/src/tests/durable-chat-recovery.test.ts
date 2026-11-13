@@ -153,7 +153,8 @@ interface ChatRecoveryTestStub {
   ): Promise<void>;
   persistPendingToolCallForTest(
     messageId: string,
-    toolName: string
+    toolName: string,
+    options?: { cutOff?: boolean }
   ): Promise<void>;
   runChatRecoveryContinueDirectForTest(
     data: Record<string, unknown>
@@ -805,15 +806,17 @@ describe("onChatRecovery", () => {
       noProgressTimeoutMs: 60_000
     });
 
-    // `previewTool` is NOT registered as a client tool — its `input-available`
-    // orphan is dead (its execute() died with the isolate), so it must NOT get
-    // the HITL exemption; it seals normally on no-progress.
+    // `previewTool` is NOT registered as a client tool, and the reply it is
+    // in was cut off: its execute() died with the isolate. The call is
+    // settled when that reply is stored, so it does NOT get the HITL
+    // exemption; the turn seals normally on no-progress.
     await agentStub.setRequestContextForTest(undefined, [
       { name: "chooseOption" }
     ]);
     await agentStub.persistPendingToolCallForTest(
       "assistant-server",
-      "previewTool"
+      "previewTool",
+      { cutOff: true }
     );
 
     const base = {
@@ -2035,6 +2038,35 @@ describe("onChatRecovery", () => {
     expect(incident?.attempt).toBe(2);
     expect(incident?.status).toBe("scheduled");
   });
+
+  it("retries a question past an earlier reply an older version stored with a dead tool call", async () => {
+    const agentStub = await getTestAgent(`retry-legacy-${crypto.randomUUID()}`);
+
+    // An older version stored a cut-off reply as it was: its server tool
+    // call still looks like it is running. The user then asked again, and
+    // that turn was interrupted before it streamed.
+    await agentStub.persistPendingToolCallForTest(
+      "assistant-legacy",
+      "previewTool"
+    );
+    await agentStub.persistMessages([
+      ...((await agentStub.getPersistedMessages()) as ChatMessage[]),
+      {
+        id: "user-retry",
+        role: "user",
+        parts: [{ type: "text", text: "Try again" }]
+      }
+    ]);
+
+    // The retry does not wait on the dead call: it settles it and answers.
+    await agentStub.runRecoveryRetryForTest({ targetUserId: "user-retry" });
+    await agentStub.waitForIdleForTest();
+
+    expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
+    const stored = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    expect(stored[0].parts[0]).toMatchObject({ state: "output-error" });
+    expect(stored.at(-1)?.role).toBe("assistant");
+  }, 8_000);
 
   it("PARKS a continuation (no reschedule, no budget spent) while a CLIENT interaction is pending", async () => {
     const agentStub = await getTestAgent(`stable-park-${crypto.randomUUID()}`);

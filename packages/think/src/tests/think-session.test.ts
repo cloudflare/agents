@@ -939,6 +939,19 @@ describe("Think — error handling", () => {
     expect(result.finalText).toBe(result.textBeforeCancel);
   });
 
+  it("stops a recovery the user cancels while its continuation streams", async () => {
+    const agent = await freshAgent(
+      `transient-cancel-run-${crypto.randomUUID()}`
+    );
+    const result = await agent.testCancelDuringRunningRecoveryForTest();
+
+    expect(result.incident).toMatchObject({
+      status: "skipped",
+      reason: "user_cancelled"
+    });
+    expect(result.finalText).toBe(result.textBeforeCancel);
+  });
+
   it("bounds a turn that streams a chunk and stalls on every attempt", async () => {
     const agent = await freshAgent(`stall-progress-${crypto.randomUUID()}`);
     const result = await agent.testRepeatedStallAfterProgressForTest(40);
@@ -4152,7 +4165,9 @@ describe("Think — onChatRecovery", () => {
       role: "user",
       parts: [{ type: "text", text: "Render a preview" }]
     } as UIMessage);
-    await agent.persistTestMessage({
+    // The reply was cut off mid-execute(), so it is stored with that call
+    // settled.
+    await agent.persistCutOffReplyForTest({
       id: "assistant-1",
       role: "assistant",
       parts: [
@@ -6379,7 +6394,9 @@ describe("Think — waitUntilStable", () => {
       parts: [{ type: "text", text: "Render a preview" }]
     } as UIMessage);
 
-    await agent.persistTestMessage({
+    // The reply was cut off mid-execute(), so it is stored with that call
+    // settled.
+    await agent.persistCutOffReplyForTest({
       id: "assistant-1",
       role: "assistant",
       parts: [

@@ -234,3 +234,75 @@ export function repairInterruptedToolParts(
     toolCallIds
   };
 }
+
+/**
+ * Settle the tool calls a cut-off reply left unanswered.
+ *
+ * A reply whose stream did not finish (an eviction, a stall, a provider
+ * error, a stop) can hold a tool call with no result. If the tool ran on the
+ * server, its `execute()` died with the stream and nothing will ever answer
+ * it. Hosts call this on such a reply before they persist it, and on the
+ * reply a recovery attempt is about to continue, so the stored transcript
+ * never shows a call as running that nothing is running.
+ *
+ * A call a client is known to own (`clientToolNames`, from the tool schemas
+ * the client sent) is kept: the client replays its result after a reconnect.
+ * So are `approval-requested` and `approval-responded` calls, which a client
+ * answer or a continuation still completes. Every other unanswered call goes
+ * to `repairPart`, which by default turns it into an errored result.
+ *
+ * Do NOT call this on a reply whose stream finished. There, an unanswered
+ * call is one the stream ended on, so it is waiting for a client, whether or
+ * not the client ever sent that tool's schema.
+ *
+ * @returns The same message when nothing changed.
+ */
+export function settleInterruptedReply<TMessage extends UIMessage>(
+  message: TMessage,
+  options: {
+    repairPart: RepairInterruptedToolPartsOptions["repairPart"];
+    clientToolNames: ReadonlySet<string>;
+  }
+): TMessage {
+  const { messages } = repairInterruptedToolParts([message], {
+    repairPart: options.repairPart,
+    shouldRepair: (part) => !awaitsKnownClient(part, options.clientToolNames),
+    repairApprovalResponded: false
+  });
+  // SAFETY: repairInterruptedToolParts returns the message it was given, or a
+  // copy of it with repaired parts.
+  return messages[0] as TMessage;
+}
+
+function awaitsKnownClient(
+  part: UIMessage["parts"][number],
+  clientToolNames: ReadonlySet<string>
+): boolean {
+  const record = part as Record<string, unknown>;
+  if (record.state === "approval-requested") return true;
+  if (record.state !== "input-available") return false;
+  const type = typeof record.type === "string" ? record.type : "";
+  const name =
+    type === "dynamic-tool"
+      ? record.toolName
+      : type.startsWith("tool-")
+        ? type.slice("tool-".length)
+        : undefined;
+  return typeof name === "string" && clientToolNames.has(name);
+}
+
+/** Whether a stored chunk log holds the `finish` chunk of its stream. */
+export function streamChunksFinished(
+  chunks: ReadonlyArray<{ body: string }>
+): boolean {
+  for (let i = chunks.length - 1; i >= 0; i--) {
+    try {
+      if ((JSON.parse(chunks[i].body) as { type?: string }).type === "finish") {
+        return true;
+      }
+    } catch {
+      // A malformed body is not a finish chunk.
+    }
+  }
+  return false;
+}

@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import type { UIMessage } from "ai";
 import {
   repairInterruptedToolParts,
+  settleInterruptedReply,
+  streamChunksFinished,
   toolPartHasSettledResult
 } from "../repair-transcript";
 
@@ -339,5 +341,77 @@ describe("repairInterruptedToolParts", () => {
     expect(result.toolCallIds).toEqual(["tc1", "tc3"]);
     // The settled one keeps identity; repaired ones are new objects.
     expect(result.messages[1]).toBe(messages[1]);
+  });
+});
+
+describe("settleInterruptedReply", () => {
+  const repairPart = (part: UIMessage["parts"][number]) =>
+    ({
+      ...part,
+      state: "output-error",
+      errorText: "interrupted"
+    }) as UIMessage["parts"][number];
+  const reply = (parts: unknown[]): UIMessage =>
+    ({ id: "a1", role: "assistant", parts }) as UIMessage;
+  const call = (name: string, state: string, extra: object = {}) => ({
+    type: `tool-${name}`,
+    toolCallId: `call-${name}`,
+    state,
+    input: {},
+    ...extra
+  });
+
+  it("errors a call no client is known to own", () => {
+    const settled = settleInterruptedReply(
+      reply([
+        { type: "text", text: "working" },
+        call("search", "input-available")
+      ]),
+      { repairPart, clientToolNames: new Set() }
+    );
+    expect(settled.parts[1]).toMatchObject({
+      state: "output-error",
+      errorText: "interrupted"
+    });
+  });
+
+  it("keeps a known client tool's call, approvals and settled results", () => {
+    const message = reply([
+      call("pick", "input-available"),
+      call("pay", "approval-requested"),
+      call("send", "approval-responded", { approval: { approved: true } }),
+      call("done", "output-available", { output: 1 })
+    ]);
+    expect(
+      settleInterruptedReply(message, {
+        repairPart,
+        clientToolNames: new Set(["pick"])
+      })
+    ).toBe(message);
+  });
+
+  it("errors a call whose input never finished streaming", () => {
+    const settled = settleInterruptedReply(
+      reply([call("search", "input-streaming")]),
+      { repairPart, clientToolNames: new Set(["search"]) }
+    );
+    expect(settled.parts[0]).toMatchObject({ state: "output-error" });
+  });
+});
+
+describe("streamChunksFinished", () => {
+  it("finds the finish chunk of a stream that ended", () => {
+    expect(
+      streamChunksFinished([
+        { body: JSON.stringify({ type: "start" }) },
+        { body: JSON.stringify({ type: "finish" }) }
+      ])
+    ).toBe(true);
+    expect(
+      streamChunksFinished([
+        { body: JSON.stringify({ type: "start" }) },
+        { body: "not json" }
+      ])
+    ).toBe(false);
   });
 });

@@ -330,3 +330,58 @@ export function hasIncompleteToolBatch(
   }
   return false;
 }
+
+/**
+ * Whether the chat is waiting on a client: a tool call a client still has to
+ * answer, or an approval it still has to give. The one definition both
+ * `@cloudflare/ai-chat` and `@cloudflare/think` use, for apps and for
+ * recovery alike.
+ *
+ * - In the latest stored message every `input-available` call counts,
+ *   whatever its tool. A reply is stored unanswered only when its stream
+ *   finished on that call, which is what a client tool does. A cut-off reply
+ *   has its dead calls settled before it is stored
+ *   (`settleInterruptedReply`), so the call is never a server tool whose
+ *   `execute()` died.
+ * - In an earlier reply, one the conversation has moved past, only a call a
+ *   client is known to own counts (`clientToolNames`, from the schemas the
+ *   client sent). Nothing else there can be told apart from a dead call an
+ *   older version stored, and the next turn settles it either way.
+ * - In the reply that is streaming now, a server tool sits at
+ *   `input-available` while it runs, so only a known client tool counts.
+ * - `approval-requested` counts everywhere.
+ *
+ * @param input.streaming - The reply being streamed, if any. A stored copy
+ *   of the same message is skipped in favor of it.
+ */
+export function hasPendingToolInteraction(input: {
+  messages: ReadonlyArray<ToolBatchMessage & { id?: string }>;
+  streaming: (ToolBatchMessage & { id?: string }) | null | undefined;
+  clientToolNames: Set<string>;
+}): boolean {
+  const { messages, streaming, clientToolNames } = input;
+  if (
+    streaming?.parts.some((part) =>
+      partAwaitsClientInteraction(part, clientToolNames)
+    )
+  ) {
+    return true;
+  }
+  const latest = streaming ? undefined : messages.at(-1);
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    if (streaming && message.id !== undefined && message.id === streaming.id) {
+      continue;
+    }
+    for (const part of message.parts) {
+      if (partAwaitsClientInteraction(part, clientToolNames)) return true;
+      if (
+        message === latest &&
+        (part as { state?: unknown } | null)?.state === "input-available"
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}

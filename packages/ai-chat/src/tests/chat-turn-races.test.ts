@@ -265,6 +265,47 @@ describe("chat turn races", () => {
     tabC.close(1000);
   });
 
+  it("a request cancelled in the queue ends on the tab that sent it", async () => {
+    const room = crypto.randomUUID();
+    const { ws: tabA } = await connectChatWS(
+      `/agents/slow-stream-agent/${room}`
+    );
+    const { ws: tabB } = await connectChatWS(
+      `/agents/slow-stream-agent/${room}`
+    );
+    const seenA = record(tabA);
+    const seenB = record(tabB);
+    const agent = await getAgentByName(env.SlowStreamAgent, room);
+
+    // Tab A's first reply streams; its second request waits in the queue.
+    sendChatRequest(tabA, "req-1", [user1], {
+      format: "plaintext",
+      chunkCount: 8,
+      chunkDelayMs: 30
+    });
+    await waitUntil(() => responses(seenA, "req-1").some((m) => m.body));
+    sendChatRequest(tabA, "req-2", [user1, user2], { format: "plaintext" });
+    await waitUntil(async () =>
+      ((await agent.getPersistedMessages()) as ChatMessage[]).some(
+        (message) => message.id === user2.id
+      )
+    );
+
+    // Tab A stops the queued request.
+    send(tabA, { type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL, id: "req-2" });
+    await waitUntil(() => responses(seenA, "req-2").some((m) => m.done));
+    await agent.waitForIdleForTest();
+
+    expect(responses(seenA, "req-2")).toEqual([
+      expect.objectContaining({ done: true, outcome: "aborted" })
+    ]);
+    // Tab B was never shown that request, so it hears nothing about it.
+    expect(responses(seenB, "req-2")).toEqual([]);
+    expect(await agent.getStartedRequestIds()).toEqual(["req-1"]);
+    tabA.close(1000);
+    tabB.close(1000);
+  });
+
   it("a request whose onChatMessage throws gets an error frame", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(
@@ -285,6 +326,31 @@ describe("chat turn races", () => {
         body: "Simulated onChatMessage error"
       })
     ]);
+    ws.close(1000);
+  });
+
+  it("a stopped reply's running server tool is stored as failed, and the chat does not wait on it", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const seen = record(ws);
+    const agent = await getAgentByName(env.TestChatAgent, room);
+
+    // The reply starts a server tool, which is still running when the user
+    // presses stop.
+    sendChatRequest(ws, "req-1", [user1], { serverToolThenHang: true });
+    await waitUntil(() => responses(seen, "req-1").some((m) => m.body));
+    send(ws, { type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL, id: "req-1" });
+    await waitUntil(() => responses(seen, "req-1").some((m) => m.done));
+    await agent.waitForIdleForTest();
+
+    // Nothing will ever answer that call: it is stored with an error, not
+    // left looking like it is running, and the chat is not waiting on anyone.
+    const stored = (await agent.getPersistedMessages()) as ChatMessage[];
+    expect(stored.at(-1)?.parts.at(-1)).toMatchObject({
+      toolCallId: "call-server-hang",
+      state: "output-error"
+    });
+    expect(await agent.hasPendingInteractionForTest()).toBe(false);
     ws.close(1000);
   });
 

@@ -32,6 +32,8 @@ import {
   reconcileMessages,
   reconcileOrphanPartial,
   repairInterruptedToolParts,
+  settleInterruptedReply,
+  streamChunksFinished,
   persistReconstructedOrphan,
   createChatFiberSnapshot,
   unwrapChatFiberSnapshot,
@@ -48,10 +50,9 @@ import {
   isReplayChunk,
   parseProtocolMessage,
   sendIfOpen,
-  TurnQueue,
-  SubmitConcurrencyController,
   hasIncompleteToolBatch,
-  continuationTargetIsLatest,
+  ChatTurns,
+  type RecoveryAttemptHandle,
   type ToolInteractionOutcome,
   partAwaitsClientInteraction,
   clientResolvableToolNames,
@@ -79,13 +80,6 @@ import {
   CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS
 } from "agents/chat";
 import {
-  ContinuationState,
-  PreStreamTurns,
-  AutoContinuationController,
-  AbortRegistry,
-  TIMED_OUT,
-  awaitWithDeadline,
-  drainInteractionApplies,
   interceptAgentToolBroadcast,
   isPositionlessAgentToolChunk,
   type ClientToolSchema
@@ -428,11 +422,6 @@ export class AIChatAgent<
 > extends Agent<Env, State, Props> {
   private _activeChatRecoveryRootRequestId: string | undefined;
   /**
-   * The stop signal of each running recovery attempt, keyed by the original
-   * request id a client cancels it with.
-   */
-  private readonly _recoveryAttemptStops = new Map<string, AbortController>();
-  /**
    * The originating user message ids of the active recovery chain (#2280),
    * carried in the recovery payload because the successor turn runs under a
    * fresh request id. Scoped to the recovery callback's async context, so a
@@ -447,10 +436,30 @@ export class AIChatAgent<
   }
 
   /**
+   * The turn core shared with `@cloudflare/think`: the turn queue, abort
+   * registry, submit concurrency, continuation slots and barrier, pre-stream
+   * set and tool-result apply chain, with the rules that tie them together.
+   * The fields below that alias its parts are the same objects.
+   */
+  private readonly _turns = new ChatTurns<Connection>(
+    {
+      messages: () => this.messages,
+      isReplyStreaming: () => this._streamingTurnActive,
+      streamingReply: () => this._streamingMessage,
+      clientToolNames: () => this._clientResolvableToolNames(),
+      hasActiveStream: () => this._resumableStream.hasActiveStream(),
+      generateRequestId: () => nanoid(),
+      keepAliveWhile: (fn) => this.keepAliveWhile(fn),
+      fireContinuation: () => this._fireAutoContinuation()
+    },
+    { defaultDebounceMs: AIChatAgent.MESSAGE_DEBOUNCE_MS }
+  );
+
+  /**
    * Registry of per-request AbortControllers.
    * Used to propagate cancellation signals for any external calls made by the agent.
    */
-  private _abortRegistry: AbortRegistry;
+  private readonly _abortRegistry = this._turns.aborts;
 
   /** Durable chat history for this Agent. */
   readonly sessions = new Sessions();
@@ -516,7 +525,12 @@ export class AIChatAgent<
    * approval) has been written to state. Set when an apply promise is created,
    * cleared when it settles. Used by waitUntilStable to avoid polling.
    */
-  private _pendingInteractionPromise: Promise<boolean> | null = null;
+  private get _pendingInteractionPromise(): Promise<boolean> | null {
+    return this._turns.pendingInteraction;
+  }
+  private set _pendingInteractionPromise(value: Promise<boolean> | null) {
+    this._turns.pendingInteraction = value;
+  }
 
   /**
    * Serialization tail for client-tool result/approval applies (#1649). Each
@@ -525,7 +539,12 @@ export class AIChatAgent<
    * back to `input-available`. Chaining every apply off this tail makes them
    * commit atomically in arrival order.
    */
-  private _interactionApplyTail: Promise<void> = Promise.resolve();
+  private get _interactionApplyTail(): Promise<void> {
+    return this._turns.interactionTail;
+  }
+  private set _interactionApplyTail(value: Promise<void>) {
+    this._turns.interactionTail = value;
+  }
 
   /**
    * Tracks the ID of a streaming message that was persisted early due to
@@ -539,7 +558,7 @@ export class AIChatAgent<
    * Serial queue for chat turns. Handles promise-chain serialization,
    * generation-based invalidation on clear, and active-request tracking.
    */
-  private _turnQueue = new TurnQueue();
+  private readonly _turnQueue = this._turns.queue;
 
   /**
    * Durable chat recovery configuration. Every chat turn runs in `runFiber`,
@@ -576,9 +595,7 @@ export class AIChatAgent<
   private _mergeQueuedUserStartIndexByEpoch = new Map<number, number>();
 
   /** Shared admission policy state for overlapping submit-message requests. */
-  private _submitConcurrency = new SubmitConcurrencyController({
-    defaultDebounceMs: AIChatAgent.MESSAGE_DEBOUNCE_MS
-  });
+  private readonly _submitConcurrency = this._turns.submits;
 
   /**
    * Set of connection IDs that are pending stream resume.
@@ -595,7 +612,7 @@ export class AIChatAgent<
    * Continuation lifecycle state: pending, deferred, active, and
    * connections awaiting a continuation stream to start.
    */
-  private _continuation = new ContinuationState<Connection>();
+  private readonly _continuation = this._turns.continuation;
 
   /**
    * Accepted-but-not-yet-streamed turns and the connections parked waiting for
@@ -612,7 +629,7 @@ export class AIChatAgent<
    * pre-stream wait is ever moved onto a durable alarm that releases the DO; if
    * that changes, this state must become durable.
    */
-  private _preStream = new PreStreamTurns<Connection>();
+  private readonly _preStream = this._turns.preStream;
   private _agentToolForwarders = new Map<
     string,
     Set<(chunk: AgentToolStoredChunk) => void>
@@ -653,16 +670,7 @@ export class AIChatAgent<
    * and the double-fire guard. Parameterized by this agent's stream-active
    * signal, apply-drain, and continuation-turn pipeline (`_fireAutoContinuation`).
    */
-  private _autoContinuation = new AutoContinuationController<Connection>({
-    continuation: this._continuation,
-    generateRequestId: () => nanoid(),
-    isStreamActive: () => this._streamingTurnActive,
-    hasPendingInteraction: () => this._pendingInteractionPromise !== null,
-    hasIncompleteToolBatch: () => this._hasIncompleteToolBatch(),
-    drainInteractionApplies: () => this._drainInteractionApplies(),
-    keepAliveWhile: <T>(fn: () => Promise<T>) => this.keepAliveWhile(fn),
-    fire: () => this._fireAutoContinuation()
-  });
+  private readonly _autoContinuation = this._turns.autoContinuation;
 
   /**
    * Stream-active gate for the auto-continuation barrier (#1650). True while an
@@ -1184,7 +1192,6 @@ export class AIChatAgent<
       return _onStart(props);
     };
 
-    this._abortRegistry = new AbortRegistry();
     const _onConnect = this.onConnect.bind(this);
     this.onConnect = async (connection: Connection, ctx: ConnectionContext) => {
       if (this._cf_requestTargetsSubAgent(ctx.request)) {
@@ -1297,7 +1304,6 @@ export class AIChatAgent<
             : undefined;
           const requestBody =
             Object.keys(customBody).length > 0 ? customBody : undefined;
-          const epoch = this._turnQueue.generation;
           const requestOriginIds = originMessageIds(messages);
           // What was stored when a regenerate arrived: its turn may delete
           // these, but never a question another tab sent after it.
@@ -1308,135 +1314,99 @@ export class AIChatAgent<
           if (requestOriginIds) {
             this._requestOriginMessageIds.set(chatMessageId, requestOriginIds);
           }
-          const concurrencyDecision =
-            this._getSubmitConcurrencyDecision(requestTrigger);
+          let concurrencyDecision!: SubmitConcurrencyDecision;
+          let epoch!: number;
 
-          if (concurrencyDecision.action === "drop") {
-            this._rollbackDroppedSubmit(connection);
-            this._completeSkippedRequest(connection, chatMessageId);
-            this._requestOriginMessageIds.delete(chatMessageId);
-            return;
-          }
-
-          // A genuinely-new turn supersedes any pending terminal record (#1645)
-          // so a stale exhaustion can't replay on a later reconnect once the
-          // user has moved on.
-          await withAgentSpan(
-            this,
-            "clear_previous_chat_state",
-            "interaction",
-            {
-              "cloudflare.agents.component": "ai_chat",
-              "cloudflare.agents.turn.request_id": chatMessageId,
-              "cloudflare.agents.turn.trigger": requestTrigger
-            },
-            () => this._clearChatTerminal()
-          );
-
-          // Mark this turn as accepted-but-not-yet-streamed (#1784) so a client
-          // that reconnects/re-mounts before the stream starts is parked and
-          // told to keep waiting (see _resumeHandshake / onConnect), then
-          // flushed into STREAM_RESUMING on _startStream or released on settle.
-          this._preStream.begin(chatMessageId);
-
-          // Register the abort controller as soon as the request is accepted, so
-          // a cancel that arrives while the turn waits in the queue (or for
-          // debounce, merge, or MCP connections) aborts this signal instead of
-          // finding no controller and being dropped (#2701). The outer finally
-          // removes it. Mirrors @cloudflare/think's _handleChatRequest.
-          const abortSignal = this._abortRegistry.getSignal(chatMessageId);
-
-          // Outer finally so the accepted pre-stream turn ALWAYS settles
-          // (#1784). begin() runs before the pre-turn-body steps below
-          // (persistMessages, _mergeQueuedUserMessages, and inside the queued
-          // execute callback mcp.waitForConnections / _setRequestContext); if
-          // any of those throws, chatTurnBody's own finally never runs. Without
-          // this backstop the request id would stay stuck in _preStream —
-          // hasInFlight() true forever — so every future client would be parked
-          // on STREAM_PENDING (60s) instead of getting an immediate
-          // STREAM_RESUME_NONE, until chat clear or DO eviction. Mirrors
-          // @cloudflare/think's _handleChatRequest.
+          // The turn core runs the request: decide, accept (pre-stream mark
+          // and abort controller, so a cancel while it waits in the queue is
+          // not lost, #2701), persist, queue, the queued checks, then the
+          // turn. It always settles the pre-stream turn (#1784) and drops the
+          // abort controller, whatever a step does.
           try {
-            // Track that this request is past the concurrency decision but
-            // not yet enqueued in _turnQueue. Decremented synchronously
-            // before _runExclusiveChatTurn (which increments queuedCount).
-            const releasePendingEnqueue =
-              this._submitConcurrency.beginEnqueue();
-            try {
+            await this._turns.runClientRequest<true>({
+              requestId: chatMessageId,
+              isSubmitMessage: requestTrigger === "submit-message",
+              concurrency: this.messageConcurrency,
+              onDecision: (decision) => {
+                concurrencyDecision = decision;
+                this._noteMergeStart(decision);
+              },
+              onDropped: () => {
+                this._rollbackDroppedSubmit(connection);
+                this._completeSkippedRequest(connection, chatMessageId);
+              },
+              // A genuinely-new turn supersedes any pending terminal record
+              // (#1645) so a stale exhaustion can't replay on a later
+              // reconnect once the user has moved on.
+              onAccepted: () =>
+                withAgentSpan(
+                  this,
+                  "clear_previous_chat_state",
+                  "interaction",
+                  {
+                    "cloudflare.agents.component": "ai_chat",
+                    "cloudflare.agents.turn.request_id": chatMessageId,
+                    "cloudflare.agents.turn.trigger": requestTrigger
+                  },
+                  () => this._clearChatTerminal()
+                ),
               // Persist and broadcast user messages before entering the turn
               // queue so other tabs see the new message immediately and so
               // overlapping submits under latest/merge/debounce can inspect
               // the full message list when their turn starts.
-              await withAgentSpan(
-                this,
-                "persist_incoming_messages",
-                "interaction",
-                {
-                  "cloudflare.agents.component": "ai_chat",
-                  "cloudflare.agents.turn.request_id": chatMessageId,
-                  "cloudflare.agents.turn.trigger": requestTrigger
-                },
-                async () => {
-                  this._broadcastChatMessage(
-                    {
-                      messages: transformedMessages,
-                      type: MessageType.CF_AGENT_CHAT_MESSAGES
-                    },
-                    [connection.id]
-                  );
+              persist: async ({ decision, generation }) => {
+                epoch = generation;
+                await withAgentSpan(
+                  this,
+                  "persist_incoming_messages",
+                  "interaction",
+                  {
+                    "cloudflare.agents.component": "ai_chat",
+                    "cloudflare.agents.turn.request_id": chatMessageId,
+                    "cloudflare.agents.turn.trigger": requestTrigger
+                  },
+                  async () => {
+                    this._broadcastChatMessage(
+                      {
+                        messages: transformedMessages,
+                        type: MessageType.CF_AGENT_CHAT_MESSAGES
+                      },
+                      [connection.id]
+                    );
 
-                  // A regenerate deletes the replies it replaces once its
-                  // turn starts (below), so a reply still streaming or
-                  // queued now is deleted too instead of surviving next to
-                  // the regenerated one.
-                  await this.persistMessages(
-                    transformedMessages,
-                    [connection.id],
-                    {
-                      _deleteStaleRows: requestTrigger !== "regenerate-message"
+                    // A regenerate deletes the replies it replaces once its
+                    // turn starts (below), so a reply still streaming or
+                    // queued now is deleted too instead of surviving next to
+                    // the regenerated one.
+                    await this.persistMessages(
+                      transformedMessages,
+                      [connection.id],
+                      {
+                        _deleteStaleRows:
+                          requestTrigger !== "regenerate-message"
+                      }
+                    );
+
+                    if (decision.strategy === "merge") {
+                      await this._mergeQueuedUserMessages(generation);
                     }
-                  );
-
-                  if (concurrencyDecision.strategy === "merge") {
-                    await this._mergeQueuedUserMessages(epoch);
                   }
-                }
-              );
-            } finally {
-              releasePendingEnqueue();
-            }
-            await this._runExclusiveChatTurn(
-              chatMessageId,
-              async () => {
-                if (
-                  this._submitConcurrency.isSuperseded(
-                    concurrencyDecision.submitSequence
-                  )
-                ) {
-                  this._completeSkippedRequest(connection, chatMessageId);
-                  return;
-                }
-
-                if (concurrencyDecision.debounceUntilMs !== null) {
-                  await this._submitConcurrency.waitForTimestamp(
-                    concurrencyDecision.debounceUntilMs
-                  );
-
-                  if (this._turnQueue.generation !== epoch) {
-                    this._completeSkippedRequest(connection, chatMessageId);
-                    return;
+                );
+                return true;
+              },
+              enqueue: async (turn, generation, onQueued) => {
+                let stale = false;
+                const done = this._runExclusiveChatTurn(chatMessageId, turn, {
+                  epoch: generation,
+                  onStale: () => {
+                    stale = true;
                   }
-
-                  if (
-                    this._submitConcurrency.isSuperseded(
-                      concurrencyDecision.submitSequence
-                    )
-                  ) {
-                    this._completeSkippedRequest(connection, chatMessageId);
-                    return;
-                  }
-                }
-
+                });
+                onQueued();
+                await done;
+                return stale ? "stale" : "completed";
+              },
+              beforeStart: async () => {
                 // Re-merge inside the lock: more overlapping submits may have
                 // persisted additional user messages while this turn was queued.
                 if (concurrencyDecision.strategy === "merge") {
@@ -1455,8 +1425,7 @@ export class AIChatAgent<
                   );
 
                   if (this._turnQueue.generation !== epoch) {
-                    this._completeSkippedRequest(connection, chatMessageId);
-                    return;
+                    return false;
                   }
 
                   if (
@@ -1464,12 +1433,11 @@ export class AIChatAgent<
                       concurrencyDecision.submitSequence
                     )
                   ) {
-                    this._completeSkippedRequest(connection, chatMessageId);
-                    return;
+                    return false;
                   }
                 }
 
-                const cancelledBeforeStart = await withAgentSpan(
+                await withAgentSpan(
                   this,
                   "prepare_chat_context",
                   "turn",
@@ -1492,33 +1460,22 @@ export class AIChatAgent<
                         timeout != null ? { timeout } : undefined
                       );
                     }
-
-                    // Cancelled before the turn started: leave the stored
-                    // request context alone, since tool continuations and
-                    // continueLastTurn read it and this request never ran.
-                    if (abortSignal?.aborted) {
-                      return true;
-                    }
-
-                    this._setRequestContext(requestClientTools, requestBody);
-                    return false;
                   }
                 );
-
-                // Don't run onChatMessage for a request cancelled before its
-                // turn started. There is no assistant message, so
-                // onChatResponse doesn't fire; the terminal frame lets the
-                // client finish the request.
-                if (cancelledBeforeStart) {
-                  this._broadcastChatMessage({
-                    body: "",
-                    done: true,
-                    id: chatMessageId,
-                    type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
-                    outcome: "aborted"
-                  });
-                  return;
-                }
+                return true;
+              },
+              onSkipped: () =>
+                this._completeSkippedRequest(connection, chatMessageId),
+              // The request was cancelled before its turn started. There is
+              // no assistant message, so onChatResponse doesn't fire, and the
+              // stored request context is left alone: tool continuations and
+              // continueLastTurn read it and this request never ran. Like a
+              // skipped request it never streamed, so only the tab that sent
+              // it was ever shown it.
+              onCancelledBeforeStart: () =>
+                this._endUnstartedRequest(connection, chatMessageId, "aborted"),
+              run: async (_prepared, signal) => {
+                this._setRequestContext(requestClientTools, requestBody);
 
                 // Regenerate: drop every reply after the messages the client
                 // sent, including one that landed while this request waited
@@ -1589,7 +1546,7 @@ export class AIChatAgent<
                             },
                             {
                               requestId: chatMessageId,
-                              abortSignal,
+                              abortSignal: signal,
                               clientTools: requestClientTools,
                               body: requestBody,
                               continuation: false
@@ -1642,7 +1599,7 @@ export class AIChatAgent<
                           // reported instead of leaving the request open.
                           if (
                             !replying &&
-                            !abortSignal?.aborted &&
+                            !signal?.aborted &&
                             !isDurableObjectResetError(error)
                           ) {
                             await this._reportTurnFailure(chatMessageId, error);
@@ -1667,20 +1624,9 @@ export class AIChatAgent<
                     }
                   );
                 });
-              },
-              {
-                epoch,
-                onStale: () =>
-                  this._completeSkippedRequest(connection, chatMessageId)
               }
-            );
+            });
           } finally {
-            // Guaranteed settle (#1784): on the happy path chatTurnBody /
-            // _completeSkippedRequest already settled (idempotent here); this
-            // covers a throw in a pre-turn-body step before chatTurnBody's
-            // finally could run.
-            this._abortRegistry.remove(chatMessageId);
-            this._settlePreStreamTurn(chatMessageId);
             this._requestOriginMessageIds.delete(chatMessageId);
           }
           return;
@@ -1720,11 +1666,9 @@ export class AIChatAgent<
 
         // Handle request cancellation
         if (event.type === "cancel") {
-          this._abortRegistry.cancel(event.id);
-          // A recovery attempt already running for this request: the client
-          // only knows the original request id until the continuation
-          // streams, so stop the attempt by that id too.
-          this._recoveryAttemptStops.get(event.id)?.abort();
+          // Aborts the request's turn, queued or running, and a recovery
+          // attempt running for it.
+          this._turns.cancel(event.id);
           await this._cancelScheduledRecovery(event.id);
           this._emit("message:cancel", { requestId: event.id });
           return;
@@ -1774,29 +1718,26 @@ export class AIChatAgent<
           const continuationClientTools =
             (clientTools as ClientToolSchema[] | undefined) ??
             this._lastClientTools;
-          this._enqueueInteractionApply(async () => {
-            const outcome = await this._settleToolResult(
-              toolCallId,
-              toolName,
-              output,
-              overrideState,
-              errorText
-            );
-            // Only a result that settled its call continues, targeted at
-            // that call's message (shared `afterInteraction`). Without
-            // autoContinue it re-arms a batch a sibling opted in for (#1650).
-            this._autoContinuation.afterInteraction(
-              outcome,
-              autoContinue === true,
-              () => ({
-                connection,
-                clientTools: continuationClientTools,
-                body: this._lastBody,
-                errorPrefix: "[AIChatAgent] Tool continuation failed:"
-              })
-            );
-            return outcome.status !== "missing";
-          });
+          // Only a result that settled its call continues, targeted at that
+          // call's message. Without autoContinue it re-arms a batch a sibling
+          // opted in for (#1650).
+          this._turns.applyInteraction(
+            () =>
+              this._settleToolResult(
+                toolCallId,
+                toolName,
+                output,
+                overrideState,
+                errorText
+              ),
+            autoContinue === true,
+            () => ({
+              connection,
+              clientTools: continuationClientTools,
+              body: this._lastBody,
+              errorPrefix: "[AIChatAgent] Tool continuation failed:"
+            })
+          );
           return;
         }
 
@@ -1804,23 +1745,16 @@ export class AIChatAgent<
         if (event.type === "tool-approval") {
           const { toolCallId, approved, autoContinue } = event;
           this._emit("tool:approval", { toolCallId, approved });
-          this._enqueueInteractionApply(async () => {
-            const outcome = await this._settleToolApproval(
-              toolCallId,
-              approved
-            );
-            this._autoContinuation.afterInteraction(
-              outcome,
-              autoContinue === true,
-              () => ({
-                connection,
-                clientTools: this._lastClientTools,
-                body: this._lastBody,
-                errorPrefix: "[AIChatAgent] Tool approval continuation failed:"
-              })
-            );
-            return outcome.status !== "missing";
-          });
+          this._turns.applyInteraction(
+            () => this._settleToolApproval(toolCallId, approved),
+            autoContinue === true,
+            () => ({
+              connection,
+              clientTools: this._lastClientTools,
+              body: this._lastBody,
+              errorPrefix: "[AIChatAgent] Tool approval continuation failed:"
+            })
+          );
           return;
         }
       }
@@ -2203,6 +2137,13 @@ export class AIChatAgent<
     // NOTE: progress is bumped at production/flush time in `_storeStreamChunk`
     // (#1637), NOT here — persisting on recovery or a client reconnect must not
     // be miscounted as new forward progress.
+    // A stream with no `finish` chunk was cut off: settle the tool calls it
+    // left unanswered, so the stored reply never shows a server tool as
+    // running after its `execute()` died. A stream that finished and only
+    // missed its persist keeps its unanswered calls: those wait for a client.
+    const settle = streamChunksFinished(chunks)
+      ? (message: UIMessage) => message
+      : (message: UIMessage) => this._settleInterruptedReply(message);
     const fallbackId = `assistant_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
     await persistReconstructedOrphan(chunks, {
       store: this._orphanStore(),
@@ -2213,10 +2154,44 @@ export class AIChatAgent<
           message.id,
           fallbackId
         );
-        return message;
+        return settle(message);
       },
-      merge: (existing, incoming) => reconcileOrphanPartial(existing, incoming)
+      merge: (existing, incoming) =>
+        settle(reconcileOrphanPartial(existing, incoming))
     });
+  }
+
+  /**
+   * Settle the tool calls a cut-off reply left unanswered (the shared
+   * `settleInterruptedReply`): a call no client is known to own becomes an
+   * errored result through {@link repairInterruptedToolPart}.
+   */
+  private _settleInterruptedReply(message: UIMessage): UIMessage {
+    return settleInterruptedReply(message, {
+      repairPart: (part) => this.repairInterruptedToolPart(part),
+      clientToolNames: this._clientResolvableToolNames()
+    });
+  }
+
+  /**
+   * Settle and store the reply a recovery attempt is about to continue,
+   * before the attempt waits for the chat to be stable. That reply was cut
+   * off by definition. One this version stored is settled already; one an
+   * older version stored may hold a server tool call nothing will answer,
+   * and the attempt would otherwise wait on it as if a client could.
+   *
+   * Earlier replies are left alone. The conversation has moved past them, so
+   * nothing waits on them, and the turn that follows settles what they left
+   * unanswered.
+   */
+  private async _settleBeforeRecovery(continueReplyId: string): Promise<void> {
+    const last = this.messages.at(-1);
+    if (last?.id !== continueReplyId || last.role !== "assistant") return;
+    const settled = this._settleInterruptedReply(last);
+    if (settled === last) return;
+    await this.persistMessages(
+      this.messages.map((message) => (message === last ? settled : message))
+    );
   }
 
   /**
@@ -2754,59 +2729,20 @@ export class AIChatAgent<
    * `waitForIdle()` (tests, `waitUntilStable`, recovery code).
    */
   private async waitForIdle(): Promise<void> {
-    for (;;) {
-      await this._submitConcurrency.waitForIdle(() =>
-        this._turnQueue.waitForIdle()
-      );
-      // An armed coalesce timer / in-flight barrier drain means an
-      // auto-continuation decision is imminent (#1650): it will either enqueue
-      // a continuation turn (re-busying the queue) or park on an incomplete
-      // batch. Wait for that decision to resolve before reporting idle so a
-      // debounced continuation isn't missed by idle observers (tests,
-      // recovery).
-      if (!this._hasArmedContinuation()) return;
-      await new Promise<void>((resolve) =>
-        setTimeout(resolve, AutoContinuationController.COALESCE_MS)
-      );
-    }
+    return this._turns.waitForIdle();
   }
 
-  /**
-   * `true` when an auto-continuation is armed and going to fire on its own —
-   * its coalesce timer is still pending or its completeness barrier is
-   * mid-drain (#1650). Such an agent is NOT idle/stable: a continuation turn is
-   * imminent, so idle observers (recovery, idle-eviction, tests) must keep
-   * waiting until it either enqueues a turn or parks on an incomplete batch.
-   * A continuation that has already entered its turn (`pastCoalesce`) is
-   * covered by the turn queue, and a parked one (waiting on an unanswered
-   * sibling) is covered by `hasPendingInteraction()`, so neither is reported
-   * here.
-   */
-  private _hasArmedContinuation(): boolean {
-    return this._autoContinuation.hasPendingDecision();
-  }
-
-  private _getSubmitConcurrencyDecision(
-    trigger: ChatRequestTrigger
-  ): SubmitConcurrencyDecision {
-    const decision = this._submitConcurrency.decide({
-      concurrency: this.messageConcurrency,
-      isSubmitMessage: trigger === "submit-message",
-      queuedTurns: this._turnQueue.queuedCount()
-    });
-
-    if (decision.strategy === "merge") {
-      if (
-        !this._mergeQueuedUserStartIndexByEpoch.has(this._turnQueue.generation)
-      ) {
-        this._mergeQueuedUserStartIndexByEpoch.set(
-          this._turnQueue.generation,
-          this.messages.length
-        );
-      }
+  /** Remember where a merge strategy's queued user messages start. */
+  private _noteMergeStart(decision: SubmitConcurrencyDecision): void {
+    if (
+      decision.strategy === "merge" &&
+      !this._mergeQueuedUserStartIndexByEpoch.has(this._turnQueue.generation)
+    ) {
+      this._mergeQueuedUserStartIndexByEpoch.set(
+        this._turnQueue.generation,
+        this.messages.length
+      );
     }
-
-    return decision;
   }
 
   private async _mergeQueuedUserMessages(
@@ -2965,7 +2901,16 @@ export class AIChatAgent<
     }
   }
 
-  private _completeSkippedRequest(connection: Connection, requestId: string) {
+  /**
+   * Send the terminal frame of a request that ended before its turn started
+   * (skipped or cancelled in the queue) to the connection that sent it. No
+   * other connection was shown the request.
+   */
+  private _endUnstartedRequest(
+    connection: Connection,
+    requestId: string,
+    outcome: "skipped" | "aborted"
+  ): void {
     this._sendDirectMessage(
       connection,
       this._withOriginMessageIds({
@@ -2973,9 +2918,13 @@ export class AIChatAgent<
         done: true,
         id: requestId,
         type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
-        outcome: "skipped"
+        outcome
       })
     );
+  }
+
+  private _completeSkippedRequest(connection: Connection, requestId: string) {
+    this._endUnstartedRequest(connection, requestId, "skipped");
     // A skipped turn settles out of the pre-stream set, but must NOT release
     // parked connections (#1784): a skip happens because a NEWER turn was
     // admitted (latest/merge supersede) or the queue generation advanced. The
@@ -3005,11 +2954,7 @@ export class AIChatAgent<
     requestId: string,
     options: { releaseParked?: boolean } = {}
   ): void {
-    const idle = this._preStream.settle(requestId);
-    const releaseParked = options.releaseParked ?? true;
-    if (releaseParked && idle && !this._resumableStream.hasActiveStream()) {
-      this._preStream.releaseAwaiting();
-    }
+    this._turns.settlePreStreamTurn(requestId, options);
   }
 
   private _rollbackDroppedSubmit(connection: Connection) {
@@ -3019,20 +2964,19 @@ export class AIChatAgent<
     });
   }
 
-  /** `true` when an assistant message is waiting on a client tool result or approval. */
+  /**
+   * `true` when the chat is waiting on a client: a tool call a client still
+   * has to answer, or an approval it still has to give.
+   *
+   * Every unanswered call in the stored transcript counts, whatever its tool.
+   * A reply is stored unanswered only when its stream finished on that call,
+   * which is what a client tool does; a reply that was cut off has its dead
+   * calls settled before it is stored. In the reply streaming now, only a
+   * tool the client sent a schema for counts, because a server tool sits at
+   * `input-available` while it runs.
+   */
   protected hasPendingInteraction(): boolean {
-    if (
-      this._streamingMessage &&
-      this._messageHasPendingInteraction(this._streamingMessage)
-    ) {
-      return true;
-    }
-
-    return this.messages.some(
-      (message) =>
-        message.role === "assistant" &&
-        this._messageHasPendingInteraction(message)
-    );
+    return this._turns.hasPendingInteraction();
   }
 
   /**
@@ -3058,83 +3002,11 @@ export class AIChatAgent<
     timeout?: number;
     pendingInteraction?: () => boolean;
   }): Promise<boolean> {
-    const deadline =
-      options?.timeout != null ? Date.now() + options.timeout : null;
-    const hasPendingInteraction =
-      options?.pendingInteraction ?? (() => this.hasPendingInteraction());
-
-    while (true) {
-      // Drain active turns AND any in-flight submits past the concurrency
-      // decision (mid-`persistMessages`) so `hasPendingInteraction()`
-      // reflects settled message state rather than in-flight streaming
-      // state. Just `_turnQueue.waitForIdle()` would miss submits whose
-      // handlers have bumped `_latestOverlappingSubmitSequence` and
-      // incremented `_pendingEnqueueCount` but haven't yet enqueued.
-      while (true) {
-        if (
-          (await this._awaitWithDeadline(
-            this._turnQueue.waitForIdle(),
-            deadline
-          )) === TIMED_OUT
-        ) {
-          return false;
-        }
-        if (this._submitConcurrency.pendingEnqueueCount === 0) break;
-        if (
-          (await this._awaitWithDeadline(
-            new Promise<void>((resolve) => setTimeout(resolve, 5)),
-            deadline
-          )) === TIMED_OUT
-        ) {
-          return false;
-        }
-      }
-
-      if (!hasPendingInteraction()) {
-        if (!this._hasArmedContinuation()) {
-          return true;
-        }
-        // An auto-continuation is armed (#1650) — not stable yet. Wait for it
-        // to fire (enqueuing a turn the outer loop then drains) or park, then
-        // re-check.
-        if (
-          (await this._awaitWithDeadline(
-            new Promise<void>((resolve) =>
-              setTimeout(resolve, AutoContinuationController.COALESCE_MS)
-            ),
-            deadline
-          )) === TIMED_OUT
-        ) {
-          return false;
-        }
-        continue;
-      }
-
-      const pending = this._pendingInteractionPromise;
-      if (pending) {
-        let result: boolean | typeof TIMED_OUT;
-        try {
-          result = await this._awaitWithDeadline(pending, deadline);
-        } catch {
-          continue;
-        }
-
-        if (result === TIMED_OUT) {
-          return false;
-        }
-      } else {
-        // No tool result/approval apply is currently in flight; we are still
-        // waiting for the user to resolve the interaction.
-        if (
-          (await this._awaitWithDeadline(
-            new Promise<void>((resolve) => setTimeout(resolve, 100)),
-            deadline
-          )) === TIMED_OUT
-        ) {
-          return false;
-        }
-      }
-    }
+    return this._turns.waitUntilStable({
+      timeout: options?.timeout,
+      hasPendingInteraction:
+        options?.pendingInteraction ?? (() => this.hasPendingInteraction())
+    });
   }
 
   private abortActiveTurn(): boolean {
@@ -3153,22 +3025,10 @@ export class AIChatAgent<
    */
   protected resetTurnState(): void {
     this._mergeQueuedUserStartIndexByEpoch.delete(this._turnQueue.generation);
-    this._turnQueue.reset();
-    this._abortRegistry.destroyAll();
-    this._submitConcurrency.reset();
-    this._pendingInteractionPromise = null;
-    // Drop the apply chain so new interactions don't serialize behind a stale
-    // (possibly hung) apply from the turn we just reset (#1649).
-    this._interactionApplyTail = Promise.resolve();
-    // Tear down the event-driven auto-continuation barrier (#1650): cancel the
-    // coalesce timer and clear the double-fire / stream-active gates so a reset
-    // mid-park can't leave a stale flag pinning future continuations.
-    this._autoContinuation.reset();
+    // Queue generation, abort controllers, submit concurrency, the tool-result
+    // apply chain, the continuation slots and barrier, and parked connections.
+    this._turns.reset();
     this._streamingTurnActive = false;
-    this._continuation.sendResumeNone();
-    this._continuation.clearAll();
-    this._preStream.releaseAwaiting();
-    this._preStream.reset();
     this._pendingChatResponseResults.length = 0;
   }
 
@@ -3187,7 +3047,7 @@ export class AIChatAgent<
    * without requiring the caller to know the id.
    */
   protected abortRequest(requestId: string, reason?: unknown): void {
-    this._abortRegistry.cancel(requestId, reason);
+    this._turns.cancel(requestId, reason);
   }
 
   /**
@@ -3222,63 +3082,15 @@ export class AIChatAgent<
     this._abortRegistry.destroyAll(reason);
   }
 
-  private _awaitWithDeadline<T>(
-    promise: Promise<T>,
-    deadline: number | null
-  ): Promise<T | typeof TIMED_OUT> {
-    return awaitWithDeadline(promise, deadline);
-  }
-
-  private _messageHasPendingInteraction(message: UIMessage): boolean {
-    return message.parts.some(
-      (part) =>
-        "state" in part &&
-        (part.state === "input-available" ||
-          part.state === "approval-requested")
-    );
-  }
-
   /**
-   * `true` when the turn is parked on a pending interaction that the CLIENT can
-   * still resolve after a restart — an `approval-requested` part, or an
-   * `input-available` part for a CLIENT tool (no server `execute`) whose
-   * `tool-result` the SPA replays over the WebSocket on reconnect.
+   * Same check as {@link hasPendingInteraction}. The two used to differ: this
+   * one ignored a server tool call that died with its isolate. Such a call is
+   * now settled when its cut-off reply is stored, so neither sees one.
    *
-   * This is intentionally NARROWER than `hasPendingInteraction()` (which
-   * `waitUntilStable` uses): a SERVER tool's `input-available` orphan is
-   * excluded, because its `execute()` promise died with the evicted isolate and
-   * nothing will ever post its result — so it must NOT be treated as a healthy
-   * "waiting on the human" wait. Used to make a HITL turn budget-free during
-   * recovery so a slow human can't trip the no-progress / attempt / stable-
-   * timeout budgets; see `_beginChatRecoveryIncident` and
-   * `_parkRecoveryForPendingInteraction`. Mirrors `@cloudflare/think`'s
-   * `hasPendingInteraction`, which is already client-only by construction.
+   * @deprecated Use {@link hasPendingInteraction}.
    */
   protected hasPendingClientInteraction(): boolean {
-    const clientResolvable = this._clientResolvableToolNames();
-    if (
-      this._streamingMessage &&
-      this._messageAwaitsClientInteraction(
-        this._streamingMessage,
-        clientResolvable
-      )
-    ) {
-      return true;
-    }
-    return this.messages.some(
-      (message) =>
-        message.role === "assistant" &&
-        this._messageAwaitsClientInteraction(message, clientResolvable)
-    );
-  }
-
-  private _messageAwaitsClientInteraction(
-    message: UIMessage,
-    clientResolvable: Set<string>
-  ): boolean {
-    return message.parts.some((part) =>
-      this._partAwaitsClientInteraction(part, clientResolvable)
-    );
+    return this.hasPendingInteraction();
   }
 
   /**
@@ -3442,22 +3254,6 @@ export class AIChatAgent<
   }
 
   /**
-   * Drain every in-flight tool-result/approval apply, including any enqueued
-   * while we wait, so the subsequent `_hasIncompleteToolBatch()` re-check sees
-   * every result that has ALREADY arrived. Bounded by real apply activity (a
-   * storage write each), never by a fixed timer: the loop re-reads
-   * `_interactionApplyTail` after each await because a sibling can extend the
-   * tail mid-drain, and stops once the tail stops advancing. Mirrors
-   * `@cloudflare/think`'s `_drainInteractionApplies`.
-   */
-  private _drainInteractionApplies(): Promise<void> {
-    return drainInteractionApplies(
-      () => this._continuation.pending !== null,
-      () => this._interactionApplyTail
-    );
-  }
-
-  /**
    * `true` when the latest assistant message is mid-batch: it carries at least
    * one settled tool result AND at least one tool call/approval still awaiting a
    * client result. That is the #1649 signature — the model fanned out parallel
@@ -3485,28 +3281,15 @@ export class AIChatAgent<
       async () => {
         const dispose = await this.keepAlive();
         try {
-          const connection = this._continuation.pending?.connection;
-          if (!connection) {
+          // Nothing to continue: the continuation was cleared, or the
+          // conversation moved on since its tool result (a newer question or
+          // reply, a regenerate, a clear).
+          const continuation = this._turns.takeContinuation();
+          if (!continuation) {
             this._clearAllAutoContinuationState(true);
             return;
           }
-          // The conversation moved on since the tool result (a newer question
-          // or reply, a regenerate, a clear): nothing left to continue.
-          if (
-            !continuationTargetIsLatest(
-              this.messages,
-              this._continuation.pending
-            )
-          ) {
-            this._clearAllAutoContinuationState(true);
-            return;
-          }
-
-          const clientTools = this._continuation.pending?.clientTools;
-          const body = this._continuation.pending?.body;
-          if (this._continuation.pending) {
-            this._continuation.pending.pastCoalesce = true;
-          }
+          const { connection, clientTools, body } = continuation;
 
           const abortSignal = this._abortRegistry.getSignal(requestId);
 
@@ -5198,7 +4981,7 @@ export class AIChatAgent<
       readProgress: () => this._chatRecoveryProgressMarker(),
       // A turn parked on a pending CLIENT interaction is waiting on the human,
       // not stuck, so the engine keeps it budget-free.
-      isAwaitingClientInteraction: () => this.hasPendingClientInteraction(),
+      isAwaitingClientInteraction: () => this.hasPendingInteraction(),
       putIncident: (key, incident) => this.ctx.storage.put(key, incident),
       syncStorage: () => this.ctx.storage.sync(),
       deleteIncident: async (key) => {
@@ -5680,16 +5463,16 @@ export class AIChatAgent<
     const previousRootRequestId = this._activeChatRecoveryRootRequestId;
     this._activeChatRecoveryRootRequestId =
       data?.originalRequestId ?? previousRootRequestId;
-    const stop = this._beginRecoveryAttempt(data?.originalRequestId);
+    const stop = this._turns.beginRecoveryAttempt(data?.originalRequestId);
     try {
+      if (data?.targetAssistantId) {
+        await this._settleBeforeRecovery(data.targetAssistantId);
+      }
       const recoveryConfig = this._resolveChatRecoveryConfig();
+      // The reply was settled above, so anything still pending is a call a
+      // client can answer, and the `!ready` branch parks on it.
       const ready = await this.waitUntilStable({
-        timeout: recoveryConfig.stableTimeoutMs,
-        // Recovery-scoped: a DEAD server-tool `input-available` orphan must not
-        // block stability (A.2 repairs it below), so gate on the client-
-        // resolvable predicate. A genuinely-pending CLIENT interaction still
-        // keeps it unstable and parks via the `!ready` branch.
-        pendingInteraction: () => this.hasPendingClientInteraction()
+        timeout: recoveryConfig.stableTimeoutMs
       });
       // A stop that landed while the attempt waited wins over the
       // stable-state timeout's park, reschedule or exhaustion.
@@ -5786,7 +5569,7 @@ export class AIChatAgent<
         result.error
       );
     } finally {
-      this._endRecoveryAttempt(data?.originalRequestId, stop);
+      stop.end();
       this._activeChatRecoveryRootRequestId = previousRootRequestId;
       // If this facet is an agent-tool child, its recovered turn just settled
       // outside `startAgentToolRun`'s finalizer — eagerly close the run so a
@@ -5796,34 +5579,13 @@ export class AIChatAgent<
     }
   }
 
-  /** Register a running recovery attempt so a cancel by `rootRequestId` stops it. */
-  private _beginRecoveryAttempt(
-    rootRequestId: string | undefined
-  ): AbortController {
-    const stop = new AbortController();
-    if (rootRequestId) this._recoveryAttemptStops.set(rootRequestId, stop);
-    return stop;
-  }
-
-  private _endRecoveryAttempt(
-    rootRequestId: string | undefined,
-    stop: AbortController
-  ): void {
-    if (
-      rootRequestId &&
-      this._recoveryAttemptStops.get(rootRequestId) === stop
-    ) {
-      this._recoveryAttemptStops.delete(rootRequestId);
-    }
-  }
-
   /**
    * Whether a client stopped this attempt. The cancel already marked the
    * incident when it was still scheduled; record it here otherwise, so the
    * attempt's own outcome does not overwrite the user's stop.
    */
   private async _recoveryAttemptStopped(
-    stop: AbortController,
+    stop: RecoveryAttemptHandle,
     incidentId: string | undefined
   ): Promise<boolean> {
     if (!stop.signal.aborted) return false;
@@ -6108,7 +5870,7 @@ export class AIChatAgent<
   private async _parkRecoveryForPendingInteraction(
     data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined
   ): Promise<boolean> {
-    if (!this.hasPendingClientInteraction()) return false;
+    if (!this.hasPendingInteraction()) return false;
     await this._updateChatRecoveryIncident(
       data?.incidentId,
       "skipped",
@@ -6252,15 +6014,11 @@ export class AIChatAgent<
     const previousRootRequestId = this._activeChatRecoveryRootRequestId;
     this._activeChatRecoveryRootRequestId =
       data?.originalRequestId ?? previousRootRequestId;
-    const stop = this._beginRecoveryAttempt(data?.originalRequestId);
+    const stop = this._turns.beginRecoveryAttempt(data?.originalRequestId);
     try {
       const recoveryConfig = this._resolveChatRecoveryConfig();
       const ready = await this.waitUntilStable({
-        timeout: recoveryConfig.stableTimeoutMs,
-        // Recovery-scoped narrow predicate (see `_chatRecoveryContinue`): a dead
-        // server-tool orphan must not block stability; a real client
-        // interaction still parks via the `!ready` branch.
-        pendingInteraction: () => this.hasPendingClientInteraction()
+        timeout: recoveryConfig.stableTimeoutMs
       });
       // A stop that landed while the attempt waited wins over the
       // stable-state timeout's park, reschedule or exhaustion.
@@ -6353,7 +6111,7 @@ export class AIChatAgent<
         result.error
       );
     } finally {
-      this._endRecoveryAttempt(data?.originalRequestId, stop);
+      stop.end();
       this._activeChatRecoveryRootRequestId = previousRootRequestId;
       // If this facet is an agent-tool child, its recovered turn just settled
       // outside `startAgentToolRun`'s finalizer — eagerly close the run so a
@@ -6722,9 +6480,10 @@ export class AIChatAgent<
     matchStates: string[],
     applyUpdate: (part: Record<string, unknown>) => Record<string, unknown>
   ): Promise<ToolInteractionOutcome> {
-    // Find the message containing this tool call.
-    // Check streaming message first (in-memory, not yet persisted), then
-    // retry persisted messages with backoff.
+    // Find the message containing this tool call: the streaming message
+    // first (in memory, not yet persisted), then the stored transcript. One
+    // look, no retry: applies run one at a time, so waiting here for a call
+    // that does not exist would stall every result queued behind it.
     let message: UIMessage | undefined;
 
     if (this._streamingMessage) {
@@ -6736,17 +6495,11 @@ export class AIChatAgent<
       }
     }
 
-    if (!message) {
-      for (let attempt = 0; attempt < 10; attempt++) {
-        message = this._findMessageByToolCallId(toolCallId);
-        if (message) break;
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-    }
+    message ??= this._findMessageByToolCallId(toolCallId);
 
     if (!message) {
       console.warn(
-        `[AIChatAgent] ${callerName}: Could not find message with toolCallId ${toolCallId} after retries`
+        `[AIChatAgent] ${callerName}: Could not find message with toolCallId ${toolCallId}`
       );
       return { status: "missing" };
     }
@@ -6926,22 +6679,7 @@ export class AIChatAgent<
   protected _enqueueInteractionApply(
     apply: () => Promise<boolean>
   ): Promise<boolean> {
-    // `.then(apply, apply)` runs regardless of a predecessor's outcome so one
-    // rejected apply can't poison the rest of the batch.
-    const resultPromise = this._interactionApplyTail.then(apply, apply);
-    this._interactionApplyTail = resultPromise.then(
-      () => undefined,
-      () => undefined
-    );
-    this._pendingInteractionPromise = resultPromise;
-    resultPromise
-      .finally(() => {
-        if (this._pendingInteractionPromise === resultPromise) {
-          this._pendingInteractionPromise = null;
-        }
-      })
-      .catch(() => {});
-    return resultPromise;
+    return this._turns.enqueueInteraction(apply);
   }
 
   /**
@@ -7726,9 +7464,7 @@ export class AIChatAgent<
     // the abort registry. A turn admitted before it must neither stream into
     // the cleared chat nor persist its reply there, even when its controller
     // is gone from the registry.
-    const turnGeneration = this._turnQueue.activeGeneration;
-    const resetSinceTurnStarted = () =>
-      turnGeneration !== null && this._turnQueue.generation !== turnGeneration;
+    const resetSinceTurnStarted = this._turns.turnResetGuard();
 
     // Keep the DO alive during streaming to prevent idle eviction
     return this.keepAliveWhile(() =>
@@ -7971,6 +7707,11 @@ export class AIChatAgent<
                   discard: !this._agentToolRunsByRequestId.get(id)
                 }
               : null;
+          // The stream was cut off (stopped, stalled, errored): settle the
+          // tool calls it left unanswered before the reply is stored.
+          if (streamResult.status !== "completed") {
+            message = this._settleInterruptedReply(message);
+          }
           if (
             message.parts.length > 0 &&
             !discardPartial &&

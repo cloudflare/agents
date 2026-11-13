@@ -25,6 +25,8 @@ packages/agents/src/chat/          ← shared foundation
   tool-output-truncation.ts        provider-executed tool payload truncation
   stream-accumulator.ts            StreamAccumulator class
   turn-queue.ts                    TurnQueue class
+  chat-turns.ts                    ChatTurns: the turn core both hosts run on (owns the queue, aborts,
+                                   submit concurrency, continuation, pre-stream set and apply chain)
   submit-concurrency.ts            SubmitConcurrencyController
   broadcast-state.ts               broadcastTransition state machine
   continuation-state.ts            ContinuationState
@@ -136,6 +138,23 @@ class StreamAccumulator {
 - **Client** (`agents/chat/react.tsx`, shared by both packages' React exports): Uses `StreamAccumulator` for broadcast/resume streams. The transport-owned path (local tab requests) still goes through `useChat`'s built-in pipeline.
 - **Think server**: Uses `StreamAccumulator` in both `_streamResult` (WebSocket path) and `chat()` (RPC sub-agent path), and to rebuild orphaned partials in `_persistOrphanedStream`.
 - **ai-chat server**: `_persistOrphanedStream` rebuilds orphaned partials through `StreamAccumulator` (the orphan-persist (a) step — see [recovery-engine.ts](#recovery-enginets)). The live streaming path (`_streamSSEReply`) **still** uses `applyChunkToParts` directly: its streaming message (`_streamingMessage`) is shared by reference with `hasPendingInteraction`, `_messagesForClientSync`, and `_findAndUpdateToolPart`, making it impractical to route through the accumulator without a deeper refactoring of the shared mutable state (see "Server-side StreamAccumulator (deferred)").
+
+### chat-turns.ts
+
+**`ChatTurns`** is the turn core `AIChatAgent` and `Think` both construct. It owns the state a host needs to run one turn at a time (`TurnQueue`, `AbortRegistry`, `SubmitConcurrencyController`, `ContinuationState`, `AutoContinuationController`, `PreStreamTurns`, and the tool-result apply chain) and the rules across them:
+
+- `turnResetGuard()` tells a running turn whether the chat was cleared since it was admitted, so it neither streams into the cleared chat nor persists there.
+- `applyInteraction()` applies tool results and approvals one at a time. Only one that settled its call schedules a continuation, targeted at that call's message.
+- `takeContinuation()` claims the pending continuation at the start of its turn, and returns `null` when the message it answers is no longer the latest.
+- `cancel(id)` aborts the request's turn, queued or running, and a recovery attempt registered for it with `beginRecoveryAttempt(rootId)`.
+- `reset()` tears all of it down in one synchronous step for a chat clear.
+- `waitForIdle()` and `waitUntilStable()` define idle and stable: no turn, no submit in flight, no tool result being applied, no continuation about to fire.
+- `runClientRequest()` runs one client chat request in the order both hosts follow: decide concurrency, accept (pre-stream mark and abort controller), persist, queue, the superseded and debounce checks, end a request cancelled meanwhile without calling the model, run the turn, settle. The host supplies the steps as a `ClientChatRequest`.
+- `decideSubmit()`, `awaitSubmitTurn()` and `settlePreStreamTurn()` cover the overlapping-submit checks.
+
+The host passes a `ChatTurnsHost`: the transcript, whether a reply is streaming, whether a resumable stream is active, `keepAliveWhile`, an id generator, and `fireContinuation`. What a turn does (the model call, streaming and persisting the reply) is still host code. [rfc-chat-turn-core.md](./rfc-chat-turn-core.md) has the plan for moving that too.
+
+Both hosts keep their old private field names (`_turnQueue`, `_continuation`, `_abortRegistry` / `_aborts`, and so on) as aliases of the core's parts.
 
 ### protocol.ts
 
@@ -370,3 +389,4 @@ The machine handles accumulator creation (including continuation context walking
 - Recovery continuations moved onto Tasks as chained `__cf_internal_chat_recovery` runs (#2194).
 - Sessions moved into a Lifecycle capability (`agents/sessions`, #2196). Both hosts persist through it, so row-size truncation left the message path and `enforceRowSizeLimit` now guards only non-session tables.
 - `ResumableStream` rebuilt over the Streams Lifecycle capability (`agents/streams`, #2173).
+- `ChatTurns` (`agents/chat/chat-turns.ts`) took over the turn coordination both hosts duplicated: the fields around `TurnQueue`, clear, cancel, the tool-result continuation decision, and the idle and stable waits. See [rfc-chat-turn-core.md](./rfc-chat-turn-core.md).

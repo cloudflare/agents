@@ -3946,6 +3946,84 @@ describe("Think — messageConcurrency", () => {
     await closeWS(ws);
   });
 
+  it("never runs a request cancelled while it waited in the queue", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setSlowStreamMode(true, 100, 10);
+    const request1 = sendChatRequest(ws, [makeUserMessage("First")]);
+    const done1 = waitForDoneId(ws, request1, 10000);
+    await waitForActiveTurn(agent);
+
+    // The second request queues behind the first; the user stops it there.
+    const request2 = sendChatRequest(ws, [makeUserMessage("Second")]);
+    const done2 = waitForDoneId(ws, request2, 10000);
+    await delay(100);
+    ws.send(
+      JSON.stringify({ type: "cf_agent_chat_request_cancel", id: request2 })
+    );
+
+    expect((await done1).at(-1)?.outcome).toBe("completed");
+    expect((await done2).at(-1)?.outcome).toBe("aborted");
+    await delay(200);
+
+    // Only the first request reached the model.
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log.map((entry) => entry.requestId)).toEqual([request1]);
+    const messages = (await agent.getMessages()) as UIMessage[];
+    expect(messages.filter((m) => m.role === "assistant")).toHaveLength(1);
+
+    await closeWS(ws);
+  });
+
+  it("stores a request's tools when its turn starts, not while it waits in the queue", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    const { ws: otherTab } = await connectWS(room);
+    await collectMessages(ws, 3);
+    const otherTabFrames: Array<Record<string, unknown>> = [];
+    otherTab.addEventListener("message", (event: MessageEvent) => {
+      otherTabFrames.push(JSON.parse(event.data as string));
+    });
+
+    await agent.setSlowStreamMode(true, 100, 10);
+    const request1 = sendChatRequest(ws, [makeUserMessage("First")], {
+      clientTools: [{ name: "first_tool", description: "From request 1" }]
+    });
+    const done1 = waitForDoneId(ws, request1, 10000);
+    await waitForActiveTurn(agent);
+
+    // The second request waits in the queue with different tools. A
+    // continuation of the running turn must still get the first request's.
+    const request2 = sendChatRequest(ws, [makeUserMessage("Second")], {
+      clientTools: [{ name: "second_tool", description: "From request 2" }]
+    });
+    const done2 = waitForDoneId(ws, request2, 10000);
+    await delay(100);
+    expect(
+      (await agent.getCapturedClientTools())?.map((tool) => tool.name)
+    ).toEqual(["first_tool"]);
+
+    // Cancelled in the queue, it never ran: its tools are never stored, and
+    // only the tab that sent it hears how it ended.
+    ws.send(
+      JSON.stringify({ type: "cf_agent_chat_request_cancel", id: request2 })
+    );
+    await done1;
+    expect((await done2).at(-1)?.outcome).toBe("aborted");
+    await delay(100);
+    expect(
+      (await agent.getCapturedClientTools())?.map((tool) => tool.name)
+    ).toEqual(["first_tool"]);
+    expect(otherTabFrames.filter((frame) => frame.id === request2)).toEqual([]);
+
+    await closeWS(ws);
+    await closeWS(otherTab);
+  });
+
   it("merge: all user messages preserved, single model turn for overlapping", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);
