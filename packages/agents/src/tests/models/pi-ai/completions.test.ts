@@ -498,6 +498,38 @@ describe("pi-ai: vendor usage on the chat-completions wire", () => {
     expect((message.usage as { reasoning?: number }).reasoning).toBe(57);
     expect(message.usage.totalTokens).toBe(66);
   });
+
+  it("reads reasoning tokens a vendor reports at the top level of usage", async () => {
+    // GitHub Copilot's spelling: `usage.reasoning_tokens`, with no
+    // `completion_tokens_details`. pi-ai's `parseChunkUsage` falls back to it.
+    const binding = fakeBinding(() =>
+      jsonResponse({
+        choices: [
+          {
+            finish_reason: "stop",
+            index: 0,
+            message: { content: "Hi!", role: "assistant" }
+          }
+        ],
+        id: "chatcmpl-r",
+        model: "llama-3.1-8b-instant",
+        object: "chat.completion",
+        usage: {
+          completion_tokens: 40,
+          prompt_tokens: 6,
+          reasoning_tokens: 32,
+          total_tokens: 46
+        }
+      })
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const message = await ai.complete(
+      ai(groqModel("llama-3.1-8b-instant")),
+      userContext("hi")
+    );
+    expect((message.usage as { reasoning?: number }).reasoning).toBe(32);
+    expect(message.usage.output).toBe(40);
+  });
 });
 
 describe("pi-ai: vendor reasoning and tool calls on the chat-completions wire", () => {
