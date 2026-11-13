@@ -21,17 +21,28 @@ export default defineConfig({
       // OpenCode inlines models.dev's catalog as one 8 MB string, too large
       // for the message that carries a module into the test runtime. These
       // tests turn catalog fetches off and use only the Cloudflare provider,
-      // so an empty catalog stands in.
+      // so an empty catalog stands in. If OpenCode's build changes shape,
+      // fail here rather than at the module transfer.
       name: "empty-models-dev-snapshot",
       enforce: "pre",
-      transform: (code, id) =>
-        id.includes("/@opencode/core/dist/") &&
-        code.includes("// src/models-dev/snapshot.txt")
-          ? code.replace(
-              /(\/\/ src\/models-dev\/snapshot\.txt\nvar snapshot_default = )'.*';/,
-              "$1'{}';"
-            )
-          : null
+      transform: (code, id) => {
+        if (
+          !id.includes("/@opencode/core/dist/") ||
+          !code.includes("// src/models-dev/snapshot.txt")
+        ) {
+          return null;
+        }
+        const stubbed = code.replace(
+          /(\/\/ src\/models-dev\/snapshot\.txt\nvar snapshot_default = )'.*';/,
+          "$1'{}';"
+        );
+        if (stubbed === code) {
+          throw new Error(
+            `empty-models-dev-snapshot: no snapshot literal to replace in ${id}; update the pattern for this @opencode/core build`
+          );
+        }
+        return stubbed;
+      }
     },
     stripNodeModulesSourceMapReferences(),
     cloudflareTest({
