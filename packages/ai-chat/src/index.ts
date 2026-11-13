@@ -2743,7 +2743,10 @@ export class AIChatAgent<
     try {
       return await fn();
     } catch (e) {
-      throw this.onError(e);
+      // `onError` observes the error and may replace it by throwing. If it
+      // returns, the original error continues to the caller.
+      await this.onError(e);
+      throw e;
     }
   }
 

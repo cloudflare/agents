@@ -27,6 +27,42 @@ host's `onAlarm`.
 
 Failures stop the phase and propagate. Failed startup remains retryable.
 
+A failure that propagates out of `fetch` (startup, a capability's request or
+upgrade hook, or the host's `onRequest`) ends in one place. Lifecycle logs the
+error, then offers it to the host's optional `onFetchError(request, error)`.
+If the host returns no response, or the hook throws, Lifecycle sends a default
+that never carries the error: `500 Internal Server Error`, or for an upgrade an
+accepted socket closed with 1011. In both cases, an original thrown value
+that is not an `Error` is rethrown to the runtime instead, as before. The
+defaults used to send `err.stack`, which leaked internals to callers who were
+not authenticated ([#2828](https://github.com/cloudflare/agents/issues/2828)).
+
+Choosing that response is a host hook, not a `LifecycleOptions` flag such as
+"expose errors in development". A flag covers one policy, while a hook covers
+every policy (dev-only stacks, error codes, a reporting ID, an upgrade that
+sends one frame before it closes) with no further API. Agent's `onError` was
+not reused: it observes errors from schedules, queues, and sockets as well as
+requests, where no response exists to choose, and capability failures never
+reach it. Capabilities do not get the hook yet. If one needs to shape failure
+responses, it can join the same dispatch the way `onRequest` does: first
+response wins, then the host.
+
+Only `fetch` has a hook that chooses a failure response, because only `fetch`
+has a caller waiting for one. The other entry points have no response to
+choose. A failed alarm rethrows so that the platform retries it. A failed
+WebSocket message is logged and dropped. A capability job's final failure goes
+to `onJobError`, which decides the job's outcome. A new entry point gets a
+hook that chooses a response only if a caller waits for its result.
+
+A failed Agent request (from `onStart`, `onRequest`, or `onConnect`) passes
+through two hooks: `onError` observes it and can replace it by throwing, then,
+if `onError` returns, the original error continues to `onFetchError`, which
+chooses the response. The intended direction is for `onError` to only observe
+errors, and for an Agent to shape failures in `onFetchError`. That change,
+along with removing the second `onError` call that `AIChatAgent` makes for an
+`onRequest` failure, is separate work, because it changes when existing
+overrides run.
+
 Native Durable Object RPC bypasses Lifecycle handlers, so a plain Lifecycle host
 calls `lifecycle.start()` from any RPC method that needs startup. Concurrent
 `start()` callers share one in-flight startup and all see its result. A call

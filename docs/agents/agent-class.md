@@ -379,11 +379,32 @@ class MyAgent extends Agent {
       console.error("Server error:", connectionOrError);
     }
 
-    // Optionally throw to propagate the error
+    // Throw to replace the error. If onError returns, the original error
+    // continues, and for a request reaches onFetchError.
     throw connectionOrError;
   }
 }
 ```
+
+### `this.onFetchError`
+
+When an HTTP request or WebSocket upgrade fails, including a failed `onStart`, the Agent logs the error and sends a response that does not include it: `500 Internal Server Error`, or for an upgrade a socket that closes with code `1011`. Override `onFetchError` to send something else, and return nothing to keep the default:
+
+```ts
+class MyAgent extends Agent<Env> {
+  onFetchError(request: Request, error: unknown) {
+    if (this.env.ENVIRONMENT !== "development") return;
+    const detail = error instanceof Error ? error.stack : String(error);
+    return new Response(detail, { status: 500 });
+  }
+}
+```
+
+Errors from `onStart`, `onRequest`, and `onConnect` pass through `onError` first. If `onError` throws, `onFetchError` receives what it threw; if `onError` returns, `onFetchError` receives the original error.
+
+For a [sub-agent](./sub-agents.md), the object that accepts the request or socket answers it. Today, a failed HTTP request reaches the child's `onFetchError`, and a failed WebSocket upgrade reaches the parent's, because the parent accepts the socket and passes the connection to the child, even when the child's `onConnect` threw. If `onBeforeSubAgent` throws, no `onFetchError` runs and the error reaches the caller of `fetch`.
+
+See [Failed requests](./lifecycle.md#failed-requests) for the full behavior.
 
 ### `this.destroy`
 
