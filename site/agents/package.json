@@ -17,7 +17,7 @@
     "@modelcontextprotocol/server": "2.4.0",
     "@orama/orama": "^3.1.18",
     "agents": "*",
-    "astro": "^7.3.3",
+    "astro": "^7.4.7",
     "clsx": "^2.1.1",
     "effect": "^3.21.4",
     "framer-motion": "^12.42.0",
