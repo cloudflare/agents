@@ -33,6 +33,7 @@ import { TEST_TIMING } from "./timing";
 import { fauxModels, TEST_SETTINGS } from "./faux";
 import {
   PiHarness,
+  type PiOnAbort,
   type PiOperationResult,
   type PiReceipt,
   type PiWhenBusy,
@@ -383,6 +384,7 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     text: string,
     options: {
       whenBusy?: PiWhenBusy;
+      onAbort?: PiOnAbort;
       session?: string;
       operationId?: string;
       entry?: InputEntry;

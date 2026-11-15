@@ -14,6 +14,7 @@ import type {
 } from "@earendil-works/pi-durable";
 import { expectTypeOf } from "vitest";
 import type {
+  PiOnAbort,
   PiOperationResult,
   PiSubmitOptions,
   PiWhenBusy,
@@ -26,6 +27,10 @@ expectTypeOf<PiWhenBusy>().toEqualTypeOf<
 
 expectTypeOf<PiWhenIdle>().toEqualTypeOf<
   NonNullable<InputSubmissionDraft["whenIdle"]>
+>();
+
+expectTypeOf<PiOnAbort>().toEqualTypeOf<
+  NonNullable<InputSubmissionDraft["onAbort"]>
 >();
 
 // Every input option pi takes is exposed, apart from the ones PiHarness

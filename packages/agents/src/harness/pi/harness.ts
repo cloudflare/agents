@@ -470,6 +470,7 @@ export class PiHarness extends LifecycleCapability {
       content: input,
       whenBusy: options.whenBusy ?? "followUp",
       ...(options.whenIdle ? { whenIdle: options.whenIdle } : {}),
+      ...(options.onAbort ? { onAbort: options.onAbort } : {}),
       ...(options.entry ? { entry: options.entry } : {}),
       ...(options.notify ? { notify: options.notify } : {})
     });
@@ -919,8 +920,8 @@ export class PiSession {
 
   /**
    * Withdraw one queued operation (or abort the run it joined), or, with no
-   * id, abort the session: pi withdraws queued inputs and aborts the
-   * running work.
+   * id, abort the session: pi withdraws queued inputs, apart from those
+   * submitted with `onAbort: "keep"`, and aborts the running work.
    */
   async abort(operationId?: string): Promise<boolean> {
     if (operationId !== undefined) {

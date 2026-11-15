@@ -432,6 +432,36 @@ describe("PiHarness on pi-durable", () => {
     expect(await stub.pending()).toEqual([]);
   });
 
+  it("keeps an onAbort: keep input queued through a session abort", async () => {
+    const stub = fresh();
+    const running = await stub.submit("gate");
+    await stub.gateStarted(1);
+    const kept = await stub.submit("one", { onAbort: "keep" });
+    const withdrawn = await stub.submit("two");
+    await stub.abort();
+
+    expect((await stub.wait(running.operationId)).status).toBe("unanswered");
+    expect(await stub.wait(withdrawn.operationId)).toMatchObject({
+      status: "unanswered",
+      reason: "aborted"
+    });
+    expect(await stub.waitWithin(kept.operationId, 300)).toBe("waiting");
+    expect(await stub.pending()).toEqual([
+      { operationId: kept.operationId, session: "1", status: "queued" }
+    ]);
+
+    // The next input places the kept one first.
+    const next = await stub.submit("three");
+    expect(await stub.wait(kept.operationId)).toMatchObject({
+      status: "done",
+      text: "echo: one"
+    });
+    expect(await stub.wait(next.operationId)).toMatchObject({
+      status: "done",
+      text: "echo: three"
+    });
+  });
+
   it("watches the session's view through a run, and a late watch shows the same transcript", async () => {
     const stub = fresh();
     const watching = stub.watch();

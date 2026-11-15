@@ -35,6 +35,17 @@ export type PiWhenBusy = "followUp" | "steer" | "reject";
  */
 export type PiWhenIdle = "reject";
 
+/**
+ * What aborting the session does with a queued input:
+ *
+ * - `withdraw` (default): the input settles `unanswered` with reason
+ *   `aborted`.
+ * - `keep`: the input stays queued; the next input runs it first. For input
+ *   its sender cannot send again, such as another agent's message.
+ *   Withdrawing the operation itself (`abort(operationId)`) still removes it.
+ */
+export type PiOnAbort = "withdraw" | "keep";
+
 export type PiSubmitOptions = {
   /** Default: the root session. */
   readonly session?: PiSessionId;
@@ -42,6 +53,7 @@ export type PiSubmitOptions = {
   readonly operationId?: string;
   readonly whenBusy?: PiWhenBusy;
   readonly whenIdle?: PiWhenIdle;
+  readonly onAbort?: PiOnAbort;
   /**
    * The transcript entry the input is placed as, instead of pi's `pi.user`:
    * for input the user did not type, such as a scheduled prompt, a webhook,
