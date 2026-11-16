@@ -623,16 +623,17 @@ export class PresenceAgent extends Agent {
 
 ### Agent Lifecycle Methods
 
-| Method                       | Signature                                                       | Description                                            |
-| ---------------------------- | --------------------------------------------------------------- | ------------------------------------------------------ |
-| `onStart`                    | `(props?) => void \| Promise<void>`                             | Called once when agent starts                          |
-| `onRequest`                  | `(request: Request) => Response \| Promise<Response>`           | Handle HTTP requests                                   |
-| `onConnect`                  | `(connection, ctx) => void \| Promise<void>`                    | WebSocket connected                                    |
-| `onMessage`                  | `(connection, message) => void \| Promise<void>`                | Message received                                       |
-| `onClose`                    | `(connection, code, reason, wasClean) => void \| Promise<void>` | Connection closed                                      |
-| `onError`                    | `(connection, error) => void \| Promise<void>`                  | WebSocket error                                        |
-| `onError`                    | `(error) => void \| Promise<void>`                              | Server error (overload)                                |
-| `shouldSendProtocolMessages` | `(connection, ctx) => boolean`                                  | Control per-connection protocol frames (default: true) |
+| Method                       | Signature                                                           | Description                                            |
+| ---------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------ |
+| `onStart`                    | `(props?) => void \| Promise<void>`                                 | Called once when agent starts                          |
+| `onRequest`                  | `(request: Request) => Response \| Promise<Response>`               | Handle HTTP requests                                   |
+| `onConnect`                  | `(connection, ctx) => void \| Promise<void>`                        | WebSocket connected                                    |
+| `onMessage`                  | `(connection, message) => void \| Promise<void>`                    | Message received                                       |
+| `onClose`                    | `(connection, code, reason, wasClean) => void \| Promise<void>`     | Connection closed                                      |
+| `onError`                    | `(connection, error) => void \| Promise<void>`                      | WebSocket error                                        |
+| `onError`                    | `(error) => void \| Promise<void>`                                  | Server error (overload)                                |
+| `onFetchError`               | `(request, error) => Response \| void \| Promise<Response \| void>` | Choose the response for a failed request or upgrade    |
+| `shouldSendProtocolMessages` | `(connection, ctx) => boolean`                                      | Control per-connection protocol frames (default: true) |
 
 ### Connection Management Methods
 
