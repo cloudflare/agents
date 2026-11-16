@@ -45,6 +45,45 @@ describe("pi-ai: Anthropic Messages over the universal gateway", () => {
     expect(field(call?.query, "messages.0.role")).toBe("user");
   });
 
+  it("keeps pi-ai's Anthropic message threads through the gateway", async () => {
+    const binding = fakeBinding(() => sseEventResponse(anthropicTextEvents()));
+    const ai = createAI({ binding: asAi(binding) });
+    await collectEvents(
+      ai.stream(ai(SONNET), userContext("hi"), { sessionId: "session-a" })
+    );
+    // pi-ai threads requests for a model on api.anthropic.com, and this wire
+    // leaves that default alone when it routes the model through AI Gateway.
+    expect(field(binding.native[0]?.query, "thread")).toEqual({
+      type: "create"
+    });
+  });
+
+  it("sends no thread when the call sets disableContinuation", async () => {
+    const binding = fakeBinding(() => sseEventResponse(anthropicTextEvents()));
+    const ai = createAI({ binding: asAi(binding) });
+    await collectEvents(
+      ai.stream(ai(SONNET), userContext("hi"), {
+        sessionId: "session-b",
+        disableContinuation: true
+      })
+    );
+    expect(field(binding.native[0]?.query, "thread")).toBeUndefined();
+    expect(field(binding.native[0]?.query, "messages.0.role")).toBe("user");
+  });
+
+  it("sends no thread when the model's compat turns threads off", async () => {
+    const binding = fakeBinding(() => sseEventResponse(anthropicTextEvents()));
+    const ai = createAI({ binding: asAi(binding) });
+    const unthreaded = {
+      ...SONNET,
+      compat: { ...SONNET.compat, supportsMessageThreads: false }
+    } as Model<Api>;
+    await collectEvents(
+      ai.stream(ai(unthreaded), userContext("hi"), { sessionId: "session-c" })
+    );
+    expect(field(binding.native[0]?.query, "thread")).toBeUndefined();
+  });
+
   it("parses a text stream in the live event shape", async () => {
     const binding = fakeBinding(() =>
       sseEventResponse(anthropicTextEvents(), {

@@ -51,7 +51,7 @@
     "@earendil-works/pi-codemode": "~1.5.0",
     "@earendil-works/pi-durable": "~1.5.0",
     "@earendil-works/pi-schema": "~1.5.0",
-    "@earendil-works/pi-tui": "1.5.0",
+    "@earendil-works/pi-tui": "1.5.2",
     "@modelcontextprotocol/client": "2.4.0",
     "@modelcontextprotocol/conformance-v2": "npm:@modelcontextprotocol/conformance@0.2.0-alpha.12",
     "@modelcontextprotocol/sdk": "1.32.2",
