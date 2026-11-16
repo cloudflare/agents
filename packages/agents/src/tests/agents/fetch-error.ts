@@ -17,6 +17,11 @@ import {
  *
  * It can be its own sub-agent, under `/sub/test-fetch-error-agent/{name}`.
  */
+/** A named error class, to show what survives the hop from a sub-agent. */
+class ConnectFailedError extends Error {
+  override name = "ConnectFailedError";
+}
+
 export class TestFetchErrorAgent extends Agent<Cloudflare.Env> {
   readonly #hookOrder: string[] = [];
 
@@ -35,7 +40,7 @@ export class TestFetchErrorAgent extends Agent<Cloudflare.Env> {
 
   onConnect(_connection: Connection, { request }: ConnectionContext): void {
     if (new URL(request.url).searchParams.has("fail")) {
-      throw new Error("agent connect failed");
+      throw new ConnectFailedError("agent connect failed");
     }
   }
 
@@ -54,6 +59,8 @@ export class TestFetchErrorAgent extends Agent<Cloudflare.Env> {
       {
         name: this.name,
         error: error instanceof Error ? error.message : String(error),
+        errorName: error instanceof Error ? error.name : undefined,
+        isConnectFailedError: error instanceof ConnectFailedError,
         hookOrder: this.#hookOrder,
         inAgentContext: getCurrentAgent().agent === this
       },

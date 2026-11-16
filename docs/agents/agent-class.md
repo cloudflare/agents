@@ -404,6 +404,8 @@ Errors from `onStart`, `onRequest`, and `onConnect` pass through `onError` first
 
 For a [sub-agent](./sub-agents.md), the object that accepts the request or socket answers it. Today, a failed HTTP request reaches the child's `onFetchError`, and a failed WebSocket upgrade reaches the parent's, because the parent accepts the socket and passes the connection to the child, even when the child's `onConnect` threw. If `onBeforeSubAgent` throws, no `onFetchError` runs and the error reaches the caller of `fetch`.
 
+When the parent's `onFetchError` answers a child's failed upgrade, `error` is a copy that crossed from the child to the parent. It is still an `Error` with the same `name` and `message`, but it is no longer an instance of the child's error class, so `error instanceof MyError` is `false`. Check `error.name` instead.
+
 See [Failed requests](./lifecycle.md#failed-requests) for the full behavior.
 
 ### `this.destroy`

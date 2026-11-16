@@ -247,6 +247,8 @@ describe("Agent onFetchError", () => {
     expect(await response.json()).toEqual({
       name: expect.any(String),
       error: "agent request failed",
+      errorName: "Error",
+      isConnectFailedError: false,
       hookOrder: ["onError", "onFetchError"],
       inAgentContext: true
     });
@@ -295,6 +297,8 @@ describe("Agent onFetchError", () => {
     expect(response.status).toBe(503);
     expect(await response.json()).toMatchObject({
       error: "agent connect failed",
+      errorName: "ConnectFailedError",
+      isConnectFailedError: true,
       hookOrder: ["onError", "onFetchError"]
     });
   });
@@ -345,6 +349,10 @@ describe("Agent onFetchError", () => {
       expect(await response.json()).toMatchObject({
         name: parent,
         error: "agent connect failed",
+        // The error crossed from the child, so it keeps its name but is no
+        // longer an instance of the child's error class.
+        errorName: "ConnectFailedError",
+        isConnectFailedError: false,
         // The parent forwards the connection without running its own
         // onConnect, so its onError never ran: the error is the child's.
         hookOrder: ["onFetchError"]
