@@ -54,10 +54,12 @@ host.
 
 Only `fetch` has a hook that chooses a failure response, because only `fetch`
 has a caller waiting for one. The other entry points have no response to
-choose. A failed alarm rethrows so that the platform retries it. A failed
-WebSocket message is logged and dropped. A capability job's final failure goes
-to `onJobError`, which decides the job's outcome. A new entry point gets a
-hook that chooses a response only if a caller waits for its result.
+choose. A failed alarm rethrows so that the platform retries it, except for a
+memory-limit reset, which the memory-limit circuit breaker handles instead. A
+failed WebSocket message is logged and dropped. A job's final failure goes to
+its capability's `onJobError`, if it has one, which decides the job's outcome;
+otherwise the job completes. A new entry point gets a hook that chooses a
+response only if a caller waits for its result.
 
 A failed Agent request (from `onStart`, `onRequest`, or `onConnect`) passes
 through two hooks: `onError` observes it and can replace it by throwing, then,
