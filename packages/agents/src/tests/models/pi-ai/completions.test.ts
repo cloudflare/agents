@@ -249,6 +249,58 @@ describe("pi-ai: Workers AI chat completions", () => {
     expect(message.usage.totalTokens).toBe(241);
   });
 
+  it("omits `tools` when a turn has none, even after tool calls", async () => {
+    const binding = fakeBinding((_call, index) =>
+      index === 0
+        ? sseResponse(workersAIToolStream())
+        : sseResponse(workersAITextStream())
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const user = {
+      content: "Weather in London?",
+      role: "user" as const,
+      timestamp: 1
+    };
+    const first = await collectEvents(
+      ai.streamSimple(ai(MODEL), {
+        messages: [user],
+        tools: [
+          {
+            description: "Get weather",
+            name: "getWeather",
+            parameters: WEATHER_TOOL_PARAMETERS as never
+          }
+        ]
+      })
+    );
+    const call = first.message.content.find((part) => part.type === "toolCall");
+    if (call?.type !== "toolCall") throw new Error("expected a tool call");
+
+    await collectEvents(
+      ai.streamSimple(ai(MODEL), {
+        messages: [
+          user,
+          first.message,
+          {
+            content: [{ text: "London: clear", type: "text" }],
+            isError: false,
+            role: "toolResult",
+            timestamp: 2,
+            toolCallId: call.id,
+            toolName: call.name
+          }
+        ]
+      })
+    );
+
+    // vLLM 0.20+ rejects `"tools": []`; pi-ai omits it too (#11843).
+    const replay = binding.calls[1]?.input;
+    expect(field(replay, "messages.1.tool_calls.0.function.name")).toBe(
+      "getWeather"
+    );
+    expect(replay).not.toHaveProperty("tools");
+  });
+
   it("turns a non-streaming JSON body into a one-shot stream", async () => {
     const binding = fakeBinding(() => jsonResponse(workersAIToolJson()));
     const ai = createAI({ binding: asAi(binding) });
