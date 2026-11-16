@@ -43,9 +43,14 @@ every policy (dev-only stacks, error codes, a reporting ID, an upgrade that
 sends one frame before it closes) with no further API. Agent's `onError` was
 not reused: it observes errors from schedules, queues, and sockets as well as
 requests, where no response exists to choose, and capability failures never
-reach it. Capabilities do not get the hook yet. If one needs to shape failure
-responses, it can join the same dispatch the way `onRequest` does: first
-response wins, then the host.
+reach it. The hook is named for `fetch`, the entry point it answers, and not
+`onRequestError`: `onRequest` handles only plain HTTP, while this hook also
+answers failed upgrades, `onConnect`, startup, and capability hooks. The name
+keeps upgrades in view: an HTTP response returned from this hook also answers
+a failed WebSocket upgrade, in place of the default 1011 close. Capabilities
+do not get the hook yet. If one needs to shape failure responses, it can join
+the same dispatch the way `onRequest` does: first response wins, then the
+host.
 
 Only `fetch` has a hook that chooses a failure response, because only `fetch`
 has a caller waiting for one. The other entry points have no response to
