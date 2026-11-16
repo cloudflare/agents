@@ -41,6 +41,14 @@
         "name": "EvictableStartObject"
       },
       {
+        "class_name": "FetchErrorObject",
+        "name": "FetchErrorObject"
+      },
+      {
+        "class_name": "TestFetchErrorAgent",
+        "name": "TestFetchErrorAgent"
+      },
+      {
         "class_name": "ScheduledLifecycleObject",
         "name": "ScheduledLifecycleObject"
       },
@@ -473,6 +481,8 @@
         "AlarmStartFailureObject",
         "ConcurrentStartObject",
         "EvictableStartObject",
+        "FetchErrorObject",
+        "TestFetchErrorAgent",
         "ScheduledLifecycleObject",
         "SchedulerHarnessObject",
         "SchedulerStartupWarnObject",

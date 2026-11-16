@@ -77,3 +77,4 @@ export {
   BodyProbeSubAgent,
   BodyProbeRootAgent
 } from "./sub-agent";
+export { TestFetchErrorAgent } from "./fetch-error";

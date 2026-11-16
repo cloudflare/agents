@@ -43,6 +43,7 @@ Agents have several lifecycle hooks that are called at different points:
 | `onClose(connection, code, reason, wasClean)` | When a WebSocket connection closes                        |
 | `onError(connection, error)`                  | When a WebSocket error occurs                             |
 | `onError(error)`                              | When a server error occurs (overloaded)                   |
+| `onFetchError(request, error)`                | When an HTTP request or WebSocket upgrade fails           |
 
 ### Lifecycle Flow
 
@@ -406,6 +407,8 @@ export class MyAgent extends Agent {
 }
 ```
 
+`onError` observes errors. To choose what the client receives when a request or upgrade fails, override `onFetchError`. By default the client gets `500 Internal Server Error`, or for an upgrade a socket that closes with code `1011`, without the error's details. See [`this.onFetchError`](./agent-class.md#thisonfetcherror).
+
 ## Hibernation
 
 Agent WebSockets always use Cloudflare's Hibernation API. An idle Agent can leave memory while its WebSocket clients remain connected; there is no non-hibernating mode.
@@ -620,16 +623,17 @@ export class PresenceAgent extends Agent {
 
 ### Agent Lifecycle Methods
 
-| Method                       | Signature                                                       | Description                                            |
-| ---------------------------- | --------------------------------------------------------------- | ------------------------------------------------------ |
-| `onStart`                    | `(props?) => void \| Promise<void>`                             | Called once when agent starts                          |
-| `onRequest`                  | `(request: Request) => Response \| Promise<Response>`           | Handle HTTP requests                                   |
-| `onConnect`                  | `(connection, ctx) => void \| Promise<void>`                    | WebSocket connected                                    |
-| `onMessage`                  | `(connection, message) => void \| Promise<void>`                | Message received                                       |
-| `onClose`                    | `(connection, code, reason, wasClean) => void \| Promise<void>` | Connection closed                                      |
-| `onError`                    | `(connection, error) => void \| Promise<void>`                  | WebSocket error                                        |
-| `onError`                    | `(error) => void \| Promise<void>`                              | Server error (overload)                                |
-| `shouldSendProtocolMessages` | `(connection, ctx) => boolean`                                  | Control per-connection protocol frames (default: true) |
+| Method                       | Signature                                                           | Description                                            |
+| ---------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------ |
+| `onStart`                    | `(props?) => void \| Promise<void>`                                 | Called once when agent starts                          |
+| `onRequest`                  | `(request: Request) => Response \| Promise<Response>`               | Handle HTTP requests                                   |
+| `onConnect`                  | `(connection, ctx) => void \| Promise<void>`                        | WebSocket connected                                    |
+| `onMessage`                  | `(connection, message) => void \| Promise<void>`                    | Message received                                       |
+| `onClose`                    | `(connection, code, reason, wasClean) => void \| Promise<void>`     | Connection closed                                      |
+| `onError`                    | `(connection, error) => void \| Promise<void>`                      | WebSocket error                                        |
+| `onError`                    | `(error) => void \| Promise<void>`                                  | Server error (overload)                                |
+| `onFetchError`               | `(request, error) => Response \| void \| Promise<Response \| void>` | Choose the response for a failed request or upgrade    |
+| `shouldSendProtocolMessages` | `(connection, ctx) => boolean`                                      | Control per-connection protocol frames (default: true) |
 
 ### Connection Management Methods
 
