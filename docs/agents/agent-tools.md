@@ -322,6 +322,20 @@ watching within budget", never as a terminal failure. Only a non-`null`
 inspection with a terminal `status` (`completed` / `error` / `aborted`)
 finalizes a run.
 
+### Statuses a child run reports
+
+A child run is `running` until one of these ends it:
+
+| Status      | When                                                                                                                                                                           |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `completed` | The run's turn finished. `output` and `summary` are set.                                                                                                                       |
+| `aborted`   | The parent cancelled the run (`cancelAgentTool`, or its `signal`), with the reason in `error`. Also when something else stopped the run's turn, such as a stop of its request. |
+| `error`     | The turn failed, its stream reported an error, the chat was cleared under it, or it was interrupted and could not be recovered.                                                |
+
+The first of these to happen is the one that is recorded. A run whose reply is cut off while chat recovery can still finish it (a dropped provider connection, a stall, an eviction) stays `running` and takes the status of the recovered turn.
+
+`startAgentToolRun(input, { runId, signal })` on a child accepts an `AbortSignal`. Aborting it cancels the run, the same as `cancelAgentToolRun(runId, reason)`. An `AbortSignal` does not cross a Durable Object RPC call, so `signal` works for a caller in the same isolate. A parent that reaches the child over RPC cancels with `cancelAgentToolRun`.
+
 ## Report progress and milestones
 
 A sub-agent running as an agent tool — awaited or detached — can report mid-run

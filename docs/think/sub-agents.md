@@ -164,6 +164,10 @@ await child.chat("Long analysis task", callback, {
 
 When aborted, the partial assistant message is still persisted.
 
+A turn you cancel gets no `onDone` and no `onError`. The promise `chat()` returns resolves, and that is the signal the turn is over. A turn cancelled before it started, while it waited behind another turn, stores nothing, the user message included, and never calls the model.
+
+If the chat is cleared while the turn waits or streams, the callback gets `onError("The chat was cleared before the turn finished.")` and nothing of the turn is stored.
+
 ---
 
 ## Programmatic Turns with saveMessages

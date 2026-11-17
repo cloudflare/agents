@@ -787,16 +787,12 @@ export class ThinkTestAgent extends Think {
     name: string,
     data: unknown
   ): number {
-    return (
-      this as unknown as {
-        _persistAgentToolMilestone(
-          runId: string,
-          name: string,
-          data: unknown,
-          at: number
-        ): number;
-      }
-    )._persistAgentToolMilestone(runId, name, data, Date.now());
+    return this["_agentToolRuns"].store.addMilestone(
+      runId,
+      name,
+      data,
+      Date.now()
+    );
   }
 
   /**
@@ -810,8 +806,8 @@ export class ThinkTestAgent extends Think {
   ): Promise<{ requestId: string; streamId: string } | null> {
     const deadline = Date.now() + 2000;
     while (Date.now() < deadline) {
-      const row = this["_readAgentToolChildRun"](runId);
-      const requestId = row?.request_id ?? undefined;
+      const requestId =
+        this["_agentToolRuns"].store.read(runId)?.requestId ?? undefined;
       if (requestId) {
         const streamId =
           this["_resumableStream"]
@@ -916,7 +912,7 @@ export class ThinkTestAgent extends Think {
   /**
    * #1575: simulate a DO restart mid-run — the in-memory request-id map is
    * empty (wiped by the restart), but the child-run row persisted its
-   * `request_id` at turn start. `_agentToolRunForRequest` must still attribute
+   * `request_id` at turn start. `AgentToolRuns.runForRequest` must still attribute
    * a frame to the run via the SQL fallback, and an unknown request resolves
    * to null.
    */
@@ -924,16 +920,16 @@ export class ThinkTestAgent extends Think {
     runId: string,
     requestId: string
   ): { running: string | null; unknown: string | null } {
-    this["_ensureAgentToolChildRunTable"]();
+    this["_agentToolRuns"].store.ensure();
     this.sql`
       INSERT INTO cf_agent_tool_child_runs (run_id, request_id, status, started_at)
       VALUES (${runId}, ${requestId}, 'running', ${Date.now()})
     `;
     // Cold in-memory map, as after a restart.
-    this["_agentToolRunsByRequestId"].clear();
+    this["_agentToolRuns"].runsByRequestId.clear();
     return {
-      running: this["_agentToolRunForRequest"](requestId),
-      unknown: this["_agentToolRunForRequest"]("no-such-request")
+      running: this["_agentToolRuns"].runForRequest(requestId),
+      unknown: this["_agentToolRuns"].runForRequest("no-such-request")
     };
   }
 
@@ -946,7 +942,7 @@ export class ThinkTestAgent extends Think {
     stored: string | undefined;
   }> {
     const runId = crypto.randomUUID();
-    this["_ensureAgentToolChildRunTable"]();
+    this["_agentToolRuns"].store.ensure();
     this.sql`
       INSERT INTO cf_agent_tool_child_runs (run_id, status, started_at)
       VALUES (${runId}, 'running', ${Date.now()})
@@ -956,7 +952,7 @@ export class ThinkTestAgent extends Think {
     });
     return {
       reported: inspection?.status,
-      stored: this["_readAgentToolChildRun"](runId)?.status
+      stored: this["_agentToolRuns"].store.read(runId)?.status
     };
   }
 
@@ -999,12 +995,12 @@ export class ThinkTestAgent extends Think {
     try {
       await this.startAgentToolRun("fail midway", { runId });
       await reachedGate;
-      this["_agentToolAbortControllers"].delete(runId);
-      this["_agentToolLastErrors"].delete(runId);
-      this["_agentToolLiveSequences"].delete(runId);
-      this["_agentToolPreTurnAssistantIds"].delete(runId);
-      this["_agentToolRunsByRequestId"].clear();
-      const before = this["_readAgentToolChildRun"](runId)?.status ?? null;
+      this["_agentToolRuns"].controllers.delete(runId);
+      this["_agentToolRuns"].lastErrors.delete(runId);
+      this["_agentToolRuns"].liveSequences.delete(runId);
+      this["_agentToolRuns"].preTurnAssistantIds.delete(runId);
+      this["_agentToolRuns"].runsByRequestId.clear();
+      const before = this["_agentToolRuns"].store.read(runId)?.status ?? null;
       const assistantText = this.messages
         .filter((message) => message.role === "assistant")
         .flatMap((message) => message.parts)
@@ -1030,7 +1026,7 @@ export class ThinkTestAgent extends Think {
   }> {
     const runId = crypto.randomUUID();
     const requestId = crypto.randomUUID();
-    this["_ensureAgentToolChildRunTable"]();
+    this["_agentToolRuns"].store.ensure();
     const streamId = this["_resumableStream"].start(requestId);
     const backlog = ["a", "b", "c"].map((delta) =>
       JSON.stringify({ type: "text-delta", id: "t", delta })
@@ -1044,7 +1040,7 @@ export class ThinkTestAgent extends Think {
         (run_id, request_id, stream_id, status, started_at)
       VALUES (${runId}, ${requestId}, ${streamId}, 'running', ${Date.now()})
     `;
-    this["_agentToolLiveSequences"].delete(runId);
+    this["_agentToolRuns"].liveSequences.delete(runId);
 
     const stream = (await this.tailAgentToolRun(runId, {
       afterSequence
@@ -1079,12 +1075,13 @@ export class ThinkTestAgent extends Think {
     }
     const deadline = Date.now() + 500;
     while (
-      this["_agentToolLiveSequences"].get(runId) !== backlog.length &&
+      this["_agentToolRuns"].liveSequences.get(runId) !== backlog.length &&
       Date.now() < deadline
     ) {
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
-    const liveSequenceAfterDrain = this["_agentToolLiveSequences"].get(runId);
+    const liveSequenceAfterDrain =
+      this["_agentToolRuns"].liveSequences.get(runId);
 
     const postBody = JSON.stringify({
       type: "text-delta",
@@ -1121,14 +1118,14 @@ export class ThinkTestAgent extends Think {
   > {
     const runId = crypto.randomUUID();
     const requestId = crypto.randomUUID();
-    this["_ensureAgentToolChildRunTable"]();
+    this["_agentToolRuns"].store.ensure();
     const streamId = this["_resumableStream"].start(requestId);
     this.sql`
       INSERT INTO cf_agent_tool_child_runs
         (run_id, request_id, stream_id, status, started_at)
       VALUES (${runId}, ${requestId}, ${streamId}, 'running', ${Date.now()})
     `;
-    this["_agentToolLiveSequences"].set(runId, 0);
+    this["_agentToolRuns"].liveSequences.set(runId, 0);
     const broadcast = (body: string) =>
       this.broadcast(
         JSON.stringify({
@@ -1176,7 +1173,7 @@ export class ThinkTestAgent extends Think {
       buffer += decoder.decode(next.value, { stream: true });
     }
     await reader.cancel();
-    this["_agentToolLiveSequences"].delete(runId);
+    this["_agentToolRuns"].liveSequences.delete(runId);
     return buffer
       .split("\n")
       .filter(Boolean)
@@ -1203,7 +1200,7 @@ export class ThinkTestAgent extends Think {
   }> {
     const runId = crypto.randomUUID();
     const requestId = crypto.randomUUID();
-    this["_ensureAgentToolChildRunTable"]();
+    this["_agentToolRuns"].store.ensure();
     const streamId = this["_resumableStream"].start(requestId);
     const backlog = ["a", "b", "c"].map((delta) =>
       JSON.stringify({ type: "text-delta", id: "t", delta })
@@ -1217,7 +1214,7 @@ export class ThinkTestAgent extends Think {
         (run_id, request_id, stream_id, status, started_at)
       VALUES (${runId}, ${requestId}, ${streamId}, 'running', ${Date.now()})
     `;
-    this["_agentToolLiveSequences"].delete(runId);
+    this["_agentToolRuns"].liveSequences.delete(runId);
 
     const self = this as unknown as {
       getAgentToolChunks: (
@@ -1292,7 +1289,7 @@ export class ThinkTestAgent extends Think {
     } finally {
       release();
       self.getAgentToolChunks = original;
-      this["_agentToolLiveSequences"].delete(runId);
+      this["_agentToolRuns"].liveSequences.delete(runId);
     }
   }
 
@@ -1304,14 +1301,14 @@ export class ThinkTestAgent extends Think {
   async progressDuringDrainForTest(): Promise<string[]> {
     const runId = crypto.randomUUID();
     const requestId = crypto.randomUUID();
-    this["_ensureAgentToolChildRunTable"]();
+    this["_agentToolRuns"].store.ensure();
     const streamId = this["_resumableStream"].start(requestId);
     this.sql`
       INSERT INTO cf_agent_tool_child_runs
         (run_id, request_id, stream_id, status, started_at)
       VALUES (${runId}, ${requestId}, ${streamId}, 'running', ${Date.now()})
     `;
-    this["_agentToolLiveSequences"].set(runId, 0);
+    this["_agentToolRuns"].liveSequences.set(runId, 0);
     const broadcast = (body: string) =>
       this.broadcast(
         JSON.stringify({
@@ -1362,7 +1359,7 @@ export class ThinkTestAgent extends Think {
       buffer += decoder.decode(next.value, { stream: true });
     }
     await reader.cancel();
-    this["_agentToolLiveSequences"].delete(runId);
+    this["_agentToolRuns"].liveSequences.delete(runId);
     return buffer
       .split("\n")
       .filter(Boolean)
@@ -2302,18 +2299,14 @@ export class ThinkTestAgent extends Think {
   async broadcastRecoveredAgentToolChunkForTest(
     eventDelivery: "full" | "terminal"
   ): Promise<void> {
-    const internals = this as unknown as {
-      _ensureAgentToolChildRunTable(): void;
-      _rebindAgentToolChildRunRequestId(requestId: string): void;
-    };
-    internals._ensureAgentToolChildRunTable();
+    this["_agentToolRuns"].store.ensure();
     this.sql`
       INSERT INTO cf_agent_tool_child_runs
         (run_id, request_id, status, started_at, event_delivery)
       VALUES (${crypto.randomUUID()}, 'pre-restart', 'running', ${Date.now()},
         ${eventDelivery === "terminal" ? "terminal" : null})
     `;
-    internals._rebindAgentToolChildRunRequestId("recovered-request");
+    this["_agentToolRuns"].rebind("recovered-request", "pre-restart");
     this.broadcast(
       JSON.stringify({
         type: "cf_agent_use_chat_response",
@@ -2349,6 +2342,433 @@ export class ThinkTestAgent extends Think {
       done: cb.doneCalled,
       error: cb.errorMessage,
       interruptedCalls: cb.interruptedCalls
+    };
+  }
+
+  private _userTextsForTest(): string[] {
+    return this.messages
+      .filter((message) => message.role === "user")
+      .map((message) =>
+        message.parts
+          .map((part) => (part.type === "text" ? part.text : ""))
+          .join("")
+      );
+  }
+
+  private _waitForTurnQueueIdleForTest(): Promise<void> {
+    return (
+      this as unknown as { _turnQueue: { waitForIdle(): Promise<void> } }
+    )._turnQueue.waitForIdle();
+  }
+
+  /** Start an RPC turn and park it inside `beforeStep`. */
+  private async _holdActiveRpcTurnForTest(): Promise<{
+    turn: Promise<void>;
+    callback: TestCollectingCallback;
+  }> {
+    await this.holdBeforeStepForTest();
+    const callback = new TestCollectingCallback();
+    const turn = this.chat("active turn", callback);
+    const deadline = Date.now() + 5000;
+    while (!this._beforeStepGateEntered) {
+      if (Date.now() > deadline) throw new Error("active turn never started");
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    return { turn, callback };
+  }
+
+  /**
+   * An RPC `chat()` waits in the queue behind a running turn. The caller
+   * cancels it, or the chat is cleared, before its turn starts.
+   */
+  async rpcChatWhileQueuedForTest(
+    action: "cancel" | "clear" | "cancel-then-clear"
+  ): Promise<{
+    userTexts: string[];
+    steps: number;
+    done: boolean;
+    error: string | null;
+    events: number;
+  }> {
+    const active = await this._holdActiveRpcTurnForTest();
+    const callback = new TestCollectingCallback();
+    const caller = new AbortController();
+    const queued = this.chat("queued turn", callback, {
+      signal: caller.signal
+    });
+    const deadline = Date.now() + 5000;
+    while (!callback.requestId) {
+      if (Date.now() > deadline) throw new Error("queued turn never accepted");
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    if (action !== "clear") caller.abort(new Error("caller cancelled"));
+    if (action !== "cancel") await this.clearMessages();
+    await this.releaseBeforeStepForTest();
+    await active.turn;
+    await queued;
+    await this._waitForTurnQueueIdleForTest();
+    return {
+      userTexts: this._userTextsForTest(),
+      steps: this._beforeStepLog.length,
+      done: callback.doneCalled,
+      error: callback.errorMessage ?? null,
+      events: callback.events.length
+    };
+  }
+
+  /**
+   * The caller cancels an RPC `chat()` while its message function is still
+   * working the message out, after the turn reached the front of the queue.
+   */
+  async rpcChatCancelledWhileResolvingForTest(): Promise<{
+    userTexts: string[];
+    steps: number;
+    done: boolean;
+    error: string | null;
+  }> {
+    const callback = new TestCollectingCallback();
+    const caller = new AbortController();
+    await this.chat(
+      async () => {
+        caller.abort(new Error("caller cancelled"));
+        return [
+          {
+            id: crypto.randomUUID(),
+            role: "user" as const,
+            parts: [{ type: "text" as const, text: "resolved late" }]
+          }
+        ];
+      },
+      callback,
+      { signal: caller.signal }
+    );
+    return {
+      userTexts: this._userTextsForTest(),
+      steps: this._beforeStepLog.length,
+      done: callback.doneCalled,
+      error: callback.errorMessage ?? null
+    };
+  }
+
+  /** The chat is cleared while an RPC `chat()` streams its reply. */
+  async rpcChatClearedWhileStreamingForTest(): Promise<{
+    messages: number;
+    done: boolean;
+    error: string | null;
+  }> {
+    let events = 0;
+    let done = false;
+    let error: string | null = null;
+    let clearing: Promise<void> | undefined;
+    await this.chat("streaming turn", {
+      onStart() {},
+      onEvent: () => {
+        events++;
+        if (events === 2) clearing = this.clearMessages();
+      },
+      onDone() {
+        done = true;
+      },
+      onError(message: string) {
+        error = message;
+      }
+    });
+    if (!clearing) throw new Error("the reply ended before the clear");
+    await clearing;
+    return { messages: this.messages.length, done, error };
+  }
+
+  /**
+   * An agent-tool run is cancelled while its turn waits in the queue behind
+   * a running turn.
+   */
+  async cancelQueuedAgentToolRunForTest(): Promise<{
+    status: string | null;
+    userTexts: string[];
+    steps: number;
+  }> {
+    const active = await this._holdActiveRpcTurnForTest();
+    const runId = crypto.randomUUID();
+    await this.startAgentToolRun("queued run", { runId });
+    await this.cancelAgentToolRun(runId, "stop");
+    await this.releaseBeforeStepForTest();
+    await active.turn;
+    const controllers = this["_agentToolRuns"].controllers;
+    const deadline = Date.now() + 5000;
+    while (controllers.size > 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    await this._waitForTurnQueueIdleForTest();
+    return {
+      status: this._readChildRunStatusForTest(runId),
+      userTexts: this._userTextsForTest(),
+      steps: this._beforeStepLog.length
+    };
+  }
+
+  /**
+   * A cancel of a run being recovered stops what runs under the request ids
+   * on its row (the recovered turn, a recovery attempt registered under the
+   * first id) and nothing else on the agent.
+   */
+  async cancelRecoveredRunForTest(): Promise<{
+    recoveredTurnAborted: boolean;
+    attemptAborted: boolean;
+    otherTurnAborted: boolean;
+    otherAttemptAborted: boolean;
+    otherSubmissionAborted: boolean;
+  }> {
+    const runId = crypto.randomUUID();
+    await this.inspectAgentToolRun(runId);
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs
+        (run_id, request_id, root_request_id, status, started_at)
+      VALUES (${runId}, 'recovered-request', 'first-request', 'running',
+        ${Date.now()})
+    `;
+    const internals = this as unknown as {
+      _aborts: {
+        getSignal(id: string): AbortSignal | undefined;
+        remove(id: string): void;
+      };
+      _turns: {
+        beginRecoveryAttempt(id: string): {
+          signal: AbortSignal;
+          end(): void;
+        };
+      };
+      _submissionAbortControllers: Map<string, AbortController>;
+    };
+    const recoveredTurn = internals._aborts.getSignal("recovered-request");
+    const otherTurn = internals._aborts.getSignal("a-users-turn");
+    const attempt = internals._turns.beginRecoveryAttempt("first-request");
+    const otherAttempt = internals._turns.beginRecoveryAttempt("a-users-root");
+    const otherSubmission = new AbortController();
+    internals._submissionAbortControllers.set(
+      "a-users-submission",
+      otherSubmission
+    );
+    try {
+      await this.cancelAgentToolRun(runId, "parent gave up");
+      return {
+        recoveredTurnAborted: recoveredTurn?.aborted ?? false,
+        attemptAborted: attempt.signal.aborted,
+        otherTurnAborted: otherTurn?.aborted ?? false,
+        otherAttemptAborted: otherAttempt.signal.aborted,
+        otherSubmissionAborted: otherSubmission.signal.aborted
+      };
+    } finally {
+      attempt.end();
+      otherAttempt.end();
+      internals._aborts.remove("recovered-request");
+      internals._aborts.remove("a-users-turn");
+      internals._submissionAbortControllers.delete("a-users-submission");
+    }
+  }
+
+  /**
+   * The run was cancelled, then the isolate died before the run's turn
+   * unwound, so chat recovery wakes for that turn. It must not run, and the
+   * incident must say the run was cancelled.
+   */
+  async recoverCancelledAgentToolRunForTest(
+    path: "continue" | "retry",
+    cancelled = true
+  ): Promise<{
+    incident: { status: string; reason?: string } | null;
+    steps: number;
+  }> {
+    await this.chat("question", new TestCollectingCallback());
+    const steps = this._beforeStepLog.length;
+    const runId = crypto.randomUUID();
+    await this.inspectAgentToolRun(runId);
+    // The run's turn was recovered once already, so the row names the
+    // recovered turn. Recovery still names the turn by its first request id.
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs
+        (run_id, request_id, root_request_id, status, started_at, completed_at,
+         cancelled_at)
+      VALUES (${runId}, 'recovered-request', 'interrupted-request', 'aborted',
+        ${Date.now()}, ${Date.now()}, ${cancelled ? Date.now() : null})
+    `;
+    const incidentId = crypto.randomUUID();
+    const key = `cf:chat-recovery:incident:${encodeURIComponent(incidentId)}`;
+    const now = Date.now();
+    await this.ctx.storage.put(key, {
+      incidentId,
+      requestId: "recovered-request",
+      recoveryRootRequestId: "interrupted-request",
+      recoveryKind: path,
+      attempt: 1,
+      maxAttempts: 10,
+      status: "scheduled",
+      firstSeenAt: now,
+      lastAttemptAt: now
+    });
+    const recovery = this as unknown as {
+      _chatRecoveryContinueDetached(d: object): Promise<void>;
+      _chatRecoveryRetryDetached(d: object): Promise<void>;
+    };
+    const data = { incidentId, originalRequestId: "interrupted-request" };
+    if (path === "continue") {
+      await recovery._chatRecoveryContinueDetached(data);
+    } else {
+      await recovery._chatRecoveryRetryDetached(data);
+    }
+    const incident =
+      (await this.ctx.storage.get<{ status: string; reason?: string }>(key)) ??
+      null;
+    return {
+      incident: incident
+        ? { status: incident.status, reason: incident.reason }
+        : null,
+      steps: this._beforeStepLog.length - steps
+    };
+  }
+
+  /**
+   * An agent-tool run whose reply stalls once and is then finished by chat
+   * recovery, in one isolate.
+   */
+  async agentToolRunWithStallForTest(): Promise<{
+    afterCutOff: string | null;
+    scheduled: number;
+    final: string | undefined;
+    summary: string | undefined;
+  }> {
+    const runId = crypto.randomUUID();
+    this._stallAfterChunks = 2;
+    this._stallAttemptsRemaining = 1;
+    this.chatStreamStallTimeoutMs = 50;
+    try {
+      await this.startAgentToolRun("stall then recover", { runId });
+      const runs = this["_agentToolRuns"];
+      const deadline = Date.now() + 8000;
+      // The run's own lifecycle ends when its turn hands back.
+      while (runs.isLive(runId) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      const afterCutOff = this._readChildRunStatusForTest(runId);
+      const scheduled = recoveryWorkCountForTest(this, "_chatRecoveryContinue");
+      if (scheduled > 0) {
+        await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
+      }
+      // The recovery attempt settles the run after its turn leaves the queue.
+      let inspection = await this.inspectAgentToolRun(runId);
+      while (inspection?.status === "running" && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        inspection = await this.inspectAgentToolRun(runId);
+      }
+      return {
+        afterCutOff,
+        scheduled,
+        final: inspection?.status,
+        summary: inspection?.summary
+      };
+    } finally {
+      this._stallAfterChunks = null;
+      this._stallAttemptsRemaining = null;
+      this.chatStreamStallTimeoutMs = 0;
+    }
+  }
+
+  /**
+   * A run started with the parent's signal is stopped through that signal
+   * while its turn waits in the queue behind a running turn.
+   */
+  async signalCancelsQueuedAgentToolRunForTest(): Promise<{
+    atAbort: { status: string | undefined; error: string | undefined };
+    userTexts: string[];
+    steps: number;
+  }> {
+    const active = await this._holdActiveRpcTurnForTest();
+    const runId = crypto.randomUUID();
+    const parent = new AbortController();
+    await this.startAgentToolRun("queued run", {
+      runId,
+      signal: parent.signal
+    });
+    parent.abort(new Error("parent stopped"));
+    // Read while the active turn still holds the queue.
+    const inspection = await this.inspectAgentToolRun(runId);
+    await this.releaseBeforeStepForTest();
+    await active.turn;
+    const runs = this["_agentToolRuns"];
+    const deadline = Date.now() + 5000;
+    while (runs.isLive(runId) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    await this._waitForTurnQueueIdleForTest();
+    return {
+      atAbort: { status: inspection?.status, error: inspection?.error },
+      userTexts: this._userTextsForTest(),
+      steps: this._beforeStepLog.length
+    };
+  }
+
+  /**
+   * The stored chunks of a run that is still running are read by its
+   * turn's request id: the row records a stream only when the run ends.
+   */
+  async chunksOfRunningRunForTest(): Promise<number> {
+    const runId = crypto.randomUUID();
+    const requestId = crypto.randomUUID();
+    // Any read creates the run table.
+    await this.inspectAgentToolRun(runId);
+    const streamId = this["_resumableStream"].start(requestId);
+    for (const delta of ["a", "b", "c"]) {
+      this["_resumableStream"].storeChunk(
+        streamId,
+        JSON.stringify({ type: "text-delta", id: "t", delta })
+      );
+    }
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs
+        (run_id, request_id, status, started_at)
+      VALUES (${runId}, ${requestId}, 'running', ${Date.now()})
+    `;
+    return (await this.getAgentToolChunks(runId)).length;
+  }
+
+  /**
+   * A parent follows, or starts over, a run an earlier isolate left open
+   * with nothing recovering it.
+   */
+  async staleRunForTest(action: "tail" | "start"): Promise<{
+    tailClosed: boolean | null;
+    reported: string | null;
+    stored: string | null;
+  }> {
+    const runId = crypto.randomUUID();
+    // Any read creates the run table.
+    await this.inspectAgentToolRun(runId);
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs (run_id, status, started_at)
+      VALUES (${runId}, 'running', ${Date.now()})
+    `;
+    let tailClosed: boolean | null = null;
+    let reported: string | null = null;
+    if (action === "tail") {
+      const reader = (
+        (await this.tailAgentToolRun(
+          runId
+        )) as unknown as ReadableStream<Uint8Array>
+      ).getReader();
+      const next = await Promise.race([
+        reader.read(),
+        new Promise<"timeout">((resolve) =>
+          setTimeout(() => resolve("timeout"), 500)
+        )
+      ]);
+      tailClosed = next !== "timeout" && next.done;
+      if (!tailClosed) await reader.cancel();
+    } else {
+      reported = (await this.startAgentToolRun("again", { runId })).status;
+    }
+    return {
+      tailClosed,
+      reported,
+      stored: this._readChildRunStatusForTest(runId)
     };
   }
 
@@ -2446,17 +2866,21 @@ export class ThinkTestAgent extends Think {
       INSERT INTO cf_agent_tool_child_runs (run_id, status, started_at)
       VALUES (${runId}, 'running', ${Date.now()})
     `;
-    const controller = new AbortController();
-    (
+    // The recovered turn runs under the request id the row names.
+    this.sql`
+      UPDATE cf_agent_tool_child_runs SET request_id = 'recovered-request'
+      WHERE run_id = ${runId}
+    `;
+    const signal = (
       this as unknown as {
-        _submissionAbortControllers: Map<string, AbortController>;
+        _aborts: { getSignal(id: string): AbortSignal | undefined };
       }
-    )._submissionAbortControllers.set("recovered-submission", controller);
-    const abortedBefore = controller.signal.aborted;
+    )._aborts.getSignal("recovered-request");
+    const abortedBefore = signal?.aborted ?? false;
     await this.cancelAgentToolRun(runId, "parent gave up re-attaching");
     return {
       abortedBefore,
-      abortedAfter: controller.signal.aborted,
+      abortedAfter: signal?.aborted ?? false,
       childStatus: this._readChildRunStatusForTest(runId)
     };
   }
@@ -4041,22 +4465,16 @@ export class ThinkTestAgent extends Think {
     runId: string,
     error: string
   ): Promise<void> {
-    (
-      this as unknown as { _agentToolLastErrors: Map<string, string> }
-    )._agentToolLastErrors.set(runId, error);
+    this["_agentToolRuns"].lastErrors.set(runId, error);
   }
 
   async getAgentToolCleanupMapSizesForTest(): Promise<{
     lastErrors: number;
     preTurnAssistantIds: number;
   }> {
-    const self = this as unknown as {
-      _agentToolLastErrors: Map<string, string>;
-      _agentToolPreTurnAssistantIds: Map<string, Set<string>>;
-    };
     return {
-      lastErrors: self._agentToolLastErrors.size,
-      preTurnAssistantIds: self._agentToolPreTurnAssistantIds.size
+      lastErrors: this["_agentToolRuns"].lastErrors.size,
+      preTurnAssistantIds: this["_agentToolRuns"].preTurnAssistantIds.size
     };
   }
 
@@ -11219,9 +11637,7 @@ export class ThinkRecoveryTestAgent extends Think {
     requestId: string,
     startedAt: number = Date.now()
   ): Promise<void> {
-    (
-      this as unknown as { _ensureAgentToolChildRunTable(): void }
-    )._ensureAgentToolChildRunTable();
+    this["_agentToolRuns"].store.ensure();
     this.sql`
       INSERT INTO cf_agent_tool_child_runs (run_id, request_id, status, started_at)
       VALUES (${runId}, ${requestId}, 'running', ${startedAt})
@@ -11236,9 +11652,7 @@ export class ThinkRecoveryTestAgent extends Think {
     runId: string,
     requestId: string
   ): Promise<void> {
-    (
-      this as unknown as { _ensureAgentToolChildRunTable(): void }
-    )._ensureAgentToolChildRunTable();
+    this["_agentToolRuns"].store.ensure();
     const now = Date.now();
     this.sql`
       INSERT INTO cf_agent_tool_child_runs
@@ -11249,13 +11663,10 @@ export class ThinkRecoveryTestAgent extends Think {
 
   /** Directly invoke the rebind helper (bypassing the full recovery flow). */
   async rebindAgentToolChildRunRequestIdForTest(
-    requestId: string
+    requestId: string,
+    rootRequestId: string
   ): Promise<void> {
-    (
-      this as unknown as {
-        _rebindAgentToolChildRunRequestId(requestId: string): void;
-      }
-    )._rebindAgentToolChildRunRequestId(requestId);
+    this["_agentToolRuns"].rebind(requestId, rootRequestId);
   }
 
   /**
@@ -11325,24 +11736,19 @@ export class ThinkRecoveryTestAgent extends Think {
     runId: string,
     requestId: string
   ): Promise<{ afterRebind: boolean; afterFinalize: boolean }> {
-    const self = this as unknown as {
-      _ensureAgentToolChildRunTable(): void;
-      _rebindAgentToolChildRunRequestId(requestId: string): void;
-      _finalizeAgentToolChildRunTailers(runId: string): void;
-      _agentToolTerminalOnlyRuns: Set<string>;
-    };
-    self._ensureAgentToolChildRunTable();
+    const runs = this["_agentToolRuns"];
+    runs.store.ensure();
     this.sql`
       INSERT INTO cf_agent_tool_child_runs
         (run_id, request_id, status, started_at, event_delivery)
       VALUES (${runId}, 'old-req', 'running', ${Date.now()}, 'terminal')
     `;
-    self._rebindAgentToolChildRunRequestId(requestId);
-    const afterRebind = self._agentToolTerminalOnlyRuns.has(runId);
-    self._finalizeAgentToolChildRunTailers(runId);
+    runs.rebind(requestId, "old-req");
+    const afterRebind = runs.terminalOnlyRuns.has(runId);
+    runs.closeTailers(runId);
     return {
       afterRebind,
-      afterFinalize: self._agentToolTerminalOnlyRuns.has(runId)
+      afterFinalize: runs.terminalOnlyRuns.has(runId)
     };
   }
 
@@ -11369,11 +11775,7 @@ export class ThinkRecoveryTestAgent extends Think {
   async resolveAgentToolRunForRequestForTest(
     requestId: string
   ): Promise<string | null> {
-    return (
-      this as unknown as {
-        _agentToolRunForRequest(requestId: string): string | null;
-      }
-    )._agentToolRunForRequest(requestId);
+    return this["_agentToolRuns"].runForRequest(requestId);
   }
 
   /**

@@ -18,6 +18,42 @@ type AgentToolInspection = Awaited<
 >;
 
 type ThinkAgentToolTestStub = {
+  agentToolRunWithStallForTest(): Promise<{
+    afterCutOff: string | null;
+    scheduled: number;
+    final: string | undefined;
+    summary: string | undefined;
+  }>;
+  signalCancelsQueuedAgentToolRunForTest(): Promise<{
+    atAbort: { status: string | undefined; error: string | undefined };
+    userTexts: string[];
+    steps: number;
+  }>;
+  chunksOfRunningRunForTest(): Promise<number>;
+  staleRunForTest(action: "tail" | "start"): Promise<{
+    tailClosed: boolean | null;
+    reported: string | null;
+    stored: string | null;
+  }>;
+  cancelQueuedAgentToolRunForTest(): Promise<{
+    status: string | null;
+    userTexts: string[];
+    steps: number;
+  }>;
+  cancelRecoveredRunForTest(): Promise<{
+    recoveredTurnAborted: boolean;
+    attemptAborted: boolean;
+    otherTurnAborted: boolean;
+    otherAttemptAborted: boolean;
+    otherSubmissionAborted: boolean;
+  }>;
+  recoverCancelledAgentToolRunForTest(
+    path: "continue" | "retry",
+    cancelled?: boolean
+  ): Promise<{
+    incident: { status: string; reason?: string } | null;
+    steps: number;
+  }>;
   inspectAgentToolRun(runId: string): Promise<AgentToolInspection>;
   broadcastRecoveredAgentToolChunkForTest(
     eventDelivery: "full" | "terminal"
@@ -375,6 +411,93 @@ describe("Think agent tools", () => {
       status: "aborted",
       error: "stop"
     });
+  });
+
+  it("never starts a run cancelled while its turn waited in the queue", async () => {
+    const agent = await freshAgent();
+    const result = await agent.cancelQueuedAgentToolRunForTest();
+    expect(result.status).toBe("aborted");
+    // Its input was not stored and the model ran for the first turn only.
+    expect(result.userTexts).toEqual(["active turn"]);
+    expect(result.steps).toBe(1);
+  });
+
+  it("a cancel of a run being recovered stops the requests on its row and nothing else", async () => {
+    const agent = await freshAgent();
+    await expect(agent.cancelRecoveredRunForTest()).resolves.toEqual({
+      recoveredTurnAborted: true,
+      attemptAborted: true,
+      otherTurnAborted: false,
+      otherAttemptAborted: false,
+      otherSubmissionAborted: false
+    });
+  });
+
+  for (const path of ["continue", "retry"] as const) {
+    it(`does not ${path} the turn of a run cancelled before the isolate died, and says why`, async () => {
+      const agent = await freshAgent();
+      await expect(
+        agent.recoverCancelledAgentToolRunForTest(path)
+      ).resolves.toEqual({
+        incident: { status: "skipped", reason: "user_cancelled" },
+        steps: 0
+      });
+    });
+  }
+
+  it("reads the stored chunks of a run that is still running", async () => {
+    const agent = await freshAgent();
+    await expect(agent.chunksOfRunningRunForTest()).resolves.toBe(3);
+  });
+
+  it("settles and closes the tail of a stale run nothing is recovering", async () => {
+    const agent = await freshAgent();
+    await expect(agent.staleRunForTest("tail")).resolves.toEqual({
+      tailClosed: true,
+      reported: null,
+      stored: "error"
+    });
+  });
+
+  it("reconciles a stale run before reporting it to a parent that starts it again", async () => {
+    const agent = await freshAgent();
+    await expect(agent.staleRunForTest("start")).resolves.toEqual({
+      tailClosed: null,
+      reported: "error",
+      stored: "error"
+    });
+  });
+
+  it("recovers the turn of a run that is aborted but that no parent cancelled", async () => {
+    const agent = await freshAgent();
+    const result = await agent.recoverCancelledAgentToolRunForTest(
+      "continue",
+      false
+    );
+    expect(result.steps).toBe(1);
+    expect(result.incident?.reason).not.toBe("user_cancelled");
+  });
+
+  it("a run whose reply is cut off stays open while chat recovery finishes its turn, then ends completed", async () => {
+    const agent = await freshAgent();
+    const result = await agent.agentToolRunWithStallForTest();
+    // Nobody cancelled the run: it is not aborted, and recovery is not
+    // skipped as a cancel.
+    expect(result.afterCutOff).toBe("running");
+    expect(result.scheduled).toBe(1);
+    expect(result.final).toBe("completed");
+    expect(result.summary).not.toBe("");
+  });
+
+  it("the parent's signal cancels a queued run at once, and the run never starts", async () => {
+    const agent = await freshAgent();
+    const result = await agent.signalCancelsQueuedAgentToolRunForTest();
+    expect(result.atAbort).toEqual({
+      status: "aborted",
+      error: "parent stopped"
+    });
+    expect(result.userTexts).toEqual(["active turn"]);
+    expect(result.steps).toBe(1);
   });
 
   it("cleans in-memory agent-tool bookkeeping after a run completes", async () => {
