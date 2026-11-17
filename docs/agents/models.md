@@ -6,7 +6,7 @@ forms, through the `AI` binding or
 
 ```ts
 // A string runs on env.AI.run.
-ai("@cf/zai-org/glm-4.7-flash"); // Workers AI
+ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017"); // Workers AI
 ai("anthropic/claude-opus-4.8"); // the AI Gateway catalog
 ai("dynamic/support"); // a dynamic route on your gateway
 
@@ -59,7 +59,7 @@ export default {
     const ai = createAI({ binding: env.AI, id: "default", cacheTtl: 60 });
 
     const workersAI = await generateText({
-      model: ai("@cf/zai-org/glm-4.7-flash"),
+      model: ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017"),
       prompt: "Say hello in three words"
     });
 
@@ -144,7 +144,10 @@ await generateText({
 
 // Or install it globally: bare strings then resolve through this provider.
 globalThis.AI_SDK_DEFAULT_PROVIDER = createAI({ binding: env.AI });
-await generateText({ model: "@cf/zai-org/glm-4.7-flash", prompt: "Hi" });
+await generateText({
+  model: "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+  prompt: "Hi"
+});
 ```
 
 Every modality is on the registry too (`registry.imageModel`,
@@ -266,7 +269,9 @@ fallbacks), and the call goes through `env.AI.run` like a Workers AI model:
 const ai = createAI({ binding: env.AI, id: "prod" });
 
 await generateText({ model: ai("dynamic/support"), prompt: "Hi" });
-ai("@cf/zai-org/glm-4.7-flash", { fallback: ["dynamic/support"] });
+ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017", {
+  fallback: ["dynamic/support"]
+});
 ```
 
 The route belongs to a gateway, so set the gateway `id` it was created on. It
@@ -439,7 +444,7 @@ of it. A leg is any model id, or any AI SDK language model:
 
 ```ts
 const model = ai(anthropic("claude-opus-4-8"), {
-  fallback: ["openai/gpt-5.5", "@cf/zai-org/glm-4.7-flash"]
+  fallback: ["openai/gpt-5.5", "@cf/deepseek-ai/deepseek-v4.1-flash-1017"]
 });
 ```
 
@@ -556,7 +561,10 @@ so `ai`'s built-in retry loop honours `isRetryable` without extra wiring.
 import { CloudflareAIError } from "agents/models/ai-sdk";
 
 try {
-  await generateText({ model: ai("@cf/zai-org/glm-4.7-flash"), prompt: "hi" });
+  await generateText({
+    model: ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017"),
+    prompt: "hi"
+  });
 } catch (error) {
   if (error instanceof CloudflareAIError) {
     error.status; // 402

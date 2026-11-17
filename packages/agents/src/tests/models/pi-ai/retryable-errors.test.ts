@@ -11,7 +11,7 @@ import {
   userContext
 } from "./helpers";
 
-const MODEL = "@cf/zai-org/glm-4.7-flash";
+const MODEL = "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
 
 /** A chat-completions chunk with no finish reason. */
 function chunk(content: string): string {

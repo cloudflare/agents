@@ -31,7 +31,7 @@ export function notAModelId(
 ): TypeError {
   return new TypeError(
     accepts === "language"
-      ? `"${modelId}" is not a model id this provider knows. Use a Workers AI id ("@cf/zai-org/glm-4.7-flash"), an AI Gateway catalog id ("<author>/<model>", e.g. "openai/gpt-5.5" or "anthropic/claude-opus-4.8"), or a dynamic route ("dynamic/<route>").`
+      ? `"${modelId}" is not a model id this provider knows. Use a Workers AI id ("@cf/deepseek-ai/deepseek-v4.1-flash-1017"), an AI Gateway catalog id ("<author>/<model>", e.g. "openai/gpt-5.5" or "anthropic/claude-opus-4.8"), or a dynamic route ("dynamic/<route>").`
       : `"${modelId}" is not a Workers AI model id. The embedding, image, speech, transcription and reranking methods take Workers AI ids, which start with "@cf/".`
   );
 }

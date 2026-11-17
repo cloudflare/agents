@@ -245,7 +245,7 @@ describe("core transport - the run path", () => {
       gateway: { byokAlias: "team-a", id: "prod" },
       headers: {},
       input: {},
-      model: "@cf/zai-org/glm-4.7-flash"
+      model: "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
     });
     expect(runs[0]?.options).not.toHaveProperty("openaiEndpoint");
     expect(runs[0]?.options).not.toHaveProperty("extraHeaders");
@@ -352,10 +352,10 @@ describe("core transport - the run path over HTTP", () => {
       gateway: { byokAlias: "team-a", id: "prod" },
       headers: {},
       input: { messages: [{ content: "hi", role: "user" }] },
-      model: "@cf/zai-org/glm-4.7-flash"
+      model: "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
     });
     expect(calls[0]?.url).toBe(
-      "https://api.cloudflare.com/client/v4/accounts/acct-1/ai/run/@cf/zai-org/glm-4.7-flash"
+      "https://api.cloudflare.com/client/v4/accounts/acct-1/ai/run/@cf/deepseek-ai/deepseek-v4.1-flash-1017"
     );
     expect(JSON.parse(String(calls[0]?.init.body))).toEqual({
       messages: [{ content: "hi", role: "user" }]
@@ -568,7 +568,11 @@ describe("core transport - gateway error envelopes", () => {
 });
 
 describe("core transport - run-path envelopes", () => {
-  const context = { model: "@cf/zai-org/glm-4.7-flash", status: 200, url: "u" };
+  const context = {
+    model: "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    status: 200,
+    url: "u"
+  };
 
   it("unwraps a successful envelope and leaves a bare payload alone", () => {
     expect(

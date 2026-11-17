@@ -14,7 +14,8 @@ import { asAi, fakeBinding, jsonResponse } from "../ai-sdk/helpers";
  */
 describe("catalog ids are `@cf/` only", () => {
   it("accepts a Workers AI id and rejects a non-`@cf/` catalog id", () => {
-    const suggested: WorkersAIModelId = "@cf/zai-org/glm-4.7-flash";
+    const suggested: WorkersAIModelId =
+      "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
     const anySlug: WorkersAIModelId = "@cf/some/future-model";
     // @ts-expect-error `@hf/` ids are in the ambient catalog but not accepted.
     const huggingFace: WorkersAIModelId = "@hf/thebloke/llama-2-13b-chat-awq";

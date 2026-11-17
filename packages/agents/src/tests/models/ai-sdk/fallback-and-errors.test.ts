@@ -10,12 +10,12 @@ import {
   sseResponse
 } from "./helpers";
 
-const MODEL = "@cf/zai-org/glm-4.7-flash";
+const MODEL = "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
 /** A second Workers AI model, so a chain has a distinguishable leg. */
-const SECOND = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+const SECOND = "@cf/qwen/qwen3.8-27b";
 
 /** A third leg, so an exhausted chain reports more than two models. */
-const THIRD = "@cf/qwen/qwen3.8-27b";
+const THIRD = "@cf/google/gemma-4-26b-a4b-it";
 
 const okBody = {
   choices: [

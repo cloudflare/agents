@@ -28,7 +28,7 @@ import {
   workersAITextStream
 } from "./helpers";
 
-const WORKERS_AI = "@cf/zai-org/glm-4.7-flash";
+const WORKERS_AI = "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
 
 describe("pi-ai: fallback", () => {
   it("falls through from a vendor model to a Workers AI leg", async () => {
@@ -98,7 +98,7 @@ describe("pi-ai: fallback", () => {
     const ai = createAI({ binding: asAi(binding) });
     // The metadata overrides describe the model they were written on. A leg
     // has its own registry entry, and its usage must be billed at its prices.
-    const model = ai("@cf/openai/gpt-oss-120b", {
+    const model = ai("@cf/qwen/qwen3.8-27b", {
       contextWindow: 999_999,
       cost: { cacheRead: 0, cacheWrite: 0, input: 999, output: 999 },
       fallback: [WORKERS_AI],
@@ -345,10 +345,10 @@ describe("pi-ai: fallback", () => {
 describe("pi-ai: models and the provider", () => {
   it("builds a Workers AI model with registry metadata when known", () => {
     const ai = createAI({ binding: asAi(fakeBinding(() => new Response())) });
-    const model = ai("@cf/meta/llama-3.3-70b-instruct-fp8-fast");
+    const model = ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017");
     expect(model.api).toBe(CLOUDFLARE_AI_API);
     expect(model.provider).toBe(CLOUDFLARE_PROVIDER_ID);
-    expect(model.id).toBe("@cf/meta/llama-3.3-70b-instruct-fp8-fast");
+    expect(model.id).toBe("@cf/deepseek-ai/deepseek-v4.1-flash-1017");
     expect(model.contextWindow).toBeGreaterThan(0);
     expect(model.cost.input).toBeGreaterThan(0);
     // Options never leak into JSON.
@@ -398,7 +398,7 @@ describe("pi-ai: models and the provider", () => {
 
     expect(ai.provider.id).toBe("cloudflare");
     const ids = ai.provider.getModels().map((entry) => entry.id);
-    expect(ids).toContain("@cf/meta/llama-3.3-70b-instruct-fp8-fast");
+    expect(ids).toContain("@cf/deepseek-ai/deepseek-v4.1-flash-1017");
     expect(ids).toContain("anthropic/claude-opus-4.8");
     expect(ids).toContain("openai/gpt-5.4");
     // pi-ai spells Claude ids as Anthropic does (`claude-opus-4-8`); AI

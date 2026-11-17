@@ -151,15 +151,15 @@ describe("Think — beforeTurn hook", () => {
     const agent = await freshAgent("gateway-cf");
     const gateway = { id: "clutch", metadata: { role: "support", siteId: 7 } };
     const { models, calls } = await agent.resolveModelGatewayForTest(
-      "@cf/meta/llama-3.1-8b-instruct",
+      "@cf/qwen/qwen3.8-27b",
       gateway
     );
 
-    expect(models).toEqual(["@cf/meta/llama-3.1-8b-instruct"]);
+    expect(models).toEqual(["@cf/qwen/qwen3.8-27b"]);
     expect(calls).toEqual([
       {
         kind: "run",
-        model: "@cf/meta/llama-3.1-8b-instruct",
+        model: "@cf/qwen/qwen3.8-27b",
         gateway
       }
     ]);
@@ -185,11 +185,11 @@ describe("Think — beforeTurn hook", () => {
   it("keeps the default gateway when getGateway returns undefined", async () => {
     const agent = await freshAgent("gateway-default");
     const cf = await agent.resolveModelGatewayForTest(
-      "@cf/meta/llama-3.1-8b-instruct",
+      "@cf/qwen/qwen3.8-27b",
       null
     );
     expect(cf.calls).toEqual([
-      { kind: "run", model: "@cf/meta/llama-3.1-8b-instruct", gateway: null }
+      { kind: "run", model: "@cf/qwen/qwen3.8-27b", gateway: null }
     ]);
 
     const catalog = await (
@@ -237,7 +237,7 @@ describe("Think — beforeTurn hook", () => {
   it("explains a missing AI binding for a valid string model id", async () => {
     const agent = await freshAgent("resolve-missing-binding");
     const message = await agent.resolveModelErrorForTest(
-      "@cf/meta/llama-3.1-8b-instruct"
+      "@cf/qwen/qwen3.8-27b"
     );
     expect(message).toContain('Workers AI binding named "AI"');
     expect(message).toContain("getAIBinding()");
@@ -254,12 +254,10 @@ describe("Think — beforeTurn hook", () => {
       const agent = await freshAgent(`resolve-hook-${hook}`);
       const { models, calls } = await agent.runTurnWithStringModelForTest(
         hook,
-        "@cf/meta/llama-3.1-8b-instruct"
+        "@cf/qwen/qwen3.8-27b"
       );
-      expect(models).toContain("@cf/meta/llama-3.1-8b-instruct");
-      expect(calls.map((call) => call.model)).toContain(
-        "@cf/meta/llama-3.1-8b-instruct"
-      );
+      expect(models).toContain("@cf/qwen/qwen3.8-27b");
+      expect(calls.map((call) => call.model)).toContain("@cf/qwen/qwen3.8-27b");
     }
   );
 

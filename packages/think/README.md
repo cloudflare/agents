@@ -975,7 +975,7 @@ import { Think } from "@cloudflare/think";
 type MyConfig = { modelTier: "fast" | "capable"; systemPrompt: string };
 
 const MODEL_IDS = {
-  fast: "@cf/meta/llama-3.1-8b-instruct",
+  fast: "@cf/qwen/qwen3.8-27b",
   capable: "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
 } as const;
 

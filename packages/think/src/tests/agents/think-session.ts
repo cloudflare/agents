@@ -1536,7 +1536,7 @@ export class ThinkTestAgent extends Think {
     result: TestChatResult;
     gatewayModels: string[];
   }> {
-    this._stringModelForTest = "@cf/meta/llama-3.1-8b-instruct";
+    this._stringModelForTest = "@cf/qwen/qwen3.8-27b";
     this._missingAIBindingForTest = true;
     this._gatewayModels = [];
     this._turnConfigOverride = { model: createMockModel("from override") };
@@ -1554,7 +1554,7 @@ export class ThinkTestAgent extends Think {
     const gateway = Promise.resolve({ id: "async" });
     this.getGateway = () => gateway as unknown as GatewayOptions;
     try {
-      this.resolveModel("@cf/meta/llama-3.1-8b-instruct");
+      this.resolveModel("@cf/qwen/qwen3.8-27b");
       return "resolved";
     } catch (error) {
       return error instanceof Error ? error.message : String(error);

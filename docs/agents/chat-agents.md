@@ -1323,7 +1323,10 @@ On the server, write transient parts with `transient: true`:
 writer.write({
   transient: true,
   type: "data-thinking",
-  data: { model: "glm-4.7-flash", startedAt: new Date().toISOString() }
+  data: {
+    model: "deepseek-v4.1-flash-1017",
+    startedAt: new Date().toISOString()
+  }
 });
 ```
 

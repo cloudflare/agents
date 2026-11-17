@@ -4,8 +4,7 @@ export const DEFAULT_PROVIDER_KEYTERMS = [
   "Durable Objects",
   "VoiceAgent",
   "DeepSeek",
-  "GLM",
-  "GPT OSS"
+  "Qwen"
 ];
 
 export function getOptionalProviderKeyterms(url: URL): string[] | undefined {

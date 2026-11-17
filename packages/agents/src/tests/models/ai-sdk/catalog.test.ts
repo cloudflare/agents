@@ -12,7 +12,7 @@ import {
 
 const CLAUDE = "anthropic/claude-opus-4.8";
 const GPT = "openai/gpt-5.5";
-const WORKERS_AI = "@cf/zai-org/glm-4.7-flash";
+const WORKERS_AI = "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
 
 /** `/run` answers a chat-completions request flat, in that shape. */
 function chatBody(text: string, model = "claude-opus-4-8-20260101") {

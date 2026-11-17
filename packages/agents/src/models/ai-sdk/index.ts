@@ -228,7 +228,7 @@ export interface AI {
  * ```ts
  * const ai = createAI({ binding: env.AI, id: "prod", cacheTtl: 60 });
  *
- * ai("@cf/zai-org/glm-4.7-flash");
+ * ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017");
  * ai("anthropic/claude-opus-4.8", { fallback: ["openai/gpt-5.5"] });
  * ai.embedding("@cf/baai/bge-base-en-v1.5");
  * ```

@@ -71,7 +71,7 @@ const DEFAULT_MODELS = [
   "openai/gpt-5.4-mini",
   "google/gemini-2.5-flash",
   "anthropic/claude-opus-4.7",
-  "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+  "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
 ];
 
 // ---------------------------------------------------------------------------

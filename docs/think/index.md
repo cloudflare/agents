@@ -726,8 +726,8 @@ export class MyAgent extends Think<Env> {
   getModel() {
     const tier = this.getConfig<MyConfig>()?.modelTier ?? "fast";
     const models = {
-      fast: "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
-      capable: "@cf/meta/llama-4-scout-17b-16e-instruct"
+      fast: "@cf/qwen/qwen3.8-27b",
+      capable: "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
     };
     return models[tier];
   }

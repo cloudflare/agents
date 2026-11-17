@@ -134,11 +134,9 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
     const url = new URL(context.connection.uri ?? "http://localhost");
     const llm = url.searchParams.get("llm");
     const llmModel =
-      llm === "deepseek"
-        ? "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
-        : llm === "gpt-oss-20b"
-          ? "@cf/openai/gpt-oss-20b"
-          : "@cf/zai-org/glm-4.7-flash";
+      llm === "qwen"
+        ? "@cf/qwen/qwen3.8-27b"
+        : "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
 
     const result = streamText({
       model: workersAi(llmModel as Parameters<typeof workersAi>[0], {
