@@ -372,7 +372,15 @@ export class DynamicWorkerExecutor implements Executor {
       "setTimeout",
       "Error",
       "String",
-      "console"
+      "console",
+      "Object",
+      "Proxy",
+      "JSON",
+      "Math",
+      "Uint8Array",
+      "ArrayBuffer",
+      "btoa",
+      "atob"
     ]);
     const VALID_IDENT = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/;
     const seenNames = new Set<string>();

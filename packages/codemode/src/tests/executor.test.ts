@@ -248,7 +248,15 @@ describe("DynamicWorkerExecutor", () => {
       "setTimeout",
       "Error",
       "String",
-      "console"
+      "console",
+      "Object",
+      "Proxy",
+      "JSON",
+      "Math",
+      "Uint8Array",
+      "ArrayBuffer",
+      "btoa",
+      "atob"
     ]) {
       const result = await executor.execute("async () => 42", [
         { name, fns: {} }
