@@ -19924,12 +19924,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               appendMessage: (message) => store.appendMessage(message, parentId)
             },
       ...(continued && {
-        continues: {
-          ...continued,
-          settleBasePart: settleInterruptedPart,
-          forgetBase: () =>
-            this._resumableStream.setStreamBasePartCount(streamId, 0)
-        }
+        continues: { ...continued, settleBasePart: settleInterruptedPart }
       }),
       fallbackId:
         this._resumableStream.getStreamMessageId(streamId) ??

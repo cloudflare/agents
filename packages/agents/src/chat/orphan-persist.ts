@@ -49,8 +49,9 @@ export interface PersistReconstructedOrphanOptions<
    * continuation mode, as the live accumulator does: the result keeps
    * `messageId` (a provider `start.messageId` is ignored) and the earlier
    * parts, and persisting the same stream again rewrites the message rather
-   * than appending a copy. When the message no longer exists, the chunks are
-   * rebuilt on their own under `messageId`, and `forgetBase` is called first.
+   * than appending a copy. When the message no longer exists it was deleted
+   * (a continuation only starts from a stored message), so nothing is written:
+   * the stream is not resurrected as a message of its own.
    */
   continues?: {
     messageId: string;
@@ -59,13 +60,6 @@ export interface PersistReconstructedOrphanOptions<
     settleBasePart?: (
       part: TMessage["parts"][number]
     ) => TMessage["parts"][number];
-    /**
-     * Called before the chunks are rebuilt on their own because the continued
-     * message is gone. Record a `basePartCount` of 0 for the stream, so a later
-     * recovery of it keeps none of the recreated message's parts, which all
-     * came from these chunks, instead of replaying the chunks after them.
-     */
-    forgetBase?: () => void | Promise<void>;
   };
   /**
    * Finalize the reconstructed message before upsert — e.g. strip internal
@@ -84,7 +78,7 @@ export interface PersistReconstructedOrphanOptions<
  * Reconstruct a message from `chunks` and upsert it via the store. Returns
  * `true` when a write happened (so a caller that broadcasts after — Think — can
  * gate its broadcast on it), `false` when there was nothing to persist (no
- * parts, or `prepare` returned `null`).
+ * parts, `prepare` returned `null`, or the message `continues` names is gone).
  */
 export async function persistReconstructedOrphan<
   TMessage extends UIMessage = UIMessage
@@ -95,6 +89,7 @@ export async function persistReconstructedOrphan<
   if (chunks.length === 0) return false;
 
   const accumulator = await createReconstructionAccumulator(options);
+  if (accumulator === null) return false;
   for (const chunk of chunks) {
     try {
       accumulator.applyChunk(JSON.parse(chunk.body) as StreamChunkData);
@@ -119,17 +114,15 @@ export async function persistReconstructedOrphan<
 
 async function createReconstructionAccumulator<TMessage extends UIMessage>(
   options: PersistReconstructedOrphanOptions<TMessage>
-): Promise<StreamAccumulator> {
+): Promise<StreamAccumulator | null> {
   const { continues } = options;
   if (continues === undefined) {
     return new StreamAccumulator({ messageId: options.fallbackId });
   }
   const continued = await options.store.getMessage(continues.messageId);
-  if (!continued && continues.basePartCount > 0) {
-    await continues.forgetBase?.();
-  }
-  const baseParts = (continued?.parts ?? []).slice(0, continues.basePartCount);
-  const metadata = continued?.metadata;
+  if (!continued) return null;
+  const baseParts = continued.parts.slice(0, continues.basePartCount);
+  const metadata = continued.metadata;
   return new StreamAccumulator({
     messageId: continues.messageId,
     continuation: true,

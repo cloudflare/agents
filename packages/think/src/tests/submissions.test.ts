@@ -2122,7 +2122,7 @@ describe("Think durable submissions", () => {
     ).toEqual(["earlier", "continued"]);
   });
 
-  it("recovers an interrupted continuation whose leaf was deleted into one copy, however often it is persisted", async () => {
+  it("does not recreate a deleted leaf when recovering the continuation that extended it, however often", async () => {
     const agent = await freshAgent();
 
     await agent.persistContinuationOrphanForTest("req-cont-gone", "leaf-1", 2, {
@@ -2132,10 +2132,7 @@ describe("Think durable submissions", () => {
     const assistants = (await agent.getStoredMessages()).filter(
       (message) => message.role === "assistant"
     );
-    expect(assistants.map((message) => message.id)).toEqual(["leaf-1"]);
-    expect(
-      (assistants[0].parts ?? []).map((part) => (part as { text: string }).text)
-    ).toEqual(["continued"]);
+    expect(assistants).toEqual([]);
   });
 
   it("recovers an interrupted continuation into the leaf when its start chunk carries a provider id", async () => {

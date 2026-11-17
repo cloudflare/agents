@@ -36,13 +36,7 @@ const leaf = {
 
 const persist = (
   store: OrphanPersistStore,
-  options: {
-    continues?: {
-      messageId: string;
-      basePartCount: number;
-      forgetBase?: () => void;
-    };
-  } = {}
+  options: { continues?: { messageId: string; basePartCount: number } } = {}
 ) =>
   persistReconstructedOrphan(continuationChunks, {
     store,
@@ -81,42 +75,17 @@ describe("persistReconstructedOrphan", () => {
     });
   });
 
-  it("rebuilds a continuation on its own when the continued message is gone", async () => {
+  it("writes nothing for a continuation whose message was deleted, however often", async () => {
     const { store, messages } = memoryStore();
 
+    const wrote = await persist(store, {
+      continues: { messageId: "leaf", basePartCount: 1 }
+    });
     await persist(store, {
       continues: { messageId: "leaf", basePartCount: 1 }
     });
 
-    expect([...messages.keys()]).toEqual(["leaf"]);
-    expect(messages.get("leaf")?.parts).toMatchObject([
-      { type: "text", text: "continued" }
-    ]);
-  });
-
-  it("does not duplicate a recreated continuation when it is recovered again", async () => {
-    const { store, messages } = memoryStore();
-    // Stands in for the stream's durable `basePartCount`.
-    let basePartCount = 1;
-    const recover = () =>
-      persist(store, {
-        continues: {
-          messageId: "leaf",
-          basePartCount,
-          forgetBase: () => {
-            basePartCount = 0;
-          }
-        }
-      });
-
-    await recover();
-    await recover();
-
-    expect([...messages.keys()]).toEqual(["leaf"]);
-    expect(messages.get("leaf")?.parts).toMatchObject([
-      { type: "text", text: "continued" }
-    ]);
-    expect(messages.get("leaf")?.parts).toHaveLength(1);
-    expect(basePartCount).toBe(0);
+    expect(wrote).toBe(false);
+    expect(messages.size).toBe(0);
   });
 });
