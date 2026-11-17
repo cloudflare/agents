@@ -2,7 +2,7 @@
 
 Durable file storage for Agents. A virtual filesystem backed by Durable Object SQLite with optional R2 spillover for large files. Includes symlinks, glob, diff, and streaming I/O.
 
-**Status:** deprecated (`@cloudflare/shell`). Agent workspaces are now a `Workspace` from [`@cloudflare/computer`](https://github.com/cloudflare/computer); Think and Agent Skills accept only that. This record describes the Shell design for anyone migrating data out of it. See [Migrating to `@cloudflare/computer`](../docs/shell/migrating-to-computer.md).
+**Status:** deprecated (`@cloudflare/shell`). The source was removed from this repo; the last released source is at the git tag `@cloudflare/shell@0.5.0`. Agent workspaces are now a `Workspace` from [`@cloudflare/computer`](https://github.com/cloudflare/computer); Think and Agent Skills accept only that. This record describes the Shell design for anyone migrating data out of it. See [Migrating to `@cloudflare/computer`](../docs/shell/migrating-to-computer.md).
 
 ## Problem
 
@@ -139,7 +139,7 @@ Multiple workspaces in one DO share the same SQLite database and alarm lifecycle
 
 ## Testing
 
-Tests in `packages/shell/src/tests/workspace.test.ts`, running inside the Workers runtime via `@cloudflare/vitest-pool-workers`:
+Tests were in `packages/shell/src/tests/workspace.test.ts` (removed from this repo; it lives at the git tag `@cloudflare/shell@0.5.0`), running inside the Workers runtime via `@cloudflare/vitest-pool-workers`:
 
 - **File I/O:** read/write roundtrip, missing files, overwrite, binary, streaming, mime types
 - **Directories:** mkdir, readDir, recursive mkdir, nested listings

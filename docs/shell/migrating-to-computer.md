@@ -14,7 +14,7 @@ The two packages use different tables, so switching packages does not move your 
 
 ## Where Shell stores data
 
-Each Shell `Workspace` owns one table named `cf_workspace_<namespace>`, where `namespace` defaults to `default`. An index named `cf_workspace_<namespace>_parent` covers `parent_path`. The DDL lives in `ensureInit()` in [`packages/shell/src/filesystem.ts`](https://github.com/cloudflare/agents/blob/main/packages/shell/src/filesystem.ts):
+Each Shell `Workspace` owns one table named `cf_workspace_<namespace>`, where `namespace` defaults to `default`. An index named `cf_workspace_<namespace>_parent` covers `parent_path`. The DDL lives in `ensureInit()` in [`packages/shell/src/filesystem.ts`](https://github.com/cloudflare/agents/blob/%40cloudflare/shell%400.5.0/packages/shell/src/filesystem.ts) at the git tag `@cloudflare/shell@0.5.0`:
 
 ```sql
 CREATE TABLE cf_workspace_default (

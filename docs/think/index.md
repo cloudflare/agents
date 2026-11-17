@@ -1041,7 +1041,7 @@ Think's workspace is a `Workspace` from [`@cloudflare/computer`](https://github.
 - Image and PDF reads stored by the old `read` tool replay as an error asking the model to read the file again.
 - Agent Skills (`agents/skills`) accept only a Computer Workspace, for both `skills.workspace()` and `skills.runner({ workspaceInstance })`. Relative paths in skill scripts resolve against `/workspace`.
 
-Files a Shell Workspace stored are not moved. [Migrating to `@cloudflare/computer`](../shell/migrating-to-computer.md) documents both storage schemas and a copy script.
+Files a Shell Workspace stored are not moved. [Migrating to `@cloudflare/computer`](https://github.com/cloudflare/agents/blob/main/docs/shell/migrating-to-computer.md) documents both storage schemas and a copy script.
 
 ## Dependencies
 
