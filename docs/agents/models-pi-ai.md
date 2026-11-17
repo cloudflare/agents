@@ -370,7 +370,12 @@ Image generation is Workers AI only. The knobs a model takes are the model's:
 `flux-1-schnell` takes a prompt and `steps` and nothing else, so `width`,
 `height`, `seed`, `guidance` and `negativePrompt` are dropped for it and listed
 in a `cloudflare-compat` diagnostic on the result rather than sent and ignored.
-Every other model in the catalog takes the full set.
+The FLUX.2 models (`@cf/black-forest-labs/flux-2-klein-9b`, `flux-2-klein-4b`
+and `flux-2-dev`) take `width`, `height`, `seed` and `guidance`, `steps` on
+`flux-2-dev` only, and up to four image input parts as reference images. They
+take multipart form data, which goes straight to Workers AI, so the gateway
+options do not apply to them. Every other model in the catalog takes the full
+set.
 
 ## Requirements
 

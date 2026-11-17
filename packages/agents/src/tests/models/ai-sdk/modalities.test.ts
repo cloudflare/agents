@@ -4,6 +4,8 @@ import { CloudflareAIError, createAI } from "../../../models/ai-sdk";
 import { asAi, fakeBinding, field, jsonResponse } from "./helpers";
 
 const FLUX = "@cf/black-forest-labs/flux-1-schnell";
+const FLUX_2_KLEIN = "@cf/black-forest-labs/flux-2-klein-9b";
+const FLUX_2_DEV = "@cf/black-forest-labs/flux-2-dev";
 const SDXL = "@cf/stabilityai/stable-diffusion-xl-base-1.0";
 const AURA = "@cf/deepgram/aura-1";
 const MELOTTS = "@cf/myshell-ai/melotts";
@@ -86,6 +88,17 @@ const fluxBody = {
     total_tokens: 0
   }
 };
+
+/** Reads the form a multipart call sent through the binding. */
+async function sentForm(input: Record<string, unknown>): Promise<FormData> {
+  const multipart = input.multipart as {
+    body: ReadableStream;
+    contentType: string;
+  };
+  return new Response(multipart.body, {
+    headers: { "content-type": multipart.contentType }
+  }).formData();
+}
 
 /** The live whisper-large-v3-turbo body, trimmed to the fields we read. */
 const whisperBody = {
@@ -260,6 +273,153 @@ describe("image generation", () => {
 
     expect(field(binding.calls[0].input, "image_b64")).toBe("iVBORw0KGgo=");
     expect(field(binding.calls[0].input, "mask")).toEqual([0, 1, 2]);
+  });
+
+  it("sends FLUX.2 its input as multipart form data, straight to Workers AI", async () => {
+    const binding = fakeBinding(() => jsonResponse({ image: JPEG_BASE64 }));
+    const ai = createAI({ binding: asAi(binding) });
+    const result = await ai.image(FLUX_2_KLEIN).doGenerate({
+      aspectRatio: undefined,
+      files: [
+        { data: PNG_BYTES, mediaType: "image/png", type: "file" },
+        { data: "AAEC", mediaType: "image/jpeg", type: "file" }
+      ],
+      mask: undefined,
+      n: 1,
+      prompt: "put the fox in the snow",
+      providerOptions: { cloudflare: { guidance: 3 } },
+      seed: 7,
+      size: "512x384"
+    });
+
+    const call = binding.calls[0];
+    expect(Object.keys(call.input)).toEqual(["multipart"]);
+    const form = await sentForm(call.input);
+    expect(
+      Object.fromEntries(
+        [...form.entries()].filter(([, value]) => typeof value === "string")
+      )
+    ).toEqual({
+      guidance: "3",
+      height: "384",
+      prompt: "put the fox in the snow",
+      seed: "7",
+      width: "512"
+    });
+    const first = form.get("input_image_0") as File;
+    expect(first.type).toBe("image/png");
+    expect(new Uint8Array(await first.arrayBuffer())).toEqual(PNG_BYTES);
+    const second = form.get("input_image_1") as File;
+    expect(second.type).toBe("image/jpeg");
+    expect(new Uint8Array(await second.arrayBuffer())).toEqual(
+      new Uint8Array([0, 1, 2])
+    );
+    // AI Gateway refuses a stream body, so the call names no gateway.
+    expect(call.options).not.toHaveProperty("gateway");
+    expect(result.images).toEqual([JPEG_BASE64]);
+    expect(result.providerMetadata?.cloudflare.images).toMatchObject([
+      { mediaType: "image/jpeg", model: FLUX_2_KLEIN }
+    ]);
+    expect(result.providerMetadata?.cloudflare).not.toHaveProperty("gateway");
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("reports FLUX.2's form as the request body, files as base64", async () => {
+    const binding = fakeBinding(() =>
+      jsonResponse(
+        { errors: [{ code: 5006, message: "Bad input" }], success: false },
+        { status: 400 }
+      )
+    );
+    const error = await createAI({ binding: asAi(binding) })
+      .image(FLUX_2_KLEIN)
+      .doGenerate({
+        aspectRatio: undefined,
+        files: [{ data: "AAEC", mediaType: "image/png", type: "file" }],
+        mask: undefined,
+        n: 1,
+        prompt: "a fox",
+        providerOptions: {},
+        seed: undefined,
+        size: undefined
+      })
+      .then(
+        () => undefined,
+        (caught: unknown) => caught
+      );
+
+    expect(error).toBeInstanceOf(CloudflareAIError);
+    expect((error as CloudflareAIError).requestBodyValues).toEqual({
+      multipart: {
+        input_image_0: { body: "AAEC", contentType: "image/png" },
+        prompt: "a fox"
+      }
+    });
+  });
+
+  it("warns for what FLUX.2 cannot take", async () => {
+    const binding = fakeBinding(() => jsonResponse({ image: JPEG_BASE64 }));
+    const ai = createAI({ binding: asAi(binding), cacheTtl: 60 });
+    const file = {
+      data: PNG_BYTES,
+      mediaType: "image/png",
+      type: "file"
+    } as const;
+    const result = await ai.image(FLUX_2_KLEIN).doGenerate({
+      aspectRatio: undefined,
+      files: [
+        { type: "url", url: "https://example.com/fox.png" },
+        file,
+        file,
+        file,
+        file,
+        file
+      ],
+      mask: { data: "AAEC", mediaType: "image/png", type: "file" },
+      n: 1,
+      prompt: "a fox",
+      providerOptions: {
+        cloudflare: { negativePrompt: "blurry", steps: 8, strength: 0.5 }
+      },
+      seed: undefined,
+      size: undefined
+    });
+
+    const form = await sentForm(binding.calls[0].input);
+    expect(form.has("steps")).toBe(false);
+    expect(form.has("input_image_3")).toBe(true);
+    expect(form.has("input_image_4")).toBe(false);
+    const features = result.warnings.flatMap((warning) =>
+      warning.type === "unsupported" ? [warning.feature] : []
+    );
+    expect(features).toEqual([
+      "negativePrompt",
+      "strength",
+      "mask",
+      "steps",
+      "files",
+      "files",
+      "gateway"
+    ]);
+  });
+
+  it("sends steps to flux-2-dev, which is not distilled", async () => {
+    const binding = fakeBinding(() => jsonResponse({ image: JPEG_BASE64 }));
+    const ai = createAI({ binding: asAi(binding) });
+    const result = await ai.image(FLUX_2_DEV).doGenerate({
+      aspectRatio: undefined,
+      files: undefined,
+      mask: undefined,
+      n: 1,
+      prompt: "a fox",
+      providerOptions: { cloudflare: { steps: 25 } },
+      seed: undefined,
+      size: undefined
+    });
+
+    const form = await sentForm(binding.calls[0].input);
+    expect(form.get("steps")).toBe("25");
+    expect(result.warnings).toEqual([]);
   });
 
   it("fans a direct doGenerate n>1 out into one call per image", async () => {

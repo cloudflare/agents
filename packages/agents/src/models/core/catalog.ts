@@ -185,16 +185,14 @@ export type CloudflareEmbeddingModelId =
  * own generated class instead. Curated for autocomplete only; the catalog
  * lives server-side and any slug is accepted.
  *
- * The FLUX.2 family (`flux-2-dev`, `flux-2-klein-4b`, `flux-2-klein-9b`) is
- * deliberately absent, for the reason {@link UnsupportedTranscriptionId}
- * records for the Deepgram recognisers: its generated input takes a required
- * `multipart` object body (`{ multipart: { body, contentType } }`) and no
- * `prompt`, which the JSON run path cannot carry — live, the run path answers
- * `400 Bad input: required properties at "/" are 'multipart'`. Suggesting an
- * id that always 400s is worse than not suggesting it.
+ * The FLUX.2 family takes multipart form data rather than JSON; `ai.image()`
+ * sends it that way, straight to Workers AI.
  */
 export type KnownImageModelId =
   | "@cf/black-forest-labs/flux-1-schnell"
+  | "@cf/black-forest-labs/flux-2-dev"
+  | "@cf/black-forest-labs/flux-2-klein-4b"
+  | "@cf/black-forest-labs/flux-2-klein-9b"
   | "@cf/leonardo/lucid-origin"
   | "@cf/leonardo/phoenix-1.0";
 

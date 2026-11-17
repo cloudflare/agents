@@ -3,9 +3,10 @@
  * `ai.generateImages(model, context)` runs it through the transport.
  *
  * Workers AI text-to-image models take `{ prompt, width?, height?, seed?,
- * num_steps?, guidance?, negative_prompt?, image? }` and answer with raw PNG
- * bytes or, for some models, JSON `{ image: "<base64>" }`; both are mapped to
- * a pi `image` output part.
+ * num_steps?, guidance?, negative_prompt?, image? }` as JSON, or the FLUX.2
+ * models the same knobs as multipart form data with reference images as
+ * files. They answer with raw PNG bytes or JSON `{ image: "<base64>" }`; both
+ * are mapped to a pi `image` output part.
  */
 
 import type {
@@ -15,13 +16,18 @@ import type {
   ImagesOptions
 } from "@earendil-works/pi-ai";
 import type { CompatWarning } from "../../core/chat-completions";
-import { buildImageInput, imageMediaTypeOf } from "../../core/images";
+import {
+  MAX_MULTIPART_SOURCE_IMAGES,
+  buildImageInput,
+  imageMediaTypeOf,
+  imageMultipartFields
+} from "../../core/images";
 import type {
   ModelOptions,
   ProviderGatewaySettings
 } from "../../core/settings";
-import { resolveOptions } from "../../core/settings";
-import type { Transport } from "../../core/transport";
+import { isGatewayConfigured, resolveOptions } from "../../core/settings";
+import type { MultipartFields, Transport } from "../../core/transport";
 import { unwrapEnvelope } from "../../core/transport";
 import { CLOUDFLARE_PROVIDER_ID } from "../catalog";
 import { assertOk } from "../errors";
@@ -168,7 +174,8 @@ export interface ImagesConfig {
 /**
  * Generates images with a Cloudflare catalog model. Text input parts join into
  * the prompt; the first image part, when present, is passed as the source
- * image for image-to-image models. Failures are reported through
+ * image for image-to-image models, and a FLUX.2 model takes up to four as
+ * reference images. Failures are reported through
  * `stopReason`/`errorMessage`, as pi-ai's images contract expects.
  */
 export async function generateImages(
@@ -189,7 +196,11 @@ export async function generateImages(
     )
     .map((part) => part.text)
     .join("\n");
-  const source = context.input.find((part) => part.type === "image");
+  const images = context.input.filter(
+    (part): part is { type: "image"; data: string; mimeType: string } =>
+      part.type === "image"
+  );
+  const source = images[0];
 
   const setting = <
     K extends keyof PiImagesCallOptions & keyof PiImagesModelOptions
@@ -215,7 +226,29 @@ export async function generateImages(
   });
   const input = built.input;
   const warnings: CompatWarning[] = built.warnings;
-  if (!built.minimal && source !== undefined && source.type === "image") {
+  let multipart: MultipartFields | undefined;
+  if (built.body === "multipart") {
+    multipart = imageMultipartFields(
+      input,
+      images.map((image) => ({
+        bytes: base64ToBytes(image.data),
+        contentType: image.mimeType
+      }))
+    );
+    if (images.length > MAX_MULTIPART_SOURCE_IMAGES) {
+      warnings.push({
+        feature: "images",
+        message: `Only the first ${MAX_MULTIPART_SOURCE_IMAGES} images are used.`
+      });
+    }
+    // A multipart body goes to Workers AI directly (see the transport).
+    if (isGatewayConfigured(resolved.gateway)) {
+      warnings.push({
+        feature: "gateway",
+        message: `${model.id} goes to Workers AI directly, so the gateway options do not apply.`
+      });
+    }
+  } else if (built.body === "json" && source !== undefined) {
     input.image = Array.from(base64ToBytes(source.data));
   }
 
@@ -235,6 +268,7 @@ export async function generateImages(
       headers: resolved.headers,
       input,
       model: model.id,
+      ...(multipart === undefined ? {} : { multipart }),
       signal: options?.signal
     });
     await assertOk(response, {

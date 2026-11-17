@@ -332,6 +332,22 @@ a `compatibility` warning.
 The run path generates one image per call, so `maxImagesPerCall` is 1 and
 `generateImage` fans a larger `n` out into parallel calls.
 
+The FLUX.2 models (`@cf/black-forest-labs/flux-2-klein-9b`, `flux-2-klein-4b`
+and `flux-2-dev`) take multipart form data rather than JSON, and the provider
+sends it as that, straight to Workers AI, so the gateway options do not apply
+and a `warnings` entry says so when any are set. They take `size`, `seed` and
+`guidance`, `steps` on `flux-2-dev` only (the klein models always run four),
+and up to four reference images from the prompt's `images`, which the prompt
+can refer to as image 0 to image 3:
+
+```ts
+const { image } = await generateImage({
+  model: ai.image("@cf/black-forest-labs/flux-2-klein-9b"),
+  prompt: { text: "Put the lizard from image 0 in the snow", images: [lizard] },
+  size: "1024x768"
+});
+```
+
 `@cf/deepgram/nova-3` takes its audio as a raw body (`audio: { body,
 contentType }`), and the provider sends it as one. Of the transcription options
 it takes `language`; the whisper-only ones come back in `warnings`.

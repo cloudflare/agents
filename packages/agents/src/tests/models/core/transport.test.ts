@@ -203,6 +203,42 @@ describe("core transport - the run path", () => {
     expect(runs[0]?.options).not.toHaveProperty("gateway");
   });
 
+  it("sends a multipart body as a form stream, without a gateway", async () => {
+    const { binding, runs } = fakeBinding(() => new Response("{}"));
+    await createTransport({ binding }).run({
+      gateway: { cacheTtl: 60, id: "prod" },
+      headers: {},
+      input: {},
+      model: "@cf/black-forest-labs/flux-2-klein-9b",
+      multipart: {
+        input_image_0: {
+          bytes: new Uint8Array([0, 1, 2]),
+          contentType: "image/png"
+        },
+        prompt: "a fox",
+        width: "512"
+      }
+    });
+    const input = runs[0]?.input as {
+      multipart: { body: ReadableStream; contentType: string };
+    };
+    expect(Object.keys(input)).toEqual(["multipart"]);
+    expect(input.multipart.contentType).toMatch(
+      /^multipart\/form-data; boundary=/
+    );
+    const form = await new Response(input.multipart.body, {
+      headers: { "content-type": input.multipart.contentType }
+    }).formData();
+    expect(form.get("prompt")).toBe("a fox");
+    expect(form.get("width")).toBe("512");
+    const image = form.get("input_image_0") as File;
+    expect(image.type).toBe("image/png");
+    expect(new Uint8Array(await image.arrayBuffer())).toEqual(
+      new Uint8Array([0, 1, 2])
+    );
+    expect(runs[0]?.options).not.toHaveProperty("gateway");
+  });
+
   it("leaves a Workers AI request to Workers AI", async () => {
     const { binding, runs } = fakeBinding(() => new Response("{}"));
     await createTransport({ binding }).run({
@@ -386,6 +422,32 @@ describe("core transport - the run path over HTTP", () => {
       "content-type": "audio/mpeg"
     });
     expect(await response.json()).toEqual({ results: {} });
+  });
+
+  it("sends a multipart body to Workers AI's run route as form data", async () => {
+    const calls = stubFetch(
+      () =>
+        new Response(
+          JSON.stringify({ result: { image: "AAEC" }, success: true }),
+          { headers: { "content-type": "application/json" } }
+        )
+    );
+    const response = await createTransport(ACCOUNT).run({
+      gateway: { cacheTtl: 60, id: "prod" },
+      headers: { "content-type": "application/json" },
+      input: {},
+      model: "@cf/black-forest-labs/flux-2-klein-9b",
+      multipart: { prompt: "a fox" }
+    });
+    expect(calls[0]?.url).toBe(
+      "https://api.cloudflare.com/client/v4/accounts/acct-1/ai/run/@cf/black-forest-labs/flux-2-klein-9b"
+    );
+    const body = calls[0]?.init.body;
+    expect(body).toBeInstanceOf(FormData);
+    expect((body as FormData).get("prompt")).toBe("a fox");
+    // `fetch` writes the content type, boundary included, from the form.
+    expect(headersOf(calls[0])).toEqual({ authorization: "Bearer token-1" });
+    expect(await response.json()).toEqual({ image: "AAEC" });
   });
 
   // TODO: the public resume route (`gateway.ai.cloudflare.com/v1/{account}/
