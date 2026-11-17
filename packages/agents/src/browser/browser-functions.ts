@@ -1,7 +1,9 @@
 /**
  * The `browser` object model-written code drives a browser with, defined
- * once. `browserTool`'s sandbox exposes it as the `browser` global, and the same functions, docs and rules are what a
- * Workspace module would expose later. Internal — not an entry point.
+ * once. `browserTool`'s sandbox exposes it as the `browser` global, and a
+ * Workspace module exposes the same functions, docs and rules through
+ * `BrowserSession.functions` and `Browser.functionDocs()`. Internal — not an
+ * entry point.
  *
  * Every function takes one options object. The CDP functions are backed by
  * a `BrowserSession`, which validates the input; `spec` shapes the session's
@@ -11,17 +13,43 @@
  */
 import type { BrowserInternalHosts } from "./browser";
 import type { InternalHostInfo } from "./internal-hosts";
-import {
-  validate,
-  type BrowserAttachInput,
-  type BrowserDebugLogInput,
-  type BrowserSendInput,
-  type BrowserSession
+import type {
+  BrowserAttachInput,
+  BrowserDebugLogInput,
+  BrowserSendInput,
+  BrowserSession
 } from "./session";
 import type { SearchableCdpSpec } from "./spec";
+import { validate } from "./validate";
 
-/** One function on the `browser` object, as the host runs it. */
+/**
+ * One function on the `browser` object, as the host runs it: it takes one
+ * input object (usually from model-written code, so it's validated) and
+ * resolves with a JSON-safe result.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
 export type BrowserFunction = (input: unknown) => Promise<unknown>;
+
+/**
+ * What the model needs to know to use the `browser` object, for a tool or
+ * module description. `Browser.functionDocs()` returns it.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
+export interface BrowserFunctionDocs {
+  /**
+   * The `browser.*` functions in Markdown, one bullet per function, then the
+   * browser's internal sites when it has any.
+   */
+  functions: string;
+  /**
+   * How to use the browser, one rule per entry, without bullets. Rules about
+   * how the code runs (timeouts, how screenshots reach the model) belong to
+   * whatever runs it, so add those yourself.
+   */
+  rules: string[];
+}
 
 interface BrowserFunctionDefinition {
   /** One line for the model: how to call it and what it returns. */
@@ -112,7 +140,20 @@ interface HostsFunctionDefinition {
   doc: string;
   /** Only offered when at least one host is assignable. */
   assignable?: true;
+  /** Throw a fix-it error for bad input, before the session admits the call. */
+  check?(input: unknown): void;
   call(hosts: BrowserInternalHosts, input: unknown): Promise<unknown>;
+}
+
+/**
+ * The internal hosts a session's functions use, and the session's check
+ * that runs before each hosts call: it rejects once the session is closed,
+ * and waits for the scope's lock when the session locks, as the CDP
+ * functions do.
+ */
+export interface SessionHosts {
+  hosts: BrowserInternalHosts;
+  admit(): Promise<void>;
 }
 
 /** The `host` field of a hosts function's input, or a fix-it error. */
@@ -137,6 +178,14 @@ const HOSTS_FUNCTIONS = {
   assignHost: {
     doc: '`browser.assignHost({ host, target })` points an assignable site at a target matching its schema and returns `{ url }`; `host` is the bare hostname, like "preview.internal". Navigate to the url next. It stays assigned across runs.',
     assignable: true,
+    check: (input) => {
+      const host = hostOf("assignHost", input);
+      if ((input as { target?: unknown }).target === undefined) {
+        throw new Error(
+          `browser.assignHost needs a target for ${host}; use browser.clearHost to unassign it`
+        );
+      }
+    },
     call: (hosts, input) =>
       hosts.assign(
         hostOf("assignHost", input),
@@ -146,6 +195,7 @@ const HOSTS_FUNCTIONS = {
   clearHost: {
     doc: "`browser.clearHost({ host })` unassigns a site and returns `{ cleared }`. An unassigned site answers 502.",
     assignable: true,
+    check: (input) => hostOf("clearHost", input),
     call: async (hosts, input) => ({
       cleared: await hosts.clear(hostOf("clearHost", input))
     })
@@ -165,11 +215,12 @@ function hostsFunctions(
 
 /**
  * The `browser` object's functions, bound to one run's session, plus the
- * hosts functions when the browser has internal hostnames.
+ * hosts functions when the browser has internal hostnames. Each hosts
+ * function checks its input, then waits for `admit`, then calls the hosts.
  */
 export function browserFunctions(
   session: BrowserSession,
-  hosts?: BrowserInternalHosts
+  sessionHosts?: SessionHosts
 ): Record<string, BrowserFunction> {
   const functions: Record<string, BrowserFunction> = Object.fromEntries(
     Object.entries(BROWSER_FUNCTIONS).map(([name, definition]) => [
@@ -177,9 +228,14 @@ export function browserFunctions(
       (input: unknown) => definition.call(session, input)
     ])
   );
-  if (hosts) {
+  if (sessionHosts) {
+    const { hosts, admit } = sessionHosts;
     for (const [name, definition] of hostsFunctions(hosts.describe())) {
-      functions[name] = (input: unknown) => definition.call(hosts, input);
+      functions[name] = async (input: unknown) => {
+        definition.check?.(input);
+        await admit();
+        return definition.call(hosts, input);
+      };
     }
   }
   return functions;
@@ -195,10 +251,20 @@ function describeHost(info: InternalHostInfo): string {
 }
 
 /**
- * The `browser` object's docs for the model, in Markdown: one line per
- * function, then the internal sites when the browser has any.
+ * The `browser` object's docs for the model: the functions offered for
+ * `hosts`, and the rules.
  */
-export function browserFunctionDocs(hosts?: BrowserInternalHosts): string {
+export function browserFunctionDocs(
+  hosts?: BrowserInternalHosts
+): BrowserFunctionDocs {
+  return { functions: functionsMarkdown(hosts), rules: [...BROWSER_RULES] };
+}
+
+/**
+ * The functions in Markdown: one line per function, then the internal sites
+ * when the browser has any.
+ */
+function functionsMarkdown(hosts?: BrowserInternalHosts): string {
   const infos = hosts?.describe() ?? [];
   const functions = [
     ...Object.values(BROWSER_FUNCTIONS),
@@ -223,7 +289,7 @@ export function browserFunctionDocs(hosts?: BrowserInternalHosts): string {
  * know; leave out what a model knows already. Rules about how the code runs
  * (timeouts, screenshots) belong to whatever runs it.
  */
-export const BROWSER_RULES: readonly string[] = [
+const BROWSER_RULES: readonly string[] = [
   "The browser persists between runs: tabs, cookies, and logins are still there next time. You never start or close it.",
   "If the browser was replaced (idle timeout, crash), a notice says so and earlier tabs and logins are gone. Before an action that matters (submitting a form, a purchase), check you're on the page you expect.",
   'Page-scoped commands (Page.*, Runtime.*, DOM.*, Input.*, Network.*, Emulation.*) need sessionId: "active", your tab, which is remembered between runs. Browser.* and Target.* commands take no sessionId.',
@@ -232,5 +298,5 @@ export const BROWSER_RULES: readonly string[] = [
   "Tabs a page opens itself (popups, target=_blank links) don't become active; a notice lists them.",
   "Runtime.evaluate: pass returnByValue: true, or objects come back as a remote reference with no value, and awaitPromise: true for async expressions. The value is at result.value. A thrown error doesn't reject: check exceptionDetails.",
   "Page.navigate returns before the page loads and doesn't throw when it fails: check errorText, then poll document.readyState with Runtime.evaluate until it is 'complete'.",
-  "Pick out what you need inside Runtime.evaluate and return only that. A screenshot over 1 MB fails the run."
+  "Pick out what you need inside Runtime.evaluate and return only that. Page.captureScreenshot throws when its result is over 1 MB."
 ];

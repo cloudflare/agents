@@ -397,6 +397,8 @@ describe("AIChatAgent chat turn serialization", () => {
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
     sendChatRequest(ws, "req-pre-stream-window", [firstUserMessage], {
+      // Client tools, so a turn start leaves their unanswered calls alone.
+      clientTools: [{ name: "testTool" }],
       format: "plaintext",
       responseDelayMs: 120,
       chunkCount: 1,

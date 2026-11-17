@@ -135,6 +135,8 @@ Test locations:
 
 Each test directory has its own `vitest.config.ts` and (for Workers tests) a `wrangler.jsonc`.
 
+Integration tests fake HTTP servers with [msw](https://mswjs.io), not by mocking `globalThis.fetch` or injecting a fake `fetch`. See "Faking HTTP servers in integration tests" in `packages/agents/AGENTS.md`.
+
 For a repo-wide rollup of **what proves feature X works, at which layer, and which CI run guards it** — plus the tracked skip/quarantine debt — see [`design/test-coverage-matrix.md`](design/test-coverage-matrix.md).
 
 ## Contributing
@@ -149,7 +151,7 @@ pnpm exec changeset       # interactive prompt — pick packages, semver bump, d
 
 This creates a markdown file in `.changeset/` that gets consumed during release.
 
-Keep the changeset description to a single line that links to the relevant documentation for details. Don't write multi-paragraph explanations — the docs are the source of truth. For example:
+Keep the changeset description to a single line. Don't write multi-paragraph explanations — the docs are the source of truth. Link to the relevant documentation when it tells the reader more than the line does, which it usually will; skip the link when it would add nothing. For example:
 
 ```md
 ---

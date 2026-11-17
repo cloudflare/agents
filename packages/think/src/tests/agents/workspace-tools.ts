@@ -5,7 +5,7 @@
  * system prompt so tests can inspect them and call the tools directly.
  */
 import { Workspace } from "@cloudflare/computer";
-import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
+import { CodemodeBackend } from "@cloudflare/computer/backends/codemode";
 import { createToolBindings } from "@cloudflare/computer/modules/tools";
 import { forAISDKTools } from "@cloudflare/computer/tools/ai-sdk";
 import { tool, type LanguageModel, type ToolSet } from "ai";
@@ -100,15 +100,16 @@ export class ThinkWorkspaceToolsAgent extends Think {
   }
 
   /** Give the Workspace a JavaScript backend so `exec` appears. */
-  async addJavaScriptBackend(): Promise<void> {
+  async addCodemodeBackend(): Promise<void> {
     this.workspace = new Workspace({
       storage: this.ctx.storage,
       backends: [
-        new WorkerJavaScriptBackend({
-          id: "js",
+        new CodemodeBackend({
           loader: this.env.LOADER,
           modules: {
-            "ws:tools": createToolBindings(forAISDKTools(() => this.getTools()))
+            "codemode:tools": createToolBindings(
+              forAISDKTools(() => this.getTools())
+            )
           }
         })
       ]

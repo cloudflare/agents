@@ -1,5 +1,5 @@
 import { Workspace } from "@cloudflare/computer";
-import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
+import { CodemodeBackend } from "@cloudflare/computer/backends/codemode";
 import { Think, skills } from "@cloudflare/think";
 import { callable, routeAgentRequest } from "agents";
 import type { ContextConfig } from "agents/context";
@@ -30,8 +30,7 @@ export class SkillsAgent extends Think<Env> {
   override workspace = new Workspace({
     storage: this.ctx.storage,
     backends: [
-      new WorkerJavaScriptBackend({
-        id: "js",
+      new CodemodeBackend({
         loader: this.env.LOADER,
         access: "read-write"
       })

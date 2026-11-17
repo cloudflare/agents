@@ -12,7 +12,7 @@
   "bin": {
     "agents": "./dist/cli.js"
   },
-  "version": "0.32.0",
+  "version": "0.33.0",
   "sideEffects": [
     "./dist/cli.js"
   ],
@@ -46,10 +46,12 @@
     "@ai-sdk/react": "^4.0.0",
     "@ai-sdk/valibot": "3.0.6",
     "@cloudflare/codemode": "workspace:*",
-    "@earendil-works/chord": "~1.4.0",
-    "@earendil-works/pi-ai": "~1.4.0",
-    "@earendil-works/pi-durable": "~1.4.0",
-    "@earendil-works/pi-tui": "1.4.0",
+    "@earendil-works/chord": "~1.5.0",
+    "@earendil-works/pi-ai": "~1.5.0",
+    "@earendil-works/pi-codemode": "~1.5.0",
+    "@earendil-works/pi-durable": "~1.5.0",
+    "@earendil-works/pi-schema": "~1.5.0",
+    "@earendil-works/pi-tui": "1.5.2",
     "@modelcontextprotocol/client": "2.4.0",
     "@modelcontextprotocol/conformance-v2": "npm:@modelcontextprotocol/conformance@0.2.0-alpha.12",
     "@modelcontextprotocol/sdk": "1.32.2",
@@ -64,9 +66,10 @@
     "ai": "^7.0.0",
     "chat": "^4.31.0",
     "esbuild": "^0.28.1",
-    "glob": "^13.0.6",
+    "glob": "^14.0.2",
     "highlight.js": "11.12.0",
     "just-bash": "^3.0.2",
+    "msw": "^2.7.0",
     "react": "^19.2.7",
     "valibot": "1.4.2",
     "zod": "^4.6.7"
@@ -75,9 +78,10 @@
     "@ai-sdk/provider": "^4.0.0",
     "@ai-sdk/react": "^3.0.0 || ^4.0.0",
     "@cloudflare/codemode": ">=0.5.0",
-    "@earendil-works/chord": "~1.4.0",
-    "@earendil-works/pi-ai": "~1.4.0",
-    "@earendil-works/pi-durable": "~1.4.0",
+    "@earendil-works/chord": "~1.5.0",
+    "@earendil-works/pi-ai": "~1.5.0",
+    "@earendil-works/pi-durable": "~1.5.0",
+    "@earendil-works/pi-schema": "~1.5.0",
     "@modelcontextprotocol/client": "2.4.0",
     "@modelcontextprotocol/sdk": "1.32.2",
     "@modelcontextprotocol/server": "2.4.0",
@@ -110,6 +114,9 @@
       "optional": true
     },
     "@earendil-works/pi-durable": {
+      "optional": true
+    },
+    "@earendil-works/pi-schema": {
       "optional": true
     },
     "@modelcontextprotocol/sdk": {

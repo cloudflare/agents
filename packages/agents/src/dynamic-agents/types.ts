@@ -52,6 +52,10 @@ export type DynamicAgentConnectionMeta = {
 
 export type DynamicAgentConnectionBridgeLike = {
   send(message: string | ArrayBuffer | ArrayBufferView): void | Promise<void>;
+  /** Sends `messages` in order, in one call. */
+  sendMany(
+    messages: ReadonlyArray<string | ArrayBuffer | ArrayBufferView>
+  ): void | Promise<void>;
   close(code?: number, reason?: string): void | Promise<void>;
   setState(state: unknown): unknown | Promise<unknown>;
   broadcast(
@@ -176,6 +180,10 @@ export type RootFacetRpcSurface = {
   _cf_sendToSubAgentConnection(
     connectionId: string,
     message: string | ArrayBuffer | ArrayBufferView
+  ): Promise<void>;
+  _cf_sendManyToSubAgentConnection(
+    connectionId: string,
+    messages: ReadonlyArray<string | ArrayBuffer | ArrayBufferView>
   ): Promise<void>;
   _cf_closeSubAgentConnection(
     connectionId: string,

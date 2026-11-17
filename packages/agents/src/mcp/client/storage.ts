@@ -107,14 +107,27 @@ function persistClientOptions(
   };
 }
 
+/**
+ * Headers as a plain record, so they survive JSON: a `Headers` instance
+ * would be stored as `{}`.
+ */
+function persistHeaders(
+  headers: HeadersInit | undefined
+): Record<string, string> | undefined {
+  return headers ? Object.fromEntries(new Headers(headers)) : undefined;
+}
+
 function persistTransportOptions(
   value?: PersistableTransportOptions
 ): PersistedMcpTransportOptions | undefined {
   if (!value) return undefined;
   return {
     type: value.type,
-    headers: value.headers,
-    requestInit: value.requestInit,
+    headers: persistHeaders(value.headers),
+    requestInit: value.requestInit && {
+      ...value.requestInit,
+      headers: persistHeaders(value.requestInit.headers)
+    },
     reconnectionOptions: value.reconnectionOptions,
     skipIssuerMetadataValidation: value.skipIssuerMetadataValidation,
     onInsufficientScope: value.onInsufficientScope,

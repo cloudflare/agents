@@ -12,14 +12,15 @@ The example composes:
 
 - `PiHarness extends LifecycleCapability`, the harness interface:
   `harness.prompt()`, `harness.submit()`, `harness.sessions`,
-  `harness.session(id)`, and `session.events()` for pi's live events;
+  `harness.session(id)`, and `session.watch()` for pi's live view;
 - one Lifecycle job as the wake, driven by pi's `onWake`: it keeps the
   object alive while pi has work running, is due when pi's next sleep ends,
   and completes when pi has nothing to do;
 - a pi session store on the object's SQLite database;
 - app glue that is not part of the harness: `sockets.ts` puts one session
-  per socket on `WebSockets`, and `view.ts` and `transcript.ts` fold pi's
-  entries and events into what the UI shows;
+  per socket on `WebSockets`, `mirror.ts` keeps the client's copy of it in
+  pi's `ConversationTranscript`, and `view.ts` and `transcript.ts` project
+  that into what the UI shows;
 - a `Workspace` from `@cloudflare/computer` on the same SQLite database,
   and its tools for the model (see [Workspace](#workspace));
 - `createAI` from `agents/models/pi-ai`: Workers AI, and other vendors through
@@ -55,8 +56,11 @@ before a tool was added never sees it; start a new session instead.
 - While a turn runs, type and press Enter to queue a follow-up, or Steer to
   join the running turn.
 
-Reload the page mid-turn: the client gets a snapshot of the current state,
-including the partial answer, and continues from there.
+Reload the page mid-turn: the client gets the session's view, including
+the partial answer, and continues from there. A long session shows its
+newest messages first; "Load earlier messages" pages back to the newest
+context reset. A compaction shows as a small "Earlier messages summarized"
+line that opens to the summary.
 
 A submit whose answer the socket never delivered is sent again on
 reconnect. The client (`src/outbox.ts`) names every submit with an
@@ -71,9 +75,13 @@ pnpm test
 ```
 
 - `sockets.test.ts` connects real WebSockets: a run started over the
-  socket, a client joining mid-run, and a socket that outlives an eviction.
+  socket, a client joining mid-run, a socket that outlives an eviction or a
+  reopened pi, a transcript longer than the watch's window, loading earlier
+  pages up to the newest reset, and filling the gap a long disconnection
+  leaves.
 - `view.test.ts` checks that a client following a run and one joining after
-  it fold pi's events into the same view.
+  it project the same view, that a reset hides the context before it, and
+  that a compaction shows as a summary notice.
 - `outbox.test.ts` checks the client's command outbox, and that a submit
   sent again on reconnect runs once.
 
@@ -94,10 +102,9 @@ export class PiAgent extends DurableObject<Env> {
     storage: this.ctx.storage,
     git: createGitClient(),
     backends: [
-      new WorkerJavaScriptBackend({
-        id: JAVASCRIPT_BACKEND,
+      new CodemodeBackend({
         loader: this.env.LOADER,
-        modules: { "ws:git": createGitModule({ allowNetwork: true }) }
+        modules: { "codemode:git": createGitModule({ allowNetwork: true }) }
       })
     ]
   });
@@ -118,7 +125,7 @@ export class PiAgent extends DurableObject<Env> {
     },
     defaults: { model: this.ai(MODEL_ID), thinkingLevel: "low" }
   });
-  // App glue: this app's socket protocol, built on session.events().
+  // App glue: this app's socket protocol, built on session.watch().
   readonly sockets = new PiSessionSockets(this.harness, this.registry, (tag) =>
     this.ctx.getWebSockets(tag)
   );
@@ -153,10 +160,21 @@ model gets an interrupted result. For `agents/skills` sources,
 `session.setModel`. Without a default model, a session's prompts end
 unanswered (`no_model`) until one is set.
 
-The harness does not choose a transport. `session.events()` returns pi's own
-`AgentEvent` stream: a `snapshot`, then one batch per commit. This app sends
-it over WebSockets (`src/sockets.ts`, `src/protocol.ts`) and folds it with
-`reduceView` (`src/view.ts`) in the browser and in the tests.
+The harness does not choose a transport. `session.watch()` returns pi's own
+conversation view: a window over the transcript and the session's live state,
+with pi's operations for each change. This app sends the view, then the
+operations, over WebSockets (`src/sockets.ts`, `src/protocol.ts`). The window
+is pi's default, the newest 50 to 100 entries. The browser applies the
+operations and merges each value into pi's `ConversationTranscript`
+(`src/mirror.ts`), which keeps every entry the client has seen, loads
+earlier pages and missed entries with `entries` requests that the server
+answers from `session.entries()`, and resumes a reconnect after its newest
+entry. `projectView` (`src/view.ts`) projects the transcript in the browser
+and in the tests.
+
+A watch ends when pi closes, as the harness closes and reopens a pi whose
+storage failed. The socket then gets a new watch that continues after the
+last entry it sent.
 
 `harness.messages()` and `prompt()`'s `messages` are pi's own transcript
 entries (`EntryRecord`). The display model the UI renders is this app's
@@ -178,29 +196,30 @@ loop the caller writes. pi-durable runs the loop itself, so
 `grep`, `write` and `delete` replay-safe. `edit` and `exec` are not: after
 an eviction the model gets an interrupted result rather than a second run.
 
-`exec` has one backend, `WorkerJavaScriptBackend`. Each call runs an ES
-module in a fresh Dynamic Worker, minted through the `LOADER` binding, with
-no network. The module can import `node:fs/promises`, which is the
-workspace, and `ws:git`. computer's own `exec` description is written for a
-choice of shell backends, so `src/workspace.ts` replaces it with one for
-JavaScript that includes the `ws:git` TypeScript interface (`clone`,
-`status`, `diff`, `log`).
+`exec` has one backend, `CodemodeBackend`. Each call runs an ES module in a
+fresh Dynamic Worker, minted through the `LOADER` binding, with no network.
+The module can import `node:fs/promises`, which is the workspace, and
+`codemode:git`. computer's own `exec` description is written for a choice of
+shell backends, so `src/workspace.ts` replaces it with one for JavaScript
+that includes the `codemode:git` TypeScript interface (`clone`, `status`,
+`diff`, `log`).
 
 Git needs two things besides the backend: `git: createGitClient()` from
 `@cloudflare/computer/git` on the `Workspace`, which needs the
-`@platformatic/vfs` peer, and the `ws:git` module from
+`@platformatic/vfs` peer, and the `codemode:git` module from
 `createGitModule({ allowNetwork: true })` (`@cloudflare/computer/modules/git`)
 on the backend, which `clone` needs. Git runs in the host, through isomorphic-git on the workspace
 files, so cloning works while the module itself has no network.
 
 ## Package sources
 
-Pi comes from npm: `@earendil-works/pi-durable`, `pi-ai`, `chord` and
-`pi-telemetry` at `~1.4.0`. Pi is MIT licensed; see
+Pi comes from npm: `@earendil-works/pi-durable`, `pi-ai`, `pi-schema`,
+`chord` and `pi-telemetry` at `~1.5.0`. Pi is MIT licensed; see
 [`licenses/mit-earendil-pi.txt`](./licenses/mit-earendil-pi.txt).
 
-`@cloudflare/computer` comes from npm at `^0.8.0`, the version Think requires.
-It includes the `ws:git` module that `exec` uses for git (added in 0.5).
+`@cloudflare/computer` comes from npm at `^0.10.0`, the version Think requires.
+It includes the `codemode:git` module that `exec` uses for git (added in 0.5
+as `ws:git`, renamed in 0.9).
 
 Note that the repository sets `minimumReleaseAge: 1440` in
 `pnpm-workspace.yaml`, so a pi release less than 24 hours old will not

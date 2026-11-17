@@ -271,6 +271,94 @@ describe("pi-ai: Workers AI chat completions", () => {
     expect(message.usage.input).toBe(100);
   });
 
+  /** OpenAI chunks for one `getWeather` call whose arguments arrive in `pieces`. */
+  function streamedToolCall(pieces: string[]): string[] {
+    const chunk = (delta: Record<string, unknown>, finish?: string) =>
+      JSON.stringify({
+        choices: [{ delta, finish_reason: finish ?? null, index: 0 }],
+        id: "chatcmpl-args",
+        model: "gpt-5-mini-2025-08-07",
+        object: "chat.completion.chunk",
+        usage: null
+      });
+    return [
+      chunk({
+        role: "assistant",
+        tool_calls: [
+          {
+            function: { arguments: "", name: "getWeather" },
+            id: "call_a",
+            index: 0,
+            type: "function"
+          }
+        ]
+      }),
+      ...pieces.map((piece) =>
+        chunk({ tool_calls: [{ function: { arguments: piece }, index: 0 }] })
+      ),
+      chunk({}, "tool_calls"),
+      "[DONE]"
+    ];
+  }
+
+  it("shows a tool call's arguments as they stream, without the raw text", async () => {
+    const binding = fakeBinding(() =>
+      sseResponse(
+        streamedToolCall(['{"city": "Lon', 'don", "unit', 's": "metric"}'])
+      )
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const stream = ai.stream(
+      ai("dynamic/support"),
+      userContext("Weather in London?")
+    );
+    // `partial` is the message being built, so copy each block as it arrives.
+    const partials: Record<string, unknown>[] = [];
+    for await (const event of stream) {
+      const block = event.type === "toolcall_delta" && event.partial.content[0];
+      if (block && block.type === "toolCall") partials.push({ ...block });
+    }
+    const message = await stream.result();
+
+    expect(partials.map((block) => block.arguments)).toEqual([
+      { city: "Lon" },
+      { city: "London" },
+      { city: "London", units: "metric" }
+    ]);
+    for (const block of partials) {
+      expect(Object.keys(block).sort()).toEqual([
+        "arguments",
+        "id",
+        "name",
+        "type"
+      ]);
+    }
+    expect(message.content).toEqual([
+      {
+        arguments: { city: "London", units: "metric" },
+        id: "call_a",
+        name: "getWeather",
+        type: "toolCall"
+      }
+    ]);
+  });
+
+  it("reports malformed final arguments instead of keeping a parsed prefix", async () => {
+    const binding = fakeBinding(() =>
+      sseResponse(streamedToolCall(['{"city": "London"', " oops"]))
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const { message } = await collectEvents(
+      ai.stream(ai("dynamic/support"), userContext("Weather in London?"))
+    );
+
+    const block = message.content[0];
+    expect(block?.type).toBe("toolCall");
+    if (block?.type !== "toolCall") return;
+    expect(block.arguments).toEqual({});
+    expect(block.argumentsError).toContain('{"city": "London" oops');
+  });
+
   it("terminates with an error event on a gateway error response", async () => {
     const binding = fakeBinding(() =>
       jsonResponse(billingError(), {

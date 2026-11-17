@@ -7,15 +7,15 @@ here is in `agents`.
 
 ## What changed
 
-| Before (#2210)                               | Now                                                             |
-| -------------------------------------------- | --------------------------------------------------------------- |
-| pi-agent-core `AgentHarness`                 | pi-durable `Harness`                                            |
-| `Tasks` run per lane, replay-driving pi      | one Lifecycle wake job, driven by pi's `onWake`                 |
-| intake table for queued submissions          | pi's own inbox                                                  |
-| `Streams` log per operation, cursors, replay | pi's `watchEvents`: snapshot, then one batch per commit         |
-| pi's 7 session tables namespaced by adapter  | pi's own `SqliteStorage` schema, prefixed `pi_` (session store) |
-| own event and message projections            | pi's `AgentEvent`s on the wire, one reducer (`view.ts`)         |
-| compaction config                            | none; pi-durable has no compaction yet                          |
+| Before (#2210)                               | Now                                                              |
+| -------------------------------------------- | ---------------------------------------------------------------- |
+| pi-agent-core `AgentHarness`                 | pi-durable `Harness`                                             |
+| `Tasks` run per lane, replay-driving pi      | one Lifecycle wake job, driven by pi's `onWake`                  |
+| intake table for queued submissions          | pi's own inbox                                                   |
+| `Streams` log per operation, cursors, replay | pi's conversation view (`session.watch()`), with its operations  |
+| pi's 7 session tables namespaced by adapter  | pi's own `SqliteStorage` schema, prefixed `pi_` (session store)  |
+| own event and message projections            | pi's view and operations on the wire, one projection (`view.ts`) |
+| compaction config                            | pi's own compaction, on by default; shown as a summary notice    |
 
 The harness went from about 3,600 lines to under 2,000, with no other SDK
 primitive besides Lifecycle jobs. It now lives in `packages/agents` as
@@ -72,12 +72,12 @@ which covers every conversation, background tasks included:
   push the job due now to re-check.
 - **`at`:** pi's tasks are asleep until then. Reschedule the job to `at`.
 - **Neither:** complete the job, so there is no alarm. If a submit is
-  between steps 1 and 2 (an in-memory counter), reschedule instead. A task
-  that pi's restart limit parked does not count: it waits for
-  `pi.retryTask()`, and waiting on it would keep the object awake forever.
+  between steps 1 and 2 (an in-memory counter), reschedule instead.
 
-The step used to wait on `conversation.waitForIdle()`, which does count a
-parked task, so a crash-looping task held the object awake indefinitely.
+Before Pi 1.5, the restart limit parked a crash-looping task
+until `pi.retryTask()`, and the step had to leave parked tasks out, or it
+would keep the object awake forever. Pi now ends such a task, so it is
+never left waiting.
 
 The whole thing relies on one Lifecycle rule: a same-id `push()` made while
 the job is dispatching supersedes that dispatch's outcome. So a submit
@@ -94,12 +94,12 @@ pi's submissions directly. The wake holds no per-submission state.
 `PiHarness` has the shape the other `examples/next/harnesses` share:
 `harness.prompt()`, `harness.submit()`, `harness.abort()`, `harness.wait()`,
 `harness.messages()` (pi's own `EntryRecord`s), `harness.sessions` (`create`, `get`, `fork`, `list`),
-`harness.session(id)` handles, and `session.events()`. A session is a pi
+`harness.session(id)` handles, and `session.watch()`. A session is a pi
 conversation. The root is `"1"`.
 
 Transport is not part of the harness. The socket protocol (one session per
 socket, a tool list on connect, commands) lives in the app's `sockets.ts` and
-`protocol.ts`, and the UI reducer in `view.ts`. They use only the harness's
+`protocol.ts`, and the UI projection in `view.ts`. They use only the harness's
 public API, so another app could put the same sessions on SSE or RPC
 instead.
 
@@ -108,14 +108,29 @@ The shared `Harness` capability in #2285 goes further than this. It has
 round trips, `compact`/`rewind`/`configure`, and capability flags. Gaps
 against it:
 
-- **Events have no cursor.** pi's watch always starts from a snapshot, and
-  there is nothing to replay. That is simpler and correct for UIs, but an
+- **Events have no cursor.** pi's watch always starts from the current view
+  (a window can start after the newest entry a client has), and there is no
+  event log to replay. That is simpler and correct for UIs, but an
   API that promises "replay from any cursor" cannot be built without a log
   that pi does not keep.
 - **No requests or replies.** pi-durable has no approval or permission
   primitive yet. A tool could park on a pi document and a hook, but that is
   ours to invent.
-- **No compaction.** `session.reset(handoff)` is the stand-in.
+
+## Decision: table prefixing belongs to pi
+
+pi's SQLite schema uses names such as `tasks`, `entries`, `conversations`,
+and `documents`, which can collide with other state in the same object.
+The old session store rewrote SQL identifiers using names from pi's
+exported `SQLITE_MIGRATIONS`. That rewrite was replaced in #2616.
+
+The current `openPiSessionStore()` in
+`packages/agents/src/harness/pi/session-store.ts` delegates to pi's
+`openDurableObjectSqliteStorage(storage, { prefix })` adapter from
+`@earendil-works/pi-durable/storage/sqlite/cloudflare`. The prefix defaults
+to `pi_`; the wrapper rejects prefixes starting with `_cf_` (case-insensitive),
+which Durable Objects reserve. Pi owns the schema and prefixing, so a
+storage prefix option is no longer an unresolved upstream request.
 
 ## Hard or unresolved
 
@@ -191,16 +206,6 @@ commits:
 Both read committed state only, so they are safe here. **Ask for:**
 `harness.submissionByRequest()` and `harness.conversations()`.
 
-### Table prefix is a SQL rewrite
-
-pi's SQLite schema uses bare names such as `tasks`, `entries`,
-`conversations`, and `documents`, which easily collide in an object that
-also hosts other state. The session store rewrites identifiers outside
-string literals, using the names it reads from pi's exported
-`SQLITE_MIGRATIONS`. pi's conformance suite passes against it. It breaks if
-a future pi statement puts a table name in a string literal or builds SQL
-dynamically. **Ask for:** a `tablePrefix` option on `SqliteStorage`.
-
 ### Abort needs tools that honor their signal
 
 `conversation.abort()` resolves only once the conversation is idle. A tool
@@ -210,9 +215,13 @@ check the signal. pi's abort has no grace period.
 ### Watches are per socket and in memory
 
 This is app glue in `sockets.ts`, not the harness. Each socket gets its own
-`session.events()` stream. After hibernation or eviction, the host's
-`onStart` calls `sockets.reattach()`, which re-watches every socket and
-sends a fresh snapshot, and the client replaces its state.
+`session.watch()`, with pi's default window, after the client asks with a
+`watch` message that carries where its transcript ends. The client merges
+every view into a `ConversationTranscript` (`mirror.ts`), so a new view
+never replaces what it has. After hibernation or eviction, the host's
+`onStart` calls `sockets.reattach()`, which re-watches every socket. A watch
+that ends because pi closed (the harness reopens a pi that failed) is
+re-watched from right after the last entry the socket got.
 `ctx.getWebSockets(tag)` finds sockets by tag, but nothing gives the tags of
 a socket, so the re-watch walks `sessions.list()` and looks up each
 session's tag.
@@ -244,8 +253,8 @@ schemas, and its `exec` runs on a Workspace backend. What came up:
 - **Two loop models.** `createPiTools` returns declarations and one
   `execute(call)` for a hand-written loop. pi-durable wants a
   `ToolRegistration` per tool, so the adapter pairs them by name. The
-  declarations are JSON Schema, not TypeBox. pi validates with TypeBox, which
-  accepts either, so only the static type needs a cast.
+  declarations are plain JSON Schema. pi validates any JSON Schema with
+  pi-schema, so only the static type needs a cast.
 - **Replay is ours to choose.** computer has no replay notion. Reads,
   searches, whole-file `write` and forced `delete` are marked safe. `edit`
   would fail on text it already replaced, and `exec` runs arbitrary code, so
@@ -253,17 +262,17 @@ schemas, and its `exec` runs on a Workspace backend. What came up:
 - **`exec`'s description assumes shells.** It is built for a choice of
   backends and talks about `npm test`. With one JavaScript backend that
   misleads the model, so the adapter replaces the description and the
-  `command` parameter's text. It documents the typed `ws:git` interface
-  rather than its `cli()`, which gives the model return values it can use
-  directly. The model still sometimes tries `node:path` first; the error
+  `command` parameter's text. It documents the typed `codemode:git`
+  interface rather than its `cli()`, which gives the model return values it
+  can use directly. The model still sometimes tries `node:path` first; the error
   names the module and it recovers.
-- **Git is opt-in twice.** The backend gets `ws:git` from
+- **Git is opt-in twice.** The backend gets `codemode:git` from
   `createGitModule()`, but every call fails until the `Workspace` gets
   `git: createGitClient()`, which needs the optional `@platformatic/vfs`
   peer. Network operations also need `createGitModule({ allowNetwork: true })`.
-- **`ws:git` paths are not the client's.** The git client's types say `dir`
-  defaults to `/`. Through `ws:git` the host resolves `dir` against the
-  module's working directory and keeps it inside the backend root. The
+- **`codemode:git` paths are not the client's.** The git client's types say
+  `dir` defaults to `/`. Through `codemode:git` the host resolves `dir`
+  against the module's working directory and keeps it inside the backend root. The
   `exec` description follows the bridge.
 - **Tool calls run in parallel.** pi runs one round's tool calls at once by
   default. In testing the model sent a `clone` and a `log` in the same
@@ -281,9 +290,9 @@ example.
 - Subagents. pi-durable's subagent tools (examples 22 and 23) should work
   unchanged as registered tools. The background variant needs the "live work
   keep-alive" above.
-- Compaction. No longer pending upstream: 0.99.2 ships `CompactionPolicy`,
-  `CompactionHooks` and the rest, wired into `HarnessOptions`. Not yet used
-  or tested here.
+- Compaction. pi compacts on its own by default; the UI shows each
+  `pi.compaction` entry as an "Earlier messages summarized" notice. The
+  example sets no `CompactionPolicy` or hooks of its own.
 - `ExecutionEnv` for pi's own `read`/`bash`/`edit`/`write`. Unused here:
   the Workspace tools come from computer instead (see "Workspace tools").
 - Session deletion. pi has no conversation delete.

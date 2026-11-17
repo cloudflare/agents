@@ -60,6 +60,17 @@ body {
   counter-reset: line;
 }
 
+/* A compaction summary is pi's notes, headed by sections: keep them small. */
+.sd-summary :is(h1, h2, h3, h4, h5, h6) {
+  margin: 0.75rem 0 0.25rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.25rem;
+}
+.sd-summary > :first-child {
+  margin-top: 0;
+}
+
 @keyframes pulse {
   from {
     opacity: 0.25;

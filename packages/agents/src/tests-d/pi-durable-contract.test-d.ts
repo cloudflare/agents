@@ -16,11 +16,16 @@ import { expectTypeOf } from "vitest";
 import type {
   PiOperationResult,
   PiSubmitOptions,
-  PiWhenBusy
+  PiWhenBusy,
+  PiWhenIdle
 } from "../harness/pi";
 
 expectTypeOf<PiWhenBusy>().toEqualTypeOf<
   NonNullable<InputSubmissionDraft["whenBusy"]>
+>();
+
+expectTypeOf<PiWhenIdle>().toEqualTypeOf<
+  NonNullable<InputSubmissionDraft["whenIdle"]>
 >();
 
 // Every input option pi takes is exposed, apart from the ones PiHarness

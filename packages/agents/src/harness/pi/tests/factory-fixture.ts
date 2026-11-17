@@ -3,11 +3,11 @@ import {
   fauxProvider,
   fauxText,
   fauxToolCall,
-  Type,
   type AssistantMessage,
   type Message,
   type TranscriptContext
 } from "@earendil-works/pi-ai";
+import { arr, num, obj, str } from "@earendil-works/pi-schema";
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "../../../lifecycle";
 import { setWakeTimingForTests } from "../harness";
@@ -83,8 +83,8 @@ function script(context: TranscriptContext): AssistantMessage {
   return fauxAssistantMessage([fauxText(`echo: ${prompt}`)]);
 }
 
-const Shout = Type.Object({ text: Type.String() });
-const Sum = Type.Object({ values: Type.Array(Type.Number()) });
+const Shout = obj({ text: str() });
+const Sum = obj({ values: arr(num()) });
 
 function text(value: string) {
   return { output: [{ type: "text" as const, text: value }] };

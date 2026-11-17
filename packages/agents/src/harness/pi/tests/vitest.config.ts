@@ -18,7 +18,11 @@ export default defineConfig({
   ],
   resolve: {
     // One copy of pi's module state for the harness and the tests.
-    dedupe: ["@earendil-works/pi-ai", "@earendil-works/pi-durable"]
+    dedupe: [
+      "@earendil-works/pi-ai",
+      "@earendil-works/pi-codemode",
+      "@earendil-works/pi-durable"
+    ]
   },
   test: {
     name: "harness-pi",

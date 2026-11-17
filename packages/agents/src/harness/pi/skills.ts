@@ -1,9 +1,10 @@
-import { Type } from "@earendil-works/pi-ai";
+import { StringEnum } from "@earendil-works/pi-ai";
 import type {
   Extension,
   ToolExecutionResult,
   ToolRegistration
 } from "@earendil-works/pi-durable";
+import { obj, opt, str } from "@earendil-works/pi-schema";
 import {
   formatSkillDiagnostic,
   loadSkillCatalog,
@@ -29,9 +30,9 @@ function errorResult(error: Error): ToolExecutionResult {
 function skillTools(catalog: SkillCatalog): ToolRegistration[] {
   const names = catalog.skills.map((entry) => entry.skill.name);
   if (names.length === 0) return [];
-  const nameSchema = Type.Union(names.map((name) => Type.Literal(name)));
+  const nameSchema = StringEnum(names);
 
-  const activateParameters = Type.Object({ name: nameSchema });
+  const activateParameters = obj({ name: nameSchema }, { open: true });
   const activateSkill: ToolRegistration<typeof activateParameters> = {
     name: "activate_skill",
     description:
@@ -46,10 +47,10 @@ function skillTools(catalog: SkillCatalog): ToolRegistration[] {
     }
   };
 
-  const resourceParameters = Type.Object({
-    name: Type.Optional(nameSchema),
-    path: Type.String({ minLength: 1 })
-  });
+  const resourceParameters = obj(
+    { name: opt(nameSchema), path: str({ minLength: 1 }) },
+    { open: true }
+  );
   const readResource: ToolRegistration<typeof resourceParameters> = {
     name: "read_skill_resource",
     description:

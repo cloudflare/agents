@@ -9,7 +9,7 @@ The two packages use different tables, so switching packages does not move your 
 - Computer only runs inside a Durable Object. It takes `ctx.storage`. D1, custom `SqlBackend`s, and `InMemoryFs` have no replacement.
 - One Durable Object storage holds one Computer workspace. Shell's `namespace` option has no equivalent yet ([cloudflare/computer#219](https://github.com/cloudflare/computer/issues/219)).
 - Computer keeps all file content in SQLite and does not write large files to R2 yet ([cloudflare/computer#217](https://github.com/cloudflare/computer/issues/217)). R2 mounts are read-only.
-- Inside an isolate, code reads and writes files through `node:fs/promises` or a shell command. Computer has no `state.*` helper object. Modules you configure on the JavaScript backend cover anything else.
+- Inside an isolate, code reads and writes files through `node:fs/promises` or a shell command. Computer has no `state.*` helper object. Modules you configure on the codemode backend cover anything else.
 - There are no host-held git credentials for model-run `git` yet ([cloudflare/computer#218](https://github.com/cloudflare/computer/issues/218)). Host code can still pass `onAuth` to `workspace.git` calls.
 
 ## Where Shell stores data

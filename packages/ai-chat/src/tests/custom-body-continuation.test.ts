@@ -147,6 +147,7 @@ describe("Custom body forwarding during tool continuation", () => {
           method: "POST",
           body: JSON.stringify({
             messages: [userMessage, toolCallMessage],
+            clientTools: [{ name: "changeBackgroundColor" }],
             customField: "first-body",
             delayMs: 1000
           })
@@ -164,6 +165,7 @@ describe("Custom body forwarding during tool continuation", () => {
           method: "POST",
           body: JSON.stringify({
             messages: [userMessage, toolCallMessage],
+            clientTools: [{ name: "changeBackgroundColor" }],
             customField: "second-body"
           })
         }

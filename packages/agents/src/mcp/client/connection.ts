@@ -27,10 +27,16 @@ import {
   fetchMcpTools
 } from "./catalog";
 import type { AgentMcpOAuthProvider } from "./do-oauth-client-provider";
-import { createMcpSdkClient, normalizeMcpClientOptions } from "./runtime";
+import { AuthorizationTurns } from "./authorization-turns";
+import {
+  advertisedElicitation,
+  createMcpSdkClient,
+  normalizeMcpClientOptions
+} from "./runtime";
 export { elicitationCapabilitiesFromHandlers } from "./runtime";
 import {
   isTransportNotImplemented,
+  isAuthorizationRefused,
   isUnauthorized,
   toErrorMessage
 } from "./errors";
@@ -82,7 +88,50 @@ export type MCPTransportOptions = (
 ) & {
   authProvider?: AgentMcpOAuthProvider;
   type?: TransportType;
+  /**
+   * Headers sent with every HTTP request, for servers that take a static
+   * credential instead of OAuth. Stored with the server, so restored
+   * connections send them too.
+   */
+  headers?: HeadersInit;
 };
+
+/**
+ * Apply `headers` to an HTTP transport's options. The SDK transports only
+ * read `requestInit`, and the SSE stream only `eventSourceInit.fetch`.
+ * Headers already in `requestInit` win.
+ */
+function withStaticHeaders<
+  T extends StreamableHTTPClientTransportOptions | SSEClientTransportOptions
+>(options: T & { headers?: HeadersInit }): T {
+  const { headers } = options;
+  if (!headers) return options;
+  const merge = (overrides: HeadersInit | undefined) => {
+    const merged = new Headers(headers);
+    new Headers(overrides).forEach((value, key) => merged.set(key, value));
+    return merged;
+  };
+  const sse = options as SSEClientTransportOptions;
+  const streamFetch = sse.eventSourceInit?.fetch ?? fetch;
+  return {
+    ...options,
+    requestInit: {
+      ...options.requestInit,
+      headers: merge(options.requestInit?.headers)
+    },
+    eventSourceInit: {
+      ...sse.eventSourceInit,
+      fetch: (url, init) =>
+        streamFetch(url, {
+          ...init,
+          // The SDK's headers win, whatever shape they arrive in.
+          headers: Object.fromEntries(
+            merge(init.headers)
+          ) as typeof init.headers
+        })
+    }
+  };
+}
 
 export type MCPClientConnectionResult = {
   state: MCPConnectionState;
@@ -135,6 +184,15 @@ export class MCPClientConnection {
     | SSEClientTransport
     | RPCClientTransport;
   private _restoredListSubscription?: McpSubscription;
+  /**
+   * Whether the last connect or discovery failed because authorization was
+   * refused in a way retrying cannot change: a 403 from the server, or an
+   * OAuth error such as `invalid_target` from the authorization server. The
+   * manager stops reconnecting such a server instead of asking again.
+   */
+  accessRefused = false;
+  /** Keeps concurrent `401`s from starting interleaved OAuth flows. */
+  private readonly _authorizationTurns = new AuthorizationTurns();
   prompts: Prompt[] = [];
   resources: Resource[] = [];
   resourceTemplates: ResourceTemplate[] = [];
@@ -142,6 +200,11 @@ export class MCPClientConnection {
 
   /** True when resuming a streamable-http session without cached capabilities */
   private _probingCapabilities = false;
+
+  /** Whether init() is connecting: its client must not be replaced. */
+  private _connecting = false;
+  /** The elicitation capability `client` was built to advertise, as JSON. */
+  private _advertisedElicitation = "null";
 
   /** Tracks in-flight discovery to allow cancellation */
   private _discoveryAbortController: AbortController | undefined;
@@ -209,6 +272,7 @@ export class MCPClientConnection {
       }
     );
     this._elicitationEnabled = created.elicitationEnabled;
+    this._advertisedElicitation = this.elicitationToAdvertise();
     return created.client;
   }
 
@@ -228,8 +292,53 @@ export class MCPClientConnection {
     // clearing the handlers un-advertises the capability on rebuild.
     this.options.capabilitySeed = undefined;
 
-    if (!this._transport) {
+    // A connect in flight runs on the current client: replacing it would
+    // leave the connection on a client that never connected. init() connects
+    // again when the handshake it made advertised something else.
+    if (!this._transport && !this._connecting) {
       this.client = this.createClient();
+    }
+  }
+
+  /** What a client built now would advertise for elicitation, as JSON. */
+  private elicitationToAdvertise(): string {
+    return JSON.stringify(
+      advertisedElicitation(
+        this.options.client,
+        this.options.capabilitySeed,
+        this.options.elicitationHandlers
+      ) ?? null
+    );
+  }
+
+  /**
+   * Connect, and connect again when the elicitation handlers changed during
+   * the handshake: apps configure them in `onStart`, while a restored
+   * server is already connecting.
+   */
+  private async connectWithCurrentHandlers(
+    transportType: TransportType
+  ): Promise<MCPClientConnectionResult> {
+    this._connecting = true;
+    try {
+      let res = await this.tryConnect(transportType);
+      // Bounded, so handlers that keep changing cannot hold the connect.
+      for (let again = 0; again < 3; again++) {
+        if (this._advertisedElicitation === this.elicitationToAdvertise()) {
+          break;
+        }
+        // A 401 keeps its transport for the callback, which builds a new
+        // client once the user has authorized.
+        if (res.state === MCPConnectionState.AUTHENTICATING) break;
+        this._transport = undefined;
+        await this.client.close().catch(() => {});
+        this.client = this.createClient();
+        if (res.state !== MCPConnectionState.CONNECTED) break;
+        res = await this.tryConnect(transportType);
+      }
+      return res;
+    } finally {
+      this._connecting = false;
     }
   }
 
@@ -261,10 +370,13 @@ export class MCPClientConnection {
       this.client = this.createClient();
     }
 
-    const res = await this.tryConnect(transportType);
+    const res = await this.connectWithCurrentHandlers(transportType);
 
     // Set the connection state
     this.connectionState = res.state;
+    this.accessRefused =
+      res.state === MCPConnectionState.FAILED &&
+      isAuthorizationRefused(res.error);
 
     // Handle the result and emit appropriate events
     if (res.state === MCPConnectionState.CONNECTED && res.transport) {
@@ -416,7 +528,12 @@ export class MCPClientConnection {
         typeof callback === "string"
           ? new URLSearchParams({ code: callback })
           : callback;
-      await this.finishAuthProbe(callbackParams);
+      // In a turn of its own: a 401's refresh that started before the
+      // exchange finishes first, and one that starts after it finds the
+      // newer token.
+      await this._authorizationTurns.run(() =>
+        this.finishAuthProbe(callbackParams)
+      );
     } catch (error) {
       this.connectionState = MCPConnectionState.FAILED;
       throw error;
@@ -620,6 +737,7 @@ export class MCPClientConnection {
       this.connectionState = isUnauthorized(e)
         ? MCPConnectionState.AUTHENTICATING
         : MCPConnectionState.CONNECTED;
+      this.accessRefused = isAuthorizationRefused(e);
 
       const error = e instanceof Error ? e.message : String(e);
       // A restored streamable HTTP session rejected with 404 must be
@@ -763,6 +881,14 @@ export class MCPClientConnection {
     );
   }
 
+  /**
+   * @internal The transport of the open session, if any. Each connect opens
+   * a new one, and init() drops it before reconnecting.
+   */
+  get session(): object | undefined {
+    return this._transport;
+  }
+
   get sessionId(): string | undefined {
     if (this._transport instanceof StreamableHTTPClientTransport) {
       return this._transport.sessionId;
@@ -898,14 +1024,26 @@ export class MCPClientConnection {
   getTransport(transportType: BaseTransportType) {
     switch (transportType) {
       case "streamable-http":
-        return new StreamableHTTPClientTransport(
-          this.url,
-          this.options.transport as StreamableHTTPClientTransportOptions
+        return this.withAuthorizationTurns(
+          new StreamableHTTPClientTransport(
+            this.url,
+            this.authorizationTurnOptions(
+              withStaticHeaders(
+                this.options.transport as StreamableHTTPClientTransportOptions
+              )
+            )
+          )
         );
       case "sse":
-        return new SSEClientTransport(
-          this.url,
-          this.options.transport as SSEClientTransportOptions
+        return this.withAuthorizationTurns(
+          new SSEClientTransport(
+            this.url,
+            this.authorizationTurnOptions(
+              withStaticHeaders(
+                this.options.transport as SSEClientTransportOptions
+              )
+            )
+          )
         );
       case "rpc":
         return new RPCClientTransport(
@@ -914,6 +1052,30 @@ export class MCPClientConnection {
       default:
         throw new Error(`Unsupported transport type: ${transportType}`);
     }
+  }
+
+  /**
+   * Take an HTTP transport's OAuth flows one at a time: a `401` waits for the
+   * authorization an earlier one started, so concurrent requests share one
+   * client registration and one pending link.
+   */
+  /** Transport options whose `fetch` records the token each 401 carried. */
+  private authorizationTurnOptions<
+    T extends StreamableHTTPClientTransportOptions | SSEClientTransportOptions
+  >(options: T): T {
+    if (!this.options.transport.authProvider) return options;
+    return {
+      ...options,
+      fetch: this._authorizationTurns.wrapFetch(options.fetch)
+    };
+  }
+
+  private withAuthorizationTurns<T extends object>(transport: T): T {
+    const { authProvider } = this.options.transport;
+    if (authProvider) {
+      this._authorizationTurns.wrapTransport(transport, authProvider);
+    }
+    return transport;
   }
 
   private async tryConnect(

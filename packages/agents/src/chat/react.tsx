@@ -2649,6 +2649,10 @@ export function useAgentChat<
           });
 
           streamStateRef.current = result.state;
+          // A server-started turn can stream here without a resume handshake
+          // (e.g. `continueLastTurn()`). Register it so `stop()` cancels it,
+          // like the resume-fallback path does (#2803).
+          if (result.isStreaming) customTransport.observeServerTurn(data.id);
           if (result.messagesUpdate) {
             setMessages(
               result.messagesUpdate as unknown as (

@@ -85,6 +85,34 @@ supporting modules live in `src/mcp/client/`; `types.ts`, `rpc.ts`, and
 
 The SDK v2 client negotiates Stateless first and falls back to Legacy on the same connection. Agents persists the selected protocol and discovery result alongside resumable HTTP state. An in-flight elicitation handler and continuation remain memory-only; isolate restart rejects the operation and the caller retries it.
 
+`MCPClientManager` (`src/mcp/client/manager.ts`) is the public API and the Lifecycle hooks; it decides nothing itself. It keeps one `MCPClientConnection` per server and hands every controller one `McpClientContext` (`context.ts`): the connections, the store, the lanes, storage, and the manager's events. Dependencies point one way, top to bottom:
+
+| Module                      | Owns                                                                                                                                                             |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `servers.ts`                | Each server's life: register, connect, discover, restore, settle, reconnect, close, remove, migrate. `afterFailure` is the one place that decides retry or stop. |
+| `authorization.ts`          | Links and OAuth: entering `authenticating` (round limit, spent links), callbacks, request recovery, provider creation and storage                                |
+| `status.ts`                 | The transitions both share: stop with a recorded failure, ready, save the session                                                                                |
+| `elicitation.ts`            | Elicitation handlers and the capabilities they advertise                                                                                                         |
+| `legacy-connect.ts`         | The deprecated `connect()`                                                                                                                                       |
+| `server-store.ts`           | Every SQL statement over `cf_agents_mcp_servers`                                                                                                                 |
+| `server-lanes.ts`           | One queue of connection work per server; re-entrant for nested calls                                                                                             |
+| `authorization-turns.ts`    | One OAuth flow at a time per connection, so concurrent 401s share one client and one link                                                                        |
+| `authorization-rounds.ts`   | The step-up round count, as pure functions                                                                                                                       |
+| `oauth-callback.ts`         | Callback recognition and parsing, state checks, code exchange, response rendering                                                                                |
+| `catalog.ts`, `ai-tools.ts` | Paginated catalogs, namespaced listings and filters; AI SDK tool conversion                                                                                      |
+| `url-policy.ts`             | Stable server ids and the SSRF policy                                                                                                                            |
+| `connection.ts`             | Transport selection, the SDK client, catalogs and the connection-level state machine                                                                             |
+
+`servers.ts` reaches `connectToServer` and `discoverIfConnected` through the manager, so a subclass override (or a test spy) sees internal calls too.
+
+Connect, discovery, establish, OAuth callback completion and restore for one server run through its lane, so they never interleave on one connection.
+
+A connect (add, restore, after the OAuth callback, explicit reconnect) makes the server's quick in-place attempts (`retry`, 3 by default) and then settles. A failure is recorded and stays: nothing retries on a timer, and restore shows it without connecting. This matches Claude Code: a few quick attempts, then `failed` until someone reconnects. A refused authorization skips even the quick attempts: a 401 no link can answer, a 403 left after any step-up, or an OAuth error other than `server_error` / `temporarily_unavailable` records `authorization-failed`; anything else records `connect-failed`.
+
+Re-authorization follows the spec's step-up retry limit (`authorization-rounds.ts`): rounds are counted per requested scope set, a round counts once its callback completed and the server asked for the same scopes again, and a fourth round within an hour records an `authorization-exhausted` failure instead of showing a link. Several links for one pending ask count as one round.
+
+A recorded failure (`failure` column, added on first use) is terminal: restore shows it without connecting, and only an explicit reconnect (`reconnectMcpServer` / `reconnectServer`, or the manager's `connectToServer` and `establishConnection`) clears it. `addMcpServer` for a registered server never retries a failure (apps call it from `onStart` and `onConnect`); it throws the recorded error. A waiting server keeps the link it was given until someone reconnects it: whether the link still works is the authorization server's call, and the callback reports it when it does not. A denied or failed callback and a 401 right after a completed authorization are recorded the same way; the manager remembers the state each callback redeemed so that link is never shown again. A server is `authenticating` exactly when the manager has persisted the `auth_url` its provider produced; connect, discovery and request-time re-authorization (scope step-up, failed refresh) all enter that state through one transition. Restore puts a server with a persisted `auth_url` back in `authenticating` on that link, as on main. Work that outlives `removeServer` (a connect, discovery or code exchange) checks it still owns the connection before writing anything back.
+
 ## Verification matrix
 
 | Surface                    | Evidence                                                                                                                                                       |

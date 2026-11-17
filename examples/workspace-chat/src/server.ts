@@ -8,7 +8,7 @@ import {
   isStepCount
 } from "ai";
 import { Workspace } from "@cloudflare/computer";
-import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
+import { CodemodeBackend } from "@cloudflare/computer/backends/codemode";
 import { createGitClient } from "@cloudflare/computer/git";
 import { createGitModule } from "@cloudflare/computer/modules/git";
 import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
@@ -27,7 +27,7 @@ type FileEntry = {
  * agent's SQLite. The model gets Computer's file tools (`read`, `ls`, `find`,
  * `grep`, `write`, `edit`, `delete`) and an `exec` tool that runs JavaScript
  * modules against the workspace in a Dynamic Worker, with git through the
- * `ws:git` module.
+ * `codemode:git` module.
  */
 export class WorkspaceChatAgent extends AIChatAgent {
   workspace = new Workspace({
@@ -35,11 +35,10 @@ export class WorkspaceChatAgent extends AIChatAgent {
     git: createGitClient(),
     defaultGitIdentity: { name: "Workspace Chat", email: "agent@example.com" },
     backends: [
-      new WorkerJavaScriptBackend({
-        id: "js",
+      new CodemodeBackend({
         loader: this.env.LOADER,
         access: "read-write",
-        modules: { "ws:git": createGitModule({ allowNetwork: true }) }
+        modules: { "codemode:git": createGitModule({ allowNetwork: true }) }
       })
     ]
   });
@@ -57,7 +56,7 @@ export class WorkspaceChatAgent extends AIChatAgent {
       instructions: [
         "You are a helpful coding assistant with a persistent workspace rooted at /workspace.",
         "Use read, ls, find, and grep to inspect files, and write, edit, and delete to change them.",
-        "For multi-file work or anything that needs code, use exec to run a JavaScript module. It can import `node:fs/promises` and, for git, `ws:git` (status, diff, log, clone, cli).",
+        "For multi-file work or anything that needs code, use exec to run a JavaScript module. It can import `node:fs/promises` and, for git, `codemode:git` (status, diff, log, clone, cli).",
         "When the user asks you to create files or projects, use the tools to actually do it.",
         "After making changes, briefly summarize what you did."
       ].join("\n"),

@@ -41,6 +41,14 @@
         "name": "EvictableStartObject"
       },
       {
+        "class_name": "FetchErrorObject",
+        "name": "FetchErrorObject"
+      },
+      {
+        "class_name": "TestFetchErrorAgent",
+        "name": "TestFetchErrorAgent"
+      },
+      {
         "class_name": "ScheduledLifecycleObject",
         "name": "ScheduledLifecycleObject"
       },
@@ -148,6 +156,10 @@
       {
         "class_name": "TestOAuthAgent",
         "name": "TestOAuthAgent"
+      },
+      {
+        "class_name": "McpIntegrationAgent",
+        "name": "McpIntegrationAgent"
       },
       {
         "class_name": "TestCustomOAuthAgent",
@@ -469,6 +481,8 @@
         "AlarmStartFailureObject",
         "ConcurrentStartObject",
         "EvictableStartObject",
+        "FetchErrorObject",
+        "TestFetchErrorAgent",
         "ScheduledLifecycleObject",
         "SchedulerHarnessObject",
         "SchedulerStartupWarnObject",
@@ -497,6 +511,7 @@
         "TestUserNotificationAgent",
         "TestRaceAgent",
         "TestOAuthAgent",
+        "McpIntegrationAgent",
         "TestCustomOAuthAgent",
         "TestMcpJurisdiction",
         "TestAlarmInitAgent",

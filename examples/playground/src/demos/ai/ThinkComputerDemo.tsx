@@ -39,7 +39,7 @@ const layers: Array<{
     details: [
       "JavaScript modules or just-bash in a Dynamic Worker, or a full Linux container",
       "The exec tool appears once the Workspace has a backend",
-      "Modules you supply, such as ws:git, are importable from executed code"
+      "Modules you supply, such as codemode:git, are importable from executed code"
     ]
   },
   {
@@ -49,7 +49,7 @@ const layers: Array<{
     details: [
       "Uses isomorphic-git against the Workspace filesystem",
       "Runs in the host, so executed code needs no network of its own",
-      "Available as workspace.git and as the ws:git module"
+      "Available as workspace.git and as the codemode:git module"
     ]
   },
   {
@@ -71,7 +71,10 @@ const flow = [
   ],
   ["think_before_turn", { contextBlocks: ["workspace tree", "recent files"] }],
   ["tool_grep", { pattern: "foo", path: "/workspace/src", matches: 3 }],
-  ["tool_exec", { backend: "js", source: "export default async () => ..." }],
+  [
+    "tool_exec",
+    { backend: "codemode", source: "export default async () => ..." }
+  ],
   ["tool_exec_result", { exitCode: 0, filesChanged: 2 }],
   ["assistant_response", { summary: "Renamed foo to bar in two files." }]
 ];
@@ -98,7 +101,7 @@ export class Assistant extends Think<Env> {
     description:
       "Every Think agent has a Computer Workspace with file tools. Add an execution backend, and the modules it offers, to give the model an exec tool.",
     code: `import { Workspace } from "@cloudflare/computer";
-import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
+import { CodemodeBackend } from "@cloudflare/computer/backends/codemode";
 import { createGitClient } from "@cloudflare/computer/git";
 import { createGitModule } from "@cloudflare/computer/modules/git";
 
@@ -107,11 +110,10 @@ export class Assistant extends Think<Env> {
     storage: this.ctx.storage,
     git: createGitClient(),
     backends: [
-      new WorkerJavaScriptBackend({
-        id: "js",
+      new CodemodeBackend({
         loader: this.env.LOADER,
         access: "read-write",
-        modules: { "ws:git": createGitModule() }
+        modules: { "codemode:git": createGitModule() }
       })
     ]
   });

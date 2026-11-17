@@ -1,6 +1,6 @@
 /**
  * The zod input schema shared by the AI SDK and TanStack AI adapters. Kept
- * out of the core so the pi adapter, which uses TypeBox, does not need zod.
+ * out of the core so the pi adapter, which uses pi-schema, does not need zod.
  * Internal — not an entry point.
  */
 import { z } from "zod";

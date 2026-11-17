@@ -234,6 +234,11 @@ thinking level) is remapped through the model's own `thinkingLevelMap` — as fa
 can carry it; see [thinking shapes](#thinking-shapes) for the one limit. Precedence is call,
 then model, then `createAI` settings.
 
+With a `sessionId`, an Anthropic model whose `baseUrl` is `api.anthropic.com` uses pi-ai's message
+threads, and AI Gateway forwards the `thread` field, so later requests send only the new messages.
+To send the whole conversation every time, set `disableContinuation: true` on the call or
+`compat.supportsMessageThreads: false` on the model.
+
 ## How a request travels
 
 | Model                                   | `api`                | Through the binding                                       | With an account id and token                           |
@@ -369,7 +374,7 @@ Every other model in the catalog takes the full set.
 
 ## Requirements
 
-This subpath needs `@earendil-works/pi-ai@~1.4.0`, an optional peer of `agents`. `agents`
+This subpath needs `@earendil-works/pi-ai@~1.5.0`, an optional peer of `agents`. `agents`
 takes no vendor package as a dependency, optional or otherwise. An unlisted `@cf/` id resolves with default metadata (a
 128k context window, 8192 output tokens, zero cost); pass overrides when you know better.
 

@@ -173,6 +173,51 @@ export class CounterSubAgent extends Agent {
     return this.cancelSchedule(id);
   }
 
+  /** Schedule a callback that throws on its first attempt. */
+  async scheduleFlakyCallback(value: string): Promise<string> {
+    const schedule = await this.schedule(
+      60,
+      "flakyScheduledCallback",
+      { value },
+      { retry: { maxAttempts: 2, baseDelayMs: 300, maxDelayMs: 300 } }
+    );
+    return schedule.id;
+  }
+
+  /** Queue an item whose callback throws on its first attempt. */
+  async queueFlakyCallback(id: string, value: string): Promise<string> {
+    return this.queue(
+      "flakyQueuedCallback",
+      { value },
+      { id, retry: { maxAttempts: 2, baseDelayMs: 300, maxDelayMs: 300 } }
+    );
+  }
+
+  /** Logs every call; the first call for an item id throws. */
+  flakyQueuedCallback(
+    payload: { value: string },
+    item: { id: string; callback: string }
+  ) {
+    this.flakyScheduledCallback(payload, item);
+  }
+
+  /** Logs every attempt; the first one for a schedule throws. */
+  flakyScheduledCallback(
+    payload: { value: string },
+    schedule: { id: string; callback: string }
+  ) {
+    const [{ count }] = this.sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM schedule_log WHERE schedule_id = ${schedule.id}
+    `;
+    this.sql`
+      INSERT INTO schedule_log
+        (value, agent_name, current_agent_name, parent_class, schedule_id, callback)
+      VALUES
+        (${payload.value}, ${this.name}, null, ${this.parentPath.at(-1)?.className ?? ""}, ${schedule.id}, ${schedule.callback})
+    `;
+    if (count === 0) throw new Error("first attempt fails");
+  }
+
   async selfDestruct(): Promise<void> {
     await this.destroy();
   }
@@ -1248,6 +1293,7 @@ export class TestSubAgentParent extends Agent {
   }
 
   private _subAgentBroadcastCalls = 0;
+  private _subAgentConnectionSendCalls = 0;
   private _startsInThisInstance = 0;
 
   onStart(): void {
@@ -1261,6 +1307,27 @@ export class TestSubAgentParent extends Agent {
 
   subAgentBroadcastCallCount(): number {
     return this._subAgentBroadcastCalls;
+  }
+
+  /** Root calls a sub-agent has made to send on one of its connections. */
+  subAgentConnectionSendCallCount(): number {
+    return this._subAgentConnectionSendCalls;
+  }
+
+  override async _cf_sendToSubAgentConnection(
+    connectionId: string,
+    message: string | ArrayBuffer | ArrayBufferView
+  ): Promise<void> {
+    this._subAgentConnectionSendCalls += 1;
+    await super._cf_sendToSubAgentConnection(connectionId, message);
+  }
+
+  override async _cf_sendManyToSubAgentConnection(
+    connectionId: string,
+    messages: ReadonlyArray<string | ArrayBuffer | ArrayBufferView>
+  ): Promise<void> {
+    this._subAgentConnectionSendCalls += 1;
+    await super._cf_sendManyToSubAgentConnection(connectionId, messages);
   }
 
   async broadcastFromSubAgentDetached(
@@ -1567,6 +1634,61 @@ export class TestSubAgentParent extends Agent {
       // teardown actually happened, asserted by the caller.
       return e instanceof Error ? e.message : String(e);
     }
+  }
+
+  /**
+   * Queue a flaky item from the facet; once its first attempt failed and
+   * the facet waits to retry, push the same id with the same payload.
+   * Returns how many callback calls the facet logged once the queue drains.
+   */
+  async subAgentQueueReplacedDuringRetry(
+    subAgentName: string
+  ): Promise<number> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    await child.queueFlakyCallback("flaky-item", "same");
+    const waitFor = async (done: () => Promise<boolean>) => {
+      const deadline = Date.now() + 5_000;
+      while (!(await done()) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    };
+    await waitFor(
+      async () => (await this.subAgentScheduleLog(subAgentName)).length > 0
+    );
+    await child.queueFlakyCallback("flaky-item", "same");
+    await waitFor(async () => (await this.rootQueueRows()).length === 0);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    return (await this.subAgentScheduleLog(subAgentName)).length;
+  }
+
+  async subAgentScheduleFlaky(
+    subAgentName: string,
+    value: string
+  ): Promise<string> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.scheduleFlakyCallback(value);
+  }
+
+  /**
+   * Run the alarm by hand; once the facet's first attempt has failed and it
+   * waits to retry, cancel the schedule from the facet. Returns how many
+   * attempts the facet logged.
+   */
+  async runAlarmCancellingDuringRetry(
+    subAgentName: string,
+    id: string
+  ): Promise<number> {
+    const alarm = this.alarm();
+    const deadline = Date.now() + 5_000;
+    while (
+      (await this.subAgentScheduleLog(subAgentName)).length === 0 &&
+      Date.now() < deadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    await this.subAgentCancelSchedule(subAgentName, id);
+    await alarm;
+    return (await this.subAgentScheduleLog(subAgentName)).length;
   }
 
   async subAgentCancelSchedule(
@@ -2707,6 +2829,20 @@ export class SlowReplySubAgent extends Agent {
     }
 
     connection.send(message);
+    return "sent";
+  }
+
+  /** Sends several direct connection messages during the current frame. */
+  @callable()
+  sendConnectionMessagesNow(messages: string[]): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.sendConnectionMessagesNow requires an active connection"
+      );
+    }
+
+    for (const message of messages) connection.send(message);
     return "sent";
   }
 

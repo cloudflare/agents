@@ -26,7 +26,7 @@ export function createWorkspaceTools(workspace: Workspace): ToolRegistration[] {
   return tools.map((tool): ToolRegistration => ({
     name: tool.name,
     description: tool.description,
-    // Plain JSON Schema: pi validates with TypeBox, which accepts it.
+    // Plain JSON Schema: pi validates it with pi-schema.
     parameters: tool.parameters,
     ...(tool.constrainedSampling
       ? { constrainedSampling: tool.constrainedSampling }

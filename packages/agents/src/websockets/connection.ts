@@ -34,6 +34,13 @@ type ConnectionAttachments = {
     id: string;
     tags: string[];
     uri?: string;
+    /**
+     * Set when the host closes the socket. Stored in the attachment, not
+     * only on the socket, so it survives hibernation: a client that ignores
+     * the Close frame can still send, and the object may have been evicted
+     * by the time that message arrives.
+     */
+    closed?: true;
   };
   __user?: unknown;
 };
@@ -64,11 +71,12 @@ function tryGetManagedWebSocketMeta(
     if (typeof id !== "string") {
       return null;
     }
-    const { uri } = pk as { uri?: unknown };
+    const { uri, closed } = pk as { uri?: unknown; closed?: unknown };
     return {
       id,
       tags: Array.isArray(tags) ? tags : [],
-      uri: typeof uri === "string" ? uri : undefined
+      uri: typeof uri === "string" ? uri : undefined,
+      ...(closed === true && { closed })
     } satisfies ConnectionAttachments["__pk"];
   } catch {
     return null;
@@ -77,6 +85,22 @@ function tryGetManagedWebSocketMeta(
 
 export function isManagedWebSocket(ws: WebSocket): boolean {
   return tryGetManagedWebSocketMeta(ws) !== null;
+}
+
+/**
+ * Whether the host closed this managed socket through its `Connection`.
+ *
+ * The platform still delivers messages that arrive on a socket after the
+ * host closed it. A handler that rejects a client from `onConnect` closes
+ * the socket before the client has the upgrade response, so everything
+ * that client sends arrives after the close.
+ *
+ * `readyState` cannot tell these apart: it also reads CLOSED once the
+ * client has closed, while messages the client sent before its close are
+ * still being delivered. Those must run.
+ */
+export function isClosedByHost(ws: WebSocket): boolean {
+  return tryGetManagedWebSocketMeta(ws)?.closed === true;
 }
 
 /**
@@ -108,6 +132,31 @@ class AttachmentCache {
 }
 
 const attachments = new AttachmentCache();
+
+/**
+ * Record in the attachment that the host closed this socket. Returns how
+ * to undo it. Best-effort: a socket that can no longer store an attachment
+ * is already closing because the client closed it, and the client sends
+ * nothing after its own close.
+ */
+function markClosedByHost(ws: WebSocket): () => void {
+  let before: ConnectionAttachments;
+  try {
+    before = attachments.get(ws);
+    if (before.__pk.closed) return () => {};
+    attachments.set(ws, { ...before, __pk: { ...before.__pk, closed: true } });
+  } catch {
+    return () => {};
+  }
+  return () => {
+    try {
+      attachments.set(ws, before);
+    } catch {
+      // The socket closed in the meantime; the mark is right after all.
+    }
+  };
+}
+
 const connections = new WeakSet<Connection>();
 const isWrapped = (ws: WebSocket): ws is Connection => {
   return connections.has(ws as Connection);
@@ -155,6 +204,21 @@ export const createConnection = (ws: WebSocket | Connection): Connection => {
       get() {
         const attachment = attachments.get(ws);
         return (attachment.__user ?? null) as ConnectionState<unknown>;
+      }
+    },
+    close: {
+      configurable: true,
+      value: function close(code?: number, reason?: string) {
+        // Mark before the platform close, while the attachment is still
+        // writable. A reserved code or an oversize reason makes the
+        // platform throw and leave the socket open, so the mark is undone.
+        const unmark = markClosedByHost(ws);
+        try {
+          WebSocket.prototype.close.call(ws, code, reason);
+        } catch (error) {
+          unmark();
+          throw error;
+        }
       }
     },
     setState: {

@@ -1,0 +1,7 @@
+{
+  "extends": "agents/tsconfig",
+  "compilerOptions": {
+    "exactOptionalPropertyTypes": true
+  },
+  "include": ["*.ts"]
+}

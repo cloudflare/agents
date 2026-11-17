@@ -395,9 +395,9 @@ describe("Tool replay chunks during continuation (issue #1404)", () => {
       expect(ok).toBe(true);
     }
 
-    // Seed an assistant message that already has the tool at output-available
-    // — this is what the cloned _streamingMessage will look like when the
-    // continuation begins.
+    // Seed an assistant message whose client tool call awaits its result.
+    // Once the result lands, this is what the cloned _streamingMessage will
+    // look like when the continuation begins.
     await agentStub.persistMessages([
       userMessage,
       {
@@ -407,9 +407,8 @@ describe("Tool replay chunks during continuation (issue #1404)", () => {
           {
             type: `tool-${toolName}`,
             toolCallId,
-            state: "output-available",
-            input,
-            output
+            state: "input-available",
+            input
           }
         ] as ChatMessage["parts"]
       }
@@ -417,8 +416,8 @@ describe("Tool replay chunks during continuation (issue #1404)", () => {
 
     const receivedMessages = collectMessages(ws);
 
-    // Trigger the continuation by re-sending the (already-applied)
-    // tool result with autoContinue. The continuation will hit the
+    // Trigger the continuation by sending the tool result with
+    // autoContinue. The continuation will hit the
     // replayPriorToolCall branch in onChatMessage and emit the
     // tool-input-start → delta → available → output-available
     // sequence. With the issue #1404 fix those replay chunks must
