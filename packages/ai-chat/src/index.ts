@@ -106,6 +106,7 @@ import {
   type ClassifyRecoveredTurnInput,
   type DispatchRecoveredTurnInput,
   type ChatRecoveryScheduleCallback,
+  type ChatRecoveryAttemptScope,
   type ChatRecoveryIncident,
   type ChatRecoveryKind
 } from "agents/chat";
@@ -892,8 +893,14 @@ export class AIChatAgent<
         continuation,
         wrap,
         // A turn that continues the latest reply takes it over from a
-        // scheduled recovery, once its fiber is durably registered.
-        continuation ? this._chatRecoveryEngine().continuationTurn(fn) : fn
+        // recovery scheduled to continue the same reply, inside its fiber.
+        // Every continuation body here calls the model, so the reply is
+        // taken at once. A body that can end without a model call must
+        // take it later, where it commits to the call.
+        this._chatRecoveryEngine().turnBody(continuation, async (takeReply) => {
+          await takeReply();
+          return fn();
+        })
       );
     } finally {
       if (this._liveChatRecoveryTurns.get(requestId) === liveTurn) {
@@ -4999,7 +5006,8 @@ export class AIChatAgent<
         reconcileAgentToolChildRuns: () =>
           this._reconcileOwnStaleAgentToolChildRuns(),
         trackAlarmWork: (turn) => this.lifecycle.trackAlarmWork(turn),
-        attemptScope: new AsyncLocalStorage<string>(),
+        attemptScope: new AsyncLocalStorage<ChatRecoveryAttemptScope>(),
+        latestMessage: () => this.messages.at(-1),
         originMessageIdsScope: this._chatRecoveryOriginIdsScope,
         // SAFETY: the recovery engine is the sole producer of each
         // callback's payload and the Task persists it verbatim, so the

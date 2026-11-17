@@ -20,8 +20,11 @@
  * 9. A stop ends the attempt. A turn that was cut off again and scheduled the
  *    next attempt leaves the incident to that attempt.
  * 10. Record the turn's result on the incident.
- * 11. Always: end the attempt, restore the root request id, reconcile
- *     agent-tool child runs.
+ * 11. Always: end the attempt and reconcile agent-tool child runs.
+ *
+ * The attempt runs inside the host's attempt scope, which carries its
+ * incident and root request id. The turn it starts inherits the scope, and
+ * nothing else does.
  *
  * A throw anywhere after step 2 is caught: see
  * {@link handleRecoveryAttemptError}.
@@ -161,7 +164,17 @@ export async function runRecoveredTurn<
   }
   try {
     if (host.admit && !(await host.admit())) return;
-    await runAdmittedAttempt(engine, host);
+    // Inside the attempt's scope. Only what runs here, the turn the attempt
+    // starts included, is this attempt's. A turn some other request starts
+    // while the attempt waits for the chat to settle is not.
+    await engine.runInAttemptScope(
+      {
+        incidentId: host.data?.incidentId,
+        rootRequestId:
+          host.data?.originalRequestId ?? engine.activeRootRequestId
+      },
+      () => runAdmittedAttempt(engine, host)
+    );
   } finally {
     // Outside the attempt's own `finally`, so what `admit` registered is
     // released even when the attempt never got as far as its `try`.
@@ -179,8 +192,6 @@ async function runAdmittedAttempt<
   const { callback, data } = host;
   const incidentId = data?.incidentId;
   const turns = engine.turns;
-  const previousRootRequestId = engine.activeRootRequestId;
-  engine.activeRootRequestId = data?.originalRequestId ?? previousRootRequestId;
   // A client stops this attempt by the original request id: the only id it
   // knows until the recovered turn streams.
   const stop = turns.beginRecoveryAttempt(data?.originalRequestId);
@@ -277,9 +288,7 @@ async function runAdmittedAttempt<
     // The turn stops for a user's stop, and for another turn that got to
     // continue the reply while this one waited in the queue.
     const turnSignal = AbortSignal.any([stop.signal, attempt.superseded]);
-    const result = await engine.runAttemptTurn(incidentId, () =>
-      host.runTurn(turnSignal)
-    );
+    const result = await host.runTurn(turnSignal);
 
     if (stop.signal.aborted) {
       await recordStop();
@@ -342,7 +351,6 @@ async function runAdmittedAttempt<
   } finally {
     stop.end();
     attempt.end();
-    engine.activeRootRequestId = previousRootRequestId;
     // If this facet is an agent-tool child, its recovered turn settled
     // outside `startAgentToolRun`'s finalizer. Close the run now so a
     // re-attached parent collects the terminal at once.

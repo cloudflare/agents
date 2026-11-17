@@ -2628,6 +2628,10 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     progress?: number;
     workBaseline?: number;
     interruptedAttempts?: number;
+    scheduled?: {
+      callback: "_chatRecoveryContinue" | "_chatRecoveryRetry";
+      targetMessageId?: string;
+    };
   }): Promise<void> {
     await this.ctx.storage.put(
       `cf:chat-recovery:incident:${encodeURIComponent(incident.incidentId)}`,

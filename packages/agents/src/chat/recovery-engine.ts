@@ -296,6 +296,14 @@ export interface ChatRecoveryAdapter {
   onGiveUpBookkeepingError(phase: "read" | "seal", error: unknown): void;
 }
 
+/** What a recovery attempt's async scope holds. */
+export type ChatRecoveryAttemptScope = {
+  /** The attempt's incident, when its payload names one. */
+  incidentId?: string;
+  /** The root request id of the attempt's chain. */
+  rootRequestId?: string;
+};
+
 /** The host's turn machinery, as the engine uses it. */
 export interface ChatRecoveryTurnBindings {
   /** Prefix for the host's log lines, such as `[Think]`. */
@@ -324,14 +332,18 @@ export interface ChatRecoveryTurnBindings {
   /** Keep a detached recovered turn inside the current alarm's domain. */
   trackAlarmWork(turn: Promise<void>): void;
   /**
-   * An async-context scope (an `AsyncLocalStorage<string>`) the engine runs
-   * a recovery attempt's turn in, holding the attempt's incident id. The
-   * host creates it, so this module needs no Node import.
+   * An async-context scope (an `AsyncLocalStorage<ChatRecoveryAttemptScope>`)
+   * the engine runs a recovery attempt in. Only code that runs inside it,
+   * the attempt and the turn it starts, belongs to the attempt. A turn some
+   * other request started while the attempt waits does not. The host creates
+   * it, so this module needs no Node import.
    */
   attemptScope: {
-    run<T>(incidentId: string, fn: () => T): T;
-    getStore(): string | undefined;
+    run<T>(attempt: ChatRecoveryAttemptScope, fn: () => T): T;
+    getStore(): ChatRecoveryAttemptScope | undefined;
   };
+  /** The latest stored message: what a continuation turn continues. */
+  latestMessage(): { id: string; role: string } | undefined;
   /**
    * An async-context scope (an `AsyncLocalStorage<string[] | undefined>`)
    * the engine runs a recovery callback in, holding the message ids the
@@ -930,6 +942,24 @@ export class ChatRecoveryEngine {
   }): Promise<void> {
     const { incident } = input;
     await this.updateIncident(incident.incidentId, "scheduled");
+    // What the scheduled attempt will do, so a turn that continues a reply
+    // can tell whether this recovery was going to continue the same one.
+    const key = chatRecoveryIncidentKey(incident.incidentId);
+    const stored = await this.adapter.getIncident(key);
+    if (stored) {
+      const targetMessageId =
+        input.callback === "_chatRecoveryContinue" &&
+        typeof input.data.targetAssistantId === "string"
+          ? input.data.targetAssistantId
+          : undefined;
+      await this.adapter.putIncident(key, {
+        ...stored,
+        scheduled: {
+          callback: input.callback,
+          ...(targetMessageId !== undefined && { targetMessageId })
+        }
+      });
+    }
     this.adapter.emitRecoveryEvent({
       type: "chat:recovery:scheduled",
       incidentId: incident.incidentId,
@@ -1040,12 +1070,16 @@ export class ChatRecoveryEngine {
   }
 
   /**
-   * The request id the recovery work now running in this isolate belongs to:
-   * the root of its chain of attempts. Set for the length of an attempt by
-   * {@link runRecoveredTurn}. A turn that is interrupted while this is set
-   * schedules a chained attempt under the same root.
+   * The root request id of the recovery attempt the calling code runs
+   * inside, or `undefined` when it runs inside none. Read from the attempt's
+   * async scope, so a turn another request started while an attempt waits
+   * for the chat to settle sees `undefined`: it is not part of that
+   * attempt's chain. A turn that is interrupted inside an attempt schedules a
+   * chained attempt under this root.
    */
-  activeRootRequestId: string | undefined;
+  get activeRootRequestId(): string | undefined {
+    return this.adapter.turns?.attemptScope.getStore()?.rootRequestId;
+  }
 
   /** The host's turn bindings. Throws for a host that did not supply them. */
   get turns(): ChatRecoveryTurnBindings {
@@ -1270,45 +1304,69 @@ export class ChatRecoveryEngine {
   }
 
   /**
-   * Run a recovery attempt's own turn, inside the host's attempt scope, so
-   * the continuation turn it starts is known to be the attempt's and does
-   * not count as someone else continuing the reply.
+   * Run a recovery attempt inside the host's attempt scope. Everything the
+   * attempt awaits in its own async chain, the turn it starts included,
+   * then reads as the attempt's. Other turns that run while it waits do not.
    */
-  runAttemptTurn<T>(
-    incidentId: string | undefined,
-    turn: () => Promise<T>
+  runInAttemptScope<T>(
+    attempt: ChatRecoveryAttemptScope,
+    run: () => Promise<T>
   ): Promise<T> {
-    return this.turns.attemptScope.run(incidentId ?? "", turn);
+    return this.turns.attemptScope.run(attempt, run);
   }
 
   /**
-   * Wrap the body of a turn that continues the latest reply (a client's
-   * answer to a tool call, the app calling `continueLastTurn`, a recovery
-   * attempt's own turn). A recovery still scheduled is for that same reply
-   * (one for an older message skips itself at its leaf check), so when the
-   * body runs the reply belongs to this turn: every other scheduled recovery
-   * is superseded. See {@link supersedeScheduledRecovery}.
+   * Wrap the body of a turn where its durable fiber is set up, and run the
+   * returned function inside the fiber.
    *
-   * Call this where the turn's durable fiber is set up, and run the returned
-   * body inside the fiber. Setting up reads which attempt, if any, the turn
-   * belongs to. Running inside the fiber means the turn is durably
-   * registered before it takes the reply: a restart between the two would
-   * otherwise leave the reply with no turn at all.
+   * Setting up reads which recovery attempt, if any, the turn belongs to
+   * from the caller's async scope. The fiber may run the body outside that
+   * scope, so the returned function re-enters it: a turn that is interrupted
+   * inside a recovery attempt is then routed as that attempt's (see
+   * `routeStreamInterruption`), and no other turn is.
+   *
+   * `body` receives `takeReply`. A turn that continues the latest reply (a
+   * client's answer to a tool call, the app calling `continueLastTurn`, a
+   * recovery attempt's own turn) calls it once it is committed to calling
+   * the model, and not before. From then on the reply is this turn's: a
+   * recovery still scheduled to continue the same reply is superseded (see
+   * {@link supersedeScheduledRecovery}). A turn that ends without calling
+   * the model must not call it, or the reply is left with no turn and no
+   * recovery. Calling it inside the fiber means the turn is durably
+   * registered first, so a restart cannot leave that gap either.
+   *
+   * @param continuation - Whether the turn continues the latest reply.
+   *   `takeReply` does nothing for a turn that starts a new reply.
    */
-  continuationTurn<T>(body: () => Promise<T>): () => Promise<T> {
-    const ownIncidentId = this.adapter.turns?.attemptScope.getStore();
-    return async () => {
-      await this.supersedeScheduledRecovery(ownIncidentId);
-      return body();
+  turnBody<T>(
+    continuation: boolean,
+    body: (takeReply: () => Promise<void>) => Promise<T>
+  ): () => Promise<T> {
+    const scope = this.adapter.turns?.attemptScope;
+    const attempt = scope?.getStore();
+    let taken = false;
+    const takeReply = async (): Promise<void> => {
+      if (!continuation || taken) return;
+      taken = true;
+      await this.supersedeScheduledRecovery(attempt?.incidentId);
     };
+    return () =>
+      scope && attempt
+        ? scope.run(attempt, () => body(takeReply))
+        : body(takeReply);
   }
 
   /**
-   * Mark each scheduled incident `skipped` with
+   * A turn is continuing the latest reply. Mark each scheduled incident
+   * whose recovery was going to continue that same reply `skipped` with
    * {@link CHAT_RECOVERY_CONTINUED_REASON}, and tell its attempt, if one is
    * running here. The attempt, queued or already waiting for the chat to
    * settle, then ends without asking the model to continue the reply a
    * second time (see `runRecoveredTurn`).
+   *
+   * Left alone: a scheduled retry (it answers a question, it does not
+   * continue a reply), and a continue of some other message. Each of those
+   * reaches its own leaf check.
    *
    * @param exceptIncidentId - The incident of the attempt the superseding
    *   turn belongs to, which is left alone.
@@ -1317,12 +1375,17 @@ export class ChatRecoveryEngine {
   async supersedeScheduledRecovery(
     exceptIncidentId?: string
   ): Promise<boolean> {
+    const reply = this.adapter.turns?.latestMessage();
+    // A continuation turn continues an assistant reply. With none, there is
+    // nothing a recovery could have been going to continue either.
+    if (reply?.role !== "assistant") return false;
     const incidents = (await this.adapter.listActiveIncidents?.()) ?? [];
     let superseded = false;
     for (const incident of incidents) {
       if (
         incident.status !== "scheduled" ||
-        incident.incidentId === exceptIncidentId
+        incident.incidentId === exceptIncidentId ||
+        !continuesReply(incident, reply.id)
       ) {
         continue;
       }
@@ -1630,6 +1693,25 @@ export function chatRecoveryProgressReader(
     await seed;
     return stream().progressMarker();
   };
+}
+
+/**
+ * Whether a scheduled incident's recovery will continue the reply
+ * `replyId`. An incident an older version scheduled does not say what it
+ * targets: its kind decides, and a continue is taken to target the latest
+ * reply, which is what `continueLastTurn` would continue.
+ */
+function continuesReply(
+  incident: ChatRecoveryIncident,
+  replyId: string
+): boolean {
+  const { scheduled } = incident;
+  if (!scheduled) return incident.recoveryKind === "continue";
+  if (scheduled.callback !== "_chatRecoveryContinue") return false;
+  return (
+    scheduled.targetMessageId === undefined ||
+    scheduled.targetMessageId === replyId
+  );
 }
 
 /** `incident.reason` for a scheduled recovery the user cancelled. */

@@ -135,6 +135,16 @@ export type ChatRecoveryIncident = {
    */
   attemptsInFlight?: ChatRecoveryAttempt[];
   /**
+   * What the recovery attempt scheduled for this incident will do: the
+   * callback, and for a continue the reply it targets. A turn that continues
+   * a reply reads it to tell whether this recovery was going to continue the
+   * same one. Optional for backward-compat.
+   */
+  scheduled?: {
+    callback: "_chatRecoveryContinue" | "_chatRecoveryRetry";
+    targetMessageId?: string;
+  };
+  /**
    * Recoveries scheduled for this incident after a transient or rate-limited
    * stream error. Drives the retry backoff and is capped by `maxAttempts`.
    * Unlike `attempt`, it is not debounced and does not reset on progress: a

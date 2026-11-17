@@ -5,6 +5,7 @@ import {
   CHAT_RECOVERY_CONTINUED_REASON,
   ChatRecoveryEngine,
   type ChatRecoveryAdapter,
+  type ChatRecoveryAttemptScope,
   type ChatRecoveryTurnBindings
 } from "../recovery-engine";
 import type {
@@ -41,6 +42,8 @@ type Scenario = {
   /** Runs while the recovered turn runs. */
   duringTurn?: (context: Harness) => void | Promise<void>;
   withSettle?: boolean;
+  /** The latest stored message. Defaults to an assistant reply. */
+  latestMessage?: { id: string; role: string };
 };
 
 type Harness = {
@@ -99,7 +102,9 @@ function setup(scenario: Scenario = {}) {
       log.push("reconcile");
     },
     trackAlarmWork: () => {},
-    attemptScope: new AsyncLocalStorage<string>(),
+    attemptScope: new AsyncLocalStorage<ChatRecoveryAttemptScope>(),
+    latestMessage: () =>
+      scenario.latestMessage ?? { id: "assistant-1", role: "assistant" },
     originMessageIdsScope: new AsyncLocalStorage<string[] | undefined>(),
     recordTerminalError: async (requestId, errorText) => {
       terminalErrors.push({ requestId, errorText });
@@ -285,7 +290,7 @@ describe("runRecoveredTurn", () => {
     expect(t.log).not.toContain("context");
   });
 
-  it("sets the root request id for the attempt and restores it after", async () => {
+  it("the attempt's turn runs under the attempt's root request id", async () => {
     let during: string | undefined;
     const t = setup({
       duringTurn: () => {
@@ -294,6 +299,47 @@ describe("runRecoveredTurn", () => {
     });
     await t.run();
     expect(during).toBe(ROOT);
+    expect(t.activeRoot()).toBeUndefined();
+  });
+
+  it("a turn another request runs while the attempt waits is not the attempt's", async () => {
+    // The other turn's code runs in its own async chain. Here it is started
+    // before the attempt and observed while the attempt waits.
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let seenByOtherTurn: string | undefined = "unset";
+    let t: ReturnType<typeof setup> | undefined;
+    const otherTurn = (async () => {
+      await gate;
+      seenByOtherTurn = t?.activeRoot();
+    })();
+    let seenByAttempt: string | undefined;
+    t = setup({
+      duringWait: async () => {
+        seenByAttempt = t?.activeRoot();
+        release?.();
+        await otherTurn;
+      }
+    });
+    await t.run();
+
+    expect(seenByAttempt).toBe(ROOT);
+    expect(seenByOtherTurn).toBeUndefined();
+  });
+
+  it("a turn body set up inside the attempt runs under its root, wherever the fiber runs it", async () => {
+    let body: (() => Promise<string | undefined>) | undefined;
+    const t = setup({
+      // Set up in the attempt, as the host's fiber wrapper is.
+      duringTurn: ({ engine }) => {
+        body = engine.turnBody(false, async () => engine.activeRootRequestId);
+      }
+    });
+    await t.run();
+    // Run later, outside the attempt's async chain, as a Task runner might.
+    expect(await body?.()).toBe(ROOT);
     expect(t.activeRoot()).toBeUndefined();
   });
 
@@ -345,7 +391,9 @@ describe("runRecoveredTurn", () => {
         throw new Error("aborted");
       }
     });
-    other = t.engine.continuationTurn(async () => {});
+    other = t.engine.turnBody(true, async (takeReply) => {
+      await takeReply();
+    });
     await expect(t.run()).resolves.toBeUndefined();
 
     expect(t.exhausted).toEqual([]);
@@ -362,9 +410,10 @@ describe("runRecoveredTurn", () => {
       // What the host's fiber wrapper does for every continuation turn: it
       // wraps the body where the fiber is set up and runs it inside.
       duringTurn: async ({ engine }) => {
-        const body = engine.continuationTurn(async () =>
-          engine.isRecoverySuperseded(INCIDENT)
-        );
+        const body = engine.turnBody(true, async (takeReply) => {
+          await takeReply();
+          return engine.isRecoverySuperseded(INCIDENT);
+        });
         superseded = await body();
       }
     });
@@ -377,10 +426,83 @@ describe("runRecoveredTurn", () => {
 
   it("a continuation turn that is not the attempt's supersedes the scheduled incident", async () => {
     const t = setup();
-    const body = t.engine.continuationTurn(async () =>
-      t.engine.isRecoverySuperseded(INCIDENT)
-    );
+    const body = t.engine.turnBody(true, async (takeReply) => {
+      await takeReply();
+      return t.engine.isRecoverySuperseded(INCIDENT);
+    });
     expect(await body()).toBe(true);
+  });
+
+  it("a continuation turn that never commits to the model leaves the recovery scheduled", async () => {
+    const t = setup();
+    // The body ends without calling `takeReply`: it called no model.
+    await t.engine.turnBody(true, async () => {})();
+    expect(t.incident()).toMatchObject({ status: "scheduled" });
+  });
+
+  it("a turn that starts a new reply supersedes nothing", async () => {
+    const t = setup();
+    await t.engine.turnBody(false, async (takeReply) => {
+      await takeReply();
+    })();
+    expect(t.incident()).toMatchObject({ status: "scheduled" });
+  });
+
+  it("a continuation turn does not supersede a scheduled retry", async () => {
+    const t = setup({
+      incident: {
+        recoveryKind: "retry",
+        scheduled: { callback: "_chatRecoveryRetry" }
+      }
+    });
+    expect(await t.engine.supersedeScheduledRecovery()).toBe(false);
+    expect(t.incident()).toMatchObject({ status: "scheduled" });
+  });
+
+  it("a continuation turn does not supersede a retry scheduled on a continue incident", async () => {
+    // A lost partial opens a `continue` incident and schedules a retry.
+    const t = setup({
+      incident: {
+        recoveryKind: "continue",
+        scheduled: { callback: "_chatRecoveryRetry" }
+      }
+    });
+    expect(await t.engine.supersedeScheduledRecovery()).toBe(false);
+  });
+
+  it("a continuation turn does not supersede a recovery that continues another reply", async () => {
+    const t = setup({
+      incident: {
+        scheduled: {
+          callback: "_chatRecoveryContinue",
+          targetMessageId: "assistant-older"
+        }
+      },
+      latestMessage: { id: "assistant-newer", role: "assistant" }
+    });
+    expect(await t.engine.supersedeScheduledRecovery()).toBe(false);
+    expect(t.incident()).toMatchObject({ status: "scheduled" });
+  });
+
+  it("a continuation turn supersedes the recovery that continues the same reply", async () => {
+    const t = setup({
+      incident: {
+        scheduled: {
+          callback: "_chatRecoveryContinue",
+          targetMessageId: "assistant-1"
+        }
+      }
+    });
+    expect(await t.engine.supersedeScheduledRecovery()).toBe(true);
+    expect(t.incident()).toMatchObject({
+      status: "skipped",
+      reason: CHAT_RECOVERY_CONTINUED_REASON
+    });
+  });
+
+  it("supersedes nothing when the latest message is not a reply", async () => {
+    const t = setup({ latestMessage: { id: "user-2", role: "user" } });
+    expect(await t.engine.supersedeScheduledRecovery()).toBe(false);
   });
 
   it("stands down when another turn continues the reply while its own turn is queued", async () => {
@@ -394,7 +516,9 @@ describe("runRecoveredTurn", () => {
         await other?.();
       }
     });
-    other = t.engine.continuationTurn(async () => {});
+    other = t.engine.turnBody(true, async (takeReply) => {
+      await takeReply();
+    });
     await t.run();
 
     // The attempt's turn was told to stop, and the incident says why.

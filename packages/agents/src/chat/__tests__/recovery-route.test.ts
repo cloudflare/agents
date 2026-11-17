@@ -2,7 +2,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { describe, expect, it, vi } from "vitest";
 import {
   ChatRecoveryEngine,
-  type ChatRecoveryAdapter
+  type ChatRecoveryAdapter,
+  type ChatRecoveryAttemptScope
 } from "../recovery-engine";
 import type { ChatRecoveryOptions } from "../lifecycle";
 import type { MessagePart } from "../message-builder";
@@ -102,7 +103,8 @@ function setup(scenario: Scenario = {}) {
       restoreRequestContext: () => {},
       reconcileAgentToolChildRuns: () => Promise.resolve(),
       trackAlarmWork: () => {},
-      attemptScope: new AsyncLocalStorage<string>(),
+      attemptScope: new AsyncLocalStorage<ChatRecoveryAttemptScope>(),
+      latestMessage: () => undefined,
       originMessageIdsScope: new AsyncLocalStorage<string[] | undefined>(),
       recordTerminalError: async (requestId, errorText) => {
         terminalErrors.push({ requestId, errorText });
@@ -286,13 +288,61 @@ describe("routeStreamInterruption", () => {
 
   it("chains the next attempt when the turn was itself a recovery attempt", async () => {
     const t = setup({ storedReplyId: "assistant-1" });
-    t.engine.activeRootRequestId = "root-request";
-    expect(await t.run()).toBe("scheduled");
+    // The interrupted turn runs inside a recovery attempt's scope.
+    const outcome = await t.engine.runInAttemptScope(
+      { incidentId: "incident-1", rootRequestId: "root-request" },
+      () => t.run()
+    );
+    expect(outcome).toBe("scheduled");
     expect(t.scheduled[0]).toMatchObject({
       reason: "chained_retry",
       data: { originalRequestId: "root-request" }
     });
     expect(t.log).toContain("after-schedule:chained");
+  });
+
+  it("opens its own incident for a turn interrupted while an attempt waits", async () => {
+    const t = setup({ storedReplyId: "assistant-1" });
+    // A recovery attempt for some other request is waiting for the chat to
+    // settle. This turn was started by a client, in its own async chain.
+    let settle: (() => void) | undefined;
+    const waiting = t.engine.runInAttemptScope(
+      { incidentId: "incident-other", rootRequestId: "root-other" },
+      () =>
+        new Promise<void>((resolve) => {
+          settle = resolve;
+        })
+    );
+    const outcome = await t.run();
+    settle?.();
+    await waiting;
+
+    expect(outcome).toBe("scheduled");
+    expect(t.scheduled[0]).toMatchObject({
+      reason: "initial",
+      data: { originalRequestId: "request-1" }
+    });
+    expect(t.incident()).toMatchObject({ recoveryRootRequestId: "request-1" });
+    expect(t.log).toContain("after-schedule");
+    // The waiting attempt's incident is not marked as rescheduled.
+    expect(t.engine.takeReschedule("incident-other")).toBe(false);
+  });
+
+  it("records what it scheduled on the incident", async () => {
+    const t = setup({ storedReplyId: "assistant-1" });
+    expect(await t.run()).toBe("scheduled");
+    expect(t.incident()).toMatchObject({
+      scheduled: {
+        callback: "_chatRecoveryContinue",
+        targetMessageId: "assistant-1"
+      }
+    });
+
+    const retry = setup({ partialParts: [], retryTarget: "user-1" });
+    expect(await retry.run()).toBe("scheduled");
+    expect(retry.incident()?.scheduled).toEqual({
+      callback: "_chatRecoveryRetry"
+    });
   });
 
   const apiCallError = (headers: Record<string, string>) =>
