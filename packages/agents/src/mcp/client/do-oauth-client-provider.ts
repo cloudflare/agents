@@ -120,7 +120,7 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
   private _retired_ = false;
   /** Tokens saved after retiring: kept in memory only, for work in flight. */
   private _retiredTokens_: StoredOAuthTokens | undefined;
-  readonly clientMetadataUrl: string | undefined;
+  readonly clientMetadataUrl?: string;
 
   constructor(
     public storage: DurableObjectStorage,
@@ -134,7 +134,9 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
       );
     }
     validateClientMetadataUrl(options.clientMetadataUrl);
-    this.clientMetadataUrl = options.clientMetadataUrl || undefined;
+    if (options.clientMetadataUrl) {
+      this.clientMetadataUrl = options.clientMetadataUrl;
+    }
   }
 
   /**
