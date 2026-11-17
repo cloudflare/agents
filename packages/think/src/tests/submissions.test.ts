@@ -154,6 +154,19 @@ type ThinkSubmissionTestStub = {
     requestId: string,
     messageId: string
   ): Promise<void>;
+  persistContinuationOrphanForTest(
+    requestId: string,
+    leafId: string,
+    times: number,
+    options?: {
+      startMessageId?: string;
+      leafMetadata?: Record<string, unknown>;
+      startMetadata?: Record<string, unknown>;
+      leafParts?: unknown[];
+      chunks?: Array<Record<string, unknown>>;
+      deleteLeaf?: boolean;
+    }
+  ): Promise<void>;
   continueRecoveredChatForTest(requestId: string): Promise<void>;
   continueRecoveredChatCatchingForTest(
     requestId: string
@@ -218,7 +231,12 @@ type ThinkSubmissionTestStub = {
     }>
   >;
   getStoredMessages(): Promise<
-    Array<{ id: string; role: string; parts?: unknown[] }>
+    Array<{
+      id: string;
+      role: string;
+      parts?: unknown[];
+      metadata?: unknown;
+    }>
   >;
   getResponseLog(): Promise<Array<{ status: string; requestId: string }>>;
   getSubmissionLog(): Promise<ThinkSubmissionInspection[]>;
@@ -2087,6 +2105,155 @@ describe("Think durable submissions", () => {
     expect(await agent.inspectSubmissionForTest("sub-orphan")).toMatchObject({
       messageId: "a-orphan"
     });
+  });
+
+  it("recovers an interrupted continuation into one assistant message, however often it is persisted", async () => {
+    const agent = await freshAgent();
+
+    await agent.persistContinuationOrphanForTest("req-cont", "leaf-1", 2);
+
+    const assistants = (await agent.getStoredMessages()).filter(
+      (message) => message.role === "assistant"
+    );
+    expect(assistants).toHaveLength(1);
+    expect(assistants[0].id).toBe("leaf-1");
+    expect(
+      (assistants[0].parts ?? []).map((part) => (part as { text: string }).text)
+    ).toEqual(["earlier", "continued"]);
+  });
+
+  it("does not recreate a deleted leaf when recovering the continuation that extended it, however often", async () => {
+    const agent = await freshAgent();
+
+    await agent.persistContinuationOrphanForTest("req-cont-gone", "leaf-1", 2, {
+      deleteLeaf: true
+    });
+
+    const assistants = (await agent.getStoredMessages()).filter(
+      (message) => message.role === "assistant"
+    );
+    expect(assistants).toEqual([]);
+  });
+
+  it("recovers an interrupted continuation into the leaf when its start chunk carries a provider id", async () => {
+    const agent = await freshAgent();
+
+    await agent.persistContinuationOrphanForTest("req-cont-id", "leaf-1", 2, {
+      startMessageId: "provider-2"
+    });
+
+    const assistants = (await agent.getStoredMessages()).filter(
+      (message) => message.role === "assistant"
+    );
+    expect(assistants.map((message) => message.id)).toEqual(["leaf-1"]);
+    expect(
+      (assistants[0].parts ?? []).map((part) => (part as { text: string }).text)
+    ).toEqual(["earlier", "continued"]);
+  });
+
+  it("keeps the continued message's metadata when recovering an interrupted continuation", async () => {
+    const agent = await freshAgent();
+
+    await agent.persistContinuationOrphanForTest("req-cont-meta", "leaf-1", 1, {
+      leafMetadata: { createdAt: 1, continuation: false },
+      startMetadata: { resumed: true }
+    });
+
+    const assistants = (await agent.getStoredMessages()).filter(
+      (message) => message.role === "assistant"
+    );
+    expect(assistants).toHaveLength(1);
+    expect(assistants[0].metadata).toEqual({
+      createdAt: 1,
+      continuation: false,
+      resumed: true
+    });
+  });
+
+  it("does not duplicate a tool call the continued message already held when the continuation replays it (#1404)", async () => {
+    const agent = await freshAgent();
+
+    await agent.persistContinuationOrphanForTest(
+      "req-cont-replay",
+      "leaf-1",
+      2,
+      {
+        leafParts: [
+          {
+            type: "tool-lookup",
+            toolCallId: "call-1",
+            state: "output-available",
+            input: { q: "x" },
+            output: "found"
+          }
+        ],
+        chunks: [
+          {
+            type: "tool-input-start",
+            toolCallId: "call-1",
+            toolName: "lookup"
+          },
+          {
+            type: "tool-input-available",
+            toolCallId: "call-1",
+            toolName: "lookup",
+            input: { q: "x" }
+          },
+          {
+            type: "tool-output-available",
+            toolCallId: "call-1",
+            output: "found"
+          },
+          { type: "text-start", id: "t2" },
+          { type: "text-delta", id: "t2", delta: "continued" },
+          { type: "text-end", id: "t2" }
+        ]
+      }
+    );
+
+    const assistants = (await agent.getStoredMessages()).filter(
+      (message) => message.role === "assistant"
+    );
+    expect(assistants).toHaveLength(1);
+    expect(assistants[0].parts).toMatchObject([
+      { toolCallId: "call-1", state: "output-available", output: "found" },
+      { type: "text", text: "continued" }
+    ]);
+  });
+
+  it("recovers a continuation's result for a tool call the continued message already held", async () => {
+    const agent = await freshAgent();
+
+    await agent.persistContinuationOrphanForTest("req-cont-tool", "leaf-1", 2, {
+      leafParts: [
+        {
+          type: "tool-lookup",
+          toolCallId: "call-1",
+          state: "approval-responded",
+          input: {},
+          approval: { id: "approval-1", approved: true }
+        }
+      ],
+      chunks: [
+        {
+          type: "tool-output-available",
+          toolCallId: "call-1",
+          output: "found"
+        },
+        { type: "text-start", id: "t2" },
+        { type: "text-delta", id: "t2", delta: "continued" },
+        { type: "text-end", id: "t2" }
+      ]
+    });
+
+    const assistants = (await agent.getStoredMessages()).filter(
+      (message) => message.role === "assistant"
+    );
+    expect(assistants).toHaveLength(1);
+    expect(assistants[0].parts).toMatchObject([
+      { toolCallId: "call-1", state: "output-available", output: "found" },
+      { type: "text", text: "continued" }
+    ]);
   });
 
   it("completes recovered chat fiber submissions through scheduled continuation", async () => {

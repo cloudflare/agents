@@ -622,6 +622,36 @@ describe("Think — error handling", () => {
     expect(result.assistantMessages).toBe(1);
   });
 
+  it("recovers an interrupted recovery continuation into the message it continues, however often (#2780)", async () => {
+    const agent = await freshAgent(
+      `continuation-orphan-${crypto.randomUUID()}`
+    );
+    const result = await agent.testRecoverContinuationStreamForTest();
+
+    // The continuation records the message it extends and its part count.
+    const earlier = result.leaf.partTypes.length;
+    expect(earlier).toBeGreaterThan(0);
+    expect(result.recorded).toEqual({
+      messageId: result.leaf.id,
+      basePartCount: earlier
+    });
+    // Recovering its stream twice rewrites that message: the earlier parts
+    // followed by the continuation's, with no second assistant message.
+    expect(result.afterRecovery.map((m) => m.id)).toEqual([result.leaf.id]);
+    const recovered = JSON.parse(result.afterRecovery[0].partsJson) as Array<{
+      type: string;
+    }>;
+    expect(recovered.slice(0, earlier).map((p) => p.type)).toEqual(
+      result.leaf.partTypes
+    );
+    expect(recovered.slice(earlier)).toMatchObject([
+      { type: "step-start" },
+      { type: "text", text: "Hello from the assistant!" }
+    ]);
+    // The live stream then finishes into the same message.
+    expect(result.finalAssistantIds).toEqual([result.leaf.id]);
+  });
+
   it("retries the user turn when the stream stalls before its first chunk (#1941)", async () => {
     const agent = await freshAgent(`stall-first-chunk-${crypto.randomUUID()}`);
     const result = await agent.testStallRecoveryForTest({

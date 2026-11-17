@@ -14280,8 +14280,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * tab briefly renders the turn twice before collapsing. Mirrors the fix in
    * `@cloudflare/ai-chat`. Continuations are skipped — they reuse the existing
    * assistant message via the `continuation` frame flag, so the id must not
-   * change mid-message. The orphan-recovery path inherits the id from the
-   * stored chunk, so it needs no separate stamping.
+   * change mid-message. Orphan recovery inherits a new turn's id from the
+   * stored chunk; a continuation's id is recorded with its stream instead
+   * (`_streamResult`).
    */
   private _alignStreamStartId(
     chunk: StreamChunkData,
@@ -15057,8 +15058,22 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const clearGen = this._turnQueue.generation;
     const continuation = options?.continuation ?? false;
     const parentId = options?.parentId;
+    const leaf = this.messages.at(-1);
+    const continuationAssistant =
+      continuation && options?.extendLeafAssistant && leaf?.role === "assistant"
+        ? leaf
+        : undefined;
+    const assistantId = continuationAssistant?.id ?? crypto.randomUUID();
+    // A continuation's stored chunks carry no message id (`_alignStreamStartId`
+    // skips them), so record it with the stream, plus how many parts the leaf
+    // held for one that extends it. Orphan recovery then rebuilds that message
+    // instead of appending a copy per recovery (#2780).
     const streamId = this._startResumableStream(requestId, {
       continuation,
+      ...(continuation && { messageId: assistantId }),
+      ...(continuationAssistant !== undefined && {
+        basePartCount: continuationAssistant.parts.length
+      }),
       ...(parentId !== undefined && { parentMessageId: parentId })
     });
 
@@ -15069,14 +15084,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       );
     }
 
-    const leaf = this.messages.at(-1);
-    const continuationAssistant =
-      continuation && options?.extendLeafAssistant && leaf?.role === "assistant"
-        ? leaf
-        : undefined;
     const leafMetadata = continuationAssistant?.metadata;
     const accumulator = new StreamAccumulator({
-      messageId: continuationAssistant?.id ?? crypto.randomUUID(),
+      messageId: assistantId,
       continuation: continuationAssistant !== undefined,
       existingParts: continuationAssistant?.parts.map(settleInterruptedPart),
       existingMetadata:
@@ -19769,6 +19779,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     options?: {
       messageId?: string;
       parentMessageId?: string;
+      basePartCount?: number;
       continuation?: boolean;
     }
   ): string {
@@ -19855,14 +19866,44 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     return stream.getStreamParentMessageId?.(streamId) ?? undefined;
   }
 
+  /**
+   * The assistant message a leaf-extending stream continues, and how many parts
+   * it held when the stream started; undefined for a stream that produces a
+   * message of its own. `_streamResult` records both when it starts the stream.
+   *
+   * Recovery keeps that many leading parts of the stored message, so it relies
+   * on them staying put until the stream is recovered. That holds today: the
+   * stream itself only adds parts after them, and once a stream is recovered
+   * it is marked completed and reclaimed when the next stream starts, so a
+   * later stream that extends the message again cannot be overwritten by a
+   * replay.
+   * (`_dropGenerationAfterResolvedPause` can trim an orphaned leaf; it only
+   * drops text and reasoning written against a paused tool result.)
+   */
+  private _orphanContinuedMessage(
+    streamId: string
+  ): { messageId: string; basePartCount: number } | undefined {
+    const messageId = this._resumableStream.getStreamMessageId(streamId);
+    const basePartCount =
+      this._resumableStream.getStreamBasePartCount(streamId);
+    return messageId !== null && basePartCount !== null
+      ? { messageId, basePartCount }
+      : undefined;
+  }
+
   private async _persistOrphanedStream(streamId: string): Promise<void> {
     this._resumableStream.flushBuffer();
     const chunks = this._resumableStream.getStreamChunks(streamId);
     if (chunks.length === 0) return;
 
     // The accumulate loop and the `getMessage → update(merge) XOR append` upsert
-    // are the shared `persistReconstructedOrphan` core. Think supplies the two
-    // host-specific hooks:
+    // are the shared `persistReconstructedOrphan` core. Think supplies:
+    //   - continues: for a stream that extended the assistant leaf (a recovery
+    //     continuation), replay its chunks onto the leaf's parts from when the
+    //     stream started, as the live accumulator did. Recovery then rewrites
+    //     the leaf instead of appending a copy each time (#2780).
+    //   - fallbackId: the id `_streamResult` recorded for a continuation, whose
+    //     `start` chunk carries none (`_alignStreamStartId` skips them).
     //   - prepare: `_strippedForPersist` (same as `_persistAssistantMessage`) —
     //     drop the internal final-answer parts and skip (`null`) an empty
     //     structural-only assistant message.
@@ -19873,6 +19914,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     let persistedId: string | undefined;
     const store = this._orphanStore();
     const parentId = this._orphanParentId(streamId);
+    const continued = this._orphanContinuedMessage(streamId);
     const wrote = await persistReconstructedOrphan(chunks, {
       store:
         parentId === undefined
@@ -19881,7 +19923,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               ...store,
               appendMessage: (message) => store.appendMessage(message, parentId)
             },
-      fallbackId: crypto.randomUUID(),
+      ...(continued && {
+        continues: { ...continued, settleBasePart: settleInterruptedPart }
+      }),
+      fallbackId:
+        this._resumableStream.getStreamMessageId(streamId) ??
+        crypto.randomUUID(),
       prepare: (message) => {
         const prepared = this._strippedForPersist(message);
         persistedId = prepared?.id;

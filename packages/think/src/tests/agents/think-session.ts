@@ -669,6 +669,12 @@ export class ThinkTestAgent extends Think {
   // persistence strips, before it hangs.
   private _stallWithFinalAnswerOnlyForTest = false;
   private _streamChunkDelayMs: number | null = null;
+  // Runs once, on the first inference that does not stall, before it yields
+  // its `afterChunks`-th chunk.
+  private _midStreamHookForTest: {
+    afterChunks: number;
+    run: () => Promise<void>;
+  } | null = null;
   private _agentToolOutputForTest = new Map<string, unknown>();
   private _responseLog: ChatResponseResult[] = [];
   private _recoveryHookForTest: ChatRecoveryOptions | "throw" | null = null;
@@ -2043,7 +2049,8 @@ export class ThinkTestAgent extends Think {
       !this._errorConfig &&
       !this._stripTextResponseForTest &&
       this._stallAfterChunks == null &&
-      this._streamChunkDelayMs == null
+      this._streamChunkDelayMs == null &&
+      this._midStreamHookForTest == null
     )
       return result;
 
@@ -2080,6 +2087,8 @@ export class ThinkTestAgent extends Think {
         : [];
     const chunkDelayMs = this._streamChunkDelayMs;
     const abortAll = () => this.cancelAllChats();
+    let midStreamHook = willStall ? null : this._midStreamHookForTest;
+    if (midStreamHook) this._midStreamHookForTest = null;
 
     return {
       toUIMessageStream(options?: {
@@ -2141,6 +2150,14 @@ export class ThinkTestAgent extends Think {
                   const { done, value } = await iterator.next();
                   if (done) return { done: true as const, value: undefined };
                   chunkCount++;
+                  if (
+                    midStreamHook &&
+                    chunkCount === midStreamHook.afterChunks
+                  ) {
+                    const { run } = midStreamHook;
+                    midStreamHook = null;
+                    await run();
+                  }
                   if (config && chunkCount >= config.afterChunks) {
                     shouldThrow = true;
                   }
@@ -2615,6 +2632,66 @@ export class ThinkTestAgent extends Think {
         finalAssistantText
       };
     } finally {
+      this._stallAfterChunks = null;
+      this._stallAttemptsRemaining = null;
+      this.chatStreamStallTimeoutMs = 0;
+    }
+  }
+
+  /**
+   * #2780: stall the first inference so recovery continues the interrupted
+   * assistant message. While that continuation streams, recover its stream
+   * twice, as a reconnect and a fiber recovery each can, then let it finish.
+   */
+  async testRecoverContinuationStreamForTest(): Promise<{
+    leaf: { id: string; partTypes: string[] };
+    recorded: { messageId: string | null; basePartCount: number | null };
+    afterRecovery: Array<{ id: string; partsJson: string }>;
+    finalAssistantIds: string[];
+  }> {
+    const assistants = async () =>
+      (await this.getMessages()).filter((m) => m.role === "assistant");
+    const internals = this as unknown as {
+      _persistOrphanedStream(streamId: string): Promise<void>;
+    };
+    this._stallAfterChunks = 3;
+    this._stallAttemptsRemaining = 1;
+    this.chatStreamStallTimeoutMs = 50;
+    try {
+      await this.testChat("stall, then continue");
+      const leaf = (await assistants()).at(-1);
+      if (!leaf) throw new Error("the stalled turn persisted no assistant");
+      let recorded: { messageId: string | null; basePartCount: number | null } =
+        { messageId: null, basePartCount: null };
+      let afterRecovery: Array<{ id: string; partsJson: string }> = [];
+      // Chunks 1-4 (start, start-step, text-start, text-delta) are stored.
+      this._midStreamHookForTest = {
+        afterChunks: 5,
+        run: async () => {
+          const streamId = this._resumableStream.activeStreamId;
+          if (!streamId) throw new Error("no active continuation stream");
+          recorded = {
+            messageId: this._resumableStream.getStreamMessageId(streamId),
+            basePartCount:
+              this._resumableStream.getStreamBasePartCount(streamId)
+          };
+          await internals._persistOrphanedStream(streamId);
+          await internals._persistOrphanedStream(streamId);
+          afterRecovery = (await assistants()).map((m) => ({
+            id: m.id,
+            partsJson: JSON.stringify(m.parts)
+          }));
+        }
+      };
+      await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
+      return {
+        leaf: { id: leaf.id, partTypes: leaf.parts.map((p) => p.type) },
+        recorded,
+        afterRecovery,
+        finalAssistantIds: (await assistants()).map((m) => m.id)
+      };
+    } finally {
+      this._midStreamHookForTest = null;
       this._stallAfterChunks = null;
       this._stallAttemptsRemaining = null;
       this.chatStreamStallTimeoutMs = 0;
@@ -8229,6 +8306,74 @@ export class ThinkProgrammaticTestAgent extends Think {
       internals._resumableStream.storeChunk(streamId, JSON.stringify(chunk));
     }
     await internals._persistOrphanedStream(streamId);
+  }
+
+  /**
+   * Persist a recovery continuation's orphaned chunks (no `start.messageId`,
+   * as `_alignStreamStartId` leaves them) `times` times onto a leaf assistant
+   * message that already holds one part (`leafParts` overrides that part and
+   * `chunks` the continuation's chunks after `start`). `deleteLeaf` deletes
+   * the leaf before the first persist.
+   */
+  async persistContinuationOrphanForTest(
+    requestId: string,
+    leafId: string,
+    times: number,
+    options: {
+      startMessageId?: string;
+      leafMetadata?: Record<string, unknown>;
+      startMetadata?: Record<string, unknown>;
+      leafParts?: UIMessage["parts"];
+      chunks?: Array<Record<string, unknown>>;
+      deleteLeaf?: boolean;
+    } = {}
+  ): Promise<void> {
+    const leafParts: UIMessage["parts"] = options.leafParts ?? [
+      { type: "text", text: "earlier", state: "done" }
+    ];
+    await this.session.appendMessage({
+      id: leafId,
+      role: "assistant",
+      parts: leafParts,
+      ...(options.leafMetadata && { metadata: options.leafMetadata })
+    } as UIMessage);
+    const internals = this as unknown as {
+      _resumableStream: {
+        start(
+          requestId: string,
+          options: {
+            messageId?: string;
+            basePartCount?: number;
+            continuation?: boolean;
+          }
+        ): string;
+        storeChunk(streamId: string, body: string): unknown;
+      };
+      _persistOrphanedStream(streamId: string): Promise<void>;
+    };
+    const streamId = internals._resumableStream.start(requestId, {
+      messageId: leafId,
+      basePartCount: leafParts.length,
+      continuation: true
+    });
+    for (const chunk of [
+      {
+        type: "start",
+        ...(options.startMessageId && { messageId: options.startMessageId }),
+        ...(options.startMetadata && { messageMetadata: options.startMetadata })
+      },
+      ...(options.chunks ?? [
+        { type: "text-start", id: "t2" },
+        { type: "text-delta", id: "t2", delta: "continued" },
+        { type: "text-end", id: "t2" }
+      ])
+    ]) {
+      internals._resumableStream.storeChunk(streamId, JSON.stringify(chunk));
+    }
+    if (options.deleteLeaf) await this.session.deleteMessages([leafId]);
+    for (let i = 0; i < times; i++) {
+      await internals._persistOrphanedStream(streamId);
+    }
   }
 
   async continueRecoveredChatForTest(requestId: string): Promise<void> {

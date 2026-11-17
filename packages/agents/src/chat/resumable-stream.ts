@@ -105,6 +105,15 @@ type ChatStreamMetadata = {
    */
   parentMessageId?: string;
   /**
+   * Set when the stream extends an existing assistant message (`messageId`):
+   * how many parts that message held when the stream started. The stream's
+   * chunks hold only what came after, so orphan recovery replays them onto
+   * that many leading parts of the stored message, which keeps the earlier
+   * parts and makes recovering the same stream twice idempotent. Absent for a
+   * stream that produces a message of its own.
+   */
+  basePartCount?: number;
+  /**
    * Whether this stream is a continuation (appends to the last assistant
    * message rather than starting a new one). Live broadcast frames carry
    * `continuation: true`, and replay frames must too (#1733): without it a
@@ -540,6 +549,7 @@ export class ResumableStream {
     options: {
       messageId?: string;
       parentMessageId?: string;
+      basePartCount?: number;
       continuation?: boolean;
       originMessageIds?: string[];
     } = {}
@@ -564,6 +574,9 @@ export class ResumableStream {
     if (options.messageId != null) metadata.messageId = options.messageId;
     if (options.parentMessageId != null) {
       metadata.parentMessageId = options.parentMessageId;
+    }
+    if (options.basePartCount != null) {
+      metadata.basePartCount = options.basePartCount;
     }
     if (this._activeIsContinuation) metadata.isContinuation = 1;
     if (seqBase > 0) metadata.seqBase = seqBase;
@@ -598,6 +611,16 @@ export class ResumableStream {
     const row = this.ops.getStream(streamId);
     if (!row) return null;
     return parseChatMetadata(row)?.messageId ?? null;
+  }
+
+  /**
+   * How many parts the message an orphaned stream extends held when the
+   * stream started, or null when the stream produces a message of its own.
+   */
+  getStreamBasePartCount(streamId: string): number | null {
+    const row = this.ops.getStream(streamId);
+    if (!row) return null;
+    return parseChatMetadata(row)?.basePartCount ?? null;
   }
 
   /**
