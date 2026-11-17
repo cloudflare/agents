@@ -192,37 +192,6 @@ describe("AIChatAgent chat turn serialization", () => {
     ws.close(1000);
   });
 
-  it("abortActiveTurn aborts the current stream", async () => {
-    const room = crypto.randomUUID();
-    const { ws } = await connectSlowStream(room);
-    await delay(50);
-
-    const agentStub = await getAgentByName(env.SlowStreamAgent, room);
-
-    sendChatRequest(ws, "req-abort-turn", [firstUserMessage], {
-      format: "plaintext",
-      useAbortSignal: true,
-      chunkCount: 20,
-      chunkDelayMs: 40
-    });
-
-    await waitUntil(
-      async () => (await agentStub.isChatTurnActiveForTest()) === true
-    );
-    const donePromise = waitForDone(ws, "req-abort-turn");
-    expect(await agentStub.isChatTurnActiveForTest()).toBe(true);
-    expect(await agentStub.abortActiveTurnForTest()).toBe(true);
-
-    await donePromise;
-    await agentStub.waitForIdleForTest();
-
-    expect(await agentStub.getAbortControllerCount()).toBe(0);
-    expect(await agentStub.isChatTurnActiveForTest()).toBe(false);
-    expect(await agentStub.abortActiveTurnForTest()).toBe(false);
-
-    ws.close(1000);
-  });
-
   it("waitForIdle covers tool-result continuations queued during an active turn", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);

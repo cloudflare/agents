@@ -194,7 +194,7 @@ describe("ChatTurns", () => {
       true,
       spec
     );
-    const taken = turns.takeContinuation();
+    const taken = turns.takeContinuation("cont-1");
     expect(taken?.requestId).toBe("cont-1");
     expect(taken?.pastCoalesce).toBe(true);
   });
@@ -207,12 +207,12 @@ describe("ChatTurns", () => {
       spec
     );
     host.transcript = [...host.transcript, user("u2")];
-    expect(turns.takeContinuation()).toBeNull();
+    expect(turns.takeContinuation("cont-1")).toBeNull();
     expect(turns.continuation.pending?.pastCoalesce).toBe(false);
   });
 
   it("takes no continuation when none is pending", () => {
-    expect(turns.takeContinuation()).toBeNull();
+    expect(turns.takeContinuation("cont-1")).toBeNull();
   });
 
   // ── Reset guard ─────────────────────────────────────────────────────

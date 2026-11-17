@@ -6285,7 +6285,14 @@ describe("Think — onChatRecovery", () => {
         return typeof type === "string" && type.startsWith("tool-");
       });
       expect(hasSettledTool).toBe(true);
-      expect(warnSpy).not.toHaveBeenCalled();
+      // The spy sees every agent in this isolate. A recovery attempt another
+      // test left behind can time out waiting for a stable chat meanwhile.
+      expect(
+        warnSpy.mock.calls.filter(
+          ([message]) =>
+            !String(message).includes("timed out waiting for stable state")
+        )
+      ).toEqual([]);
     } finally {
       warnSpy.mockRestore();
     }

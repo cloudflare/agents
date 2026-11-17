@@ -1468,6 +1468,18 @@ export class OverflowRecoveryTestAgent extends Think {
     return this._overflowResult(await this.continueLastTurn());
   }
 
+  /**
+   * An overflow during a continuation turn is compacted and retried too. The
+   * connection-less continuation is the continuation turn with no client
+   * attached, so a test can start it directly.
+   */
+  async testContinuationOverflow(): Promise<OverflowChatResult> {
+    await this._seedReactiveOverflow();
+    this._model = undefined;
+    await this._cfRunConnectionlessContinuation();
+    return this._overflowResult({ requestId: "", status: "completed" });
+  }
+
   /** An overflow during the recovery retry is compacted and retried too. */
   async testRetryOverflow(
     message: string,
