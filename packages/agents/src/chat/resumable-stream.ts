@@ -105,10 +105,12 @@ type ChatStreamMetadata = {
    */
   parentMessageId?: string;
   /**
-   * How many parts the message this stream continues already held when the
-   * stream started. The stream's chunks reconstruct only what came after, so
-   * orphan recovery keeps that many leading parts of the existing row and
-   * replaces the rest, which makes recovering the same stream twice idempotent.
+   * Set when the stream extends an existing assistant message (`messageId`):
+   * how many parts that message held when the stream started. The stream's
+   * chunks hold only what came after, so orphan recovery replays them onto
+   * that many leading parts of the stored message, which keeps the earlier
+   * parts and makes recovering the same stream twice idempotent. Absent for a
+   * stream that produces a message of its own.
    */
   basePartCount?: number;
   /**
@@ -573,7 +575,9 @@ export class ResumableStream {
     if (options.parentMessageId != null) {
       metadata.parentMessageId = options.parentMessageId;
     }
-    if (options.basePartCount) metadata.basePartCount = options.basePartCount;
+    if (options.basePartCount != null) {
+      metadata.basePartCount = options.basePartCount;
+    }
     if (this._activeIsContinuation) metadata.isContinuation = 1;
     if (seqBase > 0) metadata.seqBase = seqBase;
     if (options.originMessageIds?.length) {
@@ -609,11 +613,14 @@ export class ResumableStream {
     return parseChatMetadata(row)?.messageId ?? null;
   }
 
-  /** Parts the continued message already held when the stream started. */
-  getStreamBasePartCount(streamId: string): number {
+  /**
+   * How many parts the message an orphaned stream extends held when the
+   * stream started, or null when the stream produces a message of its own.
+   */
+  getStreamBasePartCount(streamId: string): number | null {
     const row = this.ops.getStream(streamId);
-    if (!row) return 0;
-    return parseChatMetadata(row)?.basePartCount ?? 0;
+    if (!row) return null;
+    return parseChatMetadata(row)?.basePartCount ?? null;
   }
 
   /**

@@ -162,6 +162,8 @@ type ThinkSubmissionTestStub = {
       startMessageId?: string;
       leafMetadata?: Record<string, unknown>;
       startMetadata?: Record<string, unknown>;
+      leafParts?: unknown[];
+      chunks?: Array<Record<string, unknown>>;
     }
   ): Promise<void>;
   continueRecoveredChatForTest(requestId: string): Promise<void>;
@@ -2152,6 +2154,92 @@ describe("Think durable submissions", () => {
       continuation: false,
       resumed: true
     });
+  });
+
+  it("does not duplicate a tool call the continued message already held when the continuation replays it (#1404)", async () => {
+    const agent = await freshAgent();
+
+    await agent.persistContinuationOrphanForTest(
+      "req-cont-replay",
+      "leaf-1",
+      2,
+      {
+        leafParts: [
+          {
+            type: "tool-lookup",
+            toolCallId: "call-1",
+            state: "output-available",
+            input: { q: "x" },
+            output: "found"
+          }
+        ],
+        chunks: [
+          {
+            type: "tool-input-start",
+            toolCallId: "call-1",
+            toolName: "lookup"
+          },
+          {
+            type: "tool-input-available",
+            toolCallId: "call-1",
+            toolName: "lookup",
+            input: { q: "x" }
+          },
+          {
+            type: "tool-output-available",
+            toolCallId: "call-1",
+            output: "found"
+          },
+          { type: "text-start", id: "t2" },
+          { type: "text-delta", id: "t2", delta: "continued" },
+          { type: "text-end", id: "t2" }
+        ]
+      }
+    );
+
+    const assistants = (await agent.getStoredMessages()).filter(
+      (message) => message.role === "assistant"
+    );
+    expect(assistants).toHaveLength(1);
+    expect(assistants[0].parts).toMatchObject([
+      { toolCallId: "call-1", state: "output-available", output: "found" },
+      { type: "text", text: "continued" }
+    ]);
+  });
+
+  it("recovers a continuation's result for a tool call the continued message already held", async () => {
+    const agent = await freshAgent();
+
+    await agent.persistContinuationOrphanForTest("req-cont-tool", "leaf-1", 2, {
+      leafParts: [
+        {
+          type: "tool-lookup",
+          toolCallId: "call-1",
+          state: "approval-responded",
+          input: {},
+          approval: { id: "approval-1", approved: true }
+        }
+      ],
+      chunks: [
+        {
+          type: "tool-output-available",
+          toolCallId: "call-1",
+          output: "found"
+        },
+        { type: "text-start", id: "t2" },
+        { type: "text-delta", id: "t2", delta: "continued" },
+        { type: "text-end", id: "t2" }
+      ]
+    });
+
+    const assistants = (await agent.getStoredMessages()).filter(
+      (message) => message.role === "assistant"
+    );
+    expect(assistants).toHaveLength(1);
+    expect(assistants[0].parts).toMatchObject([
+      { toolCallId: "call-1", state: "output-available", output: "found" },
+      { type: "text", text: "continued" }
+    ]);
   });
 
   it("completes recovered chat fiber submissions through scheduled continuation", async () => {
