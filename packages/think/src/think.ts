@@ -475,7 +475,11 @@ type StreamInterruptionRoute = {
   branchParentId?: string;
   /** Delay the continuation with exponential backoff (transient errors). */
   backoff?: boolean;
-  /** Provider `Retry-After` (rate limits); extends the backoff delay. */
+  /** The error that interrupted the stream. */
+  error: unknown;
+  /** The app said `persist: false`: the turn must not store the partial. */
+  onPartialDropped: () => void;
+  /** A provider `Retry-After` the engine cannot read from `error` itself. */
   retryAfterSeconds?: number;
 };
 
@@ -6909,15 +6913,15 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       : undefined;
   }
 
-  /** The provider `Retry-After` to honor for a rate-limited stream error. */
-  private _streamErrorRetryAfter(
-    error: unknown,
-    classification: ChatErrorClassification | undefined
-  ): number | undefined {
-    if (classification !== "rate_limit") return undefined;
-    return retryAfterSeconds(
-      error instanceof TransientChatStreamError ? error.original : error
-    );
+  /**
+   * The provider `Retry-After` of an error the stream reported in-band. The
+   * recovery engine reads a thrown error's headers itself. An in-band error
+   * reaches it wrapped, with the provider's error object on `original`.
+   */
+  private _streamErrorRetryAfter(error: unknown): number | undefined {
+    return error instanceof TransientChatStreamError
+      ? retryAfterSeconds(error.original)
+      : undefined;
   }
 
   /**
@@ -14435,6 +14439,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     let streamDrained = false;
     let aborted = false;
     let doneSent = false;
+    // Set when a declined recovery dropped the partial (`persist: false`).
+    let partialDropped = false;
     let streamError: string | undefined;
     let streamErrorCause: unknown;
     let pendingRpcError: string | undefined;
@@ -14725,10 +14731,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           requestId,
           streamId,
           backoff: !stalled,
-          retryAfterSeconds: this._streamErrorRetryAfter(
-            error,
-            transientClassification
-          ),
+          error,
+          retryAfterSeconds: this._streamErrorRetryAfter(error),
+          onPartialDropped: () => {
+            partialDropped = true;
+          },
           partialParts: accumulator.toMessage().parts,
           persistPartial: async () => {
             if (persistedAssistantId) return persistedAssistantId;
@@ -14772,12 +14779,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           );
           return { status: "aborted" };
         }
-        if (outcome === "exhausted" || outcome === "declined") {
-          // `routeStreamInterruption` already delivered the terminal UX
-          // (exhaustion: configured `terminalMessage` + `onExhausted`; declined:
-          // the declined message), with the done/error frame and the submission
-          // marked interrupted. Finalize the stream and return WITHOUT the
-          // generic terminal path, which would re-broadcast the raw stall error.
+        // A declined continuation (`continue: false`) falls through: the turn
+        // ends as the stream error it hit.
+        if (outcome === "exhausted") {
+          // `routeStreamInterruption` already delivered the terminal UX (the
+          // configured `terminalMessage` + `onExhausted`), with the done/error
+          // frame and the submission marked interrupted. Finalize the stream
+          // and return WITHOUT the generic terminal path, which would
+          // re-broadcast the raw stall error.
           if (!streamFinalized) {
             this._errorResumableStream(streamId, requestId);
             streamFinalized = true;
@@ -14801,7 +14810,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         streamFinalized = true;
       }
       try {
-        if (!assistantMsg && accumulator.parts.length > 0) {
+        if (!assistantMsg && accumulator.parts.length > 0 && !partialDropped) {
           assistantMsg = (
             await this._storeLiveReply(
               accumulator,
@@ -15018,6 +15027,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     this._streamingAssistant = accumulator;
 
     let doneSent = false;
+    // Set when a declined recovery dropped the partial (`persist: false`).
+    let partialDropped = false;
     // The terminal frame flips `useAgentChat` to ready, so it is held until
     // the assistant message is persisted and the transcript broadcast (#2119).
     let terminalFrame: Record<string, unknown> | undefined;
@@ -15295,10 +15306,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           requestId,
           streamId,
           backoff: !stalled,
-          retryAfterSeconds: this._streamErrorRetryAfter(
-            error,
-            transientClassification
-          ),
+          error,
+          retryAfterSeconds: this._streamErrorRetryAfter(error),
+          onPartialDropped: () => {
+            partialDropped = true;
+          },
           partialParts: partialMsg.parts,
           branchParentId: parentId,
           persistPartial: async () => {
@@ -15345,12 +15357,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           this._streamingAssistant = null;
           return { status: "aborted" };
         }
-        if (outcome === "exhausted" || outcome === "declined") {
-          // `routeStreamInterruption` already delivered the terminal UX
-          // (exhaustion: configured `terminalMessage` + `onExhausted`; declined:
-          // the declined message), with the done/error frame and the submission
-          // marked interrupted. Finalize the stream and report `aborted` (not
-          // `error`) so the caller does not re-run the generic terminal path.
+        // A declined continuation (`continue: false`) falls through: the turn
+        // ends as the stream error it hit.
+        if (outcome === "exhausted") {
+          // `routeStreamInterruption` already delivered the terminal UX (the
+          // configured `terminalMessage` + `onExhausted`), with the done/error
+          // frame and the submission marked interrupted. Finalize the stream
+          // and report `aborted` (not `error`) so the caller does not re-run
+          // the generic terminal path.
           this._errorResumableStream(streamId, requestId);
           this._pendingResumeConnections.clear();
           doneSent = true;
@@ -15440,7 +15454,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             error: streamError
           };
 
-          if (accumulator.parts.length > 0) {
+          if (accumulator.parts.length > 0 && !partialDropped) {
             let persistedMessageId: string | undefined;
             const { message } = await this._storeLiveReply(
               accumulator,
@@ -17092,10 +17106,28 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             this._persistBody();
           }
         },
+        recordTerminalError: (requestId, errorText) =>
+          this._recordTerminalChatStatus("error", requestId, errorText),
         reconcileAgentToolChildRuns: () =>
           this._reconcileOwnStaleAgentToolChildRuns(),
         trackAlarmWork: (turn) => this.lifecycle.trackAlarmWork(turn),
-        attemptScope: new AsyncLocalStorage<string>()
+        attemptScope: new AsyncLocalStorage<string>(),
+        originMessageIdsScope: this._chatRecoveryOriginIdsScope,
+        // SAFETY: the recovery engine is the sole producer of each
+        // callback's payload and the Task persists it verbatim, so the
+        // callback name selects the matching host input type.
+        attempts: {
+          _chatRecoveryContinue: (data, onTurnStarted) =>
+            this._chatRecoveryContinueDetached(
+              data as ChatRecoveryContinueData | undefined,
+              onTurnStarted
+            ),
+          _chatRecoveryRetry: (data, onTurnStarted) =>
+            this._chatRecoveryRetryDetached(
+              data as ChatRecoveryRetryData | undefined,
+              onTurnStarted
+            )
+        }
       },
       // Hibernation ordering guard. The budget decision consults
       // `hasPendingInteraction()` -> `_clientResolvableToolNames()` ->
@@ -17296,6 +17328,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       streamId: input.streamId,
       partialParts: input.partialParts,
       backoff: input.backoff,
+      error: input.error,
       retryAfterSeconds: input.retryAfterSeconds,
       latestUserMessageId:
         [...this.messages].reverse().find((m) => m.role === "user")?.id ?? null,
@@ -17321,14 +17354,21 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           lastClientTools: this._lastClientTools,
           createdAt: liveTurn?.createdAt ?? context.firstSeenAt
         }),
-      resolvePartial: async (keep) =>
-        keep ? input.persistPartial() : undefined,
+      resolvePartial: async (keep) => {
+        if (keep) return input.persistPartial();
+        input.onPartialDropped();
+        return undefined;
+      },
       requestContext: () => ({
         lastBody: this._lastBody,
         lastClientTools: this._lastClientTools
       }),
-      onDeclined: () =>
-        this._declineRecoveredTurn(recoveryRootRequestId, input.requestId),
+      // The turn then ends as its stream error, which the caller sends.
+      onDeclined: (errorText) =>
+        this._markRecoveredSubmissionInterrupted(
+          recoveryRootRequestId,
+          errorText
+        ),
       beforeSchedule: (incidentId, partialText) =>
         this._claimMessengerRecoveryDelivery(
           input.requestId,
@@ -17858,13 +17898,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   async _chatRecoveryRetry(data?: ChatRecoveryRetryData): Promise<void> {
-    await this._chatRecoveryEngine().dispatchRecovery(
+    await this._chatRecoveryEngine().runRecoveryCallback(
       "_chatRecoveryRetry",
-      data,
-      (onTurnStarted) =>
-        this._chatRecoveryOriginIdsScope.run(data?.originMessageIds, () =>
-          this._chatRecoveryRetryDetached(data, onTurnStarted)
-        )
+      data
     );
   }
 
@@ -18120,13 +18156,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   async _chatRecoveryContinue(data?: ChatRecoveryContinueData): Promise<void> {
-    await this._chatRecoveryEngine().dispatchRecovery(
+    await this._chatRecoveryEngine().runRecoveryCallback(
       "_chatRecoveryContinue",
-      data,
-      (onTurnStarted) =>
-        this._chatRecoveryOriginIdsScope.run(data?.originMessageIds, () =>
-          this._chatRecoveryContinueDetached(data, onTurnStarted)
-        )
+      data
     );
   }
 

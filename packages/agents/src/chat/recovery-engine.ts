@@ -314,6 +314,11 @@ export interface ChatRecoveryTurnBindings {
     lastClientTools?: ClientToolSchema[];
     lastBody?: Record<string, unknown>;
   }): void;
+  /**
+   * Durably record that a request ended with `errorText`, so a client that
+   * was away learns the outcome when it reconnects (#1645).
+   */
+  recordTerminalError(requestId: string, errorText: string): Promise<void>;
   /** Close agent-tool child runs a recovered turn settled. */
   reconcileAgentToolChildRuns(): Promise<void>;
   /** Keep a detached recovered turn inside the current alarm's domain. */
@@ -327,6 +332,29 @@ export interface ChatRecoveryTurnBindings {
     run<T>(incidentId: string, fn: () => T): T;
     getStore(): string | undefined;
   };
+  /**
+   * An async-context scope (an `AsyncLocalStorage<string[] | undefined>`)
+   * the engine runs a recovery callback in, holding the message ids the
+   * interrupted request came from (#2280). The recovered turn runs under a
+   * fresh request id, and the host reads the scope to stamp those ids on its
+   * frames. A concurrent client request is outside the scope and never
+   * inherits them.
+   */
+  originMessageIdsScope: {
+    run<T>(originMessageIds: string[] | undefined, fn: () => T): T;
+    getStore(): string[] | undefined;
+  };
+  /**
+   * The body of each recovery callback: one attempt. It calls
+   * `onTurnStarted` once the model turn begins.
+   */
+  attempts: Record<
+    ChatRecoveryScheduleCallback,
+    (
+      data: Record<string, unknown> | undefined,
+      onTurnStarted: () => void
+    ) => Promise<void>
+  >;
 }
 
 /** Resolved orphaned-stream identity for a recovered chat turn. */
@@ -1036,21 +1064,25 @@ export class ChatRecoveryEngine {
   }
 
   /**
-   * Run a recovery callback the Task transport delivered, up to its model
-   * handoff, then return. The turn continues as tracked alarm work, and a
-   * detached platform failure enqueues one replacement attempt.
+   * Run a recovery callback (`_chatRecoveryContinue` or `_chatRecoveryRetry`)
+   * the Task transport delivered, up to its model handoff, then return. The
+   * turn continues as tracked alarm work, and a detached platform failure
+   * enqueues one replacement attempt.
+   *
+   * The attempt runs inside the host's origin-message-ids scope, so the
+   * frames of the recovered turn carry the ids of the request it recovers.
    *
    * @param callback - The callback being run.
    * @param data - Its payload.
-   * @param detached - The attempt. It calls `onTurnStarted` once the model
-   *   turn begins.
    */
-  dispatchRecovery(
+  runRecoveryCallback(
     callback: ChatRecoveryScheduleCallback,
-    data: Record<string, unknown> | undefined,
-    detached: (onTurnStarted: () => void) => Promise<void>
+    data: Record<string, unknown> | undefined
   ): Promise<void> {
     const { turns } = this;
+    const originMessageIds = Array.isArray(data?.originMessageIds)
+      ? (data.originMessageIds as string[])
+      : undefined;
     return dispatchChatRecoveryToHandoff({
       // Each run is one attempt under the interruption budget: it counts an
       // earlier attempt that died and records itself before any heavy work.
@@ -1058,7 +1090,10 @@ export class ChatRecoveryEngine {
         this.runRecoveryAttempt({
           callback,
           data,
-          run: () => detached(onTurnStarted)
+          run: () =>
+            turns.originMessageIdsScope.run(originMessageIds, () =>
+              turns.attempts[callback](data, onTurnStarted)
+            )
         }),
       track: (turn) => turns.trackAlarmWork(turn),
       redefer: (dedupeKey) =>
@@ -1634,10 +1669,11 @@ export function chatRecoveryBackoffSeconds(
 }
 
 /**
- * The `Retry-After` an error carries, in whole seconds. Reads
- * `responseHeaders` (AI SDK `APICallError`) or `headers` on the error or its
- * `cause` chain; accepts delta-seconds or an HTTP date. `undefined` when absent
- * or unparseable.
+ * How long a provider asked the caller to wait before retrying, in whole
+ * seconds. Reads `responseHeaders` (AI SDK `APICallError`) or `headers` on
+ * the error or its `cause` chain. `retry-after-ms` (milliseconds) wins over
+ * `retry-after`, which is delta-seconds or an HTTP date. `undefined` when
+ * absent or unparseable.
  */
 export function retryAfterSeconds(
   error: unknown,
@@ -1651,22 +1687,27 @@ export function retryAfterSeconds(
       headers?: unknown;
       cause?: unknown;
     };
-    const value =
-      readRetryAfterHeader(record.responseHeaders) ??
-      readRetryAfterHeader(record.headers);
-    if (value !== undefined) return parseRetryAfter(value, now);
+    for (const headers of [record.responseHeaders, record.headers]) {
+      const milliseconds = readHeader(headers, "retry-after-ms");
+      if (milliseconds !== undefined && /^\d+(\.\d+)?$/.test(milliseconds)) {
+        return Math.ceil(Number(milliseconds) / 1000);
+      }
+      const value = readHeader(headers, "retry-after");
+      if (value !== undefined) return parseRetryAfter(value, now);
+    }
     current = record.cause;
   }
   return undefined;
 }
 
-function readRetryAfterHeader(headers: unknown): string | undefined {
+function readHeader(headers: unknown, header: string): string | undefined {
   if (headers == null || typeof headers !== "object") return undefined;
-  if (headers instanceof Headers)
-    return headers.get("retry-after") ?? undefined;
+  if (headers instanceof Headers) {
+    return headers.get(header)?.trim() ?? undefined;
+  }
   for (const [name, value] of Object.entries(headers)) {
-    if (name.toLowerCase() === "retry-after" && typeof value === "string") {
-      return value;
+    if (name.toLowerCase() === header && typeof value === "string") {
+      return value.trim();
     }
   }
   return undefined;

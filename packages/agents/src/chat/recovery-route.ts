@@ -12,7 +12,8 @@
  * 3. Ask the app (`onChatRecovery`).
  * 4. Store the partial reply, or drop it when the app said `persist: false`
  *    and it holds no settled tool result.
- * 5. Stop if the app said `continue: false`.
+ * 5. Stop if the app said `continue: false`: the turn ends as the stream
+ *    error it hit, and that outcome is recorded for a client that was away.
  * 6. Schedule a retry or a continue, and mark the incident so a recovery
  *    attempt running this turn leaves the outcome to the scheduled one.
  *
@@ -25,7 +26,10 @@ import type {
   ChatRecoveryEngine,
   ChatRecoveryScheduleReason
 } from "./recovery-engine";
-import { chatRecoveryBackoffSeconds } from "./recovery-engine";
+import {
+  chatRecoveryBackoffSeconds,
+  retryAfterSeconds
+} from "./recovery-engine";
 import type {
   ChatRecoveryIncident,
   ChatRecoveryKind
@@ -39,7 +43,9 @@ import type { MessagePart } from "./message-builder";
  *   and sends no terminal error.
  * - `"exhausted"`: the budget is spent and the terminal message was
  *   delivered. The turn must not send its own.
- * - `"declined"`: the app returned `continue: false`.
+ * - `"declined"`: the app returned `continue: false`. The turn delivers its
+ *   ordinary terminal error, the text of the error that interrupted it. The
+ *   terminal record is already written.
  * - `"failed"`: `onChatRecovery` threw, or routing itself failed. The turn
  *   delivers its ordinary terminal error.
  */
@@ -74,7 +80,17 @@ export interface StreamInterruptionHost {
   partialParts: MessagePart[];
   /** Delay the recovery with exponential backoff (transient errors). */
   backoff?: boolean;
-  /** A provider's `Retry-After`, which extends the backoff. */
+  /**
+   * The error that interrupted the stream. Its message is what the client
+   * is shown if the app declines to continue, and a provider's `Retry-After`
+   * is read from it.
+   */
+  error: unknown;
+  /**
+   * How long the provider asked to wait, when the host knows better than
+   * {@link retryAfterSeconds} reading `error`. Either one extends the
+   * backoff, up to its cap.
+   */
   retryAfterSeconds?: number;
   /** The latest user message, for the incident's identity. */
   latestUserMessageId: string | null;
@@ -98,8 +114,12 @@ export interface StreamInterruptionHost {
   resolvePartial(keep: boolean): Promise<string | undefined>;
   /** The tools and body the interrupted request ran with. */
   requestContext(): { lastBody: unknown; lastClientTools: unknown };
-  /** The app declined to continue. Runs after the incident is marked. */
-  onDeclined?(): Promise<void>;
+  /**
+   * The app declined to continue. Runs after the incident is marked and
+   * before the terminal error is recorded. `errorText` is what the client is
+   * shown.
+   */
+  onDeclined?(errorText: string): Promise<void>;
   /** Runs before the recovery is scheduled. */
   beforeSchedule?(incidentId: string, partialText: string): Promise<void>;
   /** Extra fields for the schedule payload. */
@@ -290,7 +310,13 @@ async function route(
       "skipped",
       "continue_disabled"
     );
-    await host.onDeclined?.();
+    // The turn ends as the stream error it hit. The turn itself sends that
+    // error frame. Record it here too, so a client that was away learns the
+    // outcome when it reconnects.
+    const errorText =
+      host.error instanceof Error ? host.error.message : String(host.error);
+    await host.onDeclined?.(errorText);
+    await engine.turns.recordTerminalError(requestId, errorText);
     return "declined";
   }
 
@@ -306,8 +332,12 @@ async function route(
   // Stalls count too: a turn that streams a little and then stalls resets
   // the progress-keyed attempt cap every time, so this is its only bound.
   const retries = await engine.recordTransientRetry(incident.incidentId);
+  // A provider that says how long to wait is believed, up to the cap.
   const delaySeconds = host.backoff
-    ? chatRecoveryBackoffSeconds(retries, host.retryAfterSeconds)
+    ? chatRecoveryBackoffSeconds(
+        retries,
+        host.retryAfterSeconds ?? retryAfterSeconds(host.error)
+      )
     : undefined;
   const kind: ChatRecoveryKind = retryUserId ? "retry" : "continue";
   await scheduleRecoveredTurn(engine, {

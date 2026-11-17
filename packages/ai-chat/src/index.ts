@@ -282,6 +282,8 @@ type StreamInterruptionRoute = {
   continuation: boolean;
   /** Delay the recovery with exponential backoff (transient errors). */
   backoff?: boolean;
+  /** The error that interrupted the stream. */
+  error: unknown;
   /** Skip persisting the partial (`onChatRecovery` returned `persist: false`). */
   discardPartial: () => Promise<void>;
 };
@@ -4992,10 +4994,28 @@ export class AIChatAgent<
           if ("lastBody" in context) this._lastBody = context.lastBody;
           this._persistRequestContext();
         },
+        recordTerminalError: (requestId, errorText) =>
+          this._recordChatTerminal(requestId, errorText),
         reconcileAgentToolChildRuns: () =>
           this._reconcileOwnStaleAgentToolChildRuns(),
         trackAlarmWork: (turn) => this.lifecycle.trackAlarmWork(turn),
-        attemptScope: new AsyncLocalStorage<string>()
+        attemptScope: new AsyncLocalStorage<string>(),
+        originMessageIdsScope: this._chatRecoveryOriginIdsScope,
+        // SAFETY: the recovery engine is the sole producer of each
+        // callback's payload and the Task persists it verbatim, so the
+        // callback name selects the matching host input type.
+        attempts: {
+          _chatRecoveryContinue: (data, onTurnStarted) =>
+            this._chatRecoveryContinueDetached(
+              data as ChatRecoveryContinueData | undefined,
+              onTurnStarted
+            ),
+          _chatRecoveryRetry: (data, onTurnStarted) =>
+            this._chatRecoveryRetryDetached(
+              data as ChatRecoveryRetryData | undefined,
+              onTurnStarted
+            )
+        }
       },
       readProgress: () => this._chatRecoveryProgressMarker(),
       // A turn parked on a pending CLIENT interaction is waiting on the human,
@@ -5390,13 +5410,9 @@ export class AIChatAgent<
   }
 
   async _chatRecoveryContinue(data?: ChatRecoveryContinueData): Promise<void> {
-    await this._chatRecoveryEngine().dispatchRecovery(
+    await this._chatRecoveryEngine().runRecoveryCallback(
       "_chatRecoveryContinue",
-      data,
-      (onTurnStarted) =>
-        this._chatRecoveryOriginIdsScope.run(data?.originMessageIds, () =>
-          this._chatRecoveryContinueDetached(data, onTurnStarted)
-        )
+      data
     );
   }
 
@@ -5451,6 +5467,7 @@ export class AIChatAgent<
       streamId: input.streamId,
       partialParts: input.partialParts,
       backoff: input.backoff,
+      error: input.error,
       latestUserMessageId,
       originMessageIds: this._originMessageIdsFor(input.requestId),
       // A new turn (not a continuation) whose question is still the latest
@@ -5561,13 +5578,9 @@ export class AIChatAgent<
   }
 
   async _chatRecoveryRetry(data?: ChatRecoveryRetryData): Promise<void> {
-    await this._chatRecoveryEngine().dispatchRecovery(
+    await this._chatRecoveryEngine().runRecoveryCallback(
       "_chatRecoveryRetry",
-      data,
-      (onTurnStarted) =>
-        this._chatRecoveryOriginIdsScope.run(data?.originMessageIds, () =>
-          this._chatRecoveryRetryDetached(data, onTurnStarted)
-        )
+      data
     );
   }
 
@@ -7070,6 +7083,7 @@ export class AIChatAgent<
                 targetAssistantId,
                 continuation,
                 backoff: !(error instanceof ChatStreamStalledError),
+                error,
                 discardPartial: async () => {
                   discardPartial = true;
                   // An approval request already persisted this turn's

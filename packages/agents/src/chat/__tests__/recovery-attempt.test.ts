@@ -68,6 +68,7 @@ function setup(scenario: Scenario = {}) {
     });
   }
   const log: string[] = [];
+  const terminalErrors: Array<{ requestId: string; errorText: string }> = [];
   const scheduled: string[] = [];
   const exhausted: string[] = [];
   const restored: unknown[] = [];
@@ -98,7 +99,15 @@ function setup(scenario: Scenario = {}) {
       log.push("reconcile");
     },
     trackAlarmWork: () => {},
-    attemptScope: new AsyncLocalStorage<string>()
+    attemptScope: new AsyncLocalStorage<string>(),
+    originMessageIdsScope: new AsyncLocalStorage<string[] | undefined>(),
+    recordTerminalError: async (requestId, errorText) => {
+      terminalErrors.push({ requestId, errorText });
+    },
+    attempts: {
+      _chatRecoveryContinue: async () => {},
+      _chatRecoveryRetry: async () => {}
+    }
   };
   const adapter: ChatRecoveryAdapter = {
     resolveConfig: () => resolveChatRecoveryConfig(undefined),
@@ -208,6 +217,28 @@ const cancelled = {
   status: "skipped",
   reason: CHAT_RECOVERY_CANCELLED_REASON
 } as const;
+
+describe("runRecoveryCallback", () => {
+  it("runs the callback's attempt inside the origin-message-ids scope", async () => {
+    const t = setup();
+    let scoped: string[] | undefined;
+    let outside: string[] | undefined;
+    t.turns.attempts._chatRecoveryRetry = async (data, onTurnStarted) => {
+      scoped = t.turns.originMessageIdsScope.getStore();
+      expect(data).toMatchObject({ incidentId: INCIDENT });
+      onTurnStarted();
+    };
+    await t.engine.runRecoveryCallback("_chatRecoveryRetry", {
+      incidentId: INCIDENT,
+      originMessageIds: ["user-1"]
+    });
+    outside = t.turns.originMessageIdsScope.getStore();
+
+    expect(scoped).toEqual(["user-1"]);
+    // A request outside the callback never inherits the ids.
+    expect(outside).toBeUndefined();
+  });
+});
 
 describe("runRecoveredTurn", () => {
   it("runs the steps in order and records a completed turn", async () => {

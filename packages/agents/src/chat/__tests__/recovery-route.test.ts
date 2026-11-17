@@ -36,6 +36,8 @@ type Scenario = {
   /** The stored assistant message when the partial is kept. */
   storedReplyId?: string;
   maxAttempts?: number;
+  /** The error that interrupted the stream. */
+  error?: unknown;
   /** Throws from the incident store, to fail the routing itself. */
   storageFails?: boolean;
 };
@@ -50,6 +52,7 @@ function setup(scenario: Scenario = {}) {
   }> = [];
   const exhausted: string[] = [];
   const log: string[] = [];
+  const terminalErrors: Array<{ requestId: string; errorText: string }> = [];
   const adapter: ChatRecoveryAdapter = {
     resolveConfig: () =>
       resolveChatRecoveryConfig(
@@ -99,7 +102,15 @@ function setup(scenario: Scenario = {}) {
       restoreRequestContext: () => {},
       reconcileAgentToolChildRuns: () => Promise.resolve(),
       trackAlarmWork: () => {},
-      attemptScope: new AsyncLocalStorage<string>()
+      attemptScope: new AsyncLocalStorage<string>(),
+      originMessageIdsScope: new AsyncLocalStorage<string[] | undefined>(),
+      recordTerminalError: async (requestId, errorText) => {
+        terminalErrors.push({ requestId, errorText });
+      },
+      attempts: {
+        _chatRecoveryContinue: async () => {},
+        _chatRecoveryRetry: async () => {}
+      }
     },
     onGiveUpBookkeepingError: () => {}
   };
@@ -108,6 +119,7 @@ function setup(scenario: Scenario = {}) {
     requestId: "request-1",
     streamId: "stream-1",
     partialParts: scenario.partialParts ?? [text("Partial")],
+    error: scenario.error ?? new Error("upstream reset"),
     latestUserMessageId: "user-1",
     retryTargetUserId: async () => {
       log.push("retry-target");
@@ -126,8 +138,8 @@ function setup(scenario: Scenario = {}) {
       lastBody: { model: "m" },
       lastClientTools: undefined
     }),
-    onDeclined: async () => {
-      log.push("declined");
+    onDeclined: async (errorText) => {
+      log.push(`declined: ${errorText}`);
     },
     beforeSchedule: async () => {
       log.push("before-schedule");
@@ -142,6 +154,7 @@ function setup(scenario: Scenario = {}) {
     log,
     scheduled,
     exhausted,
+    terminalErrors,
     incident: () => [...storage.values()][0],
     run: () => engine.routeStreamInterruption(host)
   };
@@ -222,13 +235,25 @@ describe("routeStreamInterruption", () => {
     expect(t.log).not.toContain("drop");
   });
 
-  it("stops when the app declines to continue", async () => {
+  it("ends a declined turn as the stream error it hit, and records it", async () => {
     const t = setup({
       options: { continue: false },
-      storedReplyId: "assistant-1"
+      storedReplyId: "assistant-1",
+      error: new Error("provider said no")
     });
+    // The turn sends the error frame itself: `declined` tells it to.
     expect(await t.run()).toBe("declined");
-    expect(t.log).toEqual(["on-chat-recovery", "keep", "declined"]);
+
+    // The incident is marked, then the host's hook, then the terminal record
+    // a client that was away reads on reconnect.
+    expect(t.log).toEqual([
+      "on-chat-recovery",
+      "keep",
+      "declined: provider said no"
+    ]);
+    expect(t.terminalErrors).toEqual([
+      { requestId: "request-1", errorText: "provider said no" }
+    ]);
     expect(t.scheduled).toEqual([]);
     expect(t.incident()).toMatchObject({
       status: "skipped",
@@ -270,12 +295,95 @@ describe("routeStreamInterruption", () => {
     expect(t.log).toContain("after-schedule:chained");
   });
 
-  it("backs off, and waits at least as long as the provider asked", async () => {
-    const t = setup({ storedReplyId: "assistant-1" });
+  const apiCallError = (headers: Record<string, string>) =>
+    Object.assign(new Error("Too Many Requests"), {
+      name: "AI_APICallError",
+      statusCode: 429,
+      responseHeaders: headers
+    });
+
+  it.each<{
+    name: string;
+    headers: Record<string, string>;
+    delay: number;
+  }>([
+    {
+      name: "retry-after in seconds",
+      headers: { "retry-after": "7" },
+      delay: 7
+    },
+    {
+      name: "retry-after-ms",
+      headers: { "retry-after-ms": "2500" },
+      delay: 3
+    },
+    {
+      name: "retry-after-ms over retry-after",
+      headers: { "retry-after": "30", "retry-after-ms": "4000" },
+      delay: 4
+    },
+    {
+      name: "a wait longer than the cap",
+      headers: { "retry-after": "600" },
+      delay: 60
+    },
+    { name: "no header", headers: {}, delay: 1 }
+  ])(
+    "reads the provider's wait from the error: $name",
+    async ({ headers, delay }) => {
+      const t = setup({
+        storedReplyId: "assistant-1",
+        error: apiCallError(headers)
+      });
+      t.host.backoff = true;
+      expect(await t.run()).toBe("scheduled");
+      expect(t.scheduled[0]?.delaySeconds).toBe(delay);
+    }
+  );
+
+  it("reads an HTTP-date retry-after", async () => {
+    const t = setup({
+      storedReplyId: "assistant-1",
+      error: apiCallError({
+        "retry-after": new Date(Date.now() + 9_500).toUTCString()
+      })
+    });
+    t.host.backoff = true;
+    expect(await t.run()).toBe("scheduled");
+    expect(t.scheduled[0]?.delaySeconds).toBeGreaterThanOrEqual(8);
+    expect(t.scheduled[0]?.delaySeconds).toBeLessThanOrEqual(10);
+  });
+
+  it("finds the provider's wait on a wrapped error", async () => {
+    const t = setup({
+      storedReplyId: "assistant-1",
+      error: new Error("stream failed", {
+        cause: apiCallError({ "retry-after": "5" })
+      })
+    });
+    t.host.backoff = true;
+    expect(await t.run()).toBe("scheduled");
+    expect(t.scheduled[0]?.delaySeconds).toBe(5);
+  });
+
+  it("lets the host's own value win over the header", async () => {
+    const t = setup({
+      storedReplyId: "assistant-1",
+      error: apiCallError({ "retry-after": "30" })
+    });
     t.host.backoff = true;
     t.host.retryAfterSeconds = 7;
     expect(await t.run()).toBe("scheduled");
-    expect(t.scheduled[0]?.delaySeconds).toBeGreaterThanOrEqual(7);
+    expect(t.scheduled[0]?.delaySeconds).toBe(7);
+  });
+
+  it("does not delay a stall, which has no backoff", async () => {
+    const t = setup({
+      storedReplyId: "assistant-1",
+      error: apiCallError({ "retry-after": "30" })
+    });
+    expect(await t.run()).toBe("scheduled");
+    expect(t.scheduled[0]?.delaySeconds).toBe(0);
   });
 
   it("returns failed when the routing itself throws", async () => {

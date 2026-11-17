@@ -2963,6 +2963,13 @@ export class ThinkTestAgent extends Think {
     };
   }
 
+  /** What `onChatRecovery` returns from now on. */
+  async setRecoveryHookForTest(
+    recovery: ChatRecoveryOptions | null
+  ): Promise<void> {
+    this._recoveryHookForTest = recovery;
+  }
+
   async armStallForTest(afterChunks: number, timeoutMs: number): Promise<void> {
     this._stallAfterChunks = afterChunks;
     this._stallAttemptsRemaining = 1;
@@ -3147,6 +3154,7 @@ export class ThinkTestAgent extends Think {
     inStream: boolean;
     error?: "api-call-503" | "code-update-reset" | "storage-reset";
     retryAfter?: string;
+    retryAfterMs?: string;
     abortFirst?: boolean;
     failIncidentBegin?: boolean;
   }): Promise<{
@@ -3161,8 +3169,17 @@ export class ThinkTestAgent extends Think {
         name: "AI_APICallError",
         statusCode: 503,
         isRetryable: true,
-        ...(options.retryAfter
-          ? { responseHeaders: { "retry-after": options.retryAfter } }
+        ...(options.retryAfter || options.retryAfterMs
+          ? {
+              responseHeaders: {
+                ...(options.retryAfter && {
+                  "retry-after": options.retryAfter
+                }),
+                ...(options.retryAfterMs && {
+                  "retry-after-ms": options.retryAfterMs
+                })
+              }
+            }
           : {})
       });
     } else if (options.error === "code-update-reset") {
@@ -10341,6 +10358,8 @@ export class ThinkRecoveryTestAgent extends Think {
             requestId: string;
             streamId: string;
             partialParts: unknown[];
+            error: unknown;
+            onPartialDropped: () => void;
             persistPartial: () => Promise<string | undefined>;
           }): Promise<string>;
         }
@@ -10348,6 +10367,8 @@ export class ThinkRecoveryTestAgent extends Think {
         requestId,
         streamId: "stall-stream",
         partialParts: [],
+        error: new Error("stream stalled"),
+        onPartialDropped: () => {},
         persistPartial: async () => undefined
       });
     } finally {

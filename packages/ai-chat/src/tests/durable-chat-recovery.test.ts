@@ -212,8 +212,10 @@ interface ChatRecoveryTestStub {
     options?: {
       prelude?: "partial" | "approval" | "start-only" | "none";
       priorAssistant?: boolean;
+      responseHeaders?: Record<string, string>;
     }
   ): Promise<"completed" | "error" | "aborted" | "skipped">;
+  getScheduledRecoveryDelayForTest(): Promise<number | null>;
   getFailingReaderCallsForTest(): Promise<number>;
   setStashData(data: unknown): Promise<void>;
   trackRecoveryTaskKeysForTest(): Promise<void>;
@@ -3150,6 +3152,50 @@ describe("platform-transient reader errors (#1964)", () => {
     expect(contexts[0].recoveryData).toEqual({ responseId: "r-123" });
     expect(contexts[0].createdAt).toBeGreaterThanOrEqual(before);
     expect(contexts[0].createdAt).toBeLessThan(incidents[0].firstSeenAt);
+  });
+
+  it.each<{ name: string; headers: Record<string, string>; delay: number }>([
+    { name: "retry-after", headers: { "retry-after": "7" }, delay: 7 },
+    { name: "retry-after-ms", headers: { "retry-after-ms": "4200" }, delay: 5 },
+    {
+      name: "a wait past the cap",
+      headers: { "retry-after": "600" },
+      delay: 60
+    }
+  ])(
+    "waits as long as the provider asked before recovering: $name",
+    async ({ headers, delay }) => {
+      const agentStub = await getTestAgent(
+        `transient-retry-after-${crypto.randomUUID()}`
+      );
+      expect(
+        await agentStub.driveFailingReaderTurnForTest(
+          "Network connection lost.",
+          1,
+          { responseHeaders: headers }
+        )
+      ).toBe("aborted");
+      expect(await agentStub.getScheduledRecoveryDelayForTest()).toBe(delay);
+    }
+  );
+
+  it("ends a transient failure the app declines to continue as the stream error, and records it", async () => {
+    const agentStub = await getTestAgent(
+      `transient-declined-${crypto.randomUUID()}`
+    );
+    await agentStub.setRecoveryOverride({ continue: false });
+
+    expect(
+      await agentStub.driveFailingReaderTurnForTest("Network connection lost.")
+    ).toBe("error");
+
+    // Nothing is scheduled, and a client that was away learns what happened.
+    expect(
+      (await agentStub.getChatRecoveryIncidentsForTest()) as unknown[]
+    ).toMatchObject([{ status: "skipped", reason: "continue_disabled" }]);
+    expect(await agentStub.getPendingChatTerminalForTest()).toMatchObject({
+      body: "Network connection lost."
+    });
   });
 
   it("exhausts repeated disconnects on the transient retry budget", async () => {

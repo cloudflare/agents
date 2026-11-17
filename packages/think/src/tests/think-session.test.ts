@@ -713,6 +713,53 @@ describe("Think — error handling", () => {
     }
   });
 
+  it("sends a WebSocket client the stream error when onChatRecovery declines to continue", async () => {
+    const room = `stall-decline-ws-${crypto.randomUUID()}`;
+    const agent = await freshAgent(room);
+    await agent.setRecoveryHookForTest({ continue: false });
+    await agent.armStallForTest(3, 50);
+    const ws = await connectThinkTestAgentWS(room);
+    try {
+      const done = waitForProtocolMessage(
+        ws,
+        (m) => m.type === "cf_agent_use_chat_response" && m.done === true
+      );
+      ws.send(
+        JSON.stringify({
+          type: "cf_agent_use_chat_request",
+          id: crypto.randomUUID(),
+          init: {
+            method: "POST",
+            body: JSON.stringify({
+              messages: [
+                {
+                  id: crypto.randomUUID(),
+                  role: "user",
+                  parts: [{ type: "text", text: "hello" }]
+                }
+              ]
+            })
+          }
+        })
+      );
+      const frame = (await done) as { error?: boolean; body?: string };
+      expect(frame.error).toBe(true);
+      expect(frame.body).toBeTruthy();
+      expect(frame.body).not.toContain("declined");
+
+      // Nothing is scheduled, and the terminal record says the same thing.
+      const recovered = await agent.runScheduledRecoveryForTest();
+      expect(recovered.scheduledContinues).toBe(0);
+      expect(recovered.scheduledRetries).toBe(0);
+      expect((await agent.getPendingChatTerminalForTest())?.body).toBe(
+        frame.body
+      );
+    } finally {
+      await agent.setRecoveryHookForTest(null);
+      await closeWS(ws);
+    }
+  });
+
   it("retries a regeneration that stalls before its first chunk as a new branch (#2028)", async () => {
     const room = `stall-first-chunk-regenerate-${crypto.randomUUID()}`;
     const agent = await freshAgent(room);
@@ -940,6 +987,28 @@ describe("Think — error handling", () => {
   );
 
   it.each([
+    { name: "retry-after", retryAfter: "7", inStream: false, delay: 7 },
+    { name: "retry-after", retryAfter: "7", inStream: true, delay: 7 },
+    { name: "retry-after-ms", retryAfterMs: "4200", inStream: false, delay: 5 },
+    { name: "retry-after-ms", retryAfterMs: "4200", inStream: true, delay: 5 }
+  ])(
+    "honors $name on an error classified transient (inStream: $inStream)",
+    async ({ retryAfter, retryAfterMs, inStream, delay }) => {
+      const agent = await freshAgent(`transient-wait-${crypto.randomUUID()}`);
+      const result = await agent.testTransientScenarioForTest({
+        classification: "transient",
+        inStream,
+        error: "api-call-503",
+        retryAfter,
+        retryAfterMs
+      });
+
+      expect(result.scheduled).toBe(1);
+      expect(result.delaySeconds).toBe(delay);
+    }
+  );
+
+  it.each([
     { error: "code-update-reset" as const, inStream: false },
     { error: "code-update-reset" as const, inStream: true },
     { error: "storage-reset" as const, inStream: false }
@@ -1085,7 +1154,7 @@ describe("Think — error handling", () => {
     expect(result.finalStreamingParts).toBe(0);
   });
 
-  it("stops stall recovery when onChatRecovery declines to continue", async () => {
+  it("ends a stalled turn as its stream error when onChatRecovery declines to continue", async () => {
     const agent = await freshAgent(`stall-decline-${crypto.randomUUID()}`);
     const result = await agent.testStallRecoveryForTest({
       afterChunks: 3,
@@ -1093,8 +1162,15 @@ describe("Think — error handling", () => {
       recovery: { continue: false }
     });
 
-    expect(result.first.error).toBeUndefined();
-    expect(result.first.interruptedCalls).toBe(1);
+    // The caller gets the stall as an error, not a clean interruption and
+    // not a generic "declined" message.
+    expect(result.first.error).toBeTruthy();
+    expect(result.first.error).not.toContain("declined");
+    expect(result.first.interruptedCalls).toBe(0);
+    // A client that was away learns the same outcome.
+    expect((await agent.getPendingChatTerminalForTest())?.body).toBe(
+      result.first.error
+    );
     expect(result.scheduledContinues).toBe(0);
     expect(result.scheduledRetries).toBe(0);
     // The settled partial is still saved.
@@ -6019,7 +6095,14 @@ describe("Think — onChatRecovery", () => {
       // nothing is persisted, and there is no warning.
       const messages = (await agent.getStoredMessages()) as UIMessage[];
       expect(messages).toHaveLength(0);
-      expect(warnSpy).not.toHaveBeenCalled();
+      // The spy sees every agent in this isolate. A recovery attempt another
+      // test left behind can time out waiting for a stable chat meanwhile.
+      expect(
+        warnSpy.mock.calls.filter(
+          ([message]) =>
+            !String(message).includes("timed out waiting for stable state")
+        )
+      ).toEqual([]);
     } finally {
       warnSpy.mockRestore();
     }
