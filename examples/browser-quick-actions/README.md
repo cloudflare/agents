@@ -47,7 +47,7 @@ const tools = createQuickActionTools({ browser: this.env.BROWSER });
 // browser_markdown, browser_extract, browser_links, browser_scrape
 
 const { text } = await generateText({
-  model: workersai("@cf/moonshotai/kimi-k2.7-code"),
+  model: workersai("@cf/deepseek-ai/deepseek-v4.1-flash-1017"),
   prompt: `Page: ${url}\n\nQuestion: ${question}`,
   tools,
   stopWhen: isStepCount(6)

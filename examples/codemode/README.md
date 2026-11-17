@@ -32,7 +32,7 @@ npm run build # from repo root
 npm start     # from this directory -- starts Vite dev server
 ```
 
-Uses Workers AI (no API key needed) with `@cf/moonshotai/kimi-k2.7-code`.
+Uses Workers AI (no API key needed) with `@cf/deepseek-ai/deepseek-v4.1-flash-1017`.
 
 ## Try it
 

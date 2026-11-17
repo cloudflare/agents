@@ -87,7 +87,7 @@ export class MyAgent extends Think<Env> {
     // A string is resolved through Think's built-in workers-ai-provider off the
     // `AI` binding. Use a "@cf/..." id for Workers AI, or a "provider/model"
     // slug like "openai/gpt-5.5" to route through AI Gateway.
-    return "@cf/moonshotai/kimi-k2.7-code";
+    return "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
   }
 
   getSystemPrompt() {
@@ -207,7 +207,7 @@ import type { ContextConfig } from "agents/context";
 
 export class MyAgent extends Think<Env> {
   getModel() {
-    return "@cf/moonshotai/kimi-k2.7-code";
+    return "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
   }
 
   configureContext(): ContextConfig[] {

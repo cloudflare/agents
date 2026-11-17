@@ -451,7 +451,6 @@ export function buildOpenAIRequest(
   const prepared = prepareChatCompletionsRequest(strict, context.modelId);
   return {
     body: prepared.body,
-    reasoningOff: prepared.reasoningOff,
     warnings: [...warnings, ...prepared.warnings.map(fromCompat)]
   };
 }

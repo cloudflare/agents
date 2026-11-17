@@ -8,7 +8,7 @@ import type {
 
 export class TaskAgent extends Think<Env> {
   getModel() {
-    return "@cf/moonshotai/kimi-k2.7-code";
+    return "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
   }
 
   getSystemPrompt() {

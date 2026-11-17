@@ -15,7 +15,7 @@ const MODEL = "@cf/zai-org/glm-4.7-flash";
 const SECOND = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 
 /** A third leg, so an exhausted chain reports more than two models. */
-const THIRD = "@cf/qwen/qwen3-30b-a3b-fp8";
+const THIRD = "@cf/qwen/qwen3.8-27b";
 
 const okBody = {
   choices: [

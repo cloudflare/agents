@@ -2,7 +2,7 @@
  * Speech recognition over the Cloudflare run path.
  *
  * `whisper-large-v3-turbo` takes the audio as base64 (`{ audio: "<base64>" }`,
- * verified live); the two older whisper ids take it as an unsigned-byte array.
+ * verified live); the older `whisper` id takes it as an unsigned-byte array.
  * Deepgram's Nova-3 takes it as a raw body (`audio: { body, contentType }`),
  * which the transport sends as one, its other fields alongside. Flux takes
  * websocket connections only, so it is refused with a clear error.
@@ -33,10 +33,7 @@ import {
  *
  * @see https://developers.cloudflare.com/workers-ai/models/whisper/
  */
-const BYTE_ARRAY_AUDIO = new Set([
-  "@cf/openai/whisper",
-  "@cf/openai/whisper-tiny-en"
-]);
+const BYTE_ARRAY_AUDIO = new Set(["@cf/openai/whisper"]);
 
 /**
  * Models that declare `audio: { body, contentType }`. JSON cannot carry that

@@ -43,7 +43,7 @@ export class Assistant extends DurableObject<Env> {
       );
     },
     defaults: {
-      model: this.ai("@cf/zai-org/glm-5.3-flash"),
+      model: this.ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017"),
       thinkingLevel: "low"
     }
   });
@@ -180,7 +180,7 @@ const { text } = await this.harness.prompt("What is 47 × 19?");
 
 // Another session, on a cheaper model.
 const session = await this.harness.sessions.create();
-await session.setModel(this.ai("@cf/zai-org/glm-5.3-flash"));
+await session.setModel(this.ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017"));
 
 // Durable once it returns; the same operation id twice is one submission.
 const receipt = await session.submit("Summarize the latest report", {

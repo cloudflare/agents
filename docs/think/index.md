@@ -47,7 +47,7 @@ export class MyAgent extends Think<Env> {
     // Resolved via Think's built-in workers-ai-provider off the `AI` binding.
     // Use a "@cf/..." id for Workers AI, or a "provider/model" slug like
     // "openai/gpt-5.5" to route through AI Gateway.
-    return "@cf/moonshotai/kimi-k2.7-code";
+    return "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
   }
 }
 
@@ -726,7 +726,7 @@ export class MyAgent extends Think<Env> {
   getModel() {
     const tier = this.getConfig<MyConfig>()?.modelTier ?? "fast";
     const models = {
-      fast: "@cf/moonshotai/kimi-k2.7-code",
+      fast: "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
       capable: "@cf/meta/llama-4-scout-17b-16e-instruct"
     };
     return models[tier];

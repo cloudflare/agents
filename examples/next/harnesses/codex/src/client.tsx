@@ -504,7 +504,7 @@ function App() {
             </div>
             <div className="flex shrink-0 items-center gap-1.5">
               <Badge variant="secondary" className="hidden sm:inline-flex">
-                Kimi K2.7
+                DeepSeek V4.1 Flash
               </Badge>
               <Badge variant={connected ? "success" : "secondary"}>
                 {connected

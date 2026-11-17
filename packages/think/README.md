@@ -16,7 +16,7 @@ import { routeAgentRequest } from "agents";
 
 export class MyAgent extends Think<Env> {
   getModel() {
-    return "@cf/moonshotai/kimi-k2.7-code";
+    return "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
   }
 
   getSystemPrompt() {
@@ -976,7 +976,7 @@ type MyConfig = { modelTier: "fast" | "capable"; systemPrompt: string };
 
 const MODEL_IDS = {
   fast: "@cf/meta/llama-3.1-8b-instruct",
-  capable: "@cf/moonshotai/kimi-k2.7-code"
+  capable: "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
 } as const;
 
 export class MyAgent extends Think<Env> {

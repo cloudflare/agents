@@ -28,7 +28,7 @@ export class Assistant extends DurableObject<Env> {
   ai = createAI({ binding: this.env.AI });
 
   harness = new ThinkHarness({
-    model: this.ai("@cf/moonshotai/kimi-k2.7-code"),
+    model: this.ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017"),
     system: "You are a helpful assistant.",
     tools: {
       weather: {

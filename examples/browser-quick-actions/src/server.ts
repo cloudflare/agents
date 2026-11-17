@@ -74,7 +74,7 @@ export class QuickActionsAgent extends Agent<Env> {
     const tools = createQuickActionTools({ browser: this.env.BROWSER });
 
     const result = await generateText({
-      model: workersai("@cf/moonshotai/kimi-k2.7-code"),
+      model: workersai("@cf/deepseek-ai/deepseek-v4.1-flash-1017"),
       instructions:
         "You are a research assistant. Use the browser_* tools to read the " +
         "page the user references, then answer concisely. Prefer " +

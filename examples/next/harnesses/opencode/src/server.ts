@@ -12,7 +12,7 @@ import { WebSockets } from "agents/websockets";
 import { OpenCodeSessionSockets } from "./sockets";
 import { workspacePlugin } from "./workspace";
 
-export const MODEL_ID = "@cf/moonshotai/kimi-k2.7-code";
+export const MODEL_ID = "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
 
 /** A playable OpenCode instance backed by one Durable Object. */
 export class OpenCodeAgent extends DurableObject<Env> {

@@ -251,7 +251,7 @@ export class GatekeeperAgent extends AIChatAgent<Env, GatekeeperState> {
     const agent = this;
 
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.7-code", {
+      model: workersai("@cf/deepseek-ai/deepseek-v4.1-flash-1017", {
         sessionAffinity: this.sessionAffinity
       }),
       instructions: `You are a helpful database administrator assistant. You manage a customer database.

@@ -308,25 +308,26 @@ const { rerankedDocuments } = await rerank({
 ```
 
 Bytes stay bytes and base64 stays base64: some models answer with a raw body
-(`image/png`, `audio/mpeg`, `audio/wav`) and some with JSON (`{ image }`,
-`{ audio }`), the content type decides, and nothing is converted on the way
-through. The media type comes off the bytes rather than the model name —
-`flux-1-schnell` answers with JPEG and MeloTTS with WAV.
+(`image/png`, `audio/mpeg`) and some with JSON (`{ image }`, `{ audio }`), the
+content type decides, and nothing is converted on the way through. The media
+type comes off the bytes rather than the model name — the flux models answer
+with JPEG where the others answer with PNG.
 
 Per-call knobs go under `providerOptions.cloudflare`, next to the gateway
 options:
 
-| Modality      | Call options used                                                                       | `providerOptions.cloudflare`                               |
-| ------------- | --------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
-| Image         | `prompt`, `n`, `size`, `seed`, `files`, `mask`                                          | `steps`, `guidance`, `negativePrompt`, `strength`          |
-| Speech        | `text`, `voice` → `speaker`, `outputFormat` → `encoding`, `language` → `lang` (MeloTTS) | —                                                          |
-| Transcription | `audio`, `mediaType`                                                                    | `language`, `task`, `initialPrompt`, `prefix`, `vadFilter` |
-| Reranking     | `query`, `documents`, `topN` → `top_k`                                                  | —                                                          |
+| Modality      | Call options used                                        | `providerOptions.cloudflare`                               |
+| ------------- | -------------------------------------------------------- | ---------------------------------------------------------- |
+| Image         | `prompt`, `n`, `size`, `seed`, `files`, `mask`           | `steps`, `guidance`, `negativePrompt`, `strength`          |
+| Speech        | `text`, `voice` → `speaker`, `outputFormat` → `encoding` | —                                                          |
+| Transcription | `audio`, `mediaType`                                     | `language`, `task`, `initialPrompt`, `prefix`, `vadFilter` |
+| Reranking     | `query`, `documents`, `topN` → `top_k`                   | —                                                          |
 
 Anything a model cannot take comes back in `warnings` rather than being sent:
 `aspectRatio` everywhere, `size`/`seed`/`guidance` on `flux-1-schnell` (which
 takes only a prompt and steps), `speed` and `instructions` on every speech
-model, `voice` on MeloTTS. Object documents are stringified for reranking, with
+model, and `language` on Aura, which takes its language from the model id
+(`@cf/deepgram/aura-2-es`). Object documents are stringified for reranking, with
 a `compatibility` warning.
 
 The run path generates one image per call, so `maxImagesPerCall` is 1 and

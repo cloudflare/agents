@@ -7,7 +7,7 @@ describe("agents/models/opencode", () => {
   it("takes Workers AI ids, catalog ids and dynamic routes", () => {
     const ai = createAI({ binding });
     for (const id of [
-      "@cf/moonshotai/kimi-k2.7-code",
+      "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
       "anthropic/claude-opus-4.8",
       "dynamic/support"
     ] as const) {

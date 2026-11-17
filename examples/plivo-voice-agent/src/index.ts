@@ -64,7 +64,7 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
     const workersAi = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
-      model: workersAi("@cf/moonshotai/kimi-k2.6", {
+      model: workersAi("@cf/deepseek-ai/deepseek-v4.1-flash-1017", {
         sessionAffinity: this.sessionAffinity
       }),
       system: SYSTEM_PROMPT,

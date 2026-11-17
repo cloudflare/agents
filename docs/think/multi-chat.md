@@ -84,7 +84,7 @@ export class AssistantDirectory extends Think<Env, DirectoryState> {
 
   // Required by Think; nothing in the directory role calls it.
   override getModel() {
-    return "@cf/moonshotai/kimi-k2.7-code";
+    return "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
   }
 
   onStart() {

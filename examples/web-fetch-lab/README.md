@@ -33,7 +33,7 @@ The `AI` binding has no local implementation, so `pnpm start` runs it remotely a
 
 The URL Lab and the corpus only use `toMarkdown`, which is available on every account. The chat also needs `web_search`, which is billed to your account's default AI Gateway (see the [web-research example](../web-research/README.md)); without credits, searches fail and the model can still fetch URLs you give it.
 
-The model is `@cf/moonshotai/kimi-k2.7-code` on Workers AI (`MODEL` in `src/shared.ts`).
+The model is `@cf/deepseek-ai/deepseek-v4.1-flash-1017` on Workers AI (`MODEL` in `src/shared.ts`).
 
 ## Driving it from the command line
 

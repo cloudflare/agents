@@ -134,8 +134,8 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
     const url = new URL(context.connection.uri ?? "http://localhost");
     const llm = url.searchParams.get("llm");
     const llmModel =
-      llm === "kimi"
-        ? "@cf/moonshotai/kimi-k2.7-code"
+      llm === "deepseek"
+        ? "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
         : llm === "gpt-oss-20b"
           ? "@cf/openai/gpt-oss-20b"
           : "@cf/zai-org/glm-4.7-flash";

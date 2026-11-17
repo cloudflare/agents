@@ -80,7 +80,9 @@ export type {
   CloudflareSpeechModelId,
   CloudflareTranscriptionModelId,
   DynamicRouteId,
+  KnownEmbeddingModelId,
   KnownImageModelId,
+  KnownLanguageModelId,
   KnownSpeechModelId,
   WorkersAIModelId
 } from "../core/catalog";

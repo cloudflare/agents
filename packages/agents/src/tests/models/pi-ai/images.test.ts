@@ -3,7 +3,8 @@ import { createAI } from "../../../models/pi-ai";
 import { asAi, fakeBinding, jsonResponse } from "./helpers";
 
 const FLUX = "@cf/black-forest-labs/flux-1-schnell";
-const SDXL = "@cf/stabilityai/stable-diffusion-xl-base-1.0";
+/** A diffusion model on the JSON body, answering raw PNG bytes. */
+const SD_IMG2IMG = "@cf/runwayml/stable-diffusion-v1-5-img2img";
 const FLUX_2_KLEIN = "@cf/black-forest-labs/flux-2-klein-9b";
 
 /** The first bytes of a JPEG, as flux-1-schnell's base64 starts. */
@@ -40,7 +41,7 @@ describe("pi-ai: image generation", () => {
   it("keeps the content type of a raw-bytes answer", async () => {
     const binding = fakeBinding(() => binaryResponse(PNG_BYTES, "image/png"));
     const ai = createAI({ binding: asAi(binding) });
-    const result = await ai.generateImages(ai.images(SDXL), prompt);
+    const result = await ai.generateImages(ai.images(SD_IMG2IMG), prompt);
     expect(result.output[0]).toMatchObject({ mimeType: "image/png" });
   });
 
@@ -67,7 +68,7 @@ describe("pi-ai: image generation", () => {
   it("sends the full knob set to a model that takes it", async () => {
     const binding = fakeBinding(() => binaryResponse(PNG_BYTES, "image/png"));
     const ai = createAI({ binding: asAi(binding) });
-    const result = await ai.generateImages(ai.images(SDXL), prompt, {
+    const result = await ai.generateImages(ai.images(SD_IMG2IMG), prompt, {
       guidance: 8,
       height: 512,
       negativePrompt: "blurry",
@@ -155,7 +156,7 @@ describe("pi-ai: image generation", () => {
   it("reports a JSON answer without an image as an error, not a throw", async () => {
     const binding = fakeBinding(() => jsonResponse({ result: {} }));
     const ai = createAI({ binding: asAi(binding) });
-    const result = await ai.generateImages(ai.images(SDXL), prompt);
+    const result = await ai.generateImages(ai.images(SD_IMG2IMG), prompt);
     expect(result.stopReason).toBe("error");
     expect(result.errorMessage).toContain("without an image field");
     expect(result.output).toEqual([]);
@@ -166,7 +167,7 @@ describe("pi-ai: image generation", () => {
       jsonResponse({ errors: [{ code: 1, message: "nope" }] }, { status: 500 })
     );
     const ai = createAI({ binding: asAi(binding) });
-    const result = await ai.generateImages(ai.images(SDXL), prompt);
+    const result = await ai.generateImages(ai.images(SD_IMG2IMG), prompt);
     expect(result.stopReason).toBe("error");
     expect(result.errorMessage).toContain("nope");
   });

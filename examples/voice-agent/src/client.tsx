@@ -114,7 +114,7 @@ function ModeToggle() {
 
 // --- WebRTC (SFU) Mode ---
 
-type LlmModel = "kimi" | "glm" | "gpt-oss-20b";
+type LlmModel = "deepseek" | "glm" | "gpt-oss-20b";
 
 async function listAudioOutputs(): Promise<MediaDeviceInfo[] | undefined> {
   if (!navigator.mediaDevices?.enumerateDevices) return undefined;
@@ -210,12 +210,12 @@ function WebRTCApp({
           GPT-OSS 20B
         </Button>
         <Button
-          variant={llmModel === "kimi" ? "primary" : "ghost"}
+          variant={llmModel === "deepseek" ? "primary" : "ghost"}
           size="sm"
           disabled={isInCall}
-          onClick={() => onLlmModelChange("kimi")}
+          onClick={() => onLlmModelChange("deepseek")}
         >
-          Kimi
+          DeepSeek
         </Button>
       </div>
 
@@ -711,12 +711,12 @@ function App() {
             GPT-OSS 20B
           </Button>
           <Button
-            variant={llmModel === "kimi" ? "primary" : "ghost"}
+            variant={llmModel === "deepseek" ? "primary" : "ghost"}
             size="sm"
             disabled={isInCall}
-            onClick={() => setLlmModel("kimi")}
+            onClick={() => setLlmModel("deepseek")}
           >
-            Kimi
+            DeepSeek
           </Button>
         </div>
 

@@ -3,7 +3,7 @@ export const DEFAULT_PROVIDER_KEYTERMS = [
   "Workers AI",
   "Durable Objects",
   "VoiceAgent",
-  "Kimi",
+  "DeepSeek",
   "GLM",
   "GPT OSS"
 ];
