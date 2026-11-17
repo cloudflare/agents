@@ -9,7 +9,7 @@ import { env, RpcTarget } from "cloudflare:workers";
 import {
   DynamicWorkerExecutor,
   ToolDispatcher,
-  type ResolvedProvider,
+  type ResolvedProvider
 } from "../executor";
 
 type ToolFns = Record<string, (...args: unknown[]) => Promise<unknown>>;
@@ -48,7 +48,7 @@ describe("ToolDispatcher", () => {
     const fns: ToolFns = {
       broken: async () => {
         throw new Error("something broke");
-      },
+      }
     };
     const dispatcher = new ToolDispatcher(fns);
 
@@ -72,7 +72,7 @@ describe("ToolDispatcher", () => {
 
   it("should preserve Uint8Array results", async () => {
     const dispatcher = new ToolDispatcher({
-      bytes: async () => new Uint8Array([1, 2, 3]),
+      bytes: async () => new Uint8Array([1, 2, 3])
     });
 
     const resJson = await dispatcher.call("bytes", "{}");
@@ -80,7 +80,7 @@ describe("ToolDispatcher", () => {
 
     expect(data.result).toEqual({
       __codemode_binary_v1__: "Uint8Array",
-      data: "AQID",
+      data: "AQID"
     });
   });
 });
@@ -90,7 +90,7 @@ describe("DynamicWorkerExecutor", () => {
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 
     const result = await executor.execute("async () => 42", [
-      codemodeProvider({}),
+      codemodeProvider({})
     ]);
     expect(result.result).toBe(42);
     expect(result.error).toBeUndefined();
@@ -105,7 +105,7 @@ describe("DynamicWorkerExecutor", () => {
 
     const result = await executor.execute(
       "async () => await codemode.add({ a: 3, b: 4 })",
-      [codemodeProvider({ add })],
+      [codemodeProvider({ add })]
     );
 
     expect(result.result).toBe(7);
@@ -125,7 +125,7 @@ describe("DynamicWorkerExecutor", () => {
         const bytes = await codemode.accept({ bytes: new Uint8Array([1, 2, 3]) });
         return { isBytes: bytes instanceof Uint8Array, values: Array.from(bytes) };
       }`,
-      [codemodeProvider({ accept })],
+      [codemodeProvider({ accept })]
     );
 
     expect(result.error).toBeUndefined();
@@ -147,7 +147,7 @@ describe("DynamicWorkerExecutor", () => {
         const bytes = await state.accept("/x.bin", new Uint8Array([1, 2, 3]));
         return { isBytes: bytes instanceof Uint8Array, values: Array.from(bytes) };
       }`,
-      [{ name: "state", fns: { accept } }],
+      [{ name: "state", fns: { accept } }]
     );
 
     expect(result.error).toBeUndefined();
@@ -173,7 +173,7 @@ describe("DynamicWorkerExecutor", () => {
           values: Array.from(new Uint8Array(buffer))
         };
       }`,
-      [codemodeProvider({ accept })],
+      [codemodeProvider({ accept })]
     );
 
     expect(result.error).toBeUndefined();
@@ -196,7 +196,7 @@ describe("DynamicWorkerExecutor", () => {
         const bytes = await codemode.accept({ bytes: view });
         return Array.from(bytes);
       }`,
-      [codemodeProvider({ accept })],
+      [codemodeProvider({ accept })]
     );
 
     expect(result.error).toBeUndefined();
@@ -218,11 +218,11 @@ describe("DynamicWorkerExecutor", () => {
     }`;
 
     const result = await executor.execute(code, [
-      codemodeProvider({ getWeather, searchWeb }),
+      codemodeProvider({ getWeather, searchWeb })
     ]);
     expect(result.result).toEqual({
       weather: { temp: 72 },
-      news: { results: ["news about temp 72"] },
+      news: { results: ["news about temp 72"] }
     });
     expect(getWeather).toHaveBeenCalledTimes(1);
     expect(searchWeb).toHaveBeenCalledTimes(1);
@@ -232,23 +232,44 @@ describe("DynamicWorkerExecutor", () => {
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 
     const result = await executor.execute("async () => 42", [
-      { name: "__stringifyForCodemode", fns: {} },
+      { name: "__stringifyForCodemode", fns: {} }
     ]);
 
     expect(result.error).toBe(
-      'Provider name "__stringifyForCodemode" is reserved',
+      'Provider name "__stringifyForCodemode" is reserved'
     );
   });
 
   it("should return a clear error for provider names that shadow harness globals", async () => {
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 
-    for (const name of ["Promise", "setTimeout", "Error", "console"]) {
+    for (const name of [
+      "Promise",
+      "setTimeout",
+      "Error",
+      "String",
+      "console"
+    ]) {
       const result = await executor.execute("async () => 42", [
-        { name, fns: {} },
+        { name, fns: {} }
       ]);
       expect(result.error).toBe(`Provider name "${name}" is reserved`);
     }
+  });
+
+  it("should return a clear error for a connector named String", async () => {
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+
+    class NoopConnector extends RpcTarget {
+      async callTool(): Promise<unknown> {
+        return null;
+      }
+    }
+
+    const result = await executor.execute("async () => 42", [], {
+      connectors: [{ name: "String", binding: new NoopConnector() }]
+    });
+    expect(result.error).toBe('Connector name "String" is reserved');
   });
 
   it("should return error when code throws", async () => {
@@ -256,7 +277,7 @@ describe("DynamicWorkerExecutor", () => {
 
     const result = await executor.execute(
       'async () => { throw new Error("boom"); }',
-      [codemodeProvider({})],
+      [codemodeProvider({})]
     );
     expect(result.error).toBe("boom");
   });
@@ -268,7 +289,7 @@ describe("DynamicWorkerExecutor", () => {
       ['async () => { throw "x"; }', "x"],
       ["async () => { throw { code: 1 }; }", "[object Object]"],
       ["async () => { throw null; }", "null"],
-      ["async () => { throw undefined; }", "undefined"],
+      ["async () => { throw undefined; }", "undefined"]
     ]) {
       const result = await executor.execute(code, [codemodeProvider({})]);
       expect(result.error).toBe(expected);
@@ -283,7 +304,7 @@ describe("DynamicWorkerExecutor", () => {
 
     const result = await executor.execute(
       "async () => await codemode.fail({})",
-      [codemodeProvider({ fail })],
+      [codemodeProvider({ fail })]
     );
     expect(result.error).toBe("tool error");
   });
@@ -313,7 +334,7 @@ describe("DynamicWorkerExecutor", () => {
 
     const result = await executor.execute(
       'async () => { console.log("hello"); console.warn("careful"); return "done"; }',
-      [codemodeProvider({})],
+      [codemodeProvider({})]
     );
 
     expect(result.result).toBe("done");
@@ -326,7 +347,7 @@ describe("DynamicWorkerExecutor", () => {
 
     const result = await executor.execute(
       'async () => { return `hello ${"world"}`; }',
-      [codemodeProvider({})],
+      [codemodeProvider({})]
     );
 
     expect(result.result).toBe("hello world");
@@ -337,7 +358,7 @@ describe("DynamicWorkerExecutor", () => {
 
     const result = await executor.execute(
       'async () => { const r = await fetch("https://example.com"); return r.status; }',
-      [codemodeProvider({})],
+      [codemodeProvider({})]
     );
 
     // fetch should fail because globalOutbound defaults to null
@@ -347,13 +368,13 @@ describe("DynamicWorkerExecutor", () => {
   it("should preserve closures in tool functions", async () => {
     const secret = "api-key-123";
     const fns: ToolFns = {
-      getSecret: async () => ({ key: secret }),
+      getSecret: async () => ({ key: secret })
     };
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 
     const result = await executor.execute(
       "async () => await codemode.getSecret({})",
-      [codemodeProvider(fns)],
+      [codemodeProvider(fns)]
     );
     expect(result.result).toEqual({ key: "api-key-123" });
   });
@@ -362,8 +383,8 @@ describe("DynamicWorkerExecutor", () => {
     const executor = new DynamicWorkerExecutor({
       loader: env.LOADER,
       modules: {
-        "helpers.js": 'export function greet(name) { return "hello " + name; }',
-      },
+        "helpers.js": 'export function greet(name) { return "hello " + name; }'
+      }
     });
 
     const code = `async () => {
@@ -380,13 +401,13 @@ describe("DynamicWorkerExecutor", () => {
     const executor = new DynamicWorkerExecutor({
       loader: env.LOADER,
       modules: {
-        "executor.js": "export default class Evil {}",
-      },
+        "executor.js": "export default class Evil {}"
+      }
     });
 
     // Should still work normally — the reserved key is ignored
     const result = await executor.execute("async () => 1 + 1", [
-      codemodeProvider({}),
+      codemodeProvider({})
     ]);
     expect(result.result).toBe(2);
     expect(result.error).toBeUndefined();
@@ -397,7 +418,7 @@ describe("DynamicWorkerExecutor", () => {
 
     // Code wrapped in markdown fences — should be stripped and normalized
     const result = await executor.execute("```js\n1 + 1\n```", [
-      codemodeProvider({}),
+      codemodeProvider({})
     ]);
     expect(result.result).toBe(2);
     expect(result.error).toBeUndefined();
@@ -427,7 +448,7 @@ describe("DynamicWorkerExecutor", () => {
     // The executor receives pre-sanitized names.
     const result = await executor.execute(
       "async () => await codemode.github_list_issues({})",
-      [codemodeProvider({ github_list_issues: listIssues })],
+      [codemodeProvider({ github_list_issues: listIssues })]
     );
 
     expect(result.result).toEqual([{ id: 1, title: "bug" }]);
@@ -437,12 +458,12 @@ describe("DynamicWorkerExecutor", () => {
   it("should include timeout in execution", async () => {
     const executor = new DynamicWorkerExecutor({
       loader: env.LOADER,
-      timeout: 100,
+      timeout: 100
     });
 
     const result = await executor.execute(
       "async () => { await new Promise(r => setTimeout(r, 5000)); return 'done'; }",
-      [codemodeProvider({})],
+      [codemodeProvider({})]
     );
 
     expect(result.error).toContain("timed out");
@@ -461,7 +482,7 @@ describe("Multiple providers (namespaces)", () => {
 
     const result = await executor.execute(
       `async () => await myns.echo({ msg: "hello" })`,
-      [{ name: "myns", fns: { echo } }],
+      [{ name: "myns", fns: { echo } }]
     );
 
     expect(result.error).toBeUndefined();
@@ -482,14 +503,14 @@ describe("Multiple providers (namespaces)", () => {
       }`,
       [
         { name: "store", fns: { get: storeGet } },
-        { name: "cache", fns: { get: cacheGet } },
-      ],
+        { name: "cache", fns: { get: cacheGet } }
+      ]
     );
 
     expect(result.error).toBeUndefined();
     expect(result.result).toEqual({
       a: { from: "store" },
-      b: { from: "cache" },
+      b: { from: "cache" }
     });
     expect(storeGet).toHaveBeenCalledTimes(1);
     expect(cacheGet).toHaveBeenCalledTimes(1);
@@ -514,14 +535,14 @@ describe("Multiple providers (namespaces)", () => {
       }`,
       [
         { name: "codemode", fns: { add: addFn } },
-        { name: "echo", fns: { ping: echoFn } },
-      ],
+        { name: "echo", fns: { ping: echoFn } }
+      ]
     );
 
     expect(result.error).toBeUndefined();
     expect(result.result).toEqual({
       sum: 7,
-      pong: { echoed: 7 },
+      pong: { echoed: 7 }
     });
     expect(addFn).toHaveBeenCalledWith({ a: 3, b: 4 });
   });
@@ -534,7 +555,7 @@ describe("Multiple providers (namespaces)", () => {
 
     const result = await executor.execute(
       `async () => await broken.doSomething({})`,
-      [{ name: "broken", fns: { doSomething: failing } }],
+      [{ name: "broken", fns: { doSomething: failing } }]
     );
 
     expect(result.error).toBe("provider failed");
@@ -545,7 +566,7 @@ describe("Multiple providers (namespaces)", () => {
 
     const result = await executor.execute("async () => 1", [
       { name: "dup", fns: {} },
-      { name: "dup", fns: {} },
+      { name: "dup", fns: {} }
     ]);
 
     expect(result.error).toContain("Duplicate");
@@ -559,9 +580,9 @@ describe("Multiple providers (namespaces)", () => {
         name: "codemode",
         fns: {
           "foo-bar": async () => "hyphen",
-          foo_bar: async () => "underscore",
-        },
-      },
+          foo_bar: async () => "underscore"
+        }
+      }
     ]);
 
     expect(result.error).toContain("both sanitize to");
@@ -571,7 +592,7 @@ describe("Multiple providers (namespaces)", () => {
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 
     const result = await executor.execute("async () => 1", [
-      { name: "__dispatchers", fns: {} },
+      { name: "__dispatchers", fns: {} }
     ]);
 
     expect(result.error).toContain("reserved");
@@ -581,7 +602,7 @@ describe("Multiple providers (namespaces)", () => {
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 
     const result = await executor.execute("async () => 1", [
-      { name: "__connectors", fns: {} },
+      { name: "__connectors", fns: {} }
     ]);
 
     expect(result.error).toContain("reserved");
@@ -592,7 +613,7 @@ describe("provider prelude", () => {
   it("lets a prelude define an own-property fn that shadows the dispatch proxy", async () => {
     const decide = vi.fn(async (...args: unknown[]) => ({
       kind: "execute",
-      seq: Number(args[0]),
+      seq: Number(args[0])
     }));
     const record = vi.fn(async () => true);
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
@@ -608,7 +629,7 @@ describe("provider prelude", () => {
           const value = await fn();
           await codemode.record(value);
           return value;
-        };`,
+        };`
     };
 
     const result = await executor.execute(
@@ -617,7 +638,7 @@ describe("provider prelude", () => {
         const v = await codemode.step(0, async () => { ran++; return 21 * 2; });
         return { v, ran };
       }`,
-      [provider],
+      [provider]
     );
 
     expect(result.error).toBeUndefined();
@@ -632,7 +653,7 @@ describe("provider prelude", () => {
       name: "codemode",
       fns: {
         decide: async () => ({ kind: "replay", result: "cached" }),
-        record: async () => true,
+        record: async () => true
       },
       prelude: String.raw`
         codemode.step = async (seq, fn) => {
@@ -641,7 +662,7 @@ describe("provider prelude", () => {
           const value = await fn();
           await codemode.record(value);
           return value;
-        };`,
+        };`
     };
 
     const result = await executor.execute(
@@ -650,7 +671,7 @@ describe("provider prelude", () => {
         const v = await codemode.step(0, async () => { ran = true; return "fresh"; });
         return { v, ran };
       }`,
-      [provider],
+      [provider]
     );
 
     expect(result.error).toBeUndefined();
@@ -706,7 +727,7 @@ describe("tool calls left pending when the program returns", () => {
     const result = await executor.execute(
       `async () => { t.ping({ x: "slow" }); return 1 }`,
       [],
-      { connectors: [{ name: "t", binding: conn }] },
+      { connectors: [{ name: "t", binding: conn }] }
     );
     expect(result.error).toBeUndefined();
     expect(result.result).toBe(1);
@@ -729,9 +750,9 @@ describe("tool calls left pending when the program returns", () => {
           hang: () => {
             calls++;
             return new Promise(() => {});
-          },
-        }),
-      ],
+          }
+        })
+      ]
     );
     expect(result.result).toBe(1);
     expect(await waitFor(() => calls > 0)).toBe(true);
@@ -746,7 +767,7 @@ describe("tool calls left pending when the program returns", () => {
       const result = await executor.execute(
         `async () => { t.ping({ i: ${i} }); return ${i} }`,
         [],
-        { connectors: [{ name: "t", binding: conn }] },
+        { connectors: [{ name: "t", binding: conn }] }
       );
       expect(result.result).toBe(i);
     }
@@ -764,7 +785,7 @@ describe("tool calls left pending when the program returns", () => {
       }
     })();
     const pending = executor.execute(`async () => await t.ping({})`, [], {
-      connectors: [{ name: "t", binding }],
+      connectors: [{ name: "t", binding }]
     });
     expect(await waitFor(() => release !== undefined)).toBe(true);
     release?.();

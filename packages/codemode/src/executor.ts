@@ -11,7 +11,7 @@ import type {
   ExecuteResult,
   ExecuteOptions,
   Executor,
-  ResolvedProvider,
+  ResolvedProvider
 } from "./executor-types";
 import { normalizeCode } from "./normalize";
 import { sanitizeToolName } from "./utils";
@@ -22,7 +22,7 @@ export type {
   ExecuteOptions,
   Executor,
   ConnectorBinding,
-  ResolvedProvider,
+  ResolvedProvider
 } from "./executor-types";
 // ConnectorBinding re-exported for public API — used by proxy-tool and runtime.
 
@@ -220,7 +220,7 @@ class GatedConnectorBinding extends RpcTarget {
   callTool(method: string, args: unknown): Promise<unknown> {
     return this.#gate.run(
       () => this.#binding.callTool(method, args),
-      () => ({ [CONNECTOR_CONTROL_KEY]: "error", message: LATE_CALL_MESSAGE }),
+      () => ({ [CONNECTOR_CONTROL_KEY]: "error", message: LATE_CALL_MESSAGE })
     );
   }
 }
@@ -250,7 +250,7 @@ export class ToolDispatcher extends RpcTarget {
       return stringifyForCodemode({ result });
     } catch (err) {
       return stringifyForCodemode({
-        error: err instanceof Error ? err.message : String(err),
+        error: err instanceof Error ? err.message : String(err)
       });
     }
   }
@@ -330,14 +330,14 @@ export class DynamicWorkerExecutor implements Executor {
     providersOrFns:
       | ResolvedProvider[]
       | Record<string, (...args: unknown[]) => Promise<unknown>>,
-    options?: ExecuteOptions,
+    options?: ExecuteOptions
   ): Promise<ExecuteResult> {
     // Backwards compat: detect old `execute(code, fns)` signature.
     let providers: ResolvedProvider[];
     if (!Array.isArray(providersOrFns)) {
       console.warn(
         "[@cloudflare/codemode] Passing raw fns to executor.execute() is deprecated. " +
-          "Use ResolvedProvider[] instead. This will be removed in the next major version.",
+          "Use ResolvedProvider[] instead. This will be removed in the next major version."
       );
       providers = [{ name: "codemode", fns: providersOrFns }];
     } else {
@@ -371,7 +371,8 @@ export class DynamicWorkerExecutor implements Executor {
       "Promise",
       "setTimeout",
       "Error",
-      "console",
+      "String",
+      "console"
     ]);
     const VALID_IDENT = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/;
     const seenNames = new Set<string>();
@@ -379,19 +380,19 @@ export class DynamicWorkerExecutor implements Executor {
       if (RESERVED_NAMES.has(provider.name)) {
         return {
           result: undefined,
-          error: `Provider name "${provider.name}" is reserved`,
+          error: `Provider name "${provider.name}" is reserved`
         };
       }
       if (!VALID_IDENT.test(provider.name)) {
         return {
           result: undefined,
-          error: `Provider name "${provider.name}" is not a valid JavaScript identifier`,
+          error: `Provider name "${provider.name}" is not a valid JavaScript identifier`
         };
       }
       if (seenNames.has(provider.name)) {
         return {
           result: undefined,
-          error: `Duplicate provider name "${provider.name}"`,
+          error: `Duplicate provider name "${provider.name}"`
         };
       }
       seenNames.add(provider.name);
@@ -410,19 +411,19 @@ export class DynamicWorkerExecutor implements Executor {
       if (RESERVED_NAMES.has(connector.name)) {
         return {
           result: undefined,
-          error: `Connector name "${connector.name}" is reserved`,
+          error: `Connector name "${connector.name}" is reserved`
         };
       }
       if (!VALID_IDENT.test(connector.name)) {
         return {
           result: undefined,
-          error: `Connector name "${connector.name}" is not a valid JavaScript identifier`,
+          error: `Connector name "${connector.name}" is not a valid JavaScript identifier`
         };
       }
       if (seenNames.has(connector.name)) {
         return {
           result: undefined,
-          error: `Duplicate name "${connector.name}" (connector clashes with provider)`,
+          error: `Duplicate name "${connector.name}" (connector clashes with provider)`
         };
       }
       seenNames.add(connector.name);
@@ -446,7 +447,7 @@ export class DynamicWorkerExecutor implements Executor {
           `          return data.result;\n` +
           `        };\n` +
           `      }\n` +
-          `    });`,
+          `    });`
       );
 
     // Sandbox-side preludes (e.g. codemode.step) injected after proxy setup.
@@ -478,7 +479,7 @@ export class DynamicWorkerExecutor implements Executor {
         `          return __r;\n` +
         `        };\n` +
         `      }\n` +
-        `    });`,
+        `    });`
     );
 
     const executorModule = [
@@ -497,7 +498,7 @@ export class DynamicWorkerExecutor implements Executor {
       "",
       "    try {",
       "      const result = await Promise.race([",
-      "        (",
+      "        ("
     ]
       .concat([normalized])
       .concat([
@@ -511,7 +512,7 @@ export class DynamicWorkerExecutor implements Executor {
         "      return { result: undefined, error: err instanceof Error ? err.message : String(err), logs: __logs };",
         "    }",
         "  }",
-        "}",
+        "}"
       ])
       .join("\n");
 
@@ -534,7 +535,7 @@ export class DynamicWorkerExecutor implements Executor {
             result: undefined,
             error:
               `Tool names "${existingName}" and "${name}" both sanitize to ` +
-              `"${sanitizedName}" in provider "${provider.name}"`,
+              `"${sanitizedName}" in provider "${provider.name}"`
           };
         }
         sanitizedNames.set(sanitizedName, name);
@@ -543,7 +544,7 @@ export class DynamicWorkerExecutor implements Executor {
         sanitizedFns[sanitizedName] = async (...args: unknown[]) => {
           const result = await gate.run<unknown>(
             () => fn(...args),
-            () => LATE_CALL,
+            () => LATE_CALL
           );
           if (result === LATE_CALL) throw new Error(LATE_CALL_MESSAGE);
           return result;
@@ -560,7 +561,7 @@ export class DynamicWorkerExecutor implements Executor {
     for (const connector of connectors) {
       connectorBindings[connector.name] = new GatedConnectorBinding(
         connector.binding,
-        gate,
+        gate
       );
     }
     const env = { ...this.#bindings };
@@ -576,10 +577,10 @@ export class DynamicWorkerExecutor implements Executor {
       mainModule: "executor.js",
       modules: {
         ...this.#modules,
-        "executor.js": executorModule,
+        "executor.js": executorModule
       },
       globalOutbound: this.#globalOutbound,
-      env: hasEnv ? env : undefined,
+      env: hasEnv ? env : undefined
     });
 
     // `worker` (the loaded child Worker) and `entrypoint` (its RPC stub) own
@@ -590,7 +591,7 @@ export class DynamicWorkerExecutor implements Executor {
       const entrypoint = worker.getEntrypoint() as unknown as {
         evaluate(
           dispatchers: Record<string, ToolDispatcher>,
-          connectors: Record<string, unknown>,
+          connectors: Record<string, unknown>
         ): Promise<{
           result: unknown;
           error?: string;
@@ -600,14 +601,14 @@ export class DynamicWorkerExecutor implements Executor {
       try {
         const response = await entrypoint.evaluate(
           dispatchers,
-          connectorBindings,
+          connectorBindings
         );
 
         if (response.error) {
           return {
             result: undefined,
             error: response.error,
-            logs: response.logs,
+            logs: response.logs
           };
         }
 
