@@ -199,9 +199,11 @@ interface ChatRecoveryTestStub {
   driveSuccessfulTurnForTest(): Promise<
     "completed" | "error" | "aborted" | "skipped"
   >;
-  driveAbortedTurnForTest(): Promise<
-    "completed" | "error" | "aborted" | "skipped"
-  >;
+  driveAbortedTurnForTest(when?: "before" | "after-store"): Promise<{
+    status: "completed" | "error" | "aborted" | "skipped";
+    userTexts: string[];
+    chatCalls: number;
+  }>;
   driveErroredTurnForTest(
     message: string
   ): Promise<"completed" | "error" | "aborted" | "skipped">;
@@ -2894,15 +2896,38 @@ describe("onChatRecovery", () => {
       body: TERMINAL
     });
 
-    // A later turn is ABORTED — driven purely server-side (`saveMessages` with
-    // a pre-aborted signal), NOT via a client request. Only the response-hook
-    // drain loop can supersede the record here, and it must do so on the
-    // aborted outcome (not just on "completed").
+    // A later turn is ABORTED — driven purely server-side (`saveMessages`
+    // with a signal), NOT via a client request. The stop lands once the
+    // turn's message is stored and before the model is called, so no reply
+    // path runs: the turn core must supersede the record itself.
     await agentStub.setForceStableTimeoutForTest(false);
-    expect(await agentStub.driveAbortedTurnForTest()).toBe("aborted");
+    const aborted = await agentStub.driveAbortedTurnForTest("after-store");
+    expect(aborted).toMatchObject({ status: "aborted", chatCalls: 0 });
+    expect(aborted.userTexts).toContain("hello");
 
     // The stale exhaustion is gone, so a reconnecting client won't replay it.
     expect(await agentStub.getPendingChatTerminalForTest()).toBeNull();
+  });
+
+  // A turn stopped before it starts stores nothing and calls nothing. The
+  // conversation did not move, so the record of the failure before it stays
+  // for a client that reconnects.
+  it("keeps the terminal record when a later server-side turn is stopped before it starts (#1645)", async () => {
+    const room = `terminal-untouched-${crypto.randomUUID()}`;
+    const agentStub = await getTestAgent(room);
+    const STREAM_ERROR = "Provider returned HTTP 500.";
+    expect(await agentStub.driveErroredTurnForTest(STREAM_ERROR)).toBe("error");
+
+    const aborted = await agentStub.driveAbortedTurnForTest("before");
+    expect(aborted).toEqual({
+      status: "aborted",
+      userTexts: ["hello"],
+      chatCalls: 0
+    });
+
+    expect(await agentStub.getPendingChatTerminalForTest()).toMatchObject({
+      body: STREAM_ERROR
+    });
   });
 
   // #1645 (record-on-error): a terminal NON-exhaustion error (e.g. a provider

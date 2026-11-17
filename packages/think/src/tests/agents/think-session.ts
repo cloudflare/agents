@@ -8950,6 +8950,124 @@ export class ThinkProgrammaticTestAgent extends Think {
     ]);
   }
 
+  /**
+   * Drive the private turn behind saveMessages with a shouldApplyMessages
+   * that answers from `answers`, while the chat is reset (as a clear does)
+   * during the first shouldApplyMessages call or during the messages
+   * function.
+   */
+  async testShouldApplyAcrossReset(
+    answers: boolean[],
+    resetDuring: "first-ask" | "messages"
+  ): Promise<{ status: SaveMessagesResult["status"]; asked: number }> {
+    let asked = 0;
+    const self = this as unknown as {
+      _runProgrammaticMessagesTurn(
+        requestId: string,
+        messages: (current: UIMessage[]) => UIMessage[],
+        options: { shouldApplyMessages: () => boolean }
+      ): Promise<SaveMessagesResult>;
+      resetTurnState(): void;
+    };
+    const result = await self._runProgrammaticMessagesTurn(
+      crypto.randomUUID(),
+      () => {
+        if (resetDuring === "messages") self.resetTurnState();
+        return [
+          {
+            id: crypto.randomUUID(),
+            role: "user" as const,
+            parts: [{ type: "text" as const, text: "Across a reset" }]
+          }
+        ];
+      },
+      {
+        shouldApplyMessages: () => {
+          if (asked === 0 && resetDuring === "first-ask") {
+            self.resetTurnState();
+          }
+          return answers[asked++] ?? true;
+        }
+      }
+    );
+    return { status: result.status, asked };
+  }
+
+  /**
+   * Queue a second saveMessages turn behind a running one, then call
+   * `abortAllRequests()` while the second still waits in the queue.
+   */
+  async testQueuedSaveMessagesStoppedByAbortAllRequests(
+    cancelAfterMs: number
+  ): Promise<{ running: SaveMessagesResult; queued: SaveMessagesResult }> {
+    const turn = (text: string) =>
+      this.saveMessages([
+        {
+          id: crypto.randomUUID(),
+          role: "user" as const,
+          parts: [{ type: "text" as const, text }]
+        }
+      ]);
+    setTimeout(() => this.abortAllRequests(), cancelAfterMs);
+    const [running, queued] = await Promise.all([
+      turn("Running"),
+      turn("Queued")
+    ]);
+    return { running, queued };
+  }
+
+  /**
+   * Leave the terminal record of an earlier failure (#1645), then drive a
+   * saveMessages turn the caller stops: with a signal that is already
+   * aborted (`"before"`: the turn does nothing), or once its messages are
+   * stored and before the model is called (`"after-store"`: the conversation
+   * moved). Returns the record left afterwards.
+   */
+  async testAbortedTurnAfterTerminalError(
+    when: "before" | "after-store"
+  ): Promise<{
+    status: SaveMessagesResult["status"];
+    stored: number;
+    modelCalls: number;
+    after: { requestId: string } | null;
+  }> {
+    const key = "cf:chat:last-terminal";
+    await this.ctx.storage.put(key, {
+      requestId: "earlier-failure",
+      body: "The assistant encountered an error."
+    });
+    const controller = new AbortController();
+    if (when === "before") controller.abort(new Error("pre-aborted"));
+    const self = this as unknown as {
+      _runProgrammaticMessagesTurn(
+        requestId: string,
+        messages: UIMessage[],
+        options: { signal: AbortSignal; onMessagesApplied: () => void }
+      ): Promise<SaveMessagesResult>;
+    };
+    const result = await self._runProgrammaticMessagesTurn(
+      crypto.randomUUID(),
+      [
+        {
+          id: crypto.randomUUID(),
+          role: "user",
+          parts: [{ type: "text", text: "Stop me" }]
+        }
+      ],
+      {
+        signal: controller.signal,
+        onMessagesApplied: () =>
+          controller.abort(new Error("stopped after the messages were stored"))
+      }
+    );
+    return {
+      status: result.status,
+      stored: (await this.getMessages()).length,
+      modelCalls: this._capturedTurnContexts.length,
+      after: (await this.ctx.storage.get<{ requestId: string }>(key)) ?? null
+    };
+  }
+
   /** Drive continueLastTurn with an external signal. */
   async testContinueLastTurnWithSignal(options: {
     preAbort?: boolean;

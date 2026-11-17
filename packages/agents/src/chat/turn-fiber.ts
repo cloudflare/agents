@@ -1,0 +1,180 @@
+/**
+ * Running one chat turn as a durable fiber, shared by `AIChatAgent` and
+ * `Think`.
+ *
+ * Every turn that calls the model runs inside a fiber, so an isolate that
+ * dies mid-turn leaves a snapshot chat recovery can start from. Both hosts
+ * wrote the same steps around it:
+ *
+ * - keep the turn's start time and latest `stash()` data while it runs, for
+ *   a stream failure that is recovered while the turn is still live;
+ * - wrap the snapshot and the app's stash data into one envelope;
+ * - a turn that continues the latest reply takes that reply over from a
+ *   recovery scheduled to continue it, inside the fiber;
+ * - on a facet, run on the legacy fiber engine; otherwise register the live
+ *   closure, start the chat-turn Task ({@link createChatTurnTaskDefinition}
+ *   runs the closure) and wait for its outcome.
+ *
+ * The host supplies its fiber and Task plumbing and the snapshot.
+ *
+ * @internal Sibling-package support for `@cloudflare/ai-chat` and
+ * `@cloudflare/think`, not a public API.
+ */
+
+import { wrapChatFiberSnapshot, type ChatFiberSnapshot } from "./recovery";
+import type { ChatTurnClosureEntry } from "./turn-task";
+
+/** What {@link ChatTurnFibers} needs from the agent that hosts it. */
+export interface ChatTurnFiberHost {
+  /** The name of the host's chat-turn Task definition and fiber. */
+  fiberName: string;
+  /** The key the turn's snapshot is stored under in the stash envelope. */
+  snapshotKey: string;
+  /** Mint the nonce of a live turn closure. */
+  generateId(): string;
+  /**
+   * `true` on a facet (a routed sub-agent). The Tasks capability does not
+   * accept runs there yet, and facet recovery goes through the root's
+   * facet-run index, so its turns stay on the legacy fiber engine.
+   */
+  isFacet(): boolean;
+  /** Run `fn` on the legacy fiber engine. */
+  runLegacyFiber<T>(
+    name: string,
+    fn: () => Promise<T>,
+    options: { initialSnapshot: unknown; wrapStash: (data: unknown) => unknown }
+  ): Promise<T>;
+  /** Start the chat-turn Task for a registered live closure. */
+  runTask(input: {
+    requestId: string;
+    continuation: boolean;
+    nonce: string;
+  }): Promise<unknown>;
+  /**
+   * Capture the caller's invocation context (live connection, request) now,
+   * and return a function that runs a turn inside it later: the Task's host
+   * boundary carries no connection.
+   */
+  captureContext(): <T>(fn: () => Promise<T>) => Promise<T>;
+  /**
+   * Wrap a turn body so a turn that continues the latest reply can take it
+   * over from a scheduled recovery (`ChatRecoveryEngine.turnBody`). The
+   * request id lets a stop by it reach a recovery attempt whose turn this is.
+   */
+  turnBody<T>(
+    continuation: boolean,
+    body: (takeReply: () => Promise<void>) => Promise<T>,
+    requestId: string
+  ): () => Promise<T>;
+}
+
+/** One turn to run as a fiber. */
+export interface ChatTurnFiber {
+  requestId: string;
+  /** Whether the turn continues the latest reply. */
+  continuation: boolean;
+  /** The turn's recovery snapshot, taken before it produces anything. */
+  snapshot: ChatFiberSnapshot<string>;
+  /**
+   * Called once the fiber is durably accepted and before the turn runs, so
+   * the host can move ownership (a recovered submission) to this turn.
+   */
+  onAccepted?(requestId: string): void;
+}
+
+export class ChatTurnFibers {
+  /**
+   * Start time and latest `stash()` data of each turn running in this
+   * isolate, by request id. A live stream failure is recovered while the
+   * turn still runs, so `onChatRecovery` reads these, not a fiber snapshot.
+   */
+  readonly liveTurns = new Map<
+    string,
+    { createdAt: number; recoveryData: unknown }
+  >();
+  /**
+   * Live turn closures by run nonce. A closure exists only in the isolate
+   * that accepted the turn. Recovery after an interruption never re-runs it.
+   */
+  readonly liveClosures = new Map<string, ChatTurnClosureEntry>();
+
+  constructor(private readonly host: ChatTurnFiberHost) {}
+
+  /** Run `fn`, the turn's model call and reply, as a durable fiber. */
+  async run<T>(turn: ChatTurnFiber, fn: () => Promise<T>): Promise<T> {
+    const { requestId, continuation, snapshot } = turn;
+    const liveTurn = { createdAt: Date.now(), recoveryData: null as unknown };
+    const wrap = (data: unknown) => {
+      liveTurn.recoveryData = data;
+      return wrapChatFiberSnapshot(this.host.snapshotKey, snapshot, data);
+    };
+    // Every continuation body here calls the model, so the reply is taken
+    // at once. A body that can end without a model call must take it later,
+    // where it commits to the call.
+    const body = this.host.turnBody(
+      continuation,
+      async (takeReply) => {
+        await takeReply();
+        return fn();
+      },
+      requestId
+    );
+
+    this.liveTurns.set(requestId, liveTurn);
+    try {
+      if (this.host.isFacet()) {
+        return await this.host.runLegacyFiber(
+          `${this.host.fiberName}:${requestId}`,
+          () => {
+            // The legacy engine stored the fiber and its snapshot before it
+            // entered this closure.
+            turn.onAccepted?.(requestId);
+            return body();
+          },
+          { initialSnapshot: wrap(null), wrapStash: wrap }
+        );
+      }
+      return await this.#runAsTask(turn, wrap, body);
+    } finally {
+      if (this.liveTurns.get(requestId) === liveTurn) {
+        this.liveTurns.delete(requestId);
+      }
+    }
+  }
+
+  async #runAsTask<T>(
+    turn: ChatTurnFiber,
+    wrap: (data: unknown) => unknown,
+    body: () => Promise<T>
+  ): Promise<T> {
+    const { requestId, continuation } = turn;
+    const nonce = this.host.generateId();
+    let resolveOutcome!: (value: unknown) => void;
+    let rejectOutcome!: (error: unknown) => void;
+    const outcome = new Promise<unknown>((resolve, reject) => {
+      resolveOutcome = resolve;
+      rejectOutcome = reject;
+    });
+    // A rejection can land while the Task start is still awaited, before
+    // the outcome is awaited below. Mark it handled so the runtime does not
+    // report an unhandled rejection this function is about to consume.
+    outcome.catch(() => {});
+    const inContext = this.host.captureContext();
+    this.liveClosures.set(nonce, {
+      initial: wrap(null),
+      wrap,
+      run: () => {
+        // Tasks accepted the run durably before it invokes the closure.
+        turn.onAccepted?.(requestId);
+        return inContext(body);
+      },
+      settle: { resolve: resolveOutcome, reject: rejectOutcome }
+    });
+    try {
+      await this.host.runTask({ requestId, continuation, nonce });
+      return (await outcome) as T;
+    } finally {
+      this.liveClosures.delete(nonce);
+    }
+  }
+}

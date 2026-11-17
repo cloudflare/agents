@@ -2997,12 +2997,100 @@ describe("Think — saveMessages with external AbortSignal", () => {
     expect(result.status).toBe("aborted");
     expect(result.requestId).toBeTruthy();
 
-    // The user message persists (it's saved before the abort gate),
-    // but the assistant message is either entirely missing OR has
-    // strictly fewer parts than a full response.
+    // The turn was stopped before it started: nothing is stored.
     const messages = (await agent.getStoredMessages()) as UIMessage[];
-    expect(messages.length).toBeGreaterThanOrEqual(1);
-    expect(messages[0].role).toBe("user");
+    expect(messages).toEqual([]);
+  });
+
+  it("stores nothing and never calls the model for a pre-aborted signal", async () => {
+    const agent = await freshProgrammaticAgent("ext-abort-pre-no-model");
+
+    const result = await agent.testSaveMessagesWithSignal("Cancel before run", {
+      preAbort: true
+    });
+
+    expect(result.status).toBe("aborted");
+    // No turn reached the model.
+    expect(await agent.getCapturedOptions()).toEqual([]);
+    expect(await agent.getStoredMessages()).toEqual([]);
+    expect(await agent.getResponseLog()).toEqual([]);
+    expect(await agent.getAbortControllerCount()).toBe(0);
+  });
+
+  it("a turn stopped after its messages are stored clears the terminal record of an earlier failure (#1645)", async () => {
+    const agent = await freshProgrammaticAgent("ext-abort-stored-terminal");
+
+    const result = await agent.testAbortedTurnAfterTerminalError("after-store");
+
+    // The message is in the transcript and the model was never called: the
+    // conversation moved, so the old failure is superseded.
+    expect(result).toEqual({
+      status: "aborted",
+      stored: 1,
+      modelCalls: 0,
+      after: null
+    });
+  });
+
+  it("a turn stopped before it starts leaves the terminal record of an earlier failure", async () => {
+    const agent = await freshProgrammaticAgent("ext-abort-pre-terminal");
+
+    const result = await agent.testAbortedTurnAfterTerminalError("before");
+
+    // It stored nothing and called nothing, so a client that reconnects
+    // still learns the turn before it failed.
+    expect(result).toMatchObject({
+      status: "aborted",
+      stored: 0,
+      modelCalls: 0
+    });
+    expect(result.after).toMatchObject({ requestId: "earlier-failure" });
+  });
+
+  it("abortAllRequests() stops a saveMessages turn still waiting in the queue", async () => {
+    const agent = await freshProgrammaticAgent("ext-abort-queued");
+    await agent.setDelayedChunkResponse(["a ", "b ", "c ", "d ", "e "], 50);
+
+    const { running, queued } =
+      await agent.testQueuedSaveMessagesStoppedByAbortAllRequests(100);
+
+    expect(running.status).toBe("aborted");
+    // The queued turn had not started. Its controller exists from the
+    // moment saveMessages is called, so the stop reaches it: it stores
+    // nothing and the model is never called for it.
+    expect(queued.status).toBe("aborted");
+    expect(await agent.getCapturedOptions()).toHaveLength(1);
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages.filter((message) => message.role === "user")).toHaveLength(
+      1
+    );
+    expect(await agent.getAbortControllerCount()).toBe(0);
+  });
+
+  it("does not ask shouldApplyMessages again once the chat was reset", async () => {
+    const agent = await freshProgrammaticAgent("should-apply-reset-messages");
+
+    const { status, asked } = await agent.testShouldApplyAcrossReset(
+      [true, true],
+      "messages"
+    );
+
+    expect(status).toBe("skipped");
+    expect(asked).toBe(1);
+    expect(await agent.getStoredMessages()).toEqual([]);
+  });
+
+  it("a turn shouldApplyMessages declines reports aborted, reset or not", async () => {
+    const agent = await freshProgrammaticAgent("should-apply-reset-decline");
+
+    const { status, asked } = await agent.testShouldApplyAcrossReset(
+      [false],
+      "first-ask"
+    );
+
+    expect(status).toBe("aborted");
+    expect(asked).toBe(1);
+    expect(await agent.getStoredMessages()).toEqual([]);
   });
 
   it("returns status: 'aborted' when aborted mid-stream", async () => {

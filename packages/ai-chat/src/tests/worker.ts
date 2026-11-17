@@ -829,6 +829,10 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return this._chatMessageCallCount;
   }
 
+  abortAllRequestsForTest(): void {
+    this.abortAllRequests();
+  }
+
   hasPendingInteractionForTest(): boolean {
     return this.hasPendingInteraction();
   }
@@ -1423,6 +1427,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     if (options?.requestId) {
       this._startedRequestIds.push(options.requestId);
       this._requestStartTimes.set(options.requestId, Date.now());
+      this._requestBodies.set(options.requestId, options.body);
     }
 
     const body = options?.body as
@@ -1531,6 +1536,20 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
 
   getStartedRequestIds(): string[] {
     return [...this._startedRequestIds];
+  }
+
+  private _requestBodies = new Map<
+    string,
+    Record<string, unknown> | undefined
+  >();
+
+  /** The body `onChatMessage` got for a request. */
+  getRequestBodyForTest(requestId: string): Record<string, unknown> | null {
+    return this._requestBodies.get(requestId) ?? null;
+  }
+
+  abortAllRequestsForTest(): void {
+    this.abortAllRequests();
   }
 
   getPersistedMessages(): Promise<ChatMessage[]> {
@@ -1732,6 +1751,67 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
         parts: [{ type: "text", text }]
       }
     ]);
+  }
+
+  /**
+   * Drive the private turn behind `saveMessages` with a
+   * `shouldApplyMessages` that answers from `answers`, one per call.
+   */
+  async testProgrammaticTurnWithShouldApply(
+    text: string,
+    answers: boolean[]
+  ): Promise<{ result: SaveMessagesResult; asked: number }> {
+    this.setTestBody({ format: "plaintext", chunkCount: 2, chunkDelayMs: 5 });
+    let asked = 0;
+    const result = await (
+      this as unknown as {
+        _runProgrammaticMessagesTurn(
+          requestId: string,
+          messages: ChatMessage[],
+          options: { shouldApplyMessages: () => boolean }
+        ): Promise<SaveMessagesResult>;
+      }
+    )._runProgrammaticMessagesTurn(
+      `should-apply-${crypto.randomUUID()}`,
+      [
+        ...this.messages,
+        {
+          id: `should-apply-${crypto.randomUUID()}`,
+          role: "user",
+          parts: [{ type: "text", text }]
+        }
+      ],
+      { shouldApplyMessages: () => answers[asked++] ?? true }
+    );
+    return { result, asked };
+  }
+
+  /**
+   * Queue a second `saveMessages` turn behind a running one, then call
+   * `abortAllRequests()` while the second still waits in the queue.
+   */
+  async testQueuedSaveMessagesStoppedByAbortAllRequests(
+    cancelAfterMs: number,
+    body: Record<string, unknown>
+  ): Promise<{ running: SaveMessagesResult; queued: SaveMessagesResult }> {
+    this.setTestBody(body);
+    const turn = (text: string) =>
+      this.saveMessages((messages) => [
+        ...messages,
+        {
+          id: `queued-abort-${crypto.randomUUID()}`,
+          role: "user",
+          parts: [{ type: "text", text }]
+        }
+      ]);
+    setTimeout(() => {
+      (this as unknown as { abortAllRequests(): void }).abortAllRequests();
+    }, cancelAfterMs);
+    const [running, queued] = await Promise.all([
+      turn("Running"),
+      turn("Queued")
+    ]);
+    return { running, queued };
   }
 
   async getPersistedUserTexts(): Promise<string[]> {
@@ -3327,8 +3407,16 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
         this._releaseBlockedPersist = resolve;
       });
     }
-    return super.persistMessages(messages, excludeBroadcastIds, options);
+    await super.persistMessages(messages, excludeBroadcastIds, options);
+    // A stop that lands right after a turn's messages are stored.
+    if (this._abortAfterUserPersist && messages.at(-1)?.role === "user") {
+      const controller = this._abortAfterUserPersist;
+      this._abortAfterUserPersist = null;
+      controller.abort(new Error("stopped after the messages were stored"));
+    }
   }
+
+  private _abortAfterUserPersist: AbortController | null = null;
 
   /**
    * Drive a turn whose model stream hangs after a partial, with a short stall
@@ -3418,16 +3506,30 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     return result.status;
   }
 
-  /** Drive an ABORTED turn purely server-side (no client request), via a
-   *  pre-aborted external signal — the stream loop breaks immediately and the
-   *  pushed `ChatResponseResult.status` is `"aborted"`. Used to verify that an
-   *  aborted programmatic turn also supersedes a stale terminal record (#1645),
-   *  not just a completed one. */
-  async driveAbortedTurnForTest(): Promise<SaveMessagesResult["status"]> {
+  /**
+   * Drive an aborted turn purely server-side (no client request), through
+   * the caller's signal. `"after-store"` stops it once its messages are
+   * stored and before the model is called: the conversation moved, so the
+   * turn supersedes a stale terminal record (#1645). `"before"` passes a
+   * signal that is already aborted: the turn does nothing.
+   */
+  async driveAbortedTurnForTest(
+    when: "before" | "after-store" = "after-store"
+  ): Promise<{
+    status: SaveMessagesResult["status"];
+    userTexts: string[];
+    chatCalls: number;
+  }> {
     const controller = new AbortController();
-    controller.abort(new Error("pre-aborted"));
+    if (when === "before") {
+      controller.abort(new Error("pre-aborted"));
+    } else {
+      this._abortAfterUserPersist = controller;
+    }
+    const callsBefore = this.onChatMessageCallCount;
     const result = await this.saveMessages(
-      [
+      (messages) => [
+        ...messages,
         {
           id: `u-${crypto.randomUUID()}`,
           role: "user",
@@ -3436,7 +3538,18 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       ],
       { signal: controller.signal }
     );
-    return result.status;
+    this._abortAfterUserPersist = null;
+    return {
+      status: result.status,
+      userTexts: this.messages
+        .filter((message) => message.role === "user")
+        .map((message) =>
+          message.parts
+            .map((part) => (part.type === "text" ? part.text : ""))
+            .join("")
+        ),
+      chatCalls: this.onChatMessageCallCount - callsBefore
+    };
   }
 
   /** Drive a turn that ends in a terminal (non-recovered) stream error — the
@@ -4140,6 +4253,63 @@ export class RecoveryThrowingAgent extends AIChatAgent<Env> {
 
   setShouldThrow(value: boolean): void {
     this._shouldThrow = value;
+  }
+
+  private _onErrorSeen: string[] = [];
+
+  override onError(connectionOrError: unknown, error?: unknown): void {
+    const cause = error ?? connectionOrError;
+    const message = cause instanceof Error ? cause.message : String(cause);
+    this._onErrorSeen.push(message);
+    throw new Error(`onError(${message})`);
+  }
+
+  async callContinueLastTurn(): Promise<{ requestId: string; status: string }> {
+    return this.continueLastTurn();
+  }
+
+  /**
+   * Drive `continueLastTurn` while `onChatMessage` throws, and report what
+   * the caller sees and what the turn left behind.
+   */
+  async testContinueLastTurnWhileThrowing(): Promise<{
+    thrown: string | null;
+    onErrorSeen: string[];
+    liveRecoveryTurns: number;
+    liveClosures: number;
+    fibers: number;
+    abortControllers: number;
+    queueIdle: boolean;
+  }> {
+    await this.persistMessages([
+      { id: "u1", role: "user", parts: [{ type: "text", text: "Hello" }] },
+      { id: "a1", role: "assistant", parts: [{ type: "text", text: "Hi" }] }
+    ]);
+    this._shouldThrow = true;
+    this._onErrorSeen = [];
+    let thrown: string | null = null;
+    try {
+      await this.continueLastTurn();
+    } catch (error) {
+      thrown = error instanceof Error ? error.message : String(error);
+    } finally {
+      this._shouldThrow = false;
+    }
+    const internals = this as unknown as {
+      _liveChatRecoveryTurns: Map<string, unknown>;
+      _liveChatTurnClosures: Map<string, unknown>;
+      _abortRegistry: { size: number };
+      _turnQueue: { isActive: boolean };
+    };
+    return {
+      thrown,
+      onErrorSeen: [...this._onErrorSeen],
+      liveRecoveryTurns: internals._liveChatRecoveryTurns.size,
+      liveClosures: internals._liveChatTurnClosures.size,
+      fibers: this.getActiveFibers().length,
+      abortControllers: internals._abortRegistry.size,
+      queueIdle: !internals._turnQueue.isActive
+    };
   }
 
   getOnChatMessageCallCount(): number {
@@ -5910,6 +6080,31 @@ export class AIChatAgentToolParent extends Agent<Env> {
    * attached — and wait for its terminal inspection. Terminal status must
    * come from the child turn's own result, not from tailing side effects.
    */
+  /**
+   * Three runs on one child, started together: a slow one, one whose input
+   * asks for a stream error, and a third. Returns the second run's outcome.
+   */
+  async startThreeChildRunsForTest(): Promise<AgentToolRunInspection> {
+    const child = await this.subAgent(
+      AIChatAgentToolChild,
+      crypto.randomUUID()
+    );
+    const errorRunId = crypto.randomUUID();
+    await child.startAgentToolRun(
+      { prompt: "first", delayMs: 200 },
+      { runId: crypto.randomUUID() }
+    );
+    await child.startAgentToolRun(
+      { prompt: "second", streamError: "boom" },
+      { runId: errorRunId }
+    );
+    await child.startAgentToolRun(
+      { prompt: "third" },
+      { runId: crypto.randomUUID() }
+    );
+    return this.waitForTerminalInspectionForTest(child, errorRunId);
+  }
+
   async startChildWithoutTailForTest(
     input: AgentToolInput,
     runId = crypto.randomUUID()

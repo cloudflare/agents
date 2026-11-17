@@ -183,7 +183,7 @@ Returns `{ requestId, status, error? }` where `status` is `"completed"`, `"error
 | ------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | `"completed"` | Turn ran to completion.                                                                                                   |
 | `"error"`     | Turn started but the stream reported an error. `error` contains the stream error message when available.                  |
-| `"skipped"`   | Turn invalidated mid-flight (e.g. by `chat-clear`); user message persisted, no model run.                                 |
+| `"skipped"`   | The chat was cleared (`chat-clear`) before the turn finished, whether it was waiting or already streaming.                |
 | `"aborted"`   | Turn cancelled before completion via `options.signal` or `chat-request-cancel`. Partial assistant chunks still persisted. |
 
 ### Static messages
@@ -295,7 +295,7 @@ async onChatResponse(result: ChatResponseResult) {
 - `saveMessages` resolves with `{ status: "aborted" }`;
 - `onChatResponse` fires with `status: "aborted"`.
 
-If the signal is **already aborted** when `saveMessages` is called, no inference work runs.
+If the signal is **already aborted** when `saveMessages` is called, or aborts while the turn waits behind another turn, the turn does not start. Nothing is stored, the model is not called, and `onChatResponse` does not fire. A stop that lands after the messages are stored and before the model is called leaves the messages in the transcript and also fires no `onChatResponse`. A stop that lands after the reply finished changes nothing: the result is `completed`.
 
 ```typescript
 class MyAgent extends Think<Env> {
@@ -385,9 +385,9 @@ protected abortAllRequests(): void
 ```
 
 - **`abortRequest(id, reason?)`** — abort a specific in-flight turn by id. No-op if no controller exists for that id. Equivalent to a client `chat-request-cancel`.
-- **`abortAllRequests()`** — abort every in-flight controller in the registry. Used by single-purpose sub-agents that don't track ids.
+- **`abortAllRequests()`** — abort every turn, running or waiting in the queue. A turn that had not started ends `aborted`: it stores nothing and does not call the model. Used by single-purpose sub-agents that don't track ids.
 
-Both methods produce the same end state as `chat-request-cancel`: inference loop terminates, partial chunks persist, the turn's `ChatResponseResult` reports `status: "aborted"`. Prefer `options.signal` on `saveMessages` / `continueLastTurn` when driving a turn programmatically — it threads the abort intent in from turn start without requiring the caller to know the id.
+For a turn that is running, both methods produce the same end state as `chat-request-cancel`: inference loop terminates, partial chunks persist, the turn's `ChatResponseResult` reports `status: "aborted"`. A turn that had not started has no `ChatResponseResult`. Prefer `options.signal` on `saveMessages` / `continueLastTurn` when driving a turn programmatically — it threads the abort intent in from turn start without requiring the caller to know the id.
 
 ---
 

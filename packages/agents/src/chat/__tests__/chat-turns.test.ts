@@ -597,6 +597,17 @@ describe("ChatTurns", () => {
       expect(turns.submits.pendingEnqueueCount).toBe(0);
     });
 
+    it("rejects a request id the registry cannot key a controller by", async () => {
+      const log: Log = [];
+      await expect(
+        request(undefined as unknown as string, log)
+      ).rejects.toThrow(TypeError);
+      // Nothing was accepted: no pre-stream mark, no persist, no queue.
+      expect(log).toEqual([]);
+      expect(turns.preStream.hasInFlight()).toBe(false);
+      expect(turns.submits.pendingEnqueueCount).toBe(0);
+    });
+
     it("drops an overlapping submit before accepting it", async () => {
       const log: Log = [];
       let release!: () => void;

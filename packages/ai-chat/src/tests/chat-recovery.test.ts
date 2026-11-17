@@ -398,6 +398,33 @@ describe("chatRecovery", () => {
       ws.close(1000);
     });
 
+    it("continueLastTurn hands onError the error onChatMessage threw, and leaves nothing behind", async () => {
+      const room = crypto.randomUUID();
+      const stub = await getAgentByName(env.RecoveryThrowingAgent, room);
+
+      const outcome = await stub.testContinueLastTurnWhileThrowing();
+
+      // onError hears of the failure from the recovery task and from the
+      // turn, as it does for a client request and for saveMessages. Both
+      // times it gets the error onChatMessage threw, never its own result.
+      // The caller gets what onError threw.
+      expect(outcome.onErrorSeen).toEqual([
+        "Simulated onChatMessage error",
+        "Simulated onChatMessage error"
+      ]);
+      expect(outcome.thrown).toBe("onError(Simulated onChatMessage error)");
+      // The recovery fiber, the turn queue and the abort registry are clean.
+      expect(outcome.liveRecoveryTurns).toBe(0);
+      expect(outcome.liveClosures).toBe(0);
+      expect(outcome.fibers).toBe(0);
+      expect(outcome.abortControllers).toBe(0);
+      expect(outcome.queueIdle).toBe(true);
+
+      // The next continuation runs normally.
+      const next = await stub.callContinueLastTurn();
+      expect(next.status).toBe("completed");
+    });
+
     it("still works for subsequent requests after an error", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(

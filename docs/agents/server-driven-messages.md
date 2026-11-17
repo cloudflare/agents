@@ -452,7 +452,9 @@ When the signal aborts:
 - `saveMessages` resolves with `{ status: "aborted" }`;
 - `onChatResponse` fires with `status: "aborted"`.
 
-Pre-aborted signals short-circuit before any model work runs.
+A signal that is already aborted, or that aborts while the turn waits behind another turn, stops the turn before it starts. Nothing is stored, the model is not called, and `saveMessages` resolves with `{ status: "aborted" }`. `onChatResponse` does not fire for such a turn, because there is no reply. A stop that lands after the messages are stored and before the model is called leaves the messages in the transcript and also fires no `onChatResponse`. A stop that lands after the reply finished changes nothing: the result is `completed`.
+
+If the chat is cleared before the turn finishes, `saveMessages` resolves with `{ status: "skipped" }`, whether the turn was waiting or already streaming.
 
 ### Limitations
 

@@ -61,6 +61,16 @@ export {
   type ChatTurnClosureEntry,
   type ChatTurnTaskHooks
 } from "./turn-task";
+
+/**
+ * @internal Running one chat turn as a durable fiber, for `AIChatAgent` and
+ * `Think`. Not a public API. See `turn-fiber.ts`.
+ */
+export {
+  ChatTurnFibers,
+  type ChatTurnFiber,
+  type ChatTurnFiberHost
+} from "./turn-fiber";
 export {
   CHAT_RECOVERY_TASK_NAME,
   chatRecoveryTaskRunOptions,
@@ -159,6 +169,24 @@ export {
   type ClientChatRequest,
   type RecoveryAttemptHandle
 } from "./chat-turns";
+
+/**
+ * @internal A turn the server starts itself (`saveMessages`,
+ * `continueLastTurn`, a retry), run through `ChatTurns.runServerTurn`. Not a
+ * public API. See `server-turn.ts`.
+ */
+export {
+  runServerTurn,
+  mapServerTurnOutcome,
+  pinnedOr,
+  prepareTurnMessages,
+  toSaveMessagesResult,
+  type ServerChatTurn,
+  type ServerTurnOutcome,
+  type ServerTurnParts,
+  type ServerTurnPrepared,
+  type ServerTurnStatus
+} from "./server-turn";
 
 export { AbortRegistry } from "./abort-registry";
 
