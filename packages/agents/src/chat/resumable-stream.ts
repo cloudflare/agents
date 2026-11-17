@@ -624,6 +624,19 @@ export class ResumableStream {
   }
 
   /**
+   * Replace the base part count recorded for a stream that extends a message.
+   * Orphan recovery sets 0 when it recreates a missing message from the
+   * stream's chunks alone, so recovering the stream again doesn't keep those
+   * parts as the message's earlier ones.
+   */
+  setStreamBasePartCount(streamId: string, basePartCount: number): void {
+    const row = this.ops.getStream(streamId);
+    const chat = row ? parseChatMetadata(row) : null;
+    if (!chat || chat.basePartCount == null) return;
+    this.ops.setMetadata(streamId, { ...chat, basePartCount });
+  }
+
+  /**
    * The message an orphaned stream's assistant message is a child of, or null
    * when the stream appends to the latest leaf or predates parent tracking.
    */

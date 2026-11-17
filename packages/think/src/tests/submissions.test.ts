@@ -164,6 +164,7 @@ type ThinkSubmissionTestStub = {
       startMetadata?: Record<string, unknown>;
       leafParts?: unknown[];
       chunks?: Array<Record<string, unknown>>;
+      deleteLeaf?: boolean;
     }
   ): Promise<void>;
   continueRecoveredChatForTest(requestId: string): Promise<void>;
@@ -2119,6 +2120,22 @@ describe("Think durable submissions", () => {
     expect(
       (assistants[0].parts ?? []).map((part) => (part as { text: string }).text)
     ).toEqual(["earlier", "continued"]);
+  });
+
+  it("recovers an interrupted continuation whose leaf was deleted into one copy, however often it is persisted", async () => {
+    const agent = await freshAgent();
+
+    await agent.persistContinuationOrphanForTest("req-cont-gone", "leaf-1", 2, {
+      deleteLeaf: true
+    });
+
+    const assistants = (await agent.getStoredMessages()).filter(
+      (message) => message.role === "assistant"
+    );
+    expect(assistants.map((message) => message.id)).toEqual(["leaf-1"]);
+    expect(
+      (assistants[0].parts ?? []).map((part) => (part as { text: string }).text)
+    ).toEqual(["continued"]);
   });
 
   it("recovers an interrupted continuation into the leaf when its start chunk carries a provider id", async () => {

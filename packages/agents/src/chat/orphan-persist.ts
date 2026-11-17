@@ -50,7 +50,7 @@ export interface PersistReconstructedOrphanOptions<
    * `messageId` (a provider `start.messageId` is ignored) and the earlier
    * parts, and persisting the same stream again rewrites the message rather
    * than appending a copy. When the message no longer exists, the chunks are
-   * rebuilt on their own under `messageId`.
+   * rebuilt on their own under `messageId`, and `forgetBase` is called first.
    */
   continues?: {
     messageId: string;
@@ -59,6 +59,13 @@ export interface PersistReconstructedOrphanOptions<
     settleBasePart?: (
       part: TMessage["parts"][number]
     ) => TMessage["parts"][number];
+    /**
+     * Called before the chunks are rebuilt on their own because the continued
+     * message is gone. Record a `basePartCount` of 0 for the stream, so a later
+     * recovery of it keeps none of the recreated message's parts, which all
+     * came from these chunks, instead of replaying the chunks after them.
+     */
+    forgetBase?: () => void | Promise<void>;
   };
   /**
    * Finalize the reconstructed message before upsert — e.g. strip internal
@@ -118,6 +125,9 @@ async function createReconstructionAccumulator<TMessage extends UIMessage>(
     return new StreamAccumulator({ messageId: options.fallbackId });
   }
   const continued = await options.store.getMessage(continues.messageId);
+  if (!continued && continues.basePartCount > 0) {
+    await continues.forgetBase?.();
+  }
   const baseParts = (continued?.parts ?? []).slice(0, continues.basePartCount);
   const metadata = continued?.metadata;
   return new StreamAccumulator({

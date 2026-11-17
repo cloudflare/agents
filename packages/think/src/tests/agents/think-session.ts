@@ -8312,7 +8312,8 @@ export class ThinkProgrammaticTestAgent extends Think {
    * Persist a recovery continuation's orphaned chunks (no `start.messageId`,
    * as `_alignStreamStartId` leaves them) `times` times onto a leaf assistant
    * message that already holds one part (`leafParts` overrides that part and
-   * `chunks` the continuation's chunks after `start`).
+   * `chunks` the continuation's chunks after `start`). `deleteLeaf` deletes
+   * the leaf before the first persist.
    */
   async persistContinuationOrphanForTest(
     requestId: string,
@@ -8324,6 +8325,7 @@ export class ThinkProgrammaticTestAgent extends Think {
       startMetadata?: Record<string, unknown>;
       leafParts?: UIMessage["parts"];
       chunks?: Array<Record<string, unknown>>;
+      deleteLeaf?: boolean;
     } = {}
   ): Promise<void> {
     const leafParts: UIMessage["parts"] = options.leafParts ?? [
@@ -8368,6 +8370,7 @@ export class ThinkProgrammaticTestAgent extends Think {
     ]) {
       internals._resumableStream.storeChunk(streamId, JSON.stringify(chunk));
     }
+    if (options.deleteLeaf) await this.session.deleteMessages([leafId]);
     for (let i = 0; i < times; i++) {
       await internals._persistOrphanedStream(streamId);
     }
