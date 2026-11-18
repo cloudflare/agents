@@ -48,7 +48,7 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 
 type Provider = "workers-ai" | "anthropic";
 
-const DEFAULT_WORKERS_AI_MODEL = "@cf/moonshotai/kimi-k2.7-code";
+const DEFAULT_WORKERS_AI_MODEL = "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
 const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6";
 
 /**
@@ -56,7 +56,7 @@ const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6";
  * exactly what `continueLastTurn` replays when it continues a partial assistant
  * turn after a deploy interruption. `trailing-user` is the control.
  *
- * Workers AI / Kimi tolerate the trailing assistant (they just respond);
+ * Workers AI / DeepSeek tolerate the trailing assistant (they just respond);
  * Anthropic 4.6+ returns a 400 ("prefill not supported"), which is what the
  * customer hits in production.
  */
@@ -1222,7 +1222,7 @@ export default {
 
     // Prefill-rejection probe: does the model reject a transcript that ends in
     // an assistant message (what recovery's continuation replays)? Defaults to
-    // Workers AI / Kimi; pass ?provider=anthropic&model=claude-sonnet-4-6.
+    // Workers AI / DeepSeek; pass ?provider=anthropic&model=claude-sonnet-4-6.
     if (url.pathname === "/probe/trailing-assistant") {
       const { provider, modelId } = probeParams(url);
       return Response.json(

@@ -73,6 +73,13 @@ type RerankingCatalogId = {
 }[keyof AiModels];
 
 /**
+ * Workers AI chat ids newer than the installed `@cloudflare/workers-types`
+ * catalog. Curated for autocomplete only; the catalog lives server-side and
+ * any slug is accepted. Drop an entry once workers-types lists it.
+ */
+export type KnownLanguageModelId = "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
+
+/**
  * A Workers AI model id.
  *
  * Workers AI is the one catalog this package keeps up with, so this is the
@@ -89,6 +96,7 @@ export type WorkersAIModelId =
   // lists `@hf/...` ids, which `ai()` rejects, so they must not be suggested.
   | Extract<
       | ChatCatalogId
+      | KnownLanguageModelId
       | Exclude<
           WorkersAIModelIdsExtending<BaseAiTextGeneration>,
           WorkersAIModelIdsExtending<BaseAiTextToImage>
@@ -167,6 +175,13 @@ export function isRunPathLanguageModelId(modelId: string): boolean {
 }
 
 /**
+ * Workers AI embedding ids newer than the installed `@cloudflare/workers-types`
+ * catalog. Curated for autocomplete only; drop an entry once workers-types
+ * lists it.
+ */
+export type KnownEmbeddingModelId = "@cf/google/embeddinggemma-2";
+
+/**
  * A text-embedding model id accepted by `ai.embedding()`.
  *
  * The modality methods are Workers AI only — there is no vendor route for them
@@ -174,7 +189,9 @@ export function isRunPathLanguageModelId(modelId: string): boolean {
  */
 export type CloudflareEmbeddingModelId =
   | Extract<
-      EmbeddingCatalogId | WorkersAIModelIdsExtending<BaseAiTextEmbeddings>,
+      | EmbeddingCatalogId
+      | KnownEmbeddingModelId
+      | WorkersAIModelIdsExtending<BaseAiTextEmbeddings>,
       `@cf/${string}`
     >
   | (`@cf/${string}` & {});
@@ -185,16 +202,14 @@ export type CloudflareEmbeddingModelId =
  * own generated class instead. Curated for autocomplete only; the catalog
  * lives server-side and any slug is accepted.
  *
- * The FLUX.2 family (`flux-2-dev`, `flux-2-klein-4b`, `flux-2-klein-9b`) is
- * deliberately absent, for the reason {@link UnsupportedTranscriptionId}
- * records for the Deepgram recognisers: its generated input takes a required
- * `multipart` object body (`{ multipart: { body, contentType } }`) and no
- * `prompt`, which the JSON run path cannot carry — live, the run path answers
- * `400 Bad input: required properties at "/" are 'multipart'`. Suggesting an
- * id that always 400s is worse than not suggesting it.
+ * The FLUX.2 family takes multipart form data rather than JSON; `ai.image()`
+ * sends it that way, straight to Workers AI.
  */
 export type KnownImageModelId =
   | "@cf/black-forest-labs/flux-1-schnell"
+  | "@cf/black-forest-labs/flux-2-dev"
+  | "@cf/black-forest-labs/flux-2-klein-4b"
+  | "@cf/black-forest-labs/flux-2-klein-9b"
   | "@cf/leonardo/lucid-origin"
   | "@cf/leonardo/phoenix-1.0";
 
@@ -272,15 +287,12 @@ type Suggests<T, Id extends string> =
  */
 export type CatalogAutocompleteCheck<
   T extends [true, true, true, true, true, true, true, true, true] = [
-    Suggests<WorkersAIModelId, "@cf/zai-org/glm-4.7-flash">,
-    Suggests<WorkersAIModelId, "@cf/meta/llama-3.3-70b-instruct-fp8-fast">,
+    Suggests<WorkersAIModelId, "@cf/deepseek-ai/deepseek-v4.1-flash-1017">,
+    Suggests<WorkersAIModelId, "@cf/qwen/qwen3.8-27b">,
     Suggests<CloudflareEmbeddingModelId, "@cf/baai/bge-base-en-v1.5">,
-    Suggests<CloudflareEmbeddingModelId, "@cf/google/embeddinggemma-300m">,
+    Suggests<CloudflareEmbeddingModelId, "@cf/google/embeddinggemma-2">,
     Suggests<CloudflareImageModelId, "@cf/black-forest-labs/flux-1-schnell">,
-    Suggests<
-      CloudflareImageModelId,
-      "@cf/stabilityai/stable-diffusion-xl-base-1.0"
-    >,
+    Suggests<CloudflareImageModelId, "@cf/black-forest-labs/flux-2-klein-9b">,
     Suggests<CloudflareSpeechModelId, "@cf/deepgram/aura-1">,
     Suggests<
       CloudflareTranscriptionModelId,

@@ -25,7 +25,7 @@ export class LunchAgent extends DurableObject<Env> {
 			models.setProvider(this.ai.provider);
 			return Harness.open(storage, { models, registry: this.registry, onWake }, context);
 		},
-		defaults: { model: this.ai('@cf/zai-org/glm-5.3-flash') },
+		defaults: { model: this.ai('@cf/deepseek-ai/deepseek-v4.1-flash-1017') },
 	});
 
 	scheduler = new Scheduler({

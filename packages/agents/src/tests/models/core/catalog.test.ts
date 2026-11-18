@@ -14,7 +14,8 @@ import { asAi, fakeBinding, jsonResponse } from "../ai-sdk/helpers";
  */
 describe("catalog ids are `@cf/` only", () => {
   it("accepts a Workers AI id and rejects a non-`@cf/` catalog id", () => {
-    const suggested: WorkersAIModelId = "@cf/zai-org/glm-4.7-flash";
+    const suggested: WorkersAIModelId =
+      "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
     const anySlug: WorkersAIModelId = "@cf/some/future-model";
     // @ts-expect-error `@hf/` ids are in the ambient catalog but not accepted.
     const huggingFace: WorkersAIModelId = "@hf/thebloke/llama-2-13b-chat-awq";
@@ -35,27 +36,19 @@ describe("catalog ids are `@cf/` only", () => {
     expect([embedding, image, vendorEmbedding]).toHaveLength(3);
   });
 
-  it("does not suggest the image models the run path cannot serve", () => {
-    // The FLUX.2 family declares a required `multipart` object body and no
-    // `prompt`, which the JSON run path cannot carry (live: 400 `required
-    // properties at "/" are 'multipart'`), so it stays out of the suggested
-    // arm exactly as the Deepgram recognisers do for transcription.
+  it("suggests the FLUX.2 image models, which ai.image() sends as multipart", () => {
     type SuggestsFlux2 = Extract<
       CloudflareImageModelId,
-      "@cf/black-forest-labs/flux-2-dev"
+      "@cf/black-forest-labs/flux-2-klein-9b"
     >;
     type SuggestsFlux1 = Extract<
       CloudflareImageModelId,
       "@cf/black-forest-labs/flux-1-schnell"
     >;
-    const notSuggested: SuggestsFlux2 extends never ? true : false = true;
-    const suggested: SuggestsFlux1 extends never ? false : true = true;
-    // The template arm still accepts any `@cf/` slug: the catalog is
-    // server-side and moves on its own.
-    const stillAssignable: CloudflareImageModelId =
-      "@cf/black-forest-labs/flux-2-dev";
+    const suggestedFlux2: SuggestsFlux2 extends never ? false : true = true;
+    const suggestedFlux1: SuggestsFlux1 extends never ? false : true = true;
 
-    expect([notSuggested, suggested, stillAssignable]).toHaveLength(3);
+    expect([suggestedFlux2, suggestedFlux1]).toHaveLength(2);
   });
 
   it("refuses an `@hf/` id at runtime too", () => {

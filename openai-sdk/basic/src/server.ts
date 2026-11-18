@@ -6,7 +6,7 @@ import { Agent as CFAgent, routeAgentRequest } from "agents";
 // import { aisdk } from "@openai/agents-extensions";
 // import { createWorkersAI } from "workers-ai-provider";
 // const model = aisdk(
-//   createWorkersAI({ binding: env.AI })("@cf/moonshotai/kimi-k2.7-code")
+//   createWorkersAI({ binding: env.AI })("@cf/deepseek-ai/deepseek-v4.1-flash-1017")
 // );
 
 export class MyAgent extends CFAgent<Env> {

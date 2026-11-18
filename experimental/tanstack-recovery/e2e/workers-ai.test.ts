@@ -7,7 +7,7 @@
  * with exact continuation math. This proves the same protocol survives a real,
  * NON-DETERMINISTIC provider: `@tanstack/ai`'s `chat()` over
  * `@cloudflare/tanstack-ai`'s `createWorkersAiChat` (model
- * `@cf/moonshotai/kimi-k2.7-code`) bound to the `AI` binding. The real model's
+ * `@cf/deepseek-ai/deepseek-v4.1-flash-1017`) bound to the `AI` binding. The real model's
  * AG-UI `StreamChunk`s flow through the SAME `TanStackRecoveryCodec`, `ws-bridge`,
  * and `ChatRecoveryEngine` — no engine change is specific to the provider.
  *

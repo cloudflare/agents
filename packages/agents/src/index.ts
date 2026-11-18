@@ -1426,7 +1426,7 @@ export class Agent<
    * @example
    * ```typescript
    * const workersai = createWorkersAI({ binding: this.env.AI });
-   * const model = workersai("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
+   * const model = workersai("@cf/deepseek-ai/deepseek-v4.1-flash-1017", {
    *   sessionAffinity: this.sessionAffinity,
    * });
    * ```

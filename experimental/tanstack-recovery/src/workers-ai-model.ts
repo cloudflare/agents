@@ -22,7 +22,7 @@ import { chat, type StreamChunk } from "@tanstack/ai";
 import type { TurnModel, TurnStreamOptions } from "./model";
 
 /** The Workers AI text model the harness exercises (matches the repo examples). */
-export const WORKERS_AI_MODEL = "@cf/moonshotai/kimi-k2.7-code";
+export const WORKERS_AI_MODEL = "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
 
 /**
  * Wrap a Workers AI `AI` binding as a {@link TurnModel}. The adapter speaks the

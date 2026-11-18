@@ -19,7 +19,7 @@ import { createAI } from "agents/models/pi-ai";
  *   model from that vendor's own pi-ai registry, routed through AI Gateway.
  *   No vendor id or wire format lives in `agents`.
  */
-const DEFAULT_MODEL = "@cf/zai-org/glm-4.7-flash";
+const DEFAULT_MODEL = "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
 
 const weatherParameters = obj({
   city: str({ description: "City name, e.g. 'Lisbon'" })

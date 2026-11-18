@@ -34,7 +34,7 @@ const tools = {
 export class AiSdkAgent extends DurableObject<Env> {
   readonly harness = new AiSdkHarness({
     model: createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.7-code"
+      "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
     ),
     tools,
     stopWhen: stepCountIs(5)

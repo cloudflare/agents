@@ -17,7 +17,7 @@ import {
   workersAIToolStream
 } from "./helpers";
 
-const MODEL = "@cf/zai-org/glm-4.7-flash";
+const MODEL = "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
 
 describe("pi-ai: Workers AI chat completions", () => {
   it("streams reasoning and text in the live stream shape", async () => {
@@ -178,7 +178,9 @@ describe("pi-ai: Workers AI chat completions", () => {
     expect(field(call?.input, "stream")).toBe(true);
     expect(field(call?.input, "max_tokens")).toBe(32);
     expect(field(call?.input, "temperature")).toBe(0.2);
-    expect(field(call?.input, "reasoning_effort")).toBe("low");
+    // pi's registry entry for this model supports only high and max, so
+    // "low" clamps up to the lowest effort it does support.
+    expect(field(call?.input, "reasoning_effort")).toBe("high");
     expect(field(call?.input, "chat_template_kwargs")).toEqual({
       enable_thinking: false
     });

@@ -148,6 +148,16 @@ export interface ResolvedGateway extends GatewayOptions {
   id: string;
 }
 
+/**
+ * Whether the caller set any gateway option, the id included. A request that
+ * goes to Workers AI directly (a raw audio or multipart body) warns when one
+ * is set, because no gateway handles it.
+ */
+export function isGatewayConfigured(gateway: ResolvedGateway): boolean {
+  const { id, ...options } = gateway;
+  return id !== DEFAULT_GATEWAY_ID || Object.keys(options).length > 0;
+}
+
 /** Everything one request needs, after merging all three option layers. */
 export interface ResolvedOptions {
   gateway: ResolvedGateway;

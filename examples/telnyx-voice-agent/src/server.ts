@@ -27,7 +27,7 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
     const workersAi = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
-      model: workersAi("@cf/zai-org/glm-4.7-flash", {
+      model: workersAi("@cf/deepseek-ai/deepseek-v4.1-flash-1017", {
         sessionAffinity: this.sessionAffinity
       }),
       instructions: SYSTEM_PROMPT,

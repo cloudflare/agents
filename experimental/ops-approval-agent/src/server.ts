@@ -45,7 +45,7 @@ type RefundLedgerRow = {
   at: number;
 };
 
-const MODEL_ID = "@cf/moonshotai/kimi-k2.7-code";
+const MODEL_ID = "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
 
 export class OpsApprovalAgent extends Think<Env, OpsState> {
   async onStart() {

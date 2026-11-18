@@ -16,7 +16,9 @@ agent loop as a Lifecycle capability on a plain Durable Object, served to
 ```ts
 export class ThinkAgent extends DurableObject<Env> {
   readonly harness = new ThinkHarness({
-    model: createAI({ binding: this.env.AI })("@cf/moonshotai/kimi-k2.7-code"),
+    model: createAI({ binding: this.env.AI })(
+      "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ),
     tools: { getWeather, sendNotification, getUserTimezone }
   });
   readonly webSockets = new WebSockets();

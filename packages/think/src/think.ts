@@ -52,7 +52,7 @@
  *     // A string is resolved via the built-in workers-ai-provider off env.AI.
  *     // Use a "@cf/..." id for Workers AI, or a "provider/model" slug like
  *     // "openai/gpt-5.5" to route through AI Gateway.
- *     return "@cf/moonshotai/kimi-k2.7-code";
+ *     return "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
  *   }
  *
  *   getSystemPrompt() {
@@ -5177,7 +5177,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * @example String (Workers AI)
    * ```typescript
    * getModel() {
-   *   return "@cf/moonshotai/kimi-k2.7-code";
+   *   return "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
    * }
    * ```
    *
@@ -5199,7 +5199,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   getModel(): ThinkModel {
     throw new Error(
       "Override getModel() to return a model id string (e.g. " +
-        '"@cf/moonshotai/kimi-k2.7-code" or "openai/gpt-5.5") or a LanguageModel.'
+        '"@cf/deepseek-ai/deepseek-v4.1-flash-1017" or "openai/gpt-5.5") or a LanguageModel.'
     );
   }
 
@@ -5272,7 +5272,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     ) {
       throw new Error(
         `Invalid model id ${JSON.stringify(model)}. Use a Workers AI id ` +
-          '(e.g. "@cf/moonshotai/kimi-k2.7-code") or a "<provider>/<model>" ' +
+          '(e.g. "@cf/deepseek-ai/deepseek-v4.1-flash-1017") or a "<provider>/<model>" ' +
           'AI Gateway slug (e.g. "openai/gpt-5.5"), or return a LanguageModel.'
       );
     }

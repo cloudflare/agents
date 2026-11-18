@@ -2,9 +2,10 @@
  * Image generation over the Cloudflare run path.
  *
  * Two answer shapes exist and the content type tells them apart: the diffusion
- * models stream raw bytes (`image/png`), while `flux-1-schnell` and the
- * Leonardo models answer JSON `{ image: "<base64>" }` — and flux's base64 is
- * JPEG, so nothing here infers a media type from the model name.
+ * models stream raw bytes (`image/png`), while the flux and Leonardo models
+ * answer JSON `{ image: "<base64>" }` — and flux-1's base64 is JPEG, so
+ * nothing here infers a media type from the model name. Requests come in two
+ * shapes too: JSON, or multipart form data for the FLUX.2 models.
  */
 
 import type {
@@ -18,7 +19,13 @@ import type {
   JSONObject,
   SharedV4Warning
 } from "@ai-sdk/provider";
-import { buildImageInput, imageMediaTypeOf } from "../../core/images";
+import {
+  MAX_MULTIPART_SOURCE_IMAGES,
+  buildImageInput,
+  imageMediaTypeOf,
+  imageMultipartFields
+} from "../../core/images";
+import type { MultipartFile } from "../../core/transport";
 import { CloudflareAIError } from "../errors";
 import { PROVIDER_OPTIONS_KEY, type ModelOptions } from "../settings";
 import { count, record, text } from "../wires/shared";
@@ -78,6 +85,38 @@ function fileData(file: ImageModelV4File): string | undefined {
 }
 
 /**
+ * The reference images for a multipart request, as form files. URLs cannot
+ * be sent and images past the model's limit are dropped, each with a warning.
+ */
+function multipartImages(
+  files: ImageModelV4File[] | undefined,
+  warnings: SharedV4Warning[]
+): MultipartFile[] {
+  const images: MultipartFile[] = [];
+  for (const file of files ?? []) {
+    if (file.type !== "file") {
+      warnings.push(
+        unsupported("files", "Image URLs are not supported; send the bytes.")
+      );
+    } else if (images.length === MAX_MULTIPART_SOURCE_IMAGES) {
+      warnings.push(
+        unsupported(
+          "files",
+          `Only the first ${MAX_MULTIPART_SOURCE_IMAGES} images are used.`
+        )
+      );
+      break;
+    } else {
+      images.push({
+        bytes: toBytes(file.data),
+        contentType: file.mediaType
+      });
+    }
+  }
+  return images;
+}
+
+/**
  * Builds the run-path body. The knobs and the flux-1 subset rule live in
  * `core/images.ts`, shared with the pi-ai module so the two cannot drift; the
  * AI SDK call options and the `files`/`mask` byte handling are mapped here.
@@ -124,7 +163,17 @@ export function buildImageRequest(
   for (const warning of built.warnings) {
     warnings.push(unsupported(warning.feature, warning.message));
   }
-  if (built.minimal) return { input, warnings };
+  if (built.body === "prompt-and-steps") return { input, warnings };
+  if (built.body === "multipart") {
+    return {
+      input,
+      multipart: imageMultipartFields(
+        input,
+        multipartImages(options.files, warnings)
+      ),
+      warnings
+    };
+  }
 
   const source = options.files?.[0];
   if (source !== undefined) {

@@ -411,7 +411,7 @@ export class SandboxAgent extends AIChatAgent<Env, SandboxState> {
     const agent = this;
 
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.7-code", {
+      model: workersai("@cf/deepseek-ai/deepseek-v4.1-flash-1017", {
         sessionAffinity: this.sessionAffinity
       }),
       instructions: `You are a helpful assistant that can write and execute JavaScript code to work with a customer database.

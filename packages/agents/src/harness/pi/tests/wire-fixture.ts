@@ -34,7 +34,7 @@ function chunk(delta: Record<string, unknown>, finish?: string): string {
   return JSON.stringify({
     choices: [{ delta, finish_reason: finish ?? null, index: 0 }],
     id: "chatcmpl-wire",
-    model: "@cf/zai-org/glm-4.7-flash",
+    model: "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
     object: "chat.completion.chunk",
     usage: null
   });
@@ -121,7 +121,7 @@ export class PiWireTestObject extends DurableObject<Cloudflare.Env> {
         context
       );
     },
-    defaults: { model: this.#ai("@cf/zai-org/glm-4.7-flash") }
+    defaults: { model: this.#ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017") }
   });
   readonly lifecycle = Lifecycle.install(this).use(this.harness);
 

@@ -39,7 +39,7 @@ import "./styles.css";
 const OBJECT_KEY = "opencode-harness-object";
 const SESSION_KEY = "opencode-harness-session";
 const ROOT_SESSION = "ses_root";
-const MODEL = "@cf/moonshotai/kimi-k2.7-code";
+const MODEL = "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
 
 const SUGGESTIONS = [
   {

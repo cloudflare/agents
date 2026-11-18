@@ -29,9 +29,35 @@ import { requireWorkersAIId } from "../errors";
 const MAX_EMBEDDINGS_PER_CALL = 3000;
 
 /**
+ * Embedding ids that take the OpenAI shape: `{ input: string[] }`, answered
+ * with `{ data: [{ embedding }] }`. They refuse `{ text }` (`400 required
+ * properties at '/' are 'input'`, verified live).
+ *
+ * @see https://developers.cloudflare.com/workers-ai/models/embeddinggemma-2/
+ */
+const OPENAI_INPUT = new Set(["@cf/google/embeddinggemma-2"]);
+
+/** The run-path body for one embedding leg. */
+function embeddingInput(
+  modelId: string,
+  values: string[]
+): Record<string, unknown> {
+  return OPENAI_INPUT.has(modelId) ? { input: values } : { text: values };
+}
+
+/**
+ * One row of `data`: a bare vector, or an OpenAI `{ embedding }` object.
+ */
+function vectorOf(row: unknown): number[] {
+  const vector = array(row) ?? array(record(row)?.embedding) ?? [];
+  return vector.filter((value): value is number => typeof value === "number");
+}
+
+/**
  * An `EmbeddingModelV4` over the Workers AI text-embedding catalog. The run
  * path takes `{ text: string[] }` and answers `{ data, shape, usage }`,
- * sometimes inside the Cloudflare envelope.
+ * sometimes inside the Cloudflare envelope; the {@link OPENAI_INPUT} models
+ * take and answer the OpenAI shape instead.
  */
 export class CloudflareEmbeddingModel implements EmbeddingModelV4 {
   readonly specificationVersion = "v4" as const;
@@ -75,13 +101,13 @@ export class CloudflareEmbeddingModel implements EmbeddingModelV4 {
       this.#options,
       parseModalityCallOptions(options.providerOptions)
     );
-    const input = { text: options.values };
     const transport: Transport = this.#config.transport;
     return withFallback(
       this.modelId,
       resolved.fallback,
       transport.url,
       async (modelId) => {
+        const input = embeddingInput(modelId, options.values);
         const response = await transport.run({
           gateway: resolved.gateway,
           headers: {
@@ -113,11 +139,7 @@ export class CloudflareEmbeddingModel implements EmbeddingModelV4 {
               url: transport.url
             })
           ) ?? {};
-        const embeddings = (array(body.data) ?? []).map((row) =>
-          (array(row) ?? []).filter(
-            (value): value is number => typeof value === "number"
-          )
-        );
+        const embeddings = (array(body.data) ?? []).map(vectorOf);
         const tokens = count(record(body.usage)?.prompt_tokens);
         return {
           embeddings,
