@@ -22,6 +22,52 @@ export interface CdpAttachOptions {
   timeoutMs?: number;
 }
 
+/**
+ * A CDP event: a message the browser sent on its own, with a `method` and
+ * no `id`.
+ */
+export interface CdpEvent {
+  /** The event's name, e.g. `"Page.frameNavigated"`. */
+  method: string;
+  /** The event's parameters; `{}` when the browser sent none. */
+  params: Record<string, unknown>;
+  /**
+   * The CDP session (from `Target.attachToTarget` with `flatten: true`) the
+   * event came from. Absent for browser-level events.
+   */
+  sessionId?: string;
+}
+
+/** Handles one {@link CdpEvent}. Runs synchronously; see {@link CdpConnection.on}. */
+export type CdpEventHandler = (event: CdpEvent) => void;
+
+/** Which CDP session's events a listener hears. */
+export interface CdpEventFilter {
+  /**
+   * Omit to hear the event from every session and from the browser itself.
+   * Pass a session id to hear only that session's, or `null` to hear only
+   * browser-level events (the ones sent without a `sessionId`).
+   */
+  sessionId?: string | null;
+}
+
+/** {@link CdpConnection.waitFor}'s options. */
+export interface CdpWaitForOptions extends CdpEventFilter {
+  /** Wait for the first matching event this returns `true` for. */
+  predicate?: (event: CdpEvent) => boolean;
+  /** How long to wait. Defaults to the connection's command timeout. */
+  timeoutMs?: number;
+  /** Stop waiting when it aborts, rejecting with its reason. */
+  signal?: AbortSignal;
+}
+
+interface CdpListener {
+  handler: CdpEventHandler;
+  sessionId: string | null | undefined;
+  /** Cleared on unsubscribe, so a delivery already under way skips it. */
+  active: boolean;
+}
+
 /** Construction options for {@link CdpConnection}. */
 export interface CdpConnectionOptions {
   /** Default per-command timeout. Defaults to 10 seconds. */
@@ -70,6 +116,11 @@ export class CdpConnection {
   #socket: WebSocket;
   #nextId = 1;
   #pending = new Map<number, PendingCommand>();
+  #listeners = new Map<string, CdpListener[]>();
+  /** Rejects every pending {@link waitFor} when the connection ends. */
+  #endWaits = new Set<(error: Error) => void>();
+  /** Set once the connection has ended: closed, disconnected, or errored. */
+  #ended = false;
   #debugLog: DebugEntry[] = [];
   #defaultTimeoutMs: number;
   #dispose?: () => void;
@@ -108,11 +159,127 @@ export class CdpConnection {
     socket.addEventListener("message", (event) => this.#handleMessage(event));
     socket.addEventListener("error", () => {
       this.#rejectAll(new Error("CDP socket error"));
+      this.#end(new Error("CDP socket error"));
       this.#runDispose();
     });
     socket.addEventListener("close", () => {
       this.#rejectAll(new Error("CDP connection closed"));
+      this.#end(new Error("CDP connection closed"));
       this.#runDispose();
+    });
+  }
+
+  /**
+   * Listen for a CDP event, e.g. `"Page.frameNavigated"`, and return a
+   * function that stops listening. The browser sends an event only once its
+   * domain is enabled in that session (`Page.enable`, `Network.enable`).
+   *
+   * Without `filter.sessionId` the handler hears the event from every CDP
+   * session on this connection and from the browser itself. Pass a session
+   * id to hear one session's, or `sessionId: null` for browser-level events
+   * only. Browser Run, for example, sends `Cloudflare.handoffComplete` once
+   * at browser level and once more in each attached session, so a listener
+   * that wants it once passes `sessionId: null`.
+   *
+   * Handlers run synchronously, in the order they were added, as each event
+   * arrives: an event is delivered before the next message is handled, so
+   * code awaiting a command's reply has already seen the events sent before
+   * it. A handler that throws is logged and doesn't stop the others. One
+   * removed during a delivery isn't called for that event, and one added
+   * during it is first called for the next.
+   *
+   * @experimental The API surface may change before stabilizing.
+   */
+  on(
+    method: string,
+    handler: CdpEventHandler,
+    filter: CdpEventFilter = {}
+  ): () => void {
+    const listener: CdpListener = {
+      handler,
+      sessionId: filter.sessionId,
+      active: true
+    };
+    const listeners = this.#listeners.get(method) ?? [];
+    listeners.push(listener);
+    this.#listeners.set(method, listeners);
+    return () => {
+      if (!listener.active) return;
+      listener.active = false;
+      const current = this.#listeners.get(method);
+      if (!current) return;
+      const remaining = current.filter((entry) => entry !== listener);
+      if (remaining.length > 0) this.#listeners.set(method, remaining);
+      else this.#listeners.delete(method);
+    };
+  }
+
+  /**
+   * Resolve with the next `method` event that matches `options`, heard as
+   * {@link on} hears it. It starts listening when called, so call it before
+   * sending the command that causes the event, and await it after:
+   *
+   * ```ts
+   * const loaded = cdp.waitFor("Page.loadEventFired", { sessionId });
+   * await cdp.send("Page.navigate", { url }, { sessionId });
+   * await loaded;
+   * ```
+   *
+   * Rejects when `timeoutMs` passes (by default the connection's command
+   * timeout), when `signal` aborts, with its reason, when the connection
+   * ends, and when `predicate` throws.
+   *
+   * @experimental The API surface may change before stabilizing.
+   */
+  waitFor(method: string, options: CdpWaitForOptions = {}): Promise<CdpEvent> {
+    const { predicate, signal } = options;
+    const timeoutMs = options.timeoutMs ?? this.#defaultTimeoutMs;
+    if (this.#ended) {
+      return Promise.reject(
+        new Error(`CDP connection closed while waiting for ${method}`)
+      );
+    }
+    if (signal?.aborted) return Promise.reject(signal.reason);
+    return new Promise<CdpEvent>((resolve, reject) => {
+      const settle = (outcome: () => void) => {
+        unsubscribe();
+        clearTimeout(timeoutId);
+        signal?.removeEventListener("abort", onAbort);
+        this.#endWaits.delete(onEnd);
+        outcome();
+      };
+      const onAbort = () => settle(() => reject(signal?.reason));
+      const onEnd = (error: Error) =>
+        settle(() =>
+          reject(new Error(`${error.message} while waiting for ${method}`))
+        );
+      const timeoutId = setTimeout(
+        () =>
+          settle(() =>
+            reject(
+              new Error(
+                `Timed out after ${timeoutMs}ms waiting for CDP event ${method}`
+              )
+            )
+          ),
+        timeoutMs
+      );
+      const unsubscribe = this.on(
+        method,
+        (event) => {
+          let matched: boolean;
+          try {
+            matched = predicate ? predicate(event) : true;
+          } catch (error) {
+            settle(() => reject(error));
+            return;
+          }
+          if (matched) settle(() => resolve(event));
+        },
+        { sessionId: options.sessionId }
+      );
+      signal?.addEventListener("abort", onAbort, { once: true });
+      this.#endWaits.add(onEnd);
     });
   }
 
@@ -219,6 +386,7 @@ export class CdpConnection {
 
   disconnect(): void {
     this.#rejectAll(new Error("CDP session disconnected"));
+    this.#end(new Error("CDP session disconnected"));
     try {
       this.#socket.close(1000, "Done");
     } catch {
@@ -239,6 +407,35 @@ export class CdpConnection {
     if (this.#disposed) return;
     this.#disposed = true;
     this.#dispose?.();
+  }
+
+  /** Stop delivering events, and reject every pending {@link waitFor}. */
+  #end(error: Error): void {
+    if (this.#ended) return;
+    this.#ended = true;
+    this.#listeners.clear();
+    for (const endWait of [...this.#endWaits]) endWait(error);
+  }
+
+  /** Run the event's listeners, in order, each isolated from the others. */
+  #deliver(event: CdpEvent): void {
+    const listeners = this.#listeners.get(event.method);
+    if (!listeners) return;
+    for (const listener of [...listeners]) {
+      if (!listener.active) continue;
+      const wanted = listener.sessionId;
+      if (wanted !== undefined && wanted !== (event.sessionId ?? null)) {
+        continue;
+      }
+      try {
+        listener.handler(event);
+      } catch (error) {
+        console.error(
+          `[agents/browser] A CDP event handler for ${event.method} threw`,
+          error
+        );
+      }
+    }
   }
 
   #rejectAll(error: Error): void {
@@ -269,6 +466,15 @@ export class CdpConnection {
     });
 
     if (typeof payload.id !== "number") {
+      if (typeof payload.method === "string" && !this.#ended) {
+        this.#deliver({
+          method: payload.method,
+          params: isRecord(payload.params) ? payload.params : {},
+          ...(typeof payload.sessionId === "string"
+            ? { sessionId: payload.sessionId }
+            : {})
+        });
+      }
       return;
     }
 
@@ -305,6 +511,10 @@ export class CdpConnection {
       this.#debugLog.splice(0, this.#debugLog.length - MAX_DEBUG_ENTRIES);
     }
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 const LOCALHOST_HOSTS = new Set([

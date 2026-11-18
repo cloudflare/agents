@@ -343,6 +343,38 @@ const spec = normalizeCdpSpec({
 });
 ```
 
+### Listening for CDP events (experimental)
+
+A `CdpConnection`, from any of these or from `browser.connect()`, also delivers CDP events. `on()` returns a function that stops listening, and `waitFor()` resolves with the next matching event:
+
+```ts
+const { cdp } = await this.browser.connect();
+const { targetId } = (await cdp.send("Target.createTarget", {
+  url: "about:blank"
+})) as { targetId: string };
+const sessionId = await cdp.attachToTarget(targetId);
+await cdp.send("Page.enable", {}, { sessionId });
+
+const stop = cdp.on(
+  "Page.frameNavigated",
+  ({ params }) => console.log("navigated", params.frame),
+  { sessionId }
+);
+
+// Start waiting before sending the command that causes the event.
+const loaded = cdp.waitFor("Page.loadEventFired", {
+  sessionId,
+  timeoutMs: 30_000
+});
+await cdp.send("Page.navigate", { url: "https://example.com" }, { sessionId });
+await loaded;
+stop();
+```
+
+Without `sessionId`, a listener hears the event from every CDP session on the connection and from the browser itself. `sessionId: null` hears browser-level events only. Browser Run sends `Cloudflare.handoffComplete` once at browser level and once more in each attached session, so listen for it with `sessionId: null` to hear it once.
+
+Handlers run synchronously as each event arrives, so code awaiting a command's reply has already seen the events sent before it. A handler that throws is logged and doesn't stop the others. `waitFor()` rejects on timeout (by default the connection's command timeout), when its `signal` aborts, and when the connection closes.
+
 ## Local development
 
 Recent Wrangler releases support Browser Run in local development. `npx wrangler dev` provisions the browser automatically, so the same `browser: env.BROWSER` setup works locally and when deployed.

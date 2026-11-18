@@ -4,7 +4,11 @@ export {
   connectUrl,
   type CdpSendOptions,
   type CdpAttachOptions,
-  type CdpConnectionOptions
+  type CdpConnectionOptions,
+  type CdpEvent,
+  type CdpEventFilter,
+  type CdpEventHandler,
+  type CdpWaitForOptions
 } from "./cdp-connection";
 
 export {
