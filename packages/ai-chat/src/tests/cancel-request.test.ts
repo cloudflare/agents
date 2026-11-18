@@ -86,6 +86,35 @@ const userMessage: ChatMessage = {
 };
 
 describe("Cancel request", () => {
+  it("ends a cancelled request aborted when onChatMessage fails with the abort's reason", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectSlowStream(room);
+    await new Promise((r) => setTimeout(r, 50));
+    const requestId = "req-cancel-before-response";
+    const collecting = collectMessages(ws);
+
+    // `onChatMessage` waits on the turn's signal and rejects with its
+    // reason, the way `await generateText({ abortSignal })` does.
+    sendChatRequest(ws, requestId, [userMessage], {
+      failOnAbort: "before-response"
+    });
+    await new Promise((r) => setTimeout(r, 200));
+    sendCancel(ws, requestId);
+
+    const { messages, timedOut } = await collecting;
+    expect(timedOut).toBe(false);
+    const frames = messages.filter(isUseChatResponseMessage);
+    expect(frames.filter((frame) => frame.error)).toEqual([]);
+    expect(frames.at(-1)).toMatchObject({
+      id: requestId,
+      done: true,
+      outcome: "aborted"
+    });
+    const agent = await getAgentByName(env.SlowStreamAgent, room);
+    expect(await agent.getOnErrorCallsForTest()).toEqual([]);
+    ws.close(1000);
+  });
+
   it("cancel during plaintext streaming sends done and stops chunks", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);

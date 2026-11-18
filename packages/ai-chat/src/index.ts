@@ -88,6 +88,7 @@ import {
   ChatRecoveryEngine,
   runChatRecoveryExhaustion,
   ChatStreamStalledError,
+  isTurnStopped,
   iterateWithStallWatchdog,
   CHAT_RECOVERY_PROGRESS_KEY,
   recordChatTerminal,
@@ -828,6 +829,7 @@ export class AIChatAgent<
     fiberName: (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME,
     snapshotKey: "__cfAIChatFiberSnapshot",
     generateId: () => nanoid(),
+    turnSignal: (requestId) => this._abortRegistry.getExistingSignal(requestId),
     isFacet: () => this.parentPath.length > 0,
     runLegacyFiber: (name, fn, options) =>
       this._runFiberWithStashWrapper(name, fn, options),
@@ -1501,7 +1503,7 @@ export class AIChatAgent<
                       );
                     }
                   );
-                });
+                }, signal);
               }
             });
           } finally {
@@ -2472,10 +2474,18 @@ export class AIChatAgent<
     });
   }
 
-  private async _tryCatchChat<T>(fn: () => T | Promise<T>) {
+  /**
+   * @param signal - The signal of the turn `fn` runs, if it runs one. What
+   *   a stopped turn throws is not an error: `onError` is not called for it.
+   */
+  private async _tryCatchChat<T>(
+    fn: () => T | Promise<T>,
+    signal?: AbortSignal
+  ) {
     try {
       return await fn();
     } catch (e) {
+      if (isTurnStopped(signal)) throw e;
       // `onError` observes the error and may replace it by throwing. If it
       // returns, the original error continues to the caller.
       await this.onError(e);
@@ -3290,7 +3300,7 @@ export class AIChatAgent<
             { clientTools, body }
           )
       );
-    });
+    }, abortSignal);
 
     return outcome;
   }
@@ -6326,7 +6336,7 @@ export class AIChatAgent<
           // rather than leaving a second seam here.
           this._onStreamingTurnFinalized();
         }
-      })
+      }, abortSignal)
     );
   }
 

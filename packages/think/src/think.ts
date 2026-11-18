@@ -241,6 +241,7 @@ import {
   retryAfterSeconds,
   isDurableObjectResetError,
   ChatStreamStalledError,
+  isTurnStopped,
   iterateWithStallWatchdog,
   CHAT_RECOVERY_PROGRESS_KEY,
   recordChatTerminal,
@@ -5738,6 +5739,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     fiberName: (this.constructor as typeof Think).CHAT_FIBER_NAME,
     snapshotKey: "__cfThinkChatFiberSnapshot",
     generateId: () => crypto.randomUUID(),
+    turnSignal: (requestId) => this._turns.aborts.getExistingSignal(requestId),
     isFacet: () => this.parentPath.length > 0,
     runLegacyFiber: (name, fn, options) =>
       this._runFiberWithStashWrapper(name, fn, options),
@@ -12449,8 +12451,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           );
         } catch (error) {
           // An RPC caller hears of a turn that failed before its reply
-          // through its callback, not as a rejected call.
-          if (!sink) throw error;
+          // through its callback, not as a rejected call. A stopped turn
+          // did not fail: the turn core ends it `aborted`.
+          if (!sink || isTurnStopped(abortSignal)) throw error;
           const wrapped = this.onChatError(error, {
             stage: "turn",
             messagesPersisted: true
@@ -13569,7 +13572,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             this._turns.runtimeAbort(() =>
               this.abortRequest(
                 requestId,
-                new Error("chat stream stalled: inactivity watchdog fired")
+                // A `ChatStreamStalledError` reason marks the abort as the
+                // runtime's, not a stop (`isTurnStopped`).
+                new ChatStreamStalledError(
+                  "chat stream stalled: inactivity watchdog fired"
+                )
               )
             );
           }
@@ -13699,6 +13706,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           overflowRetry ||
           streamError !== undefined
         );
+      } catch (error) {
+        // What the reply throws after the turn was stopped is the stop (the
+        // provider call fails with the abort's reason), not an error.
+        if (!isTurnStopped(abortSignal)) throw error;
+        aborted = true;
       } finally {
         this._insideInferenceLoop = false;
         // Only early exits leave an abandoned tee branch; a naturally
@@ -14177,7 +14189,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             this._turns.runtimeAbort(() =>
               this.abortRequest(
                 requestId,
-                new Error("chat stream stalled: inactivity watchdog fired")
+                // A `ChatStreamStalledError` reason marks the abort as the
+                // runtime's, not a stop (`isTurnStopped`).
+                new ChatStreamStalledError(
+                  "chat stream stalled: inactivity watchdog fired"
+                )
               )
             );
           }
@@ -14341,6 +14357,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           overflowRetry ||
           streamError !== undefined
         );
+      } catch (error) {
+        // What the reply throws after the turn was stopped is the stop (the
+        // provider call fails with the abort's reason), not an error.
+        if (!isTurnStopped(abortSignal)) throw error;
+        streamAborted = true;
       } finally {
         this._insideInferenceLoop = false;
         // Only early exits leave an abandoned tee branch; a naturally

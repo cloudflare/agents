@@ -77,6 +77,7 @@ import {
   type TurnFailureHost
 } from "./turn-failure";
 import { TurnQueue } from "./turn-queue";
+import { isTurnStopped } from "./turn-stop";
 
 /** The transcript shape the core reads: ids for targets, parts for batches. */
 export type ChatTurnMessage = {
@@ -202,8 +203,9 @@ export interface ClientChatRequest<TPrepared> {
    */
   onSkipped(): void;
   /**
-   * The request was cancelled before its turn started. Send the `aborted`
-   * terminal frame. The model is never called.
+   * The request was cancelled before its turn started, or its turn threw
+   * after it was stopped and before it replied ({@link isTurnStopped}).
+   * Send the `aborted` terminal frame.
    */
   onCancelledBeforeStart(): void;
   /**
@@ -408,7 +410,14 @@ export class ChatTurns<
             request.onCancelledBeforeStart();
             return;
           }
-          await request.run(prepared, signal);
+          try {
+            await request.run(prepared, signal);
+          } catch (error) {
+            // What a stopped turn throws because of the stop is not a
+            // failure: the request ends `aborted`.
+            if (!isTurnStopped(signal)) throw error;
+            request.onCancelledBeforeStart();
+          }
         },
         generation,
         releasePendingEnqueue

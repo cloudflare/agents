@@ -567,6 +567,33 @@ describe("ChatTurns", () => {
       expect(turns.submits.pendingEnqueueCount).toBe(0);
     });
 
+    it("ends a request aborted when its run throws after a stop, without reporting an error", async () => {
+      const log: Log = [];
+      await request("r1", log, {
+        run: async (_prepared, signal) => {
+          turns.cancel("r1", "stop reason");
+          throw signal.reason;
+        },
+        onError: (error) => void log.push(`r1:error:${String(error)}`)
+      });
+      expect(log).toEqual(["r1:accepted", "r1:persist", "r1:aborted"]);
+    });
+
+    it("reports what a run throws when nothing stopped the request", async () => {
+      const log: Log = [];
+      await request("r1", log, {
+        run: async () => {
+          throw new Error("boom");
+        },
+        onError: (error) => void log.push(`r1:error:${String(error)}`)
+      });
+      expect(log).toEqual([
+        "r1:accepted",
+        "r1:persist",
+        "r1:error:Error: boom"
+      ]);
+    });
+
     it("rejects a request id the registry cannot key a controller by", async () => {
       const log: Log = [];
       await expect(

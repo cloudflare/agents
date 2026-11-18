@@ -5972,7 +5972,9 @@ export class Agent<
     });
 
     const child = await this.subAgent(cls as SubAgentClass<Agent>, runId);
-    const adapter = this._asAgentToolChildAdapter<Input, Output>(child);
+    // Replaced with a fresh stub when the child's isolate goes away under
+    // the tail.
+    let adapter = this._asAgentToolChildAdapter<Input, Output>(child);
     const childStart = await adapter.startAgentToolRun(options.input, {
       runId,
       ...(eventDelivery === "terminal" ? { eventDelivery } : {})
@@ -6020,7 +6022,9 @@ export class Agent<
         return result;
       } else {
         parentAbortListener = () => {
-          void adapter.cancelAgentToolRun(runId, options.signal?.reason);
+          void adapter
+            .cancelAgentToolRun(runId, options.signal?.reason)
+            .catch(() => {});
         };
         options.signal.addEventListener("abort", parentAbortListener, {
           once: true
@@ -6029,26 +6033,40 @@ export class Agent<
     }
 
     try {
-      if (adapter.tailAgentToolRun) {
-        const stream = await adapter.tailAgentToolRun(runId, {
-          afterSequence: -1
-        });
-        sequence = (
-          await this._forwardAgentToolStream(
-            stream,
+      // The tail is an RPC stream from the child. It breaks when the child's
+      // isolate goes away under it (an eviction, a reset), which says
+      // nothing about the run: the child's chat recovery may be finishing
+      // its turn. The run's row decides, below.
+      let tailBroke = false;
+      try {
+        if (adapter.tailAgentToolRun) {
+          const stream = await adapter.tailAgentToolRun(runId, {
+            afterSequence: -1
+          });
+          sequence = (
+            await this._forwardAgentToolStream(
+              stream,
+              options.parentToolCallId,
+              runId,
+              sequence,
+              options.signal
+            )
+          ).next;
+        } else {
+          const chunks = await adapter.getAgentToolChunks(runId);
+          sequence = this._broadcastAgentToolChunks(
             options.parentToolCallId,
             runId,
-            sequence,
-            options.signal
-          )
-        ).next;
-      } else {
-        const chunks = await adapter.getAgentToolChunks(runId);
-        sequence = this._broadcastAgentToolChunks(
-          options.parentToolCallId,
-          runId,
-          chunks,
-          sequence
+            chunks,
+            sequence
+          );
+        }
+      } catch (error) {
+        if (options.signal?.aborted) throw error;
+        tailBroke = true;
+        // The old stub may still name the instance that went away.
+        adapter = this._asAgentToolChildAdapter<Input, Output>(
+          await this.subAgent(cls as SubAgentClass<Agent>, runId)
         );
       }
 
@@ -6068,8 +6086,55 @@ export class Agent<
         return result;
       }
 
-      const inspection =
-        (await adapter.inspectAgentToolRun(runId)) ?? childStart;
+      const inspected = await adapter.inspectAgentToolRun(runId);
+      if (
+        tailBroke &&
+        (inspected?.status === "running" || inspected?.status === "starting")
+      ) {
+        // The child still has the run open: it is recovering the turn. Wait
+        // for it the way a recovered parent does, within the same budgets,
+        // and hand back the run's own terminal status.
+        const reattach = await this._reattachAgentToolRunToTerminal<Output>(
+          adapter,
+          {
+            run_id: runId,
+            agent_type: agentType,
+            parent_tool_call_id: options.parentToolCallId ?? null
+          },
+          sequence,
+          this._resolvedOptions.agentToolReattachNoProgressTimeoutMs,
+          this._resolvedOptions.agentToolReattachMaxWindowMs
+        );
+        if (reattach.result) {
+          await this._finishAgentToolRun(runInfo, reattach.result, {
+            sequence: reattach.sequence,
+            completedAt: reattach.completedAt
+          });
+          return reattach.result;
+        }
+        // Budget spent with the run still open: the parent gives up, and
+        // says so. `interrupted` is not the run's outcome, and a later
+        // `runAgentTool` with the same run id re-attaches.
+        const childTornDown = await this._teardownGivenUpAgentToolChild(
+          adapter,
+          runId,
+          reattach.reason
+        );
+        const result: RunAgentToolResult<Output> = {
+          runId,
+          agentType,
+          status: "interrupted",
+          error: this._interruptedMessageForReason(reattach.reason),
+          ...(reattach.reason !== undefined ? { reason: reattach.reason } : {}),
+          childStillRunning: !childTornDown
+        };
+        await this._finishAgentToolRun(runInfo, result, {
+          sequence: reattach.sequence
+        });
+        return result;
+      }
+
+      const inspection = inspected ?? childStart;
       const result = this._terminalResultFromInspection<Output>(
         agentType,
         inspection

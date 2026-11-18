@@ -369,6 +369,28 @@ describe("Think agent tools", () => {
     });
   });
 
+  it("waits for a run whose child isolate reset, and returns the status the child's recovery reached", async () => {
+    const parent = await getAgentByName(
+      env.ThinkAgentToolParent,
+      crypto.randomUUID()
+    );
+    const outcome = await (
+      parent as unknown as {
+        runThinkChildThroughResetForTest(): Promise<{
+          result: { status: string; error?: string };
+          parentRow: string | null;
+          child: { status: string; error?: string } | null;
+        }>;
+      }
+    ).runThinkChildThroughResetForTest();
+    // The reset broke the parent's tail. The child's chat recovery finished
+    // the turn, and that is what the parent's model is told.
+    expect(outcome.child?.status).toBe("completed");
+    expect(outcome.result.status).toBe("completed");
+    expect(outcome.result.error).toBeUndefined();
+    expect(outcome.parentRow).toBe("completed");
+  }, 30_000);
+
   it("preserves explicit agent-tool cancellation as aborted", async () => {
     const agent = await freshAgent();
     const runId = crypto.randomUUID();

@@ -342,6 +342,51 @@ function getParent(name = crypto.randomUUID()) {
 }
 
 describe("AIChatAgent as an agent-tool child", () => {
+  it("gives up as interrupted, not error, when the run stays open past the parent's no-progress budget", async () => {
+    const parent = await getAgentByName(
+      env.AIChatAgentToolParent,
+      crypto.randomUUID()
+    );
+    const outcome = await (
+      parent as unknown as {
+        runChildThatNeverRecoversForTest(): Promise<{
+          status: string;
+          reason?: string;
+          childStillRunning?: boolean;
+          parentRow: string | null;
+        }>;
+      }
+    ).runChildThatNeverRecoversForTest();
+    expect(outcome).toEqual({
+      status: "interrupted",
+      reason: "no-progress",
+      childStillRunning: true,
+      parentRow: "interrupted"
+    });
+  });
+
+  it("waits for a run whose child isolate reset, and returns the status the child's recovery reached", async () => {
+    const parent = await getAgentByName(
+      env.AIChatAgentToolParent,
+      crypto.randomUUID()
+    );
+    const outcome = await (
+      parent as unknown as {
+        runChildThroughResetForTest(): Promise<{
+          result: { status: string; error?: string };
+          parentRow: string | null;
+          child: { status: string; error?: string } | null;
+        }>;
+      }
+    ).runChildThroughResetForTest();
+    // The reset broke the parent's tail. The child's chat recovery finished
+    // the turn, and that is what the parent's model is told.
+    expect(outcome.child?.status).toBe("completed");
+    expect(outcome.result.status).toBe("completed");
+    expect(outcome.result.error).toBeUndefined();
+    expect(outcome.parentRow).toBe("completed");
+  }, 30_000);
+
   it("seals the executing facet's recovery incident when the root alarm breaker seals", async () => {
     const parentName = crypto.randomUUID();
     const parent = await getParent(parentName);

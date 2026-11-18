@@ -582,6 +582,55 @@ function createDelayedMultiChunkMockModel(
   } as LanguageModel;
 }
 
+/**
+ * A model that behaves like a provider behind `fetch`: when the turn's
+ * signal aborts, the call fails with the signal's reason, whatever it is.
+ * `"connect"` is still waiting for the response when that happens;
+ * `"stream"` has sent one text chunk and waits for the next.
+ */
+function createAbortAwareMockModel(
+  phase: "connect" | "stream",
+  started: () => void
+): LanguageModel {
+  const whenAborted = (signal: AbortSignal | undefined) =>
+    new Promise<never>((_, reject) => {
+      if (!signal) return;
+      if (signal.aborted) return reject(signal.reason);
+      signal.addEventListener("abort", () => reject(signal.reason), {
+        once: true
+      });
+    });
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-abort-aware",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented in mock");
+    },
+    async doStream(options: { abortSignal?: AbortSignal }) {
+      if (phase === "connect") {
+        started();
+        return whenAborted(options.abortSignal);
+      }
+      const stream = new ReadableStream({
+        async start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          controller.enqueue({ type: "text-start", id: "t-1" });
+          controller.enqueue({ type: "text-delta", id: "t-1", delta: "Hi" });
+          started();
+          try {
+            await whenAborted(options.abortSignal);
+          } catch (reason) {
+            controller.error(reason);
+          }
+        }
+      });
+      return { stream };
+    }
+  } as LanguageModel;
+}
+
 /** Sentinel error class to distinguish simulated errors in tests */
 class SimulatedChatError extends Error {
   constructor(message: string) {
@@ -1431,9 +1480,32 @@ export class ThinkTestAgent extends Think {
     return this._agentToolOutputForTest.get(runId);
   }
 
+  private _agentErrorLog: string[] = [];
+
+  override onError(connection: Connection, error: unknown): void;
+  override onError(error: unknown): void;
+  override onError(connectionOrError: Connection | unknown, error?: unknown) {
+    const thrown = error === undefined ? connectionOrError : error;
+    this._agentErrorLog.push(
+      thrown instanceof Error ? thrown.message : String(thrown)
+    );
+  }
+
+  /** Set to make `beforeTurn` wait for the turn's signal and fail with it. */
+  private _beforeTurnAbortWait: (() => void) | null = null;
+
   override beforeTurn(
     ctx: TurnContext
   ): TurnConfig | void | Promise<TurnConfig | void> {
+    if (this._beforeTurnAbortWait) {
+      const signal = ctx.abortSignal;
+      this._beforeTurnAbortWait();
+      return new Promise<never>((_, reject) => {
+        signal?.addEventListener("abort", () => reject(signal.reason), {
+          once: true
+        });
+      });
+    }
     this._beforeTurnLog.push({
       system: ctx.system,
       toolNames: Object.keys(ctx.tools),
@@ -2448,6 +2520,168 @@ export class ThinkTestAgent extends Think {
       done: callback.doneCalled,
       error: callback.errorMessage ?? null
     };
+  }
+
+  /** Stream the next turns slowly, one chunk every `delayMs`. */
+  async useSlowModelForTest(chunks: string[], delayMs: number): Promise<void> {
+    this._turnConfigOverride = {
+      model: createDelayedMultiChunkMockModel(chunks, delayMs)
+    };
+  }
+
+  /** Reset this agent's isolate, as an eviction does. */
+  async resetIsolateForTest(): Promise<void> {
+    this.ctx.abort("test: forced reset");
+  }
+
+  /**
+   * A turn is stopped through its own signal while the model call is in
+   * flight, and the provider fails the call with the signal's reason.
+   * Returns everything that could tell an app the turn failed.
+   */
+  async stopWithReasonForTest(options: {
+    entry:
+      | "chat"
+      | "saveMessages"
+      | "continueLastTurn"
+      | "abortRequest"
+      | "agentTool";
+    phase: "hook" | "connect" | "stream";
+    reason: "none" | "string" | "error";
+  }): Promise<{
+    status: string | null;
+    done: boolean;
+    error: string | null;
+    responses: string[];
+    chatErrors: string[];
+    agentErrors: string[];
+    errorFrames: number;
+    failedEvents: number;
+    terminalOutcomes: string[];
+    /** The agent-tool run's row, for `entry: "agentTool"`. */
+    run: { status: string | null; error: string | null } | null;
+  }> {
+    if (options.entry === "continueLastTurn") {
+      await this.testChat("first turn");
+    }
+    this._responseLog = [];
+    this._chatErrorLog = [];
+    this._agentErrorLog = [];
+    let markStarted = () => {};
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    if (options.phase === "hook") {
+      // App code that passes the turn's signal on from `beforeTurn`.
+      this._beforeTurnAbortWait = () => markStarted();
+    } else {
+      this._turnConfigOverride = {
+        model: createAbortAwareMockModel(options.phase, () => markStarted())
+      };
+    }
+    let errorFrames = 0;
+    const terminalOutcomes: string[] = [];
+    const self = this as unknown as {
+      _broadcastChat(frame: Record<string, unknown>): void;
+      _emit(type: string, payload: unknown): void;
+    };
+    const broadcastChat = self._broadcastChat;
+    self._broadcastChat = (frame) => {
+      if (frame.error === true) errorFrames++;
+      if (frame.done === true && typeof frame.outcome === "string") {
+        terminalOutcomes.push(frame.outcome);
+      }
+      return broadcastChat.call(this, frame);
+    };
+    let run: { status: string | null; error: string | null } | null = null;
+    let failedEvents = 0;
+    const emit = self._emit;
+    self._emit = (type, payload) => {
+      if (type === "chat:request:failed") failedEvents++;
+      return emit.call(this, type, payload);
+    };
+    const caller = new AbortController();
+    const stop = (requestId: string | undefined) => {
+      const reason =
+        options.reason === "string"
+          ? "caller-stop"
+          : options.reason === "error"
+            ? new Error("caller-stop")
+            : undefined;
+      if (options.entry === "abortRequest") {
+        if (!requestId) throw new Error("no request id to abort");
+        this.abortRequest(requestId, reason);
+      } else {
+        caller.abort(reason);
+      }
+    };
+    const callback = new TestCollectingCallback();
+    try {
+      let status: string | null = null;
+      if (options.entry === "chat" || options.entry === "abortRequest") {
+        const turn = this.chat("stop me", callback, { signal: caller.signal });
+        await started;
+        stop(callback.requestId);
+        await turn;
+      } else if (options.entry === "agentTool") {
+        const runId = crypto.randomUUID();
+        await this.startAgentToolRun("stop me", { runId });
+        await started;
+        await this.cancelAgentToolRun(
+          runId,
+          options.reason === "none"
+            ? undefined
+            : options.reason === "string"
+              ? "caller-stop"
+              : new Error("caller-stop")
+        );
+        const controllers = this["_agentToolRuns"].controllers;
+        const deadline = Date.now() + 5000;
+        while (controllers.size > 0 && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        const inspection = await this.inspectAgentToolRun(runId);
+        run = {
+          status: inspection?.status ?? null,
+          error: inspection?.error ?? null
+        };
+      } else {
+        const turn =
+          options.entry === "saveMessages"
+            ? this.saveMessages(
+                [
+                  {
+                    id: crypto.randomUUID(),
+                    role: "user",
+                    parts: [{ type: "text", text: "stop me" }]
+                  }
+                ],
+                { signal: caller.signal }
+              )
+            : this.continueLastTurn(undefined, { signal: caller.signal });
+        await started;
+        stop(undefined);
+        status = (await turn).status;
+      }
+      await this._waitForTurnQueueIdleForTest();
+      return {
+        status,
+        done: callback.doneCalled,
+        error: callback.errorMessage ?? null,
+        responses: this._responseLog.map((response) => response.status),
+        chatErrors: [...this._chatErrorLog],
+        agentErrors: [...this._agentErrorLog],
+        errorFrames,
+        failedEvents,
+        terminalOutcomes,
+        run
+      };
+    } finally {
+      self._broadcastChat = broadcastChat;
+      self._emit = emit;
+      this._turnConfigOverride = null;
+      this._beforeTurnAbortWait = null;
+    }
   }
 
   /** The chat is cleared while an RPC `chat()` streams its reply. */
@@ -5008,6 +5242,58 @@ export class ThinkAgentToolParent extends Agent {
       input,
       inputPreview: input
     });
+  }
+
+  /**
+   * The child's isolate resets while the parent waits on its run. Returns
+   * what the parent's `runAgentTool` handed back and what the child's row
+   * says once its chat recovery has finished the turn.
+   */
+  async runThinkChildThroughResetForTest(): Promise<{
+    result: { status: string; error?: string; summary?: string };
+    parentRow: string | null;
+    child: { status: string; error?: string } | null;
+  }> {
+    const runId = crypto.randomUUID();
+    const child = await this.subAgent(ThinkTestAgent, runId);
+    await child.useSlowModelForTest(["one ", "two ", "three ", "four "], 100);
+    const running = this.runAgentTool(ThinkTestAgent, {
+      runId,
+      parentToolCallId: "think-tool-call",
+      input: "work through a reset",
+      inputPreview: "work through a reset"
+    });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    await child.resetIsolateForTest().catch(() => {});
+    const result = await running;
+    const deadline = Date.now() + 10_000;
+    let inspection: { status: string; error?: string } | null = null;
+    while (Date.now() < deadline) {
+      const fresh = await this.subAgent(ThinkTestAgent, runId);
+      inspection = await fresh.inspectAgentToolRun(runId);
+      if (
+        inspection &&
+        inspection.status !== "running" &&
+        inspection.status !== "starting"
+      ) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    const row = this.sql<{ status: string }>`
+      SELECT status FROM cf_agent_tool_runs WHERE run_id = ${runId}
+    `[0];
+    return {
+      result: {
+        status: result.status,
+        error: result.error,
+        summary: result.summary
+      },
+      parentRow: row?.status ?? null,
+      child: inspection
+        ? { status: inspection.status, error: inspection.error }
+        : null
+    };
   }
 
   /**

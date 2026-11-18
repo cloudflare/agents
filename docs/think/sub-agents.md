@@ -164,7 +164,7 @@ await child.chat("Long analysis task", callback, {
 
 When aborted, the partial assistant message is still persisted.
 
-A turn you cancel gets no `onDone` and no `onError`. The promise `chat()` returns resolves, and that is the signal the turn is over. A turn cancelled before it started, while it waited behind another turn, stores nothing, the user message included, and never calls the model.
+A turn you cancel gets no `onDone` and no `onError`, whatever reason the abort carries: `controller.abort()`, `controller.abort("moved on")` and `controller.abort(new Error("moved on"))` all end the turn `aborted`. The promise `chat()` returns resolves, and that is the signal the turn is over. A turn cancelled before it started, while it waited behind another turn, stores nothing, the user message included, and never calls the model.
 
 If the chat is cleared while the turn waits or streams, the callback gets `onError("The chat was cleared before the turn finished.")` and nothing of the turn is stored.
 
@@ -395,6 +395,8 @@ protected abortAllRequests(): void
 
 - **`abortRequest(id, reason?)`** — abort a specific in-flight turn by id. No-op if no controller exists for that id. Equivalent to a client `chat-request-cancel`.
 - **`abortAllRequests()`** — abort every turn, running or waiting in the queue. A turn that had not started ends `aborted`: it stores nothing and does not call the model. Used by single-purpose sub-agents that don't track ids.
+
+A stop ends the turn `aborted` whatever `reason` is. The model call or a hook that waits on the turn's `abortSignal` fails with that reason, and that failure is the stop, not an error: `onChatError` is not called and clients get no error frame.
 
 For a turn that is running, both methods produce the same end state as `chat-request-cancel`: inference loop terminates, partial chunks persist, the turn's `ChatResponseResult` reports `status: "aborted"`. A turn that had not started has no `ChatResponseResult`. Prefer `options.signal` on `saveMessages` / `continueLastTurn` when driving a turn programmatically — it threads the abort intent in from turn start without requiring the caller to know the id.
 
