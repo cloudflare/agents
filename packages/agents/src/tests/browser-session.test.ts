@@ -412,7 +412,7 @@ function setup(options: { observer?: boolean } = {}) {
     provider: browserRun(fake.browser),
     name: "work",
     store,
-    ...(options.observer ? { experimental_observer: true } : {})
+    ...(options.observer === undefined ? {} : { observer: options.observer })
   });
 
   /** Run `calls` as one session and return its results and report. */
@@ -510,7 +510,8 @@ describe("BrowserSession", () => {
       newTabs: [],
       tabClosed: false,
       tabShared: false,
-      notices: []
+      notices: [],
+      observed: expect.objectContaining({ available: true })
     });
     expect(t.activeTab()).toBe("target-2");
   });
@@ -533,7 +534,8 @@ describe("BrowserSession", () => {
     await t.run([evaluateActive]);
     await t.run([evaluateActive]);
 
-    expect(t.sockets).toHaveLength(2);
+    // The model's and the observer's, per session.
+    expect(t.sockets).toHaveLength(4);
     expect(t.sockets.every((socket) => socket.closed)).toBe(true);
     expect(t.stored()?.sessionId).toBe("session-1");
   });
@@ -813,7 +815,8 @@ describe("BrowserSession", () => {
       session.send({ method: "Target.getTargets" })
     ]);
     await session.close();
-    expect(t.sockets).toHaveLength(1);
+    // One for the model, one for the observer.
+    expect(t.sockets).toHaveLength(2);
   });
 
   it("picks a tab afresh after the active tab is closed", async () => {
@@ -1277,15 +1280,30 @@ describe("BrowserSession observer", () => {
     return t.sockets[1].sent.map(({ method }) => method);
   }
 
-  it("is off by default", async () => {
+  it("is on by default", async () => {
     const t = setup();
+    const { report } = await t.run([navigateActive("https://example.com/")]);
+    expect(t.sockets).toHaveLength(2);
+    expect(report?.observed).toMatchObject({ available: true });
+  });
+
+  it("is off with observer: false", async () => {
+    const t = setup({ observer: false });
     const { report } = await t.run([navigateActive("https://example.com/")]);
     expect(t.sockets).toHaveLength(1);
     expect(report).not.toHaveProperty("observed");
   });
 
+  it("isn't opened for a raw browser.connect() unless asked for", async () => {
+    const t = setup();
+    const connected = await t.browser.connect();
+    expect(connected).not.toHaveProperty("observer");
+    expect(t.sockets).toHaveLength(1);
+    connected.cdp.disconnect();
+  });
+
   it("opens alongside the model's socket", async () => {
-    const t = setup({ observer: true });
+    const t = setup();
     // Both upgrades are under way before the model's socket is used.
     const session = t.browser.session();
     await session.send({ method: "Target.getTargets" });
@@ -1295,7 +1313,7 @@ describe("BrowserSession observer", () => {
   });
 
   it("records where the model's tab went and what each document returned", async () => {
-    const t = setup({ observer: true });
+    const t = setup();
     const instance = await t.start();
     const { target, error, report } = await observed(t, [
       navigateActive("https://example.com/")
@@ -1349,7 +1367,7 @@ describe("BrowserSession observer", () => {
   it("holds the model's first command to a tab for at most 250 ms", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
-      const t = setup({ observer: true });
+      const t = setup();
       // A slow tab: the observer's enables get no reply in time.
       t.silentMethods.set(2, ["Page.enable", "Network.enable"]);
       const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -1379,7 +1397,7 @@ describe("BrowserSession observer", () => {
   });
 
   it("starts on the scope's tab before the model's first command", async () => {
-    const t = setup({ observer: true });
+    const t = setup();
     await t.run([evaluateActive]);
     const stored = t.activeTab();
     const session = t.browser.session();
@@ -1397,7 +1415,7 @@ describe("BrowserSession observer", () => {
   });
 
   it("doesn't follow a target that isn't a page, nor call it blocked", async () => {
-    const t = setup({ observer: true });
+    const t = setup();
     const instance = await t.start();
     const worker = instance.addTab("https://example.com/sw.js");
     const tab = instance.tabs.find(({ targetId }) => targetId === worker);
@@ -1413,7 +1431,7 @@ describe("BrowserSession observer", () => {
   });
 
   it("keeps observing after the model disables Page and Network", async () => {
-    const t = setup({ observer: true });
+    const t = setup();
     const disable = (method: string): Call => [
       "send",
       { method, sessionId: "active" }
@@ -1430,7 +1448,7 @@ describe("BrowserSession observer", () => {
   });
 
   it("keeps its traffic out of the model's socket and debug log", async () => {
-    const t = setup({ observer: true });
+    const t = setup();
     const { results } = await observed(t, [
       navigateActive("https://example.com/"),
       ["getDebugLog", {}]
@@ -1444,7 +1462,7 @@ describe("BrowserSession observer", () => {
   });
 
   it("follows a raw Target.attachToTarget but not the page's popups", async () => {
-    const t = setup({ observer: true });
+    const t = setup();
     const instance = await t.start();
     const other = instance.addTab("https://other.example/");
     const { report } = await observed(t, [
@@ -1470,7 +1488,7 @@ describe("BrowserSession observer", () => {
   });
 
   it("answers dialogs at once, records them, and tells the model", async () => {
-    const t = setup({ observer: true });
+    const t = setup();
     const session = t.browser.session();
     const target = evaluatedIn(await call(session, evaluateActive));
     const instance = t.instance();
@@ -1506,7 +1524,7 @@ describe("BrowserSession observer", () => {
   });
 
   it("ignores events tagged with another connection's session id", async () => {
-    const t = setup({ observer: true });
+    const t = setup();
     const session = t.browser.session();
     await call(session, evaluateActive);
     // Browser Run tags Cloudflare.* events with every connection's ids.
@@ -1523,7 +1541,7 @@ describe("BrowserSession observer", () => {
   it("reports a tab a dialog left blocked, and how to recover it", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
-      const t = setup({ observer: true });
+      const t = setup();
       const instance = await t.start();
       const stuck = instance.addTab("https://stuck.example/");
       instance.blocked.add(stuck);
@@ -1551,7 +1569,7 @@ describe("BrowserSession observer", () => {
   });
 
   it("goes on without the observer when it can't connect, and says so", async () => {
-    const t = setup({ observer: true });
+    const t = setup();
     t.upgradeOverrides.set(
       2,
       async () => new Response("unavailable", { status: 503 })
@@ -1571,7 +1589,7 @@ describe("BrowserSession observer", () => {
   it("goes on without the observer when it doesn't connect within 2 s", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
-      const t = setup({ observer: true });
+      const t = setup();
       t.upgradeOverrides.set(2, () => new Promise<Response>(() => {}));
       const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
       const running = t.run([evaluateActive]);

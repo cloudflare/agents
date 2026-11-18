@@ -388,20 +388,20 @@ Without `sessionId`, a listener hears the event from every CDP session on the co
 
 Handlers run synchronously as each event arrives, so code awaiting a command's reply has already seen the events sent before it. A handler that throws is logged and does not stop the others, and no handler runs once the connection ends. Every handler gets the same event object, so its `params` are read-only. `waitFor()` rejects on timeout (by default the connection's command timeout), when its `signal` aborts, and when the connection closes. A wait that rejects before your code awaits it is not reported as an unhandled rejection, so a failed command beside it leaves nothing behind.
 
-### Observing the model's browsing (experimental)
+### The host observer
 
-Create the `Browser` with `experimental_observer: true` to give each browser session a host-only observer: a second CDP connection, opened alongside the model's, that follows the tabs the model works in. Model code can't see, address, or detach it. The model's first command to each tab waits for the observer to be ready there, at most about 250 ms, so the observer sees the first navigation; later commands don't wait. The observer follows page targets only.
+Each browser session has a host-only observer: a second CDP connection, opened alongside the model's, that follows the tabs the model works in. Model code can't see, address, or detach it. The model's first command to each tab waits for the observer to be ready there, at most about 250 ms, so the observer sees the first navigation; later commands don't wait. The observer follows page targets only. It costs about one round trip per session. To turn it off, create the `Browser` with `observer: false`:
 
 ```ts
 browser = new Browser({
   provider: browserRun(this.env.BROWSER),
-  experimental_observer: true
+  observer: false
 });
 ```
 
 The observer answers JavaScript dialogs as soon as they open, because an unanswered `alert()`, `confirm()`, or `prompt()` blocks every later command in its tab. It accepts `alert` and `beforeunload`, and dismisses `confirm` and `prompt`, so the host never says yes for the model. The model gets a notice for each dialog. A dialog that opened before the observer could answer it can't be answered later, and leaves its tab blocked. When a tab still doesn't respond as the session closes, the model is told to reload or navigate it.
 
-When the session closes, `BrowserSessionReport.observed` holds what the observer saw in each tab: its initial URL, main-frame navigations, each main document's status and redirects, the dialogs it answered, and connect and setup timings in milliseconds. It's for the host: `browserTool` passes only notices to the model. If the observer can't connect within 2 seconds, the session goes on without it and `observed` says why. The record is advisory, not enforcement: model code can still close a tab or block requests.
+When the session closes, `BrowserSessionReport.observed` (experimental: its shape may change) holds what the observer saw in each tab: its initial URL, main-frame navigations, each main document's status and redirects, the dialogs it answered, and connect and setup timings in milliseconds. It's for the host: `browserTool` passes only notices to the model. If the observer can't connect within 2 seconds, the session goes on without it and `observed` says why. The record is advisory, not enforcement: model code can still close a tab or block requests.
 
 ## Local development
 

@@ -140,14 +140,16 @@ export interface BrowserOptions {
   timeoutMs?: number;
   /**
    * Give each {@link BrowserSession} a host-only observer: a second CDP
-   * connection that watches the tabs the session works in and records
-   * where they went and what each page returned, in the report's
-   * `observed`. Model code can't reach it. Off by default.
+   * connection, opened alongside the model's, that follows the tabs the
+   * session works in. It answers the pages' JavaScript dialogs, which
+   * otherwise hang the tab, and records where the tabs went and what each
+   * page returned in the report's `observed`. Model code can't reach it.
    *
-   * @experimental For the browser features being built on it; the option
-   * and the record may change or go away.
+   * On by default: it costs about one round trip per session. `false`
+   * turns it off. Raw {@link Browser.connect} callers get no observer
+   * unless they ask for one.
    */
-  experimental_observer?: boolean;
+  observer?: boolean;
   /**
    * Minimum interval between activity-driven `updatedAt` refreshes.
    * Defaults to {@link SESSION_TOUCH_INTERVAL_MS}, capped at half the
@@ -184,7 +186,7 @@ export interface BrowserConnectOptions {
   scope?: string;
   /**
    * Also open a host-only observer connection, at the same time as the
-   * main one, when the `Browser` was created with `experimental_observer`.
+   * main one, unless the `Browser` was created with `observer: false`.
    * It comes back as {@link BrowserConnection.observer}. `BrowserSession`
    * asks for it.
    *
@@ -393,7 +395,7 @@ export class Browser extends LifecycleCapability {
       throw new Error("Browser scopes must be non-empty");
     }
     const withObserver =
-      options.observer === true && this.#options.experimental_observer === true;
+      options.observer === true && this.#options.observer !== false;
     let resolved = await this.resolve();
     let cdp: CdpConnection;
     // Both start now: the model's socket, then the observer's beside it.

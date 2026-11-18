@@ -863,7 +863,6 @@ describe("browser connector e2e", () => {
   describe("host observer", () => {
     afterAll(async () => {
       await callAgent("closeObserved");
-      await callAgent("closeNamed");
     });
 
     /** Model code: navigate the active tab and wait until it has loaded. */
@@ -992,7 +991,7 @@ describe("browser connector e2e", () => {
       // did too when this was written ("hung: CDP command timed out"), but
       // it's a different Chrome, so this logs the outcome instead of
       // asserting it. The tab is closed either way.
-      const output = await runNamed(
+      const output = (await callAgent("runUnobserved", [
         `async () => {
         const { targetId } = await browser.cdp({ method: "Target.createTarget", params: { url: "${BASE_URL}/pages/ok" } });
         const { sessionId } = await browser.attachToTarget({ targetId });
@@ -1010,7 +1009,7 @@ describe("browser connector e2e", () => {
         return outcome;
       }`,
         "dialog-probe"
-      );
+      ])) as NamedRunOutput;
       console.log(`[probe] alert() with the observer off: ${output.result}`);
       expect(output.status).toBe("completed");
     });

@@ -45,8 +45,11 @@ type NamedRunOutput = (
 /** The named session the persistent-browser tests drive. */
 const NAMED_SESSION = "e2e";
 
-/** The browser the host observer tests drive, with the observer on. */
+/** The browser the host observer tests drive (the observer is on by default). */
 const OBSERVED_SESSION = "e2e-observed";
+
+/** A browser with the observer turned off, for comparison. */
+const UNOBSERVED_SESSION = "e2e-unobserved";
 
 /** Pages the observer tests navigate to, served by this Worker. */
 function servePage(url: URL): Response | undefined {
@@ -139,8 +142,16 @@ export class BrowserTestAgent extends Agent<Env> {
     return new Browser({
       provider: browserRun(this.env.BROWSER),
       name: OBSERVED_SESSION,
+      store: this.#store()
+    });
+  }
+
+  #unobservedBrowser(): Browser {
+    return new Browser({
+      provider: browserRun(this.env.BROWSER),
+      name: UNOBSERVED_SESSION,
       store: this.#store(),
-      experimental_observer: true
+      observer: false
     });
   }
 
@@ -154,16 +165,23 @@ export class BrowserTestAgent extends Agent<Env> {
     return this.#runIn(this.#namedBrowser(), code, scope);
   }
 
-  /** {@link runNamed}, on a browser whose sessions have a host observer. */
+  /** {@link runNamed}, on the observer tests' own browser. */
   @callable()
   async runObserved(code: string, scope?: string): Promise<NamedRunOutput> {
     return this.#runIn(this.#observedBrowser(), code, scope);
   }
 
-  /** Close the observed browser so it doesn't outlive the suite. */
+  /** {@link runNamed}, on a browser created with `observer: false`. */
+  @callable()
+  async runUnobserved(code: string, scope?: string): Promise<NamedRunOutput> {
+    return this.#runIn(this.#unobservedBrowser(), code, scope);
+  }
+
+  /** Close the observer tests' browsers so they don't outlive the suite. */
   @callable()
   async closeObserved(): Promise<void> {
     await this.#observedBrowser().close();
+    await this.#unobservedBrowser().close();
   }
 
   async #runIn(

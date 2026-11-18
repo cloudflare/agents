@@ -163,7 +163,7 @@ export interface BrowserSessionReport {
   /**
    * What the host's observer saw in the tabs this session worked in.
    * Present when the browser gives sessions an observer (`Browser`'s
-   * `experimental_observer`). For the host: don't show it to the model.
+   * `observer`, on by default). For the host: don't show it to the model.
    *
    * @experimental May change or go away.
    */
