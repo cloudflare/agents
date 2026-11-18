@@ -702,3 +702,34 @@ describe("ExtensionManager", () => {
     });
   });
 });
+
+describe("ExtensionManager worker id stability", () => {
+  function recordingLoader() {
+    const ids: string[] = [];
+    const loader = {
+      get: (id: string, cb: () => unknown) => {
+        ids.push(id);
+        return (env.LOADER as WorkerLoader).get(id, cb as never);
+      }
+    } as unknown as WorkerLoader;
+    return { ids, loader };
+  }
+
+  it("reuses the same worker id across managers for identical extensions", async () => {
+    const { ids, loader } = recordingLoader();
+    const manifest = makeManifest({ name: "stable" });
+    await new ExtensionManager({ loader }).load(
+      manifest,
+      GREET_EXTENSION_SOURCE
+    );
+    await new Promise((r) => setTimeout(r, 5));
+    await new ExtensionManager({ loader }).load(
+      manifest,
+      GREET_EXTENSION_SOURCE
+    );
+    expect(ids[0]).toBe(ids[1]);
+
+    await new ExtensionManager({ loader }).load(manifest, MULTI_TOOL_SOURCE);
+    expect(ids[2]).not.toBe(ids[0]);
+  });
+});

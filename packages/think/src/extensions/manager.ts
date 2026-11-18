@@ -104,6 +104,14 @@ export interface ExtensionManagerOptions {
   ) => Fetcher;
 }
 
+async function hashWorkerConfig(input: unknown): Promise<string> {
+  const data = new TextEncoder().encode(JSON.stringify(input));
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(digest).slice(0, 16), (b) =>
+    b.toString(16).padStart(2, "0")
+  ).join("");
+}
+
 export class ExtensionManager {
   #loader: WorkerLoader;
   #storage: DurableObjectStorage | null;
@@ -203,14 +211,24 @@ export class ExtensionManager {
       workerEnv.host = this.#createHostBinding(permissions, ownLabels);
     }
 
+    // Stable, content-derived id: Dynamic Workers are billed per distinct
+    // id, so restarts must reuse the id while code/permissions are unchanged.
+    const globalOutbound = permissions.network?.length ? undefined : null;
+    const hash = await hashWorkerConfig({
+      workerModule,
+      globalOutbound: globalOutbound === null ? "null" : "inherit",
+      envBindings: Object.keys(workerEnv).sort(),
+      permissions
+    });
+
     const worker = this.#loader.get(
-      `ext-${manifest.name}-${manifest.version}-${Date.now()}`,
+      `ext-${manifest.name}-${manifest.version}-${hash}`,
       () => ({
         compatibilityDate: "2025-06-01",
         compatibilityFlags: ["nodejs_compat"],
         mainModule: "extension.js",
         modules: { "extension.js": workerModule },
-        globalOutbound: permissions.network?.length ? undefined : null,
+        globalOutbound,
         ...(Object.keys(workerEnv).length > 0 ? { env: workerEnv } : {})
       })
     );
