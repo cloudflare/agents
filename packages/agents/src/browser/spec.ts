@@ -63,6 +63,16 @@ interface RawCdpDomain {
 }
 
 /**
+ * The raw Chrome DevTools Protocol: the JSON Chrome serves at
+ * `/json/protocol` and publishes as `browser_protocol.json` and
+ * `js_protocol.json`. Other top-level fields, such as `version`, are allowed
+ * and ignored. `normalizeCdpSpec` turns it into a `SearchableCdpSpec`.
+ */
+export interface RawCdpProtocol {
+  domains?: RawCdpDomain[];
+}
+
+/**
  * The element type of an array field or type. `$ref` is always
  * domain-qualified (`"Network.Cookie"`), matching a type's `name`.
  */
@@ -189,11 +199,21 @@ function normalizeFields(
   }));
 }
 
-function normalizeCdpSpec(spec: {
-  domains?: RawCdpDomain[];
-}): SearchableCdpSpec {
+/**
+ * Normalize Chrome's raw protocol JSON into the spec a `BrowserSource`
+ * connection's `spec()` returns (a `SearchableCdpSpec`): every `$ref`
+ * domain-qualified (`"Page.FrameId"`), commands with `method`, events with
+ * `event`, types with `name`, and empty arrays where the protocol omits them.
+ *
+ * Use it for a source that has no `/json/protocol` endpoint or Browser Run
+ * binding for `loadCdpSpec`. Chrome publishes the protocol in two files,
+ * `browser_protocol.json` and `js_protocol.json`; merge their `domains` into
+ * one object before calling. Unlike `loadCdpSpec`, the spec is not cached, so
+ * keep it yourself (for example in a module-level constant).
+ */
+export function normalizeCdpSpec(protocol: RawCdpProtocol): SearchableCdpSpec {
   return {
-    domains: (spec.domains ?? []).map(({ domain, ...raw }) => ({
+    domains: (protocol.domains ?? []).map(({ domain, ...raw }) => ({
       name: domain,
       description: raw.description,
       experimental: raw.experimental,
@@ -246,7 +266,7 @@ async function getCachedSpec<K>(
     set(key: K, entry: SpecCacheEntry): void;
   },
   key: K,
-  load: () => Promise<{ domains?: RawCdpDomain[] }>
+  load: () => Promise<RawCdpProtocol>
 ): Promise<SearchableCdpSpec> {
   const cached = cache.get(key);
   if (cached && Date.now() - cached.cachedAt < CACHE_TTL_MS) {
@@ -276,7 +296,7 @@ async function fetchCdpSpecFromUrl(
         );
       }
 
-      return (await response.json()) as { domains?: RawCdpDomain[] };
+      return (await response.json()) as RawCdpProtocol;
     }
   );
 }
@@ -294,7 +314,7 @@ async function fetchCdpSpecFromSession(
         `Failed to fetch CDP spec from Browser Rendering: ${response.status}`
       );
     }
-    return (await response.json()) as { domains?: RawCdpDomain[] };
+    return (await response.json()) as RawCdpProtocol;
   });
 }
 
@@ -336,7 +356,7 @@ async function fetchCdpSpecFromBrowser(
         );
       }
 
-      return (await response.json()) as { domains?: RawCdpDomain[] };
+      return (await response.json()) as RawCdpProtocol;
     } finally {
       try {
         await browser.fetch(

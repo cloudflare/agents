@@ -329,6 +329,20 @@ const spec = await loadCdpSpec({ browser: this.env.BROWSER, sessionId });
 
 `connectBrowserSession` does not delete the session when the connection closes, so you can reconnect. `loadCdpSpec` without a `sessionId` creates a temporary session to read the protocol, then deletes it.
 
+A custom `BrowserSource` with no `/json/protocol` endpoint or Browser Run binding can build its spec with `normalizeCdpSpec`. Chrome publishes the protocol as `browser_protocol.json` and `js_protocol.json` ([ChromeDevTools/devtools-protocol](https://github.com/ChromeDevTools/devtools-protocol/tree/master/json)). Merge their `domains`, normalize once, and keep the result, since `normalizeCdpSpec` does not cache:
+
+```ts
+import { normalizeCdpSpec, type RawCdpProtocol } from "agents/browser";
+
+// Protocol JSON you already have, such as the two published files
+declare const browserProtocol: RawCdpProtocol;
+declare const jsProtocol: RawCdpProtocol;
+
+const spec = normalizeCdpSpec({
+  domains: [...(browserProtocol.domains ?? []), ...(jsProtocol.domains ?? [])]
+});
+```
+
 ## Local development
 
 Recent Wrangler releases support Browser Run in local development. `npx wrangler dev` provisions the browser automatically, so the same `browser: env.BROWSER` setup works locally and when deployed.
