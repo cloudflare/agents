@@ -189,7 +189,7 @@ describe("claude-code preset", () => {
     const turn = {
       operationId: "op",
       prompt: "hi",
-      settings: { model: "claude-sonnet-4-5" },
+      settings: { model: "claude-sonnet-5-5" },
       state: {}
     };
     const first = claudeCodeCli.command(turn);

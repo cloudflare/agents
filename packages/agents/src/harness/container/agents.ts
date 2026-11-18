@@ -100,7 +100,7 @@ function route(
 
 /** `claudeCode()`'s options: its provider connection and settings. */
 export type ClaudeCodeAgentOptions = ProviderConnection & {
-  /** Default `claude-sonnet-4-5`. Change one session's with `setModel`. */
+  /** Default `claude-sonnet-5-5`. Change one session's with `setModel`. */
   readonly model?: string;
   /** The `@anthropic-ai/claude-code` version. Default `2.1.289`. */
   readonly version?: string;
@@ -150,7 +150,7 @@ export function claudeCode(options: ClaudeCodeAgentOptions): ContainerAgent {
         keyHeader: (key) => ({ "x-api-key": key })
       })
     ],
-    model: options.model ?? "claude-sonnet-4-5",
+    model: options.model ?? "claude-sonnet-5-5",
     options: {
       ...(options.appendSystemPrompt === undefined
         ? {}
