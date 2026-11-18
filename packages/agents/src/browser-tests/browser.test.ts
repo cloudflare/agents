@@ -192,6 +192,21 @@ type StoredSessions = Record<
   { sessionId: string; createdAt: number; updatedAt: number }
 >;
 
+interface ObservedTab {
+  targetId: string;
+  initialUrl?: string;
+  navigations: Array<{ url: string; sameDocument?: true }>;
+  dialogs: Array<{ type: string; message: string; accepted: boolean }>;
+  blocked?: { url?: string };
+  setupMs?: number;
+  documents: Array<{
+    url: string;
+    status?: number;
+    redirects: Array<{ url: string; status: number }>;
+    error?: string;
+  }>;
+}
+
 interface NamedRunOutput {
   status: "completed" | "error";
   result?: unknown;
@@ -201,7 +216,30 @@ interface NamedRunOutput {
     newTabs: Array<{ targetId: string; url?: string }>;
     tabClosed: boolean;
     tabShared: boolean;
+    observed?:
+      | { available: true; connectMs: number; tabs: ObservedTab[] }
+      | { available: false; reason: string };
+    notices: string[];
   } | null;
+}
+
+/** Run code against the browser whose sessions have a host observer. */
+async function runObserved(
+  code: string,
+  scope?: string
+): Promise<NamedRunOutput> {
+  return (await callAgent("runObserved", [code, scope])) as NamedRunOutput;
+}
+
+/** The observer's tabs from a run, failing when it had none. */
+function observedTabs(output: NamedRunOutput): ObservedTab[] {
+  const observed = output.report?.observed;
+  if (!observed?.available) {
+    throw new Error(
+      `the observer was unavailable: ${observed ? observed.reason : "no record"}`
+    );
+  }
+  return observed.tabs;
 }
 
 /** Run code against the persistent named browser, in a scope. */
@@ -816,6 +854,177 @@ describe("browser connector e2e", () => {
       expect(output.status).toBe("completed");
       expect(output.report?.restarted).toBe(true);
       expect(output.result).not.toBe("lost");
+    });
+  });
+
+  // The host observer: a second CDP connection a BrowserSession opens to the
+  // same browser. Pages come from the test worker, which real Chrome reaches
+  // at BASE_URL.
+  describe("host observer", () => {
+    afterAll(async () => {
+      await callAgent("closeObserved");
+      await callAgent("closeNamed");
+    });
+
+    /**
+     * Model code: attach the active tab, then give the observer, which sets
+     * up in the background, time to enable Page and Network there.
+     */
+    const warmUp = `
+      await browser.cdp({ method: "Runtime.evaluate", params: { expression: "1" }, sessionId: "active" });
+      await new Promise((r) => setTimeout(r, 500));`;
+
+    /** Model code: navigate the active tab and wait until it has loaded. */
+    const navigate = (path: string) => `
+      await browser.cdp({
+        method: "Page.navigate",
+        params: { url: "${BASE_URL}${path}" },
+        sessionId: "active"
+      });
+      for (let i = 0; i < 100; i++) {
+        const { result } = await browser.cdp({
+          method: "Runtime.evaluate",
+          params: { expression: "location.pathname + ' ' + document.readyState", returnByValue: true },
+          sessionId: "active"
+        });
+        if (result.value.endsWith(" complete") && !result.value.startsWith("/pages/redirect")) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }`;
+
+    it("records each navigation's document, with its status and redirects", async () => {
+      const output = await runObserved(`async () => {
+        ${warmUp}
+        ${navigate("/pages/redirect")}
+        ${navigate("/pages/missing")}
+      }`);
+      expect(output.status).toBe("completed");
+      const [tab, ...others] = observedTabs(output);
+      expect(others).toEqual([]);
+      expect(tab.navigations.map((n) => n.url)).toEqual([
+        `${BASE_URL}/pages/ok`,
+        `${BASE_URL}/pages/missing`
+      ]);
+      expect(tab.documents).toEqual([
+        {
+          url: `${BASE_URL}/pages/ok`,
+          status: 200,
+          redirects: [{ url: `${BASE_URL}/pages/redirect`, status: 302 }]
+        },
+        { url: `${BASE_URL}/pages/missing`, status: 404, redirects: [] }
+      ]);
+
+      // The next session reads where the tab already is.
+      const next = await runObserved(`async () => {
+        await browser.cdp({ method: "Runtime.evaluate", params: { expression: "1" }, sessionId: "active" });
+      }`);
+      expect(observedTabs(next)[0].initialUrl).toBe(
+        `${BASE_URL}/pages/missing`
+      );
+    });
+
+    it("keeps observing after the model disables Page and Network", async () => {
+      const output = await runObserved(`async () => {
+        ${warmUp}
+        for (const method of ["Page.enable", "Network.enable", "Page.disable", "Network.disable"]) {
+          await browser.cdp({ method, sessionId: "active" });
+        }
+        ${navigate("/pages/ok")}
+      }`);
+      expect(output.status).toBe("completed");
+      const [tab] = observedTabs(output);
+      expect(tab.documents.at(-1)).toMatchObject({
+        url: `${BASE_URL}/pages/ok`,
+        status: 200
+      });
+    });
+
+    it("isn't detached by the model's Target.detachFromTarget({ targetId })", async () => {
+      const output = await runObserved(`async () => {
+        ${warmUp}
+        const { targetInfos } = await browser.cdp({ method: "Target.getTargets" });
+        const { result } = await browser.cdp({
+          method: "Runtime.evaluate",
+          params: { expression: "location.href", returnByValue: true },
+          sessionId: "active"
+        });
+        const tab = targetInfos.find((t) => t.type === "page" && t.url === result.value);
+        await browser.cdp({ method: "Target.detachFromTarget", params: { targetId: tab.targetId } });
+        // A second detach finds no session of the model's left on the tab.
+        let second = "detached";
+        try {
+          await browser.cdp({ method: "Target.detachFromTarget", params: { targetId: tab.targetId } });
+        } catch (error) {
+          second = String(error.message ?? error);
+        }
+        ${navigate("/pages/missing")}
+        return second;
+      }`);
+      expect(output.status).toBe("completed");
+      // Chrome didn't hand the model the observer's session to detach.
+      expect(String(output.result)).toContain("No session");
+      const [tab] = observedTabs(output);
+      expect(tab.documents.at(-1)).toMatchObject({
+        url: `${BASE_URL}/pages/missing`,
+        status: 404
+      });
+    });
+
+    it("answers a page's alert(), so the run doesn't hang", async () => {
+      const output = await runObserved(`async () => {
+        ${warmUp}
+        ${navigate("/pages/ok")}
+        await browser.cdp({
+          method: "Runtime.evaluate",
+          params: { expression: "setTimeout(() => alert('hello'), 0); 1" },
+          sessionId: "active"
+        });
+        await new Promise((r) => setTimeout(r, 200));
+        const { result } = await browser.cdp({
+          method: "Runtime.evaluate",
+          params: { expression: "confirm('sure?') + ' ' + document.title", returnByValue: true },
+          sessionId: "active",
+          timeoutMs: 5000
+        });
+        return result.value;
+      }`);
+      expect(output.status).toBe("completed");
+      // The alert was accepted and the confirm dismissed.
+      expect(output.result).toBe("false ok");
+      expect(observedTabs(output)[0].dialogs).toEqual([
+        { type: "alert", message: "hello", accepted: true },
+        { type: "confirm", message: "sure?", accepted: false }
+      ]);
+      expect(output.report?.notices).toEqual(
+        expect.arrayContaining([expect.stringContaining("confirm dialog")])
+      );
+    });
+
+    it("records what a page's alert() does with the observer off", async () => {
+      // Browser Run hangs the tab until it's reloaded. The local simulator
+      // did too when this was written ("hung: CDP command timed out"), but
+      // it's a different Chrome, so this logs the outcome instead of
+      // asserting it. The tab is closed either way.
+      const output = await runNamed(
+        `async () => {
+        const { targetId } = await browser.cdp({ method: "Target.createTarget", params: { url: "${BASE_URL}/pages/ok" } });
+        const { sessionId } = await browser.attachToTarget({ targetId });
+        await new Promise((r) => setTimeout(r, 500));
+        await browser.cdp({ method: "Runtime.evaluate", params: { expression: "setTimeout(() => alert('probe'), 0); 1" }, sessionId });
+        await new Promise((r) => setTimeout(r, 200));
+        let outcome;
+        try {
+          const { result } = await browser.cdp({ method: "Runtime.evaluate", params: { expression: "document.title", returnByValue: true }, sessionId, timeoutMs: 3000 });
+          outcome = "answered: " + result.value;
+        } catch (error) {
+          outcome = "hung: " + String(error.message ?? error);
+        }
+        await browser.cdp({ method: "Target.closeTarget", params: { targetId } });
+        return outcome;
+      }`,
+        "dialog-probe"
+      );
+      console.log(`[probe] alert() with the observer off: ${output.result}`);
+      expect(output.status).toBe("completed");
     });
   });
 });
