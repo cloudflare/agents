@@ -97,9 +97,11 @@ export {
 
 export {
   loadCdpSpec,
+  normalizeCdpSpec,
   type CdpField,
   type CdpItems,
   type CdpSpecSource,
+  type RawCdpProtocol,
   type SearchableCdpSpec
 } from "./spec";
 

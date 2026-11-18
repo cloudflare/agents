@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { CdpField, CdpItems } from "../browser";
-import { loadCdpSpec } from "../browser/spec";
+import { loadCdpSpec, normalizeCdpSpec } from "../browser";
+import type { CdpField, CdpItems, RawCdpProtocol } from "../browser";
 
 // A trimmed slice of Chrome's real /json/protocol shape.
 const RAW_PROTOCOL = {
@@ -158,5 +158,83 @@ describe("loadCdpSpec normalization", () => {
       ])
     );
     for (const ref of refs) expect(typeNames).toContain(ref);
+  });
+});
+
+describe("normalizeCdpSpec", () => {
+  it("matches loadCdpSpec for the same protocol", async () => {
+    const loaded = await loadCdpSpec({ browser: fakeBinding() });
+
+    expect(normalizeCdpSpec(RAW_PROTOCOL)).toEqual(loaded);
+  });
+
+  it("normalizes the domains of two published files merged into one", () => {
+    // Shaped like browser_protocol.json and js_protocol.json: a top-level
+    // `version` beside `domains`, and fields the normalizer ignores.
+    const browserProtocol = {
+      version: { major: "1", minor: "3" },
+      domains: [
+        {
+          domain: "Page",
+          dependencies: ["Runtime"],
+          commands: [
+            {
+              name: "getFrameTree",
+              returns: [{ name: "frameTree", $ref: "FrameTree" }]
+            }
+          ],
+          types: [{ id: "FrameTree", type: "object" }]
+        }
+      ]
+    };
+    const jsProtocol = {
+      version: { major: "1", minor: "3" },
+      domains: [
+        {
+          domain: "Runtime",
+          events: [
+            {
+              name: "consoleAPICalled",
+              parameters: [
+                { name: "args", type: "array", items: { $ref: "RemoteObject" } }
+              ]
+            }
+          ],
+          types: [{ id: "RemoteObject", type: "object" }]
+        }
+      ]
+    };
+
+    const spec = normalizeCdpSpec({
+      domains: [...browserProtocol.domains, ...jsProtocol.domains]
+    });
+
+    expect(spec.domains.map((d) => d.name)).toEqual(["Page", "Runtime"]);
+    expect(spec.domains[0].commands[0]).toMatchObject({
+      method: "Page.getFrameTree",
+      returns: [{ name: "frameTree", $ref: "Page.FrameTree" }]
+    });
+    expect(spec.domains[1].events[0]).toMatchObject({
+      event: "Runtime.consoleAPICalled",
+      parameters: [
+        { name: "args", type: "array", items: { $ref: "Runtime.RemoteObject" } }
+      ]
+    });
+  });
+
+  it("accepts a parsed protocol file with its version", async () => {
+    const file = {
+      version: { major: "1", minor: "3" },
+      domains: RAW_PROTOCOL.domains
+    };
+    const parsed: RawCdpProtocol = file;
+    const fetched = await Response.json(file).json<RawCdpProtocol>();
+
+    expect(normalizeCdpSpec(fetched)).toEqual(normalizeCdpSpec(parsed));
+    expect(normalizeCdpSpec(parsed)).toEqual(normalizeCdpSpec(RAW_PROTOCOL));
+  });
+
+  it("returns no domains when the protocol has none", () => {
+    expect(normalizeCdpSpec({})).toEqual({ domains: [] });
   });
 });
