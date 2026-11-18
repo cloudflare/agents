@@ -866,14 +866,6 @@ describe("browser connector e2e", () => {
       await callAgent("closeNamed");
     });
 
-    /**
-     * Model code: attach the active tab, then give the observer, which sets
-     * up in the background, time to enable Page and Network there.
-     */
-    const warmUp = `
-      await browser.cdp({ method: "Runtime.evaluate", params: { expression: "1" }, sessionId: "active" });
-      await new Promise((r) => setTimeout(r, 500));`;
-
     /** Model code: navigate the active tab and wait until it has loaded. */
     const navigate = (path: string) => `
       await browser.cdp({
@@ -893,7 +885,6 @@ describe("browser connector e2e", () => {
 
     it("records each navigation's document, with its status and redirects", async () => {
       const output = await runObserved(`async () => {
-        ${warmUp}
         ${navigate("/pages/redirect")}
         ${navigate("/pages/missing")}
       }`);
@@ -924,7 +915,6 @@ describe("browser connector e2e", () => {
 
     it("keeps observing after the model disables Page and Network", async () => {
       const output = await runObserved(`async () => {
-        ${warmUp}
         for (const method of ["Page.enable", "Network.enable", "Page.disable", "Network.disable"]) {
           await browser.cdp({ method, sessionId: "active" });
         }
@@ -940,7 +930,6 @@ describe("browser connector e2e", () => {
 
     it("isn't detached by the model's Target.detachFromTarget({ targetId })", async () => {
       const output = await runObserved(`async () => {
-        ${warmUp}
         const { targetInfos } = await browser.cdp({ method: "Target.getTargets" });
         const { result } = await browser.cdp({
           method: "Runtime.evaluate",
@@ -971,7 +960,6 @@ describe("browser connector e2e", () => {
 
     it("answers a page's alert(), so the run doesn't hang", async () => {
       const output = await runObserved(`async () => {
-        ${warmUp}
         ${navigate("/pages/ok")}
         await browser.cdp({
           method: "Runtime.evaluate",

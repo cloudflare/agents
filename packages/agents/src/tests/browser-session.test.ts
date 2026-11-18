@@ -59,7 +59,8 @@ class MemorySessionStore implements BrowserSessionStore {
 
 interface Tab {
   targetId: string;
-  type: "page";
+  /** A worker has no Page domain. */
+  type: "page" | "service_worker";
   url: string;
   title?: string;
   openerId?: string;
@@ -209,6 +210,20 @@ class FakeBrowserInstance {
             error: {
               code: -32001,
               message: `Session with given id not found.`
+            }
+          };
+        }
+        const inTab = this.tabs.find(
+          (tab) => tab.targetId === this.attached.get(command.sessionId ?? "")
+        );
+        if (
+          inTab?.type === "service_worker" &&
+          command.method.startsWith("Page.")
+        ) {
+          return {
+            error: {
+              code: -32601,
+              message: `'${command.method}' wasn't found`
             }
           };
         }
@@ -1230,17 +1245,19 @@ describe("BrowserSession observer", () => {
     }
   ];
 
-  /** Let the observer's setup, which runs in the background, finish. */
+  /** Let background work (the observer's attach) get going. */
   const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-  /** Attach "active", let the observer set up, then make `calls`. */
+  /**
+   * Use "active", then make `calls`. No waiting in between: the first
+   * command waits for the observer's setup itself.
+   */
   async function observed(t: ReturnType<typeof setup>, calls: Call[]) {
     const session = t.browser.session();
     const results: unknown[] = [];
     let error: unknown;
     try {
       const target = evaluatedIn(await call(session, evaluateActive));
-      await settle();
       for (const entry of calls) results.push(await call(session, entry));
       return { target, results, error, report: await session.close() };
     } catch (caught) {
@@ -1329,28 +1346,70 @@ describe("BrowserSession observer", () => {
     expect(instance.sockets.size).toBe(0);
   });
 
-  it("doesn't hold up the model's commands while it sets up a tab", async () => {
+  it("holds the model's first command to a tab for at most 250 ms", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       const t = setup({ observer: true });
+      // A slow tab: the observer's enables get no reply in time.
       t.silentMethods.set(2, ["Page.enable", "Network.enable"]);
       const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
       const session = t.browser.session();
-      // Resolves although the observer's setup can't finish.
-      const target = evaluatedIn(await call(session, evaluateActive));
-      expect(observerSent(t)).toContain("Page.enable");
+      let firstDone = false;
+      const first = call(session, evaluateActive).then((result) => {
+        firstDone = true;
+        return result;
+      });
+      await vi.advanceTimersByTimeAsync(249);
+      expect(firstDone).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      const target = evaluatedIn(await first);
+      // Later commands don't wait.
+      await call(session, evaluateActive);
       const closing = session.close();
-      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.advanceTimersByTimeAsync(2_000);
       const report = await closing;
       warned.mockRestore();
-      // The browser answered for the tab, so it looks blocked.
-      expect(tabsOf(report)[0]).toMatchObject({
-        targetId: target,
-        blocked: { url: "about:blank" }
-      });
+      // Its setup timed out, but it answered at close: slow, not blocked.
+      expect(tabsOf(report)[0].targetId).toBe(target);
+      expect(tabsOf(report)[0]).not.toHaveProperty("blocked");
+      expect(report?.notices).toEqual([]);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("starts on the scope's tab before the model's first command", async () => {
+    const t = setup({ observer: true });
+    await t.run([evaluateActive]);
+    const stored = t.activeTab();
+    const session = t.browser.session();
+    // Nothing attached "active" yet.
+    await session.send({ method: "Target.getTargets" });
+    await settle();
+    const observerSocket = t.sockets[3];
+    expect(observerSocket.sent[0]).toMatchObject({
+      method: "Target.attachToTarget",
+      params: { targetId: stored }
+    });
+    const report = await session.close();
+    // The model never used the tab, so it isn't in the record.
+    expect(tabsOf(report)).toEqual([]);
+  });
+
+  it("doesn't follow a target that isn't a page, nor call it blocked", async () => {
+    const t = setup({ observer: true });
+    const instance = await t.start();
+    const worker = instance.addTab("https://example.com/sw.js");
+    const tab = instance.tabs.find(({ targetId }) => targetId === worker);
+    if (tab) tab.type = "service_worker";
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const session = t.browser.session();
+    await session.attachToTarget({ targetId: worker });
+    const report = await session.close();
+    warned.mockRestore();
+    expect(tabsOf(report)).toEqual([]);
+    expect(report?.notices).toEqual([]);
+    expect(observerSent(t)).toContain("Target.detachFromTarget");
   });
 
   it("keeps observing after the model disables Page and Network", async () => {
@@ -1414,7 +1473,6 @@ describe("BrowserSession observer", () => {
     const t = setup({ observer: true });
     const session = t.browser.session();
     const target = evaluatedIn(await call(session, evaluateActive));
-    await settle();
     const instance = t.instance();
     for (const type of ["alert", "confirm", "prompt", "beforeunload"]) {
       instance.emit(target, "Page.javascriptDialogOpening", {
@@ -1451,7 +1509,6 @@ describe("BrowserSession observer", () => {
     const t = setup({ observer: true });
     const session = t.browser.session();
     await call(session, evaluateActive);
-    await settle();
     // Browser Run tags Cloudflare.* events with every connection's ids.
     t.sockets[1].event({
       method: "Page.javascriptDialogOpening",
@@ -1472,9 +1529,11 @@ describe("BrowserSession observer", () => {
       instance.blocked.add(stuck);
       const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
       const session = t.browser.session();
-      await session.attachToTarget({ targetId: stuck });
+      const attaching = session.attachToTarget({ targetId: stuck });
+      await vi.advanceTimersByTimeAsync(250);
+      await attaching;
       const closing = session.close();
-      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.advanceTimersByTimeAsync(3_000);
       const report = await closing;
       warned.mockRestore();
       expect(tabsOf(report)[0]).toMatchObject({
@@ -1482,7 +1541,7 @@ describe("BrowserSession observer", () => {
         blocked: { url: "https://stuck.example/" }
       });
       expect(report?.notices).toEqual([
-        `The tab ${stuck} (https://stuck.example/) isn't responding, probably because of a dialog that opened between runs, which can't be answered now. Its page commands time out until you send Page.reload to it or navigate it.`
+        `The tab ${stuck} (https://stuck.example/) isn't responding, probably because of a dialog that opened before the host could answer it, which can't be answered now. Its page commands time out until you send Page.reload to it or navigate it.`
       ]);
       // The observer didn't reload it: that's the model's call.
       expect(observerSent(t)).not.toContain("Page.reload");

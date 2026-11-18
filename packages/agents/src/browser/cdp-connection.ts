@@ -124,6 +124,18 @@ const DEFAULT_TIMEOUT_MS = 10_000;
 /** JSON-RPC's "method not found" code, which Chrome also uses for CDP. */
 export const CDP_METHOD_NOT_FOUND = -32601;
 
+/** A command got no reply within its timeout. */
+export class CdpTimeoutError extends Error {
+  override readonly name = "CdpTimeoutError";
+  /** The CDP method that timed out. */
+  readonly method: string;
+
+  constructor(method: string, timeoutMs: number) {
+    super(`CDP command timed out after ${timeoutMs}ms: ${method}`);
+    this.method = method;
+  }
+}
+
 /** The browser answered a command with a JSON-RPC error. */
 export class CdpProtocolError extends Error {
   override readonly name = "CdpProtocolError";
@@ -372,9 +384,7 @@ export class CdpConnection {
       const startedAt = performance.now();
       const timeoutId = setTimeout(() => {
         this.#pending.delete(id);
-        reject(
-          new Error(`CDP command timed out after ${timeoutMs}ms: ${method}`)
-        );
+        reject(new CdpTimeoutError(String(method), timeoutMs));
       }, timeoutMs);
       this.#pending.set(id, {
         resolve,

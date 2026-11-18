@@ -576,8 +576,10 @@ export class BrowserSession {
       method === "Target.attachToTarget" &&
       typeof liveParams?.targetId === "string"
     ) {
-      // The model attached itself: the observer follows it there.
+      // The model attached itself: the observer follows it there, and
+      // its next command waits (briefly) for the observer to be ready.
       state.observer?.attach(liveParams.targetId);
+      await state.observer?.ready(liveParams.targetId);
     }
     if (method === "Page.captureScreenshot") this.#assertFits(result);
     return result;
@@ -665,7 +667,7 @@ export class BrowserSession {
           await this.#recordSharedTab(state, active);
         }
       } finally {
-        observed = await state.observer?.close();
+        observed = await state.observer?.close(state.workedIn);
         state.connected.cdp.disconnect();
       }
       return {
@@ -767,6 +769,11 @@ export class BrowserSession {
       void observer?.close();
       connected.cdp.disconnect();
       throw error;
+    }
+    // Start on the scope's tab now, before the model's first command to it.
+    const stored = connected.activeTargetId;
+    if (stored && initialPages.some((page) => page.targetId === stored)) {
+      observer?.attach(stored);
     }
     const state: ConnectedState = {
       connected,
@@ -950,6 +957,8 @@ export class BrowserSession {
       targetId = created.targetId;
     }
     this.#setActive(state, targetId);
+    // Alongside the model's attach to it, which follows.
+    state.observer?.attach(targetId);
     return targetId;
   }
 
@@ -965,13 +974,15 @@ export class BrowserSession {
   ): Promise<LiveSessionId> {
     const existing = state.attached.get(targetId);
     if (existing) return existing;
+    state.observer?.attach(targetId);
     const live = (await state.connected.cdp.attachToTarget(targetId, {
       timeoutMs
     })) as LiveSessionId;
     state.attached.set(targetId, live);
     state.workedIn.add(targetId);
-    // In the background: the model's commands never wait for the observer.
-    state.observer?.attach(targetId);
+    // The model's first command here waits for the observer, at most
+    // ~250 ms, so the observer hears what it does. Later ones don't.
+    await state.observer?.ready(targetId);
     return live;
   }
 

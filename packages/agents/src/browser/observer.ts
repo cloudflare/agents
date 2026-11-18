@@ -20,13 +20,25 @@
  * socket.) What it records is still advice, not enforcement: the model can
  * close the tab or block requests.
  *
- * It never fails a run or holds up the model's commands. If it can't connect
- * in time, or a tab can't be observed, the session goes on without it and
- * the record says so.
+ * It never fails a run. The model's first command to each tab waits for the
+ * observer's setup there, at most ~250 ms, so the first navigation's status
+ * isn't missed; later commands never wait. If it can't connect in time, or
+ * a tab can't be observed, the session goes on without it and the record
+ * says so. It follows page targets only.
  */
 
 import type { BrowserObserverConnection } from "./browser";
-import type { CdpConnection, CdpEvent } from "./cdp-connection";
+import {
+  CdpTimeoutError,
+  type CdpConnection,
+  type CdpEvent
+} from "./cdp-connection";
+
+/**
+ * The longest the model's first command to a tab waits for the observer to
+ * finish setting up there.
+ */
+export const OBSERVER_FIRST_COMMAND_WAIT_MS = 250;
 
 /** How long a session waits for its observer to connect before going on without it. */
 export const OBSERVER_CONNECT_TIMEOUT_MS = 2_000;
@@ -102,10 +114,10 @@ export interface BrowserObservedTab {
   /** Dialogs the observer answered, oldest first. */
   dialogs: BrowserObservedDialog[];
   /**
-   * The tab didn't answer the observer's setup while the browser did:
-   * probably a dialog that opened while no observer was connected, which
-   * nobody can answer now. Page commands in it time out until it's
-   * reloaded or navigated. `url` is where it was.
+   * The tab didn't answer the observer's setup, nor its last command at
+   * close, while the browser did: probably a dialog that opened before the
+   * host could answer it, which nobody can answer now. Page commands in it
+   * time out until it's reloaded or navigated. `url` is where it was.
    */
   blocked?: { url?: string };
   /** From attaching to the tab until its setup finished or gave up, in ms. */
@@ -153,9 +165,8 @@ export class HostObserver {
   }
 
   /**
-   * Start observing a tab the session just attached the model to. Returns
-   * at once: the model's commands never wait for the observer, so events
-   * from a command sent before the setup finishes can be missed.
+   * Start observing a tab: one the session is about to attach the model
+   * to, or just did. Returns at once; {@link ready} waits for the setup.
    */
   attach(targetId: string): void {
     if (this.#closing || this.#attaching.has(targetId)) return;
@@ -163,17 +174,43 @@ export class HostObserver {
   }
 
   /**
+   * Wait for the observer's setup in a tab, at most `capMs`, before the
+   * model's first command there, so the observer hears what it does.
+   * Resolves at once for a tab it isn't setting up; never rejects.
+   */
+  async ready(
+    targetId: string,
+    capMs = OBSERVER_FIRST_COMMAND_WAIT_MS
+  ): Promise<void> {
+    const attaching = this.#attaching.get(targetId);
+    if (!attaching) return;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      attaching,
+      new Promise<void>((resolve) => {
+        timeoutId = setTimeout(resolve, capMs);
+      })
+    ]);
+    clearTimeout(timeoutId);
+  }
+
+  /**
    * Read the record and close the connection. Waits for tab setups still
    * running, then sends one last command to each tab and waits for its
-   * reply, so the events Chrome sent before it have arrived. Never rejects;
-   * later calls resolve with the same record.
+   * reply, so the events Chrome sent before it have arrived. A tab that
+   * looked blocked but answers it wasn't: it was only slow. Never rejects;
+   * later calls resolve with the same record, which lists only the tabs in
+   * `workedIn` when given: the observer may start on a tab the model then
+   * doesn't use.
    */
-  close(): Promise<BrowserObserverRecord> {
-    this.#closing ??= this.#close();
+  close(workedIn?: ReadonlySet<string>): Promise<BrowserObserverRecord> {
+    this.#closing ??= this.#close(workedIn);
     return this.#closing;
   }
 
-  async #close(): Promise<BrowserObserverRecord> {
+  async #close(
+    workedIn: ReadonlySet<string> | undefined
+  ): Promise<BrowserObserverRecord> {
     const connected = await this.#ready;
     if (!connected.cdp) {
       const { reason, connectMs } = connected;
@@ -187,14 +224,14 @@ export class HostObserver {
     try {
       await Promise.allSettled(this.#attaching.values());
       await Promise.allSettled(
-        [...this.#tabsBySession]
-          .filter(([, tab]) => !tab.record.blocked)
-          .map(([sessionId]) =>
-            cdp.send("Page.getFrameTree", undefined, {
-              sessionId,
-              timeoutMs: OBSERVER_FLUSH_TIMEOUT_MS
-            })
-          )
+        [...this.#tabsBySession].map(async ([sessionId, tab]) => {
+          await cdp.send("Page.getFrameTree", undefined, {
+            sessionId,
+            timeoutMs: OBSERVER_FLUSH_TIMEOUT_MS
+          });
+          // It answers: it was slow, not blocked.
+          delete tab.record.blocked;
+        })
       );
     } finally {
       cdp.disconnect();
@@ -202,7 +239,9 @@ export class HostObserver {
     return {
       available: true,
       connectMs,
-      tabs: this.#tabs.map(({ record }) => structuredClone(record))
+      tabs: this.#tabs
+        .filter(({ record }) => !workedIn || workedIn.has(record.targetId))
+        .map(({ record }) => structuredClone(record))
     };
   }
 
@@ -289,21 +328,35 @@ export class HostObserver {
         tab.record.initialUrl = frame.url;
       }
     }
-    const failed = [page, network, frameTree].find(
-      (result) => result.status === "rejected"
+    const errors = [page, network, frameTree].flatMap((result) =>
+      result.status === "rejected" ? [result.reason as unknown] : []
     );
-    if (failed) {
-      await this.#checkBlocked(cdp, tab, failed.reason);
+    if (errors.some((error) => !(error instanceof CdpTimeoutError))) {
+      // The target answered, but not as a page does (a worker, say):
+      // stop following it.
+      this.#forget(cdp, sessionId, tab);
+      this.#warn(`set up target ${targetId}`, errors[0]);
+      return;
+    }
+    if (errors.length > 0) {
+      await this.#checkBlocked(cdp, tab, errors[0]);
     }
     tab.record.setupMs = Date.now() - startedAt;
   }
 
+  /** Stop following a target, and leave it out of the record. */
+  #forget(cdp: CdpConnection, sessionId: string, tab: ObservedTabState): void {
+    this.#tabsBySession.delete(sessionId);
+    this.#tabs.splice(this.#tabs.indexOf(tab), 1);
+    cdp.send("Target.detachFromTarget", { sessionId }).catch(() => undefined);
+  }
+
   /**
-   * The tab didn't answer its setup. If the browser still answers for it,
-   * the tab is blocked, most likely by a dialog that opened while no
-   * observer was connected: only a session with Page enabled before a
+   * The tab's setup timed out. If the browser still answers for it and it
+   * is a page, it looks blocked, most likely by a dialog that opened before
+   * the host could answer it: only a session with Page enabled before a
    * dialog opens can answer it. Recovering means reloading or navigating
-   * the tab, which is left to the model.
+   * the tab, which is left to the model. {@link close} checks again.
    */
   async #checkBlocked(
     cdp: CdpConnection,
@@ -317,8 +370,11 @@ export class HostObserver {
         { targetId },
         { timeoutMs: OBSERVER_SETUP_TIMEOUT_MS }
       );
-      const url = asRecord(asRecord(info)?.targetInfo)?.url;
-      tab.record.blocked = typeof url === "string" ? { url } : {};
+      const targetInfo = asRecord(asRecord(info)?.targetInfo);
+      if (targetInfo?.type === "page") {
+        const { url } = targetInfo;
+        tab.record.blocked = typeof url === "string" ? { url } : {};
+      }
     } catch {
       // The browser doesn't answer either: not a stuck tab.
     }
@@ -491,7 +547,7 @@ export function observerNotices(
     if (!tab.blocked) continue;
     const where = tab.blocked.url ? ` (${tab.blocked.url})` : "";
     notices.push(
-      `The tab ${tab.targetId}${where} isn't responding, probably because of a dialog that opened between runs, which can't be answered now. Its page commands time out until you send Page.reload to it or navigate it.`
+      `The tab ${tab.targetId}${where} isn't responding, probably because of a dialog that opened before the host could answer it, which can't be answered now. Its page commands time out until you send Page.reload to it or navigate it.`
     );
   }
   return notices;
