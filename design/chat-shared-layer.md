@@ -207,6 +207,7 @@ A provider rejects a request that holds a tool call with no result, and Anthropi
 - `repairTranscriptBeforeTurn` settles every unanswered call in a message a later message follows, whoever owns it, and an approved call that never ran. A turn that starts a new reply treats the last message the same way. A continuation turn keeps, in the message it continues, a call to a tool the client sent a schema for and an approval request, and reports them as `keptToolCallIds`. A turn that kept any does not call the model.
 - `settleInterruptedReply` settles a reply whose stream was cut off, before it is stored. A call a client is known to own is kept.
 - `stripTrailingReasoning` removes the reasoning an assistant message ends in. It runs inside both of the above.
+- `settleInterruptedPart` (`message-builder.ts`) closes a text or reasoning part an interruption left streaming. Both hosts apply it to the message a continuation extends, so the continuation's parts follow the cut-off ones in order.
 - `replyIsEmpty` says whether a reply holds nothing a client can show and nothing a model request can carry. Such a reply is not stored. The before-turn repair and the settle before a recovery remove a stored one through the sink, and the recovery then retries the question.
 - `interruptedToolPartAsError` is the default for the hosts' `repairInterruptedToolPart` hook. Its text says what is known about the call.
 - `persistRepairedTranscript` stores what a repair changed and emits `chat:transcript:repaired`, through a `RepairedTranscriptSink` the host supplies.
