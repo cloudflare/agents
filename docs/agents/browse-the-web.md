@@ -384,7 +384,7 @@ try {
 
 Events are typed from the [`devtools-protocol`](https://www.npmjs.com/package/devtools-protocol) package: a handler for `Page.frameNavigated` gets that event's `params`, and so do `waitFor()` and its `predicate`. Any other event name, such as Browser Run's own `Cloudflare.handoffComplete`, works too, with untyped `params`. A `CdpEventHandler` with no type argument handles any event, so one handler can listen for several.
 
-Without `sessionId`, a listener hears the event from every CDP session on the connection and from the browser itself. `sessionId: null` hears browser-level events only. Browser Run sends `Cloudflare.handoffComplete` once at browser level and once more in each attached session, so listen for it with `sessionId: null` to hear it once.
+Without `sessionId`, a listener hears the event from every CDP session on the connection and from the browser itself. `sessionId: null` hears browser-level events only. Browser Run sends `Cloudflare.handoffComplete` once at browser level and once per attached session on any connection, tagged with that connection's session id, so listen for it with `sessionId: null` to hear it once.
 
 Handlers run synchronously as each event arrives, so code awaiting a command's reply has already seen the events sent before it. A handler that throws is logged and does not stop the others, and no handler runs once the connection ends. Every handler gets the same event object, so its `params` are read-only. `waitFor()` rejects on timeout (by default the connection's command timeout), when its `signal` aborts, and when the connection closes. A wait that rejects before your code awaits it is not reported as an unhandled rejection, so a failed command beside it leaves nothing behind.
 

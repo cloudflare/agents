@@ -31,6 +31,11 @@ import {
   type BrowserFunction,
   type SessionHosts
 } from "./browser-functions";
+import {
+  HostObserver,
+  observerNotices,
+  type BrowserObserverRecord
+} from "./observer";
 import { DEFAULT_BROWSER_SCOPE } from "./scope";
 import type { SearchableCdpSpec } from "./spec";
 import { validate } from "./validate";
@@ -155,6 +160,14 @@ export interface BrowserSessionReport {
    * empty when nothing did. Show them after the run's result.
    */
   notices: string[];
+  /**
+   * What the host's observer saw in the tabs this session worked in.
+   * Present when the browser gives sessions an observer (`Browser`'s
+   * `experimental_observer`). For the host: don't show it to the model.
+   *
+   * @experimental May change or go away.
+   */
+  observed?: BrowserObserverRecord;
 }
 
 const RESTARTED_NOTICE =
@@ -167,7 +180,9 @@ const TAB_SHARED_NOTICE =
   "Another conversation using this browser is also working in your tab, so its page may change between your runs. Open a tab of your own with Target.createTarget if you need one.";
 
 /** What the report says, in sentences the model reads. */
-function reportNotices(report: Omit<BrowserSessionReport, "notices">) {
+function reportNotices(
+  report: Omit<BrowserSessionReport, "notices" | "observed">
+) {
   return [
     report.restarted && RESTARTED_NOTICE,
     report.tabClosed && !report.restarted && TAB_CLOSED_NOTICE,
@@ -362,6 +377,8 @@ interface TargetInfo {
 /** The session's connection and what it learned. Dropped when it closes. */
 interface ConnectedState {
   connected: BrowserConnection;
+  /** The host's observer, when the browser offers one. */
+  observer?: HostObserver;
   /** Live CDP session per target, valid on this socket only. */
   attached: Map<TargetId, LiveSessionId>;
   /**
@@ -377,7 +394,7 @@ interface ConnectedState {
   activeResolved: boolean;
   /** Tabs this session closed with `Target.closeTarget`. */
   closed: Set<TargetId>;
-  report: Omit<BrowserSessionReport, "notices">;
+  report: Omit<BrowserSessionReport, "notices" | "observed">;
 }
 
 const SEND_SCHEMA = {
@@ -555,6 +572,13 @@ export class BrowserSession {
       throw await this.#teach(state, error, method, sessionId);
     }
     this.#observe(state, method, liveParams, result);
+    if (
+      method === "Target.attachToTarget" &&
+      typeof liveParams?.targetId === "string"
+    ) {
+      // The model attached itself: the observer follows it there.
+      state.observer?.attach(liveParams.targetId);
+    }
     if (method === "Page.captureScreenshot") this.#assertFits(result);
     return result;
   }
@@ -584,7 +608,14 @@ export class BrowserSession {
     return (await this.#connect()).connected.spec();
   }
 
-  /** Recent CDP traffic on this session's connection, newest last. */
+  /**
+   * Recent CDP traffic on this session's connection, newest last. The
+   * observer's traffic is on its own connection, so it isn't here, except
+   * that Browser Run's `Cloudflare.*` events arrive on every connection
+   * tagged with every connection's session ids, so this log can show the
+   * observer's session id. That's harmless: the id doesn't work on this
+   * connection.
+   */
   async getDebugLog(input?: BrowserDebugLogInput): Promise<unknown[]> {
     const { limit } = validate(
       "browser.getDebugLog",
@@ -626,6 +657,7 @@ export class BrowserSession {
       }
       if (!state) return undefined;
       this.#state = undefined;
+      let observed: BrowserObserverRecord | undefined;
       try {
         const open = await this.#recordNewTabs(state);
         const active = await this.#saveActiveTarget(state, open);
@@ -633,9 +665,14 @@ export class BrowserSession {
           await this.#recordSharedTab(state, active);
         }
       } finally {
+        observed = await state.observer?.close();
         state.connected.cdp.disconnect();
       }
-      return { ...state.report, notices: reportNotices(state.report) };
+      return {
+        ...state.report,
+        notices: [...reportNotices(state.report), ...observerNotices(observed)],
+        ...(observed ? { observed } : {})
+      };
     } finally {
       // Release the lock only after the active tab is saved, so the next
       // session in the scope finds where this one left off.
@@ -716,18 +753,24 @@ export class BrowserSession {
   }
 
   async #open(): Promise<ConnectedState> {
-    const connected = await this.#browser.connect(
-      this.#scope === undefined ? undefined : { scope: this.#scope }
-    );
+    const connected = await this.#browser.connect({
+      ...(this.#scope === undefined ? {} : { scope: this.#scope }),
+      observer: true
+    });
+    const observer = connected.observer
+      ? new HostObserver(connected.observer, this.#browser.name)
+      : undefined;
     let initialPages: TargetInfo[];
     try {
       initialPages = await this.#pages(connected.cdp);
     } catch (error) {
+      void observer?.close();
       connected.cdp.disconnect();
       throw error;
     }
     const state: ConnectedState = {
       connected,
+      ...(observer ? { observer } : {}),
       attached: new Map(),
       workedIn: new Set(),
       initialPages: new Set(initialPages.map((page) => page.targetId)),
@@ -927,6 +970,8 @@ export class BrowserSession {
     })) as LiveSessionId;
     state.attached.set(targetId, live);
     state.workedIn.add(targetId);
+    // In the background: the model's commands never wait for the observer.
+    state.observer?.attach(targetId);
     return live;
   }
 

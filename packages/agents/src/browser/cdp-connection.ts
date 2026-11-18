@@ -214,8 +214,9 @@ export class CdpConnection {
    * session on this connection and from the browser itself. Pass a session
    * id to hear one session's, or `sessionId: null` for browser-level events
    * only. Browser Run, for example, sends `Cloudflare.handoffComplete` once
-   * at browser level and once more in each attached session, so a listener
-   * that wants it once passes `sessionId: null`.
+   * at browser level and once per attached session on any connection, so
+   * a listener that wants it once passes `sessionId: null`, and one that
+   * filters by session must use its own connection's session ids.
    *
    * Handlers run synchronously, in the order they were added, as each event
    * arrives: an event is delivered before the next message is handled, so

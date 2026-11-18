@@ -45,6 +45,7 @@ export {
   Browser,
   MAX_BROWSER_SCOPES,
   type BrowserConnection,
+  type BrowserObserverConnection,
   type BrowserConnectOptions,
   type BrowserOptions,
   type BrowserInternalHosts,
@@ -53,6 +54,14 @@ export {
 } from "./browser";
 
 export { DEFAULT_BROWSER_SCOPE, conversationScope } from "./scope";
+
+export type {
+  BrowserObservedDocument,
+  BrowserObservedNavigation,
+  BrowserObservedRedirect,
+  BrowserObservedTab,
+  BrowserObserverRecord
+} from "./observer";
 
 export type { BrowserFunction, BrowserFunctionDocs } from "./browser-functions";
 
