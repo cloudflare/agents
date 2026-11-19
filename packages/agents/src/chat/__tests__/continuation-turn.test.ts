@@ -1377,6 +1377,7 @@ describe("what a continuation turn runs", () => {
       lastTurnReplyId: () => undefined,
       streamed: new Map<string, boolean>(),
       firing: new Set<object>(),
+      unscheduled: new Set<string>(),
       dropped: () => {}
     };
     host.model = async (continuation) => {
