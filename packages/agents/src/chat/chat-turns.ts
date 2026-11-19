@@ -278,6 +278,7 @@ export class ChatTurns<
       autoContinuation: this.autoContinuation,
       aborts: this.aborts,
       messages: () => host.messages(),
+      lastTurnReplyId: () => host.lastTurnReplyId?.(),
       streamed: new Map(),
       firing: new Set(),
       dropped: (event) => host.continuationDropped?.(event)

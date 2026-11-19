@@ -465,5 +465,4 @@ describe("continuationTargetIsLatest", () => {
       ).toBe(true);
     });
   });
-
 });

@@ -1473,8 +1473,11 @@ export class OverflowRecoveryTestAgent extends Think {
    * connection-less continuation is the continuation turn with no client
    * attached, so a test can start it directly.
    */
-  async testContinuationOverflow(): Promise<OverflowChatResult> {
+  async testContinuationOverflow(
+    alwaysOverflow = false
+  ): Promise<OverflowChatResult> {
     await this._seedReactiveOverflow();
+    this.alwaysOverflow = alwaysOverflow;
     this._model = undefined;
     // A continuation answers a result: the transcript ends in one.
     const reply = await this.session.appendMessage({

@@ -111,6 +111,11 @@ class FakeHost implements ChatTurnsHost {
   generateRequestId() {
     return `cont-${++this.ids}`;
   }
+  /** The last reply a turn stored, as a host that records it reports it. */
+  lastReply: string | null = null;
+  lastTurnReplyId() {
+    return this.lastReply;
+  }
   keepAliveWhile<T>(fn: () => Promise<T>) {
     return fn();
   }
@@ -346,6 +351,36 @@ describe("the continuation turn", () => {
     expect(quiet.ran).toEqual([]);
     expect(quiet.errors).toEqual([]);
     expect(quietTurns.continuation.pending).toBeNull();
+  });
+
+  it("continues a reply that only a message appended without a turn follows", async () => {
+    // A detached run's note, stored with no turn. It is text, and it is not
+    // the model's answer to the tool result.
+    host.lastReply = "a1";
+    await result("a1");
+    host.transcript = [
+      ...host.transcript,
+      { id: "note", role: "assistant", parts: [{ type: "text", text: "FYI" }] }
+    ];
+    await fire();
+    await drain();
+
+    expect(host.ran).toEqual(["cont-1"]);
+    expect(host.droppedEvents).toEqual([]);
+  });
+
+  it("does not continue a reply that went on to its answer before a message was appended", async () => {
+    host.lastReply = "a1";
+    await result("a1");
+    host.transcript = [
+      ...withAnswer(host.transcript),
+      { id: "note", role: "assistant", parts: [{ type: "text", text: "FYI" }] }
+    ];
+    await fire();
+    await drain();
+
+    expect(host.ran).toEqual([]);
+    expect(host.droppedEvents).toEqual(["cont-1:answered"]);
   });
 
   it("does nothing when no continuation is pending", async () => {
@@ -911,6 +946,7 @@ describe("what a continuation turn runs", () => {
       autoContinuation: turns.autoContinuation,
       aborts: turns.aborts,
       messages: () => host.transcript,
+      lastTurnReplyId: () => undefined,
       streamed: new Map<string, boolean>(),
       firing: new Set<object>(),
       dropped: () => {}
@@ -928,6 +964,7 @@ describe("what a continuation turn runs", () => {
       autoContinuation: turns.autoContinuation,
       aborts: turns.aborts,
       messages: () => host.transcript,
+      lastTurnReplyId: () => undefined,
       streamed: new Map<string, boolean>(),
       firing: new Set<object>(),
       dropped: () => {}

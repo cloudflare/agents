@@ -16419,8 +16419,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     if (connection || !autoContinue) {
       // Without `autoContinue` this re-arms the barrier, so a sibling that
       // already opted in fires once the batch is whole.
-      await this._turns.applyInteraction(apply, autoContinue, () =>
-        this._continuationSpec(connection as Connection)
+      await this._turns.applyInteraction(
+        apply,
+        autoContinue,
+        () => this._continuationSpec(connection as Connection),
+        (run) => this._enqueueInteractionOutcome(run)
       );
     } else {
       let outcome: ToolInteractionOutcome | undefined;

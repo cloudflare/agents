@@ -66,6 +66,11 @@ export interface ContinuationTurnParts<
     parts: ReadonlyArray<unknown>;
   }>;
   /**
+   * The id of the last reply a turn stored, when the host records it. See
+   * {@link continuationTargetIsLatest}.
+   */
+  lastTurnReplyId(): string | null | undefined;
+  /**
    * The continuation turns running now, by request id, and whether each
    * one's stream has started. {@link runContinuationBody} adds and removes
    * the entry. {@link continuationStreamStarted} only flips it, so a stream
@@ -168,8 +173,8 @@ export interface ContinuationTurn<
  * check for every continuation, whatever scheduled it:
  *
  * - `moved_on`: the conversation moved on since its result was stored (a
- *   newer question or reply, a regenerate, a clear), so none of the
- *   messages it answers is the latest;
+ *   newer question or reply, a regenerate, a clear). A message appended
+ *   without a turn does not count ({@link continuationTargetIsLatest});
  * - `answered`: the message it answers already went on to the model's
  *   answer ({@link transcriptEndsInAnswer}).
  *
@@ -177,11 +182,25 @@ export interface ContinuationTurn<
  * reads it.
  */
 function nothingToAnswer(
-  messages: ReturnType<ContinuationTurnParts["messages"]>,
+  parts: Pick<ContinuationTurnParts, "messages" | "lastTurnReplyId">,
   continuation: Pick<ContinuationPending, "targetMessageIds">
 ): "moved_on" | "answered" | null {
-  if (!continuationTargetIsLatest(messages, continuation)) return "moved_on";
-  if (transcriptEndsInAnswer(messages)) return "answered";
+  const messages = parts.messages();
+  if (
+    !continuationTargetIsLatest(messages, continuation, parts.lastTurnReplyId())
+  ) {
+    return "moved_on";
+  }
+  // The reply it answers is the latest of its messages that is stored. A
+  // message appended after it without a turn is not the model's answer.
+  let reply = messages.length - 1;
+  while (
+    reply >= 0 &&
+    !continuation.targetMessageIds.includes(messages[reply].id)
+  ) {
+    reply--;
+  }
+  if (transcriptEndsInAnswer(messages.slice(0, reply + 1))) return "answered";
   return null;
 }
 
@@ -204,7 +223,7 @@ function tryClaimContinuation<TConnection extends ContinuationConnection>(
   | { dropped: ContinuationDropped["reason"] | null } {
   const pending = parts.continuation.pending;
   if (!pending || pending.requestId !== requestId) return { dropped: null };
-  const dropped = nothingToAnswer(parts.messages(), pending);
+  const dropped = nothingToAnswer(parts, pending);
   if (dropped) return { dropped };
   pending.pastCoalesce = true;
   return { continuation: pending };
@@ -279,10 +298,7 @@ export async function runContinuationTurn<
       return null;
     }
     if (unscheduled) {
-      const dropped = nothingToAnswer(
-        parts.messages(),
-        unscheduled.continuation
-      );
+      const dropped = nothingToAnswer(parts, unscheduled.continuation);
       if (!dropped) return unscheduled.continuation;
       parts.dropped({ requestId, reason: dropped });
       return null;
