@@ -13895,9 +13895,19 @@ export class ThinkAdmissionTestAgent extends Think {
   }
 
   override beforeTurn(ctx: TurnContext): TurnConfig {
-    const body = ctx.body as
+    let body = ctx.body as
       | { tag?: string; chunks?: number; delayMs?: number }
       | undefined;
+    // A turn with no body (a submission) streams slowly when the question
+    // it answers says "slow".
+    if (body?.tag === undefined) {
+      const question = [...ctx.messages]
+        .reverse()
+        .find((message) => message.role === "user");
+      if (JSON.stringify(question?.content ?? "").includes("slow")) {
+        body = { tag: "s", chunks: 30, delayMs: 100 };
+      }
+    }
     const tag = body?.tag ?? "q";
     const chunks = Array.from(
       { length: body?.chunks ?? 3 },

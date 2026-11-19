@@ -17,6 +17,11 @@ const MSG_CHAT_CLEAR = "cf_agent_chat_clear";
 
 type AdmissionStub = {
   resetIsolateForTest(): Promise<void>;
+  submitMessages(
+    messages: UIMessage[],
+    options: { submissionId: string }
+  ): Promise<{ status: string }>;
+  listSubmissions(): Promise<Array<{ submissionId: string; status: string }>>;
   getMessagesForTest(): Promise<UIMessage[]>;
   getAdmissionsForTest(): Promise<
     Array<{ requestId: string; stopped: boolean }>
@@ -254,4 +259,44 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
     expect(messages.map((m) => m.role)).toEqual(["user", "assistant"]);
     expect(await restarted.getAdmissionsForTest()).toEqual([]);
   }, 40_000);
+
+  it("submissions: one running and one pending at the reset each get their own reply, in order", async () => {
+    const binding = "ThinkAdmissionTestAgent";
+    const room = crypto.randomUUID();
+    const stub = await agent(binding, room);
+    await stub.submitMessages([user("u1", "slow one")], { submissionId: "s1" });
+    await stub.submitMessages([user("u2", "quick two")], {
+      submissionId: "s2"
+    });
+    await waitFor(
+      () => stub.listSubmissions(),
+      (subs) =>
+        subs.some((x) => x.submissionId === "s1" && x.status === "running"),
+      5000
+    );
+    await delay(800);
+
+    await reset(binding, room);
+    const restarted = await agent(binding, room);
+    const subs = await waitFor(
+      () => restarted.listSubmissions(),
+      (list) =>
+        list.length === 2 &&
+        list.every((x) => x.status !== "running" && x.status !== "pending")
+    );
+    expect(
+      Object.fromEntries(subs.map((x) => [x.submissionId, x.status]))
+    ).toEqual({ s1: "completed", s2: "completed" });
+    const messages = await restarted.getMessagesForTest();
+    expect(messages.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "assistant"
+    ]);
+    expect(messages[0].id).toBe("u1");
+    expect(textOf(messages[1]).startsWith("s0 ")).toBe(true);
+    expect(messages[2].id).toBe("u2");
+    expect(textOf(messages[3])).toBe(QUICK_REPLY);
+  }, 60_000);
 });

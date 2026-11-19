@@ -11705,6 +11705,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     this._ensureSubmissionTable();
     const row = this._readSubmission(payload.submissionId);
     if (!row || row.status !== "pending") return;
+    if (this._submissionsBehindRecovery.has(row.submission_id)) {
+      // Queued again when the recovery settles.
+      if (await this._chatRecoveryNames()) return;
+      this._submissionsBehindRecovery.delete(row.submission_id);
+    }
     await this._admitTurn({
       admission: "execute-submission",
       trigger: "submission",
@@ -12052,7 +12057,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     }
 
     // Rows still pending (reverted above, or accepted before their run
-    // item existed) get their run queued; queued ones keep their slot.
+    // item existed) get their run queued; queued ones keep their slot. They
+    // run once no interrupted turn waits for recovery.
+    for (const row of this.sql<{ submission_id: string }>`
+      SELECT submission_id FROM cf_think_submissions WHERE status = 'pending'
+    `) {
+      this._submissionsBehindRecovery.add(row.submission_id);
+    }
     await this._queuePendingSubmissionRuns();
   }
 
@@ -16469,7 +16480,16 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           this._turns.turnAccepted(requestId);
         }
       },
-      recoverySettled: () => this._resumeAdmissions(),
+      recoverySettled: () => {
+        this._resumeAdmissions();
+        if (this._submissionsBehindRecovery.size > 0) {
+          void this.keepAliveWhile(() =>
+            this._queuePendingSubmissionRuns()
+          ).catch((error) =>
+            console.error("[Think] failed to queue submissions:", error)
+          );
+        }
+      },
       emitRecoveryEvent: (event) => {
         this._emit(event.type, {
           incidentId: event.incidentId,
@@ -16711,6 +16731,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * so the submission runner must leave them `running`.
    */
   private _recoveryOwnedSubmissions = new Set<string>();
+  /**
+   * Submissions that were pending when this isolate started. They were
+   * accepted behind a turn the reset may have cut off, so they run after
+   * that turn's recovery, as a client request queued behind it does
+   * (`ChatTurns.resumeAdmissions`).
+   */
+  private _submissionsBehindRecovery = new Set<string>();
 
   private _claimSubmissionForRecovery(
     submissionId: string | undefined,
