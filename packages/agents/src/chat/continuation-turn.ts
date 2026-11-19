@@ -232,10 +232,11 @@ function tryClaimContinuation<TConnection extends ContinuationConnection>(
  *    cancelled meanwhile, the model is never called, and the host is told
  *    the continuation was dropped.
  * 4. Run the host's turn body ({@link runContinuationBody}).
- * 5. However the turn ended (ran, failed, or skipped), drop the abort signal
- *    and settle ({@link settleContinuationTurn}), inside the turn. A turn a
- *    chat reset dropped from the queue never started: it only drops its
- *    abort signal and releases the pending continuation if it still owns it.
+ * 5. However the turn ended (ran, failed, or skipped), settle
+ *    ({@link settleContinuationTurn}), inside the turn, and drop the abort
+ *    signal. A turn that never started (the host's enqueue failed, or a
+ *    chat reset dropped it from the queue) only drops its abort signal and
+ *    releases the pending continuation if it still owns it.
  * 6. Once the turn has left the queue, deliver `onChatResponse` for a
  *    failure that was reported.
  *
@@ -269,7 +270,6 @@ export async function runContinuationTurn<
   const firing = {};
   parts.firing.add(firing);
 
-  let started = false;
   const outcome: ContinuationOutcome<TMessage> = { reported: false };
 
   /** What the turn continues, or `null` after telling the host why not. */
@@ -295,7 +295,6 @@ export async function runContinuationTurn<
 
   try {
     await turn.enqueue(requestId, async () => {
-      started = true;
       // On the queue and running: the queue says the chat is busy now.
       parts.firing.delete(firing);
       try {
@@ -304,8 +303,9 @@ export async function runContinuationTurn<
         await runContinuationBody(parts, turn, continuation, signal, outcome);
       } finally {
         // Inside the turn, so the next turn in the queue sees settled slots.
-        parts.aborts.remove(requestId);
-        if (!unscheduled) settleContinuationTurn(parts, requestId);
+        // With no pending continuation of its own there is nothing to
+        // settle, and the settle finds nothing.
+        settleContinuationTurn(parts, requestId);
       }
     });
   } catch (error) {
@@ -315,10 +315,11 @@ export async function runContinuationTurn<
     }
   } finally {
     parts.firing.delete(firing);
-    if (!started) {
-      parts.aborts.remove(requestId);
-      if (!unscheduled) releaseOwnPending(parts, requestId);
-    }
+    // The abort signal goes however the turn ended. The release is for a
+    // turn that never started (the host's enqueue failed, or a reset dropped
+    // the turn from the queue): a turn that ran has settled already.
+    parts.aborts.remove(requestId);
+    releaseOwnPending(parts, requestId);
   }
 
   // The turn has left the queue: `onChatResponse` may start a turn itself.
@@ -400,10 +401,10 @@ async function runContinuationBody<
 function releaseOwnPending<TConnection extends ContinuationConnection>(
   parts: ContinuationTurnParts<TConnection>,
   requestId: string
-): boolean {
-  if (parts.continuation.pending?.requestId !== requestId) return false;
-  releasePending(parts);
-  return true;
+): void {
+  if (parts.continuation.pending?.requestId === requestId) {
+    releasePending(parts);
+  }
 }
 
 /** Free the pending slot and tell its waiting connections there is no stream. */
@@ -489,8 +490,9 @@ export function settleContinuationTurn<
 >(parts: ContinuationTurnParts<TConnection>, requestId: string): void {
   const { continuation } = parts;
   const pending = continuation.pending;
-  if (releaseOwnPending(parts, requestId)) {
+  if (pending?.requestId === requestId) {
     // Its stream never started.
+    releasePending(parts);
   } else if (pending && !pending.pastCoalesce) {
     const deferred = continuation.deferred;
     if (deferred) {

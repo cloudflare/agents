@@ -1,4 +1,12 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach,
+  onTestFinished
+} from "vitest";
 import { AutoContinuationController } from "../auto-continuation-controller";
 import {
   ChatTurns,
@@ -12,6 +20,7 @@ import type {
 import { ContinuationState } from "../continuation-state";
 import {
   continuationStreamStarted,
+  runContinuationTurn,
   transcriptEndsInAnswer,
   type ContinuationTurn
 } from "../continuation-turn";
@@ -105,8 +114,12 @@ class FakeHost implements ChatTurnsHost {
   keepAliveWhile<T>(fn: () => Promise<T>) {
     return fn();
   }
+  /** The continuation turn the last fire started. */
+  fired: Promise<void> = Promise.resolve();
   fireContinuation() {
-    void this.turns.runContinuationTurn(this.turn());
+    this.fired = this.turns.runContinuationTurn(this.turn());
+    // A test that cares awaits `fired`. Nothing else may see a rejection.
+    this.fired.catch(() => {});
   }
 
   /** Continuations the core dropped, with the reason. */
@@ -221,8 +234,14 @@ describe("the continuation turn", () => {
 
   it("runs the model with the pending continuation and an abort signal, then settles", async () => {
     let seen: AbortSignal | undefined;
+    let busyInTurn: boolean | undefined;
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    onTestFinished(() => logged.mockRestore());
     host.model = async (continuation, signal) => {
       seen = signal;
+      // Counted as firing only until the turn starts: from here the queue
+      // says the chat is busy.
+      busyInTurn = turns.hasPendingDecision();
       expect(continuation.pastCoalesce).toBe(true);
       expect(turns.aborts.has(continuation.requestId)).toBe(true);
       await host.stream(continuation.requestId, true);
@@ -232,6 +251,10 @@ describe("the continuation turn", () => {
     await drain();
 
     expect(host.ran).toEqual(["cont-1"]);
+    expect(busyInTurn).toBe(false);
+    // A turn that did not fail has no failure to hand `onChatResponse`.
+    expect(host.reports).toEqual([]);
+    expect(logged).not.toHaveBeenCalled();
     expect(seen?.aborted).toBe(false);
     expect(host.resumed).toEqual(["c1"]);
     expect(turns.continuation.pending).toBeNull();
@@ -299,6 +322,58 @@ describe("the continuation turn", () => {
     expect(host.droppedEvents).toEqual(["cont-1:moved_on"]);
     expect(connection.sent).toEqual([RESUME_NONE]);
     expect(turns.continuation.pending).toBeNull();
+    // A dropped continuation is not a failure: the turn body never ran.
+    expect(host.errors).toEqual([]);
+  });
+
+  it("does nothing when no continuation is pending", async () => {
+    await turns.runContinuationTurn(host.turn());
+
+    expect(host.ran).toEqual([]);
+    expect(host.errors).toEqual([]);
+    expect(turns.aborts.size).toBe(0);
+  });
+
+  it("a turn the host could not enqueue releases the waiting connection and its abort signal", async () => {
+    const turn = host.turn();
+    host.turn = () => ({
+      ...turn,
+      enqueue: async () => {
+        throw new Error("keep-alive lease failed");
+      }
+    });
+    await result("a1");
+    await fire();
+    await drain();
+
+    expect(host.ran).toEqual([]);
+    expect(host.errors).toMatchObject([{ reported: false }]);
+    // The tab is told there is no stream, the slot is free for the next
+    // result, and no controller is left behind.
+    expect(connection.sent).toEqual([RESUME_NONE]);
+    expect(turns.continuation.pending).toBeNull();
+    expect(turns.aborts.size).toBe(0);
+    expect(turns.hasPendingDecision()).toBe(false);
+  });
+
+  it("a newer pending continuation with no deferred result is left as it is", async () => {
+    const second = makeConnection("c2");
+    host.model = async (continuation) => {
+      if (continuation.requestId !== "cont-1") return;
+      host.replyStreaming = true;
+      turns.streamStarted("cont-1", () => {});
+      // Arrives while the turn streams: a pending one, nothing deferred.
+      await result("a1", second);
+      host.replyStreaming = false;
+      turns.replyFinalized();
+    };
+    await result("a1");
+    await fire();
+    await drain();
+
+    expect(host.errors).toEqual([]);
+    expect(turns.continuation.pending?.requestId).toBe("cont-2");
+    expect(turns.continuation.pending?.targetMessageIds).toEqual(["a1"]);
   });
 
   it("a turn a chat reset dropped from the queue leaves the new chat's continuations alone", async () => {
@@ -505,8 +580,12 @@ describe("the continuation turn", () => {
       user("u1"),
       toolReply("a1", "output-available")
     ];
+    let followUpTargets: readonly string[] | undefined;
     host.model = async (continuation) => {
-      if (continuation.requestId !== "cont-1") return;
+      if (continuation.requestId !== "cont-1") {
+        followUpTargets = continuation.targetMessageIds;
+        return;
+      }
       // Deferred, for the latest reply: arrives while the turn waits on
       // the model.
       await result("a1", second);
@@ -523,15 +602,21 @@ describe("the continuation turn", () => {
     await fire();
     await drain();
 
-    // The follow-up still answers the latest reply's result.
+    // The follow-up still answers the latest reply's result: it answers
+    // both messages.
     expect(host.ran).toEqual(["cont-1", "cont-2"]);
+    expect(followUpTargets).toEqual(["a0", "a1"]);
   });
 
   it("leaves a newer pending continuation alone, and lets it cover the deferred result", async () => {
     const second = makeConnection("c2");
     const third = makeConnection("c3");
+    let followUpTargets: readonly string[] | undefined;
     host.model = async (continuation) => {
-      if (continuation.requestId !== "cont-1") return;
+      if (continuation.requestId !== "cont-1") {
+        followUpTargets = continuation.targetMessageIds;
+        return;
+      }
       // Deferred: arrives while the turn waits on the model.
       await result("a1", second);
       host.replyStreaming = true;
@@ -547,8 +632,10 @@ describe("the continuation turn", () => {
     await fire();
     await drain();
 
-    // One follow-up for both results, not two.
+    // One follow-up for both results, not two, and it names their message
+    // once.
     expect(host.ran).toEqual(["cont-1", "cont-2"]);
+    expect(followUpTargets).toEqual(["a1"]);
     expect(turns.continuation.deferred).toBeNull();
     expect(third.sent).toEqual([RESUME_NONE]);
   });
@@ -643,6 +730,8 @@ describe("what a continuation turn runs", () => {
     await fire();
     await drain();
 
+    // The turn never rejects, whatever the hook does.
+    await expect(host.fired).resolves.toBeUndefined();
     expect(host.errors).toMatchObject([{ reported: true }]);
     expect(host.reports.at(-1)).toBe("respond:a1:error:after-turn");
     expect(turns.continuation.pending).toBeNull();
@@ -668,6 +757,19 @@ describe("what a continuation turn runs", () => {
     host.model = async (continuation) => {
       turns.streamStarted(continuation.requestId, () => {});
       throw new Error("persist failed");
+    };
+    await result("a1");
+    await fire();
+    await drain();
+
+    expect(host.reports).toEqual([]);
+    expect(host.errors).toMatchObject([{ reported: false }]);
+  });
+
+  it("does not report a turn the Durable Object's reset cut off", async () => {
+    // Recovery continues it after the restart: clients are told nothing.
+    host.model = async () => {
+      throw new Error("Durable Object reset because its code was updated.");
     };
     await result("a1");
     await fire();
@@ -796,6 +898,30 @@ describe("what a continuation turn runs", () => {
     }
 
     expect(parts.streamed.size).toBe(0);
+  });
+
+  it("a continuation turn leaves no record behind", async () => {
+    const parts = {
+      continuation: turns.continuation,
+      autoContinuation: turns.autoContinuation,
+      aborts: turns.aborts,
+      messages: () => host.transcript,
+      streamed: new Map<string, boolean>(),
+      firing: new Set<object>(),
+      dropped: () => {}
+    };
+    host.model = async (continuation) => {
+      expect(parts.streamed.get(continuation.requestId)).toBe(false);
+      continuationStreamStarted(parts, continuation.requestId, () => {});
+      expect(parts.streamed.get(continuation.requestId)).toBe(true);
+    };
+    await result("a1");
+    turns.autoContinuation.cancelTimer();
+    await runContinuationTurn(parts, host.turn());
+
+    expect(host.ran).toEqual(["cont-1"]);
+    expect(parts.streamed.size).toBe(0);
+    expect(parts.firing.size).toBe(0);
   });
 
   it("the stream's end clears the continuation it made active", async () => {
@@ -980,6 +1106,28 @@ describe("transcriptEndsInAnswer", () => {
       ])
     ).toBe(false);
     expect(transcriptEndsInAnswer([assistant(step, text, step)])).toBe(true);
+  });
+
+  it("counts a file as the model's answer", () => {
+    const file = { type: "file", mediaType: "image/png", url: "data:," };
+    expect(transcriptEndsInAnswer([assistant(step, tool, step, file)])).toBe(
+      true
+    );
+  });
+
+  it("does not count empty text as an answer", () => {
+    expect(
+      transcriptEndsInAnswer([
+        assistant(step, tool, step, { type: "text", text: "" })
+      ])
+    ).toBe(false);
+  });
+
+  it("looks past a part with no type", () => {
+    expect(transcriptEndsInAnswer([assistant(step, text, {})])).toBe(true);
+    expect(transcriptEndsInAnswer([assistant(step, tool, { type: 7 })])).toBe(
+      false
+    );
   });
 
   it("is false when the latest message is not an assistant reply", () => {
