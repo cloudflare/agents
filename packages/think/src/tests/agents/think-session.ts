@@ -2588,6 +2588,32 @@ export class ThinkTestAgent extends Think {
     }
   }
 
+  /**
+   * A `saveMessages` turn whose stream stalls: the watchdog cuts it off and
+   * hands it to recovery. Returns what the caller of `saveMessages` gets.
+   */
+  async testSaveMessagesWithStall(
+    afterChunks: number,
+    timeoutMs: number
+  ): Promise<{ status: string; reason: string | null }> {
+    this._stallAfterChunks = afterChunks;
+    this._stallAttemptsRemaining = 1;
+    this.chatStreamStallTimeoutMs = timeoutMs;
+    try {
+      const result = await this.saveMessages([
+        {
+          id: crypto.randomUUID(),
+          role: "user",
+          parts: [{ type: "text", text: "trigger stall" }]
+        }
+      ]);
+      return { status: result.status, reason: result.reason ?? null };
+    } finally {
+      this._stallAfterChunks = null;
+      this._stallAttemptsRemaining = null;
+    }
+  }
+
   async testChatWithStallThenRecover(
     afterChunks: number,
     timeoutMs: number

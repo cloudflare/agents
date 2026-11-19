@@ -250,6 +250,7 @@ describe("Think — agentic loop", () => {
       beforeTurnContinuations: boolean[];
       promptIncludedSeedMarker: boolean[];
       status?: string;
+      responses?: Array<{ status: string; continuation: boolean }>;
       terminalFrames?: Array<{ error?: boolean; outcome?: string }>;
       terminalRecord?: string | null;
     };
@@ -492,6 +493,10 @@ describe("Think — agentic loop", () => {
       expect(result.status).toBe("aborted");
       expect(result.errorClassification).toBeUndefined();
       expect(result.terminalFrames).toEqual([{ outcome: "aborted" }]);
+      // ...and onChatResponse hears of the turn once, as aborted.
+      expect(result.responses).toEqual([
+        { status: "aborted", continuation: false }
+      ]);
     });
 
     it("ends the stream of a continued turn whose overflow cannot be recovered", async () => {
@@ -509,6 +514,11 @@ describe("Think — agentic loop", () => {
       expect(result.errorClassification).toBe("context_overflow");
       expect(result.terminalFrames).toEqual([{ error: true }]);
       expect(result.terminalRecord).toBe(result.error);
+      // The failed turn fires onChatResponse once, as it did before the
+      // continuation had overflow recovery.
+      expect(result.responses).toEqual([
+        { status: "error", continuation: true }
+      ]);
     });
 
     it("ends the stream of a retried turn whose overflow cannot be recovered", async () => {
@@ -523,6 +533,9 @@ describe("Think — agentic loop", () => {
       expect(result.status).toBe("error");
       expect(result.terminalFrames).toEqual([{ error: true }]);
       expect(result.terminalRecord).toBe(result.error);
+      expect(result.responses).toEqual([
+        { status: "error", continuation: false }
+      ]);
     });
 
     it("recovers a context overflow during continueLastTurn", async () => {

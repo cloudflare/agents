@@ -349,6 +349,23 @@ describe("AIChatAgent saveMessages — external AbortSignal", () => {
     expect(replyText).toBe("");
   });
 
+  it("says a turn its caller stopped was stopped", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getAgentByName(env.SlowStreamAgent, room);
+
+    const result = await agentStub.testSaveMessagesWithSignal("Long response", {
+      abortAfterMs: 150,
+      body: {
+        format: "plaintext",
+        useAbortSignal: true,
+        chunkCount: 30,
+        chunkDelayMs: 50
+      }
+    });
+
+    expect(result).toMatchObject({ status: "aborted", reason: "stopped" });
+  });
+
   it("returns 'aborted' when aborted mid-stream and persists partial chunks", async () => {
     const room = crypto.randomUUID();
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);

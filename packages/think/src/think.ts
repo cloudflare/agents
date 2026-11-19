@@ -1402,6 +1402,8 @@ function nextDeclaredScheduleTime(
 type StreamResultStatus = {
   status: Exclude<SaveMessagesResult["status"], "skipped">;
   error?: string;
+  /** `"interrupted"` for a reply cut off and handed to recovery. */
+  reason?: SaveMessagesResult["reason"];
   output?: unknown;
 };
 
@@ -13280,11 +13282,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         // overflow terminal is reported the same way.
         let overflowError: string | undefined;
         let overflowRequested = false;
+        let overflowPartial: UIMessage | undefined;
         const overflowRecovery = this._overflowReactiveEnabled
           ? {
-              onRetry: (error?: string) => {
+              onRetry: (error: string | undefined, partial: UIMessage) => {
                 overflowRequested = true;
                 overflowError = error;
+                overflowPartial = partial;
               }
             }
           : undefined;
@@ -13322,23 +13326,45 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           // overflow, so that falls through to terminal too.
           if (shortened && !abortSignal?.aborted) continue;
         }
+        // The reply path left this turn without its terminal: no frame, no
+        // terminal record, no `onChatResponse`. Every turn that ends gets
+        // all three, here, whatever started it.
+        const end = async (
+          status: "aborted" | "error",
+          error?: string
+        ): Promise<StreamResultStatus> => {
+          terminal(
+            status === "error"
+              ? { body: error, error: true }
+              : { body: "", outcome: "aborted" }
+          );
+          // Records the terminal status, then calls `onChatResponse` with
+          // what the last attempt streamed.
+          await this._fireLiveResponseHook({
+            message: overflowPartial ?? {
+              id: crypto.randomUUID(),
+              role: "assistant",
+              parts: []
+            },
+            requestId,
+            continuation,
+            status,
+            ...(error !== undefined && { error })
+          });
+          return { status, ...(error !== undefined && { error }) };
+        };
         if (abortSignal?.aborted) {
           // Stopped at the overflow or while compacting: the caller asked
           // for a stop, so that is what it is told.
-          terminal({ body: "", outcome: "aborted" });
-          await this._recordTerminalChatStatus("aborted", requestId, "");
-          return { status: "aborted" };
+          return end("aborted");
         }
         // Budget spent or compaction no-op: surface terminally through
         // onChatError (classified), so the turn never loops or ends silently
         // with no answer.
-        const message = this._finalizeContextOverflowError(
-          requestId,
-          overflowError
+        return end(
+          "error",
+          this._finalizeContextOverflowError(requestId, overflowError)
         );
-        terminal({ body: message, error: true });
-        await this._recordTerminalChatStatus("error", requestId, message);
-        return { status: "error", error: message };
       }
     };
 
@@ -14786,7 +14812,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
        * so the driver can compact and re-run, and `{ status: "aborted" }` is
        * returned. Pass only while the retry budget allows.
        */
-      overflowRecovery?: { onRetry: (error?: string) => void };
+      overflowRecovery?: {
+        /**
+         * @param partial - What this attempt streamed before the overflow.
+         *   It is not stored. A driver with no retry left hands it to
+         *   `onChatResponse`.
+         */
+        onRetry: (error: string | undefined, partial: UIMessage) => void;
+      };
       /**
        * Stream into the assistant leaf (same id, existing parts) instead of a
        * new assistant message. Recovery continuations set this so an
@@ -15079,7 +15112,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         this._completeSubmissionRetryStream(streamId, requestId);
         this._pendingResumeConnections.clear();
         doneSent = true;
-        options.overflowRecovery.onRetry(streamError);
+        options.overflowRecovery.onRetry(streamError, accumulator.toMessage());
         this._streamingAssistant = null;
         return { status: "aborted" };
       }
@@ -15173,7 +15206,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           // Plain clear (no auto-continuation re-check): recovery re-runs the
           // turn and its own stream finalize re-triggers the held barrier.
           this._streamingAssistant = null;
-          return { status: "aborted" };
+          return { status: "aborted", reason: "interrupted" };
         }
         // A declined continuation (`continue: false`) falls through: the turn
         // ends as the stream error it hit.
@@ -15187,7 +15220,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           this._pendingResumeConnections.clear();
           doneSent = true;
           this._streamingAssistant = null;
-          return { status: "aborted" };
+          return { status: "aborted", reason: "interrupted" };
         }
       }
       streamError = error instanceof Error ? error.message : "Stream error";

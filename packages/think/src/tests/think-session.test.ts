@@ -622,6 +622,16 @@ describe("Think — error handling", () => {
     expect(result.assistantMessages).toBe(1);
   });
 
+  it("tells the caller of saveMessages that a stalled turn was interrupted, not stopped", async () => {
+    const agent = await freshAgent(`stall-save-${crypto.randomUUID()}`);
+
+    // The turn is handed to recovery, which may still finish the reply.
+    expect(await agent.testSaveMessagesWithStall(3, 50)).toEqual({
+      status: "aborted",
+      reason: "interrupted"
+    });
+  });
+
   it("recovers an interrupted recovery continuation into the message it continues, however often (#2780)", async () => {
     const agent = await freshAgent(
       `continuation-orphan-${crypto.randomUUID()}`
@@ -3114,6 +3124,8 @@ describe("Think — saveMessages with external AbortSignal", () => {
       await agent.testSaveMessagesAbortMidStream("Long response", 100);
 
     expect(result.status).toBe("aborted");
+    // The caller stopped it.
+    expect(result.reason).toBe("stopped");
     // The onChatResponse hook fires with status: "aborted" too.
     expect(lastResponseStatus).toBe("aborted");
     // Both user and partial assistant messages should be persisted.

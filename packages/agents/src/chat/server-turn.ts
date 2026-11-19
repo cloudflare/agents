@@ -27,7 +27,7 @@
  */
 
 import type { AbortRegistry } from "./abort-registry";
-import type { SaveMessagesResult } from "./lifecycle";
+import type { AbortedTurnReason, SaveMessagesResult } from "./lifecycle";
 import type { TurnQueue } from "./turn-queue";
 
 export type ServerTurnStatus = SaveMessagesResult["status"];
@@ -37,6 +37,12 @@ export interface ServerTurnOutcome {
   status: ServerTurnStatus;
   /** The error message, when `status` is `"error"`. */
   error?: string;
+  /**
+   * Why the turn is `aborted`. A reply path sets `"interrupted"` for a turn
+   * it handed to recovery. The core fills in `"stopped"` for every other
+   * aborted turn, and drops the field for any other status.
+   */
+  reason?: AbortedTurnReason;
 }
 
 /** What `prepare` hands back: the input to store, or a reason to stop. */
@@ -172,12 +178,12 @@ export async function runServerTurn<TInput = undefined>(
       if (endsHere()) return;
       input = prepared.input;
     }
+    // From here the turn stores its messages or calls the model.
+    touched = true;
     if (turn.persist) {
-      touched = true;
       await turn.persist(input);
       if (endsHere()) return;
     }
-    touched = true;
     const ran = await turn.run(signal, input);
     if (ran) {
       outcome = ran;
@@ -214,7 +220,15 @@ export async function runServerTurn<TInput = undefined>(
   // The status was settled when the turn's work ended. A reset that lands
   // later, while the host's queue wrapper is still busy with the turn (its
   // `onChatResponse`), changes nothing about a turn that already finished.
-  return outcome;
+  return {
+    status: outcome.status,
+    ...(outcome.error !== undefined && { error: outcome.error }),
+    // `aborted` always says why. Only a reply path knows of an interruption;
+    // everything else that aborts a turn is a stop.
+    ...(outcome.status === "aborted" && {
+      reason: outcome.reason ?? "stopped"
+    })
+  };
 }
 
 /**
@@ -282,7 +296,8 @@ export function toSaveMessagesResult(
   return {
     requestId,
     status: outcome.status,
-    ...(outcome.error !== undefined && { error: outcome.error })
+    ...(outcome.error !== undefined && { error: outcome.error }),
+    ...(outcome.reason !== undefined && { reason: outcome.reason })
   };
 }
 

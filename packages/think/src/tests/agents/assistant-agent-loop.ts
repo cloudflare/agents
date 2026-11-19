@@ -818,6 +818,8 @@ type OverflowChatResult = {
   terminalFrames?: Array<{ error?: boolean; outcome?: string }>;
   /** The terminal record a client that connects later would get. */
   terminalRecord?: string | null;
+  /** Each `onChatResponse` call for the turn. */
+  responses?: Array<{ status: string; continuation: boolean }>;
 };
 
 /**
@@ -1386,6 +1388,7 @@ export class OverflowRecoveryTestAgent extends Think {
     this.compactionEventPayloads = [];
     this.proactiveStepPrompts = [];
     this._terminalFrames = [];
+    this._responses = [];
 
     await this.session.appendMessage({
       id: crypto.randomUUID(),
@@ -1400,6 +1403,14 @@ export class OverflowRecoveryTestAgent extends Think {
   }
 
   private _terminalFrames: Array<{ error?: boolean; outcome?: string }> = [];
+  private _responses: Array<{ status: string; continuation: boolean }> = [];
+
+  override onChatResponse(result: ChatResponseResult): void {
+    this._responses.push({
+      status: result.status,
+      continuation: result.continuation
+    });
+  }
 
   override broadcast(
     msg: string | ArrayBuffer | ArrayBufferView,
@@ -1433,6 +1444,7 @@ export class OverflowRecoveryTestAgent extends Think {
     );
     return {
       status: result.status,
+      responses: [...this._responses],
       terminalFrames: [...this._terminalFrames],
       terminalRecord: record?.body ?? null,
       done: result.status === "completed",

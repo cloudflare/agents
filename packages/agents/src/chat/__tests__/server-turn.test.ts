@@ -5,6 +5,7 @@ import {
   pinnedOr,
   prepareTurnMessages,
   runServerTurn,
+  toSaveMessagesResult,
   type ServerChatTurn,
   type ServerTurnParts
 } from "../server-turn";
@@ -108,7 +109,7 @@ describe("runServerTurn", () => {
     parts.aborts.destroyAll();
     release();
 
-    expect(await pending).toEqual({ status: "aborted" });
+    expect(await pending).toEqual({ status: "aborted", reason: "stopped" });
     // Nothing of the turn runs: no prepare, nothing stored, no model call,
     // and the host's state is left as it was.
     expect(log).toEqual([]);
@@ -125,7 +126,7 @@ describe("runServerTurn", () => {
         }
       })
     );
-    expect(result).toEqual({ status: "aborted" });
+    expect(result).toEqual({ status: "aborted", reason: "stopped" });
     // It stored nothing, so the host is not told.
     expect(log).toEqual([]);
   });
@@ -140,16 +141,117 @@ describe("runServerTurn", () => {
         }
       })
     );
-    expect(result).toEqual({ status: "aborted" });
+    expect(result).toEqual({ status: "aborted", reason: "stopped" });
     expect(log).toEqual(["s1:prepare", "s1:persist", "s1:onAborted"]);
   });
 
-  it("rejects a request id the registry cannot key a controller by", async () => {
+  it("rejects a request id the registry cannot key a controller by, before it queues anything", async () => {
+    let enqueued = false;
     await expect(
-      runServerTurn(parts, turn(undefined as unknown as string))
-    ).rejects.toThrow(TypeError);
+      runServerTurn(
+        parts,
+        turn(undefined as unknown as string, {
+          enqueue: async (run) => {
+            enqueued = true;
+            await run();
+            return "completed";
+          }
+        })
+      )
+    ).rejects.toThrow("runServerTurn: requestId must be a string");
+    // Without the guard the turn would be admitted and fail later, inside
+    // the queue, with whatever the first use of the missing signal throws.
+    expect(enqueued).toBe(false);
     expect(log).toEqual([]);
-    expect(parts.queue.queuedCount()).toBe(0);
+  });
+
+  it("reports completed for a run that returns nothing and was not stopped", async () => {
+    const result = await runServerTurn(
+      parts,
+      turn("s1", { run: async () => {} })
+    );
+    expect(result).toStrictEqual({ status: "completed" });
+  });
+
+  it("tells the host about a stopped turn that has nothing to store but did run", async () => {
+    // continueLastTurn, a recovery continue: no persist step.
+    const result = await runServerTurn(
+      parts,
+      turn("s1", {
+        prepare: undefined,
+        persist: undefined,
+        run: async () => {
+          parts.aborts.cancel("s1");
+        }
+      })
+    );
+    expect(result).toEqual({ status: "aborted", reason: "stopped" });
+    expect(log).toEqual(["s1:onAborted"]);
+  });
+
+  it("ends a stopped turn whose host has no onAborted hook", async () => {
+    const result = await runServerTurn(
+      parts,
+      turn("s1", {
+        onAborted: undefined,
+        run: async () => {
+          parts.aborts.cancel("s1");
+        }
+      })
+    );
+    expect(result).toEqual({ status: "aborted", reason: "stopped" });
+  });
+
+  it("drops the controller and the listener when the turn's work ends, before the host's queue wrapper returns", async () => {
+    const controller = new AbortController();
+    let registeredAfterTurn: boolean | undefined;
+    let abortedByLateSignal: boolean | undefined;
+    await runServerTurn(
+      parts,
+      turn("s1", {
+        signal: controller.signal,
+        enqueue: async (run) => {
+          await run();
+          // The host is still busy with the turn here (its onChatResponse).
+          registeredAfterTurn = parts.aborts.has("s1");
+          const later = parts.aborts.getSignal("s1");
+          controller.abort();
+          abortedByLateSignal = later?.aborted;
+          parts.aborts.remove("s1");
+          return "completed";
+        }
+      })
+    );
+    expect(registeredAfterTurn).toBe(false);
+    // The caller's signal is no longer linked to this request id.
+    expect(abortedByLateSignal).toBe(false);
+  });
+
+  it("says a turn its reply path handed to recovery was interrupted, not stopped", async () => {
+    const result = await runServerTurn(
+      parts,
+      turn("s1", {
+        run: async () => ({ status: "aborted", reason: "interrupted" })
+      })
+    );
+    expect(result).toStrictEqual({ status: "aborted", reason: "interrupted" });
+    expect(log).not.toContain("s1:onAborted");
+  });
+
+  it("gives a reason only for an aborted turn", async () => {
+    const completed = await runServerTurn(
+      parts,
+      turn("s1", {
+        // A reply path that left a reason on a turn that then completed.
+        run: async () => ({ status: "completed", reason: "interrupted" })
+      })
+    );
+    expect(completed).toStrictEqual({ status: "completed" });
+    const failed = await runServerTurn(
+      parts,
+      turn("s2", { run: async () => ({ status: "error", error: "boom" }) })
+    );
+    expect(failed).toStrictEqual({ status: "error", error: "boom" });
   });
 
   it("stores nothing for a caller signal aborted before the call", async () => {
@@ -159,7 +261,7 @@ describe("runServerTurn", () => {
       parts,
       turn("s1", { signal: controller.signal })
     );
-    expect(result).toEqual({ status: "aborted" });
+    expect(result).toEqual({ status: "aborted", reason: "stopped" });
     expect(log).toEqual([]);
     expect(parts.aborts.size).toBe(0);
   });
@@ -174,7 +276,7 @@ describe("runServerTurn", () => {
     await settle();
     controller.abort();
     release();
-    expect(await pending).toEqual({ status: "aborted" });
+    expect(await pending).toEqual({ status: "aborted", reason: "stopped" });
     expect(log).toEqual([]);
   });
 
@@ -192,7 +294,7 @@ describe("runServerTurn", () => {
         }
       })
     );
-    expect(result).toEqual({ status: "aborted" });
+    expect(result).toEqual({ status: "aborted", reason: "stopped" });
     expect(log).toContain("s1:aborted:true");
     // The host already handled an aborted reply.
     expect(log).not.toContain("s1:onAborted");
@@ -207,7 +309,7 @@ describe("runServerTurn", () => {
         }
       })
     );
-    expect(result).toEqual({ status: "aborted" });
+    expect(result).toEqual({ status: "aborted", reason: "stopped" });
     expect(log).toContain("s1:onAborted");
   });
 
@@ -223,7 +325,7 @@ describe("runServerTurn", () => {
       })
     );
     expect(aborted).toBe(true);
-    expect(result).toEqual({ status: "aborted" });
+    expect(result).toEqual({ status: "aborted", reason: "stopped" });
   });
 
   it("lets a completed reply stand when a stop lands after it finished", async () => {
@@ -280,7 +382,7 @@ describe("runServerTurn", () => {
     await settle();
     parts.aborts.cancel("s1");
     release();
-    expect(await pending).toEqual({ status: "aborted" });
+    expect(await pending).toEqual({ status: "aborted", reason: "stopped" });
     expect(log).toEqual([]);
   });
 
@@ -331,7 +433,7 @@ describe("runServerTurn", () => {
       parts,
       turn("s1", { prepare: async () => ({ declined: "aborted" }) })
     );
-    expect(result).toEqual({ status: "aborted" });
+    expect(result).toEqual({ status: "aborted", reason: "stopped" });
     // No onAborted: the host declined the turn itself.
     expect(log).toEqual([]);
   });
@@ -347,7 +449,7 @@ describe("runServerTurn", () => {
         }
       })
     );
-    expect(result).toEqual({ status: "aborted" });
+    expect(result).toEqual({ status: "aborted", reason: "stopped" });
     expect(log).toEqual([]);
   });
 
@@ -518,6 +620,25 @@ describe("mapServerTurnOutcome", () => {
       "completed"
     );
     expect(map("aborted", { reported: true })).toBe("aborted");
+  });
+});
+
+describe("toSaveMessagesResult", () => {
+  it("carries only the fields the outcome has", () => {
+    expect(toSaveMessagesResult("r1", { status: "completed" })).toStrictEqual({
+      requestId: "r1",
+      status: "completed"
+    });
+    expect(
+      toSaveMessagesResult("r1", { status: "error", error: "boom" })
+    ).toStrictEqual({ requestId: "r1", status: "error", error: "boom" });
+    expect(
+      toSaveMessagesResult("r1", { status: "aborted", reason: "interrupted" })
+    ).toStrictEqual({
+      requestId: "r1",
+      status: "aborted",
+      reason: "interrupted"
+    });
   });
 });
 

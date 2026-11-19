@@ -601,7 +601,7 @@ describe("ChatTurns", () => {
       const log: Log = [];
       await expect(
         request(undefined as unknown as string, log)
-      ).rejects.toThrow(TypeError);
+      ).rejects.toThrow("runClientRequest: requestId must be a string");
       // Nothing was accepted: no pre-stream mark, no persist, no queue.
       expect(log).toEqual([]);
       expect(turns.preStream.hasInFlight()).toBe(false);

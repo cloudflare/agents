@@ -85,10 +85,12 @@ export type SaveMessagesOptions = {
  * - `"skipped"` — the turn was invalidated mid-flight, typically by a
  *   `CHAT_CLEAR` protocol message that bumped the turn-queue
  *   generation.
- * - `"aborted"` — the turn started but was cancelled before
- *   completion, either by `MSG_CHAT_CANCEL` over the chat WebSocket or
- *   by an external `AbortSignal` passed via {@link SaveMessagesOptions}.
- *   Partial chunks streamed before the abort are still persisted.
+ * - `"aborted"` — the turn did not run to completion. `reason` says why:
+ *   `"stopped"` when it was cancelled (by `MSG_CHAT_CANCEL` over the chat
+ *   WebSocket or by an external `AbortSignal` passed via
+ *   {@link SaveMessagesOptions}), `"interrupted"` when its reply was cut off
+ *   and handed to chat recovery, which may still finish it. Partial chunks
+ *   streamed before the abort are still persisted.
  * - `"error"` — the turn ran but ended with a stream error. Partial chunks
  *   streamed before the error are still persisted.
  */
@@ -99,7 +101,20 @@ export type SaveMessagesResult = {
   status: "completed" | "error" | "skipped" | "aborted";
   /** Error message when `status` is `"error"`. */
   error?: string;
+  /**
+   * Why the turn ended, when `status` is `"aborted"`.
+   *
+   * - `"stopped"`: something stopped the turn (the caller's signal, a
+   *   client's cancel, `abortAllRequests()`). No reply will follow.
+   * - `"interrupted"`: the reply was cut off (a stalled or dropped provider
+   *   stream) and handed to chat recovery. Nobody stopped it, and the reply
+   *   may still arrive: recovery continues or retries the turn on its own.
+   */
+  reason?: AbortedTurnReason;
 };
+
+/** Why a turn ended `aborted`. See {@link SaveMessagesResult.reason}. */
+export type AbortedTurnReason = "stopped" | "interrupted";
 
 /**
  * Context passed to the `onChatRecovery` hook when an interrupted chat

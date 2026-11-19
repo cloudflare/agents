@@ -122,14 +122,16 @@ describe("ChatTurnFibers", () => {
 
   it("wraps the snapshot and the app's stash data into one envelope", async () => {
     let envelope: unknown;
+    // One snapshot for the run and the expectation: it carries a timestamp.
+    const turnSnapshot = snapshot("r1");
     await fibers.run(
-      { requestId: "r1", continuation: false, snapshot: snapshot("r1") },
+      { requestId: "r1", continuation: false, snapshot: turnSnapshot },
       async () => {
         envelope = fibers.liveClosures.get("nonce-1")!.wrap({ step: 2 });
         expect(fibers.liveTurns.get("r1")?.recoveryData).toEqual({ step: 2 });
       }
     );
-    expect(envelope).toEqual({ __snapshot: snapshot("r1"), user: { step: 2 } });
+    expect(envelope).toEqual({ __snapshot: turnSnapshot, user: { step: 2 } });
   });
 
   it("tells the host once the fiber is accepted, before the turn runs", async () => {
@@ -163,6 +165,57 @@ describe("ChatTurnFibers", () => {
     expect(log[0]).toContain("legacy:chat:r1:");
     expect(log).toContain("accepted");
     expect(log.some((entry) => entry.startsWith("task:"))).toBe(false);
+  });
+
+  it("keeps a running turn's entry when an earlier turn with the same request id ends", async () => {
+    // A turn run inside a queue slot the host already holds reuses the
+    // slot's request id.
+    let releaseFirst!: () => void;
+    let nonces = 0;
+    host.generateId = () => `nonce-${++nonces}`;
+    const first = fibers.run(
+      { requestId: "r1", continuation: false, snapshot: snapshot("r1") },
+      () => new Promise<void>((resolve) => (releaseFirst = resolve))
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    let contextAfterFirstEnded: unknown;
+    const second = fibers.run(
+      { requestId: "r1", continuation: false, snapshot: snapshot("r1") },
+      async () => {
+        releaseFirst();
+        await first;
+        contextAfterFirstEnded = fibers.requestContext("r1");
+      }
+    );
+    await second;
+    // The second turn is still running when the first ends: its entry stays.
+    expect(contextAfterFirstEnded).toBeDefined();
+    expect(fibers.liveTurns.size).toBe(0);
+  });
+
+  it("rejects cleanly when the Task start fails after the turn already rejected", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => void unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      host.runTask = async ({ nonce }) => {
+        fibers.liveClosures.get(nonce)!.settle.reject(new Error("turn failed"));
+        throw new Error("task failed");
+      };
+      await expect(
+        fibers.run(
+          { requestId: "r1", continuation: false, snapshot: snapshot("r1") },
+          async () => "never runs"
+        )
+      ).rejects.toThrow("task failed");
+      // Give an unhandled rejection a tick to surface.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+    // The turn's own rejection was never awaited. It must not leak as an
+    // unhandled rejection.
+    expect(unhandled).toEqual([]);
   });
 
   it("rejects with the turn's error and leaves nothing behind", async () => {

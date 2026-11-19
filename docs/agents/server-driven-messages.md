@@ -449,8 +449,10 @@ When the signal aborts:
 
 - the inference loop's signal aborts (same path `chat-request-cancel` takes);
 - partial chunks streamed before the abort are persisted;
-- `saveMessages` resolves with `{ status: "aborted" }`;
+- `saveMessages` resolves with `{ status: "aborted", reason: "stopped" }`;
 - `onChatResponse` fires with `status: "aborted"`.
+
+`aborted` does not always mean a stop. When the reply is cut off, for example by a stalled or dropped provider stream, and handed to chat recovery, `saveMessages` resolves with `{ status: "aborted", reason: "interrupted" }`. Nobody stopped that turn, and the reply may still arrive, because recovery continues or retries it on its own. Check `reason` before you treat `aborted` as a cancel.
 
 A signal that is already aborted, or that aborts while the turn waits behind another turn, stops the turn before it starts. Nothing is stored, the model is not called, and `saveMessages` resolves with `{ status: "aborted" }`. `onChatResponse` does not fire for such a turn, because there is no reply. A stop that lands after the messages are stored and before the model is called leaves the messages in the transcript and also fires no `onChatResponse`. A stop that lands after the reply finished changes nothing: the result is `completed`.
 

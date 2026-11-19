@@ -262,6 +262,8 @@ type ProgrammaticTurnOptions = SaveMessagesOptions & {
 type StreamResultStatus = {
   status: Exclude<SaveMessagesResult["status"], "skipped">;
   error?: string;
+  /** `"interrupted"` for a reply cut off and handed to recovery. */
+  reason?: SaveMessagesResult["reason"];
   finishReason?: string;
 };
 
@@ -7107,7 +7109,7 @@ export class AIChatAgent<
                   outcome: "recovering",
                   ...(continuation && { continuation: true })
                 });
-                streamResult = { status: "aborted" };
+                streamResult = { status: "aborted", reason: "interrupted" };
                 streamCompleted.value = true;
                 stallRouted = true;
               } else if (outcome === "exhausted") {
@@ -7116,7 +7118,7 @@ export class AIChatAgent<
                 // deploy-recovery exhaustion. Finalize the resumable stream and
                 // report `aborted` so the generic terminal path is not re-run.
                 this._markStreamError(streamId);
-                streamResult = { status: "aborted" };
+                streamResult = { status: "aborted", reason: "interrupted" };
                 streamCompleted.value = true;
                 stallRouted = true;
               }

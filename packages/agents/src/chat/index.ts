@@ -389,7 +389,8 @@ export type {
   ResolvedChatRecoveryConfig,
   MessageConcurrency,
   SaveMessagesOptions,
-  SaveMessagesResult
+  SaveMessagesResult,
+  AbortedTurnReason
 } from "./lifecycle";
 export {
   truncateOlderMessages,

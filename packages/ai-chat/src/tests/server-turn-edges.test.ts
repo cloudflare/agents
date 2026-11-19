@@ -31,7 +31,7 @@ type Stub = {
   clearDuringNextResponseHookForTest(): Promise<void>;
   saveSyntheticUserMessage(
     text: string
-  ): Promise<{ requestId: string; status: string }>;
+  ): Promise<{ requestId: string; status: string; reason?: string }>;
   getPersistedMessages(): Promise<unknown[]>;
   runChatRecoveryContinueDirectForTest(
     data: Record<string, unknown>
@@ -113,6 +113,22 @@ describe("a turn that finished before a clear", () => {
 
     expect(result.status).toBe("completed");
     expect(await stub.getOnChatMessageCallCount()).toBe(1);
+  });
+});
+
+describe("why a turn is aborted", () => {
+  it("says interrupted for a turn that was cut off and handed to recovery", async () => {
+    const { stub } = await agent();
+    await stub.armFailingReaderForTest("Network connection lost.");
+
+    const result = await stub.saveSyntheticUserMessage("hello");
+
+    // Nobody stopped it, and recovery then finishes the reply.
+    expect(result).toMatchObject({ status: "aborted", reason: "interrupted" });
+    await expect
+      .poll(() => stub.getOnChatMessageCallCount(), { timeout: 8000 })
+      .toBe(2);
+    await stub.waitForIdleForTest();
   });
 });
 
