@@ -326,13 +326,15 @@ finalizes a run.
 
 A child run is `running` until one of these ends it:
 
-| Status      | When                                                                                                                                                                           |
-| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `completed` | The run's turn finished. `output` and `summary` are set.                                                                                                                       |
-| `aborted`   | The parent cancelled the run (`cancelAgentTool`, or its `signal`), with the reason in `error`. Also when something else stopped the run's turn, such as a stop of its request. |
-| `error`     | The turn failed, its stream reported an error, the chat was cleared under it, or it was interrupted and could not be recovered.                                                |
+| Status      | When                                                                                                                                                                                                                                                                                         |
+| ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `completed` | The run's turn finished. `output` and `summary` are set.                                                                                                                                                                                                                                     |
+| `aborted`   | The parent cancelled the run (`cancelAgentTool`, or its `signal`), or the run's turn was stopped on the child: a client of the child cancelled its request, or the child called `abortRequest`, `abortAllRequests` or (`Think`) `cancelChat`. The reason, when one was given, is in `error`. |
+| `error`     | The turn failed, its stream reported an error, the chat was cleared under it, or it was interrupted and could not be recovered.                                                                                                                                                              |
 
-The first of these to happen is the one that is recorded. A run whose reply is cut off while chat recovery can still finish it (a dropped provider connection, a stall, an eviction) stays `running` and takes the status of the recovered turn.
+The first of these to happen is the one that is recorded. A run whose reply is cut off while chat recovery can still finish it (a dropped provider connection, a stall, an eviction) stays `running` and takes the status of the recovered turn. A stop that lands while such a run waits for its recovery ends it `aborted` and cancels the recovery: the stop is the outcome, and the cut-off reply is not reported as a completed run.
+
+While an awaited `runAgentTool` follows a child, it also inspects the run once per `agentToolReattachNoProgressTimeoutMs` (default 120 seconds). The child settles a run that has nothing left to finish it when it is inspected, so the parent does not wait on a run that will never end. A run the child reports as still running is followed further, however long its turn takes.
 
 ### When the child's isolate resets under the parent
 

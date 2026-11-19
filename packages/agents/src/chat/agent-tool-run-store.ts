@@ -92,10 +92,13 @@ export interface AgentToolRunStore {
     }
   ): void;
   /**
-   * Put the request id of the run's turn on its row. The first one bound
-   * also becomes the run's root request id, which later binds leave alone.
+   * Put the request id of the run's turn on its row. A row with no root
+   * request id takes `rootRequestId`, which later binds leave alone.
+   *
+   * @param rootRequestId - The id the turn first ran under. Defaults to
+   *   `requestId`: the run's first turn.
    */
-  bindRequest(runId: string, requestId: string): void;
+  bindRequest(runId: string, requestId: string, rootRequestId?: string): void;
   /** Record a stream error on the row. */
   recordStreamError(runId: string, error: string): void;
   /** Record that a parent cancelled the run. */
@@ -342,14 +345,14 @@ export function createAgentToolRunStore(
         startMessageId
       );
     },
-    bindRequest: (runId, requestId) => {
+    bindRequest: (runId, requestId, rootRequestId = requestId) => {
       ensure();
       run(
         `update ${runs}
          set request_id = ?, root_request_id = coalesce(root_request_id, ?)
          where run_id = ?`,
         requestId,
-        requestId,
+        rootRequestId,
         runId
       );
     },

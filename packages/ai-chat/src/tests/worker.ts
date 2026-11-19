@@ -3791,6 +3791,186 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   }
 
   /**
+   * An agent-tool run on an agent that already holds a request body from
+   * its own client. With `recovered`, the run's reply is cut off once and
+   * chat recovery finishes it. Returns the stored body once the run is
+   * over.
+   */
+  async storedBodyAfterAgentToolRunForTest(recovered: boolean): Promise<{
+    status: string | undefined;
+    body: Record<string, unknown> | undefined;
+  }> {
+    const self = this as unknown as {
+      _setRequestContext(
+        clientTools: undefined,
+        body: Record<string, unknown> | undefined
+      ): void;
+      _lastBody: Record<string, unknown> | undefined;
+    };
+    self._setRequestContext(undefined, { theme: "dark" });
+    const runId = crypto.randomUUID();
+    if (recovered) {
+      this._failingTurn = {
+        message: "Network connection lost.",
+        remaining: 1,
+        prelude: "partial"
+      };
+    }
+    await this.startAgentToolRun("the run's own input", { runId });
+    const deadline = Date.now() + 8000;
+    let inspection = await this.inspectAgentToolRun(runId);
+    while (inspection?.status === "running" && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      inspection = await this.inspectAgentToolRun(runId);
+    }
+    await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
+    return { status: inspection?.status, body: self._lastBody };
+  }
+
+  /** Set to start one follow-up turn from the next `onChatResponse`. */
+  private _followUpFromResponse = false;
+  private _followUpRequestId: string | undefined;
+
+  override async onChatResponse(result: ChatResponseResult): Promise<void> {
+    if (!this._followUpFromResponse || result.status !== "completed") return;
+    this._followUpFromResponse = false;
+    const followUp = await this.saveMessages((messages) => [
+      ...messages,
+      {
+        id: `follow-up-${crypto.randomUUID()}`,
+        role: "user",
+        parts: [{ type: "text", text: "and one more thing" }]
+      }
+    ]);
+    this._followUpRequestId = followUp.requestId;
+  }
+
+  /**
+   * An agent-tool run on an agent whose `onChatResponse` starts a turn of
+   * its own once the run's reply completes. With `recovered`, the run's
+   * reply is cut off once and chat recovery finishes it. Returns which
+   * request the run's row names, and whose chunks the run reports.
+   */
+  async agentToolRunWithFollowUpTurnForTest(recovered: boolean): Promise<{
+    status: string | undefined;
+    rowIsFollowUp: boolean;
+    followUpRan: boolean;
+    followUpChunksInRun: number;
+  }> {
+    const runId = crypto.randomUUID();
+    if (recovered) {
+      this._failingTurn = {
+        message: "Network connection lost.",
+        remaining: 1,
+        prelude: "partial"
+      };
+    }
+    this._followUpFromResponse = true;
+    this._followUpRequestId = undefined;
+    await this.startAgentToolRun("answer, then a follow-up follows", { runId });
+    const deadline = Date.now() + 8000;
+    let inspection = await this.inspectAgentToolRun(runId);
+    while (
+      (inspection?.status === "running" || !this._followUpRequestId) &&
+      Date.now() < deadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      inspection = await this.inspectAgentToolRun(runId);
+    }
+    await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
+    const followUp = this._followUpRequestId;
+    const row = this["_agentToolRuns"].store.read(runId);
+    const followUpStream = followUp
+      ? this._resumableStream.latestStreamInfoForRequest(followUp)?.id
+      : undefined;
+    return {
+      status: inspection?.status,
+      rowIsFollowUp: followUp !== undefined && row?.requestId === followUp,
+      followUpRan: followUp !== undefined,
+      followUpChunksInRun:
+        followUpStream !== undefined &&
+        (await this.inspectAgentToolRun(runId))?.streamId === followUpStream
+          ? (await this.getAgentToolChunks(runId)).length
+          : 0
+    };
+  }
+
+  /**
+   * An agent-tool run's reply is cut off, so the run is left open for chat
+   * recovery, with a parent tailing it. Then the run's request is stopped
+   * on the child, one of the ways an app or a client can stop it.
+   */
+  async stopLeftOpenAgentToolRunForTest(
+    how: "abortRequest" | "abortAllRequests" | "client-cancel"
+  ): Promise<{
+    beforeStop: string | undefined;
+    status: string | undefined;
+    error: string | undefined;
+    tailClosed: boolean;
+    readerCalls: number;
+  }> {
+    const runId = crypto.randomUUID();
+    this._failingTurn = {
+      message: "Network connection lost.",
+      remaining: 1,
+      prelude: "partial"
+    };
+    await this.startAgentToolRun("get cut off, then stopped", { runId });
+    const runs = this["_agentToolRuns"];
+    // A parent's tail of the run. `tailClosed` flips when it ends.
+    let tailClosed = false;
+    const reader = (
+      (await this.tailAgentToolRun(runId, {
+        afterSequence: -1
+      })) as unknown as ReadableStream<Uint8Array>
+    ).getReader();
+    void (async () => {
+      try {
+        while (!(await reader.read()).done) {
+          // Drain.
+        }
+      } catch {
+        // A broken tail has ended too.
+      }
+      tailClosed = true;
+    })();
+
+    const deadline = Date.now() + 8000;
+    while (runs.isLive(runId) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const beforeStop = runs.store.read(runId)?.status;
+    const requestId = runs.store.read(runId)?.requestId;
+    if (!requestId) throw new Error("the run never bound a request");
+    const readerCalls = this._failingReaderCalls;
+
+    if (how === "abortRequest") {
+      this.abortRequest(requestId, "stopped");
+    } else if (how === "abortAllRequests") {
+      this.abortAllRequests("stopped");
+    } else {
+      // What the `cancel` WebSocket message does.
+      await this["_turns"].cancel(requestId);
+    }
+    // Long enough for a recovery that was not cancelled to run.
+    const tailDeadline = Date.now() + 3000;
+    while (!tailClosed && Date.now() < tailDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const closedBeforeInspect = tailClosed;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    // Read the row, not an inspection: an inspection would settle it.
+    const row = runs.store.read(runId);
+    return {
+      beforeStop,
+      status: row?.status,
+      error: row?.error ?? undefined,
+      tailClosed: closedBeforeInspect,
+      readerCalls: this._failingReaderCalls - readerCalls
+    };
+  }
+
+  /**
    * An agent-tool run whose reply is cut off once (the reader throws after a
    * partial reply) and is then finished by chat recovery, in one isolate.
    */
@@ -6572,6 +6752,147 @@ export class AIChatAgentToolParent extends Agent<Env> {
   }
 
   /**
+   * The parent forwards five chunks of the run's first turn, then its tail
+   * breaks. The recovered turn has a stream of its own, which holds two
+   * chunks when the parent re-attaches and gets two more. Returns the
+   * sequence the parent broadcast each chunk under.
+   */
+  async runChildRecoveredOnAShorterStreamForTest(): Promise<{
+    status: string;
+    sequences: number[];
+  }> {
+    const runId = crypto.randomUUID();
+    const running: AgentToolRunInspection = {
+      runId,
+      status: "running",
+      startedAt: Date.now()
+    };
+    const line = (sequence: number, body: string) =>
+      new TextEncoder().encode(`${JSON.stringify({ sequence, body })}\n`);
+    const chunk = (text: string) =>
+      JSON.stringify({ type: "text-delta", id: "t", delta: text });
+    const self = this as unknown as {
+      _asAgentToolChildAdapter(child: unknown): unknown;
+    };
+    const asAdapter = self._asAgentToolChildAdapter;
+    let tails = 0;
+    let done = false;
+    self._asAgentToolChildAdapter = () => ({
+      startAgentToolRun: async () => running,
+      cancelAgentToolRun: async () => {},
+      inspectAgentToolRun: async () =>
+        done ? { ...running, status: "completed", summary: "ok" } : running,
+      // The run's current stream: the recovered turn's, two chunks so far.
+      getAgentToolChunks: async () => [
+        { sequence: 0, body: chunk("r0") },
+        { sequence: 1, body: chunk("r1") }
+      ],
+      tailAgentToolRun: async () => {
+        const first = ++tails === 1;
+        let sent = 0;
+        return new ReadableStream<Uint8Array>({
+          // One chunk per read: an errored stream drops what is queued.
+          pull(controller) {
+            if (first) {
+              if (sent < 5) {
+                controller.enqueue(line(sent, chunk(`a${sent}`)));
+                sent++;
+                return;
+              }
+              controller.error(
+                new Error(
+                  "ReadableStream received over RPC disconnected prematurely."
+                )
+              );
+              return;
+            }
+            if (sent < 2) {
+              controller.enqueue(line(2 + sent, chunk(`r${2 + sent}`)));
+              sent++;
+              return;
+            }
+            done = true;
+            controller.close();
+          }
+        });
+      }
+    });
+    this.events = [];
+    try {
+      const result = await this.runAgentTool(AIChatAgentToolChild, {
+        runId,
+        parentToolCallId: "test-tool-call",
+        input: { prompt: "recovers on a shorter stream" },
+        inputPreview: "recovers on a shorter stream"
+      });
+      return {
+        status: result.status,
+        sequences: this.events
+          .filter((message) => message.event.kind === "chunk")
+          .map((message) => message.sequence)
+      };
+    } finally {
+      self._asAgentToolChildAdapter = asAdapter;
+    }
+  }
+
+  /**
+   * The child never closes the parent's tail and never sends anything
+   * through it. Its run is over by the second time the parent asks.
+   */
+  async runChildWhoseTailNeverClosesForTest(): Promise<{
+    status: string;
+    inspections: number;
+    parentRow: string | null;
+  }> {
+    const runId = crypto.randomUUID();
+    const running: AgentToolRunInspection = {
+      runId,
+      status: "running",
+      startedAt: Date.now()
+    };
+    const self = this as unknown as {
+      _asAgentToolChildAdapter(child: unknown): unknown;
+      _resolvedOptions: { agentToolReattachNoProgressTimeoutMs: number };
+    };
+    const asAdapter = self._asAgentToolChildAdapter;
+    const budget = self._resolvedOptions.agentToolReattachNoProgressTimeoutMs;
+    let inspections = 0;
+    self._asAgentToolChildAdapter = () => ({
+      startAgentToolRun: async () => running,
+      cancelAgentToolRun: async () => {},
+      inspectAgentToolRun: async () =>
+        ++inspections < 2
+          ? running
+          : { ...running, status: "aborted", error: "stopped on the child" },
+      getAgentToolChunks: async () => [],
+      tailAgentToolRun: async () => new ReadableStream({})
+    });
+    self._resolvedOptions.agentToolReattachNoProgressTimeoutMs = 50;
+    try {
+      const result = await Promise.race([
+        this.runAgentTool(AIChatAgentToolChild, {
+          runId,
+          parentToolCallId: "test-tool-call",
+          input: { prompt: "never closes" },
+          inputPreview: "never closes"
+        }),
+        new Promise<{ status: string }>((resolve) =>
+          setTimeout(() => resolve({ status: "still waiting" }), 3000)
+        )
+      ]);
+      return {
+        status: result.status,
+        inspections,
+        parentRow: this.getParentAgentToolStatusForTest(runId)
+      };
+    } finally {
+      self._asAgentToolChildAdapter = asAdapter;
+      self._resolvedOptions.agentToolReattachNoProgressTimeoutMs = budget;
+    }
+  }
+
+  /**
    * The parent's tail breaks and the child keeps reporting the run as
    * running without ever producing anything: the parent's no-progress
    * budget runs out.
@@ -6642,8 +6963,16 @@ export class AIChatAgentToolParent extends Agent<Env> {
       input: { prompt: "work through a reset", chunkDelayMs: 100 },
       inputPreview: "work through a reset"
     });
-    await new Promise((resolve) => setTimeout(resolve, 150));
     const child = await this.subAgent(AIChatAgentToolChild, runId);
+    // Reset once the run's reply is streaming: a turn that had not
+    // started cannot be recovered.
+    const streaming = Date.now() + 5000;
+    while (
+      (await child.getAgentToolChunks(runId)).length === 0 &&
+      Date.now() < streaming
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
     await child.resetIsolateForTest().catch(() => {});
     const result = await running;
     const deadline = Date.now() + 10_000;

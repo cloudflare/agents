@@ -111,7 +111,11 @@ export interface AgentToolRunsHost {
     input: unknown
   ): { output: unknown; summary: string | null };
   /** The stored transcript, oldest first. */
-  messages(): ReadonlyArray<{ id: string; role: string }>;
+  messages(): ReadonlyArray<{
+    id: string;
+    role: string;
+    parts?: ReadonlyArray<unknown>;
+  }>;
   /**
    * Cancel one request the way a client's stop does: its turn, queued or
    * running, a recovery attempt running for it, and a recovery scheduled
@@ -166,6 +170,27 @@ export function agentToolRunOutcome(input: {
     return { status: "aborted", error: null };
   }
   return { status: "completed" };
+}
+
+/**
+ * The message a run's own part of the transcript starts after: the newest
+ * one, skipping assistant replies with no parts. The turn that follows
+ * removes such an empty reply, and an anchor that is gone would make every
+ * message look like the run's.
+ */
+function startAnchor(
+  transcript: ReadonlyArray<{
+    id: string;
+    role: string;
+    parts?: ReadonlyArray<unknown>;
+  }>
+): string | null {
+  for (let i = transcript.length - 1; i >= 0; i--) {
+    const message = transcript[i];
+    if (message.role === "assistant" && message.parts?.length === 0) continue;
+    return message.id;
+  }
+  return null;
 }
 
 /** An abort reason as text, or `null` when none was given. */
@@ -280,9 +305,9 @@ export class AgentToolRuns {
    * frame: in memory for live attribution, and on the row so attribution
    * survives a restart mid-run (#1575).
    */
-  bindTurn(runId: string, requestId: string): void {
+  bindTurn(runId: string, requestId: string, rootRequestId?: string): void {
     this.runsByRequestId.set(requestId, runId);
-    this.host.store.bindRequest(runId, requestId);
+    this.host.store.bindRequest(runId, requestId, rootRequestId);
   }
 
   // ── Progress ───────────────────────────────────────────────────────
@@ -315,7 +340,10 @@ export class AgentToolRuns {
     const run = this.host.store.forRequest(rootRequestId);
     if (!run || !isAgentToolRunOpen(run.status)) return;
     if (run.terminalOnly) this.terminalOnlyRuns.add(run.runId);
-    this.bindTurn(run.runId, requestId);
+    // A row written before rows had a root request id takes the one
+    // recovery names the turn by, not the recovered turn's own id: the
+    // next recovery, and a cancel, still find the run by it.
+    this.bindTurn(run.runId, requestId, rootRequestId);
   }
 
   /**
@@ -405,7 +433,7 @@ export class AgentToolRuns {
       input: options.input,
       startedAt,
       terminalOnly: options.terminalOnly,
-      startMessageId: transcript.at(-1)?.id ?? null
+      startMessageId: startAnchor(transcript)
     });
     const controller = new AbortController();
     this.controllers.set(runId, controller);
@@ -459,7 +487,10 @@ export class AgentToolRuns {
           if (
             run &&
             isAgentToolRunOpen(run.status) &&
-            (await this.#recoveryOf(run)) === "in-progress"
+            (await this.#recoveryOf(run)) === "in-progress" &&
+            // A cancel or a stop can land while the recovery state is
+            // read. It settled the run, and nothing is left to wait for.
+            this.#isOpen(runId)
           ) {
             recovering = true;
             return;
@@ -515,6 +546,13 @@ export class AgentToolRuns {
   cancel(runId: string, reason?: unknown): void {
     const run = this.host.store.read(runId);
     if (!run || !isAgentToolRunOpen(run.status)) return;
+    // The row first: stopping the turn below comes back here through the
+    // host's stop path ({@link stopped}), and finds the run settled.
+    this.host.store.markCancelled(runId, Date.now());
+    this.#settle(runId, () => ({
+      status: "aborted",
+      error: abortReasonText(reason)
+    }));
     const controller = this.controllers.get(runId);
     if (controller) {
       controller.abort(reason);
@@ -523,13 +561,35 @@ export class AgentToolRuns {
         if (requestId) this.host.cancelRequest(requestId, reason);
       }
     }
-    this.host.store.markCancelled(runId, Date.now());
-    this.#settle(runId, () => ({
-      status: "aborted",
-      error: abortReasonText(reason)
-    }));
     // Release any parent live-tail so it stops waiting on this run.
     this.closeTailers(runId);
+  }
+
+  /**
+   * A stop landed on the agent for `requestId`, or for every request
+   * (`null`): a client's cancel, `abortRequest`, a stop of everything. Call
+   * it from every stop path (`ChatTurnsHost.stopped`).
+   *
+   * A stop of a run's turn is a cancel of the run. The stop aborts the turn
+   * or its recovery attempt and cancels a recovery that was scheduled, so
+   * nothing is left that would finish the run. Without this a run left open
+   * for recovery stays `running`, its tails stay open and the parent waits
+   * on it for good.
+   */
+  stopped(requestId: string | null, reason?: unknown): void {
+    if (requestId === null) {
+      for (const runId of this.host.store.listOpen()) {
+        this.cancel(runId, reason);
+      }
+      return;
+    }
+    const run = this.host.store.forRequest(requestId);
+    if (run && isAgentToolRunOpen(run.status)) this.cancel(run.runId, reason);
+  }
+
+  #isOpen(runId: string): boolean {
+    const run = this.host.store.read(runId);
+    return run !== null && isAgentToolRunOpen(run.status);
   }
 
   /**
@@ -623,6 +683,9 @@ export class AgentToolRuns {
     if (active !== null && active === run.requestId) return;
     const error = run.error;
     this.#settle(runId, () => {
+      // Recovery of the turn was stopped. The stop is the outcome, whatever
+      // the cut-off reply holds.
+      if (recovery === "cancelled") return { status: "aborted", error: null };
       // A recorded stream error means the turn failed even if it stored a
       // reply, as in the live lifecycle.
       if (error !== null) return { status: "error", error };
@@ -728,6 +791,16 @@ export class AgentToolRuns {
     // Outside `start`, so `cancel` (its sibling on the source) reaches them.
     let closed = false;
     let forward: ((chunk: AgentToolStoredChunk) => void) | undefined;
+    // This tail's entry in `closers`. Dropped when the tail ends, however
+    // it ends: a tail of a finished run is never closed through it.
+    let registered: (() => void) | undefined;
+    const forget = () => {
+      if (!registered) return;
+      const set = this.closers.get(runId);
+      set?.delete(registered);
+      if (set && set.size === 0) this.closers.delete(runId);
+      registered = undefined;
+    };
     const detach = () => {
       if (!forward) return;
       const set = this.forwarders.get(runId);
@@ -751,6 +824,7 @@ export class AgentToolRuns {
           }
           closed = true;
           detach();
+          forget();
           try {
             controller.close();
           } catch {
@@ -792,6 +866,7 @@ export class AgentToolRuns {
             // the broadcast loop and starves the run's other tailers.
             closed = true;
             detach();
+            forget();
           }
         };
 
@@ -819,6 +894,7 @@ export class AgentToolRuns {
           const closers = this.closers.get(runId) ?? new Set();
           closers.add(close);
           this.closers.set(runId, closers);
+          registered = close;
 
           const backlog = read.chunks
             ? await read.chunks(runId, options)
@@ -851,6 +927,7 @@ export class AgentToolRuns {
         } catch (error) {
           closed = true;
           detach();
+          forget();
           try {
             controller.error(error);
           } catch {
@@ -861,6 +938,7 @@ export class AgentToolRuns {
       cancel: () => {
         closed = true;
         detach();
+        forget();
       }
     });
   }
@@ -898,7 +976,7 @@ export class AgentToolRuns {
    */
   async #recoveryOf(
     run: AgentToolRunRecord
-  ): Promise<"in-progress" | "failed" | "none"> {
+  ): Promise<"in-progress" | "cancelled" | "failed" | "none"> {
     const ids = new Set<string>();
     if (run.requestId) ids.add(run.requestId);
     if (run.rootRequestId) ids.add(run.rootRequestId);
@@ -907,6 +985,7 @@ export class AgentToolRuns {
       prefix: CHAT_RECOVERY_INCIDENT_KEY_PREFIX
     });
     let failed = false;
+    let cancelled = false;
     for (const incident of incidents.values()) {
       const root = incident.recoveryRootRequestId;
       if (!ids.has(incident.requestId) && !(root && ids.has(root))) continue;
@@ -920,7 +999,14 @@ export class AgentToolRuns {
       if (incident.status === "exhausted" || incident.status === "failed") {
         failed = true;
       }
+      if (
+        incident.status === "skipped" &&
+        incident.reason === CHAT_RECOVERY_CANCELLED_REASON
+      ) {
+        cancelled = true;
+      }
     }
+    if (cancelled) return "cancelled";
     return failed ? "failed" : "none";
   }
 

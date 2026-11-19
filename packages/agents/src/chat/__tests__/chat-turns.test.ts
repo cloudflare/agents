@@ -1,3 +1,4 @@
+import { ChatStreamStalledError } from "../stall-watchdog";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { AutoContinuationController } from "../auto-continuation-controller";
 import {
@@ -22,7 +23,12 @@ class FakeHost implements ChatTurnsHost {
   replyStreaming = false;
   activeStream = false;
   fired = 0;
+  stops: Array<{ requestId: string | null; reason: unknown }> = [];
   private ids = 0;
+
+  stopped(requestId: string | null, reason: unknown) {
+    this.stops.push({ requestId, reason });
+  }
 
   messages() {
     return this.transcript;
@@ -512,6 +518,64 @@ describe("ChatTurns", () => {
   });
 
   // ── Client requests ─────────────────────────────────────────────────
+
+  describe("a stop is reported to the host", () => {
+    it("cancel reports the request and its reason, whether or not a turn runs under it", async () => {
+      await turns.cancel("nothing-runs-here", "why");
+      turns.aborts.getSignal("r1");
+      await turns.cancel("r1");
+      expect(host.stops).toEqual([
+        { requestId: "nothing-runs-here", reason: "why" },
+        { requestId: "r1", reason: undefined }
+      ]);
+    });
+
+    it("a stop of everything reports no request id", async () => {
+      await turns.stopAll("all");
+      expect(host.stops).toEqual([{ requestId: null, reason: "all" }]);
+    });
+
+    it("a caller's linked signal is a stop like any other", () => {
+      const caller = new AbortController();
+      turns.aborts.getSignal("r1");
+      turns.linkExternal("r1", caller.signal);
+      caller.abort("gave up");
+      expect(host.stops).toEqual([{ requestId: "r1", reason: "gave up" }]);
+    });
+
+    it("the runtime's own abort is not a stop", () => {
+      const signal = turns.aborts.getSignal("r1");
+      turns.runtimeAbort(
+        () => void turns.cancel("r1", new ChatStreamStalledError("stalled"))
+      );
+      expect(signal?.aborted).toBe(true);
+      expect(host.stops).toEqual([]);
+      expect(turns.isStopped(signal)).toBe(false);
+    });
+
+    it("a stop that lands after the runtime's abort still counts as a stop", () => {
+      const signal = turns.aborts.getSignal("r1");
+      turns.runtimeAbort(
+        () => void turns.cancel("r1", new ChatStreamStalledError("stalled"))
+      );
+      expect(turns.isStopped(signal)).toBe(false);
+      // The signal is already aborted, and keeps the stall as its reason.
+      void turns.cancel("r1", "user pressed stop");
+      expect(signal?.reason).toBeInstanceOf(ChatStreamStalledError);
+      expect(turns.isStopped(signal)).toBe(true);
+    });
+
+    it("a host whose stop bookkeeping fails still stopped the turn", async () => {
+      const signal = turns.aborts.getSignal("r1");
+      host.stopped = () => {
+        throw new Error("storage is down");
+      };
+      const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+      await expect(turns.cancel("r1")).resolves.toBeUndefined();
+      expect(signal?.aborted).toBe(true);
+      logged.mockRestore();
+    });
+  });
 
   describe("runClientRequest", () => {
     type Log = string[];

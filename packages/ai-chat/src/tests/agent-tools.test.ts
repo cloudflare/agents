@@ -342,6 +342,47 @@ function getParent(name = crypto.randomUUID()) {
 }
 
 describe("AIChatAgent as an agent-tool child", () => {
+  it("numbers the chunks it forwards after a re-attach past the ones it already sent, so clients do not drop them as repeats", async () => {
+    const parent = await getAgentByName(
+      env.AIChatAgentToolParent,
+      crypto.randomUUID()
+    );
+    const outcome = await (
+      parent as unknown as {
+        runChildRecoveredOnAShorterStreamForTest(): Promise<{
+          status: string;
+          sequences: number[];
+        }>;
+      }
+    ).runChildRecoveredOnAShorterStreamForTest();
+    expect(outcome.status).toBe("completed");
+    // Five chunks before the break, two after. A client keys a chunk by its
+    // sequence, so each of the seven needs its own.
+    expect(outcome.sequences).toHaveLength(7);
+    expect(new Set(outcome.sequences).size).toBe(7);
+    expect(outcome.sequences).toEqual(
+      [...outcome.sequences].sort((a, b) => a - b)
+    );
+  });
+
+  it("does not wait for good on a tail the child never closes: it asks the child, and returns the run's status", async () => {
+    const parent = await getAgentByName(
+      env.AIChatAgentToolParent,
+      crypto.randomUUID()
+    );
+    const outcome = await (
+      parent as unknown as {
+        runChildWhoseTailNeverClosesForTest(): Promise<{
+          status: string;
+          inspections: number;
+          parentRow: string | null;
+        }>;
+      }
+    ).runChildWhoseTailNeverClosesForTest();
+    expect(outcome.status).toBe("aborted");
+    expect(outcome.parentRow).toBe("aborted");
+  });
+
   it("gives up as interrupted, not error, when the run stays open past the parent's no-progress budget", async () => {
     const parent = await getAgentByName(
       env.AIChatAgentToolParent,

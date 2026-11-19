@@ -511,6 +511,59 @@ describe("Think agent tools", () => {
     expect(result.summary).not.toBe("");
   });
 
+  // The turn `onChatResponse` starts is not the run's, whether the run's
+  // reply completed live or was recovered.
+  for (const recovered of [false, true]) {
+    it(`does not bind a turn started from onChatResponse to the run (${recovered ? "recovered" : "live"} reply)`, async () => {
+      const agent = await freshAgent();
+      const result = await (
+        agent as unknown as {
+          agentToolRunWithFollowUpTurnForTest(recovered: boolean): Promise<{
+            status: string | undefined;
+            followUp: string;
+            rowIsFollowUp: boolean;
+          }>;
+        }
+      ).agentToolRunWithFollowUpTurnForTest(recovered);
+      expect(result.status).toBe("completed");
+      expect(result.followUp).toBe("completed");
+      expect(result.rowIsFollowUp).toBe(false);
+    });
+  }
+
+  // The stop cancels the turn's recovery, so nothing is left to finish the
+  // run: the stop is its outcome, and the parent's tail closes.
+  for (const how of [
+    "cancelChat",
+    "abortRequest",
+    "abortAllRequests",
+    "client-cancel"
+  ] as const) {
+    it(`a run left open for recovery is settled aborted when its request is stopped (${how})`, async () => {
+      const agent = await freshAgent();
+      const result = await (
+        agent as unknown as {
+          stopLeftOpenAgentToolRunForTest(how: string): Promise<{
+            beforeStop: string | null;
+            status: string | undefined;
+            error: string | undefined;
+            tailClosed: boolean;
+            recoveryRan: number;
+            steps: number;
+          }>;
+        }
+      ).stopLeftOpenAgentToolRunForTest(how);
+      expect(result.beforeStop).toBe("running");
+      expect(result.status).toBe("aborted");
+      expect(result.tailClosed).toBe(true);
+      // The model is not called again for the stopped run.
+      expect(result.steps).toBe(0);
+      if (how === "cancelChat" || how === "abortRequest") {
+        expect(result.error).toBe("stopped");
+      }
+    });
+  }
+
   it("the parent's signal cancels a queued run at once, and the run never starts", async () => {
     const agent = await freshAgent();
     const result = await agent.signalCancelsQueuedAgentToolRunForTest();

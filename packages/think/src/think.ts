@@ -4801,7 +4801,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         ),
       lastTurnReplyId: () => this._lastTurnReplyId(),
       continuationDropped: (event) =>
-        this._emit("chat:continuation:dropped", { ...event })
+        this._emit("chat:continuation:dropped", { ...event }),
+      stopped: (requestId, reason) => this._afterStop(requestId, reason)
     },
     { defaultDebounceMs: Think.MESSAGE_DEBOUNCE_MS }
   );
@@ -12890,8 +12891,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       case "cancel":
         // A user's stop: it also drops the continuations waiting on the
         // turn it stops.
-        this._turns.cancel(event.id);
-        await this._chatRecoveryEngine().tryCancelScheduledRecovery(event.id);
+        await this._turns.cancel(event.id);
         break;
 
       case "cancel-continuation":
@@ -13156,17 +13156,39 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * without requiring the caller to know the id.
    */
   cancelChat(requestId: string, reason?: string): void {
-    this._turns.cancel(requestId, reason);
-    void this.keepAliveWhile(() =>
-      this._chatRecoveryEngine().tryCancelScheduledRecovery(requestId)
-    );
+    this._holdForStop(this._turns.cancel(requestId, reason));
   }
 
   /**
-   * A cancel can land while the turn's recovery is waiting out its backoff,
-   * with nothing in flight to abort: cancel the scheduled recovery instead,
-   * so the queued callback bails when it fires.
+   * Hold the isolate while a stop finishes its bookkeeping. The stop itself
+   * already happened, synchronously, when `settled` was created.
    */
+  private _holdForStop(settled: Promise<void>): void {
+    void this.keepAliveWhile(() => settled);
+  }
+
+  /**
+   * What every stop does beyond aborting a running turn, whichever way the
+   * stop came in (a client's cancel, {@link cancelChat},
+   * {@link abortRequest}, {@link abortAllRequests}, a caller's `signal`):
+   *
+   * - an agent-tool run whose turn the stop names is cancelled, so a run
+   *   left open for chat recovery is settled and its parent stops waiting;
+   * - a recovery of the request that is waiting out its backoff, with
+   *   nothing in flight to abort, is cancelled, so its callback bails when
+   *   it fires.
+   *
+   * @param requestId - The stopped request, or `null` for every request.
+   */
+  private async _afterStop(
+    requestId: string | null,
+    reason: unknown
+  ): Promise<void> {
+    this._agentToolRuns.stopped(requestId, reason);
+    if (requestId !== null) {
+      await this._chatRecoveryEngine().tryCancelScheduledRecovery(requestId);
+    }
+  }
 
   /**
    * Abort every in-flight chat turn on this agent, and drop every
@@ -13182,7 +13204,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * waits as a queue item until its callback runs, so that item goes too.
    */
   private _stopEveryChat(): void {
-    this._turns.stopAll();
+    this._holdForStop(this._turns.stopAll());
     // Once its callback runs, the turn core has it and has just stopped it.
     if (this._connectionlessContinuationRunning) return;
     void this.keepAliveWhile(async () => {
@@ -13204,7 +13226,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   private _connectionlessContinuationRunning = false;
 
   protected abortRequest(requestId: string, reason?: unknown): void {
-    this._turns.cancel(requestId, reason);
+    this._holdForStop(this._turns.cancel(requestId, reason));
   }
 
   /**
@@ -13709,7 +13731,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       } catch (error) {
         // What the reply throws after the turn was stopped is the stop (the
         // provider call fails with the abort's reason), not an error.
-        if (!isTurnStopped(abortSignal)) throw error;
+        if (!this._turns.isStopped(abortSignal)) throw error;
         aborted = true;
       } finally {
         this._insideInferenceLoop = false;
@@ -14360,7 +14382,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       } catch (error) {
         // What the reply throws after the turn was stopped is the stop (the
         // provider call fails with the abort's reason), not an error.
-        if (!isTurnStopped(abortSignal)) throw error;
+        if (!this._turns.isStopped(abortSignal)) throw error;
         streamAborted = true;
       } finally {
         this._insideInferenceLoop = false;

@@ -149,4 +149,68 @@ describe("an agent-tool run whose reply is cut off in the isolate", () => {
     expect(result.summary).toContain("Continued response.");
     expect(result.readerCalls).toBe(1);
   });
+
+  // The run's input is the stored body only while the run's turn runs.
+  for (const recovered of [false, true]) {
+    it(`puts the chat's own request body back when the run is over (${recovered ? "recovered" : "live"} reply)`, async () => {
+      const agent = await getStub(`body-${crypto.randomUUID()}`);
+      const result = await (
+        agent as unknown as {
+          storedBodyAfterAgentToolRunForTest(recovered: boolean): Promise<{
+            status: string | undefined;
+            body: Record<string, unknown> | undefined;
+          }>;
+        }
+      ).storedBodyAfterAgentToolRunForTest(recovered);
+      expect(result.status).toBe("completed");
+      expect(result.body).toEqual({ theme: "dark" });
+    });
+  }
+
+  // `saveMessages` from `onChatResponse` is supported. The turn it starts
+  // is not the run's, whether the run's reply completed live or recovered.
+  for (const recovered of [false, true]) {
+    it(`does not bind a turn started from onChatResponse to the run (${recovered ? "recovered" : "live"} reply)`, async () => {
+      const agent = await getStub(`follow-up-${crypto.randomUUID()}`);
+      const result = await (
+        agent as unknown as {
+          agentToolRunWithFollowUpTurnForTest(recovered: boolean): Promise<{
+            status: string | undefined;
+            rowIsFollowUp: boolean;
+            followUpRan: boolean;
+            followUpChunksInRun: number;
+          }>;
+        }
+      ).agentToolRunWithFollowUpTurnForTest(recovered);
+      expect(result.status).toBe("completed");
+      expect(result.followUpRan).toBe(true);
+      expect(result.rowIsFollowUp).toBe(false);
+      expect(result.followUpChunksInRun).toBe(0);
+    });
+  }
+
+  // The stop cancels the turn's recovery, so nothing is left to finish the
+  // run: the stop is its outcome, and the parent's tail closes.
+  for (const how of ["client-cancel", "abortRequest", "abortAllRequests"]) {
+    it(`is settled aborted when its request is stopped (${how})`, async () => {
+      const agent = await getStub(`stopped-run-${crypto.randomUUID()}`);
+      const result = await (
+        agent as unknown as {
+          stopLeftOpenAgentToolRunForTest(how: string): Promise<{
+            beforeStop: string | undefined;
+            status: string | undefined;
+            error: string | undefined;
+            tailClosed: boolean;
+            readerCalls: number;
+          }>;
+        }
+      ).stopLeftOpenAgentToolRunForTest(how);
+      expect(result.beforeStop).toBe("running");
+      expect(result.status).toBe("aborted");
+      expect(result.tailClosed).toBe(true);
+      // The reply is not read again for the stopped run.
+      expect(result.readerCalls).toBe(0);
+      if (how !== "client-cancel") expect(result.error).toBe("stopped");
+    });
+  }
 });

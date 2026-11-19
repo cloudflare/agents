@@ -466,7 +466,8 @@ export class AIChatAgent<
         ),
       lastTurnReplyId: () => this._lastTurnReplyId,
       continuationDropped: (event) =>
-        this._emit("chat:continuation:dropped", { ...event })
+        this._emit("chat:continuation:dropped", { ...event }),
+      stopped: (requestId, reason) => this._afterStop(requestId, reason)
     },
     { defaultDebounceMs: AIChatAgent.MESSAGE_DEBOUNCE_MS }
   );
@@ -707,12 +708,8 @@ export class AIChatAgent<
     },
     messages: () => this.messages,
     // The same as a client's stop for the request (#1630).
-    cancelRequest: (requestId, reason) => {
-      this._turns.cancel(requestId, reason);
-      void this.keepAliveWhile(() =>
-        this._chatRecoveryEngine().tryCancelScheduledRecovery(requestId)
-      );
-    }
+    cancelRequest: (requestId, reason) =>
+      this._holdForStop(this._turns.cancel(requestId, reason))
   });
 
   /**
@@ -1548,8 +1545,7 @@ export class AIChatAgent<
         if (event.type === "cancel") {
           // Aborts the request's turn, queued or running, and a recovery
           // attempt running for it.
-          this._turns.cancel(event.id);
-          await this._chatRecoveryEngine().tryCancelScheduledRecovery(event.id);
+          await this._turns.cancel(event.id);
           this._emit("message:cancel", { requestId: event.id });
           return;
         }
@@ -2811,14 +2807,40 @@ export class AIChatAgent<
    * without requiring the caller to know the id.
    */
   protected abortRequest(requestId: string, reason?: unknown): void {
-    this._turns.cancel(requestId, reason);
+    this._holdForStop(this._turns.cancel(requestId, reason));
   }
 
   /**
-   * A cancel can land while the turn's recovery is waiting out its backoff,
-   * with nothing in flight to abort: cancel the scheduled recovery instead,
-   * so the queued callback bails when it fires.
+   * Hold the isolate while a stop finishes its bookkeeping. The stop itself
+   * already happened, synchronously, when `settled` was created.
    */
+  private _holdForStop(settled: Promise<void>): void {
+    void this.keepAliveWhile(() => settled);
+  }
+
+  /**
+   * What every stop does beyond aborting a running turn, whichever way the
+   * stop came in (a client's cancel, {@link abortRequest},
+   * {@link abortAllRequests}, a caller's `signal`):
+   *
+   * - an agent-tool run whose turn the stop names is cancelled, so a run
+   *   left open for chat recovery is settled and its parent stops waiting;
+   * - a recovery of the request that is waiting out its backoff, with
+   *   nothing in flight to abort, is cancelled, so its callback bails when
+   *   it fires.
+   *
+   * @param requestId - The stopped request, or `null` for every request.
+   */
+  private async _afterStop(
+    requestId: string | null,
+    reason: unknown
+  ): Promise<void> {
+    this._agentToolRuns.stopped(requestId, reason);
+    if (requestId !== null) {
+      await this._chatRecoveryEngine().tryCancelScheduledRecovery(requestId);
+    }
+  }
+
   /**
    * Abort every in-flight chat turn on this agent.
    *
@@ -2838,7 +2860,7 @@ export class AIChatAgent<
    * {@link resetTurnState} for the full teardown that runs on `chat-clear`.
    */
   protected abortAllRequests(reason?: unknown): void {
-    this._turns.stopAll(reason);
+    this._holdForStop(this._turns.stopAll(reason));
   }
 
   /**

@@ -393,7 +393,7 @@ protected abortRequest(requestId: string, reason?: unknown): void
 protected abortAllRequests(): void
 ```
 
-- **`abortRequest(id, reason?)`** — abort a specific in-flight turn by id. No-op if no controller exists for that id. Equivalent to a client `chat-request-cancel`.
+- **`abortRequest(id, reason?)`** — stop the request `id`, the same as a client `chat-request-cancel` or `cancelChat(id)`: its turn if one is running or queued, and a chat recovery of it that is scheduled or running.
 - **`abortAllRequests()`** — abort every turn, running or waiting in the queue. A turn that had not started ends `aborted`: it stores nothing and does not call the model. Used by single-purpose sub-agents that don't track ids.
 
 A stop ends the turn `aborted` whatever `reason` is. The model call or a hook that waits on the turn's `abortSignal` fails with that reason, and that failure is the stop, not an error: `onChatError` is not called and clients get no error frame.

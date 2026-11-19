@@ -81,3 +81,28 @@ describe("a stopped turn ends aborted, whatever reason the stop carried", () => 
     }
   }
 });
+
+describe("a stop right after a stall", () => {
+  it("is a stop: the stalled reply is not recovered", async () => {
+    const agent = (await getAgentByName(
+      env.ThinkTestAgent as unknown as DurableObjectNamespace<ThinkTestAgent>,
+      crypto.randomUUID()
+    )) as unknown as {
+      stopRightAfterStallForTest(): Promise<{
+        scheduled: number;
+        stepsAfterStop: number;
+        done: boolean;
+        error: string | null;
+        responses: string[];
+        activeIncidents: number;
+      }>;
+    };
+    const result = await agent.stopRightAfterStallForTest();
+    // The watchdog had already aborted the turn's signal for the stall, so
+    // the signal alone cannot say a stop followed.
+    expect(result.stepsAfterStop).toBe(0);
+    expect(result.activeIncidents).toBe(0);
+    expect(result).toMatchObject({ done: false, error: null });
+    expect(result.responses.filter((status) => status === "error")).toEqual([]);
+  });
+});

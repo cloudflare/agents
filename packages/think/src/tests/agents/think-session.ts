@@ -1472,8 +1472,84 @@ export class ThinkTestAgent extends Think {
     modelId: string;
   }> = [];
 
-  override onChatResponse(result: ChatResponseResult): void {
+  /** Set to start one follow-up turn from the next `onChatResponse`. */
+  private _followUpFromResponse = false;
+  private _followUpSubmissionId: string | undefined;
+
+  override onChatResponse(result: ChatResponseResult): void | Promise<void> {
     this._responseLog.push(result);
+    if (!this._followUpFromResponse || result.status !== "completed") return;
+    this._followUpFromResponse = false;
+    // `saveMessages` is refused inside a turn; a submission is the way to
+    // start one from here.
+    return this.submitMessages([
+      {
+        id: `follow-up-${crypto.randomUUID()}`,
+        role: "user",
+        parts: [{ type: "text", text: "and one more thing" }]
+      }
+    ]).then((submission) => {
+      this._followUpSubmissionId = submission.submissionId;
+    });
+  }
+
+  /**
+   * An agent-tool run on an agent whose `onChatResponse` starts a turn of
+   * its own once the run's reply completes. With `recovered`, the run's
+   * reply stalls once and chat recovery finishes it. Returns which request
+   * the run's row names.
+   */
+  async agentToolRunWithFollowUpTurnForTest(recovered: boolean): Promise<{
+    status: string | undefined;
+    followUp: string;
+    rowIsFollowUp: boolean;
+  }> {
+    const runId = crypto.randomUUID();
+    if (recovered) {
+      this._stallAfterChunks = 2;
+      this._stallAttemptsRemaining = 1;
+      this.chatStreamStallTimeoutMs = 50;
+    }
+    this._followUpFromResponse = true;
+    this._followUpSubmissionId = undefined;
+    try {
+      await this.startAgentToolRun("answer, then a follow-up follows", {
+        runId
+      });
+      const runs = this["_agentToolRuns"];
+      const deadline = Date.now() + 8000;
+      while (runs.isLive(runId) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      if (recoveryWorkCountForTest(this, "_chatRecoveryContinue") > 0) {
+        await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
+      }
+      let inspection = await this.inspectAgentToolRun(runId);
+      while (
+        (inspection?.status === "running" || !this._followUpSubmissionId) &&
+        Date.now() < deadline
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        inspection = await this.inspectAgentToolRun(runId);
+      }
+      const followUp = this._followUpSubmissionId
+        ? await this.waitForSubmission(this._followUpSubmissionId, {
+            timeoutMs: 5000
+          })
+        : null;
+      const row = runs.store.read(runId);
+      return {
+        status: inspection?.status,
+        followUp: followUp?.status ?? "never ran",
+        rowIsFollowUp:
+          followUp?.requestId !== undefined &&
+          row?.requestId === followUp.requestId
+      };
+    } finally {
+      this._stallAfterChunks = null;
+      this._stallAttemptsRemaining = null;
+      this.chatStreamStallTimeoutMs = 0;
+    }
   }
 
   protected override getAgentToolOutput(runId: string): unknown {
@@ -2858,6 +2934,178 @@ export class ThinkTestAgent extends Think {
         : null,
       steps: this._beforeStepLog.length - steps
     };
+  }
+
+  /** Set to stop the request the moment the stall watchdog aborts it. */
+  private _stopRightAfterStall = false;
+
+  protected override abortRequest(requestId: string, reason?: unknown): void {
+    super.abortRequest(requestId, reason);
+    if (
+      this._stopRightAfterStall &&
+      reason instanceof Error &&
+      reason.name === "ChatStreamStalledError"
+    ) {
+      this._stopRightAfterStall = false;
+      // A user's stop, before the stalled reply has scheduled its recovery.
+      this.cancelChat(requestId, "user stop");
+    }
+  }
+
+  /**
+   * A reply stalls, and the user stops the request right after the watchdog
+   * aborted it, before recovery is scheduled.
+   */
+  async stopRightAfterStallForTest(): Promise<{
+    scheduled: number;
+    stepsAfterStop: number;
+    done: boolean;
+    error: string | null;
+    responses: string[];
+    activeIncidents: number;
+  }> {
+    this._stallAfterChunks = 2;
+    this._stallAttemptsRemaining = 1;
+    this.chatStreamStallTimeoutMs = 50;
+    this._stopRightAfterStall = true;
+    this._responseLog = [];
+    const callback = new TestCollectingCallback();
+    try {
+      await this.chat("stall, then stop", callback);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const steps = this._beforeStepLog.length;
+      const scheduled = recoveryWorkCountForTest(this, "_chatRecoveryContinue");
+      if (scheduled > 0) {
+        await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
+      }
+      await this._waitForTurnQueueIdleForTest();
+      const incidents = await this.ctx.storage.list<{ status: string }>({
+        prefix: "cf:chat-recovery:incident:"
+      });
+      return {
+        scheduled,
+        stepsAfterStop: this._beforeStepLog.length - steps,
+        done: callback.doneCalled,
+        error: callback.errorMessage ?? null,
+        responses: this._responseLog.map((response) => response.status),
+        activeIncidents: [...incidents.values()].filter((incident) =>
+          ["detected", "scheduled", "attempting"].includes(incident.status)
+        ).length
+      };
+    } finally {
+      this._stopRightAfterStall = false;
+      this._stallAfterChunks = null;
+      this._stallAttemptsRemaining = null;
+      this.chatStreamStallTimeoutMs = 0;
+    }
+  }
+
+  /**
+   * An agent-tool run's reply stalls, so the run is left open for chat
+   * recovery, with a parent tailing it. Then the run's request is stopped
+   * on the child, one of the ways an app or a client can stop it.
+   */
+  async stopLeftOpenAgentToolRunForTest(
+    how: "cancelChat" | "abortRequest" | "abortAllRequests" | "client-cancel"
+  ): Promise<{
+    beforeStop: string | null;
+    status: string | undefined;
+    error: string | undefined;
+    tailClosed: boolean;
+    recoveryRan: number;
+    steps: number;
+  }> {
+    let runId = "";
+    try {
+      const runs = this["_agentToolRuns"];
+      let tailClosed = false;
+      let beforeStop: string | null = null;
+      // The stalled reply's recovery is scheduled with no backoff, so on a
+      // busy machine it can finish the run before the stop below. Start
+      // over until the stop lands on a run that is still left open.
+      for (
+        let attempt = 0;
+        attempt < 5 && beforeStop !== "running";
+        attempt++
+      ) {
+        runId = crypto.randomUUID();
+        this._stallAfterChunks = 2;
+        this._stallAttemptsRemaining = 1;
+        this.chatStreamStallTimeoutMs = 50;
+        await this.startAgentToolRun("stall, then get stopped", { runId });
+        // A parent's tail of the run. `tailClosed` flips when it ends.
+        tailClosed = false;
+        const reader = (
+          (await this.tailAgentToolRun(runId, {
+            afterSequence: -1
+          })) as unknown as ReadableStream<Uint8Array>
+        ).getReader();
+        void (async () => {
+          try {
+            while (!(await reader.read()).done) {
+              // Drain.
+            }
+          } catch {
+            // A broken tail has ended too.
+          }
+          tailClosed = true;
+        })();
+        const deadline = Date.now() + 8000;
+        while (runs.isLive(runId) && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 1));
+        }
+        beforeStop = this._readChildRunStatusForTest(runId);
+      }
+      const requestId = runs.store.read(runId)?.requestId;
+      if (!requestId) throw new Error("the run never bound a request");
+      const steps = this._beforeStepLog.length;
+
+      if (how === "cancelChat") {
+        this.cancelChat(requestId, "stopped");
+      } else if (how === "abortRequest") {
+        this.abortRequest(requestId, "stopped");
+      } else if (how === "abortAllRequests") {
+        this.abortAllRequests();
+      } else {
+        // What the `cancel` WebSocket message does.
+        await (
+          this as unknown as {
+            _handleProtocolEvent(
+              connection: unknown,
+              event: { type: "cancel"; id: string }
+            ): Promise<void>;
+          }
+        )._handleProtocolEvent(undefined, { type: "cancel", id: requestId });
+      }
+      // The stop's bookkeeping, then whatever recovery is still queued.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const recoveryRan = recoveryWorkCountForTest(
+        this,
+        "_chatRecoveryContinue"
+      );
+      if (recoveryRan > 0) {
+        await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
+      }
+      const tailDeadline = Date.now() + 1000;
+      while (!tailClosed && Date.now() < tailDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      const closedBeforeInspect = tailClosed;
+      // Read the row, not an inspection: an inspection would settle it.
+      const row = runs.store.read(runId);
+      return {
+        beforeStop,
+        status: row?.status,
+        error: row?.error ?? undefined,
+        tailClosed: closedBeforeInspect,
+        recoveryRan,
+        steps: this._beforeStepLog.length - steps
+      };
+    } finally {
+      this._stallAfterChunks = null;
+      this._stallAttemptsRemaining = null;
+      this.chatStreamStallTimeoutMs = 0;
+    }
   }
 
   /**
@@ -5263,7 +5511,15 @@ export class ThinkAgentToolParent extends Agent {
       input: "work through a reset",
       inputPreview: "work through a reset"
     });
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    // Reset once the run's reply is streaming: a turn that had not
+    // started cannot be recovered.
+    const streaming = Date.now() + 5000;
+    while (
+      (await child.getAgentToolChunks(runId)).length === 0 &&
+      Date.now() < streaming
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
     await child.resetIsolateForTest().catch(() => {});
     const result = await running;
     const deadline = Date.now() + 10_000;

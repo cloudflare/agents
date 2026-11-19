@@ -48,6 +48,11 @@ function makeStore() {
         startMessageId
       }),
     writes: (runId: string) => writes.get(runId) ?? 0,
+    /** Make the row look like one the previous release wrote: no root. */
+    clearRoot: (runId: string) =>
+      void db
+        .prepare("update runs set root_request_id = null where run_id = ?")
+        .run(runId),
     terminal: (runId: string): AgentToolRunTerminal | undefined => {
       const run = store.read(runId);
       if (!run) return undefined;
@@ -73,6 +78,7 @@ type Incident = {
   status: string;
   requestId: string;
   recoveryRootRequestId?: string;
+  reason?: string;
 };
 
 function setup() {
@@ -85,7 +91,9 @@ function setup() {
   let reply = false;
   let activeRequestId: string | null = null;
   let activeStream: string | null = null;
-  let transcript: Array<{ id: string; role: string }> | undefined;
+  let transcript:
+    | Array<{ id: string; role: string; parts?: unknown[] }>
+    | undefined;
   let holdList: Promise<void> | undefined;
   const lifecycles: Promise<unknown>[] = [];
   let requestIds = 0;
@@ -144,18 +152,26 @@ function setup() {
     settled: () => Promise.all(lifecycles),
     /** The state of chat recovery for the turn `requestId` names. */
     setRecovery: (
-      state: "in-progress" | "failed" | "none",
+      state: "in-progress" | "failed" | "cancelled" | "none",
       requestId = "req-1"
     ) => {
       incidents.delete(requestId);
       if (state === "none") return;
       incidents.set(requestId, {
-        status: state === "in-progress" ? "scheduled" : "exhausted",
+        status:
+          state === "in-progress"
+            ? "scheduled"
+            : state === "cancelled"
+              ? "skipped"
+              : "exhausted",
         requestId,
-        recoveryRootRequestId: requestId
+        recoveryRootRequestId: requestId,
+        ...(state === "cancelled" && { reason: "user_cancelled" })
       });
     },
-    setTranscript: (messages: Array<{ id: string; role: string }>) => {
+    setTranscript: (
+      messages: Array<{ id: string; role: string; parts?: unknown[] }>
+    ) => {
       transcript = messages;
     },
     setReply: (value: boolean) => {
@@ -800,6 +816,14 @@ describe("AgentToolRuns", () => {
       expect(store.read("run-1")?.status).toBe("error");
     });
 
+    it("a tail of a run that has ended leaves no closer behind", async () => {
+      const { runs, store } = setup();
+      store.seed("run-1");
+      runs.cancel("run-1", "stop");
+      for (let i = 0; i < 3; i++) await readAll(runs.tail("run-1"));
+      expect(runs.closers.size).toBe(0);
+    });
+
     it("a consumer that cancels the stream detaches and does not cancel the run", async () => {
       const { runs, store } = setup();
       const turn = heldTurn();
@@ -808,6 +832,7 @@ describe("AgentToolRuns", () => {
       await new Promise((resolve) => setTimeout(resolve, 10));
       expect(runs.forwarders.get("run-1")?.size).toBe(1);
       await reader.cancel();
+      expect(runs.closers.size).toBe(0);
       expect(runs.forwarders.size).toBe(0);
       expect(store.read("run-1")?.status).toBe("running");
       expect(turn.signal()?.aborted).toBe(false);
@@ -1026,6 +1051,120 @@ describe("AgentToolRuns", () => {
     });
   });
 
+  // A run left open for recovery has no controller and no turn in flight.
+  // What ends it is the recovered turn, or a stop.
+  describe("a stop on the agent, for a run left open for recovery", () => {
+    async function leftOpen() {
+      const context = setup();
+      const turn = heldTurn();
+      await context.runs.start("run-1", START, turn.run);
+      context.setRecovery("in-progress");
+      turn.end({ requestId: "req-1", status: "aborted" });
+      await context.settled();
+      expect(context.store.read("run-1")?.status).toBe("running");
+      return context;
+    }
+
+    it("a stop of the run's request settles the run aborted, with the reason, and closes its tails", async () => {
+      const { runs, store, recovered } = await leftOpen();
+      let closed = 0;
+      runs.closers.set("run-1", new Set([() => void closed++]));
+
+      runs.stopped("req-1", "user pressed stop");
+
+      expect(store.terminal("run-1")).toEqual({
+        status: "aborted",
+        error: "user pressed stop"
+      });
+      expect(closed).toBe(1);
+      expect(runs.liveSequences.size).toBe(0);
+      expect(runs.runsByRequestId.size).toBe(0);
+      // The run's request is stopped through the host, once.
+      expect(recovered).toEqual([
+        { requestId: "req-1", reason: "user pressed stop" }
+      ]);
+      // A recovery that still fires for the turn is not run.
+      expect(runs.isRecoveredRunCancelled("req-1")).toBe(true);
+    });
+
+    it("a stop of the recovered turn's request does the same", async () => {
+      const { runs, store } = await leftOpen();
+      runs.rebind("req-2", "req-1");
+      runs.stopped("req-2");
+      expect(store.terminal("run-1")).toEqual({
+        status: "aborted",
+        error: null
+      });
+    });
+
+    it("a stop of every request settles every open run", async () => {
+      const { runs, store } = await leftOpen();
+      store.seed("run-2");
+      runs.stopped(null, "stop all");
+      expect(store.terminal("run-1")).toEqual({
+        status: "aborted",
+        error: "stop all"
+      });
+      expect(store.terminal("run-2")).toEqual({
+        status: "aborted",
+        error: "stop all"
+      });
+    });
+
+    it("a stop of another request leaves the run alone", async () => {
+      const { runs, store, recovered } = await leftOpen();
+      runs.stopped("someone-else");
+      expect(store.read("run-1")?.status).toBe("running");
+      expect(recovered).toEqual([]);
+    });
+
+    it("a stop that comes back through the host's stop path does not loop", async () => {
+      const { runs, store, recovered } = await leftOpen();
+      // The host's cancelRequest stops the request, which reports the stop.
+      const push = recovered.push.bind(recovered);
+      recovered.push = (entry) => {
+        runs.stopped(entry.requestId, entry.reason);
+        return push(entry);
+      };
+      runs.cancel("run-1", "stop");
+      expect(recovered).toHaveLength(1);
+      expect(store.writes("run-1")).toBe(1);
+    });
+
+    it("is aborted, not completed, when its recovery was cancelled and nothing told the run", async () => {
+      const { runs, store, setRecovery, setReply } = await leftOpen();
+      // The cut-off partial is in the transcript.
+      setReply(true);
+      setRecovery("cancelled");
+      await runs.reconcileOwn();
+      expect(store.terminal("run-1")).toEqual({
+        status: "aborted",
+        error: null
+      });
+    });
+  });
+
+  it("a cancel that lands while the lifecycle reads recovery state leaves nothing in memory", async () => {
+    const { runs, store, settled, setRecovery, holdRecoveryRead } = setup();
+    const turn = heldTurn();
+    await runs.start("run-1", START, turn.run);
+    setRecovery("in-progress");
+    const release = holdRecoveryRead();
+    turn.end({ requestId: "req-1", status: "aborted" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    runs.cancel("run-1", "stop");
+    release();
+    await settled();
+
+    expect(store.terminal("run-1")).toEqual({
+      status: "aborted",
+      error: "stop"
+    });
+    expect(runs.liveSequences.size).toBe(0);
+    expect(runs.preTurnAssistantIds.size).toBe(0);
+    expect(runs.runsByRequestId.size).toBe(0);
+  });
+
   describe("the parent's signal", () => {
     it("still cancels a run that was left open for recovery", async () => {
       const { runs, store, settled, setRecovery, recovered } = setup();
@@ -1118,6 +1257,35 @@ describe("AgentToolRuns", () => {
       });
     });
 
+    it("does not anchor a run on an empty reply, which its own turn removes", async () => {
+      const { runs, store, setTranscript } = setup();
+      setTranscript([
+        { id: "users-question", role: "user", parts: [{}] },
+        { id: "users-answer", role: "assistant", parts: [{}] },
+        { id: "empty", role: "assistant", parts: [] }
+      ]);
+      const turn = heldTurn();
+      await runs.start("run-1", START, turn.run);
+      expect(store.read("run-1")?.startMessageId).toBe("users-answer");
+
+      // The isolate goes away. The run's turn had removed the empty reply
+      // and stored nothing of its own.
+      runs.controllers.delete("run-1");
+      runs.closeTailers("run-1");
+      const after = [
+        { id: "users-question", role: "user" },
+        { id: "users-answer", role: "assistant" }
+      ];
+      setTranscript(after);
+      expect(runs.messagesSinceStart("run-1", after)).toEqual([]);
+      await runs.reconcileStale("run-1");
+      // Not completed with the user's earlier answer as its output.
+      expect(store.terminal("run-1")).toEqual({
+        status: "error",
+        error: "Agent tool run was interrupted before the child could finish."
+      });
+    });
+
     it("counts what follows the run's start as the run's, after a restart", async () => {
       const { runs, store, setTranscript } = setup();
       store.seed("run-1", false, "users-answer");
@@ -1188,9 +1356,42 @@ describe("AgentToolRuns", () => {
         cancelledAt: null,
         startMessageId: null
       });
-      store.bindRequest("old", "req-2");
-      // A row from before the column existed takes its next bind as root.
-      expect(store.read("old")?.rootRequestId).toBe("req-2");
+      // A row from before the column existed takes the root its next bind
+      // names: the id the turn first ran under, not the recovered turn's.
+      store.bindRequest("old", "req-2", "req-1");
+      expect(store.read("old")).toMatchObject({
+        requestId: "req-2",
+        rootRequestId: "req-1"
+      });
+      // A later bind leaves it alone.
+      store.bindRequest("old", "req-3", "req-9");
+      expect(store.read("old")?.rootRequestId).toBe("req-1");
+    });
+
+    it("a run started before rows had a root is still found by its first request id after a recovery", () => {
+      const { runs, store, recovered } = setup();
+      store.seed("old");
+      // What the previous release wrote: the request id, and no root.
+      store.bindRequest("old", "X");
+      store.clearRoot("old");
+
+      // First recovery after the upgrade. Recovery names the turn "X".
+      runs.rebind("Y", "X");
+      expect(store.read("old")).toMatchObject({
+        requestId: "Y",
+        rootRequestId: "X"
+      });
+      // A second recovered turn is bound too, so its frames reach the parent.
+      runs.rebind("Z", "X");
+      expect(store.read("old")?.requestId).toBe("Z");
+      // A cancel reaches the recovery, which is registered under "X"...
+      runs.cancel("old", "stop");
+      expect(recovered.map((entry) => entry.requestId).sort()).toEqual([
+        "X",
+        "Z"
+      ]);
+      // ...and a recovery that still fires for "X" is not run.
+      expect(runs.isRecoveredRunCancelled("X")).toBe(true);
     });
   });
 });
