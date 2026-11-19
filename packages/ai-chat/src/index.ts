@@ -1737,7 +1737,8 @@ export class AIChatAgent<
               clientTools: continuationClientTools,
               body: this._lastBody,
               errorPrefix: "[AIChatAgent] Tool continuation failed:"
-            })
+            }),
+            (run) => this._enqueueInteractionApply(run)
           );
           return;
         }
@@ -1754,7 +1755,8 @@ export class AIChatAgent<
               clientTools: this._lastClientTools,
               body: this._lastBody,
               errorPrefix: "[AIChatAgent] Tool approval continuation failed:"
-            })
+            }),
+            (run) => this._enqueueInteractionApply(run)
           );
           return;
         }
@@ -3015,16 +3017,10 @@ export class AIChatAgent<
    * a pending interaction resolves. Safe to call at any time; if there is
    * nothing pending it returns immediately.
    *
-   * `pendingInteraction` overrides which "still waiting" predicate gates
-   * stability. It defaults to the broad {@link hasPendingInteraction} (any
-   * `input-available` / `approval-requested` part) to preserve the documented
-   * semantics for app overrides. The recovery paths pass the narrower
-   * {@link hasPendingClientInteraction} so a DEAD server-tool `input-available`
-   * orphan (its `execute()` died with the evicted isolate; nothing will resolve
-   * it) does NOT block stability — recovery then repairs it to an errored
-   * result and continues, instead of waiting until the budget is spent. This
-   * mirrors `@cloudflare/think`, whose single pending predicate is already
-   * client-only by construction.
+   * `pendingInteraction` replaces the check for a client still having
+   * something to answer. It defaults to {@link hasPendingInteraction}.
+   * Recovery passes {@link hasPendingClientInteraction}, which is the same
+   * check unless a subclass overrides it.
    */
   protected async waitUntilStable(options?: {
     timeout?: number;
@@ -3111,11 +3107,14 @@ export class AIChatAgent<
   }
 
   /**
-   * Same check as {@link hasPendingInteraction}. The two used to differ: this
+   * What chat recovery asks before it waits, parks or gives up: is a client
+   * still to answer something? The same check as
+   * {@link hasPendingInteraction} by default. The two used to differ: this
    * one ignored a server tool call that died with its isolate. Such a call is
    * now settled when its cut-off reply is stored, so neither sees one.
    *
-   * @deprecated Use {@link hasPendingInteraction}.
+   * Override it to change what recovery waits for without changing what
+   * {@link waitUntilStable} waits for elsewhere.
    */
   protected hasPendingClientInteraction(): boolean {
     return this.hasPendingInteraction();
@@ -5017,7 +5016,7 @@ export class AIChatAgent<
       readProgress: () => this._chatRecoveryProgressMarker(),
       // A turn parked on a pending CLIENT interaction is waiting on the human,
       // not stuck, so the engine keeps it budget-free.
-      isAwaitingClientInteraction: () => this.hasPendingInteraction(),
+      isAwaitingClientInteraction: () => this.hasPendingClientInteraction(),
       putIncident: (key, incident) => this.ctx.storage.put(key, incident),
       syncStorage: () => this.ctx.storage.sync(),
       deleteIncident: async (key) => {
@@ -5508,7 +5507,8 @@ export class AIChatAgent<
       // The reply was settled above, so anything still pending is a call a
       // client can answer, and the `!ready` branch parks on it.
       const ready = await this.waitUntilStable({
-        timeout: recoveryConfig.stableTimeoutMs
+        timeout: recoveryConfig.stableTimeoutMs,
+        pendingInteraction: () => this.hasPendingClientInteraction()
       });
       // A stop that landed while the attempt waited wins over the
       // stable-state timeout's park, reschedule or exhaustion.
@@ -5906,7 +5906,7 @@ export class AIChatAgent<
   private async _parkRecoveryForPendingInteraction(
     data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined
   ): Promise<boolean> {
-    if (!this.hasPendingInteraction()) return false;
+    if (!this.hasPendingClientInteraction()) return false;
     await this._updateChatRecoveryIncident(
       data?.incidentId,
       "skipped",
@@ -6054,7 +6054,8 @@ export class AIChatAgent<
     try {
       const recoveryConfig = this._resolveChatRecoveryConfig();
       const ready = await this.waitUntilStable({
-        timeout: recoveryConfig.stableTimeoutMs
+        timeout: recoveryConfig.stableTimeoutMs,
+        pendingInteraction: () => this.hasPendingClientInteraction()
       });
       // A stop that landed while the attempt waited wins over the
       // stable-state timeout's park, reschedule or exhaustion.
@@ -6482,7 +6483,7 @@ export class AIChatAgent<
    * write and `MESSAGE_UPDATED` broadcast.
    *
    * @param toolCallId - The tool call ID to find
-   * @param callerName - Name for log messages (e.g. "_applyToolResult")
+   * @param callerName - Name for log messages (e.g. "_settleToolResult")
    * @param matchStates - Which tool part states to match
    * @param applyUpdate - Mutation to apply to the matched part (streaming: in-place, persisted: spread)
    * @returns true if the update was applied (or matched as an idempotent
@@ -6738,29 +6739,9 @@ export class AIChatAgent<
    * @param output - The output from the tool execution
    * @param overrideState - Optional state override ("output-error" to signal denial/failure)
    * @param errorText - Error message when overrideState is "output-error"
-   * @returns true if the result was applied, false if the message was not found
+   * @returns What the apply did to the part: changed it, left it as it was
+   *   (an idempotent re-apply), or found no part.
    */
-  private async _applyToolResult(
-    toolCallId: string,
-    _toolName: string,
-    output: unknown,
-    overrideState?: "output-error",
-    errorText?: string
-  ): Promise<boolean> {
-    return (
-      (
-        await this._settleToolResult(
-          toolCallId,
-          _toolName,
-          output,
-          overrideState,
-          errorText
-        )
-      ).status !== "missing"
-    );
-  }
-
-  /** {@link _applyToolResult}, reporting what the apply did to the part. */
   private async _settleToolResult(
     toolCallId: string,
     _toolName: string,
@@ -6770,7 +6751,7 @@ export class AIChatAgent<
   ): Promise<ToolInteractionOutcome> {
     return this._updateToolPart(
       toolCallId,
-      "_applyToolResult",
+      "_settleToolResult",
       [
         "input-available",
         "approval-requested",
@@ -7444,19 +7425,8 @@ export class AIChatAgent<
    *
    * @param toolCallId - The tool call ID this approval is for
    * @param approved - Whether the tool execution was approved
-   * @returns true if the approval was applied, false if the message was not found
+   * @returns What the apply did to the part.
    */
-  private async _applyToolApproval(
-    toolCallId: string,
-    approved: boolean
-  ): Promise<boolean> {
-    return (
-      (await this._settleToolApproval(toolCallId, approved)).status !==
-      "missing"
-    );
-  }
-
-  /** {@link _applyToolApproval}, reporting what the apply did to the part. */
   private async _settleToolApproval(
     toolCallId: string,
     approved: boolean
@@ -7469,7 +7439,7 @@ export class AIChatAgent<
     const update = toolApprovalUpdate(toolCallId, approved);
     return this._updateToolPart(
       toolCallId,
-      "_applyToolApproval",
+      "_settleToolApproval",
       update.matchStates,
       update.apply
     );

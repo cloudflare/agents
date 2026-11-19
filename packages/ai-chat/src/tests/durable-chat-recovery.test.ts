@@ -147,6 +147,7 @@ interface ChatRecoveryTestStub {
     interruptedAttempts?: number;
   }): Promise<void>;
   setForceStableTimeoutForTest(value: boolean): Promise<void>;
+  setPendingClientInteractionForTest(value: boolean | null): Promise<void>;
   setRequestContextForTest(
     body: Record<string, unknown> | undefined,
     clientTools: Array<{ name: string }>
@@ -2067,6 +2068,49 @@ describe("onChatRecovery", () => {
     expect(stored[0].parts[0]).toMatchObject({ state: "output-error" });
     expect(stored.at(-1)?.role).toBe("assistant");
   }, 8_000);
+
+  it("asks a subclass's hasPendingClientInteraction whether a client is still to answer", async () => {
+    const agentStub = await getTestAgent(
+      `stable-park-override-${crypto.randomUUID()}`
+    );
+    await agentStub.setForceStableTimeoutForTest(true);
+    // Nothing in the transcript is unanswered. The subclass says a client
+    // still has to answer something only it knows about.
+    await agentStub.setPendingClientInteractionForTest(true);
+    await agentStub.persistMessages([
+      {
+        id: "user-override",
+        role: "user",
+        parts: [{ type: "text", text: "hello" }]
+      },
+      {
+        id: "assistant-override",
+        role: "assistant",
+        parts: [{ type: "text", text: "partial" }]
+      }
+    ]);
+    await agentStub.seedIncidentForTest({
+      incidentId: "inc-override",
+      requestId: "root-override",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+    const continueData = {
+      incidentId: "inc-override",
+      originalRequestId: "root-override",
+      targetAssistantId: "assistant-override"
+    };
+    await agentStub.preScheduleRecoveryContinueForTest(continueData);
+    await agentStub.runChatRecoveryContinueDirectForTest(continueData);
+
+    const parked = await agentStub.getIncidentForTest("inc-override");
+    expect(parked?.status).toBe("skipped");
+    expect(parked?.reason).toBe("awaiting_client_interaction");
+  });
 
   it("PARKS a continuation (no reschedule, no budget spent) while a CLIENT interaction is pending", async () => {
     const agentStub = await getTestAgent(`stable-park-${crypto.randomUUID()}`);

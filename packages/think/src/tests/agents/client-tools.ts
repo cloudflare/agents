@@ -1562,6 +1562,20 @@ export class ThinkClientToolsAgent extends Think {
     )._submitConcurrency.overlappingSubmitCount;
   }
 
+  private _interactionAppliesSeen = 0;
+
+  /** Counts every apply, as a subclass that wraps applies would see them. */
+  protected override _enqueueInteractionApply(
+    apply: () => Promise<void>
+  ): Promise<boolean> {
+    this._interactionAppliesSeen++;
+    return super._enqueueInteractionApply(apply);
+  }
+
+  async getInteractionAppliesSeenForTest(): Promise<number> {
+    return this._interactionAppliesSeen;
+  }
+
   private _useDeclaredClientTool = false;
 
   async setDeclaredClientToolForTest(value: boolean): Promise<void> {

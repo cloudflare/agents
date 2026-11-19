@@ -3321,6 +3321,36 @@ describe("Think — chained client tools across continuations (#2443)", () => {
 
 // ── Tool results that have nothing left to continue ──────────────
 
+describe("Think — a subclass that wraps tool result applies", () => {
+  it("sees a client tool result", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    await agent.persistToolCallMessage([
+      makeUserMessage("use client tool"),
+      makeToolMessage("tc-hook", "client_action", "input-available")
+    ]);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId: "tc-hook",
+        toolName: "client_action",
+        output: "done",
+        autoContinue: false
+      })
+    );
+    await waitUntil(async () => {
+      const stored = (await agent.getMessages()) as UIMessage[];
+      return JSON.stringify(stored).includes("output-available");
+    });
+
+    expect(await agent.getInteractionAppliesSeenForTest()).toBe(1);
+    await closeWS(ws);
+  });
+});
+
 describe("Think — waiting on a client after an upgrade", () => {
   it("does not wait on a server tool call an older release stored in the latest reply", async () => {
     const agent = await freshAgent();

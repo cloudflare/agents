@@ -583,9 +583,9 @@ export class TestChatAgent extends AIChatAgent<Env> {
     });
   }
 
-  // Test helper: directly invoke the protected _applyToolResult so tests
-  // can exercise the idempotency branch without scheduling an
-  // auto-continuation (issue #1404).
+  // Test helper: apply a tool result the way the tool-result handler does,
+  // with no auto-continuation, so tests can exercise the idempotency branch
+  // (issue #1404).
   async testApplyToolResult(
     toolCallId: string,
     toolName: string,
@@ -593,17 +593,52 @@ export class TestChatAgent extends AIChatAgent<Env> {
     overrideState?: "output-error",
     errorText?: string
   ): Promise<boolean> {
-    return (
-      this as unknown as {
-        _applyToolResult(
-          toolCallId: string,
-          toolName: string,
-          output: unknown,
-          overrideState?: "output-error",
-          errorText?: string
+    const self = this as unknown as {
+      _settleToolResult(
+        toolCallId: string,
+        toolName: string,
+        output: unknown,
+        overrideState?: "output-error",
+        errorText?: string
+      ): Promise<{ status: "changed" | "unchanged" | "missing" }>;
+      _turns: {
+        applyInteraction(
+          apply: () => Promise<unknown>,
+          autoContinue: boolean,
+          spec: () => never,
+          enqueue: (run: () => Promise<boolean>) => Promise<boolean>
         ): Promise<boolean>;
-      }
-    )._applyToolResult(toolCallId, toolName, output, overrideState, errorText);
+      };
+    };
+    return self._turns.applyInteraction(
+      () =>
+        self._settleToolResult(
+          toolCallId,
+          toolName,
+          output,
+          overrideState,
+          errorText
+        ),
+      false,
+      () => {
+        throw new Error("no continuation without autoContinue");
+      },
+      (run) => this._enqueueInteractionApply(run)
+    );
+  }
+
+  /** How many applies went through the overridable enqueue hook. */
+  private _interactionAppliesSeen = 0;
+
+  getInteractionAppliesSeenForTest(): number {
+    return this._interactionAppliesSeen;
+  }
+
+  protected override _enqueueInteractionApply(
+    apply: () => Promise<boolean>
+  ): Promise<boolean> {
+    this._interactionAppliesSeen++;
+    return super._enqueueInteractionApply(apply);
   }
 
   private _getChainedContinuationRegressionResponse(): Response | undefined {
@@ -2884,6 +2919,19 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   }
 
   private _forceStableTimeout = false;
+
+  /** A subclass's own answer to "is a client still to answer?". */
+  private _clientInteractionOverride: boolean | null = null;
+
+  setPendingClientInteractionForTest(value: boolean | null): void {
+    this._clientInteractionOverride = value;
+  }
+
+  protected override hasPendingClientInteraction(): boolean {
+    return (
+      this._clientInteractionOverride ?? super.hasPendingClientInteraction()
+    );
+  }
 
   setForceStableTimeoutForTest(value: boolean): void {
     this._forceStableTimeout = value;

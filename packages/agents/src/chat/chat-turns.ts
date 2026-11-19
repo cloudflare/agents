@@ -431,14 +431,19 @@ export class ChatTurns<
    * targeted at that call's message; without it, a batch a sibling opted in
    * for is re-armed (#1650).
    *
+   * @param enqueue - How the apply joins the queue. Defaults to
+   *   {@link enqueueInteraction}. A host with an overridable enqueue hook
+   *   passes it, so a subclass that wraps applies sees every one of them.
    * @returns Whether the tool call was found.
    */
   applyInteraction(
     apply: () => Promise<ToolInteractionOutcome>,
     autoContinue: boolean,
-    spec: () => ContinuationSpec<TConnection>
+    spec: () => ContinuationSpec<TConnection>,
+    enqueue: (run: () => Promise<boolean>) => Promise<boolean> = (run) =>
+      this.enqueueInteraction(run)
   ): Promise<boolean> {
-    return this.enqueueInteraction(async () => {
+    return enqueue(async () => {
       const outcome = await apply();
       this.autoContinuation.afterInteraction(outcome, autoContinue, spec);
       return outcome.status !== "missing";

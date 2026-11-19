@@ -13719,7 +13719,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               event.errorText
             ),
           event.autoContinue === true,
-          () => this._continuationSpec(connection)
+          () => this._continuationSpec(connection),
+          (run) => this._enqueueInteractionOutcome(run)
         );
         break;
       }
@@ -13728,7 +13729,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         this._turns.applyInteraction(
           () => this._applyToolApproval(event.toolCallId, event.approved),
           event.autoContinue === true,
-          () => this._continuationSpec(connection)
+          () => this._continuationSpec(connection),
+          (run) => this._enqueueInteractionOutcome(run)
         );
         break;
       }
@@ -16065,6 +16067,21 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       await apply();
       return true;
     });
+  }
+
+  /**
+   * Queue a client tool result or approval through
+   * {@link _enqueueInteractionApply}, the hook a subclass can wrap, and
+   * report whether its tool call was found.
+   */
+  private async _enqueueInteractionOutcome(
+    run: () => Promise<boolean>
+  ): Promise<boolean> {
+    let found = false;
+    await this._enqueueInteractionApply(async () => {
+      found = await run();
+    });
+    return found;
   }
 
   private async _applyToolResult(
