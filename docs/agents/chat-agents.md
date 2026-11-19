@@ -593,6 +593,24 @@ The same bounded recovery handles an `AIChatAgent` stream that fails while the a
 
 Durable recovery is always enabled. Use `chatRecovery` only to tune its budgets and terminal behavior.
 
+#### Requests waiting behind an interrupted turn
+
+A client request stores its user message as soon as it arrives, then waits in the turn queue while an earlier turn finishes. The queue lives in memory, so the agent also writes a small record for each accepted request: its request id, the ids of the user messages it stored, its client tools and body, and its `messageConcurrency` decision. The record is deleted when the request's turn starts (from then on the turn's fiber is what recovery uses) or when the request ends without a turn.
+
+If the isolate resets while requests wait, the next isolate recovers the interrupted turn first. Once no interrupted turn is waiting for recovery, the waiting requests run again in the order they arrived, each as its own turn under its own request id. So a conversation where `U2` was sent while `A1` streamed ends `U1, U2, A1, A2`, as it would with no reset. A tab that reconnects gets the stream of that request, or its terminal frame, under the request id it sent.
+
+The usual rules still apply after the reset:
+
+- A stop by the request id, sent before or after the reset, ends the request `aborted` without calling the model.
+- A clear deletes every record, so nothing that was waiting runs afterwards.
+- A request a later one superseded under `"latest"`, `"merge"` or `"debounce"` stays superseded.
+- A request whose user message is no longer stored ends `skipped`.
+- A new request that arrives before the waiting ones have run lets them go first, without waiting for the recovery. The recovery then finds the conversation has moved on, as it does for any new message.
+
+While it waits, a request's user message does not count as the conversation moving on, so the recovered turn still continues or retries the reply it was recovering.
+
+A `saveMessages()` or `continueLastTurn()` call that is waiting in the queue stores nothing until its turn starts, so a reset loses nothing of it. Its caller's promise rejects with the reset, and the caller decides whether to call again.
+
 > **Assign `chatRecovery` as a class field or in the constructor — never in `onStart()`.** On every wake the SDK evaluates recovery budgets (and may seal an interrupted turn, firing `onExhausted`) _before_ your `onStart()` body runs. A config produced inside `onStart()` is therefore read as the built-in defaults at the moment recovery decides, so your `maxRecoveryWork` / `shouldKeepRecovering` / `onExhausted` silently never apply to the recovery that matters. The SDK logs a one-time warning if it detects `chatRecovery` being assigned during `onStart()`.
 
 #### `onChatRecovery`

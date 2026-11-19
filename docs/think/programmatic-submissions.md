@@ -171,6 +171,14 @@ persisted to the conversation.
 If the chat is cleared or turn state is reset before a pending submission runs,
 that submission is marked `skipped`.
 
+If the isolate resets while one submission runs and others are pending, the
+running one's turn is recovered first. The pending submissions run after that
+recovery settles, in order, each with its own reply. A submission accepted
+after the reset runs as usual.
+
+Client requests sent over a WebSocket get the same treatment: see
+[Requests waiting behind an interrupted turn](../agents/chat-agents.md#requests-waiting-behind-an-interrupted-turn).
+
 ## Compared with `saveMessages`
 
 Use `saveMessages()` when the caller can wait for the full turn:
