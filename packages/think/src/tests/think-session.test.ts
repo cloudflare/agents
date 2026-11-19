@@ -3738,6 +3738,38 @@ describe("Think — onChatRecovery", () => {
     });
   });
 
+  it("does not continue a reply again when the recovery callback is delivered again after a reset cut its turn off", async () => {
+    const agent = await freshRecoveryAgent("recovery-redelivered");
+    const seed = {
+      incidentId: "req-redelivered:",
+      requestId: "req-redelivered",
+      recoveryKind: "continue" as const,
+      attempt: 1,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now(),
+      // The first delivery's turn started, then the isolate was reset. The
+      // interrupted turn's own recovery stores its partial and schedules the
+      // next attempt. The Task also runs this same step again.
+      scheduleCount: 1,
+      startedDelivery: 1
+    };
+    await agent.seedIncidentForTest(seed);
+
+    await agent.runChatRecoveryContinueForTestWith({
+      incidentId: "req-redelivered:",
+      originalRequestId: "req-redelivered",
+      delivery: 1
+    });
+
+    expect(await agent.getTurnBodies()).toHaveLength(0);
+    const incidents = (await agent.getChatRecoveryIncidentsForTest()) as Array<{
+      status: string;
+    }>;
+    expect(incidents[0]?.status).toBe("scheduled");
+  });
+
   it("continuation does not replay a trailing assistant message (assistant prefill)", async () => {
     const agent = await freshRecoveryAgent("continuation-prefill");
 

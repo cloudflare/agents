@@ -9,9 +9,11 @@ import { connectChatWS } from "./test-utils";
 type Stub = {
   persistMessages(messages: unknown[]): Promise<void>;
   seedIncidentForTest(incident: Record<string, unknown>): Promise<void>;
-  getIncidentForTest(
-    id: string
-  ): Promise<{ status: string; reason?: string } | null>;
+  getIncidentForTest(id: string): Promise<{
+    status: string;
+    reason?: string;
+    startedDelivery?: number;
+  } | null>;
   runChatRecoveryContinueDirectForTest(
     data: Record<string, unknown>
   ): Promise<void>;
@@ -33,7 +35,12 @@ async function agent(room: string): Promise<Stub> {
   )) as unknown as Stub;
 }
 
-async function seedCutOffReply(stub: Stub, incidentId: string, root: string) {
+async function seedCutOffReply(
+  stub: Stub,
+  incidentId: string,
+  root: string,
+  extra: Record<string, unknown> = {}
+) {
   await stub.persistMessages([
     { id: "u1", role: "user", parts: [{ type: "text", text: "hi" }] },
     {
@@ -52,7 +59,8 @@ async function seedCutOffReply(stub: Stub, incidentId: string, root: string) {
     status: "scheduled",
     firstSeenAt: Date.now(),
     lastAttemptAt: Date.now(),
-    scheduled: { callback: "_chatRecoveryContinue", targetMessageId: "a1" }
+    scheduled: { callback: "_chatRecoveryContinue", targetMessageId: "a1" },
+    ...extra
   });
 }
 
@@ -146,5 +154,54 @@ describe("the recovery attempt scope", () => {
     await stub.waitForIdleForTest();
     // [recovered turn, follow-up saveMessages turn]
     expect(await stub.getRecoveryRootsSeenForTest()).toEqual(["root-c", null]);
+  }, 20_000);
+});
+
+describe("a recovery callback delivered again after a reset", () => {
+  const seed = (stub: Stub, extra: Record<string, unknown>) =>
+    seedCutOffReply(stub, "inc-d", "root-d", extra);
+  const data = {
+    incidentId: "inc-d",
+    originalRequestId: "root-d",
+    targetAssistantId: "a1",
+    delivery: 1
+  };
+
+  it("does not continue the reply a second time: the interrupted turn's recovery owns it", async () => {
+    const stub = await agent(crypto.randomUUID());
+    // The first delivery's turn started and a reset cut it off. The Task
+    // runs the same step again, before or after the interrupted turn's own
+    // recovery has scheduled the next attempt.
+    await seed(stub, { scheduleCount: 1, startedDelivery: 1 });
+
+    await stub.runChatRecoveryContinueDirectForTest(data);
+    await stub.waitForIdleForTest();
+
+    expect(await stub.getOnChatMessageCallCount()).toBe(0);
+    expect((await stub.getIncidentForTest("inc-d"))?.status).toBe("scheduled");
+  }, 20_000);
+
+  it("does not run once the interrupted turn's recovery scheduled the next attempt", async () => {
+    const stub = await agent(crypto.randomUUID());
+    await seed(stub, { scheduleCount: 2 });
+
+    await stub.runChatRecoveryContinueDirectForTest(data);
+    await stub.waitForIdleForTest();
+
+    expect(await stub.getOnChatMessageCallCount()).toBe(0);
+  }, 20_000);
+
+  it("marks the schedule's turn as started from inside the turn", async () => {
+    const stub = await agent(crypto.randomUUID());
+    await seed(stub, { scheduleCount: 1 });
+    // The turn fails with an application error, so the incident is kept and
+    // shows what the turn wrote.
+    await stub.throwFromNextTurnForTest("boom");
+
+    await stub.runChatRecoveryContinueCatchingForTest(data);
+    await stub.waitForIdleForTest();
+
+    expect(await stub.getOnChatMessageCallCount()).toBe(1);
+    expect((await stub.getIncidentForTest("inc-d"))?.startedDelivery).toBe(1);
   }, 20_000);
 });

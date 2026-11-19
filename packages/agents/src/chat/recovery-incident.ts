@@ -152,6 +152,15 @@ export type ChatRecoveryIncident = {
    */
   scheduleCount?: number;
   /**
+   * The schedule ({@link scheduleCount}) whose turn has started. A recovery
+   * callback is delivered at least once: after an isolate reset the same
+   * payload runs again. If its turn had started, that turn was cut off, and
+   * the interrupted turn's own recovery stores its partial and schedules the
+   * next attempt. The callback delivered again reads this and leaves the
+   * turn to it, so one interruption is continued once.
+   */
+  startedDelivery?: number;
+  /**
    * The platform transient the last attempt hit, while the incident waits
    * for that attempt to run again. Cleared by the next schedule.
    */
@@ -918,6 +927,12 @@ export async function evaluateChatRecoveryIncident(
     // after its turn.
     ...(existing?.scheduleCount
       ? { scheduleCount: existing.scheduleCount }
+      : {}),
+    // Carried until the next schedule replaces the count it names: a
+    // callback delivered again while this evaluation's recovery is still
+    // deciding must not run the turn in the meantime.
+    ...(existing?.startedDelivery !== undefined
+      ? { startedDelivery: existing.startedDelivery }
       : {}),
     ...(exhausted
       ? {

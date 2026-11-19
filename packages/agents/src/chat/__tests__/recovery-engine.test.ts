@@ -761,7 +761,8 @@ describe("ChatRecoveryEngine.scheduleRecovery (fake adapter)", () => {
 
     expect(fake.schedules[0]).toEqual({
       callback: "_chatRecoveryRetry",
-      data,
+      // Plus the number of this schedule, the incident's first.
+      data: { ...data, delivery: 1 },
       reason: "stable_timeout_retry",
       delaySeconds: 0
     });

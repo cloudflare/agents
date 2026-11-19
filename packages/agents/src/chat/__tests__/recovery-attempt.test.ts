@@ -958,3 +958,107 @@ describe("runRecoveredTurn", () => {
     expect(t.log).not.toContain("stopped");
   });
 });
+
+describe("a recovery callback delivered more than once", () => {
+  // The host's turn: its body runs through `engine.turnBody`, inside the
+  // turn's fiber, as `_runChatRecoveryFiber` does in both classes.
+  const turnThroughFiber =
+    (during?: () => void | Promise<void>) =>
+    async ({ engine }: Harness) => {
+      await engine.turnBody(true, async () => during?.(), "turn-request")();
+    };
+
+  it("records on the incident that the turn of its schedule started", async () => {
+    let duringTurn: unknown;
+    const t = setup({
+      incident: { scheduleCount: 2 },
+      duringTurn: turnThroughFiber(() => {
+        duringTurn = t.incident()?.startedDelivery;
+      })
+    });
+    t.host.data = { ...t.host.data, delivery: 2 };
+
+    await t.run();
+
+    expect(duringTurn).toBe(2);
+    expect(t.log).toContain("turn");
+  });
+
+  it("does not run the turn again after a reset cut it off: the interrupted turn's recovery owns it", async () => {
+    // The first delivery's turn started, then the isolate was reset. The
+    // incident still reads `scheduled`, with the started mark.
+    const t = setup({ incident: { scheduleCount: 2, startedDelivery: 2 } });
+    t.host.data = { ...t.host.data, delivery: 2 };
+
+    await t.run();
+
+    expect(t.log).not.toContain("turn");
+    expect(t.log).not.toContain("begin");
+    // Nothing is recorded: the incident is the wake's to move on.
+    expect(t.incident()).toMatchObject({ status: "scheduled" });
+    expect(t.events).toEqual([]);
+    // What the callback holds is still released.
+    expect(t.log).toContain("reconcile");
+  });
+
+  it("does not run an older schedule's payload once a newer attempt is scheduled", async () => {
+    const t = setup({ incident: { scheduleCount: 3 } });
+    t.host.data = { ...t.host.data, delivery: 2 };
+
+    await t.run();
+
+    expect(t.log).not.toContain("turn");
+    expect(t.incident()).toMatchObject({ status: "scheduled" });
+  });
+
+  it("runs a payload an older version scheduled, which has no schedule number", async () => {
+    const t = setup({ incident: { scheduleCount: 2, startedDelivery: 2 } });
+
+    await t.run();
+
+    expect(t.log).toContain("turn");
+  });
+
+  it("runs the same payload again after a deferral, which ends the turn without a reset", async () => {
+    let failing = true;
+    const t = setup({
+      incident: { scheduleCount: 1 },
+      duringTurn: turnThroughFiber(() => {
+        if (failing) throw new Error("Network connection lost.");
+      })
+    });
+    t.host.data = { ...t.host.data, delivery: 1 };
+
+    await expect(t.run()).rejects.toThrow("Network connection lost.");
+    expect(t.incident()?.startedDelivery).toBeUndefined();
+
+    failing = false;
+    await t.rerun();
+    expect(t.incident()).toBeUndefined();
+    expect(t.log.filter((entry) => entry === "turn")).toHaveLength(2);
+  });
+
+  it("hands each schedule its number in the callback's payload", async () => {
+    const t = setup({ incident: { scheduleCount: 4 } });
+    const payloads: unknown[] = [];
+    const adapter = (
+      t.engine as unknown as {
+        adapter: { scheduleRecovery: (...args: unknown[]) => Promise<void> };
+      }
+    ).adapter;
+    adapter.scheduleRecovery = (_callback, data) => {
+      payloads.push(data);
+      return Promise.resolve();
+    };
+
+    await t.engine.scheduleRecovery({
+      incident: t.incident()!,
+      recoveryKind: "continue",
+      callback: "_chatRecoveryContinue",
+      data: { incidentId: INCIDENT }
+    });
+
+    expect(payloads).toEqual([{ incidentId: INCIDENT, delivery: 5 }]);
+    expect(t.incident()?.scheduleCount).toBe(5);
+  });
+});

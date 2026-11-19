@@ -3465,17 +3465,22 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     attempt: number;
     status: string;
     reason?: string;
+    startedDelivery?: number;
   } | null> {
     const incident = await this.ctx.storage.get<{
       attempt: number;
       status: string;
       reason?: string;
+      startedDelivery?: number;
     }>(`cf:chat-recovery:incident:${encodeURIComponent(incidentId)}`);
     return incident
       ? {
           attempt: incident.attempt,
           status: incident.status,
-          reason: incident.reason
+          reason: incident.reason,
+          ...(incident.startedDelivery !== undefined && {
+            startedDelivery: incident.startedDelivery
+          })
         }
       : null;
   }

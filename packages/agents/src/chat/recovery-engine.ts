@@ -302,6 +302,8 @@ export type ChatRecoveryAttemptScope = {
   incidentId?: string;
   /** The root request id of the attempt's chain. */
   rootRequestId?: string;
+  /** The schedule this delivery of the attempt is for, when it has one. */
+  delivery?: number;
 };
 
 /** The host's turn machinery, as the engine uses it. */
@@ -949,6 +951,10 @@ export class ChatRecoveryEngine {
     // tell that its own turn scheduled the next one).
     const key = chatRecoveryIncidentKey(incident.incidentId);
     const stored = await this.adapter.getIncident(key);
+    // The callback carries the number of its schedule, so a delivery of an
+    // older schedule, or a second delivery of this one after its turn
+    // started, can tell it is not the one to run (`recoveryDelivery`).
+    let delivery: number | undefined;
     if (stored) {
       const targetMessageId =
         input.callback === "_chatRecoveryContinue" &&
@@ -956,10 +962,11 @@ export class ChatRecoveryEngine {
           ? input.data.targetAssistantId
           : undefined;
       const { deferredError: _deferredError, ...rest } = stored;
+      delivery = (stored.scheduleCount ?? 0) + 1;
       await this.adapter.putIncident(key, {
         ...rest,
         status: "scheduled",
-        scheduleCount: (stored.scheduleCount ?? 0) + 1,
+        scheduleCount: delivery,
         scheduled: {
           callback: input.callback,
           ...(targetMessageId !== undefined && { targetMessageId })
@@ -980,10 +987,52 @@ export class ChatRecoveryEngine {
     });
     await this.adapter.scheduleRecovery(
       input.callback,
-      input.data,
+      delivery === undefined ? input.data : { ...input.data, delivery },
       input.reason ?? "initial",
       input.delaySeconds ?? 0
     );
+  }
+
+  /**
+   * Whether a delivered recovery callback is the one to run its turn.
+   *
+   * - `"run"`: it is. Also the answer for a payload with no schedule number
+   *   (one an older version scheduled) and for an incident that is gone.
+   * - `"stale"`: a newer attempt was scheduled since. That one runs.
+   * - `"cut_off"`: this schedule's turn already started, so this is a second
+   *   delivery after a reset cut the turn off. The interrupted turn's own
+   *   recovery owns it: it stores the partial, counts the attempt and
+   *   schedules the next one.
+   */
+  async recoveryDelivery(
+    incidentId: string | undefined,
+    delivery: unknown
+  ): Promise<"run" | "stale" | "cut_off"> {
+    if (!incidentId || typeof delivery !== "number") return "run";
+    const incident = await this.readIncident(incidentId);
+    if (!incident || incident.scheduleCount === undefined) return "run";
+    if (incident.scheduleCount !== delivery) return "stale";
+    return incident.startedDelivery === delivery ? "cut_off" : "run";
+  }
+
+  /** Record that the turn of the attempt's schedule has started. */
+  private async markDeliveryStarted(
+    attempt: ChatRecoveryAttemptScope | undefined
+  ): Promise<void> {
+    if (!attempt?.incidentId || attempt.delivery === undefined) return;
+    const key = chatRecoveryIncidentKey(attempt.incidentId);
+    const incident = await this.adapter.getIncident(key);
+    if (
+      incident?.status !== "scheduled" ||
+      incident.scheduleCount !== attempt.delivery ||
+      incident.startedDelivery === attempt.delivery
+    ) {
+      return;
+    }
+    await this.adapter.putIncident(key, {
+      ...incident,
+      startedDelivery: attempt.delivery
+    });
   }
 
   /**
@@ -1386,10 +1435,14 @@ export class ChatRecoveryEngine {
       taken = true;
       await this.supersedeScheduledRecovery(attempt?.incidentId);
     };
-    return () =>
-      scope && attempt
-        ? scope.run(attempt, () => body(takeReply))
-        : body(takeReply);
+    // The first write inside the fiber: from here on, a reset wakes the
+    // interrupted turn's recovery, and the callback delivered again must
+    // not run the turn a second time.
+    const run = async (): Promise<T> => {
+      await this.markDeliveryStarted(attempt);
+      return body(takeReply);
+    };
+    return () => (scope && attempt ? scope.run(attempt, run) : run());
   }
 
   /**
@@ -1471,7 +1524,10 @@ export class ChatRecoveryEngine {
     const key = chatRecoveryIncidentKey(incidentId);
     const incident = await this.adapter.getIncident(key);
     if (incident?.status !== "scheduled") return;
-    await this.adapter.putIncident(key, { ...incident, deferredError: error });
+    // The deferred turn ended without a reset, so nothing else will run it
+    // again: the same payload has to.
+    const { startedDelivery: _startedDelivery, ...rest } = incident;
+    await this.adapter.putIncident(key, { ...rest, deferredError: error });
   }
 
   /** Whether the user cancelled this incident's scheduled recovery. */

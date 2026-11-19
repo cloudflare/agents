@@ -51,6 +51,8 @@ export type RecoveryAttemptData = {
   incidentId?: string;
   originalRequestId?: string;
   recoveredRequestId?: string;
+  /** The number of the schedule this payload was enqueued for. */
+  delivery?: number;
   /** The body the interrupted request ran with. `null` when it had none. */
   lastBody?: Record<string, unknown> | null;
   /** The client tools it ran with. `null` when it had none. */
@@ -157,6 +159,16 @@ export async function runRecoveredTurn<
       await host.onStopped?.();
       return;
     }
+    // A callback is delivered at least once. An older schedule's payload,
+    // or this one's after its turn already started, is not the one to run.
+    if (
+      (await engine.recoveryDelivery(
+        host.data?.incidentId,
+        host.data?.delivery
+      )) !== "run"
+    ) {
+      return;
+    }
     if (host.admit && !(await host.admit())) return;
     // Inside the attempt's scope. Only what runs here, the turn the attempt
     // starts included, is this attempt's. A turn some other request starts
@@ -165,7 +177,10 @@ export async function runRecoveredTurn<
       {
         incidentId: host.data?.incidentId,
         rootRequestId:
-          host.data?.originalRequestId ?? engine.activeRootRequestId
+          host.data?.originalRequestId ?? engine.activeRootRequestId,
+        ...(typeof host.data?.delivery === "number" && {
+          delivery: host.data.delivery
+        })
       },
       () => runAdmittedAttempt(engine, host)
     );
