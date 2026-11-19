@@ -4801,13 +4801,15 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * queued behind the recovered turn stored. Those requests run after it,
    * so their questions have not moved the conversation on.
    */
-  private _recoveryLeaf(): UIMessage | undefined {
+  private async _recoveryLeaf(): Promise<{ id: string; role: string } | null> {
+    const leaf = await this.session.getLatestLeaf();
     const queued = this._turns.admittedMessageIds();
+    if (!leaf || !queued.has(leaf.id)) return leaf;
     const messages = this.messages;
     for (let i = messages.length - 1; i >= 0; i--) {
       if (!queued.has(messages[i].id)) return messages[i];
     }
-    return undefined;
+    return null;
   }
 
   /**
@@ -16948,7 +16950,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       retryTargetUserId !== null &&
       options.continue !== false &&
       !streamIsTerminal;
-    const lastLeaf = shouldRetry ? null : this._recoveryLeaf();
+    const lastLeaf = shouldRetry ? null : await this._recoveryLeaf();
     const targetId =
       lastLeaf?.role === "assistant" && !streamIsTerminal
         ? lastLeaf.id
@@ -17069,7 +17071,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       return null;
     }
 
-    const lastLeaf = this._recoveryLeaf() ?? null;
+    const lastLeaf = await this._recoveryLeaf();
     // A regeneration branches beside the response it replaces, so that
     // response, not the user message, is still the leaf.
     const branchParentId = regenerationParentOf(snapshot);
@@ -17087,7 +17089,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   private async _hasPersistedRecoveredAssistant(
     snapshot: ChatFiberSnapshot | null
   ): Promise<boolean> {
-    const lastLeaf = this._recoveryLeaf();
+    const lastLeaf = await this._recoveryLeaf();
     return (
       lastLeaf?.role === "assistant" &&
       lastLeaf.id !== snapshot?.latestMessageId
@@ -17286,7 +17288,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const { regeneratedLeafId, targetUserId } = target;
     return {
       checkLeaf: async () => {
-        const lastLeaf = this._recoveryLeaf();
+        const lastLeaf = await this._recoveryLeaf();
         if (
           !lastLeaf ||
           (regeneratedLeafId === undefined && lastLeaf.role !== "user")
@@ -17560,7 +17562,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       // by this attempt or an earlier run of it): answer the question again.
       retryLostReply: this._recoveryRetrySteps(host, data, {}, onTurnStarted),
       checkLeaf: async () => {
-        const lastLeaf = this._recoveryLeaf();
+        const lastLeaf = await this._recoveryLeaf();
         if (!targetId || lastLeaf?.id === targetId) return { moved: false };
         supersededByNewerUserTurn = lastLeaf?.role === "user";
         return { moved: true, reason: "conversation_changed" };
