@@ -55,9 +55,12 @@ describe("ChatTurnFibers", () => {
     let liveDuringRun = false;
     const value = await fibers.run(
       { requestId: "r1", continuation: true, snapshot: snapshot("r1") },
-      async () => {
+      async (takeReply) => {
         liveDuringRun =
           fibers.liveTurns.has("r1") && fibers.liveClosures.has("nonce-1");
+        log.push("model");
+        // The model returned a reply: the turn takes it.
+        await takeReply();
         log.push("run");
         return "reply";
       }
@@ -68,11 +71,53 @@ describe("ChatTurnFibers", () => {
       "context:captured",
       "task:r1:true:nonce-1",
       "context:entered",
+      "model",
       "takeReply:true",
       "run"
     ]);
     expect(fibers.liveTurns.size).toBe(0);
     expect(fibers.liveClosures.size).toBe(0);
+  });
+
+  it("does not take the reply for a turn that ends before its model call returned one", async () => {
+    // The repair or a hook threw, or the model call returned nothing: a
+    // recovery scheduled to continue the reply must stay in place.
+    await expect(
+      fibers.run(
+        { requestId: "r1", continuation: true, snapshot: snapshot("r1") },
+        async () => {
+          throw new Error("hook failed");
+        }
+      )
+    ).rejects.toThrow("hook failed");
+    await fibers.run(
+      { requestId: "r2", continuation: true, snapshot: snapshot("r2") },
+      async () => undefined
+    );
+    expect(log.some((entry) => entry.startsWith("takeReply"))).toBe(false);
+  });
+
+  it("gives the tools and body a running turn was started with", async () => {
+    const pinned = createChatFiberSnapshot({
+      kind: "test-turn",
+      requestId: "r1",
+      continuation: false,
+      messages: [],
+      lastBody: { agentToolInput: "x" },
+      lastClientTools: undefined
+    });
+    let during: unknown;
+    await fibers.run(
+      { requestId: "r1", continuation: false, snapshot: pinned },
+      async () => {
+        during = fibers.requestContext("r1");
+      }
+    );
+    expect(during).toEqual({
+      lastBody: { agentToolInput: "x" },
+      lastClientTools: undefined
+    });
+    expect(fibers.requestContext("r1")).toBeUndefined();
   });
 
   it("wraps the snapshot and the app's stash data into one envelope", async () => {

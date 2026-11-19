@@ -211,26 +211,25 @@ export async function runServerTurn<TInput = undefined>(
     release();
   }
 
-  if (declined) return outcome;
-  // A reset can land between the turn's end and the queue handing back.
-  return mapServerTurnOutcome(outcome, {
-    reset: !isCurrent(),
-    aborted: false,
-    reported: true
-  });
+  // The status was settled when the turn's work ended. A reset that lands
+  // later, while the host's queue wrapper is still busy with the turn (its
+  // `onChatResponse`), changes nothing about a turn that already finished.
+  return outcome;
 }
 
 /**
  * The status a caller gets for a turn.
  *
  * - An `error` stands.
- * - A reset since the turn was admitted wins over everything else:
- *   `skipped`. Nothing of the turn is left to report, whether the reset
- *   came before the reply or cut it off.
+ * - A reply the host's reply path reported `completed` stands: it finished
+ *   and was stored. A stop or a reset that lands afterwards, while the
+ *   response hook runs, does not undo it.
+ * - Otherwise a reset since the turn was admitted gives `skipped`. Nothing
+ *   of the turn is left to report, whether the reset came before the reply
+ *   or cut it off.
  * - A turn stopped before its reply path reported anything (`run` was not
  *   called, or returned nothing) is `aborted`.
- * - An outcome the reply path reported stands. A stop that lands after a
- *   reply finished does not turn `completed` into `aborted`.
+ * - An `aborted` the reply path reported stands, absent a reset.
  */
 export function mapServerTurnOutcome(
   outcome: ServerTurnOutcome,
@@ -244,9 +243,24 @@ export function mapServerTurnOutcome(
   }
 ): ServerTurnOutcome {
   if (outcome.status === "error") return outcome;
+  if (state.reported && outcome.status === "completed") return outcome;
   if (state.reset) return { status: "skipped" };
   if (!state.reported && state.aborted) return { status: "aborted" };
   return outcome;
+}
+
+/**
+ * The tools and body a caller passes with a turn: an agent-tool run's input,
+ * or what a recovered turn was running with. A field left out means "the
+ * stored one, read when the turn starts"; `null` pins "none".
+ *
+ * A pinned context is that turn's only. It is never written to the stored
+ * request context, so it cannot leak into the chat's next turn, and nothing
+ * has to be put back when the turn ends.
+ */
+export interface PinnedTurnContext<TClientTool = unknown> {
+  clientTools?: TClientTool[] | null;
+  body?: Record<string, unknown> | null;
 }
 
 /**

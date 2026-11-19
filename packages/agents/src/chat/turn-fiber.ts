@@ -10,7 +10,10 @@
  *   a stream failure that is recovered while the turn is still live;
  * - wrap the snapshot and the app's stash data into one envelope;
  * - a turn that continues the latest reply takes that reply over from a
- *   recovery scheduled to continue it, inside the fiber;
+ *   recovery scheduled to continue it, once its model call has returned a
+ *   reply and not before: a turn that ends earlier (a repair or a hook
+ *   throws, the model call fails or returns nothing) leaves the recovery in
+ *   place;
  * - on a facet, run on the legacy fiber engine; otherwise register the live
  *   closure, start the chat-turn Task ({@link createChatTurnTaskDefinition}
  *   runs the closure) and wait for its outcome.
@@ -90,7 +93,11 @@ export class ChatTurnFibers {
    */
   readonly liveTurns = new Map<
     string,
-    { createdAt: number; recoveryData: unknown }
+    {
+      createdAt: number;
+      recoveryData: unknown;
+      snapshot: ChatFiberSnapshot<string>;
+    }
   >();
   /**
    * Live turn closures by run nonce. A closure exists only in the isolate
@@ -100,25 +107,51 @@ export class ChatTurnFibers {
 
   constructor(private readonly host: ChatTurnFiberHost) {}
 
-  /** Run `fn`, the turn's model call and reply, as a durable fiber. */
-  async run<T>(turn: ChatTurnFiber, fn: () => Promise<T>): Promise<T> {
+  /**
+   * The tools and body the turn running under `requestId` was started with,
+   * or `undefined` when no such turn runs here. A live stream failure
+   * schedules its recovery with these, not with the stored request context:
+   * a turn whose caller pinned its context never wrote it there.
+   */
+  requestContext(requestId: string):
+    | {
+        lastBody: ChatFiberSnapshot["lastBody"];
+        lastClientTools: ChatFiberSnapshot["lastClientTools"];
+      }
+    | undefined {
+    const snapshot = this.liveTurns.get(requestId)?.snapshot;
+    return (
+      snapshot && {
+        lastBody: snapshot.lastBody,
+        lastClientTools: snapshot.lastClientTools
+      }
+    );
+  }
+
+  /**
+   * Run `fn`, the turn's model call and reply, as a durable fiber.
+   *
+   * @param fn - Receives `takeReply`. Call it once the model call has
+   *   returned a reply and before the reply is streamed or stored: from
+   *   then on this turn is the one continuing the reply, and a recovery
+   *   scheduled to continue the same reply stands down. It does nothing for
+   *   a turn that starts a new reply, and nothing the second time.
+   */
+  async run<T>(
+    turn: ChatTurnFiber,
+    fn: (takeReply: () => Promise<void>) => Promise<T>
+  ): Promise<T> {
     const { requestId, continuation, snapshot } = turn;
-    const liveTurn = { createdAt: Date.now(), recoveryData: null as unknown };
+    const liveTurn = {
+      createdAt: Date.now(),
+      recoveryData: null as unknown,
+      snapshot
+    };
     const wrap = (data: unknown) => {
       liveTurn.recoveryData = data;
       return wrapChatFiberSnapshot(this.host.snapshotKey, snapshot, data);
     };
-    // Every continuation body here calls the model, so the reply is taken
-    // at once. A body that can end without a model call must take it later,
-    // where it commits to the call.
-    const body = this.host.turnBody(
-      continuation,
-      async (takeReply) => {
-        await takeReply();
-        return fn();
-      },
-      requestId
-    );
+    const body = this.host.turnBody(continuation, fn, requestId);
 
     this.liveTurns.set(requestId, liveTurn);
     try {

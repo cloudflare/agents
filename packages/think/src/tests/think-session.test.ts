@@ -3067,6 +3067,16 @@ describe("Think — saveMessages with external AbortSignal", () => {
     expect(await agent.getAbortControllerCount()).toBe(0);
   });
 
+  it("a turn whose reply finished is completed when a clear lands while onChatResponse runs", async () => {
+    const agent = await freshProgrammaticAgent("clear-during-response-hook");
+
+    const result = await agent.testClearDuringResponseHook();
+
+    // The reply was stored and the hook was handed `completed`. The clear
+    // came after, and does not turn the turn into `skipped`.
+    expect(result).toEqual({ status: "completed", hookStatus: "completed" });
+  });
+
   it("does not ask shouldApplyMessages again once the chat was reset", async () => {
     const agent = await freshProgrammaticAgent("should-apply-reset-messages");
 

@@ -418,19 +418,49 @@ describe("runServerTurn", () => {
     expect(log).toEqual(["s1:prepare"]);
   });
 
-  it("reports skipped, not aborted, for a completed turn the chat was reset under", async () => {
+  it("reports skipped, not aborted, for a turn with no reply the chat was reset under", async () => {
     const result = await runServerTurn(
       parts,
       turn("s1", {
         run: async () => {
           parts.queue.reset();
           parts.aborts.destroyAll();
-          return { status: "completed" };
         }
       })
     );
     expect(result).toEqual({ status: "skipped" });
     expect(log).not.toContain("s1:onAborted");
+  });
+
+  it("lets a completed reply stand when the chat is cleared while its response hook runs", async () => {
+    const result = await runServerTurn(
+      parts,
+      turn("s1", {
+        run: async () => {
+          // The reply finished and was stored. The clear lands while the
+          // host still awaits the app's onChatResponse inside the turn.
+          parts.queue.reset();
+          parts.aborts.destroyAll();
+          return { status: "completed" };
+        }
+      })
+    );
+    expect(result).toEqual({ status: "completed" });
+  });
+
+  it("lets a completed reply stand when the chat is cleared before the queue hands back", async () => {
+    const result = await runServerTurn(
+      parts,
+      turn("s1", {
+        enqueue: async (run, generation) => {
+          const queued = await parts.queue.enqueue("s1", run, { generation });
+          // The host's queue wrapper drains onChatResponse after the turn.
+          parts.queue.reset();
+          return queued.status;
+        }
+      })
+    );
+    expect(result).toEqual({ status: "completed" });
   });
 
   it("runs a turn inside a queue slot the host already holds", async () => {
@@ -474,9 +504,12 @@ describe("mapServerTurnOutcome", () => {
     ).toBe(error);
   });
 
-  it("lets a reset win over every other status", () => {
+  it("gives skipped for a reset, unless a reply finished first", () => {
     expect(map("completed", { reset: true, aborted: true })).toBe("skipped");
     expect(map("aborted", { reset: true, reported: true })).toBe("skipped");
+    // The reply path reported `completed`: the reply was stored before the
+    // reset.
+    expect(map("completed", { reset: true, reported: true })).toBe("completed");
   });
 
   it("reports a stop only for a turn whose reply path reported nothing", () => {

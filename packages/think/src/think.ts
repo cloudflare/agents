@@ -191,6 +191,7 @@ import {
   ChatTurns,
   ChatTurnFibers,
   pinnedOr,
+  type PinnedTurnContext as PinnedContext,
   prepareTurnMessages,
   type ServerChatTurn,
   toSaveMessagesResult,
@@ -1408,15 +1409,7 @@ type ProgrammaticMessagesResult = SaveMessagesResult & {
   output?: unknown;
 };
 
-/**
- * The tools and body a caller passes with a server-started turn. A field
- * left out means "the stored one, read when the turn starts"; `null` pins
- * "none".
- */
-type PinnedTurnContext = {
-  clientTools?: ClientToolSchema[] | null;
-  body?: Record<string, unknown> | null;
-};
+type PinnedTurnContext = PinnedContext<ClientToolSchema>;
 
 function withOutput(output: unknown): { output?: unknown } {
   return output !== undefined ? { output } : {};
@@ -6043,8 +6036,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   private _runChatRecoveryFiber<T>(
     requestId: string,
     continuation: boolean,
-    fn: () => Promise<T>,
-    branchParentId?: string
+    fn: (takeReply: () => Promise<void>) => Promise<T>,
+    branchParentId?: string,
+    // The tools and body the turn runs with, for its recovery snapshot. Left
+    // out by a turn that runs with the stored ones.
+    context?: {
+      clientTools: ClientToolSchema[] | undefined;
+      body: Record<string, unknown> | undefined;
+    }
   ): Promise<T> {
     // A recovered turn tells its attempt when its fiber is durably accepted,
     // so the attempt can move a submission it owns to this turn.
@@ -6057,8 +6056,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           this._activeChatRecoveryRootRequestId ?? requestId,
         continuation,
         messages: this.messages,
-        lastBody: this._lastBody,
-        lastClientTools: this._lastClientTools,
+        lastBody: context ? context.body : this._lastBody,
+        lastClientTools: context ? context.clientTools : this._lastClientTools,
         originMessageIds: this._originMessageIdsFor(requestId)
       }),
       ...(branchParentId !== undefined && { branchParentId })
@@ -13238,7 +13237,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         ...(continuation && { continuation: true })
       });
 
-    const attempts = async (): Promise<StreamResultStatus | undefined> => {
+    const attempts = async (
+      takeReply: () => Promise<void>
+    ): Promise<StreamResultStatus | undefined> => {
       // Every attempt re-runs the same turn from the now-compacted history:
       // an overflow retry is not an auto-continuation.
       for (let attempt = 0; ; attempt++) {
@@ -13270,6 +13271,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           }
           return undefined;
         }
+        // The model returned a reply: a turn that continues the latest
+        // reply takes it over from a scheduled recovery now.
+        await takeReply();
 
         // The reply path suppresses a classified overflow whenever recovery
         // is enabled; this loop owns the retry-or-terminal call, so every
@@ -13342,7 +13346,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       requestId,
       continuation,
       attempts,
-      parentId
+      parentId,
+      { clientTools: turn.clientTools, body: turn.body }
     );
   }
 
@@ -14844,6 +14849,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // the assistant message is persisted and the transcript broadcast (#2119).
     let terminalFrame: Record<string, unknown> | undefined;
     let streamAborted = false;
+    // The chat was reset before the reply could be stored.
+    let resetBeforeStore = false;
     let streamError: string | undefined;
     let streamErrorCause: unknown;
     let output: unknown;
@@ -15245,7 +15252,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       const submissionResult: SubmissionTurnResult = streamAborted
         ? { status: "aborted" }
         : { status: "completed", output };
-      if (!resetSinceTurnStarted()) {
+      resetBeforeStore = resetSinceTurnStarted();
+      if (!resetBeforeStore) {
         try {
           // A stream that was stopped or errored is cut off: settle the tool
           // calls it left unanswered before the reply is stored.
@@ -15335,7 +15343,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     return streamError
       ? { status: "error", error: streamError }
       : {
-          status: streamAborted ? "aborted" : "completed",
+          // A reply the chat was cleared under before it could be stored did
+          // not complete. One that was stored first did, whatever came after.
+          status: streamAborted || resetBeforeStore ? "aborted" : "completed",
           ...(output !== undefined && { output })
         };
   }
@@ -16907,16 +16917,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         beginRecoveryAttempt: (rootRequestId) =>
           this._turns.beginRecoveryAttempt(rootRequestId),
         waitUntilStable: (timeout) => this.waitUntilStable({ timeout }),
-        restoreRequestContext: (context) => {
-          if ("lastClientTools" in context) {
-            this._lastClientTools = context.lastClientTools;
-            this._persistClientTools();
-          }
-          if ("lastBody" in context) {
-            this._lastBody = context.lastBody;
-            this._persistBody();
-          }
-        },
         recordTerminalError: (requestId, errorText) =>
           this._recordTerminalChatStatus("error", requestId, errorText),
         reconcileAgentToolChildRuns: () =>
@@ -17129,6 +17129,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const recoveryRootRequestId =
       this._activeChatRecoveryRootRequestId ?? input.requestId;
     const liveTurn = this._liveChatRecoveryTurns.get(input.requestId);
+    // The turn's own tools and body. A pinned turn never wrote them to the
+    // stored context.
+    const turnContext = this._chatTurnFibers.requestContext(
+      input.requestId
+    ) ?? {
+      lastBody: this._lastBody,
+      lastClientTools: this._lastClientTools
+    };
     // If a durable submission is running for this turn, the recovery must
     // complete it, or the submission hangs.
     const recoveredRequestId = () =>
@@ -17161,8 +17169,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           partialParts: context.partialParts,
           recoveryData: liveTurn?.recoveryData ?? null,
           messages: [...this.messages],
-          lastBody: this._lastBody,
-          lastClientTools: this._lastClientTools,
+          ...turnContext,
           createdAt: liveTurn?.createdAt ?? context.firstSeenAt
         }),
       resolvePartial: async (keep) => {
@@ -17170,10 +17177,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         input.onPartialDropped();
         return undefined;
       },
-      requestContext: () => ({
-        lastBody: this._lastBody,
-        lastClientTools: this._lastClientTools
-      }),
+      requestContext: () => turnContext,
       // The turn then ends as its stream error, which the caller sends.
       onDeclined: (errorText) =>
         this._markRecoveredSubmissionInterrupted(
@@ -17727,13 +17731,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       // Being superseded is benign: the submission ends `skipped`, never
       // `error`.
       onSkipped: () => host.completeSubmission("skipped", null, null),
-      runTurn: (signal) =>
+      runTurn: (signal, context) =>
         this._runRecoveredTurnAfterAcceptance(
           host.submission(),
           onTurnStarted,
           () =>
             this._retryLastUserTurn({
-              ...this._recoveredTurnContext(data),
+              ...context,
               signal: host.turnSignal(signal),
               trigger: "recovery-retry",
               ...(regeneratedLeafId !== undefined && {
@@ -17987,13 +17991,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           await host.completeSubmission("skipped", null, null);
         }
       },
-      runTurn: (signal) =>
+      runTurn: (signal, context) =>
         this._runRecoveredTurnAfterAcceptance(
           host.submission(),
           onTurnStarted,
           () =>
             this.continueLastTurn(undefined, {
-              ...this._recoveredTurnContext(data),
+              ...context,
               signal: host.turnSignal(signal),
               trigger: "recovery-continue"
             })
@@ -18008,23 +18012,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           true
         )
     });
-  }
-
-  /**
-   * The tools and body a recovered turn was running with, to pin on the
-   * turn that recovers it: other turns can start between this attempt and
-   * its turn, and each stores its own.
-   */
-  private _recoveredTurnContext(
-    data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined
-  ): PinnedTurnContext {
-    if (!data) return {};
-    return {
-      ...("lastClientTools" in data && {
-        clientTools: data.lastClientTools ?? null
-      }),
-      ...("lastBody" in data && { body: data.lastBody ?? null })
-    };
   }
 
   private _getPartialStreamText(streamId: string): {
@@ -18203,7 +18190,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         const { connection, clientTools } = continuation;
         let streamed = false;
         try {
-          const continuationBody = async () => {
+          const continuationBody = async (takeReply: () => Promise<void>) => {
             const result = await agentContext.run(
               {
                 agent: this,
@@ -18220,6 +18207,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
                 })
             );
             if (result) {
+              // The model returned a reply: this turn continues it now.
+              await takeReply();
               await this._streamResult(requestId, result, abortSignal, {
                 continuation: true
               });
@@ -18386,7 +18375,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         inheritChannel: true,
         allowNested: true,
         execute: async () => {
-          const continuationBody = async () => {
+          const continuationBody = async (takeReply: () => Promise<void>) => {
             const result = await agentContext.run(
               {
                 agent: this,
@@ -18403,6 +18392,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
                 })
             );
             if (result) {
+              // The model returned a reply: this turn continues it now.
+              await takeReply();
               await this._streamResult(requestId, result, abortSignal, {
                 continuation: true
               });

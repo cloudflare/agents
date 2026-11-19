@@ -2362,6 +2362,14 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       await hold.released;
     }
 
+    // The turn ends before the model returned a reply.
+    const endBeforeReply = this._endBeforeReply;
+    if (endBeforeReply) {
+      this._endBeforeReply = null;
+      if (endBeforeReply === "nothing") return undefined;
+      throw new Error("onChatMessage failed before a reply");
+    }
+
     if (this._hangTurnsRemaining > 0) {
       this._hangTurnsRemaining--;
       return makeHangingSSEResponse();
@@ -3847,6 +3855,81 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   ): void {
     this._lastBody = body;
     this._lastClientTools = clientTools;
+  }
+
+  /** The next turn's response reader throws `message` after a partial. */
+  armFailingReaderForTest(message: string): void {
+    this._failingTurn = { message, remaining: 1, prelude: "partial" };
+  }
+
+  private _endBeforeReply: "nothing" | "throw" | null = null;
+
+  /** The next `onChatMessage` returns no response, or throws. */
+  endNextTurnBeforeReplyForTest(how: "nothing" | "throw"): void {
+    this._endBeforeReply = how;
+  }
+
+  /** Call `continueLastTurn` the way an app does. */
+  async continueLastTurnForTest(): Promise<string> {
+    try {
+      return (await this.continueLastTurn()).status;
+    } catch (error) {
+      return `threw: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
+  /** The stored request context: what the chat's next turn would run with. */
+  getStoredRequestContextForTest(): {
+    body: Record<string, unknown> | null;
+    clientTools: string[] | null;
+  } {
+    return {
+      body: this._lastBody ?? null,
+      clientTools: this._lastClientTools?.map((tool) => tool.name) ?? null
+    };
+  }
+
+  private _pinnedTurnForTest: Promise<SaveMessagesResult> | null = null;
+
+  /** Start a turn whose caller pins its own body, as an agent-tool run does. */
+  startPinnedTurnForTest(body: Record<string, unknown>): void {
+    this._pinnedTurnForTest = (
+      this as unknown as {
+        _runProgrammaticMessagesTurn(
+          requestId: string,
+          messages: (current: ChatMessage[]) => ChatMessage[],
+          options: { body: Record<string, unknown>; clientTools: null }
+        ): Promise<SaveMessagesResult>;
+      }
+    )._runProgrammaticMessagesTurn(
+      crypto.randomUUID(),
+      (current) => [
+        ...current,
+        {
+          id: `pinned-${crypto.randomUUID()}`,
+          role: "user",
+          parts: [{ type: "text", text: "pinned turn" }]
+        }
+      ],
+      { body, clientTools: null }
+    );
+  }
+
+  async awaitPinnedTurnForTest(): Promise<string> {
+    return (await this._pinnedTurnForTest)?.status ?? "none";
+  }
+
+  private _clearDuringResponseHook = false;
+
+  /** A clear lands while the next `onChatResponse` runs. */
+  clearDuringNextResponseHookForTest(): void {
+    this._clearDuringResponseHook = true;
+  }
+
+  protected override async onChatResponse(): Promise<void> {
+    if (!this._clearDuringResponseHook) return;
+    this._clearDuringResponseHook = false;
+    this.resetTurnState();
   }
 
   async saveSyntheticUserMessage(

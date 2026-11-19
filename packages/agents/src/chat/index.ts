@@ -181,6 +181,7 @@ export {
   pinnedOr,
   prepareTurnMessages,
   toSaveMessagesResult,
+  type PinnedTurnContext,
   type ServerChatTurn,
   type ServerTurnOutcome,
   type ServerTurnParts,

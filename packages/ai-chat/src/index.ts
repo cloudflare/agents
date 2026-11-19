@@ -898,10 +898,18 @@ export class AIChatAgent<
     return this._chatTurnFibers.liveTurns;
   }
 
+  /**
+   * @param context - The tools and body the turn runs with, for its
+   *   recovery snapshot. Left out by a turn that runs with the stored ones.
+   */
   private _runChatRecoveryFiber<T>(
     requestId: string,
     continuation: boolean,
-    fn: () => Promise<T>
+    fn: (takeReply: () => Promise<void>) => Promise<T>,
+    context?: {
+      clientTools: ClientToolSchema[] | undefined;
+      body: Record<string, unknown> | undefined;
+    }
   ): Promise<T> {
     return this._chatTurnFibers.run(
       {
@@ -914,8 +922,10 @@ export class AIChatAgent<
             this._activeChatRecoveryRootRequestId ?? requestId,
           continuation,
           messages: this.messages,
-          lastBody: this._lastBody,
-          lastClientTools: this._lastClientTools,
+          lastBody: context ? context.body : this._lastBody,
+          lastClientTools: context
+            ? context.clientTools
+            : this._lastClientTools,
           originMessageIds: this._originMessageIdsFor(requestId)
         })
       },
@@ -3308,7 +3318,9 @@ export class AIChatAgent<
                 email: undefined
               },
               async () => {
-                const autoContinuationBody = async () => {
+                const autoContinuationBody = async (
+                  takeReply: () => Promise<void>
+                ) => {
                   let replying = false;
                   try {
                     await this._repairInterruptedToolsBeforeTurn({
@@ -3326,6 +3338,9 @@ export class AIChatAgent<
                     );
 
                     if (response) {
+                      // The model returned a reply: this turn continues it
+                      // now.
+                      await takeReply();
                       const replyResult = await this._reply(
                         requestId,
                         response,
@@ -3483,11 +3498,11 @@ export class AIChatAgent<
       body?: Record<string, unknown> | null;
       clientTools?: ClientToolSchema[] | null;
       /**
-       * Put the stored tools and body back when the turn ends. For a turn
-       * whose context is its own (an agent-tool run's input), so the chat's
-       * next turn does not inherit it.
+       * Write this turn's tools and body to the stored request context, so
+       * later turns run with them too. Only for a body the app itself gave
+       * `continueLastTurn`. A pinned context is otherwise this turn's only.
        */
-      restoreContext?: boolean;
+      storeContext?: boolean;
       /** The caller already holds the queue slot: run without waiting. */
       inline?: boolean;
       prepare?: ServerChatTurn<UIMessage[]>["prepare"];
@@ -3509,7 +3524,7 @@ export class AIChatAgent<
         this._runServerTurnBody(requestId, signal, {
           body: turn.body,
           clientTools: turn.clientTools,
-          restoreContext: turn.restoreContext ?? false,
+          storeContext: turn.storeContext ?? false,
           continuation: turn.continuation
         }),
       onAborted: () => this._clearChatTerminal()
@@ -3525,8 +3540,9 @@ export class AIChatAgent<
    * A caller can pin the tools and body with the turn. What it leaves out is
    * the stored one, read here, when the turn starts, so a turn that waited in
    * the queue runs with the context of the request that ran before it, like a
-   * continuation does. Either way the turn's context becomes the stored
-   * context while it runs, which is what chat recovery snapshots.
+   * continuation does. A pinned context is never written to the stored one:
+   * it goes to `onChatMessage` and into the turn's recovery snapshot, and
+   * the chat's stored context is left for the turns after it.
    *
    * @returns The reply's outcome, or nothing when `onChatMessage` returned no
    *   response.
@@ -3537,27 +3553,19 @@ export class AIChatAgent<
     turn: {
       body: Record<string, unknown> | null | undefined;
       clientTools: ClientToolSchema[] | null | undefined;
-      restoreContext: boolean;
+      storeContext: boolean;
       continuation: boolean;
     }
   ): Promise<StreamResultStatus | undefined> {
     const { continuation } = turn;
-    const previousClientTools = this._lastClientTools;
-    const previousBody = this._lastBody;
-    const clientTools = pinnedOr(turn.clientTools, () => previousClientTools);
-    const body = pinnedOr(turn.body, () => previousBody);
-    this._setRequestContext(clientTools, body);
-    try {
-      return await this._runServerTurnReply(requestId, abortSignal, {
-        clientTools,
-        body,
-        continuation
-      });
-    } finally {
-      if (turn.restoreContext) {
-        this._setRequestContext(previousClientTools, previousBody);
-      }
-    }
+    const clientTools = pinnedOr(turn.clientTools, () => this._lastClientTools);
+    const body = pinnedOr(turn.body, () => this._lastBody);
+    if (turn.storeContext) this._setRequestContext(clientTools, body);
+    return this._runServerTurnReply(requestId, abortSignal, {
+      clientTools,
+      body,
+      continuation
+    });
   }
 
   private async _runServerTurnReply(
@@ -3581,24 +3589,31 @@ export class AIChatAgent<
           email: undefined
         },
         () =>
-          this._runChatRecoveryFiber(requestId, continuation, async () => {
-            await this._repairInterruptedToolsBeforeTurn({ continuation });
-            const response = await this.onChatMessage(() => {}, {
-              requestId,
-              abortSignal,
-              clientTools,
-              body,
-              continuation
-            });
-
-            if (response) {
-              outcome = await this._reply(requestId, response, [], {
-                continuation,
-                chatMessageId: requestId,
-                abortSignal
+          this._runChatRecoveryFiber(
+            requestId,
+            continuation,
+            async (takeReply) => {
+              await this._repairInterruptedToolsBeforeTurn({ continuation });
+              const response = await this.onChatMessage(() => {}, {
+                requestId,
+                abortSignal,
+                clientTools,
+                body,
+                continuation
               });
-            }
-          })
+
+              if (response) {
+                // The model returned a reply: this turn continues it now.
+                await takeReply();
+                outcome = await this._reply(requestId, response, [], {
+                  continuation,
+                  chatMessageId: requestId,
+                  abortSignal
+                });
+              }
+            },
+            { clientTools, body }
+          )
       );
     });
 
@@ -4785,7 +4800,7 @@ export class AIChatAgent<
    *   front of the queue, before and after the messages are worked out.
    *   `false` ends the turn `aborted` with nothing stored and no model call.
    * @param options.body - The body this turn runs with, in place of the
-   *   stored one. The stored one is put back when the turn ends.
+   *   stored one, which is left as it is.
    * @param options.clientTools - The same for the client tools. `null` runs
    *   the turn with none.
    */
@@ -4803,9 +4818,6 @@ export class AIChatAgent<
       continuation: false,
       body: options?.body,
       clientTools: options?.clientTools,
-      // A context the caller passed is this turn's only.
-      restoreContext:
-        options?.body !== undefined || options?.clientTools !== undefined,
       prepare: ({ isCurrent }) =>
         prepareTurnMessages<UIMessage>({
           messages,
@@ -4836,6 +4848,7 @@ export class AIChatAgent<
     body?: Record<string, unknown>,
     options?: SaveMessagesOptions
   ): Promise<SaveMessagesResult> {
+    const pinned: ProgrammaticTurnOptions | undefined = options;
     if (!this._findLastAssistantMessage()) {
       return { requestId: "", status: "skipped" };
     }
@@ -4847,13 +4860,17 @@ export class AIChatAgent<
     this._rebindAgentToolChildRunRequestId(requestId);
     return this._runServerTurn(requestId, {
       signal: options?.signal,
-      body,
+      body: body ?? pinned?.body,
+      clientTools: pinned?.clientTools,
+      // A body the app passes becomes the chat's stored body, as it always
+      // has. A context framework code pins is this turn's only.
+      storeContext: body !== undefined,
       continuation: true
     });
   }
 
   private async _retryLastUserTurn(
-    options?: SaveMessagesOptions
+    options?: ProgrammaticTurnOptions
   ): Promise<SaveMessagesResult> {
     const lastMessage =
       this.messages.length > 0 ? this.messages[this.messages.length - 1] : null;
@@ -4868,6 +4885,8 @@ export class AIChatAgent<
     this._rebindAgentToolChildRunRequestId(requestId);
     return this._runServerTurn(requestId, {
       signal: options?.signal,
+      body: options?.body,
+      clientTools: options?.clientTools,
       continuation: false
     });
   }
@@ -4957,13 +4976,6 @@ export class AIChatAgent<
             timeout,
             pendingInteraction: () => this.hasPendingClientInteraction()
           }),
-        restoreRequestContext: (context) => {
-          if ("lastClientTools" in context) {
-            this._lastClientTools = context.lastClientTools;
-          }
-          if ("lastBody" in context) this._lastBody = context.lastBody;
-          this._persistRequestContext();
-        },
         recordTerminalError: (requestId, errorText) =>
           this._recordChatTerminal(requestId, errorText),
         reconcileAgentToolChildRuns: () =>
@@ -5409,9 +5421,12 @@ export class AIChatAgent<
       // re-enters inference (`_repairInterruptedToolsBeforeTurn`), so the
       // next `convertToModelMessages` doesn't 400 with
       // `AI_MissingToolResultsError`.
-      runTurn: (signal) => {
+      runTurn: (signal, context) => {
         onTurnStarted?.();
-        return this.continueLastTurn(undefined, { signal });
+        // The pinned context rides on the options object, through a
+        // subclass's `continueLastTurn` override too.
+        const options: ProgrammaticTurnOptions = { ...context, signal };
+        return this.continueLastTurn(undefined, options);
       }
     });
   }
@@ -5431,6 +5446,14 @@ export class AIChatAgent<
     input: StreamInterruptionRoute
   ): Promise<StreamInterruptionOutcome> {
     const liveTurn = this._liveChatRecoveryTurns.get(input.requestId);
+    // The turn's own tools and body. A pinned turn never wrote them to the
+    // stored context.
+    const turnContext = this._chatTurnFibers.requestContext(
+      input.requestId
+    ) ?? {
+      lastBody: this._lastBody,
+      lastClientTools: this._lastClientTools
+    };
     const latestUserMessageId =
       [...this.messages].reverse().find((m) => m.role === "user")?.id ?? null;
     return this._chatRecoveryEngine().routeStreamInterruption({
@@ -5460,8 +5483,7 @@ export class AIChatAgent<
           partialParts: context.partialParts,
           recoveryData: liveTurn?.recoveryData ?? null,
           messages: [...this.messages],
-          lastBody: this._lastBody,
-          lastClientTools: this._lastClientTools,
+          ...turnContext,
           createdAt: liveTurn?.createdAt ?? context.firstSeenAt
         }),
       resolvePartial: async (keep) => {
@@ -5470,10 +5492,7 @@ export class AIChatAgent<
         // A continuation's message was there before this turn and stays.
         return input.continuation ? input.targetAssistantId : undefined;
       },
-      requestContext: () => ({
-        lastBody: this._lastBody,
-        lastClientTools: this._lastClientTools
-      })
+      requestContext: () => turnContext
     });
   }
 
@@ -5574,9 +5593,9 @@ export class AIChatAgent<
       },
       // `_retryLastUserTurn` repairs any interrupted tool orphan before it
       // re-enters inference, like `continueLastTurn`.
-      runTurn: (signal) => {
+      runTurn: (signal, context) => {
         onTurnStarted?.();
-        return this._retryLastUserTurn({ signal });
+        return this._retryLastUserTurn({ ...context, signal });
       }
     });
   }
@@ -7161,6 +7180,12 @@ export class AIChatAgent<
               : null;
           // The stream was cut off (stopped, stalled, errored): settle the
           // tool calls it left unanswered before the reply is stored.
+          // A reply the chat was cleared under before it could be stored did
+          // not complete. One that was stored first did, whatever came after.
+          const resetBeforeStore = resetSinceTurnStarted();
+          if (resetBeforeStore && streamResult.status === "completed") {
+            streamResult = { status: "aborted" };
+          }
           if (streamResult.status !== "completed") {
             message = this._settleInterruptedReply(message);
           }
@@ -7171,7 +7196,7 @@ export class AIChatAgent<
           if (
             message.parts.length > 0 &&
             !discardPartial &&
-            !resetSinceTurnStarted()
+            !resetBeforeStore
           ) {
             if (earlyPersistedId) {
               // Message already exists in this.messages from the early persist.

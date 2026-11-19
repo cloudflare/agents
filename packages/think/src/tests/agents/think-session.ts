@@ -7502,7 +7502,35 @@ export class ThinkProgrammaticTestAgent extends Think {
     };
   }
 
+  private _clearDuringResponseHook = false;
+
+  /**
+   * Drive a saveMessages turn, with a chat clear landing while its
+   * `onChatResponse` runs: after the reply finished and was stored.
+   */
+  async testClearDuringResponseHook(): Promise<{
+    status: SaveMessagesResult["status"];
+    hookStatus: string | null;
+  }> {
+    this._clearDuringResponseHook = true;
+    const result = await this.saveMessages([
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text: "hello" }]
+      }
+    ]);
+    return {
+      status: result.status,
+      hookStatus: this._responseLog.at(-1)?.status ?? null
+    };
+  }
+
   override onChatResponse(result: ChatResponseResult): void {
+    if (this._clearDuringResponseHook) {
+      this._clearDuringResponseHook = false;
+      this.resetTurnState();
+    }
     this._responseLog.push(result);
     // Capture the real cutover, BEFORE the submission finalizer writes its
     // ledger outcome. Tests restore exactly this durable crash-window row.
