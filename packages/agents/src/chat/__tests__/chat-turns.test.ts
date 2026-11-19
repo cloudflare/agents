@@ -473,6 +473,74 @@ describe("ChatTurns", () => {
     await expect(timedOut).resolves.toBe(false);
   });
 
+  describe("waitUntilStable with a tool result being applied", () => {
+    const gate = () => {
+      let open!: () => void;
+      const opened = new Promise<void>((resolve) => {
+        open = resolve;
+      });
+      return { opened, open };
+    };
+
+    it("reports stable as soon as the apply settles the call", async () => {
+      host.transcript = [user("u1"), toolReply("a1", "input-available")];
+      const apply = gate();
+      void turns.enqueueInteraction(async () => {
+        await apply.opened;
+        host.transcript = [user("u1"), toolReply("a1", "output-available")];
+        return true;
+      });
+      let settled: boolean | undefined;
+      void turns.waitUntilStable({ timeout: 1000 }).then((value) => {
+        settled = value;
+      });
+
+      await vi.advanceTimersByTimeAsync(500);
+      expect(settled).toBeUndefined();
+      apply.open();
+      // Woken by the apply, not by the next 100ms poll.
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toBe(true);
+    });
+
+    it("reports not stable at the timeout while the apply is still running", async () => {
+      host.transcript = [user("u1"), toolReply("a1", "input-available")];
+      const apply = gate();
+      void turns.enqueueInteraction(async () => {
+        await apply.opened;
+        return true;
+      });
+      let settled: boolean | undefined;
+      void turns.waitUntilStable({ timeout: 300 }).then((value) => {
+        settled = value;
+      });
+
+      await vi.advanceTimersByTimeAsync(299);
+      expect(settled).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(2);
+      expect(settled).toBe(false);
+      apply.open();
+    });
+
+    it("keeps waiting after an apply that throws and leaves the call open", async () => {
+      host.transcript = [user("u1"), toolReply("a1", "input-available")];
+      void turns
+        .enqueueInteraction(async () => {
+          throw new Error("apply failed");
+        })
+        .catch(() => {});
+      let settled: boolean | undefined;
+      void turns.waitUntilStable({ timeout: 300 }).then((value) => {
+        settled = value;
+      });
+
+      await vi.advanceTimersByTimeAsync(250);
+      expect(settled).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(settled).toBe(false);
+    });
+  });
+
   // ── Client requests ─────────────────────────────────────────────────
 
   describe("runClientRequest", () => {
