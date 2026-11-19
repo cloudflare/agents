@@ -422,6 +422,17 @@ export class AIChatAgent<
 > extends Agent<Env, State, Props> {
   private _activeChatRecoveryRootRequestId: string | undefined;
   /**
+   * Set around the persist of a client request's incoming messages. Holds
+   * the request's `isCurrent` check, which `persistMessages` reads right
+   * before it writes: `false` once the chat was reset since the request was
+   * accepted. An async scope, so an app's `persistMessages` override need
+   * not pass anything along, and no other persist is affected.
+   */
+  private _incomingPersistScope = new AsyncLocalStorage<{
+    isCurrent: () => boolean;
+  }>();
+
+  /**
    * The originating user message ids of the active recovery chain (#2280),
    * carried in the recovery payload because the successor turn runs under a
    * fresh request id. Scoped to the recovery callback's async context, so a
@@ -1374,7 +1385,7 @@ export class AIChatAgent<
               // queue so other tabs see the new message immediately and so
               // overlapping submits under latest/merge/debounce can inspect
               // the full message list when their turn starts.
-              persist: async ({ decision, generation }) => {
+              persist: async ({ decision, generation, isCurrent }) => {
                 epoch = generation;
                 await withAgentSpan(
                   this,
@@ -1398,21 +1409,28 @@ export class AIChatAgent<
                     // turn starts (below), so a reply still streaming or
                     // queued now is deleted too instead of surviving next to
                     // the regenerated one.
-                    await this.persistMessages(
-                      transformedMessages,
-                      [connection.id],
-                      {
-                        _deleteStaleRows:
-                          requestTrigger !== "regenerate-message"
-                      }
+                    // Inside the scope, the write is skipped once the chat
+                    // was cleared: `persistMessages` can await before it
+                    // writes (an app's override, auto-compaction), and a
+                    // clear from another tab can land in that wait.
+                    await this._incomingPersistScope.run({ isCurrent }, () =>
+                      this.persistMessages(
+                        transformedMessages,
+                        [connection.id],
+                        {
+                          _deleteStaleRows:
+                            requestTrigger !== "regenerate-message"
+                        }
+                      )
                     );
 
-                    if (decision.strategy === "merge") {
+                    if (isCurrent() && decision.strategy === "merge") {
                       await this._mergeQueuedUserMessages(generation);
                     }
                   }
                 );
-                return true;
+                // Cleared meanwhile: nothing was stored, so there is no turn.
+                return isCurrent() ? true : null;
               },
               enqueue: async (turn, generation, onQueued) => {
                 let stale = false;
@@ -6211,6 +6229,10 @@ export class AIChatAgent<
     /** @internal */
     options?: { _deleteStaleRows?: boolean }
   ) {
+    const incoming = this._incomingPersistScope.getStore();
+    // A client request's messages, admitted before the chat was cleared:
+    // writing them now would put the cleared history back.
+    if (incoming?.isCurrent() === false) return;
     // Snapshot the pre-write transcript: `this.messages` is mirrored from the
     // change feed and therefore mutates as the loop below writes.
     const priorMessages = [...this.messages];

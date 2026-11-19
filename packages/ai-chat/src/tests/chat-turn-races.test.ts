@@ -481,6 +481,41 @@ describe("chat turn races", () => {
     ws.close(1000);
   });
 
+  it("a clear from another tab is not undone by a request whose messages are still being stored", async () => {
+    const room = crypto.randomUUID();
+    const { ws: tab1 } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const { ws: tab2 } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const seen = record(tab1);
+    const agent = await getAgentByName(env.TestChatAgent, room);
+    const oldReply: ChatMessage = {
+      id: "assistant-old",
+      role: "assistant",
+      parts: [{ type: "text", text: "An earlier answer" }]
+    };
+    await agent.persistMessages([user1, oldReply]);
+    // The app's persistMessages awaits before it stores a user message.
+    await agent.setPersistDelayForTest("user", 300);
+
+    // Tab 1 sends a question with the history it has. The persist waits.
+    sendChatRequest(tab1, "req-late", [user1, oldReply, user2]);
+    await delay(100);
+    // Tab 2 clears the chat.
+    send(tab2, { type: MessageType.CF_AGENT_CHAT_CLEAR });
+    await waitUntil(() => responses(seen, "req-late").some((m) => m.done));
+    await delay(400);
+    await agent.waitForIdleForTest();
+
+    // The cleared history stays cleared, and the request ends as skipped
+    // without calling the model.
+    expect(await agent.getPersistedMessages()).toEqual([]);
+    expect(responses(seen, "req-late").filter((m) => m.done)).toEqual([
+      expect.objectContaining({ outcome: "skipped" })
+    ]);
+    expect(await agent.getChatMessageCallCountForTest()).toBe(0);
+    tab1.close(1000);
+    tab2.close(1000);
+  });
+
   it("a tool result for an older reply does not continue the newer reply", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
