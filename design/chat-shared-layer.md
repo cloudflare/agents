@@ -187,7 +187,7 @@ Both hosts keep their old private field names (`_turnQueue`, `_continuation`, `_
 
 **`runServerTurn`** runs a turn the server starts: `saveMessages`, `continueLastTurn`, the retry, a recovered turn, an agent-tool run, and `Think.chat()`. It captures the queue generation, creates the abort controller and links the caller's signal, queues the turn, and at the front of the queue runs the host's `prepare`, `persist` and `run`, checking for a reset and a stop before each. A turn stopped before its messages are stored stores nothing, and a turn stopped before `run` never calls the model.
 
-`mapServerTurnOutcome` decides the status the caller gets. A reset gives `skipped`, a stop before any reply gives `aborted`, an error stays an error, and what the reply path reported stands. A skipped result carries a `reason`: `cleared`, `nothing-to-continue`, or `awaiting-client` for a `continueLastTurn()` whose reply still waits on a client. `pinnedOr` lets a caller pin the tools and body a turn runs with.
+`mapServerTurnOutcome` decides the status the caller gets. A reset gives `skipped`, a stop before any reply gives `aborted`, an error stays an error, and what the reply path reported stands. A skipped result carries a `reason`: `cleared`, `nothing-to-continue`, or `awaiting-client` for a `continueLastTurn()` whose reply still waits on a client. `pinnedOr` lets a caller pin the tools and body a turn runs with. A pinned context is this turn's only: it is never written to the stored request context. An `aborted` result says why in `reason`: `stopped`, or `interrupted` for a reply handed to recovery.
 
 ### continuation-turn.ts
 
@@ -209,6 +209,8 @@ A provider rejects a request that holds a tool call with no result, and Anthropi
 - `stripTrailingReasoning` removes the reasoning an assistant message ends in. It runs inside both of the above.
 - `settleInterruptedPart` (`message-builder.ts`) closes a text or reasoning part an interruption left streaming. Both hosts apply it to the message a continuation extends, so the continuation's parts follow the cut-off ones in order.
 - `replyIsEmpty` says whether a reply holds nothing a client can show and nothing a model request can carry. Such a reply is not stored. The before-turn repair and the settle before a recovery remove a stored one through the sink, and the recovery then retries the question.
+- `removeEmptyReplyToContinue` is what `continueLastTurn()` calls first: a last reply that holds nothing is removed, and the host answers the question again.
+- `chunkMustBeStoredNow` (`recovery-codec.ts`) says which stream chunks go to storage at once: a tool call, before the tool runs, and a settled tool result.
 - `interruptedToolPartAsError` is the default for the hosts' `repairInterruptedToolPart` hook. Its text says what is known about the call.
 - `persistRepairedTranscript` stores what a repair changed and emits `chat:transcript:repaired`, through a `RepairedTranscriptSink` the host supplies.
 
