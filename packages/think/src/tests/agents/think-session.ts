@@ -58,7 +58,12 @@ import {
   enforceRowSizeLimit,
   StreamAccumulator
 } from "agents/chat";
-import type { ClientToolSchema, ResumableStream, TurnQueue } from "agents/chat";
+import type {
+  ChatTurns,
+  ClientToolSchema,
+  ResumableStream,
+  TurnQueue
+} from "agents/chat";
 import type { Schedule } from "agents";
 import type { Session } from "../../think";
 import type { ContextConfig } from "agents/context";
@@ -13873,4 +13878,78 @@ export class ThinkLegacySessionApiAgent extends Think {
     const result = await this.session.compact();
     return { result, errors: [...this._compactionErrors] };
   }
+}
+
+/**
+ * Durable admission across a real isolate reset (`ctx.abort()`). The model
+ * a turn runs with comes from the request's body, which the admission
+ * record and the recovery snapshot both keep, so a turn replayed or
+ * recovered in a new isolate streams the same text: `tag` then a number,
+ * `chunks` times, one every `delayMs`.
+ */
+export class ThinkAdmissionTestAgent extends Think {
+  override chatRecovery: ChatRecoveryConfig = true;
+
+  override getModel(): LanguageModel {
+    return createDelayedMultiChunkMockModel(["unused "], 1);
+  }
+
+  override beforeTurn(ctx: TurnContext): TurnConfig {
+    const body = ctx.body as
+      | { tag?: string; chunks?: number; delayMs?: number }
+      | undefined;
+    const tag = body?.tag ?? "q";
+    const chunks = Array.from(
+      { length: body?.chunks ?? 3 },
+      (_, i) => `${tag}${i} `
+    );
+    return {
+      model: createDelayedMultiChunkMockModel(chunks, body?.delayMs ?? 10)
+    };
+  }
+
+  async resetIsolateForTest(): Promise<void> {
+    this.ctx.abort("test: forced reset");
+  }
+
+  getMessagesForTest(): UIMessage[] {
+    return this.messages;
+  }
+
+  getAdmissionsForTest(): Array<{ requestId: string; stopped: boolean }> {
+    try {
+      return this.sql<{ request_id: string; stopped: number }>`
+        SELECT request_id, stopped FROM cf_agents_chat_admissions ORDER BY seq
+      `.map((row) => ({
+        requestId: row.request_id,
+        stopped: row.stopped === 1
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Write an admission record by hand: the record a reset leaves when it
+   * lands between a turn's fiber and the record's delete.
+   */
+  seedAdmissionForTest(requestId: string, messageIds: string[]): void {
+    const { admissions } = (this as unknown as { _turns: ChatTurns })._turns;
+    admissions?.admit({
+      requestId,
+      messageIds,
+      decision: { strategy: null, overlapping: false, debounceUntilMs: null },
+      payload: {
+        trigger: "submit-message",
+        body: {},
+        clientTools: undefined
+      }
+    });
+    admissions?.live.delete(requestId);
+  }
+}
+
+/** {@link ThinkAdmissionTestAgent} under `messageConcurrency: "latest"`. */
+export class ThinkLatestAdmissionTestAgent extends ThinkAdmissionTestAgent {
+  override messageConcurrency = "latest" as const;
 }

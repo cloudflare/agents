@@ -140,6 +140,14 @@
         "name": "ThinkRecoveryTestAgent"
       },
       {
+        "class_name": "ThinkAdmissionTestAgent",
+        "name": "ThinkAdmissionTestAgent"
+      },
+      {
+        "class_name": "ThinkLatestAdmissionTestAgent",
+        "name": "ThinkLatestAdmissionTestAgent"
+      },
+      {
         "class_name": "ThinkNonRecoveryTestAgent",
         "name": "ThinkNonRecoveryTestAgent"
       },
@@ -273,6 +281,8 @@
         "ThinkScheduledTasksTestAgent",
         "ThinkAsyncHookTestAgent",
         "ThinkRecoveryTestAgent",
+        "ThinkAdmissionTestAgent",
+        "ThinkLatestAdmissionTestAgent",
         "ThinkNonRecoveryTestAgent",
         "ThinkAgentToolParent",
         "ThinkNestedMiddleAgent",
