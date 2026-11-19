@@ -16474,8 +16474,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     } else {
       // Like a connection's: only an outcome that settled its call
       // continues, and not when a stop landed while it was applied.
-      await this._turns.applyInteractionThen(apply, (targetMessageId) =>
-        this._queueConnectionlessContinuation(targetMessageId)
+      await this._turns.applyInteractionThen(
+        apply,
+        (targetMessageId) =>
+          this._queueConnectionlessContinuation(targetMessageId),
+        (run) => this._enqueueInteractionOutcome(run)
       );
     }
     if (

@@ -520,8 +520,12 @@ export class ChatTurns<
     enqueue: (run: () => Promise<boolean>) => Promise<boolean> = (run) =>
       this.enqueueInteraction(run)
   ): Promise<boolean> {
-    return this.#applyUnlessStopped(apply, autoContinue, (outcome) =>
-      this.autoContinuation.afterInteraction(outcome, autoContinue, spec)
+    return this.#applyUnlessStopped(
+      apply,
+      autoContinue,
+      (outcome) =>
+        this.autoContinuation.afterInteraction(outcome, autoContinue, spec),
+      enqueue
     );
   }
 
@@ -533,14 +537,22 @@ export class ChatTurns<
    *
    * @param continueFor - Start the continuation that answers the message
    *   the result is stored in.
+   * @param enqueue - As for {@link applyInteraction}.
    */
   applyInteractionThen(
     apply: () => Promise<ToolInteractionOutcome>,
-    continueFor: (targetMessageId: string) => Promise<void>
+    continueFor: (targetMessageId: string) => Promise<void>,
+    enqueue: (run: () => Promise<boolean>) => Promise<boolean> = (run) =>
+      this.enqueueInteraction(run)
   ): Promise<boolean> {
-    return this.#applyUnlessStopped(apply, true, async (outcome) => {
-      if (outcome.status === "changed") await continueFor(outcome.messageId);
-    });
+    return this.#applyUnlessStopped(
+      apply,
+      true,
+      async (outcome) => {
+        if (outcome.status === "changed") await continueFor(outcome.messageId);
+      },
+      enqueue
+    );
   }
 
   /**
@@ -552,7 +564,8 @@ export class ChatTurns<
   #applyUnlessStopped(
     apply: () => Promise<ToolInteractionOutcome>,
     autoContinue: boolean,
-    decide: (outcome: ToolInteractionOutcome) => void | Promise<void>
+    decide: (outcome: ToolInteractionOutcome) => void | Promise<void>,
+    enqueue: (run: () => Promise<boolean>) => Promise<boolean>
   ): Promise<boolean> {
     const stops = this.#stops;
     return enqueue(async () => {
