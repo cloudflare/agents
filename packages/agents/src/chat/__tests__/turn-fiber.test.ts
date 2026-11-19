@@ -79,6 +79,19 @@ describe("ChatTurnFibers", () => {
     expect(fibers.liveClosures.size).toBe(0);
   });
 
+  it("names the turn's request id to the recovery engine, so a stop by it reaches a recovery attempt", async () => {
+    const named: string[] = [];
+    host.turnBody = (_continuation, body, requestId) => () => {
+      named.push(requestId);
+      return body(async () => {});
+    };
+    await fibers.run(
+      { requestId: "r1", continuation: true, snapshot: snapshot("r1") },
+      async () => {}
+    );
+    expect(named).toEqual(["r1"]);
+  });
+
   it("does not take the reply for a turn that ends before its model call returned one", async () => {
     // The repair or a hook threw, or the model call returned nothing: a
     // recovery scheduled to continue the reply must stay in place.

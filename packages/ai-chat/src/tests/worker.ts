@@ -2449,6 +2449,11 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   }
 
   protected override async onChatResponse(_result: ChatResponseResult) {
+    if (this._clearDuringResponseHook) {
+      this._clearDuringResponseHook = false;
+      this.resetTurnState();
+      return;
+    }
     if (!this._saveFromNextResponse) return;
     this._saveFromNextResponse = false;
     await this.saveMessages((messages) => [
@@ -3924,12 +3929,6 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   /** A clear lands while the next `onChatResponse` runs. */
   clearDuringNextResponseHookForTest(): void {
     this._clearDuringResponseHook = true;
-  }
-
-  protected override async onChatResponse(): Promise<void> {
-    if (!this._clearDuringResponseHook) return;
-    this._clearDuringResponseHook = false;
-    this.resetTurnState();
   }
 
   async saveSyntheticUserMessage(
