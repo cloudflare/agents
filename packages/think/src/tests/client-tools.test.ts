@@ -4002,6 +4002,119 @@ describe("Think — stop means stop for continuations", () => {
     await closeWS(ws);
   }, 25000);
 
+  it("a tab's stop while it waits for a continuation to start reaches the server", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+    const toolCallId = "tc-tab-stop";
+    await agent.persistToolCallMessage([
+      makeUserMessage("first"),
+      makeToolMessage(toolCallId, "client_action", "input-available")
+    ]);
+
+    await agent.holdTurnQueueForTest();
+    const released = waitForMessageOfType(ws, "cf_agent_stream_resume_none");
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId,
+        toolName: "client_action",
+        output: "result",
+        autoContinue: true
+      })
+    );
+    await waitUntil(
+      async () => (await agent.pendingContinuationRequestIdForTest()) !== null
+    );
+    await delay(150);
+
+    // The tab has no request id for the continuation yet: the transport
+    // sends a cancel that names the continuation by its connection.
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_chat_request_cancel",
+        continuation: true
+      })
+    );
+    await released;
+    await agent.releaseTurnQueueForTest();
+    await delay(400);
+
+    expect(await agent.continuationTurnCountForTest()).toBe(0);
+    expect(await agent.pendingContinuationRequestIdForTest()).toBeNull();
+    expect(await agent.getMessages()).toHaveLength(2);
+    await closeWS(ws);
+  });
+
+  it("cancelAllChats drops a continuation parked on an unanswered sibling, with no turn running", async () => {
+    const room = crypto.randomUUID();
+    const dropped: string[] = [];
+    const unsubscribe = subscribe("chat", (event) => {
+      if (event.type === "chat:continuation:dropped" && event.name === room) {
+        dropped.push(event.payload.reason);
+      }
+    });
+    onTestFinished(unsubscribe);
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+    const reply: UIMessage = {
+      id: crypto.randomUUID(),
+      role: "assistant",
+      parts: [
+        { type: "step-start" },
+        {
+          type: "tool-client_action",
+          toolCallId: "tc-parked-1",
+          state: "input-available",
+          input: { action: "one" }
+        },
+        {
+          type: "tool-client_action",
+          toolCallId: "tc-parked-2",
+          state: "input-available",
+          input: { action: "two" }
+        }
+      ] as UIMessage["parts"]
+    };
+    await agent.persistToolCallMessage([makeUserMessage("first"), reply]);
+
+    // The first result asks to continue and parks on its sibling.
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId: "tc-parked-1",
+        toolName: "client_action",
+        output: "one",
+        autoContinue: true
+      })
+    );
+    await waitUntil(
+      async () => (await agent.pendingContinuationRequestIdForTest()) !== null
+    );
+    await delay(150);
+
+    // The user stops everything. No turn is running.
+    await agent.cancelAllChats();
+    expect(await agent.pendingContinuationRequestIdForTest()).toBeNull();
+    // The sibling answers later, without asking to continue.
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId: "tc-parked-2",
+        toolName: "client_action",
+        output: "two",
+        autoContinue: false
+      })
+    );
+    await delay(400);
+
+    expect(await agent.continuationTurnCountForTest()).toBe(0);
+    expect(dropped).toEqual(["stopped"]);
+    await closeWS(ws);
+  });
+
   it("cancelAllChats also drops the continuation of a result answered while the reply streamed", async () => {
     const room = crypto.randomUUID();
     const dropped: string[] = [];

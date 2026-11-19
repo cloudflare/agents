@@ -1659,6 +1659,13 @@ export class AIChatAgent<
           return;
         }
 
+        // A stop from a tab that waits for a tool continuation to start. It
+        // has no request id for it yet, so it names itself.
+        if (event.type === "cancel-continuation") {
+          this._turns.cancelWaitingContinuation(connection.id);
+          return;
+        }
+
         // Handle client-initiated stream resume request.
         // The client sends this after its message handler is registered,
         // avoiding the race condition where CF_AGENT_STREAM_RESUMING sent
@@ -3024,13 +3031,14 @@ export class AIChatAgent<
    * A turn still waiting in the queue is aborted too: it ends `aborted`
    * when it reaches the front, stores nothing and does not call the model.
    *
-   * Does NOT invalidate queued turns, continuation timers, or submit
-   * concurrency state — use {@link resetTurnState} for the full
-   * teardown that runs on `chat-clear`.
+   * Every auto-continuation that waits to run is dropped too, whether a
+   * turn is running or not. A tool result that arrives afterwards continues
+   * as usual.
+   *
+   * Does NOT invalidate queued turns or submit concurrency state — use
+   * {@link resetTurnState} for the full teardown that runs on `chat-clear`.
    */
   protected abortAllRequests(reason?: unknown): void {
-    // A stop of everything: it also drops the continuations that were
-    // waiting on the turn running now.
     this._turns.stopAll(reason);
   }
 

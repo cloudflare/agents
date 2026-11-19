@@ -252,12 +252,18 @@ export class ChatTurns<
   interactionTail: Promise<void> = Promise.resolve();
 
   /**
-   * The request id of the running turn a stop has stopped. Request ids are
-   * unique, so a value left from an earlier turn matches nothing.
+   * The request id of the turn a stop has stopped: the running turn, or the
+   * reply that had just ended. Request ids are unique, so a value left from
+   * an earlier turn matches nothing.
    */
   #stoppedTurn: string | null = null;
-  /** How many times a stop has stopped a running turn. */
+  /** How many stops have dropped what was waiting. */
   #stops = 0;
+  /**
+   * The request whose reply stream started last. With no turn running, a
+   * stop for it is a stop of the reply a waiting continuation continues.
+   */
+  #lastReply: string | null = null;
   /** Depth of {@link runtimeAbort} calls in progress. */
   #runtimeAborts = 0;
 
@@ -292,6 +298,7 @@ export class ChatTurns<
       lastTurnReplyId: () => host.lastTurnReplyId?.(),
       streamed: new Map(),
       firing: new Set(),
+      unscheduled: new Set(),
       dropped: (event) => host.continuationDropped?.(event)
     };
   }
@@ -513,21 +520,55 @@ export class ChatTurns<
     enqueue: (run: () => Promise<boolean>) => Promise<boolean> = (run) =>
       this.enqueueInteraction(run)
   ): Promise<boolean> {
-    // A result whose frame arrived before a stop was waiting when the stop
-    // landed, also when its apply had not finished yet. It must not
-    // schedule a continuation once it does.
+    return this.#applyUnlessStopped(apply, autoContinue, (outcome) =>
+      this.autoContinuation.afterInteraction(outcome, autoContinue, spec)
+    );
+  }
+
+  /**
+   * {@link applyInteraction} for a result no connection is there to
+   * continue: the host starts the continuation itself (`Think` queues its
+   * connection-less one). The same rules hold: only an apply that settled
+   * its call continues, and not when a stop landed while it applied.
+   *
+   * @param continueFor - Start the continuation that answers the message
+   *   the result is stored in.
+   */
+  applyInteractionThen(
+    apply: () => Promise<ToolInteractionOutcome>,
+    continueFor: (targetMessageId: string) => Promise<void>
+  ): Promise<boolean> {
+    return this.#applyUnlessStopped(apply, true, async (outcome) => {
+      if (outcome.status === "changed") await continueFor(outcome.messageId);
+    });
+  }
+
+  /**
+   * Run `apply` in the apply chain, then `decide` its continuation, unless
+   * a stop landed since the frame arrived. A result whose frame arrived
+   * before a stop was waiting when the stop landed, also when its apply had
+   * not finished yet. It must not schedule a continuation once it does.
+   */
+  #applyUnlessStopped(
+    apply: () => Promise<ToolInteractionOutcome>,
+    autoContinue: boolean,
+    decide: (outcome: ToolInteractionOutcome) => void | Promise<void>
+  ): Promise<boolean> {
     const stops = this.#stops;
     return enqueue(async () => {
       const outcome = await apply();
       if (stops !== this.#stops) {
         if (autoContinue && outcome.status === "changed") {
           this.host.continuationDropped?.({
-            requestId: this.#stoppedTurn ?? "",
-            reason: "stopped"
+            requestId: null,
+            reason: "stopped",
+            ...(this.#stoppedTurn !== null && {
+              stoppedRequestId: this.#stoppedTurn
+            })
           });
         }
       } else {
-        this.autoContinuation.afterInteraction(outcome, autoContinue, spec);
+        await decide(outcome);
       }
       return outcome.status !== "missing";
     });
@@ -600,6 +641,7 @@ export class ChatTurns<
     requestId: string,
     notifyResuming: (connection: TConnection) => void
   ): void {
+    this.#lastReply = requestId;
     this.preStream.flushOnStreamStart(notifyResuming);
     continuationStreamStarted(
       this.#continuationParts,
@@ -642,6 +684,12 @@ export class ChatTurns<
    * usual, so a second stop for a turn that was stopped already drops
    * nothing.
    *
+   * With no turn running, the stop still lands when `requestId` is the
+   * request whose reply just ended: a continuation of that reply that has
+   * not started (in its coalesce window, or parked on an unanswered sibling)
+   * is dropped the same way. A stop for any other ended request drops
+   * nothing.
+   *
    * The rule is about the turn, not about how it was stopped:
    * {@link stopAll} and a signal linked with {@link linkExternal} drop the
    * same way. An abort the runtime does for its own reasons (the stall
@@ -649,31 +697,61 @@ export class ChatTurns<
    * drops nothing.
    */
   cancel(requestId: string, reason?: unknown): void {
-    this.#stop(
-      () => {
-        this.aborts.cancel(requestId, reason);
-        this.#recoveryAttempts.get(requestId)?.abort(reason);
-      },
-      (active) => active === requestId
-    );
+    this.#stop(() => {
+      this.aborts.cancel(requestId, reason);
+      this.#recoveryAttempts.get(requestId)?.abort(reason);
+    }, requestId);
   }
 
   /**
    * Stop every request: abort every controller and empty the registry, and
-   * abort every running recovery attempt. The turn running now is stopped
-   * like one stopped with {@link cancel}: the continuations waiting on it
-   * are dropped.
+   * abort every running recovery attempt. Every continuation waiting now
+   * is dropped, whether a turn is running or not: one in its coalesce
+   * window or parked on an unanswered sibling has no running turn, and
+   * "stop everything" covers it all the same. A result that arrives after
+   * this call continues as usual.
    */
   stopAll(reason?: unknown): void {
-    this.#stop(
-      () => {
-        this.aborts.destroyAll(reason);
-        for (const attempt of this.#recoveryAttempts.values()) {
-          attempt.abort(reason);
-        }
-      },
-      () => true
-    );
+    this.#stop(() => {
+      this.aborts.destroyAll(reason);
+      for (const attempt of this.#recoveryAttempts.values()) {
+        attempt.abort(reason);
+      }
+    }, null);
+  }
+
+  /**
+   * A tab pressed stop while it waited for a continuation to start. It has
+   * no request id to cancel yet (the continuation's id reaches it with
+   * `STREAM_RESUMING`), so it names itself:
+   *
+   * - the continuation it waits on has not started: it is dropped, with
+   *   everything else that was waiting, and the tabs waiting on it get
+   *   `STREAM_RESUME_NONE`;
+   * - that continuation's turn is running, before or just after its stream
+   *   started: the turn is stopped like one stopped with {@link cancel};
+   * - its tool result is still being applied: the result schedules nothing.
+   *
+   * A tab that waits on nothing stops nothing.
+   */
+  cancelWaitingContinuation(connectionId: string, reason?: unknown): void {
+    const { pending, activeRequestId, activeConnectionId } = this.continuation;
+    if (pending && this.continuation.awaitingConnections.has(connectionId)) {
+      if (pending.pastCoalesce) {
+        this.cancel(pending.requestId, reason);
+        return;
+      }
+      // Fired and queued, or not fired yet: its turn finds nothing to claim.
+      this.aborts.cancel(pending.requestId, reason);
+      this.#dropWaiting(null);
+      return;
+    }
+    if (activeRequestId !== null && activeConnectionId === connectionId) {
+      this.cancel(activeRequestId, reason);
+      return;
+    }
+    // A result whose frame arrived before the stop and is still applying.
+    if (this.pendingInteraction !== null) this.#dropWaiting(null);
   }
 
   /**
@@ -715,12 +793,14 @@ export class ChatTurns<
   }
 
   /**
-   * Run `abort`, and when it is what stops the turn running now, drop the
-   * continuations that were waiting on that turn.
+   * Run `abort`, and drop the waiting continuations when the stop lands on
+   * them: it stops the turn running now, it names the reply that just
+   * ended, or it stops every request.
    *
-   * @param namesActive - Whether the abort names the running turn directly.
+   * @param requestId - The request the stop names, or `null` for a stop of
+   *   every request.
    */
-  #stop(abort: () => void, namesActive: (active: string) => boolean): void {
+  #stop(abort: () => void, requestId: string | null): void {
     const active = this.queue.activeRequestId;
     const activeSignal =
       active === null ? undefined : this.aborts.getExistingSignal(active);
@@ -728,7 +808,22 @@ export class ChatTurns<
 
     abort();
 
-    if (active === null || this.#runtimeAborts > 0) return;
+    if (this.#runtimeAborts > 0) return;
+    if (requestId === null) {
+      // Every request: whatever waits now is dropped, with or without a
+      // running turn, also when an earlier stop stopped that turn already.
+      this.#dropWaiting(active);
+      return;
+    }
+    if (active === null) {
+      // No turn is running. The stop lands only on the reply that just
+      // ended, and only once.
+      if (requestId !== this.#lastReply || this.#stoppedTurn === requestId) {
+        return;
+      }
+      this.#dropWaiting(requestId);
+      return;
+    }
     // A stop for a turn that a stop already stopped stops nothing. What is
     // waiting by now arrived after the first stop. (A nested stop, through a
     // linked signal, may have just recorded it.)
@@ -738,11 +833,21 @@ export class ChatTurns<
     // abort signal linked to the recovery attempt, which is registered
     // under the original id the client stops it by.
     const stoppedRunningTurn =
-      namesActive(active) || (!wasAborted && activeSignal?.aborted === true);
+      active === requestId || (!wasAborted && activeSignal?.aborted === true);
     if (!stoppedRunningTurn) return;
-    this.#stoppedTurn = active;
+    this.#dropWaiting(active);
+  }
+
+  /**
+   * A stop landed: record it, so a result whose frame arrived before it
+   * schedules nothing once its apply finishes, and drop what waits now.
+   *
+   * @param stoppedRequestId - The turn the stop stopped, or `null`.
+   */
+  #dropWaiting(stoppedRequestId: string | null): void {
+    this.#stoppedTurn = stoppedRequestId;
     this.#stops++;
-    dropWaitingContinuations(this.#continuationParts, active);
+    dropWaitingContinuations(this.#continuationParts, stoppedRequestId);
   }
 
   /**
@@ -776,6 +881,7 @@ export class ChatTurns<
    */
   reset(): void {
     this.queue.reset();
+    this.#lastReply = null;
     this.aborts.destroyAll();
     this.submits.reset();
     this.pendingInteraction = null;
