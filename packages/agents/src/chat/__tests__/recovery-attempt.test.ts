@@ -1062,3 +1062,84 @@ describe("a recovery callback delivered more than once", () => {
     expect(t.incident()?.scheduleCount).toBe(5);
   });
 });
+
+describe("what an attempt records, and in what order", () => {
+  it("records a turn the host skipped as skipped, not failed", async () => {
+    const t = setup({ result: { status: "skipped" } });
+    await t.run();
+    expect(t.incident()).toMatchObject({ status: "skipped" });
+    expect(t.events).not.toContain("chat:recovery:failed");
+  });
+
+  // Each of these writes the incident before it runs the host's hook. If
+  // the isolate dies between the two, the callback is delivered again and
+  // reads the incident. With the hook first, it would read `scheduled` and
+  // run the turn the user stopped, or continue a reply a second time.
+  const statusWhen = (
+    t: ReturnType<typeof setup>,
+    hook: "onStopped" | "onClientContinued" | "onSkipped"
+  ) => {
+    const seen: Array<string | undefined> = [];
+    t.host[hook] = async () => {
+      seen.push(t.incident()?.status);
+    };
+    return seen;
+  };
+
+  it("records a stop before the host is told", async () => {
+    const t = setup({ duringWait: ({ stop }) => stop() });
+    const seen = statusWhen(t, "onStopped");
+    await t.run();
+    expect(seen).toEqual(["skipped"]);
+    expect(t.incident()).toMatchObject({ reason: "user_cancelled" });
+  });
+
+  it("records that a client still has to answer before the host is told", async () => {
+    const t = setup({ ready: false, pendingInteraction: true });
+    const seen = statusWhen(t, "onClientContinued");
+    await t.run();
+    expect(seen).toEqual(["skipped"]);
+    expect(t.incident()).toMatchObject({
+      reason: "awaiting_client_interaction"
+    });
+  });
+
+  it("records that the conversation moved on before the host is told", async () => {
+    const t = setup({ leaf: { moved: true, reason: "conversation_changed" } });
+    const seen = statusWhen(t, "onSkipped");
+    await t.run();
+    expect(seen).toEqual(["skipped"]);
+  });
+
+  it("marks a superseded incident before it tells the attempt running here", async () => {
+    // The mark is what a callback delivered again after a reset reads. The
+    // signal only reaches an attempt in this isolate.
+    const t = setup();
+    const attempt = t.engine.beginAttempt(INCIDENT);
+    let seen: string | undefined;
+    attempt.superseded.addEventListener("abort", () => {
+      seen = t.incident()?.status;
+    });
+
+    await t.engine.supersedeScheduledRecovery();
+
+    expect(attempt.superseded.aborted).toBe(true);
+    expect(seen).toBe("skipped");
+    attempt.end();
+  });
+
+  it("records a stop on the incident before it stops the attempt running here", async () => {
+    const t = setup();
+    const attempt = t.engine.beginAttempt(INCIDENT);
+    let seen: string | undefined;
+    attempt.stopped.addEventListener("abort", () => {
+      seen = t.incident()?.status;
+    });
+
+    await t.engine.cancelScheduledRecovery(ROOT);
+
+    expect(attempt.stopped.aborted).toBe(true);
+    expect(seen).toBe("skipped");
+    attempt.end();
+  });
+});

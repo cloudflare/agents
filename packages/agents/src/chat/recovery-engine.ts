@@ -1920,7 +1920,8 @@ function retryAfterIn(
 function readHeader(headers: unknown, header: string): string | undefined {
   if (headers == null || typeof headers !== "object") return undefined;
   if (headers instanceof Headers) {
-    return headers.get(header)?.trim() ?? undefined;
+    // `Headers` strips the whitespace around a value itself.
+    return headers.get(header) ?? undefined;
   }
   for (const [name, value] of Object.entries(headers)) {
     if (name.toLowerCase() === header && typeof value === "string") {

@@ -54,6 +54,11 @@ function setup(scenario: Scenario = {}) {
   const exhausted: string[] = [];
   const log: string[] = [];
   const terminalErrors: Array<{ requestId: string; errorText: string }> = [];
+  const events: Array<{ type: string; recoveryKind?: string }> = [];
+  /** The partial text handed to the give-up and to `beforeSchedule`. */
+  const partialTexts: string[] = [];
+  /** The incident's status each time the partial was resolved. */
+  const statusAtResolve: string[] = [];
   const adapter: ChatRecoveryAdapter = {
     resolveConfig: () =>
       resolveChatRecoveryConfig(
@@ -77,14 +82,21 @@ function setup(scenario: Scenario = {}) {
       storage.delete(key);
       return Promise.resolve();
     },
-    emitRecoveryEvent: () => {},
+    emitRecoveryEvent: (event) => {
+      events.push({
+        type: event.type,
+        ...("recoveryKind" in event && { recoveryKind: event.recoveryKind })
+      });
+    },
     scheduleRecovery: (callback, data, reason, delaySeconds) => {
       scheduled.push({ callback, data, reason, delaySeconds });
       return Promise.resolve();
     },
     setRecovering: () => Promise.resolve(),
-    exhaustChatRecovery: (incident) => {
+    exhaustChatRecovery: (incident, _config, partial) => {
+      log.push("give-up");
       exhausted.push(incident.reason ?? "");
+      partialTexts.push(partial.text);
       return Promise.resolve();
     },
     resolveRecoveryStream: () => ({ streamId: "", streamStillActive: false }),
@@ -107,6 +119,7 @@ function setup(scenario: Scenario = {}) {
       latestMessage: () => undefined,
       originMessageIdsScope: new AsyncLocalStorage<string[] | undefined>(),
       recordTerminalError: async (requestId, errorText) => {
+        log.push("terminal-record");
         terminalErrors.push({ requestId, errorText });
       },
       attempts: {
@@ -134,6 +147,7 @@ function setup(scenario: Scenario = {}) {
     },
     resolvePartial: async (keep) => {
       log.push(keep ? "keep" : "drop");
+      statusAtResolve.push([...storage.values()][0]?.status ?? "none");
       return keep ? scenario.storedReplyId : undefined;
     },
     requestContext: () => ({
@@ -143,7 +157,8 @@ function setup(scenario: Scenario = {}) {
     onDeclined: async (errorText) => {
       log.push(`declined: ${errorText}`);
     },
-    beforeSchedule: async () => {
+    beforeSchedule: async (_incidentId, partialText) => {
+      partialTexts.push(partialText);
       log.push("before-schedule");
     },
     afterSchedule: (chained) => {
@@ -157,6 +172,9 @@ function setup(scenario: Scenario = {}) {
     scheduled,
     exhausted,
     terminalErrors,
+    events,
+    partialTexts,
+    statusAtResolve,
     incident: () => [...storage.values()][0],
     incidents: () => [...storage.values()],
     run: () => engine.routeStreamInterruption(host)
@@ -252,7 +270,8 @@ describe("routeStreamInterruption", () => {
     expect(t.log).toEqual([
       "on-chat-recovery",
       "keep",
-      "declined: provider said no"
+      "declined: provider said no",
+      "terminal-record"
     ]);
     expect(t.terminalErrors).toEqual([
       { requestId: "request-1", errorText: "provider said no" }
@@ -443,5 +462,59 @@ describe("routeStreamInterruption", () => {
     expect(await t.run()).toBe("failed");
     error.mockRestore();
     expect(t.scheduled).toEqual([]);
+  });
+
+  describe("what the app and a client that was away are told", () => {
+    const mixed = [
+      text("Par"),
+      { type: "reasoning", text: "thinking" } as MessagePart,
+      text("tial")
+    ];
+
+    it("hands the give-up the text the turn streamed, without its reasoning", async () => {
+      const t = setup({ maxAttempts: 1, partialParts: mixed });
+      await t.run();
+      t.partialTexts.length = 0;
+      expect(await t.run()).toBe("exhausted");
+      expect(t.partialTexts).toEqual(["Partial"]);
+    });
+
+    it("hands beforeSchedule the same text", async () => {
+      const t = setup({ partialParts: mixed, storedReplyId: "assistant-1" });
+      expect(await t.run()).toBe("scheduled");
+      expect(t.partialTexts).toEqual(["Partial"]);
+    });
+
+    it("reports the kind of what it scheduled", async () => {
+      const kind = (t: ReturnType<typeof setup>) =>
+        t.events.find((event) => event.type === "chat:recovery:scheduled")
+          ?.recoveryKind;
+      const continued = setup({ storedReplyId: "assistant-1" });
+      await continued.run();
+      expect(kind(continued)).toBe("continue");
+
+      const retried = setup({ partialParts: [], retryTarget: "user-1" });
+      await retried.run();
+      expect(kind(retried)).toBe("retry");
+    });
+  });
+
+  describe("what is stored first, in case the isolate dies between two steps", () => {
+    it("stores the partial before it gives up: a give-up with no partial stored would lose it for good", async () => {
+      const t = setup({ maxAttempts: 1, storedReplyId: "assistant-1" });
+      await t.run();
+      t.log.length = 0;
+      await t.run();
+      expect(t.log).toEqual(["keep", "give-up"]);
+    });
+
+    it("stores the partial before it marks the incident failed", async () => {
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      const t = setup({ options: new Error("hook bug") });
+      await t.run();
+      error.mockRestore();
+      expect(t.statusAtResolve).toEqual(["attempting"]);
+      expect(t.incident()).toMatchObject({ status: "failed" });
+    });
   });
 });
