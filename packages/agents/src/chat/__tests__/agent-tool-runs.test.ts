@@ -1060,7 +1060,11 @@ describe("AgentToolRuns", () => {
       runs.closers.set("run-1", new Set([() => void closed++]));
       // The reply path scheduled recovery and handed back `aborted`.
       setRecovery("in-progress");
-      turn.end({ requestId: "req-1", status: "aborted" });
+      turn.end({
+        requestId: "req-1",
+        status: "aborted",
+        reason: "interrupted"
+      });
       await settled();
 
       expect(store.read("run-1")?.status).toBe("running");
@@ -1100,7 +1104,11 @@ describe("AgentToolRuns", () => {
       await runs.start("run-1", START, turn.run);
       runs.bindTurn("run-1", "req-1");
       setRecovery("in-progress");
-      turn.end({ requestId: "req-1", status: "aborted" });
+      turn.end({
+        requestId: "req-1",
+        status: "aborted",
+        reason: "interrupted"
+      });
       await settled();
 
       runs.cancel("run-1", "stop");
@@ -1121,7 +1129,11 @@ describe("AgentToolRuns", () => {
       const turn = heldTurn();
       await context.runs.start("run-1", START, turn.run);
       context.setRecovery("in-progress");
-      turn.end({ requestId: "req-1", status: "aborted" });
+      turn.end({
+        requestId: "req-1",
+        status: "aborted",
+        reason: "interrupted"
+      });
       await context.settled();
       expect(context.store.read("run-1")?.status).toBe("running");
       return context;
@@ -1206,18 +1218,13 @@ describe("AgentToolRuns", () => {
     });
   });
 
-  it("a cancel that lands while the lifecycle reads recovery state leaves nothing in memory", async () => {
-    const { runs, store, settled, setRecovery, holdRecoveryRead } = setup();
+  it("ends a run whose turn is handed to recovery after a cancel already settled it", async () => {
+    const { runs, store, settled } = setup();
     const turn = heldTurn();
     await runs.start("run-1", START, turn.run);
-    setRecovery("in-progress");
-    const release = holdRecoveryRead();
-    turn.end({ requestId: "req-1", status: "aborted" });
-    await new Promise((resolve) => setTimeout(resolve, 0));
     runs.cancel("run-1", "stop");
-    release();
+    turn.end({ requestId: "req-1", status: "aborted", reason: "interrupted" });
     await settled();
-
     expect(store.terminal("run-1")).toEqual({
       status: "aborted",
       error: "stop"
@@ -1225,6 +1232,17 @@ describe("AgentToolRuns", () => {
     expect(runs.liveSequences.size).toBe(0);
     expect(runs.preTurnAssistantIds.size).toBe(0);
     expect(runs.runsByRequestId.size).toBe(0);
+  });
+
+  it("ends a run whose turn was stopped by something else, with no recovery behind it", async () => {
+    const { runs, store, settled, setRecovery } = setup();
+    const turn = heldTurn();
+    await runs.start("run-1", START, turn.run);
+    // An incident for the request does not make a stopped turn recoverable.
+    setRecovery("in-progress");
+    turn.end({ requestId: "req-1", status: "aborted", reason: "stopped" });
+    await settled();
+    expect(store.terminal("run-1")).toEqual({ status: "aborted", error: null });
   });
 
   describe("the parent's signal", () => {
@@ -1235,7 +1253,11 @@ describe("AgentToolRuns", () => {
       await runs.start("run-1", { ...START, signal: parent.signal }, turn.run);
       runs.bindTurn("run-1", "req-1");
       setRecovery("in-progress");
-      turn.end({ requestId: "req-1", status: "aborted" });
+      turn.end({
+        requestId: "req-1",
+        status: "aborted",
+        reason: "interrupted"
+      });
       await settled();
       expect(store.read("run-1")?.status).toBe("running");
 
@@ -1710,7 +1732,11 @@ describe("AgentToolRuns, rule by rule", () => {
       const turn = heldTurn();
       await runs.start("left-open", START, turn.run);
       setRecovery("in-progress");
-      turn.end({ requestId: "req-1", status: "aborted" });
+      turn.end({
+        requestId: "req-1",
+        status: "aborted",
+        reason: "interrupted"
+      });
       await settled();
       expect(runs.isLive("left-open")).toBe(false);
 

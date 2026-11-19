@@ -65,6 +65,11 @@ export interface AgentToolTurnResult {
   requestId: string;
   status: "completed" | "error" | "aborted" | "skipped";
   error?: string;
+  /**
+   * For `aborted`: `"interrupted"` when the reply was cut off and handed to
+   * chat recovery, which may still finish it (`runServerTurn`).
+   */
+  reason?: "stopped" | "interrupted";
 }
 
 /** The parts of the host's resumable stream a run's chunks are read from. */
@@ -484,24 +489,19 @@ export class AgentToolRuns {
             return true;
           }
         });
-        if (turn.status === "aborted") {
-          // A turn that hands back `aborted` while its run is still open
-          // was not cancelled (a cancel settles the row at once). That is
-          // what a reply cut off in this isolate does once chat recovery
-          // is scheduled for it. The run is not over: leave the row open,
-          // as an eviction would have, and let recovery settle it
+        if (
+          turn.status === "aborted" &&
+          turn.reason === "interrupted" &&
+          // A cancel or a stop settled the row meanwhile: nothing is left
+          // to wait for.
+          this.#isOpen(runId)
+        ) {
+          // The reply was cut off in this isolate and chat recovery is
+          // scheduled for it. The run is not over: leave the row open, as
+          // an eviction would have, and let recovery settle it
           // (reconcileOwn).
-          // SAFETY: a run's row is never deleted.
-          const run = this.host.store.read(runId) as AgentToolRunRecord;
-          if (
-            (await this.#recoveryOf(run)) === "in-progress" &&
-            // A cancel or a stop settles the row at once, before or while
-            // the recovery state is read. Nothing is left to wait for then.
-            this.#isOpen(runId)
-          ) {
-            recovering = true;
-            return;
-          }
+          recovering = true;
+          return;
         }
         const outcome = agentToolRunOutcome({
           turn,

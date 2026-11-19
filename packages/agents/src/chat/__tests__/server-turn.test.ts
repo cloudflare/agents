@@ -410,7 +410,7 @@ describe("runServerTurn", () => {
           }
         })
       );
-      expect(result).toEqual({ status: "aborted" });
+      expect(result).toEqual({ status: "aborted", reason: "stopped" });
       expect(log).toContain("s1:onAborted");
       expect(parts.aborts.size).toBe(0);
     });

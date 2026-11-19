@@ -12524,7 +12524,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             if (streamed.status !== "overflow_retry") {
               return { status: streamed.status, error: streamed.error };
             }
-            overflowRecovery?.onRetry(streamed.error);
+            overflowRecovery?.onRetry(
+              streamed.error,
+              streamed.partial ?? {
+                id: crypto.randomUUID(),
+                role: "assistant",
+                parts: []
+              }
+            );
             return { status: "aborted" };
           }
         );
@@ -13521,6 +13528,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   ): Promise<{
     status: "completed" | "error" | "aborted" | "overflow_retry";
     error?: string;
+    /** What the attempt streamed, for `overflow_retry`. */
+    partial?: UIMessage;
   }> {
     // Whether the chat was reset (cleared) since this turn was admitted. A
     // turn admitted before a reset must not store its reply in the cleared
@@ -13760,7 +13769,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       if (overflowRetry) {
         this._completeSubmissionRetryStream(streamId, requestId);
         streamFinalized = true;
-        return { status: "overflow_retry", error: streamError };
+        return {
+          status: "overflow_retry",
+          error: streamError,
+          partial: accumulator.toMessage()
+        };
       }
 
       streamDrained = true;

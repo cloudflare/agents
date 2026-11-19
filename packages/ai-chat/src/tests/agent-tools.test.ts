@@ -1558,13 +1558,13 @@ describe("AIChatAgent as an agent-tool child", () => {
     expect(result.chatCalls).toEqual(["first run"]);
   });
 
-  it("runs each queued run with its own input, and leaves the stored context alone while it waits", async () => {
+  it("runs each queued run with its own input, and never stores it as the request context", async () => {
     const result = await (
       await getParent()
     ).childQueuedRunsKeepTheirOwnBodyForTest();
-    // Two runs wait behind the first: the stored context is still the
-    // running turn's.
-    expect(result.storedWhileQueued).toBe("a");
+    // A run's input goes to its own turn only: it is never the stored
+    // request context, while the run waits or while it runs.
+    expect(result.storedWhileQueued).toBeUndefined();
     expect(result.second).toEqual({ status: "error", error: "boom" });
   });
 

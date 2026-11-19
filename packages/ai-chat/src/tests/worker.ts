@@ -2722,7 +2722,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     }
     if (!this._saveFromNextResponse) return;
     this._saveFromNextResponse = false;
-    await this.saveMessages((messages) => [
+    const followUp = await this.saveMessages((messages) => [
       ...messages,
       {
         id: `follow-up-${crypto.randomUUID()}`,
@@ -2730,6 +2730,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
         parts: [{ type: "text", text: "follow-up from onChatResponse" }]
       }
     ]);
+    this._followUpRequestId = followUp.requestId;
   }
 
   /** Holds the next onChatMessage call until released: the model is slow. */
@@ -3827,23 +3828,8 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     return { status: inspection?.status, body: self._lastBody };
   }
 
-  /** Set to start one follow-up turn from the next `onChatResponse`. */
-  private _followUpFromResponse = false;
+  /** The request id of the turn `onChatResponse` last started. */
   private _followUpRequestId: string | undefined;
-
-  override async onChatResponse(result: ChatResponseResult): Promise<void> {
-    if (!this._followUpFromResponse || result.status !== "completed") return;
-    this._followUpFromResponse = false;
-    const followUp = await this.saveMessages((messages) => [
-      ...messages,
-      {
-        id: `follow-up-${crypto.randomUUID()}`,
-        role: "user",
-        parts: [{ type: "text", text: "and one more thing" }]
-      }
-    ]);
-    this._followUpRequestId = followUp.requestId;
-  }
 
   /**
    * An agent-tool run on an agent whose `onChatResponse` starts a turn of
@@ -3865,7 +3851,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
         prelude: "partial"
       };
     }
-    this._followUpFromResponse = true;
+    this._saveFromNextResponse = true;
     this._followUpRequestId = undefined;
     await this.startAgentToolRun("answer, then a follow-up follows", { runId });
     const deadline = Date.now() + 8000;
