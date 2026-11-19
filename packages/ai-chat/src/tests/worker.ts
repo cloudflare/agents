@@ -35,7 +35,8 @@ import type {
 import {
   CHAT_RECOVERY_TASK_NAME,
   ResumableStream,
-  chatRecoveryTaskRunOptions
+  chatRecoveryTaskRunOptions,
+  type ChatTurns
 } from "agents/chat";
 
 // Type helper for tool call parts - extracts from ChatMessage parts
@@ -1621,6 +1622,40 @@ export class CustomSanitizeAgent extends AIChatAgent<Env> {
  * - `chunkDelayMs`: delay between chunks in ms (default: 50)
  */
 export class SlowStreamAgent extends AIChatAgent<Env> {
+  /** Reset this agent's isolate, as an eviction or a deploy does. */
+  async resetIsolateForTest(): Promise<void> {
+    this.ctx.abort("test: forced reset");
+  }
+
+  /** The admission records, as `ChatTurns` stores them. */
+  getAdmissionsForTest(): Array<{ requestId: string; stopped: boolean }> {
+    try {
+      return this.sql<{ request_id: string; stopped: number }>`
+        SELECT request_id, stopped FROM cf_agents_chat_admissions ORDER BY seq
+      `.map((row) => ({
+        requestId: row.request_id,
+        stopped: row.stopped === 1
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Write an admission record by hand: the record a reset leaves when it
+   * lands between a turn's fiber and the record's delete.
+   */
+  seedAdmissionForTest(requestId: string, messageIds: string[]): void {
+    const { admissions } = (this as unknown as { _turns: ChatTurns })._turns;
+    admissions?.admit({
+      requestId,
+      messageIds,
+      decision: { strategy: null, overlapping: false, debounceUntilMs: null },
+      payload: { trigger: "submit-message", body: {}, clientTools: undefined }
+    });
+    admissions?.live.delete(requestId);
+  }
+
   /** The body later turns run with. */
   getStoredBodyForTest(): Record<string, unknown> | undefined {
     return this._lastBody;

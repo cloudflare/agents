@@ -72,6 +72,11 @@ export interface ChatTurnFiberHost {
     body: (takeReply: () => Promise<void>) => Promise<T>,
     requestId: string
   ): () => Promise<T>;
+  /**
+   * The turn's fiber is durably accepted: recovery owns the turn from now
+   * on (`ChatTurns.turnAccepted`). Optional.
+   */
+  turnAccepted?(requestId: string): void;
 }
 
 /** One turn to run as a fiber. */
@@ -187,6 +192,7 @@ export class ChatTurnFibers {
             () => {
               // The legacy engine stored the fiber and its snapshot before it
               // entered this closure.
+              this.host.turnAccepted?.(requestId);
               turn.onAccepted?.(requestId);
               return body();
             },
@@ -225,6 +231,7 @@ export class ChatTurnFibers {
       wrap,
       run: () => {
         // Tasks accepted the run durably before it invokes the closure.
+        this.host.turnAccepted?.(requestId);
         turn.onAccepted?.(requestId);
         return inContext(body);
       },

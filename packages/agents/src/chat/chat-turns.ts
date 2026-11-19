@@ -35,6 +35,11 @@
 import type { UIMessage } from "ai";
 import { AbortRegistry } from "./abort-registry";
 import {
+  ChatAdmissions,
+  type ChatAdmissionRecord,
+  type ChatAdmissionsHost
+} from "./admissions";
+import {
   TIMED_OUT,
   awaitWithDeadline,
   drainInteractionApplies
@@ -164,6 +169,24 @@ export interface ChatTurnsHost {
 export interface ChatTurnsOptions {
   /** Wait for trailing-edge debounced overlapping submits, in milliseconds. */
   defaultDebounceMs: number;
+  /**
+   * Durable admission of client requests (`admissions.ts`). Without it a
+   * request waiting in the queue is lost when the isolate resets.
+   */
+  admissions?: ChatTurnsAdmissionOptions;
+}
+
+/** What durable admission needs from the host. See `admissions.ts`. */
+export interface ChatTurnsAdmissionOptions extends Omit<
+  ChatAdmissionsHost,
+  "replay" | "beginReplay"
+> {
+  /**
+   * The request a record describes, to run again after a reset. It has no
+   * connection: its frames go to every connection. Return `null` when it
+   * cannot run any more; its record is then dropped.
+   */
+  replayRequest(record: ChatAdmissionRecord): ClientChatRequest<unknown> | null;
 }
 
 /**
@@ -173,6 +196,13 @@ export interface ChatTurnsOptions {
  */
 export interface ClientChatRequest<TPrepared> {
   requestId: string;
+  /**
+   * What a replay after a reset needs: the ids of the user messages the
+   * request stores, and the host's data to run it again (JSON). With it,
+   * the request is recorded before its messages are stored, and the record
+   * goes when its turn has a fiber or it ends. See `admissions.ts`.
+   */
+  admission?: { messageIds: string[]; payload: unknown };
   /** `true` for a new message, `false` for a regenerate. */
   isSubmitMessage: boolean;
   /** The host's `messageConcurrency` setting. */
@@ -305,10 +335,41 @@ export class ChatTurns<
   /** Stop signals of running recovery attempts, by original request id. */
   readonly #recoveryAttempts = new Map<string, AbortController>();
 
+  /** Durable admission records, when the host keeps them. */
+  readonly admissions: ChatAdmissions | null;
+  /** Concurrency decisions of replays not started yet, by request id. */
+  readonly #restoredDecisions = new Map<string, SubmitConcurrencyDecision>();
+
   constructor(
     private readonly host: ChatTurnsHost,
     options: ChatTurnsOptions
   ) {
+    const admissions = options.admissions;
+    this.admissions = admissions
+      ? new ChatAdmissions({
+          store: admissions.store,
+          recoveryPending: () => admissions.recoveryPending(),
+          recoveryOwns: (requestId) => admissions.recoveryOwns(requestId),
+          beginReplay: (records) => {
+            for (const record of records) {
+              this.#restoredDecisions.set(
+                record.requestId,
+                this.submits.restore(record.decision)
+              );
+            }
+          },
+          replay: (record, onQueued) => {
+            const request = admissions.replayRequest(record);
+            if (!request) {
+              this.#restoredDecisions.delete(record.requestId);
+              this.admissions?.end(record.requestId);
+              onQueued();
+              return Promise.resolve();
+            }
+            return this.#runClientRequest(request, { record, onQueued });
+          }
+        })
+      : null;
     this.submits = new SubmitConcurrencyController({
       defaultDebounceMs: options.defaultDebounceMs
     });
@@ -388,15 +449,29 @@ export class ChatTurns<
    * 5. Whatever happened, drop the abort controller and settle the
    *    pre-stream turn.
    */
-  async runClientRequest<TPrepared>(
+  runClientRequest<TPrepared>(
     request: ClientChatRequest<TPrepared>
+  ): Promise<void> {
+    return this.#runClientRequest(request);
+  }
+
+  /**
+   * {@link runClientRequest}, or the replay of a request a reset left
+   * (`replay`): its decision is the stored one, its record exists, and
+   * `onQueued` is told when it is queued or ended before that.
+   */
+  async #runClientRequest<TPrepared>(
+    request: ClientChatRequest<TPrepared>,
+    replay?: { record: ChatAdmissionRecord; onQueued: () => void }
   ): Promise<void> {
     const { requestId } = request;
     const generation = this.queue.generation;
-    const decision = this.decideSubmit(
-      request.concurrency,
-      request.isSubmitMessage
-    );
+    const admissions = request.admission ? this.admissions : null;
+    const restored = replay && this.#restoredDecisions.get(requestId);
+    if (replay) this.#restoredDecisions.delete(requestId);
+    const decision = replay
+      ? (restored ?? this.submits.restore(replay.record.decision))
+      : this.decideSubmit(request.concurrency, request.isSubmitMessage);
     request.onDecision?.(decision);
     if (decision.action === "drop") {
       request.onDropped();
@@ -409,10 +484,33 @@ export class ChatTurns<
     if (!signal) {
       throw new TypeError("runClientRequest: requestId must be a string");
     }
+    // A stop that landed on the record before the reset still stops it.
+    if (replay?.record.stopped) this.aborts.cancel(requestId);
     this.preStream.begin(requestId);
     const releasePendingEnqueue = this.submits.beginEnqueue();
+    let queued = false;
+    const onQueued = () => {
+      queued = true;
+      releasePendingEnqueue();
+      replay?.onQueued();
+    };
     let stage: "persist" | "turn" = "persist";
     try {
+      // The record comes before the messages: a reset between the two
+      // leaves a record whose replay finds no message and ends `skipped`,
+      // where the other order would leave a message nothing answers.
+      if (admissions && !replay && request.admission) {
+        admissions.admit({
+          requestId,
+          messageIds: request.admission.messageIds,
+          decision: {
+            strategy: decision.strategy,
+            overlapping: decision.submitSequence !== null,
+            debounceUntilMs: decision.debounceUntilMs
+          },
+          payload: request.admission.payload
+        });
+      }
       // Inside the try, so a failure here is reported and settled like any
       // other step's.
       await request.onAccepted?.();
@@ -426,6 +524,8 @@ export class ChatTurns<
         return;
       }
       stage = "turn";
+      // Requests an earlier isolate left go first.
+      if (admissions && !replay) await admissions.beforeEnqueue();
 
       const outcome = await request.enqueue(
         async () => {
@@ -451,7 +551,7 @@ export class ChatTurns<
           }
         },
         generation,
-        releasePendingEnqueue
+        onQueued
       );
       if (outcome === "stale") request.onSkipped();
     } catch (error) {
@@ -459,9 +559,40 @@ export class ChatTurns<
       await request.onError(error, stage);
     } finally {
       releasePendingEnqueue();
+      if (!queued) replay?.onQueued();
+      if (admissions) admissions.end(requestId);
       this.aborts.remove(requestId);
       this.settlePreStreamTurn(requestId);
     }
+  }
+
+  // ── Durable admission ──────────────────────────────────────────────
+
+  /**
+   * A turn has a fiber now: recovery owns it, and its admission record
+   * goes. Call it where the host's fiber is durably accepted.
+   */
+  turnAccepted(requestId: string): void {
+    this.admissions?.release(requestId);
+  }
+
+  /**
+   * Queue again, in order, the requests an earlier isolate accepted and
+   * never gave a turn with a fiber. Call it when the host starts and when a
+   * recovery settles: nothing happens while an interrupted turn still waits
+   * for recovery. See `admissions.ts`.
+   */
+  resumeAdmissions(): Promise<void> {
+    return this.admissions?.resume() ?? Promise.resolve();
+  }
+
+  /**
+   * The user messages of requests that have no turn with a fiber yet. A
+   * recovery does not read them as the conversation moving on: they wait
+   * behind the turn it recovers.
+   */
+  admittedMessageIds(): ReadonlySet<string> {
+    return this.admissions?.messageIds() ?? new Set();
   }
 
   /**
@@ -851,6 +982,8 @@ export class ChatTurns<
    * drops nothing.
    */
   cancel(requestId: string, reason?: unknown): Promise<void> {
+    // A request that waits as a record, here or after a reset, stays stopped.
+    this.admissions?.stop(requestId);
     this.#noteStopped(this.aborts.getExistingSignal(requestId));
     this.#stop(() => {
       this.aborts.cancel(requestId, reason);
@@ -901,6 +1034,7 @@ export class ChatTurns<
    * this call continues as usual.
    */
   stopAll(reason?: unknown): Promise<void> {
+    this.admissions?.stopAll();
     for (const signal of this.aborts.signals()) this.#noteStopped(signal);
     this.#stop(() => {
       this.aborts.destroyAll(reason);
@@ -1070,6 +1204,8 @@ export class ChatTurns<
    * host's to clear.
    */
   reset(): void {
+    this.admissions?.clear();
+    this.#restoredDecisions.clear();
     this.queue.reset();
     this.#lastReply = null;
     this.aborts.destroyAll();
