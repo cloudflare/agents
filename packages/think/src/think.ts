@@ -4791,6 +4791,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       isReplyStreaming: () => this._streamingAssistant !== null,
       streamingReply: () => this._streamingAssistant?.toMessage() ?? null,
       clientToolNames: () => this._clientResolvableToolNames(),
+      clientAnswerableToolNames: () => this._clientAnswerableToolNames(),
       hasActiveStream: () => this._resumableStream.hasActiveStream(),
       generateRequestId: () => crypto.randomUUID(),
       keepAliveWhile: (fn) => this.keepAliveWhile(fn),
@@ -7624,6 +7625,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // splice stays correct even when the override changes the message count.
     this._turnModelMessageBaseline = finalMessages.length;
     this._activeTurnTools = mergedTools;
+    this._recordUnexecutedTools(mergedTools);
 
     // `maxTurns` is an overridable per-channel default: a user `beforeTurn`
     // returning `maxSteps` still wins, then the channel cap, then the instance
@@ -16900,6 +16902,85 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    */
   private _clientResolvableToolNames(): Set<string> {
     return clientResolvableToolNames(this._lastClientTools);
+  }
+
+  /**
+   * Every tool a client may answer: the tools the client sent a schema for,
+   * and the tools the server declares with no `execute` (an app answers
+   * those from the client, without ever sending their schema). A call for
+   * any other tool was the server's to run. Unanswered in a stored reply, it
+   * is dead: an older version stored cut-off replies as they were.
+   */
+  private _clientAnswerableToolNames(): Set<string> {
+    const names = this._clientResolvableToolNames();
+    for (const name of this._unexecutedToolNames()) names.add(name);
+    return names;
+  }
+
+  /**
+   * Names of the tools in `tools` the server does not run: no `execute`,
+   * and not run by the provider.
+   */
+  private static _unexecutedToolNamesOf(tools: ToolSet): string[] {
+    return Object.entries(tools)
+      .filter(([, definition]) => {
+        const candidate = definition as {
+          execute?: unknown;
+          type?: unknown;
+        };
+        return (
+          typeof candidate.execute !== "function" &&
+          candidate.type !== "provider" &&
+          candidate.type !== "provider-defined"
+        );
+      })
+      .map(([name]) => name)
+      .sort();
+  }
+
+  /**
+   * Store which of a turn's tools the server does not run, so the answer is
+   * there after a restart, before any turn has assembled its tools again.
+   */
+  private _recordUnexecutedTools(tools: ToolSet): void {
+    const names = Think._unexecutedToolNamesOf(tools);
+    this._unexecutedTools = names;
+    // `_configSet` skips the write when the value has not changed.
+    this._configSet("unexecutedTools", JSON.stringify(names));
+  }
+
+  /** Read once per isolate: `hasPendingInteraction()` is polled. */
+  private _unexecutedTools: string[] | undefined;
+
+  /**
+   * The tools the last turn had that the server does not run. Before the
+   * first turn on this version there is no record, so read `getTools()`:
+   * the app's own tools are where a tool without `execute` is declared.
+   */
+  private _unexecutedToolNames(): string[] {
+    if (this._unexecutedTools) return this._unexecutedTools;
+    const stored = this._configGet("unexecutedTools");
+    if (stored !== undefined) {
+      try {
+        const parsed: unknown = JSON.parse(stored);
+        if (Array.isArray(parsed)) {
+          this._unexecutedTools = parsed.filter(
+            (name): name is string => typeof name === "string"
+          );
+          return this._unexecutedTools;
+        }
+      } catch {
+        // Fall through to the app's tools.
+      }
+    }
+    try {
+      this._unexecutedTools = Think._unexecutedToolNamesOf(this.getTools());
+    } catch {
+      // `getTools()` can need turn-time context. Without it, only the
+      // client's own tools are known to be a client's.
+      this._unexecutedTools = [];
+    }
+    return this._unexecutedTools;
   }
 
   /**

@@ -81,6 +81,13 @@ export interface ChatTurnsHost {
    * with the request whose turn last started.
    */
   clientToolNames(): Set<string>;
+  /**
+   * Every tool a client may answer, when the host can tell: the client's
+   * own tools and the ones the server declares without an `execute`. A host
+   * that cannot see its tools omits this, or returns `null`. See
+   * {@link hasPendingToolInteraction}.
+   */
+  clientAnswerableToolNames?(): Set<string> | null;
   /** `true` while a resumable stream is active (clients can resume it). */
   hasActiveStream(): boolean;
   /** Mint the request id of a new continuation turn. */
@@ -543,7 +550,8 @@ export class ChatTurns<
     return hasPendingToolInteraction({
       messages: this.host.messages(),
       streaming: this.host.streamingReply(),
-      clientToolNames: this.host.clientToolNames()
+      clientToolNames: this.host.clientToolNames(),
+      clientAnswerableToolNames: this.host.clientAnswerableToolNames?.()
     });
   }
 

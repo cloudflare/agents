@@ -342,7 +342,11 @@ export function hasIncompleteToolBatch(
  *   finished on that call, which is what a client tool does. A cut-off reply
  *   has its dead calls settled before it is stored
  *   (`settleInterruptedReply`), so the call is never a server tool whose
- *   `execute()` died.
+ *   `execute()` died. That holds for replies this version stored. An older
+ *   version stored a cut-off reply as it was, so a host that can name the
+ *   tools only a client can answer passes them
+ *   (`clientAnswerableToolNames`), and then only those count. A dead server
+ *   call in an old row is not waited on.
  * - In an earlier reply, one the conversation has moved past, only a call a
  *   client is known to own counts (`clientToolNames`, from the schemas the
  *   client sent). Nothing else there can be told apart from a dead call an
@@ -353,13 +357,20 @@ export function hasIncompleteToolBatch(
  *
  * @param input.streaming - The reply being streamed, if any. A stored copy
  *   of the same message is skipped in favor of it.
+ * @param input.clientAnswerableToolNames - Every tool a client may answer,
+ *   as far as the host can tell: the tools the client sent a schema for, and
+ *   the tools the server declares without running them itself. `null` or
+ *   absent when the host cannot tell (its tools are not visible to it), in
+ *   which case any tool may be a client's.
  */
 export function hasPendingToolInteraction(input: {
   messages: ReadonlyArray<ToolBatchMessage & { id?: string }>;
   streaming: (ToolBatchMessage & { id?: string }) | null | undefined;
   clientToolNames: Set<string>;
+  clientAnswerableToolNames?: Set<string> | null;
 }): boolean {
   const { messages, streaming, clientToolNames } = input;
+  const answerable = input.clientAnswerableToolNames ?? null;
   if (
     streaming?.parts.some((part) =>
       partAwaitsClientInteraction(part, clientToolNames)
@@ -379,7 +390,9 @@ export function hasPendingToolInteraction(input: {
         message === latest &&
         (part as { state?: unknown } | null)?.state === "input-available"
       ) {
-        return true;
+        if (answerable === null) return true;
+        const toolName = toolPartName(part as Record<string, unknown>);
+        if (toolName != null && answerable.has(toolName)) return true;
       }
     }
   }

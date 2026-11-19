@@ -3321,6 +3321,31 @@ describe("Think — chained client tools across continuations (#2443)", () => {
 
 // ── Tool results that have nothing left to continue ──────────────
 
+describe("Think — waiting on a client after an upgrade", () => {
+  it("does not wait on a server tool call an older release stored in the latest reply", async () => {
+    const agent = await freshAgent();
+    // An older release stored a stopped reply as it was, with its server
+    // tool call unanswered. Nothing will ever answer it.
+    await agent.persistToolCallMessage([
+      makeUserMessage("search for it"),
+      makeToolMessage("tc-dead", "serverSearch", "input-available")
+    ]);
+
+    expect(await agent.waitUntilStableForTest({ timeout: 500 })).toBe(true);
+  });
+
+  it("still waits on a tool the server declares and a client answers", async () => {
+    const agent = await freshAgent();
+    await agent.setDeclaredClientToolForTest(true);
+    await agent.persistToolCallMessage([
+      makeUserMessage("ask me"),
+      makeToolMessage("tc-ask", "askUser", "input-available")
+    ]);
+
+    expect(await agent.waitUntilStableForTest({ timeout: 500 })).toBe(false);
+  });
+});
+
 describe("Think — tool results with nothing to continue", () => {
   it("a tool result is answered after a message was appended without a turn", async () => {
     const room = crypto.randomUUID();

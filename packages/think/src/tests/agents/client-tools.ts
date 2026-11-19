@@ -1074,6 +1074,16 @@ export class ThinkClientToolsAgent extends Think {
         ...this._serverApprovalTools()
       };
     }
+    if (this._useDeclaredClientTool) {
+      // Declared on the server with no `execute`: a client answers it, and
+      // never sends its schema.
+      return {
+        askUser: tool({
+          description: "Ask the user a question",
+          inputSchema: z.object({ question: z.string() })
+        })
+      };
+    }
     if (!this._useServerApprovalTool) return {};
     return this._serverApprovalTools();
   }
@@ -1550,6 +1560,12 @@ export class ThinkClientToolsAgent extends Think {
         _submitConcurrency: { overlappingSubmitCount: number };
       }
     )._submitConcurrency.overlappingSubmitCount;
+  }
+
+  private _useDeclaredClientTool = false;
+
+  async setDeclaredClientToolForTest(value: boolean): Promise<void> {
+    this._useDeclaredClientTool = value;
   }
 
   waitUntilStableForTest(options?: { timeout?: number }): Promise<boolean> {
