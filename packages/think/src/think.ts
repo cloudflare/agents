@@ -7007,6 +7007,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       storage: this.ctx.storage,
       ...(hasBridge
         ? {
+            workerIdScope: `${agentClassName}:${agentId}`,
             createHostBinding: (
               permissions: import("./extensions/types").ExtensionPermissions,
               ownContextLabels: string[]

@@ -702,3 +702,97 @@ describe("ExtensionManager", () => {
     });
   });
 });
+
+describe("ExtensionManager worker id stability", () => {
+  function recordingLoader() {
+    const ids: string[] = [];
+    const loader = {
+      get: (id: string, cb: () => unknown) => {
+        ids.push(id);
+        return (env.LOADER as WorkerLoader).get(id, cb as never);
+      }
+    } as unknown as WorkerLoader;
+    return { ids, loader };
+  }
+
+  it("reuses the same worker id across managers for identical extensions", async () => {
+    const { ids, loader } = recordingLoader();
+    const manifest = makeManifest({ name: "stable" });
+    await new ExtensionManager({ loader }).load(
+      manifest,
+      GREET_EXTENSION_SOURCE
+    );
+    await new Promise((r) => setTimeout(r, 5));
+    await new ExtensionManager({ loader }).load(
+      manifest,
+      GREET_EXTENSION_SOURCE
+    );
+    expect(ids[0]).toBe(ids[1]);
+
+    await new ExtensionManager({ loader }).load(manifest, MULTI_TOOL_SOURCE);
+    expect(ids[2]).not.toBe(ids[0]);
+  });
+});
+
+describe("ExtensionManager worker id scoping for host bindings", () => {
+  function fakeLoader() {
+    const ids: string[] = [];
+    const loader = {
+      get: (id: string) => {
+        ids.push(id);
+        return {
+          getEntrypoint: () => ({
+            describe: async () => "[]",
+            manifest: async () => JSON.stringify({ hooks: [] })
+          })
+        };
+      }
+    } as unknown as WorkerLoader;
+    return { ids, loader };
+  }
+
+  const createHostBinding = () => ({}) as Fetcher;
+  const hostManifest = (context: ExtensionManifest["context"] = []) =>
+    makeManifest({
+      name: "notes",
+      permissions: { workspace: "read" },
+      context
+    });
+
+  it("gives different agents different ids for the same host extension", async () => {
+    const { ids, loader } = fakeLoader();
+    for (const workerIdScope of ["Agent:a", "Agent:a", "Agent:b"]) {
+      await new ExtensionManager({
+        loader,
+        createHostBinding,
+        workerIdScope
+      }).load(hostManifest(), GREET_EXTENSION_SOURCE);
+    }
+    expect(ids[0]).toBe(ids[1]);
+    expect(ids[2]).not.toBe(ids[0]);
+  });
+
+  it("changes the id when the context labels change", async () => {
+    const { ids, loader } = fakeLoader();
+    const load = (context: ExtensionManifest["context"]) =>
+      new ExtensionManager({
+        loader,
+        createHostBinding,
+        workerIdScope: "Agent:a"
+      }).load(hostManifest(context), GREET_EXTENSION_SOURCE);
+    await load([{ label: "draft", type: "writable" }]);
+    await load([{ label: "final", type: "writable" }]);
+    expect(ids[1]).not.toBe(ids[0]);
+  });
+
+  it("never reuses a host extension id without a scope", async () => {
+    const { ids, loader } = fakeLoader();
+    for (let i = 0; i < 2; i++) {
+      await new ExtensionManager({ loader, createHostBinding }).load(
+        hostManifest(),
+        GREET_EXTENSION_SOURCE
+      );
+    }
+    expect(ids[1]).not.toBe(ids[0]);
+  });
+});

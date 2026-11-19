@@ -102,6 +102,22 @@ export interface ExtensionManagerOptions {
     permissions: ExtensionPermissions,
     ownContextLabels: string[]
   ) => Fetcher;
+  /**
+   * Identifies the agent that `createHostBinding` binds to (for example
+   * `${className}:${ctx.id}`). It is part of the Dynamic Worker id of
+   * extensions that receive `env.host`, so a cached worker is never shared
+   * with another agent. Without it, such extensions get a fresh id per
+   * manager instance.
+   */
+  workerIdScope?: string;
+}
+
+async function hashWorkerConfig(input: unknown): Promise<string> {
+  const data = new TextEncoder().encode(JSON.stringify(input));
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(digest).slice(0, 16), (b) =>
+    b.toString(16).padStart(2, "0")
+  ).join("");
 }
 
 export class ExtensionManager {
@@ -113,6 +129,7 @@ export class ExtensionManager {
         ownContextLabels: string[]
       ) => Fetcher)
     | null;
+  #workerIdScope: string;
   #extensions = new Map<string, LoadedExtension>();
   #restored = false;
   #onUnload:
@@ -123,6 +140,7 @@ export class ExtensionManager {
     this.#loader = options.loader;
     this.#storage = options.storage ?? null;
     this.#createHostBinding = options.createHostBinding ?? null;
+    this.#workerIdScope = options.workerIdScope ?? crypto.randomUUID();
   }
 
   /**
@@ -188,6 +206,7 @@ export class ExtensionManager {
     // Fetcher as env.host when the extension declares ANY permission
     // that requires host access (workspace, context, messages, session).
     const workerEnv: Record<string, Fetcher> = {};
+    let ownLabels: string[] = [];
     const needsHost =
       (permissions.workspace ?? "none") !== "none" ||
       permissions.context?.read !== undefined ||
@@ -197,20 +216,34 @@ export class ExtensionManager {
       permissions.session?.metadata;
     if (this.#createHostBinding && needsHost) {
       const prefix = sanitizeName(manifest.name);
-      const ownLabels = (manifest.context ?? []).map(
-        (c) => `${prefix}_${c.label}`
-      );
+      ownLabels = (manifest.context ?? []).map((c) => `${prefix}_${c.label}`);
       workerEnv.host = this.#createHostBinding(permissions, ownLabels);
     }
 
+    // Stable, content-derived id: Dynamic Workers are billed per distinct
+    // id, so restarts must reuse the id while code/permissions are unchanged.
+    // A cached worker keeps the env it was created with, so an id that
+    // carries `env.host` must also cover the agent and the context labels
+    // that binding was created for.
+    const globalOutbound = permissions.network?.length ? undefined : null;
+    const hash = await hashWorkerConfig({
+      workerModule,
+      globalOutbound: globalOutbound === null ? "null" : "inherit",
+      envBindings: Object.keys(workerEnv).sort(),
+      permissions,
+      ...(workerEnv.host
+        ? { hostScope: this.#workerIdScope, ownContextLabels: ownLabels }
+        : {})
+    });
+
     const worker = this.#loader.get(
-      `ext-${manifest.name}-${manifest.version}-${Date.now()}`,
+      `ext-${manifest.name}-${manifest.version}-${hash}`,
       () => ({
         compatibilityDate: "2025-06-01",
         compatibilityFlags: ["nodejs_compat"],
         mainModule: "extension.js",
         modules: { "extension.js": workerModule },
-        globalOutbound: permissions.network?.length ? undefined : null,
+        globalOutbound,
         ...(Object.keys(workerEnv).length > 0 ? { env: workerEnv } : {})
       })
     );
