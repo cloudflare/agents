@@ -3321,6 +3321,55 @@ describe("Think — chained client tools across continuations (#2443)", () => {
 
 // ── Tool results that have nothing left to continue ──────────────
 
+describe("Think — a tool result while the reply is being stored", () => {
+  it("is stored with the reply, and the model answers it", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    // The turn ends on a client tool call. Its store is held open after the
+    // reply was built and before it is written.
+    await agent.holdReplyStoreForTest();
+    sendChatRequest(ws, [makeUserMessage("use client tool")], {
+      clientTools: [{ name: "client_action", description: "A client tool" }]
+    });
+    await waitUntil(() => agent.isReplyStoreHeldForTest(), 8000);
+
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId: "tc-client-1",
+        toolName: "client_action",
+        output: "tool output",
+        autoContinue: true
+      })
+    );
+    await waitUntil(
+      async () =>
+        (await agent.streamingToolCallState("tc-client-1")) ===
+        "output-available"
+    );
+    await delay(100);
+    await agent.releaseReplyStoreForTest();
+
+    // The continuation answers after the tool call's reply.
+    await waitUntil(async () => {
+      const stored = (await agent.getMessages()) as UIMessage[];
+      return stored.length >= 3;
+    }, 8000);
+    const stored = (await agent.getMessages()) as UIMessage[];
+    const part = stored
+      .flatMap((m) => m.parts as Array<Record<string, unknown>>)
+      .find((p) => p.toolCallId === "tc-client-1");
+    expect(part?.state).toBe("output-available");
+    expect(part?.output).toBe("tool output");
+    expect(stored.at(-1)?.role).toBe("assistant");
+    expect(await agent.waitUntilStableForTest({ timeout: 2000 })).toBe(true);
+    await closeWS(ws);
+  });
+});
+
 describe("Think — a subclass that wraps tool result applies", () => {
   it("sees a client tool result", async () => {
     const room = crypto.randomUUID();

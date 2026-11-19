@@ -4861,6 +4861,16 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   // persist. Null when no stream is active. Mirrors `@cloudflare/ai-chat`'s
   // `_streamingMessage` handling.
   private _streamingAssistant: StreamAccumulator | null = null;
+  /**
+   * The live reply while {@link _storeLiveReply} stores it. The reply is
+   * built before the write, and the write can await. A tool result applied to
+   * the accumulator in between sets `dirty`, so the reply is stored again
+   * with it.
+   */
+  private _replyBeingStored: {
+    accumulator: StreamAccumulator;
+    dirty: boolean;
+  } | null = null;
   // Resolved pauses, by tool call id, whose outcome write or generation drop
   // may not have landed: the outcome is being written, or its own turn was
   // still streaming. See `_dropGenerationAfterResolvedPause`. Mirrored in
@@ -14740,11 +14750,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       }
       streamFinalized = true;
 
-      assistantMsg =
+      const buildReply = () =>
         streamError || aborted
           ? this._settleInterruptedReply(accumulator.toMessage())
           : accumulator.toMessage();
-      const response: ChatResponseResult = {
+      assistantMsg = buildReply();
+      let response: ChatResponseResult = {
         message: assistantMsg,
         requestId,
         continuation: false,
@@ -14752,14 +14763,28 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         ...(streamError && { error: streamError })
       };
       if (accumulator.parts.length > 0) {
-        await this._rememberPendingResponseHook(response);
-        persistedAssistantId = await this._persistAssistantMessageWithCutover(
-          streamId,
-          assistantMsg,
-          undefined,
-          this._streamCutoverOptions(requestId),
-          { requestId, result: { status: aborted ? "aborted" : "completed" } }
+        const { message } = await this._storeLiveReply(
+          accumulator,
+          buildReply,
+          async (built) => {
+            response = { ...response, message: built };
+            await this._rememberPendingResponseHook(response);
+            persistedAssistantId =
+              await this._persistAssistantMessageWithCutover(
+                streamId,
+                built,
+                undefined,
+                this._streamCutoverOptions(requestId),
+                {
+                  requestId,
+                  result: { status: aborted ? "aborted" : "completed" }
+                }
+              );
+            return persistedAssistantId !== undefined;
+          }
         );
+        assistantMsg = message;
+        response = { ...response, message };
         this._broadcastMessages();
       }
       // After the transcript broadcast: `done` flips `useAgentChat` to ready,
@@ -14808,12 +14833,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           persistPartial: async () => {
             if (persistedAssistantId) return persistedAssistantId;
             if (accumulator.parts.length === 0) return undefined;
-            const partial = this._settleInterruptedReply(
-              accumulator.toMessage()
+            const { stored, message: partial } = await this._storeLiveReply(
+              accumulator,
+              () => this._settleInterruptedReply(accumulator.toMessage()),
+              (message) => this._persistAssistantMessage(message)
             );
-            if (!(await this._persistAssistantMessage(partial))) {
-              return undefined;
-            }
+            if (!stored) return undefined;
             assistantMsg = partial;
             persistedAssistantId = partial.id;
             this._broadcastMessages();
@@ -14877,8 +14902,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       }
       try {
         if (!assistantMsg && accumulator.parts.length > 0) {
-          assistantMsg = this._settleInterruptedReply(accumulator.toMessage());
-          await this._persistAssistantMessage(assistantMsg);
+          assistantMsg = (
+            await this._storeLiveReply(
+              accumulator,
+              () => this._settleInterruptedReply(accumulator.toMessage()),
+              (message) => this._persistAssistantMessage(message)
+            )
+          ).message;
           this._broadcastMessages();
         }
       } finally {
@@ -15376,14 +15406,15 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               return undefined;
             }
             // The stream was cut off: settle the calls it left unanswered.
-            if (
-              !(await this._persistAssistantMessage(
-                this._settleInterruptedReply(partialMsg),
-                parentId
-              ))
-            ) {
-              return undefined;
-            }
+            // Built from the accumulator now, not from `partialMsg`: a tool
+            // result may have landed on it since.
+            const { stored } = await this._storeLiveReply(
+              accumulator,
+              () => this._settleInterruptedReply(accumulator.toMessage()),
+              (message) => this._persistAssistantMessage(message, parentId),
+              () => !resetSinceTurnStarted()
+            );
+            if (!stored) return undefined;
             this._broadcastMessages();
             return partialMsg.id;
           }
@@ -15493,12 +15524,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         try {
           // A stream that was stopped or errored is cut off: settle the tool
           // calls it left unanswered before the reply is stored.
-          const assistantMsg =
+          const buildReply = () =>
             streamError || streamAborted
               ? this._settleInterruptedReply(accumulator.toMessage())
               : accumulator.toMessage();
-          const response: ChatResponseResult = {
-            message: assistantMsg,
+          let response: ChatResponseResult = {
+            message: buildReply(),
             requestId,
             continuation,
             status: streamError
@@ -15510,15 +15541,26 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           };
 
           if (accumulator.parts.length > 0) {
-            await this._rememberPendingResponseHook(response);
-            const persistedMessageId =
-              await this._persistAssistantMessageWithCutover(
-                streamId,
-                assistantMsg,
-                parentId,
-                this._streamCutoverOptions(requestId),
-                { requestId, result: submissionResult }
-              );
+            let persistedMessageId: string | undefined;
+            const { message } = await this._storeLiveReply(
+              accumulator,
+              buildReply,
+              async (assistantMsg) => {
+                response = { ...response, message: assistantMsg };
+                await this._rememberPendingResponseHook(response);
+                persistedMessageId =
+                  await this._persistAssistantMessageWithCutover(
+                    streamId,
+                    assistantMsg,
+                    parentId,
+                    this._streamCutoverOptions(requestId),
+                    { requestId, result: submissionResult }
+                  );
+                return persistedMessageId !== undefined;
+              },
+              () => !resetSinceTurnStarted()
+            );
+            response = { ...response, message };
             if (
               !streamError &&
               !streamAborted &&
@@ -15638,6 +15680,40 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       normalizedInputs: 0,
       toolCallIds
     });
+  }
+
+  /**
+   * Store the reply a live stream built. `build` reads the accumulator, and
+   * `write` stores what it returns, resolving to whether it stored anything.
+   * The write can await, and a client tool result that lands meanwhile is
+   * applied to the accumulator only (the row is not there yet), so the
+   * written copy can lack it. The reply is then stored again from the
+   * accumulator until nothing changed, while `isCurrent` holds.
+   *
+   * @returns Whether the reply was stored, and the last copy written.
+   */
+  private async _storeLiveReply(
+    accumulator: StreamAccumulator,
+    build: () => UIMessage,
+    write: (message: UIMessage) => Promise<boolean>,
+    isCurrent: () => boolean = () => true
+  ): Promise<{ stored: boolean; message: UIMessage }> {
+    const storing = { accumulator, dirty: false };
+    this._replyBeingStored = storing;
+    try {
+      let message = build();
+      const stored = await write(message);
+      while (stored && storing.dirty && isCurrent()) {
+        storing.dirty = false;
+        message = build();
+        const toPersist = this._strippedForPersist(message);
+        if (toPersist === null) break;
+        this._patchCachedMessage(await this._updateMessageInHistory(toPersist));
+      }
+      return { stored, message };
+    } finally {
+      if (this._replyBeingStored === storing) this._replyBeingStored = null;
+    }
   }
 
   /** Resolves to `false` when stripping left nothing to persist. */
@@ -16762,6 +16838,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           accParts[result.index] = result.parts[result.index];
           broadcastMessage = streaming.toMessage();
           changedMessageId = streaming.messageId;
+          // The reply may be being stored from a copy built before this.
+          if (this._replyBeingStored?.accumulator === streaming) {
+            this._replyBeingStored.dirty = true;
+          }
         }
       }
     }

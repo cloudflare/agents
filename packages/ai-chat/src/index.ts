@@ -445,7 +445,7 @@ export class AIChatAgent<
     {
       messages: () => this.messages,
       isReplyStreaming: () => this._streamingTurnActive,
-      streamingReply: () => this._streamingMessage,
+      streamingReply: () => this._replyInFlight(),
       clientToolNames: () => this._clientResolvableToolNames(),
       hasActiveStream: () => this._resumableStream.hasActiveStream(),
       generateRequestId: () => nanoid(),
@@ -505,6 +505,25 @@ export class AIChatAgent<
    * @internal
    */
   private _streamingMessage: UIMessage | null = null;
+
+  /**
+   * The finished reply while it is being stored: between leaving
+   * {@link _streamingMessage} and `persistMessages` having written it. An
+   * app's `persistMessages` override can await in that window, and a tool
+   * result that arrives then must still find the reply. `dirty` is set when
+   * one was applied, so the reply is stored again with it.
+   */
+  private _replyBeingStored: { message: UIMessage; dirty: boolean } | null =
+    null;
+
+  /**
+   * The reply that is not in the stored transcript yet, or not in its final
+   * form: streaming, or finished and being stored. A tool result or approval
+   * is applied to it in place.
+   */
+  private _replyInFlight(): UIMessage | null {
+    return this._streamingMessage ?? this._replyBeingStored?.message ?? null;
+  }
 
   /**
    * Queued by `_reply` so the hook can fire after the turn lock releases.
@@ -2901,23 +2920,22 @@ export class AIChatAgent<
   }
 
   private _messagesForClientSync(): readonly UIMessage[] {
-    if (!this._streamingMessage || this._streamingMessage.parts.length === 0) {
+    const inFlight = this._replyInFlight();
+    if (!inFlight || inFlight.parts.length === 0) {
       return this.messages;
     }
 
     const existingIdx = this.messages.findIndex(
-      (message) => message.id === this._streamingMessage?.id
+      (message) => message.id === inFlight.id
     );
 
     if (existingIdx >= 0) {
       return this.messages.map((message, idx) =>
-        idx === existingIdx && this._streamingMessage
-          ? this._streamingMessage
-          : message
+        idx === existingIdx ? inFlight : message
       );
     }
 
-    return [...this.messages, this._streamingMessage];
+    return [...this.messages, inFlight];
   }
 
   private _sendDirectMessage(
@@ -6517,16 +6535,19 @@ export class AIChatAgent<
     matchStates: string[],
     applyUpdate: (part: Record<string, unknown>) => Record<string, unknown>
   ): Promise<ToolInteractionOutcome> {
-    // Find the message containing this tool call: the streaming message
-    // first (in memory, not yet persisted), then the stored transcript. One
-    // look, no retry: applies run one at a time, so waiting here for a call
-    // that does not exist would stall every result queued behind it.
+    // Find the message containing this tool call: the reply in flight first
+    // (streaming, or finished and being stored), then the stored transcript.
+    // One look, no retry: applies run one at a time, so waiting here for a
+    // call that does not exist would stall every result queued behind it.
+    // The reply in flight covers every moment a reply exists and is not yet
+    // stored, so there is nothing to wait for.
     let message: UIMessage | undefined;
 
-    if (this._streamingMessage) {
-      for (const part of this._streamingMessage.parts) {
+    const inFlight = this._replyInFlight();
+    if (inFlight) {
+      for (const part of inFlight.parts) {
         if ("toolCallId" in part && part.toolCallId === toolCallId) {
-          message = this._streamingMessage;
+          message = inFlight;
           break;
         }
       }
@@ -6541,7 +6562,7 @@ export class AIChatAgent<
       return { status: "missing" };
     }
 
-    const isStreamingMessage = message === this._streamingMessage;
+    const isStreamingMessage = message === inFlight;
     // `wasFound` tracks whether any matching part was processed (real
     // change OR idempotent no-op). `hasRealChange` tracks whether any
     // apply actually mutated state. Tracking both separately matters
@@ -6570,6 +6591,11 @@ export class AIChatAgent<
           ) {
             Object.assign(part, applied);
             hasRealChange = true;
+            // A reply that is being stored may already have been written
+            // without this change: `_reply` stores it again.
+            if (this._replyBeingStored?.message === message) {
+              this._replyBeingStored.dirty = true;
+            }
           }
           break;
         }
@@ -7718,6 +7744,10 @@ export class AIChatAgent<
           if (streamResult.status !== "completed") {
             message = this._settleInterruptedReply(message);
           }
+          // The reply left `_streamingMessage` above and is not stored yet.
+          // Keep it findable until it is, with no await in between.
+          const storing = { message, dirty: false };
+          this._replyBeingStored = storing;
           if (
             message.parts.length > 0 &&
             !discardPartial &&
@@ -7766,8 +7796,22 @@ export class AIChatAgent<
                 excludeBroadcastIds
               );
             }
-            this._recordTurnReply(earlyPersistedId ?? message.id);
+            // A tool result that arrived while the reply was being stored
+            // was applied to it in place. The store may have written the
+            // reply before that, so store it again until nothing changed.
+            const storedId = earlyPersistedId ?? message.id;
+            while (storing.dirty && !resetSinceTurnStarted()) {
+              storing.dirty = false;
+              await this.persistMessages(
+                this.messages.map((stored) =>
+                  stored.id === storedId ? { ...message, id: storedId } : stored
+                ),
+                excludeBroadcastIds
+              );
+            }
+            this._recordTurnReply(storedId);
           }
+          if (this._replyBeingStored === storing) this._replyBeingStored = null;
           // Nothing to persist (or the persist threw, or an override never
           // reached the session write): settle the stream so it is not
           // mistaken for an interrupted turn.
@@ -7787,6 +7831,10 @@ export class AIChatAgent<
           });
           return streamResult;
         } finally {
+          // Also when the persist threw: the reply is not coming back.
+          if (this._replyBeingStored?.message.id === message.id) {
+            this._replyBeingStored = null;
+          }
           this.#pendingCutover = null;
           this._resumableStream.finalizePending();
           this._releaseTerminalFrames(

@@ -1616,6 +1616,35 @@ export class ThinkClientToolsAgent extends Think {
     this._continuationStartLatch = new LatchForTest();
   }
 
+  /**
+   * Hold the end-of-turn store of the next reply open, after the reply was
+   * built and before it is written, until released. Stands in for any await
+   * in that window that lets a tool result in.
+   */
+  async holdReplyStoreForTest(): Promise<void> {
+    const latch = new LatchForTest();
+    this._replyStoreLatch = latch;
+    const internal = this as unknown as {
+      _rememberPendingResponseHook(result: unknown): Promise<void>;
+    };
+    const original = internal._rememberPendingResponseHook;
+    internal._rememberPendingResponseHook = async (result: unknown) => {
+      internal._rememberPendingResponseHook = original;
+      await latch.wait();
+      return original.call(this, result);
+    };
+  }
+
+  async isReplyStoreHeldForTest(): Promise<boolean> {
+    return this._replyStoreLatch?.isWaiting ?? false;
+  }
+
+  async releaseReplyStoreForTest(): Promise<void> {
+    this._replyStoreLatch?.open();
+  }
+
+  private _replyStoreLatch: LatchForTest | undefined;
+
   async isContinuationStartHeldForTest(): Promise<boolean> {
     return this._continuationStartLatch?.isWaiting ?? false;
   }

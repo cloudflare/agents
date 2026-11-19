@@ -252,6 +252,31 @@ export class TestChatAgent extends AIChatAgent<Env> {
   private _capturedRequestId: string | undefined = undefined;
   private _chatMessageCallCount = 0;
 
+  private _persistDelayForTest: {
+    role: "user" | "assistant";
+    ms: number;
+  } | null = null;
+
+  /**
+   * Make `persistMessages` wait before it writes when the last message has
+   * `role`, the way an app's override that awaits before `super` does.
+   */
+  setPersistDelayForTest(role: "user" | "assistant", ms: number): void {
+    this._persistDelayForTest = { role, ms };
+  }
+
+  override async persistMessages(
+    messages: ChatMessage[],
+    excludeBroadcastIds: string[] = [],
+    options?: { _deleteStaleRows?: boolean }
+  ) {
+    const wait = this._persistDelayForTest;
+    if (wait && messages.at(-1)?.role === wait.role) {
+      await new Promise((resolve) => setTimeout(resolve, wait.ms));
+    }
+    return super.persistMessages(messages, excludeBroadcastIds, options);
+  }
+
   async onChatMessage(
     _onFinish: GenerateTextOnFinishCallback<ToolSet>,
     options?: OnChatMessageOptions

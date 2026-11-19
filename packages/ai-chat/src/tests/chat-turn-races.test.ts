@@ -383,6 +383,40 @@ describe("chat turn races", () => {
     tabB.close(1000);
   });
 
+  it("a tool result that arrives while the finished reply is being stored is applied", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const seen = record(ws);
+    const agent = await getAgentByName(env.TestChatAgent, room);
+    // The app's persistMessages awaits before it stores an assistant message.
+    await agent.setPersistDelayForTest("assistant", 300);
+
+    // Turn 1 streams a client tool call and finishes. Its reply has left the
+    // stream and is not stored yet.
+    sendChatRequest(ws, "req-tool", [user1], { clientToolCall: true });
+    await waitUntil(() =>
+      seen.some((m) => JSON.stringify(m).includes("tool-input-available"))
+    );
+    await delay(100);
+    expect(await agent.getPersistedMessages()).toHaveLength(1);
+
+    // The tab's tool finishes and its result arrives in that window.
+    send(ws, toolResult("call-turn"));
+    await waitUntil(() => responses(seen, "req-tool").some((m) => m.done));
+    await delay(700);
+    await agent.waitForIdleForTest();
+
+    // The result is stored with the reply, and the model answers it.
+    const stored = (await agent.getPersistedMessages()) as ChatMessage[];
+    expect(
+      stored[1].parts.find(
+        (part) => "toolCallId" in part && part.toolCallId === "call-turn"
+      )
+    ).toMatchObject({ state: "output-available", output: { ok: true } });
+    expect(await agent.getChatMessageCallCountForTest()).toBe(2);
+    ws.close(1000);
+  });
+
   it("a tool result is answered after a message was appended without a turn", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
