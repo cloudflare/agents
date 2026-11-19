@@ -1381,6 +1381,15 @@ export class ThinkClientToolsAgent extends Think {
     )._repairToolTranscriptParts(messages).messages;
   }
 
+  /** Append a message with no turn, as an app's status message is. */
+  async appendNoteForTest(text: string): Promise<UIMessage> {
+    return this.appendMessageToHistory({
+      id: `note-${crypto.randomUUID()}`,
+      role: "assistant",
+      parts: [{ type: "text", text }]
+    });
+  }
+
   async persistToolCallMessage(messages: UIMessage[]): Promise<void> {
     for (const msg of messages) {
       await this.session.appendMessage(msg);

@@ -2266,12 +2266,17 @@ export class AIChatAgent<
   protected _orphanStore(): OrphanPersistStore {
     return {
       getMessage: (id) => this.messages.find((m) => m.id === id) ?? null,
-      appendMessage: (message) =>
-        this.persistMessages([...this.messages, message]),
-      updateMessage: (message) =>
-        this.persistMessages(
+      // A recovered partial is a turn's reply, stored late.
+      appendMessage: async (message) => {
+        await this.persistMessages([...this.messages, message]);
+        this._recordTurnReply(message.id);
+      },
+      updateMessage: async (message) => {
+        await this.persistMessages(
           this.messages.map((m) => (m.id === message.id ? message : m))
-        )
+        );
+        this._recordTurnReply(message.id);
+      }
     };
   }
 
@@ -2382,11 +2387,30 @@ export class AIChatAgent<
           this._lastBody = JSON.parse(row.value);
         } else if (row.key === "lastClientTools") {
           this._lastClientTools = JSON.parse(row.value);
+        } else if (row.key === "lastTurnReplyId") {
+          this._lastTurnReplyId = JSON.parse(row.value);
         }
       } catch {
         // Corrupted row — ignore and let the next request overwrite it
       }
     }
+  }
+
+  /**
+   * The id of the last reply a turn stored. `continuationTargetIsLatest`
+   * reads it to tell a later turn's reply from a message appended without a
+   * turn. Stored, because a reply can wait on a client for longer than the
+   * isolate lives.
+   */
+  private _lastTurnReplyId: string | null = null;
+
+  private _recordTurnReply(messageId: string): void {
+    if (this._lastTurnReplyId === messageId) return;
+    this._lastTurnReplyId = messageId;
+    this.sql`
+      insert or replace into cf_ai_chat_request_context (key, value)
+      values ('lastTurnReplyId', ${JSON.stringify(messageId)})
+    `;
   }
 
   /**
@@ -3494,16 +3518,26 @@ export class AIChatAgent<
             return;
           }
           // The conversation moved on since the tool result (a newer question
-          // or reply, a regenerate, a clear): nothing left to continue.
+          // or reply, a regenerate, a clear): nothing left to continue. A
+          // message appended without a turn does not count.
           if (
             !continuationTargetIsLatest(
               this.messages,
-              this._continuation.pending
+              this._continuation.pending,
+              this._lastTurnReplyId
             )
           ) {
             this._clearAllAutoContinuationState(true);
             return;
           }
+          // The reply that asked for the tool is extended while it is the
+          // last message. When a message was appended after it, the answer
+          // is a new reply after that message, which is left as it is.
+          const extendsReply =
+            this._continuation.pending?.targetMessageIds == null ||
+            this._continuation.pending.targetMessageIds.includes(
+              this.messages.at(-1)?.id ?? ""
+            );
 
           const clientTools = this._continuation.pending?.clientTools;
           const body = this._continuation.pending?.body;
@@ -3545,7 +3579,7 @@ export class AIChatAgent<
                         response,
                         [],
                         {
-                          continuation: true,
+                          continuation: extendsReply,
                           chatMessageId: requestId,
                           onStreamStart: () => {
                             replying = true;
@@ -8022,6 +8056,7 @@ export class AIChatAgent<
                 excludeBroadcastIds
               );
             }
+            this._recordTurnReply(earlyPersistedId ?? message.id);
           }
           // Nothing to persist (or the persist threw, or an override never
           // reached the session write): settle the stream so it is not

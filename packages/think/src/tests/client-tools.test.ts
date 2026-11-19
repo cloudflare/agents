@@ -3322,6 +3322,49 @@ describe("Think — chained client tools across continuations (#2443)", () => {
 // ── Tool results that have nothing left to continue ──────────────
 
 describe("Think — tool results with nothing to continue", () => {
+  it("a tool result is answered after a message was appended without a turn", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    // Turn 1 ends on a client tool call.
+    const done = waitForDone(ws);
+    sendChatRequest(ws, [makeUserMessage("use client tool")], {
+      clientTools: [{ name: "client_action", description: "A client tool" }]
+    });
+    await done;
+    await delay(200);
+
+    // While the tool runs in the tab, the app appends a status message.
+    // No turn stores it and none answers it.
+    const note = (await agent.appendNoteForTest(
+      "Background job finished."
+    )) as unknown as UIMessage;
+    const beforeResult = (await agent.getMessages()) as UIMessage[];
+    expect(beforeResult.at(-1)?.id).toBe(note.id);
+
+    // The tool result arrives, and the model answers it.
+    const continued = waitForDone(ws, 15000);
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId: "tc-client-1",
+        toolName: "client_action",
+        output: "tool output",
+        autoContinue: true
+      })
+    );
+    await continued;
+    await delay(200);
+
+    const stored = (await agent.getMessages()) as UIMessage[];
+    expect(stored.length).toBe(beforeResult.length + 1);
+    expect(stored.at(-1)?.role).toBe("assistant");
+    expect(stored.find((m) => m.id === note.id)).toEqual(note);
+    await closeWS(ws);
+  });
+
   it("a second tab's result for an answered call does not continue again", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);

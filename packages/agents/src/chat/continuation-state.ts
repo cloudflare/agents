@@ -183,18 +183,51 @@ export function addContinuationTarget(
 
 /**
  * Whether a pending continuation still has something to answer: a message
- * whose tool result scheduled it is the last message. A newer question, a
- * newer reply, a regenerate or a clear moved the conversation on, and
- * continuing would make the model append to a reply that did not ask for it.
+ * whose tool result scheduled it is still stored, and the conversation has
+ * not moved past it.
+ *
+ * The conversation moved past it when a newer question follows it (a user
+ * message), or a later turn stored a reply after it. Continuing then would
+ * make the model answer inside, or after, a reply that did not ask for it.
  * Mirrors pi's `continue()`, which settles a transcript that already ends in
- * an answer as `nothing_to_answer`.
+ * an answer as `nothing_to_answer`. A regenerate or a clear removes the
+ * message, which also ends the continuation.
+ *
+ * A message appended without a turn does not move the conversation: a
+ * detached run's narrated milestone, a status message an app stored with
+ * `persistMessages`. Nothing answers those, so dropping the continuation
+ * would leave the client's tool result with no reply at all.
+ *
+ * @param messages - The transcript.
+ * @param pending - The pending continuation.
+ * @param lastTurnReplyId - The id of the last reply a turn stored, which the
+ *   host records. It is what tells a later turn's reply from an appended
+ *   message. When the host has no record, or the message is no longer
+ *   stored, anything after the target is taken to be a reply: the target
+ *   must then be the last message.
  */
 export function continuationTargetIsLatest(
-  messages: ReadonlyArray<{ id: string }>,
-  pending: Pick<ContinuationPending, "targetMessageIds"> | null
+  messages: ReadonlyArray<{ id: string; role?: string }>,
+  pending: Pick<ContinuationPending, "targetMessageIds"> | null,
+  lastTurnReplyId?: string | null
 ): boolean {
   const targets = pending?.targetMessageIds;
   if (targets == null) return true;
-  const last = messages.at(-1)?.id;
-  return last !== undefined && targets.includes(last);
+  let target = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (targets.includes(messages[i].id)) {
+      target = i;
+      break;
+    }
+  }
+  if (target < 0) return false;
+  if (target === messages.length - 1) return true;
+  for (let i = target + 1; i < messages.length; i++) {
+    if (messages[i].role === "user") return false;
+  }
+  const reply =
+    lastTurnReplyId == null
+      ? -1
+      : messages.findIndex((message) => message.id === lastTurnReplyId);
+  return reply >= 0 && reply <= target;
 }

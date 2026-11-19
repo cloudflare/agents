@@ -4743,11 +4743,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     return {
       getMessage: async (id) =>
         (await this.session.getMessage(id)) as UIMessage | null,
+      // A recovered partial is a turn's reply, stored late.
       appendMessage: async (message, parentId) => {
         await this.session.appendMessage(message, { parentId });
+        this._recordTurnReply(message.id);
       },
       updateMessage: async (message) => {
         await this.session.updateMessage(message);
+        this._recordTurnReply(message.id);
       }
     };
   }
@@ -15614,7 +15617,22 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const toPersist = this._strippedForPersist(msg);
     if (toPersist === null) return false;
     await this._upsertMessageInHistory(toPersist, parentId);
+    this._recordTurnReply(toPersist.id);
     return true;
+  }
+
+  /**
+   * Record the reply a turn just stored. `continuationTargetIsLatest` reads
+   * it to tell a later turn's reply from a message appended without a turn.
+   * Durable, because a reply can wait on a client for longer than the
+   * isolate lives.
+   */
+  private _recordTurnReply(messageId: string): void {
+    this._configSet("lastTurnReplyId", messageId);
+  }
+
+  private _lastTurnReplyId(): string | null {
+    return this._configGet("lastTurnReplyId") ?? null;
   }
 
   /**
@@ -15636,6 +15654,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     if (this._resumableStream.pendingCutoverId !== streamId) {
       // The stream was settled by another path (a stall, an error): plain persist.
       await this._upsertMessageInHistory(toPersist, parentId);
+      this._recordTurnReply(toPersist.id);
       if (submission) {
         this._recordSubmissionMessage(submission.requestId, toPersist.id);
       }
@@ -15668,6 +15687,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       throw error;
     }
     await after?.();
+    this._recordTurnReply(toPersist.id);
     return toPersist.id;
   }
 
@@ -18937,9 +18957,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       allowNested: true,
       execute: async () => {
         // The conversation moved on since the tool result (a newer question
-        // or reply, a clear): nothing left to continue.
+        // or reply, a clear): nothing left to continue. A message appended
+        // without a turn does not count.
         if (
-          !continuationTargetIsLatest(this.messages, this._continuation.pending)
+          !continuationTargetIsLatest(
+            this.messages,
+            this._continuation.pending,
+            this._lastTurnReplyId()
+          )
         ) {
           this._aborts.remove(requestId);
           this._settleContinuationTurn(requestId, false);

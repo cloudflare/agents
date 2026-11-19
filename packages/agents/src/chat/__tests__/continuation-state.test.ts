@@ -375,6 +375,83 @@ describe("continuationTargetIsLatest", () => {
     ).toBe(true);
   });
 
+  describe("messages after the target", () => {
+    const user1 = { id: "user-1", role: "user" };
+    const reply = { id: "assistant-1", role: "assistant" };
+    const note = { id: "note-1", role: "assistant" };
+    const pending = { targetMessageIds: ["assistant-1"] };
+
+    it("is true when only a message appended without a turn follows the target", () => {
+      // The reply with the tool call is the last reply a turn stored. The
+      // note after it came from no turn.
+      expect(
+        continuationTargetIsLatest([user1, reply, note], pending, "assistant-1")
+      ).toBe(true);
+    });
+
+    it("is true when several appended messages follow the target", () => {
+      expect(
+        continuationTargetIsLatest(
+          [user1, reply, note, { id: "note-2", role: "system" }],
+          pending,
+          "assistant-1"
+        )
+      ).toBe(true);
+    });
+
+    it("is false when a newer question follows the target", () => {
+      expect(
+        continuationTargetIsLatest(
+          [user1, reply, note, { id: "user-2", role: "user" }],
+          pending,
+          "assistant-1"
+        )
+      ).toBe(false);
+    });
+
+    it("is false when a later turn stored a reply after the target, with no question between", () => {
+      // The second question was stored before the first reply, so no user
+      // message separates the two replies.
+      expect(
+        continuationTargetIsLatest(
+          [
+            user1,
+            { id: "user-2", role: "user" },
+            reply,
+            { id: "assistant-2", role: "assistant" }
+          ],
+          pending,
+          "assistant-2"
+        )
+      ).toBe(false);
+    });
+
+    it("is false when the host has no record of the last turn reply", () => {
+      expect(continuationTargetIsLatest([user1, reply, note], pending)).toBe(
+        false
+      );
+      expect(
+        continuationTargetIsLatest([user1, reply, note], pending, null)
+      ).toBe(false);
+    });
+
+    it("is false when the recorded turn reply is no longer stored", () => {
+      expect(
+        continuationTargetIsLatest([user1, reply, note], pending, "gone")
+      ).toBe(false);
+    });
+
+    it("uses the latest stored target of several", () => {
+      expect(
+        continuationTargetIsLatest(
+          [user1, { id: "assistant-0", role: "assistant" }, reply, note],
+          { targetMessageIds: ["assistant-0", "assistant-1"] },
+          "assistant-1"
+        )
+      ).toBe(true);
+    });
+  });
+
   it("is true for a continuation with no target", () => {
     expect(continuationTargetIsLatest([], { targetMessageIds: null })).toBe(
       true

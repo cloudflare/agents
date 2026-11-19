@@ -317,6 +317,51 @@ describe("chat turn races", () => {
     tabB.close(1000);
   });
 
+  it("a tool result is answered after a message was appended without a turn", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const seen = record(ws);
+    const agent = await getAgentByName(env.TestChatAgent, room);
+
+    // Turn 1 ends on a client tool call.
+    sendChatRequest(ws, "req-tool", [user1], { clientToolCall: true });
+    await waitUntil(() => responses(seen, "req-tool").some((m) => m.done));
+    await agent.waitForIdleForTest();
+    const afterTurn = (await agent.getPersistedMessages()) as ChatMessage[];
+    expect(afterTurn.map((m) => m.role)).toEqual(["user", "assistant"]);
+
+    // While the tool runs in the tab, the app appends a status message.
+    // No turn stores it and none answers it.
+    const note: ChatMessage = {
+      id: "note-1",
+      role: "assistant",
+      parts: [{ type: "text", text: "Background job finished." }]
+    };
+    await agent.persistMessages([...afterTurn, note]);
+
+    // The tool result arrives.
+    send(ws, toolResult("call-turn"));
+    await delay(300);
+    await agent.waitForIdleForTest();
+
+    // The model was asked again, and its answer is a new reply after the
+    // note, which is left as it was.
+    expect(await agent.getChatMessageCallCountForTest()).toBe(2);
+    const stored = (await agent.getPersistedMessages()) as ChatMessage[];
+    expect(stored.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "assistant",
+      "assistant"
+    ]);
+    expect(stored[1].parts.at(-1)).toMatchObject({
+      state: "output-available"
+    });
+    expect(stored[2]).toEqual(note);
+    expect(stored[3].parts.some((part) => part.type === "text")).toBe(true);
+    ws.close(1000);
+  });
+
   it("a tool result for an older reply does not continue the newer reply", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
