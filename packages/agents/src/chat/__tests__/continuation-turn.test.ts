@@ -326,6 +326,28 @@ describe("the continuation turn", () => {
     expect(host.errors).toEqual([]);
   });
 
+  it("drops a continuation for a host that does not listen for drops", async () => {
+    const quiet = new FakeHost();
+    Object.assign(quiet, { continuationDropped: undefined });
+    const quietTurns = new ChatTurns<TestConnection>(quiet, {
+      defaultDebounceMs: 750
+    });
+    quiet.turns = quietTurns;
+    quiet.transcript = [user("u1"), toolReply("a1", "output-available")];
+    await quietTurns.applyInteraction(
+      async () => ({ status: "changed", messageId: "a1" }),
+      true,
+      spec
+    );
+    quiet.transcript = [...quiet.transcript, user("u2")];
+    await fire();
+    await drain();
+
+    expect(quiet.ran).toEqual([]);
+    expect(quiet.errors).toEqual([]);
+    expect(quietTurns.continuation.pending).toBeNull();
+  });
+
   it("does nothing when no continuation is pending", async () => {
     await turns.runContinuationTurn(host.turn());
 
