@@ -161,5 +161,29 @@ export class AISDKRecoveryCodec implements ChatRecoveryCodec {
   }
 }
 
+/**
+ * Whether a stream chunk must reach storage at once, not with the next
+ * packed segment.
+ *
+ * - A settled tool result (`tool-output-available`, `-error`, `-denied`)
+ *   records a finished side effect or a user's denial. Lost to an eviction,
+ *   recovery would run the tool a second time.
+ * - `tool-input-available` is the call itself, written just before the tool
+ *   runs. A tool can run for a long time with no further chunk, and lost to
+ *   an eviction the transcript would hold no trace that a call was made and
+ *   may have had side effects. Stored, recovery settles it as an error that
+ *   says so.
+ *
+ * Both chat hosts ask this for every chunk they store.
+ */
+export function chunkMustBeStoredNow(type: string | undefined): boolean {
+  return (
+    type === "tool-input-available" ||
+    type === "tool-output-available" ||
+    type === "tool-output-error" ||
+    type === "tool-output-denied"
+  );
+}
+
 /** Shared stateless {@link AISDKRecoveryCodec} instance. */
 export const aiSdkRecoveryCodec = new AISDKRecoveryCodec();

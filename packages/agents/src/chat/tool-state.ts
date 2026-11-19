@@ -259,7 +259,7 @@ export function toolPartName(
  */
 export function partAwaitsClientInteraction(
   part: unknown,
-  clientResolvable: Set<string>
+  clientResolvable: ReadonlySet<string>
 ): boolean {
   if (typeof part !== "object" || part === null || !("state" in part)) {
     return false;

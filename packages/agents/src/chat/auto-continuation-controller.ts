@@ -25,7 +25,6 @@
  * `@cloudflare/think`, not a public API.
  */
 
-import type { ClientToolSchema } from "./client-tools";
 import {
   addContinuationTarget,
   type ContinuationConnection,
@@ -34,17 +33,14 @@ import {
 
 /**
  * The data a host supplies to schedule (or re-target) a pending/deferred
- * auto-continuation. Mirrors the fields a host writes onto
- * {@link ContinuationState.pending} — the host owns where the values come from
- * (e.g. Think hardcodes a fixed `errorPrefix` and `body: undefined`; ai-chat
- * threads them per tool-result event).
+ * auto-continuation. The tools and body the continuation turn runs with are
+ * not part of it: the turn reads the stored request context when it starts
+ * (`ChatRequestContext`), so there is one copy of them.
  */
 export interface ContinuationSpec<
   TConnection extends ContinuationConnection = ContinuationConnection
 > {
   connection: TConnection;
-  clientTools: ClientToolSchema[] | undefined;
-  body: Record<string, unknown> | undefined;
   errorPrefix: string;
   /**
    * The message the result or approval is stored in: the assistant message
@@ -156,8 +152,6 @@ export class AutoContinuationController<
       c.deferred = {
         connection: spec.connection,
         connectionId: spec.connection.id,
-        clientTools: spec.clientTools,
-        body: spec.body,
         errorPrefix: spec.errorPrefix,
         prerequisite: null,
         // Results coalesced into one follow-up: keep every message they target.
@@ -172,8 +166,6 @@ export class AutoContinuationController<
     if (c.pending) {
       c.pending.connection = spec.connection;
       c.pending.connectionId = spec.connection.id;
-      c.pending.clientTools = spec.clientTools;
-      c.pending.body = spec.body;
       c.pending.errorPrefix = spec.errorPrefix;
       // Keep the targets of results already coalesced into this continuation:
       // a later result for an older reply must not drop a newer one's.
@@ -190,8 +182,6 @@ export class AutoContinuationController<
       connection: spec.connection,
       connectionId: spec.connection.id,
       requestId: this.host.generateRequestId(),
-      clientTools: spec.clientTools,
-      body: spec.body,
       errorPrefix: spec.errorPrefix,
       prerequisite: null,
       pastCoalesce: false,

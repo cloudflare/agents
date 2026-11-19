@@ -102,7 +102,9 @@ export type SaveMessagesResult = {
   /** Error message when `status` is `"error"`. */
   error?: string;
   /**
-   * Why the turn ended, when `status` is `"aborted"`.
+   * Why the turn ended, when `status` is `"aborted"` or `"skipped"`.
+   *
+   * For `"skipped"`, see {@link SkippedTurnReason}. For `"aborted"`:
    *
    * - `"stopped"`: something stopped the turn (the caller's signal, a
    *   client's cancel, `abortAllRequests()`). No reply will follow.
@@ -110,11 +112,26 @@ export type SaveMessagesResult = {
    *   stream) and handed to chat recovery. Nobody stopped it, and the reply
    *   may still arrive: recovery continues or retries the turn on its own.
    */
-  reason?: AbortedTurnReason;
+  reason?: AbortedTurnReason | SkippedTurnReason;
 };
 
 /** Why a turn ended `aborted`. See {@link SaveMessagesResult.reason}. */
 export type AbortedTurnReason = "stopped" | "interrupted";
+
+/**
+ * Why a turn was skipped without calling the model.
+ *
+ * - `"cleared"`: the chat was cleared before or while the turn ran.
+ * - `"nothing-to-continue"`: `continueLastTurn()` found no assistant
+ *   message to continue.
+ * - `"awaiting-client"`: `continueLastTurn()` found the reply still waiting
+ *   on a client, for a tool result or an approval. Nothing was changed. The
+ *   client's answer starts the continuation.
+ */
+export type SkippedTurnReason =
+  | "cleared"
+  | "nothing-to-continue"
+  | "awaiting-client";
 
 /**
  * Context passed to the `onChatRecovery` hook when an interrupted chat

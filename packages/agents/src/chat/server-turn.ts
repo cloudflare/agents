@@ -27,7 +27,11 @@
  */
 
 import type { AbortRegistry } from "./abort-registry";
-import type { AbortedTurnReason, SaveMessagesResult } from "./lifecycle";
+import type {
+  AbortedTurnReason,
+  SaveMessagesResult,
+  SkippedTurnReason
+} from "./lifecycle";
 import type { TurnQueue } from "./turn-queue";
 import { isTurnStopped } from "./turn-stop";
 
@@ -39,11 +43,12 @@ export interface ServerTurnOutcome {
   /** The error message, when `status` is `"error"`. */
   error?: string;
   /**
-   * Why the turn is `aborted`. A reply path sets `"interrupted"` for a turn
-   * it handed to recovery. The core fills in `"stopped"` for every other
-   * aborted turn, and drops the field for any other status.
+   * Why the turn is `aborted` or `skipped`. A reply path sets
+   * `"interrupted"` for a turn it handed to recovery, and the core fills in
+   * `"stopped"` for every other aborted turn. A skipped turn says why it
+   * was skipped. The field is dropped for any other status.
    */
-  reason?: AbortedTurnReason;
+  reason?: AbortedTurnReason | SkippedTurnReason;
 }
 
 /** What `prepare` hands back: the input to store, or a reason to stop. */
@@ -52,6 +57,8 @@ export type ServerTurnPrepared<TInput> =
   | {
       /** End the turn here with this status. Nothing is stored. */
       declined: Extract<ServerTurnStatus, "aborted" | "skipped">;
+      /** Why, for a turn declined as `skipped`. */
+      reason?: SkippedTurnReason;
     };
 
 /**
@@ -186,7 +193,10 @@ export async function runServerTurn<TInput = undefined>(
     if (turn.prepare) {
       const prepared = await turn.prepare({ isCurrent });
       if ("declined" in prepared) {
-        outcome = { status: prepared.declined };
+        outcome = {
+          status: prepared.declined,
+          ...(prepared.reason !== undefined && { reason: prepared.reason })
+        };
         declined = true;
         return;
       }
@@ -234,7 +244,9 @@ export async function runServerTurn<TInput = undefined>(
       }
       return outcome.status;
     }, generation);
-    if (admitted === "stale") outcome = { status: "skipped" };
+    if (admitted === "stale") {
+      outcome = { status: "skipped", reason: "cleared" };
+    }
   } finally {
     release();
   }
@@ -249,7 +261,10 @@ export async function runServerTurn<TInput = undefined>(
     // everything else that aborts a turn is a stop.
     ...(outcome.status === "aborted" && {
       reason: outcome.reason ?? "stopped"
-    })
+    }),
+    // A skipped turn says why it was skipped.
+    ...(outcome.status === "skipped" &&
+      outcome.reason !== undefined && { reason: outcome.reason })
   };
 }
 
@@ -280,7 +295,7 @@ export function mapServerTurnOutcome(
 ): ServerTurnOutcome {
   if (outcome.status === "error") return outcome;
   if (state.reported && outcome.status === "completed") return outcome;
-  if (state.reset) return { status: "skipped" };
+  if (state.reset) return { status: "skipped", reason: "cleared" };
   if (!state.reported && state.aborted) return { status: "aborted" };
   return outcome;
 }
@@ -316,7 +331,9 @@ export function toSaveMessagesResult(
   outcome: ServerTurnOutcome
 ): SaveMessagesResult {
   return {
-    requestId,
+    // Nothing ran under the id of a turn that found the reply waiting on a
+    // client, as for a turn with no reply to continue.
+    requestId: outcome.reason === "awaiting-client" ? "" : requestId,
     status: outcome.status,
     ...(outcome.error !== undefined && { error: outcome.error }),
     ...(outcome.reason !== undefined && { reason: outcome.reason })

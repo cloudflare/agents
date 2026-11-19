@@ -2768,6 +2768,328 @@ describe("Think — client tool schemas", () => {
 
     await closeWS(ws);
   });
+
+  it("new request with no clientTools key clears stored tools", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    // A client that runs tools sends the first request.
+    await agent.setTextOnlyMode(true);
+    let donePromise = waitForDone(ws);
+    sendChatRequest(ws, [makeUserMessage("hello")], {
+      clientTools: [{ name: "tool_a", description: "Tool A" }]
+    });
+    await donePromise;
+    expect(await agent.getCapturedClientTools()).toHaveLength(1);
+
+    // A client that runs none sends the next one, with no `clientTools` key.
+    // Its turn must not offer the model the first client's tools.
+    donePromise = waitForDone(ws);
+    sendChatRequest(ws, [makeUserMessage("hello again")]);
+    await donePromise;
+
+    expect(await agent.getCapturedClientTools()).toBeUndefined();
+
+    await closeWS(ws);
+  });
+});
+
+describe("Think — before-turn repair", () => {
+  it("a continuation turn keeps the client tool call its reply still waits on, and does not call the model", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    // The client sent the schema of `client_action`, and the latest reply
+    // ended on a call to it that nobody has answered.
+    await agent.setTextOnlyMode(true);
+    const donePromise = waitForDone(ws);
+    sendChatRequest(ws, [makeUserMessage("hello")], {
+      clientTools: [{ name: "client_action", description: "A client tool" }]
+    });
+    await donePromise;
+    await agent.persistToolCallMessage([
+      makeUserMessage("earlier"),
+      makeToolMessage("tc-earlier", "server_action", "input-available"),
+      makeUserMessage("do it"),
+      makeToolMessage("tc-keep", "client_action", "input-available")
+    ]);
+
+    const modelCalls = ((await agent.getTextOnlyPromptsForTest()) as unknown[])
+      .length;
+
+    // The app continues that reply. The call is still the client's to
+    // answer, so there is nothing to continue yet: the turn never calls the
+    // model. The result says why, and names no request.
+    expect(await agent.continueLastTurnForTest()).toEqual({
+      requestId: "",
+      status: "skipped",
+      reason: "awaiting-client"
+    });
+    expect(
+      ((await agent.getTextOnlyPromptsForTest()) as unknown[]).length
+    ).toBe(modelCalls);
+
+    // A skipped call leaves the chat as it found it, the reply the chat
+    // moved past included.
+    expect(
+      await agent.probeToolPartStateForTest({ toolCallId: "tc-keep" })
+    ).toEqual({ state: "input-available" });
+    expect(
+      await agent.probeToolPartStateForTest({ toolCallId: "tc-earlier" })
+    ).toEqual({ state: "input-available" });
+
+    await closeWS(ws);
+  });
+
+  it("a repair after a continuation turn ended does not run as a continuation", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setTextOnlyMode(true);
+    const donePromise = waitForDone(ws);
+    sendChatRequest(ws, [makeUserMessage("hello")], {
+      clientTools: [{ name: "client_action", description: "A client tool" }]
+    });
+    await donePromise;
+    // A continuation turn runs to its end.
+    expect((await agent.continueLastTurnForTest()).status).toBe("completed");
+
+    // Outside a turn the repair settles everything. It must not remember
+    // that the last turn was a continuation and keep the client's call.
+    const repaired = (await agent.repairToolTranscriptPartsForTest([
+      makeUserMessage("do it"),
+      makeToolMessage("tc-after", "client_action", "input-available")
+    ])) as UIMessage[];
+    expect(repaired[1].parts[0]).toMatchObject({ state: "output-error" });
+
+    await closeWS(ws);
+  });
+
+  it("refuses to build a continuation's request over a call a client still owns", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setTextOnlyMode(true);
+    const donePromise = waitForDone(ws);
+    sendChatRequest(ws, [makeUserMessage("hello")], {
+      clientTools: [{ name: "client_action", description: "A client tool" }]
+    });
+    await donePromise;
+    await agent.persistToolCallMessage([
+      makeUserMessage("do it"),
+      makeToolMessage("tc-guard", "client_action", "input-available")
+    ]);
+
+    // A continuation that reached the request builder without the check at
+    // its entry: the rule holds where the request is built.
+    expect(await agent.assembleAsContinuationForTest()).toContain(
+      "cannot call the model while its reply waits on a client for tool call(s) tc-guard"
+    );
+    expect(
+      await agent.probeToolPartStateForTest({ toolCallId: "tc-guard" })
+    ).toEqual({ state: "input-available" });
+
+    await closeWS(ws);
+  });
+
+  it("a continuation whose repair throws is settled and reported", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setTextOnlyMode(true);
+    let donePromise = waitForDone(ws);
+    sendChatRequest(ws, [makeUserMessage("hello")], {
+      clientTools: [{ name: "client_action", description: "A client tool" }]
+    });
+    await donePromise;
+    // An earlier reply holds a call the app's `repairInterruptedToolPart`
+    // override throws on. The latest reply ended on a client tool call.
+    await agent.persistToolCallMessage([
+      makeUserMessage("earlier"),
+      makeToolMessage("tc-throws", "throwing_repair", "input-available"),
+      makeUserMessage("do it"),
+      makeToolMessage("tc-answered", "client_action", "input-available")
+    ]);
+
+    // The client's answer starts a continuation, whose repair throws.
+    donePromise = waitForDone(ws);
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId: "tc-answered",
+        toolName: "client_action",
+        output: "done",
+        autoContinue: true
+      })
+    );
+    const frames = await donePromise;
+
+    // It is reported like any continuation that failed before its stream.
+    expect(
+      frames.find((frame) => frame.type === MSG_CHAT_RESPONSE && frame.done)
+    ).toMatchObject({ error: true, continuation: true });
+    // And it is settled: left marked as running, every later tool result
+    // would wait behind it for good.
+    await waitUntil(
+      async () => (await agent.getContinuationSlotsForTest()).pending === false
+    );
+    expect(await agent.getContinuationSlotsForTest()).toEqual({
+      pending: false,
+      deferred: false
+    });
+
+    await closeWS(ws);
+  });
+
+  it("a duplicate tool result from another tab leaves the stored tools", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws: tabA } = await connectWS(room);
+    await collectMessages(tabA, 3);
+    const { ws: tabB } = await connectWS(room);
+    await collectMessages(tabB, 3);
+    const toolsOfA = [{ name: "client_action", description: "Tab A's tool" }];
+    const toolsOfB = [{ name: "other_action", description: "Tab B's tool" }];
+
+    await agent.persistToolCallMessage([
+      makeUserMessage("hello"),
+      makeToolMessage("tc-two-tabs", "client_action", "input-available")
+    ]);
+
+    const result = (clientTools: unknown) =>
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId: "tc-two-tabs",
+        toolName: "client_action",
+        output: "result",
+        clientTools
+      });
+    // Tab A's result settles the call and lists its tools.
+    tabA.send(result(toolsOfA));
+    await waitUntil(
+      async () =>
+        (await agent.probeToolPartStateForTest({ toolCallId: "tc-two-tabs" }))
+          .state === "output-available"
+    );
+    expect(await agent.getCapturedClientTools()).toEqual(toolsOfA);
+
+    // Tab B answers the same call late, listing other tools. Its result
+    // settles nothing, so the stored tools stay.
+    tabB.send(result(toolsOfB));
+    await delay(200);
+    expect(await agent.getCapturedClientTools()).toEqual(toolsOfA);
+
+    await closeWS(tabA);
+    await closeWS(tabB);
+  });
+
+  it("removes the reasoning a cut-off reply ends in before it continues it", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setTextOnlyMode(true);
+    // The reply ran a tool and was cut off right after the model's reasoning
+    // for the next step. Sent as it is, Anthropic rejects the request: the
+    // assistant message's final block is a thinking block.
+    await agent.persistToolCallMessage([
+      makeUserMessage("look it up"),
+      {
+        id: "assistant-reasoning",
+        role: "assistant",
+        parts: [
+          { type: "step-start" },
+          {
+            type: "tool-client_action",
+            toolCallId: "tc-done",
+            state: "output-available",
+            input: { action: "test" },
+            output: "found"
+          },
+          { type: "step-start" },
+          {
+            type: "reasoning",
+            text: "It was found, so",
+            state: "done",
+            providerMetadata: { anthropic: { signature: "sig" } }
+          }
+        ]
+      } as unknown as UIMessage
+    ]);
+
+    expect((await agent.continueLastTurnForTest()).status).toBe("completed");
+
+    // The stored reply lost its trailing reasoning and kept the result.
+    const stored = ((await agent.getMessages()) as UIMessage[]).find(
+      (message) => message.id === "assistant-reasoning"
+    );
+    expect(stored?.parts.map((part) => part.type)).toEqual([
+      "step-start",
+      "tool-client_action"
+    ]);
+    // And no assistant message of the model request ends in reasoning.
+    const prompt = (
+      (await agent.getTextOnlyPromptsForTest()) as Array<
+        Array<{ role: string; content: unknown }>
+      >
+    ).at(-1)!;
+    const lastBlocks = prompt
+      .filter((message) => message.role === "assistant")
+      .map((message) =>
+        Array.isArray(message.content)
+          ? (message.content.at(-1) as { type?: string } | undefined)?.type
+          : "text"
+      );
+    expect(lastBlocks).not.toContain("reasoning");
+    expect(prompt.at(-1)?.role).toBe("tool");
+
+    await closeWS(ws);
+  });
+
+  it("a new question settles the client tool call an earlier reply still waits on", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setTextOnlyMode(true);
+    let donePromise = waitForDone(ws);
+    const clientTools = [
+      { name: "client_action", description: "A client tool" }
+    ];
+    sendChatRequest(ws, [makeUserMessage("hello")], { clientTools });
+    await donePromise;
+    await agent.persistToolCallMessage([
+      makeUserMessage("do it"),
+      makeToolMessage("tc-moved-past", "client_action", "input-available")
+    ]);
+
+    donePromise = waitForDone(ws);
+    sendChatRequest(ws, [makeUserMessage("never mind")], { clientTools });
+    await donePromise;
+
+    // The text tells the model the truth: the client's tool may have run.
+    expect(
+      await agent.probeToolPartStateForTest({ toolCallId: "tc-moved-past" })
+    ).toEqual({
+      state: "output-error",
+      errorText:
+        "The conversation moved on before this tool call was answered. The tool may still have run."
+    });
+
+    await closeWS(ws);
+  });
 });
 
 // ── Broadcast and persistence ────────────────────────────────────
