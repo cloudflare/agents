@@ -3285,6 +3285,11 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     release: () => void;
   } | null = null;
 
+  /** The protected "cancel whatever is running". */
+  abortAllRequestsForTest(): void {
+    this.abortAllRequests();
+  }
+
   holdStableWaitForTest(): void {
     let release!: () => void;
     const released = new Promise<void>((resolve) => {
