@@ -297,7 +297,7 @@ TLA+ models describe the tying code, and each was changed before the code it des
 | `AgentToolRun.tla`   | An agent-tool run: its one terminal status, cancel, a cut-off reply, recovery, what the parent returns.                                                                          |
 | `ChatRpc.tla`        | `Think.chat()` under a cancel and a clear, and what a stopped stream throws.                                                                                                     |
 
-The checker runs 164 cases over the eight models with everystate, a TLC-compatible TLA+ model checker that needs no Java. The models are not in the repo yet.
+The checker runs 165 cases over the eight models with everystate, a TLC-compatible TLA+ model checker that needs no Java. The models are not in the repo yet.
 
 The code is covered by unit tests next to each core file (`packages/agents/src/chat/__tests__/`) and by the host suites. Each behavior change in the table has a test that failed before it. Where a change went into the core, the test is a host test in each class whose behavior moved, and a unit test for the rule.
 
