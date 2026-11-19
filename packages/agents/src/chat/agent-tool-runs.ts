@@ -128,6 +128,8 @@ export interface AgentToolRunsHost {
 const FAILED_ERROR = "Agent tool run failed during streaming.";
 const INTERRUPTED_ERROR =
   "Agent tool run was interrupted before the child could finish.";
+const NEVER_STARTED_ERROR =
+  "Agent tool run was interrupted while its turn was still waiting to start. Nothing of it was stored, so there was nothing to recover. Run it again.";
 
 /**
  * The one definition of an open run: its status is `starting` or `running`.
@@ -232,15 +234,17 @@ export class AgentToolRuns {
   /** The input of each run started in this isolate, as it was passed in. */
   readonly #liveInputs = new Map<string, unknown>();
   /** Removes the listener on the parent's signal, per run that has one. */
-  readonly #parentSignals = new Map<string, () => void>();
+  readonly parentSignals = new Map<string, () => void>();
   readonly #progress: AgentToolProgressEmitter;
 
   constructor(private readonly host: AgentToolRunsHost) {
     this.#progress = new AgentToolProgressEmitter({
       resolveActiveRun: () => {
-        const requestId = host.activeRequestId();
-        if (!requestId) return null;
-        const runId = this.runsByRequestId.get(requestId);
+        // No active turn is no key in the map.
+        const runId = this.runsByRequestId.get(
+          host.activeRequestId() as string
+        );
+        const requestId = host.activeRequestId() as string;
         return runId ? { runId, requestId } : null;
       },
       broadcast: (requestId, body) => host.broadcastChunk(requestId, body),
@@ -266,14 +270,7 @@ export class AgentToolRuns {
    *   the host must not broadcast.
    */
   intercept(msg: string | ArrayBuffer | ArrayBufferView): boolean {
-    // Cheap idle guard so the common broadcast path stays allocation-free.
-    if (
-      this.forwarders.size === 0 &&
-      this.liveSequences.size === 0 &&
-      this.terminalOnlyRuns.size === 0
-    ) {
-      return false;
-    }
+    // With no run in flight this returns before it parses anything.
     const chunkRunId = interceptAgentToolBroadcast(msg, {
       forwarders: this.forwarders,
       liveSequences: this.liveSequences,
@@ -283,7 +280,8 @@ export class AgentToolRuns {
       runForRequest: (requestId) => this.runForRequest(requestId),
       terminalOnlyRuns: this.terminalOnlyRuns
     });
-    return chunkRunId !== null && this.terminalOnlyRuns.has(chunkRunId);
+    // `has(null)` is false: a frame that is no run's chunk is broadcast.
+    return this.terminalOnlyRuns.has(chunkRunId as string);
   }
 
   /**
@@ -344,6 +342,8 @@ export class AgentToolRuns {
     // recovery names the turn by, not the recovered turn's own id: the
     // next recovery, and a cancel, still find the run by it.
     this.bindTurn(run.runId, requestId, rootRequestId);
+    // A turn that is being recovered did start.
+    this.host.store.markTurnStarted(run.runId, Date.now());
   }
 
   /**
@@ -381,9 +381,11 @@ export class AgentToolRuns {
       reason: string
     ) => Promise<void>
   ): Promise<boolean> {
-    if (!this.isRecoveredRunCancelled(attempt?.originalRequestId)) return true;
+    if (!attempt || !this.isRecoveredRunCancelled(attempt.originalRequestId)) {
+      return true;
+    }
     await updateIncident(
-      attempt?.incidentId,
+      attempt.incidentId,
       "skipped",
       CHAT_RECOVERY_CANCELLED_REASON
     );
@@ -423,45 +425,38 @@ export class AgentToolRuns {
     // same run id, the second sent before the first returned, must not both
     // find no row.
     if (this.host.store.read(runId)) {
-      const existing = await this.inspect(runId);
-      if (existing) return existing;
+      // SAFETY: the row exists, so the inspection does.
+      return (await this.inspect(runId)) as AgentToolRunInspection;
     }
 
     const startedAt = Date.now();
-    const transcript = this.host.messages();
     this.host.store.insert(runId, {
       input: options.input,
       startedAt,
-      terminalOnly: options.terminalOnly,
-      startMessageId: startAnchor(transcript)
+      terminalOnly: options.terminalOnly
     });
     const controller = new AbortController();
     this.controllers.set(runId, controller);
-    this.preTurnAssistantIds.set(
-      runId,
-      new Set(
-        transcript
-          .filter((message) => message.role === "assistant")
-          .map((message) => message.id)
-      )
-    );
+    this.#noteTranscript(runId);
     this.liveSequences.set(runId, 0);
     this.#liveInputs.set(runId, options.input);
     if (options.terminalOnly) this.terminalOnlyRuns.add(runId);
 
     // The parent's signal is a cancel like any other: one path, so the row
     // records it at once and its reason, whatever the turn does afterwards.
-    const abortFromParent = () => this.cancel(runId, options.signal?.reason);
-    if (options.signal?.aborted) {
-      abortFromParent();
-    } else if (options.signal) {
-      const parent = options.signal;
-      parent.addEventListener("abort", abortFromParent, { once: true });
-      // Kept until the run ends, not until its first turn does: a run left
-      // open for recovery can still be cancelled through the signal.
-      this.#parentSignals.set(runId, () =>
-        parent.removeEventListener("abort", abortFromParent)
-      );
+    const parent = options.signal;
+    if (parent) {
+      const abortFromParent = () => this.cancel(runId, parent.reason);
+      if (parent.aborted) {
+        abortFromParent();
+      } else {
+        parent.addEventListener("abort", abortFromParent);
+        // Kept until the run ends, not until its first turn does: a run
+        // left open for recovery can still be cancelled through the signal.
+        this.parentSignals.set(runId, () =>
+          parent.removeEventListener("abort", abortFromParent)
+        );
+      }
     }
 
     const lifecycle = async () => {
@@ -475,21 +470,33 @@ export class AgentToolRuns {
         const turn = await runTurn({
           requestId,
           signal: controller.signal,
-          shouldStart: () => !controller.signal.aborted
+          shouldStart: () => {
+            if (controller.signal.aborted) return false;
+            // The turn is at the front of the queue. What is in the
+            // transcript now was there before the run: a turn that ran
+            // while this one waited is not the run's.
+            this.#noteTranscript(runId);
+            this.host.store.markTurnStarted(
+              runId,
+              Date.now(),
+              startAnchor(this.host.messages())
+            );
+            return true;
+          }
         });
-        if (turn.status === "aborted" && !controller.signal.aborted) {
-          // Nobody stopped the run, yet its turn handed back `aborted`.
-          // That is what a reply cut off in this isolate does once chat
-          // recovery is scheduled for it. The run is not over: leave the
-          // row open, as an eviction would have, and let recovery settle
-          // it (reconcileOwn).
-          const run = this.host.store.read(runId);
+        if (turn.status === "aborted") {
+          // A turn that hands back `aborted` while its run is still open
+          // was not cancelled (a cancel settles the row at once). That is
+          // what a reply cut off in this isolate does once chat recovery
+          // is scheduled for it. The run is not over: leave the row open,
+          // as an eviction would have, and let recovery settle it
+          // (reconcileOwn).
+          // SAFETY: a run's row is never deleted.
+          const run = this.host.store.read(runId) as AgentToolRunRecord;
           if (
-            run &&
-            isAgentToolRunOpen(run.status) &&
             (await this.#recoveryOf(run)) === "in-progress" &&
-            // A cancel or a stop can land while the recovery state is
-            // read. It settled the run, and nothing is left to wait for.
+            // A cancel or a stop settles the row at once, before or while
+            // the recovery state is read. Nothing is left to wait for then.
             this.#isOpen(runId)
           ) {
             recovering = true;
@@ -587,9 +594,17 @@ export class AgentToolRuns {
     if (run && isAgentToolRunOpen(run.status)) this.cancel(run.runId, reason);
   }
 
+  /** Remember which messages are in the transcript now, for a live run. */
+  #noteTranscript(runId: string): void {
+    // Every id that is there: only the assistant ones are ever asked for.
+    this.preTurnAssistantIds.set(
+      runId,
+      new Set(this.host.messages().map((message) => message.id))
+    );
+  }
+
   #isOpen(runId: string): boolean {
-    const run = this.host.store.read(runId);
-    return run !== null && isAgentToolRunOpen(run.status);
+    return this.host.store.listOpen().includes(runId);
   }
 
   /**
@@ -598,15 +613,12 @@ export class AgentToolRuns {
    * live run keeps it until {@link start}'s lifecycle ends.
    */
   closeTailers(runId: string): void {
-    const closers = this.closers.get(runId);
-    if (closers) {
-      for (const close of closers) close();
-      this.closers.delete(runId);
-    }
+    // Each tail removes its own closer as it closes.
+    for (const close of [...(this.closers.get(runId) ?? [])]) close();
     this.forwarders.delete(runId);
     if (this.controllers.has(runId)) return;
-    this.#parentSignals.get(runId)?.();
-    this.#parentSignals.delete(runId);
+    this.parentSignals.get(runId)?.();
+    this.parentSignals.delete(runId);
     this.liveSequences.delete(runId);
     this.lastErrors.delete(runId);
     this.preTurnAssistantIds.delete(runId);
@@ -616,7 +628,9 @@ export class AgentToolRuns {
     // Drop this run's request-id mappings. When no run remains in memory
     // clear the whole map, so negative entries for unrelated turns cannot
     // accumulate (#1575).
-    if (this.controllers.size === 0 && this.liveSequences.size === 0) {
+    // (Every run in flight has a counter: a live one, and one left open
+    // for recovery.)
+    if (this.liveSequences.size === 0) {
       this.runsByRequestId.clear();
     } else {
       for (const [requestId, owner] of this.runsByRequestId) {
@@ -646,9 +660,9 @@ export class AgentToolRuns {
       );
     }
     const startMessageId = this.host.store.read(runId)?.startMessageId;
-    if (!startMessageId) return [...messages];
+    // No anchor, or an anchor that is gone, gives -1: every message.
     const start = messages.findIndex((m) => m.id === startMessageId);
-    return start < 0 ? [...messages] : messages.slice(start + 1);
+    return messages.slice(start + 1);
   }
 
   // ── A run an earlier isolate started ───────────────────────────────
@@ -677,8 +691,10 @@ export class AgentToolRuns {
     // completed recovery deletes its incident.
     const recovery = await this.#recoveryOf(stale);
     if (recovery === "in-progress") return;
-    const run = this.host.store.read(runId);
-    if (!run || !this.isStale(run)) return;
+    // Read again: a recovered turn may have been bound meanwhile. A cancel
+    // that landed meanwhile settled the row, and the write below is a
+    // no-op for it.
+    const run = this.host.store.read(runId) ?? stale;
     const active = this.host.streams().activeRequestId;
     if (active !== null && active === run.requestId) return;
     const error = run.error;
@@ -686,6 +702,13 @@ export class AgentToolRuns {
       // Recovery of the turn was stopped. The stop is the outcome, whatever
       // the cut-off reply holds.
       if (recovery === "cancelled") return { status: "aborted", error: null };
+      // The run's turn was still in the queue when the isolate went away.
+      // It stored nothing, so nothing in the transcript is the run's,
+      // whatever another turn has stored since. (A row with no root request
+      // id is from before turns were marked as started.)
+      if (run.rootRequestId !== null && run.turnStartedAt === null) {
+        return { status: "error", error: NEVER_STARTED_ERROR };
+      }
       // A recorded stream error means the turn failed even if it stored a
       // reply, as in the live lifecycle.
       if (error !== null) return { status: "error", error };
@@ -789,40 +812,30 @@ export class AgentToolRuns {
   ): ReadableStream<Uint8Array> {
     const signal = options?.signal;
     // Outside `start`, so `cancel` (its sibling on the source) reaches them.
-    let closed = false;
     let forward: ((chunk: AgentToolStoredChunk) => void) | undefined;
     // This tail's entry in `closers`. Dropped when the tail ends, however
     // it ends: a tail of a finished run is never closed through it.
     let registered: (() => void) | undefined;
-    const forget = () => {
-      if (!registered) return;
-      const set = this.closers.get(runId);
-      set?.delete(registered);
-      if (set && set.size === 0) this.closers.delete(runId);
-      registered = undefined;
+    /** Remove `entry` from the run's set in `map`, and an emptied set. */
+    const drop = <T>(map: Map<string, Set<T>>, entry: T | undefined) => {
+      const set = map.get(runId);
+      // SAFETY: deleting what is not there, `undefined` included, is a no-op.
+      set?.delete(entry as T);
+      // Another tail of the run keeps the set. An empty one goes, so the
+      // broadcast idle guard goes cold again.
+      if (set?.size === 0) map.delete(runId);
     };
-    const detach = () => {
-      if (!forward) return;
-      const set = this.forwarders.get(runId);
-      set?.delete(forward);
-      // Drop the empty set so the broadcast idle guard goes cold again. A
-      // run that was already terminal at attach will not be closed again.
-      if (set && set.size === 0) this.forwarders.delete(runId);
-      forward = undefined;
-    };
+    const forget = () => drop(this.closers, registered);
+    const detach = () => drop(this.forwarders, forward);
     return new ReadableStream<Uint8Array>({
       start: async (controller) => {
-        // Set while the backlog is read: a close that lands then waits for
-        // the drain, so the chunks stored so far still reach the consumer.
+        // Set while the backlog is read. A close that lands then is left to
+        // the inspection after the drain, which closes the tail of a run
+        // that has ended, so the chunks stored so far still reach the
+        // consumer.
         let draining = true;
-        let closeAfterDrain = false;
         const close = () => {
-          if (closed) return;
-          if (draining) {
-            closeAfterDrain = true;
-            return;
-          }
-          closed = true;
+          if (draining) return;
           detach();
           forget();
           try {
@@ -842,7 +855,7 @@ export class AgentToolRuns {
           abort();
           return;
         }
-        signal?.addEventListener("abort", abort, { once: true });
+        signal?.addEventListener("abort", abort);
 
         // Stored positions and live sequences share one numbering, so one
         // high-water mark dedupes the handoff: a chunk that is both in the
@@ -851,7 +864,6 @@ export class AgentToolRuns {
         // position, so they bypass the mark and never move it.
         let lastEmitted = options?.afterSequence ?? -1;
         const emit = (chunk: AgentToolStoredChunk) => {
-          if (closed) return;
           if (!isPositionlessAgentToolChunk(chunk)) {
             if (chunk.sequence <= lastEmitted) return;
             lastEmitted = chunk.sequence;
@@ -861,10 +873,10 @@ export class AgentToolRuns {
               chunkEncoder.encode(`${JSON.stringify(chunk)}\n`)
             );
           } catch {
-            // The consumer detached between its cancel and this enqueue.
-            // Do not close an already-cancelled stream: that throws out of
-            // the broadcast loop and starves the run's other tailers.
-            closed = true;
+            // The stream no longer takes chunks: it was closed or cancelled
+            // while the backlog was read, or the consumer went away. Drop
+            // the tail and say nothing: a throw here would leave the
+            // broadcast loop and starve the run's other tailers.
             detach();
             forget();
           }
@@ -874,7 +886,6 @@ export class AgentToolRuns {
         // race ahead of it nor get lost.
         const pending: AgentToolStoredChunk[] = [];
         forward = (chunk) => {
-          if (closed) return;
           if (draining) {
             pending.push(chunk);
             return;
@@ -887,7 +898,7 @@ export class AgentToolRuns {
           // stored and broadcast during that read would otherwise be in
           // neither (#1589). Seed a cold live counter first, so such a
           // chunk continues the stored numbering.
-          const seeded = this.#seedLiveSequence(runId);
+          this.#seedLiveSequence(runId);
           const forwarders = this.forwarders.get(runId) ?? new Set();
           forwarders.add(forward);
           this.forwarders.set(runId, forwarders);
@@ -899,33 +910,19 @@ export class AgentToolRuns {
           const backlog = read.chunks
             ? await read.chunks(runId, options)
             : this.chunks(runId, options);
-          for (const chunk of backlog) {
-            if (closed) return;
-            emit(chunk);
-          }
+          for (const chunk of backlog) emit(chunk);
           // No await between the drain and this handoff, so no live chunk
           // slips past it.
           draining = false;
           for (const chunk of pending) emit(chunk);
-          pending.length = 0;
-          if (closeAfterDrain) {
-            // The run ended while the backlog was read.
-            if (seeded) this.liveSequences.delete(runId);
-            close();
-            return;
-          }
 
+          // Also closes the tail of a run that ended while the backlog was
+          // read. Settling a run drops a counter seeded above.
           const inspection = await (read.inspect ?? ((id) => this.inspect(id)))(
             runId
           );
-          if (!inspection || !isAgentToolRunOpen(inspection.status)) {
-            // A seeded counter must not keep the idle guard hot for a run
-            // that has ended.
-            if (seeded) this.liveSequences.delete(runId);
-            close();
-          }
+          if (!inspection || !isAgentToolRunOpen(inspection.status)) close();
         } catch (error) {
-          closed = true;
           detach();
           forget();
           try {
@@ -936,7 +933,6 @@ export class AgentToolRuns {
         }
       },
       cancel: () => {
-        closed = true;
         detach();
         forget();
       }
@@ -959,15 +955,12 @@ export class AgentToolRuns {
    * unseeded counter numbers the recovered turn's chunks from 0 and the
    * tail's high-water mark drops them. Seeds only an open run with a bound
    * turn; a warm counter stands.
-   *
-   * @returns Whether it seeded.
    */
-  #seedLiveSequence(runId: string): boolean {
-    if (this.liveSequences.has(runId)) return false;
+  #seedLiveSequence(runId: string): void {
+    if (this.liveSequences.has(runId)) return;
     const run = this.host.store.read(runId);
-    if (!run?.requestId || !isAgentToolRunOpen(run.status)) return false;
+    if (!run?.requestId || !isAgentToolRunOpen(run.status)) return;
     this.liveSequences.set(runId, this.chunks(runId).length);
-    return true;
   }
 
   /**
@@ -976,11 +969,10 @@ export class AgentToolRuns {
    */
   async #recoveryOf(
     run: AgentToolRunRecord
-  ): Promise<"in-progress" | "cancelled" | "failed" | "none"> {
-    const ids = new Set<string>();
-    if (run.requestId) ids.add(run.requestId);
-    if (run.rootRequestId) ids.add(run.rootRequestId);
-    if (ids.size === 0) return "none";
+  ): Promise<"in-progress" | "cancelled" | "failed" | undefined> {
+    // A row that never bound a request has neither, and matches nothing.
+    const ids = new Set([run.requestId, run.rootRequestId]);
+    ids.delete(null);
     const incidents = await this.host.storage().list<ChatRecoveryIncident>({
       prefix: CHAT_RECOVERY_INCIDENT_KEY_PREFIX
     });
@@ -999,15 +991,11 @@ export class AgentToolRuns {
       if (incident.status === "exhausted" || incident.status === "failed") {
         failed = true;
       }
-      if (
-        incident.status === "skipped" &&
-        incident.reason === CHAT_RECOVERY_CANCELLED_REASON
-      ) {
-        cancelled = true;
-      }
+      // Only a skipped incident carries this reason.
+      if (incident.reason === CHAT_RECOVERY_CANCELLED_REASON) cancelled = true;
     }
     if (cancelled) return "cancelled";
-    return failed ? "failed" : "none";
+    return failed ? "failed" : undefined;
   }
 
   // ── Writes ─────────────────────────────────────────────────────────
@@ -1043,7 +1031,8 @@ export class AgentToolRuns {
   #collect(runId: string): { output: unknown; summary: string | null } {
     const input = this.#liveInputs.has(runId)
       ? this.#liveInputs.get(runId)
-      : this.host.store.read(runId)?.input;
+      : // SAFETY: a run's row is never deleted.
+        (this.host.store.read(runId) as AgentToolRunRecord).input;
     return this.host.collectResult(runId, input);
   }
 
@@ -1072,8 +1061,8 @@ export class AgentToolRuns {
    * reconciles lazily.
    */
   async reconcileOwn(): Promise<void> {
+    // A run that is live here is not stale, and is left alone.
     for (const runId of this.host.store.listOpen()) {
-      if (this.controllers.has(runId)) continue;
       try {
         await this.reconcileStale(runId);
       } catch {

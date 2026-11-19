@@ -342,13 +342,15 @@ An awaited `runAgentTool` follows the child's run over a live stream. If the chi
 
 The parent stops waiting in these cases:
 
-| Case                                                                                                                                               | What `runAgentTool` returns                                                         |
-| -------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| The child forwards nothing for `agentToolReattachNoProgressTimeoutMs` (default 120 seconds)                                                        | `interrupted`, `reason: "no-progress"`, `childStillRunning: true`                   |
-| `agentToolReattachMaxWindowMs` is set and runs out                                                                                                 | `interrupted`, `reason: "window-exceeded"`; the child is cancelled                  |
-| The child cannot recover the turn: chat recovery is off, its attempts are used up, or the run had not started streaming when the isolate went away | `error`                                                                             |
-| The child cannot be reached or inspected after the break                                                                                           | `error`                                                                             |
-| The parent's own isolate is reset                                                                                                                  | Nothing. The parent's recovery re-attaches to the run on its next start, as before. |
+| Case                                                                                                                                                                                    | What `runAgentTool` returns                                                            |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| The child forwards nothing for `agentToolReattachNoProgressTimeoutMs` (default 120 seconds)                                                                                             | `interrupted`, `reason: "no-progress"`, `childStillRunning: true`                      |
+| `agentToolReattachMaxWindowMs` is set and runs out                                                                                                                                      | `interrupted`, `reason: "window-exceeded"`; the child is cancelled                     |
+| The child cannot recover the turn: chat recovery is off, or its attempts are used up                                                                                                    | `error`                                                                                |
+| The reset landed before the run's turn was under way: it was still waiting in the child's queue, or had started and was not yet registered for recovery. Nothing of the run was stored. | `error`. For a turn that was still waiting, the text says so and says to run it again. |
+| The child's isolate went away under the call that starts the run, and the child has no such run                                                                                         | `error`, with the failure of that call                                                 |
+| The child cannot be reached or inspected after the break                                                                                                                                | `error`                                                                                |
+| The parent's own isolate is reset                                                                                                                                                       | Nothing. The parent's recovery re-attaches to the run on its next start, as before.    |
 
 `interrupted` is not the run's outcome. A later `runAgentTool` with the same `runId` re-attaches and collects the result.
 

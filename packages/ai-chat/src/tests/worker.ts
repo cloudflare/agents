@@ -5511,16 +5511,30 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
   async cancelFinishedRunForTest(): Promise<{
     status: string | undefined;
     otherTurnAborted: boolean;
+    ownRequestAborted: boolean;
+    after: { status: string; cancelledAt: number | null } | null;
   }> {
     const runId = crypto.randomUUID();
     await this.startAgentToolRun({ prompt: "quick run" }, { runId });
     const finished = await this._waitForRunTerminalForTest(runId);
     await this._waitForRunsSettledForTest();
+    const store = this["_agentToolRuns"].store;
     const signal = this["_abortRegistry"].getSignal("another-turn");
+    // A later turn could run under the finished run's old request id.
+    const ownRequestId = store.read(runId)?.requestId ?? "";
+    const own = this["_abortRegistry"].getSignal(ownRequestId);
     await this.cancelAgentToolRun(runId, "late cancel");
     const otherTurnAborted = signal?.aborted ?? false;
+    const ownRequestAborted = own?.aborted ?? false;
     this["_abortRegistry"].remove("another-turn");
-    return { status: finished?.status, otherTurnAborted };
+    this["_abortRegistry"].remove(ownRequestId);
+    const row = store.read(runId);
+    return {
+      status: finished?.status,
+      otherTurnAborted,
+      ownRequestAborted,
+      after: row ? { status: row.status, cancelledAt: row.cancelledAt } : null
+    };
   }
 
   /**
@@ -6943,6 +6957,60 @@ export class AIChatAgentToolParent extends Agent<Env> {
     } finally {
       self._asAgentToolChildAdapter = asAdapter;
       self._resolvedOptions.agentToolReattachNoProgressTimeoutMs = budget;
+    }
+  }
+
+  /**
+   * The child's isolate goes away under the `startAgentToolRun` call, so
+   * the call fails. With `childHasRun`, the child had inserted the run
+   * before it went and finishes it afterwards. Without, it never heard of
+   * the run.
+   */
+  async runChildWhoseStartCallFailsForTest(childHasRun: boolean): Promise<{
+    result: { status: string; error?: string } | { threw: string };
+    parentRow: string | null;
+  }> {
+    const runId = crypto.randomUUID();
+    const self = this as unknown as {
+      _asAgentToolChildAdapter(child: unknown): unknown;
+    };
+    const asAdapter = self._asAgentToolChildAdapter;
+    let inspections = 0;
+    self._asAgentToolChildAdapter = () => ({
+      startAgentToolRun: async () => {
+        throw new Error("test: forced reset");
+      },
+      cancelAgentToolRun: async () => {},
+      inspectAgentToolRun: async () => {
+        if (!childHasRun) return null;
+        return {
+          runId,
+          status: ++inspections < 2 ? "running" : "completed",
+          summary: "done after all",
+          startedAt: 1
+        };
+      },
+      getAgentToolChunks: async () => [],
+      tailAgentToolRun: async () =>
+        new ReadableStream<Uint8Array>({
+          start: (controller) => controller.close()
+        })
+    });
+    try {
+      const result = await this.runAgentTool(AIChatAgentToolChild, {
+        runId,
+        parentToolCallId: "test-tool-call",
+        input: { prompt: "start call fails" },
+        inputPreview: "start call fails"
+      }).then(
+        (value) => ({ status: value.status, error: value.error }),
+        (error) => ({
+          threw: error instanceof Error ? error.message : String(error)
+        })
+      );
+      return { result, parentRow: this.getParentAgentToolStatusForTest(runId) };
+    } finally {
+      self._asAgentToolChildAdapter = asAdapter;
     }
   }
 

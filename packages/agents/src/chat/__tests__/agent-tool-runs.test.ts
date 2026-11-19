@@ -6,10 +6,12 @@ import {
 } from "../agent-tool-run-store";
 import {
   AgentToolRuns,
+  abortReasonText,
   agentToolRunOutcome,
   type AgentToolStreams,
   type AgentToolTurnResult
 } from "../agent-tool-runs";
+import { CHAT_RECOVERY_INCIDENT_KEY_PREFIX } from "../recovery-incident";
 
 type SqlValue = string | number | null;
 
@@ -17,17 +19,44 @@ type SqlValue = string | number | null;
  * The real run store on an in-memory SQLite database, plus what the tests
  * read back: the terminal a row holds and how often one was written.
  */
-function makeStore() {
-  const db = new DatabaseSync(":memory:");
+const TABLES = {
+  runs: "runs",
+  milestones: "milestones",
+  requestIndex: "runs_request"
+};
+
+/** A store over `db`, counting the statements it runs. */
+function storeOn(db: DatabaseSync, failOn?: (query: string) => string | null) {
+  let statements = 0;
   const store = createAgentToolRunStore(
     () => ({
       exec: (query: string, ...bindings: unknown[]) => {
+        statements++;
+        const failure = failOn?.(query);
+        if (failure) throw new Error(failure);
         const rows = db.prepare(query).all(...(bindings as SqlValue[]));
         return { toArray: () => rows as Record<string, unknown>[] };
       }
     }),
-    { runs: "runs", milestones: "milestones", requestIndex: "runs_request" }
+    TABLES
   );
+  return Object.assign(store, { statements: () => statements });
+}
+
+/** The names of the tables and indexes in `db`. */
+function schemaOf(db: DatabaseSync): string[] {
+  return (
+    db.prepare("select name from sqlite_master order by name").all() as Array<{
+      name: string;
+    }>
+  )
+    .map((row) => row.name)
+    .filter((name) => !name.startsWith("sqlite_"));
+}
+
+function makeStore() {
+  const db = new DatabaseSync(":memory:");
+  const store = storeOn(db);
   const writes = new Map<string, number>();
   const writeTerminal = store.writeTerminal;
   store.writeTerminal = (runId, terminal, turn) => {
@@ -36,18 +65,27 @@ function makeStore() {
   };
   return Object.assign(store, {
     /** Insert an open row, as an earlier isolate would have left it. */
+    /**
+     * Insert an open row, as an earlier isolate would have left it, with
+     * its turn started after `startMessageId`.
+     */
     seed: (
       runId: string,
       terminalOnly = false,
       startMessageId: string | null = null
-    ) =>
-      store.insert(runId, {
-        input: "go",
-        startedAt: 1,
-        terminalOnly,
-        startMessageId
-      }),
+    ) => {
+      store.insert(runId, { input: "go", startedAt: 1, terminalOnly });
+      store.markTurnStarted(runId, 2, startMessageId);
+    },
+    /** An open row whose turn was still waiting in the queue. */
+    seedQueued: (runId: string, requestId: string) => {
+      store.insert(runId, { input: "go", startedAt: 1, terminalOnly: false });
+      store.bindRequest(runId, requestId);
+    },
     writes: (runId: string) => writes.get(runId) ?? 0,
+    /** Run SQL against the database directly, past the store. */
+    raw: (query: string) => void db.exec(query),
+    schema: () => schemaOf(db),
     /** Make the row look like one the previous release wrote: no root. */
     clearRoot: (runId: string) =>
       void db
@@ -97,17 +135,23 @@ function setup() {
   let holdList: Promise<void> | undefined;
   const lifecycles: Promise<unknown>[] = [];
   let requestIds = 0;
+  let flushes = 0;
+  // Strict about what it is asked: the real stream store is not asked for
+  // a request or a stream that does not exist.
   const streams: AgentToolStreams = {
-    flushBuffer: () => {},
+    flushBuffer: () => void flushes++,
     latestStreamInfoForRequest: (requestId) => {
+      if (typeof requestId !== "string") throw new Error("no request id");
       const id = streamOf.get(requestId);
       return id ? { id } : null;
     },
-    getStreamChunks: (streamId) =>
-      (stored.get(streamId) ?? []).map((body, chunk_index) => ({
+    getStreamChunks: (streamId) => {
+      if (typeof streamId !== "string") throw new Error("no stream id");
+      return (stored.get(streamId) ?? []).map((body, chunk_index) => ({
         body,
         chunk_index
-      })),
+      }));
+    },
     get activeRequestId() {
       return activeStream;
     }
@@ -117,7 +161,11 @@ function setup() {
     store,
     streams: () => streams,
     storage: () => ({
-      list: (async () => {
+      list: (async (options?: { prefix?: string }) => {
+        // Only incidents are asked for, never the whole storage.
+        if (options?.prefix !== CHAT_RECOVERY_INCIDENT_KEY_PREFIX) {
+          throw new Error("listed storage without the incident prefix");
+        }
         await holdList;
         return incidents;
       }) as unknown as DurableObjectStorage["list"]
@@ -169,6 +217,12 @@ function setup() {
         ...(state === "cancelled" && { reason: "user_cancelled" })
       });
     },
+    /** Put one incident in storage as it is, or remove it. */
+    setIncident: (key: string, incident: Incident | undefined) => {
+      if (incident) incidents.set(key, incident);
+      else incidents.delete(key);
+    },
+    flushes: () => flushes,
     setTranscript: (
       messages: Array<{ id: string; role: string; parts?: unknown[] }>
     ) => {
@@ -209,9 +263,15 @@ function heldTurn() {
   let fail!: (error: unknown) => void;
   let signal: AbortSignal | undefined;
   let requestId = "";
-  const run = (turn: { requestId: string; signal: AbortSignal }) => {
+  let shouldStart: () => boolean = () => true;
+  const run = (turn: {
+    requestId: string;
+    signal: AbortSignal;
+    shouldStart?: () => boolean;
+  }) => {
     signal = turn.signal;
     requestId = turn.requestId;
+    if (turn.shouldStart) shouldStart = turn.shouldStart;
     return new Promise<AgentToolTurnResult>((resolve, reject) => {
       end = resolve;
       fail = reject;
@@ -223,7 +283,9 @@ function heldTurn() {
     fail: (error: unknown) => fail(error),
     signal: () => signal,
     /** The request id the core bound the run's turn to. */
-    requestId: () => requestId
+    requestId: () => requestId,
+    /** What the turn asks when it reaches the front of the queue. */
+    shouldStart: () => shouldStart()
   };
 }
 
@@ -1266,6 +1328,7 @@ describe("AgentToolRuns", () => {
       ]);
       const turn = heldTurn();
       await runs.start("run-1", START, turn.run);
+      turn.shouldStart();
       expect(store.read("run-1")?.startMessageId).toBe("users-answer");
 
       // The isolate goes away. The run's turn had removed the empty reply
@@ -1302,16 +1365,11 @@ describe("AgentToolRuns", () => {
   describe("the run table", () => {
     it("is not created by the lookups every recovered turn makes", () => {
       const { runs, store } = setup();
-      let created = false;
-      const ensure = store.ensure;
-      store.ensure = () => {
-        created = true;
-        ensure();
-      };
       runs.rebind("req-2", "req-1");
       expect(runs.isRecoveredRunCancelled("req-1")).toBe(false);
       expect(store.listOpen()).toEqual([]);
-      expect(created).toBe(false);
+      runs.stopped("req-1");
+      expect(store.schema()).toEqual([]);
     });
 
     it("does not hide a failing query as an unknown run", () => {
@@ -1392,6 +1450,881 @@ describe("AgentToolRuns", () => {
       ]);
       // ...and a recovery that still fires for "X" is not run.
       expect(runs.isRecoveredRunCancelled("X")).toBe(true);
+    });
+  });
+});
+
+// Each test here pins one rule that nothing else did (found by mutation
+// testing): a wrong answer would settle a run early, report it wrongly, or
+// leave a parent waiting.
+describe("AgentToolRuns, rule by rule", () => {
+  const decoder = new TextDecoder();
+  const frame = (requestId: string, body: string) =>
+    JSON.stringify({ type: "response", id: requestId, body });
+  /** Read what a tail has delivered so far, without waiting for its end. */
+  function collect(stream: ReadableStream<Uint8Array>) {
+    const reader = stream.getReader();
+    const bodies: string[] = [];
+    let ended = false;
+    let failure: unknown;
+    const done = (async () => {
+      try {
+        for (;;) {
+          const next = await reader.read();
+          if (next.done) break;
+          for (const line of decoder.decode(next.value).split("\n")) {
+            if (line) bodies.push((JSON.parse(line) as { body: string }).body);
+          }
+        }
+      } catch (error) {
+        failure = error;
+      }
+      ended = true;
+    })();
+    return {
+      bodies,
+      ended: () => ended,
+      failure: () => failure,
+      done,
+      cancel: () => reader.cancel()
+    };
+  }
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+
+  describe("the outcome of a turn", () => {
+    it("is an error for a turn that failed without saying why", () => {
+      expect(
+        agentToolRunOutcome({
+          turn: { status: "error" },
+          resetError: "cleared"
+        })
+      ).toEqual({
+        status: "error",
+        error: "Agent tool run failed during streaming."
+      });
+    });
+
+    it("gives an abort reason as text, and none as null", () => {
+      expect(abortReasonText(undefined)).toBeNull();
+      expect(abortReasonText(null)).toBeNull();
+      expect(abortReasonText("stop")).toBe("stop");
+      expect(abortReasonText(new Error("gave up"))).toBe("gave up");
+    });
+  });
+
+  describe("starting a run", () => {
+    it("anchors on the only message, and on a user message with no parts", async () => {
+      const one = setup();
+      one.setTranscript([{ id: "only", role: "assistant", parts: [{}] }]);
+      const first = heldTurn();
+      await one.runs.start("run-1", START, first.run);
+      first.shouldStart();
+      expect(one.store.read("run-1")?.startMessageId).toBe("only");
+
+      const user = setup();
+      user.setTranscript([
+        { id: "answer", role: "assistant", parts: [{}] },
+        { id: "empty-question", role: "user", parts: [] }
+      ]);
+      const second = heldTurn();
+      await user.runs.start("run-1", START, second.run);
+      second.shouldStart();
+      expect(user.store.read("run-1")?.startMessageId).toBe("empty-question");
+
+      // A host whose messages carry no parts list.
+      const bare = setup();
+      bare.setTranscript([{ id: "answer", role: "assistant" }]);
+      const third = heldTurn();
+      await bare.runs.start("run-1", START, third.run);
+      third.shouldStart();
+      expect(bare.store.read("run-1")?.startMessageId).toBe("answer");
+    });
+
+    it("takes what is in the transcript when its turn starts, not when it was queued, as there before it", async () => {
+      const { runs, store, setTranscript } = setup();
+      setTranscript([{ id: "q1", role: "user", parts: [{}] }]);
+      const turn = heldTurn();
+      await runs.start("run-1", START, turn.run);
+      expect(store.read("run-1")).toMatchObject({
+        turnStartedAt: null,
+        startMessageId: null
+      });
+      // Another turn replies while the run's turn waits in the queue.
+      const whileQueued = [
+        { id: "q1", role: "user", parts: [{}] },
+        { id: "other-turns-answer", role: "assistant", parts: [{}] }
+      ];
+      setTranscript(whileQueued);
+      expect(turn.shouldStart()).toBe(true);
+      expect(store.read("run-1")?.startMessageId).toBe("other-turns-answer");
+      expect(store.read("run-1")?.turnStartedAt).toEqual(expect.any(Number));
+      expect(runs.messagesSinceStart("run-1", whileQueued)).toEqual([
+        whileQueued[0]
+      ]);
+      // Asked again (the host asks before and after it works the messages
+      // out): the first answer stands.
+      setTranscript([
+        ...whileQueued,
+        { id: "later", role: "user", parts: [{}] }
+      ]);
+      const startedAt = store.read("run-1")?.turnStartedAt;
+      store.markTurnStarted("run-1", 999_999_999_999_999, "later");
+      expect(store.read("run-1")).toMatchObject({
+        startMessageId: "other-turns-answer",
+        turnStartedAt: startedAt
+      });
+    });
+
+    it("does not mark the turn of a cancelled run as started", async () => {
+      const { runs, store } = setup();
+      const turn = heldTurn();
+      await runs.start("run-1", START, turn.run);
+      runs.cancel("run-1");
+      expect(turn.shouldStart()).toBe(false);
+      expect(store.read("run-1")?.turnStartedAt).toBeNull();
+    });
+
+    it("tells the turn whether it may still start", async () => {
+      const { runs } = setup();
+      const turn = heldTurn();
+      await runs.start("run-1", START, turn.run);
+      expect(turn.shouldStart()).toBe(true);
+      runs.cancel("run-1");
+      expect(turn.shouldStart()).toBe(false);
+    });
+
+    it("lets the parent's signal go when the run ends", async () => {
+      const { runs, settled } = setup();
+      const parent = new AbortController();
+      const removed: unknown[][] = [];
+      const remove = parent.signal.removeEventListener.bind(parent.signal);
+      parent.signal.removeEventListener = ((...args: unknown[]) => {
+        removed.push(args);
+        return (remove as (...a: unknown[]) => void)(...args);
+      }) as typeof parent.signal.removeEventListener;
+      const turn = heldTurn();
+      await runs.start("run-1", { ...START, signal: parent.signal }, turn.run);
+      turn.end({ requestId: "req-1", status: "completed" });
+      await settled();
+      expect(removed).toHaveLength(1);
+      expect(removed[0][0]).toBe("abort");
+      expect(runs.parentSignals.size).toBe(0);
+    });
+
+    it("settles a completed turn as completed, whatever recovery state its request has", async () => {
+      const { runs, store, settled, setRecovery } = setup();
+      const turn = heldTurn();
+      await runs.start("run-1", START, turn.run);
+      setRecovery("in-progress");
+      turn.end({ requestId: "req-1", status: "completed" });
+      await settled();
+      expect(store.read("run-1")?.status).toBe("completed");
+    });
+
+    it("counts a row an older version left as `starting` as open", () => {
+      const { runs, store } = setup();
+      store.seed("run-1");
+      store.raw("update runs set status = 'starting' where run_id = 'run-1'");
+      runs.cancel("run-1", "stop");
+      expect(store.terminal("run-1")).toEqual({
+        status: "aborted",
+        error: "stop"
+      });
+    });
+
+    it("exposes the run table", () => {
+      const { runs, store } = setup();
+      expect(runs.store).toBe(store);
+    });
+  });
+
+  describe("frames", () => {
+    it("keeps a terminal-only run's chunks from being broadcast, and no other frame", async () => {
+      const { runs } = setup();
+      await runs.start(
+        "quiet",
+        { ...START, terminalOnly: true },
+        heldTurn().run
+      );
+      await runs.start("loud", START, heldTurn().run);
+      expect(runs.intercept(frame("req-1", "a"))).toBe(true);
+      expect(runs.intercept(frame("req-2", "a"))).toBe(false);
+      expect(runs.intercept(frame("someone-else", "a"))).toBe(false);
+      expect(runs.intercept(new Uint8Array([1]))).toBe(false);
+    });
+
+    it("knows a terminal-only run from its row after a restart", async () => {
+      const { runs, store } = setup();
+      store.seed("quiet", true);
+      store.bindRequest("quiet", "req-q");
+      // Another run is in flight, so frames are looked at.
+      await runs.start("loud", START, heldTurn().run);
+      expect(runs.intercept(frame("req-q", "a"))).toBe(true);
+
+      const recovered = setup();
+      recovered.store.seed("quiet", true);
+      recovered.store.bindRequest("quiet", "req-q");
+      recovered.runs.rebind("req-9", "req-q");
+      expect(recovered.runs.intercept(frame("req-9", "a"))).toBe(true);
+
+      const plain = setup();
+      plain.store.seed("loud");
+      plain.store.bindRequest("loud", "req-q");
+      plain.runs.rebind("req-9", "req-q");
+      plain.runs.liveSequences.set("loud", 0);
+      expect(plain.runs.intercept(frame("req-9", "a"))).toBe(false);
+    });
+
+    it("asks the row for a request once, and remembers either answer", () => {
+      const { runs, store } = setup();
+      store.seed("run-1");
+      store.bindRequest("run-1", "req-1");
+      let asked = 0;
+      const openForRequest = store.openForRequest;
+      store.openForRequest = (requestId) => {
+        asked++;
+        return openForRequest(requestId);
+      };
+      expect(runs.runForRequest("req-1")).toBe("run-1");
+      expect(runs.runForRequest("req-1")).toBe("run-1");
+      expect(runs.runForRequest("nobody")).toBeNull();
+      expect(runs.runForRequest("nobody")).toBeNull();
+      expect(asked).toBe(2);
+    });
+  });
+
+  describe("recovery admission", () => {
+    it("admits an attempt that carries no schedule payload", async () => {
+      const { runs } = setup();
+      await expect(
+        runs.admitRecoveredTurn(undefined, async () => {
+          throw new Error("no incident to update");
+        })
+      ).resolves.toBe(true);
+    });
+  });
+
+  describe("what is kept in memory", () => {
+    it("keeps the request mapping of a run left open for recovery when another run's state is dropped", async () => {
+      const { runs, store, settled, setRecovery } = setup();
+      const turn = heldTurn();
+      await runs.start("left-open", START, turn.run);
+      setRecovery("in-progress");
+      turn.end({ requestId: "req-1", status: "aborted" });
+      await settled();
+      expect(runs.isLive("left-open")).toBe(false);
+
+      store.seed("stale");
+      runs.closeTailers("stale");
+      expect(runs.runForRequest("req-1")).toBe("left-open");
+      expect([...runs.runsByRequestId.keys()]).toEqual(["req-1"]);
+    });
+
+    it("forgets a live run's input when the run ends: a later read uses the stored copy", async () => {
+      const { runs, store, collected, settled } = setup();
+      const input = { when: new Date(0) };
+      const turn = heldTurn();
+      await runs.start("run-1", { ...START, input }, turn.run);
+      turn.end({ requestId: "req-1", status: "completed" });
+      await settled();
+      expect(collected.at(-1)).toBe(input);
+      // A completed row an older version wrote holds no output: it is
+      // collected again when the parent reads it.
+      store.raw("update runs set output_json = null where run_id = 'run-1'");
+      await runs.inspect("run-1");
+      expect(collected.at(-1)).toEqual({ when: "1970-01-01T00:00:00.000Z" });
+    });
+
+    it("closing the tails of a live run keeps its counters", async () => {
+      const { runs } = setup();
+      await runs.start("run-1", START, heldTurn().run);
+      runs.intercept(frame("req-1", "a"));
+      runs.closeTailers("run-1");
+      expect(runs.liveSequences.get("run-1")).toBe(1);
+      expect(runs.runForRequest("req-1")).toBe("run-1");
+    });
+
+    it("a run that ends takes its own request mapping with it and leaves another run's", async () => {
+      const { runs } = setup();
+      const first = heldTurn();
+      await runs.start("run-1", START, first.run);
+      const second = heldTurn();
+      await runs.start("run-2", START, second.run);
+      // A turn that is no run's, resolved while both runs are in flight.
+      expect(runs.runForRequest("someone-else")).toBeNull();
+      runs.intercept(
+        JSON.stringify({
+          type: "response",
+          id: "req-1",
+          body: "x",
+          error: true
+        })
+      );
+      expect(runs.lastErrors.size).toBe(1);
+
+      first.end({ requestId: "req-1", status: "completed" });
+      await tick();
+      expect([...runs.runsByRequestId]).toEqual([
+        ["req-2", "run-2"],
+        ["someone-else", null]
+      ]);
+      expect(runs.lastErrors.size).toBe(0);
+
+      runs.cancel("run-2");
+      second.end({ requestId: "req-2", status: "aborted" });
+      await tick();
+      // No run is left: the answers cached for other turns go too.
+      expect(runs.runsByRequestId.size).toBe(0);
+    });
+  });
+
+  describe("the run's own part of the transcript", () => {
+    const transcript = [
+      { id: "q1", role: "user" },
+      { id: "a1", role: "assistant" },
+      { id: "q2", role: "user" },
+      { id: "a2", role: "assistant" }
+    ];
+
+    it("for a live run, drops the replies that were there before it and keeps the rest", async () => {
+      const { runs, setTranscript } = setup();
+      setTranscript(transcript.slice(0, 2));
+      await runs.start("run-1", START, heldTurn().run);
+      expect(
+        runs.messagesSinceStart("run-1", transcript).map((m) => m.id)
+      ).toEqual(["q1", "q2", "a2"]);
+    });
+
+    it("after a restart, is what follows the anchor", () => {
+      const { runs, store } = setup();
+      store.seed("first", false, "q1");
+      store.seed("middle", false, "a1");
+      store.seed("gone", false, "deleted-since");
+      store.seed("none");
+      const ids = (runId: string) =>
+        runs.messagesSinceStart(runId, transcript).map((m) => m.id);
+      expect(ids("first")).toEqual(["a1", "q2", "a2"]);
+      expect(ids("middle")).toEqual(["q2", "a2"]);
+      expect(ids("gone")).toEqual(["q1", "a1", "q2", "a2"]);
+      expect(ids("none")).toEqual(["q1", "a1", "q2", "a2"]);
+    });
+  });
+
+  describe("reconciling a stale run", () => {
+    it("does nothing for a run that does not exist", async () => {
+      const { runs, store } = setup();
+      await expect(runs.reconcileStale("nobody")).resolves.toBeUndefined();
+      expect(store.schema()).not.toEqual(["nothing"]);
+      expect(store.read("nobody")).toBeNull();
+    });
+
+    it("leaves a run that is live here alone", async () => {
+      const { runs, store } = setup();
+      await runs.start("run-1", START, heldTurn().run);
+      await runs.reconcileStale("run-1");
+      await runs.reconcileOwn();
+      expect(store.read("run-1")?.status).toBe("running");
+      expect(store.writes("run-1")).toBe(0);
+    });
+
+    it("sees a recovered turn that was bound while it read recovery state", async () => {
+      const { runs, store, holdRecoveryRead, setActiveStream } = setup();
+      store.seed("run-1");
+      store.bindRequest("run-1", "req-1");
+      const release = holdRecoveryRead();
+      const reconciling = runs.reconcileStale("run-1");
+      // The recovered turn starts streaming under a new request id.
+      runs.rebind("req-2", "req-1");
+      setActiveStream("req-2");
+      release();
+      await reconciling;
+      expect(store.read("run-1")?.status).toBe("running");
+    });
+
+    it("is an error that says so for a run whose turn was still queued, whatever another turn stored since", async () => {
+      const { runs, store, setTranscript } = setup();
+      store.seedQueued("run-1", "req-1");
+      // The other turn on the agent was recovered and replied.
+      setTranscript([
+        { id: "q", role: "user" },
+        { id: "other-turns-answer", role: "assistant" }
+      ]);
+      await runs.reconcileStale("run-1");
+      expect(store.terminal("run-1")).toEqual({
+        status: "error",
+        error:
+          "Agent tool run was interrupted while its turn was still waiting to start. Nothing of it was stored, so there was nothing to recover. Run it again."
+      });
+    });
+
+    it("takes a row from before turns were marked as started as started", async () => {
+      // No root request id: the previous release wrote it.
+      const legacy = setup();
+      legacy.store.insert("run-1", {
+        input: "go",
+        startedAt: 1,
+        terminalOnly: false
+      });
+      legacy.store.raw(
+        "update runs set request_id = 'X' where run_id = 'run-1'"
+      );
+      legacy.setReply(true);
+      await legacy.runs.reconcileStale("run-1");
+      expect(legacy.store.read("run-1")?.status).toBe("completed");
+
+      // The same row, recovered once after the upgrade: it has a root now,
+      // and a recovered turn did start.
+      const recovered = setup();
+      recovered.store.insert("run-1", {
+        input: "go",
+        startedAt: 1,
+        terminalOnly: false
+      });
+      recovered.store.raw(
+        "update runs set request_id = 'X' where run_id = 'run-1'"
+      );
+      recovered.runs.rebind("Y", "X");
+      expect(recovered.store.read("run-1")?.turnStartedAt).toEqual(
+        expect.any(Number)
+      );
+      recovered.setReply(true);
+      await recovered.runs.reconcileStale("run-1");
+      expect(recovered.store.read("run-1")?.status).toBe("completed");
+    });
+
+    it("needs an assistant reply since the start to call the run completed", async () => {
+      const { runs, store, setTranscript } = setup();
+      store.seed("run-1");
+      setTranscript([{ id: "the-input", role: "user" }]);
+      await runs.reconcileStale("run-1");
+      expect(store.read("run-1")?.status).toBe("error");
+    });
+
+    // The state of chat recovery for the run's turn decides whether the run
+    // is still being worked on, was given up, or was stopped.
+    describe("by the state of its turn's recovery", () => {
+      async function reconciled(
+        incident: {
+          status: string;
+          requestId: string;
+          recoveryRootRequestId?: string;
+          reason?: string;
+        },
+        bind: (context: ReturnType<typeof setup>) => void = () => {}
+      ) {
+        const context = setup();
+        context.store.seed("run-1");
+        context.store.bindRequest("run-1", "req-1");
+        bind(context);
+        // The cut-off partial is in the transcript.
+        context.setReply(true);
+        context.setIncident("incident", incident);
+        await context.runs.reconcileStale("run-1");
+        return context.store.read("run-1")?.status;
+      }
+
+      for (const status of ["detected", "scheduled", "attempting"]) {
+        it(`stays open while an incident is ${status}`, async () => {
+          expect(await reconciled({ status, requestId: "req-1" })).toBe(
+            "running"
+          );
+        });
+      }
+
+      for (const status of ["exhausted", "failed"]) {
+        it(`is an error, not completed with the partial, once recovery ${status === "failed" ? "failed" : "is exhausted"}`, async () => {
+          expect(await reconciled({ status, requestId: "req-1" })).toBe(
+            "error"
+          );
+        });
+      }
+
+      it("is completed when the incident of its turn is over for another reason", async () => {
+        expect(
+          await reconciled({
+            status: "skipped",
+            requestId: "req-1",
+            reason: "continued_by_interaction"
+          })
+        ).toBe("completed");
+        expect(
+          await reconciled({ status: "completed", requestId: "req-1" })
+        ).toBe("completed");
+      });
+
+      it("finds an incident that names the turn only by its root request id", async () => {
+        // After a second eviction: the incident's own request id is the
+        // first recovered turn's, which the row no longer names.
+        expect(
+          await reconciled(
+            {
+              status: "scheduled",
+              requestId: "req-2",
+              recoveryRootRequestId: "req-1"
+            },
+            ({ runs }) => runs.rebind("req-3", "req-1")
+          )
+        ).toBe("running");
+      });
+
+      it("finds an incident that names the recovered turn's own request id", async () => {
+        expect(
+          await reconciled(
+            {
+              status: "scheduled",
+              requestId: "req-2",
+              recoveryRootRequestId: "some-other-root"
+            },
+            ({ runs }) => runs.rebind("req-2", "req-1")
+          )
+        ).toBe("running");
+      });
+
+      it("is not held, failed or stopped by another turn's incident", async () => {
+        for (const incident of [
+          {
+            status: "attempting",
+            requestId: "other",
+            recoveryRootRequestId: "other"
+          },
+          { status: "exhausted", requestId: "other" },
+          { status: "skipped", requestId: "other", reason: "user_cancelled" }
+        ]) {
+          expect(await reconciled(incident)).toBe("completed");
+        }
+      });
+
+      it("ignores every incident for a run that never bound a request", async () => {
+        const { runs, store, setReply, setIncident } = setup();
+        store.seed("run-1");
+        setReply(true);
+        // An incident with no request id of its own must not match the
+        // row's missing one.
+        setIncident("incident", {
+          status: "scheduled",
+          requestId: null as unknown as string
+        });
+        await runs.reconcileStale("run-1");
+        expect(store.read("run-1")?.status).toBe("completed");
+      });
+    });
+  });
+
+  describe("what the parent reads", () => {
+    it("reports no error for a running run whose stream recorded one, and no empty milestone list", async () => {
+      const { runs, store } = setup();
+      await runs.start("run-1", START, heldTurn().run);
+      store.recordStreamError("run-1", "provider failed");
+      const inspection = await runs.inspect("run-1");
+      expect(inspection?.status).toBe("running");
+      expect(inspection?.error).toBeUndefined();
+      expect(inspection && "milestones" in inspection).toBe(false);
+    });
+
+    it("reports an empty summary for a completed row that holds none", async () => {
+      const { runs, store } = setup();
+      store.seed("run-1");
+      store.writeTerminal("run-1", {
+        status: "completed",
+        output: 1,
+        summary: null
+      });
+      expect((await runs.inspect("run-1"))?.summary).toBe("");
+    });
+
+    it("flushes buffered chunks before it reads them, and reads none for a run with no request", async () => {
+      const { runs, store, flushes, storeChunks } = setup();
+      store.seed("unbound");
+      expect(runs.chunks("unbound")).toEqual([]);
+      expect(flushes()).toBe(1);
+
+      store.seed("bound");
+      store.bindRequest("bound", "req-1");
+      storeChunks("req-1", ["a"]);
+      expect(runs.chunks("bound")).toEqual([{ sequence: 0, body: "a" }]);
+      expect(flushes()).toBe(2);
+    });
+
+    it("reads the stream recorded on the row, not a newer one of the same request", () => {
+      const { runs, store, storeChunks } = setup();
+      store.seed("run-1");
+      storeChunks("req-1", ["newer"]);
+      store.writeTerminal(
+        "run-1",
+        { status: "aborted", error: null },
+        { requestId: "req-1", streamId: "stream-recorded" }
+      );
+      expect(store.read("run-1")).toMatchObject({
+        requestId: "req-1",
+        streamId: "stream-recorded"
+      });
+      expect(runs.chunks("run-1")).toEqual([]);
+    });
+  });
+
+  describe("tails", () => {
+    it("one tail leaving does not cut off another tail of the same run", async () => {
+      const { runs, settled } = setup();
+      const turn = heldTurn();
+      await runs.start("run-1", START, turn.run);
+      const leaving = collect(runs.tail("run-1"));
+      const staying = collect(runs.tail("run-1"));
+      await tick();
+      await leaving.cancel();
+      runs.intercept(frame("req-1", "after"));
+      await tick();
+      expect(staying.bodies).toEqual(["after"]);
+      // ...and the run's end still closes it.
+      turn.end({ requestId: "req-1", status: "completed" });
+      await settled();
+      await staying.done;
+      expect(staying.ended()).toBe(true);
+      expect(runs.closers.size).toBe(0);
+      expect(runs.forwarders.size).toBe(0);
+    });
+
+    it("closes at once, with nothing, for a consumer whose signal is already aborted", async () => {
+      const { runs, storeChunks } = setup();
+      await runs.start("run-1", START, heldTurn().run);
+      storeChunks("req-1", ["backlog"]);
+      const gaveUp = new AbortController();
+      gaveUp.abort();
+      const tail = collect(runs.tail("run-1", { signal: gaveUp.signal }));
+      await tail.done;
+      expect(tail.failure()).toBeUndefined();
+      expect(tail.bodies).toEqual([]);
+      expect(runs.forwarders.size).toBe(0);
+      expect(runs.closers.size).toBe(0);
+    });
+
+    it("closes cleanly for a run that does not exist", async () => {
+      const { runs } = setup();
+      const tail = collect(runs.tail("nobody"));
+      await tail.done;
+      expect(tail.failure()).toBeUndefined();
+      expect(tail.bodies).toEqual([]);
+      expect(runs.liveSequences.size).toBe(0);
+    });
+
+    it("does not repeat a live chunk at or before the position the consumer asked from", async () => {
+      const { runs, storeChunks } = setup();
+      await runs.start("run-1", START, heldTurn().run);
+      storeChunks("req-1", ["zero", "one"]);
+      const tail = collect(runs.tail("run-1", { afterSequence: 1 }));
+      await tick();
+      // The live counter is cold in this test, so these arrive as 0, 1, 2.
+      for (const body of ["zero", "one", "two"]) {
+        runs.intercept(frame("req-1", body));
+      }
+      await tick();
+      expect(tail.bodies).toEqual(["two"]);
+    });
+
+    it("delivers a progress frame whatever position it carries", async () => {
+      const { runs, storeChunks } = setup();
+      await runs.start("run-1", START, heldTurn().run);
+      storeChunks("req-1", ["zero", "one", "two"]);
+      const tail = collect(runs.tail("run-1", { afterSequence: 2 }));
+      await tick();
+      const progress = JSON.stringify({
+        type: "data-agent-progress",
+        id: "p1",
+        data: { message: "halfway" }
+      });
+      runs.intercept(frame("req-1", progress));
+      await tick();
+      expect(tail.bodies).toEqual([progress]);
+    });
+
+    it("a tail whose stream no longer takes chunks is dropped, and the broadcast goes on", async () => {
+      const { runs } = setup();
+      await runs.start("run-1", START, heldTurn().run);
+      const broken = collect(runs.tail("run-1"));
+      const healthy = collect(runs.tail("run-1"));
+      await tick();
+      const enqueue = ReadableStreamDefaultController.prototype.enqueue;
+      let thrown = 0;
+      ReadableStreamDefaultController.prototype.enqueue = function (
+        this: ReadableStreamDefaultController,
+        chunk
+      ) {
+        if (thrown++ === 0) throw new TypeError("stream is closed");
+        return enqueue.call(this, chunk);
+      };
+      try {
+        expect(() => runs.intercept(frame("req-1", "a"))).not.toThrow();
+      } finally {
+        ReadableStreamDefaultController.prototype.enqueue = enqueue;
+      }
+      runs.intercept(frame("req-1", "b"));
+      await tick();
+      expect(broken.bodies).toEqual([]);
+      expect(healthy.bodies).toEqual(["a", "b"]);
+      expect(runs.forwarders.get("run-1")?.size).toBe(1);
+      expect(runs.closers.get("run-1")?.size).toBe(1);
+    });
+
+    it("fails the stream, and keeps nothing, when the backlog cannot be read", async () => {
+      const { runs } = setup();
+      await runs.start("run-1", START, heldTurn().run);
+      const tail = collect(
+        runs.tail("run-1", undefined, {
+          chunks: async () => {
+            throw new Error("chunk read failed");
+          }
+        })
+      );
+      await tail.done;
+      expect(String(tail.failure())).toContain("chunk read failed");
+      expect(runs.forwarders.size).toBe(0);
+      expect(runs.closers.size).toBe(0);
+    });
+
+    it("seeds the live counter only for an open run with a bound turn, and leaves a warm one", async () => {
+      const { runs, store, storeChunks, setRecovery } = setup();
+      // Open, no request bound yet.
+      store.seed("unbound");
+      setRecovery("in-progress", "nothing");
+      runs.tail("unbound", undefined, { inspect: async () => null });
+      await tick();
+      expect(runs.liveSequences.has("unbound")).toBe(false);
+
+      // Open and bound, counter already warm at a different number.
+      store.seed("warm");
+      store.bindRequest("warm", "req-w");
+      storeChunks("req-w", ["a", "b"]);
+      runs.liveSequences.set("warm", 7);
+      runs.tail("warm", undefined, {
+        inspect: async () => ({
+          runId: "warm",
+          status: "running",
+          startedAt: 1
+        })
+      });
+      await tick();
+      expect(runs.liveSequences.get("warm")).toBe(7);
+
+      // Ended.
+      store.seed("ended");
+      store.bindRequest("ended", "req-e");
+      storeChunks("req-e", ["a"]);
+      runs.cancel("ended");
+      runs.tail("ended");
+      await tick();
+      expect(runs.liveSequences.has("ended")).toBe(false);
+    });
+  });
+
+  describe("the run table, method by method", () => {
+    it("reads what was never stored as undefined, and JSON it cannot parse too", () => {
+      const { store } = setup();
+      store.insert("run-1", {
+        input: undefined,
+        startedAt: 1,
+        terminalOnly: false
+      });
+      const run = store.read("run-1");
+      expect(run?.input).toBeUndefined();
+      expect(run?.output).toBeUndefined();
+      expect(run?.terminalOnly).toBe(false);
+      store.raw(
+        "update runs set output_json = '{not json' where run_id = 'run-1'"
+      );
+      expect(store.read("run-1")?.output).toBeUndefined();
+    });
+
+    it("reports progress only for a row that holds a snapshot and its time", () => {
+      const { store } = setup();
+      store.seed("run-1");
+      expect(store.read("run-1") && "progress" in store.read("run-1")!).toBe(
+        false
+      );
+      // A milestone moves the no-progress clock without a snapshot.
+      expect(store.addMilestone("run-1", "first", undefined, 5)).toBe(0);
+      expect(store.addMilestone("run-1", "second", { n: 1 }, 6)).toBe(1);
+      expect("progress" in store.read("run-1")!).toBe(false);
+
+      store.writeProgress("run-1", { message: "halfway" }, 10);
+      expect(store.read("run-1")?.progress).toEqual({
+        message: "halfway",
+        at: 10
+      });
+      store.addMilestone("run-1", "third", undefined, 20);
+      expect(store.read("run-1")?.progress?.at).toBe(20);
+
+      // A snapshot without its time is not reported.
+      store.raw("update runs set last_signal_at = null where run_id = 'run-1'");
+      expect("progress" in store.read("run-1")!).toBe(false);
+
+      const milestones = store.milestones("run-1");
+      expect("data" in milestones[0]).toBe(false);
+      expect(milestones[1]).toEqual({
+        name: "second",
+        sequence: 1,
+        at: 6,
+        data: { n: 1 }
+      });
+    });
+
+    it("creates the request index with the tables", () => {
+      const { store } = setup();
+      store.ensure();
+      expect(store.schema()).toEqual(["milestones", "runs", "runs_request"]);
+    });
+
+    it("does not swallow a failure to add a column", () => {
+      const store = storeOn(new DatabaseSync(":memory:"), (query) =>
+        query.startsWith("alter table") ? "disk I/O error" : null
+      );
+      expect(() => store.ensure()).toThrow("disk I/O error");
+    });
+
+    it("pays for the table check once", () => {
+      const db = new DatabaseSync(":memory:");
+      storeOn(db).ensure();
+      const store = storeOn(db);
+      store.forRequest("req-1");
+      const afterFirst = store.statements();
+      store.forRequest("req-1");
+      store.listOpen();
+      // One select each, and no second look at the schema.
+      expect(store.statements() - afterFirst).toBe(2);
+    });
+
+    // A store may be asked anything first: after a restart, on a table the
+    // previous release created.
+    const OLD_SCHEMA =
+      "create table runs (run_id text primary key, request_id text, status text not null, started_at integer not null)";
+    const firstCalls: Array<
+      [string, (store: ReturnType<typeof storeOn>) => unknown]
+    > = [
+      ["openForRequest", (store) => store.openForRequest("req-1")],
+      ["bindRequest", (store) => store.bindRequest("old", "req-2", "req-1")],
+      ["recordStreamError", (store) => store.recordStreamError("old", "x")],
+      ["markCancelled", (store) => store.markCancelled("old", 1)],
+      ["markTurnStarted", (store) => store.markTurnStarted("old", 1, "m")],
+      [
+        "writeTerminal",
+        (store) => store.writeTerminal("old", { status: "error", error: "x" })
+      ],
+      ["writeProgress", (store) => store.writeProgress("old", {}, 1)],
+      ["addMilestone", (store) => store.addMilestone("old", "m", undefined, 1)],
+      ["milestones", (store) => store.milestones("old")]
+    ];
+    for (const [method, call] of firstCalls) {
+      it(`${method} works as the first call on a table from an older version`, () => {
+        const db = new DatabaseSync(":memory:");
+        db.exec(OLD_SCHEMA);
+        db.exec(
+          "insert into runs (run_id, request_id, status, started_at) values ('old', 'req-1', 'running', 1)"
+        );
+        expect(() => call(storeOn(db))).not.toThrow();
+      });
+    }
+
+    it("openForRequest works as the first call on an agent with no table yet", () => {
+      const store = storeOn(new DatabaseSync(":memory:"));
+      expect(store.openForRequest("req-1")).toBeNull();
     });
   });
 });

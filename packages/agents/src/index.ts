@@ -5975,10 +5975,20 @@ export class Agent<
     // Replaced with a fresh stub when the child's isolate goes away under
     // the tail.
     let adapter = this._asAgentToolChildAdapter<Input, Output>(child);
-    const childStart = await adapter.startAgentToolRun(options.input, {
-      runId,
-      ...(eventDelivery === "terminal" ? { eventDelivery } : {})
-    });
+    let childStart: AgentToolRunInspection<Output> | undefined;
+    // Set when the start call itself failed. The child may still have
+    // started the run (its isolate went away under the call): an awaited
+    // run asks the child below, like a run whose tail broke.
+    let startFailure: { error: unknown } | undefined;
+    try {
+      childStart = await adapter.startAgentToolRun(options.input, {
+        runId,
+        ...(eventDelivery === "terminal" ? { eventDelivery } : {})
+      });
+    } catch (error) {
+      if (detached) throw error;
+      startFailure = { error };
+    }
     this._markAgentToolRunning(runId);
 
     if (detached) {
@@ -6037,7 +6047,7 @@ export class Agent<
       // isolate goes away under it (an eviction, a reset), which says
       // nothing about the run: the child's chat recovery may be finishing
       // its turn. The run's row decides, below.
-      let tailBroke = false;
+      let tailBroke = startFailure !== undefined;
       // The tail ends when the child closes it, and the child closes it
       // when the run ends. A run nothing will end (its turn's recovery was
       // dropped, say) would hold this call for good. So the parent also
@@ -6049,6 +6059,7 @@ export class Agent<
       // is numbered after it.
       const cursor = { next: sequence };
       try {
+        if (startFailure) throw startFailure.error;
         if (adapter.tailAgentToolRun) {
           const stream = await adapter.tailAgentToolRun(runId, {
             afterSequence: -1
@@ -6151,6 +6162,9 @@ export class Agent<
       }
 
       const inspection = inspected ?? childStart;
+      // The start failed and the child has no such run: the run never
+      // began, and the failure is its error.
+      if (!inspection) throw startFailure?.error;
       const result = this._terminalResultFromInspection<Output>(
         agentType,
         inspection

@@ -49,8 +49,16 @@ export interface AgentToolRunRecord {
    */
   cancelledAt: number | null;
   /**
-   * The id of the newest message in the transcript when the run started, or
-   * `null` for an empty transcript. What follows it is the run's.
+   * When the run's turn reached the front of the queue and started, or a
+   * recovered turn was bound to the run. `null` while the turn waits in the
+   * queue: a run that is interrupted then has nothing of its own in the
+   * transcript and nothing to recover.
+   */
+  turnStartedAt: number | null;
+  /**
+   * The id of the newest message in the transcript when the run's turn
+   * started, or `null` for an empty transcript. What follows it is the
+   * run's.
    */
   startMessageId: string | null;
   /** The latest progress the run reported. */
@@ -88,8 +96,16 @@ export interface AgentToolRunStore {
       input: unknown;
       startedAt: number;
       terminalOnly: boolean;
-      startMessageId: string | null;
     }
+  ): void;
+  /**
+   * Record that the run's turn started, and the newest message that was
+   * there. The first call stands: a later one changes neither.
+   */
+  markTurnStarted(
+    runId: string,
+    at: number,
+    startMessageId?: string | null
   ): void;
   /**
    * Put the request id of the run's turn on its row. A row with no root
@@ -159,6 +175,7 @@ const COLUMNS = [
   ["completed_at", "integer"],
   ["cancelled_at", "integer"],
   ["start_message_id", "text"],
+  ["turn_started_at", "integer"],
   // The latest progress snapshot; `last_signal_at` drives the parent's
   // resetting no-progress budget across an eviction.
   ["progress_json", "text"],
@@ -180,6 +197,7 @@ type Row = {
   completed_at: number | null;
   cancelled_at: number | null;
   start_message_id: string | null;
+  turn_started_at: number | null;
   progress_json: string | null;
   last_signal_at: number | null;
   event_delivery: string | null;
@@ -187,8 +205,8 @@ type Row = {
 
 /** Store a value as JSON. A value JSON cannot hold is stored as its string. */
 function toJson(value: unknown): string | null {
-  if (value === undefined) return null;
   try {
+    // `undefined` has no JSON: it is stored as SQL null.
     return JSON.stringify(value) ?? null;
   } catch {
     return JSON.stringify(String(value));
@@ -200,17 +218,19 @@ function fromJson(value: string | null): unknown {
   try {
     return JSON.parse(value);
   } catch {
-    return undefined;
+    // JSON that cannot be read is read as nothing stored.
   }
+  return undefined;
 }
 
 function progressOf(row: Row): AgentToolProgressSnapshot | undefined {
   if (row.progress_json === null || row.last_signal_at === null) {
     return undefined;
   }
-  const parsed = fromJson(row.progress_json);
   return {
-    ...(typeof parsed === "object" && parsed !== null ? parsed : {}),
+    // SAFETY: the column only ever holds a snapshot object
+    // (`writeProgress`), and spreading anything else adds nothing.
+    ...(fromJson(row.progress_json) as object),
     at: row.last_signal_at
   };
 }
@@ -231,6 +251,7 @@ function record(row: Row | undefined): AgentToolRunRecord | null {
     startedAt: row.started_at,
     completedAt: row.completed_at,
     cancelledAt: row.cancelled_at,
+    turnStartedAt: row.turn_started_at,
     startMessageId: row.start_message_id,
     ...(progress ? { progress } : {}),
     terminalOnly: row.event_delivery === "terminal"
@@ -331,18 +352,29 @@ export function createAgentToolRunStore(
             `select run_id from ${runs} where ${OPEN}`
           ).map((row) => row.run_id)
         : [],
-    insert: (runId, { input, startedAt, terminalOnly, startMessageId }) => {
+    insert: (runId, { input, startedAt, terminalOnly }) => {
       ensure();
       run(
         `insert into ${runs}
-          (run_id, status, input_json, started_at, event_delivery,
-           start_message_id)
-         values (?, 'running', ?, ?, ?, ?)`,
+          (run_id, status, input_json, started_at, event_delivery)
+         values (?, 'running', ?, ?, ?)`,
         runId,
         toJson(input),
         startedAt,
-        terminalOnly ? "terminal" : null,
-        startMessageId
+        terminalOnly ? "terminal" : null
+      );
+    },
+    markTurnStarted: (runId, at, startMessageId = null) => {
+      ensure();
+      run(
+        `update ${runs}
+         set start_message_id =
+               case when turn_started_at is null then ? else start_message_id end,
+             turn_started_at = coalesce(turn_started_at, ?)
+         where run_id = ?`,
+        startMessageId,
+        at,
+        runId
       );
     },
     bindRequest: (runId, requestId, rootRequestId = requestId) => {
@@ -413,12 +445,12 @@ export function createAgentToolRunStore(
     },
     addMilestone: (runId, name, data, at) => {
       ensure();
-      const sequence =
-        all<{ next: number }>(
-          `select coalesce(max(sequence), -1) + 1 as next
-           from ${milestones} where run_id = ?`,
-          runId
-        )[0]?.next ?? 0;
+      // An aggregate with no `group by` always returns one row.
+      const sequence = all<{ next: number }>(
+        `select coalesce(max(sequence), -1) + 1 as next
+         from ${milestones} where run_id = ?`,
+        runId
+      )[0].next;
       run(
         `insert or ignore into ${milestones}
           (run_id, sequence, name, data_json, at)

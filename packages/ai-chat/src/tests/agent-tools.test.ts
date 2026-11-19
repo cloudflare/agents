@@ -273,6 +273,8 @@ type ParentStub = DurableObjectStub & {
   childCancelFinishedRunForTest(): Promise<{
     status: string | undefined;
     otherTurnAborted: boolean;
+    ownRequestAborted: boolean;
+    after: { status: string; cancelledAt: number | null } | null;
   }>;
   childCancelRecoveredRunForTest(): Promise<{
     recoveredTurnAborted: boolean;
@@ -342,6 +344,44 @@ function getParent(name = crypto.randomUUID()) {
 }
 
 describe("AIChatAgent as an agent-tool child", () => {
+  it("returns an error, and settles its row, when the start call fails and the child has no such run", async () => {
+    const parent = await getAgentByName(
+      env.AIChatAgentToolParent,
+      crypto.randomUUID()
+    );
+    const outcome = await (
+      parent as unknown as {
+        runChildWhoseStartCallFailsForTest(childHasRun: boolean): Promise<{
+          result: unknown;
+          parentRow: string | null;
+        }>;
+      }
+    ).runChildWhoseStartCallFailsForTest(false);
+    expect(outcome).toEqual({
+      result: { status: "error", error: "test: forced reset" },
+      parentRow: "error"
+    });
+  });
+
+  it("waits for the run when the start call fails but the child did start it", async () => {
+    const parent = await getAgentByName(
+      env.AIChatAgentToolParent,
+      crypto.randomUUID()
+    );
+    const outcome = await (
+      parent as unknown as {
+        runChildWhoseStartCallFailsForTest(childHasRun: boolean): Promise<{
+          result: unknown;
+          parentRow: string | null;
+        }>;
+      }
+    ).runChildWhoseStartCallFailsForTest(true);
+    expect(outcome).toEqual({
+      result: { status: "completed" },
+      parentRow: "completed"
+    });
+  });
+
   it("numbers the chunks it forwards after a re-attach past the ones it already sent, so clients do not drop them as repeats", async () => {
     const parent = await getAgentByName(
       env.AIChatAgentToolParent,
@@ -1468,6 +1508,10 @@ describe("AIChatAgent as an agent-tool child", () => {
     const result = await (await getParent()).childCancelFinishedRunForTest();
     expect(result.status).toBe("completed");
     expect(result.otherTurnAborted).toBe(false);
+    // The finished run is left exactly as it was: nothing is stopped under
+    // its old request id, and its row is not marked cancelled.
+    expect(result.ownRequestAborted).toBe(false);
+    expect(result.after).toEqual({ status: "completed", cancelledAt: null });
   });
 
   it("a cancel of a run being recovered stops the requests on its row and nothing else", async () => {
