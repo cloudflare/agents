@@ -5007,7 +5007,12 @@ export class AIChatAgent<
         label: "[AIChatAgent]",
         beginRecoveryAttempt: (rootRequestId) =>
           this._turns.beginRecoveryAttempt(rootRequestId),
-        waitUntilStable: (timeout) => this.waitUntilStable({ timeout }),
+        // Recovery asks the overridable client-interaction check.
+        waitUntilStable: (timeout) =>
+          this.waitUntilStable({
+            timeout,
+            pendingInteraction: () => this.hasPendingClientInteraction()
+          }),
         restoreRequestContext: (context) => {
           if ("lastClientTools" in context) {
             this._lastClientTools = context.lastClientTools;
