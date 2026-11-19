@@ -14,8 +14,8 @@
  *    and it holds no settled tool result.
  * 5. Stop if the app said `continue: false`: the turn ends as the stream
  *    error it hit, and that outcome is recorded for a client that was away.
- * 6. Schedule a retry or a continue, and mark the incident so a recovery
- *    attempt running this turn leaves the outcome to the scheduled one.
+ * 6. Schedule a retry or a continue. A recovery attempt running this turn
+ *    sees the new schedule on the incident and leaves the outcome to it.
  *
  * @internal Sibling-package support for AI Chat and Think.
  */
@@ -352,7 +352,6 @@ async function route(
     delaySeconds,
     reason: chained ? "chained_retry" : undefined
   });
-  engine.markRescheduled(incident.incidentId);
   host.afterSchedule?.(chained);
   return "scheduled";
 }

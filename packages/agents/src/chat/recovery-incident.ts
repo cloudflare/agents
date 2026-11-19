@@ -145,6 +145,18 @@ export type ChatRecoveryIncident = {
     targetMessageId?: string;
   };
   /**
+   * How many times a recovery attempt was scheduled for this incident. A
+   * running attempt compares it before and after its turn to tell that the
+   * turn was cut off again and scheduled the next attempt. Optional for
+   * backward-compat.
+   */
+  scheduleCount?: number;
+  /**
+   * The platform transient the last attempt hit, while the incident waits
+   * for that attempt to run again. Cleared by the next schedule.
+   */
+  deferredError?: string;
+  /**
    * Recoveries scheduled for this incident after a transient or rate-limited
    * stream error. Drives the retry backoff and is capped by `maxAttempts`.
    * Unlike `attempt`, it is not debounced and does not reset on progress: a
@@ -887,6 +899,11 @@ export async function evaluateChatRecoveryIncident(
     ...(interruptedAttempts > 0 ? { interruptedAttempts } : {}),
     ...attemptsInFlightAfter(trigger, existing, exhausted),
     ...(transientRetries > 0 ? { transientRetries } : {}),
+    // Carried across evaluations: a running attempt compares it before and
+    // after its turn.
+    ...(existing?.scheduleCount
+      ? { scheduleCount: existing.scheduleCount }
+      : {}),
     ...(exhausted
       ? {
           reason: interruptedBudgetExceeded

@@ -1012,9 +1012,9 @@ describe("onChatRecovery", () => {
     // row) and the incident is NOT sealed — sealing first would turn the
     // deferred re-run into a no-op and drop the terminal record.
     expect(result.firstThrew).toBe(true);
-    // The attempt's catch marks it `failed` for observability before it
-    // rethrows the transient.
-    expect(result.incidentStatusAfterFirst).toBe("failed");
+    // A deferral is not an outcome: the incident stays live for the re-run.
+    expect(result.incidentStatusAfterFirst).not.toBe("exhausted");
+    expect(result.incidentStatusAfterFirst).not.toBe("failed");
     // Second give-up (the deferred re-run on a healthy isolate): terminalizes
     // fully — banner delivered, incident sealed, no re-throw.
     expect(result.secondThrew).toBe(false);

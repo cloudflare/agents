@@ -158,6 +158,7 @@ function setup(scenario: Scenario = {}) {
     exhausted,
     terminalErrors,
     incident: () => [...storage.values()][0],
+    incidents: () => [...storage.values()],
     run: () => engine.routeStreamInterruption(host)
   };
 }
@@ -186,8 +187,8 @@ describe("routeStreamInterruption", () => {
       }
     });
     expect(t.incident()).toMatchObject({ status: "scheduled" });
-    // The mark a recovery attempt reads after its turn returns.
-    expect(t.engine.takeReschedule(t.incident()?.incidentId)).toBe(true);
+    // What a recovery attempt reads after its turn returns.
+    expect(t.incident()?.scheduleCount).toBe(1);
   });
 
   it("retries the question when the turn produced nothing", async () => {
@@ -324,8 +325,8 @@ describe("routeStreamInterruption", () => {
     });
     expect(t.incident()).toMatchObject({ recoveryRootRequestId: "request-1" });
     expect(t.log).toContain("after-schedule");
-    // The waiting attempt's incident is not marked as rescheduled.
-    expect(t.engine.takeReschedule("incident-other")).toBe(false);
+    // One incident, the turn's own. Nothing was written for the attempt's.
+    expect(t.incidents()).toHaveLength(1);
   });
 
   it("records what it scheduled on the incident", async () => {

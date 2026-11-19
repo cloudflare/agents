@@ -461,7 +461,12 @@ export class AIChatAgent<
       hasActiveStream: () => this._resumableStream.hasActiveStream(),
       generateRequestId: () => nanoid(),
       keepAliveWhile: (fn) => this.keepAliveWhile(fn),
-      fireContinuation: () => this._fireAutoContinuation(),
+      // Fired from a timer that may have been armed inside a recovered turn.
+      // The continuation is its own turn, not the recovery attempt's.
+      fireContinuation: () =>
+        this._chatRecoveryEngine().outsideAttempt(() =>
+          this._fireAutoContinuation()
+        ),
       lastTurnReplyId: () => this._lastTurnReplyId
     },
     { defaultDebounceMs: AIChatAgent.MESSAGE_DEBOUNCE_MS }
@@ -897,10 +902,14 @@ export class AIChatAgent<
         // Every continuation body here calls the model, so the reply is
         // taken at once. A body that can end without a model call must
         // take it later, where it commits to the call.
-        this._chatRecoveryEngine().turnBody(continuation, async (takeReply) => {
-          await takeReply();
-          return fn();
-        })
+        this._chatRecoveryEngine().turnBody(
+          continuation,
+          async (takeReply) => {
+            await takeReply();
+            return fn();
+          },
+          requestId
+        )
       );
     } finally {
       if (this._liveChatRecoveryTurns.get(requestId) === liveTurn) {
@@ -3227,7 +3236,11 @@ export class AIChatAgent<
                 );
               }
               try {
-                await this.onChatResponse(chatResult);
+                // The hook is the app's, and may start a turn of its own.
+                // Neither belongs to a recovery attempt whose turn this was.
+                await this._chatRecoveryEngine().outsideAttempt(() =>
+                  this.onChatResponse(chatResult)
+                );
               } catch (hookError) {
                 console.error("[AIChatAgent] onChatResponse threw:", hookError);
               }

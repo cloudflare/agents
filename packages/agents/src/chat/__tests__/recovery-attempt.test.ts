@@ -72,6 +72,7 @@ function setup(scenario: Scenario = {}) {
   }
   const log: string[] = [];
   const terminalErrors: Array<{ requestId: string; errorText: string }> = [];
+  const events: string[] = [];
   const scheduled: string[] = [];
   const exhausted: string[] = [];
   const restored: unknown[] = [];
@@ -130,7 +131,9 @@ function setup(scenario: Scenario = {}) {
       storage.delete(k);
       return Promise.resolve();
     },
-    emitRecoveryEvent: () => {},
+    emitRecoveryEvent: (event) => {
+      events.push(event.type);
+    },
     scheduleRecovery: (_callback, _data, reason) => {
       scheduled.push(reason);
       return Promise.resolve();
@@ -214,7 +217,10 @@ function setup(scenario: Scenario = {}) {
     turns,
     activeRoot: () => engine.activeRootRequestId,
     restored,
-    run: () => engine.runRecoveredTurn(host)
+    events,
+    run: () => engine.runRecoveredTurn(host),
+    // The same payload delivered again, as a deferral or a Task retry does.
+    rerun: () => engine.runRecoveredTurn(host)
   };
 }
 
@@ -346,7 +352,7 @@ describe("runRecoveredTurn", () => {
   it("does nothing for an incident cancelled while it was scheduled", async () => {
     const t = setup({ incident: cancelled });
     await t.run();
-    expect(t.log).toEqual(["stopped"]);
+    expect(t.log).toEqual(["stopped", "reconcile", "release"]);
     expect(t.incident()).toMatchObject(cancelled);
   });
 
@@ -354,7 +360,7 @@ describe("runRecoveredTurn", () => {
     const t = setup();
     t.host.admit = async () => false;
     await t.run();
-    expect(t.log).toEqual(["release"]);
+    expect(t.log).toEqual(["reconcile", "release"]);
   });
 
   it("releases what the host admitted when the attempt cannot start", async () => {
@@ -364,7 +370,7 @@ describe("runRecoveredTurn", () => {
       throw new Error("cannot register");
     };
     await expect(t.run()).rejects.toThrow("cannot register");
-    expect(t.log).toEqual(["release"]);
+    expect(t.log).toEqual(["reconcile", "release"]);
   });
 
   it("ends without a turn when a client's answer continued the reply during the wait", async () => {
@@ -671,31 +677,104 @@ describe("runRecoveredTurn", () => {
     expect(t.log).not.toContain("before-outcome");
   });
 
+  // What `routeStreamInterruption` does when a turn is cut off again and
+  // schedules the next attempt.
+  const scheduleNext = (engine: ChatRecoveryEngine) =>
+    engine.scheduleRecovery({
+      incident: { incidentId: INCIDENT } as ChatRecoveryIncident,
+      recoveryKind: "continue",
+      callback: "_chatRecoveryContinue",
+      data: { incidentId: INCIDENT },
+      reason: "chained_retry"
+    });
+
   it("leaves the incident to the attempt an interrupted turn scheduled", async () => {
     const t = setup({
       result: { status: "aborted" },
-      duringTurn: ({ engine }) => engine.markRescheduled(INCIDENT)
+      duringTurn: ({ engine }) => scheduleNext(engine)
     });
     await t.run();
     expect(t.incident()).toMatchObject({ status: "scheduled" });
     expect(t.log).not.toContain("before-outcome");
   });
 
-  it("drops a reschedule mark an earlier interruption left", async () => {
+  it("an earlier interruption's schedule does not swallow this attempt's outcome", async () => {
     const t = setup({ result: { status: "error", error: "boom" } });
-    // The turn that was cut off first marked the incident and nothing took
-    // the mark back.
-    t.engine.markRescheduled(INCIDENT);
+    // The turn that was cut off first scheduled this attempt.
+    await scheduleNext(t.engine);
     await t.run();
     expect(t.incident()).toMatchObject({ status: "failed", reason: "boom" });
   });
 
-  it("records a completed turn even when it marked a reschedule", async () => {
+  it("records a completed turn even when it scheduled another attempt", async () => {
     const t = setup({
-      duringTurn: ({ engine }) => engine.markRescheduled(INCIDENT)
+      duringTurn: ({ engine }) => scheduleNext(engine)
     });
     await t.run();
     expect(t.incident()).toBeUndefined();
+  });
+
+  it("keeps the outcome of a turn the app declined to continue, with one event", async () => {
+    const t = setup({
+      result: { status: "error", error: "stream broke" },
+      // routeStreamInterruption, `continue: false`
+      duringTurn: ({ engine }) =>
+        engine.updateIncident(INCIDENT, "skipped", "continue_disabled")
+    });
+    await t.run();
+    expect(t.incident()).toMatchObject({
+      status: "skipped",
+      reason: "continue_disabled"
+    });
+    expect(t.events).toEqual(["chat:recovery:skipped"]);
+    expect(t.log).toContain("after-outcome");
+  });
+
+  it("a stop by the incident's current request id during the wait stops the attempt", async () => {
+    // A chained attempt: the incident's request id is the recovered turn the
+    // client last saw cut off. The attempt is registered under the root.
+    const t = setup({
+      incident: { requestId: "request-cut-off" },
+      duringWait: async ({ engine }) => {
+        expect(await engine.cancelScheduledRecovery("request-cut-off")).toBe(
+          true
+        );
+      }
+    });
+    await t.run();
+    expect(t.log).not.toContain("turn");
+    expect(t.log).toContain("stopped");
+    expect(t.incident()).toMatchObject(cancelled);
+  });
+
+  it("a stop by the recovered turn's own request id reaches the attempt", async () => {
+    const t = setup({
+      // The turn throws a platform transient after it was stopped. Without
+      // the stop reaching the attempt, it would be deferred and run again.
+      duringTurn: async ({ engine }) => {
+        // The host's fiber wrapper registers the turn's request id.
+        engine.turnBody(true, async () => {}, "request-recovered-turn");
+        expect(
+          await engine.cancelScheduledRecovery("request-recovered-turn")
+        ).toBe(true);
+        throw new Error("Network connection lost.");
+      }
+    });
+    await expect(t.run()).resolves.toBeUndefined();
+    expect(t.turnSignals[0]?.aborted).toBe(true);
+    expect(t.incident()).toMatchObject(cancelled);
+  });
+
+  it("a request id that names no incident cancels nothing", async () => {
+    const t = setup({
+      duringWait: async ({ engine }) => {
+        expect(await engine.cancelScheduledRecovery("some-other-request")).toBe(
+          false
+        );
+      }
+    });
+    await t.run();
+    expect(t.log).toContain("turn");
   });
 
   it("does not mark failed an incident the turn already gave up on", async () => {
@@ -780,25 +859,89 @@ describe("runRecoveredTurn", () => {
     expect(t.incident()).toMatchObject(cancelled);
   });
 
-  it("rethrows a platform transient without giving up", async () => {
+  it("defers on a platform transient and keeps the incident live", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
-    const deferred: string[] = [];
     const t = setup({
       duringTurn: () => {
         throw new Error("Network connection lost.");
       }
     });
-    t.host.whileDeferring = async (incidentId, write) => {
-      deferred.push(incidentId);
-      await write();
-    };
     await expect(t.run()).rejects.toThrow("Network connection lost.");
     error.mockRestore();
 
     expect(t.exhausted).toEqual([]);
-    expect(deferred).toEqual([INCIDENT]);
-    expect(t.incident()).toMatchObject({ status: "failed" });
+    // Not an outcome: no event, and the status a stop or a continuation
+    // looks for.
+    expect(t.events).toEqual([]);
+    expect(t.incident()).toMatchObject({
+      status: "scheduled",
+      deferredError: "Network connection lost."
+    });
     expect(t.log.slice(-3)).toEqual(["end", "reconcile", "release"]);
+
+    // The same payload runs again a few seconds later. A stop in between:
+    expect(await t.engine.cancelScheduledRecovery(ROOT)).toBe(true);
+    t.log.length = 0;
+    await t.rerun();
+    expect(t.log).toEqual(["stopped", "reconcile", "release"]);
+  });
+
+  it("a turn that continued the reply during a deferral supersedes the rerun", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const t = setup({
+      duringTurn: () => {
+        throw new Error("Network connection lost.");
+      }
+    });
+    await expect(t.run()).rejects.toThrow("Network connection lost.");
+    error.mockRestore();
+
+    expect(await t.engine.supersedeScheduledRecovery()).toBe(true);
+    t.log.length = 0;
+    await t.rerun();
+    expect(t.log).not.toContain("turn");
+    expect(t.log).toContain("client-continued");
+  });
+
+  it("reconciles agent-tool child runs for an attempt cancelled before it started", async () => {
+    const t = setup({ incident: cancelled });
+    await t.run();
+    expect(t.log).toEqual(["stopped", "reconcile", "release"]);
+  });
+
+  it("a reconcile that throws does not replace the transient the attempt threw", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const t = setup({
+      duringTurn: () => {
+        throw new Error("Network connection lost.");
+      }
+    });
+    t.turns.reconcileAgentToolChildRuns = async () => {
+      throw new Error("storage is down");
+    };
+    await expect(t.run()).rejects.toThrow("Network connection lost.");
+    error.mockRestore();
+  });
+
+  it("runs outsideAttempt code outside the attempt's scope and the origin ids scope", async () => {
+    let inside: string | undefined;
+    let outside: string | undefined = "unset";
+    let idsOutside: string[] | undefined = ["unset"];
+    const t = setup({
+      duringTurn: ({ engine }) => {
+        inside = engine.activeRootRequestId;
+        t.turns.originMessageIdsScope.run(["user-1"], () => {
+          engine.outsideAttempt(() => {
+            outside = engine.activeRootRequestId;
+            idsOutside = t.turns.originMessageIdsScope.getStore();
+          });
+        });
+      }
+    });
+    await t.run();
+    expect(inside).toBe(ROOT);
+    expect(outside).toBeUndefined();
+    expect(idsOutside).toBeUndefined();
   });
 
   it("rethrows a memory-limit reset with no bookkeeping", async () => {

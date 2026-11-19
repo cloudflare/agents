@@ -2262,6 +2262,18 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     this.onChatMessageCallCount++;
     this.onChatMessageBodies.push(ctx?.body);
     this.onChatMessageClientTools.push(ctx?.clientTools);
+    this._recoveryRootsSeen.push(
+      (
+        this as unknown as {
+          _chatRecoveryEngine(): { activeRootRequestId?: string };
+        }
+      )._chatRecoveryEngine().activeRootRequestId ?? null
+    );
+    if (this._throwFromNextTurn) {
+      const message = this._throwFromNextTurn;
+      this._throwFromNextTurn = null;
+      throw new Error(message);
+    }
 
     const hold = this._turnHold;
     if (hold && !hold.waiting) {
@@ -2325,6 +2337,41 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   }
 
   private _emitStreamError: string | null = null;
+
+  private _throwFromNextTurn: string | null = null;
+  private _recoveryRootsSeen: Array<string | null> = [];
+  private _saveFromNextResponse = false;
+
+  /** Make the next `onChatMessage` call throw `message`. */
+  throwFromNextTurnForTest(message: string | null): void {
+    this._throwFromNextTurn = message;
+  }
+
+  /**
+   * The recovery root request id each `onChatMessage` call ran under, or
+   * `null` for a turn that was not a recovery attempt's.
+   */
+  getRecoveryRootsSeenForTest(): Array<string | null> {
+    return this._recoveryRootsSeen;
+  }
+
+  /** Make the next `onChatResponse` start a turn of its own. */
+  saveFromNextResponseForTest(): void {
+    this._saveFromNextResponse = true;
+  }
+
+  protected override async onChatResponse(_result: ChatResponseResult) {
+    if (!this._saveFromNextResponse) return;
+    this._saveFromNextResponse = false;
+    await this.saveMessages((messages) => [
+      ...messages,
+      {
+        id: `follow-up-${crypto.randomUUID()}`,
+        role: "user",
+        parts: [{ type: "text", text: "follow-up from onChatResponse" }]
+      }
+    ]);
+  }
 
   /** Holds the next onChatMessage call until released: the model is slow. */
   private _turnHold: {
@@ -3069,6 +3116,18 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     await super._chatRecoveryContinueDetached(
       data as Parameters<AIChatAgent<Env>["_chatRecoveryContinue"]>[0]
     );
+  }
+
+  /** The same, returning the message of what the attempt threw, if anything. */
+  async runChatRecoveryContinueCatchingForTest(
+    data: Record<string, unknown>
+  ): Promise<string | null> {
+    try {
+      await this.runChatRecoveryContinueDirectForTest(data);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
   }
 
   async runChatRecoveryRetryDirectForTest(

@@ -6276,7 +6276,9 @@ describe("Think — onChatRecovery", () => {
     expect(result.threw).toBe(true);
     expect(result.exhaustedContexts).toBe(0);
     expect(result.terminalBroadcast).toBeUndefined();
-    expect(result.incidentStatus).toBe("failed");
+    // A deferral is not an outcome: the incident stays live, so a stop
+    // or a continuation during the deferral still finds it.
+    expect(result.incidentStatus).toBe("attempting");
   });
 
   it("keeps a messenger reply pending while the platform re-runs recovery", async () => {
@@ -6290,7 +6292,9 @@ describe("Think — onChatRecovery", () => {
     });
 
     expect(result.threw).toBe(true);
-    expect(result.incidentStatus).toBe("failed");
+    // A deferral is not an outcome: the incident stays live, so a stop
+    // or a continuation during the deferral still finds it.
+    expect(result.incidentStatus).toBe("attempting");
     expect(result.messengerOutcome).toBeNull();
   });
 
@@ -6309,7 +6313,9 @@ describe("Think — onChatRecovery", () => {
     expect(result.threw).toBe(true);
     expect(result.exhaustedContexts).toBe(0);
     expect(result.terminalBroadcast).toBeUndefined();
-    expect(result.incidentStatus).toBe("failed");
+    // A deferral is not an outcome: the incident stays live, so a stop
+    // or a continuation during the deferral still finds it.
+    expect(result.incidentStatus).toBe("attempting");
   });
 
   it('re-throws "Network connection lost." (storage transient in a deploy-reset window) and does NOT terminalize (#1730)', async () => {
@@ -6327,7 +6333,9 @@ describe("Think — onChatRecovery", () => {
     expect(result.threw).toBe(true);
     expect(result.exhaustedContexts).toBe(0);
     expect(result.terminalBroadcast).toBeUndefined();
-    expect(result.incidentStatus).toBe("failed");
+    // A deferral is not an outcome: the incident stays live, so a stop
+    // or a continuation during the deferral still finds it.
+    expect(result.incidentStatus).toBe("attempting");
   });
 
   it("re-throws the SqlError shape (wrapped transient, retryable flag lost) and does NOT terminalize (#1730)", async () => {
@@ -6344,7 +6352,9 @@ describe("Think — onChatRecovery", () => {
     expect(result.threw).toBe(true);
     expect(result.exhaustedContexts).toBe(0);
     expect(result.terminalBroadcast).toBeUndefined();
-    expect(result.incidentStatus).toBe("failed");
+    // A deferral is not an outcome: the incident stays live, so a stop
+    // or a continuation during the deferral still finds it.
+    expect(result.incidentStatus).toBe("attempting");
   });
 
   it("re-throws the exact Durable Object storage-reset error through a SqlError cause and does NOT terminalize", async () => {
@@ -6360,7 +6370,9 @@ describe("Think — onChatRecovery", () => {
     expect(result.threw).toBe(true);
     expect(result.exhaustedContexts).toBe(0);
     expect(result.terminalBroadcast).toBeUndefined();
-    expect(result.incidentStatus).toBe("failed");
+    // A deferral is not an outcome: the incident stays live, so a stop
+    // or a continuation during the deferral still finds it.
+    expect(result.incidentStatus).toBe("attempting");
     expect(result.submissionStatus).toBe("running");
   });
 
@@ -6391,7 +6403,9 @@ describe("Think — onChatRecovery", () => {
     expect(result.threw).toBe(true);
     expect(result.exhaustedContexts).toBe(0);
     expect(result.terminalBroadcast).toBeUndefined();
-    expect(result.incidentStatus).toBe("failed");
+    // A deferral is not an outcome: the incident stays live, so a stop
+    // or a continuation during the deferral still finds it.
+    expect(result.incidentStatus).toBe("attempting");
   });
 
   it("leaves the recovered submission `running` on a deferral so the re-run picks it up (#1730)", async () => {

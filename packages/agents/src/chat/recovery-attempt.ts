@@ -19,8 +19,10 @@
  *    signal.
  * 9. A stop ends the attempt. A turn that was cut off again and scheduled the
  *    next attempt leaves the incident to that attempt.
- * 10. Record the turn's result on the incident.
- * 11. Always: end the attempt and reconcile agent-tool child runs.
+ * 10. Record the turn's result on the incident, unless the turn's own
+ *     routing already settled it (it gave up, or the app declined).
+ * 11. Always: end the attempt and reconcile agent-tool child runs, also for
+ *     an attempt that was cancelled before it started.
  *
  * The attempt runs inside the host's attempt scope, which carries its
  * incident and root request id. The turn it starts inherits the scope, and
@@ -108,14 +110,6 @@ export interface RecoveredTurnHost<
   beforeOutcome?(result: TResult): Promise<void>;
   /** Runs after the turn's result is recorded on the incident. */
   afterOutcome?(result: TResult): Promise<void>;
-  /**
-   * Wraps the "failed" incident write made before a platform transient is
-   * rethrown, so the host can tell that write from a real failure.
-   */
-  whileDeferring?(
-    incidentId: string,
-    write: () => Promise<void>
-  ): Promise<void>;
   /** Always runs last, whether or not the attempt was admitted. */
   release?(): void;
 }
@@ -158,11 +152,11 @@ export async function runRecoveredTurn<
   engine: ChatRecoveryEngine,
   host: RecoveredTurnHost<TData, TResult>
 ): Promise<void> {
-  if (await engine.isRecoveryCancelled(host.data?.incidentId)) {
-    await host.onStopped?.();
-    return;
-  }
   try {
+    if (await engine.isRecoveryCancelled(host.data?.incidentId)) {
+      await host.onStopped?.();
+      return;
+    }
     if (host.admit && !(await host.admit())) return;
     // Inside the attempt's scope. Only what runs here, the turn the attempt
     // starts included, is this attempt's. A turn some other request starts
@@ -176,8 +170,22 @@ export async function runRecoveredTurn<
       () => runAdmittedAttempt(engine, host)
     );
   } finally {
-    // Outside the attempt's own `finally`, so what `admit` registered is
-    // released even when the attempt never got as far as its `try`.
+    // On every way out, an attempt that was cancelled before it was admitted
+    // included. If this facet is an agent-tool child, its recovered turn
+    // settled outside `startAgentToolRun`'s finalizer, or will never run:
+    // close the run now, so a parent that follows it is not left waiting.
+    // A failure here must not replace what the attempt threw: a platform
+    // transient has to reach the caller as one, to be deferred.
+    try {
+      await engine.turns.reconcileAgentToolChildRuns();
+    } catch (error) {
+      console.error(
+        `${engine.turns.label} failed to reconcile agent-tool child runs after a recovery attempt`,
+        error
+      );
+    }
+    // What `admit` registered is released even when the attempt never got
+    // as far as its own `try`.
     host.release?.();
   }
 }
@@ -195,8 +203,10 @@ async function runAdmittedAttempt<
   // A client stops this attempt by the original request id: the only id it
   // knows until the recovered turn streams.
   const stop = turns.beginRecoveryAttempt(data?.originalRequestId);
-  // Aborts when another turn continues this attempt's reply.
+  // Signals from the engine: another turn continued this attempt's reply, or
+  // a client stopped the incident by an id `stop` is not registered under.
   const attempt = engine.beginAttempt(incidentId);
+  const stopped = (): boolean => stop.signal.aborted || attempt.stopped.aborted;
   const recordStop = async (): Promise<void> => {
     await engine.recordRecoveryStop(incidentId);
     await host.onStopped?.();
@@ -211,7 +221,7 @@ async function runAdmittedAttempt<
 
     // Before the timeout branch: a stopped attempt must not reschedule,
     // park or give up.
-    if (stop.signal.aborted) {
+    if (stopped()) {
       await recordStop();
       return;
     }
@@ -282,15 +292,21 @@ async function runAdmittedAttempt<
         ...("lastBody" in data && { lastBody: data.lastBody ?? undefined })
       });
     }
-    // Drop a mark an earlier interruption left, so only this turn's own
-    // reschedule counts below.
-    engine.takeReschedule(incidentId);
+    // How many times the incident had an attempt scheduled, before the
+    // turn. If the turn is cut off again and schedules the next attempt, the
+    // count moves.
+    const schedulesBefore =
+      (await engine.readIncident(incidentId))?.scheduleCount ?? 0;
     // The turn stops for a user's stop, and for another turn that got to
     // continue the reply while this one waited in the queue.
-    const turnSignal = AbortSignal.any([stop.signal, attempt.superseded]);
+    const turnSignal = AbortSignal.any([
+      stop.signal,
+      attempt.stopped,
+      attempt.superseded
+    ]);
     const result = await host.runTurn(turnSignal);
 
-    if (stop.signal.aborted) {
+    if (stopped()) {
       await recordStop();
       return;
     }
@@ -299,35 +315,47 @@ async function runAdmittedAttempt<
       await host.onClientContinued?.();
       return;
     }
-    if (result.status !== "completed" && engine.takeReschedule(incidentId)) {
+    // What the turn's own routing left on the incident. A turn that was cut
+    // off again went through `routeStreamInterruption`, which either
+    // scheduled the next attempt or settled the incident itself: gave up
+    // with the budget spent, or the app declined to continue.
+    const after =
+      result.status === "completed"
+        ? null
+        : await engine.readIncident(incidentId);
+    if (
+      after?.status === "scheduled" &&
+      (after.scheduleCount ?? 0) > schedulesBefore
+    ) {
       // Interrupted again: the attempt it scheduled owns the outcome.
       return;
     }
 
     await host.beforeOutcome?.(result);
-    // A turn that was cut off with the budget spent already gave up and
-    // said so. Marking that incident failed would unseal it.
-    if (
-      result.status === "completed" ||
-      !(await engine.isRecoverySealed(incidentId))
-    ) {
-      // A turn that returns "aborted" here was stopped: by its own request
-      // id, a clear, or the host cancelling every chat. (A turn cut off again
-      // returned above.) The stop is the outcome, not a failure.
-      const stopped = result.status === "aborted";
+    // An incident the turn settled keeps that outcome: one outcome, one
+    // event. Writing "failed" over a give-up would also unseal it.
+    const settledByTurn =
+      after?.status === "exhausted" ||
+      after?.status === "skipped" ||
+      after?.status === "failed";
+    if (!settledByTurn) {
+      // A turn that returns "aborted" here was stopped without naming a
+      // request: a clear, or the host cancelling every chat. (A turn cut off
+      // again returned above.) The stop is the outcome, not a failure.
+      const aborted = result.status === "aborted";
       await engine.updateIncident(
         incidentId,
         result.status === "completed"
           ? "completed"
-          : result.status === "skipped" || stopped
+          : result.status === "skipped" || aborted
             ? "skipped"
             : "failed",
-        stopped ? CHAT_RECOVERY_CANCELLED_REASON : result.error
+        aborted ? CHAT_RECOVERY_CANCELLED_REASON : result.error
       );
     }
     await host.afterOutcome?.(result);
   } catch (error) {
-    if (stop.signal.aborted && !isDurableObjectMemoryLimitReset(error)) {
+    if (stopped() && !isDurableObjectMemoryLimitReset(error)) {
       // The user's stop is the outcome, whatever threw after it. A stop
       // that cannot be recorded rethrows, so the driving Task runs the
       // callback again instead of leaving the incident and a submission open.
@@ -342,19 +370,10 @@ async function runAdmittedAttempt<
       await host.onClientContinued?.();
       return;
     }
-    await handleRecoveryAttemptError(engine, {
-      callback,
-      data,
-      error,
-      whileDeferring: host.whileDeferring
-    });
+    await handleRecoveryAttemptError(engine, { callback, data, error });
   } finally {
     stop.end();
     attempt.end();
-    // If this facet is an agent-tool child, its recovered turn settled
-    // outside `startAgentToolRun`'s finalizer. Close the run now so a
-    // re-attached parent collects the terminal at once.
-    await turns.reconcileAgentToolChildRuns();
   }
 }
 
@@ -364,10 +383,11 @@ async function runAdmittedAttempt<
  * - A Durable Object memory-limit reset is rethrown with no bookkeeping. The
  *   isolate is condemned and nothing written here would survive (#2613).
  * - A platform transient (a deploy reset, a `retryable` platform error,
- *   "Network connection lost.") is rethrown after a best-effort "failed"
- *   write, so the driving Task run keeps ownership and the platform re-runs
- *   the attempt once it is healthy (#1730). The turn can still recover, so it
- *   is not terminalized.
+ *   "Network connection lost.") is rethrown, so the driving Task run keeps
+ *   ownership and the platform re-runs the attempt once it is healthy
+ *   (#1730). This is a deferral, not an outcome: the incident stays
+ *   `scheduled`, so a stop, or a turn that continues the reply, during the
+ *   deferral still finds it. Only the error is recorded on the incident.
  * - Any other error gives up through `exhaustRecoveryGiveUp` with
  *   `recovery_error` (`onExhausted` and the terminal message) and is not
  *   rethrown. The driving attempt swallows a non-transient throw, so without
@@ -380,10 +400,6 @@ export async function handleRecoveryAttemptError(
     callback: ChatRecoveryScheduleCallback;
     data: RecoveryAttemptData | undefined;
     error: unknown;
-    whileDeferring?: (
-      incidentId: string,
-      write: () => Promise<void>
-    ) => Promise<void>;
   }
 ): Promise<void> {
   const { callback, data, error } = input;
@@ -393,20 +409,16 @@ export async function handleRecoveryAttemptError(
   // already gone.
   if (isDurableObjectMemoryLimitReset(error)) throw error;
   if (isPlatformTransientError(error)) {
-    const message = error instanceof Error ? error.message : String(error);
-    const incidentId = data?.incidentId;
-    const write = () => engine.updateIncident(incidentId, "failed", message);
     try {
-      if (incidentId && input.whileDeferring) {
-        await input.whileDeferring(incidentId, write);
-      } else {
-        await write();
-      }
+      await engine.recordDeferral(
+        data?.incidentId,
+        error instanceof Error ? error.message : String(error)
+      );
     } catch (bookkeepingError) {
       // Observability only. In a deploy reset or storage outage this write
       // can reject too, and that must not replace the deferral.
       console.error(
-        `${logPrefix} failed to mark recovery incident failed before deferring`,
+        `${logPrefix} failed to record a deferred recovery attempt`,
         bookkeepingError
       );
     }

@@ -4798,7 +4798,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       hasActiveStream: () => this._resumableStream.hasActiveStream(),
       generateRequestId: () => crypto.randomUUID(),
       keepAliveWhile: (fn) => this.keepAliveWhile(fn),
-      fireContinuation: () => this._fireAutoContinuation(),
+      // Fired from a timer that may have been armed inside a recovered turn.
+      // The continuation is its own turn, not the recovery attempt's.
+      fireContinuation: () =>
+        this._chatRecoveryEngine().outsideAttempt(() =>
+          this._fireAutoContinuation()
+        ),
       lastTurnReplyId: () => this._lastTurnReplyId()
     },
     { defaultDebounceMs: Think.MESSAGE_DEBOUNCE_MS }
@@ -6050,10 +6055,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         // Every continuation body here calls the model, so the reply is
         // taken at once. A body that can end without a model call must
         // take it later, where it commits to the call.
-        this._chatRecoveryEngine().turnBody(continuation, async (takeReply) => {
-          await takeReply();
-          return fn();
-        })
+        this._chatRecoveryEngine().turnBody(
+          continuation,
+          async (takeReply) => {
+            await takeReply();
+            return fn();
+          },
+          requestId
+        )
       );
     } finally {
       if (this._liveChatRecoveryTurns.get(requestId) === liveTurn) {
@@ -17181,8 +17190,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           this._settleMessengerRecovery(event.incidentId, "completed");
         } else if (
           event.type === "chat:recovery:skipped" ||
-          (event.type === "chat:recovery:failed" &&
-            !this._deferringRecoveryIncidents.has(event.incidentId))
+          event.type === "chat:recovery:failed"
         ) {
           this._settleMessengerRecovery(event.incidentId, "interrupted");
         }
@@ -17416,12 +17424,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       this._recoveryOwnedSubmissions.add(submissionId);
     }
   }
-
-  /**
-   * Incidents marked `failed` only for observability while the platform
-   * re-runs the same recovery attempt; their messenger reply stays pending.
-   */
-  private _deferringRecoveryIncidents = new Set<string>();
 
   private async _latestUserLeafId(): Promise<string | null> {
     const leaf = await this.session.getLatestLeaf();
@@ -17843,22 +17845,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /**
-   * Run the "failed" incident write made before a platform transient is
-   * rethrown. The mark tells the messenger path that the reply stays pending.
-   */
-  private async _whileDeferringRecovery(
-    incidentId: string,
-    write: () => Promise<void>
-  ): Promise<void> {
-    this._deferringRecoveryIncidents.add(incidentId);
-    try {
-      await write();
-    } finally {
-      this._deferringRecoveryIncidents.delete(incidentId);
-    }
-  }
-
-  /**
    * Keep the recovery callback as owner until a chat Task or facet fiber is durably
    * accepted. At acceptance, move the running submission to the successor's
    * request identity before signaling handoff. If an override never starts a
@@ -18033,9 +18019,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       // Before the incident settles: once it is terminal, nothing re-emits
       // the event that would settle a messenger reply after a reset.
       beforeOutcome: (result: SaveMessagesResult) =>
-        this._stageMessengerRecoveryOutcome(data, result.status),
-      whileDeferring: (incidentId: string, write: () => Promise<void>) =>
-        this._whileDeferringRecovery(incidentId, write)
+        this._stageMessengerRecoveryOutcome(data, result.status)
     };
   }
 
@@ -18722,7 +18706,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     if (this._insideResponseHook) return;
     this._insideResponseHook = true;
     try {
-      await this.onChatResponse(result);
+      // The hook is the app's. Nothing it starts belongs to a recovery
+      // attempt whose turn this was.
+      await this._chatRecoveryEngine().outsideAttempt(() =>
+        this.onChatResponse(result)
+      );
     } catch (err) {
       console.error("[Think] onChatResponse error:", err);
     } finally {
