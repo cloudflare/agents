@@ -188,6 +188,7 @@ import {
   CHAT_MESSAGE_TYPES,
   ResumableStream,
   createChatStreams,
+  addContinuationTarget,
   ChatTurns,
   ChatTurnFibers,
   pinnedOr,
@@ -2490,6 +2491,11 @@ const WORKFLOW_NOTIFICATION_GIVE_UP_MS = 12 * 60 * 60 * 1000;
 /** Queue callback that runs one connection-less continuation turn. */
 const CONNECTIONLESS_CONTINUATION_CALLBACK = "_cfRunConnectionlessContinuation";
 const CONNECTIONLESS_CONTINUATION_QUEUE_ID = "connectionless-continuation";
+/** The payload of the connection-less continuation's queue item. */
+type ConnectionlessContinuation = {
+  /** The messages the approvals' outcomes are stored in. */
+  targetMessageIds: string[];
+};
 /** Queue callback that runs one media-eviction pass. */
 const MEDIA_EVICTION_CALLBACK = "_cfEvictAgedMedia";
 /** Queue callback that runs one pending submission. */
@@ -14952,7 +14958,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
                 body: chunkBody,
                 done: false,
                 ...(seq !== undefined && { seq }),
-                ...(continuation && { continuation: true })
+                ...(continuation && {
+                  continuation: true,
+                  messageId: assistantId
+                })
               });
             }
             continue;
@@ -15052,7 +15061,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             body: chunkBody,
             done: false,
             ...(seq !== undefined && { seq }),
-            ...(continuation && { continuation: true })
+            // A tab that draws the frames itself writes them into the
+            // message this stream is stored in, not into the last one.
+            ...(continuation && { continuation: true, messageId: assistantId })
           });
         }
         streamDrainedNaturally = !(
@@ -16317,6 +16328,20 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * and the continuation still fires so the model can act on it. Provider
    * assembly projects this narrowly identified note to ordinary user context
    * without changing its durable authorship.
+   *
+   * The outcome is applied like a client tool result
+   * (`ChatTurns.applyInteraction`), and its continuation is one like any
+   * other: it answers the message the outcome is stored in (the paused
+   * call's message, or the note), and runs only while that message is the
+   * latest and has not gone on to an answer. An approval that arrives after
+   * the conversation moved on is not lost: the outcome is stored, the next
+   * turn's model call reads it, and `chat:continuation:dropped` says why no
+   * turn ran for it.
+   *
+   * An outcome that leaves the execution paused (it paused again on its next
+   * gated call) settles nothing, so it does not continue: a reply written
+   * for it would be the latest message by the time the real outcome
+   * arrives, and that outcome's continuation would have nothing to answer.
    */
   private async _applyExecutionOutcome(
     executionId: string,
@@ -16333,6 +16358,26 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       if ((await this._findExecutionToolCallDurably(executionId)) != null) {
         return false;
       }
+    }
+    const apply = async (): Promise<ToolInteractionOutcome> => {
+      if (toolCallId) {
+        // Recorded before the outcome is written, so a restart before either
+        // write lands still applies both before the next inference.
+        await this._rememberResolvedPause(toolCallId, { executionId, output });
+        const outcome = await this._applyToolUpdateToMessages(
+          pausedExecutionUpdate(toolCallId, executionId, output)
+        );
+        if (isPausedToolPart({ state: "output-available", output })) {
+          // The execution paused again on its next gated call. The call is
+          // not settled: it still waits on an approval, as the text after
+          // it says. There is nothing new for the model to answer, so no
+          // continuation runs until the approval that settles it.
+          await this._forgetResolvedPause(toolCallId);
+          return { status: "unchanged" };
+        }
+        await this._dropGenerationAfterResolvedPause(toolCallId);
+        return outcome;
+      }
       let summary: string;
       try {
         summary = JSON.stringify(output)?.slice(0, 4_000) ?? String(output);
@@ -16342,7 +16387,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       const outcomeSource = executionId.startsWith(ACTION_PAUSE_ID_PREFIX)
         ? "durable action"
         : "execute tool";
-      await this._appendMessageToHistory({
+      const note = await this._appendMessageToHistory({
         id: `${EXECUTION_OUTCOME_MESSAGE_PREFIX}${executionId}-${crypto.randomUUID()}`,
         role: "system",
         parts: [
@@ -16355,51 +16400,53 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           }
         ]
       } as UIMessage);
-    } else {
-      await this._enqueueInteractionApply(async () => {
-        // Recorded before the outcome is written, so a restart before either
-        // write lands still applies both before the next inference.
-        await this._rememberResolvedPause(toolCallId, { executionId, output });
-        await this._applyToolUpdateToMessages(
-          pausedExecutionUpdate(toolCallId, executionId, output)
-        );
-        await this._dropGenerationAfterResolvedPause(toolCallId);
-      });
-    }
-    if (options?.autoContinue === false) {
-      // No continuation will run the deferred drop, so apply it once the
-      // parking turn has persisted its message.
-      if (toolCallId && this._deferredResolvedPauses.has(toolCallId)) {
-        if (this._streamingAssistant) {
-          this._flushResolvedPausesOnFinalize = true;
-        } else {
-          await this._enqueueInteractionApply(() =>
-            this._flushDeferredResolvedPauses()
-          );
-        }
-      }
-      // Re-arm the barrier so a sibling that already opted in fires once the
-      // batch is whole, matching the client tool-result/approval path.
-      this._rearmPendingAutoContinuationForBatch();
-      return true;
-    }
+      return { status: "changed", messageId: note.id };
+    };
+    const autoContinue = options?.autoContinue !== false;
     // Continue on the approving connection when there is one (WS callable),
     // else any open connection (DO-stub approval with clients attached). When
     // NO connection is open — an approval arriving via RPC from a dashboard,
     // webhook, or voice backend — fall back to a connection-independent
     // continuation so the model still advances and the result isn't stranded.
-    const { connection } = getCurrentAgent();
-    let target = connection;
+    let target = getCurrentAgent().connection;
     if (!target) {
       for (const open of this.getConnections()) {
         target = open;
         break;
       }
     }
-    if (target) {
-      this._scheduleAutoContinuation(target);
+    const connection = target;
+    if (connection || !autoContinue) {
+      // Without `autoContinue` this re-arms the barrier, so a sibling that
+      // already opted in fires once the batch is whole.
+      await this._turns.applyInteraction(apply, autoContinue, () =>
+        this._continuationSpec(connection as Connection)
+      );
     } else {
-      await this._queueConnectionlessContinuation();
+      let outcome: ToolInteractionOutcome | undefined;
+      await this._enqueueInteractionApply(async () => {
+        outcome = await apply();
+      });
+      const applied = outcome as ToolInteractionOutcome | undefined;
+      // Like a connection's: only an outcome that settled its call continues.
+      if (applied?.status === "changed") {
+        await this._queueConnectionlessContinuation(applied.messageId);
+      }
+    }
+    if (
+      !autoContinue &&
+      toolCallId &&
+      this._deferredResolvedPauses.has(toolCallId)
+    ) {
+      // No continuation will run the deferred drop, so apply it once the
+      // parking turn has persisted its message.
+      if (this._streamingAssistant) {
+        this._flushResolvedPausesOnFinalize = true;
+      } else {
+        await this._enqueueInteractionApply(() =>
+          this._flushDeferredResolvedPauses()
+        );
+      }
     }
     return true;
   }
@@ -18108,10 +18155,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
   // ── Auto-continuation ──────────────────────────────────────────
 
-  private _scheduleAutoContinuation(connection: Connection): void {
-    this._autoContinuation.schedule(this._continuationSpec(connection));
-  }
-
   private _continuationSpec(connection: Connection) {
     return {
       connection,
@@ -18236,7 +18279,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           continuation: true,
           inheritChannel: true,
           allowNested: true,
-          execute: turn
+          execute: async () => {
+            // The core reads the transcript to decide whether the turn has
+            // anything to answer. Text written after a pause that has since
+            // resolved is still stored when the pause resolved mid-stream
+            // (or before a restart), and would read as the model's answer.
+            await this._flushDeferredResolvedPauses();
+            return turn();
+          }
         }),
       // The one turn body every turn runs, for the continuation's
       // connection and tools.
@@ -18268,12 +18318,28 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * item is durable, so the turn still runs if the object leaves memory
    * before the alarm fires; the last request body and client tools it needs
    * are persisted config, restored on start. Approvals landing while one
-   * continuation is pending or running coalesce onto the single item.
+   * continuation is pending or running coalesce onto the single item, which
+   * records the message each one's outcome is stored in
+   * (`targetMessageId`): the continuation answers those messages, and runs
+   * only while one of them is the latest, like any other.
    */
-  private async _queueConnectionlessContinuation(): Promise<void> {
-    await this.queue(CONNECTIONLESS_CONTINUATION_CALLBACK, undefined, {
-      id: CONNECTIONLESS_CONTINUATION_QUEUE_ID
-    });
+  private async _queueConnectionlessContinuation(
+    targetMessageId: string
+  ): Promise<void> {
+    // A push with the item's id replaces its payload, so carry over the
+    // messages the approvals already coalesced onto it answer.
+    const queued = await this.getQueue<ConnectionlessContinuation>(
+      CONNECTIONLESS_CONTINUATION_QUEUE_ID
+    );
+    const targetMessageIds = addContinuationTarget(
+      queued?.payload?.targetMessageIds,
+      targetMessageId
+    );
+    await this.queue<ConnectionlessContinuation>(
+      CONNECTIONLESS_CONTINUATION_CALLBACK,
+      { targetMessageIds: [...targetMessageIds] },
+      { id: CONNECTIONLESS_CONTINUATION_QUEUE_ID }
+    );
   }
 
   /**
@@ -18284,13 +18350,21 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * client that reconnects later resumes the continued turn from history.
    * @internal Queue callback.
    */
-  async _cfRunConnectionlessContinuation(): Promise<void> {
+  async _cfRunConnectionlessContinuation(
+    queued?: ConnectionlessContinuation
+  ): Promise<void> {
+    // An item an older version queued names no message: it answers the
+    // latest one.
+    const latest = this.messages.at(-1)?.id;
+    const targetMessageIds =
+      queued?.targetMessageIds ?? (latest === undefined ? [] : [latest]);
     await this._turns.runUnscheduledContinuationTurn(
       this._continuationTurn(),
       {
         requestId: crypto.randomUUID(),
         connection: undefined,
-        clientTools: this._lastClientTools
+        clientTools: this._lastClientTools,
+        targetMessageIds
       },
       "[Think] Connection-less continuation failed:"
     );

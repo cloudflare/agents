@@ -98,6 +98,13 @@ export type OutgoingMessage<ChatMessage extends UIMessage = UIMessage> =
       error?: boolean;
       /** Whether this is a continuation (append to last assistant message) */
       continuation?: boolean;
+      /**
+       * On a continuation's chunk frames: the id of the message the server
+       * stores the continuation in. A client that draws the frames itself
+       * writes into that message, and adds it when it does not have it.
+       * Absent means the last assistant message.
+       */
+      messageId?: string;
       /** Whether this chunk is being replayed from storage (stream resumption) */
       replay?: boolean;
       /** Signals that replay of stored chunks is complete (stream is still active) */

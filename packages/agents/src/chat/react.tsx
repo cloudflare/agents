@@ -2645,7 +2645,10 @@ export function useAgentChat<
             error: data.error,
             replay: data.replay,
             replayComplete: data.replayComplete,
-            continuation: data.continuation
+            continuation: data.continuation,
+            continuationMessageId: data.continuation
+              ? data.messageId
+              : undefined
           });
 
           streamStateRef.current = result.state;

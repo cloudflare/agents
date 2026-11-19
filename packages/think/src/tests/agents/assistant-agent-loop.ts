@@ -1476,7 +1476,23 @@ export class OverflowRecoveryTestAgent extends Think {
   async testContinuationOverflow(): Promise<OverflowChatResult> {
     await this._seedReactiveOverflow();
     this._model = undefined;
-    await this._cfRunConnectionlessContinuation();
+    // A continuation answers a result: the transcript ends in one.
+    const reply = await this.session.appendMessage({
+      id: crypto.randomUUID(),
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-lookup",
+          toolCallId: "call-lookup",
+          state: "output-available",
+          input: {},
+          output: "found"
+        }
+      ]
+    } as UIMessage);
+    await this._cfRunConnectionlessContinuation({
+      targetMessageIds: [reply.message.id]
+    });
     return this._overflowResult({ requestId: "", status: "completed" });
   }
 

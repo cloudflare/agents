@@ -959,7 +959,8 @@ export class ResumableStream {
         requestId,
         this._storedBodies(streamId),
         continuation,
-        this._seqBase(streamId)
+        this._seqBase(streamId),
+        this.getStreamMessageId(streamId) ?? undefined
       )
     ) {
       // Connection closed mid-replay — leave the stream active so the
@@ -1028,7 +1029,8 @@ export class ResumableStream {
         requestId,
         this._storedBodies(row.stream_id),
         continuation,
-        chat?.seqBase
+        chat?.seqBase,
+        chat?.messageId
       )
     ) {
       return false;
@@ -1065,7 +1067,8 @@ export class ResumableStream {
         requestId,
         this._storedBodies(row.stream_id),
         continuation,
-        chat.seqBase
+        chat.seqBase,
+        chat.messageId
       )
     ) {
       return false;
@@ -1104,7 +1107,8 @@ export class ResumableStream {
       requestId,
       this._storedBodies(row.stream_id),
       chat?.isContinuation === 1,
-      chat?.seqBase
+      chat?.seqBase,
+      chat?.messageId
     );
   }
 

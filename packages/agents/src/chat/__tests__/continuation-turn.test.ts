@@ -16,6 +16,7 @@ import {
   type ContinuationTurn
 } from "../continuation-turn";
 import { CHAT_MESSAGE_TYPES } from "../protocol";
+import { ChatStreamStalledError } from "../stall-watchdog";
 
 const COALESCE = AutoContinuationController.COALESCE_MS;
 const RESUME_NONE = JSON.stringify({
@@ -262,10 +263,30 @@ describe("the continuation turn", () => {
   });
 
   it("claims only the continuation the turn was fired for", async () => {
+    let release!: () => void;
+    const blocker = turns.queue.enqueue(
+      "other",
+      () => new Promise<void>((resolve) => (release = resolve))
+    );
     await result("a1");
-    expect(turns.takeContinuation("cont-other")).toBeNull();
+    await fire();
+    // The continuation the queued turn was fired for is gone, and a newer
+    // one is pending by the time the turn starts.
+    turns.continuation.clearPending();
+    await result("a1");
+    expect(turns.continuation.pending?.requestId).toBe("cont-2");
+    release();
+    await blocker;
+    await drain();
+
+    expect(host.ran).toEqual([]);
+    expect(host.droppedEvents).toEqual([]);
+    expect(turns.continuation.pending?.requestId).toBe("cont-2");
     expect(turns.continuation.pending?.pastCoalesce).toBe(false);
-    expect(turns.takeContinuation("cont-1")?.requestId).toBe("cont-1");
+
+    await fire();
+    await drain();
+    expect(host.ran).toEqual(["cont-2"]);
   });
 
   it("runs nothing once the conversation moved on, and releases the waiting connection", async () => {
@@ -668,6 +689,87 @@ describe("what a continuation turn runs", () => {
     expect(host.reports).toEqual([]);
   });
 
+  it("does not hand the host a stopped turn's error, whatever it threw", async () => {
+    // A stopped provider call rejects with the stop's reason, not an
+    // AbortError.
+    host.model = async (continuation, signal) => {
+      turns.cancel(continuation.requestId, "the user stopped it");
+      throw signal.reason;
+    };
+    await result("a1");
+    await fire();
+    await drain();
+
+    expect(host.ran).toEqual(["cont-1"]);
+    expect(host.errors).toEqual([]);
+    expect(host.reports).toEqual([]);
+  });
+
+  it("hands the host the error of a turn the stall watchdog aborted", async () => {
+    // The watchdog's abort is the runtime's, not a stop.
+    host.model = async (continuation) => {
+      turns.aborts.cancel(
+        continuation.requestId,
+        new ChatStreamStalledError("stalled")
+      );
+      throw new Error("stalled");
+    };
+    await result("a1");
+    await fire();
+    await drain();
+
+    expect(host.errors).toMatchObject([{ reported: false }]);
+  });
+
+  it("is not idle between the fire and the turn when the host's enqueue awaits first", async () => {
+    // Think's admission awaits a keep-alive lease before it enqueues.
+    const turn = host.turn();
+    host.turn = () => ({
+      ...turn,
+      enqueue: async (requestId, run) => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return turns.queue.enqueue(requestId, run);
+      }
+    });
+    await result("a1");
+    await fire();
+    // Fired, and not on the queue yet.
+    expect(turns.queue.isActive).toBe(false);
+    expect(host.ran).toEqual([]);
+
+    let idle = false;
+    let stable = false;
+    void turns.waitForIdle().then(() => (idle = true));
+    void turns.waitUntilStable().then(() => (stable = true));
+    await vi.advanceTimersByTimeAsync(1);
+    expect(idle).toBe(false);
+    expect(stable).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(2 * COALESCE);
+    expect(host.ran).toEqual(["cont-1"]);
+    expect(idle).toBe(true);
+    expect(stable).toBe(true);
+  });
+
+  it("is idle again after a fired turn the queue dropped", async () => {
+    const turn = host.turn();
+    host.turn = () => ({
+      ...turn,
+      enqueue: async (requestId, run) => {
+        const generation = turns.queue.generation;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return turns.queue.enqueue(requestId, run, { generation });
+      }
+    });
+    await result("a1");
+    await fire();
+    turns.reset();
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(host.ran).toEqual([]);
+    expect(turns.hasPendingDecision()).toBe(false);
+  });
+
   it("the stream's start resumes connections parked on the turn's pre-stream window too", async () => {
     const parked = makeConnection("parked");
     const resumed: string[] = [];
@@ -686,6 +788,7 @@ describe("what a continuation turn runs", () => {
       aborts: turns.aborts,
       messages: () => host.transcript,
       streamed: new Map<string, boolean>(),
+      firing: new Set<object>(),
       dropped: () => {}
     };
     for (let i = 0; i < 100; i++) {
@@ -697,7 +800,6 @@ describe("what a continuation turn runs", () => {
 
   it("the stream's end clears the continuation it made active", async () => {
     await result("a1");
-    turns.takeContinuation("cont-1");
     turns.streamStarted("cont-1", () => {});
     expect(turns.continuation.activeRequestId).toBe("cont-1");
 
@@ -712,7 +814,7 @@ describe("what a continuation turn runs", () => {
     const unscheduled = (requestId = "free-1") =>
       turns.runUnscheduledContinuationTurn(
         host.turn(),
-        { requestId, connection: undefined },
+        { requestId, connection: undefined, targetMessageIds: ["a1"] },
         "[free]"
       );
 
@@ -743,6 +845,31 @@ describe("what a continuation turn runs", () => {
 
       expect(host.ran).toEqual([]);
       expect(turns.aborts.has("free-1")).toBe(false);
+    });
+
+    it("runs nothing once the conversation moved past the message it answers", async () => {
+      host.transcript = [...host.transcript, user("u2")];
+      await unscheduled();
+
+      expect(host.ran).toEqual([]);
+      expect(host.droppedEvents).toEqual(["free-1:moved_on"]);
+      expect(turns.aborts.has("free-1")).toBe(false);
+    });
+
+    it("runs nothing once the message it answers went on to its answer", async () => {
+      host.transcript = withAnswer(host.transcript);
+      await unscheduled();
+
+      expect(host.ran).toEqual([]);
+      expect(host.droppedEvents).toEqual(["free-1:answered"]);
+    });
+
+    it("runs nothing in a chat that was cleared since", async () => {
+      host.transcript = [];
+      await unscheduled();
+
+      expect(host.ran).toEqual([]);
+      expect(host.droppedEvents).toEqual(["free-1:moved_on"]);
     });
 
     it("reports a failure before the stream", async () => {

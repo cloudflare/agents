@@ -83,7 +83,8 @@ describe("AutoContinuationController", () => {
       connection: makeConnection(connId),
       clientTools: undefined,
       body: undefined,
-      errorPrefix: "[test] continuation failed:"
+      errorPrefix: "[test] continuation failed:",
+      targetMessageId: "assistant-1"
     });
   }
 
@@ -260,6 +261,7 @@ describe("AutoContinuationController", () => {
       clientTools: undefined,
       body: undefined,
       errorPrefix: "[test]",
+      targetMessageIds: ["assistant-1"],
       prerequisite: null
     };
 
@@ -455,15 +457,5 @@ describe("AutoContinuationController", () => {
     await vi.advanceTimersByTimeAsync(COALESCE);
     expect(host.fireCount).toBe(1);
     expect(controller.hasPendingDecision()).toBe(false);
-  });
-
-  it("a result with no target turns the latest-message check off", () => {
-    controller.afterInteraction(
-      { status: "changed", messageId: "assistant-1" },
-      true,
-      spec
-    );
-    schedule();
-    expect(host.continuation.pending?.targetMessageIds).toBeNull();
   });
 });

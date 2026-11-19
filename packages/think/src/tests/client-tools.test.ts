@@ -3847,6 +3847,52 @@ describe("Think — the continuation turn", () => {
     await closeWS(ws);
   });
 
+  it("names the message a continuation is stored in on its chunk frames", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    // A second tab that only watches: it gets the continuation as a plain
+    // broadcast and draws it from these frames.
+    const { ws } = await connectWS(room);
+    const { ws: watcher } = await connectWS(room);
+    await collectMessages(ws, 3);
+    await collectMessages(watcher, 3);
+    const toolCallId = "tc-named-message";
+    await agent.persistToolCallMessage([
+      makeUserMessage("first"),
+      makeToolMessage(toolCallId, "client_action", "input-available")
+    ]);
+    const frames: Array<Record<string, unknown>> = [];
+    watcher.addEventListener("message", (event: MessageEvent) => {
+      const frame = JSON.parse(event.data as string) as Record<string, unknown>;
+      if (frame.type === "cf_agent_use_chat_response") frames.push(frame);
+    });
+
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId,
+        toolName: "client_action",
+        output: "result",
+        autoContinue: true
+      })
+    );
+    await waitUntil(() => frames.some((frame) => frame.done === true));
+
+    const stored = (await agent.getMessages()) as UIMessage[];
+    expect(stored).toHaveLength(3);
+    const chunks = frames.filter(
+      (frame) => frame.done !== true && frame.body !== ""
+    );
+    expect(chunks.length).toBeGreaterThan(0);
+    // Think stores the continuation as a message of its own, and says so.
+    for (const chunk of chunks) {
+      expect(chunk.continuation).toBe(true);
+      expect(chunk.messageId).toBe(stored[2].id);
+    }
+    await closeWS(ws);
+    await closeWS(watcher);
+  });
+
   it("a result for a call the reply already answered past does not continue it", async () => {
     const room = crypto.randomUUID();
     const dropped: string[] = [];

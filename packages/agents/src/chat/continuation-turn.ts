@@ -50,6 +50,7 @@ import {
   type TurnFailureHost,
   type TurnFailureResult
 } from "./turn-failure";
+import { isTurnStopped } from "./turn-stop";
 
 /** The parts of the turn core the continuation lifecycle works on. */
 export interface ContinuationTurnParts<
@@ -72,6 +73,13 @@ export interface ContinuationTurnParts<
    */
   readonly streamed: Map<string, boolean>;
   /**
+   * One entry per continuation turn between its fire and the start of its
+   * turn. The chat is not idle while this holds anything: a host's
+   * `enqueue` may await before the turn is on the queue, and the queue alone
+   * would report idle in that window.
+   */
+  readonly firing: Set<object>;
+  /**
    * A continuation was dropped: it will not run, and nothing failed. The
    * host reports it to the app (an observability event), so "the model never
    * answered my tool result" has something to look at.
@@ -93,9 +101,10 @@ export interface ContinuationDropped {
 }
 
 /**
- * What a continuation turn runs with: its request id, and the connection
- * and tools of the latest result that scheduled it. `connection` is
- * `undefined` for a continuation no connection scheduled.
+ * What a continuation turn runs with: its request id, the connection and
+ * tools of the latest result that scheduled it, and the messages those
+ * results are stored in. `connection` is `undefined` for a continuation no
+ * connection scheduled.
  */
 export interface ContinuationContext<
   TConnection extends ContinuationConnection = ContinuationConnection
@@ -104,6 +113,8 @@ export interface ContinuationContext<
   connection: TConnection | undefined;
   clientTools?: ClientToolSchema[];
   body?: Record<string, unknown>;
+  /** See {@link ContinuationPending.targetMessageIds}. */
+  targetMessageIds: readonly string[];
 }
 
 /**
@@ -116,8 +127,11 @@ export interface ContinuationTurn<
 > {
   /**
    * Admit the turn through the host's own queue wrapper (tracing, hooks,
-   * keep-alive). It must enqueue `turn` on the core's queue synchronously,
-   * so the chat is not idle between the fire and the turn.
+   * keep-alive) onto the core's queue. It may await before it enqueues: the
+   * core reports the chat busy from the fire until the turn starts
+   * ({@link ContinuationTurnParts.firing}). Whatever the host has to store
+   * before the transcript is read (`Think` drops the text written after a
+   * pause that has since resolved) it does before it calls `turn`.
    */
   enqueue(requestId: string, turn: () => Promise<void>): Promise<unknown>;
   /**
@@ -136,7 +150,9 @@ export interface ContinuationTurn<
   /** How a failure before the stream is reported. */
   failure: TurnFailureHost<TMessage>;
   /**
-   * The turn rejected. Log it when clients were not told.
+   * The turn rejected, and it was not stopped: a stopped turn fails with
+   * the stop's reason, which is not an error ({@link isTurnStopped}). Log it
+   * when clients were not told.
    *
    * @param context.reported - Whether clients were told
    *   ({@link reportTurnFailure} ran).
@@ -148,31 +164,37 @@ export interface ContinuationTurn<
 }
 
 /**
- * Claim the pending continuation at the start of its turn. Returns `null`
- * when there is nothing for this turn to continue:
+ * Why a continuation has nothing to answer, or `null` when it has. The one
+ * check for every continuation, whatever scheduled it:
  *
- * - no continuation is pending, or the pending one was fired for another
- *   turn (`requestId`). A turn that ran someone else's continuation would
- *   leave it marked as running after the turn ended, and every later result
- *   would wait behind it forever;
- * - the conversation moved on since its tool result (a newer question or
- *   reply, a regenerate, a clear), so the message it answers is no longer
- *   the latest;
- * - the message it answers already went on to the model's answer
- *   ({@link transcriptEndsInAnswer}).
+ * - `moved_on`: the conversation moved on since its result was stored (a
+ *   newer question or reply, a regenerate, a clear), so none of the
+ *   messages it answers is the latest;
+ * - `answered`: the message it answers already went on to the model's
+ *   answer ({@link transcriptEndsInAnswer}).
+ *
+ * The result itself is stored either way, and the next turn's model call
+ * reads it.
  */
-export function claimContinuation<TConnection extends ContinuationConnection>(
-  parts: ContinuationTurnParts<TConnection>,
-  requestId: string
-): ContinuationPending<TConnection> | null {
-  const claim = tryClaimContinuation(parts, requestId);
-  return "continuation" in claim ? claim.continuation : null;
+function nothingToAnswer(
+  messages: ReturnType<ContinuationTurnParts["messages"]>,
+  continuation: Pick<ContinuationPending, "targetMessageIds">
+): "moved_on" | "answered" | null {
+  if (!continuationTargetIsLatest(messages, continuation)) return "moved_on";
+  if (transcriptEndsInAnswer(messages)) return "answered";
+  return null;
 }
 
 /**
- * {@link claimContinuation}, saying why there is nothing to continue.
- * `dropped` is `null` when the turn's own continuation is already gone:
- * whoever removed it reported that.
+ * Claim the pending continuation at the start of its turn. `dropped` says
+ * why there is nothing for this turn to continue:
+ *
+ * - `null`: no continuation is pending, or the pending one was fired for
+ *   another turn (`requestId`). A turn that ran someone else's continuation
+ *   would leave it marked as running after the turn ended, and every later
+ *   result would wait behind it forever. Whoever removed this turn's own
+ *   continuation reported that;
+ * - a reason from {@link nothingToAnswer}.
  */
 function tryClaimContinuation<TConnection extends ContinuationConnection>(
   parts: ContinuationTurnParts<TConnection>,
@@ -182,16 +204,8 @@ function tryClaimContinuation<TConnection extends ContinuationConnection>(
   | { dropped: ContinuationDropped["reason"] | null } {
   const pending = parts.continuation.pending;
   if (!pending || pending.requestId !== requestId) return { dropped: null };
-  // A continuation with no target (`null`) runs whatever the transcript: its
-  // host rewrites the transcript when the turn runs (a resolved pause in
-  // Think drops the text generated after it).
-  if (pending.targetMessageIds != null) {
-    const messages = parts.messages();
-    if (!continuationTargetIsLatest(messages, pending)) {
-      return { dropped: "moved_on" };
-    }
-    if (transcriptEndsInAnswer(messages)) return { dropped: "answered" };
-  }
+  const dropped = nothingToAnswer(parts.messages(), pending);
+  if (dropped) return { dropped };
   pending.pastCoalesce = true;
   return { continuation: pending };
 }
@@ -205,19 +219,18 @@ function tryClaimContinuation<TConnection extends ContinuationConnection>(
  * - a continuation nothing scheduled on a connection (`unscheduled`).
  *   `Think` uses it when an approval arrives over RPC with no client
  *   attached. No pending continuation stands for it, so there is nothing to
- *   claim and nothing to settle. It is not checked against the transcript
- *   either: like a pending continuation with no target, it runs whatever
- *   the transcript, because `Think` rewrites the transcript when the turn
- *   runs (a resolved pause drops the text generated after it).
+ *   claim and nothing to settle. It is checked against the transcript like
+ *   any other ({@link nothingToAnswer}).
  *
  * The steps:
  *
  * 1. Create the abort signal now, so a cancel reaches the turn while it
  *    waits in the queue.
  * 2. Enqueue the turn.
- * 3. When the turn starts, claim the continuation ({@link claimContinuation}).
- *    With nothing to claim, or when it was cancelled meanwhile, the model is
- *    never called, and the host is told the continuation was dropped.
+ * 3. When the turn starts, claim the continuation
+ *    ({@link tryClaimContinuation}). With nothing to claim, or when it was
+ *    cancelled meanwhile, the model is never called, and the host is told
+ *    the continuation was dropped.
  * 4. Run the host's turn body ({@link runContinuationBody}).
  * 5. However the turn ended (ran, failed, or skipped), drop the abort signal
  *    and settle ({@link settleContinuationTurn}), inside the turn. A turn a
@@ -226,7 +239,12 @@ function tryClaimContinuation<TConnection extends ContinuationConnection>(
  * 6. Once the turn has left the queue, deliver `onChatResponse` for a
  *    failure that was reported.
  *
- * Never rejects: a failure goes to `turn.onError`.
+ * From the fire until the turn starts the chat is not idle
+ * ({@link ContinuationTurnParts.firing}), whatever the host's `enqueue`
+ * awaits first.
+ *
+ * Never rejects: a failure goes to `turn.onError`, unless the turn was
+ * stopped ({@link isTurnStopped}).
  */
 export async function runContinuationTurn<
   TConnection extends ContinuationConnection,
@@ -248,6 +266,8 @@ export async function runContinuationTurn<
     ? unscheduled.errorPrefix
     : pending!.errorPrefix;
   const signal = parts.aborts.getSignal(requestId);
+  const firing = {};
+  parts.firing.add(firing);
 
   let started = false;
   const outcome: ContinuationOutcome<TMessage> = { reported: false };
@@ -258,7 +278,15 @@ export async function runContinuationTurn<
       parts.dropped({ requestId, reason: "stopped" });
       return null;
     }
-    if (unscheduled) return unscheduled.continuation;
+    if (unscheduled) {
+      const dropped = nothingToAnswer(
+        parts.messages(),
+        unscheduled.continuation
+      );
+      if (!dropped) return unscheduled.continuation;
+      parts.dropped({ requestId, reason: dropped });
+      return null;
+    }
     const claimed = tryClaimContinuation(parts, requestId);
     if ("continuation" in claimed) return claimed.continuation;
     if (claimed.dropped) parts.dropped({ requestId, reason: claimed.dropped });
@@ -268,6 +296,8 @@ export async function runContinuationTurn<
   try {
     await turn.enqueue(requestId, async () => {
       started = true;
+      // On the queue and running: the queue says the chat is busy now.
+      parts.firing.delete(firing);
       try {
         const continuation = claim();
         if (!continuation || !signal) return;
@@ -279,8 +309,12 @@ export async function runContinuationTurn<
       }
     });
   } catch (error) {
-    turn.onError(error, { errorPrefix, reported: outcome.reported });
+    // A stopped turn fails with the stop's reason. That is not an error.
+    if (!isTurnStopped(signal)) {
+      turn.onError(error, { errorPrefix, reported: outcome.reported });
+    }
   } finally {
+    parts.firing.delete(firing);
     if (!started) {
       parts.aborts.remove(requestId);
       if (!unscheduled) releaseOwnPending(parts, requestId);
@@ -425,7 +459,7 @@ export function continuationStreamEnded<
  * result arrives to do it.
  *
  * Whether that continuation still has something to answer is decided when
- * its turn starts ({@link claimContinuation}), not here.
+ * its turn starts ({@link tryClaimContinuation}), not here.
  */
 export function replyFinalized<TConnection extends ContinuationConnection>(
   parts: ContinuationTurnParts<TConnection>
@@ -536,15 +570,10 @@ export function transcriptEndsInAnswer(
   return hasContent;
 }
 
-/**
- * The targets of two continuations folded into one. `null` means "run
- * whatever the transcript" and wins. `undefined` is a continuation that
- * recorded no target, which is treated the same way when it is read.
- */
+/** The targets of two continuations folded into one. */
 function mergeContinuationTargets(
-  a: readonly string[] | null | undefined,
-  b: readonly string[] | null | undefined
-): readonly string[] | null {
-  if (a == null || b == null) return null;
+  a: readonly string[],
+  b: readonly string[]
+): readonly string[] {
   return [...a, ...b.filter((id) => !a.includes(id))];
 }

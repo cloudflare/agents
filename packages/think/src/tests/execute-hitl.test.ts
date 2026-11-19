@@ -279,6 +279,13 @@ describe("Think HITL — approve/reject paused executions", () => {
       );
     });
 
+    // The call is still paused, so nothing was settled and the model is not
+    // asked again: a reply written now would be the latest message by the
+    // time the run completes, and that outcome could not continue.
+    await delay(300);
+    expect(await agent.waitUntilStableForTest()).toBe(true);
+    expect(await agent.assistantMessageCount()).toBe(1);
+
     // Second approve completes the run.
     const done = (await callRpc(ws, "approveExecution", [
       first.executionId

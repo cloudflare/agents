@@ -1,6 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { env, exports } from "cloudflare:workers";
 import { getAgentByName } from "agents";
+import { subscribe } from "agents/observability";
 import type { UIMessage } from "ai";
 import { z } from "zod";
 import { action } from "../think";
@@ -554,6 +555,112 @@ describe("durable-pause actions (turn-driven, connection-less)", () => {
     } finally {
       ws.close();
     }
+  });
+});
+
+describe("a resolved pause continues like any other result", () => {
+  const movedOn: UIMessage[] = [
+    {
+      id: "user-next",
+      role: "user",
+      parts: [{ type: "text", text: "Never mind, what time is it?" }]
+    },
+    {
+      id: "assistant-next",
+      role: "assistant",
+      parts: [{ type: "text", text: "It is noon." }]
+    }
+  ];
+  const pausedOutput = (messages: UIMessage[]) =>
+    (
+      messages
+        .flatMap((message) => message.parts)
+        .find(
+          (part) =>
+            "toolCallId" in part &&
+            (part as Record<string, unknown>).toolCallId === "dp1"
+        ) as Record<string, unknown> | undefined
+    )?.output;
+  const droppedFor = (room: string) => {
+    const dropped: string[] = [];
+    onTestFinished(
+      subscribe("chat", (event) => {
+        if (event.type === "chat:continuation:dropped" && event.name === room) {
+          dropped.push(event.payload.reason);
+        }
+      })
+    );
+    return dropped;
+  };
+
+  it("does not continue an approval that arrives over RPC after the conversation moved on", async () => {
+    const room = `dp-moved-on-${crypto.randomUUID()}`;
+    const dropped = droppedFor(room);
+    const agent = await freshPauseAgent(room);
+    await agent.useDurablePauseActionForTest();
+    const first = await agent.testChat("call pauseAction");
+    expect(first.done).toBe(true);
+    const [pending] = await agent.listActionPendingForTest();
+    // The user kept chatting while the action waited for approval.
+    await agent.appendMessagesForTest(movedOn);
+    const modelCallsBefore = await agent.getDurablePauseModelCallCount();
+
+    const approved = await agent.approveExecutionForTest(pending.execution_id);
+    expect(approved).toBe("paused-exec: hello");
+
+    await vi.waitFor(() => expect(dropped).toEqual(["moved_on"]), {
+      timeout: 5000,
+      interval: 50
+    });
+    expect(await agent.waitUntilStableForTest()).toBe(true);
+    // No turn ran on a transcript that ends in the latest answer. The
+    // outcome is stored, so the next turn's model call reads it.
+    expect(await agent.getDurablePauseModelCallCount()).toBe(modelCallsBefore);
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(pausedOutput(messages)).toBe("paused-exec: hello");
+    expect(messages.at(-1)?.id).toBe("assistant-next");
+  });
+
+  it("does not continue an approval on an open connection after the conversation moved on", async () => {
+    const room = `dp-moved-on-ws-${crypto.randomUUID()}`;
+    const dropped = droppedFor(room);
+    const agent = await freshPauseAgent(room);
+    await agent.useDurablePauseActionForTest();
+    const first = await agent.testChat("call pauseAction");
+    expect(first.done).toBe(true);
+    const [pending] = await agent.listActionPendingForTest();
+    await agent.appendMessagesForTest(movedOn);
+    const modelCallsBefore = await agent.getDurablePauseModelCallCount();
+
+    const ws = await connectWS(room);
+    const frames = collectChatResponses(ws);
+    try {
+      const approved = await agent.approveExecutionForTest(
+        pending.execution_id
+      );
+      expect(approved).toBe("paused-exec: hello");
+
+      await vi.waitFor(() => expect(dropped).toEqual(["moved_on"]), {
+        timeout: 5000,
+        interval: 50
+      });
+      expect(await agent.waitUntilStableForTest()).toBe(true);
+      expect(await agent.getDurablePauseModelCallCount()).toBe(
+        modelCallsBefore
+      );
+      expect(frames).toEqual([]);
+      const messages = (await agent.getStoredMessages()) as UIMessage[];
+      expect(pausedOutput(messages)).toBe("paused-exec: hello");
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("records the message each coalesced approval answers on the queued continuation", async () => {
+    const agent = await freshPauseAgent(`dp-targets-${crypto.randomUUID()}`);
+    expect(
+      await agent.queueConnectionlessContinuationsForTest(["m1", "m2", "m1"])
+    ).toEqual(["m1", "m2"]);
   });
 });
 

@@ -14,7 +14,7 @@
  * - tool results and approvals apply one at a time, and only one that settled
  *   its call schedules a continuation ({@link applyInteraction});
  * - a continuation runs only while the message it answers is still the latest
- *   ({@link takeContinuation}), and its turn runs and settles one way
+ *   and has not gone on to its answer, and its turn runs and settles one way
  *   ({@link runContinuationTurn}, `continuation-turn.ts`);
  * - a cancel reaches a queued turn, a running turn, and a running recovery
  *   attempt ({@link cancel});
@@ -38,16 +38,14 @@ import {
 } from "./async-helpers";
 import {
   AutoContinuationController,
-  type ContinuationSpec,
+  type ContinuationSource,
   type ToolInteractionOutcome
 } from "./auto-continuation-controller";
 import {
   ContinuationState,
-  type ContinuationConnection,
-  type ContinuationPending
+  type ContinuationConnection
 } from "./continuation-state";
 import {
-  claimContinuation,
   continuationStreamEnded,
   continuationStreamStarted,
   replyFinalized,
@@ -281,6 +279,7 @@ export class ChatTurns<
       aborts: this.aborts,
       messages: () => host.messages(),
       streamed: new Map(),
+      firing: new Set(),
       dropped: (event) => host.continuationDropped?.(event)
     };
   }
@@ -490,7 +489,7 @@ export class ChatTurns<
   applyInteraction(
     apply: () => Promise<ToolInteractionOutcome>,
     autoContinue: boolean,
-    spec: () => ContinuationSpec<TConnection>,
+    spec: () => ContinuationSource<TConnection>,
     enqueue: (run: () => Promise<boolean>) => Promise<boolean> = (run) =>
       this.enqueueInteraction(run)
   ): Promise<boolean> {
@@ -514,16 +513,6 @@ export class ChatTurns<
   }
 
   // ── Continuations ──────────────────────────────────────────────────
-
-  /**
-   * Claim the pending continuation at the start of the turn `requestId` was
-   * fired for. Returns `null` when there is nothing for that turn to
-   * continue. {@link runContinuationTurn} calls the same check. See
-   * {@link claimContinuation}.
-   */
-  takeContinuation(requestId: string): ContinuationPending<TConnection> | null {
-    return claimContinuation(this.#continuationParts, requestId);
-  }
 
   /**
    * Run the continuation turn for the pending continuation, from its abort
@@ -675,9 +664,17 @@ export class ChatTurns<
     });
   }
 
-  /** `true` while a continuation decision is still to come. */
+  /**
+   * `true` while a continuation decision is still to come, or a
+   * continuation has fired and its turn has not started: the host's enqueue
+   * may await before the turn is on the queue, and the chat is not idle in
+   * between.
+   */
   hasPendingDecision(): boolean {
-    return this.autoContinuation.hasPendingDecision();
+    return (
+      this.autoContinuation.hasPendingDecision() ||
+      this.#continuationParts.firing.size > 0
+    );
   }
 
   /**

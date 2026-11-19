@@ -127,6 +127,7 @@ export {
 
 export {
   ContinuationState,
+  addContinuationTarget,
   continuationTargetIsLatest,
   type ContinuationConnection,
   type ContinuationPending,
@@ -150,6 +151,7 @@ export { PreStreamTurns } from "./pre-stream-turns";
 export {
   AutoContinuationController,
   type AutoContinuationHost,
+  type ContinuationSource,
   type ContinuationSpec,
   type ToolInteractionOutcome
 } from "./auto-continuation-controller";
@@ -160,7 +162,6 @@ export {
  * `continuation-turn.ts`.
  */
 export {
-  claimContinuation,
   continuationStreamEnded,
   continuationStreamStarted,
   replyFinalized,

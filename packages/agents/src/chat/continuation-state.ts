@@ -35,11 +35,12 @@ export interface ContinuationPending<
   prerequisite: Promise<boolean> | null;
   pastCoalesce: boolean;
   /**
-   * The assistant messages whose tool results or approvals this continuation
-   * answers. It runs only while one of them is still the last message
-   * ({@link continuationTargetIsLatest}); `null` skips the check.
+   * The messages whose tool results or approvals this continuation answers.
+   * It runs only while one of them is still the last message
+   * ({@link continuationTargetIsLatest}). Every continuation has at least
+   * one: there is no continuation that runs whatever the transcript.
    */
-  targetMessageIds?: readonly string[] | null;
+  targetMessageIds: readonly string[];
 }
 
 export interface ContinuationDeferred<
@@ -51,7 +52,7 @@ export interface ContinuationDeferred<
   body?: Record<string, unknown>;
   errorPrefix: string;
   prerequisite: Promise<boolean> | null;
-  targetMessageIds?: readonly string[] | null;
+  targetMessageIds: readonly string[];
 }
 
 export class ContinuationState<
@@ -158,7 +159,7 @@ export class ContinuationState<
       errorPrefix: d.errorPrefix,
       prerequisite: d.prerequisite,
       pastCoalesce: false,
-      targetMessageIds: d.targetMessageIds ?? null
+      targetMessageIds: d.targetMessageIds
     };
 
     if (d.connectionId !== null) {
@@ -168,15 +169,11 @@ export class ContinuationState<
   }
 }
 
-/**
- * Add `id` to a continuation's targets. A result with no target (`null`) means
- * the continuation must run whatever the transcript, so it clears the check.
- */
+/** Add `id` to a continuation's targets. */
 export function addContinuationTarget(
-  targets: readonly string[] | null | undefined,
-  id: string | null | undefined
-): readonly string[] | null {
-  if (id == null || targets === null) return null;
+  targets: readonly string[] | undefined,
+  id: string
+): readonly string[] {
   if (targets === undefined) return [id];
   return targets.includes(id) ? targets : [...targets, id];
 }
@@ -208,11 +205,10 @@ export function addContinuationTarget(
  */
 export function continuationTargetIsLatest(
   messages: ReadonlyArray<{ id: string; role?: string }>,
-  pending: Pick<ContinuationPending, "targetMessageIds"> | null,
+  pending: Pick<ContinuationPending, "targetMessageIds">,
   lastTurnReplyId?: string | null
 ): boolean {
-  const targets = pending?.targetMessageIds;
-  if (targets == null) return true;
+  const targets = pending.targetMessageIds;
   let target = -1;
   for (let i = messages.length - 1; i >= 0; i--) {
     if (targets.includes(messages[i].id)) {
