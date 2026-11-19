@@ -12817,6 +12817,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       if (
         errored ||
         (terminalStream?.status === "completed" &&
+          // Closed with no producer left: cut off, not answered.
+          !terminalStream.cutOff &&
           row.result_status !== "retry")
       ) {
         await this._completeRecoveredSubmission(
@@ -17542,7 +17544,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       const info = this._resumableStream.latestStreamInfoForRequest(requestId);
       if (info) {
         streamId = info.id;
-        streamStatus = info.status;
+        // A stream that was closed with no producer left (a tab reconnected
+        // and its resume closed it before this recovery ran) reads
+        // `completed`, but the model never finished the reply. It is still
+        // the cut-off stream recovery continues.
+        streamStatus =
+          info.cutOff && info.status === "completed"
+            ? "streaming"
+            : info.status;
       }
     }
     if (!streamId && this._resumableStream.hasActiveStream()) {

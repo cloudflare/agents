@@ -10863,6 +10863,29 @@ export class ThinkRecoveryTestAgent extends Think {
     if (options.restore) this["_resumableStream"].restore();
   }
 
+  /**
+   * What a tab that reconnects does to a stream a reset left with no
+   * producer, when its resume request is acknowledged before the interrupted
+   * turn's recovery has run: the stream is replayed, closed and stored.
+   */
+  async acknowledgeResumeForTest(requestId: string): Promise<boolean> {
+    const self = this as unknown as {
+      _resumableStream: {
+        replayChunks(
+          connection: { id: string; send(message: string): void },
+          requestId: string
+        ): string | null;
+      };
+      _persistOrphanedStream(streamId: string): Promise<void>;
+    };
+    const orphaned = self._resumableStream.replayChunks(
+      { id: "tab-after-reset", send: () => {} },
+      requestId
+    );
+    if (orphaned) await self._persistOrphanedStream(orphaned);
+    return orphaned !== null;
+  }
+
   async getScheduledChatRecoveryCountForTest(
     callback = "_chatRecoveryContinue"
   ): Promise<number> {

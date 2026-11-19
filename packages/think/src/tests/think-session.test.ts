@@ -3421,6 +3421,40 @@ describe("Think — chatRecovery", () => {
     ).resolves.toBe("completed");
   });
 
+  it("does not settle a submission as completed on a stream a reconnecting tab closed after a reset", async () => {
+    const agent = await freshRecoveryAgent(
+      `terminal-cut-off-${crypto.randomUUID()}`
+    );
+    await agent.seedRunningSubmissionForTest("cut-off-submission");
+    await agent.insertInterruptedStream(
+      "cut-off-stream",
+      "cut-off-submission",
+      [
+        {
+          body: JSON.stringify({ type: "start", messageId: "a-cut-off" }),
+          index: 0
+        },
+        { body: JSON.stringify({ type: "text-start", id: "t" }), index: 1 },
+        {
+          body: JSON.stringify({ type: "text-delta", id: "t", delta: "1 2" }),
+          index: 2
+        }
+      ],
+      "streaming",
+      { restore: true }
+    );
+    // The row now reads completed, but the model never finished the reply.
+    expect(await agent.acknowledgeResumeForTest("cut-off-submission")).toBe(
+      true
+    );
+
+    await agent.recoverSubmissionsOnStartForTest();
+
+    await expect(
+      agent.getSubmissionStatusForTest("cut-off-submission")
+    ).resolves.toBe("error");
+  });
+
   it.each(["retry", "continue"] as const)(
     "keeps pending %s recovery ahead of terminal-stream ledger settlement",
     async (recoveryKind) => {
@@ -4922,6 +4956,61 @@ describe("Think — onChatRecovery", () => {
     ]);
     expect(messages[0].id).toBe("u-empty-opened-stream");
     expect(await agent.getTurnCallCount()).toBe(1);
+  });
+
+  it("continues a cut-off turn whose stream a reconnecting tab closed before recovery ran", async () => {
+    const agent = await freshRecoveryAgent(
+      `tab-before-recovery-${crypto.randomUUID()}`
+    );
+    await agent.persistTestMessage({
+      id: "u-tab",
+      role: "user",
+      parts: [{ type: "text", text: "Count to 40" }]
+    });
+    await agent.insertInterruptedStream(
+      "stream-tab",
+      "req-tab",
+      [
+        {
+          body: JSON.stringify({ type: "start", messageId: "a-tab" }),
+          index: 0
+        },
+        { body: JSON.stringify({ type: "text-start", id: "t" }), index: 1 },
+        {
+          body: JSON.stringify({ type: "text-delta", id: "t", delta: "1 2 3" }),
+          index: 2
+        }
+      ],
+      "streaming",
+      { restore: true }
+    );
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-tab", {
+      __cfThinkChatFiberSnapshot: {
+        kind: "think-chat-turn",
+        version: 1,
+        requestId: "req-tab",
+        continuation: false,
+        latestMessageId: "u-tab",
+        latestMessageRole: "user",
+        latestUserMessageId: "u-tab",
+        startedAt: Date.now()
+      },
+      user: null
+    });
+
+    // The tab reconnects first. Its resume is acknowledged, which closes the
+    // stream nobody is producing and stores the partial.
+    expect(await agent.acknowledgeResumeForTest("req-tab")).toBe(true);
+
+    // Then the interrupted turn's recovery runs. The stream is closed, but
+    // the model never finished it: the turn is continued.
+    const scheduled = await agent.triggerFiberRecovery();
+    expect(scheduled.scheduledContinueCount).toBe(1);
+    const incidents = (await agent.getChatRecoveryIncidentsForTest()) as Array<{
+      status: string;
+      reason?: string;
+    }>;
+    expect(incidents[0]).toMatchObject({ status: "scheduled" });
   });
 
   it("continues a partial stream with request context from the recovered snapshot", async () => {
