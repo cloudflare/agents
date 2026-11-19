@@ -212,6 +212,7 @@ import {
   streamChunksFinished,
   toolPartHasSettledResult,
   persistReconstructedOrphan,
+  keepStoredReplies,
   reconcileMessages,
   CHAT_RECOVERY_TASK_NAME,
   chatRecoveryTaskRunOptions,
@@ -15953,8 +15954,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const serverMessagesById = new Map(
       serverMessages.map((message) => [message.id, message])
     );
-    const reconciled = keepResolvedPauses(
-      reconcileMessages(incomingMessages, serverMessages, sanitizeMessage),
+    // A client's copy of a reply can be behind the stored one (the tab that
+    // pressed stop has one chunk fewer). It never shortens the stored reply.
+    const reconciled = keepStoredReplies(
+      keepResolvedPauses(
+        reconcileMessages(incomingMessages, serverMessages, sanitizeMessage),
+        serverMessages
+      ),
       serverMessages
     );
 

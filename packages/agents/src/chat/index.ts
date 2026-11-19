@@ -193,6 +193,8 @@ export {
   reconcileOrphanPartial
 } from "./message-reconciler";
 
+export { keepStoredReplies } from "./stored-replies";
+
 /**
  * @internal Shared transcript-repair primitive — flips interrupted tool calls
  * to a settled shape so a recovered turn's next provider call doesn't 400 with

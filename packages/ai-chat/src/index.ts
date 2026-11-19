@@ -29,6 +29,7 @@ import {
 import { MessageType, type OutgoingMessage } from "./types";
 import { autoTransformMessages } from "./ai-chat-v5-migration";
 import {
+  keepStoredReplies,
   reconcileMessages,
   reconcileOrphanPartial,
   repairInterruptedToolParts,
@@ -6237,9 +6238,14 @@ export class AIChatAgent<
     // change feed and therefore mutates as the loop below writes.
     const priorMessages = [...this.messages];
     const priorById = new Map(priorMessages.map((m) => [m.id, m]));
-    const mergedMessages = reconcileMessages(messages, priorMessages, (msg) =>
+    const reconciled = reconcileMessages(messages, priorMessages, (msg) =>
       this._sanitizeMessageForPersistence(msg)
     );
+    // A client's copy of a reply can be behind the stored one (the tab that
+    // pressed stop has one chunk fewer). It never shortens the stored reply.
+    const mergedMessages = incoming
+      ? keepStoredReplies(reconciled, priorMessages)
+      : reconciled;
 
     const toWrite: UIMessage[] = [];
     for (const message of mergedMessages) {

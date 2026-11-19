@@ -516,6 +516,45 @@ describe("chat turn races", () => {
     tab2.close(1000);
   });
 
+  it("a request from a tab a chunk behind does not shorten the stored reply", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const seen = record(ws);
+    const agent = await getAgentByName(env.TestChatAgent, room);
+    // A reply stopped mid-text. The server stored every chunk it streamed.
+    const stored: ChatMessage = {
+      id: "assistant-stopped",
+      role: "assistant",
+      parts: [
+        { type: "step-start" },
+        { type: "text", text: "One, two, three", state: "streaming" }
+      ]
+    };
+    await agent.persistMessages([user1, stored]);
+
+    // The tab that pressed stop drew one chunk fewer, and sends that copy
+    // with its next question.
+    const behind: ChatMessage = {
+      ...stored,
+      parts: [
+        { type: "step-start" },
+        { type: "text", text: "One, two", state: "done" }
+      ]
+    };
+    sendChatRequest(ws, "req-next", [user1, behind, user2]);
+    await waitUntil(() => responses(seen, "req-next").some((m) => m.done));
+    await agent.waitForIdleForTest();
+
+    const after = (await agent.getPersistedMessages()) as ChatMessage[];
+    expect(after.slice(0, 3).map((m) => m.id)).toEqual([
+      user1.id,
+      "assistant-stopped",
+      user2.id
+    ]);
+    expect(after[1].parts).toEqual(stored.parts);
+    ws.close(1000);
+  });
+
   it("a tool result for an older reply does not continue the newer reply", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);

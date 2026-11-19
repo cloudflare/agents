@@ -3400,6 +3400,43 @@ describe("Think — a subclass that wraps tool result applies", () => {
   });
 });
 
+describe("Think — a client copy of a reply that is behind", () => {
+  it("does not shorten the stored reply", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+    const question = makeUserMessage("count");
+    // A reply stopped mid-text. The server stored every chunk it streamed.
+    const stored: UIMessage = {
+      id: crypto.randomUUID(),
+      role: "assistant",
+      parts: [
+        { type: "step-start" },
+        { type: "text", text: "One, two, three", state: "streaming" }
+      ]
+    };
+    await agent.persistToolCallMessage([question, stored]);
+
+    // The tab that pressed stop drew one chunk fewer, and sends that copy
+    // with its next question.
+    const behind: UIMessage = {
+      ...stored,
+      parts: [
+        { type: "step-start" },
+        { type: "text", text: "One, two", state: "done" }
+      ]
+    };
+    const done = waitForDone(ws);
+    sendChatRequest(ws, [question, behind, makeUserMessage("go on")]);
+    await done;
+
+    const after = (await agent.getMessages()) as UIMessage[];
+    expect(after.find((m) => m.id === stored.id)?.parts).toEqual(stored.parts);
+    await closeWS(ws);
+  });
+});
+
 describe("Think — waiting on a client after an upgrade", () => {
   it("does not wait on a server tool call an older release stored in the latest reply", async () => {
     const agent = await freshAgent();
