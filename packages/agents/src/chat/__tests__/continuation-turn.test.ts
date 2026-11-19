@@ -825,6 +825,87 @@ describe("the continuation turn", () => {
       expect(host.ran).toEqual([]);
     });
 
+    it("reports only a stopped result that asked to continue and settled its call", async () => {
+      await startReply();
+      const inFlight = (
+        outcome: "changed" | "unchanged",
+        autoContinue: boolean
+      ) => {
+        let finishApply!: () => void;
+        const applied = turns.applyInteraction(
+          () =>
+            new Promise((resolve) => {
+              finishApply = () =>
+                resolve(
+                  outcome === "changed"
+                    ? { status: "changed", messageId: "a1" }
+                    : { status: "unchanged" }
+                );
+            }),
+          autoContinue,
+          () => spec()
+        );
+        return { applied, finish: () => finishApply() };
+      };
+      // Neither would have continued: one did not ask to, the other
+      // answered a call that was settled already.
+      const quiet = inFlight("changed", false);
+      const repeat = inFlight("unchanged", true);
+      await drain();
+      turns.cancel("req-1");
+      quiet.finish();
+      await quiet.applied;
+      await drain();
+      repeat.finish();
+      await repeat.applied;
+
+      expect(host.droppedEvents).toEqual([]);
+      await endReply();
+    });
+
+    it("a stop for another request does not drop what waits on a reply the runtime aborted", async () => {
+      await startReply();
+      turns.aborts.getSignal("req-1");
+      turns.aborts.getSignal("other");
+      await result("a1");
+      // The stall watchdog's abort: recovery continues the reply.
+      turns.runtimeAbort(() => turns.cancel("req-1"));
+      // A stop that names another request is not what aborted the reply.
+      turns.cancel("other");
+
+      await endReply();
+      await fire();
+      await drain();
+      expect(host.ran).toEqual(["cont-1"]);
+      expect(host.droppedEvents).toEqual([]);
+    });
+
+    it("stopping every request stops a running recovery attempt", async () => {
+      const attempt = turns.beginRecoveryAttempt("original");
+      const other = turns.beginRecoveryAttempt("another");
+      const reason = new Error("stop everything");
+      turns.stopAll(reason);
+
+      expect(attempt.signal.aborted).toBe(true);
+      expect(attempt.signal.reason).toBe(reason);
+      expect(other.signal.aborted).toBe(true);
+    });
+
+    it("a stop for a reply of the chat before a reset leaves the new chat's continuation alone", async () => {
+      await startReply();
+      await endReply();
+      turns.reset();
+      host.transcript = [user("u1"), toolReply("a1", "output-available")];
+      await result("a1");
+      // "req-1" streamed the last reply of the chat that was cleared.
+      turns.cancel("req-1");
+      await fire();
+      await drain();
+
+      expect(host.ran).toEqual(["cont-1"]);
+      expect(host.droppedEvents).toEqual([]);
+    });
+
     it("a second stop does not drop a result that arrived after the first", async () => {
       await startReply();
       await result("a1");
@@ -1468,6 +1549,70 @@ describe("what a continuation turn runs", () => {
       await drain();
 
       expect(stopped).toBe(true);
+    });
+
+    it("reports the result deferred behind a continuation that is stopped", async () => {
+      host.model = async (continuation) => {
+        // Arrives while the continuation runs: deferred. Then the user
+        // stops the continuation.
+        await result("a1");
+        turns.cancel(continuation.requestId);
+      };
+      await result("a1");
+      await fire();
+      await drain();
+      await fire();
+      await drain();
+
+      expect(host.ran).toEqual(["cont-1"]);
+      expect(turns.continuation.deferred).toBeNull();
+      // It had no continuation of its own yet, so it has no id of its own.
+      expect(host.droppedEvents).toEqual(["(result):stopped<cont-1"]);
+    });
+
+    it("drops a result still being applied at a stop for a host that does not listen for drops", async () => {
+      const quiet = new FakeHost();
+      Object.assign(quiet, { continuationDropped: undefined });
+      const quietTurns = new ChatTurns<TestConnection>(quiet, {
+        defaultDebounceMs: 750
+      });
+      quiet.turns = quietTurns;
+      let finishApply!: () => void;
+      const applied = quietTurns.applyInteraction(
+        () =>
+          new Promise((resolve) => {
+            finishApply = () => resolve({ status: "changed", messageId: "a1" });
+          }),
+        true,
+        () => ({
+          connection,
+          clientTools: undefined,
+          body: undefined,
+          errorPrefix: "[test]"
+        })
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      quietTurns.stopAll();
+      finishApply();
+
+      await expect(applied).resolves.toBe(true);
+      expect(quietTurns.continuation.pending).toBeNull();
+    });
+
+    it("leaves a continuation that streams for another tab alone", async () => {
+      let stopped: boolean | undefined;
+      host.model = async (continuation, signal) => {
+        turns.streamStarted(continuation.requestId, () => {});
+        // A tab that waits on nothing presses stop. It has no request id,
+        // and this continuation is not the one it waits on.
+        turns.cancelWaitingContinuation("other-tab");
+        stopped = signal.aborted;
+      };
+      await result("a1");
+      await fire();
+      await drain();
+
+      expect(stopped).toBe(false);
     });
 
     it("a result still being applied when the tab stops schedules nothing", async () => {

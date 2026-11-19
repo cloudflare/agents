@@ -742,7 +742,6 @@ export class ChatTurns<
         return;
       }
       // Fired and queued, or not fired yet: its turn finds nothing to claim.
-      this.aborts.cancel(pending.requestId, reason);
       this.#dropWaiting(null);
       return;
     }
