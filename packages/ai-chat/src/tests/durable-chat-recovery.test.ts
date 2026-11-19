@@ -3090,6 +3090,36 @@ describe("stall watchdog (chatStreamStallTimeoutMs)", () => {
     expect(await agentStub.getOnChatMessageCallCount()).toBeLessThanOrEqual(3);
   }, 15_000);
 
+  it("keeps the give-up's terminal record when the stalled turn it happened in ends", async () => {
+    const agentStub = await getTestAgent(
+      `stall-terminal-${crypto.randomUUID()}`
+    );
+    await agentStub.setChatRecoveryConfigForTest({ maxAttempts: 2 });
+
+    expect(
+      await agentStub.driveStallingTurnForTest({
+        timeoutMs: 100,
+        hangTurns: 20
+      })
+    ).toBe("aborted");
+    await expect
+      .poll(
+        async () =>
+          (
+            (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
+              status?: string;
+            }>
+          )[0]?.status,
+        { timeout: 10_000, interval: 100 }
+      )
+      .toBe("exhausted");
+    // The turn that stalled last ends aborted after the give-up. A tab that
+    // connects now must still learn the turn gave up.
+    await agentStub.waitForIdleForTest();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(await agentStub.getPendingChatTerminalForTest()).not.toBeNull();
+  }, 15_000);
+
   it("keeps an incident given up when the recovered turn that gave up returns", async () => {
     const agentStub = await getTestAgent(`stall-sealed-${crypto.randomUUID()}`);
     await agentStub.setChatRecoveryConfigForTest({ maxAttempts: 2 });

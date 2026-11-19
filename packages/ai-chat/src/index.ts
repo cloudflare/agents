@@ -3217,7 +3217,8 @@ export class AIChatAgent<
                 chatResult.status === "completed" ||
                 chatResult.status === "aborted"
               ) {
-                await this._clearChatTerminal();
+                // Not the record of this turn's own give-up.
+                await this._clearChatTerminal(chatResult.requestId);
               } else if (chatResult.status === "error") {
                 // A terminal (non-recovered) error — e.g. a provider 500 surfaced
                 // as a stream `error` part — has no durable trace otherwise, so a
@@ -5180,8 +5181,8 @@ export class AIChatAgent<
   }
 
   /** Clear the durable terminal record once a later turn supersedes it (#1645). */
-  private async _clearChatTerminal(): Promise<void> {
-    await clearChatTerminal(this.ctx.storage);
+  private async _clearChatTerminal(endedRequestId?: string): Promise<void> {
+    await clearChatTerminal(this.ctx.storage, endedRequestId);
   }
 
   private async _pendingChatTerminal(): Promise<{

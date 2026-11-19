@@ -576,10 +576,25 @@ export async function recordChatTerminal(
   await storage.put(CHAT_LAST_TERMINAL_KEY, record);
 }
 
-/** Clear the durable terminal record once a later turn supersedes it (#1645). */
+/**
+ * Clear the durable terminal record once a later turn supersedes it (#1645).
+ *
+ * @param endedRequestId - The turn that just ended without an error, when
+ *   that is why the record is cleared. A record made for that same turn is
+ *   kept: recovery gave up on it while it was still running (a live stall
+ *   with the budget spent), and the turn then ended as aborted. The record
+ *   is the only trace of the give-up for a client that was away.
+ */
 export async function clearChatTerminal(
-  storage: Pick<DurableObjectStorage, "delete">
+  storage: Pick<DurableObjectStorage, "get" | "delete">,
+  endedRequestId?: string
 ): Promise<void> {
+  if (endedRequestId !== undefined) {
+    const record = await storage.get<ChatTerminalRecord>(
+      CHAT_LAST_TERMINAL_KEY
+    );
+    if (record?.requestId === endedRequestId) return;
+  }
   await storage.delete(CHAT_LAST_TERMINAL_KEY);
 }
 

@@ -19100,7 +19100,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     if (status === "error" || status === "interrupted") {
       await this._recordChatTerminal(requestId, body, messageIds);
     } else {
-      await this._clearChatTerminal();
+      // Not the record of this turn's own give-up.
+      await this._clearChatTerminal(requestId);
     }
     // Any terminal turn outcome resolves an in-progress recovery (#1620): a
     // recovered turn that completes, errors, or is exhausted must clear the
@@ -19123,8 +19124,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /** Clear the durable terminal record once a later turn supersedes it (#1645). */
-  private async _clearChatTerminal(): Promise<void> {
-    await clearChatTerminal(this.ctx.storage);
+  private async _clearChatTerminal(endedRequestId?: string): Promise<void> {
+    await clearChatTerminal(this.ctx.storage, endedRequestId);
   }
 
   private async _pendingChatTerminal(): Promise<{

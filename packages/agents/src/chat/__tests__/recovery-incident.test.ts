@@ -11,6 +11,9 @@ import {
   CHAT_RECOVERY_PROGRESS_KEY,
   chatRecoveryIncidentId,
   chatRecoveryIncidentKey,
+  clearChatTerminal,
+  pendingChatTerminal,
+  recordChatTerminal,
   DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS,
   DEFAULT_CHAT_RECOVERY_MAX_INTERRUPTED_ATTEMPTS,
   DEFAULT_CHAT_RECOVERY_MAX_WORK,
@@ -1099,5 +1102,40 @@ describe("admitChatRecoveryAttempt / finishChatRecoveryAttempt (#2613)", () => {
     });
     expect(incident.interruptedAttempts).toBe(2);
     expect(incident.attemptsInFlight).toEqual([{ isolate: "y", token: "t3" }]);
+  });
+});
+
+describe("clearChatTerminal", () => {
+  function storage() {
+    const map = new Map<string, unknown>();
+    return {
+      get: async <T>(key: string) => map.get(key) as T | undefined,
+      put: async (key: string, value: unknown) => void map.set(key, value),
+      delete: async (key: string) => map.delete(key)
+    } as unknown as DurableObjectStorage;
+  }
+
+  it("keeps the record of a give-up when the turn it was made for ends", async () => {
+    const store = storage();
+    await recordChatTerminal(store, "req-1", "Recovery gave up.");
+    await clearChatTerminal(store, "req-1");
+    expect(await pendingChatTerminal(store)).toEqual({
+      requestId: "req-1",
+      body: "Recovery gave up."
+    });
+  });
+
+  it("clears the record when a later turn ends", async () => {
+    const store = storage();
+    await recordChatTerminal(store, "req-1", "Recovery gave up.");
+    await clearChatTerminal(store, "req-2");
+    expect(await pendingChatTerminal(store)).toBeNull();
+  });
+
+  it("clears the record when no turn is named (a new request, a clear)", async () => {
+    const store = storage();
+    await recordChatTerminal(store, "req-1", "Recovery gave up.");
+    await clearChatTerminal(store);
+    expect(await pendingChatTerminal(store)).toBeNull();
   });
 });
