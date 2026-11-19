@@ -490,7 +490,7 @@ export class AgentToolRuns {
           }
         });
         if (
-          turn.status === "aborted" &&
+          // Only an `aborted` turn carries a reason.
           turn.reason === "interrupted" &&
           // A cancel or a stop settled the row meanwhile: nothing is left
           // to wait for.
