@@ -1996,6 +1996,39 @@ describe("transient recovery backoff", () => {
     expect(chatRecoveryBackoffSeconds(1, 600)).toBe(60);
   });
 
+  it("reads the header inside the error the AI SDK throws once its own retries are used up", () => {
+    const call = (seconds: string) => ({
+      name: "AI_APICallError",
+      statusCode: 429,
+      responseHeaders: { "retry-after": seconds }
+    });
+    // A RetryError has no `cause`: the provider's errors are in `lastError`
+    // and `errors`.
+    expect(
+      retryAfterSeconds({
+        name: "AI_RetryError",
+        reason: "maxRetriesExceeded",
+        errors: [call("2"), call("4"), call("9")],
+        lastError: call("9")
+      })
+    ).toBe(9);
+    // The newest attempt that carries a header wins.
+    expect(
+      retryAfterSeconds({ errors: [call("2"), call("4"), { name: "Other" }] })
+    ).toBe(4);
+    // Wrapped once more, as a host's own error.
+    expect(
+      retryAfterSeconds({ cause: { lastError: { cause: call("6") } } })
+    ).toBe(6);
+  });
+
+  it("stops on an error that wraps itself", () => {
+    const loop: { lastError?: unknown; errors?: unknown[] } = {};
+    loop.lastError = loop;
+    loop.errors = [loop];
+    expect(retryAfterSeconds(loop)).toBeUndefined();
+  });
+
   it("reads Retry-After from response headers, headers or the cause chain", () => {
     const now = Date.parse("2026-01-01T00:00:00Z");
     expect(retryAfterSeconds({ responseHeaders: { "Retry-After": "3" } })).toBe(

@@ -1806,7 +1806,9 @@ export function chatRecoveryBackoffSeconds(
 /**
  * How long a provider asked the caller to wait before retrying, in whole
  * seconds. Reads `responseHeaders` (AI SDK `APICallError`) or `headers` on
- * the error or its `cause` chain. `retry-after-ms` (milliseconds) wins over
+ * the error, then on the errors it wraps: `lastError` and `errors` (AI SDK
+ * `RetryError`, thrown once its own retries are used up; the newest attempt
+ * is read first) and `cause`. `retry-after-ms` (milliseconds) wins over
  * `retry-after`, which is delta-seconds or an HTTP date. `undefined` when
  * absent or unparseable.
  */
@@ -1814,25 +1816,49 @@ export function retryAfterSeconds(
   error: unknown,
   now: number = Date.now()
 ): number | undefined {
-  let current = error;
-  for (let depth = 0; depth < 8 && current != null; depth++) {
-    if (typeof current !== "object") return undefined;
-    const record = current as {
-      responseHeaders?: unknown;
-      headers?: unknown;
-      cause?: unknown;
-    };
-    for (const headers of [record.responseHeaders, record.headers]) {
-      const milliseconds = readHeader(headers, "retry-after-ms");
-      if (milliseconds !== undefined && /^\d+(\.\d+)?$/.test(milliseconds)) {
-        return Math.ceil(Number(milliseconds) / 1000);
-      }
-      const value = readHeader(headers, "retry-after");
-      if (value !== undefined) return parseRetryAfter(value, now);
+  return retryAfterIn(error, now, new Set(), 0).seconds;
+}
+
+/**
+ * `found` separates "this error carries the header, and it does not parse"
+ * (stop there, as the newest answer) from "no header here, keep looking".
+ */
+function retryAfterIn(
+  error: unknown,
+  now: number,
+  seen: Set<object>,
+  depth: number
+): { found: boolean; seconds?: number } {
+  if (error == null || typeof error !== "object") return { found: false };
+  if (depth >= 8 || seen.has(error)) return { found: false };
+  seen.add(error);
+  const record = error as {
+    responseHeaders?: unknown;
+    headers?: unknown;
+    lastError?: unknown;
+    errors?: unknown;
+    cause?: unknown;
+  };
+  for (const headers of [record.responseHeaders, record.headers]) {
+    const milliseconds = readHeader(headers, "retry-after-ms");
+    if (milliseconds !== undefined && /^\d+(\.\d+)?$/.test(milliseconds)) {
+      return { found: true, seconds: Math.ceil(Number(milliseconds) / 1000) };
     }
-    current = record.cause;
+    const value = readHeader(headers, "retry-after");
+    if (value !== undefined) {
+      return { found: true, seconds: parseRetryAfter(value, now) };
+    }
   }
-  return undefined;
+  const wrapped = [
+    record.lastError,
+    ...(Array.isArray(record.errors) ? [...record.errors].reverse() : []),
+    record.cause
+  ];
+  for (const inner of wrapped) {
+    const result = retryAfterIn(inner, now, seen, depth + 1);
+    if (result.found) return result;
+  }
+  return { found: false };
 }
 
 function readHeader(headers: unknown, header: string): string | undefined {
