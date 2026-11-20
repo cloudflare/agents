@@ -605,4 +605,16 @@ describe("newUserMessageIds", () => {
     ).toEqual(["u2", "u3"]);
     expect(newUserMessageIds([m("u1")], new Set())).toEqual(["u1"]);
   });
+
+  it("ends at a message that is not a user's, so what it holds goes last", () => {
+    expect(
+      newUserMessageIds([m("u1"), m("a1", "assistant")], new Set())
+    ).toEqual([]);
+    expect(
+      newUserMessageIds(
+        [m("u1"), m("a1", "assistant"), m("u2")],
+        new Set(["u1"])
+      )
+    ).toEqual(["u2"]);
+  });
 });

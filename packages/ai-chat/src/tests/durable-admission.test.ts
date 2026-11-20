@@ -20,6 +20,7 @@ type AdmissionStub = {
   >;
   seedAdmissionForTest(requestId: string, messageIds: string[]): Promise<void>;
   seedQueuedRequestForTest(requestId: string): Promise<void>;
+  getTranscriptsSeenForTest(): Promise<string[][]>;
 };
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -130,16 +131,26 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
       () => restarted.getPersistedMessages(),
       (m) => m.filter((x) => x.role === "assistant").length >= 2
     );
+    // Each reply follows the question it answers.
     expect(messages.map((m) => m.role)).toEqual([
       "user",
-      "user",
       "assistant",
+      "user",
       "assistant"
     ]);
-    expect(messages.map((m) => m.id).slice(0, 2)).toEqual(["u1", "u2"]);
+    expect(messages[0].id).toBe("u1");
+    expect(messages[2].id).toBe("u2");
     // The recovered turn answers first, then the queued request.
-    expect(textOf(messages[2])).not.toBe(QUICK_REPLY);
+    expect(textOf(messages[1])).not.toBe(QUICK_REPLY);
     expect(textOf(messages[3])).toBe(QUICK_REPLY);
+    // The recovered turn never saw the queued question. The queued turn's
+    // transcript ends in its own question.
+    const seen = await restarted.getTranscriptsSeenForTest();
+    expect(seen.length).toBeGreaterThanOrEqual(2);
+    for (const transcript of seen) {
+      if (transcript.includes("u2")) expect(transcript.at(-1)).toBe("u2");
+    }
+    expect(seen.at(-1)).toEqual(["u1", messages[1].id, "u2"]);
 
     await waitFor(
       async () => doneFrame(frames, "r2"),
@@ -196,10 +207,12 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
       (m) => m.some((x) => x.role === "assistant")
     );
     await delay(1000);
+    // The stopped request's question is kept, after the reply before it,
+    // with no reply of its own.
     expect((await stub.getPersistedMessages()).map((m) => m.role)).toEqual([
       "user",
-      "user",
-      "assistant"
+      "assistant",
+      "user"
     ]);
     expect(messages.every((m) => textOf(m) !== QUICK_REPLY)).toBe(true);
     expect(await stub.getAdmissionsForTest()).toEqual([]);
@@ -263,12 +276,13 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
       (m) => m.filter((x) => x.role === "assistant").length >= 2
     );
     await delay(500);
-    expect((await stub.getPersistedMessages()).map((m) => m.role)).toEqual([
-      "user",
-      "user",
-      "user",
-      "assistant",
-      "assistant"
+    // The superseded question is kept, and answered with the latest.
+    expect((await stub.getPersistedMessages()).map((m) => m.id)).toEqual([
+      "u1",
+      messages[1].id,
+      "u2",
+      "u3",
+      messages[4].id
     ]);
     expect(textOf(messages[4])).toBe(QUICK_REPLY);
     expect(doneFrame(frames, "r2")?.outcome).toBe("skipped");

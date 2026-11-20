@@ -998,11 +998,17 @@ describe("AIChatAgent messageConcurrency", () => {
         chunkCount: 1,
         chunkDelayMs: 10
       });
+      // It waits with its message on its record, not in the transcript.
       await waitUntil(async () =>
-        ((await agentStub.getPersistedMessages()) as ChatMessage[]).some(
-          (message) => message.id === secondUserMessage.id
+        (await agentStub.getQueuedMessageIdsForTest()).includes(
+          secondUserMessage.id
         )
       );
+      expect(
+        ((await agentStub.getPersistedMessages()) as ChatMessage[]).map(
+          (message) => message.id
+        )
+      ).toEqual([firstUserMessage.id]);
       expect(await agentStub.getStartedRequestIds()).toEqual([firstId]);
 
       // Cancel the queued request first, then the active one so the queued

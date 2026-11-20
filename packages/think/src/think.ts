@@ -4772,7 +4772,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         ),
       continuationDropped: (event) =>
         this._emit("chat:continuation:dropped", { ...event }),
-      stopped: (requestId, reason) => this._afterStop(requestId, reason)
+      stopped: (requestId, reason) => this._afterStop(requestId, reason),
+      // A waiting message that will not join: tabs stop drawing it.
+      waitingChanged: () => this._broadcastMessages()
     },
     {
       defaultDebounceMs: Think.MESSAGE_DEBOUNCE_MS,
@@ -4818,19 +4820,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /**
-   * The last message a recovery checks: the latest one that no request
-   * queued behind the recovered turn stored. Those requests run after it,
-   * so their questions have not moved the conversation on.
+   * The last message a recovery checks. A request queued behind the
+   * recovered turn holds its question on its record until its turn starts,
+   * so it is not in the session.
    */
-  private async _recoveryLeaf(): Promise<{ id: string; role: string } | null> {
-    const leaf = await this.session.getLatestLeaf();
-    const queued = this._turns.admittedMessageIds();
-    if (!leaf || !queued.has(leaf.id)) return leaf;
-    const messages = this.messages;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (!queued.has(messages[i].id)) return messages[i];
-    }
-    return null;
+  private _recoveryLeaf(): Promise<{ id: string; role: string } | null> {
+    return this.session.getLatestLeaf();
   }
 
   /**
@@ -4860,7 +4855,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       requestId,
       isRegeneration: stored.trigger === "regenerate-message",
       messages: null,
-      newMessageIds: record.messageIds,
       clientTools: stored.clientTools,
       body: stored.body ?? {},
       connection: null,
@@ -6044,7 +6038,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         recoveryRootRequestId:
           this._activeChatRecoveryRootRequestId ?? requestId,
         continuation,
-        messages: this._turns.snapshotMessages(this.messages, requestId),
+        messages: this.messages,
         lastBody: context ? context.body : this._lastBody,
         lastClientTools: context ? context.clientTools : this._lastClientTools,
         originMessageIds: this._originMessageIdsFor(requestId)
@@ -12995,7 +12989,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         url.pathname === "/get-messages" ||
         url.pathname.endsWith("/get-messages")
       ) {
-        return Response.json(this.messages);
+        // Then the messages waiting requests hold: a tab that loads the
+        // transcript while one waits draws it.
+        return Response.json(this._turns.clientView(this.messages).messages);
       }
       const messengerResponse =
         await this._messengerRuntime?.handleRequest(request);
@@ -13169,7 +13165,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           requestId,
           isRegeneration,
           messages: incomingMessages,
-          newMessageIds: this._newUserMessageIds(incomingMessages),
           clientTools: rawClientTools,
           body: customBody,
           connection,
@@ -13191,16 +13186,18 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * queue, the queued checks, then the turn. It always settles the
    * pre-stream turn (#1784) and drops the abort controller.
    *
+   * The request's new user messages wait on its record until its turn
+   * starts (`join`), so the turn running now never sees them and the turn
+   * that answers them reads them last.
+   *
    * A replay after an isolate reset (`messages: null`) has no connection:
-   * its messages are stored already, and its frames go to every connection.
+   * its messages are on its record, and its frames go to every connection.
    */
   private _clientChatRequest(input: {
     requestId: string;
     isRegeneration: boolean;
     /** What the client sent, or `null` for a replay. */
     messages: UIMessage[] | null;
-    /** The user messages this request stores. */
-    newMessageIds: string[];
     clientTools: ClientToolSchema[] | undefined;
     body: Record<string, unknown>;
     connection: Connection | null;
@@ -13215,16 +13212,22 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       requestId,
       isRegeneration,
       messages: incomingMessages,
-      newMessageIds,
       clientTools: rawClientTools,
       body: customBody,
       connection
     } = input;
     const isSubmitMessage = !isRegeneration;
+    // Messages other waiting requests hold are theirs, even when this tab
+    // drew them and sent them back.
+    const queued = incomingMessages ? this._turns.queuedMessageIds() : null;
+    const sent = incomingMessages?.filter((m) => !queued?.has(m.id)) ?? [];
+    const heldIds = new Set(this._newUserMessageIds(sent));
+    const held = sent.filter((message) => heldIds.has(message.id));
+    const base = sent.filter((message) => !heldIds.has(message.id));
     return {
       requestId,
       admission: {
-        messageIds: newMessageIds,
+        messages: held,
         payload: {
           trigger: isRegeneration ? "regenerate-message" : "submit-message",
           clientTools: rawClientTools,
@@ -13256,16 +13259,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           () => this._clearChatTerminal()
         ),
       persist: async ({ generation, isCurrent }) => {
-        // A replay after a reset: its messages were stored before the reset.
-        // One that is gone (a clear, or a reset before it was written) has
-        // nothing to answer.
+        // A replay after a reset: its messages are on its record.
         if (!incomingMessages) {
-          return this._turns.replayHasNothingToAnswer(
-            newMessageIds,
-            this.messages
-          )
-            ? null
-            : { branchParentId: input.branchParentId, generation };
+          return { branchParentId: input.branchParentId, generation };
         }
         // ── Reconcile, persist, and broadcast user messages ──────────
         //
@@ -13276,14 +13272,51 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         // up the server's tool outputs. Without this, Session's
         // INSERT-OR-IGNORE-by-ID would persist a duplicate orphan
         // assistant row alongside the real server-generated one.
-        const reconciledTurn = await this._reconcileAndPersistIncoming(
-          incomingMessages,
-          { requestId, isRegeneration, isCurrent, channel: "web" }
-        );
+        const reconciledTurn = await this._reconcileAndPersistIncoming(base, {
+          requestId,
+          isRegeneration,
+          isCurrent,
+          channel: "web"
+        });
         if (!reconciledTurn) return null;
 
+        // Other tabs see the new messages as queued.
         this._broadcastMessages(connection ? [connection.id] : []);
-        return { branchParentId: reconciledTurn.branchParentId, generation };
+        return {
+          // A regenerate of a question that waits branches from it.
+          branchParentId:
+            isRegeneration && held.length > 0
+              ? held[held.length - 1].id
+              : reconciledTurn.branchParentId,
+          generation
+        };
+      },
+      // The turn is at the front of the queue: its new messages join the
+      // session under the latest leaf (the reply of the turn it waited
+      // behind), and the other tabs are told.
+      join: async ({ messages, isCurrent }) => {
+        const joined = await withAgentSpan(
+          this,
+          "persist_incoming_messages",
+          "turn",
+          {
+            "cloudflare.agents.component": "think",
+            "cloudflare.agents.turn.request_id": requestId,
+            "cloudflare.agents.turn.trigger": "ws-chat"
+          },
+          async () => {
+            for (const message of messages as UIMessage[]) {
+              if (!isCurrent()) return false;
+              await this._persistIncomingMessage(message, undefined, "web");
+            }
+            if (!isCurrent()) return false;
+            if (!this._cacheCoversActivePath) await this._syncMessages();
+            return true;
+          }
+        );
+        // The tab that sent them draws them already.
+        if (joined) this._broadcastMessages(connection ? [connection.id] : []);
+        return joined;
       },
       enqueue: (turn, generation, onQueued) =>
         this.keepAliveWhile(async () => {
@@ -17790,12 +17823,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   private _rollbackDroppedSubmit(connection: Connection): void {
-    connection.send(
-      JSON.stringify({
-        type: MSG_CHAT_MESSAGES,
-        messages: this.messages
-      })
-    );
+    connection.send(JSON.stringify(this._messagesFrame()));
   }
 
   // ── Auto-continuation ──────────────────────────────────────────
@@ -18589,7 +18617,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     Array<Record<string, unknown>>
   > {
     const messages: Array<Record<string, unknown>> = [
-      { type: MSG_CHAT_MESSAGES, messages: this.messages, connect: true }
+      this._messagesFrame({ connect: true })
     ];
     // Replay an in-progress "recovering…" status so a client that connects
     // mid-recovery reads the turn as working rather than frozen (#1620). This
@@ -18890,11 +18918,20 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     this.broadcast(JSON.stringify(message), exclude);
   }
 
+  /**
+   * The message list tabs are sent: the transcript, then the messages
+   * waiting requests hold, named in `queuedMessageIds`.
+   */
+  private _messagesFrame(extra?: Record<string, unknown>) {
+    return {
+      type: MSG_CHAT_MESSAGES,
+      ...this._turns.clientView(this.messages),
+      ...extra
+    };
+  }
+
   private _broadcastMessages(exclude?: string[]) {
-    this._broadcast(
-      { type: MSG_CHAT_MESSAGES, messages: this.messages },
-      exclude
-    );
+    this._broadcast(this._messagesFrame(), exclude);
   }
 }
 

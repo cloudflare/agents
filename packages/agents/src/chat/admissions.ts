@@ -47,11 +47,14 @@ import type { AgentToolSql } from "./agent-tool-run-store";
 import type { NormalizedMessageConcurrency } from "./submit-concurrency";
 
 /**
- * The user messages a client request stores: the ones at the end of what it
- * sent that are not stored yet. A client sends its whole transcript, and
- * with windowed history `stored` holds only the newest messages, so an
- * older message outside the window is not one this request stores: only the
- * run after the last stored message counts.
+ * The new user messages a client request holds until its turn starts: the
+ * user messages at the end of what it sent that are not stored yet. A
+ * client sends its whole transcript, and with windowed history `stored`
+ * holds only the newest messages, so an older message outside the window
+ * is not new: only the run after the last stored message counts. The run
+ * ends at a message that is not a user's (a reply the tab drew while it
+ * streamed): that one, and what comes before it, is stored with the
+ * request, as before, so the held messages always go last.
  *
  * @param messages - What the request sent, oldest first.
  * @param stored - The ids of the stored messages the host holds in memory.
@@ -62,8 +65,8 @@ export function newUserMessageIds(
 ): string[] {
   const ids: string[] = [];
   for (let i = messages.length - 1; i >= 0; i--) {
-    if (stored.has(messages[i].id)) break;
-    if (messages[i].role === "user") ids.unshift(messages[i].id);
+    if (stored.has(messages[i].id) || messages[i].role !== "user") break;
+    ids.unshift(messages[i].id);
   }
   return ids;
 }
