@@ -192,6 +192,10 @@ import {
   addContinuationTarget,
   ChatTurns,
   ChatTurnFibers,
+  createChatAdmissionStore,
+  chatRecoveryNames,
+  type ChatAdmissionRecord,
+  type ClientChatRequest,
   pinnedOr,
   type PinnedTurnContext as PinnedContext,
   prepareTurnMessages,
@@ -3500,6 +3504,19 @@ function isMethodOverridden(instance: object, methodName: string): boolean {
   return false;
 }
 
+/**
+ * What `Think` stores with a client request's admission record, to run it
+ * again after an isolate reset. See `ChatTurns.resumeAdmissions`.
+ */
+type StoredThinkClientRequest = {
+  trigger: "submit-message" | "regenerate-message";
+  clientTools: ClientToolSchema[] | undefined;
+  body: Record<string, unknown>;
+  originMessageIds: string[] | undefined;
+  /** A regenerate: the message whose reply it replaces. */
+  branchParentId: string | undefined;
+};
+
 export class Think<
   Env extends Cloudflare.Env = Cloudflare.Env,
   State = unknown,
@@ -4042,6 +4059,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               await this._replayPendingResponseHooks();
               await this._replayMessengerRecoveryDeliveries();
               await this._recoverSubmissionsOnStart();
+              // Requests an earlier isolate accepted and never started run
+              // again, once no interrupted turn waits for recovery.
+              this._resumeAdmissions();
             },
             "Pending submissions / workflow notifications were not recovered on " +
               "this wake; the next successful wake will recover them."
@@ -4740,8 +4760,116 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         this._emit("chat:continuation:dropped", { ...event }),
       stopped: (requestId, reason) => this._afterStop(requestId, reason)
     },
-    { defaultDebounceMs: Think.MESSAGE_DEBOUNCE_MS }
+    {
+      defaultDebounceMs: Think.MESSAGE_DEBOUNCE_MS,
+      // A request waiting in the queue survives an isolate reset.
+      admissions: {
+        store: createChatAdmissionStore(() => this.ctx.storage.sql),
+        recoveryPending: () => this._chatRecoveryNames(),
+        recoveryOwns: (requestId) => this._chatRecoveryNames(requestId),
+        replayRequest: (record) => this._replayClientChatRequest(record)
+      }
+    }
   );
+
+  /**
+   * Whether a chat turn waits for recovery, or, with `requestId`, whether a
+   * turn of that request had a fiber recovery knows about.
+   */
+  private _chatRecoveryNames(requestId?: string): Promise<boolean> {
+    return chatRecoveryNames({
+      sql: this.ctx.storage.sql,
+      storage: this.ctx.storage,
+      turnName: (this.constructor as typeof Think).CHAT_FIBER_NAME,
+      liveRequestIds: new Set(this._chatTurnFibers.liveTurns.keys()),
+      requestId
+    });
+  }
+
+  /**
+   * Run the requests an earlier isolate left. Never rejects: what fails is
+   * logged, and the next start or recovery tries again.
+   */
+  private _resumeAdmissions(): void {
+    void this.keepAliveWhile(() => this._turns.resumeAdmissions()).catch(
+      (error) => console.error("[Think] failed to replay requests:", error)
+    );
+  }
+
+  /**
+   * The last message a recovery checks: the latest one that no request
+   * queued behind the recovered turn stored. Those requests run after it,
+   * so their questions have not moved the conversation on.
+   */
+  private async _recoveryLeaf(): Promise<{ id: string; role: string } | null> {
+    const leaf = await this.session.getLatestLeaf();
+    const queued = this._turns.admittedMessageIds();
+    if (!leaf || !queued.has(leaf.id)) return leaf;
+    const messages = this.messages;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (!queued.has(messages[i].id)) return messages[i];
+    }
+    return null;
+  }
+
+  /**
+   * User messages a client request stores: the ones at the end of what it
+   * sent that are not stored yet.
+   */
+  private _newUserMessageIds(messages: UIMessage[]): string[] {
+    const stored = new Set(this.messages.map((message) => message.id));
+    const ids: string[] = [];
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (stored.has(messages[i].id)) break;
+      if (messages[i].role === "user") ids.unshift(messages[i].id);
+    }
+    return ids;
+  }
+
+  /**
+   * A request an earlier isolate accepted and never gave a turn with a
+   * fiber, to run again (`ChatTurns.resumeAdmissions`).
+   */
+  private _replayClientChatRequest(record: ChatAdmissionRecord) {
+    const stored = record.payload as StoredThinkClientRequest | undefined;
+    if (!stored || typeof stored !== "object") return null;
+    const requestId = record.requestId;
+    if (stored.originMessageIds) {
+      this._requestOriginMessageIds.set(requestId, stored.originMessageIds);
+    }
+    const forget = () => this._requestOriginMessageIds.delete(requestId);
+    const request = this._clientChatRequest({
+      requestId,
+      isRegeneration: stored.trigger === "regenerate-message",
+      messages: null,
+      newMessageIds: record.messageIds,
+      clientTools: stored.clientTools,
+      body: stored.body ?? {},
+      connection: null,
+      branchParentId: stored.branchParentId,
+      originMessageIds: stored.originMessageIds
+    });
+    const { persist, enqueue } = request;
+    return {
+      ...request,
+      persist: async (context: Parameters<typeof persist>[0]) => {
+        const prepared = await persist(context);
+        if (prepared === null) forget();
+        return prepared;
+      },
+      enqueue: async (
+        turn: () => Promise<void>,
+        generation: number,
+        onQueued: () => void
+      ) => {
+        try {
+          return await enqueue(turn, generation, onQueued);
+        } finally {
+          forget();
+        }
+      }
+    };
+  }
   private readonly _aborts = this._turns.aborts;
   private readonly _turnQueue = this._turns.queue;
   /**
@@ -5712,7 +5840,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       return (fn) => (ambient ? agentContext.run(ambient, fn) : fn());
     },
     turnBody: (continuation, body, requestId) =>
-      this._chatRecoveryEngine().turnBody(continuation, body, requestId)
+      this._chatRecoveryEngine().turnBody(continuation, body, requestId),
+    turnAccepted: (requestId) => this._turns.turnAccepted(requestId)
   });
 
   /**
@@ -11578,6 +11707,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     this._ensureSubmissionTable();
     const row = this._readSubmission(payload.submissionId);
     if (!row || row.status !== "pending") return;
+    if (this._submissionsBehindRecovery.has(row.submission_id)) {
+      // Queued again when the recovery settles.
+      if (await this._chatRecoveryNames()) return;
+      this._submissionsBehindRecovery.delete(row.submission_id);
+    }
     await this._admitTurn({
       admission: "execute-submission",
       trigger: "submission",
@@ -11925,7 +12059,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     }
 
     // Rows still pending (reverted above, or accepted before their run
-    // item existed) get their run queued; queued ones keep their slot.
+    // item existed) get their run queued; queued ones keep their slot. They
+    // run once no interrupted turn waits for recovery.
+    for (const row of this.sql<{ submission_id: string }>`
+      SELECT submission_id FROM cf_think_submissions WHERE status = 'pending'
+    `) {
+      this._submissionsBehindRecovery.add(row.submission_id);
+    }
     await this._queuePendingSubmissionRuns();
   }
 
@@ -12978,7 +13118,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     if (!Array.isArray(incomingMessages)) return;
 
     const isRegeneration = rawTrigger === "regenerate-message";
-    const isSubmitMessage = !isRegeneration;
     const requestId = event.id;
     const requestOriginIds = originMessageIds(incomingMessages);
     if (requestOriginIds) {
@@ -12990,122 +13129,194 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // persist, queue, the queued checks, then the turn. It always settles the
     // pre-stream turn (#1784) and drops the abort controller.
     try {
-      await this._turns.runClientRequest<{
-        branchParentId: string | undefined;
-        generation: number;
-      }>({
-        requestId,
-        isSubmitMessage,
-        concurrency: this.messageConcurrency,
-        onDropped: () => {
-          this._rollbackDroppedSubmit(connection);
-          this._completeSkippedRequest(connection, requestId);
-        },
-        // A genuinely-new turn supersedes any pending terminal record (#1645)
-        // so a stale exhaustion can't replay over the resume handshake to a
-        // client that reconnects between this submit being accepted and the
-        // new turn streaming.
-        onAccepted: () =>
+      await this._turns.runClientRequest(
+        this._clientChatRequest({
+          requestId,
+          isRegeneration,
+          messages: incomingMessages,
+          newMessageIds: this._newUserMessageIds(incomingMessages),
+          clientTools: rawClientTools,
+          body: customBody,
+          connection,
+          branchParentId: isRegeneration
+            ? incomingMessages.at(-1)?.id
+            : undefined,
+          originMessageIds: requestOriginIds
+        })
+      );
+    } finally {
+      this._requestOriginMessageIds.delete(requestId);
+    }
+  }
+
+  /**
+   * One client chat request, as the turn core runs it: decide, accept
+   * (pre-stream mark and abort controller, so a cancel while it waits in the
+   * queue is not lost), record it for a replay after a reset, persist,
+   * queue, the queued checks, then the turn. It always settles the
+   * pre-stream turn (#1784) and drops the abort controller.
+   *
+   * A replay after an isolate reset (`messages: null`) has no connection:
+   * its messages are stored already, and its frames go to every connection.
+   */
+  private _clientChatRequest(input: {
+    requestId: string;
+    isRegeneration: boolean;
+    /** What the client sent, or `null` for a replay. */
+    messages: UIMessage[] | null;
+    /** The user messages this request stores. */
+    newMessageIds: string[];
+    clientTools: ClientToolSchema[] | undefined;
+    body: Record<string, unknown>;
+    connection: Connection | null;
+    /** A regenerate: the message whose reply it replaces. */
+    branchParentId: string | undefined;
+    originMessageIds: string[] | undefined;
+  }): ClientChatRequest<{
+    branchParentId: string | undefined;
+    generation: number;
+  }> {
+    const {
+      requestId,
+      isRegeneration,
+      messages: incomingMessages,
+      newMessageIds,
+      clientTools: rawClientTools,
+      body: customBody,
+      connection
+    } = input;
+    const isSubmitMessage = !isRegeneration;
+    return {
+      requestId,
+      admission: {
+        messageIds: newMessageIds,
+        payload: {
+          trigger: isRegeneration ? "regenerate-message" : "submit-message",
+          clientTools: rawClientTools,
+          body: customBody,
+          originMessageIds: input.originMessageIds,
+          branchParentId: input.branchParentId
+        } satisfies StoredThinkClientRequest
+      },
+      isSubmitMessage,
+      concurrency: this.messageConcurrency,
+      onDropped: () => {
+        if (connection) this._rollbackDroppedSubmit(connection);
+        this._completeSkippedRequest(connection, requestId);
+      },
+      // A genuinely-new turn supersedes any pending terminal record (#1645)
+      // so a stale exhaustion can't replay over the resume handshake to a
+      // client that reconnects between this submit being accepted and the
+      // new turn streaming.
+      onAccepted: () =>
+        withAgentSpan(
+          this,
+          "clear_previous_chat_state",
+          "interaction",
+          {
+            "cloudflare.agents.component": "think",
+            "cloudflare.agents.turn.request_id": requestId,
+            "cloudflare.agents.turn.trigger": "ws-chat"
+          },
+          () => this._clearChatTerminal()
+        ),
+      persist: async ({ generation, isCurrent }) => {
+        // A replay after a reset: its messages were stored before the reset.
+        // One that is gone (a clear, or a reset before it was written) has
+        // nothing to answer.
+        if (!incomingMessages) {
+          return this._turns.replayHasNothingToAnswer(
+            newMessageIds,
+            this.messages
+          )
+            ? null
+            : { branchParentId: input.branchParentId, generation };
+        }
+        // ── Reconcile, persist, and broadcast user messages ──────────
+        //
+        // The client may post an in-flight assistant snapshot it minted
+        // optimistically (e.g. while a previous tool call is still
+        // streaming). Reconcile against the server's current active path
+        // so client IDs map onto server IDs and stale client states pick
+        // up the server's tool outputs. Without this, Session's
+        // INSERT-OR-IGNORE-by-ID would persist a duplicate orphan
+        // assistant row alongside the real server-generated one.
+        const reconciledTurn = await this._reconcileAndPersistIncoming(
+          incomingMessages,
+          { requestId, isRegeneration, isCurrent, channel: "web" }
+        );
+        if (!reconciledTurn) return null;
+
+        this._broadcastMessages(connection ? [connection.id] : []);
+        return { branchParentId: reconciledTurn.branchParentId, generation };
+      },
+      enqueue: (turn, generation, onQueued) =>
+        this.keepAliveWhile(async () => {
+          const result = await this._admitTurn({
+            admission: "queue",
+            trigger: "ws-chat",
+            requestId,
+            generation,
+            continuation: false,
+            channel: "web",
+            onQueued,
+            execute: turn
+          });
+          return result.status;
+        }),
+      onSkipped: () => this._completeSkippedRequest(connection, requestId),
+      // Cancelled before its turn started: the model is never called. Like
+      // a skipped request it never streamed, so only the tab that sent it
+      // was ever shown it.
+      onCancelledBeforeStart: () =>
+        this._endUnstartedRequest(connection, requestId, "aborted"),
+      run: async ({ branchParentId }, abortSignal) => {
+        // The request's tools and body become the stored request context
+        // now that its turn runs. Storing them when the request was
+        // accepted would change what a continuation of the turn still
+        // running uses, and a request cancelled or skipped in the queue
+        // would leave its context behind.
+        // The request's tools and body become the stored request context
+        // now that its turn runs. A request that sends no client tools
+        // clears the stored ones: the tools a turn offers the model are
+        // the ones the client that sent the request can run.
+        const { clientTools: clientToolsForTurn, body: bodyForTurn } =
           withAgentSpan(
             this,
-            "clear_previous_chat_state",
-            "interaction",
+            "persist_chat_request_context",
+            "turn",
             {
               "cloudflare.agents.component": "think",
               "cloudflare.agents.turn.request_id": requestId,
               "cloudflare.agents.turn.trigger": "ws-chat"
             },
-            () => this._clearChatTerminal()
-          ),
-        persist: async ({ generation, isCurrent }) => {
-          // ── Reconcile, persist, and broadcast user messages ──────────
-          //
-          // The client may post an in-flight assistant snapshot it minted
-          // optimistically (e.g. while a previous tool call is still
-          // streaming). Reconcile against the server's current active path
-          // so client IDs map onto server IDs and stale client states pick
-          // up the server's tool outputs. Without this, Session's
-          // INSERT-OR-IGNORE-by-ID would persist a duplicate orphan
-          // assistant row alongside the real server-generated one.
-          const reconciledTurn = await this._reconcileAndPersistIncoming(
-            incomingMessages,
-            { requestId, isRegeneration, isCurrent, channel: "web" }
+            () =>
+              this._requestContext.set({
+                clientTools: rawClientTools,
+                body: customBody
+              })
           );
-          if (!reconciledTurn) return null;
-
-          this._broadcastMessages([connection.id]);
-          return { branchParentId: reconciledTurn.branchParentId, generation };
-        },
-        enqueue: (turn, generation, onQueued) =>
-          this.keepAliveWhile(async () => {
-            const result = await this._admitTurn({
-              admission: "queue",
-              trigger: "ws-chat",
-              requestId,
-              generation,
-              continuation: false,
-              channel: "web",
-              onQueued,
-              execute: turn
-            });
-            return result.status;
-          }),
-        onSkipped: () => this._completeSkippedRequest(connection, requestId),
-        // Cancelled before its turn started: the model is never called. Like
-        // a skipped request it never streamed, so only the tab that sent it
-        // was ever shown it.
-        onCancelledBeforeStart: () =>
-          this._endUnstartedRequest(connection, requestId, "aborted"),
-        run: async ({ branchParentId }, abortSignal) => {
-          // The request's tools and body become the stored request context
-          // now that its turn runs. Storing them when the request was
-          // accepted would change what a continuation of the turn still
-          // running uses, and a request cancelled or skipped in the queue
-          // would leave its context behind.
-          // The request's tools and body become the stored request context
-          // now that its turn runs. A request that sends no client tools
-          // clears the stored ones: the tools a turn offers the model are
-          // the ones the client that sent the request can run.
-          const { clientTools: clientToolsForTurn, body: bodyForTurn } =
-            withAgentSpan(
-              this,
-              "persist_chat_request_context",
-              "turn",
-              {
-                "cloudflare.agents.component": "think",
-                "cloudflare.agents.turn.request_id": requestId,
-                "cloudflare.agents.turn.trigger": "ws-chat"
-              },
-              () =>
-                this._requestContext.set({
-                  clientTools: rawClientTools,
-                  body: customBody
-                })
-            );
-          await this._runModelTurn(requestId, abortSignal, {
-            continuation: false,
-            connection,
-            clientTools: clientToolsForTurn,
-            body: bodyForTurn,
-            parentId: branchParentId
-          });
-        },
-        // Persist the terminal error before broadcasting it: the broadcast is
-        // transient, so a client disconnected at this moment (a pre-stream
-        // failure like message reconciliation) would otherwise never learn the
-        // turn failed and stay frozen on reconnect (see `_buildIdleConnectMessages`).
-        onError: async (error, stage) => {
-          await this._turns.reportTurnFailure(this._turnFailureHost(), {
-            requestId,
-            error,
-            continuation: false,
-            stage
-          });
-        }
-      });
-    } finally {
-      this._requestOriginMessageIds.delete(requestId);
-    }
+        await this._runModelTurn(requestId, abortSignal, {
+          continuation: false,
+          connection: connection ?? undefined,
+          clientTools: clientToolsForTurn,
+          body: bodyForTurn,
+          parentId: branchParentId
+        });
+      },
+      // Persist the terminal error before broadcasting it: the broadcast is
+      // transient, so a client disconnected at this moment (a pre-stream
+      // failure like message reconciliation) would otherwise never learn the
+      // turn failed and stay frozen on reconnect (see `_buildIdleConnectMessages`).
+      onError: async (error, stage) => {
+        await this._turns.reportTurnFailure(this._turnFailureHost(), {
+          requestId,
+          error,
+          continuation: false,
+          stage
+        });
+      }
+    };
   }
 
   /**
@@ -16268,6 +16479,21 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       // not stuck, so the engine keeps it budget-free. SERVER-tool orphans are
       // excluded by `hasPendingInteraction` and still recover normally.
       isAwaitingClientInteraction: () => this.hasPendingInteraction(),
+      turnRecovered: (requestIds) => {
+        for (const requestId of requestIds) {
+          this._turns.turnAccepted(requestId);
+        }
+      },
+      recoverySettled: () => {
+        this._resumeAdmissions();
+        if (this._submissionsBehindRecovery.size > 0) {
+          void this.keepAliveWhile(() =>
+            this._queuePendingSubmissionRuns()
+          ).catch((error) =>
+            console.error("[Think] failed to queue submissions:", error)
+          );
+        }
+      },
       emitRecoveryEvent: (event) => {
         this._emit(event.type, {
           incidentId: event.incidentId,
@@ -16509,6 +16735,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * so the submission runner must leave them `running`.
    */
   private _recoveryOwnedSubmissions = new Set<string>();
+  /**
+   * Submissions that were pending when this isolate started. They were
+   * accepted behind a turn the reset may have cut off, so they run after
+   * that turn's recovery, as a client request queued behind it does
+   * (`ChatTurns.resumeAdmissions`).
+   */
+  private _submissionsBehindRecovery = new Set<string>();
 
   private _claimSubmissionForRecovery(
     submissionId: string | undefined,
@@ -16719,7 +16952,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       retryTargetUserId !== null &&
       options.continue !== false &&
       !streamIsTerminal;
-    const lastLeaf = shouldRetry ? null : await this.session.getLatestLeaf();
+    const lastLeaf = shouldRetry ? null : await this._recoveryLeaf();
     const targetId =
       lastLeaf?.role === "assistant" && !streamIsTerminal
         ? lastLeaf.id
@@ -16840,7 +17073,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       return null;
     }
 
-    const lastLeaf = await this.session.getLatestLeaf();
+    const lastLeaf = await this._recoveryLeaf();
     // A regeneration branches beside the response it replaces, so that
     // response, not the user message, is still the leaf.
     const branchParentId = regenerationParentOf(snapshot);
@@ -16858,7 +17091,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   private async _hasPersistedRecoveredAssistant(
     snapshot: ChatFiberSnapshot | null
   ): Promise<boolean> {
-    const lastLeaf = await this.session.getLatestLeaf();
+    const lastLeaf = await this._recoveryLeaf();
     return (
       lastLeaf?.role === "assistant" &&
       lastLeaf.id !== snapshot?.latestMessageId
@@ -17057,7 +17290,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const { regeneratedLeafId, targetUserId } = target;
     return {
       checkLeaf: async () => {
-        const lastLeaf = await this.session.getLatestLeaf();
+        const lastLeaf = await this._recoveryLeaf();
         if (
           !lastLeaf ||
           (regeneratedLeafId === undefined && lastLeaf.role !== "user")
@@ -17331,7 +17564,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       // by this attempt or an earlier run of it): answer the question again.
       retryLostReply: this._recoveryRetrySteps(host, data, {}, onTurnStarted),
       checkLeaf: async () => {
-        const lastLeaf = await this.session.getLatestLeaf();
+        const lastLeaf = await this._recoveryLeaf();
         if (!targetId || lastLeaf?.id === targetId) return { moved: false };
         supersededByNewerUserTurn = lastLeaf?.role === "user";
         return { moved: true, reason: "conversation_changed" };
@@ -17387,29 +17620,32 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * other connection was shown the request.
    */
   private _endUnstartedRequest(
-    connection: Connection,
+    connection: Connection | null,
     requestId: string,
     outcome: "skipped" | "aborted"
   ): void {
+    const frame = {
+      type: MSG_CHAT_RESPONSE,
+      id: requestId,
+      body: "",
+      done: true,
+      outcome
+    };
+    // A request replayed after a reset has no connection: the tab that sent
+    // it may be any of them now.
+    if (!connection) {
+      this._broadcastChat(frame);
+      return;
+    }
     try {
-      connection.send(
-        JSON.stringify(
-          this._withOriginMessageIds({
-            type: MSG_CHAT_RESPONSE,
-            id: requestId,
-            body: "",
-            done: true,
-            outcome
-          })
-        )
-      );
+      connection.send(JSON.stringify(this._withOriginMessageIds(frame)));
     } catch {
       // The connection closed before the server could answer.
     }
   }
 
   private _completeSkippedRequest(
-    connection: Connection,
+    connection: Connection | null,
     requestId: string
   ): void {
     this._endUnstartedRequest(connection, requestId, "skipped");

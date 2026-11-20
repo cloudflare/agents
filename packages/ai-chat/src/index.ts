@@ -52,6 +52,10 @@ import {
   ChatTurns,
   AgentToolRuns,
   createAgentToolRunStore,
+  createChatAdmissionStore,
+  chatRecoveryNames,
+  type ChatAdmissionRecord,
+  type ClientChatRequest,
   ChatTurnFibers,
   pinnedOr,
   prepareTurnMessages,
@@ -417,6 +421,21 @@ const decoder = new TextDecoder();
 const LEGACY_LIFT_WINDOW_ROWS = 25;
 const LEGACY_LIFT_WINDOW_BYTES = 4 * 1024 * 1024;
 
+/**
+ * What `AIChatAgent` stores with a client request's admission record, to run
+ * it again after an isolate reset. See `ChatTurns.resumeAdmissions`.
+ */
+type StoredClientChatRequest = {
+  trigger: ChatRequestTrigger;
+  clientTools: ClientToolSchema[] | undefined;
+  body: Record<string, unknown>;
+  originMessageIds: string[] | undefined;
+  /** A regenerate: the messages the client sent. */
+  keepIds?: string[];
+  /** A regenerate: the stored user messages it did not send. */
+  storedUserIds?: string[];
+};
+
 export class AIChatAgent<
   Env extends Cloudflare.Env = Cloudflare.Env,
   State = unknown,
@@ -477,8 +496,31 @@ export class AIChatAgent<
         this._emit("chat:continuation:dropped", { ...event }),
       stopped: (requestId, reason) => this._afterStop(requestId, reason)
     },
-    { defaultDebounceMs: AIChatAgent.MESSAGE_DEBOUNCE_MS }
+    {
+      defaultDebounceMs: AIChatAgent.MESSAGE_DEBOUNCE_MS,
+      // A request waiting in the queue survives an isolate reset.
+      admissions: {
+        store: createChatAdmissionStore(() => this.ctx.storage.sql),
+        recoveryPending: () => this._chatRecoveryNames(),
+        recoveryOwns: (requestId) => this._chatRecoveryNames(requestId),
+        replayRequest: (record) => this._replayClientChatRequest(record)
+      }
+    }
   );
+
+  /**
+   * Whether a chat turn waits for recovery, or, with `requestId`, whether a
+   * turn of that request had a fiber recovery knows about.
+   */
+  private _chatRecoveryNames(requestId?: string): Promise<boolean> {
+    return chatRecoveryNames({
+      sql: this.ctx.storage.sql,
+      storage: this.ctx.storage,
+      turnName: (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME,
+      liveRequestIds: new Set(this._chatTurnFibers.liveTurns.keys()),
+      requestId
+    });
+  }
 
   /**
    * Registry of per-request AbortControllers.
@@ -879,7 +921,8 @@ export class AIChatAgent<
       return (fn) => (ambient ? agentContext.run(ambient, fn) : fn());
     },
     turnBody: (continuation, body, requestId) =>
-      this._chatRecoveryEngine().turnBody(continuation, body, requestId)
+      this._chatRecoveryEngine().turnBody(continuation, body, requestId),
+    turnAccepted: (requestId) => this._turns.turnAccepted(requestId)
   });
 
   /**
@@ -1099,7 +1142,11 @@ export class AIChatAgent<
           });
         }
       );
-      return _onStart(props);
+      const started = await _onStart(props);
+      // Requests an earlier isolate accepted and never started run again,
+      // once the app has started and no interrupted turn waits for recovery.
+      this._resumeAdmissions();
+      return started;
     };
 
     const _onConnect = this.onConnect.bind(this);
@@ -1210,341 +1257,29 @@ export class AIChatAgent<
               ? "regenerate-message"
               : "submit-message";
           const requestOriginIds = originMessageIds(messages);
-          // What was stored when a regenerate arrived: its turn may delete
-          // these, but never a question another tab sent after it.
-          const storedAtAdmission =
-            requestTrigger === "regenerate-message"
-              ? new Set(this.messages.map((message) => message.id))
-              : null;
           if (requestOriginIds) {
             this._requestOriginMessageIds.set(chatMessageId, requestOriginIds);
           }
-          let concurrencyDecision!: SubmitConcurrencyDecision;
-          let epoch!: number;
-
-          // The turn core runs the request: decide, accept (pre-stream mark
-          // and abort controller, so a cancel while it waits in the queue is
-          // not lost, #2701), persist, queue, the queued checks, then the
-          // turn. It always settles the pre-stream turn (#1784) and drops the
-          // abort controller, whatever a step does.
           try {
-            await this._turns.runClientRequest<true>({
-              requestId: chatMessageId,
-              isSubmitMessage: requestTrigger === "submit-message",
-              concurrency: this.messageConcurrency,
-              onDecision: (decision) => {
-                concurrencyDecision = decision;
-                this._noteMergeStart(decision);
-              },
-              onDropped: () => {
-                this._rollbackDroppedSubmit(connection);
-                this._completeSkippedRequest(connection, chatMessageId);
-              },
-              // A genuinely-new turn supersedes any pending terminal record
-              // (#1645) so a stale exhaustion can't replay on a later
-              // reconnect once the user has moved on.
-              onAccepted: () =>
-                withAgentSpan(
-                  this,
-                  "clear_previous_chat_state",
-                  "interaction",
-                  {
-                    "cloudflare.agents.component": "ai_chat",
-                    "cloudflare.agents.turn.request_id": chatMessageId,
-                    "cloudflare.agents.turn.trigger": requestTrigger
-                  },
-                  () => this._clearChatTerminal()
-                ),
-              // Persist and broadcast user messages before entering the turn
-              // queue so other tabs see the new message immediately and so
-              // overlapping submits under latest/merge/debounce can inspect
-              // the full message list when their turn starts.
-              persist: async ({ decision, generation, isCurrent }) => {
-                epoch = generation;
-                await withAgentSpan(
-                  this,
-                  "persist_incoming_messages",
-                  "interaction",
-                  {
-                    "cloudflare.agents.component": "ai_chat",
-                    "cloudflare.agents.turn.request_id": chatMessageId,
-                    "cloudflare.agents.turn.trigger": requestTrigger
-                  },
-                  async () => {
-                    this._broadcastChatMessage(
-                      {
-                        messages: transformedMessages,
-                        type: MessageType.CF_AGENT_CHAT_MESSAGES
-                      },
-                      [connection.id]
-                    );
-
-                    // A regenerate deletes the replies it replaces once its
-                    // turn starts (below), so a reply still streaming or
-                    // queued now is deleted too instead of surviving next to
-                    // the regenerated one.
-                    // Inside the scope, the write is skipped once the chat
-                    // was cleared: `persistMessages` can await before it
-                    // writes (an app's override, auto-compaction), and a
-                    // clear from another tab can land in that wait.
-                    await this._incomingPersistScope.run({ isCurrent }, () =>
-                      this.persistMessages(
-                        transformedMessages,
-                        [connection.id],
-                        {
-                          _deleteStaleRows:
-                            requestTrigger !== "regenerate-message"
-                        }
-                      )
-                    );
-
-                    if (isCurrent() && decision.strategy === "merge") {
-                      await this._mergeQueuedUserMessages(generation);
-                    }
-                  }
-                );
-                // Cleared meanwhile: nothing was stored, so there is no turn.
-                return isCurrent() ? true : null;
-              },
-              enqueue: async (turn, generation, onQueued) => {
-                let stale = false;
-                const done = this._runExclusiveChatTurn(chatMessageId, turn, {
-                  epoch: generation,
-                  onStale: () => {
-                    stale = true;
-                  }
-                });
-                onQueued();
-                await done;
-                return stale ? "stale" : "completed";
-              },
-              beforeStart: async () => {
-                // Re-merge inside the lock: more overlapping submits may have
-                // persisted additional user messages while this turn was queued.
-                if (concurrencyDecision.strategy === "merge") {
-                  await withAgentSpan(
-                    this,
-                    "merge_queued_messages",
-                    "turn",
-                    {
-                      "cloudflare.agents.component": "ai_chat",
-                      "cloudflare.agents.turn.request_id": chatMessageId,
-                      "cloudflare.agents.turn.trigger": requestTrigger,
-                      "cloudflare.agents.turn.admission": "queue",
-                      "cloudflare.agents.turn.generation": epoch
-                    },
-                    () => this._mergeQueuedUserMessages(epoch)
-                  );
-
-                  if (this._turnQueue.generation !== epoch) {
-                    return false;
-                  }
-
-                  if (
-                    this._submitConcurrency.isSuperseded(
-                      concurrencyDecision.submitSequence
-                    )
-                  ) {
-                    return false;
-                  }
-                }
-
-                await withAgentSpan(
-                  this,
-                  "prepare_chat_context",
-                  "turn",
-                  {
-                    "cloudflare.agents.component": "ai_chat",
-                    "cloudflare.agents.turn.request_id": chatMessageId,
-                    "cloudflare.agents.turn.trigger": requestTrigger,
-                    "cloudflare.agents.turn.admission": "queue",
-                    "cloudflare.agents.turn.generation": epoch
-                  },
-                  async () => {
-                    // Optionally wait for in-flight MCP connections to settle (e.g. after hibernation restore)
-                    // so that getAITools() returns the full set of tools in onChatMessage
-                    if (this.waitForMcpConnections) {
-                      const timeout =
-                        typeof this.waitForMcpConnections === "object"
-                          ? this.waitForMcpConnections.timeout
-                          : undefined;
-                      await this.mcp.waitForConnections(
-                        timeout != null ? { timeout } : undefined
-                      );
-                    }
-                  }
-                );
-                return true;
-              },
-              onSkipped: () =>
-                this._completeSkippedRequest(connection, chatMessageId),
-              // The request was cancelled before its turn started. There is
-              // no assistant message, so onChatResponse doesn't fire, and the
-              // stored request context is left alone: tool continuations and
-              // continueLastTurn read it and this request never ran. Like a
-              // skipped request it never streamed, so only the tab that sent
-              // it was ever shown it.
-              onCancelledBeforeStart: () =>
-                this._endUnstartedRequest(connection, chatMessageId, "aborted"),
-              run: async (_prepared, signal) => {
-                // Regenerate: drop every reply after the messages the client
-                // sent, including one that landed while this request waited
-                // in the queue (another tab's turn was still streaming). A
-                // question another tab sent meanwhile has moved the chat on:
-                // skip the regenerate rather than delete that question.
-                if (storedAtAdmission) {
-                  const keep = new Set(
-                    transformedMessages.map((message) => message.id)
-                  );
-                  const stale = this.messages.filter(
-                    (message) => !keep.has(message.id)
-                  );
-                  if (
-                    stale.some(
-                      (message) =>
-                        message.role === "user" &&
-                        !storedAtAdmission.has(message.id)
-                    )
-                  ) {
-                    this._completeSkippedRequest(connection, chatMessageId);
-                    return;
-                  }
-                  if (stale.length > 0) {
-                    await this.persistMessages(transformedMessages, [], {
-                      _deleteStaleRows: true
-                    });
-                  }
-                }
-
-                // The request's tools and body become the stored request
-                // context now that its turn runs. A request that sends no
-                // tools clears the stored ones. Decided first, stored after:
-                // a regenerate skipped above never ran, and leaves the
-                // context that continuations and `continueLastTurn` read.
-                const { clientTools: requestClientTools, body: requestBody } =
-                  this._requestContext.set({ clientTools, body: customBody });
-
-                this._emit("message:request");
-
-                return this._tryCatchChat(async () => {
-                  // Wrap in agentContext.run() to propagate connection context to onChatMessage
-                  // This ensures getCurrentAgent() returns the connection inside tool execute functions
-                  return agentContext.run(
-                    {
-                      agent: this,
-                      connection,
-                      request: undefined,
-                      email: undefined
-                    },
-                    async () => {
-                      const chatTurnBody = async () => {
-                        let replying = false;
-                        try {
-                          await withAgentSpan(
-                            this,
-                            "repair_interrupted_tools",
-                            "turn",
-                            {
-                              "cloudflare.agents.component": "ai_chat",
-                              "cloudflare.agents.turn.request_id":
-                                chatMessageId,
-                              "cloudflare.agents.turn.trigger": requestTrigger,
-                              "cloudflare.agents.turn.admission": "queue",
-                              "cloudflare.agents.turn.generation": epoch
-                            },
-                            () =>
-                              this._repairInterruptedToolsBeforeTurn({
-                                continuation: false
-                              })
-                          );
-                          const response = await this.onChatMessage(
-                            async (_finishResult) => {
-                              // User-provided hook. Cleanup is now handled by _reply,
-                              // so this is optional for the user to pass to streamText.
-                            },
-                            {
-                              requestId: chatMessageId,
-                              abortSignal: signal,
-                              clientTools: requestClientTools,
-                              body: requestBody,
-                              continuation: false
-                            }
-                          );
-
-                          if (response) {
-                            await withAgentSpan(
-                              this,
-                              "persist_chat_result",
-                              "turn",
-                              {
-                                "cloudflare.agents.component": "ai_chat",
-                                "cloudflare.agents.turn.request_id":
-                                  chatMessageId,
-                                "cloudflare.agents.turn.trigger":
-                                  requestTrigger,
-                                "cloudflare.agents.turn.admission": "queue",
-                                "cloudflare.agents.turn.generation": epoch
-                              },
-                              () =>
-                                this._reply(
-                                  chatMessageId,
-                                  response,
-                                  [connection.id],
-                                  {
-                                    chatMessageId,
-                                    abortSignal: signal,
-                                    onStreamStart: () => {
-                                      replying = true;
-                                    }
-                                  }
-                                )
-                            );
-                          } else {
-                            console.warn(
-                              `[AIChatAgent] onChatMessage returned no response for chatMessageId: ${chatMessageId}`
-                            );
-                            this._broadcastChatMessage({
-                              body: "No response was generated by the agent.",
-                              done: true,
-                              id: chatMessageId,
-                              type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
-                              outcome: "completed"
-                            });
-                          }
-                        } catch (error) {
-                          // onChatMessage (or _reply before its stream was
-                          // set up) threw: no frame reached the client yet,
-                          // so report the failure the way a stream error is
-                          // reported instead of leaving the request open.
-                          if (
-                            !replying &&
-                            !signal?.aborted &&
-                            !isDurableObjectResetError(error)
-                          ) {
-                            await this._reportTurnFailure(chatMessageId, error);
-                          }
-                          throw error;
-                        } finally {
-                          this._abortRegistry.remove(chatMessageId);
-                          // Settle the pre-stream turn on the normal path (#1784):
-                          // a no-op release when the turn streamed (already flushed
-                          // into STREAM_RESUMING on _startStream) or a release on
-                          // the no-response path. A throw BEFORE chatTurnBody runs
-                          // is caught by the outer finally instead.
-                          this._settlePreStreamTurn(chatMessageId);
-                        }
-                      };
-
-                      await this._runChatRecoveryFiber(
-                        chatMessageId,
-                        false,
-                        chatTurnBody
-                      );
-                    }
-                  );
-                }, signal);
-              }
-            });
+            await this._turns.runClientRequest(
+              this._clientChatRequest({
+                requestId: chatMessageId,
+                trigger: requestTrigger,
+                messages: transformedMessages,
+                newMessageIds: this._newUserMessageIds(transformedMessages),
+                clientTools,
+                body: customBody,
+                connection,
+                // What was stored when a regenerate arrived: its turn may
+                // delete these, but never a question another tab sent after
+                // it.
+                regenerate:
+                  requestTrigger === "regenerate-message"
+                    ? this._regenerateAdmission(transformedMessages)
+                    : null,
+                originMessageIds: requestOriginIds
+              })
+            );
           } finally {
             this._requestOriginMessageIds.delete(chatMessageId);
           }
@@ -2699,28 +2434,513 @@ export class AIChatAgent<
   }
 
   /**
+   * One client chat request, as the turn core runs it: decide, accept
+   * (pre-stream mark and abort controller, so a cancel while it waits in the
+   * queue is not lost, #2701), record it for a replay after a reset,
+   * persist, queue, the queued checks, then the turn. It always settles the
+   * pre-stream turn (#1784) and drops the abort controller, whatever a step
+   * does.
+   *
+   * A replay after an isolate reset (`messages: null`) has no connection:
+   * its messages are stored already, and its frames go to every connection.
+   */
+  /** User messages in `messages` that are not stored yet. */
+  private _newUserMessageIds(messages: UIMessage[]): string[] {
+    const stored = new Set(this.messages.map((message) => message.id));
+    return messages
+      .filter((message) => message.role === "user" && !stored.has(message.id))
+      .map((message) => message.id);
+  }
+
+  /**
+   * What a regenerate needs to know about when it arrived: the messages it
+   * keeps, and the stored user messages it did not send. A question another
+   * tab sends later is in neither, and makes the regenerate skip.
+   */
+  private _regenerateAdmission(messages: UIMessage[]): {
+    keepIds: string[];
+    storedUserIds: Set<string>;
+  } {
+    const keepIds = messages.map((message) => message.id);
+    const keep = new Set(keepIds);
+    return {
+      keepIds,
+      storedUserIds: new Set(
+        this.messages
+          .filter((message) => message.role === "user" && !keep.has(message.id))
+          .map((message) => message.id)
+      )
+    };
+  }
+
+  /**
+   * A request an earlier isolate accepted and never gave a turn with a
+   * fiber, to run again (`ChatTurns.resumeAdmissions`).
+   */
+  /**
+   * Run the requests an earlier isolate left. Never rejects: what fails is
+   * logged, and the next start or recovery tries again.
+   */
+  private _resumeAdmissions(): void {
+    void this.keepAliveWhile(() => this._turns.resumeAdmissions()).catch(
+      (error) =>
+        console.error("[AIChatAgent] failed to replay requests:", error)
+    );
+  }
+
+  /**
+   * The last message a recovery checks: the latest one that no request
+   * queued behind the recovered turn stored. Those requests run after it,
+   * so their questions have not moved the conversation on.
+   */
+  private _recoveryLeaf(): UIMessage | undefined {
+    const queued = this._turns.admittedMessageIds();
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      if (!queued.has(this.messages[i].id)) return this.messages[i];
+    }
+    return undefined;
+  }
+
+  private _replayClientChatRequest(
+    record: ChatAdmissionRecord
+  ): ClientChatRequest<true> | null {
+    const stored = record.payload as StoredClientChatRequest | undefined;
+    if (!stored || typeof stored !== "object") return null;
+    const requestId = record.requestId;
+    if (stored.originMessageIds) {
+      this._requestOriginMessageIds.set(requestId, stored.originMessageIds);
+    }
+    const forget = () => this._requestOriginMessageIds.delete(requestId);
+    const request = this._clientChatRequest({
+      requestId,
+      trigger: stored.trigger,
+      messages: null,
+      newMessageIds: record.messageIds,
+      clientTools: stored.clientTools,
+      body: stored.body ?? {},
+      connection: null,
+      regenerate:
+        stored.trigger === "regenerate-message"
+          ? {
+              keepIds: stored.keepIds ?? [],
+              storedUserIds: new Set(stored.storedUserIds ?? [])
+            }
+          : null,
+      originMessageIds: stored.originMessageIds
+    });
+    const { persist, enqueue } = request;
+    return {
+      ...request,
+      persist: async (context) => {
+        const prepared = await persist(context);
+        if (prepared === null) forget();
+        return prepared;
+      },
+      enqueue: async (turn, generation, onQueued) => {
+        try {
+          return await enqueue(turn, generation, onQueued);
+        } finally {
+          forget();
+        }
+      }
+    };
+  }
+
+  private _clientChatRequest(input: {
+    requestId: string;
+    trigger: ChatRequestTrigger;
+    /** What the client sent, or `null` for a replay. */
+    messages: UIMessage[] | null;
+    /** The user messages this request stores. */
+    newMessageIds: string[];
+    clientTools: ClientToolSchema[] | undefined;
+    body: Record<string, unknown>;
+    connection: Connection | null;
+    /**
+     * A regenerate: the messages the client sent, and the user messages
+     * stored when it arrived that it did not send.
+     */
+    regenerate: { keepIds: string[]; storedUserIds: Set<string> } | null;
+    originMessageIds: string[] | undefined;
+  }): ClientChatRequest<true> {
+    const {
+      requestId: chatMessageId,
+      trigger: requestTrigger,
+      messages: transformedMessages,
+      newMessageIds,
+      clientTools,
+      body: customBody,
+      connection,
+      regenerate
+    } = input;
+    let concurrencyDecision!: SubmitConcurrencyDecision;
+    let epoch!: number;
+    return {
+      requestId: chatMessageId,
+      admission: {
+        messageIds: newMessageIds,
+        payload: {
+          trigger: requestTrigger,
+          clientTools,
+          body: customBody,
+          originMessageIds: input.originMessageIds,
+          ...(regenerate && {
+            keepIds: regenerate.keepIds,
+            storedUserIds: [...regenerate.storedUserIds]
+          })
+        } satisfies StoredClientChatRequest
+      },
+      isSubmitMessage: requestTrigger === "submit-message",
+      concurrency: this.messageConcurrency,
+      onDecision: (decision) => {
+        concurrencyDecision = decision;
+        this._noteMergeStart(decision);
+      },
+      onDropped: () => {
+        if (connection) this._rollbackDroppedSubmit(connection);
+        this._completeSkippedRequest(connection, chatMessageId);
+      },
+      // A genuinely-new turn supersedes any pending terminal record
+      // (#1645) so a stale exhaustion can't replay on a later
+      // reconnect once the user has moved on.
+      onAccepted: () =>
+        withAgentSpan(
+          this,
+          "clear_previous_chat_state",
+          "interaction",
+          {
+            "cloudflare.agents.component": "ai_chat",
+            "cloudflare.agents.turn.request_id": chatMessageId,
+            "cloudflare.agents.turn.trigger": requestTrigger
+          },
+          () => this._clearChatTerminal()
+        ),
+      // Persist and broadcast user messages before entering the turn
+      // queue so other tabs see the new message immediately and so
+      // overlapping submits under latest/merge/debounce can inspect
+      // the full message list when their turn starts.
+      persist: async ({ decision, generation, isCurrent }) => {
+        epoch = generation;
+        // A replay after a reset: its messages were stored before the reset.
+        // One that is gone (a clear, or a reset before it was written) has
+        // nothing to answer.
+        if (!transformedMessages) {
+          return this._turns.replayHasNothingToAnswer(
+            newMessageIds,
+            this.messages
+          )
+            ? null
+            : true;
+        }
+        await withAgentSpan(
+          this,
+          "persist_incoming_messages",
+          "interaction",
+          {
+            "cloudflare.agents.component": "ai_chat",
+            "cloudflare.agents.turn.request_id": chatMessageId,
+            "cloudflare.agents.turn.trigger": requestTrigger
+          },
+          async () => {
+            this._broadcastChatMessage(
+              {
+                messages: transformedMessages,
+                type: MessageType.CF_AGENT_CHAT_MESSAGES
+              },
+              connection ? [connection.id] : []
+            );
+
+            // A regenerate deletes the replies it replaces once its
+            // turn starts (below), so a reply still streaming or
+            // queued now is deleted too instead of surviving next to
+            // the regenerated one.
+            // Inside the scope, the write is skipped once the chat
+            // was cleared: `persistMessages` can await before it
+            // writes (an app's override, auto-compaction), and a
+            // clear from another tab can land in that wait.
+            await this._incomingPersistScope.run({ isCurrent }, () =>
+              this.persistMessages(
+                transformedMessages,
+                connection ? [connection.id] : [],
+                {
+                  _deleteStaleRows: requestTrigger !== "regenerate-message"
+                }
+              )
+            );
+
+            if (isCurrent() && decision.strategy === "merge") {
+              await this._mergeQueuedUserMessages(generation);
+            }
+          }
+        );
+        // Cleared meanwhile: nothing was stored, so there is no turn.
+        return isCurrent() ? true : null;
+      },
+      enqueue: async (turn, generation, onQueued) => {
+        let stale = false;
+        const done = this._runExclusiveChatTurn(chatMessageId, turn, {
+          epoch: generation,
+          onStale: () => {
+            stale = true;
+          }
+        });
+        onQueued();
+        await done;
+        return stale ? "stale" : "completed";
+      },
+      beforeStart: async () => {
+        // Re-merge inside the lock: more overlapping submits may have
+        // persisted additional user messages while this turn was queued.
+        if (concurrencyDecision.strategy === "merge") {
+          await withAgentSpan(
+            this,
+            "merge_queued_messages",
+            "turn",
+            {
+              "cloudflare.agents.component": "ai_chat",
+              "cloudflare.agents.turn.request_id": chatMessageId,
+              "cloudflare.agents.turn.trigger": requestTrigger,
+              "cloudflare.agents.turn.admission": "queue",
+              "cloudflare.agents.turn.generation": epoch
+            },
+            () => this._mergeQueuedUserMessages(epoch)
+          );
+
+          if (this._turnQueue.generation !== epoch) {
+            return false;
+          }
+
+          if (
+            this._submitConcurrency.isSuperseded(
+              concurrencyDecision.submitSequence
+            )
+          ) {
+            return false;
+          }
+        }
+
+        await withAgentSpan(
+          this,
+          "prepare_chat_context",
+          "turn",
+          {
+            "cloudflare.agents.component": "ai_chat",
+            "cloudflare.agents.turn.request_id": chatMessageId,
+            "cloudflare.agents.turn.trigger": requestTrigger,
+            "cloudflare.agents.turn.admission": "queue",
+            "cloudflare.agents.turn.generation": epoch
+          },
+          async () => {
+            // Optionally wait for in-flight MCP connections to settle (e.g. after hibernation restore)
+            // so that getAITools() returns the full set of tools in onChatMessage
+            if (this.waitForMcpConnections) {
+              const timeout =
+                typeof this.waitForMcpConnections === "object"
+                  ? this.waitForMcpConnections.timeout
+                  : undefined;
+              await this.mcp.waitForConnections(
+                timeout != null ? { timeout } : undefined
+              );
+            }
+          }
+        );
+        return true;
+      },
+      onSkipped: () => this._completeSkippedRequest(connection, chatMessageId),
+      // The request was cancelled before its turn started. There is
+      // no assistant message, so onChatResponse doesn't fire, and the
+      // stored request context is left alone: tool continuations and
+      // continueLastTurn read it and this request never ran. Like a
+      // skipped request it never streamed, so only the tab that sent
+      // it was ever shown it.
+      onCancelledBeforeStart: () =>
+        this._endUnstartedRequest(connection, chatMessageId, "aborted"),
+      run: async (_prepared, signal) => {
+        // Regenerate: drop every reply after the messages the client
+        // sent, including one that landed while this request waited
+        // in the queue (another tab's turn was still streaming). A
+        // question another tab sent meanwhile has moved the chat on:
+        // skip the regenerate rather than delete that question.
+        if (regenerate) {
+          const keep = new Set(regenerate.keepIds);
+          const stale = this.messages.filter(
+            (message) => !keep.has(message.id)
+          );
+          if (
+            stale.some(
+              (message) =>
+                message.role === "user" &&
+                !regenerate.storedUserIds.has(message.id)
+            )
+          ) {
+            this._completeSkippedRequest(connection, chatMessageId);
+            return;
+          }
+          if (stale.length > 0) {
+            await this.persistMessages(
+              transformedMessages ??
+                this.messages.filter((message) => keep.has(message.id)),
+              [],
+              { _deleteStaleRows: true }
+            );
+          }
+        }
+
+        // The request's tools and body become the stored request
+        // context now that its turn runs. A request that sends no
+        // tools clears the stored ones. Decided first, stored after:
+        // a regenerate skipped above never ran, and leaves the
+        // context that continuations and `continueLastTurn` read.
+        const { clientTools: requestClientTools, body: requestBody } =
+          this._requestContext.set({ clientTools, body: customBody });
+
+        this._emit("message:request");
+
+        return this._tryCatchChat(async () => {
+          // Wrap in agentContext.run() to propagate connection context to onChatMessage
+          // This ensures getCurrentAgent() returns the connection inside tool execute functions
+          return agentContext.run(
+            {
+              agent: this,
+              connection: connection ?? undefined,
+              request: undefined,
+              email: undefined
+            },
+            async () => {
+              const chatTurnBody = async () => {
+                let replying = false;
+                try {
+                  await withAgentSpan(
+                    this,
+                    "repair_interrupted_tools",
+                    "turn",
+                    {
+                      "cloudflare.agents.component": "ai_chat",
+                      "cloudflare.agents.turn.request_id": chatMessageId,
+                      "cloudflare.agents.turn.trigger": requestTrigger,
+                      "cloudflare.agents.turn.admission": "queue",
+                      "cloudflare.agents.turn.generation": epoch
+                    },
+                    () =>
+                      this._repairInterruptedToolsBeforeTurn({
+                        continuation: false
+                      })
+                  );
+                  const response = await this.onChatMessage(
+                    async (_finishResult) => {
+                      // User-provided hook. Cleanup is now handled by _reply,
+                      // so this is optional for the user to pass to streamText.
+                    },
+                    {
+                      requestId: chatMessageId,
+                      abortSignal: signal,
+                      clientTools: requestClientTools,
+                      body: requestBody,
+                      continuation: false
+                    }
+                  );
+
+                  if (response) {
+                    await withAgentSpan(
+                      this,
+                      "persist_chat_result",
+                      "turn",
+                      {
+                        "cloudflare.agents.component": "ai_chat",
+                        "cloudflare.agents.turn.request_id": chatMessageId,
+                        "cloudflare.agents.turn.trigger": requestTrigger,
+                        "cloudflare.agents.turn.admission": "queue",
+                        "cloudflare.agents.turn.generation": epoch
+                      },
+                      () =>
+                        this._reply(
+                          chatMessageId,
+                          response,
+                          connection ? [connection.id] : [],
+                          {
+                            chatMessageId,
+                            abortSignal: signal,
+                            onStreamStart: () => {
+                              replying = true;
+                            }
+                          }
+                        )
+                    );
+                  } else {
+                    console.warn(
+                      `[AIChatAgent] onChatMessage returned no response for chatMessageId: ${chatMessageId}`
+                    );
+                    this._broadcastChatMessage({
+                      body: "No response was generated by the agent.",
+                      done: true,
+                      id: chatMessageId,
+                      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+                      outcome: "completed"
+                    });
+                  }
+                } catch (error) {
+                  // onChatMessage (or _reply before its stream was
+                  // set up) threw: no frame reached the client yet,
+                  // so report the failure the way a stream error is
+                  // reported instead of leaving the request open.
+                  if (
+                    !replying &&
+                    !signal?.aborted &&
+                    !isDurableObjectResetError(error)
+                  ) {
+                    await this._reportTurnFailure(chatMessageId, error);
+                  }
+                  throw error;
+                } finally {
+                  this._abortRegistry.remove(chatMessageId);
+                  // Settle the pre-stream turn on the normal path (#1784):
+                  // a no-op release when the turn streamed (already flushed
+                  // into STREAM_RESUMING on _startStream) or a release on
+                  // the no-response path. A throw BEFORE chatTurnBody runs
+                  // is caught by the outer finally instead.
+                  this._settlePreStreamTurn(chatMessageId);
+                }
+              };
+
+              await this._runChatRecoveryFiber(
+                chatMessageId,
+                false,
+                chatTurnBody
+              );
+            }
+          );
+        }, signal);
+      }
+    };
+  }
+
+  /**
    * Send the terminal frame of a request that ended before its turn started
    * (skipped or cancelled in the queue) to the connection that sent it. No
    * other connection was shown the request.
    */
   private _endUnstartedRequest(
-    connection: Connection,
+    connection: Connection | null,
     requestId: string,
     outcome: "skipped" | "aborted"
   ): void {
-    this._sendDirectMessage(
-      connection,
-      this._withOriginMessageIds({
-        body: "",
-        done: true,
-        id: requestId,
-        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
-        outcome
-      })
-    );
+    const frame = this._withOriginMessageIds({
+      body: "",
+      done: true,
+      id: requestId,
+      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+      outcome
+    });
+    // A request replayed after a reset has no connection: the tab that sent
+    // it may be any of them now.
+    if (connection) this._sendDirectMessage(connection, frame);
+    else this._broadcastChatMessage(frame);
   }
 
-  private _completeSkippedRequest(connection: Connection, requestId: string) {
+  private _completeSkippedRequest(
+    connection: Connection | null,
+    requestId: string
+  ) {
     this._endUnstartedRequest(connection, requestId, "skipped");
     // A skipped turn settles out of the pre-stream set, but must NOT release
     // parked connections (#1784): a skip happens because a NEWER turn was
@@ -4083,6 +4303,12 @@ export class AIChatAgent<
       // A turn parked on a pending CLIENT interaction is waiting on the human,
       // not stuck, so the engine keeps it budget-free.
       isAwaitingClientInteraction: () => this.hasPendingClientInteraction(),
+      turnRecovered: (requestIds) => {
+        for (const requestId of requestIds) {
+          this._turns.turnAccepted(requestId);
+        }
+      },
+      recoverySettled: () => this._resumeAdmissions(),
       emitRecoveryEvent: (event) =>
         this._emit(event.type, {
           incidentId: event.incidentId,
@@ -4377,10 +4603,7 @@ export class AIChatAgent<
       input.streamId,
       input.partial
     );
-    const preStreamLeaf =
-      this.messages.length > 0
-        ? this.messages[this.messages.length - 1]
-        : undefined;
+    const preStreamLeaf = this._recoveryLeaf();
     const emptyPartialNewTurn =
       !!input.streamId &&
       input.snapshot?.continuation === false &&
@@ -4408,10 +4631,7 @@ export class AIChatAgent<
     const { incident, options, snapshot, recoveryRootRequestId } = input;
     const originIds =
       this._originMessageIdsFor(input.requestId) ?? snapshot?.originMessageIds;
-    const leaf =
-      this.messages.length > 0
-        ? this.messages[this.messages.length - 1]
-        : undefined;
+    const leaf = this._recoveryLeaf();
     const lostPartialUserId =
       snapshot?.continuation === false &&
       snapshot.latestUserMessageId &&
@@ -4511,7 +4731,7 @@ export class AIChatAgent<
       // question that got no reply (stopped, or failed) also moved it, and
       // continuing would answer that question inside the old reply.
       checkLeaf: async () =>
-        targetId && this.messages.at(-1)?.id !== targetId
+        targetId && this._recoveryLeaf()?.id !== targetId
           ? { moved: true, reason: "conversation_changed" }
           : { moved: false },
       // `continueLastTurn` repairs interrupted server-tool orphans before it
@@ -4656,8 +4876,7 @@ export class AIChatAgent<
       return false;
     }
 
-    const lastMessage =
-      this.messages.length > 0 ? this.messages[this.messages.length - 1] : null;
+    const lastMessage = this._recoveryLeaf();
     return (
       lastMessage?.role === "user" &&
       lastMessage.id === snapshot.latestUserMessageId
@@ -4710,7 +4929,7 @@ export class AIChatAgent<
   } {
     return {
       checkLeaf: async () => {
-        const lastMessage = this.messages.at(-1);
+        const lastMessage = this._recoveryLeaf();
         if (!lastMessage || lastMessage.role !== "user") {
           return { moved: true, reason: "no_unanswered_user_message" };
         }

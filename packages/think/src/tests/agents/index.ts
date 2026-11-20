@@ -29,6 +29,8 @@ export {
   ThinkScheduledTasksTestAgent,
   ThinkAsyncHookTestAgent,
   ThinkRecoveryTestAgent,
+  ThinkAdmissionTestAgent,
+  ThinkLatestAdmissionTestAgent,
   ThinkNonRecoveryTestAgent,
   ThinkAgentToolParent,
   ThinkNestedMiddleAgent,

@@ -64,6 +64,22 @@ export {
 } from "./turn-task";
 
 /**
+ * @internal Durable admission of client requests, for `AIChatAgent` and
+ * `Think`. Not a public API. See `admissions.ts`.
+ */
+export {
+  CHAT_ADMISSIONS_TABLE,
+  CHAT_ADMISSION_TTL_MS,
+  ChatAdmissions,
+  chatRecoveryNames,
+  createChatAdmissionStore,
+  type ChatAdmissionRecord,
+  type ChatAdmissionStore,
+  type ChatAdmissionsHost,
+  type StoredSubmitDecision
+} from "./admissions";
+
+/**
  * @internal Running one chat turn as a durable fiber, for `AIChatAgent` and
  * `Think`. Not a public API. See `turn-fiber.ts`.
  */
@@ -200,6 +216,7 @@ export {
   ChatTurns,
   type ChatTurnsHost,
   type ChatTurnsOptions,
+  type ChatTurnsAdmissionOptions,
   type ChatTurnMessage,
   type ClientChatRequest,
   type RecoveryAttemptHandle
