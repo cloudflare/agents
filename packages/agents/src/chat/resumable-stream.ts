@@ -139,6 +139,13 @@ type ChatStreamMetadata = {
    * that completed normally.
    */
   outcome?: ChatTurnOutcome;
+  /**
+   * Set when the stream was closed with no producer left: an isolate reset
+   * cut the turn off, and a reconnecting tab's resume (or recovery itself)
+   * closed the row. The row reads `completed`, but the model never finished
+   * the reply, so recovery still continues the turn.
+   */
+  cutOff?: boolean;
   /** Terminal evidence pinned until its consumer durably settles and releases it. */
 };
 
@@ -680,12 +687,20 @@ export class ResumableStream {
     }
   }
 
-  private _recordOutcome(streamId: string, outcome?: ChatTurnOutcome): void {
-    if (outcome === undefined || outcome === "completed") return;
+  private _recordOutcome(
+    streamId: string,
+    outcome?: ChatTurnOutcome,
+    cutOff = false
+  ): void {
+    if (!cutOff && (outcome === undefined || outcome === "completed")) return;
     const row = this.ops.getStream(streamId);
     const chat = row ? parseChatMetadata(row) : null;
     if (!chat) return;
-    this.ops.setMetadata(streamId, { ...chat, outcome });
+    this.ops.setMetadata(streamId, {
+      ...chat,
+      ...(outcome !== undefined && outcome !== "completed" && { outcome }),
+      ...(cutOff && { cutOff: true })
+    });
   }
 
   /**
@@ -699,7 +714,8 @@ export class ResumableStream {
     const orphaned = streamId === this._activeStreamId && !this._isLive;
     this._recordOutcome(
       streamId,
-      outcome ?? (orphaned ? "aborted" : undefined)
+      outcome ?? (orphaned ? "aborted" : undefined),
+      orphaned
     );
     this.ops.settle(streamId, "completed", null);
     if (this._pendingCutover === streamId) this._pendingCutover = null;
@@ -1096,15 +1112,24 @@ export class ResumableStream {
    * Latest chat stream row for a request regardless of status — the recovery
    * engines' stream-evidence lookup.
    */
-  latestStreamInfoForRequest(
-    requestId: string
-  ): { id: string; status: PublicStreamStatus; createdAt: number } | null {
+  latestStreamInfoForRequest(requestId: string): {
+    id: string;
+    status: PublicStreamStatus;
+    createdAt: number;
+    /**
+     * The stream was closed with no producer left (see
+     * {@link ChatStreamMetadata.cutOff}). Its `completed` status says the
+     * row is closed, not that the reply finished.
+     */
+    cutOff: boolean;
+  } | null {
     const row = this._latestChatRowByTag(requestId);
     if (!row) return null;
     return {
       id: row.stream_id,
       status: toPublicStatus(row.state),
-      createdAt: row.created_at
+      createdAt: row.created_at,
+      cutOff: parseChatMetadata(row)?.cutOff === true
     };
   }
 

@@ -131,7 +131,8 @@ export type FailingReaderPrelude =
  */
 function makeFailingSSEResponse(
   errorMessage: string,
-  prelude: FailingReaderPrelude = "partial"
+  prelude: FailingReaderPrelude = "partial",
+  responseHeaders?: Record<string, string>
 ) {
   const encoder = new TextEncoder();
   const chunks = {
@@ -165,7 +166,13 @@ function makeFailingSSEResponse(
         );
       }
       await new Promise((resolve) => setTimeout(resolve, 10));
-      controller.error(new Error(errorMessage));
+      // A provider error carries its response headers (AI SDK
+      // `APICallError.responseHeaders`).
+      controller.error(
+        responseHeaders
+          ? Object.assign(new Error(errorMessage), { responseHeaders })
+          : new Error(errorMessage)
+      );
     }
   });
   return new Response(stream, {
@@ -2247,6 +2254,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   async onChatMessage(
     _onFinish?: unknown,
     ctx?: {
+      requestId?: string;
       body?: Record<string, unknown>;
       clientTools?: ClientToolSchema[];
     }
@@ -2254,10 +2262,23 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     this.onChatMessageCallCount++;
     this.onChatMessageBodies.push(ctx?.body);
     this.onChatMessageClientTools.push(ctx?.clientTools);
+    this._recoveryRootsSeen.push(
+      (
+        this as unknown as {
+          _chatRecoveryEngine(): { activeRootRequestId?: string };
+        }
+      )._chatRecoveryEngine().activeRootRequestId ?? null
+    );
+    if (this._throwFromNextTurn) {
+      const message = this._throwFromNextTurn;
+      this._throwFromNextTurn = null;
+      throw new Error(message);
+    }
 
     const hold = this._turnHold;
     if (hold && !hold.waiting) {
       hold.waiting = true;
+      this._heldTurnRequestId = ctx?.requestId ?? null;
       await hold.released;
     }
 
@@ -2280,10 +2301,13 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
     if (this._failingTurn) {
       this._failingReaderCalls++;
-      const { message, remaining, prelude } = this._failingTurn;
+      const { message, remaining, prelude, responseHeaders } =
+        this._failingTurn;
       this._failingTurn =
-        remaining > 1 ? { message, remaining: remaining - 1, prelude } : null;
-      return makeFailingSSEResponse(message, prelude);
+        remaining > 1
+          ? { message, remaining: remaining - 1, prelude, responseHeaders }
+          : null;
+      return makeFailingSSEResponse(message, prelude, responseHeaders);
     }
 
     if (this._emitStreamError) {
@@ -2314,6 +2338,41 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
   private _emitStreamError: string | null = null;
 
+  private _throwFromNextTurn: string | null = null;
+  private _recoveryRootsSeen: Array<string | null> = [];
+  private _saveFromNextResponse = false;
+
+  /** Make the next `onChatMessage` call throw `message`. */
+  throwFromNextTurnForTest(message: string | null): void {
+    this._throwFromNextTurn = message;
+  }
+
+  /**
+   * The recovery root request id each `onChatMessage` call ran under, or
+   * `null` for a turn that was not a recovery attempt's.
+   */
+  getRecoveryRootsSeenForTest(): Array<string | null> {
+    return this._recoveryRootsSeen;
+  }
+
+  /** Make the next `onChatResponse` start a turn of its own. */
+  saveFromNextResponseForTest(): void {
+    this._saveFromNextResponse = true;
+  }
+
+  protected override async onChatResponse(_result: ChatResponseResult) {
+    if (!this._saveFromNextResponse) return;
+    this._saveFromNextResponse = false;
+    await this.saveMessages((messages) => [
+      ...messages,
+      {
+        id: `follow-up-${crypto.randomUUID()}`,
+        role: "user",
+        parts: [{ type: "text", text: "follow-up from onChatResponse" }]
+      }
+    ]);
+  }
+
   /** Holds the next onChatMessage call until released: the model is slow. */
   private _turnHold: {
     waiting: boolean;
@@ -2327,6 +2386,13 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       release = resolve;
     });
     this._turnHold = { waiting: false, released, release };
+  }
+
+  private _heldTurnRequestId: string | null = null;
+
+  /** The request id of the turn held in onChatMessage. */
+  heldTurnRequestIdForTest(): string | null {
+    return this._heldTurnRequestId;
   }
 
   isTurnHeldForTest(): boolean {
@@ -2540,8 +2606,10 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     interruptedAttempts?: number;
   }> {
     const { trigger = "stalled", ...identity } = input;
-    const self = this as unknown as {
-      _beginChatRecoveryIncident(
+    const engine = (
+      this as unknown as { _chatRecoveryEngine(): unknown }
+    )._chatRecoveryEngine() as {
+      beginIncident(
         i: typeof identity & { trigger: "interrupted" | "stalled" }
       ): Promise<{
         incident: {
@@ -2553,7 +2621,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
         exhausted: boolean;
       }>;
     };
-    const { incident, exhausted } = await self._beginChatRecoveryIncident({
+    const { incident, exhausted } = await engine.beginIncident({
       ...identity,
       trigger
     });
@@ -2582,14 +2650,16 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     reason?: string
   ): Promise<void> {
     await (
-      this as unknown as {
-        _updateChatRecoveryIncident(
+      (
+        this as unknown as { _chatRecoveryEngine(): unknown }
+      )._chatRecoveryEngine() as {
+        updateIncident(
           id: string,
           status: string,
           reason?: string
         ): Promise<void>;
       }
-    )._updateChatRecoveryIncident(incidentId, status, reason);
+    ).updateIncident(incidentId, status, reason);
   }
 
   async seedIncidentForTest(incident: {
@@ -2605,6 +2675,10 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     progress?: number;
     workBaseline?: number;
     interruptedAttempts?: number;
+    scheduled?: {
+      callback: "_chatRecoveryContinue" | "_chatRecoveryRetry";
+      targetMessageId?: string;
+    };
   }): Promise<void> {
     await this.ctx.storage.put(
       `cf:chat-recovery:incident:${encodeURIComponent(incident.incidentId)}`,
@@ -2649,8 +2723,36 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   }
 
   /**
-   * #1730 layer 3: drive the stable-timeout give-up
-   * (`_exhaustRecoveryAfterStableTimeout`) while the durable terminal write
+   * Run a recovery continue attempt that gives up on a stable-state timeout:
+   * the wait times out and the incident's attempt budget is spent. This is
+   * the path production takes to the give-up.
+   */
+  private async _giveUpOnStableTimeoutForTest(data: {
+    incidentId: string;
+    originalRequestId: string;
+  }): Promise<void> {
+    const key = `cf:chat-recovery:incident:${encodeURIComponent(data.incidentId)}`;
+    const incident = await this.ctx.storage.get<{
+      attempt: number;
+      maxAttempts: number;
+    }>(key);
+    if (incident) {
+      await this.ctx.storage.put(key, {
+        ...incident,
+        attempt: incident.maxAttempts
+      });
+    }
+    const forced = this._forceStableTimeout;
+    this._forceStableTimeout = true;
+    try {
+      await super._chatRecoveryContinueDetached(data);
+    } finally {
+      this._forceStableTimeout = forced;
+    }
+  }
+
+  /**
+   * #1730 layer 3: drive the stable-timeout give-up while the durable terminal write
    * (`_recordChatTerminal`, #1645) rejects with a platform transient — the
    * exact window a give-up tends to run in. The FIRST give-up must re-throw
    * (so `Agent._executeScheduleCallback` preserves the one-shot row) and must
@@ -2693,10 +2795,6 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
         exclude?: string[]
       ): void;
       _recordChatTerminal(requestId: string, body: string): Promise<void>;
-      _exhaustRecoveryAfterStableTimeout(
-        callback: string,
-        data: unknown
-      ): Promise<void>;
     };
     const realBroadcast = self._broadcastChatMessage.bind(this);
     self._broadcastChatMessage = (m, exclude) => {
@@ -2728,10 +2826,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
     let firstThrew = false;
     try {
-      await self._exhaustRecoveryAfterStableTimeout(
-        "_chatRecoveryContinue",
-        data
-      );
+      await this._giveUpOnStableTimeoutForTest(data);
     } catch {
       firstThrew = true;
     }
@@ -2739,10 +2834,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
     let secondThrew = false;
     try {
-      await self._exhaustRecoveryAfterStableTimeout(
-        "_chatRecoveryContinue",
-        data
-      );
+      await this._giveUpOnStableTimeoutForTest(data);
     } catch {
       secondThrew = true;
     } finally {
@@ -2799,10 +2891,6 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
         msg: { body?: string; error?: boolean; done?: boolean },
         exclude?: string[]
       ): void;
-      _exhaustRecoveryAfterStableTimeout(
-        callback: string,
-        data: unknown
-      ): Promise<void>;
     };
     const realBroadcast = self._broadcastChatMessage.bind(this);
     self._broadcastChatMessage = (m, exclude) => {
@@ -2827,10 +2915,28 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
     let threw = false;
     try {
-      await self._exhaustRecoveryAfterStableTimeout("_chatRecoveryContinue", {
-        incidentId: begun.incidentId,
-        originalRequestId: requestId
-      });
+      // The give-up alone, through its production entry: on the full
+      // attempt path the failing read would be the cancelled check's.
+      await (
+        this as unknown as {
+          _chatRecoveryEngine(): {
+            exhaustRecoveryGiveUp(input: {
+              callback: string;
+              data: unknown;
+              reason: string;
+            }): Promise<void>;
+          };
+        }
+      )
+        ._chatRecoveryEngine()
+        .exhaustRecoveryGiveUp({
+          callback: "_chatRecoveryContinue",
+          data: {
+            incidentId: begun.incidentId,
+            originalRequestId: requestId
+          },
+          reason: "stable_timeout"
+        });
     } catch {
       threw = true;
     } finally {
@@ -2887,10 +2993,6 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
         msg: { body?: string; error?: boolean; done?: boolean },
         exclude?: string[]
       ): void;
-      _exhaustRecoveryAfterStableTimeout(
-        callback: string,
-        data: unknown
-      ): Promise<void>;
     };
     const realBroadcast = self._broadcastChatMessage.bind(this);
     self._broadcastChatMessage = (m, exclude) => {
@@ -2921,7 +3023,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
     let threw = false;
     try {
-      await self._exhaustRecoveryAfterStableTimeout("_chatRecoveryContinue", {
+      await this._giveUpOnStableTimeoutForTest({
         incidentId: begun.incidentId,
         originalRequestId: requestId
       });
@@ -2986,11 +3088,19 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     this._stableHold = null;
   }
 
+  /** Makes waitUntilStable throw, as a bug inside a recovery attempt would. */
+  private _stableWaitError: string | null = null;
+
+  setStableWaitErrorForTest(message: string | null): void {
+    this._stableWaitError = message;
+  }
+
   override async waitUntilStable(options?: {
     timeout?: number;
     pendingInteraction?: () => boolean;
   }): Promise<boolean> {
     if (this._forceStableTimeout) return false;
+    if (this._stableWaitError) throw new Error(this._stableWaitError);
     const hold = this._stableHold;
     if (hold && !hold.waiting) {
       hold.waiting = true;
@@ -3006,6 +3116,18 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     await super._chatRecoveryContinueDetached(
       data as Parameters<AIChatAgent<Env>["_chatRecoveryContinue"]>[0]
     );
+  }
+
+  /** The same, returning the message of what the attempt threw, if anything. */
+  async runChatRecoveryContinueCatchingForTest(
+    data: Record<string, unknown>
+  ): Promise<string | null> {
+    try {
+      await this.runChatRecoveryContinueDirectForTest(data);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
   }
 
   async runChatRecoveryRetryDirectForTest(
@@ -3235,6 +3357,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     message: string;
     remaining: number;
     prelude: FailingReaderPrelude;
+    responseHeaders?: Record<string, string>;
   } | null = null;
   private _failingReaderCalls = 0;
 
@@ -3258,7 +3381,11 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   async driveFailingReaderTurnForTest(
     message: string,
     turns = 1,
-    options: { prelude?: FailingReaderPrelude; priorAssistant?: boolean } = {}
+    options: {
+      prelude?: FailingReaderPrelude;
+      priorAssistant?: boolean;
+      responseHeaders?: Record<string, string>;
+    } = {}
   ): Promise<SaveMessagesResult["status"]> {
     if (options.priorAssistant) {
       await this.persistMessages([
@@ -3277,7 +3404,8 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     this._failingTurn = {
       message,
       remaining: turns,
-      prelude: options.prelude ?? "partial"
+      prelude: options.prelude ?? "partial",
+      responseHeaders: options.responseHeaders
     };
     const result = await this.saveMessages((current) => [
       ...current,
@@ -3337,17 +3465,22 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     attempt: number;
     status: string;
     reason?: string;
+    startedDelivery?: number;
   } | null> {
     const incident = await this.ctx.storage.get<{
       attempt: number;
       status: string;
       reason?: string;
+      startedDelivery?: number;
     }>(`cf:chat-recovery:incident:${encodeURIComponent(incidentId)}`);
     return incident
       ? {
           attempt: incident.attempt,
           status: incident.status,
-          reason: incident.reason
+          reason: incident.reason,
+          ...(incident.startedDelivery !== undefined && {
+            startedDelivery: incident.startedDelivery
+          })
         }
       : null;
   }
@@ -3680,13 +3813,28 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
   /** Make the next routing into recovery throw (an incident write failure). */
   failNextIncidentBeginForTest(): void {
-    const self = this as unknown as {
-      _beginChatRecoveryIncident(...args: unknown[]): Promise<unknown>;
+    const engine = (
+      this as unknown as { _chatRecoveryEngine(): unknown }
+    )._chatRecoveryEngine() as {
+      beginIncident(...args: unknown[]): Promise<unknown>;
     };
-    self._beginChatRecoveryIncident = async () => {
-      Reflect.deleteProperty(self, "_beginChatRecoveryIncident");
+    engine.beginIncident = async () => {
+      Reflect.deleteProperty(engine, "beginIncident");
       throw new Error("incident write failed");
     };
+  }
+
+  /** The backoff, in seconds, of the recovery Task scheduled last. */
+  getScheduledRecoveryDelayForTest(): number | null {
+    return (
+      this.sql<{ delay: number | null }>`
+        SELECT json_extract(input, '$.delaySeconds') AS delay
+        FROM cf_agents_task_runs
+        WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+        ORDER BY created_at DESC
+        LIMIT 1
+      `[0]?.delay ?? null
+    );
   }
 
   getScheduleCountForCallback(callback: string): number {
