@@ -274,6 +274,7 @@ import type {
 } from "agents/chat";
 import {
   chunkMustBeStoredNow,
+  takeAtFirstContent,
   replyIsEmpty,
   settleInterruptedPart,
   stripTrailingReasoning
@@ -12591,9 +12592,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           }
           return undefined;
         }
-        // The model returned a reply: a turn that continues the latest
-        // reply takes it over from a scheduled recovery now.
-        await takeReply();
+        // A turn that continues the latest reply takes it over from a
+        // scheduled recovery at the stream's first chunk with content
+        // (`beforeContent`). The stream is lazy: a provider error arrives
+        // inside it, and leaves the recovery in place.
 
         // The reply path suppresses a classified overflow whenever recovery
         // is enabled; this loop owns the retry-or-terminal call, so every
@@ -12622,7 +12624,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
                 ...turn.stream,
                 continuation,
                 parentId,
-                overflowRecovery
+                overflowRecovery,
+                beforeContent: takeReply
               });
             }
             const streamed = await this._streamResultToRpcCallback(
@@ -12630,7 +12633,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               result,
               sink,
               abortSignal,
-              { overflowRecovery: overflowRecovery !== undefined }
+              {
+                overflowRecovery: overflowRecovery !== undefined,
+                beforeContent: takeReply
+              }
             );
             if (streamed.status !== "overflow_retry") {
               return { status: streamed.status, error: streamed.error };
@@ -13726,6 +13732,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
        * and re-run. Pass only while the retry budget allows.
        */
       overflowRecovery?: boolean;
+      /**
+       * Runs once, before the first chunk that carries content
+       * (`takeAtFirstContent`).
+       */
+      beforeContent?: () => Promise<void>;
     }
   ): Promise<{
     status: "completed" | "error" | "aborted" | "overflow_retry";
@@ -13737,6 +13748,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // turn admitted before a reset must not store its reply in the cleared
     // chat. `chat()` reports the reset to the caller.
     const resetSinceTurnStarted = this._turns.turnResetGuard();
+    const contentGate = takeAtFirstContent(options?.beforeContent);
     const streamId = this._startResumableStream(requestId);
     const accumulator = new StreamAccumulator({
       messageId: crypto.randomUUID()
@@ -13819,6 +13831,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             aborted = true;
             break;
           }
+          await contentGate((chunk as { type?: string }).type);
 
           // RPC callbacks receive serialized UIMessage chunks directly; unlike
           // the WebSocket protocol, there is no wrapper frame to rewrite for
@@ -14338,11 +14351,17 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
        * the documented `continueLastTurn()` behavior of a separate message.
        */
       extendLeafAssistant?: boolean;
+      /**
+       * Runs once, before the first chunk that carries content
+       * (`takeAtFirstContent`).
+       */
+      beforeContent?: () => Promise<void>;
     }
   ): Promise<StreamResultStatus> {
     // Whether the chat was reset (cleared) since this turn was admitted. A
     // reset before the stream started counts too.
     const resetSinceTurnStarted = this._turns.turnResetGuard();
+    const contentGate = takeAtFirstContent(options?.beforeContent);
     const continuation = options?.continuation ?? false;
     const parentId = options?.parentId;
     const leaf = this.messages.at(-1);
@@ -14444,6 +14463,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             streamAborted = true;
             break;
           }
+          await contentGate((chunk as { type?: string }).type);
 
           const streamChunk = withoutOverwrittenStartMetadata(
             this._annotateActionApprovalChunk(

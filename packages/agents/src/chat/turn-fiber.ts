@@ -139,8 +139,9 @@ export class ChatTurnFibers {
   /**
    * Run `fn`, the turn's model call and reply, as a durable fiber.
    *
-   * @param fn - Receives `takeReply`. Call it once the model call has
-   *   returned a reply and before the reply is streamed or stored: from
+   * @param fn - Receives `takeReply`. Call it at the stream's first chunk
+   *   that carries content (`takeAtFirstContent`), before that chunk is
+   *   streamed or stored: from
    *   then on this turn is the one continuing the reply, and a recovery
    *   scheduled to continue the same reply stands down. It does nothing for
    *   a turn that starts a new reply, and nothing the second time.

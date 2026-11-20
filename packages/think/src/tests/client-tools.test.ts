@@ -4016,6 +4016,40 @@ describe("Think — tool results with nothing to continue", () => {
     await closeWS(ws);
   });
 
+  it("a recovery still continues a reply whose answer's model call failed in its stream", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    const done = waitForDone(ws);
+    sendChatRequest(ws, [makeUserMessage("use client tool")], {
+      clientTools: [{ name: "client_action", description: "A client tool" }]
+    });
+    await done;
+    await delay(200);
+
+    await agent.startRecoveryContinueForTest();
+    await delay(300);
+
+    // The answer's turn calls the model, and the provider fails inside the
+    // stream, before any content: it never continued the reply.
+    await agent.failNextModelCallInStreamForTest();
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId: "tc-client-1",
+        toolName: "client_action",
+        output: "tool output",
+        autoContinue: true
+      })
+    );
+
+    const incident = await agent.finishRecoveryContinueForTest();
+    expect(incident.reason).not.toBe("continued_by_interaction");
+    await closeWS(ws);
+  });
+
   it("a recovered turn runs with the interrupted request's body and leaves the stored one", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);

@@ -1452,11 +1452,13 @@ export class ChatRecoveryEngine {
    *
    * `body` receives `takeReply`. A turn that continues the latest reply (a
    * client's answer to a tool call, the app calling `continueLastTurn`, a
-   * recovery attempt's own turn) calls it once it is committed to calling
-   * the model, and not before. From then on the reply is this turn's: a
+   * recovery attempt's own turn) calls it before the first stream chunk
+   * that carries content (`takeAtFirstContent`), and not before: a model
+   * call can return a stream that only carries the provider's error. From
+   * then on the reply is this turn's: a
    * recovery still scheduled to continue the same reply is superseded (see
-   * {@link supersedeScheduledRecovery}). A turn that ends without calling
-   * the model must not call it, or the reply is left with no turn and no
+   * {@link supersedeScheduledRecovery}). A turn that ends with no content
+   * must not call it, or the reply is left with no turn and no
    * recovery. Calling it inside the fiber means the turn is durably
    * registered first, so a restart cannot leave that gap either.
    *

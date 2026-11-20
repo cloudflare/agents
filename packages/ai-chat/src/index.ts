@@ -86,6 +86,7 @@ import {
 } from "agents/chat";
 import {
   chunkMustBeStoredNow,
+  takeAtFirstContent,
   replyIsEmpty,
   settleInterruptedPart,
   stripTrailingReasoning,
@@ -3531,12 +3532,15 @@ export class AIChatAgent<
               });
 
               if (response) {
-                // The model returned a reply: this turn continues it now.
-                await takeReply();
+                // The turn takes the reply over from a scheduled recovery
+                // at the stream's first chunk with content. With the AI SDK
+                // the Response exists before the provider is called, so a
+                // provider error in the stream leaves the recovery in place.
                 outcome = await this._reply(requestId, response, [], {
                   continuation: turn.extendsReply ?? continuation,
                   chatMessageId: requestId,
-                  abortSignal
+                  abortSignal,
+                  beforeContent: takeReply
                 });
               }
             },
@@ -5607,7 +5611,8 @@ export class AIChatAgent<
     message: UIMessage,
     streamCompleted: { value: boolean },
     continuation = false,
-    abortSignal?: AbortSignal
+    abortSignal?: AbortSignal,
+    contentGate?: (type: string | undefined) => Promise<void> | undefined
   ): Promise<StreamResultStatus> {
     streamCompleted.value = false;
 
@@ -5701,6 +5706,7 @@ export class AIChatAgent<
         if (line.startsWith("data: ") && line !== "data: [DONE]") {
           try {
             const data: UIMessageChunk = JSON.parse(line.slice(6));
+            await contentGate?.(data.type);
 
             // Drop replay chunks before applying or broadcasting them.
             //
@@ -6030,7 +6036,8 @@ export class AIChatAgent<
     message: UIMessage,
     streamCompleted: { value: boolean },
     continuation = false,
-    abortSignal?: AbortSignal
+    abortSignal?: AbortSignal,
+    contentGate?: (type: string | undefined) => Promise<void> | undefined
   ): Promise<StreamResultStatus> {
     // A continuation opens a text part of its own. A part the interruption
     // left streaming was closed when the message was cloned.
@@ -6095,6 +6102,7 @@ export class AIChatAgent<
 
       // Accumulate into the single text part to preserve exact formatting
       if (chunk.length > 0) {
+        await contentGate?.("text-delta");
         textPart.text += chunk;
         await this._broadcastTextEvent(
           streamId,
@@ -6178,14 +6186,21 @@ export class AIChatAgent<
        * should also pass abortSignal to streamText for proper cancellation.
        */
       abortSignal?: AbortSignal;
+      /**
+       * Runs once, before the first chunk that carries content
+       * (`takeAtFirstContent`).
+       */
+      beforeContent?: () => Promise<void>;
     } = {}
   ): Promise<StreamResultStatus> {
     const {
       continuation = false,
       chatMessageId,
       onStreamStart,
-      abortSignal
+      abortSignal,
+      beforeContent
     } = options;
+    const contentGate = takeAtFirstContent(beforeContent);
     // A chat clear (resetTurnState) bumps the queue generation and empties
     // the abort registry. A turn admitted before it must neither stream into
     // the cleared chat nor persist its reply there, even when its controller
@@ -6294,7 +6309,8 @@ export class AIChatAgent<
                 message,
                 streamCompleted,
                 continuation,
-                abortSignal
+                abortSignal,
+                contentGate
               );
             } else {
               streamResult = await this._sendPlaintextReply(
@@ -6304,7 +6320,8 @@ export class AIChatAgent<
                 message,
                 streamCompleted,
                 continuation,
-                abortSignal
+                abortSignal,
+                contentGate
               );
             }
           } catch (error) {

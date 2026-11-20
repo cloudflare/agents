@@ -388,7 +388,9 @@ export {
  */
 export {
   aiSdkRecoveryCodec,
+  chunkCarriesContent,
   chunkMustBeStoredNow,
+  takeAtFirstContent,
   partialHasSettledToolResults,
   shouldCreditStreamProgress,
   type ChatRecoveryCodec,

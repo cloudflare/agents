@@ -1161,7 +1161,29 @@ export class ThinkClientToolsAgent extends Think {
     this._useExecutableClientTool = true;
   }
 
+  private _failNextModelCallInStream = false;
+
+  /** The next model call fails inside its stream, as a provider 500 does. */
+  async failNextModelCallInStreamForTest(): Promise<void> {
+    this._failNextModelCallInStream = true;
+  }
+
   getModel(): LanguageModel {
+    if (this._failNextModelCallInStream) {
+      this._failNextModelCallInStream = false;
+      return {
+        specificationVersion: "v3",
+        provider: "test",
+        modelId: "mock-failing",
+        supportedUrls: {},
+        doGenerate() {
+          throw new Error("doGenerate not implemented");
+        },
+        doStream() {
+          return Promise.reject(new Error("provider rejected the request"));
+        }
+      } as LanguageModel;
+    }
     if (this._useChainedClientTool)
       return createChainedClientToolModel({
         holdSecondCall: () => this._chainedStreamLatch.wait(),
