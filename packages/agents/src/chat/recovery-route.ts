@@ -242,7 +242,7 @@ async function route(
     partialParts.length === 0 ? await host.retryTargetUserId() : null;
   const recoveryKind: ChatRecoveryKind = lostReplyUserId ? "retry" : "continue";
 
-  const { incident, config, exhausted } = await engine.beginIncident({
+  const { incident, config, exhausted, stopped } = await engine.beginIncident({
     requestId,
     recoveryRootRequestId,
     latestUserMessageId: host.latestUserMessageId,
@@ -256,6 +256,13 @@ async function route(
     )
     .map((part) => part.text)
     .join("");
+
+  if (stopped) {
+    // A user stopped the turn while it was routed: what it streamed is kept,
+    // nothing is scheduled and nothing gives up.
+    await host.resolvePartial(true);
+    return "stopped";
+  }
 
   if (exhausted) {
     // The same give-up as deploy recovery, not the raw stream error.

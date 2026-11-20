@@ -541,3 +541,41 @@ describe("routeStreamInterruption", () => {
     });
   });
 });
+
+describe("a stop while an interruption is routed", () => {
+  it("is not turned into a give-up once the budget is spent", async () => {
+    const t = setup({ maxAttempts: 1, storedReplyId: "assistant-1" });
+    expect(await t.run()).toBe("scheduled");
+    // The user stops the request while the next interruption is routed.
+    await t.engine.updateIncident(
+      t.incident()!.incidentId,
+      "skipped",
+      "user_cancelled"
+    );
+    const eventsBefore = t.events.length;
+    const outcome = await t.run();
+    expect({
+      outcome,
+      gaveUp: t.exhausted.length,
+      incident: t.incident()
+    }).toMatchObject({
+      outcome: "stopped",
+      gaveUp: 0,
+      incident: { status: "skipped", reason: "user_cancelled" }
+    });
+    // No events for a record the route did not write.
+    expect(t.events.slice(eventsBefore)).toEqual([]);
+  });
+
+  it("with budget left, ends the route as stopped", async () => {
+    const t = setup({ storedReplyId: "assistant-1" });
+    expect(await t.run()).toBe("scheduled");
+    await t.engine.updateIncident(
+      t.incident()!.incidentId,
+      "skipped",
+      "user_cancelled"
+    );
+    expect(await t.run()).toBe("stopped");
+    expect(t.exhausted).toHaveLength(0);
+  });
+});

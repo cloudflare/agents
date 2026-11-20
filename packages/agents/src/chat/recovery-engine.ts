@@ -136,6 +136,12 @@ export interface BeginChatRecoveryIncidentResult {
    * when nothing was recorded.
    */
   attempt: ChatRecoveryAttempt | null;
+  /**
+   * A user stopped the turn while it was being routed here: the incident
+   * ends `skipped` with `user_cancelled`, and the caller ends the turn as
+   * stopped. `exhausted` is then `false` and `attempt` `null`.
+   */
+  stopped?: boolean;
 }
 
 /**
@@ -777,13 +783,36 @@ export class ChatRecoveryEngine {
     // replay is itself an attempt: it counts the death and records itself so
     // that its own death, if it dies too, is counted by the next isolate
     // (#2613).
-    const { incident, config, exhausted, attempt } = await this.beginIncident({
-      requestId,
-      recoveryRootRequestId,
-      latestUserMessageId: snapshot?.latestUserMessageId,
-      recoveryKind,
-      trigger: "interrupted"
-    });
+    const { incident, config, exhausted, attempt, stopped } =
+      await this.beginIncident({
+        requestId,
+        recoveryRootRequestId,
+        latestUserMessageId: snapshot?.latestUserMessageId,
+        recoveryKind,
+        trigger: "interrupted"
+      });
+    if (stopped) {
+      // A stop of this turn's request landed: keep what it stored, close its
+      // stream, and continue nothing.
+      try {
+        if (
+          await this._shouldPersistOrphanedPartial(wake, {
+            streamId,
+            streamStillActive,
+            streamStatus,
+            snapshot,
+            options: undefined,
+            partial
+          })
+        ) {
+          await wake.persistOrphanedStream(streamId);
+        }
+        if (streamStillActive) await wake.completeRecoveredStream(streamId);
+      } finally {
+        this.#settled();
+      }
+      return true;
+    }
     try {
       return await this.#replayRecoveredTurn(wake, {
         ctx,
@@ -998,16 +1027,53 @@ export class ChatRecoveryEngine {
         adapter.onShouldKeepRecoveringError?.(error)
     });
 
-    // Written in the incident chain, and not over a stop that landed while
-    // the budget was evaluated: the schedule that follows then reads the
-    // stop and records it (`scheduleRecovery`).
-    await this.#update(key, (current) =>
-      current && isCancelled(current) ? undefined : incident
-    );
+    // Written in the incident chain, and not over a stop: one that landed
+    // while the budget was evaluated, or one of the request this routes.
+    // The stop is then the outcome, not the evaluation, whatever budget is
+    // left.
+    let stopped = false;
+    const { after } = await this.#update(key, (current) => {
+      if (current && isCancelled(current)) {
+        stopped = true;
+        return undefined;
+      }
+      if (this.#wasStopped(incident)) {
+        stopped = true;
+        return {
+          ...incident,
+          status: "skipped",
+          reason: CHAT_RECOVERY_CANCELLED_REASON
+        };
+      }
+      return incident;
+    });
     // Confirm the record before the caller acts on it. The next attempt may
     // run in this invocation, and if it hits a memory-limit reset, writes that
     // were not yet confirmed are discarded with it.
     await adapter.syncStorage();
+    if (stopped) {
+      // No events for a record this did not write. One it wrote as the
+      // stop's outcome says so once.
+      if (after !== undefined && after !== "delete") {
+        adapter.emitRecoveryEvent({
+          type: "chat:recovery:skipped",
+          incidentId: incident.incidentId,
+          requestId: incident.requestId,
+          attempt: incident.attempt,
+          maxAttempts: incident.maxAttempts,
+          recoveryKind: incident.recoveryKind,
+          reason: CHAT_RECOVERY_CANCELLED_REASON
+        });
+      }
+      await adapter.setRecovering(false);
+      return {
+        incident: after !== undefined && after !== "delete" ? after : incident,
+        config,
+        exhausted: false,
+        attempt: null,
+        stopped: true
+      };
+    }
     for (const event of events) {
       adapter.emitRecoveryEvent(event);
     }
