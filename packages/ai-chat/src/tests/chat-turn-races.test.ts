@@ -261,15 +261,22 @@ describe("chat turn races", () => {
     await agent.waitForIdleForTest();
 
     const stored = (await agent.getPersistedMessages()) as ChatMessage[];
-    // Both questions stay, each with one reply; the regenerate is skipped.
+    // The question waits behind the regenerate, which was sent first: the
+    // regenerate replaces the first reply, then the question is stored and
+    // answered. Both questions stay, each with one reply.
+    expect(stored.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "assistant"
+    ]);
     expect(stored.filter((m) => m.role === "user").map((m) => m.id)).toEqual([
       "user-1",
       "user-2"
     ]);
-    expect(stored.filter((m) => m.role === "assistant")).toHaveLength(2);
-    expect(responses(seenB, "req-2").filter((m) => m.done)).toEqual([
-      expect.objectContaining({ outcome: "skipped" })
-    ]);
+    const regenerated = responses(seenB, "req-2").filter((m) => m.done);
+    expect(regenerated).toHaveLength(1);
+    expect(regenerated[0].outcome ?? "completed").toBe("completed");
     tabA.close(1000);
     tabB.close(1000);
     tabC.close(1000);
@@ -296,8 +303,8 @@ describe("chat turn races", () => {
     await waitUntil(() => responses(seenA, "req-1").some((m) => m.body));
     sendChatRequest(tabA, "req-2", [user1, user2], { format: "plaintext" });
     await waitUntil(async () =>
-      ((await agent.getPersistedMessages()) as ChatMessage[]).some(
-        (message) => message.id === user2.id
+      ((await agent.getQueuedMessageIdsForTest()) as string[]).includes(
+        user2.id
       )
     );
 
