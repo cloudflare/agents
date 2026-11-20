@@ -105,16 +105,21 @@ describe("a message queued behind a running turn", () => {
       "u1"
     ]);
 
-    // A tab that loads the transcript now gets it too, and a tab that
-    // connects is told it is queued.
+    // A tab that connects is sent it, named as queued. The HTTP transcript
+    // holds what is stored.
     const loaded = (await (
       await exports.default.fetch(`http://example.com${path}/get-messages`)
     ).json()) as ChatMessage[];
-    expect(loaded.map((m) => m.id)).toEqual(["u1", "u2"]);
+    expect(loaded.map((m) => m.id)).toEqual(["u1"]);
     const { ws: tabC } = await connectChatWS(path);
     const seenC = record(tabC);
     await waitFor(() => seenC.some((f) => f.connect === true));
     expect(seenC.find((f) => f.connect)?.queuedMessageIds).toEqual(["u2"]);
+    // Without the reply that streams: the tab gets it from the stream.
+    expect(seenC.find((f) => f.connect)?.messages?.map((m) => m.id)).toEqual([
+      "u1",
+      "u2"
+    ]);
 
     await waitFor(() =>
       seenA.some(

@@ -140,7 +140,7 @@ describe("a message queued behind a running turn", () => {
     expect(shown?.queuedMessageIds).toEqual(["u2"]);
     expect((await stub.getMessagesForTest()).map((m) => m.id)).toEqual(["u1"]);
 
-    // A tab that connects, or loads the transcript, gets it too.
+    // A tab that connects is sent it, named as queued.
     const tabC = await connect(binding, room);
     const seenC = record(tabC);
     await waitFor(
@@ -151,12 +151,19 @@ describe("a message queued behind a running turn", () => {
     expect(seenC.find((f) => f.connect === true)?.queuedMessageIds).toEqual([
       "u2"
     ]);
+    // Without the reply that streams: the tab gets it from the stream.
+    expect(
+      (
+        (seenC.find((f) => f.connect === true)?.messages ?? []) as UIMessage[]
+      ).map((m) => m.id)
+    ).toEqual(["u1", "u2"]);
     const loaded = (await (
       await exports.default.fetch(
         `http://example.com/agents/think-admission-test-agent/${room}/get-messages`
       )
     ).json()) as UIMessage[];
-    expect(loaded.map((m) => m.id)).toEqual(["u1", "u2"]);
+    // The HTTP transcript holds what is stored.
+    expect(loaded.map((m) => m.id)).toEqual(["u1"]);
 
     const messages = await waitFor(
       () => stub.getMessagesForTest(),

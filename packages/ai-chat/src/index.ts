@@ -1188,12 +1188,17 @@ export class AIChatAgent<
 
       // A tab loads the transcript over HTTP. While requests wait, it is also
       // sent the message list, so it knows which messages are queued.
+      // The HTTP transcript has the stored messages only; this list names
+      // the queued ones, which a tab keeps apart and draws last.
       if (this._turns.queuedMessageIds().size > 0) {
-        this._sendDirectMessage(connection, {
-          messages: this._messagesForClientSync(),
-          type: MessageType.CF_AGENT_CHAT_MESSAGES,
-          connect: true
-        });
+        sendIfOpen(
+          connection,
+          JSON.stringify({
+            type: MessageType.CF_AGENT_CHAT_MESSAGES,
+            connect: true,
+            ...this._turns.connectView(this.messages)
+          })
+        );
       }
 
       // Notify client about active streams that can be resumed
@@ -2260,14 +2265,7 @@ export class AIChatAgent<
         }
         const next = await batches.next();
         if (next.done) {
-          // Then the messages waiting requests hold: a tab that loads the
-          // transcript while one waits draws it.
-          let waiting = "";
-          for (const message of this._turns.clientView([]).messages) {
-            waiting += `${first ? "" : ","}${JSON.stringify(message)}`;
-            first = false;
-          }
-          controller.enqueue(encoder.encode(`${waiting}]`));
+          controller.enqueue(encoder.encode("]"));
           controller.close();
           return;
         }
