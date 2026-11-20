@@ -43,7 +43,22 @@ There is nothing for starting, closing, or resetting browsers. `browser/browser-
 - **Helpful errors.** Each function checks its arguments, and common CDP errors come back with a fix: a page command sent without `sessionId`, a CDP session id from an earlier run, an event sent as a command.
 - **Screenshots over 1 MB fail** with a hint to capture the viewport or use JPEG (see [Key Decisions](#key-decisions)).
 
-The tool turns the report into the result's `notice`, a sentence for each of restarted, tab closed, tab shared, and new tabs. It's all text, so a runner with only a text channel loses nothing.
+The tool turns the report into the result's `notice`, a sentence for each of restarted, tab closed, tab shared, and new tabs, plus the observer's dialog and blocked-tab notices. It's all text, so a runner with only a text channel loses nothing.
+
+### The host observer
+
+Each `BrowserSession` also opens a host-only observer (`browser/observer.ts`): a second CDP connection to the same browser, opened at the same time as the model's. It attaches to each page the session attaches the model to, enables Page and Network there, and records navigations and each main document's status, redirects, and load error in the report's `observed`, for the host only. The model's first command to a tab waits for the observer's setup there, at most 250 ms, so the first navigation isn't missed.
+
+- **Why a second socket.** Chrome keeps CDP sessions per connection, so model code can't address, detach, or disable the observer's sessions, and the observer's traffic stays out of the model's debug log. A session on the model's own socket would need guards for each of those.
+- **Why on by default.** On Browser Run an unanswered `alert()`, `confirm()` or `prompt()` hangs every later command in its tab until it's reloaded, and only a session that had Page enabled when the dialog opened can answer it. So the observer answers them: it accepts `alert` and `beforeunload` and dismisses `confirm` and `prompt`, and the model gets a notice saying how to answer yes (override `window.confirm` or `window.prompt` first). Measured from a Durable Object, it adds about 22 ms per session on a browser that already has the tab, and about 82 ms on a new one. `Browser({ observer: false })` turns it off.
+- **Blocked tabs.** A dialog that opened before any observer was connected can't be answered. When the observer's setup in a page times out while the browser still answers, the tab is flagged: a model command to it that times out says to reload or navigate it, and so does the close notice, unless the tab answers by then.
+
+Tradeoffs:
+
+- The record is advisory, not enforcement: model code can still close the tab, block requests, or serve a page from a service worker.
+- It doesn't follow popups or targets that aren't pages, and it misses what happens in a tab before the observer attaches (a `Target.createTarget({ url })` tab's first load, say).
+- The model can no longer accept a `confirm()` through CDP: the observer answers first.
+- It needs a provider whose second connection reaches the same browser (see [Persistent Browser](./browser-sessions.md#the-host-observer)).
 
 ### Code shapes
 
