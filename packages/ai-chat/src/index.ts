@@ -51,6 +51,8 @@ import {
   TurnQueue,
   SubmitConcurrencyController,
   hasIncompleteToolBatch,
+  continuationTargetIsLatest,
+  type ToolInteractionOutcome,
   partAwaitsClientInteraction,
   clientResolvableToolNames,
   toolApprovalUpdate,
@@ -418,9 +420,6 @@ const agentToolChunkEncoder = new TextEncoder();
 /** Bounds for one window of the legacy lift: rows and their summed bytes. */
 const LEGACY_LIFT_WINDOW_ROWS = 25;
 const LEGACY_LIFT_WINDOW_BYTES = 4 * 1024 * 1024;
-
-/** What applying a client tool result or approval did to its tool part. */
-type ToolPartApplyOutcome = "changed" | "unchanged" | "missing";
 
 export class AIChatAgent<
   Env extends Cloudflare.Env = Cloudflare.Env,
@@ -1772,6 +1771,9 @@ export class AIChatAgent<
 
           this._emit("tool:result", { toolCallId, toolName });
 
+          const continuationClientTools =
+            (clientTools as ClientToolSchema[] | undefined) ??
+            this._lastClientTools;
           this._enqueueInteractionApply(async () => {
             const outcome = await this._settleToolResult(
               toolCallId,
@@ -1780,30 +1782,21 @@ export class AIChatAgent<
               overrideState,
               errorText
             );
-            // Continue only for a result that settled the tool call. A
-            // second tab's result for an answered call, or one for a call
-            // that no longer exists (cleared, regenerated), has nothing new
-            // for the model.
-            if (autoContinue && outcome === "changed") {
-              this._scheduleAutoContinuation(
+            // Only a result that settled its call continues, targeted at
+            // that call's message (shared `afterInteraction`). Without
+            // autoContinue it re-arms a batch a sibling opted in for (#1650).
+            this._autoContinuation.afterInteraction(
+              outcome,
+              autoContinue === true,
+              () => ({
                 connection,
-                (clientTools as ClientToolSchema[] | undefined) ??
-                  this._lastClientTools,
-                this._lastBody,
-                "[AIChatAgent] Tool continuation failed:"
-              );
-            }
-            return outcome !== "missing";
+                clientTools: continuationClientTools,
+                body: this._lastBody,
+                errorPrefix: "[AIChatAgent] Tool continuation failed:"
+              })
+            );
+            return outcome.status !== "missing";
           });
-
-          if (!autoContinue) {
-            // A result that arrived WITHOUT autoContinue (e.g. a standalone
-            // errored tool) can still be the one that completes a parallel batch
-            // a sibling already opted to continue — re-arm the barrier so that
-            // continuation fires once the batch is whole (#1650). Never CREATES
-            // a pending continuation.
-            this._rearmPendingAutoContinuationForBatch();
-          }
           return;
         }
 
@@ -1816,20 +1809,18 @@ export class AIChatAgent<
               toolCallId,
               approved
             );
-            if (autoContinue && outcome === "changed") {
-              this._scheduleAutoContinuation(
+            this._autoContinuation.afterInteraction(
+              outcome,
+              autoContinue === true,
+              () => ({
                 connection,
-                this._lastClientTools,
-                this._lastBody,
-                "[AIChatAgent] Tool approval continuation failed:"
-              );
-            }
-            return outcome !== "missing";
+                clientTools: this._lastClientTools,
+                body: this._lastBody,
+                errorPrefix: "[AIChatAgent] Tool approval continuation failed:"
+              })
+            );
+            return outcome.status !== "missing";
           });
-
-          if (!autoContinue) {
-            this._rearmPendingAutoContinuationForBatch();
-          }
           return;
         }
       }
@@ -2275,12 +2266,17 @@ export class AIChatAgent<
   protected _orphanStore(): OrphanPersistStore {
     return {
       getMessage: (id) => this.messages.find((m) => m.id === id) ?? null,
-      appendMessage: (message) =>
-        this.persistMessages([...this.messages, message]),
-      updateMessage: (message) =>
-        this.persistMessages(
+      // A recovered partial is a turn's reply, stored late.
+      appendMessage: async (message) => {
+        await this.persistMessages([...this.messages, message]);
+        this._recordTurnReply(message.id);
+      },
+      updateMessage: async (message) => {
+        await this.persistMessages(
           this.messages.map((m) => (m.id === message.id ? message : m))
-        )
+        );
+        this._recordTurnReply(message.id);
+      }
     };
   }
 
@@ -2391,11 +2387,30 @@ export class AIChatAgent<
           this._lastBody = JSON.parse(row.value);
         } else if (row.key === "lastClientTools") {
           this._lastClientTools = JSON.parse(row.value);
+        } else if (row.key === "lastTurnReplyId") {
+          this._lastTurnReplyId = JSON.parse(row.value);
         }
       } catch {
         // Corrupted row — ignore and let the next request overwrite it
       }
     }
+  }
+
+  /**
+   * The id of the last reply a turn stored. `continuationTargetIsLatest`
+   * reads it to tell a later turn's reply from a message appended without a
+   * turn. Stored, because a reply can wait on a client for longer than the
+   * isolate lives.
+   */
+  private _lastTurnReplyId: string | null = null;
+
+  private _recordTurnReply(messageId: string): void {
+    if (this._lastTurnReplyId === messageId) return;
+    this._lastTurnReplyId = messageId;
+    this.sql`
+      insert or replace into cf_ai_chat_request_context (key, value)
+      values ('lastTurnReplyId', ${JSON.stringify(messageId)})
+    `;
   }
 
   /**
@@ -2795,11 +2810,7 @@ export class AIChatAgent<
    * here.
    */
   private _hasArmedContinuation(): boolean {
-    return (
-      this._continuation.pending !== null &&
-      !this._continuation.pending.pastCoalesce &&
-      this._autoContinuation.isArmed()
-    );
+    return this._autoContinuation.hasPendingDecision();
   }
 
   private _getSubmitConcurrencyDecision(
@@ -3426,40 +3437,6 @@ export class AIChatAgent<
   }
 
   /**
-   * Schedule an auto-continuation for a tool result/approval that opted in with
-   * `autoContinue: true` (#1650). Thin host wrapper that builds the
-   * {@link ContinuationSpec} and delegates to the shared
-   * {@link AutoContinuationController}, which owns the coalesce timer and the
-   * completeness-gated fire (shared with `@cloudflare/think`).
-   */
-  private _scheduleAutoContinuation(
-    connection: Connection,
-    clientTools: ClientToolSchema[] | undefined,
-    body: Record<string, unknown> | undefined,
-    errorPrefix: string
-  ) {
-    this._autoContinuation.schedule({
-      connection,
-      clientTools,
-      body,
-      errorPrefix
-    });
-  }
-
-  /**
-   * Re-arm the barrier for a result/approval that arrived WITHOUT `autoContinue`
-   * (#1650). A standalone errored result declines to continue on its own, but in
-   * a parallel batch a SIBLING may already have opted in — and this result can be
-   * the one that completes the batch, so we must re-run the barrier check. Unlike
-   * `_scheduleAutoContinuation` this NEVER creates a pending continuation (a
-   * standalone errored tool with no opted-in sibling must not auto-continue), and
-   * it no-ops once the continuation is running (`pastCoalesce`).
-   */
-  private _rearmPendingAutoContinuationForBatch(): void {
-    this._autoContinuation.rearmForBatch();
-  }
-
-  /**
    * Called when a streaming assistant turn finalizes (its message, with ALL tool
    * parts, is now persisted). Clears the stream-active gate and re-runs the
    * barrier for a continuation the gate held (#1650). Essential for an all-fast
@@ -3540,6 +3517,27 @@ export class AIChatAgent<
             this._clearAllAutoContinuationState(true);
             return;
           }
+          // The conversation moved on since the tool result (a newer question
+          // or reply, a regenerate, a clear): nothing left to continue. A
+          // message appended without a turn does not count.
+          if (
+            !continuationTargetIsLatest(
+              this.messages,
+              this._continuation.pending,
+              this._lastTurnReplyId
+            )
+          ) {
+            this._clearAllAutoContinuationState(true);
+            return;
+          }
+          // The reply that asked for the tool is extended while it is the
+          // last message. When a message was appended after it, the answer
+          // is a new reply after that message, which is left as it is.
+          const extendsReply =
+            this._continuation.pending?.targetMessageIds == null ||
+            this._continuation.pending.targetMessageIds.includes(
+              this.messages.at(-1)?.id ?? ""
+            );
 
           const clientTools = this._continuation.pending?.clientTools;
           const body = this._continuation.pending?.body;
@@ -3581,7 +3579,7 @@ export class AIChatAgent<
                         response,
                         [],
                         {
-                          continuation: true,
+                          continuation: extendsReply,
                           chatMessageId: requestId,
                           onStreamStart: () => {
                             replying = true;
@@ -6740,12 +6738,14 @@ export class AIChatAgent<
     applyUpdate: (part: Record<string, unknown>) => Record<string, unknown>
   ): Promise<boolean> {
     return (
-      (await this._updateToolPart(
-        toolCallId,
-        callerName,
-        matchStates,
-        applyUpdate
-      )) !== "missing"
+      (
+        await this._updateToolPart(
+          toolCallId,
+          callerName,
+          matchStates,
+          applyUpdate
+        )
+      ).status !== "missing"
     );
   }
 
@@ -6758,7 +6758,7 @@ export class AIChatAgent<
     callerName: string,
     matchStates: string[],
     applyUpdate: (part: Record<string, unknown>) => Record<string, unknown>
-  ): Promise<ToolPartApplyOutcome> {
+  ): Promise<ToolInteractionOutcome> {
     // Find the message containing this tool call.
     // Check streaming message first (in-memory, not yet persisted), then
     // retry persisted messages with backoff.
@@ -6785,7 +6785,7 @@ export class AIChatAgent<
       console.warn(
         `[AIChatAgent] ${callerName}: Could not find message with toolCallId ${toolCallId} after retries`
       );
-      return "missing";
+      return { status: "missing" };
     }
 
     const isStreamingMessage = message === this._streamingMessage;
@@ -6870,7 +6870,7 @@ export class AIChatAgent<
       console.warn(
         `[AIChatAgent] ${callerName}: Tool part with toolCallId ${toolCallId} not in expected state (expected: ${matchStates.join("|")})`
       );
-      return "missing";
+      return { status: "missing" };
     }
 
     // Idempotent no-op: caller asked us to apply something we'd already
@@ -6878,7 +6878,7 @@ export class AIChatAgent<
     // re-delivery). Skip the broadcast — clients are already in the
     // correct state and a redundant MESSAGE_UPDATED would just churn UI.
     if (!hasRealChange) {
-      return "unchanged";
+      return { status: "unchanged" };
     }
 
     // Broadcast the update to all clients.
@@ -6900,7 +6900,7 @@ export class AIChatAgent<
       }
     }
 
-    return "changed";
+    return { status: "changed", messageId: message.id };
   }
 
   /**
@@ -7011,13 +7011,15 @@ export class AIChatAgent<
     errorText?: string
   ): Promise<boolean> {
     return (
-      (await this._settleToolResult(
-        toolCallId,
-        _toolName,
-        output,
-        overrideState,
-        errorText
-      )) !== "missing"
+      (
+        await this._settleToolResult(
+          toolCallId,
+          _toolName,
+          output,
+          overrideState,
+          errorText
+        )
+      ).status !== "missing"
     );
   }
 
@@ -7028,7 +7030,7 @@ export class AIChatAgent<
     output: unknown,
     overrideState?: "output-error",
     errorText?: string
-  ): Promise<ToolPartApplyOutcome> {
+  ): Promise<ToolInteractionOutcome> {
     return this._updateToolPart(
       toolCallId,
       "_applyToolResult",
@@ -7711,14 +7713,17 @@ export class AIChatAgent<
     toolCallId: string,
     approved: boolean
   ): Promise<boolean> {
-    return (await this._settleToolApproval(toolCallId, approved)) !== "missing";
+    return (
+      (await this._settleToolApproval(toolCallId, approved)).status !==
+      "missing"
+    );
   }
 
   /** {@link _applyToolApproval}, reporting what the apply did to the part. */
   private async _settleToolApproval(
     toolCallId: string,
     approved: boolean
-  ): Promise<ToolPartApplyOutcome> {
+  ): Promise<ToolInteractionOutcome> {
     // Use the shared `agents/chat` builder so the approval merge — including
     // the fallback that synthesizes `approval.id` from `toolCallId` when an
     // older / hand-seeded transcript lacks one — stays identical to Think.
@@ -8051,6 +8056,7 @@ export class AIChatAgent<
                 excludeBroadcastIds
               );
             }
+            this._recordTurnReply(earlyPersistedId ?? message.id);
           }
           // Nothing to persist (or the persist threw, or an override never
           // reached the session write): settle the stream so it is not

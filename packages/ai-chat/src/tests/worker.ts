@@ -303,6 +303,21 @@ export class TestChatAgent extends AIChatAgent<Env> {
       return new Response(null);
     }
 
+    // A turn that ends on a client tool call. The continuation that answers
+    // its result falls through to the plain reply.
+    if (options?.body?.clientToolCall === true && !options.continuation) {
+      return makeSSEChunkResponse([
+        { type: "start" },
+        {
+          type: "tool-input-available",
+          toolCallId: "call-turn",
+          toolName: "testTool",
+          input: {}
+        },
+        { type: "finish" }
+      ]);
+    }
+
     if (options?.body?.sseWithMessageId === true) {
       return makeSSEChunkResponse([
         { type: "start", messageId: `fresh-msg-${Date.now()}` },

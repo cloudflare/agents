@@ -113,7 +113,7 @@ describe("Custom body forwarding during tool continuation", () => {
     ws.close(1000);
   });
 
-  it("should keep the original body when a later request runs before continuation", async () => {
+  it("does not continue a tool call after later requests replied past it", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
 
@@ -190,10 +190,12 @@ describe("Custom body forwarding during tool continuation", () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
     await agentStub.waitForIdleForTest();
 
-    const continuationBody = await agentStub.getCapturedBody();
-    expect(continuationBody).toEqual({
-      customField: "first-body",
-      delayMs: 1000
+    // Both requests replied after the tool call, so the tool call's message
+    // is no longer the latest one and the continuation is skipped: only the
+    // two requests ran the model.
+    expect(await agentStub.getChatMessageCallCountForTest()).toBe(2);
+    expect(await agentStub.getCapturedBody()).toEqual({
+      customField: "second-body"
     });
 
     ws.close(1000);

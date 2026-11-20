@@ -192,6 +192,8 @@ import {
   ContinuationState,
   PreStreamTurns,
   AutoContinuationController,
+  continuationTargetIsLatest,
+  type ToolInteractionOutcome,
   TIMED_OUT,
   awaitWithDeadline,
   drainInteractionApplies,
@@ -4741,11 +4743,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     return {
       getMessage: async (id) =>
         (await this.session.getMessage(id)) as UIMessage | null,
+      // A recovered partial is a turn's reply, stored late.
       appendMessage: async (message, parentId) => {
         await this.session.appendMessage(message, { parentId });
+        this._recordTurnReply(message.id);
       },
       updateMessage: async (message) => {
         await this.session.updateMessage(message);
+        this._recordTurnReply(message.id);
       }
     };
   }
@@ -13688,31 +13693,36 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           this._lastClientTools = event.clientTools as ClientToolSchema[];
           this._persistClientTools();
         }
-        this._enqueueInteractionApply(() =>
-          this._applyToolResult(
+        this._enqueueInteractionApply(async () => {
+          const outcome = await this._applyToolResult(
             event.toolCallId,
             event.output,
             event.state as "output-error" | undefined,
             event.errorText
-          )
-        );
-        if (event.autoContinue) {
-          this._scheduleAutoContinuation(connection);
-        } else {
-          this._rearmPendingAutoContinuationForBatch();
-        }
+          );
+          // Only a result that settled its call continues, targeted at that
+          // call's message; without autoContinue it re-arms a batch (#1650).
+          this._autoContinuation.afterInteraction(
+            outcome,
+            event.autoContinue === true,
+            () => this._continuationSpec(connection)
+          );
+        });
         break;
       }
 
       case "tool-approval": {
-        this._enqueueInteractionApply(() =>
-          this._applyToolApproval(event.toolCallId, event.approved)
-        );
-        if (event.autoContinue) {
-          this._scheduleAutoContinuation(connection);
-        } else {
-          this._rearmPendingAutoContinuationForBatch();
-        }
+        this._enqueueInteractionApply(async () => {
+          const outcome = await this._applyToolApproval(
+            event.toolCallId,
+            event.approved
+          );
+          this._autoContinuation.afterInteraction(
+            outcome,
+            event.autoContinue === true,
+            () => this._continuationSpec(connection)
+          );
+        });
         break;
       }
 
@@ -15607,7 +15617,22 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const toPersist = this._strippedForPersist(msg);
     if (toPersist === null) return false;
     await this._upsertMessageInHistory(toPersist, parentId);
+    this._recordTurnReply(toPersist.id);
     return true;
+  }
+
+  /**
+   * Record the reply a turn just stored. `continuationTargetIsLatest` reads
+   * it to tell a later turn's reply from a message appended without a turn.
+   * Durable, because a reply can wait on a client for longer than the
+   * isolate lives.
+   */
+  private _recordTurnReply(messageId: string): void {
+    this._configSet("lastTurnReplyId", messageId);
+  }
+
+  private _lastTurnReplyId(): string | null {
+    return this._configGet("lastTurnReplyId") ?? null;
   }
 
   /**
@@ -15629,6 +15654,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     if (this._resumableStream.pendingCutoverId !== streamId) {
       // The stream was settled by another path (a stall, an error): plain persist.
       await this._upsertMessageInHistory(toPersist, parentId);
+      this._recordTurnReply(toPersist.id);
       if (submission) {
         this._recordSubmissionMessage(submission.requestId, toPersist.id);
       }
@@ -15661,6 +15687,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       throw error;
     }
     await after?.();
+    this._recordTurnReply(toPersist.id);
     return toPersist.id;
   }
 
@@ -16032,22 +16059,22 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     output: unknown,
     overrideState?: "output-error",
     errorText?: string
-  ): Promise<void> {
+  ): Promise<ToolInteractionOutcome> {
     const update = toolResultUpdate(
       toolCallId,
       output,
       overrideState,
       errorText
     );
-    await this._applyToolUpdateToMessages(update);
+    return this._applyToolUpdateToMessages(update);
   }
 
   private async _applyToolApproval(
     toolCallId: string,
     approved: boolean
-  ): Promise<void> {
+  ): Promise<ToolInteractionOutcome> {
     const update = toolApprovalUpdate(toolCallId, approved);
-    await this._applyToolUpdateToMessages(update);
+    return this._applyToolUpdateToMessages(update);
   }
 
   // ── Durable execution approvals (codemode HITL) ──────────────────
@@ -16670,7 +16697,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     toolCallId: string;
     matchStates: string[];
     apply: (part: Record<string, unknown>) => Record<string, unknown>;
-  }): Promise<void> {
+  }): Promise<ToolInteractionOutcome> {
     // The message to update can live in two places. During a streaming turn
     // the assistant message exists ONLY in the in-flight accumulator until
     // `_persistAssistantMessage` writes it at a turn boundary; a parallel-
@@ -16681,6 +16708,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // `input-available` — #1649). Mirrors `@cloudflare/ai-chat`'s streaming-
     // message handling, generalized to also cover the post-persist case.
     let broadcastMessage: UIMessage | undefined;
+    // `undefined`: no part found; `null`: found, already settled.
+    let changedMessageId: string | null | undefined;
 
     // (1) In-flight accumulator. A client tool result that arrives over the
     // WebSocket before the end-of-stream persist would be missed by a
@@ -16695,12 +16724,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       const result = applyToolUpdate(accParts, update);
       if (result) {
         accumulatorOwnsCall = true;
+        changedMessageId ??= null;
         if (result.parts[result.index] !== accParts[result.index]) {
           // `accParts` is a typed alias of the accumulator's live array, so
           // this in-place write is reflected by `streaming.toMessage()` and
           // the eventual end-of-stream persist.
           accParts[result.index] = result.parts[result.index];
           broadcastMessage = streaming.toMessage();
+          changedMessageId = streaming.messageId;
         }
       }
     }
@@ -16723,6 +16754,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     if (owner) {
       const ownerParts = owner.parts as Array<Record<string, unknown>>;
       const result = applyToolUpdate(ownerParts, update);
+      if (result) changedMessageId ??= null;
       if (result && result.parts[result.index] !== ownerParts[result.index]) {
         const updatedMsg = {
           ...owner,
@@ -16740,6 +16772,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         // reconcile it here to reflect the tool update just written.
         this._patchCachedMessage(safe);
         broadcastMessage = safe;
+        // The live reply, when it also holds the call, is the one a
+        // continuation answers: keep it as the changed message.
+        if (typeof changedMessageId !== "string") changedMessageId = owner.id;
       }
     }
 
@@ -16749,6 +16784,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         message: broadcastMessage
       });
     }
+    if (typeof changedMessageId === "string") {
+      return { status: "changed", messageId: changedMessageId };
+    }
+    return changedMessageId === null
+      ? { status: "unchanged" }
+      : { status: "missing" };
   }
 
   /**
@@ -16852,12 +16893,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * controller's `isArmed()`.
    */
   private _hasArmedContinuation(): boolean {
-    const pending = this._continuation.pending;
-    return (
-      pending !== null &&
-      !pending.pastCoalesce &&
-      this._autoContinuation.isArmed()
-    );
+    return this._autoContinuation.hasPendingDecision();
   }
 
   protected async waitUntilStable(options?: {
@@ -18815,12 +18851,16 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   // ── Auto-continuation ──────────────────────────────────────────
 
   private _scheduleAutoContinuation(connection: Connection): void {
-    this._autoContinuation.schedule({
+    this._autoContinuation.schedule(this._continuationSpec(connection));
+  }
+
+  private _continuationSpec(connection: Connection) {
+    return {
       connection,
       clientTools: this._lastClientTools,
       body: undefined,
       errorPrefix: "[Think] Auto-continuation failed:"
-    });
+    };
   }
 
   /**
@@ -18916,6 +18956,20 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       inheritChannel: true,
       allowNested: true,
       execute: async () => {
+        // The conversation moved on since the tool result (a newer question
+        // or reply, a clear): nothing left to continue. A message appended
+        // without a turn does not count.
+        if (
+          !continuationTargetIsLatest(
+            this.messages,
+            this._continuation.pending,
+            this._lastTurnReplyId()
+          )
+        ) {
+          this._aborts.remove(requestId);
+          this._settleContinuationTurn(requestId, false);
+          return;
+        }
         if (this._continuation.pending) {
           this._continuation.pending.pastCoalesce = true;
         }
