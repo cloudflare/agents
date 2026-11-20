@@ -132,6 +132,21 @@ export function replyIsEmpty(message: {
   );
 }
 
+/**
+ * Whether the hosts remove this stored reply before the next turn: it holds
+ * nothing once its trailing reasoning is gone ({@link replyIsEmpty} of
+ * {@link stripTrailingReasoning}).
+ */
+export function replyIsRemovedAsEmpty(message: {
+  role: string;
+  parts: ReadonlyArray<unknown>;
+}): boolean {
+  if (message.role !== "assistant") return false;
+  // SAFETY: `stripTrailingReasoning` reads only the role and each part's
+  // `type`, `text` and tool call id, which any stored message carries.
+  return replyIsEmpty(stripTrailingReasoning(message as UIMessage));
+}
+
 function countReasoning(message: UIMessage): number {
   return message.parts.filter((part) => part.type === "reasoning").length;
 }

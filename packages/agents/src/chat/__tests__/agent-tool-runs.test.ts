@@ -1371,6 +1371,28 @@ describe("AgentToolRuns", () => {
       });
     });
 
+    for (const [label, parts] of [
+      ["only step-start", [{ type: "step-start" }]],
+      [
+        "reasoning with nothing after it",
+        [{ type: "step-start" }, { type: "reasoning", text: "thinking" }]
+      ],
+      ["only an empty text part", [{ type: "text", text: "" }]]
+    ] as const) {
+      it(`does not anchor a run on a reply of ${label}, which its own turn removes`, async () => {
+        const { runs, store, setTranscript } = setup();
+        setTranscript([
+          { id: "users-question", role: "user", parts: [{}] },
+          { id: "users-answer", role: "assistant", parts: [{}] },
+          { id: "empty", role: "assistant", parts }
+        ]);
+        const turn = heldTurn();
+        await runs.start("run-1", START, turn.run);
+        turn.shouldStart();
+        expect(store.read("run-1")?.startMessageId).toBe("users-answer");
+      });
+    }
+
     it("counts what follows the run's start as the run's, after a restart", async () => {
       const { runs, store, setTranscript } = setup();
       store.seed("run-1", false, "users-answer");

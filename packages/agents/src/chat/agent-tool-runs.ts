@@ -56,6 +56,7 @@ import type {
   AgentToolRunTerminal
 } from "./agent-tool-run-store";
 import { CHAT_RECOVERY_CANCELLED_REASON } from "./recovery-engine";
+import { replyIsRemovedAsEmpty } from "./repair-transcript";
 import {
   CHAT_RECOVERY_INCIDENT_KEY_PREFIX,
   type ChatRecoveryIncident
@@ -182,9 +183,10 @@ export function agentToolRunOutcome(input: {
 
 /**
  * The message a run's own part of the transcript starts after: the newest
- * one, skipping assistant replies with no parts. The turn that follows
- * removes such an empty reply, and an anchor that is gone would make every
- * message look like the run's.
+ * one, skipping assistant replies the turn that follows removes because
+ * they hold nothing ({@link replyIsRemovedAsEmpty}): no parts, only
+ * `step-start`, empty text, or reasoning with nothing after it. An anchor
+ * that is gone would make every message look like the run's.
  */
 function startAnchor(
   transcript: ReadonlyArray<{
@@ -195,7 +197,9 @@ function startAnchor(
 ): string | null {
   for (let i = transcript.length - 1; i >= 0; i--) {
     const message = transcript[i];
-    if (message.role === "assistant" && message.parts?.length === 0) continue;
+    if (message.parts !== undefined && replyIsRemovedAsEmpty(message)) {
+      continue;
+    }
     return message.id;
   }
   return null;
