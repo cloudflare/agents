@@ -243,12 +243,41 @@ describe("DynamicWorkerExecutor", () => {
   it("should return a clear error for provider names that shadow harness globals", async () => {
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 
-    for (const name of ["Promise", "setTimeout", "Error", "console"]) {
+    for (const name of [
+      "Promise",
+      "setTimeout",
+      "Error",
+      "String",
+      "console",
+      "Object",
+      "Proxy",
+      "JSON",
+      "Math",
+      "Uint8Array",
+      "ArrayBuffer",
+      "btoa",
+      "atob"
+    ]) {
       const result = await executor.execute("async () => 42", [
         { name, fns: {} }
       ]);
       expect(result.error).toBe(`Provider name "${name}" is reserved`);
     }
+  });
+
+  it("should return a clear error for a connector named String", async () => {
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+
+    class NoopConnector extends RpcTarget {
+      async callTool(): Promise<unknown> {
+        return null;
+      }
+    }
+
+    const result = await executor.execute("async () => 42", [], {
+      connectors: [{ name: "String", binding: new NoopConnector() }]
+    });
+    expect(result.error).toBe('Connector name "String" is reserved');
   });
 
   it("should return error when code throws", async () => {
@@ -259,6 +288,20 @@ describe("DynamicWorkerExecutor", () => {
       [codemodeProvider({})]
     );
     expect(result.error).toBe("boom");
+  });
+
+  it("should return an error when code throws a non-Error value", async () => {
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+
+    for (const [code, expected] of [
+      ['async () => { throw "x"; }', "x"],
+      ["async () => { throw { code: 1 }; }", "[object Object]"],
+      ["async () => { throw null; }", "null"],
+      ["async () => { throw undefined; }", "undefined"]
+    ]) {
+      const result = await executor.execute(code, [codemodeProvider({})]);
+      expect(result.error).toBe(expected);
+    }
   });
 
   it("should return error when tool function throws", async () => {
