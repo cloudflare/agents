@@ -22,6 +22,9 @@ import type { UIMessage } from "ai";
 import { normalizeToolInput, settleInterruptedPart } from "./message-builder";
 import { cutOffReplyToSettle } from "./recovery-attempt";
 import { partAwaitsClientInteraction } from "./tool-state";
+import { replyIsEmpty } from "./reply-empty";
+
+export { replyIsEmpty };
 
 /**
  * Whether a tool part already has a settled result the provider accepts, so it
@@ -103,33 +106,6 @@ export function stripTrailingReasoning<TMessage extends UIMessage>(
     ...message,
     parts: [...message.parts.slice(0, lastContent + 1), ...kept]
   };
-}
-
-/**
- * Whether a reply holds nothing: nothing a client can show and nothing a
- * model request can carry. That is an assistant message with no parts, or
- * with only `step-start` markers and text or reasoning parts that have no
- * text. A reply cut off while the model was still reasoning is left like
- * this once {@link stripTrailingReasoning} has run.
- *
- * Such a reply is not stored, and one that is stored is removed: a client
- * draws it as an empty bubble, and nothing can continue it.
- */
-export function replyIsEmpty(message: {
-  role: string;
-  parts: ReadonlyArray<unknown>;
-}): boolean {
-  return (
-    message.role === "assistant" &&
-    message.parts.every((part) => {
-      const record = part as { type?: unknown; text?: unknown };
-      if (record.type === "step-start") return true;
-      return (
-        (record.type === "text" || record.type === "reasoning") &&
-        (typeof record.text !== "string" || record.text.length === 0)
-      );
-    })
-  );
 }
 
 /**

@@ -15,6 +15,7 @@
 import type { UIMessage } from "ai";
 import { StreamAccumulator } from "./stream-accumulator";
 import type { StreamChunkData } from "./message-builder";
+import { dropEmptyReply } from "./reply-empty";
 
 // ── State ──────────────────────────────────────────────────────────
 
@@ -162,9 +163,12 @@ export function transition(
           : accumulator.mergeInto(prev);
 
       if (event.done) {
+        // A stream that ended with nothing in it (stopped before its first
+        // content) leaves no empty bubble behind: the server stores none.
         return {
           state: { status: "idle" },
-          messagesUpdate: mergeUnlessDiverged,
+          messagesUpdate: (prev) =>
+            dropEmptyReply(mergeUnlessDiverged(prev), accumulator.messageId),
           isStreaming: false
         };
       }
