@@ -49,6 +49,11 @@ import {
 import type { MessageConcurrency } from "./lifecycle";
 import { PreStreamTurns } from "./pre-stream-turns";
 import {
+  runServerTurn,
+  type ServerChatTurn,
+  type ServerTurnOutcome
+} from "./server-turn";
+import {
   SubmitConcurrencyController,
   type SubmitConcurrencyDecision
 } from "./submit-concurrency";
@@ -315,8 +320,13 @@ export class ChatTurns<
       return;
     }
 
-    this.preStream.begin(requestId);
+    // The registry hands out a signal for every string id. Anything else
+    // would give a turn no stop can reach.
     const signal = this.aborts.getSignal(requestId);
+    if (!signal) {
+      throw new TypeError("runClientRequest: requestId must be a string");
+    }
+    this.preStream.begin(requestId);
     const releasePendingEnqueue = this.submits.beginEnqueue();
     let stage: "persist" | "turn" = "persist";
     try {
@@ -344,13 +354,11 @@ export class ChatTurns<
             request.onSkipped();
             return;
           }
-          if (signal?.aborted) {
+          if (signal.aborted) {
             request.onCancelledBeforeStart();
             return;
           }
-          // The registry always has a controller here: only a reset removes
-          // it, and a reset makes the turn stale before it reaches this point.
-          await request.run(prepared, signal ?? new AbortController().signal);
+          await request.run(prepared, signal);
         },
         generation,
         releasePendingEnqueue
@@ -364,6 +372,17 @@ export class ChatTurns<
       this.aborts.remove(requestId);
       this.settlePreStreamTurn(requestId);
     }
+  }
+
+  /**
+   * Run one turn the server starts itself (`saveMessages`,
+   * `continueLastTurn`, a retry), start to finish. The counterpart of
+   * {@link runClientRequest}; see {@link runServerTurn} for the steps.
+   */
+  runServerTurn<TInput = undefined>(
+    turn: ServerChatTurn<TInput>
+  ): Promise<ServerTurnOutcome> {
+    return runServerTurn({ queue: this.queue, aborts: this.aborts }, turn);
   }
 
   /**

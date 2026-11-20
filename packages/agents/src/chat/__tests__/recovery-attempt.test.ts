@@ -75,7 +75,8 @@ function setup(scenario: Scenario = {}) {
   const events: string[] = [];
   const scheduled: string[] = [];
   const exhausted: string[] = [];
-  const restored: unknown[] = [];
+  // The context each turn was handed.
+  const pinned: unknown[] = [];
   let controller: AbortController | undefined;
   // The host's turn machinery, as its adapter binds it.
   const turns: ChatRecoveryTurnBindings = {
@@ -94,10 +95,6 @@ function setup(scenario: Scenario = {}) {
       log.push("wait");
       await scenario.duringWait?.(harness);
       return scenario.ready ?? true;
-    },
-    restoreRequestContext: (context) => {
-      log.push("context");
-      restored.push(context);
     },
     reconcileAgentToolChildRuns: async () => {
       log.push("reconcile");
@@ -173,8 +170,9 @@ function setup(scenario: Scenario = {}) {
       log.push("leaf");
       return scenario.leaf ?? { moved: false };
     },
-    runTurn: async (signal) => {
+    runTurn: async (signal, context) => {
       log.push("turn");
+      pinned.push(context);
       turnSignals.push(signal);
       await scenario.duringTurn?.(harness);
       return scenario.result ?? { status: "completed" };
@@ -216,7 +214,7 @@ function setup(scenario: Scenario = {}) {
     incident: () => storage.get(key),
     turns,
     activeRoot: () => engine.activeRootRequestId,
-    restored,
+    pinned,
     events,
     run: () => engine.runRecoveredTurn(host),
     // The same payload delivered again, as a deferral or a Task retry does.
@@ -261,7 +259,6 @@ describe("runRecoveredTurn", () => {
       "settle",
       "wait",
       "leaf",
-      "context",
       "turn",
       "before-outcome",
       "after-outcome",
@@ -274,26 +271,19 @@ describe("runRecoveredTurn", () => {
     expect(t.activeRoot()).toBeUndefined();
   });
 
-  it("restores the interrupted request's tools and body before the turn", async () => {
+  it("hands the turn the interrupted request's tools and body, and writes nothing", async () => {
     const t = setup();
     await t.run();
-    // `null` in the payload means the request had none: the key is present
-    // and cleared, not left as it was.
-    expect(t.restored).toEqual([
-      { lastBody: { model: "m" }, lastClientTools: undefined }
-    ]);
-    expect(Object.keys(t.restored[0] as object).sort()).toEqual([
-      "lastBody",
-      "lastClientTools"
-    ]);
+    // `null` in the payload means the request had none: the key is pinned
+    // as "none", not left for the stored one.
+    expect(t.pinned).toEqual([{ body: { model: "m" }, clientTools: null }]);
   });
 
-  it("leaves the stored tools and body when the payload names neither", async () => {
+  it("pins nothing when the payload names neither, so the turn reads the stored ones", async () => {
     const t = setup();
     t.host.data = { incidentId: INCIDENT, originalRequestId: ROOT };
     await t.run();
-    expect(t.restored).toEqual([]);
-    expect(t.log).not.toContain("context");
+    expect(t.pinned).toEqual([{}]);
   });
 
   it("the attempt's turn runs under the attempt's root request id", async () => {

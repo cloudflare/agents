@@ -944,7 +944,9 @@ export class ThinkClientToolsAgent extends Think {
    * Schedule a recovery continue for the latest reply and start its attempt,
    * which then waits for the chat to settle.
    */
-  async startRecoveryContinueForTest(): Promise<void> {
+  async startRecoveryContinueForTest(
+    context: Record<string, unknown> = {}
+  ): Promise<void> {
     const reply = this.messages.filter((m) => m.role === "assistant").at(-1);
     const incidentId = "inc-answered";
     await this.ctx.storage.put(`cf:chat-recovery:incident:${incidentId}`, {
@@ -961,7 +963,8 @@ export class ThinkClientToolsAgent extends Think {
     this._recoveryAttemptForTest = this._chatRecoveryContinueDetached({
       incidentId,
       originalRequestId: "root-answered",
-      targetAssistantId: reply?.id
+      targetAssistantId: reply?.id,
+      ...context
     });
   }
 
@@ -978,6 +981,38 @@ export class ThinkClientToolsAgent extends Think {
     return { status: incident?.status, reason: incident?.reason };
   }
 
+  private _failNextContinuationBeforeStream = false;
+
+  /** The next continuation turn's `beforeTurn` throws, once. */
+  async failNextContinuationBeforeStreamForTest(): Promise<void> {
+    this._failNextContinuationBeforeStream = true;
+  }
+
+  /**
+   * Run a recovery continue whose payload names the tools and body of the
+   * request that was interrupted. Returns the body the recovered turn ran
+   * with and the stored body afterwards.
+   */
+  async runRecoveryContinueWithContextForTest(
+    storedBody: Record<string, unknown>,
+    lastBody: Record<string, unknown>
+  ): Promise<{ ranWith: string; storedAfter: string }> {
+    const internals = this as unknown as {
+      _lastBody: Record<string, unknown> | undefined;
+    };
+    internals._lastBody = storedBody;
+    await this.startRecoveryContinueForTest({
+      lastBody,
+      lastClientTools: null
+    });
+    await this._recoveryAttemptForTest;
+    // JSON text: an RPC return type cannot carry `unknown` values.
+    return {
+      ranWith: JSON.stringify(this._turnBodies.at(-1) ?? null),
+      storedAfter: JSON.stringify(internals._lastBody ?? null)
+    };
+  }
+
   async setFailContinuationBeforeStream(value: boolean): Promise<void> {
     this._failContinuationBeforeStream = value;
   }
@@ -986,10 +1021,29 @@ export class ThinkClientToolsAgent extends Think {
     return this._chatErrorLog;
   }
 
+  private _turnBodies: Array<Record<string, unknown> | null> = [];
+
+  /** The body each turn ran with, in the order the turns started. */
+  async getTurnBodiesForTest(): Promise<Array<Record<string, unknown> | null>> {
+    return this._turnBodies;
+  }
+
+  async saveMessagesForTest(text: string): Promise<string> {
+    const result = await this.saveMessages([
+      { id: crypto.randomUUID(), role: "user", parts: [{ type: "text", text }] }
+    ]);
+    return result.status;
+  }
+
   override async beforeTurn(ctx: TurnContext): Promise<TurnConfig | void> {
+    this._turnBodies.push(ctx.body ?? null);
     this._lastTurnToolNames = Object.keys(ctx.tools);
     if (ctx.continuation) await this._continuationStartLatch?.wait();
     if (ctx.continuation && this._failContinuationBeforeStream) {
+      throw new Error("continuation failed before streaming");
+    }
+    if (ctx.continuation && this._failNextContinuationBeforeStream) {
+      this._failNextContinuationBeforeStream = false;
       throw new Error("continuation failed before streaming");
     }
     if (this._stampMetadata) {

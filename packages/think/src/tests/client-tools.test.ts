@@ -3553,6 +3553,66 @@ describe("Think — tool results with nothing to continue", () => {
     await closeWS(tabB);
   });
 
+  it("a recovery still continues a reply whose answer's turn ended before the model call", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    // Turn 1 ends on a client tool call.
+    const done = waitForDone(ws);
+    sendChatRequest(ws, [makeUserMessage("use client tool")], {
+      clientTools: [{ name: "client_action", description: "A client tool" }]
+    });
+    await done;
+    await delay(200);
+
+    // A recovery continue for that reply starts and waits for the client.
+    await agent.startRecoveryContinueForTest();
+    await delay(300);
+
+    // The client answers. The answer's turn throws in a hook, before any
+    // model call: it never continued the reply.
+    await agent.failNextContinuationBeforeStreamForTest();
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId: "tc-client-1",
+        toolName: "client_action",
+        output: "tool output",
+        autoContinue: true
+      })
+    );
+
+    // The recovery was not superseded by a turn that did nothing.
+    const incident = await agent.finishRecoveryContinueForTest();
+    expect(incident.reason).not.toBe("continued_by_interaction");
+    await closeWS(ws);
+  });
+
+  it("a recovered turn runs with the interrupted request's body and leaves the stored one", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+    const done = waitForDone(ws);
+    sendChatRequest(ws, [makeUserMessage("hello")]);
+    await done;
+    await delay(200);
+
+    const result = await agent.runRecoveryContinueWithContextForTest(
+      { chat: true },
+      { agentToolInput: "the run's input" }
+    );
+
+    expect(JSON.parse(result.ranWith)).toEqual({
+      agentToolInput: "the run's input"
+    });
+    // The chat's next turn does not inherit it.
+    expect(JSON.parse(result.storedAfter)).toEqual({ chat: true });
+    await closeWS(ws);
+  });
+
   it("a recovery waiting on the client does not continue the reply the answer continued", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);
@@ -4248,6 +4308,43 @@ describe("Think — messageConcurrency", () => {
 
     await closeWS(ws);
     await closeWS(otherTab);
+  });
+
+  it("a saveMessages turn queued behind a request runs with that request's body", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setSlowStreamMode(true, 100, 10);
+    const request1 = sendChatRequest(ws, [makeUserMessage("First")], {
+      marker: "first"
+    });
+    const done1 = waitForDoneId(ws, request1, 10000);
+    await waitForActiveTurn(agent);
+
+    // Queued behind the first request. Its body becomes the stored body
+    // when its turn starts.
+    const request2 = sendChatRequest(ws, [makeUserMessage("Second")], {
+      marker: "second"
+    });
+    const done2 = waitForDoneId(ws, request2, 10000);
+    await delay(100);
+
+    // Called while the stored body is still the first request's. The turn
+    // runs after the second request and reads the stored body then.
+    const status = await agent.saveMessagesForTest("Server follow-up");
+    await done1;
+    await done2;
+
+    expect(status).toBe("completed");
+    expect(await agent.getTurnBodiesForTest()).toEqual([
+      { marker: "first" },
+      { marker: "second" },
+      { marker: "second" }
+    ]);
+
+    await closeWS(ws);
   });
 
   it("merge: all user messages preserved, single model turn for overlapping", async () => {

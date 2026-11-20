@@ -2588,6 +2588,32 @@ export class ThinkTestAgent extends Think {
     }
   }
 
+  /**
+   * A `saveMessages` turn whose stream stalls: the watchdog cuts it off and
+   * hands it to recovery. Returns what the caller of `saveMessages` gets.
+   */
+  async testSaveMessagesWithStall(
+    afterChunks: number,
+    timeoutMs: number
+  ): Promise<{ status: string; reason: string | null }> {
+    this._stallAfterChunks = afterChunks;
+    this._stallAttemptsRemaining = 1;
+    this.chatStreamStallTimeoutMs = timeoutMs;
+    try {
+      const result = await this.saveMessages([
+        {
+          id: crypto.randomUUID(),
+          role: "user",
+          parts: [{ type: "text", text: "trigger stall" }]
+        }
+      ]);
+      return { status: result.status, reason: result.reason ?? null };
+    } finally {
+      this._stallAfterChunks = null;
+      this._stallAttemptsRemaining = null;
+    }
+  }
+
   async testChatWithStallThenRecover(
     afterChunks: number,
     timeoutMs: number
@@ -7502,7 +7528,35 @@ export class ThinkProgrammaticTestAgent extends Think {
     };
   }
 
+  private _clearDuringResponseHook = false;
+
+  /**
+   * Drive a saveMessages turn, with a chat clear landing while its
+   * `onChatResponse` runs: after the reply finished and was stored.
+   */
+  async testClearDuringResponseHook(): Promise<{
+    status: SaveMessagesResult["status"];
+    hookStatus: string | null;
+  }> {
+    this._clearDuringResponseHook = true;
+    const result = await this.saveMessages([
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text: "hello" }]
+      }
+    ]);
+    return {
+      status: result.status,
+      hookStatus: this._responseLog.at(-1)?.status ?? null
+    };
+  }
+
   override onChatResponse(result: ChatResponseResult): void {
+    if (this._clearDuringResponseHook) {
+      this._clearDuringResponseHook = false;
+      this.resetTurnState();
+    }
     this._responseLog.push(result);
     // Capture the real cutover, BEFORE the submission finalizer writes its
     // ledger outcome. Tests restore exactly this durable crash-window row.
@@ -8948,6 +9002,124 @@ export class ThinkProgrammaticTestAgent extends Think {
         parts: [{ type: "text", text }]
       }
     ]);
+  }
+
+  /**
+   * Drive the private turn behind saveMessages with a shouldApplyMessages
+   * that answers from `answers`, while the chat is reset (as a clear does)
+   * during the first shouldApplyMessages call or during the messages
+   * function.
+   */
+  async testShouldApplyAcrossReset(
+    answers: boolean[],
+    resetDuring: "first-ask" | "messages"
+  ): Promise<{ status: SaveMessagesResult["status"]; asked: number }> {
+    let asked = 0;
+    const self = this as unknown as {
+      _runProgrammaticMessagesTurn(
+        requestId: string,
+        messages: (current: UIMessage[]) => UIMessage[],
+        options: { shouldApplyMessages: () => boolean }
+      ): Promise<SaveMessagesResult>;
+      resetTurnState(): void;
+    };
+    const result = await self._runProgrammaticMessagesTurn(
+      crypto.randomUUID(),
+      () => {
+        if (resetDuring === "messages") self.resetTurnState();
+        return [
+          {
+            id: crypto.randomUUID(),
+            role: "user" as const,
+            parts: [{ type: "text" as const, text: "Across a reset" }]
+          }
+        ];
+      },
+      {
+        shouldApplyMessages: () => {
+          if (asked === 0 && resetDuring === "first-ask") {
+            self.resetTurnState();
+          }
+          return answers[asked++] ?? true;
+        }
+      }
+    );
+    return { status: result.status, asked };
+  }
+
+  /**
+   * Queue a second saveMessages turn behind a running one, then call
+   * `abortAllRequests()` while the second still waits in the queue.
+   */
+  async testQueuedSaveMessagesStoppedByAbortAllRequests(
+    cancelAfterMs: number
+  ): Promise<{ running: SaveMessagesResult; queued: SaveMessagesResult }> {
+    const turn = (text: string) =>
+      this.saveMessages([
+        {
+          id: crypto.randomUUID(),
+          role: "user" as const,
+          parts: [{ type: "text" as const, text }]
+        }
+      ]);
+    setTimeout(() => this.abortAllRequests(), cancelAfterMs);
+    const [running, queued] = await Promise.all([
+      turn("Running"),
+      turn("Queued")
+    ]);
+    return { running, queued };
+  }
+
+  /**
+   * Leave the terminal record of an earlier failure (#1645), then drive a
+   * saveMessages turn the caller stops: with a signal that is already
+   * aborted (`"before"`: the turn does nothing), or once its messages are
+   * stored and before the model is called (`"after-store"`: the conversation
+   * moved). Returns the record left afterwards.
+   */
+  async testAbortedTurnAfterTerminalError(
+    when: "before" | "after-store"
+  ): Promise<{
+    status: SaveMessagesResult["status"];
+    stored: number;
+    modelCalls: number;
+    after: { requestId: string } | null;
+  }> {
+    const key = "cf:chat:last-terminal";
+    await this.ctx.storage.put(key, {
+      requestId: "earlier-failure",
+      body: "The assistant encountered an error."
+    });
+    const controller = new AbortController();
+    if (when === "before") controller.abort(new Error("pre-aborted"));
+    const self = this as unknown as {
+      _runProgrammaticMessagesTurn(
+        requestId: string,
+        messages: UIMessage[],
+        options: { signal: AbortSignal; onMessagesApplied: () => void }
+      ): Promise<SaveMessagesResult>;
+    };
+    const result = await self._runProgrammaticMessagesTurn(
+      crypto.randomUUID(),
+      [
+        {
+          id: crypto.randomUUID(),
+          role: "user",
+          parts: [{ type: "text", text: "Stop me" }]
+        }
+      ],
+      {
+        signal: controller.signal,
+        onMessagesApplied: () =>
+          controller.abort(new Error("stopped after the messages were stored"))
+      }
+    );
+    return {
+      status: result.status,
+      stored: (await this.getMessages()).length,
+      modelCalls: this._capturedTurnContexts.length,
+      after: (await this.ctx.storage.get<{ requestId: string }>(key)) ?? null
+    };
   }
 
   /** Drive continueLastTurn with an external signal. */

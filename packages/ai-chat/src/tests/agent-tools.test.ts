@@ -239,6 +239,7 @@ type ParentStub = DurableObjectStub & {
     injectAfterMs: number,
     runId?: string
   ): Promise<RunAgentToolResult>;
+  startThreeChildRunsForTest(): Promise<AgentToolRunInspection>;
   startChildWithoutTailForTest(
     input: {
       prompt: string;
@@ -1060,6 +1061,14 @@ describe("AIChatAgent as an agent-tool child", () => {
       output: { handledPrompt: "structured output", messageCount: 2 }
     });
     expect(second).toEqual(first);
+  });
+
+  // A run's input goes with its turn. Three runs started together: the
+  // second used to read whatever body was stored when its turn started.
+  it("runs each of three queued runs with its own input", async () => {
+    const parent = await getParent();
+    const inspection = await parent.startThreeChildRunsForTest();
+    expect(inspection).toMatchObject({ status: "error", error: "boom" });
   });
 
   it("marks AIChatAgent stream error chunks as failed agent-tool runs", async () => {
