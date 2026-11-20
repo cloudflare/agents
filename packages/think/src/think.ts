@@ -12929,7 +12929,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         // are queued and draws them after the reply.
         if (this._turns.queuedMessageIds().size > 0) {
           connection.send(
-            JSON.stringify(this._messagesFrame({ connect: true }))
+            JSON.stringify({
+              type: MSG_CHAT_MESSAGES,
+              connect: true,
+              ...this._turns.connectView(this.messages)
+            })
           );
         }
         this._notifyStreamResuming(connection);
@@ -12998,9 +13002,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         url.pathname === "/get-messages" ||
         url.pathname.endsWith("/get-messages")
       ) {
-        // Then the messages waiting requests hold: a tab that loads the
-        // transcript while one waits draws it.
-        return Response.json(this._turns.clientView(this.messages).messages);
+        // The stored messages only. A tab learns of queued ones over its
+        // socket, where they are named as queued.
+        return Response.json(this.messages);
       }
       const messengerResponse =
         await this._messengerRuntime?.handleRequest(request);

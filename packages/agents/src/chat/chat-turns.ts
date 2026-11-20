@@ -709,6 +709,24 @@ export class ChatTurns<
   }
 
   /**
+   * {@link clientView} for a tab that has just connected while a reply
+   * streams: without the reply. The tab gets the reply from the stream it
+   * resumes, and a copy in its list would be continued by that replay, so
+   * the reply would be drawn with its first chunks twice.
+   */
+  connectView<TMessage extends { id: string }>(
+    messages: ReadonlyArray<TMessage>
+  ): { messages: TMessage[]; queuedMessageIds?: string[] } {
+    const streaming = this.host.streamingReply()?.id;
+    const view = this.clientView(messages);
+    if (streaming === undefined) return view;
+    return {
+      ...view,
+      messages: view.messages.filter((message) => message.id !== streaming)
+    };
+  }
+
+  /**
    * The ids of the messages waiting requests hold that have not joined the
    * transcript. A client's copy of the transcript can include them (a tab
    * draws them): they are not new messages of the request it sends.
