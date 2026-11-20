@@ -13223,7 +13223,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const sent = incomingMessages?.filter((m) => !queued?.has(m.id)) ?? [];
     const heldIds = new Set(this._newUserMessageIds(sent));
     const held = sent.filter((message) => heldIds.has(message.id));
-    const base = sent.filter((message) => !heldIds.has(message.id));
     return {
       requestId,
       admission: {
@@ -13272,24 +13271,18 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         // up the server's tool outputs. Without this, Session's
         // INSERT-OR-IGNORE-by-ID would persist a duplicate orphan
         // assistant row alongside the real server-generated one.
-        const reconciledTurn = await this._reconcileAndPersistIncoming(base, {
+        const reconciledTurn = await this._reconcileAndPersistIncoming(sent, {
           requestId,
           isRegeneration,
           isCurrent,
-          channel: "web"
+          channel: "web",
+          hold: heldIds
         });
         if (!reconciledTurn) return null;
 
         // Other tabs see the new messages as queued.
         this._broadcastMessages(connection ? [connection.id] : []);
-        return {
-          // A regenerate of a question that waits branches from it.
-          branchParentId:
-            isRegeneration && held.length > 0
-              ? held[held.length - 1].id
-              : reconciledTurn.branchParentId,
-          generation
-        };
+        return { branchParentId: reconciledTurn.branchParentId, generation };
       },
       // The turn is at the front of the queue: its new messages join the
       // session under the latest leaf (the reply of the turn it waited
@@ -15366,6 +15359,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       isCurrent: () => boolean;
       /** Channel stamped on user messages the server has not stored yet. */
       channel?: string;
+      /**
+       * Messages a waiting request holds: they shape the reconcile and the
+       * branch point, and are not stored here.
+       */
+      hold?: ReadonlySet<string>;
     }
   ): Promise<{ branchParentId: string | undefined } | null> {
     const spanAttributes = {
@@ -15408,6 +15406,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
         for (const msg of reconciled) {
           if (!options.isCurrent()) return false;
+          if (options.hold?.has(msg.id)) continue;
           await this._persistIncomingMessage(
             msg,
             serverMessagesById,

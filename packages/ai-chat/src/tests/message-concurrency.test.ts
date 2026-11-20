@@ -230,6 +230,20 @@ describe("AIChatAgent messageConcurrency", () => {
     expect(userTexts).toEqual(
       expect.arrayContaining(["Hello", "Second", "Third"])
     );
+    // The queued questions wait off the transcript, then join after the
+    // first reply. The turn that answers them sees them last.
+    expect(persistedMessages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "user",
+      "assistant"
+    ]);
+    const seen = await agentStub.getTranscriptsSeenForTest();
+    expect(seen).toEqual([
+      ["user-1"],
+      ["user-1", persistedMessages[1].id, "user-2", "user-3"]
+    ]);
 
     ws.close(1000);
   });
@@ -378,6 +392,18 @@ describe("AIChatAgent messageConcurrency", () => {
       expect.arrayContaining(["Hello", "Second\n\nThird"])
     );
     expect(userMessages).toHaveLength(2);
+    // One merged question, after the first reply, answered by one turn.
+    expect(persistedMessages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "assistant"
+    ]);
+    const seen = await agentStub.getTranscriptsSeenForTest();
+    expect(seen).toEqual([
+      ["user-1"],
+      ["user-1", persistedMessages[1].id, "user-3"]
+    ]);
 
     ws.close(1000);
   });
@@ -463,6 +489,20 @@ describe("AIChatAgent messageConcurrency", () => {
     expect(userTexts).toEqual(
       expect.arrayContaining(["Hello", "Second", "Third"])
     );
+    // The queued questions wait off the transcript, then join after the
+    // first reply. The turn that answers them sees them last.
+    expect(persistedMessages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "user",
+      "assistant"
+    ]);
+    const seen = await agentStub.getTranscriptsSeenForTest();
+    expect(seen).toEqual([
+      ["user-1"],
+      ["user-1", persistedMessages[1].id, "user-2", "user-3"]
+    ]);
 
     ws.close(1000);
   });

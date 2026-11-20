@@ -13927,7 +13927,20 @@ export class ThinkAdmissionTestAgent extends Think {
     return createDelayedMultiChunkMockModel(["unused "], 1);
   }
 
+  /** What each model request in this isolate held: role and text. */
+  private _modelRequests: Array<Array<{ role: string; text: string }>> = [];
+
+  getModelRequestsForTest(): Array<Array<{ role: string; text: string }>> {
+    return this._modelRequests;
+  }
+
   override beforeTurn(ctx: TurnContext): TurnConfig {
+    this._modelRequests.push(
+      ctx.messages.map((message) => ({
+        role: message.role,
+        text: JSON.stringify(message.content)
+      }))
+    );
     let body = ctx.body as
       | { tag?: string; chunks?: number; delayMs?: number }
       | undefined;
@@ -13980,7 +13993,8 @@ export class ThinkAdmissionTestAgent extends Think {
     const { admissions } = (this as unknown as { _turns: ChatTurns })._turns;
     admissions?.admit({
       requestId,
-      messageIds,
+      messages: messageIds.map((id) => ({ id, role: "user", parts: [] })),
+      afterUserId: null,
       decision: { strategy: null, overlapping: false, debounceUntilMs: null },
       payload: {
         trigger: "submit-message",

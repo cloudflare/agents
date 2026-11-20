@@ -2637,7 +2637,6 @@ export class AIChatAgent<
     const sent = transformedMessages?.filter((m) => !queued?.has(m.id)) ?? [];
     const heldIds = new Set(this._newUserMessageIds(sent));
     const held = sent.filter((message) => heldIds.has(message.id));
-    const base = sent.filter((message) => !heldIds.has(message.id));
     let concurrencyDecision!: SubmitConcurrencyDecision;
     let epoch!: number;
     return {
@@ -2699,7 +2698,7 @@ export class AIChatAgent<
           async () => {
             this._broadcastChatMessage(
               {
-                messages: held.length > 0 ? this.messages : base,
+                messages: held.length > 0 ? this.messages : sent,
                 type: MessageType.CF_AGENT_CHAT_MESSAGES
               },
               connection ? [connection.id] : []
@@ -2717,9 +2716,10 @@ export class AIChatAgent<
             // transcript, so it deletes nothing, as when they were stored
             // with it.
             await this._persistForTurn(isCurrent, true, () =>
-              this.persistMessages(base, connection ? [connection.id] : [], {
+              this.persistMessages(sent, connection ? [connection.id] : [], {
                 _deleteStaleRows:
-                  requestTrigger !== "regenerate-message" && held.length === 0
+                  requestTrigger !== "regenerate-message" && held.length === 0,
+                _hold: heldIds
               })
             );
           }
@@ -5067,7 +5067,15 @@ export class AIChatAgent<
     messages: UIMessage[],
     excludeBroadcastIds: string[] = [],
     /** @internal */
-    options?: { _deleteStaleRows?: boolean }
+    options?: {
+      _deleteStaleRows?: boolean;
+      /**
+       * Messages a waiting request holds: they shape the reconcile (a
+       * client's stale copy is told apart by what follows it) and are left
+       * out of what is stored and broadcast.
+       */
+      _hold?: ReadonlySet<string>;
+    }
   ) {
     const scope = this._turnPersistScope.getStore();
     const turn = scope?.open ? scope : undefined;
@@ -5084,9 +5092,12 @@ export class AIChatAgent<
     );
     // A client's copy of a reply can be behind the stored one (the tab that
     // pressed stop has one chunk fewer). It never shortens the stored reply.
-    const mergedMessages = turn?.clientCopy
+    const hold = options?._hold;
+    const kept = turn?.clientCopy
       ? keepStoredReplies(reconciled, priorMessages)
       : reconciled;
+    const mergedMessages =
+      hold && hold.size > 0 ? kept.filter((m) => !hold.has(m.id)) : kept;
 
     const toWrite: UIMessage[] = [];
     for (const message of mergedMessages) {
