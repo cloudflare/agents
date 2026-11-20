@@ -6190,11 +6190,15 @@ export class ThinkToolsTestAgent extends Think {
   /** Skip the next transcript tool update, as a restart right before it would. */
   async skipNextToolUpdateForTest(): Promise<void> {
     const self = this as unknown as {
-      _applyToolUpdateToMessages(update: unknown): Promise<void>;
+      _applyToolUpdateToMessages(
+        update: unknown
+      ): Promise<{ status: "missing" }>;
     };
     const original = self._applyToolUpdateToMessages;
     self._applyToolUpdateToMessages = async () => {
       self._applyToolUpdateToMessages = original;
+      // The write never landed: nothing was settled.
+      return { status: "missing" };
     };
   }
 

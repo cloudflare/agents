@@ -221,6 +221,15 @@ export type IncomingMessage<ChatMessage extends UIMessage = UIMessage> =
       id: string;
     }
   | {
+      /**
+       * The user pressed stop while this tab waited for a tool continuation
+       * to start. The tab has no request id for it yet, so the server stops
+       * the continuation this connection waits on.
+       */
+      type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL;
+      continuation: true;
+    }
+  | {
       /** Client acknowledges stream resuming notification and is ready to receive chunks */
       type: MessageType.CF_AGENT_STREAM_RESUME_ACK;
       /** The request ID of the stream being resumed */

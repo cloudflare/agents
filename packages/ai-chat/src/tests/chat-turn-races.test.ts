@@ -721,6 +721,77 @@ describe("chat turn races", () => {
     ws.close(1000);
   });
 
+  it("a tab's stop while it waits for a continuation to start reaches the server", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const seen = record(ws);
+    const agent = await getAgentByName(env.TestChatAgent, room);
+    await agent.persistMessages([user1, toolReply("assistant-1", "call-1")]);
+
+    await agent.holdTurnQueueForTest();
+    send(ws, toolResult("call-1"));
+    await waitUntil(
+      async () => (await agent.pendingContinuationRequestIdForTest()) !== null
+    );
+    await delay(150);
+
+    // The tab has no request id for the continuation yet: the transport
+    // sends a cancel that names the continuation by its connection.
+    send(ws, {
+      type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
+      continuation: true
+    });
+    await delay(50);
+    await agent.releaseTurnQueueForTest();
+    await agent.waitForIdleForTest();
+
+    expect(await agent.getChatMessageCallCountForTest()).toBe(0);
+    expect(await agent.getContinuationStateForTest()).toMatchObject({
+      hasPending: false,
+      hasDeferred: false
+    });
+    expect(
+      seen.some((m) => m.type === MessageType.CF_AGENT_STREAM_RESUME_NONE)
+    ).toBe(true);
+    ws.close(1000);
+  });
+
+  it("abortAllRequests() drops a continuation parked on an unanswered sibling, with no turn running", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const agent = await getAgentByName(env.TestChatAgent, room);
+    const reply = toolReply("assistant-1", "call-1");
+    reply.parts.push({
+      type: "tool-testTool",
+      toolCallId: "call-2",
+      state: "input-available",
+      input: {}
+    } as ChatMessage["parts"][number]);
+    await agent.persistMessages([user1, reply]);
+
+    // The first result asks to continue and parks on its sibling.
+    send(ws, toolResult("call-1"));
+    await waitUntil(
+      async () => (await agent.pendingContinuationRequestIdForTest()) !== null
+    );
+    await delay(150);
+    expect(await agent.getChatMessageCallCountForTest()).toBe(0);
+
+    // The user stops everything. No turn is running.
+    await agent.abortAllRequestsForTest();
+    // The sibling answers later, without asking to continue.
+    send(ws, { ...toolResult("call-2"), autoContinue: false });
+    await delay(300);
+    await agent.waitForIdleForTest();
+
+    expect(await agent.getChatMessageCallCountForTest()).toBe(0);
+    expect(await agent.getContinuationStateForTest()).toMatchObject({
+      hasPending: false,
+      hasDeferred: false
+    });
+    ws.close(1000);
+  });
+
   it("a result that arrives while a continuation fails still reaches the model", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
@@ -1068,5 +1139,205 @@ describe("chat turn races", () => {
     } finally {
       unsubscribe();
     }
+  });
+
+  it("a stopped reply does not continue for a tool result answered while it streamed", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const seen = record(ws);
+    const agent = await getAgentByName(env.TestChatAgent, room);
+
+    // The reply streams a client tool call and keeps streaming.
+    sendChatRequest(ws, "req-1", [user1], {
+      consumeClientToolResultWithinStream: true
+    });
+    await waitUntil(() =>
+      responses(seen, "req-1").some((m) =>
+        m.body.includes("call_consumed_within_stream")
+      )
+    );
+    // The tab answers the call while the reply streams, then the user stops
+    // the reply.
+    send(ws, {
+      type: MessageType.CF_AGENT_TOOL_RESULT,
+      toolCallId: "call_consumed_within_stream",
+      toolName: "fastClientTool",
+      output: { ok: true },
+      autoContinue: true
+    });
+    send(ws, { type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL, id: "req-1" });
+    await waitUntil(() => responses(seen, "req-1").some((m) => m.done));
+    await delay(300);
+    await agent.waitForIdleForTest();
+
+    // Stop means stop: the model is not called again.
+    expect(await agent.getChatMessageCallCountForTest()).toBe(1);
+    expect(await agent.getContinuationStateForTest()).toMatchObject({
+      hasPending: false,
+      hasDeferred: false
+    });
+    // The answer is kept for the next turn.
+    const stored = (await agent.getPersistedMessages()) as ChatMessage[];
+    const call = stored
+      .flatMap((m) => m.parts)
+      .find(
+        (part) =>
+          "toolCallId" in part &&
+          part.toolCallId === "call_consumed_within_stream"
+      );
+    expect(call).toMatchObject({ state: "output-available" });
+    ws.close(1000);
+  });
+
+  it("stopping every request also drops the continuation of a result answered while the reply streamed", async () => {
+    const room = crypto.randomUUID();
+    const dropped: string[] = [];
+    const unsubscribe = subscribe("chat", (event) => {
+      if (event.type === "chat:continuation:dropped" && event.name === room) {
+        dropped.push(event.payload.reason);
+      }
+    });
+    try {
+      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+      const seen = record(ws);
+      const agent = await getAgentByName(env.TestChatAgent, room);
+
+      sendChatRequest(ws, "req-1", [user1], {
+        consumeClientToolResultWithinStream: true
+      });
+      await waitUntil(() =>
+        responses(seen, "req-1").some((m) =>
+          m.body.includes("call_consumed_within_stream")
+        )
+      );
+      send(ws, {
+        type: MessageType.CF_AGENT_TOOL_RESULT,
+        toolCallId: "call_consumed_within_stream",
+        toolName: "fastClientTool",
+        output: { ok: true },
+        autoContinue: true
+      });
+      await waitUntil(
+        async () => (await agent.pendingContinuationRequestIdForTest()) !== null
+      );
+      // The app stops everything, not through the WebSocket cancel.
+      await agent.abortAllRequestsForTest();
+      await waitUntil(() => responses(seen, "req-1").some((m) => m.done));
+      await delay(300);
+      await agent.waitForIdleForTest();
+
+      expect(await agent.getChatMessageCallCountForTest()).toBe(1);
+      expect(dropped).toEqual(["stopped"]);
+      ws.close(1000);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it("a stopped continuation does not run the result that arrived while it ran", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const agent = await getAgentByName(env.TestChatAgent, room);
+    const reply: ChatMessage = {
+      id: "assistant-1",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-testTool",
+          toolCallId: "call-1",
+          state: "input-available",
+          input: {}
+        },
+        {
+          type: "tool-otherTool",
+          toolCallId: "call-2",
+          state: "approval-responded",
+          input: {},
+          approval: { id: "approval-2", approved: true }
+        }
+      ] as ChatMessage["parts"]
+    };
+    await agent.persistMessages([user1, reply]);
+    await agent.setTestBody({ delayMs: 400 });
+
+    // The first result's continuation waits on the model. A second result
+    // lands meanwhile, and then the user stops the continuation.
+    send(ws, toolResult("call-1"));
+    await waitUntil(
+      async () => (await agent.getChatMessageCallCountForTest()) === 1
+    );
+    const continuationId = await agent.pendingContinuationRequestIdForTest();
+    expect(continuationId).not.toBeNull();
+    send(ws, toolResult("call-2"));
+    await waitUntil(
+      async () =>
+        (await agent.getContinuationStateForTest()).hasDeferred === true
+    );
+    send(ws, {
+      type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
+      id: continuationId
+    });
+    await delay(900);
+    await agent.waitForIdleForTest();
+
+    // Stop means stop: the second result does not start the model again.
+    expect(await agent.getChatMessageCallCountForTest()).toBe(1);
+    expect(await agent.getContinuationStateForTest()).toMatchObject({
+      hasPending: false,
+      hasDeferred: false
+    });
+    const stored = (await agent.getPersistedMessages()) as ChatMessage[];
+    expect(stored[1].parts[1]).toMatchObject({ state: "output-available" });
+    ws.close(1000);
+  });
+
+  it("a result that arrives after a continuation was stopped still continues", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const agent = await getAgentByName(env.TestChatAgent, room);
+    const reply: ChatMessage = {
+      id: "assistant-1",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-testTool",
+          toolCallId: "call-1",
+          state: "input-available",
+          input: {}
+        },
+        {
+          type: "tool-otherTool",
+          toolCallId: "call-2",
+          state: "approval-responded",
+          input: {},
+          approval: { id: "approval-2", approved: true }
+        }
+      ] as ChatMessage["parts"]
+    };
+    await agent.persistMessages([user1, reply]);
+    await agent.setTestBody({ delayMs: 400 });
+
+    // The first result's continuation waits on the model, and the user
+    // stops it. The stopped turn is still winding down when a second
+    // result arrives: that is a new action.
+    send(ws, toolResult("call-1"));
+    await waitUntil(
+      async () => (await agent.getChatMessageCallCountForTest()) === 1
+    );
+    const continuationId = await agent.pendingContinuationRequestIdForTest();
+    send(ws, {
+      type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
+      id: continuationId
+    });
+    await delay(50);
+    send(ws, toolResult("call-2"));
+
+    await waitUntil(
+      async () => (await agent.getChatMessageCallCountForTest()) === 2
+    );
+    await delay(600);
+    await agent.waitForIdleForTest();
+    expect(await agent.getChatMessageCallCountForTest()).toBe(2);
+    ws.close(1000);
   });
 });

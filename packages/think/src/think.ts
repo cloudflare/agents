@@ -9182,10 +9182,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   ): Promise<void> {
     const requestId = crypto.randomUUID();
     const abortSignal = this._aborts.getSignal(requestId);
-    const detachExternal = this._aborts.linkExternal(
-      requestId,
-      options?.signal
-    );
+    const detachExternal = this._turns.linkExternal(requestId, options?.signal);
     const ignoredTools = (options as { tools?: unknown } | undefined)?.tools;
     if (
       ignoredTools != null &&
@@ -13684,8 +13681,16 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         break;
 
       case "cancel":
-        this._aborts.cancel(event.id);
+        // A user's stop: it also drops the continuations waiting on the
+        // turn it stops.
+        this._turns.cancel(event.id);
         await this._chatRecoveryEngine().tryCancelScheduledRecovery(event.id);
+        break;
+
+      case "cancel-continuation":
+        // A stop from a tab that waits for a tool continuation to start. It
+        // has no request id for it yet, so it names itself.
+        this._turns.cancelWaitingContinuation(connection.id);
         break;
 
       case "messages":
@@ -13956,10 +13961,40 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * so the queued callback bails when it fires.
    */
 
-  /** Abort every in-flight chat turn on this agent. */
+  /**
+   * Abort every in-flight chat turn on this agent, and drop every
+   * auto-continuation that waits to run, whether a turn is running or not.
+   */
   cancelAllChats(): void {
-    this._aborts.destroyAll();
+    this._stopEveryChat();
   }
+
+  /**
+   * A stop of everything (`ChatTurns.stopAll`): every turn is aborted and
+   * every waiting continuation dropped. The connection-less continuation
+   * waits as a queue item until its callback runs, so that item goes too.
+   */
+  private _stopEveryChat(): void {
+    this._turns.stopAll();
+    // Once its callback runs, the turn core has it and has just stopped it.
+    if (this._connectionlessContinuationRunning) return;
+    void this.keepAliveWhile(async () => {
+      if (await this.dequeue(CONNECTIONLESS_CONTINUATION_QUEUE_ID)) {
+        this._emit("chat:continuation:dropped", {
+          requestId: null,
+          reason: "stopped"
+        });
+      }
+    }).catch((error) => {
+      console.error(
+        "[Think] Failed to drop the queued connection-less continuation",
+        error
+      );
+    });
+  }
+
+  /** The connection-less continuation's queue callback is running. */
+  private _connectionlessContinuationRunning = false;
 
   protected abortRequest(requestId: string, reason?: unknown): void {
     this._turns.cancel(requestId, reason);
@@ -13976,12 +14011,15 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * A turn still waiting in the queue is aborted too: it ends `aborted`
    * when it reaches the front, stores nothing and does not call the model.
    *
-   * Does NOT invalidate queued turns, continuation timers, or submit
-   * concurrency state — use {@link resetTurnState} for the full
-   * teardown that runs on `chat-clear`.
+   * Every auto-continuation that waits to run is dropped too, whether a
+   * turn is running or not. A tool result that arrives afterwards continues
+   * as usual.
+   *
+   * Does NOT invalidate queued turns or submit concurrency state — use
+   * {@link resetTurnState} for the full teardown that runs on `chat-clear`.
    */
   protected abortAllRequests(): void {
-    this._aborts.destroyAll();
+    this._stopEveryChat();
   }
 
   private async _handleClear(connection?: Connection) {
@@ -14318,9 +14356,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               requestId,
               timeoutMs: stallTimeoutMs
             });
-            this.abortRequest(
-              requestId,
-              new Error("chat stream stalled: inactivity watchdog fired")
+            // The runtime's own abort, not a stop: recovery continues
+            // the turn, so the continuations waiting on it are kept.
+            this._turns.runtimeAbort(() =>
+              this.abortRequest(
+                requestId,
+                new Error("chat stream stalled: inactivity watchdog fired")
+              )
             );
           }
         );
@@ -14906,9 +14948,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             });
             // Tear down the upstream model stream so a hung provider/transport
             // is released; the watchdog's throw drives the terminal error below.
-            this.abortRequest(
-              requestId,
-              new Error("chat stream stalled: inactivity watchdog fired")
+            // The runtime's own abort, not a stop: recovery continues
+            // the turn, so the continuations waiting on it are kept.
+            this._turns.runtimeAbort(() =>
+              this.abortRequest(
+                requestId,
+                new Error("chat stream stalled: inactivity watchdog fired")
+              )
             );
           }
         );
@@ -16426,15 +16472,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         (run) => this._enqueueInteractionOutcome(run)
       );
     } else {
-      let outcome: ToolInteractionOutcome | undefined;
-      await this._enqueueInteractionApply(async () => {
-        outcome = await apply();
-      });
-      const applied = outcome as ToolInteractionOutcome | undefined;
-      // Like a connection's: only an outcome that settled its call continues.
-      if (applied?.status === "changed") {
-        await this._queueConnectionlessContinuation(applied.messageId);
-      }
+      // Like a connection's: only an outcome that settled its call
+      // continues, and not when a stop landed while it was applied.
+      await this._turns.applyInteractionThen(
+        apply,
+        (targetMessageId) =>
+          this._queueConnectionlessContinuation(targetMessageId),
+        (run) => this._enqueueInteractionOutcome(run)
+      );
     }
     if (
       !autoContinue &&
@@ -18361,16 +18406,21 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const latest = this.messages.at(-1)?.id;
     const targetMessageIds =
       queued?.targetMessageIds ?? (latest === undefined ? [] : [latest]);
-    await this._turns.runUnscheduledContinuationTurn(
-      this._continuationTurn(),
-      {
-        requestId: crypto.randomUUID(),
-        connection: undefined,
-        clientTools: this._lastClientTools,
-        targetMessageIds
-      },
-      "[Think] Connection-less continuation failed:"
-    );
+    this._connectionlessContinuationRunning = true;
+    try {
+      await this._turns.runUnscheduledContinuationTurn(
+        this._continuationTurn(),
+        {
+          requestId: crypto.randomUUID(),
+          connection: undefined,
+          clientTools: this._lastClientTools,
+          targetMessageIds
+        },
+        "[Think] Connection-less continuation failed:"
+      );
+    } finally {
+      this._connectionlessContinuationRunning = false;
+    }
   }
 
   // ── Response hook ──────────────────────────────────────────────

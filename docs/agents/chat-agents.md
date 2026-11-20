@@ -565,7 +565,7 @@ The `destroy()` method cancels any pending chat requests and cleans up stream st
 
 ### Request Cancellation
 
-When a user clicks "stop" in the chat UI, the client sends a `CF_AGENT_CHAT_REQUEST_CANCEL` message. The server propagates this to the `abortSignal` in `options`:
+When a user clicks "stop" in the chat UI, the client sends a `CF_AGENT_CHAT_REQUEST_CANCEL` message. The server propagates this to the `abortSignal` in `options`. While a tab waits for a tool continuation to start it has no request id for it yet, so it sends the message with `continuation: true` in place of `id`, and the server stops the continuation that connection waits on:
 
 ```typescript
 async onChatMessage(_onFinish, options) {
