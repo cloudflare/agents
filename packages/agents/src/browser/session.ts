@@ -310,9 +310,10 @@ const HOST_ONLY = "it is for the host, not your code.";
 const NO_TUNNELING =
   "send each command with browser.cdp instead, passing sessionId to reach a tab.";
 const NO_REQUEST_INTERCEPTION =
-  "your code can't receive Fetch.requestPaused events, so every request it " +
-  "paused would hang the tab. To block URLs, send Network.setBlockedURLs; " +
-  "to add request headers, send Network.setExtraHTTPHeaders.";
+  "your code can't receive the events for intercepted requests, so every " +
+  "request it intercepted would hang the tab. To block URLs, send " +
+  "Network.setBlockedURLs; to add request headers, send " +
+  "Network.setExtraHTTPHeaders.";
 
 /**
  * Commands model code can't send, and why.
@@ -322,13 +323,15 @@ const NO_REQUEST_INTERCEPTION =
  * - Live View and handoff: a Live View link controls the whole browser, so it
  *   goes to a trusted person through `Browser.liveView()`, never to the model.
  * - Tunnels: these carry raw protocol messages past this check.
- * - Request interception: model code never gets the `Fetch.requestPaused`
- *   events it would have to answer, so it could only hang its own tab, or
- *   answer a request it guessed the id of with a response the host's
- *   observer then records.
+ * - Request interception, current (`Fetch.enable`) and legacy
+ *   (`Network.setRequestInterception`): model code never gets the events it
+ *   would have to answer (`Fetch.requestPaused`, `Network.requestIntercepted`),
+ *   so it could only hang its own tab, or answer a request it guessed the id
+ *   of with a made-up response.
  */
 const REFUSED_COMMANDS = new Map([
   ["Fetch.enable", NO_REQUEST_INTERCEPTION],
+  ["Network.setRequestInterception", NO_REQUEST_INTERCEPTION],
   ["Browser.close", MANAGED_BROWSER],
   ["Browser.crash", MANAGED_BROWSER],
   ["Browser.crashGpuProcess", MANAGED_BROWSER],

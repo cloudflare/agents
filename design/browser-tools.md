@@ -39,6 +39,7 @@ There is nothing for starting, closing, or resetting browsers. `browser/browser-
 - **Popups don't take over.** Tabs the page opens itself are reported as `newTabs`, and the model decides whether to switch.
 - **A lost browser doesn't stop the run.** If the browser expired, was closed, or crashed, connecting replaces it and the code runs in the new one. The report says `restarted`.
 - **The model can't close the browser or get a Live View link.** `Browser.close`, `Browser.crash*`, `Cloudflare.getLiveView` and `Cloudflare.handoff` are refused, and so are `Target.sendMessageToTarget` and `Target.exposeDevToolsProtocol`, which could tunnel them.
+- **The model can't intercept requests.** `Fetch.enable` and `Network.setRequestInterception` are refused: model code never receives the events it would have to answer (`Fetch.requestPaused`, `Network.requestIntercepted`), so every intercepted request would hang the tab. The error points to `Network.setBlockedURLs` and `Network.setExtraHTTPHeaders`.
 - **Helpful errors.** Each function checks its arguments, and common CDP errors come back with a fix: a page command sent without `sessionId`, a CDP session id from an earlier run, an event sent as a command.
 - **Screenshots over 1 MB fail** with a hint to capture the viewport or use JPEG (see [Key Decisions](#key-decisions)).
 

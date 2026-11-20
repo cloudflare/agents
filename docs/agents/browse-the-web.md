@@ -384,6 +384,7 @@ Recent Wrangler releases support Browser Run in local development. `npx wrangler
 - The model's code runs in a fresh Dynamic Worker for every call, with no network access (`fetch` and `connect` are blocked). `browser` is its only way out.
 - CDP commands go to your Durable Object over Workers RPC. The WebSocket and the browser stay in your Durable Object, not the sandbox.
 - The model cannot close or crash the browser; `Browser.close` and `Browser.crash*` are refused.
+- The model cannot intercept requests: `Fetch.enable` and `Network.setRequestInterception` are refused, because its code never receives the events it would have to answer, so every intercepted request would hang the tab. `Network.setBlockedURLs` and `Network.setExtraHTTPHeaders` still work.
 - The model cannot get a Live View link: `Cloudflare.getLiveView` and `Cloudflare.handoff` are refused, and so are `Target.sendMessageToTarget` and `Target.exposeDevToolsProtocol`, which could carry those commands inside them.
 - Live View links give whoever holds them control of the browser, including its logins. Do not show them to the model or store them.
 
