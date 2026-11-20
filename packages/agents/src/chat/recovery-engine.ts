@@ -2122,7 +2122,7 @@ export function retryAfterSeconds(
   error: unknown,
   now: number = Date.now()
 ): number | undefined {
-  return retryAfterIn(error, now, new Set(), 0).seconds;
+  return retryAfterIn(error, now, new Set()).seconds;
 }
 
 /**
@@ -2132,11 +2132,11 @@ export function retryAfterSeconds(
 function retryAfterIn(
   error: unknown,
   now: number,
-  seen: Set<object>,
-  depth: number
+  seen: Set<object>
 ): { found: boolean; seconds?: number } {
   if (error == null || typeof error !== "object") return { found: false };
-  if (depth >= 8 || seen.has(error)) return { found: false };
+  // An error that wraps itself, directly or further down, is read once.
+  if (seen.has(error)) return { found: false };
   seen.add(error);
   const record = error as {
     responseHeaders?: unknown;
@@ -2161,7 +2161,7 @@ function retryAfterIn(
     record.cause
   ];
   for (const inner of wrapped) {
-    const result = retryAfterIn(inner, now, seen, depth + 1);
+    const result = retryAfterIn(inner, now, seen);
     if (result.found) return result;
   }
   return { found: false };

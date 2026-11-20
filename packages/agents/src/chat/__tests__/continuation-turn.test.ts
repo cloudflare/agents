@@ -1482,6 +1482,41 @@ describe("what a continuation turn runs", () => {
     expect(parts.firing.size).toBe(0);
   });
 
+  it("a connection-less continuation leaves no record behind, run or dropped", async () => {
+    const parts = {
+      continuation: turns.continuation,
+      autoContinuation: turns.autoContinuation,
+      aborts: turns.aborts,
+      messages: () => host.transcript,
+      clientToolNames: () => new Set<string>(),
+      streamed: new Map<string, boolean>(),
+      firing: new Set<object>(),
+      unscheduled: new Set<string>(),
+      dropped: () => {}
+    };
+    const run = (requestId: string, enqueue?: () => Promise<void>) =>
+      runContinuationTurn(
+        parts,
+        enqueue ? { ...host.turn(), enqueue: () => enqueue() } : host.turn(),
+        {
+          continuation: {
+            requestId,
+            connection: undefined,
+            targetMessageIds: ["a1"]
+          },
+          errorPrefix: "[free]"
+        }
+      );
+    await run("free-1");
+    expect(host.ran).toEqual(["free-1"]);
+    expect(parts.unscheduled.size).toBe(0);
+
+    // A host enqueue that fails never runs the turn.
+    await run("free-2", () => Promise.reject(new Error("no queue")));
+    expect(parts.unscheduled.size).toBe(0);
+    expect(parts.firing.size).toBe(0);
+  });
+
   it("the stream's end clears the continuation it made active", async () => {
     await result("a1");
     turns.streamStarted("cont-1", () => {});

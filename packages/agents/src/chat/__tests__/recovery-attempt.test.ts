@@ -786,6 +786,24 @@ describe("runRecoveredTurn", () => {
     expect(t.incident()).toBeUndefined();
   });
 
+  it("keeps a failure its turn's own routing recorded, with one event", async () => {
+    const t = setup({
+      result: { status: "error", error: "attempt saw this" },
+      // routeStreamInterruption, when onChatRecovery throws.
+      duringTurn: async ({ engine }) => {
+        await engine.updateIncident(INCIDENT, "failed", "hook threw");
+      }
+    });
+    await t.run();
+    expect(t.incident()).toMatchObject({
+      status: "failed",
+      reason: "hook threw"
+    });
+    expect(
+      t.events.filter((event) => event === "chat:recovery:failed")
+    ).toHaveLength(1);
+  });
+
   it("keeps the outcome of a turn the app declined to continue, with one event", async () => {
     const t = setup({
       result: { status: "error", error: "stream broke" },
@@ -1353,5 +1371,33 @@ describe("incident writes that overlap", () => {
     expect(
       t.events.filter((event) => event === "chat:recovery:skipped")
     ).toHaveLength(1);
+  });
+});
+
+describe("the give-up after the isolate ran out of memory", () => {
+  it("gives up on every live incident, each once, and seals it", async () => {
+    const t = setup();
+    const adapter = (t.engine as unknown as { adapter: ChatRecoveryAdapter })
+      .adapter;
+    await adapter.putIncident(chatRecoveryIncidentKey("incident-2"), {
+      ...t.incident()!,
+      incidentId: "incident-2",
+      recoveryKind: "retry"
+    });
+
+    await t.engine.sealMemoryLimitedRecovery();
+
+    expect(t.exhausted).toEqual(["out_of_memory", "out_of_memory"]);
+    expect(t.incident()).toMatchObject({
+      status: "exhausted",
+      reason: "out_of_memory"
+    });
+    expect(
+      await adapter.getIncident(chatRecoveryIncidentKey("incident-2"))
+    ).toMatchObject({ status: "exhausted", reason: "out_of_memory" });
+
+    // Sealed: a second trip gives up on nothing again.
+    await t.engine.sealMemoryLimitedRecovery();
+    expect(t.exhausted).toHaveLength(2);
   });
 });
