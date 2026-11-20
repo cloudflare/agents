@@ -297,6 +297,30 @@ describe("durable admission", () => {
     expect(b.started).toEqual(["r3"]);
   });
 
+  it("under `latest`, a new request during recovery is not superseded by the older replays", async () => {
+    const db = new DatabaseSync(":memory:");
+    const first = isolate(db, { concurrency: "latest" });
+    void first.send("r1");
+    await tick();
+    void first.send("r2");
+    void first.send("r3");
+    await tick();
+    // After the reset recovery still owns r1's turn, so nothing is replayed
+    // until a new request arrives.
+    const b = isolate(db, {
+      concurrency: "latest",
+      recoveryPending: () => true
+    });
+    b.copyTranscript(first);
+    void b.send("r4");
+    await tick();
+    await tick();
+    await tick();
+    expect(b.started).toEqual(["r4"]);
+    expect(b.ended.get("r2")).toBe("skipped");
+    expect(b.ended.get("r3")).toBe("skipped");
+  });
+
   it("the user messages of recorded requests are known, for recovery's leaf", async () => {
     const db = new DatabaseSync(":memory:");
     const a = await queueBehindRunningTurn(db, ["r2"]);

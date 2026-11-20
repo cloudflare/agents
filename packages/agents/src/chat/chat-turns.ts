@@ -341,6 +341,12 @@ export class ChatTurns<
   readonly admissions: ChatAdmissions | null;
   /** Concurrency decisions of replays not started yet, by request id. */
   readonly #restoredDecisions = new Map<string, SubmitConcurrencyDecision>();
+  /** Client requests decided and not queued yet (not replays). */
+  readonly #decidedNotQueued = new Set<{
+    decision: SubmitConcurrencyDecision;
+    concurrency: MessageConcurrency;
+    isSubmitMessage: boolean;
+  }>();
 
   constructor(
     private readonly host: ChatTurnsHost,
@@ -358,6 +364,21 @@ export class ChatTurns<
                 record.requestId,
                 this.submits.restore(record.decision)
               );
+            }
+            // A request decided before these replays is newer than every one
+            // of them, and they now hold newer sequence numbers. Decide it
+            // again against them: under `latest`, `merge` or `debounce` it
+            // supersedes them, as it would have before the reset.
+            if (records.length === 0) return;
+            for (const slot of this.#decidedNotQueued) {
+              const again = this.submits.decide({
+                concurrency: slot.concurrency,
+                isSubmitMessage: slot.isSubmitMessage,
+                queuedTurns: 1
+              });
+              if (again.action === "execute" && again.submitSequence !== null) {
+                slot.decision = again;
+              }
             }
           },
           replay: (record, onQueued) => {
@@ -478,6 +499,13 @@ export class ChatTurns<
       request.onDropped();
       return;
     }
+    // Until it is queued, replays that start meanwhile decide it again.
+    const slot = {
+      decision,
+      concurrency: request.concurrency,
+      isSubmitMessage: request.isSubmitMessage
+    };
+    if (!replay) this.#decidedNotQueued.add(slot);
 
     // The registry hands out a signal for every string id. Anything else
     // would give a turn no stop can reach.
@@ -492,6 +520,7 @@ export class ChatTurns<
     let queued = false;
     const onQueued = () => {
       queued = true;
+      this.#decidedNotQueued.delete(slot);
       releasePendingEnqueue();
       replay?.onQueued();
     };
@@ -527,10 +556,9 @@ export class ChatTurns<
       stage = "turn";
       // Requests an earlier isolate left go first.
       if (admissions && !replay) await admissions.beforeEnqueue();
-
       const outcome = await request.enqueue(
         async () => {
-          if (!(await this.awaitSubmitTurn(decision, generation))) {
+          if (!(await this.awaitSubmitTurn(slot.decision, generation))) {
             request.onSkipped();
             return;
           }
@@ -560,6 +588,7 @@ export class ChatTurns<
       await request.onError(error, stage);
     } finally {
       releasePendingEnqueue();
+      this.#decidedNotQueued.delete(slot);
       if (!queued) replay?.onQueued();
       if (admissions) admissions.end(requestId);
       this.aborts.remove(requestId);
