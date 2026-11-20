@@ -13427,38 +13427,21 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   /**
    * A stop of everything (`ChatTurns.stopAll`): every turn is aborted and
    * every waiting continuation dropped. The connection-less continuation
-   * waits as a queue item until its callback runs, so that item goes too.
+   * waits as a queue item until its callback runs. It is not dequeued here:
+   * a read and a dequeue would leave a window in which an approval pushed
+   * after the stop replaces the item and is dequeued with it. The stop count
+   * is durable, the item carries the count it was pushed under, and its
+   * callback drops an item pushed before a later stop
+   * ({@link _cfRunConnectionlessContinuation}). A push after the stop
+   * carries the new count and runs.
    */
   private _stopEveryChat(): void {
-    const stops = this._connectionlessStops() + 1;
-    this._configSet(CONNECTIONLESS_STOPS_KEY, String(stops));
+    this._configSet(
+      CONNECTIONLESS_STOPS_KEY,
+      String(this._connectionlessStops() + 1)
+    );
     this._holdForStop(this._turns.stopAll());
-    // Once its callback runs, the turn core has it and has just stopped it.
-    if (this._connectionlessContinuationRunning) return;
-    void this.keepAliveWhile(async () => {
-      // An item pushed after this stop (an approval that arrived since) is
-      // not this stop's to drop. A callback that starts before the dequeue
-      // reads `stops` and returns.
-      const queued = await this.getQueue<ConnectionlessContinuation>(
-        CONNECTIONLESS_CONTINUATION_QUEUE_ID
-      );
-      if (!queued || (queued.payload?.stops ?? 0) >= stops) return;
-      if (await this.dequeue(CONNECTIONLESS_CONTINUATION_QUEUE_ID)) {
-        this._emit("chat:continuation:dropped", {
-          requestId: null,
-          reason: "stopped"
-        });
-      }
-    }).catch((error) => {
-      console.error(
-        "[Think] Failed to drop the queued connection-less continuation",
-        error
-      );
-    });
   }
-
-  /** The connection-less continuation's queue callback is running. */
-  private _connectionlessContinuationRunning = false;
 
   /**
    * Stops of every chat ({@link _stopEveryChat}), durable so an item pushed
@@ -14919,6 +14902,18 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               async (assistantMsg) => {
                 response = { ...response, message: assistantMsg };
                 await this._rememberPendingResponseHook(response);
+                // The await above is a storage write. The input gate holds
+                // new events while it is pending, but work already running
+                // (another turn's callback, an RPC caller's continuation) can
+                // still clear the chat in it. Check again before the write,
+                // as `AIChatAgent` checks before each write of its reply.
+                if (resetSinceTurnStarted()) {
+                  resetBeforeStore = true;
+                  await this._forgetPendingResponseHook(requestId).catch(
+                    () => {}
+                  );
+                  return false;
+                }
                 persistedMessageId =
                   await this._persistAssistantMessageWithCutover(
                     streamId,
@@ -14955,7 +14950,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           // output and terminal outcome still commit with stream settlement.
           this._finalizeSubmissionStream(requestId, submissionResult);
 
-          await this._fireLiveResponseHook(response);
+          // A clear kept the reply out: no hook, as for a clear before it.
+          if (!resetBeforeStore) await this._fireLiveResponseHook(response);
         } catch (e) {
           await this._forgetPendingResponseHook(requestId).catch(() => {});
           console.error("Failed to persist assistant message:", e);
@@ -17960,7 +17956,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const latest = this.messages.at(-1)?.id;
     const targetMessageIds =
       queued?.targetMessageIds ?? (latest === undefined ? [] : [latest]);
-    // Pushed before a stop of every chat, which has not dequeued it yet.
+    // Pushed before a later stop of every chat: the stop drops it here.
     if (
       queued?.stops !== undefined &&
       queued.stops < this._connectionlessStops()
@@ -17971,20 +17967,15 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       });
       return;
     }
-    this._connectionlessContinuationRunning = true;
-    try {
-      await this._turns.runUnscheduledContinuationTurn(
-        this._continuationTurn(),
-        {
-          requestId: crypto.randomUUID(),
-          connection: undefined,
-          targetMessageIds
-        },
-        "[Think] Connection-less continuation failed:"
-      );
-    } finally {
-      this._connectionlessContinuationRunning = false;
-    }
+    await this._turns.runUnscheduledContinuationTurn(
+      this._continuationTurn(),
+      {
+        requestId: crypto.randomUUID(),
+        connection: undefined,
+        targetMessageIds
+      },
+      "[Think] Connection-less continuation failed:"
+    );
   }
 
   // ── Response hook ──────────────────────────────────────────────

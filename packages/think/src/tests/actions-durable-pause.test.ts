@@ -667,6 +667,11 @@ describe("a resolved pause continues like any other result", () => {
     const agent = await freshPauseAgent(`dp-stop-${crypto.randomUUID()}`);
     expect(await agent.runConnectionlessAfterStopForTest()).toBe(false);
   });
+
+  it("a connection-less continuation queued after a stop of every chat runs", async () => {
+    const agent = await freshPauseAgent(`dp-stop-after-${crypto.randomUUID()}`);
+    expect(await agent.runConnectionlessAfterStopForTest(true)).toBe(true);
+  });
 });
 
 describe("resolving a durable pause drops pending-state generation (#2054)", () => {

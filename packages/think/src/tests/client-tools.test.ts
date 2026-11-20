@@ -4027,6 +4027,24 @@ describe("Think — tool results with nothing to continue", () => {
     await closeWS(ws);
   });
 
+  it("a clear while the reply is being stored keeps it out of the cleared chat", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    await agent.setTextOnlyMode(true);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+    await agent.clearDuringNextReplyStoreForTest();
+
+    const done = waitForDone(ws, 15000);
+    sendChatRequest(ws, [makeUserMessage("hello")]);
+    await done;
+    await delay(200);
+
+    expect(await agent.getMessages()).toEqual([]);
+    expect(await agent.getResponseLog()).toEqual([]);
+    await closeWS(ws);
+  });
+
   it("a recovery still continues a reply whose answer's model call failed in its stream", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);

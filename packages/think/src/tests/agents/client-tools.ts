@@ -1161,6 +1161,22 @@ export class ThinkClientToolsAgent extends Think {
     this._useExecutableClientTool = true;
   }
 
+  /**
+   * Clear the chat while the next reply's pending response hook is being
+   * recorded, between the reset check and the reply's write.
+   */
+  async clearDuringNextReplyStoreForTest(): Promise<void> {
+    const self = this as unknown as {
+      _rememberPendingResponseHook(result: unknown): Promise<void>;
+    };
+    const original = self._rememberPendingResponseHook.bind(this);
+    self._rememberPendingResponseHook = async (result) => {
+      self._rememberPendingResponseHook = original;
+      await original(result);
+      await this.clearMessages();
+    };
+  }
+
   private _failNextModelCallInStream = false;
 
   /** The next model call fails inside its stream, as a provider 500 does. */

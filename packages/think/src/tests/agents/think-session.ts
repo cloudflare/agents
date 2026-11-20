@@ -7144,7 +7144,9 @@ export class ThinkToolsTestAgent extends Think {
    * item's callback before the stop's dequeue gets to it. Returns whether
    * its turn ran.
    */
-  async runConnectionlessAfterStopForTest(): Promise<boolean> {
+  async runConnectionlessAfterStopForTest(
+    pushAfterStop = false
+  ): Promise<boolean> {
     const self = this as unknown as {
       _queueConnectionlessContinuation(id: string): Promise<void>;
       _cfRunConnectionlessContinuation(payload: unknown): Promise<void>;
@@ -7160,9 +7162,13 @@ export class ThinkToolsTestAgent extends Think {
       return start(...args);
     };
     await self._queueConnectionlessContinuation("m1");
-    const item = await this.getQueue("connectionless-continuation");
     this.cancelAllChats();
-    await run(item?.payload);
+    // An approval after the stop replaces the item, and must run.
+    if (pushAfterStop) await self._queueConnectionlessContinuation("m2");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const item = await this.getQueue("connectionless-continuation");
+    if (!item) return false;
+    await run(item.payload);
     return ran;
   }
 
