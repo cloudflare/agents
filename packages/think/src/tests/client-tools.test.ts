@@ -4053,7 +4053,9 @@ describe("Think — tool results with nothing to continue", () => {
     await delay(300);
 
     const connections = await agent.getResponseConnectionsForTest();
-    const log = await agent.getResponseLog();
+    const log = (await agent.getResponseLog()) as unknown as Array<{
+      continuation?: boolean;
+    }>;
     const at = log.findIndex((result) => result.continuation);
     expect(at).toBeGreaterThanOrEqual(0);
     expect(connections[at]).not.toBeNull();
