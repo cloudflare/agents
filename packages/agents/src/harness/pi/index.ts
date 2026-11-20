@@ -12,6 +12,7 @@ export {
   type PiHarnessFactory,
   type PiHarnessOptions,
   type PiModel,
+  type PiRootResult,
   type PiSessionDefaults
 } from "./harness";
 export {
@@ -26,6 +27,7 @@ export type {
   PiPendingOperation,
   PiPromptResponse,
   PiReceipt,
+  PiSessionCreateOptions,
   PiSessionId,
   PiSessionInfo,
   PiSessionOptions,

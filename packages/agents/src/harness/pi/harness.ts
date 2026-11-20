@@ -41,6 +41,7 @@ import type {
   PiPendingOperation,
   PiPromptResponse,
   PiReceipt,
+  PiSessionCreateOptions,
   PiSessionId,
   PiSessionInfo,
   PiSessionOptions,
@@ -199,6 +200,18 @@ export type PiHarnessOptions = {
   readonly harness: PiHarnessFactory;
   /** What a new session starts with. */
   readonly defaults?: PiSessionDefaults;
+};
+
+/** What `harness.root()` returns. */
+export type PiRootResult = {
+  /** The root session. */
+  readonly session: PiSession;
+  /**
+   * Whether this call created the root, so its `agent` and `init` were
+   * applied. `false` when the root already existed: something used it
+   * first, and `init` did not run.
+   */
+  readonly created: boolean;
 };
 
 type Opened = {
@@ -362,6 +375,34 @@ export class PiHarness extends LifecycleCapability {
     return new PiSession(this, id);
   }
 
+  /**
+   * The root session, creating it with `agent` and `init` in one commit
+   * when it does not exist yet, as pi's `Harness.root()` does. `agent` is
+   * applied over `defaults`. When the root already exists, nothing is
+   * written and `init` does not run; `created` says which happened.
+   *
+   * Without this call, the first use of the root creates it with
+   * `defaults`. So call it before anything else uses the root, for example
+   * to seed the root's transcript with an existing history.
+   */
+  async root(options: PiSessionCreateOptions = {}): Promise<PiRootResult> {
+    const { pi } = await this.#open();
+    // pi runs `init` only in the commit that creates the root, and runs a
+    // commit's callback once: it never retries one. `root()` resolves only
+    // once that commit is stored, and rejects if the callback throws or the
+    // commit fails. So `init` ran in a resolved call exactly when the
+    // root was created by it.
+    let created = false;
+    await this.#root(pi, {
+      ...(options.agent ? { agent: options.agent } : {}),
+      init: async (tx, id) => {
+        created = true;
+        await options.init?.(tx, id);
+      }
+    });
+    return { session: this.session(ROOT_SESSION), created };
+  }
+
   /** Submit a prompt and wait for its answer. */
   prompt(
     input: UserInput,
@@ -467,12 +508,29 @@ export class PiHarness extends LifecycleCapability {
 
   // ── Used by PiSession and PiSessions ─────────────────────────────────────
 
-  /** @internal */
+  /**
+   * @internal Every use of a session goes through here. The first use of
+   * the root creates it, with `defaults`.
+   */
   async conversation(session: PiSessionId): Promise<Conversation> {
     const { pi } = await this.#open();
-    const conversation = await pi.conversation(conversationId(session), BG);
+    const id = conversationId(session);
+    if (id === ROOT_CONVERSATION_ID) return this.#root(pi, {});
+    const conversation = await pi.conversation(id, BG);
     if (!conversation) throw new Error(`Unknown pi session ${session}`);
     return conversation;
+  }
+
+  /**
+   * pi's root conversation, created with `options` over `defaults` when
+   * absent. pi checks for the root and creates it in one commit, so two
+   * calls never both create it.
+   */
+  #root(pi: Harness, options: PiSessionCreateOptions): Promise<Conversation> {
+    return pi.root(BG, {
+      agent: { ...this.agentDefaults(), ...options.agent },
+      ...(options.init ? { init: options.init } : {})
+    });
   }
 
   /** @internal */
@@ -811,7 +869,8 @@ export class PiHarness extends LifecycleCapability {
       // Called synchronously when pi begins closing, unlike `closed`, so a
       // closed pi is never handed out. It must not call pi.
       pi.subscribeClose(() => onClose(pi, closed));
-      await pi.root(BG, { agent: this.agentDefaults() });
+      // Opening creates no conversation: the root's first use creates it
+      // (see `conversation()`), so `root()` can seed it.
       // Continue whatever the last pi left, in this isolate or the last one:
       // pi reconciles tasks that were running to pending and schedules them
       // again.
@@ -1051,28 +1110,43 @@ export class PiSessions {
     return this.#harness.session(id);
   }
 
-  /** A new top-level session, configured like the root. */
-  async create(): Promise<PiSession> {
+  /**
+   * A new top-level session, configured with `defaults`, then `agent`; `init`
+   * runs in the commit that creates it.
+   */
+  async create(options: PiSessionCreateOptions = {}): Promise<PiSession> {
     const pi = await this.#harness.pi();
     const conversation = await pi.createConversation(
       {
         ownership: { kind: "ownerless" },
-        agent: this.#harness.agentDefaults()
+        agent: { ...this.#harness.agentDefaults(), ...options.agent },
+        ...(options.init ? { init: options.init } : {})
       },
       BG
     );
     return this.#harness.session(String(conversation.id));
   }
 
-  /** A new session that sees `from`'s history up to its newest entry. */
-  async fork(from: PiSessionId): Promise<PiSession> {
+  /**
+   * A new session that sees `from`'s history up to its newest entry, with
+   * `from`'s configuration, then `agent`; `init` runs in the commit that
+   * creates it.
+   */
+  async fork(
+    from: PiSessionId,
+    options: PiSessionCreateOptions = {}
+  ): Promise<PiSession> {
     const conversation = await this.#harness.conversation(from);
     const newest = await conversation.entries({}, 1, undefined, BG);
     const at = newest.items[0];
     if (!at) throw new Error(`Session ${from} has no entries to fork from`);
     const fork = await conversation.fork(
       at.id,
-      { ownership: { kind: "ownerless" } },
+      {
+        ownership: { kind: "ownerless" },
+        ...(options.agent ? { agent: options.agent } : {}),
+        ...(options.init ? { init: options.init } : {})
+      },
       BG
     );
     return this.#harness.session(String(fork.id));
@@ -1080,7 +1154,8 @@ export class PiSessions {
 
   /**
    * Every conversation, including ones subagent tools own. Read from pi's
-   * storage directly: the Harness has no conversation listing.
+   * storage directly: the Harness has no conversation listing. The root is
+   * listed once it exists: its first use, or `harness.root()`, creates it.
    */
   async list(): Promise<PiSessionInfo[]> {
     const storage = await this.#harness.storage();

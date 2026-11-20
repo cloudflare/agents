@@ -9,6 +9,8 @@
  * exhaustive switches in `harness/pi/harness.ts`.
  */
 import type {
+  ConversationCreateOptions,
+  Harness,
   InputSubmissionDraft,
   SettledSubmissionRecord,
   SubmissionDraft
@@ -18,6 +20,7 @@ import type {
   PiContinueOptions,
   PiOnAbort,
   PiOperationResult,
+  PiSessionCreateOptions,
   PiSubmitOptions,
   PiWhenBusy,
   PiWhenIdle
@@ -62,4 +65,15 @@ expectTypeOf<
 
 expectTypeOf<PiOperationResult["status"]>().toEqualTypeOf<
   SettledSubmissionRecord["status"]
+>();
+
+// Every option pi takes when it creates a conversation is exposed, apart
+// from `ownership`, which PiHarness sets: the same for the root,
+// `sessions.create()` and `sessions.fork()`.
+expectTypeOf<PiSessionCreateOptions>().toEqualTypeOf<
+  Omit<ConversationCreateOptions, "ownership">
+>();
+
+expectTypeOf<PiSessionCreateOptions>().toEqualTypeOf<
+  NonNullable<Parameters<Harness["root"]>[1]>
 >();

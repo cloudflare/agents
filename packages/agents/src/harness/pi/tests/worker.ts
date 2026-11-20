@@ -5,10 +5,13 @@ import {
   fauxToolCall,
   type AssistantMessage,
   type Message,
-  type TranscriptContext
+  type Model,
+  type TranscriptContext,
+  type Usage
 } from "@earendil-works/pi-ai";
 import { num, obj, str } from "@earendil-works/pi-schema";
 import {
+  AssistantEntry,
   createRegistry,
   defineSignal,
   defineTask,
@@ -18,6 +21,10 @@ import {
   ConversationBusy,
   ConversationIdle,
   Harness,
+  ROOT_CONVERSATION_ID,
+  ToolResultEntry,
+  UserEntry,
+  type ConversationInit,
   type EntryRecord,
   type Extension,
   type InputEntry,
@@ -216,6 +223,102 @@ function script(
   return fauxAssistantMessage([fauxText(`echo: ${prompt}`)]);
 }
 
+/** Usage for an imported assistant message, which has none: pi sums it. */
+const NO_USAGE: Usage = {
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  totalTokens: 0,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+};
+
+/**
+ * Seed a session's transcript with a history, one entry per message, as a
+ * host importing an existing chat does: the user's message, the model's
+ * tool call, the tool's result, and the model's answer. Pass it as `init`.
+ */
+function seedHistory(
+  model: Pick<Model<string>, "api" | "provider" | "id">,
+  value: number
+): ConversationInit {
+  const assistant = (
+    content: AssistantMessage["content"],
+    stopReason: AssistantMessage["stopReason"]
+  ): AssistantMessage => ({
+    role: "assistant",
+    content,
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+    usage: NO_USAGE,
+    stopReason,
+    timestamp: Date.now()
+  });
+  const callId = `imported-${value}`;
+  return async (tx, conversationId) => {
+    await tx.appendEntry(UserEntry, conversationId, {
+      model: [
+        { role: "user", content: `multiply ${value}`, timestamp: Date.now() }
+      ]
+    });
+    await tx.appendEntry(AssistantEntry, conversationId, {
+      model: [
+        assistant(
+          [
+            {
+              type: "toolCall",
+              id: callId,
+              name: "multiply",
+              arguments: { value }
+            }
+          ],
+          "toolUse"
+        )
+      ]
+    });
+    await tx.appendEntry(ToolResultEntry, conversationId, {
+      model: [
+        {
+          role: "toolResult",
+          toolCallId: callId,
+          toolName: "multiply",
+          content: [{ type: "text", text: String(value * 3) }],
+          isError: false,
+          timestamp: Date.now()
+        }
+      ],
+      data: { diagnostics: [] }
+    });
+    await tx.appendEntry(AssistantEntry, conversationId, {
+      model: [
+        assistant([{ type: "text", text: `tool said: ${value * 3}` }], "stop")
+      ]
+    });
+  };
+}
+
+/** A model request as tests compare it: each message as `role: text`. */
+function requestTexts(context: TranscriptContext): string[] {
+  return context.messages.map((message) => {
+    if (message.role === "system") {
+      return `system: ${textOf(message.content)}${JSON.stringify(message.sections ?? {})}`;
+    }
+    if (message.role === "assistant") {
+      return `assistant: ${message.content
+        .map((part) =>
+          part.type === "toolCall"
+            ? `${part.name}(${JSON.stringify(part.arguments)})`
+            : part.type === "text"
+              ? part.text
+              : ""
+        )
+        .join("")}`;
+    }
+    return `${message.role}: ${textOf(message.content)}`;
+  });
+}
+
 /**
  * The text of each transcript entry that carries a model message, so tests
  * can compare transcripts as strings. A tool call with no text is "".
@@ -292,12 +395,88 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     super(ctx, env);
     setWakeTimingForTests(this.harness, TEST_TIMING);
     this.#faux.setResponses(
-      Array.from(
-        { length: 200 },
-        () => (context: TranscriptContext) => script(context, ctx.storage)
-      )
+      Array.from({ length: 200 }, () => (context: TranscriptContext) => {
+        this.#requests.push(requestTexts(context));
+        return script(context, ctx.storage);
+      })
     );
     piHarnessInstances.track(ctx.id.name ?? "", this.harness);
+  }
+
+  /** What this instance sent the model, one request at a time. */
+  readonly #requests: string[][] = [];
+
+  /** The last model request this instance sent, each message as `role: text`. */
+  lastRequest(): string[] {
+    return this.#requests.at(-1) ?? [];
+  }
+
+  /**
+   * `harness.root()` with `seedHistory(value)` as `init`, or with an `init`
+   * that appends an entry and then throws. Reports whether `init` ran,
+   * since its function cannot cross RPC.
+   */
+  async seedRoot(
+    options: { value?: number; instructions?: string; fail?: boolean } = {}
+  ): Promise<
+    | { session: string; created: boolean; initRan: boolean }
+    | { error: string; initRan: boolean }
+  > {
+    let initRan = false;
+    const seed = seedHistory(this.#faux.getModel(), options.value ?? 4);
+    try {
+      const { session, created } = await this.harness.root({
+        ...(options.instructions
+          ? { agent: { instructions: options.instructions } }
+          : {}),
+        init: async (tx, id) => {
+          initRan = true;
+          await seed(tx, id);
+          if (options.fail) throw new Error("import failed");
+        }
+      });
+      return { session: session.id, created, initRan };
+    } catch (error) {
+      return {
+        error: error instanceof Error ? error.message : String(error),
+        initRan
+      };
+    }
+  }
+
+  /** `sessions.create()`, seeded with `seedHistory(value)`. */
+  async createSeededSession(
+    value: number,
+    instructions?: string
+  ): Promise<string> {
+    const session = await this.harness.sessions.create({
+      ...(instructions ? { agent: { instructions } } : {}),
+      init: seedHistory(this.#faux.getModel(), value)
+    });
+    return session.id;
+  }
+
+  /** `sessions.fork(from)`, with `seedHistory(value)` appended after the fork. */
+  async forkSeeded(from: string, value: number): Promise<string> {
+    const session = await this.harness.sessions.fork(from, {
+      init: seedHistory(this.#faux.getModel(), value)
+    });
+    return session.id;
+  }
+
+  /**
+   * Whether pi has the root conversation, read through `harness.pi()`, which
+   * does not create it.
+   */
+  async rootExists(): Promise<boolean> {
+    const pi = await this.harness.pi();
+    return (await pi.conversation(ROOT_CONVERSATION_ID, BACKGROUND_CONTEXT))
+      ? true
+      : false;
+  }
+
+  async busy(session?: string): Promise<boolean> {
+    return this.harness.session(session).busy();
   }
 
   /** The harness's pending Lifecycle jobs: its wake, while it has one. */
@@ -366,7 +545,7 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
    */
   async remindAt(until: number): Promise<void> {
     const pi = await this.harness.pi();
-    const root = await pi.root(BACKGROUND_CONTEXT);
+    const root = await this.harness.conversation("1");
     await root.commit(
       (tx) =>
         tx.createTask(

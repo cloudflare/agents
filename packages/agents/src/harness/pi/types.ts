@@ -1,4 +1,6 @@
 import type {
+  AgentChange,
+  ConversationInit,
   EntryRecord,
   InputEntry,
   SubmissionNotify
@@ -81,6 +83,28 @@ export type PiContinueOptions = {
 export type PiSessionOptions = {
   /** Default: the root session. */
   readonly session?: PiSessionId;
+};
+
+/**
+ * How `harness.root()`, `sessions.create()` and `sessions.fork()` create a
+ * session: pi-durable's `ConversationCreateOptions`, without `ownership`.
+ * Both apply in the one commit that creates the session.
+ */
+export type PiSessionCreateOptions = {
+  /**
+   * pi's agent change for the new session. For the root and `create()`, it
+   * is applied over the harness's `defaults`; a fork starts with its
+   * parent's configuration, and this is applied over that.
+   */
+  readonly agent?: AgentChange;
+  /**
+   * pi's `ConversationInit`: runs inside the commit that creates the
+   * session, after `agent`, for example to seed its transcript with
+   * `tx.appendEntry()`, one entry per message. Table reads throw
+   * `ReadAfterWrite` there. A throw fails the commit, so the session is not
+   * created.
+   */
+  readonly init?: ConversationInit;
 };
 
 /** Returned once a submission is durable. It says nothing about the model yet. */
