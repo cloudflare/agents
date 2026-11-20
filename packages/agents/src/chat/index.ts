@@ -73,6 +73,7 @@ export {
   ChatAdmissions,
   chatRecoveryNames,
   createChatAdmissionStore,
+  newUserMessageIds,
   type ChatAdmissionRecord,
   type ChatAdmissionStore,
   type ChatAdmissionsHost,

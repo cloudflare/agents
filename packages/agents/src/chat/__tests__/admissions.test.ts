@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   chatRecoveryNames,
   createChatAdmissionStore,
+  newUserMessageIds,
   type ChatAdmissionRecord
 } from "../admissions";
 import {
@@ -479,5 +480,37 @@ describe("chatRecoveryNames", () => {
         liveRequestIds: new Set(["r1"])
       })
     ).toBe(true);
+  });
+});
+
+describe("newUserMessageIds", () => {
+  const m = (id: string, role = "user") => ({ id, role });
+
+  it("counts only the user messages after the last stored one", () => {
+    // Windowed history holds only a1 and u2: u0 and u1 are stored, outside
+    // the window. The request stores u3 alone.
+    expect(
+      newUserMessageIds(
+        [
+          m("u0"),
+          m("a0", "assistant"),
+          m("u1"),
+          m("a1", "assistant"),
+          m("u2"),
+          m("u3")
+        ],
+        new Set(["a1", "u2"])
+      )
+    ).toEqual(["u3"]);
+  });
+
+  it("counts every trailing user message the request sent", () => {
+    expect(
+      newUserMessageIds(
+        [m("a1", "assistant"), m("u2"), m("u3")],
+        new Set(["a1"])
+      )
+    ).toEqual(["u2", "u3"]);
+    expect(newUserMessageIds([m("u1")], new Set())).toEqual(["u1"]);
   });
 });

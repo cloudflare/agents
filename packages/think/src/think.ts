@@ -193,6 +193,7 @@ import {
   ChatTurns,
   ChatTurnFibers,
   createChatAdmissionStore,
+  newUserMessageIds,
   chatRecoveryNames,
   type ChatAdmissionRecord,
   type ClientChatRequest,
@@ -4826,13 +4827,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * sent that are not stored yet.
    */
   private _newUserMessageIds(messages: UIMessage[]): string[] {
-    const stored = new Set(this.messages.map((message) => message.id));
-    const ids: string[] = [];
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (stored.has(messages[i].id)) break;
-      if (messages[i].role === "user") ids.unshift(messages[i].id);
-    }
-    return ids;
+    return newUserMessageIds(
+      messages,
+      new Set(this.messages.map((message) => message.id))
+    );
   }
 
   /**

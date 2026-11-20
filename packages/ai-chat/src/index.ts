@@ -53,6 +53,7 @@ import {
   AgentToolRuns,
   createAgentToolRunStore,
   createChatAdmissionStore,
+  newUserMessageIds,
   chatRecoveryNames,
   type ChatAdmissionRecord,
   type ClientChatRequest,
@@ -2447,10 +2448,10 @@ export class AIChatAgent<
    */
   /** User messages in `messages` that are not stored yet. */
   private _newUserMessageIds(messages: UIMessage[]): string[] {
-    const stored = new Set(this.messages.map((message) => message.id));
-    return messages
-      .filter((message) => message.role === "user" && !stored.has(message.id))
-      .map((message) => message.id);
+    return newUserMessageIds(
+      messages,
+      new Set(this.messages.map((message) => message.id))
+    );
   }
 
   /**
