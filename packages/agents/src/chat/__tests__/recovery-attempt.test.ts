@@ -111,6 +111,9 @@ function setup(scenario: Scenario = {}) {
     recordTerminalError: async (requestId, errorText) => {
       terminalErrors.push({ requestId, errorText });
     },
+    endSkippedRequest: (requestId) => {
+      log.push(`end-skipped:${requestId}`);
+    },
     attempts: {
       _chatRecoveryContinue: async () => {},
       _chatRecoveryRetry: async () => {}
@@ -1236,6 +1239,22 @@ describe("a recovery callback delivered more than once", () => {
 });
 
 describe("what an attempt records, and in what order", () => {
+  it("gives a skipped turn's incident a reason and ends the request the tab waits on", async () => {
+    const t = setup({ result: { status: "skipped" } });
+    await t.run();
+    expect(t.incident()).toMatchObject({
+      status: "skipped",
+      reason: "turn_skipped"
+    });
+    expect(t.log).toContain(`end-skipped:${ROOT}`);
+
+    const withReason = setup({
+      result: { status: "skipped", reason: "awaiting-client" }
+    });
+    await withReason.run();
+    expect(withReason.incident()).toMatchObject({ reason: "awaiting-client" });
+  });
+
   it("records a turn the host skipped as skipped, not failed", async () => {
     const t = setup({ result: { status: "skipped" } });
     await t.run();

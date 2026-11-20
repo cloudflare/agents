@@ -2720,7 +2720,8 @@ export function useAgentChat<
           agentRef.current.send(
             JSON.stringify({
               type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST,
-              probeId: idleProbeId
+              probeId: idleProbeId,
+              ...customTransport.resumeRequestIds()
             })
           );
         }

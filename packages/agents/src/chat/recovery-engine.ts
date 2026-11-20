@@ -341,6 +341,12 @@ export interface ChatRecoveryTurnBindings {
    * was away learns the outcome when it reconnects (#1645).
    */
   recordTerminalError(requestId: string, errorText: string): Promise<void>;
+  /**
+   * Tell the tabs that a request recovery took over ended `skipped`: the
+   * recovered turn found nothing to do. Optional: without it the tab that
+   * waits on the request learns only that recovery is over.
+   */
+  endSkippedRequest?(requestId: string): void;
   /** Close agent-tool child runs a recovered turn settled. */
   reconcileAgentToolChildRuns(): Promise<void>;
   /** Keep a detached recovered turn inside the current alarm's domain. */

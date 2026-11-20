@@ -707,6 +707,38 @@ describe("chat turn races", () => {
     ws.close(1000);
   });
 
+  it("a tab that was away when its request ended gets its done frame on resume", async () => {
+    const room = crypto.randomUUID();
+    const first = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const agent = await getAgentByName(env.TestChatAgent, room);
+    // The reply is stored after the tab went away.
+    await agent.setPersistDelayForTest("assistant", 300);
+    sendChatRequest(first.ws, "req-away", [user1]);
+    await delay(100);
+    first.ws.close(1000);
+    await delay(500);
+    await agent.waitForIdleForTest();
+
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const seen = record(ws);
+    send(ws, {
+      type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST,
+      probeId: "p1",
+      requestIds: ["req-away"]
+    });
+    await waitUntil(() =>
+      seen.some(
+        (m) =>
+          m.type === MessageType.CF_AGENT_STREAM_RESUMING &&
+          "id" in m &&
+          m.id === "req-away"
+      )
+    );
+    send(ws, { type: MessageType.CF_AGENT_STREAM_RESUME_ACK, id: "req-away" });
+    await waitUntil(() => responses(seen, "req-away").some((m) => m.done));
+    ws.close(1000);
+  });
+
   it("a persist that work started inside a turn's persist starts later is not held to that turn", async () => {
     const room = crypto.randomUUID();
     const { ws: tab1 } = await connectChatWS(`/agents/test-chat-agent/${room}`);

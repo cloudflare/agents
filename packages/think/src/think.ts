@@ -231,6 +231,9 @@ import {
   createChatRecoveryTaskDefinition,
   createChatTurnTaskDefinition,
   enqueueChatRecoveryTask,
+  clearRecentChatTerminals,
+  recentChatTerminal,
+  recordRecentChatTerminal,
   type StreamInterruptionOutcome,
   createChatFiberSnapshot,
   unwrapChatFiberSnapshot,
@@ -4719,6 +4722,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // replay onto a freshly-cleared (empty) conversation on reconnect. Covers
     // both the WS `chat-clear` path and the programmatic `clearMessages()` API.
     await this._clearChatTerminal();
+    clearRecentChatTerminals(this.ctx.storage.kv);
   }
 
   /** Append a message while keeping Think's live message cache coherent. */
@@ -12999,7 +13003,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   ): Promise<void> {
     switch (event.type) {
       case "stream-resume-request":
-        await this._handleStreamResumeRequest(connection, event.probeId);
+        await this._handleStreamResumeRequest(
+          connection,
+          event.probeId,
+          event.requestIds
+        );
         break;
 
       case "stream-resume-ack":
@@ -13078,9 +13086,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
   private async _handleStreamResumeRequest(
     connection: Connection,
-    probeId?: string
+    probeId?: string,
+    requestIds?: string[]
   ): Promise<void> {
-    await this._resumeHandshake().handleResumeRequest(connection, probeId);
+    await this._resumeHandshake().handleResumeRequest(
+      connection,
+      probeId,
+      requestIds
+    );
   }
 
   private async _handleStreamResumeAck(
@@ -16489,6 +16502,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         waitUntilStable: (timeout) => this.waitUntilStable({ timeout }),
         recordTerminalError: (requestId, errorText) =>
           this._recordTerminalChatStatus("error", requestId, errorText),
+        endSkippedRequest: (requestId) =>
+          this._endUnstartedRequest(null, requestId, "skipped"),
         reconcileAgentToolChildRuns: () => this._agentToolRuns.reconcileOwn(),
         trackAlarmWork: (turn) => this.lifecycle.trackAlarmWork(turn),
         attemptScope: new AsyncLocalStorage<ChatRecoveryAttemptScope>(),
@@ -18579,7 +18594,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       persistOrphanedStream: (streamId) =>
         this._persistOrphanedStream(streamId),
       isConnectionPresent: (connectionId) =>
-        this.getConnection(connectionId) !== undefined
+        this.getConnection(connectionId) !== undefined,
+      recentTerminal: (requestIds) =>
+        recentChatTerminal(this.ctx.storage.kv, requestIds)
     }));
   }
 
@@ -18791,6 +18808,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       ...(exclude || []),
       ...this._pendingResumeConnections
     ];
+    // A tab that is away when the request ends gets this frame when it
+    // resumes (`recent-terminals.ts`).
+    if (message.type === MSG_CHAT_RESPONSE) {
+      recordRecentChatTerminal(
+        this.ctx.storage.kv,
+        this._withOriginMessageIds(message)
+      );
+    }
     this.broadcast(
       JSON.stringify(this._withOriginMessageIds(message)),
       allExclusions

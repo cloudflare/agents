@@ -517,3 +517,12 @@ export {
   type TruncateOptions,
   type TruncateToolResultsOptions
 } from "./truncate-older-messages";
+
+export {
+  clearRecentChatTerminals,
+  recentChatTerminal,
+  recordRecentChatTerminal,
+  RECENT_TERMINALS_MAX,
+  type ChatRecentTerminal,
+  type RecentTerminalsKv
+} from "./recent-terminals";

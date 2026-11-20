@@ -81,6 +81,9 @@ import {
   createChatRecoveryTaskDefinition,
   createChatTurnTaskDefinition,
   enqueueChatRecoveryTask,
+  clearRecentChatTerminals,
+  recentChatTerminal,
+  recordRecentChatTerminal,
   type ChatRecoveryTaskReason,
   type StreamInterruptionOutcome
 } from "agents/chat";
@@ -1313,6 +1316,7 @@ export class AIChatAgent<
           // can't replay onto a freshly-cleared (empty) conversation when a
           // client reconnects and runs the resume probe.
           await this._clearChatTerminal();
+          clearRecentChatTerminals(this.ctx.storage.kv);
           this._resumableStream.clearAll();
           this._pendingResumeConnections.clear();
           this._preStream.releaseAwaiting();
@@ -1358,7 +1362,8 @@ export class AIChatAgent<
         if (event.type === "stream-resume-request") {
           await this._resumeHandshake().handleResumeRequest(
             connection,
-            event.probeId
+            event.probeId,
+            event.requestIds
           );
           return;
         }
@@ -1485,7 +1490,9 @@ export class AIChatAgent<
       isConnectionPresent: (connectionId) =>
         this._isConnectionPresent(connectionId),
       holdsTerminalFrames: (requestId) =>
-        this._heldTerminalFrames.has(requestId)
+        this._heldTerminalFrames.has(requestId),
+      recentTerminal: (requestIds) =>
+        recentChatTerminal(this.ctx.storage.kv, requestIds)
     }));
   }
 
@@ -1948,6 +1955,11 @@ export class AIChatAgent<
       ...(exclude || []),
       ...this._pendingResumeConnections
     ];
+    // A tab that is away when the request ends gets this frame when it
+    // resumes (`recent-terminals.ts`).
+    if (message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE) {
+      recordRecentChatTerminal(this.ctx.storage.kv, message);
+    }
     this.broadcast(JSON.stringify(message), allExclusions);
   }
 
@@ -4256,6 +4268,8 @@ export class AIChatAgent<
           }),
         recordTerminalError: (requestId, errorText) =>
           this._recordChatTerminal(requestId, errorText),
+        endSkippedRequest: (requestId) =>
+          this._endUnstartedRequest(null, requestId, "skipped"),
         reconcileAgentToolChildRuns: () => this._agentToolRuns.reconcileOwn(),
         trackAlarmWork: (turn) => this.lifecycle.trackAlarmWork(turn),
         attemptScope: new AsyncLocalStorage<ChatRecoveryAttemptScope>(),
