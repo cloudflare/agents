@@ -1,20 +1,26 @@
 /**
  * Durable admission of client requests, shared by `AIChatAgent` and `Think`.
  *
- * A client request stores its user messages before it waits in the turn
- * queue, and the queue lives in memory. When an isolate resets (a deploy, an
+ * The turn queue lives in memory. When an isolate resets (a deploy, an
  * eviction, a crash) while one turn runs and others wait behind it, only the
- * running turn has a fiber, so only it is recovered. A request that was
- * accepted and was waiting used to be lost: its user message stayed in the
- * transcript with no reply, and the tab that sent it never got a terminal
- * frame.
+ * running turn has a fiber, so only it is recovered. The record is what
+ * keeps a waiting request.
  *
- * The rule, checked in `ChatAdmission.tla`:
+ * A request's new user messages are held on its record, not stored in the
+ * transcript, until its turn reaches the front of the queue. A turn answers
+ * its own message, and the transcript a model request is built from never
+ * holds a later question than the one the turn answers: two queued
+ * questions read `U1, A1, U2, A2`. Tabs see a waiting message at once: the
+ * message lists the hosts send end with the held messages, named in
+ * `queuedMessageIds` ({@link ChatAdmissions.waitingMessages}).
  *
- * - every accepted request writes a record before it stores its messages:
- *   its request id, the ids of the user messages it stores, its concurrency
- *   decision, and what the host needs to run it again (tools, body,
- *   trigger);
+ * The rules, checked in `ChatAdmission.tla` and `ChatOrder.tla`:
+ *
+ * - every accepted request writes a record when it is accepted: its request
+ *   id, the user messages it holds, its concurrency decision, and what the
+ *   host needs to run it again (tools, body, trigger);
+ * - the held messages join the transcript at the front of the queue, once:
+ *   a message already stored (a reset after the join) is not stored again;
  * - the record goes when the request's turn has a fiber (recovery owns the
  *   turn from then on) and when the request ends without one;
  * - a stop by the request id is written on the record, and a clear deletes
@@ -24,8 +30,10 @@
  *   request id. A new request replays them first, ahead of itself, without
  *   waiting for recovery;
  * - a record whose request has a turn that recovery knows (it had a fiber)
- *   is left to recovery, and a record whose messages are gone ends
- *   `skipped`.
+ *   is left to recovery. A replayed record whose conversation moved on
+ *   without it (a user message nothing waits on follows the one it was
+ *   accepted after: a rollback answered something newer) ends `skipped`
+ *   with its messages never stored.
  *
  * The store is the host's, behind {@link ChatAdmissionStore}. An object
  * written by an older release has no records, and an older release never
@@ -39,11 +47,14 @@ import type { AgentToolSql } from "./agent-tool-run-store";
 import type { NormalizedMessageConcurrency } from "./submit-concurrency";
 
 /**
- * The user messages a client request stores: the ones at the end of what it
- * sent that are not stored yet. A client sends its whole transcript, and
- * with windowed history `stored` holds only the newest messages, so an
- * older message outside the window is not one this request stores: only the
- * run after the last stored message counts.
+ * The new user messages a client request holds until its turn starts: the
+ * user messages at the end of what it sent that are not stored yet. A
+ * client sends its whole transcript, and with windowed history `stored`
+ * holds only the newest messages, so an older message outside the window
+ * is not new: only the run after the last stored message counts. The run
+ * ends at a message that is not a user's (a reply the tab drew while it
+ * streamed): that one, and what comes before it, is stored with the
+ * request, as before, so the held messages always go last.
  *
  * @param messages - What the request sent, oldest first.
  * @param stored - The ids of the stored messages the host holds in memory.
@@ -54,8 +65,8 @@ export function newUserMessageIds(
 ): string[] {
   const ids: string[] = [];
   for (let i = messages.length - 1; i >= 0; i--) {
-    if (stored.has(messages[i].id)) break;
-    if (messages[i].role === "user") ids.unshift(messages[i].id);
+    if (stored.has(messages[i].id) || messages[i].role !== "user") break;
+    ids.unshift(messages[i].id);
   }
   return ids;
 }
@@ -72,13 +83,30 @@ export interface StoredSubmitDecision {
   debounceUntilMs: number | null;
 }
 
+/** A message a request holds until its turn starts. JSON. */
+export interface HeldChatMessage {
+  id: string;
+  role: string;
+}
+
 /** One accepted request that has no turn with a fiber yet. */
 export interface ChatAdmissionRecord {
   requestId: string;
   /** Admission order. */
   seq: number;
-  /** The user messages the request stores. A replay needs them stored. */
+  /** The ids of {@link messages}. */
   messageIds: string[];
+  /**
+   * The user messages the request holds until its turn starts, as the
+   * client sent them. They join the transcript at the front of the queue.
+   */
+  messages: HeldChatMessage[];
+  /**
+   * The latest user message a tab showed when the request was accepted,
+   * stored or waiting. A replay checks that no user message nothing waits
+   * on came after it.
+   */
+  afterUserId: string | null;
   decision: StoredSubmitDecision;
   /** What the host needs to run the request again. JSON. */
   payload: unknown;
@@ -92,7 +120,8 @@ export interface ChatAdmissionStore {
   /** Write a record. Its `seq` follows every record written before it. */
   add(record: {
     requestId: string;
-    messageIds: string[];
+    messages: HeldChatMessage[];
+    afterUserId: string | null;
     decision: StoredSubmitDecision;
     payload: unknown;
   }): void;
@@ -120,8 +149,17 @@ export const CHAT_ADMISSION_TTL_MS = 60 * 60 * 1000;
 export const CHAT_ADMISSIONS_TABLE = "cf_agents_chat_admissions";
 
 /**
+ * The longest piece of held-message JSON kept in one row. A JS string unit
+ * is at most three bytes of UTF-8, so a piece stays under the 2 MB row
+ * limit. Longer JSON (a message with large files) is split across rows of
+ * the `_messages` table.
+ */
+const HELD_MESSAGES_PIECE = 500_000;
+
+/**
  * A {@link ChatAdmissionStore} on the host's SQLite. The table is created on
- * first use, so an object that never queues a request pays nothing for it.
+ * first write, so an object that never takes a client request pays nothing
+ * for it.
  */
 export function createChatAdmissionStore(
   sql: () => AgentToolSql,
@@ -131,9 +169,13 @@ export function createChatAdmissionStore(
     sql()
       .exec(query, ...bindings)
       .toArray();
-  let ready = false;
+  const pieces = `${table}_messages`;
+  // Records whose messages are split into pieces, so a delete touches the
+  // pieces table only for them.
+  const withPieces = new Set<string>();
+  let state: "unknown" | "absent" | "ready" = "unknown";
   const ensure = (): void => {
-    if (ready) return;
+    if (state === "ready") return;
     run(
       `create table if not exists ${table} (
         request_id text primary key,
@@ -142,51 +184,126 @@ export function createChatAdmissionStore(
         decision text not null,
         payload text,
         stopped integer not null default 0,
-        created_at integer not null
+        created_at integer not null,
+        messages text,
+        message_pieces integer not null default 0,
+        after_user_id text
       )`
     );
-    ready = true;
+    // A table an earlier build of this release created has no held
+    // messages. Its records read as holding none.
+    const columns = new Set(
+      run(`pragma table_info(${table})`).map((row) => String(row.name))
+    );
+    if (!columns.has("messages")) {
+      run(`alter table ${table} add column messages text`);
+      run(
+        `alter table ${table} add column message_pieces integer not null default 0`
+      );
+      run(`alter table ${table} add column after_user_id text`);
+    }
+    run(
+      `create table if not exists ${pieces} (
+        request_id text not null,
+        piece integer not null,
+        data text not null,
+        primary key (request_id, piece)
+      )`
+    );
+    state = "ready";
+  };
+  /** Whether the table exists, without creating it. */
+  const exists = (): boolean => {
+    if (state === "ready") return true;
+    if (state === "absent") return false;
+    const found =
+      run(
+        `select 1 from sqlite_master where type = 'table' and name = ?`,
+        table
+      ).length > 0;
+    if (found) ensure();
+    else state = "absent";
+    return found;
   };
   return {
     add(record) {
       ensure();
+      const messages = JSON.stringify(record.messages);
+      const split = messages.length > HELD_MESSAGES_PIECE;
+      let count = 0;
+      if (split) {
+        withPieces.add(record.requestId);
+        run(`delete from ${pieces} where request_id = ?`, record.requestId);
+        for (const piece of splitPieces(messages, HELD_MESSAGES_PIECE)) {
+          run(
+            `insert into ${pieces} (request_id, piece, data) values (?, ?, ?)`,
+            record.requestId,
+            count++,
+            piece
+          );
+        }
+      }
       run(
         `insert or replace into ${table}
-           (request_id, seq, message_ids, decision, payload, stopped, created_at)
-         select ?, coalesce(max(seq), 0) + 1, ?, ?, ?, 0, ? from ${table}`,
+           (request_id, seq, message_ids, decision, payload, stopped,
+            created_at, messages, message_pieces, after_user_id)
+         select ?, coalesce(max(seq), 0) + 1, ?, ?, ?, 0, ?, ?, ?, ?
+         from ${table}`,
         record.requestId,
-        JSON.stringify(record.messageIds),
+        JSON.stringify(record.messages.map((message) => message.id)),
         JSON.stringify(record.decision),
         record.payload === undefined ? null : JSON.stringify(record.payload),
-        Date.now()
+        Date.now(),
+        split ? null : messages,
+        count,
+        record.afterUserId
       );
     },
     remove(requestId) {
-      ensure();
+      if (!exists()) return;
       run(`delete from ${table} where request_id = ?`, requestId);
+      if (withPieces.delete(requestId)) {
+        run(`delete from ${pieces} where request_id = ?`, requestId);
+      }
     },
     stop(requestId) {
-      ensure();
+      if (!exists()) return;
       run(`update ${table} set stopped = 1 where request_id = ?`, requestId);
     },
     stopAll() {
-      ensure();
+      if (!exists()) return;
       run(`update ${table} set stopped = 1`);
     },
     clear() {
-      ensure();
+      if (!exists()) return;
       run(`delete from ${table}`);
+      run(`delete from ${pieces}`);
+      withPieces.clear();
     },
     list() {
-      ensure();
+      if (!exists()) return [];
       return run(
         `select request_id, seq, message_ids, decision, payload, stopped,
-                created_at
+                created_at, messages, message_pieces, after_user_id
          from ${table} order by seq`
       ).map((row) => ({
         requestId: String(row.request_id),
         seq: Number(row.seq),
         messageIds: parseJson<string[]>(row.message_ids) ?? [],
+        messages: heldMessages(
+          Number(row.message_pieces) > 0 &&
+            withPieces.add(String(row.request_id))
+            ? run(
+                `select data from ${pieces} where request_id = ?
+                 order by piece`,
+                row.request_id
+              )
+                .map((piece) => String(piece.data))
+                .join("")
+            : row.messages
+        ),
+        afterUserId:
+          typeof row.after_user_id === "string" ? row.after_user_id : null,
         decision: parseJson<StoredSubmitDecision>(row.decision) ?? {
           strategy: null,
           overlapping: false,
@@ -198,6 +315,36 @@ export function createChatAdmissionStore(
       }));
     }
   };
+}
+
+/**
+ * `text` in pieces of at most `size` code units, never between the two
+ * halves of a surrogate pair: SQLite stores text as UTF-8, which cannot
+ * hold half a pair.
+ */
+export function splitPieces(text: string, size: number): string[] {
+  const pieces: string[] = [];
+  let at = 0;
+  while (at < text.length) {
+    let end = Math.min(at + size, text.length);
+    const last = text.charCodeAt(end - 1);
+    if (end < text.length && last >= 0xd800 && last <= 0xdbff) end--;
+    pieces.push(text.slice(at, end));
+    at = end;
+  }
+  return pieces;
+}
+
+function heldMessages(value: unknown): HeldChatMessage[] {
+  const parsed = parseJson<unknown>(value);
+  if (!Array.isArray(parsed)) return [];
+  return parsed.filter(
+    (message): message is HeldChatMessage =>
+      typeof message === "object" &&
+      message !== null &&
+      typeof (message as HeldChatMessage).id === "string" &&
+      typeof (message as HeldChatMessage).role === "string"
+  );
 }
 
 function parseJson<T>(value: unknown): T | undefined {
@@ -328,6 +475,11 @@ export interface ChatAdmissionsHost {
    * queue, or once it ended before it got there.
    */
   replay(record: ChatAdmissionRecord, onQueued: () => void): Promise<void>;
+  /**
+   * Records were dropped before their messages joined the transcript (too
+   * old to replay): tabs that draw those messages as waiting must be told.
+   */
+  waitingDropped?(): void;
 }
 
 /**
@@ -343,50 +495,110 @@ export class ChatAdmissions {
 
   constructor(private readonly host: ChatAdmissionsHost) {}
 
-  /** Record an accepted request, before its messages are stored. */
+  /**
+   * The records, as last read. Every write goes through this class, so the
+   * copy stays current. `null` until the first read.
+   */
+  #records: ChatAdmissionRecord[] | null = null;
+
+  #list(): ChatAdmissionRecord[] {
+    this.#records ??= this.host.store.list();
+    return this.#records;
+  }
+
+  /** Change the copy as the store was changed, if it was read. */
+  #changed(
+    change: (records: ChatAdmissionRecord[]) => ChatAdmissionRecord[]
+  ): void {
+    if (this.#records) this.#records = change(this.#records);
+  }
+
+  /** Record an accepted request. It holds its messages until its turn. */
   admit(record: {
     requestId: string;
-    messageIds: string[];
+    messages: HeldChatMessage[];
+    afterUserId: string | null;
     decision: StoredSubmitDecision;
     payload: unknown;
   }): void {
     this.live.add(record.requestId);
     this.host.store.add(record);
+    this.#changed((records) => [
+      ...records.filter((r) => r.requestId !== record.requestId),
+      {
+        requestId: record.requestId,
+        seq: (records.at(-1)?.seq ?? 0) + 1,
+        messageIds: record.messages.map((message) => message.id),
+        messages: record.messages,
+        afterUserId: record.afterUserId,
+        decision: record.decision,
+        payload: record.payload,
+        stopped: false,
+        createdAt: Date.now()
+      }
+    ]);
   }
 
   /** The request's turn has a fiber, or the request ended without one. */
   release(requestId: string): void {
     this.host.store.remove(requestId);
+    this.#changed((records) =>
+      records.filter((r) => r.requestId !== requestId)
+    );
   }
 
   /** The process that owned the request ended. */
   end(requestId: string): void {
     this.live.delete(requestId);
-    this.host.store.remove(requestId);
+    this.release(requestId);
   }
 
   stop(requestId: string): void {
     this.host.store.stop(requestId);
+    this.#changed((records) =>
+      records.map((r) =>
+        r.requestId === requestId ? { ...r, stopped: true } : r
+      )
+    );
   }
 
   stopAll(): void {
     this.host.store.stopAll();
+    this.#changed((records) => records.map((r) => ({ ...r, stopped: true })));
   }
 
   /** A clear: every record goes. */
   clear(): void {
     this.host.store.clear();
+    this.#records = [];
     this.#orphansMaybe = false;
   }
 
-  /** The user messages of every request that has no turn with a fiber yet. */
-  messageIds(exceptRequestId?: string): Set<string> {
-    return new Set(
-      this.host.store
-        .list()
-        .filter((r) => r.requestId !== exceptRequestId)
-        .flatMap((r) => r.messageIds)
-    );
+  /** The record of a request, if it has one. */
+  record(requestId: string): ChatAdmissionRecord | undefined {
+    return this.#list().find((r) => r.requestId === requestId);
+  }
+
+  /**
+   * The messages requests hold that have not joined the transcript yet, in
+   * admission order: what a tab draws after the transcript, marked as
+   * queued. A message already stored (its turn has started) is left out.
+   *
+   * @param stored - The ids of the stored messages.
+   */
+  waitingMessages(stored: ReadonlySet<string>): HeldChatMessage[] {
+    const records = this.#list();
+    if (records.length === 0) return [];
+    const seen = new Set<string>();
+    const waiting: HeldChatMessage[] = [];
+    for (const record of records) {
+      for (const message of record.messages) {
+        if (stored.has(message.id) || seen.has(message.id)) continue;
+        seen.add(message.id);
+        waiting.push(message);
+      }
+    }
+    return waiting;
   }
 
   /**
@@ -425,21 +637,22 @@ export class ChatAdmissions {
   }
 
   #orphans(): ChatAdmissionRecord[] {
-    return this.host.store.list().filter((r) => !this.live.has(r.requestId));
+    return this.#list().filter((r) => !this.live.has(r.requestId));
   }
 
   async #replay(): Promise<void> {
     const records: ChatAdmissionRecord[] = [];
+    let expired = false;
     for (const record of this.#orphans()) {
-      if (
-        Date.now() - record.createdAt > CHAT_ADMISSION_TTL_MS ||
-        (await this.host.recoveryOwns(record.requestId))
-      ) {
-        this.host.store.remove(record.requestId);
+      const old = Date.now() - record.createdAt > CHAT_ADMISSION_TTL_MS;
+      if (old || (await this.host.recoveryOwns(record.requestId))) {
+        this.release(record.requestId);
+        if (old) expired = true;
         continue;
       }
       records.push(record);
     }
+    if (expired) this.host.waitingDropped?.();
     const replays = records.filter(
       (record) => !this.live.has(record.requestId)
     );
@@ -448,9 +661,7 @@ export class ChatAdmissions {
     for (const listed of replays) {
       // Read again: a stop or a clear can have landed while this pass
       // awaited, and the request has no abort controller yet to take it.
-      const record = this.host.store
-        .list()
-        .find((r) => r.requestId === listed.requestId);
+      const record = this.record(listed.requestId);
       if (!record) {
         this.live.delete(listed.requestId);
         continue;

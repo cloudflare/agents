@@ -464,6 +464,13 @@ export class AIChatAgent<
     isCurrent: () => boolean;
     /** The messages are a client's copy (`keepStoredReplies`). */
     clientCopy: boolean;
+    /**
+     * Messages a waiting request holds: they shape the reconcile (a
+     * client's stale copy is told apart by what follows it) and are left
+     * out of what is stored and broadcast. In the scope, so an override of
+     * `persistMessages` that does not pass its options on still holds them.
+     */
+    hold?: ReadonlySet<string>;
     open: boolean;
   }>();
 
@@ -471,9 +478,10 @@ export class AIChatAgent<
   private async _persistForTurn<T>(
     isCurrent: () => boolean,
     clientCopy: boolean,
-    persist: () => Promise<T>
+    persist: () => Promise<T>,
+    hold?: ReadonlySet<string>
   ): Promise<T> {
-    const scope = { isCurrent, clientCopy, open: true };
+    const scope = { isCurrent, clientCopy, hold, open: true };
     try {
       return await this._turnPersistScope.run(scope, persist);
     } finally {
@@ -518,7 +526,13 @@ export class AIChatAgent<
         ),
       continuationDropped: (event) =>
         this._emit("chat:continuation:dropped", { ...event }),
-      stopped: (requestId, reason) => this._afterStop(requestId, reason)
+      stopped: (requestId, reason) => this._afterStop(requestId, reason),
+      // A waiting message that will not join: tabs stop drawing it.
+      waitingChanged: () =>
+        this._broadcastChatMessage({
+          messages: this._messagesForClientSync(),
+          type: MessageType.CF_AGENT_CHAT_MESSAGES
+        })
     },
     {
       defaultDebounceMs: AIChatAgent.MESSAGE_DEBOUNCE_MS,
@@ -1038,7 +1052,7 @@ export class AIChatAgent<
           recoveryRootRequestId:
             this._activeChatRecoveryRootRequestId ?? requestId,
           continuation,
-          messages: this._turns.snapshotMessages(this.messages, requestId),
+          messages: this.messages,
           lastBody: context ? context.body : this._lastBody,
           lastClientTools: context
             ? context.clientTools
@@ -1180,6 +1194,21 @@ export class AIChatAgent<
         return _onConnect(connection, ctx);
       }
 
+      // A tab loads the transcript over HTTP. While requests wait, it is also
+      // sent the message list, so it knows which messages are queued.
+      // The HTTP transcript has the stored messages only; this list names
+      // the queued ones, which a tab keeps apart and draws last.
+      if (this._turns.queuedMessageIds().size > 0) {
+        sendIfOpen(
+          connection,
+          JSON.stringify({
+            type: MessageType.CF_AGENT_CHAT_MESSAGES,
+            connect: true,
+            ...this._turns.connectView(this.messages)
+          })
+        );
+      }
+
       // Notify client about active streams that can be resumed
       if (this._resumableStream.hasActiveStream()) {
         this._notifyStreamResuming(connection);
@@ -1291,7 +1320,6 @@ export class AIChatAgent<
                 requestId: chatMessageId,
                 trigger: requestTrigger,
                 messages: transformedMessages,
-                newMessageIds: this._newUserMessageIds(transformedMessages),
                 clientTools,
                 body: customBody,
                 connection,
@@ -1337,7 +1365,12 @@ export class AIChatAgent<
 
         // Handle message replacement
         if (event.type === "messages") {
-          const transformedMessages = autoTransformMessages(event.messages);
+          // A message a waiting request holds is stored when its turn
+          // starts, not because a tab sent it back.
+          const queued = this._turns.queuedMessageIds();
+          const transformedMessages = autoTransformMessages(
+            event.messages
+          ).filter((message) => !queued.has(message.id));
           await this.persistMessages(transformedMessages, [connection.id]);
           return;
         }
@@ -1954,8 +1987,19 @@ export class AIChatAgent<
     return withOriginMessageIds(message, this._originMessageIdsFor(message.id));
   }
 
+  /**
+   * A message list for tabs ends with the messages waiting requests hold,
+   * named in `queuedMessageIds` (`ChatTurns.clientView`).
+   */
+  private _withQueuedMessages(message: OutgoingMessage): OutgoingMessage {
+    if (message.type !== MessageType.CF_AGENT_CHAT_MESSAGES) return message;
+    const view = this._turns.clientView(message.messages);
+    if (!view.queuedMessageIds) return message;
+    return { ...message, ...view };
+  }
+
   private _broadcastChatMessage(message: OutgoingMessage, exclude?: string[]) {
-    message = this._withOriginMessageIds(message);
+    message = this._withQueuedMessages(this._withOriginMessageIds(message));
     if (
       message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
       (message.done || message.error)
@@ -2446,7 +2490,7 @@ export class AIChatAgent<
     message: OutgoingMessage
   ): void {
     try {
-      connection.send(JSON.stringify(message));
+      connection.send(JSON.stringify(this._withQueuedMessages(message)));
     } catch {
       // Connection closed before the server could reply.
     }
@@ -2515,16 +2559,12 @@ export class AIChatAgent<
   }
 
   /**
-   * The last message a recovery checks: the latest one that no request
-   * queued behind the recovered turn stored. Those requests run after it,
-   * so their questions have not moved the conversation on.
+   * The last message a recovery checks. A request queued behind the
+   * recovered turn holds its question on its record until its turn starts,
+   * so it is not here.
    */
   private _recoveryLeaf(): UIMessage | undefined {
-    const queued = this._turns.admittedMessageIds();
-    for (let i = this.messages.length - 1; i >= 0; i--) {
-      if (!queued.has(this.messages[i].id)) return this.messages[i];
-    }
-    return undefined;
+    return this.messages[this.messages.length - 1];
   }
 
   private _replayClientChatRequest(
@@ -2541,7 +2581,6 @@ export class AIChatAgent<
       requestId,
       trigger: stored.trigger,
       messages: null,
-      newMessageIds: record.messageIds,
       clientTools: stored.clientTools,
       body: stored.body ?? {},
       connection: null,
@@ -2577,8 +2616,6 @@ export class AIChatAgent<
     trigger: ChatRequestTrigger;
     /** What the client sent, or `null` for a replay. */
     messages: UIMessage[] | null;
-    /** The user messages this request stores. */
-    newMessageIds: string[];
     clientTools: ClientToolSchema[] | undefined;
     body: Record<string, unknown>;
     connection: Connection | null;
@@ -2593,18 +2630,28 @@ export class AIChatAgent<
       requestId: chatMessageId,
       trigger: requestTrigger,
       messages: transformedMessages,
-      newMessageIds,
       clientTools,
       body: customBody,
       connection,
       regenerate
     } = input;
+    // The request's new user messages wait on its record until its turn
+    // starts: a turn answers its own question, and the turn running now
+    // never sees it. Messages other waiting requests hold are theirs, even
+    // when this tab drew them and sent them back.
+    const queued = transformedMessages ? this._turns.queuedMessageIds() : null;
+    const sent = transformedMessages?.filter((m) => !queued?.has(m.id)) ?? [];
+    const heldIds = new Set(this._newUserMessageIds(sent));
+    const held = sent.filter((message) => heldIds.has(message.id));
     let concurrencyDecision!: SubmitConcurrencyDecision;
     let epoch!: number;
+    // Lists naming queued messages once this request was shown to the
+    // other tabs.
+    let queuedViewsAtAccept = 0;
     return {
       requestId: chatMessageId,
       admission: {
-        messageIds: newMessageIds,
+        messages: held,
         payload: {
           trigger: requestTrigger,
           clientTools,
@@ -2620,7 +2667,6 @@ export class AIChatAgent<
       concurrency: this.messageConcurrency,
       onDecision: (decision) => {
         concurrencyDecision = decision;
-        this._noteMergeStart(decision);
       },
       onDropped: () => {
         if (connection) this._rollbackDroppedSubmit(connection);
@@ -2641,23 +2687,14 @@ export class AIChatAgent<
           },
           () => this._clearChatTerminal()
         ),
-      // Persist and broadcast user messages before entering the turn
-      // queue so other tabs see the new message immediately and so
-      // overlapping submits under latest/merge/debounce can inspect
-      // the full message list when their turn starts.
-      persist: async ({ decision, generation, isCurrent }) => {
+      // Store what the request changes in the stored transcript (a tool
+      // result, an edited message) and show its new messages to other tabs
+      // as queued, before it enters the turn queue. The new messages join
+      // the transcript when its turn starts (`join`).
+      persist: async ({ generation, isCurrent }) => {
         epoch = generation;
-        // A replay after a reset: its messages were stored before the reset.
-        // One that is gone (a clear, or a reset before it was written) has
-        // nothing to answer.
-        if (!transformedMessages) {
-          return this._turns.replayHasNothingToAnswer(
-            newMessageIds,
-            this.messages
-          )
-            ? null
-            : true;
-        }
+        // A replay after a reset: its messages are on its record.
+        if (!transformedMessages) return true;
         await withAgentSpan(
           this,
           "persist_incoming_messages",
@@ -2670,7 +2707,7 @@ export class AIChatAgent<
           async () => {
             this._broadcastChatMessage(
               {
-                messages: transformedMessages,
+                messages: held.length > 0 ? this.messages : sent,
                 type: MessageType.CF_AGENT_CHAT_MESSAGES
               },
               connection ? [connection.id] : []
@@ -2684,23 +2721,55 @@ export class AIChatAgent<
             // was cleared: `persistMessages` can await before it
             // writes (an app's override, auto-compaction), and a
             // clear from another tab can land in that wait.
-            await this._persistForTurn(isCurrent, true, () =>
-              this.persistMessages(
-                transformedMessages,
-                connection ? [connection.id] : [],
-                {
-                  _deleteStaleRows: requestTrigger !== "regenerate-message"
-                }
-              )
+            // A request with new messages is not a subset of the stored
+            // transcript, so it deletes nothing, as when they were stored
+            // with it.
+            await this._persistForTurn(
+              isCurrent,
+              true,
+              () =>
+                this.persistMessages(sent, connection ? [connection.id] : [], {
+                  _deleteStaleRows:
+                    requestTrigger !== "regenerate-message" && held.length === 0
+                }),
+              heldIds
             );
-
-            if (isCurrent() && decision.strategy === "merge") {
-              await this._mergeQueuedUserMessages(generation);
-            }
           }
         );
+        queuedViewsAtAccept = this._turns.queuedViews;
         // Cleared meanwhile: nothing was stored, so there is no turn.
         return isCurrent() ? true : null;
+      },
+      // The turn is at the front of the queue: its new messages join the
+      // transcript after everything stored meanwhile (the reply of the turn
+      // it waited behind), and the other tabs are told.
+      join: async ({ messages, generation, isCurrent }) => {
+        epoch = generation;
+        this._noteMergeStart(concurrencyDecision);
+        // Stored already, by a join before a reset.
+        if (messages.length === 0) return isCurrent();
+        await withAgentSpan(
+          this,
+          "persist_incoming_messages",
+          "turn",
+          {
+            "cloudflare.agents.component": "ai_chat",
+            "cloudflare.agents.turn.request_id": chatMessageId,
+            "cloudflare.agents.turn.trigger": requestTrigger
+          },
+          () =>
+            this._persistForTurn(isCurrent, false, () =>
+              this.persistMessages(
+                [...this.messages, ...(messages as UIMessage[])],
+                // The tab that sent them draws them already, unless it
+                // was since shown them as queued.
+                connection && this._turns.queuedViews === queuedViewsAtAccept
+                  ? [connection.id]
+                  : []
+              )
+            )
+        );
+        return isCurrent();
       },
       enqueue: async (turn, generation, onQueued) => {
         let stale = false;
@@ -2731,6 +2800,9 @@ export class AIChatAgent<
             },
             () => this._mergeQueuedUserMessages(epoch)
           );
+          // The questions this turn answers are merged. A later group
+          // starts after its reply.
+          this._mergeQueuedUserStartIndexByEpoch.delete(epoch);
 
           if (this._turnQueue.generation !== epoch) {
             return false;
@@ -2804,8 +2876,9 @@ export class AIChatAgent<
           }
           if (stale.length > 0) {
             await this.persistMessages(
-              transformedMessages ??
-                this.messages.filter((message) => keep.has(message.id)),
+              transformedMessages
+                ? sent
+                : this.messages.filter((message) => keep.has(message.id)),
               [],
               { _deleteStaleRows: true }
             );
@@ -5029,9 +5102,12 @@ export class AIChatAgent<
     );
     // A client's copy of a reply can be behind the stored one (the tab that
     // pressed stop has one chunk fewer). It never shortens the stored reply.
-    const mergedMessages = turn?.clientCopy
+    const hold = turn?.hold;
+    const kept = turn?.clientCopy
       ? keepStoredReplies(reconciled, priorMessages)
       : reconciled;
+    const mergedMessages =
+      hold && hold.size > 0 ? kept.filter((m) => !hold.has(m.id)) : kept;
 
     const toWrite: UIMessage[] = [];
     for (const message of mergedMessages) {

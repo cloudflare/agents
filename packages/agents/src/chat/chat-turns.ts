@@ -37,7 +37,8 @@ import { AbortRegistry } from "./abort-registry";
 import {
   ChatAdmissions,
   type ChatAdmissionRecord,
-  type ChatAdmissionsHost
+  type ChatAdmissionsHost,
+  type HeldChatMessage
 } from "./admissions";
 import {
   TIMED_OUT,
@@ -158,6 +159,12 @@ export interface ChatTurnsHost {
    * runtime's own abort ({@link ChatTurns.runtimeAbort}). Optional.
    */
   stopped?(requestId: string | null, reason: unknown): void | Promise<void>;
+  /**
+   * A waiting request's messages will not join the transcript (it ended
+   * before its turn, or its record was dropped): send tabs the message list
+   * again, so they stop drawing them as queued. Optional.
+   */
+  waitingChanged?(): void;
 }
 
 export interface ChatTurnsOptions {
@@ -173,7 +180,7 @@ export interface ChatTurnsOptions {
 /** What durable admission needs from the host. See `admissions.ts`. */
 export interface ChatTurnsAdmissionOptions extends Omit<
   ChatAdmissionsHost,
-  "replay" | "beginReplay"
+  "replay" | "beginReplay" | "waitingDropped"
 > {
   /**
    * The request a record describes, to run again after a reset. It has no
@@ -191,12 +198,13 @@ export interface ChatTurnsAdmissionOptions extends Omit<
 export interface ClientChatRequest<TPrepared> {
   requestId: string;
   /**
-   * What a replay after a reset needs: the ids of the user messages the
-   * request stores, and the host's data to run it again (JSON). With it,
-   * the request is recorded before its messages are stored, and the record
-   * goes when its turn has a fiber or it ends. See `admissions.ts`.
+   * The new user messages the request holds until its turn starts, and the
+   * host's data to run it again after a reset (JSON). With it, the request
+   * is recorded when it is accepted, the messages join the transcript at
+   * the front of the queue ({@link join}), and the record goes when its
+   * turn has a fiber or it ends. See `admissions.ts`.
    */
-  admission?: { messageIds: string[]; payload: unknown };
+  admission?: { messages: HeldChatMessage[]; payload: unknown };
   /** `true` for a new message, `false` for a regenerate. */
   isSubmitMessage: boolean;
   /** The host's `messageConcurrency` setting. */
@@ -214,9 +222,11 @@ export interface ClientChatRequest<TPrepared> {
    */
   onAccepted?(): void | Promise<void>;
   /**
-   * Store the request's messages and show them to other clients. Runs before
-   * the turn queue, so they are visible while the request waits. Return
-   * `null` to skip the request.
+   * Store what the request changes in the stored transcript, and show the
+   * request to other clients. Runs before the turn queue. The messages
+   * {@link admission} holds are not stored here: they join at
+   * {@link join}, and tabs draw them as queued meanwhile. Return `null` to
+   * skip the request.
    *
    * @param context.isCurrent - `false` once the chat was reset since the
    *   request arrived.
@@ -237,6 +247,22 @@ export interface ClientChatRequest<TPrepared> {
     generation: number,
     onQueued: () => void
   ): Promise<"completed" | "stale">;
+  /**
+   * The request's turn is at the front of the queue: store the messages
+   * {@link admission} holds, after everything stored so far, and tell tabs.
+   * Called once the debounce wait is over, before the superseded check (a
+   * superseded request's question is kept, and the turn that superseded it
+   * reads it) and before a stop is honored (a stopped request's question is
+   * kept too, unanswered). Not called after a clear. `messages` leaves out
+   * those already stored (a reset after an earlier join), so it can be
+   * empty. Return `false` to skip the request.
+   */
+  join?(context: {
+    prepared: TPrepared;
+    messages: HeldChatMessage[];
+    generation: number;
+    isCurrent: () => boolean;
+  }): Promise<boolean>;
   /**
    * Host checks at the front of the queue, after the core's superseded and
    * debounce checks: merging queued messages, waiting for MCP connections.
@@ -381,6 +407,7 @@ export class ChatTurns<
               }
             }
           },
+          waitingDropped: () => host.waitingChanged?.(),
           replay: (record, onQueued) => {
             const request = admissions.replayRequest(record);
             if (!request) {
@@ -464,10 +491,13 @@ export class ChatTurns<
    *    stream) and create its abort controller, so a cancel that arrives at
    *    any later point, including while it waits in the queue, is not lost
    *    (#2701).
-   * 3. Store its messages, then queue the turn.
-   * 4. At the front of the queue: skip it if a newer submit superseded it or
-   *    the chat was reset, end it with `aborted` if it was cancelled
-   *    meanwhile (the model is never called), otherwise run it.
+   * 3. Record it with the new messages it holds, store what it changes in
+   *    the stored transcript, then queue the turn.
+   * 4. At the front of the queue: skip it if the chat was reset. Otherwise
+   *    its held messages join the transcript, after everything stored so
+   *    far. Then skip it if a newer submit superseded it, end it with
+   *    `aborted` if it was cancelled meanwhile (the model is never called),
+   *    otherwise run it.
    * 5. Whatever happened, drop the abort controller and settle the
    *    pre-stream turn.
    */
@@ -487,6 +517,9 @@ export class ChatTurns<
     replay?: { record: ChatAdmissionRecord; onQueued: () => void }
   ): Promise<void> {
     const { requestId } = request;
+    if (!request.join && (request.admission?.messages.length ?? 0) > 0) {
+      throw new TypeError("runClientRequest: held messages need a join step");
+    }
     const generation = this.queue.generation;
     const admissions = request.admission ? this.admissions : null;
     const restored = replay && this.#restoredDecisions.get(requestId);
@@ -525,14 +558,20 @@ export class ChatTurns<
       replay?.onQueued();
     };
     let stage: "persist" | "turn" = "persist";
+    // The messages the request holds until its turn starts.
+    const held: HeldChatMessage[] = replay
+      ? replay.record.messages
+      : (request.admission?.messages ?? []);
+    let joined = held.length === 0;
     try {
-      // The record comes before the messages: a reset between the two
-      // leaves a record whose replay finds no message and ends `skipped`,
-      // where the other order would leave a message nothing answers.
+      // The record holds the request's new messages: a reset at any point
+      // before its turn has a fiber leaves them on the record, and only
+      // there, so the replay stores them once and nothing else can.
       if (admissions && !replay && request.admission) {
         admissions.admit({
           requestId,
-          messageIds: request.admission.messageIds,
+          messages: held,
+          afterUserId: this.#latestUserId(),
           decision: {
             strategy: decision.strategy,
             overlapping: decision.submitSequence !== null,
@@ -558,7 +597,34 @@ export class ChatTurns<
       if (admissions && !replay) await admissions.beforeEnqueue();
       const outcome = await request.enqueue(
         async () => {
-          if (!(await this.awaitSubmitTurn(slot.decision, generation))) {
+          const current = await this.awaitSubmitTurn(slot.decision, generation);
+          if (this.queue.generation !== generation) {
+            request.onSkipped();
+            return;
+          }
+          if (!joined) {
+            // A replay whose conversation moved on without it (a rollback
+            // answered something newer) stores nothing.
+            if (replay && this.#replayMovedOn(replay.record)) {
+              request.onSkipped();
+              return;
+            }
+            const stored = new Set(this.host.messages().map((m) => m.id));
+            const fresh = held.filter((message) => !stored.has(message.id));
+            if (
+              !(await request.join?.({
+                prepared,
+                messages: fresh,
+                generation,
+                isCurrent: () => this.queue.generation === generation
+              }))
+            ) {
+              request.onSkipped();
+              return;
+            }
+            joined = true;
+          }
+          if (!current) {
             request.onSkipped();
             return;
           }
@@ -591,6 +657,10 @@ export class ChatTurns<
       this.#decidedNotQueued.delete(slot);
       if (!queued) replay?.onQueued();
       if (admissions) admissions.end(requestId);
+      // Tabs drew its messages as queued. They are not coming.
+      if (!joined && this.queue.generation === generation) {
+        this.host.waitingChanged?.();
+      }
       this.aborts.remove(requestId);
       this.settlePreStreamTurn(requestId);
     }
@@ -617,50 +687,100 @@ export class ChatTurns<
   }
 
   /**
-   * The user messages of requests that have no turn with a fiber yet. A
-   * recovery does not read them as the conversation moving on: they wait
-   * behind the turn it recovers.
+   * What a tab is sent as the message list: `messages` (the stored
+   * transcript), then the messages waiting requests hold, in admission
+   * order, named in `queuedMessageIds`. A tab draws those after the
+   * transcript and after a reply that is streaming. Without waiting
+   * requests it is `messages` alone.
    */
-  admittedMessageIds(exceptRequestId?: string): ReadonlySet<string> {
-    return this.admissions?.messageIds(exceptRequestId) ?? new Set();
+  clientView<TMessage extends { id: string }>(
+    messages: ReadonlyArray<TMessage>
+  ): { messages: TMessage[]; queuedMessageIds?: string[] } {
+    const waiting =
+      this.admissions?.waitingMessages(new Set(messages.map((m) => m.id))) ??
+      [];
+    if (waiting.length === 0) return { messages: [...messages] };
+    this.#queuedViews++;
+    return {
+      messages: [...messages, ...(waiting as unknown as TMessage[])],
+      queuedMessageIds: waiting.map((message) => message.id)
+    };
   }
 
   /**
-   * The transcript a turn's recovery snapshot records: without the user
-   * messages of other requests waiting behind it. Recovery reads the leaf
-   * the same way (it skips them), so the snapshot's latest user message is
-   * the one this turn answers, not a question queued after it.
+   * {@link clientView} for a tab that has just connected while a reply
+   * streams: without the reply. The tab gets the reply from the stream it
+   * resumes, and a copy in its list would be continued by that replay, so
+   * the reply would be drawn with its first chunks twice.
    */
-  snapshotMessages<TMessage extends { id: string }>(
-    messages: ReadonlyArray<TMessage>,
-    requestId: string
-  ): TMessage[] {
-    const queued = this.admittedMessageIds(requestId);
-    return queued.size === 0
-      ? [...messages]
-      : messages.filter((message) => !queued.has(message.id));
+  connectView<TMessage extends { id: string }>(
+    messages: ReadonlyArray<TMessage>
+  ): { messages: TMessage[]; queuedMessageIds?: string[] } {
+    const streaming = this.host.streamingReply()?.id;
+    const view = this.clientView(messages);
+    if (streaming === undefined) return view;
+    return {
+      ...view,
+      messages: view.messages.filter((message) => message.id !== streaming)
+    };
   }
 
   /**
-   * Whether a request replayed after a reset has nothing left to answer:
-   * one of its user messages is gone, or a user message no waiting request
-   * stored follows them. That message was answered after the reset, by a
-   * newer request or by a release without durable admission (a rollback),
-   * and the conversation has moved on.
+   * The ids of the messages waiting requests hold that have not joined the
+   * transcript. A client's copy of the transcript can include them (a tab
+   * draws them): they are not new messages of the request it sends.
    */
-  replayHasNothingToAnswer(
-    messageIds: ReadonlyArray<string>,
-    messages: ReadonlyArray<ChatTurnMessage>
-  ): boolean {
-    const ids = new Set(messageIds);
-    const at = messages.map((m) => ids.has(m.id));
-    if (at.filter(Boolean).length < ids.size) return true;
-    const last = at.lastIndexOf(true);
-    if (last < 0) return false;
-    const queued = this.admittedMessageIds();
+  queuedMessageIds(): Set<string> {
+    const stored = new Set(this.host.messages().map((m) => m.id));
+    return new Set(
+      (this.admissions?.waitingMessages(stored) ?? []).map((m) => m.id)
+    );
+  }
+
+  #queuedViews = 0;
+
+  /**
+   * How many message lists {@link clientView} has built that named queued
+   * messages. A host compares it across a request's wait: when it moved,
+   * the tab that sent the request may have been shown its message as
+   * queued, and must be told when it joins.
+   */
+  get queuedViews(): number {
+    return this.#queuedViews;
+  }
+
+  /** The latest user message a tab shows: stored, or held by a request. */
+  #latestUserId(): string | null {
+    const messages = this.host.messages();
+    const stored = new Set(messages.map((m) => m.id));
+    const waiting = this.admissions?.waitingMessages(stored) ?? [];
+    for (const list of [waiting, messages]) {
+      for (let i = list.length - 1; i >= 0; i--) {
+        if (list[i].role === "user") return list[i].id;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Whether a request replayed after a reset has nothing left to answer: a
+   * user message follows the one the request was accepted after, and no
+   * waiting request holds it. That message was answered after the reset by
+   * a release without durable admission (a rollback), and the conversation
+   * has moved on. When the message it was accepted after is gone, it runs.
+   */
+  #replayMovedOn(record: ChatAdmissionRecord): boolean {
+    if (record.afterUserId === null) return false;
+    const messages = this.host.messages();
+    const at = messages.findIndex((m) => m.id === record.afterUserId);
+    if (at < 0) return false;
+    const own = new Set(record.messageIds);
+    const held = new Set(
+      (this.admissions?.waitingMessages(new Set()) ?? []).map((m) => m.id)
+    );
     return messages
-      .slice(last + 1)
-      .some((m) => m.role === "user" && !queued.has(m.id));
+      .slice(at + 1)
+      .some((m) => m.role === "user" && !own.has(m.id) && !held.has(m.id));
   }
 
   /**

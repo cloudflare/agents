@@ -4,7 +4,9 @@ import {
   chatRecoveryNames,
   createChatAdmissionStore,
   newUserMessageIds,
-  type ChatAdmissionRecord
+  splitPieces,
+  type ChatAdmissionRecord,
+  type HeldChatMessage
 } from "../admissions";
 import {
   ChatTurns,
@@ -53,6 +55,8 @@ function isolate(
     concurrency?: MessageConcurrency;
     recoveryPending?: () => boolean;
     recoveryOwns?: (requestId: string) => boolean | Promise<boolean>;
+    /** `false`: a turn's fiber is never accepted, so its record stays. */
+    fiber?: boolean;
   } = {}
 ) {
   let statements = 0;
@@ -68,22 +72,26 @@ function isolate(
   const started: string[] = [];
   const gates = new Map<string, () => void>();
   const replayed: ChatAdmissionRecord[] = [];
+  const joins: string[] = [];
+  /** The transcript each turn started with: what its model request holds. */
+  const asked = new Map<string, string[]>();
 
-  const request = (
-    requestId: string,
-    replay = false
-  ): ClientChatRequest<true> => ({
+  const request = (requestId: string): ClientChatRequest<true> => ({
     requestId,
     isSubmitMessage: true,
     concurrency: options.concurrency ?? "queue",
-    admission: { messageIds: [`u-${requestId}`], payload: { requestId } },
+    admission: {
+      messages: [{ id: `u-${requestId}`, role: "user" }],
+      payload: { requestId }
+    },
     onDropped: () => ended.set(requestId, "skipped"),
-    persist: async () => {
-      if (!replay)
-        host.transcript.push({ id: `u-${requestId}`, role: "user", parts: [] });
-      return host.transcript.some((m) => m.id === `u-${requestId}`)
-        ? true
-        : null;
+    persist: async () => true,
+    join: async ({ messages }) => {
+      joins.push(...messages.map((m) => m.id));
+      for (const message of messages) {
+        host.transcript.push({ ...message, parts: [] });
+      }
+      return true;
     },
     enqueue: async (turn, generation, onQueued) => {
       const done = turns.queue.enqueue(requestId, turn, { generation });
@@ -93,8 +101,12 @@ function isolate(
     },
     run: async () => {
       started.push(requestId);
+      asked.set(
+        requestId,
+        host.transcript.map((m) => m.id)
+      );
       // The turn's fiber is accepted.
-      turns.turnAccepted(requestId);
+      if (options.fiber !== false) turns.turnAccepted(requestId);
       await new Promise<void>((resolve) => gates.set(requestId, resolve));
       ended.set(requestId, "ran");
     },
@@ -110,7 +122,7 @@ function isolate(
       recoveryOwns: async (id) => (await options.recoveryOwns?.(id)) ?? false,
       replayRequest: (record) => {
         replayed.push(record);
-        return request(record.requestId, true);
+        return request(record.requestId);
       }
     }
   });
@@ -121,6 +133,9 @@ function isolate(
     ended,
     started,
     replayed,
+    joins,
+    asked,
+    ids: () => host.transcript.map((m) => m.id),
     statements: () => statements,
     records: () => store.list().map((r) => r.requestId),
     send: (requestId: string) => turns.runClientRequest(request(requestId)),
@@ -270,15 +285,40 @@ describe("durable admission", () => {
     expect(b.records()).toEqual([]);
   });
 
-  it("ends `skipped` a request whose message is gone", async () => {
+  it("a replay stores the message its record holds, after the transcript", async () => {
     const db = new DatabaseSync(":memory:");
-    await queueBehindRunningTurn(db, ["r2"]);
+    const a = await queueBehindRunningTurn(db, ["r2"]);
+    // The waiting message is on the record only.
+    expect(a.ids()).toEqual(["u-r1"]);
     const b = isolate(db);
+    b.copyTranscript(a);
+    b.host.transcript.push({ id: "a-r1", role: "assistant", parts: [] });
     await b.turns.resumeAdmissions();
     await tick();
-    expect(b.started).toEqual([]);
-    expect(b.ended.get("r2")).toBe("skipped");
-    expect(b.records()).toEqual([]);
+    expect(b.started).toEqual(["r2"]);
+    expect(b.asked.get("r2")).toEqual(["u-r1", "a-r1", "u-r2"]);
+  });
+
+  it("a reset after the message joined does not store it again", async () => {
+    const db = new DatabaseSync(":memory:");
+    const a = isolate(db, { fiber: false });
+    void a.send("r1");
+    await tick();
+    void a.send("r2");
+    await tick();
+    a.finish("r1");
+    await tick();
+    await tick();
+    // r2 joined and started, and its fiber was never accepted.
+    expect(a.started).toEqual(["r1", "r2"]);
+    expect(a.records()).toEqual(["r2"]);
+    const b = isolate(db);
+    b.copyTranscript(a);
+    await b.turns.resumeAdmissions();
+    await tick();
+    expect(b.started).toEqual(["r2"]);
+    expect(b.joins).toEqual([]);
+    expect(b.ids()).toEqual(["u-r1", "u-r2"]);
   });
 
   it("under `latest`, a request a later one superseded stays superseded", async () => {
@@ -296,6 +336,8 @@ describe("durable admission", () => {
     await tick();
     expect(b.ended.get("r2")).toBe("skipped");
     expect(b.started).toEqual(["r3"]);
+    // The superseded question is kept, before the one that superseded it.
+    expect(b.asked.get("r3")).toEqual(["u-r1", "u-r2", "u-r3"]);
   });
 
   it("under `latest`, a new request during recovery is not superseded by the older replays", async () => {
@@ -322,10 +364,64 @@ describe("durable admission", () => {
     expect(b.ended.get("r3")).toBe("skipped");
   });
 
-  it("the user messages of recorded requests are known, for recovery's leaf", async () => {
+  it("tabs are sent a waiting message after the transcript, named as queued", async () => {
     const db = new DatabaseSync(":memory:");
     const a = await queueBehindRunningTurn(db, ["r2"]);
-    expect([...a.turns.admittedMessageIds()]).toEqual(["u-r2"]);
+    const view = a.turns.clientView(a.host.transcript);
+    expect(view.messages.map((m) => m.id)).toEqual(["u-r1", "u-r2"]);
+    expect(view.queuedMessageIds).toEqual(["u-r2"]);
+    // After a reset, before the replay, too.
+    const b = isolate(db, { recoveryPending: () => true });
+    b.copyTranscript(a);
+    expect(b.turns.clientView(b.host.transcript).queuedMessageIds).toEqual([
+      "u-r2"
+    ]);
+    a.finish("r1");
+    await tick();
+    await tick();
+    // Joined: drawn once, not queued.
+    const after = a.turns.clientView(a.host.transcript);
+    expect(after.messages.map((m) => m.id)).toEqual(["u-r1", "u-r2"]);
+    expect(after.queuedMessageIds).toBeUndefined();
+  });
+
+  it("a running turn's request never holds the question queued behind it", async () => {
+    const db = new DatabaseSync(":memory:");
+    const a = await queueBehindRunningTurn(db, ["r2", "r3"]);
+    expect(a.asked.get("r1")).toEqual(["u-r1"]);
+    a.host.transcript.push({ id: "a-r1", role: "assistant", parts: [] });
+    a.finish("r1");
+    await tick();
+    await tick();
+    expect(a.asked.get("r2")).toEqual(["u-r1", "a-r1", "u-r2"]);
+    a.host.transcript.push({ id: "a-r2", role: "assistant", parts: [] });
+    a.finish("r2");
+    await tick();
+    await tick();
+    expect(a.asked.get("r3")).toEqual(["u-r1", "a-r1", "u-r2", "a-r2", "u-r3"]);
+  });
+
+  it("a request stopped while it waits keeps its question, unanswered", async () => {
+    const db = new DatabaseSync(":memory:");
+    const a = await queueBehindRunningTurn(db, ["r2", "r3"]);
+    await a.turns.cancel("r2");
+    a.finish("r1");
+    await tick();
+    await tick();
+    expect(a.ended.get("r2")).toBe("aborted");
+    expect(a.asked.get("r3")).toEqual(["u-r1", "u-r2", "u-r3"]);
+  });
+
+  it("a clear drops a waiting message: it is never stored", async () => {
+    const db = new DatabaseSync(":memory:");
+    const a = await queueBehindRunningTurn(db, ["r2"]);
+    a.turns.reset();
+    a.host.transcript = [];
+    a.finish("r1");
+    await tick();
+    await tick();
+    expect(a.joins).toEqual(["u-r1"]);
+    expect(a.turns.clientView(a.host.transcript).messages).toEqual([]);
   });
 
   it("drops a record older than an hour, which only a rollback leaves", async () => {
@@ -342,30 +438,28 @@ describe("durable admission", () => {
     expect(b.records()).toEqual([]);
   });
 
-  it("a replay has nothing to answer once a user message nothing waits on follows its own", async () => {
+  it("a replay stores nothing once a user message nothing waits on follows the one it came after", async () => {
     const db = new DatabaseSync(":memory:");
     const a = await queueBehindRunningTurn(db, ["r2"]);
-    const msg = (id: string, role: string) => ({ id, role, parts: [] });
-    const t = a.turns;
-    expect(t.replayHasNothingToAnswer(["u-r2"], [msg("u-r2", "user")])).toBe(
-      false
+    const b = isolate(db);
+    b.copyTranscript(a);
+    // A release without durable admission ran meanwhile (a rollback) and
+    // answered a newer question.
+    b.host.transcript.push(
+      { id: "a-r1", role: "assistant", parts: [] },
+      { id: "u-new", role: "user", parts: [] },
+      { id: "a-new", role: "assistant", parts: [] }
     );
-    // A reply after it (the recovered turn's) does not move it on.
-    expect(
-      t.replayHasNothingToAnswer(
-        ["u-r2"],
-        [msg("u-r2", "user"), msg("a1", "assistant")]
-      )
-    ).toBe(false);
-    // A question an older release answered after a rollback does.
-    expect(
-      t.replayHasNothingToAnswer(
-        ["u-r2"],
-        [msg("u-r2", "user"), msg("u3", "user")]
-      )
-    ).toBe(true);
-    // Gone.
-    expect(t.replayHasNothingToAnswer(["u-r2"], [])).toBe(true);
+    let changed = 0;
+    (b.host as Host & { waitingChanged(): void }).waitingChanged = () =>
+      changed++;
+    await b.turns.resumeAdmissions();
+    await tick();
+    expect(b.started).toEqual([]);
+    expect(b.ended.get("r2")).toBe("skipped");
+    expect(b.ids()).not.toContain("u-r2");
+    // Tabs that drew it as queued are told.
+    expect(changed).toBe(1);
   });
 
   it("a stop that lands while the replay awaits still stops the request", async () => {
@@ -483,6 +577,41 @@ describe("chatRecoveryNames", () => {
   });
 });
 
+describe("held messages", () => {
+  it("round-trip a large message with a surrogate pair on a piece boundary", () => {
+    const db = new DatabaseSync(":memory:");
+    const store = createChatAdmissionStore(() => ({
+      exec: (query: string, ...bindings: unknown[]) => {
+        const rows = db.prepare(query).all(...(bindings as SQLInputValue[]));
+        return { toArray: () => rows as Record<string, unknown>[] };
+      }
+    }));
+    // The JSON opens with `[{"id":"u","role":"user","text":"` (33 units),
+    // so an emoji at the cut lands its high surrogate at 499,999.
+    const head = '[{"id":"u","role":"user","text":"';
+    const text = `${"a".repeat(500_000 - head.length - 1)}😀${"b".repeat(600_000)}`;
+    store.add({
+      requestId: "r1",
+      messages: [{ id: "u", role: "user", text } as HeldChatMessage],
+      afterUserId: null,
+      decision: { strategy: null, overlapping: false, debounceUntilMs: null },
+      payload: null
+    });
+    // A new isolate reads it from storage.
+    const again = createChatAdmissionStore(() => ({
+      exec: (query: string, ...bindings: unknown[]) => {
+        const rows = db.prepare(query).all(...(bindings as SQLInputValue[]));
+        return { toArray: () => rows as Record<string, unknown>[] };
+      }
+    }));
+    const [record] = again.list();
+    expect(
+      (record.messages[0] as HeldChatMessage & { text: string }).text
+    ).toBe(text);
+    expect(splitPieces("ab😀", 3)).toEqual(["ab", "😀"]);
+  });
+});
+
 describe("newUserMessageIds", () => {
   const m = (id: string, role = "user") => ({ id, role });
 
@@ -513,23 +642,16 @@ describe("newUserMessageIds", () => {
     ).toEqual(["u2", "u3"]);
     expect(newUserMessageIds([m("u1")], new Set())).toEqual(["u1"]);
   });
-});
 
-describe("snapshotMessages", () => {
-  it("leaves out the user messages of requests waiting behind the turn, not its own", async () => {
-    const db = new DatabaseSync(":memory:");
-    const a = isolate(db);
-    void a.send("r1");
-    await tick();
-    void a.send("r2");
-    await tick();
-    // r2 waits behind r1, whose fiber released r1's record. A retry of r1
-    // records r1's question as its latest user message, not r2's.
-    const snapshot = a.turns.snapshotMessages(a.host.transcript, "r1");
-    expect(snapshot.map((m) => m.id)).toEqual(["u-r1"]);
-    // r2's own turn keeps its question.
+  it("ends at a message that is not a user's, so what it holds goes last", () => {
     expect(
-      a.turns.snapshotMessages(a.host.transcript, "r2").map((m) => m.id)
-    ).toEqual(["u-r1", "u-r2"]);
+      newUserMessageIds([m("u1"), m("a1", "assistant")], new Set())
+    ).toEqual([]);
+    expect(
+      newUserMessageIds(
+        [m("u1"), m("a1", "assistant"), m("u2")],
+        new Set(["u1"])
+      )
+    ).toEqual(["u2"]);
   });
 });

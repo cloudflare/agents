@@ -77,6 +77,7 @@ export {
   type ChatAdmissionRecord,
   type ChatAdmissionStore,
   type ChatAdmissionsHost,
+  type HeldChatMessage,
   type StoredSubmitDecision
 } from "./admissions";
 
