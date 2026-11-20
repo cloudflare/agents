@@ -539,6 +539,45 @@ export class ChatRecoveryEngine {
     }
   }
 
+  /** The tail of the chain every incident read-modify-write runs on. */
+  #incidentWrites: Promise<unknown> = Promise.resolve();
+
+  /**
+   * Read an incident, compute its next value and write it, with no other
+   * incident write in between. Every read-modify-write of an incident goes
+   * through here, so a cancel that lands while another write is under way
+   * is never written over with the record as it was before the cancel.
+   *
+   * @param change - Synchronous, so nothing can wait on the chain from
+   *   inside it. Returns the next record, `"delete"`, or `undefined` to
+   *   write nothing.
+   * @returns The record before and after. `after` is `undefined` when
+   *   nothing was written.
+   */
+  #update(
+    key: string,
+    change: (
+      incident: ChatRecoveryIncident | null
+    ) => ChatRecoveryIncident | "delete" | undefined
+  ): Promise<{
+    before: ChatRecoveryIncident | null;
+    after: ChatRecoveryIncident | "delete" | undefined;
+  }> {
+    const run = async () => {
+      const before = await this.adapter.getIncident(key);
+      const after = change(before);
+      if (after === "delete") {
+        await this.#deleteIncident(key);
+      } else if (after !== undefined) {
+        await this.#putIncident(key, after);
+      }
+      return { before, after };
+    };
+    const next = this.#incidentWrites.then(run, run);
+    this.#incidentWrites = next.catch(() => {});
+    return next;
+  }
+
   async #deleteIncident(key: string): Promise<void> {
     await this.adapter.deleteIncident(key);
     this.#settled();
@@ -570,12 +609,12 @@ export class ChatRecoveryEngine {
     const { adapter } = this;
     const key = chatRecoveryIncidentKey(incidentId);
     try {
-      const stored = await adapter.getIncident(key);
-      const next = stored ? finishChatRecoveryAttempt(stored, attempt) : null;
-      if (next) {
-        await this.#putIncident(key, next);
-        await adapter.syncStorage();
-      }
+      const { after } = await this.#update(key, (stored) =>
+        stored
+          ? (finishChatRecoveryAttempt(stored, attempt) ?? undefined)
+          : undefined
+      );
+      if (after) await adapter.syncStorage();
     } catch {
       // An entry left behind costs at most one extra counted interruption.
     }
@@ -620,14 +659,20 @@ export class ChatRecoveryEngine {
 
     adapter.ensureInteractionStateLoaded?.();
     const attempt = this.#newAttempt();
-    const { incident, exhausted } = admitChatRecoveryAttempt({
-      existing,
-      attempt,
-      config: adapter.resolveConfig(),
-      awaitingClientInteraction:
-        adapter.isAwaitingClientInteraction?.() ?? false
+    let exhausted = false;
+    await this.#update(chatRecoveryIncidentKey(incidentId), (current) => {
+      // Admitted on the record as it is now: a cancel since the read above
+      // is kept.
+      const admitted = admitChatRecoveryAttempt({
+        existing: current ?? existing,
+        attempt,
+        config: adapter.resolveConfig(),
+        awaitingClientInteraction:
+          adapter.isAwaitingClientInteraction?.() ?? false
+      });
+      exhausted = admitted.exhausted;
+      return admitted.incident;
     });
-    await this.#putIncident(chatRecoveryIncidentKey(incidentId), incident);
     await adapter.syncStorage();
 
     if (exhausted) {
@@ -992,20 +1037,20 @@ export class ChatRecoveryEngine {
     // continue the same one), and a count of schedules (so an attempt can
     // tell that its own turn scheduled the next one).
     const key = chatRecoveryIncidentKey(incident.incidentId);
-    const stored = await this.adapter.getIncident(key);
     // The callback carries the number of its schedule, so a delivery of an
     // older schedule, or a second delivery of this one after its turn
     // started, can tell it is not the one to run (`recoveryDelivery`).
     let delivery: number | undefined;
-    if (stored) {
-      const targetMessageId =
-        input.callback === "_chatRecoveryContinue" &&
-        typeof input.data.targetAssistantId === "string"
-          ? input.data.targetAssistantId
-          : undefined;
-      const { deferredError: _deferredError, ...rest } = stored;
-      delivery = (stored.scheduleCount ?? 0) + 1;
-      await this.#putIncident(key, {
+    const targetMessageId =
+      input.callback === "_chatRecoveryContinue" &&
+      typeof input.data.targetAssistantId === "string"
+        ? input.data.targetAssistantId
+        : undefined;
+    const { before: stored } = await this.#update(key, (current) => {
+      if (!current) return undefined;
+      const { deferredError: _deferredError, ...rest } = current;
+      delivery = (current.scheduleCount ?? 0) + 1;
+      return {
         ...rest,
         status: "scheduled",
         scheduleCount: delivery,
@@ -1013,7 +1058,9 @@ export class ChatRecoveryEngine {
           callback: input.callback,
           ...(targetMessageId !== undefined && { targetMessageId })
         }
-      });
+      };
+    });
+    if (stored) {
       await this.adapter.setRecovering(
         true,
         stored.recoveryRootRequestId ?? stored.requestId
@@ -1068,19 +1115,16 @@ export class ChatRecoveryEngine {
     attempt: ChatRecoveryAttemptScope | undefined
   ): Promise<void> {
     if (!attempt?.incidentId || attempt.delivery === undefined) return;
-    const key = chatRecoveryIncidentKey(attempt.incidentId);
-    const incident = await this.adapter.getIncident(key);
-    if (
-      incident?.status !== "scheduled" ||
-      incident.scheduleCount !== attempt.delivery ||
-      incident.startedDelivery === attempt.delivery
-    ) {
-      return;
-    }
-    await this.#putIncident(key, {
-      ...incident,
-      startedDelivery: attempt.delivery
-    });
+    const { delivery } = attempt;
+    await this.#update(
+      chatRecoveryIncidentKey(attempt.incidentId),
+      (incident) =>
+        incident?.status !== "scheduled" ||
+        incident.scheduleCount !== delivery ||
+        incident.startedDelivery === delivery
+          ? undefined
+          : { ...incident, startedDelivery: delivery }
+    );
   }
 
   /**
@@ -1110,19 +1154,21 @@ export class ChatRecoveryEngine {
     const { adapter } = this;
     if (!input.incidentId) return false;
     const key = chatRecoveryIncidentKey(input.incidentId);
-    const incident = await adapter.getIncident(key);
-    if (!incident) return false;
-    const attempt = incident.attempt ?? 0;
-    if (attempt >= (incident.maxAttempts ?? input.fallbackMaxAttempts)) {
-      return false;
-    }
-    await this.#putIncident(key, {
-      ...incident,
-      attempt: attempt + 1,
-      status: "scheduled",
-      lastAttemptAt: adapter.now(),
-      reason: "stable_timeout_retry"
+    const { after } = await this.#update(key, (incident) => {
+      if (!incident) return undefined;
+      const attempt = incident.attempt ?? 0;
+      if (attempt >= (incident.maxAttempts ?? input.fallbackMaxAttempts)) {
+        return undefined;
+      }
+      return {
+        ...incident,
+        attempt: attempt + 1,
+        status: "scheduled",
+        lastAttemptAt: adapter.now(),
+        reason: "stable_timeout_retry"
+      };
     });
+    if (!after) return false;
     await adapter.scheduleRecovery(
       input.callback,
       input.data ?? {},
@@ -1140,11 +1186,12 @@ export class ChatRecoveryEngine {
    */
   async recordTransientRetry(incidentId: string): Promise<number> {
     const { adapter } = this;
-    const key = chatRecoveryIncidentKey(incidentId);
-    const incident = await adapter.getIncident(key);
-    if (!incident) return 1;
-    const transientRetries = (incident.transientRetries ?? 0) + 1;
-    await this.#putIncident(key, { ...incident, transientRetries });
+    let transientRetries = 1;
+    await this.#update(chatRecoveryIncidentKey(incidentId), (incident) => {
+      if (!incident) return undefined;
+      transientRetries = (incident.transientRetries ?? 0) + 1;
+      return { ...incident, transientRetries };
+    });
     return transientRetries;
   }
 
@@ -1167,20 +1214,22 @@ export class ChatRecoveryEngine {
     let cancelled = false;
     for (const incident of incidents) {
       const running = this.#runningAttempts.get(incident.incidentId);
-      if (
-        incident.status === "scheduled" &&
-        (incident.recoveryRootRequestId === requestId ||
-          incident.requestId === requestId ||
-          running?.turnRequestId === requestId)
-      ) {
-        await this.updateIncident(
-          incident.incidentId,
-          "skipped",
-          CHAT_RECOVERY_CANCELLED_REASON
-        );
-        running?.stopped.abort();
-        cancelled = true;
-      }
+      const named = (current: ChatRecoveryIncident): boolean =>
+        current.status === "scheduled" &&
+        (current.recoveryRootRequestId === requestId ||
+          current.requestId === requestId ||
+          running?.turnRequestId === requestId);
+      if (!named(incident)) continue;
+      // Checked again where it is written: two stops of one incident (a
+      // tab's cancel and the stop of the turn it names) record one outcome.
+      const applied = await this.updateIncident(
+        incident.incidentId,
+        "skipped",
+        CHAT_RECOVERY_CANCELLED_REASON,
+        named
+      );
+      running?.stopped.abort();
+      if (applied) cancelled = true;
     }
     return cancelled;
   }
@@ -1363,11 +1412,11 @@ export class ChatRecoveryEngine {
    * the attempt's own outcome does not overwrite the user's stop.
    */
   async recordRecoveryStop(incidentId: string | undefined): Promise<void> {
-    if (await this.isRecoveryCancelled(incidentId)) return;
     await this.updateIncident(
       incidentId,
       "skipped",
-      CHAT_RECOVERY_CANCELLED_REASON
+      CHAT_RECOVERY_CANCELLED_REASON,
+      (incident) => !isCancelled(incident)
     );
   }
 
@@ -1534,11 +1583,16 @@ export class ChatRecoveryEngine {
       ) {
         continue;
       }
-      await this.updateIncident(
+      const applied = await this.updateIncident(
         incident.incidentId,
         "skipped",
-        CHAT_RECOVERY_CONTINUED_REASON
+        CHAT_RECOVERY_CONTINUED_REASON,
+        (current) =>
+          current.status === "scheduled" &&
+          continuesReply(current, reply.id) &&
+          !this.#ownTurnContinuedIt(current)
       );
+      if (!applied) continue;
       this.#runningAttempts.get(incident.incidentId)?.superseded.abort();
       superseded = true;
     }
@@ -1593,13 +1647,13 @@ export class ChatRecoveryEngine {
     error: string
   ): Promise<void> {
     if (!incidentId) return;
-    const key = chatRecoveryIncidentKey(incidentId);
-    const incident = await this.adapter.getIncident(key);
-    if (incident?.status !== "scheduled") return;
-    // The deferred turn ended without a reset, so nothing else will run it
-    // again: the same payload has to.
-    const { startedDelivery: _startedDelivery, ...rest } = incident;
-    await this.#putIncident(key, { ...rest, deferredError: error });
+    await this.#update(chatRecoveryIncidentKey(incidentId), (incident) => {
+      if (incident?.status !== "scheduled") return undefined;
+      // The deferred turn ended without a reset, so nothing else will run it
+      // again: the same payload has to.
+      const { startedDelivery: _startedDelivery, ...rest } = incident;
+      return { ...rest, deferredError: error };
+    });
   }
 
   /**
@@ -1608,10 +1662,11 @@ export class ChatRecoveryEngine {
    */
   async markReplyRemoved(incidentId: string | undefined): Promise<void> {
     if (!incidentId) return;
-    const key = chatRecoveryIncidentKey(incidentId);
-    const incident = await this.adapter.getIncident(key);
-    if (!incident || incident.replyRemoved) return;
-    await this.#putIncident(key, { ...incident, replyRemoved: true });
+    await this.#update(chatRecoveryIncidentKey(incidentId), (incident) =>
+      !incident || incident.replyRemoved
+        ? undefined
+        : { ...incident, replyRemoved: true }
+    );
   }
 
   /**
@@ -1644,10 +1699,7 @@ export class ChatRecoveryEngine {
     const incident = await this.adapter.getIncident(
       chatRecoveryIncidentKey(incidentId)
     );
-    return (
-      incident?.status === "skipped" &&
-      incident.reason === CHAT_RECOVERY_CANCELLED_REASON
-    );
+    return incident !== null && isCancelled(incident);
   }
 
   /**
@@ -1784,27 +1836,27 @@ export class ChatRecoveryEngine {
    * No-op when `incidentId` is undefined or the record is already gone. This is
    * the transition twin of {@link beginIncident}: all I/O is adapter-owned, the
    * engine owns only the state-machine shape.
+   *
+   * @param only - Checked on the record as it is read for the write. A
+   *   record it rejects is left alone, with no event.
+   * @returns Whether the transition was written.
    */
   async updateIncident(
     incidentId: string | undefined,
     status: ChatRecoveryIncident["status"],
-    reason?: string
-  ): Promise<void> {
-    if (!incidentId) return;
+    reason?: string,
+    only?: (incident: ChatRecoveryIncident) => boolean
+  ): Promise<boolean> {
+    if (!incidentId) return false;
     const { adapter } = this;
     const key = chatRecoveryIncidentKey(incidentId);
-    const incident = await adapter.getIncident(key);
-    if (!incident) return;
-
-    if (status === "completed") {
-      await this.#deleteIncident(key);
-    } else {
-      await this.#putIncident(key, {
-        ...incident,
-        status,
-        ...(reason ? { reason } : {})
-      });
-    }
+    const { before: incident, after } = await this.#update(key, (current) => {
+      if (!current || (only && !only(current))) return undefined;
+      return status === "completed"
+        ? "delete"
+        : { ...current, status, ...(reason ? { reason } : {}) };
+    });
+    if (!incident || after === undefined) return false;
 
     const eventType =
       status === "completed"
@@ -1838,6 +1890,7 @@ export class ChatRecoveryEngine {
     ) {
       await adapter.setRecovering(false);
     }
+    return true;
   }
 }
 
@@ -1929,6 +1982,14 @@ function continuesReply(
   return (
     scheduled.targetMessageId === undefined ||
     scheduled.targetMessageId === replyId
+  );
+}
+
+/** Whether the user cancelled this incident's recovery. */
+function isCancelled(incident: ChatRecoveryIncident): boolean {
+  return (
+    incident.status === "skipped" &&
+    incident.reason === CHAT_RECOVERY_CANCELLED_REASON
   );
 }
 

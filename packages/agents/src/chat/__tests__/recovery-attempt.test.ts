@@ -786,8 +786,9 @@ describe("runRecoveredTurn", () => {
     const t = setup({
       result: { status: "error", error: "stream broke" },
       // routeStreamInterruption, `continue: false`
-      duringTurn: ({ engine }) =>
-        engine.updateIncident(INCIDENT, "skipped", "continue_disabled")
+      duringTurn: async ({ engine }) => {
+        await engine.updateIncident(INCIDENT, "skipped", "continue_disabled");
+      }
     });
     await t.run();
     expect(t.incident()).toMatchObject({
@@ -1290,5 +1291,63 @@ describe("what an attempt records, and in what order", () => {
     expect(attempt.stopped.aborted).toBe(true);
     expect(seen).toBe("skipped");
     attempt.end();
+  });
+});
+
+describe("incident writes that overlap", () => {
+  /**
+   * Every incident read takes a macrotask, as storage does. The first one
+   * takes longer, so the write that follows it lands last.
+   */
+  function slowReads(t: ReturnType<typeof setup>): void {
+    let reads = 0;
+    const adapter = (
+      t.engine as unknown as {
+        adapter: {
+          getIncident: (key: string) => Promise<ChatRecoveryIncident | null>;
+        };
+      }
+    ).adapter;
+    const read = adapter.getIncident.bind(adapter);
+    adapter.getIncident = async (key) => {
+      const incident = await read(key);
+      const ms = reads++ === 0 ? 10 : 1;
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      return incident ? { ...incident } : null;
+    };
+  }
+
+  it("keeps a cancel that lands while another write of the incident is under way", async () => {
+    const t = setup({ incident: { scheduleCount: 1 } });
+    slowReads(t);
+
+    // The deferral reads the incident `scheduled`, the cancel writes it
+    // `skipped`, then the deferral writes.
+    await Promise.all([
+      t.engine.recordDeferral(INCIDENT, "Network connection lost."),
+      t.engine.cancelScheduledRecovery(ROOT)
+    ]);
+
+    expect(t.incident()).toMatchObject({
+      status: "skipped",
+      reason: "user_cancelled"
+    });
+  });
+
+  it("records two stops of one incident as one outcome, with one event", async () => {
+    const t = setup({ incident: { scheduleCount: 1 } });
+    slowReads(t);
+
+    // A tab's cancel and the stop of the turn it names, at once.
+    await Promise.all([
+      t.engine.cancelScheduledRecovery(ROOT),
+      t.engine.cancelScheduledRecovery(ROOT),
+      t.engine.recordRecoveryStop(INCIDENT)
+    ]);
+
+    expect(t.incident()).toMatchObject({ reason: "user_cancelled" });
+    expect(
+      t.events.filter((event) => event === "chat:recovery:skipped")
+    ).toHaveLength(1);
   });
 });
