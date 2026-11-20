@@ -249,13 +249,19 @@ describe("PiHarness on pi-durable", () => {
     expect((await stub.wait(op.operationId)).text).toBe("tool said: approved");
   });
 
-  it("hands pi the task to notify when an input settles", async () => {
+  it("settles an input as usual when the task to notify does not exist", async () => {
     const stub = fresh();
     const notify = { taskId: 999_999, key: "answered" };
     const receipt = await stub.submit("hello", { notify });
     expect(await stub.storedNotify(receipt.operationId)).toEqual(notify);
-    // A task that is not there to notify fails nothing.
     expect((await stub.wait(receipt.operationId)).text).toBe("echo: hello");
+  });
+
+  it("hands pi the task to notify when a continue settles", async () => {
+    const stub = fresh();
+    const notify = { taskId: 999_999, key: "answered" };
+    const receipt = await stub.continueSession(undefined, notify);
+    expect(await stub.storedNotify(receipt.operationId)).toEqual(notify);
   });
 
   it("answers follow-ups queued while a run is going, in order", async () => {
@@ -950,4 +956,152 @@ describe("PiHarness after a failed run (settings.afterFailedRun)", () => {
     });
     expect(await stub.pending()).toEqual([]);
   });
+});
+
+/** Poll until the fixture's parked tool or gate has recorded its task id. */
+async function parked(stub: DurableObjectStub<PiHarnessTestObject>) {
+  for (let i = 0; i < 300 && (await stub.parkedTask()) === null; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  expect(await stub.parkedTask()).not.toBeNull();
+}
+
+/** Poll until the harness has no wake job, as a call parked on a signal leaves it. */
+async function quiet(stub: DurableObjectStub<PiHarnessTestObject>) {
+  for (let i = 0; i < 300 && (await stub.wakeJobTime()) !== null; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  expect(await stub.wakeJobTime()).toBeNull();
+}
+
+describe("PiHarness with parked tool calls", () => {
+  // Without onWake, nothing but the harness arms the wake for the work a
+  // signal starts, so a crash while it runs would leave it stranded.
+  it("schedules the wake before a signal, so the woken call survives a crash", async () => {
+    const name = `nowake:${crypto.randomUUID()}`;
+    let stub = fresh(name);
+    const op = await stub.submit("approval-gate");
+    await parked(stub);
+    await quiet(stub);
+
+    expect(await stub.approve("ok")).toBe("delivered");
+    expect(await stub.wakeJobTime()).not.toBeNull();
+    expect(await stub.alarmTime()).not.toBeNull();
+    await stub.gateStarted(1);
+
+    await abortAllDurableObjects();
+    // Only the alarm can restart the call now: nothing touches the object.
+    await new Promise((resolve) => setTimeout(resolve, 4_000));
+    stub = fresh(name);
+    expect(await stub.gateRuns()).toBe(2);
+    await stub.release();
+    expect((await stub.wait(op.operationId)).text).toBe(
+      "tool said: ok after 2 runs"
+    );
+  }, 30_000);
+
+  it("wakes a call parked with a deadline from the alarm after eviction", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    const op = await stub.submit("deadline");
+    await parked(stub);
+    // A deadline is a time pi needs a wake for.
+    expect(await stub.wakeJobTime()).not.toBeNull();
+    await evictDurableObject(stub);
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    stub = fresh(name);
+    // Already answered by the time anything asks.
+    const result = await stub.waitWithin(op.operationId, 100);
+    expect(result).toMatchObject({
+      status: "done",
+      text: "tool said: woke expired"
+    });
+  }, 30_000);
+
+  it("runs a parked call's cancel() when the session is aborted after eviction", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    const op = await stub.submit("approval-gate");
+    await parked(stub);
+    await quiet(stub);
+    await evictDurableObject(stub);
+    stub = fresh(name);
+    expect(await stub.abort()).toBe(true);
+    expect(await stub.wait(op.operationId)).toMatchObject({
+      status: "unanswered",
+      reason: "aborted"
+    });
+    expect(await stub.cancels()).toBe(1);
+    expect(await stub.pending()).toEqual([]);
+    expect(await alarmCleared(stub)).toBe(true);
+  }, 30_000);
+
+  it("holds a tool call at a beforeTool gate until its signal, rerunning the hook on each open", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    const op = await stub.submit("multiply 77");
+    await parked(stub);
+    await quiet(stub);
+    expect(await stub.gateHookRuns()).toBe(1);
+    // While held, pi still counts the call as running work.
+    expect(await stub.pending()).toMatchObject([{ status: "running" }]);
+    await evictDurableObject(stub);
+    stub = fresh(name);
+    // Pi runs the gate again when it reopens, so it must be idempotent.
+    await stub.pending();
+    for (let i = 0; i < 100 && (await stub.gateHookRuns()) < 2; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(await stub.gateHookRuns()).toBe(2);
+    await quiet(stub);
+    expect(await stub.approve("go", "gate")).toBe("delivered");
+    expect((await stub.wait(op.operationId)).text).toBe("tool said: 231");
+  }, 30_000);
+
+  it("wakes a tool waiting on its subagent with the subagent's answer", async () => {
+    const stub = fresh();
+    const op = await stub.submit("subagent:hello");
+    expect((await stub.wait(op.operationId)).text).toBe(
+      "tool said: echo: hello"
+    );
+    const child = (await stub.listSessions()).find((s) => s.id !== "1");
+    expect(child).toBeDefined();
+    expect(await stub.sessionTexts(child!.id)).toEqual([
+      "hello",
+      "echo: hello"
+    ]);
+  }, 30_000);
+
+  it("wakes a tool waiting on its subagent after a crash while the subagent runs", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    const op = await stub.submit("subagent:gate");
+    await parked(stub);
+    await stub.gateStarted(1);
+    await abortAllDurableObjects();
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    stub = fresh(name);
+    await stub.release();
+    expect((await stub.wait(op.operationId)).text).toBe(
+      "tool said: tool said: released after 2 runs"
+    );
+  }, 30_000);
+
+  it("stops a subagent the waiting call owns when its session is aborted", async () => {
+    const stub = fresh();
+    const op = await stub.submit("subagent:gate");
+    await parked(stub);
+    await stub.gateStarted(1);
+    expect(await stub.abort()).toBe(true);
+    expect(await stub.wait(op.operationId)).toMatchObject({
+      status: "unanswered",
+      reason: "aborted"
+    });
+    for (let i = 0; i < 100 && (await stub.pending()).length > 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(await stub.pending()).toEqual([]);
+    const child = (await stub.listSessions()).find((s) => s.id !== "1");
+    expect(child?.busy).toBe(false);
+  }, 30_000);
 });

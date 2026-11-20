@@ -14,7 +14,10 @@ import {
   type ModelRef,
   type Page,
   type SettledSubmissionRecord,
+  type SignalResult,
+  type SignalToken,
   type SubmissionDraft,
+  type TaskId,
   type UserInput,
   type Wake
 } from "@earendil-works/pi-durable";
@@ -241,8 +244,9 @@ function signalContext(signal: AbortSignal | undefined): Context {
  *
  * What pi cannot do on a Durable Object is wake itself: its scheduler runs
  * in memory, and an evicted object has no memory. The harness is that wake,
- * with one Lifecycle job driven by `pi.wake()`. Input goes to pi once, in
- * `submit()`, after the job is scheduled. While pi has work running, the
+ * with one Lifecycle job driven by `pi.wake()`. Anything that can start
+ * work, such as `submit()`, `signal()`, `abort()` or `reset()`, goes to pi
+ * once, after the job is scheduled. While pi has work running, the
  * job waits on it, rescheduling itself as a heartbeat. While pi's tasks
  * sleep, the job is due when the first one wakes; pi tells the harness
  * through the `onWake` the factory passes to `Harness.open`. When pi has
@@ -257,7 +261,7 @@ export class PiHarness extends LifecycleCapability {
   #waiting: Promise<void> | undefined;
   /** Resolves the current wait's sleep early: `pi.wake()` changed. */
   #changed: (() => void) | undefined;
-  /** Submissions between their wake and pi's admission. */
+  /** Calls that can start work, between their wake and pi's admission. */
   #admitting = 0;
   /** Whether pi has called `onWake`, so the factory passed it. */
   #onWakeWired = false;
@@ -439,6 +443,23 @@ export class PiHarness extends LifecycleCapability {
     });
   }
 
+  /**
+   * Deliver `value` to pi task `taskId` under `key`, as pi's
+   * `Harness.signal()` does: for a tool parked on that signal, such as one
+   * waiting for a person's answer or a webhook. The wake job is scheduled
+   * first, so if the object dies while the woken call runs, the job's alarm
+   * restarts it. Call this rather than `pi().signal()`, which does not.
+   */
+  async signal<T>(
+    taskId: TaskId,
+    signal: SignalToken<T>,
+    key: string,
+    value: T
+  ): Promise<SignalResult> {
+    const { pi } = await this.#open();
+    return this.#admit(() => pi.signal(taskId, signal, key, value, BG));
+  }
+
   /** The opened pi Harness, for anything the interface does not cover. */
   async pi(): Promise<Harness> {
     return (await this.#open()).pi;
@@ -482,7 +503,8 @@ export class PiHarness extends LifecycleCapability {
     options: PiContinueOptions
   ): Promise<PiReceipt> {
     return this.#admitDraft(session, options.operationId, {
-      type: "continue"
+      type: "continue",
+      ...(options.notify ? { notify: options.notify } : {})
     });
   }
 
@@ -516,12 +538,14 @@ export class PiHarness extends LifecycleCapability {
     if (!record || record.status === "done" || record.status === "unanswered") {
       return false;
     }
-    const outcome = await pi.abortSubmission(record.id, BG, id);
+    const outcome = await this.#admit(() =>
+      pi.abortSubmission(record.id, BG, id)
+    );
     switch (outcome) {
       case "aborted":
         return true;
       case "already_placed":
-        await (await pi.conversation(id, BG))?.abort(BG);
+        await this.abortConversation(session);
         return true;
       case "settled":
       case "not_found":
@@ -532,6 +556,28 @@ export class PiHarness extends LifecycleCapability {
         return exhaustive;
       }
     }
+  }
+
+  /**
+   * @internal Abort a session's running work and withdraw its queued
+   * inputs. Stopping a parked call runs its `cancel()`, which is work, so
+   * the wake is scheduled first.
+   */
+  async abortConversation(session: PiSessionId): Promise<void> {
+    const conversation = await this.conversation(session);
+    await this.#admit(() => conversation.abort(BG));
+  }
+
+  /**
+   * @internal Start a new context. Inputs kept behind a failed run or an
+   * abort run in it, so the wake is scheduled first.
+   */
+  async resetConversation(
+    session: PiSessionId,
+    handoff: string | undefined
+  ): Promise<void> {
+    const conversation = await this.conversation(session);
+    await this.#admit(() => conversation.reset(handoff, BG));
   }
 
   /** @internal Wait for pi to settle an operation, by its request id. */
@@ -927,14 +973,13 @@ export class PiSession {
     if (operationId !== undefined) {
       return this.#harness.withdraw(this.id, operationId);
     }
-    const conversation = await this.#harness.conversation(this.id);
-    await conversation.abort(BG);
+    await this.#harness.abortConversation(this.id);
     return true;
   }
 
   /** Start a new context, optionally from a handoff note. */
   async reset(handoff?: string): Promise<void> {
-    await (await this.#harness.conversation(this.id)).reset(handoff, BG);
+    await this.#harness.resetConversation(this.id, handoff);
   }
 
   /**

@@ -65,8 +65,8 @@ export type PiSubmitOptions = {
   /**
    * A pi task to signal when this input settles: pi delivers its
    * `SubmissionSettled` signal, the settled record, to `taskId` under `key`.
-   * For a tool that parks until another session answers. A task that is gone
-   * or no longer listening is skipped; the input settles as usual.
+   * For a tool that parks until another session answers. If the task has
+   * ended or does not exist, the input settles as usual.
    */
   readonly notify?: SubmissionNotify;
 };
@@ -74,6 +74,8 @@ export type PiSubmitOptions = {
 export type PiContinueOptions = {
   /** Idempotency key. Continuing with the same id twice returns the same receipt. */
   readonly operationId?: string;
+  /** A pi task to signal when the run settles. See `PiSubmitOptions.notify`. */
+  readonly notify?: SubmissionNotify;
 };
 
 export type PiSessionOptions = {
