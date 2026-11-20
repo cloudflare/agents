@@ -37,6 +37,11 @@ import { openai } from "workers-ai-provider/openai";
 import { ThinkSession } from "../session";
 import { Think as LegacyThink } from "../think";
 import type { Session, SessionMessage } from "agents/sessions";
+import {
+  AgentContextProvider,
+  Context,
+  type ContextConfig
+} from "agents/context";
 import type {
   AddMessagesOptions,
   CancelSubmissionResult,
@@ -138,6 +143,7 @@ export class Think<
   session!: ThinkSession;
 
   #messages: UIMessage[] = [];
+  #context: Context | undefined;
   #handle: Session | undefined;
   #defaultProvider: ReturnType<typeof createWorkersAI> | undefined;
 
@@ -151,8 +157,16 @@ export class Think<
       configureSession: (handle, id) => {
         if (id === this.harness.session().id) this.#handle = handle;
       },
+      // The root session's blocks, built in onStart, as Think builds them.
+      context: (_handle, id) =>
+        id === this.harness.session().id ? this.#context : undefined,
       model: async () => this.resolveModel(await this.getModel()),
-      system: () => this.getSystemPrompt(),
+      // As in Think, getSystemPrompt() is the fallback for an agent with no
+      // context blocks.
+      system: () =>
+        this.#context && this.#context.getBlocks().length > 0
+          ? undefined
+          : this.getSystemPrompt(),
       tools: () => this.getTools(),
       get maxSteps() {
         return self.maxSteps;
@@ -216,13 +230,18 @@ export class Think<
 
     const onStart = this.onStart.bind(this);
     this.onStart = async (props?: Props) => {
+      const handle = await this.#rootHandle();
       this.session = await this.configureSession(
-        new ThinkSession(await this.#rootHandle(), () => {
-          throw new Error(
-            "Context blocks are not supported by the harness-backed Think yet"
-          );
-        })
+        new ThinkSession(handle, () => this.context)
       );
+      this.#context = new Context(handle, {
+        blocks: [
+          ...(await this.configureContext()),
+          ...this.session.internal_takePendingContext()
+        ],
+        defaultProvider: (label) => new AgentContextProvider(this, label)
+      });
+      await this.#context.load();
       this.harness.observe((session, event) => {
         if (session !== this.harness.session().id) return;
         if (event.type === "reset") this.#messages = [];
@@ -297,11 +316,23 @@ export class Think<
     return session;
   }
 
-  // Think calls these with a default; the harness-backed Think has none of
-  // the features behind them, so each returns Think's empty default.
-  configureContext(): unknown[] | Promise<unknown[]> {
+  /** Declare the prompt context blocks, as in Think. */
+  configureContext(): ContextConfig[] | Promise<ContextConfig[]> {
     return [];
   }
+
+  /** The root session's context blocks. Available once started. */
+  protected get context(): Context {
+    if (!this.#context) {
+      throw new Error(
+        "Context is not initialized yet; it is available after onStart()."
+      );
+    }
+    return this.#context;
+  }
+
+  // Think calls these with a default; the harness-backed Think has none of
+  // the features behind them, so each returns Think's empty default.
   getSkills(): unknown[] | Promise<unknown[]> {
     return [];
   }
