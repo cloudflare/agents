@@ -355,6 +355,8 @@ if (result.status === "aborted") {
 }
 ```
 
+A stopped turn ends `aborted` whatever reason the abort carries. `abort()`, `abort("moved on")` and `abort(new Error("moved on"))` are the same stop, and so are `abortRequest(id, reason)` and a client's cancel. Code that waits on the turn's `abortSignal` fails with that reason when the turn is stopped, in `onChatMessage` or in the model call. That failure is the stop: `onError` is not called for it, clients get no error frame, and `onChatResponse` reports `status: "aborted"` when a reply had started.
+
 The same `options.signal` is accepted by `continueLastTurn()`. See
 [`cloudflare/agents#1406`](https://github.com/cloudflare/agents/issues/1406)
 for the agent-tool orchestration pattern that motivated the API, and

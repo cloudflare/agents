@@ -13,20 +13,28 @@ const snapshot = (requestId: string) =>
 describe("ChatTurnFibers", () => {
   let log: string[];
   let facet: boolean;
+  let turnSignal: AbortSignal | undefined;
   let fibers: ChatTurnFibers;
   let host: ChatTurnFiberHost;
 
   beforeEach(() => {
     log = [];
     facet = false;
+    turnSignal = undefined;
     host = {
       fiberName: "chat",
       snapshotKey: "__snapshot",
       generateId: () => "nonce-1",
+      turnSignal: () => turnSignal,
       isFacet: () => facet,
       runLegacyFiber: async (name, fn, options) => {
         log.push(`legacy:${name}:${JSON.stringify(options.initialSnapshot)}`);
-        return fn();
+        try {
+          return await fn();
+        } catch (error) {
+          log.push("engine:failed");
+          throw error;
+        }
       },
       // The Task runs the registered closure and settles the caller.
       runTask: async ({ requestId, continuation, nonce }) => {
@@ -35,6 +43,7 @@ describe("ChatTurnFibers", () => {
         try {
           closure.settle.resolve(await closure.run());
         } catch (error) {
+          log.push("engine:failed");
           closure.settle.reject(error);
         }
       },
@@ -230,6 +239,39 @@ describe("ChatTurnFibers", () => {
     // unhandled rejection.
     expect(unhandled).toEqual([]);
   });
+
+  for (const engine of ["Task", "legacy fiber"]) {
+    it(`gives the caller what a stopped turn threw, and does not fail the ${engine} with it`, async () => {
+      facet = engine === "legacy fiber";
+      const controller = new AbortController();
+      turnSignal = controller.signal;
+      await expect(
+        fibers.run(
+          { requestId: "r1", continuation: false, snapshot: snapshot("r1") },
+          async () => {
+            // The stop, then what the model call throws because of it.
+            controller.abort("stop reason");
+            throw controller.signal.reason;
+          }
+        )
+      ).rejects.toBe("stop reason");
+      expect(log).not.toContain("engine:failed");
+    });
+
+    it(`fails the ${engine} with the error of a turn nothing stopped`, async () => {
+      facet = engine === "legacy fiber";
+      turnSignal = new AbortController().signal;
+      await expect(
+        fibers.run(
+          { requestId: "r1", continuation: false, snapshot: snapshot("r1") },
+          async () => {
+            throw new Error("boom");
+          }
+        )
+      ).rejects.toThrow("boom");
+      expect(log).toContain("engine:failed");
+    });
+  }
 
   it("rejects with the turn's error and leaves nothing behind", async () => {
     await expect(

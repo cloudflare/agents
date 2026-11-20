@@ -25,6 +25,7 @@
  */
 
 import { wrapChatFiberSnapshot, type ChatFiberSnapshot } from "./recovery";
+import { isTurnStopped } from "./turn-stop";
 import type { ChatTurnClosureEntry } from "./turn-task";
 
 /** What {@link ChatTurnFibers} needs from the agent that hosts it. */
@@ -35,6 +36,8 @@ export interface ChatTurnFiberHost {
   snapshotKey: string;
   /** Mint the nonce of a live turn closure. */
   generateId(): string;
+  /** The abort signal of the turn running under `requestId`, if it has one. */
+  turnSignal(requestId: string): AbortSignal | undefined;
   /**
    * `true` on a facet (a routed sub-agent). The Tasks capability does not
    * accept runs there yet, and facet recovery goes through the root's
@@ -151,23 +154,47 @@ export class ChatTurnFibers {
       liveTurn.recoveryData = data;
       return wrapChatFiberSnapshot(this.host.snapshotKey, snapshot, data);
     };
-    const body = this.host.turnBody(continuation, fn, requestId);
+    const run = this.host.turnBody(continuation, fn, requestId);
+    // What a stopped turn throws because of the stop is not a failure
+    // (`isTurnStopped`), so the fiber does not fail with it: the engine
+    // would log it and hand it to the agent's `onError`. The caller still
+    // gets the throw, and ends the turn `aborted`. The signal is read now:
+    // the turn drops its controller before the throw gets here.
+    const signal = this.host.turnSignal(requestId);
+    let stopped: { error: unknown } | undefined;
+    const body = async (): Promise<T> => {
+      try {
+        return await run();
+      } catch (error) {
+        if (!isTurnStopped(signal)) throw error;
+        stopped = { error };
+        // SAFETY: never returned to the caller, which gets the throw below.
+        return undefined as T;
+      }
+    };
+    /** Give the caller what the stopped turn threw. */
+    const settled = (value: T): T => {
+      if (stopped) throw stopped.error;
+      return value;
+    };
 
     this.liveTurns.set(requestId, liveTurn);
     try {
       if (this.host.isFacet()) {
-        return await this.host.runLegacyFiber(
-          `${this.host.fiberName}:${requestId}`,
-          () => {
-            // The legacy engine stored the fiber and its snapshot before it
-            // entered this closure.
-            turn.onAccepted?.(requestId);
-            return body();
-          },
-          { initialSnapshot: wrap(null), wrapStash: wrap }
+        return settled(
+          await this.host.runLegacyFiber(
+            `${this.host.fiberName}:${requestId}`,
+            () => {
+              // The legacy engine stored the fiber and its snapshot before it
+              // entered this closure.
+              turn.onAccepted?.(requestId);
+              return body();
+            },
+            { initialSnapshot: wrap(null), wrapStash: wrap }
+          )
         );
       }
-      return await this.#runAsTask(turn, wrap, body);
+      return settled(await this.#runAsTask(turn, wrap, body));
     } finally {
       if (this.liveTurns.get(requestId) === liveTurn) {
         this.liveTurns.delete(requestId);
