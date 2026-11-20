@@ -4,6 +4,7 @@ import { createAI } from "../../../models/ai-sdk";
 import {
   asAi,
   callOptions,
+  collect,
   fakeBinding,
   jsonResponse,
   sseResponse
@@ -106,6 +107,112 @@ describe("AI Gateway dynamic routes", () => {
     expect(result.warnings).toContainEqual(
       expect.objectContaining({ feature: "chat-template-kwargs" })
     );
+  });
+
+  it.each([false, true])(
+    "opts in to Workers AI reasoning controls (stream=%s)",
+    async (stream) => {
+      const binding = fakeBinding(() =>
+        stream ? sseResponse(routeStream) : jsonResponse(routeBody)
+      );
+      const ai = createAI({ binding: asAi(binding) });
+      const model = ai(ROUTE, { workersAI: true });
+      for (const cloudflare of [
+        { chatTemplateKwargs: { enable_thinking: false, custom: "kept" } },
+        {
+          reasoningEffort: null,
+          chatTemplateKwargs: { enable_thinking: true, custom: "kept" }
+        }
+      ]) {
+        const options = callOptions({ providerOptions: { cloudflare } });
+        const result = stream
+          ? await model.doStream(options)
+          : await model.doGenerate(options);
+        if ("stream" in result) {
+          const parts = await collect(result.stream);
+          expect(parts[0]).toEqual({ type: "stream-start", warnings: [] });
+          expect(parts).toContainEqual(
+            expect.objectContaining({ type: "text-delta", delta: "Hello" })
+          );
+        } else {
+          expect(result.warnings).toEqual([]);
+        }
+        expect(binding.calls.at(-1)?.input).toMatchObject({
+          chat_template_kwargs: { enable_thinking: false, custom: "kept" }
+        });
+        expect(binding.calls.at(-1)?.input).not.toHaveProperty(
+          "reasoning_effort"
+        );
+      }
+    }
+  );
+
+  it("keeps strict behavior without a per-model opt-in", async () => {
+    const binding = fakeBinding(() => jsonResponse(routeBody));
+    const ai = createAI({ binding: asAi(binding) });
+    for (const workersAI of [undefined, false]) {
+      const result = await ai(ROUTE, {
+        workersAI,
+        reasoningEffort: null
+      }).doGenerate(
+        callOptions({ providerOptions: { cloudflare: { workersAI: true } } })
+      );
+      expect(binding.calls.at(-1)?.input).not.toHaveProperty(
+        "chat_template_kwargs"
+      );
+      expect(result.warnings).toContainEqual(
+        expect.objectContaining({ feature: "reasoning-off" })
+      );
+    }
+  });
+
+  it("does not override a catalog model's profile", async () => {
+    const binding = fakeBinding(() => jsonResponse(routeBody));
+    const ai = createAI({ binding: asAi(binding) });
+    const result = await ai("openai/gpt-5.5", {
+      workersAI: true,
+      reasoningEffort: null
+    }).doGenerate(callOptions());
+    expect(binding.calls[0].input).not.toHaveProperty("chat_template_kwargs");
+    expect(result.warnings).toContainEqual(
+      expect.objectContaining({ feature: "reasoning-off" })
+    );
+  });
+
+  it("keeps route opt-ins local to their fallback leg", async () => {
+    const binding = fakeBinding((call) =>
+      call.model === ROUTE
+        ? jsonResponse(
+            { errors: [{ code: 1, message: "nope" }] },
+            { status: 500 }
+          )
+        : jsonResponse(routeBody)
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    for (const fallback of [
+      "dynamic/backup" as const,
+      ai("dynamic/backup", { workersAI: true })
+    ]) {
+      await ai(ROUTE, { workersAI: true, fallback: [fallback] }).doGenerate(
+        callOptions({
+          providerOptions: { cloudflare: { reasoningEffort: null } }
+        })
+      );
+      expect(binding.calls.at(-2)?.input).toHaveProperty(
+        "chat_template_kwargs.enable_thinking",
+        false
+      );
+      if (typeof fallback === "string") {
+        expect(binding.calls.at(-1)?.input).not.toHaveProperty(
+          "chat_template_kwargs"
+        );
+      } else {
+        expect(binding.calls.at(-1)?.input).toHaveProperty(
+          "chat_template_kwargs.enable_thinking",
+          false
+        );
+      }
+    }
   });
 
   it("works through generateText", async () => {
