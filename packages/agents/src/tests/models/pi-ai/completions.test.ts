@@ -530,6 +530,38 @@ describe("pi-ai: vendor usage on the chat-completions wire", () => {
     expect((message.usage as { reasoning?: number }).reasoning).toBe(32);
     expect(message.usage.output).toBe(40);
   });
+
+  it("reads cached tokens a vendor reports at the top level of usage", async () => {
+    // Kimi's spelling: `usage.cached_tokens`, with no `prompt_tokens_details`.
+    // pi-ai's `parseChunkUsage` falls back to it.
+    const binding = fakeBinding(() =>
+      jsonResponse({
+        choices: [
+          {
+            finish_reason: "stop",
+            index: 0,
+            message: { content: "Hi!", role: "assistant" }
+          }
+        ],
+        id: "chatcmpl-c",
+        model: "llama-3.1-8b-instant",
+        object: "chat.completion",
+        usage: {
+          cached_tokens: 80,
+          completion_tokens: 5,
+          prompt_tokens: 100,
+          total_tokens: 105
+        }
+      })
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const message = await ai.complete(
+      ai(groqModel("llama-3.1-8b-instant")),
+      userContext("hi")
+    );
+    expect(message.usage.cacheRead).toBe(80);
+    expect(message.usage.input).toBe(20);
+  });
 });
 
 describe("pi-ai: vendor reasoning and tool calls on the chat-completions wire", () => {

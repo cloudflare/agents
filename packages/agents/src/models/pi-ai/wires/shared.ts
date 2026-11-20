@@ -130,6 +130,8 @@ export interface OpenAIUsage {
   completion_tokens?: number;
   total_tokens?: number;
   prompt_cache_hit_tokens?: number;
+  /** Kimi's spelling, on the final usage chunk. */
+  cached_tokens?: number;
   prompt_tokens_details?: {
     cached_tokens?: number;
     cache_write_tokens?: number;
@@ -155,6 +157,7 @@ export function usageFromOpenAI(
   const cacheRead =
     raw.prompt_tokens_details?.cached_tokens ??
     raw.prompt_cache_hit_tokens ??
+    raw.cached_tokens ??
     0;
   const cacheWrite = raw.prompt_tokens_details?.cache_write_tokens ?? 0;
   const nestedReasoning = raw.completion_tokens_details?.reasoning_tokens;
