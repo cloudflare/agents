@@ -176,7 +176,8 @@ running one's turn is recovered first. The pending submissions run after that
 recovery settles, in order, each with its own reply. A submission accepted
 after the reset runs as usual.
 
-Client requests sent over a WebSocket get the same treatment: see
+Client requests sent over a WebSocket get the same treatment: a waiting
+request's messages join the Session when its turn starts. See
 [Requests waiting behind an interrupted turn](https://github.com/cloudflare/agents/blob/main/docs/agents/chat-agents.md#requests-waiting-behind-an-interrupted-turn).
 
 ## Compared with `saveMessages`
