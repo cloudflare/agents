@@ -12,8 +12,6 @@ import type { UIMessage } from "ai";
 
 const MSG_CHAT_REQUEST = "cf_agent_use_chat_request";
 const MSG_CHAT_RESPONSE = "cf_agent_use_chat_response";
-const MSG_CHAT_CANCEL = "cf_agent_chat_request_cancel";
-const MSG_CHAT_CLEAR = "cf_agent_chat_clear";
 
 type AdmissionStub = {
   resetIsolateForTest(): Promise<void>;
@@ -85,12 +83,6 @@ function record(ws: WebSocket): Array<Record<string, unknown>> {
   return frames;
 }
 
-function doneFrame(frames: Array<Record<string, unknown>>, id: string) {
-  return frames.find(
-    (f) => f.type === MSG_CHAT_RESPONSE && f.id === id && f.done === true
-  );
-}
-
 async function waitFor<T>(
   read: () => Promise<T>,
   ok: (value: T) => boolean,
@@ -140,7 +132,7 @@ describe("a message queued behind a running turn", () => {
       (f) => f !== undefined
     );
     const shown = seenA.find((f) => Array.isArray(f.queuedMessageIds));
-    expect((shown?.messages as UIMessage[]).map((m) => m.id)).toEqual([
+    expect(((shown?.messages ?? []) as UIMessage[]).map((m) => m.id)).toEqual([
       "u1",
       "u2"
     ]);
