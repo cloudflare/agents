@@ -1074,6 +1074,16 @@ export class ThinkClientToolsAgent extends Think {
         ...this._serverApprovalTools()
       };
     }
+    if (this._useDeclaredClientTool) {
+      // Declared on the server with no `execute`: a client answers it, and
+      // never sends its schema.
+      return {
+        askUser: tool({
+          description: "Ask the user a question",
+          inputSchema: z.object({ question: z.string() })
+        })
+      };
+    }
     if (!this._useServerApprovalTool) return {};
     return this._serverApprovalTools();
   }
@@ -1326,6 +1336,7 @@ export class ThinkClientToolsAgent extends Think {
     const internal = this as unknown as {
       _lastClientTools: ClientToolSchema[] | undefined;
       _persistAssistantMessage: (msg: UIMessage) => Promise<void>;
+      _settleInterruptedReply: (msg: UIMessage) => UIMessage;
       hasPendingInteraction: () => boolean;
     };
 
@@ -1337,19 +1348,23 @@ export class ThinkClientToolsAgent extends Think {
       internal._lastClientTools = undefined;
     }
 
-    await internal._persistAssistantMessage({
-      id: crypto.randomUUID(),
-      role: "assistant",
-      parts: [
-        {
-          type: "tool-client_action",
-          toolCallId: "tc-orphan-1",
-          toolName: "client_action",
-          state: "input-available",
-          input: { action: "do_thing" }
-        } as unknown as UIMessage["parts"][number]
-      ]
-    });
+    // The reply was cut off, so it is stored the way a cut-off reply is:
+    // with the calls no client is known to own settled.
+    await internal._persistAssistantMessage(
+      internal._settleInterruptedReply({
+        id: crypto.randomUUID(),
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-client_action",
+            toolCallId: "tc-orphan-1",
+            toolName: "client_action",
+            state: "input-available",
+            input: { action: "do_thing" }
+          } as unknown as UIMessage["parts"][number]
+        ]
+      })
+    );
 
     return internal.hasPendingInteraction();
   }
@@ -1547,6 +1562,26 @@ export class ThinkClientToolsAgent extends Think {
     )._submitConcurrency.overlappingSubmitCount;
   }
 
+  private _interactionAppliesSeen = 0;
+
+  /** Counts every apply, as a subclass that wraps applies would see them. */
+  protected override _enqueueInteractionApply(
+    apply: () => Promise<void>
+  ): Promise<boolean> {
+    this._interactionAppliesSeen++;
+    return super._enqueueInteractionApply(apply);
+  }
+
+  async getInteractionAppliesSeenForTest(): Promise<number> {
+    return this._interactionAppliesSeen;
+  }
+
+  private _useDeclaredClientTool = false;
+
+  async setDeclaredClientToolForTest(value: boolean): Promise<void> {
+    this._useDeclaredClientTool = value;
+  }
+
   waitUntilStableForTest(options?: { timeout?: number }): Promise<boolean> {
     return this.waitUntilStable(options);
   }
@@ -1580,6 +1615,35 @@ export class ThinkClientToolsAgent extends Think {
   async holdContinuationStartForTest(): Promise<void> {
     this._continuationStartLatch = new LatchForTest();
   }
+
+  /**
+   * Hold the end-of-turn store of the next reply open, after the reply was
+   * built and before it is written, until released. Stands in for any await
+   * in that window that lets a tool result in.
+   */
+  async holdReplyStoreForTest(): Promise<void> {
+    const latch = new LatchForTest();
+    this._replyStoreLatch = latch;
+    const internal = this as unknown as {
+      _rememberPendingResponseHook(result: unknown): Promise<void>;
+    };
+    const original = internal._rememberPendingResponseHook;
+    internal._rememberPendingResponseHook = async (result: unknown) => {
+      internal._rememberPendingResponseHook = original;
+      await latch.wait();
+      return original.call(this, result);
+    };
+  }
+
+  async isReplyStoreHeldForTest(): Promise<boolean> {
+    return this._replyStoreLatch?.isWaiting ?? false;
+  }
+
+  async releaseReplyStoreForTest(): Promise<void> {
+    this._replyStoreLatch?.open();
+  }
+
+  private _replyStoreLatch: LatchForTest | undefined;
 
   async isContinuationStartHeldForTest(): Promise<boolean> {
     return this._continuationStartLatch?.isWaiting ?? false;
@@ -1695,7 +1759,7 @@ export class ThinkClientToolsAgent extends Think {
       _autoContinuation: { fireWhenStable(): void; reset(): void };
       _pendingInteractionPromise: Promise<boolean> | null;
       _interactionApplyTail: Promise<void>;
-      _hasArmedContinuation(): boolean;
+      _turns: { hasPendingDecision(): boolean };
     };
 
     // Seed an unfired pending continuation (no message-level interaction, so the
@@ -1725,7 +1789,7 @@ export class ThinkClientToolsAgent extends Think {
     internal._autoContinuation.fireWhenStable();
 
     try {
-      const hasArmedContinuation = internal._hasArmedContinuation();
+      const hasArmedContinuation = internal._turns.hasPendingDecision();
       const messageInteractionPending = this.hasPendingInteraction();
       const stable = await this.waitUntilStable({ timeout: timeoutMs });
       return { hasArmedContinuation, messageInteractionPending, stable };

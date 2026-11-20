@@ -3321,6 +3321,147 @@ describe("Think — chained client tools across continuations (#2443)", () => {
 
 // ── Tool results that have nothing left to continue ──────────────
 
+describe("Think — a tool result while the reply is being stored", () => {
+  it("is stored with the reply, and the model answers it", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    // The turn ends on a client tool call. Its store is held open after the
+    // reply was built and before it is written.
+    await agent.holdReplyStoreForTest();
+    sendChatRequest(ws, [makeUserMessage("use client tool")], {
+      clientTools: [{ name: "client_action", description: "A client tool" }]
+    });
+    await waitUntil(() => agent.isReplyStoreHeldForTest(), 8000);
+
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId: "tc-client-1",
+        toolName: "client_action",
+        output: "tool output",
+        autoContinue: true
+      })
+    );
+    await waitUntil(
+      async () =>
+        (await agent.streamingToolCallState("tc-client-1")) ===
+        "output-available"
+    );
+    await delay(100);
+    await agent.releaseReplyStoreForTest();
+
+    // The continuation answers after the tool call's reply.
+    await waitUntil(async () => {
+      const stored = (await agent.getMessages()) as UIMessage[];
+      return stored.length >= 3;
+    }, 8000);
+    const stored = (await agent.getMessages()) as UIMessage[];
+    const part = stored
+      .flatMap((m) => m.parts as Array<Record<string, unknown>>)
+      .find((p) => p.toolCallId === "tc-client-1");
+    expect(part?.state).toBe("output-available");
+    expect(part?.output).toBe("tool output");
+    expect(stored.at(-1)?.role).toBe("assistant");
+    expect(await agent.waitUntilStableForTest({ timeout: 2000 })).toBe(true);
+    await closeWS(ws);
+  });
+});
+
+describe("Think — a subclass that wraps tool result applies", () => {
+  it("sees a client tool result", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    await agent.persistToolCallMessage([
+      makeUserMessage("use client tool"),
+      makeToolMessage("tc-hook", "client_action", "input-available")
+    ]);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId: "tc-hook",
+        toolName: "client_action",
+        output: "done",
+        autoContinue: false
+      })
+    );
+    await waitUntil(async () => {
+      const stored = (await agent.getMessages()) as UIMessage[];
+      return JSON.stringify(stored).includes("output-available");
+    });
+
+    expect(await agent.getInteractionAppliesSeenForTest()).toBe(1);
+    await closeWS(ws);
+  });
+});
+
+describe("Think — a client copy of a reply that is behind", () => {
+  it("does not shorten the stored reply", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+    const question = makeUserMessage("count");
+    // A reply stopped mid-text. The server stored every chunk it streamed.
+    const stored: UIMessage = {
+      id: crypto.randomUUID(),
+      role: "assistant",
+      parts: [
+        { type: "step-start" },
+        { type: "text", text: "One, two, three", state: "streaming" }
+      ]
+    };
+    await agent.persistToolCallMessage([question, stored]);
+
+    // The tab that pressed stop drew one chunk fewer, and sends that copy
+    // with its next question.
+    const behind: UIMessage = {
+      ...stored,
+      parts: [
+        { type: "step-start" },
+        { type: "text", text: "One, two", state: "done" }
+      ]
+    };
+    const done = waitForDone(ws);
+    sendChatRequest(ws, [question, behind, makeUserMessage("go on")]);
+    await done;
+
+    const after = (await agent.getMessages()) as UIMessage[];
+    expect(after.find((m) => m.id === stored.id)?.parts).toEqual(stored.parts);
+    await closeWS(ws);
+  });
+});
+
+describe("Think — waiting on a client after an upgrade", () => {
+  it("does not wait on a server tool call an older release stored in the latest reply", async () => {
+    const agent = await freshAgent();
+    // An older release stored a stopped reply as it was, with its server
+    // tool call unanswered. Nothing will ever answer it.
+    await agent.persistToolCallMessage([
+      makeUserMessage("search for it"),
+      makeToolMessage("tc-dead", "serverSearch", "input-available")
+    ]);
+
+    expect(await agent.waitUntilStableForTest({ timeout: 500 })).toBe(true);
+  });
+
+  it("still waits on a tool the server declares and a client answers", async () => {
+    const agent = await freshAgent();
+    await agent.setDeclaredClientToolForTest(true);
+    await agent.persistToolCallMessage([
+      makeUserMessage("ask me"),
+      makeToolMessage("tc-ask", "askUser", "input-available")
+    ]);
+
+    expect(await agent.waitUntilStableForTest({ timeout: 500 })).toBe(false);
+  });
+});
+
 describe("Think — tool results with nothing to continue", () => {
   it("a tool result is answered after a message was appended without a turn", async () => {
     const room = crypto.randomUUID();
@@ -3987,6 +4128,84 @@ describe("Think — messageConcurrency", () => {
 
     expect((await done).at(-1)?.outcome).toBe("aborted");
     await closeWS(ws);
+  });
+
+  it("never runs a request cancelled while it waited in the queue", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setSlowStreamMode(true, 100, 10);
+    const request1 = sendChatRequest(ws, [makeUserMessage("First")]);
+    const done1 = waitForDoneId(ws, request1, 10000);
+    await waitForActiveTurn(agent);
+
+    // The second request queues behind the first; the user stops it there.
+    const request2 = sendChatRequest(ws, [makeUserMessage("Second")]);
+    const done2 = waitForDoneId(ws, request2, 10000);
+    await delay(100);
+    ws.send(
+      JSON.stringify({ type: "cf_agent_chat_request_cancel", id: request2 })
+    );
+
+    expect((await done1).at(-1)?.outcome).toBe("completed");
+    expect((await done2).at(-1)?.outcome).toBe("aborted");
+    await delay(200);
+
+    // Only the first request reached the model.
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log.map((entry) => entry.requestId)).toEqual([request1]);
+    const messages = (await agent.getMessages()) as UIMessage[];
+    expect(messages.filter((m) => m.role === "assistant")).toHaveLength(1);
+
+    await closeWS(ws);
+  });
+
+  it("stores a request's tools when its turn starts, not while it waits in the queue", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    const { ws: otherTab } = await connectWS(room);
+    await collectMessages(ws, 3);
+    const otherTabFrames: Array<Record<string, unknown>> = [];
+    otherTab.addEventListener("message", (event: MessageEvent) => {
+      otherTabFrames.push(JSON.parse(event.data as string));
+    });
+
+    await agent.setSlowStreamMode(true, 100, 10);
+    const request1 = sendChatRequest(ws, [makeUserMessage("First")], {
+      clientTools: [{ name: "first_tool", description: "From request 1" }]
+    });
+    const done1 = waitForDoneId(ws, request1, 10000);
+    await waitForActiveTurn(agent);
+
+    // The second request waits in the queue with different tools. A
+    // continuation of the running turn must still get the first request's.
+    const request2 = sendChatRequest(ws, [makeUserMessage("Second")], {
+      clientTools: [{ name: "second_tool", description: "From request 2" }]
+    });
+    const done2 = waitForDoneId(ws, request2, 10000);
+    await delay(100);
+    expect(
+      (await agent.getCapturedClientTools())?.map((tool) => tool.name)
+    ).toEqual(["first_tool"]);
+
+    // Cancelled in the queue, it never ran: its tools are never stored, and
+    // only the tab that sent it hears how it ended.
+    ws.send(
+      JSON.stringify({ type: "cf_agent_chat_request_cancel", id: request2 })
+    );
+    await done1;
+    expect((await done2).at(-1)?.outcome).toBe("aborted");
+    await delay(100);
+    expect(
+      (await agent.getCapturedClientTools())?.map((tool) => tool.name)
+    ).toEqual(["first_tool"]);
+    expect(otherTabFrames.filter((frame) => frame.id === request2)).toEqual([]);
+
+    await closeWS(ws);
+    await closeWS(otherTab);
   });
 
   it("merge: all user messages preserved, single model turn for overlapping", async () => {

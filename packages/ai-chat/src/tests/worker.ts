@@ -252,6 +252,31 @@ export class TestChatAgent extends AIChatAgent<Env> {
   private _capturedRequestId: string | undefined = undefined;
   private _chatMessageCallCount = 0;
 
+  private _persistDelayForTest: {
+    role: "user" | "assistant";
+    ms: number;
+  } | null = null;
+
+  /**
+   * Make `persistMessages` wait before it writes when the last message has
+   * `role`, the way an app's override that awaits before `super` does.
+   */
+  setPersistDelayForTest(role: "user" | "assistant", ms: number): void {
+    this._persistDelayForTest = { role, ms };
+  }
+
+  override async persistMessages(
+    messages: ChatMessage[],
+    excludeBroadcastIds: string[] = [],
+    options?: { _deleteStaleRows?: boolean }
+  ) {
+    const wait = this._persistDelayForTest;
+    if (wait && messages.at(-1)?.role === wait.role) {
+      await new Promise((resolve) => setTimeout(resolve, wait.ms));
+    }
+    return super.persistMessages(messages, excludeBroadcastIds, options);
+  }
+
   async onChatMessage(
     _onFinish: GenerateTextOnFinishCallback<ToolSet>,
     options?: OnChatMessageOptions
@@ -316,6 +341,33 @@ export class TestChatAgent extends AIChatAgent<Env> {
         },
         { type: "finish" }
       ]);
+    }
+
+    // A server tool starts running and its stream never finishes: only a
+    // stop, a stall or an eviction ends it.
+    if (options?.body?.serverToolThenHang === true) {
+      const encoder = new TextEncoder();
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            for (const chunk of [
+              { type: "start" },
+              {
+                type: "tool-input-available",
+                toolCallId: "call-server-hang",
+                toolName: "slowServerTool",
+                input: {}
+              }
+            ]) {
+              controller.enqueue(
+                encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`)
+              );
+            }
+          },
+          cancel() {}
+        }),
+        { headers: { "Content-Type": "text/event-stream" } }
+      );
     }
 
     if (options?.body?.sseWithMessageId === true) {
@@ -556,9 +608,9 @@ export class TestChatAgent extends AIChatAgent<Env> {
     });
   }
 
-  // Test helper: directly invoke the protected _applyToolResult so tests
-  // can exercise the idempotency branch without scheduling an
-  // auto-continuation (issue #1404).
+  // Test helper: apply a tool result the way the tool-result handler does,
+  // with no auto-continuation, so tests can exercise the idempotency branch
+  // (issue #1404).
   async testApplyToolResult(
     toolCallId: string,
     toolName: string,
@@ -566,17 +618,52 @@ export class TestChatAgent extends AIChatAgent<Env> {
     overrideState?: "output-error",
     errorText?: string
   ): Promise<boolean> {
-    return (
-      this as unknown as {
-        _applyToolResult(
-          toolCallId: string,
-          toolName: string,
-          output: unknown,
-          overrideState?: "output-error",
-          errorText?: string
+    const self = this as unknown as {
+      _settleToolResult(
+        toolCallId: string,
+        toolName: string,
+        output: unknown,
+        overrideState?: "output-error",
+        errorText?: string
+      ): Promise<{ status: "changed" | "unchanged" | "missing" }>;
+      _turns: {
+        applyInteraction(
+          apply: () => Promise<unknown>,
+          autoContinue: boolean,
+          spec: () => never,
+          enqueue: (run: () => Promise<boolean>) => Promise<boolean>
         ): Promise<boolean>;
-      }
-    )._applyToolResult(toolCallId, toolName, output, overrideState, errorText);
+      };
+    };
+    return self._turns.applyInteraction(
+      () =>
+        self._settleToolResult(
+          toolCallId,
+          toolName,
+          output,
+          overrideState,
+          errorText
+        ),
+      false,
+      () => {
+        throw new Error("no continuation without autoContinue");
+      },
+      (run) => this._enqueueInteractionApply(run)
+    );
+  }
+
+  /** How many applies went through the overridable enqueue hook. */
+  private _interactionAppliesSeen = 0;
+
+  getInteractionAppliesSeenForTest(): number {
+    return this._interactionAppliesSeen;
+  }
+
+  protected override _enqueueInteractionApply(
+    apply: () => Promise<boolean>
+  ): Promise<boolean> {
+    this._interactionAppliesSeen++;
+    return super._enqueueInteractionApply(apply);
   }
 
   private _getChainedContinuationRegressionResponse(): Response | undefined {
@@ -705,10 +792,6 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return this._capturedRequestId;
   }
 
-  hasPendingInteractionForTest(): boolean {
-    return this.hasPendingInteraction();
-  }
-
   waitUntilStableForTest(options?: { timeout?: number }): Promise<boolean> {
     return this.waitUntilStable(options);
   }
@@ -737,6 +820,10 @@ export class TestChatAgent extends AIChatAgent<Env> {
 
   getChatMessageCallCountForTest(): number {
     return this._chatMessageCallCount;
+  }
+
+  hasPendingInteractionForTest(): boolean {
+    return this.hasPendingInteraction();
   }
 
   getContinuationStateForTest(): {
@@ -2858,6 +2945,19 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
   private _forceStableTimeout = false;
 
+  /** A subclass's own answer to "is a client still to answer?". */
+  private _clientInteractionOverride: boolean | null = null;
+
+  setPendingClientInteractionForTest(value: boolean | null): void {
+    this._clientInteractionOverride = value;
+  }
+
+  protected override hasPendingClientInteraction(): boolean {
+    return (
+      this._clientInteractionOverride ?? super.hasPendingClientInteraction()
+    );
+  }
+
   setForceStableTimeoutForTest(value: boolean): void {
     this._forceStableTimeout = value;
   }
@@ -3273,21 +3373,31 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
    *  `setRequestContextForTest`. */
   async persistPendingToolCallForTest(
     messageId: string,
-    toolName: string
+    toolName: string,
+    options: { cutOff?: boolean } = {}
   ): Promise<void> {
+    const reply: ChatMessage = {
+      id: messageId,
+      role: "assistant" as const,
+      parts: [
+        {
+          type: `tool-${toolName}`,
+          toolCallId: `call_${messageId}`,
+          state: "input-available",
+          input: {}
+        }
+      ] as ChatMessage["parts"]
+    };
+    // A reply whose stream was cut off is settled before it is stored, the
+    // way `_reply` and the orphan path store one.
     await this.persistMessages([
-      {
-        id: messageId,
-        role: "assistant" as const,
-        parts: [
-          {
-            type: `tool-${toolName}`,
-            toolCallId: `call_${messageId}`,
-            state: "input-available",
-            input: {}
-          }
-        ] as ChatMessage["parts"]
-      }
+      options.cutOff
+        ? (
+            this as unknown as {
+              _settleInterruptedReply(message: ChatMessage): ChatMessage;
+            }
+          )._settleInterruptedReply(reply)
+        : reply
     ]);
   }
 
