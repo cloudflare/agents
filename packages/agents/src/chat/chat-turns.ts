@@ -701,6 +701,7 @@ export class ChatTurns<
       this.admissions?.waitingMessages(new Set(messages.map((m) => m.id))) ??
       [];
     if (waiting.length === 0) return { messages: [...messages] };
+    this.#queuedViews++;
     return {
       messages: [...messages, ...(waiting as unknown as TMessage[])],
       queuedMessageIds: waiting.map((message) => message.id)
@@ -717,6 +718,18 @@ export class ChatTurns<
     return new Set(
       (this.admissions?.waitingMessages(stored) ?? []).map((m) => m.id)
     );
+  }
+
+  #queuedViews = 0;
+
+  /**
+   * How many message lists {@link clientView} has built that named queued
+   * messages. A host compares it across a request's wait: when it moved,
+   * the tab that sent the request may have been shown its message as
+   * queued, and must be told when it joins.
+   */
+  get queuedViews(): number {
+    return this.#queuedViews;
   }
 
   /** The latest user message a tab shows: stored, or held by a request. */

@@ -2639,6 +2639,9 @@ export class AIChatAgent<
     const held = sent.filter((message) => heldIds.has(message.id));
     let concurrencyDecision!: SubmitConcurrencyDecision;
     let epoch!: number;
+    // Lists naming queued messages once this request was shown to the
+    // other tabs.
+    let queuedViewsAtAccept = 0;
     return {
       requestId: chatMessageId,
       admission: {
@@ -2724,6 +2727,7 @@ export class AIChatAgent<
             );
           }
         );
+        queuedViewsAtAccept = this._turns.queuedViews;
         // Cleared meanwhile: nothing was stored, so there is no turn.
         return isCurrent() ? true : null;
       },
@@ -2746,8 +2750,11 @@ export class AIChatAgent<
             this._persistForTurn(isCurrent, false, () =>
               this.persistMessages(
                 [...this.messages, ...(messages as UIMessage[])],
-                // The tab that sent them draws them already.
-                connection ? [connection.id] : []
+                // The tab that sent them draws them already, unless it
+                // was since shown them as queued.
+                connection && this._turns.queuedViews === queuedViewsAtAccept
+                  ? [connection.id]
+                  : []
               )
             )
         );
