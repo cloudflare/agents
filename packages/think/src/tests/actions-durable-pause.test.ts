@@ -662,6 +662,11 @@ describe("a resolved pause continues like any other result", () => {
       await agent.queueConnectionlessContinuationsForTest(["m1", "m2", "m1"])
     ).toEqual(["m1", "m2"]);
   });
+
+  it("a queued connection-less continuation does not run once every chat was stopped", async () => {
+    const agent = await freshPauseAgent(`dp-stop-${crypto.randomUUID()}`);
+    expect(await agent.runConnectionlessAfterStopForTest()).toBe(false);
+  });
 });
 
 describe("resolving a durable pause drops pending-state generation (#2054)", () => {

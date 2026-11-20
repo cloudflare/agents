@@ -2478,6 +2478,11 @@ const CONNECTIONLESS_CONTINUATION_QUEUE_ID = "connectionless-continuation";
 type ConnectionlessContinuation = {
   /** The messages the approvals' outcomes are stored in. */
   targetMessageIds: string[];
+  /**
+   * The number of stops of every chat this isolate had seen when the item
+   * was pushed. An item pushed before a later stop does not run.
+   */
+  stops?: number;
 };
 /** Queue callback that runs one media-eviction pass. */
 const MEDIA_EVICTION_CALLBACK = "_cfEvictAgedMedia";
@@ -13419,10 +13424,18 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * waits as a queue item until its callback runs, so that item goes too.
    */
   private _stopEveryChat(): void {
+    const stops = ++this._connectionlessStops;
     this._holdForStop(this._turns.stopAll());
     // Once its callback runs, the turn core has it and has just stopped it.
     if (this._connectionlessContinuationRunning) return;
     void this.keepAliveWhile(async () => {
+      // An item pushed after this stop (an approval that arrived since) is
+      // not this stop's to drop. A callback that starts before the dequeue
+      // reads `stops` and returns.
+      const queued = await this.getQueue<ConnectionlessContinuation>(
+        CONNECTIONLESS_CONTINUATION_QUEUE_ID
+      );
+      if (!queued || (queued.payload?.stops ?? 0) >= stops) return;
       if (await this.dequeue(CONNECTIONLESS_CONTINUATION_QUEUE_ID)) {
         this._emit("chat:continuation:dropped", {
           requestId: null,
@@ -13439,6 +13452,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
   /** The connection-less continuation's queue callback is running. */
   private _connectionlessContinuationRunning = false;
+
+  /** Stops of every chat in this isolate ({@link _stopEveryChat}). */
+  private _connectionlessStops = 0;
 
   protected abortRequest(requestId: string, reason?: unknown): void {
     this._holdForStop(this._turns.cancel(requestId, reason));
@@ -17857,7 +17873,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     targetMessageId: string
   ): Promise<void> {
     // A push with the item's id replaces its payload, so carry over the
-    // messages the approvals already coalesced onto it answer.
+    // messages the approvals already coalesced onto it answer. Applies run
+    // one at a time, so no other push lands between the read and the push.
+    // A push while the item's callback runs supersedes that run's outcome:
+    // the item is kept and runs again with this payload.
     const queued = await this.getQueue<ConnectionlessContinuation>(
       CONNECTIONLESS_CONTINUATION_QUEUE_ID
     );
@@ -17867,7 +17886,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     );
     await this.queue<ConnectionlessContinuation>(
       CONNECTIONLESS_CONTINUATION_CALLBACK,
-      { targetMessageIds: [...targetMessageIds] },
+      {
+        targetMessageIds: [...targetMessageIds],
+        stops: this._connectionlessStops
+      },
       { id: CONNECTIONLESS_CONTINUATION_QUEUE_ID }
     );
   }
@@ -17888,6 +17910,18 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const latest = this.messages.at(-1)?.id;
     const targetMessageIds =
       queued?.targetMessageIds ?? (latest === undefined ? [] : [latest]);
+    // Pushed before a stop of every chat in this isolate, which has not
+    // dequeued it yet.
+    if (
+      queued?.stops !== undefined &&
+      queued.stops < this._connectionlessStops
+    ) {
+      this._emit("chat:continuation:dropped", {
+        requestId: null,
+        reason: "stopped"
+      });
+      return;
+    }
     this._connectionlessContinuationRunning = true;
     try {
       await this._turns.runUnscheduledContinuationTurn(
