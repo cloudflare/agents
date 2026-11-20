@@ -44,7 +44,7 @@ State persists in SQLite. Agent restarts on next event.
 - **Connection state** — `connection.setState()` data for each WebSocket client
 - **Fiber checkpoints** — `stash()` data from `runFiber()`
 
-Higher-level abstractions built on SQLite — such as [Workspace](https://github.com/cloudflare/agents/blob/main/docs/shell/index.md) files, [Session](./sessions.md) messages, and MCP connection state — also survive, since they are backed by the same SQLite storage.
+Higher-level abstractions built on SQLite — such as [Workspace](https://github.com/cloudflare/computer) files, [Session](./sessions.md) messages, and MCP connection state — also survive, since they are backed by the same SQLite storage.
 
 ### What does not survive
 

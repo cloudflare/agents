@@ -4996,22 +4996,6 @@ importers:
         specifier: ^4.13.16
         version: 4.13.16
 
-  packages/shell:
-    dependencies:
-      '@cloudflare/codemode':
-        specifier: '>=0.5.0'
-        version: link:../codemode
-      isomorphic-git:
-        specifier: ^1.38.6
-        version: 1.38.6
-    devDependencies:
-      '@cloudflare/vitest-pool-workers':
-        specifier: ^0.19.1
-        version: 0.19.1(@cloudflare/workers-types@5.20261014.1)(@vitest/runner@4.1.10)(@vitest/snapshot@4.1.11)(vitest@4.1.11)
-      vitest:
-        specifier: 4.1.11
-        version: 4.1.11(@opentelemetry/api@1.9.1)(@types/node@26.4.0)(@vitest/browser-playwright@4.1.11)(jsdom@29.1.1(@noble/hashes@1.8.0))(msw@2.14.6(@types/node@26.4.0)(typescript@6.0.3))(vite@8.3.5(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
-
   packages/think:
     dependencies:
       '@ai-sdk/anthropic':

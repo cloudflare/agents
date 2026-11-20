@@ -270,4 +270,4 @@ Think's design — skills, extensions, tree-structured sessions, compaction, and
 - [rfc-chat-recovery-foundation.md](./rfc-chat-recovery-foundation.md) — shared recovery engine
 - [rfc-think-multi-session.md](./rfc-think-multi-session.md) (rejected) and [rfc-user-chat-durable-objects.md](./rfc-user-chat-durable-objects.md) (accepted) — multi-chat topology
 - [loopback.md](./loopback.md) — extension host bridge
-- [workspace.md](./workspace.md) — the Workspace behind Think's file tools
+- [workspace.md](./workspace.md) — the deprecated Shell Workspace that Think used before `@cloudflare/computer`, kept for data migration

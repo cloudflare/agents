@@ -71,7 +71,7 @@ Install each capability with `lifecycle.use()`. Capabilities marked experimental
 | `Streams`          | `agents/streams`    | Experimental | [Streams](./streams.md)                                         |
 | `Tasks`            | `agents/tasks`      | Experimental | [Tasks](./tasks.md)                                             |
 
-Building your own harness? Sessions stores the conversation, Streams holds durable incremental output, and Tasks runs replayable background work. [Models](./models.md) and [Models for pi-ai](./models-pi-ai.md) give you one provider for Workers AI and third-party models. [Context](./context.md) and [Workspace](https://github.com/cloudflare/agents/blob/main/docs/shell/index.md) are also available.
+Building your own harness? Sessions stores the conversation, Streams holds durable incremental output, and Tasks runs replayable background work. [Models](./models.md) and [Models for pi-ai](./models-pi-ai.md) give you one provider for Workers AI and third-party models. [Context](./context.md) and [Workspace](https://github.com/cloudflare/computer) are also available.
 
 ## Agent class
 
@@ -139,7 +139,7 @@ Building your own harness? Sessions stores the conversation, Streams holds durab
 - [Models](./models.md) - `createAI` — one AI SDK provider for Workers AI and third-party catalog models, same string space
 - [Models for pi-ai](./models-pi-ai.md) - `createAI` for pi-ai: Workers AI ids and third-party models through AI Gateway, as a pi-ai provider
 - [Context (Experimental)](./context.md) - System-prompt blocks, frozen prompts, writable/searchable/loadable providers, and their tools
-- [Workspace (Experimental)](https://github.com/cloudflare/agents/blob/main/docs/shell/index.md) - Durable virtual filesystem backed by SQLite + R2
+- [Workspace](https://github.com/cloudflare/computer/tree/main/packages/computer) - `@cloudflare/computer`: a durable filesystem, shell, JavaScript and container execution backends, git, and AI SDK tools for a Durable Object
 - [Codemode (Experimental)](./codemode.md) - LLM-generated executable code for tool orchestration
 - [Browse the Web](./browse-the-web.md) - Full CDP access for web inspection, scraping, and debugging
 - [Search the Web (Beta)](./search-the-web.md) - A `websearch` tool over Cloudflare's Web Search API for the pi harness, the AI SDK, and TanStack AI
