@@ -947,10 +947,52 @@ describe("ChatTurns", () => {
         emitRepaired: () => {}
       };
 
-      await turns.settleBeforeRecovery(messages, "other", flip, sink);
+      await turns.settleBeforeRecovery(() => messages, "other", flip, sink);
       expect(stored).toEqual([]);
-      await turns.settleBeforeRecovery(messages, "a1", flip, sink);
+      await turns.settleBeforeRecovery(() => messages, "a1", flip, sink);
       expect(stored).toEqual([["a1"]]);
+    });
+
+    it("settleBeforeRecovery waits for an apply in flight and reads the transcript after it", async () => {
+      let messages = [
+        user("u1"),
+        toolReply("a1", "input-available")
+      ] as UIMessage[];
+      const seen: string[] = [];
+      const sink = {
+        persist: async (changed: UIMessage[]) => {
+          seen.push(stateOf(changed[0]) ?? "");
+        },
+        remove: async () => {},
+        emitRepaired: () => {}
+      };
+      let finish!: () => void;
+      // A client's result is being applied.
+      const applying = turns.enqueueInteraction(
+        () =>
+          new Promise<boolean>((resolve) => {
+            finish = () => {
+              messages = [
+                user("u1"),
+                toolReply("a1", "output-available")
+              ] as UIMessage[];
+              resolve(true);
+            };
+          })
+      );
+      const settling = turns.settleBeforeRecovery(
+        () => messages,
+        "a1",
+        flip,
+        sink
+      );
+      await Promise.resolve();
+      finish();
+      await applying;
+      await settling;
+      // The applied result stands: the settle never writes the call back
+      // as interrupted.
+      expect(seen).not.toContain("output-error");
     });
 
     it("removes a reply the repair left empty and returns the list without it", async () => {

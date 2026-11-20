@@ -1168,6 +1168,7 @@ export class AIChatAgent<
       const started = await _onStart(props);
       // Requests an earlier isolate accepted and never started run again,
       // once the app has started and no interrupted turn waits for recovery.
+      this._appStartedForAdmissions = true;
       this._resumeAdmissions();
       return started;
     };
@@ -1745,7 +1746,7 @@ export class AIChatAgent<
     removal?: ReplyRemoval
   ): Promise<"removed" | undefined> {
     return this._turns.settleBeforeRecovery(
-      this.messages,
+      () => this.messages,
       continueReplyId,
       (part) => this.repairInterruptedToolPart(part),
       this._repairedTranscriptSink(),
@@ -2479,11 +2480,18 @@ export class AIChatAgent<
    * A request an earlier isolate accepted and never gave a turn with a
    * fiber, to run again (`ChatTurns.resumeAdmissions`).
    */
+  /** The app's `onStart` has finished, so replays may run. */
+  private _appStartedForAdmissions = false;
+
   /**
    * Run the requests an earlier isolate left. Never rejects: what fails is
    * logged, and the next start or recovery tries again.
    */
   private _resumeAdmissions(): void {
+    // A recovery can settle before the app's `onStart` finished (a facet's
+    // legacy fiber recovery runs first). Its replays then wait for the
+    // call `onStart` makes once it is done.
+    if (!this._appStartedForAdmissions) return;
     void this.keepAliveWhile(() => this._turns.resumeAdmissions()).catch(
       (error) =>
         console.error("[AIChatAgent] failed to replay requests:", error)

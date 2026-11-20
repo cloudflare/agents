@@ -4066,6 +4066,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           this._runBestEffortOnStartStep(
             "durable-work-recovery",
             async () => {
+              // The app's onStart is done: replays may run from here on,
+              // also when a step below fails.
+              this._appStartedForAdmissions = true;
               await this._sweepActionLedger();
               await this._sweepActionPendingApprovals();
               await this._migrateLegacyWorkflowNotifications();
@@ -4796,11 +4799,18 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     });
   }
 
+  /** The app's `onStart` has finished, so replays may run. */
+  private _appStartedForAdmissions = false;
+
   /**
    * Run the requests an earlier isolate left. Never rejects: what fails is
    * logged, and the next start or recovery tries again.
    */
   private _resumeAdmissions(): void {
+    // A recovery can settle before the app's `onStart` finished (a facet's
+    // legacy fiber recovery runs first). Its replays then wait for the
+    // call startup makes once it is done.
+    if (!this._appStartedForAdmissions) return;
     void this.keepAliveWhile(() => this._turns.resumeAdmissions()).catch(
       (error) => console.error("[Think] failed to replay requests:", error)
     );
@@ -15050,7 +15060,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     removal?: ReplyRemoval
   ): Promise<"removed" | undefined> {
     return this._turns.settleBeforeRecovery(
-      this.messages,
+      () => this.messages,
       continueReplyId,
       (part) => this.repairInterruptedToolPart(part),
       this._repairedTranscriptSink(),

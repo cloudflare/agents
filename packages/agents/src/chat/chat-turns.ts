@@ -1019,20 +1019,28 @@ export class ChatTurns<
    * Settle and store the reply a recovery attempt is about to continue. See
    * {@link settleReplyBeforeRecovery}.
    */
-  settleBeforeRecovery(
-    messages: ReadonlyArray<UIMessage>,
+  async settleBeforeRecovery(
+    messages: () => ReadonlyArray<UIMessage>,
     continueReplyId: string,
     repairPart: RepairInterruptedToolPartsOptions["repairPart"],
     sink: RepairedTranscriptSink,
     removal?: ReplyRemoval
   ): Promise<"removed" | undefined> {
-    return settleReplyBeforeRecovery(
-      messages,
-      continueReplyId,
-      { repairPart, clientToolNames: this.host.clientToolNames() },
-      sink,
-      removal
-    );
+    // On the apply chain, with the transcript read there: the settle writes
+    // the whole reply, and a client's tool result applied between its read
+    // and its write would be written over (or the dead call put back).
+    let settled: "removed" | undefined;
+    await this.enqueueInteraction(async () => {
+      settled = await settleReplyBeforeRecovery(
+        messages(),
+        continueReplyId,
+        { repairPart, clientToolNames: this.host.clientToolNames() },
+        sink,
+        removal
+      );
+      return true;
+    });
+    return settled;
   }
 
   // ── Cancel and reset ───────────────────────────────────────────────
