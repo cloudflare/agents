@@ -1240,7 +1240,6 @@ export class ChatRecoveryEngine {
    * record is gone.
    */
   async recordTransientRetry(incidentId: string): Promise<number> {
-    const { adapter } = this;
     let transientRetries = 1;
     await this.#update(chatRecoveryIncidentKey(incidentId), (incident) => {
       if (!incident) return undefined;
