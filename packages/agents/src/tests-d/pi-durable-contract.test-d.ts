@@ -10,10 +10,13 @@
  */
 import type {
   InputSubmissionDraft,
-  SettledSubmissionRecord
+  SettledSubmissionRecord,
+  SubmissionDraft
 } from "@earendil-works/pi-durable";
 import { expectTypeOf } from "vitest";
 import type {
+  PiContinueOptions,
+  PiOnAbort,
   PiOperationResult,
   PiSubmitOptions,
   PiWhenBusy,
@@ -28,12 +31,34 @@ expectTypeOf<PiWhenIdle>().toEqualTypeOf<
   NonNullable<InputSubmissionDraft["whenIdle"]>
 >();
 
+expectTypeOf<PiOnAbort>().toEqualTypeOf<
+  NonNullable<InputSubmissionDraft["onAbort"]>
+>();
+
 // Every input option pi takes is exposed, apart from the ones PiHarness
 // fills in itself: `type` and `content` from the input, `requestId` from
 // `operationId`.
 expectTypeOf<
   Exclude<keyof InputSubmissionDraft, "type" | "content" | "requestId">
 >().toEqualTypeOf<Exclude<keyof PiSubmitOptions, "session" | "operationId">>();
+
+// The same for a continue: every option pi takes on one, apart from `type`
+// and `requestId`.
+type ContinueSubmissionDraft = Extract<SubmissionDraft, { type: "continue" }>;
+expectTypeOf<
+  Exclude<
+    {
+      [
+        K in keyof ContinueSubmissionDraft
+      ]-?: undefined extends ContinueSubmissionDraft[K]
+        ? [ContinueSubmissionDraft[K]] extends [undefined]
+          ? never
+          : K
+        : K;
+    }[keyof ContinueSubmissionDraft],
+    "type" | "requestId"
+  >
+>().toEqualTypeOf<Exclude<keyof PiContinueOptions, "operationId">>();
 
 expectTypeOf<PiOperationResult["status"]>().toEqualTypeOf<
   SettledSubmissionRecord["status"]

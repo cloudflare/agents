@@ -83,7 +83,8 @@ class TextBlock implements BlockComponent {
     this.#markdown.setText(block.text);
   }
 
-  render(width: number): string[] {
+  // Markdown returns its cached lines, which pi-tui types as read-only.
+  render(width: number): readonly string[] {
     return this.#text ? this.#markdown.render(width) : [];
   }
 

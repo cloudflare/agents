@@ -13,6 +13,11 @@ export type PiRunningTool = {
   readonly callId: string;
   readonly name: string;
   readonly output: string;
+  /**
+   * Parked: the call waits for a signal or a time, such as a person's
+   * answer, and holds no invocation meanwhile.
+   */
+  readonly parked: boolean;
 };
 
 /**
@@ -140,11 +145,17 @@ export function projectView(view: TranscriptView): PiSessionView {
     live: partial ? projectMessage(partial, LIVE_ID) : null,
     running: live.run !== undefined,
     tools: (live.tools ?? [])
-      .filter((slot) => slot.status === "running")
+      .filter(
+        (slot) =>
+          slot.status === "running" ||
+          slot.status === "sleeping" ||
+          slot.status === "waiting"
+      )
       .map((slot) => ({
         callId: slot.callId,
         name: slot.name,
-        output: slot.output ?? ""
+        output: slot.output ?? "",
+        parked: slot.status !== "running"
       })),
     queued: inbox?.items.length ?? 0,
     retry: live.generation?.retry ?? null,

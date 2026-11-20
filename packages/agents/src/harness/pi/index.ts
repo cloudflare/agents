@@ -21,6 +21,7 @@ export {
 export { skills } from "./skills";
 export type {
   PiContinueOptions,
+  PiOnAbort,
   PiOperationResult,
   PiPendingOperation,
   PiPromptResponse,

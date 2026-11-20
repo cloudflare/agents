@@ -18,6 +18,28 @@ import {
 const OPUS = anthropicModel("claude-opus-4-8");
 const SONNET = anthropicModel("claude-sonnet-4-5");
 
+/**
+ * A text reply that names the requested model. pi-ai records a thread only
+ * for such a reply: one from another model reads as a fallback, which
+ * Anthropic does not store.
+ */
+function sameModelTextEvents() {
+  return anthropicTextEvents().map((event) =>
+    event.event === "message_start"
+      ? {
+          ...event,
+          data: {
+            type: "message_start",
+            message: {
+              ...(event.data as { message: object }).message,
+              model: SONNET.id
+            }
+          }
+        }
+      : event
+  );
+}
+
 describe("pi-ai: Anthropic Messages over the universal gateway", () => {
   it("sends the vendor's own body to the anthropic provider", async () => {
     const binding = fakeBinding(() => sseEventResponse(anthropicTextEvents()));
@@ -82,6 +104,92 @@ describe("pi-ai: Anthropic Messages over the universal gateway", () => {
       ai.stream(ai(unthreaded), userContext("hi"), { sessionId: "session-c" })
     );
     expect(field(binding.native[0]?.query, "thread")).toBeUndefined();
+  });
+
+  it("continues pi-ai's Anthropic message thread through the gateway", async () => {
+    // pi-ai threads a session on api.anthropic.com: the second turn sends only
+    // the new message and points at the last reply. This shows the wire sends
+    // what pi-ai built; that AI Gateway forwards the `thread` field and the
+    // beta header was checked live, not here.
+    const events = sameModelTextEvents();
+    const binding = fakeBinding(() => sseEventResponse(events));
+    const ai = createAI({ binding: asAi(binding) });
+    const first = await collectEvents(
+      ai.stream(ai(SONNET), userContext("hi"), { sessionId: "conv-1" })
+    );
+    await collectEvents(
+      ai.stream(
+        ai(SONNET),
+        {
+          messages: [
+            { content: "hi", role: "user", timestamp: 1 },
+            first.message,
+            { content: "and again", role: "user", timestamp: 2 }
+          ]
+        },
+        { sessionId: "conv-1" }
+      )
+    );
+
+    const [create, next] = binding.native;
+    expect(field(create?.query, "thread")).toEqual({ type: "create" });
+    expect(field(next?.query, "thread")).toEqual({
+      previous_message_id: "msg_011CegXJ2PMnTsENC1z3qbFx",
+      type: "continue"
+    });
+    expect(field(next?.query, "messages")).toHaveLength(1);
+    expect(next?.headers?.["anthropic-beta"]).toContain(
+      "message-threads-2026-08-12"
+    );
+  });
+
+  it("resends in full when Anthropic can no longer continue the thread", async () => {
+    // Threads expire after a few minutes idle, while pi-ai's thread state
+    // outlives the turn. pi-ai resends a rejected continue as a new thread,
+    // and only recognises the rejection as the Anthropic SDK's own error.
+    const binding = fakeBinding((_call, index) =>
+      index === 1
+        ? jsonResponse(
+            {
+              type: "error",
+              error: {
+                type: "invalid_request_error",
+                message: "thread not found",
+                details: { error_code: "thread_not_found" }
+              }
+            },
+            { status: 400 }
+          )
+        : sseEventResponse(sameModelTextEvents())
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const first = await collectEvents(
+      ai.stream(ai(SONNET), userContext("hi"), { sessionId: "conv-expired" })
+    );
+    const second = await collectEvents(
+      ai.stream(
+        ai(SONNET),
+        {
+          messages: [
+            { content: "hi", role: "user", timestamp: 1 },
+            first.message,
+            { content: "and again", role: "user", timestamp: 2 }
+          ]
+        },
+        { sessionId: "conv-expired" }
+      )
+    );
+
+    expect(second.message.stopReason).toBe("stop");
+    const [, rejected, resent] = binding.native;
+    expect(field(rejected?.query, "thread")).toMatchObject({
+      type: "continue"
+    });
+    expect(field(resent?.query, "thread")).toEqual({ type: "create" });
+    expect(field(resent?.query, "messages")).toHaveLength(3);
+    expect(second.message.diagnostics?.map((d) => d.type)).toContain(
+      "anthropic_thread_fallback"
+    );
   });
 
   it("parses a text stream in the live event shape", async () => {
