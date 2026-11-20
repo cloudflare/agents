@@ -12923,6 +12923,15 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         // because `this.messages` at this point still only contains
         // the user message — the assistant message is not persisted
         // until the stream finishes.
+        //
+        // Except while requests wait behind the stream: the tab is sent the
+        // list first, before the replay starts, so it knows which messages
+        // are queued and draws them after the reply.
+        if (this._turns.queuedMessageIds().size > 0) {
+          connection.send(
+            JSON.stringify(this._messagesFrame({ connect: true }))
+          );
+        }
         this._notifyStreamResuming(connection);
       } else {
         // No active stream. If a turn is accepted but its stream hasn't started
