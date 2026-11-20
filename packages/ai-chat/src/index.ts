@@ -923,7 +923,8 @@ export class AIChatAgent<
     },
     turnBody: (continuation, body, requestId) =>
       this._chatRecoveryEngine().turnBody(continuation, body, requestId),
-    turnAccepted: (requestId) => this._turns.turnAccepted(requestId)
+    turnAccepted: (requestId) => this._turns.turnAccepted(requestId),
+    inRecoveryAttempt: () => this._chatRecoveryEngine().inAttempt
   });
 
   /**

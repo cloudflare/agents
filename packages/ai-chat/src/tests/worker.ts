@@ -3745,6 +3745,39 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     });
   }
 
+  /** The chat-turn Task runs not yet settled: a turn a replay could recover. */
+  openChatTurnRunsForTest(): number {
+    return (
+      this.sql<{ count: number }>`
+        SELECT COUNT(*) AS count FROM cf_agents_task_runs
+        WHERE definition = '__cf_internal_chat_turn'
+          AND state IN ('pending', 'running', 'waiting')
+      `[0]?.count ?? 0
+    );
+  }
+
+  /** Run every open chat-turn Task run now, as a later wake would. */
+  async runOpenChatTurnRunsForTest(): Promise<void> {
+    const past = Date.now() - 1_000;
+    this.sql`
+      UPDATE cf_agents_task_runs SET next_at = ${past}
+      WHERE definition = '__cf_internal_chat_turn'
+        AND state IN ('pending', 'running', 'waiting')
+    `;
+    this.sql`
+      UPDATE cf_agents_task_steps SET next_at = ${past}
+      WHERE run_id IN (
+        SELECT run_id FROM cf_agents_task_runs
+        WHERE definition = '__cf_internal_chat_turn'
+      )
+    `;
+    this.sql`
+      UPDATE cf_agents_jobs SET time = ${past} WHERE id LIKE 'task:%'
+    `;
+    await this.alarm();
+    await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
+  }
+
   async rvContinueWithStreamErrorForTest(message: string): Promise<string> {
     this._emitStreamError = message;
     try {

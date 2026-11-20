@@ -10,10 +10,13 @@
  *   a stream failure that is recovered while the turn is still live;
  * - wrap the snapshot and the app's stash data into one envelope;
  * - a turn that continues the latest reply takes that reply over from a
- *   recovery scheduled to continue it, once its model call has returned a
- *   reply and not before: a turn that ends earlier (a repair or a hook
- *   throws, the model call fails or returns nothing) leaves the recovery in
- *   place;
+ *   recovery scheduled to continue it at the stream's first chunk with
+ *   content, and not before: a turn that ends earlier (a repair or a hook
+ *   throws, the model call fails, in its stream too, or returns nothing)
+ *   leaves the recovery in place;
+ * - a recovery attempt's turn that throws does not fail its fiber: the
+ *   attempt owns the turn, and a failed fiber would be recovered again as
+ *   an interrupted turn;
  * - on a facet, run on the legacy fiber engine; otherwise register the live
  *   closure, start the chat-turn Task ({@link createChatTurnTaskDefinition}
  *   runs the closure) and wait for its outcome.
@@ -26,6 +29,7 @@
 
 import { wrapChatFiberSnapshot, type ChatFiberSnapshot } from "./recovery";
 import { isTurnStopped } from "./turn-stop";
+import { isDurableObjectMemoryLimitReset } from "../retries";
 import type { ChatTurnClosureEntry } from "./turn-task";
 
 /** What {@link ChatTurnFibers} needs from the agent that hosts it. */
@@ -77,6 +81,11 @@ export interface ChatTurnFiberHost {
    * on (`ChatTurns.turnAccepted`). Optional.
    */
   turnAccepted?(requestId: string): void;
+  /**
+   * Whether the caller is a recovery attempt (`ChatRecoveryEngine.inAttempt`).
+   * Optional: a host without one never runs a turn for an attempt.
+   */
+  inRecoveryAttempt?(): boolean;
 }
 
 /** One turn to run as a fiber. */
@@ -167,18 +176,28 @@ export class ChatTurnFibers {
     // gets the throw, and ends the turn `aborted`. The signal is read now:
     // the turn drops its controller before the throw gets here.
     const signal = this.host.turnSignal(requestId);
+    // A recovery attempt's turn that throws is the attempt's to run again:
+    // it records the outcome, or defers and is delivered again. A fiber
+    // that failed would be replayed as an interrupted turn as well, a
+    // second owner of the reply that a stop of the attempt does not reach.
+    const attemptOwnsIt = this.host.inRecoveryAttempt?.() ?? false;
     let stopped: { error: unknown } | undefined;
     const body = async (): Promise<T> => {
       try {
         return await run();
       } catch (error) {
-        if (!isTurnStopped(signal)) throw error;
+        if (
+          !isTurnStopped(signal) &&
+          !(attemptOwnsIt && !isDurableObjectMemoryLimitReset(error))
+        ) {
+          throw error;
+        }
         stopped = { error };
         // SAFETY: never returned to the caller, which gets the throw below.
         return undefined as T;
       }
     };
-    /** Give the caller what the stopped turn threw. */
+    /** Give the caller what the stopped or attempt's turn threw. */
     const settled = (value: T): T => {
       if (stopped) throw stopped.error;
       return value;

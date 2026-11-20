@@ -1235,12 +1235,19 @@ export class ChatRecoveryEngine {
   }
 
   /**
-   * The root request id of the recovery attempt the calling code runs
-   * inside, or `undefined` when it runs inside none. Read from the attempt's
-   * async scope, so a turn another request started while an attempt waits
+   * Whether the calling code runs inside a recovery attempt. Read from the
+   * attempt's async scope, so a turn another request started while an attempt waits
    * for the chat to settle sees `undefined`: it is not part of that
    * attempt's chain. A turn that is interrupted inside an attempt schedules a
    * chained attempt under this root.
+   */
+  get inAttempt(): boolean {
+    return this.adapter.turns?.attemptScope.getStore() !== undefined;
+  }
+
+  /**
+   * The root request id of the recovery attempt the calling code runs
+   * inside, or `undefined` when it runs inside none. See {@link inAttempt}.
    */
   get activeRootRequestId(): string | undefined {
     return this.adapter.turns?.attemptScope.getStore()?.rootRequestId;

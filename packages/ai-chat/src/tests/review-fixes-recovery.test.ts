@@ -103,6 +103,40 @@ describe("rv-recovery: an attempt that hit a platform transient", () => {
     });
   }, 20_000);
 
+  it("a stop during the redefer window leaves nothing that continues the reply later", async () => {
+    const room = `rv-transient-stop-fiber-${crypto.randomUUID()}`;
+    const stub = (await agent(room)) as Stub & {
+      openChatTurnRunsForTest(): Promise<number>;
+      runOpenChatTurnRunsForTest(): Promise<void>;
+    };
+    await seedCutOffReply(stub, "inc-f", "root-f");
+    const data = {
+      incidentId: "inc-f",
+      originalRequestId: "root-f",
+      targetAssistantId: "a1"
+    };
+    await stub.throwFromNextTurnForTest("Network connection lost.");
+    await expect(
+      stub.runChatRecoveryContinueDirectForTest(data)
+    ).rejects.toThrow(/Network connection lost/);
+
+    const { ws } = await connectChatWS(
+      `/agents/chat-recovery-test-agent/${room}`
+    );
+    ws.send(
+      JSON.stringify({ type: "cf_agent_chat_request_cancel", id: "root-f" })
+    );
+    await new Promise((r) => setTimeout(r, 200));
+    ws.close(1000);
+
+    // The deferred turn is the attempt's to run again, and the stop ended
+    // the attempt. No chat-turn run is left for a later wake to recover.
+    expect(await stub.openChatTurnRunsForTest()).toBe(0);
+    await stub.runOpenChatTurnRunsForTest();
+    await stub.runChatRecoveryContinueDirectForTest(data);
+    expect(await stub.getOnChatMessageCallCount()).toBe(1);
+  }, 20_000);
+
   it("a turn that continued the reply during the redefer window supersedes the rerun", async () => {
     const room = `rv-transient-supersede-${crypto.randomUUID()}`;
     const stub = await agent(room);
