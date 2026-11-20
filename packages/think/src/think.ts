@@ -13225,10 +13225,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         // One that is gone (a clear, or a reset before it was written) has
         // nothing to answer.
         if (!incomingMessages) {
-          const stored = new Set(this.messages.map((message) => message.id));
-          return newMessageIds.every((id) => stored.has(id))
-            ? { branchParentId: input.branchParentId, generation }
-            : null;
+          return this._turns.replayHasNothingToAnswer(
+            newMessageIds,
+            this.messages
+          )
+            ? null
+            : { branchParentId: input.branchParentId, generation };
         }
         // ── Reconcile, persist, and broadcast user messages ──────────
         //

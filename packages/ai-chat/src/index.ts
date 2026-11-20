@@ -2624,8 +2624,12 @@ export class AIChatAgent<
         // One that is gone (a clear, or a reset before it was written) has
         // nothing to answer.
         if (!transformedMessages) {
-          const stored = new Set(this.messages.map((message) => message.id));
-          return newMessageIds.every((id) => stored.has(id)) ? true : null;
+          return this._turns.replayHasNothingToAnswer(
+            newMessageIds,
+            this.messages
+          )
+            ? null
+            : true;
         }
         await withAgentSpan(
           this,

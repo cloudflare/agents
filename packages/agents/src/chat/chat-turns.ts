@@ -596,6 +596,28 @@ export class ChatTurns<
   }
 
   /**
+   * Whether a request replayed after a reset has nothing left to answer:
+   * one of its user messages is gone, or a user message no waiting request
+   * stored follows them. That message was answered after the reset, by a
+   * newer request or by a release without durable admission (a rollback),
+   * and the conversation has moved on.
+   */
+  replayHasNothingToAnswer(
+    messageIds: ReadonlyArray<string>,
+    messages: ReadonlyArray<ChatTurnMessage>
+  ): boolean {
+    const ids = new Set(messageIds);
+    const at = messages.map((m) => ids.has(m.id));
+    if (at.filter(Boolean).length < ids.size) return true;
+    const last = at.lastIndexOf(true);
+    if (last < 0) return false;
+    const queued = this.admittedMessageIds();
+    return messages
+      .slice(last + 1)
+      .some((m) => m.role === "user" && !queued.has(m.id));
+  }
+
+  /**
    * Run one turn the server starts itself (`saveMessages`,
    * `continueLastTurn`, a retry), start to finish. The counterpart of
    * {@link runClientRequest}; see {@link runServerTurn} for the steps.

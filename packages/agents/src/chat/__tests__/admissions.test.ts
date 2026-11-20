@@ -315,4 +315,30 @@ describe("durable admission", () => {
     expect(b.replayed).toEqual([]);
     expect(b.records()).toEqual([]);
   });
+
+  it("a replay has nothing to answer once a user message nothing waits on follows its own", async () => {
+    const db = new DatabaseSync(":memory:");
+    const a = await queueBehindRunningTurn(db, ["r2"]);
+    const msg = (id: string, role: string) => ({ id, role, parts: [] });
+    const t = a.turns;
+    expect(t.replayHasNothingToAnswer(["u-r2"], [msg("u-r2", "user")])).toBe(
+      false
+    );
+    // A reply after it (the recovered turn's) does not move it on.
+    expect(
+      t.replayHasNothingToAnswer(
+        ["u-r2"],
+        [msg("u-r2", "user"), msg("a1", "assistant")]
+      )
+    ).toBe(false);
+    // A question an older release answered after a rollback does.
+    expect(
+      t.replayHasNothingToAnswer(
+        ["u-r2"],
+        [msg("u-r2", "user"), msg("u3", "user")]
+      )
+    ).toBe(true);
+    // Gone.
+    expect(t.replayHasNothingToAnswer(["u-r2"], [])).toBe(true);
+  });
 });
