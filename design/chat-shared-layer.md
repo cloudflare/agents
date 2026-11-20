@@ -27,6 +27,8 @@ packages/agents/src/chat/          ← shared foundation
   turn-queue.ts                    TurnQueue class
   chat-turns.ts                    ChatTurns: the turn core both hosts run on (owns the queue, aborts,
                                    submit concurrency, continuation, pre-stream set and apply chain)
+  admissions.ts                    ChatAdmissions: a client request's durable record, and its replay
+                                   after a reset
   server-turn.ts                   runServerTurn: a turn the server starts (saveMessages, continueLastTurn,
                                    the retry, a recovered turn, an agent-tool run, Think.chat())
   continuation-turn.ts             the auto-continuation turn, from the fire to the settle
@@ -182,6 +184,10 @@ Stop, clear and idle:
 The host passes a `ChatTurnsHost`: the transcript, whether a reply is streaming, the reply being streamed, the names of the tools a client runs, whether a resumable stream is active, `keepAliveWhile`, an id generator, and `fireContinuation`. What a turn does (the model call, streaming and persisting the reply) is still host code, in one turn body per host for every server-started turn (`AIChatAgent._runServerTurnReply`, `Think._runModelTurn`). [rfc-chat-turn-core.md](./rfc-chat-turn-core.md) has the differences that were settled on the way and what is still host code.
 
 Both hosts keep their old private field names (`_turnQueue`, `_continuation`, `_abortRegistry` / `_aborts`, and so on) as aliases of the core's parts.
+
+### admissions.ts
+
+**`ChatAdmissions`** keeps an accepted client request across an isolate reset. `runClientRequest` writes a record in `cf_agents_chat_admissions` before the request's messages, and the record is deleted when the turn's fiber is durably accepted, when recovery picks the turn up, or when the request ends. A stop is written on the record, and a clear deletes every record. `resume()` replays the records a reset left, in order and with their concurrency decisions restored, once no recovery is pending. A new request replays them first. `saveMessages` and `continueLastTurn` have no record: they store nothing until their turn starts.
 
 ### server-turn.ts
 
