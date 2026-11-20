@@ -86,6 +86,14 @@ export interface ChatAdmissionStore {
   list(): ChatAdmissionRecord[];
 }
 
+/**
+ * A record older than this is dropped, not replayed: an hour, the life of a
+ * recovery incident. One can only be that old if a release without durable
+ * admission ran in between (a rollback), and that release has already let
+ * the request go.
+ */
+export const CHAT_ADMISSION_TTL_MS = 60 * 60 * 1000;
+
 /** The table admission records live in. */
 export const CHAT_ADMISSIONS_TABLE = "cf_agents_chat_admissions";
 
@@ -387,7 +395,10 @@ export class ChatAdmissions {
   async #replay(): Promise<void> {
     const records: ChatAdmissionRecord[] = [];
     for (const record of this.#orphans()) {
-      if (await this.host.recoveryOwns(record.requestId)) {
+      if (
+        Date.now() - record.createdAt > CHAT_ADMISSION_TTL_MS ||
+        (await this.host.recoveryOwns(record.requestId))
+      ) {
         this.host.store.remove(record.requestId);
         continue;
       }

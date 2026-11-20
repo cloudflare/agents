@@ -301,4 +301,18 @@ describe("durable admission", () => {
     const a = await queueBehindRunningTurn(db, ["r2"]);
     expect([...a.turns.admittedMessageIds()]).toEqual(["u-r2"]);
   });
+
+  it("drops a record older than an hour, which only a rollback leaves", async () => {
+    const db = new DatabaseSync(":memory:");
+    const a = await queueBehindRunningTurn(db, ["r2"]);
+    db.prepare("update cf_agents_chat_admissions set created_at = ?").run(
+      Date.now() - 2 * 60 * 60 * 1000
+    );
+    const b = isolate(db);
+    b.copyTranscript(a);
+    await b.turns.resumeAdmissions();
+    await tick();
+    expect(b.replayed).toEqual([]);
+    expect(b.records()).toEqual([]);
+  });
 });
