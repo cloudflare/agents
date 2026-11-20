@@ -75,7 +75,7 @@ function drawn(messages: UIMessage[]): string[] {
   return messages.map((m) => `${m.id}:${textOf(m)}`);
 }
 
-async function mount(agent: ReturnType<typeof useAgent>) {
+async function mount(agent: ReturnType<typeof useAgent>, resume = false) {
   const view: {
     messages: UIMessage[];
     chat?: ReturnType<typeof useAgentChat>;
@@ -85,7 +85,7 @@ async function mount(agent: ReturnType<typeof useAgent>) {
       agent,
       getInitialMessages: null,
       messages: [] as UIMessage[],
-      resume: false
+      resume
     });
     view.messages = chat.messages;
     view.chat = chat;
@@ -230,6 +230,46 @@ describe("a message queued behind a reply", () => {
       "u2:Say the word apple.",
       "a2:apple"
     ]);
+  });
+
+  it("a tab that connects mid-reply and resumes it draws the reply once", async () => {
+    const { agent, dispatch, list } = fakeAgent("queued-resume");
+    const view = await mount(agent, true);
+    const partial: UIMessage = {
+      id: "a1",
+      role: "assistant",
+      parts: [{ type: "text", text: "1 2 " }]
+    };
+    // What a server sends a tab that connects while a reply streams and a
+    // question waits: the list (with the reply so far), then the offer.
+    await act(async () => {
+      list([u1, partial, u2], ["u2"]);
+      dispatch({ type: "cf_agent_stream_resuming", id: "r1" });
+      await sleep(30);
+    });
+    const replay = (body: Record<string, unknown>) =>
+      dispatch({
+        type: "cf_agent_use_chat_response",
+        id: "r1",
+        body: JSON.stringify(body),
+        done: false,
+        replay: true
+      });
+    await act(async () => {
+      replay({ type: "start", messageId: "a1" });
+      replay({ type: "text-start", id: "t1" });
+      replay({ type: "text-delta", id: "t1", delta: "1 2 " });
+      await sleep(30);
+      dispatch({
+        type: "cf_agent_use_chat_response",
+        id: "r1",
+        body: JSON.stringify({ type: "text-delta", id: "t1", delta: "3" }),
+        done: false
+      });
+      await sleep(30);
+    });
+    // The reply is drawn once, above the question.
+    expect(view.messages.map((m) => m.id)).toEqual(["u1", "a1", "u2"]);
   });
 
   it("goes when the server says it will not join", async () => {

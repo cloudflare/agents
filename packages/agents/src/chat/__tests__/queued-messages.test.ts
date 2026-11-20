@@ -1,29 +1,43 @@
 import { describe, expect, it } from "vitest";
-import { drawQueuedLast } from "../queued-messages";
+import { drawQueuedLast, splitQueuedMessages } from "../queued-messages";
 
 const m = (id: string) => ({ id });
+const ids = (list: Array<{ id: string }>) => list.map((x) => x.id);
+
+describe("splitQueuedMessages", () => {
+  it("keeps queued messages out of the stored list", () => {
+    const { stored, queued } = splitQueuedMessages(
+      [m("u1"), m("a1"), m("u2"), m("u3")],
+      ["u2", "u3"]
+    );
+    expect(ids(stored)).toEqual(["u1", "a1"]);
+    expect(ids(queued)).toEqual(["u2", "u3"]);
+  });
+
+  it("is the whole list when nothing is queued", () => {
+    const { stored, queued } = splitQueuedMessages([m("u1")], undefined);
+    expect(ids(stored)).toEqual(["u1"]);
+    expect(queued).toEqual([]);
+  });
+});
 
 describe("drawQueuedLast", () => {
   it("draws queued messages after the rest, a streaming reply included", () => {
-    const messages = [m("u1"), m("u2"), m("a1")];
-    expect(drawQueuedLast(messages, new Set(["u2"])).map((x) => x.id)).toEqual([
+    expect(ids(drawQueuedLast([m("u1"), m("a1")], [m("u2")]))).toEqual([
       "u1",
       "a1",
       "u2"
     ]);
   });
 
-  it("keeps queued messages in the order they came", () => {
-    const messages = [m("u1"), m("u2"), m("u3"), m("a1")];
-    expect(
-      drawQueuedLast(messages, new Set(["u3", "u2"])).map((x) => x.id)
-    ).toEqual(["u1", "a1", "u2", "u3"]);
+  it("draws a queued message the chat also holds once, last", () => {
+    expect(ids(drawQueuedLast([m("u1"), m("u2"), m("a1")], [m("u2")]))).toEqual(
+      ["u1", "a1", "u2"]
+    );
   });
 
-  it("returns the same list when nothing is queued or it is last already", () => {
-    const messages = [m("u1"), m("a1"), m("u2")];
-    expect(drawQueuedLast(messages, new Set())).toBe(messages);
-    expect(drawQueuedLast(messages, new Set(["u2"]))).toBe(messages);
-    expect(drawQueuedLast(messages, new Set(["gone"]))).toBe(messages);
+  it("returns the same list when nothing is queued", () => {
+    const messages = [m("u1"), m("a1")];
+    expect(drawQueuedLast(messages, [])).toBe(messages);
   });
 });

@@ -12,7 +12,7 @@ import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isSocketAddressPending } from "../socket-address";
 import { chatThrottleOptions } from "./chat-throttle";
 import { dropEmptyReply } from "./reply-empty";
-import { drawQueuedLast } from "./queued-messages";
+import { drawQueuedLast, splitQueuedMessages } from "./queued-messages";
 import type { ChatTurnOutcome, OutgoingMessage } from "./wire-types";
 import { STREAM_RESUME_NONE_REASONS } from "./protocol";
 import { MessageType } from "./wire-types";
@@ -698,8 +698,6 @@ export function detectToolsRequiringConfirmation(
     .filter(([_name, tool]) => !tool.execute)
     .map(([name]) => name);
 }
-
-const NO_QUEUED_MESSAGES: ReadonlySet<string> = new Set();
 
 export function useAgentChat<
   // oxlint-disable-next-line no-unused-vars -- kept for backward compat
@@ -1434,9 +1432,11 @@ export function useAgentChat<
   ]);
 
   const localResponseMessageIdsRef = useRef(new Map<string, string>());
-  /** The messages the last message list named as queued. */
-  const [queuedMessageIds, setQueuedMessageIds] =
-    useState<ReadonlySet<string>>(NO_QUEUED_MESSAGES);
+  /**
+   * The messages the last message list named as queued, kept out of the
+   * chat's list and drawn after it (`queued-messages.ts`).
+   */
+  const [queuedMessages, setQueuedMessages] = useState<ChatMessage[]>([]);
   const protectedStreamingAssistantRef = useRef<{
     assistantId: string;
     anchorMessageId: string | null;
@@ -1650,7 +1650,7 @@ export function useAgentChat<
   const resetLocalChatState = useCallback(() => {
     markInitialMessagesSeeded();
     setMessages([]);
-    setQueuedMessageIds(NO_QUEUED_MESSAGES);
+    setQueuedMessages([]);
     setClientToolResults(new Map());
     setPendingOnToolCallIds(new Set());
     resetToolContinuation();
@@ -2174,16 +2174,17 @@ export function useAgentChat<
             ? new Set(pendingBufferedSendIdsRef.current)
             : new Set<string>();
           pendingBufferedSendIdsRef.current.clear();
-          // Messages waiting requests hold are drawn last (`queued-messages`).
-          setQueuedMessageIds(
-            Array.isArray(data.queuedMessageIds) &&
-              data.queuedMessageIds.length > 0
-              ? new Set(data.queuedMessageIds)
-              : NO_QUEUED_MESSAGES
+          // Messages waiting requests hold stay out of the chat's list and
+          // are drawn after it (`queued-messages.ts`).
+          const { stored, queued } = splitQueuedMessages(
+            data.messages,
+            data.queuedMessageIds
           );
+          setQueuedMessages(queued);
+          const queuedIds = new Set(queued.map((message) => message.id));
           setMessages((currentMessages: ChatMessage[]) => {
             let next = preserveProtectedStreamingAssistant(
-              data.messages,
+              stored,
               currentMessages
             );
             // A cross-tab observer builds the in-flight assistant via the
@@ -2222,7 +2223,10 @@ export function useAgentChat<
             }
             // Rescue sends the transport buffered while the socket was down
             // that the reconnect replay would otherwise drop.
-            return restoreBufferedSends(next, currentMessages, bufferedSendIds);
+            next = restoreBufferedSends(next, currentMessages, bufferedSendIds);
+            return queuedIds.size === 0
+              ? next
+              : next.filter((message) => !queuedIds.has(message.id));
           });
           break;
         }
@@ -2988,8 +2992,8 @@ export function useAgentChat<
   }, [chatMessages, clientToolResults]);
 
   const displayedMessages = useMemo(
-    () => drawQueuedLast(messagesWithToolResults, queuedMessageIds),
-    [messagesWithToolResults, queuedMessageIds]
+    () => drawQueuedLast(messagesWithToolResults, queuedMessages),
+    [messagesWithToolResults, queuedMessages]
   );
 
   // Cleanup stale entries from clientToolResults when messages change
