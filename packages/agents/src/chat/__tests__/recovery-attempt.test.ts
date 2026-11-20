@@ -1087,6 +1087,26 @@ describe("a recovery callback delivered more than once", () => {
     expect(t.log).toContain("turn");
   });
 
+  it("does not run a numbered payload whose incident is gone: its recovery is over", async () => {
+    // A completed recovery deletes its incident. The same payload delivered
+    // again must not continue the finished reply.
+    const t = setup({ incident: null });
+    t.host.data = { ...t.host.data, delivery: 1 };
+
+    await t.run();
+
+    expect(t.log).not.toContain("turn");
+  });
+
+  it("runs a numbered payload whose incident an older release wrote, with no count", async () => {
+    const t = setup({ incident: {} });
+    t.host.data = { ...t.host.data, delivery: 1 };
+
+    await t.run();
+
+    expect(t.log).toContain("turn");
+  });
+
   it("runs the same payload again after a deferral, which ends the turn without a reset", async () => {
     let failing = true;
     const t = setup({

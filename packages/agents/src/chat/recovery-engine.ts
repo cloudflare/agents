@@ -1039,8 +1039,10 @@ export class ChatRecoveryEngine {
    * Whether a delivered recovery callback is the one to run its turn.
    *
    * - `"run"`: it is. Also the answer for a payload with no schedule number
-   *   (one an older version scheduled) and for an incident that is gone.
-   * - `"stale"`: a newer attempt was scheduled since. That one runs.
+   *   (one an older version scheduled), and for an incident an older version
+   *   wrote, which has no count.
+   * - `"stale"`: a newer attempt was scheduled since, and that one runs; or
+   *   the incident is gone, so its recovery is over.
    * - `"cut_off"`: this schedule's turn already started, so this is a second
    *   delivery after a reset cut the turn off. The interrupted turn's own
    *   recovery owns it: it stores the partial, counts the attempt and
@@ -1052,7 +1054,11 @@ export class ChatRecoveryEngine {
   ): Promise<"run" | "stale" | "cut_off"> {
     if (!incidentId || typeof delivery !== "number") return "run";
     const incident = await this.readIncident(incidentId);
-    if (!incident || incident.scheduleCount === undefined) return "run";
+    // A numbered payload was scheduled by this version, which deletes an
+    // incident only once its recovery completed (or a clear removed it). A
+    // second delivery of it must not continue the finished reply.
+    if (!incident) return "stale";
+    if (incident.scheduleCount === undefined) return "run";
     if (incident.scheduleCount !== delivery) return "stale";
     return incident.startedDelivery === delivery ? "cut_off" : "run";
   }

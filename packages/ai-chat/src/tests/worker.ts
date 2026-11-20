@@ -3720,6 +3720,46 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   }
 
   /** Simulate the not-yet-settled recovery Task currently dispatching. */
+  /** What `_dispatchRecoveredChatTurn` does on a wake: schedule a continue of `target`. */
+  async rvScheduleLikeWakeForTest(
+    incidentId: string,
+    target: string
+  ): Promise<void> {
+    const incident = await this.ctx.storage.get<Record<string, unknown>>(
+      `cf:chat-recovery:incident:${encodeURIComponent(incidentId)}`
+    );
+    const engine = (
+      this as unknown as {
+        _chatRecoveryEngine(): {
+          scheduleRecoveredTurn(input: Record<string, unknown>): Promise<void>;
+        };
+      }
+    )._chatRecoveryEngine();
+    await engine.scheduleRecoveredTurn({
+      incident,
+      recoveryKind: "continue",
+      recoveryRootRequestId: incident?.recoveryRootRequestId,
+      targetAssistantId: target,
+      // The run has not fired yet when the next detection lands.
+      delaySeconds: 60
+    });
+  }
+
+  async rvContinueWithStreamErrorForTest(message: string): Promise<string> {
+    this._emitStreamError = message;
+    try {
+      return (await this.continueLastTurn()).status;
+    } finally {
+      this._emitStreamError = null;
+    }
+  }
+
+  async rvIncidentRawForTest(incidentId: string): Promise<unknown> {
+    return this.ctx.storage.get(
+      `cf:chat-recovery:incident:${encodeURIComponent(incidentId)}`
+    );
+  }
+
   async preScheduleRecoveryContinueForTest(
     data: Record<string, unknown>
   ): Promise<void> {
