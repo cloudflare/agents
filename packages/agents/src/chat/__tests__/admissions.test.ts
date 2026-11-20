@@ -1,6 +1,7 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import {
+  chatRecoveryNames,
   createChatAdmissionStore,
   type ChatAdmissionRecord
 } from "../admissions";
@@ -50,7 +51,7 @@ function isolate(
   options: {
     concurrency?: MessageConcurrency;
     recoveryPending?: () => boolean;
-    recoveryOwns?: (requestId: string) => boolean;
+    recoveryOwns?: (requestId: string) => boolean | Promise<boolean>;
   } = {}
 ) {
   let statements = 0;
@@ -105,7 +106,7 @@ function isolate(
     admissions: {
       store,
       recoveryPending: async () => options.recoveryPending?.() ?? false,
-      recoveryOwns: async (id) => options.recoveryOwns?.(id) ?? false,
+      recoveryOwns: async (id) => (await options.recoveryOwns?.(id)) ?? false,
       replayRequest: (record) => {
         replayed.push(record);
         return request(record.requestId, true);
@@ -340,5 +341,119 @@ describe("durable admission", () => {
     ).toBe(true);
     // Gone.
     expect(t.replayHasNothingToAnswer(["u-r2"], [])).toBe(true);
+  });
+
+  it("a stop that lands while the replay awaits still stops the request", async () => {
+    const db = new DatabaseSync(":memory:");
+    const a = await queueBehindRunningTurn(db, ["r2"]);
+    const holder: { b?: ReturnType<typeof isolate> } = {};
+    const b = isolate(db, {
+      recoveryOwns: async (id) => {
+        await holder.b?.turns.cancel(id);
+        return false;
+      }
+    });
+    holder.b = b;
+    b.copyTranscript(a);
+    await b.turns.resumeAdmissions();
+    await tick();
+    expect(b.started).toEqual([]);
+    expect(b.ended.get("r2")).toBe("aborted");
+  });
+
+  it("a clear that lands while the replay awaits leaves nothing to replay", async () => {
+    const db = new DatabaseSync(":memory:");
+    const a = await queueBehindRunningTurn(db, ["r2"]);
+    const holder: { b?: ReturnType<typeof isolate> } = {};
+    const b = isolate(db, {
+      recoveryOwns: async () => {
+        holder.b?.turns.reset();
+        return false;
+      }
+    });
+    holder.b = b;
+    b.copyTranscript(a);
+    await b.turns.resumeAdmissions();
+    await tick();
+    expect(b.replayed).toEqual([]);
+    expect(b.started).toEqual([]);
+  });
+});
+
+describe("chatRecoveryNames", () => {
+  function setup(incidents: Array<Record<string, unknown>>) {
+    const db = new DatabaseSync(":memory:");
+    db.exec(
+      "create table cf_agents_task_runs (definition text, state text, input text)"
+    );
+    db.prepare("insert into cf_agents_task_runs values (?, ?, ?)").run(
+      "turn",
+      "running",
+      JSON.stringify({ requestId: "r1" })
+    );
+    const sql = {
+      exec: (query: string, ...bindings: unknown[]) => {
+        const rows = db.prepare(query).all(...(bindings as SQLInputValue[]));
+        return { toArray: () => rows as Record<string, unknown>[] };
+      }
+    };
+    const storage = {
+      list: async <T>() =>
+        new Map(incidents.map((incident, i) => [`k${i}`, incident as T]))
+    } as unknown as Pick<DurableObjectStorage, "list">;
+    return { sql, storage };
+  }
+
+  it("a turn's run that nothing has picked up waits for recovery", async () => {
+    const { sql, storage } = setup([]);
+    expect(
+      await chatRecoveryNames({
+        sql,
+        storage,
+        turnName: "turn",
+        liveRequestIds: new Set()
+      })
+    ).toBe(true);
+    expect(
+      await chatRecoveryNames({
+        sql,
+        storage,
+        turnName: "turn",
+        liveRequestIds: new Set(["r1"])
+      })
+    ).toBe(false);
+  });
+
+  it("a turn's run still settling after recovery settled its incident does not", async () => {
+    const { sql, storage } = setup([{ status: "skipped", requestId: "r1" }]);
+    expect(
+      await chatRecoveryNames({
+        sql,
+        storage,
+        turnName: "turn",
+        liveRequestIds: new Set()
+      })
+    ).toBe(false);
+    expect(
+      await chatRecoveryNames({
+        sql,
+        storage,
+        turnName: "turn",
+        liveRequestIds: new Set(),
+        requestId: "r1"
+      })
+    ).toBe(true);
+  });
+
+  it("a live incident waits for recovery", async () => {
+    const { sql, storage } = setup([{ status: "scheduled", requestId: "r0" }]);
+    expect(
+      await chatRecoveryNames({
+        sql,
+        storage,
+        turnName: "turn",
+        liveRequestIds: new Set(["r1"])
+      })
+    ).toBe(true);
   });
 });

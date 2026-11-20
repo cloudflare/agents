@@ -206,6 +206,7 @@ export type Env = {
   NonChatRecoveryTestAgent: DurableObjectNamespace<NonChatRecoveryTestAgent>;
   RecoveryThrowingAgent: DurableObjectNamespace<RecoveryThrowingAgent>;
   RecoverySlowStreamAgent: DurableObjectNamespace<RecoverySlowStreamAgent>;
+  AsyncStartAdmissionAgent: DurableObjectNamespace<AsyncStartAdmissionAgent>;
   AIChatAgentToolParent: DurableObjectNamespace<AIChatAgentToolParent>;
   AIChatAgentToolChild: DurableObjectNamespace<AIChatAgentToolChild>;
   StuckAgentToolChild: DurableObjectNamespace<StuckAgentToolChild>;
@@ -5053,6 +5054,55 @@ export class RecoveryThrowingAgent extends AIChatAgent<Env> {
 
   async waitForIdleForTest(): Promise<void> {
     await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
+  }
+}
+
+/**
+ * An app whose `onStart` takes a while and whose turns need it done: a
+ * request replayed after a reset must not run before the app has started.
+ */
+export class AsyncStartAdmissionAgent extends SlowStreamAgent {
+  private _ready = false;
+
+  override async onStart(): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    this._ready = true;
+  }
+
+  override async onChatMessage(
+    onFinish: GenerateTextOnFinishCallback<ToolSet>,
+    options?: OnChatMessageOptions
+  ) {
+    if (!this._ready) {
+      return new Response("not started", {
+        headers: { "Content-Type": "text/plain" }
+      });
+    }
+    return super.onChatMessage(onFinish, options);
+  }
+
+  /**
+   * Store a user message and the record of the request that stored it, as
+   * a reset leaves them when it lands before the request's turn started.
+   */
+  async seedQueuedRequestForTest(requestId: string): Promise<void> {
+    const id = `u-${requestId}`;
+    await this.persistMessages([
+      ...this.messages,
+      { id, role: "user", parts: [{ type: "text", text: requestId }] }
+    ]);
+    const { admissions } = (this as unknown as { _turns: ChatTurns })._turns;
+    admissions?.admit({
+      requestId,
+      messageIds: [id],
+      decision: { strategy: null, overlapping: false, debounceUntilMs: null },
+      payload: {
+        trigger: "submit-message",
+        body: { format: "sse", chunkCount: 3, chunkDelayMs: 10 },
+        clientTools: undefined
+      }
+    });
+    admissions?.live.delete(requestId);
   }
 }
 

@@ -205,6 +205,9 @@ export async function chatRecoveryNames(input: {
   requestId?: string;
 }): Promise<boolean> {
   const { requestId } = input;
+  // Requests recovery has an incident for. Their turn's run can still be
+  // settling after the incident did; it no longer waits for recovery.
+  const named = new Set<string>();
   const incidents = await input.storage.list<{
     status?: string;
     requestId?: string;
@@ -212,6 +215,10 @@ export async function chatRecoveryNames(input: {
   }>({ prefix: "cf:chat-recovery:incident:" });
   for (const incident of incidents.values()) {
     if (!incident) continue;
+    if (incident.requestId) named.add(incident.requestId);
+    if (incident.recoveryRootRequestId) {
+      named.add(incident.recoveryRootRequestId);
+    }
     if (requestId === undefined) {
       if (
         incident.status === "detected" ||
@@ -229,7 +236,9 @@ export async function chatRecoveryNames(input: {
   }
   for (const id of interruptedTurnRequestIds(input.sql, input.turnName)) {
     if (
-      requestId === undefined ? !input.liveRequestIds.has(id) : id === requestId
+      requestId === undefined
+        ? !input.liveRequestIds.has(id) && !named.has(id)
+        : id === requestId
     ) {
       return true;
     }
@@ -409,7 +418,16 @@ export class ChatAdmissions {
     );
     for (const record of replays) this.live.add(record.requestId);
     this.host.beginReplay(replays);
-    for (const record of replays) {
+    for (const listed of replays) {
+      // Read again: a stop or a clear can have landed while this pass
+      // awaited, and the request has no abort controller yet to take it.
+      const record = this.host.store
+        .list()
+        .find((r) => r.requestId === listed.requestId);
+      if (!record) {
+        this.live.delete(listed.requestId);
+        continue;
+      }
       await new Promise<void>((queued) => {
         this.host.replay(record, queued).then(
           () => queued(),

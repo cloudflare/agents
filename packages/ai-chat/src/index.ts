@@ -1142,10 +1142,11 @@ export class AIChatAgent<
           });
         }
       );
+      const started = await _onStart(props);
       // Requests an earlier isolate accepted and never started run again,
-      // once no interrupted turn waits for recovery.
+      // once the app has started and no interrupted turn waits for recovery.
       this._resumeAdmissions();
-      return _onStart(props);
+      return started;
     };
 
     const _onConnect = this.onConnect.bind(this);

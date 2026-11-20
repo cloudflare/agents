@@ -19,6 +19,7 @@ type AdmissionStub = {
     Array<{ requestId: string; stopped: boolean }>
   >;
   seedAdmissionForTest(requestId: string, messageIds: string[]): Promise<void>;
+  seedQueuedRequestForTest(requestId: string): Promise<void>;
 };
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -297,5 +298,20 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
     const messages = await restarted.getPersistedMessages();
     expect(messages.map((m) => m.role)).toEqual(["user", "assistant"]);
     expect(await restarted.getAdmissionsForTest()).toEqual([]);
+  }, 40_000);
+
+  it("a request replayed after a reset runs once the app's onStart is done", async () => {
+    const room = crypto.randomUUID();
+    const binding = "AsyncStartAdmissionAgent";
+    const stub = await agent(binding, room);
+    await stub.seedQueuedRequestForTest("r9");
+    await reset(binding, room);
+    const restarted = await agent(binding, room);
+    const messages = await waitFor(
+      () => restarted.getPersistedMessages(),
+      (m) => m.some((x) => x.role === "assistant")
+    );
+    expect(messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+    expect(textOf(messages[1])).toBe(QUICK_REPLY);
   }, 40_000);
 });

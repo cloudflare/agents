@@ -177,7 +177,7 @@ recovery settles, in order, each with its own reply. A submission accepted
 after the reset runs as usual.
 
 Client requests sent over a WebSocket get the same treatment: see
-[Requests waiting behind an interrupted turn](../agents/chat-agents.md#requests-waiting-behind-an-interrupted-turn).
+[Requests waiting behind an interrupted turn](https://github.com/cloudflare/agents/blob/main/docs/agents/chat-agents.md#requests-waiting-behind-an-interrupted-turn).
 
 ## Compared with `saveMessages`
 
