@@ -12,6 +12,7 @@ import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isSocketAddressPending } from "../socket-address";
 import { chatThrottleOptions } from "./chat-throttle";
 import { dropEmptyReply } from "./reply-empty";
+import { drawQueuedLast } from "./queued-messages";
 import type { ChatTurnOutcome, OutgoingMessage } from "./wire-types";
 import { STREAM_RESUME_NONE_REASONS } from "./protocol";
 import { MessageType } from "./wire-types";
@@ -697,6 +698,8 @@ export function detectToolsRequiringConfirmation(
     .filter(([_name, tool]) => !tool.execute)
     .map(([name]) => name);
 }
+
+const NO_QUEUED_MESSAGES: ReadonlySet<string> = new Set();
 
 export function useAgentChat<
   // oxlint-disable-next-line no-unused-vars -- kept for backward compat
@@ -1431,6 +1434,9 @@ export function useAgentChat<
   ]);
 
   const localResponseMessageIdsRef = useRef(new Map<string, string>());
+  /** The messages the last message list named as queued. */
+  const [queuedMessageIds, setQueuedMessageIds] =
+    useState<ReadonlySet<string>>(NO_QUEUED_MESSAGES);
   const protectedStreamingAssistantRef = useRef<{
     assistantId: string;
     anchorMessageId: string | null;
@@ -1644,6 +1650,7 @@ export function useAgentChat<
   const resetLocalChatState = useCallback(() => {
     markInitialMessagesSeeded();
     setMessages([]);
+    setQueuedMessageIds(NO_QUEUED_MESSAGES);
     setClientToolResults(new Map());
     setPendingOnToolCallIds(new Set());
     resetToolContinuation();
@@ -2167,6 +2174,13 @@ export function useAgentChat<
             ? new Set(pendingBufferedSendIdsRef.current)
             : new Set<string>();
           pendingBufferedSendIdsRef.current.clear();
+          // Messages waiting requests hold are drawn last (`queued-messages`).
+          setQueuedMessageIds(
+            Array.isArray(data.queuedMessageIds) &&
+              data.queuedMessageIds.length > 0
+              ? new Set(data.queuedMessageIds)
+              : NO_QUEUED_MESSAGES
+          );
           setMessages((currentMessages: ChatMessage[]) => {
             let next = preserveProtectedStreamingAssistant(
               data.messages,
@@ -2973,6 +2987,11 @@ export function useAgentChat<
     })) as ChatMessage[];
   }, [chatMessages, clientToolResults]);
 
+  const displayedMessages = useMemo(
+    () => drawQueuedLast(messagesWithToolResults, queuedMessageIds),
+    [messagesWithToolResults, queuedMessageIds]
+  );
+
   // Cleanup stale entries from clientToolResults when messages change
   // to prevent memory leak in long conversations.
   useEffect(() => {
@@ -3079,7 +3098,7 @@ export function useAgentChat<
   return {
     ...useChatHelpers,
     resumeStream,
-    messages: messagesWithToolResults,
+    messages: displayedMessages,
     isServerStreaming: effectiveIsServerStreaming,
     isStreaming,
     /**
