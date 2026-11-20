@@ -1031,7 +1031,7 @@ export class ChatRecoveryEngine {
     data: Record<string, unknown>;
     reason?: ChatRecoveryScheduleReason;
     delaySeconds?: number;
-  }): Promise<void> {
+  }): Promise<boolean> {
     const { incident } = input;
     // One write: the status, what the scheduled attempt will do (so a turn
     // that continues a reply can tell whether this recovery was going to
@@ -1047,8 +1047,21 @@ export class ChatRecoveryEngine {
       typeof input.data.targetAssistantId === "string"
         ? input.data.targetAssistantId
         : undefined;
-    const { before: stored } = await this.#update(key, (current) => {
+    let stoppedInstead = false;
+    const { before: stored, after } = await this.#update(key, (current) => {
       if (!current) return undefined;
+      // A stop of the turn landed while it was routed here, before this
+      // write: the stop is the outcome, and nothing is scheduled.
+      if (isCancelled(current) || this.#wasStopped(current)) {
+        stoppedInstead = true;
+        return isCancelled(current)
+          ? undefined
+          : {
+              ...current,
+              status: "skipped",
+              reason: CHAT_RECOVERY_CANCELLED_REASON
+            };
+      }
       const { deferredError: _deferredError, ...rest } = current;
       delivery = (current.scheduleCount ?? 0) + 1;
       return {
@@ -1061,6 +1074,21 @@ export class ChatRecoveryEngine {
         }
       };
     });
+    if (stoppedInstead) {
+      if (after !== undefined && stored) {
+        this.adapter.emitRecoveryEvent({
+          type: "chat:recovery:skipped",
+          incidentId: incident.incidentId,
+          requestId: stored.requestId,
+          attempt: stored.attempt,
+          maxAttempts: stored.maxAttempts,
+          recoveryKind: stored.recoveryKind,
+          reason: CHAT_RECOVERY_CANCELLED_REASON
+        });
+      }
+      await this.adapter.setRecovering(false);
+      return false;
+    }
     if (stored) {
       await this.adapter.setRecovering(
         true,
@@ -1080,6 +1108,32 @@ export class ChatRecoveryEngine {
       delivery === undefined ? input.data : { ...input.data, delivery },
       input.reason ?? "initial",
       input.delaySeconds ?? 0
+    );
+    return true;
+  }
+
+  /**
+   * Request ids a user stopped in this isolate, newest last. A stop that
+   * lands while a turn is routed into recovery, before its incident is
+   * `scheduled`, finds nothing to cancel; the schedule reads this instead.
+   * Bounded: an id only matters while its turn is being routed.
+   */
+  readonly #stoppedRequestIds = new Set<string>();
+
+  #noteStoppedRequest(requestId: string): void {
+    this.#stoppedRequestIds.delete(requestId);
+    this.#stoppedRequestIds.add(requestId);
+    if (this.#stoppedRequestIds.size > 64) {
+      const oldest = this.#stoppedRequestIds.values().next().value;
+      if (oldest !== undefined) this.#stoppedRequestIds.delete(oldest);
+    }
+  }
+
+  #wasStopped(incident: ChatRecoveryIncident): boolean {
+    return (
+      this.#stoppedRequestIds.has(incident.requestId) ||
+      (incident.recoveryRootRequestId !== undefined &&
+        this.#stoppedRequestIds.has(incident.recoveryRootRequestId))
     );
   }
 
@@ -1211,6 +1265,7 @@ export class ChatRecoveryEngine {
    * @returns Whether any incident was cancelled.
    */
   async cancelScheduledRecovery(requestId: string): Promise<boolean> {
+    this.#noteStoppedRequest(requestId);
     const incidents = (await this.adapter.listActiveIncidents?.()) ?? [];
     let cancelled = false;
     for (const incident of incidents) {
@@ -1330,7 +1385,7 @@ export class ChatRecoveryEngine {
    * Schedule the recovery attempt for an interrupted turn: a retry of its
    * question or a continue of its reply. See `recovery-route.ts`.
    */
-  scheduleRecoveredTurn(input: RecoveredTurnSchedule): Promise<void> {
+  scheduleRecoveredTurn(input: RecoveredTurnSchedule): Promise<boolean> {
     return scheduleRecoveredTurn(this, input);
   }
 

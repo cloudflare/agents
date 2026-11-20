@@ -13026,7 +13026,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           ),
           event.autoContinue === true,
           () => this._continuationSpec(connection),
-          (run) => this._enqueueInteractionOutcome(run)
+          (run) => this._enqueueInteractionOutcome(run),
+          connection.id
         );
         break;
       }
@@ -13036,7 +13037,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           () => this._applyToolApproval(event.toolCallId, event.approved),
           event.autoContinue === true,
           () => this._continuationSpec(connection),
-          (run) => this._enqueueInteractionOutcome(run)
+          (run) => this._enqueueInteractionOutcome(run),
+          connection.id
         );
         break;
       }
@@ -13339,6 +13341,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // Queue generation, abort controllers, submit concurrency, the tool-result
     // apply chain, the continuation slots and barrier, and parked connections.
     this._turns.reset();
+    this._agentToolRuns.chatReset();
     for (const controller of this._submissionAbortControllers.values()) {
       controller.abort(new Error("Turn state reset"));
     }
@@ -14159,6 +14162,24 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           );
           return { status: "aborted" };
         }
+        if (outcome === "stopped") {
+          // A user stopped the turn while it was routed: it ends stopped.
+          if (!streamFinalized) {
+            this._finishResumableStream(streamId, "aborted");
+            streamFinalized = true;
+          }
+          if (!doneSent) {
+            this._broadcastChat({
+              type: MSG_CHAT_RESPONSE,
+              id: requestId,
+              body: "",
+              done: true,
+              outcome: "aborted"
+            });
+            doneSent = true;
+          }
+          return { status: "aborted" };
+        }
         // A declined continuation (`continue: false`) falls through: the turn
         // ends as the stream error it hit.
         if (outcome === "exhausted") {
@@ -14762,6 +14783,24 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           // turn and its own stream finalize re-triggers the held barrier.
           this._streamingAssistant = null;
           return { status: "aborted", reason: "interrupted" };
+        }
+        if (outcome === "stopped") {
+          // A user stopped the turn while it was routed: it ends stopped.
+          this._finishResumableStream(streamId, "aborted");
+          this._pendingResumeConnections.clear();
+          if (!doneSent) {
+            this._broadcastChat({
+              type: MSG_CHAT_RESPONSE,
+              id: requestId,
+              body: "",
+              done: true,
+              outcome: "aborted",
+              ...(continuation && { continuation: true })
+            });
+            doneSent = true;
+          }
+          this._streamingAssistant = null;
+          return { status: "aborted" };
         }
         // A declined continuation (`continue: false`) falls through: the turn
         // ends as the stream error it hit.
@@ -15913,7 +15952,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         apply,
         autoContinue,
         () => this._continuationSpec(connection as Connection),
-        (run) => this._enqueueInteractionOutcome(run)
+        (run) => this._enqueueInteractionOutcome(run),
+        connection?.id ?? null
       );
     } else {
       // Like a connection's: only an outcome that settled its call

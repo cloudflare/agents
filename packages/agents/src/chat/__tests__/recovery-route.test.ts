@@ -208,6 +208,30 @@ describe("routeStreamInterruption", () => {
     expect(t.incident()?.scheduleCount).toBe(1);
   });
 
+  it("schedules nothing for a turn a user stopped while it was routed", async () => {
+    const t = setup({ storedReplyId: "assistant-1" });
+    // The stop lands while the app's hook runs: the incident is open but
+    // not `scheduled` yet, so the stop finds nothing to cancel.
+    t.host.onChatRecovery = async () => {
+      await t.engine.cancelScheduledRecovery("request-1");
+      return {};
+    };
+
+    expect(await t.run()).toBe("stopped");
+    expect(t.scheduled).toEqual([]);
+    expect(t.incident()).toMatchObject({
+      status: "skipped",
+      reason: "user_cancelled"
+    });
+    expect(t.events.map((event) => event.type)).not.toContain(
+      "chat:recovery:scheduled"
+    );
+    expect(
+      t.events.filter((event) => event.type === "chat:recovery:skipped")
+    ).toHaveLength(1);
+    expect(t.log).not.toContain("after-schedule");
+  });
+
   it("retries the question when the turn produced nothing", async () => {
     const t = setup({ partialParts: [], retryTarget: "user-1" });
     expect(await t.run()).toBe("scheduled");

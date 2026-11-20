@@ -1051,6 +1051,31 @@ describe("AgentToolRuns", () => {
   });
 
   describe("a run whose stream is cut off in this isolate", () => {
+    it("ends with the reset's error when the chat is cleared while recovery has it", async () => {
+      const { runs, store, settled, setRecovery } = setup();
+      let closed = 0;
+      const turn = heldTurn();
+      await runs.start("run-1", START, turn.run);
+      runs.bindTurn("run-1", "req-1");
+      runs.closers.set("run-1", new Set([() => void closed++]));
+      setRecovery("in-progress");
+      turn.end({
+        requestId: "req-1",
+        status: "aborted",
+        reason: "interrupted"
+      });
+      await settled();
+      expect(store.read("run-1")?.status).toBe("running");
+
+      runs.chatReset();
+
+      expect(store.terminal("run-1")).toEqual({
+        status: "error",
+        error: "cleared"
+      });
+      expect(closed).toBe(1);
+    });
+
     it("stays open while recovery works on its turn, and is settled when recovery ends", async () => {
       const { runs, store, settled, setRecovery, setTranscript } = setup();
       let closed = 0;

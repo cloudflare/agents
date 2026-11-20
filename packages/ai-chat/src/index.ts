@@ -1408,7 +1408,8 @@ export class AIChatAgent<
               connection,
               errorPrefix: "[AIChatAgent] Tool continuation failed:"
             }),
-            (run) => this._enqueueInteractionApply(run)
+            (run) => this._enqueueInteractionApply(run),
+            connection.id
           );
           return;
         }
@@ -1424,7 +1425,8 @@ export class AIChatAgent<
               connection,
               errorPrefix: "[AIChatAgent] Tool approval continuation failed:"
             }),
-            (run) => this._enqueueInteractionApply(run)
+            (run) => this._enqueueInteractionApply(run),
+            connection.id
           );
           return;
         }
@@ -3017,6 +3019,7 @@ export class AIChatAgent<
     // Queue generation, abort controllers, submit concurrency, the tool-result
     // apply chain, the continuation slots and barrier, and parked connections.
     this._turns.reset();
+    this._agentToolRuns.chatReset();
     this._streamingTurnActive = false;
     this._pendingChatResponseResults.length = 0;
   }
@@ -6383,6 +6386,21 @@ export class AIChatAgent<
                   ...(continuation && { continuation: true })
                 });
                 streamResult = { status: "aborted", reason: "interrupted" };
+                streamCompleted.value = true;
+                stallRouted = true;
+              } else if (outcome === "stopped") {
+                // A user stopped the turn while it was routed: nothing was
+                // scheduled, and the turn ends as a stopped one.
+                this._finishStream(streamId, "aborted");
+                this._broadcastChatMessage({
+                  body: "",
+                  done: true,
+                  id,
+                  type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+                  outcome: "aborted",
+                  ...(continuation && { continuation: true })
+                });
+                streamResult = { status: "aborted" };
                 streamCompleted.value = true;
                 stallRouted = true;
               } else if (outcome === "exhausted") {

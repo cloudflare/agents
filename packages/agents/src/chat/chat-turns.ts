@@ -705,6 +705,9 @@ export class ChatTurns<
    * @param enqueue - How the apply joins the queue. Defaults to
    *   {@link enqueueInteraction}. A host with an overridable enqueue hook
    *   passes it, so a subclass that wraps applies sees every one of them.
+   * @param connectionId - The connection the frame came from, so a stop
+   *   from that tab drops this result and no other tab's
+   *   ({@link cancelWaitingContinuation}). Read from `spec` when left out.
    * @returns Whether the tool call was found.
    */
   applyInteraction(
@@ -712,7 +715,8 @@ export class ChatTurns<
     autoContinue: boolean,
     spec: () => ContinuationSource<TConnection>,
     enqueue: (run: () => Promise<boolean>) => Promise<boolean> = (run) =>
-      this.enqueueInteraction(run)
+      this.enqueueInteraction(run),
+    connectionId?: string | null
   ): Promise<boolean> {
     return this.#applyUnlessStopped(
       apply,
@@ -720,7 +724,7 @@ export class ChatTurns<
       (outcome) =>
         this.autoContinuation.afterInteraction(outcome, autoContinue, spec),
       enqueue,
-      spec().connection.id
+      connectionId === undefined ? connectionOf(spec) : connectionId
     );
   }
 
@@ -1375,4 +1379,16 @@ export class ChatTurns<
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** The connection a continuation spec names, or `null` when it cannot say. */
+function connectionOf<TConnection extends ContinuationConnection>(
+  spec: () => ContinuationSource<TConnection>
+): string | null {
+  try {
+    return spec().connection?.id ?? null;
+  } catch {
+    // A spec may throw when the result is not to continue.
+    return null;
+  }
 }

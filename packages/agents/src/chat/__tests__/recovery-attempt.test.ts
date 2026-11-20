@@ -759,7 +759,9 @@ describe("runRecoveredTurn", () => {
   it("leaves the incident to the attempt an interrupted turn scheduled", async () => {
     const t = setup({
       result: { status: "aborted" },
-      duringTurn: ({ engine }) => scheduleNext(engine)
+      duringTurn: async ({ engine }) => {
+        await scheduleNext(engine);
+      }
     });
     await t.run();
     expect(t.incident()).toMatchObject({ status: "scheduled" });
@@ -776,7 +778,9 @@ describe("runRecoveredTurn", () => {
 
   it("records a completed turn even when it scheduled another attempt", async () => {
     const t = setup({
-      duringTurn: ({ engine }) => scheduleNext(engine)
+      duringTurn: async ({ engine }) => {
+        await scheduleNext(engine);
+      }
     });
     await t.run();
     expect(t.incident()).toBeUndefined();

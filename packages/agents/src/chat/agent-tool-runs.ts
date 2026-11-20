@@ -542,6 +542,24 @@ export class AgentToolRuns {
   }
 
   /**
+   * The chat was cleared. A run with no lifecycle in this isolate (left
+   * open for chat recovery, or interrupted in an earlier one) has nothing
+   * left to finish it: recovery skips a cleared chat. It ends `error` with
+   * the reset's error now. A run whose turn is live here ends through its
+   * own lifecycle, with the same error.
+   */
+  chatReset(): void {
+    for (const runId of this.host.store.listOpen()) {
+      if (this.controllers.has(runId)) continue;
+      this.#settle(runId, () => ({
+        status: "error",
+        error: this.host.resetError
+      }));
+      this.closeTailers(runId);
+    }
+  }
+
+  /**
    * Cancel a run. A no-op for a run that does not exist or has ended, so a
    * late or repeated cancel aborts nothing.
    *
