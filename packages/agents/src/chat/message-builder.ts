@@ -679,6 +679,28 @@ export function isReplayChunk(
 }
 
 /**
+ * Close a text or reasoning part an interruption left `streaming`.
+ *
+ * A turn that continues a cut-off reply opens text and reasoning parts of
+ * its own, after the parts the reply already holds. So its reasoning and
+ * its text follow the cut-off text in the order the model wrote them, and
+ * the continuation never writes into the old part. An end chunk closes only
+ * the newest part of its type, so a part left streaming would otherwise
+ * never be closed.
+ *
+ * Both chat hosts apply this to the parts of the message a continuation
+ * extends, before its first chunk.
+ *
+ * @returns The same part when it is not a streaming text or reasoning part.
+ */
+export function settleInterruptedPart(part: MessagePart): MessagePart {
+  return (part.type === "text" || part.type === "reasoning") &&
+    part.state === "streaming"
+    ? { ...part, state: "done" as const }
+    : part;
+}
+
+/**
  * Finds the last part in the array matching the given type.
  * Searches from the end for efficiency (the part we want is usually recent).
  */

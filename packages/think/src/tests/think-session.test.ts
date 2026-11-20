@@ -1347,7 +1347,9 @@ describe("Think — abort", () => {
       "partial4 "
     ]);
 
-    await agent.testChatWithAbort("Abort and persist", 2);
+    // After the first text chunk. A reply stopped before it has any content
+    // holds nothing and is not stored.
+    await agent.testChatWithAbort("Abort and persist", 4);
 
     const history = await agent.getStoredMessages();
     expect(history).toHaveLength(2);
@@ -1358,13 +1360,28 @@ describe("Think — abort", () => {
     };
     expect(assistantMsg.role).toBe("assistant");
     expect(assistantMsg.parts.length).toBeGreaterThan(0);
+    // Nothing will write into the text part again: it is stored closed.
+    expect(
+      (history[1] as UIMessage).parts.find((part) => part.type === "text")
+    ).toMatchObject({ state: "done" });
+  });
+
+  it("stores no reply for a turn stopped before it has any content", async () => {
+    const agent = await freshAgent("abort-empty");
+    await agent.setMultiChunkResponse(["partial1 ", "partial2 "]);
+
+    // Stopped after `start` and `start-step`: nothing a client can show.
+    await agent.testChatWithAbort("Abort before content", 2);
+
+    const history = (await agent.getStoredMessages()) as UIMessage[];
+    expect(history.map((message) => message.role)).toEqual(["user"]);
   });
 
   it("should recover and chat normally after abort", async () => {
     const agent = await freshAgent("abort-recover");
 
     await agent.setMultiChunkResponse(["a ", "b ", "c ", "d "]);
-    await agent.testChatWithAbort("Abort this", 2);
+    await agent.testChatWithAbort("Abort this", 4);
 
     await agent.clearMultiChunkResponse();
     const result = await agent.testChat("Normal after abort");
@@ -4005,6 +4022,19 @@ describe("Think — onChatRecovery", () => {
     // text) are durable before the stream completes — surviving an eviction
     // that would otherwise lose the result and re-run the (non-idempotent) tool.
     expect(afterToolOutputCount).toBeGreaterThan(bufferedTextCount);
+  });
+
+  it("stores a tool call before the tool runs, so a reset mid-run leaves a record of it", async () => {
+    const agent = await freshRecoveryAgent("tool-call-durability");
+
+    const { beforeCall, afterCall } =
+      await agent.probeToolCallDurabilityForTest();
+
+    // The second reasoning chunk is still in the buffer.
+    expect(beforeCall).toBe(1);
+    // The call is in storage before `execute()` starts. A tool can run for
+    // a long time with no further chunk.
+    expect(afterCall).toBeGreaterThan(beforeCall);
   });
 
   it("replays a pre-stream error to a reconnecting client (hydration)", async () => {

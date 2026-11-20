@@ -99,6 +99,14 @@ export type ChatRecoveryIncident = {
   lastProgressAt?: number;
   reason?: string;
   /**
+   * The reply this incident was to continue held nothing and was removed, so
+   * the attempt answers the question again. Written before the reply is
+   * removed: the same continue payload is delivered again after a platform
+   * transient, an eviction or a stable-timeout reschedule, and without this
+   * that run would find no reply, take the conversation for changed and skip.
+   */
+  replyRemoved?: boolean;
+  /**
    * High-water mark of the durable, monotonic recovery-progress counter
    * observed for this incident. Distinguishes a turn making forward progress
    * but repeatedly interrupted by isolate resets (deploys) — which must NOT

@@ -1515,6 +1515,10 @@ export class ThinkClientToolsAgent extends Think {
     part: UIMessage["parts"][number]
   ): UIMessage["parts"][number] {
     const record = part as Record<string, unknown>;
+    // An app's override that fails on a part it did not expect.
+    if (record.type === "tool-throwing_repair") {
+      throw new Error("repairInterruptedToolPart failed");
+    }
     if (record.type === "tool-ask_user") {
       const input = record.input as { prompt?: unknown } | undefined;
       const prompt = typeof input?.prompt === "string" ? input.prompt : "";
@@ -1525,14 +1529,78 @@ export class ThinkClientToolsAgent extends Think {
     return super.repairInterruptedToolPart(part);
   }
 
+  /** The before-turn repair on `messages`, storing and reporting nothing. */
   async repairToolTranscriptPartsForTest(
     messages: UIMessage[]
   ): Promise<UIMessage[]> {
-    return (
-      this as unknown as {
-        _repairToolTranscriptParts(m: UIMessage[]): { messages: UIMessage[] };
-      }
-    )._repairToolTranscriptParts(messages).messages;
+    const internal = this as unknown as {
+      _turnIsContinuation: boolean;
+      _turns: {
+        settleBeforeTurn(
+          messages: UIMessage[],
+          options: {
+            continuation: boolean;
+            repairPart: (
+              part: UIMessage["parts"][number]
+            ) => UIMessage["parts"][number];
+          },
+          sink: { persist(): Promise<void>; emitRepaired(): void }
+        ): Promise<{ messages: UIMessage[] }>;
+      };
+    };
+    const repaired = await internal._turns.settleBeforeTurn(
+      messages,
+      {
+        continuation: internal._turnIsContinuation,
+        repairPart: (part) => this.repairInterruptedToolPart(part)
+      },
+      { persist: async () => {}, emitRepaired: () => {} }
+    );
+    return repaired.messages;
+  }
+
+  /**
+   * Build a model request as a continuation turn would, without going
+   * through a continuation entry point. Returns the error it throws.
+   */
+  async assembleAsContinuationForTest(): Promise<string | null> {
+    const internal = this as unknown as {
+      _turnIsContinuation: boolean;
+      _assembleModelMessages(tools: Record<string, never>): Promise<unknown>;
+    };
+    internal._turnIsContinuation = true;
+    try {
+      await internal._assembleModelMessages({});
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    } finally {
+      internal._turnIsContinuation = false;
+    }
+  }
+
+  /** The stored state of a tool call, or `missing`. */
+  async probeToolPartStateForTest(opts: {
+    toolCallId: string;
+  }): Promise<{ state: string; errorText?: string }> {
+    const messages = (await this.getMessages()) as UIMessage[];
+    const part = messages
+      .flatMap((m) => m.parts as Array<Record<string, unknown>>)
+      .find((p) => p.toolCallId === opts.toolCallId);
+    return {
+      state: (part?.state as string) ?? "missing",
+      ...(typeof part?.errorText === "string" && { errorText: part.errorText })
+    };
+  }
+
+  /** Run `continueLastTurn` and wait for the continuation turn to end. */
+  async continueLastTurnForTest(): Promise<{
+    requestId: string;
+    status: string;
+    reason?: string;
+  }> {
+    const { requestId, status, reason } = await this.continueLastTurn();
+    return { requestId, status, ...(reason !== undefined && { reason }) };
   }
 
   /** Append a message with no turn, as an app's status message is. */

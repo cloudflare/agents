@@ -40,7 +40,7 @@
 import { isDurableObjectResetError } from "../retries";
 import type { AbortRegistry } from "./abort-registry";
 import type { AutoContinuationController } from "./auto-continuation-controller";
-import type { ClientToolSchema } from "./client-tools";
+import { continuationWaitsOnClient } from "./before-turn";
 import {
   continuationTargetIsLatest,
   type ContinuationConnection,
@@ -67,6 +67,8 @@ export interface ContinuationTurnParts<
     role: string;
     parts: ReadonlyArray<unknown>;
   }>;
+  /** Names of the tools a client is known to run (the schemas it sent). */
+  clientToolNames(): ReadonlySet<string>;
   /**
    * The id of the last reply a turn stored, when the host records it. See
    * {@link continuationTargetIsLatest}.
@@ -121,23 +123,26 @@ export interface ContinuationDropped {
    * - `moved_on`: a newer message follows the reply its tool result is in.
    * - `stopped`: it was stopped before it ran, in the queue or because the
    *   turn it was waiting on was stopped.
+   * - `awaiting_client`: the reply it would continue still waits on a
+   *   client for a tool result or an approval. The barrier holds a
+   *   continuation until its batch is answered, so this is a backstop. The
+   *   client's answer schedules a new continuation.
    */
-  reason: "answered" | "moved_on" | "stopped";
+  reason: "answered" | "moved_on" | "stopped" | "awaiting_client";
 }
 
 /**
- * What a continuation turn runs with: its request id, the connection and
- * tools of the latest result that scheduled it, and the messages those
- * results are stored in. `connection` is `undefined` for a continuation no
- * connection scheduled.
+ * What a continuation turn runs with: its request id, the connection of
+ * the latest result that scheduled it, and the messages those results are
+ * stored in. `connection` is `undefined` for a continuation no connection
+ * scheduled. The host reads the tools and body from the stored request
+ * context when the turn starts.
  */
 export interface ContinuationContext<
   TConnection extends ContinuationConnection = ContinuationConnection
 > {
   requestId: string;
   connection: TConnection | undefined;
-  clientTools?: ClientToolSchema[];
-  body?: Record<string, unknown>;
   /** See {@link ContinuationPending.targetMessageIds}. */
   targetMessageIds: readonly string[];
 }
@@ -196,15 +201,22 @@ export interface ContinuationTurn<
  *   newer question or reply, a regenerate, a clear). A message appended
  *   without a turn does not count ({@link continuationTargetIsLatest});
  * - `answered`: the message it answers already went on to the model's
- *   answer ({@link transcriptEndsInAnswer}).
+ *   answer ({@link transcriptEndsInAnswer});
+ * - `awaiting_client`: the last message still waits on a client for a tool
+ *   result or an approval. The request would hold a tool call with no
+ *   result, so there is nothing to continue until the client answers
+ *   ({@link continuationWaitsOnClient}).
  *
  * The result itself is stored either way, and the next turn's model call
  * reads it.
  */
 function nothingToAnswer(
-  parts: Pick<ContinuationTurnParts, "messages" | "lastTurnReplyId">,
+  parts: Pick<
+    ContinuationTurnParts,
+    "messages" | "lastTurnReplyId" | "clientToolNames"
+  >,
   continuation: Pick<ContinuationPending, "targetMessageIds">
-): "moved_on" | "answered" | null {
+): "moved_on" | "answered" | "awaiting_client" | null {
   const messages = parts.messages();
   if (
     !continuationTargetIsLatest(messages, continuation, parts.lastTurnReplyId())
@@ -221,6 +233,9 @@ function nothingToAnswer(
     reply--;
   }
   if (transcriptEndsInAnswer(messages.slice(0, reply + 1))) return "answered";
+  if (continuationWaitsOnClient(messages, parts.clientToolNames())) {
+    return "awaiting_client";
+  }
   return null;
 }
 

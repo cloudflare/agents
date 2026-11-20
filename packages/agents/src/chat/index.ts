@@ -5,6 +5,7 @@ export {
   isReplayChunk,
   lateToolInputForwardChunks,
   normalizeToolInput,
+  settleInterruptedPart,
   type MessageParts,
   type MessagePart,
   type StreamChunkData
@@ -290,13 +291,50 @@ export { keepStoredReplies } from "./stored-replies";
  * and `@cloudflare/ai-chat`, not a public API. See `repair-transcript.ts`.
  */
 export {
+  persistRepairedTranscript,
+  removeEmptyReplyToContinue,
   repairInterruptedToolParts,
+  replyIsEmpty,
   settleInterruptedReply,
+  settleReplyBeforeRecovery,
   streamChunksFinished,
+  stripTrailingReasoning,
   toolPartHasSettledResult,
+  unsettledToolCallIds,
+  type RepairedTranscriptSink,
+  type ReplyRemoval,
   type RepairInterruptedToolPartsOptions,
-  type RepairInterruptedToolPartsResult
+  type RepairInterruptedToolPartsResult,
+  type SettleInterruptedReplyOptions
 } from "./repair-transcript";
+
+/**
+ * @internal What a turn settles before the model is called: the request
+ * context a client request stores, and the before-turn transcript repair.
+ * Sibling-package support, not a public API. See `before-turn.ts`.
+ */
+export {
+  continuationWaitsOnClient,
+  replyToContinueIsEmpty,
+  interruptedToolPartAsError,
+  INTERRUPTED_TOOL_ERROR_TEXT,
+  repairTranscriptBeforeTurn,
+  type BeforeTurnRepairOptions,
+  type BeforeTurnRepairResult
+} from "./before-turn";
+
+/**
+ * @internal The one owner of a chat's stored request context (client tools
+ * and body). Sibling-package support, not a public API. See
+ * `request-context.ts`.
+ */
+export {
+  ChatRequestContext,
+  clientRequestContext,
+  type ClientRequestContext,
+  type RequestContextKey,
+  type RequestContextStore
+} from "./request-context";
 
 export type { OrphanPersistStore } from "./orphan-store";
 
@@ -333,6 +371,7 @@ export {
  */
 export {
   aiSdkRecoveryCodec,
+  chunkMustBeStoredNow,
   partialHasSettledToolResults,
   shouldCreditStreamProgress,
   type ChatRecoveryCodec,
@@ -450,7 +489,8 @@ export type {
   MessageConcurrency,
   SaveMessagesOptions,
   SaveMessagesResult,
-  AbortedTurnReason
+  AbortedTurnReason,
+  SkippedTurnReason
 } from "./lifecycle";
 export {
   truncateOlderMessages,
