@@ -254,8 +254,8 @@ export interface ClientChatRequest<TPrepared> {
    * superseded request's question is kept, and the turn that superseded it
    * reads it) and before a stop is honored (a stopped request's question is
    * kept too, unanswered). Not called after a clear. `messages` leaves out
-   * those already stored (a reset after an earlier join). Return `false` to
-   * skip the request.
+   * those already stored (a reset after an earlier join), so it can be
+   * empty. Return `false` to skip the request.
    */
   join?(context: {
     prepared: TPrepared;
@@ -612,7 +612,6 @@ export class ChatTurns<
             const stored = new Set(this.host.messages().map((m) => m.id));
             const fresh = held.filter((message) => !stored.has(message.id));
             if (
-              fresh.length > 0 &&
               !(await request.join?.({
                 prepared,
                 messages: fresh,

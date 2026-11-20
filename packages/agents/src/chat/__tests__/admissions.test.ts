@@ -4,7 +4,9 @@ import {
   chatRecoveryNames,
   createChatAdmissionStore,
   newUserMessageIds,
-  type ChatAdmissionRecord
+  splitPieces,
+  type ChatAdmissionRecord,
+  type HeldChatMessage
 } from "../admissions";
 import {
   ChatTurns,
@@ -572,6 +574,41 @@ describe("chatRecoveryNames", () => {
         liveRequestIds: new Set(["r1"])
       })
     ).toBe(true);
+  });
+});
+
+describe("held messages", () => {
+  it("round-trip a large message with a surrogate pair on a piece boundary", () => {
+    const db = new DatabaseSync(":memory:");
+    const store = createChatAdmissionStore(() => ({
+      exec: (query: string, ...bindings: unknown[]) => {
+        const rows = db.prepare(query).all(...(bindings as SQLInputValue[]));
+        return { toArray: () => rows as Record<string, unknown>[] };
+      }
+    }));
+    // The JSON opens with `[{"id":"u","role":"user","text":"` (33 units),
+    // so an emoji at the cut lands its high surrogate at 499,999.
+    const head = '[{"id":"u","role":"user","text":"';
+    const text = `${"a".repeat(500_000 - head.length - 1)}😀${"b".repeat(600_000)}`;
+    store.add({
+      requestId: "r1",
+      messages: [{ id: "u", role: "user", text } as HeldChatMessage],
+      afterUserId: null,
+      decision: { strategy: null, overlapping: false, debounceUntilMs: null },
+      payload: null
+    });
+    // A new isolate reads it from storage.
+    const again = createChatAdmissionStore(() => ({
+      exec: (query: string, ...bindings: unknown[]) => {
+        const rows = db.prepare(query).all(...(bindings as SQLInputValue[]));
+        return { toArray: () => rows as Record<string, unknown>[] };
+      }
+    }));
+    const [record] = again.list();
+    expect(
+      (record.messages[0] as HeldChatMessage & { text: string }).text
+    ).toBe(text);
+    expect(splitPieces("ab😀", 3)).toEqual(["ab", "😀"]);
   });
 });
 

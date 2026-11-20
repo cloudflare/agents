@@ -699,6 +699,8 @@ export function detectToolsRequiringConfirmation(
     .map(([name]) => name);
 }
 
+const NO_MESSAGES: never[] = [];
+
 export function useAgentChat<
   // oxlint-disable-next-line no-unused-vars -- kept for backward compat
   State = unknown,
@@ -1436,7 +1438,18 @@ export function useAgentChat<
    * The messages the last message list named as queued, kept out of the
    * chat's list and drawn after it (`queued-messages.ts`).
    */
-  const [queuedMessages, setQueuedMessages] = useState<ChatMessage[]>([]);
+  const [queued, setQueued] = useState<{
+    /** The chat they belong to: a switch to another chat leaves them. */
+    chatId: string | null;
+    messages: ChatMessage[];
+  }>({ chatId: null, messages: [] });
+  const queuedMessages =
+    queued.chatId === stableChatIdRef.current ? queued.messages : NO_MESSAGES;
+  const queuedMessagesRef = useRef(queuedMessages);
+  queuedMessagesRef.current = queuedMessages;
+  const setQueuedMessages = useCallback((messages: ChatMessage[]) => {
+    setQueued({ chatId: stableChatIdRef.current, messages });
+  }, []);
   const protectedStreamingAssistantRef = useRef<{
     assistantId: string;
     anchorMessageId: string | null;
@@ -1667,6 +1680,7 @@ export function useAgentChat<
   }, [
     markInitialMessagesSeeded,
     setMessages,
+    setQueuedMessages,
     resetToolContinuation,
     customTransport
   ]);
@@ -2846,7 +2860,8 @@ export function useAgentChat<
     restoreProtectedStreamingAssistant,
     resetLocalChatState,
     invalidateResumeGeneration,
-    setRecoveringRequestId
+    setRecoveringRequestId,
+    setQueuedMessages
   ]);
 
   // Own mount/chat-generation resumption so StrictMode, reconnects, tool
@@ -3142,10 +3157,19 @@ export function useAgentChat<
     },
     setMessages: (messagesOrUpdater: Parameters<typeof setMessages>[0]) => {
       setMessages((currentMessages: ChatMessage[]) => {
+        // The caller sees and sets the list the hook returns, queued
+        // messages included. Queued messages it keeps stay apart and are
+        // drawn last; the ones it leaves out go.
+        const waiting = queuedMessagesRef.current;
         const resolvedMessages =
           typeof messagesOrUpdater === "function"
-            ? messagesOrUpdater(currentMessages)
+            ? messagesOrUpdater(drawQueuedLast(currentMessages, waiting))
             : messagesOrUpdater;
+        if (waiting.length > 0) {
+          const ids = new Set(resolvedMessages.map((m) => m.id));
+          const kept = waiting.filter((m) => ids.has(m.id));
+          if (kept.length !== waiting.length) setQueuedMessages(kept);
+        }
 
         if (resolvedMessages.length === 0) {
           markInitialMessagesSeeded();
@@ -3158,7 +3182,9 @@ export function useAgentChat<
             })
           );
         }
-        return resolvedMessages;
+        if (waiting.length === 0) return resolvedMessages;
+        const queuedIds = new Set(waiting.map((m) => m.id));
+        return resolvedMessages.filter((m) => !queuedIds.has(m.id));
       });
     }
   };

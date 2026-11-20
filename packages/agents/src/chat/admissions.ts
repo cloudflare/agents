@@ -234,12 +234,12 @@ export function createChatAdmissionStore(
       if (split) {
         withPieces.add(record.requestId);
         run(`delete from ${pieces} where request_id = ?`, record.requestId);
-        for (let at = 0; at < messages.length; at += HELD_MESSAGES_PIECE) {
+        for (const piece of splitPieces(messages, HELD_MESSAGES_PIECE)) {
           run(
             `insert into ${pieces} (request_id, piece, data) values (?, ?, ?)`,
             record.requestId,
             count++,
-            messages.slice(at, at + HELD_MESSAGES_PIECE)
+            piece
           );
         }
       }
@@ -315,6 +315,24 @@ export function createChatAdmissionStore(
       }));
     }
   };
+}
+
+/**
+ * `text` in pieces of at most `size` code units, never between the two
+ * halves of a surrogate pair: SQLite stores text as UTF-8, which cannot
+ * hold half a pair.
+ */
+export function splitPieces(text: string, size: number): string[] {
+  const pieces: string[] = [];
+  let at = 0;
+  while (at < text.length) {
+    let end = Math.min(at + size, text.length);
+    const last = text.charCodeAt(end - 1);
+    if (end < text.length && last >= 0xd800 && last <= 0xdbff) end--;
+    pieces.push(text.slice(at, end));
+    at = end;
+  }
+  return pieces;
 }
 
 function heldMessages(value: unknown): HeldChatMessage[] {
