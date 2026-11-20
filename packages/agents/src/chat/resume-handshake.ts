@@ -28,6 +28,7 @@ import {
 import type { ContinuationState } from "./continuation-state";
 import type { PreStreamTurns } from "./pre-stream-turns";
 import type { ResumableStream } from "./resumable-stream";
+import type { ChatRecentTerminal } from "./recent-terminals";
 
 /** A pending terminal outcome captured before connect (#1645). */
 export interface PendingChatTerminal {
@@ -80,6 +81,12 @@ export interface ResumeHandshakeHost {
    * the outcome from the live frame that follows the transcript.
    */
   holdsTerminalFrames?(requestId: string): boolean;
+  /**
+   * The recorded terminal frame of one of `requestIds` that ended
+   * (`recent-terminals.ts`), or `null`. Optional: without it a tab that was
+   * away when its request ended learns nothing on resume.
+   */
+  recentTerminal?(requestIds: readonly string[]): ChatRecentTerminal | null;
 }
 
 /**
@@ -130,7 +137,9 @@ export class ResumeHandshake {
    */
   async handleResumeRequest(
     connection: Connection,
-    probeId?: string
+    probeId?: string,
+    /** The request ids the tab still waits on, newest last. */
+    requestIds: readonly string[] = []
   ): Promise<void> {
     const { resumableStream, continuation, preStream } = this.host;
     if (resumableStream.hasActiveStream()) {
@@ -168,6 +177,12 @@ export class ResumeHandshake {
       // resume handshake so the terminal error frame can be delivered on the
       // resumed stream (the only path that surfaces as an error on the client)
       // once this connection ACKs — see `_replayTerminalOnAck`.
+    } else if (
+      this._replayRecentTerminalOnResume(connection, requestIds, probeId)
+    ) {
+      // A request this tab waits on ended while it was away (a request
+      // replayed after a reset with no tab connected, or a turn that ended
+      // while every tab reconnected). Its terminal frame follows the ACK.
     } else if (preStream?.park(connection, probeId)) {
       // A normal turn is accepted but its resumable stream has not started yet
       // (#1784). `park` enrolled the connection and sent `STREAM_PENDING`; the
@@ -268,7 +283,14 @@ export class ResumeHandshake {
       // Delivered the pending terminal error frame on the resumed stream the
       // client just ACKed (#1645).
     } else if (
-      !resumableStream.replayCompletedChunksByRequestId(connection, requestId)
+      !resumableStream.replayCompletedChunksByRequestId(
+        connection,
+        requestId
+      ) &&
+      // No stored stream to replay: the recorded terminal frame of a request
+      // that ended while this tab was away (a replayed request that never
+      // streamed, or a stream whose rows its cutover deleted).
+      !this._replayRecentTerminalOnAck(connection, requestId)
     ) {
       const messageIds = resumableStream.getOriginMessageIds(requestId);
       const outcome = resumableStream.getOutcome(requestId);
@@ -285,6 +307,52 @@ export class ResumeHandshake {
         })
       );
     }
+  }
+
+  /** See {@link handleResumeRequest}: announce a request that ended. */
+  private _replayRecentTerminalOnResume(
+    connection: Connection,
+    requestIds: readonly string[],
+    probeId?: string
+  ): boolean {
+    const ended = this.host.recentTerminal?.(requestIds);
+    if (!ended) return false;
+    sendIfOpen(
+      connection,
+      JSON.stringify({
+        type: CHAT_MESSAGE_TYPES.STREAM_RESUMING,
+        id: ended.requestId,
+        ...(probeId ? { probeId } : {})
+      })
+    );
+    return true;
+  }
+
+  /** Send the recorded terminal frame of a request that ended. */
+  private _replayRecentTerminalOnAck(
+    connection: Connection,
+    requestId: string
+  ): boolean {
+    const ended = this.host.recentTerminal?.([requestId]);
+    if (!ended) return false;
+    const messageIds =
+      ended.messageIds ??
+      this.host.resumableStream.getOriginMessageIds(requestId);
+    sendIfOpen(
+      connection,
+      JSON.stringify({
+        body: ended.body,
+        done: true,
+        id: requestId,
+        type: this.host.responseMessageType,
+        replay: true,
+        ...(ended.error && { error: true }),
+        ...(ended.outcome !== undefined && { outcome: ended.outcome }),
+        ...(ended.continuation && { continuation: true }),
+        ...(messageIds && { messageIds })
+      })
+    );
+    return true;
   }
 
   /**

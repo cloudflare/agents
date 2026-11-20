@@ -7139,6 +7139,39 @@ export class ThinkToolsTestAgent extends Think {
     return item?.payload.targetMessageIds;
   }
 
+  /**
+   * Queue the connection-less continuation, stop every chat, and run the
+   * item's callback before the stop's dequeue gets to it. Returns whether
+   * its turn ran.
+   */
+  async runConnectionlessAfterStopForTest(
+    pushAfterStop = false
+  ): Promise<boolean> {
+    const self = this as unknown as {
+      _queueConnectionlessContinuation(id: string): Promise<void>;
+      _cfRunConnectionlessContinuation(payload: unknown): Promise<void>;
+      _turns: { runUnscheduledContinuationTurn(...args: unknown[]): unknown };
+    };
+    const run = self._cfRunConnectionlessContinuation.bind(this);
+    self._cfRunConnectionlessContinuation = () => new Promise(() => {});
+    const turns = self._turns;
+    const start = turns.runUnscheduledContinuationTurn.bind(turns);
+    let ran = false;
+    turns.runUnscheduledContinuationTurn = (...args: unknown[]) => {
+      ran = true;
+      return start(...args);
+    };
+    await self._queueConnectionlessContinuation("m1");
+    this.cancelAllChats();
+    // An approval after the stop replaces the item, and must run.
+    if (pushAfterStop) await self._queueConnectionlessContinuation("m2");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const item = await this.getQueue("connectionless-continuation");
+    if (!item) return false;
+    await run(item.payload);
+    return ran;
+  }
+
   /** Keep a resolved pause's connectionless continuation from running. */
   async holdConnectionlessContinuationForTest(): Promise<void> {
     (

@@ -6,7 +6,7 @@ import type { UIMessage } from "ai";
 const idle: BroadcastStreamState = { status: "idle" };
 
 function textChunk(text: string) {
-  return { type: "text-delta", textDelta: text };
+  return { type: "text-delta", delta: text };
 }
 
 function makeMessages(...texts: string[]): UIMessage[] {
@@ -322,6 +322,58 @@ describe("broadcast stream state machine", () => {
     ]);
     expect(messages[1].parts).toMatchObject([{ text: "tool call here" }]);
     expect(messages[2].parts).toMatchObject([{ text: "You are in Porto." }]);
+  });
+
+  it("drops the message a stopped continuation opened when nothing followed", () => {
+    // The first frame names a new message; the stop lands before content.
+    let state: BroadcastStreamState = idle;
+    let messages = makeMessages("where", "tool call here");
+    for (const chunkData of [{ type: "start" }, { type: "start-step" }]) {
+      const result = transition(state, {
+        type: "response",
+        streamId: "cont-1",
+        messageId: "fallback-id",
+        chunkData,
+        continuation: true,
+        continuationMessageId: "assistant-2"
+      });
+      state = result.state;
+      if (result.messagesUpdate) messages = result.messagesUpdate(messages);
+    }
+    const done = transition(state, {
+      type: "response",
+      streamId: "cont-1",
+      messageId: "fallback-id",
+      done: true,
+      continuation: true,
+      continuationMessageId: "assistant-2"
+    });
+    messages = done.messagesUpdate!(messages);
+
+    expect(messages.map((message) => message.id)).toEqual(["msg-0", "msg-1"]);
+  });
+
+  it("keeps the message a continuation extended when nothing followed", () => {
+    const first = transition(idle, {
+      type: "response",
+      streamId: "s1",
+      messageId: "fallback-id",
+      chunkData: { type: "start" },
+      continuation: true,
+      continuationMessageId: "msg-1"
+    });
+    const done = transition(first.state, {
+      type: "response",
+      streamId: "s1",
+      messageId: "fallback-id",
+      done: true,
+      continuation: true,
+      continuationMessageId: "msg-1"
+    });
+    const messages = done.messagesUpdate!(makeMessages("hi", "response"));
+
+    expect(messages.map((message) => message.id)).toEqual(["msg-0", "msg-1"]);
+    expect(messages[1].parts).toMatchObject([{ text: "response" }]);
   });
 
   it("extends the message a continuation names when the tab holds it", () => {

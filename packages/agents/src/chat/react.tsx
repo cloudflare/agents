@@ -11,6 +11,7 @@ import { nanoid } from "nanoid";
 import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isSocketAddressPending } from "../socket-address";
 import { chatThrottleOptions } from "./chat-throttle";
+import { dropEmptyReply } from "./reply-empty";
 import type { ChatTurnOutcome, OutgoingMessage } from "./wire-types";
 import { STREAM_RESUME_NONE_REASONS } from "./protocol";
 import { MessageType } from "./wire-types";
@@ -2498,7 +2499,17 @@ export function useAgentChat<
                 setIsServerStreaming(false);
               }
               customTransport.handleServerTurnCompleted(data.id);
+              const openedId =
+                localResponseIds.get(data.id) ??
+                (data.continuation ? data.messageId : undefined);
               restoreProtectedStreamingAssistant(localResponseIds.get(data.id));
+              // A stream that ended with nothing in it leaves no empty
+              // bubble behind: the server stores none.
+              if (openedId !== undefined) {
+                setMessages((current: ChatMessage[]) =>
+                  dropEmptyReply(current, openedId)
+                );
+              }
               localResponseIds.delete(data.id);
               localRequestIdsRef.current.delete(data.id);
               fallbackAckedResumeRequestIdsRef.current.delete(data.id);
@@ -2709,7 +2720,8 @@ export function useAgentChat<
           agentRef.current.send(
             JSON.stringify({
               type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST,
-              probeId: idleProbeId
+              probeId: idleProbeId,
+              ...customTransport.resumeRequestIds()
             })
           );
         }

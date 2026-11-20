@@ -9,6 +9,7 @@ import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { tool } from "ai";
 import { z } from "zod";
 import { Think } from "../../think";
+import { getCurrentAgent } from "agents";
 import type {
   ChatErrorContext,
   ChatResponseResult,
@@ -1125,8 +1126,16 @@ export class ThinkClientToolsAgent extends Think {
     return this._failedContinuationHookError;
   }
 
+  private _responseConnections: Array<string | null> = [];
+
+  /** The connection `getCurrentAgent()` named in each `onChatResponse`. */
+  async getResponseConnectionsForTest(): Promise<Array<string | null>> {
+    return this._responseConnections;
+  }
+
   override async onChatResponse(result: ChatResponseResult): Promise<void> {
     this._responseLog.push(result);
+    this._responseConnections.push(getCurrentAgent().connection?.id ?? null);
     if (
       this._saveInFailedContinuationHook &&
       result.continuation &&
@@ -1161,7 +1170,45 @@ export class ThinkClientToolsAgent extends Think {
     this._useExecutableClientTool = true;
   }
 
+  /**
+   * Clear the chat while the next reply's pending response hook is being
+   * recorded, between the reset check and the reply's write.
+   */
+  async clearDuringNextReplyStoreForTest(): Promise<void> {
+    const self = this as unknown as {
+      _rememberPendingResponseHook(result: unknown): Promise<void>;
+    };
+    const original = self._rememberPendingResponseHook.bind(this);
+    self._rememberPendingResponseHook = async (result) => {
+      self._rememberPendingResponseHook = original;
+      await original(result);
+      await this.clearMessages();
+    };
+  }
+
+  private _failNextModelCallInStream = false;
+
+  /** The next model call fails inside its stream, as a provider 500 does. */
+  async failNextModelCallInStreamForTest(): Promise<void> {
+    this._failNextModelCallInStream = true;
+  }
+
   getModel(): LanguageModel {
+    if (this._failNextModelCallInStream) {
+      this._failNextModelCallInStream = false;
+      return {
+        specificationVersion: "v3",
+        provider: "test",
+        modelId: "mock-failing",
+        supportedUrls: {},
+        doGenerate() {
+          throw new Error("doGenerate not implemented");
+        },
+        doStream() {
+          return Promise.reject(new Error("provider rejected the request"));
+        }
+      } as LanguageModel;
+    }
     if (this._useChainedClientTool)
       return createChainedClientToolModel({
         holdSecondCall: () => this._chainedStreamLatch.wait(),

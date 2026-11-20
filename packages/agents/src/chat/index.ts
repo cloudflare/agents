@@ -73,6 +73,7 @@ export {
   ChatAdmissions,
   chatRecoveryNames,
   createChatAdmissionStore,
+  newUserMessageIds,
   type ChatAdmissionRecord,
   type ChatAdmissionStore,
   type ChatAdmissionsHost,
@@ -388,7 +389,9 @@ export {
  */
 export {
   aiSdkRecoveryCodec,
+  chunkCarriesContent,
   chunkMustBeStoredNow,
+  takeAtFirstContent,
   partialHasSettledToolResults,
   shouldCreditStreamProgress,
   type ChatRecoveryCodec,
@@ -492,7 +495,7 @@ export {
   iterateWithStallWatchdog
 } from "./stall-watchdog";
 
-export { isTurnStopped } from "./turn-stop";
+export { ChatRecoverySupersededError, isTurnStopped } from "./turn-stop";
 
 export type {
   ChatResponseResult,
@@ -515,3 +518,12 @@ export {
   type TruncateOptions,
   type TruncateToolResultsOptions
 } from "./truncate-older-messages";
+
+export {
+  clearRecentChatTerminals,
+  recentChatTerminal,
+  recordRecentChatTerminal,
+  RECENT_TERMINALS_MAX,
+  type ChatRecentTerminal,
+  type RecentTerminalsKv
+} from "./recent-terminals";

@@ -310,6 +310,12 @@ Override `formatDetachedCompletion(run, result)` to customize the injected text,
 or return an empty string to suppress the notification for a given outcome. An
 explicit `onFinish` takes precedence over `notify`.
 
+A notification is a message in the chat. If it lands while a client tool call
+is waiting on its result, the conversation has moved on: the tool result is
+still stored when it arrives, but the reply that asked for it is not continued.
+The model reads the result on the next turn. The agent emits
+`chat:continuation:dropped` with the reason `moved_on`.
+
 ### The `inspectAgentToolRun` contract
 
 A child's `inspectAgentToolRun(runId)` returns the run's current status snapshot,

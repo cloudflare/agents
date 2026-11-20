@@ -53,7 +53,13 @@ export type StreamInterruptionOutcome =
   | "scheduled"
   | "exhausted"
   | "declined"
-  | "failed";
+  | "failed"
+  /**
+   * A user stopped the turn while it was routed here: nothing was
+   * scheduled, and the incident ends `skipped` with `user_cancelled`. The
+   * turn ends as a stopped one.
+   */
+  | "stopped";
 
 /** What the engine knows when it asks the app about a live interruption. */
 export type StreamInterruptionRecoveryContext = {
@@ -167,9 +173,9 @@ export type RecoveredTurnSchedule = {
 export async function scheduleRecoveredTurn(
   engine: ChatRecoveryEngine,
   input: RecoveredTurnSchedule
-): Promise<void> {
+): Promise<boolean> {
   const { incident, requestContext } = input;
-  await engine.scheduleRecovery({
+  return engine.scheduleRecovery({
     incident,
     delaySeconds: input.delaySeconds,
     reason: input.reason,
@@ -236,7 +242,7 @@ async function route(
     partialParts.length === 0 ? await host.retryTargetUserId() : null;
   const recoveryKind: ChatRecoveryKind = lostReplyUserId ? "retry" : "continue";
 
-  const { incident, config, exhausted } = await engine.beginIncident({
+  const { incident, config, exhausted, stopped } = await engine.beginIncident({
     requestId,
     recoveryRootRequestId,
     latestUserMessageId: host.latestUserMessageId,
@@ -250,6 +256,13 @@ async function route(
     )
     .map((part) => part.text)
     .join("");
+
+  if (stopped) {
+    // A user stopped the turn while it was routed: what it streamed is kept,
+    // nothing is scheduled and nothing gives up.
+    await host.resolvePartial(true);
+    return "stopped";
+  }
 
   if (exhausted) {
     // The same give-up as deploy recovery, not the raw stream error.
@@ -340,7 +353,7 @@ async function route(
       )
     : undefined;
   const kind: ChatRecoveryKind = retryUserId ? "retry" : "continue";
-  await scheduleRecoveredTurn(engine, {
+  const scheduled = await scheduleRecoveredTurn(engine, {
     incident,
     recoveryKind: kind,
     recoveryRootRequestId,
@@ -352,6 +365,8 @@ async function route(
     delaySeconds,
     reason: chained ? "chained_retry" : undefined
   });
+  // A stop landed between the interruption and this schedule.
+  if (!scheduled) return "stopped";
   host.afterSchedule?.(chained);
   return "scheduled";
 }

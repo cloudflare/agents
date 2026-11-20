@@ -107,6 +107,12 @@ export type ChatRecoveryIncident = {
    */
   replyRemoved?: boolean;
   /**
+   * The question the removed reply answered, recorded with
+   * {@link replyRemoved}. A later run of the attempt answers it again only
+   * while it is still the latest message.
+   */
+  replyRemovedFor?: string;
+  /**
    * High-water mark of the durable, monotonic recovery-progress counter
    * observed for this incident. Distinguishes a turn making forward progress
    * but repeatedly interrupted by isolate resets (deploys) — which must NOT

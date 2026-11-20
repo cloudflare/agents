@@ -350,11 +350,48 @@ export class TestChatAgent extends AIChatAgent<Env> {
     this._persistDelayForTest = { role, ms };
   }
 
+  /** `saveMessages` with one more user message; returns the status. */
+  async saveUserMessageForTest(text: string): Promise<string> {
+    const result = await this.saveMessages([
+      ...this.messages,
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text }]
+      }
+    ]);
+    return result.status;
+  }
+
+  private _laterNoteForTest: { ms: number } | null = null;
+
+  /**
+   * Make the next `persistMessages` of a user message start work that
+   * stores a note `ms` later, the way an override's fire-and-forget does.
+   */
+  storeNoteLaterFromPersistForTest(ms: number): void {
+    this._laterNoteForTest = { ms };
+  }
+
   override async persistMessages(
     messages: ChatMessage[],
     excludeBroadcastIds: string[] = [],
     options?: { _deleteStaleRows?: boolean }
   ) {
+    const later = this._laterNoteForTest;
+    if (later && messages.at(-1)?.role === "user") {
+      this._laterNoteForTest = null;
+      setTimeout(() => {
+        void this.persistMessages([
+          ...this.messages,
+          {
+            id: "note-later",
+            role: "assistant",
+            parts: [{ type: "text", text: "Stored later." }]
+          }
+        ]);
+      }, later.ms);
+    }
     const wait = this._persistDelayForTest;
     if (wait && messages.at(-1)?.role === wait.role) {
       await new Promise((resolve) => setTimeout(resolve, wait.ms));
@@ -3720,6 +3757,79 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   }
 
   /** Simulate the not-yet-settled recovery Task currently dispatching. */
+  /** What `_dispatchRecoveredChatTurn` does on a wake: schedule a continue of `target`. */
+  async rvScheduleLikeWakeForTest(
+    incidentId: string,
+    target: string
+  ): Promise<void> {
+    const incident = await this.ctx.storage.get<Record<string, unknown>>(
+      `cf:chat-recovery:incident:${encodeURIComponent(incidentId)}`
+    );
+    const engine = (
+      this as unknown as {
+        _chatRecoveryEngine(): {
+          scheduleRecoveredTurn(input: Record<string, unknown>): Promise<void>;
+        };
+      }
+    )._chatRecoveryEngine();
+    await engine.scheduleRecoveredTurn({
+      incident,
+      recoveryKind: "continue",
+      recoveryRootRequestId: incident?.recoveryRootRequestId,
+      targetAssistantId: target,
+      // The run has not fired yet when the next detection lands.
+      delaySeconds: 60
+    });
+  }
+
+  /** The chat-turn Task runs not yet settled: a turn a replay could recover. */
+  openChatTurnRunsForTest(): number {
+    return (
+      this.sql<{ count: number }>`
+        SELECT COUNT(*) AS count FROM cf_agents_task_runs
+        WHERE definition = '__cf_internal_chat_turn'
+          AND state IN ('pending', 'running', 'waiting')
+      `[0]?.count ?? 0
+    );
+  }
+
+  /** Run every open chat-turn Task run now, as a later wake would. */
+  async runOpenChatTurnRunsForTest(): Promise<void> {
+    const past = Date.now() - 1_000;
+    this.sql`
+      UPDATE cf_agents_task_runs SET next_at = ${past}
+      WHERE definition = '__cf_internal_chat_turn'
+        AND state IN ('pending', 'running', 'waiting')
+    `;
+    this.sql`
+      UPDATE cf_agents_task_steps SET next_at = ${past}
+      WHERE run_id IN (
+        SELECT run_id FROM cf_agents_task_runs
+        WHERE definition = '__cf_internal_chat_turn'
+      )
+    `;
+    this.sql`
+      UPDATE cf_agents_jobs SET time = ${past} WHERE id LIKE 'task:%'
+    `;
+    await this.alarm();
+    await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
+  }
+
+  async rvContinueWithStreamErrorForTest(message: string): Promise<string> {
+    this._emitStreamError = message;
+    try {
+      return (await this.continueLastTurn()).status;
+    } finally {
+      this._emitStreamError = null;
+    }
+  }
+
+  async rvIncidentRawForTest(incidentId: string): Promise<unknown> {
+    return this.ctx.storage.get(
+      `cf:chat-recovery:incident:${encodeURIComponent(incidentId)}`
+    );
+  }
+
   async preScheduleRecoveryContinueForTest(
     data: Record<string, unknown>
   ): Promise<void> {

@@ -144,8 +144,11 @@ function parseChatRecoveryTaskInput(input: unknown): ChatRecoveryTaskInput {
 /**
  * Build run options for one recovery attempt.
  *
- * Initial detection joins an existing in-flight attempt for the same incident
- * and callback. Chained retries are otherwise unkeyed because each one is
+ * Initial detection joins an existing in-flight attempt for the same incident,
+ * callback and schedule number, so a retried enqueue of one schedule creates
+ * one run. A later schedule of the same incident carries a newer number and
+ * gets its own run: the older run is stale by then and returns without a
+ * turn. Chained retries are otherwise unkeyed because each one is
  * enqueued while the preceding run still exists — a genuinely new attempt,
  * not a retry of this same enqueue. `dedupeKey`, when supplied, keys this
  * specific enqueue call by `runId` instead: every retry of one failed
@@ -166,13 +169,20 @@ export function chatRecoveryTaskRunOptions(
     typeof input.data.recoveredRequestId === "string"
       ? input.data.recoveredRequestId
       : undefined;
+  // The schedule's number is part of the key. A second schedule of the same
+  // incident has a newer number, which makes the run it would join stale
+  // (`recoveryDelivery`), so it must get its own run.
+  const delivery =
+    typeof input.data.delivery === "number" ? input.data.delivery : undefined;
 
   return {
     retain: false,
     ...(dedupeKey !== undefined ? { runId: dedupeKey } : {}),
     ...(reason === "initial" && incidentId
       ? {
-          idempotencyKey: `chat-recovery:${input.callback}:${incidentId}`
+          idempotencyKey: `chat-recovery:${input.callback}:${incidentId}${
+            delivery === undefined ? "" : `:${delivery}`
+          }`
         }
       : {}),
     metadata: {

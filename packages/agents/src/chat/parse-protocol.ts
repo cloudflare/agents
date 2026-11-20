@@ -47,7 +47,12 @@ export type ChatProtocolEvent =
       approved: boolean;
       autoContinue?: boolean;
     }
-  | { type: "stream-resume-request"; probeId?: string }
+  | {
+      type: "stream-resume-request";
+      probeId?: string;
+      /** The request ids the tab still waits on, newest last. */
+      requestIds?: string[];
+    }
   | { type: "stream-resume-ack"; id: string }
   | { type: "messages"; messages: unknown[] };
 
@@ -127,7 +132,12 @@ export function parseProtocolMessage(raw: string): ChatProtocolEvent | null {
     case CHAT_MESSAGE_TYPES.STREAM_RESUME_REQUEST:
       return {
         type: "stream-resume-request",
-        ...(typeof data.probeId === "string" ? { probeId: data.probeId } : {})
+        ...(typeof data.probeId === "string" ? { probeId: data.probeId } : {}),
+        ...(Array.isArray(data.requestIds) && {
+          requestIds: data.requestIds
+            .filter((id): id is string => typeof id === "string")
+            .slice(-8)
+        })
       };
 
     case CHAT_MESSAGE_TYPES.STREAM_RESUME_ACK:

@@ -38,6 +38,28 @@
 import type { AgentToolSql } from "./agent-tool-run-store";
 import type { NormalizedMessageConcurrency } from "./submit-concurrency";
 
+/**
+ * The user messages a client request stores: the ones at the end of what it
+ * sent that are not stored yet. A client sends its whole transcript, and
+ * with windowed history `stored` holds only the newest messages, so an
+ * older message outside the window is not one this request stores: only the
+ * run after the last stored message counts.
+ *
+ * @param messages - What the request sent, oldest first.
+ * @param stored - The ids of the stored messages the host holds in memory.
+ */
+export function newUserMessageIds(
+  messages: ReadonlyArray<{ id: string; role: string }>,
+  stored: ReadonlySet<string>
+): string[] {
+  const ids: string[] = [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (stored.has(messages[i].id)) break;
+    if (messages[i].role === "user") ids.unshift(messages[i].id);
+  }
+  return ids;
+}
+
 /** The concurrency decision a request was accepted with, as stored. */
 export interface StoredSubmitDecision {
   strategy: NormalizedMessageConcurrency | null;
@@ -358,8 +380,13 @@ export class ChatAdmissions {
   }
 
   /** The user messages of every request that has no turn with a fiber yet. */
-  messageIds(): Set<string> {
-    return new Set(this.host.store.list().flatMap((r) => r.messageIds));
+  messageIds(exceptRequestId?: string): Set<string> {
+    return new Set(
+      this.host.store
+        .list()
+        .filter((r) => r.requestId !== exceptRequestId)
+        .flatMap((r) => r.messageIds)
+    );
   }
 
   /**

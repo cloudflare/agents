@@ -257,6 +257,12 @@ async addBackgroundContext(data: string) {
 }
 ```
 
+A message appended while a client tool call is waiting on its result moves the
+conversation on. When the result arrives it is stored, but the reply that asked
+for it is not continued: the model reads the result on the next turn, and the
+agent emits `chat:continuation:dropped` with the reason `moved_on`. The
+`waitUntilStable()` call above waits for pending tool calls first.
+
 ## Reacting to responses you did not initiate
 
 `onChatResponse` fires after **every** completed turn — user-initiated messages, `saveMessages` calls, and auto-continuations. Use it when you need to observe or react to responses regardless of how they were triggered.

@@ -56,6 +56,7 @@ import type {
   AgentToolRunTerminal
 } from "./agent-tool-run-store";
 import { CHAT_RECOVERY_CANCELLED_REASON } from "./recovery-engine";
+import { replyIsRemovedAsEmpty } from "./repair-transcript";
 import {
   CHAT_RECOVERY_INCIDENT_KEY_PREFIX,
   type ChatRecoveryIncident
@@ -182,9 +183,10 @@ export function agentToolRunOutcome(input: {
 
 /**
  * The message a run's own part of the transcript starts after: the newest
- * one, skipping assistant replies with no parts. The turn that follows
- * removes such an empty reply, and an anchor that is gone would make every
- * message look like the run's.
+ * one, skipping assistant replies the turn that follows removes because
+ * they hold nothing ({@link replyIsRemovedAsEmpty}): no parts, only
+ * `step-start`, empty text, or reasoning with nothing after it. An anchor
+ * that is gone would make every message look like the run's.
  */
 function startAnchor(
   transcript: ReadonlyArray<{
@@ -195,7 +197,10 @@ function startAnchor(
 ): string | null {
   for (let i = transcript.length - 1; i >= 0; i--) {
     const message = transcript[i];
-    if (message.role === "assistant" && message.parts?.length === 0) continue;
+    const { parts } = message;
+    if (parts !== undefined && replyIsRemovedAsEmpty({ ...message, parts })) {
+      continue;
+    }
     return message.id;
   }
   return null;
@@ -385,7 +390,7 @@ export class AgentToolRuns {
       incidentId: string | undefined,
       status: "skipped",
       reason: string
-    ) => Promise<void>
+    ) => Promise<unknown>
   ): Promise<boolean> {
     if (!attempt || !this.isRecoveredRunCancelled(attempt.originalRequestId)) {
       return true;
@@ -534,6 +539,24 @@ export class AgentToolRuns {
     };
     void this.host.keepAliveWhile(lifecycle);
     return { runId, status: "running", startedAt };
+  }
+
+  /**
+   * The chat was cleared. A run with no lifecycle in this isolate (left
+   * open for chat recovery, or interrupted in an earlier one) has nothing
+   * left to finish it: recovery skips a cleared chat. It ends `error` with
+   * the reset's error now. A run whose turn is live here ends through its
+   * own lifecycle, with the same error.
+   */
+  chatReset(): void {
+    for (const runId of this.host.store.listOpen()) {
+      if (this.controllers.has(runId)) continue;
+      this.#settle(runId, () => ({
+        status: "error",
+        error: this.host.resetError
+      }));
+      this.closeTailers(runId);
+    }
   }
 
   /**
