@@ -1105,3 +1105,235 @@ describe("PiHarness with parked tool calls", () => {
     expect(child?.busy).toBe(false);
   }, 30_000);
 });
+
+describe("PiHarness's root session", () => {
+  /** The seeded history, as `entryTexts` shows it: the tool call has no text. */
+  const SEEDED = ["multiply 4", "", "12", "tool said: 12"];
+  /** The seeded history, as the model is sent it. */
+  const SEEDED_REQUEST = [
+    "user: multiply 4",
+    'assistant: multiply({"value":4})',
+    "toolResult: 12",
+    "assistant: tool said: 12"
+  ];
+
+  /** The last model request without its system messages. */
+  async function lastRequest(stub: DurableObjectStub<PiHarnessTestObject>) {
+    return (await stub.lastRequest()).filter(
+      (message) => !message.startsWith("system: ")
+    );
+  }
+
+  it("does not exist on a new object until its first use creates it with defaults", async () => {
+    const stub = fresh();
+    // Opening pi and reading around the root does not create it.
+    expect(await stub.pending()).toEqual([]);
+    expect(await stub.busy()).toBe(false);
+    expect(await stub.listSessions()).toEqual([]);
+    expect(await stub.rootExists()).toBe(false);
+
+    // The first prompt creates it, with the defaults' model.
+    expect(await stub.prompt("hello")).toMatchObject({
+      status: "done",
+      text: "echo: hello"
+    });
+    expect(await stub.listSessions()).toEqual([{ id: "1", busy: false }]);
+  });
+
+  it("seeds a new root in the commit that creates it, applying agent over defaults", async () => {
+    const stub = fresh();
+    expect(
+      await stub.seedRoot({ instructions: "Answer like a pirate." })
+    ).toEqual({ session: "1", created: true, initRan: true });
+    expect(await stub.messages()).toEqual(SEEDED);
+
+    // The next prompt is answered after the seeded history, on the defaults'
+    // model, with the agent's instructions.
+    expect(await stub.prompt("hello")).toMatchObject({
+      status: "done",
+      text: "echo: hello",
+      messages: [...SEEDED, "hello", "echo: hello"]
+    });
+    expect(await lastRequest(stub)).toEqual([...SEEDED_REQUEST, "user: hello"]);
+    expect(
+      (await stub.lastRequest()).some(
+        (message) =>
+          message.startsWith("system: ") &&
+          message.includes("Answer like a pirate.")
+      )
+    ).toBe(true);
+  });
+
+  it("writes nothing and runs no init when the root already exists", async () => {
+    const prompted = fresh();
+    await prompted.prompt("hello");
+    expect(await prompted.seedRoot()).toEqual({
+      session: "1",
+      created: false,
+      initRan: false
+    });
+    expect(await prompted.messages()).toEqual(["hello", "echo: hello"]);
+
+    const seeded = fresh();
+    expect(await seeded.seedRoot()).toMatchObject({ created: true });
+    expect(await seeded.seedRoot({ value: 5 })).toEqual({
+      session: "1",
+      created: false,
+      initRan: false
+    });
+    expect(await seeded.messages()).toEqual(SEEDED);
+  });
+
+  it("creates the root only once when a seed and a prompt race for it", async () => {
+    const stub = fresh();
+    const [seeded, prompted] = await Promise.all([
+      stub.seedRoot(),
+      stub.prompt("hello")
+    ]);
+    expect(prompted).toMatchObject({ status: "done", text: "echo: hello" });
+    const messages = await stub.messages();
+    if ("created" in seeded && seeded.created) {
+      expect(messages).toEqual([...SEEDED, "hello", "echo: hello"]);
+    } else {
+      expect(seeded).toEqual({ session: "1", created: false, initRan: false });
+      expect(messages).toEqual(["hello", "echo: hello"]);
+    }
+  });
+
+  it("does not create the root when init throws, so a later root() seeds it", async () => {
+    const stub = fresh();
+    expect(await stub.seedRoot({ fail: true })).toEqual({
+      error: "import failed",
+      initRan: true
+    });
+    expect(await stub.rootExists()).toBe(false);
+    expect(await stub.listSessions()).toEqual([]);
+
+    expect(await stub.seedRoot()).toEqual({
+      session: "1",
+      created: true,
+      initRan: true
+    });
+    expect(await stub.messages()).toEqual(SEEDED);
+    expect((await stub.prompt("hello")).text).toBe("echo: hello");
+  });
+
+  it("keeps the root's id when a session is created before the root", async () => {
+    const stub = fresh();
+    const other = await stub.createSession();
+    expect(other).not.toBe("1");
+    expect(await stub.rootExists()).toBe(false);
+
+    expect(await stub.seedRoot()).toEqual({
+      session: "1",
+      created: true,
+      initRan: true
+    });
+    expect(await stub.messages()).toEqual(SEEDED);
+    expect(await stub.messages(other)).toEqual([]);
+    expect(
+      (await stub.listSessions()).map((session) => session.id).sort()
+    ).toEqual(["1", other].sort());
+  });
+
+  it("seeds the root after the object restarts before its root was created", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    // pi opens in startup, with no root.
+    expect(await stub.pending()).toEqual([]);
+    expect(await stub.rootExists()).toBe(false);
+    const before = await stub.instance();
+
+    await abortAllDurableObjects();
+    stub = fresh(name);
+    // pi reopens and resumes with nothing to do, so no wake is left.
+    expect(await stub.instance()).not.toBe(before);
+    expect(await stub.rootExists()).toBe(false);
+    expect(await stub.alarmTime()).toBeNull();
+
+    expect(await stub.seedRoot()).toMatchObject({ created: true });
+    expect((await stub.prompt("hello")).messages).toEqual([
+      ...SEEDED,
+      "hello",
+      "echo: hello"
+    ]);
+  });
+
+  it("seeds a session sessions.create() makes, applying agent over defaults", async () => {
+    const stub = fresh();
+    const session = await stub.createSeededSession(5, "Answer like a pirate.");
+    expect(await stub.messages(session)).toEqual([
+      "multiply 5",
+      "",
+      "15",
+      "tool said: 15"
+    ]);
+    expect(await stub.prompt("hello", session)).toMatchObject({
+      status: "done",
+      text: "echo: hello"
+    });
+    expect(await lastRequest(stub)).toEqual([
+      "user: multiply 5",
+      'assistant: multiply({"value":5})',
+      "toolResult: 15",
+      "assistant: tool said: 15",
+      "user: hello"
+    ]);
+    expect(
+      (await stub.lastRequest()).some((message) =>
+        message.includes("Answer like a pirate.")
+      )
+    ).toBe(true);
+    // Creating a session does not create the root.
+    expect(await stub.rootExists()).toBe(false);
+  });
+
+  for (const create of [false, true]) {
+    const target = create ? "sessions.create()" : "root()";
+
+    it(`keeps a default that ${target}'s agent leaves undefined`, async () => {
+      const stub = fresh(`configured:${crypto.randomUUID()}`);
+      const session = await stub.createWithAgent("undefined", create);
+      expect(await stub.agentState(session)).toMatchObject({
+        model: { provider: "faux", modelId: expect.any(String) },
+        thinkingLevel: "high",
+        maxTurns: 5
+      });
+      expect(await stub.prompt("hello", session)).toMatchObject({
+        status: "done",
+        text: "echo: hello"
+      });
+    });
+
+    it(`clears a default that ${target}'s agent sets to null`, async () => {
+      const stub = fresh(`configured:${crypto.randomUUID()}`);
+      const session = await stub.createWithAgent("null", create);
+      const state = await stub.agentState(session);
+      expect(state).toBeDefined();
+      expect(state).not.toHaveProperty("model");
+      expect(state).not.toHaveProperty("thinkingLevel");
+      expect(state).not.toHaveProperty("maxTurns");
+      expect(await stub.prompt("hello", session)).toMatchObject({
+        status: "unanswered",
+        reason: "no_model"
+      });
+    });
+  }
+
+  it("seeds a fork after the history it copies", async () => {
+    const stub = fresh();
+    await stub.prompt("hello");
+    const fork = await stub.forkSeeded("1", 6);
+    expect(await stub.messages(fork)).toEqual([
+      "hello",
+      "echo: hello",
+      "multiply 6",
+      "",
+      "18",
+      "tool said: 18"
+    ]);
+    // The fork keeps the root's configuration, so it is answered.
+    expect((await stub.prompt("again", fork)).text).toBe("echo: again");
+    expect(await stub.messages()).toEqual(["hello", "echo: hello"]);
+  });
+});

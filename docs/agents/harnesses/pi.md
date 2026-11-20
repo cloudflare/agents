@@ -207,6 +207,8 @@ const result = await session.wait(receipt.operationId);
 
 `harness.prompt()`, `submit()`, `wait()`, `abort()`, `messages()` and `pending()` act on the root session, or on `{ session }`. `harness.sessions` has `create()`, `fork(from)`, `get(id)` and `list()`, which includes sessions subagents created. `ROOT_SESSION` is the root's id. `harness.signal()` delivers a signal to a parked tool call (see [Tools that wait](#tools-that-wait)).
 
+The root session is created on its first use, with `defaults`: the first call that works with it, such as `prompt()`, `submit()`, `messages()` or `watch()`, creates it. Until then `sessions.list()` does not include it, and Pi's own `pi.conversation(ROOT_CONVERSATION_ID)` through `harness.pi()` returns `undefined`. Pi's own `pi.root()` would create it without `defaults`, so use `harness.root()` instead. Calls that only read around it, such as `pending()`, `busy()` and `list()`, do not create it. To create it yourself, with your own configuration or history, call `harness.root()` (see [Seed a session with an existing history](#seed-a-session-with-an-existing-history)).
+
 `messages()` and `watch()` are Pi's own records, not a UI-ready chat transcript. The example below projects them into one.
 
 ```ts
@@ -225,6 +227,113 @@ function render(view: ConversationView): void {
 ```
 
 The window holds the newest 50 entries and grows to 100 before its oldest leave. To render a longer transcript, merge each value into Pi's `ConversationTranscript`, which pages older entries with `session.entries()`.
+
+### Seed a session with an existing history
+
+To start a session from a chat history your application already has, such as one imported from another system, write it into the session's transcript in the commit that creates the session. `harness.root()`, `sessions.create()` and `sessions.fork()` take Pi's `init` for that, and `agent` for the session's configuration:
+
+| Option  | What it is                                                                                                                                                                                                                                                                                                                   |
+| ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `agent` | Pi's `AgentChange`, such as `instructions` or `thinkingLevel`. For the root and `create()`, it is applied over `defaults`. A fork starts with the configuration of the session it forks, and `agent` is applied over that. As in Pi, a field that is `undefined` leaves the value underneath in place, and `null` clears it. |
+| `init`  | Pi's `ConversationInit`, `(tx, conversationId) => …`. It runs inside the commit that creates the session, after `agent`. Append one entry per message with `tx.appendEntry()`. If it throws, the commit fails and the session is not created.                                                                                |
+
+Use Pi's own entry kinds, so Pi treats the messages as if they had happened in the session: `UserEntry` for a user message, `AssistantEntry` for a model message, and `ToolResultEntry` for a tool result, with an empty `diagnostics` list. An assistant message needs `usage`, which Pi sums; an imported message has none, so give it zeros. Its `api`, `provider` and `model` name the model that wrote it, as on a message Pi stores itself; the example takes them from a model of `createAI`.
+
+```ts
+import type {
+  Api,
+  AssistantMessage,
+  Model,
+  Usage
+} from "@earendil-works/pi-ai";
+import {
+  AssistantEntry,
+  ToolResultEntry,
+  UserEntry,
+  type ConversationInit
+} from "@earendil-works/pi-durable";
+
+const NO_USAGE: Usage = {
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  totalTokens: 0,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+};
+
+/** The history, one entry per message, as `model` wrote it. */
+function history(model: Model<Api>): ConversationInit {
+  const answer = (
+    content: AssistantMessage["content"],
+    stopReason: AssistantMessage["stopReason"]
+  ): AssistantMessage => ({
+    role: "assistant",
+    content,
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+    usage: NO_USAGE,
+    stopReason,
+    timestamp: Date.now()
+  });
+  return async (tx, conversationId) => {
+    const timestamp = Date.now();
+    await tx.appendEntry(UserEntry, conversationId, {
+      model: [
+        { role: "user", content: "How many words is the draft?", timestamp }
+      ]
+    });
+    await tx.appendEntry(AssistantEntry, conversationId, {
+      model: [
+        answer(
+          [
+            {
+              type: "toolCall",
+              id: "call-1",
+              name: "word_count",
+              arguments: { text: "The quick brown fox" }
+            }
+          ],
+          "toolUse"
+        )
+      ]
+    });
+    await tx.appendEntry(ToolResultEntry, conversationId, {
+      model: [
+        {
+          role: "toolResult",
+          toolCallId: "call-1",
+          toolName: "word_count",
+          content: [{ type: "text", text: "4" }],
+          isError: false,
+          timestamp
+        }
+      ],
+      data: { diagnostics: [] }
+    });
+    await tx.appendEntry(AssistantEntry, conversationId, {
+      model: [
+        answer([{ type: "text", text: "The draft is 4 words long." }], "stop")
+      ]
+    });
+  };
+}
+
+// In the Durable Object:
+const { session, created } = await this.harness.root({
+  agent: { instructions: "You are an editor." },
+  init: history(this.ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017"))
+});
+if (!created) {
+  // The root already existed, so the history was not written.
+}
+await session.prompt("Make it longer.");
+```
+
+`harness.root()` returns the root session and `created`. When the root does not exist yet, it creates it with `agent` and `init` in one commit, and `created` is `true`. When it already exists, because a call used it first or an earlier `root()` created it, nothing is written, `init` does not run, and `created` is `false`. So call `root()` before anything else uses the root, and check `created` rather than assuming the history was written. A `root()` whose `init` throws creates nothing, so a later `root()` can try again.
+
+`sessions.create({ agent, init })` and `sessions.fork(from, { agent, init })` seed the session they create the same way. A fork's `init` appends after the history it copies from `from`.
 
 ### Label input the user did not type
 

@@ -235,7 +235,7 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     count: number,
     perCommit = count
   ): Promise<void> {
-    const root = await (await this.harness.pi()).root(BG);
+    const root = await this.#root();
     for (let start = 1; start <= count; start += perCommit) {
       const end = Math.min(start + perCommit - 1, count);
       await root.commit(async (tx) => {
@@ -267,7 +267,7 @@ export class PiHarnessTestObject extends DurableObject<Env> {
   /** Compact the root session and wait for the summary to be placed. */
   async compact(): Promise<void> {
     const pi = await this.harness.pi();
-    const root = await pi.root(BG);
+    const root = await this.#root();
     const task = await root.compact(undefined, BG);
     const { state } = await pi.waitForTask(task, BG);
     if (state.status !== "terminal" || state.outcome.status !== "completed") {
@@ -276,6 +276,16 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     const { submissionId } = state.outcome.result;
     if (submissionId === undefined) throw new Error("Nothing was compacted");
     await (await pi.submission(submissionId, BG))?.wait(BG);
+  }
+
+  /**
+   * pi's root conversation. `harness.root()` creates it with the harness's
+   * defaults if nothing has used it yet; pi's own `root()` would create it
+   * without them.
+   */
+  async #root() {
+    await this.harness.root();
+    return (await this.harness.pi()).root(BG);
   }
 
   #transcript(): ConversationTranscript {
