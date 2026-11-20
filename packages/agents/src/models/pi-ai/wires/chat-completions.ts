@@ -350,7 +350,9 @@ class CompletionAssembler {
     if (reason === null || reason === undefined) return false;
     this.output.stopReason = mapFinishReason(reason);
     if (this.output.stopReason === "error") {
-      this.output.errorMessage = `The model stopped with finish_reason "${reason}".`;
+      // pi-ai's own wording: its retry classifier matches
+      // "Provider finish_reason: error", a vendor's mid-stream failure.
+      this.output.errorMessage = `Provider finish_reason: ${reason}`;
     }
     return true;
   }

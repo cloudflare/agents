@@ -1,4 +1,5 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
+import { isRetryableAssistantError } from "@earendil-works/pi-ai/utils/retry";
 import { describe, expect, it } from "vitest";
 import { createAI, CLOUDFLARE_DIAGNOSTIC } from "../../../models/pi-ai";
 import {
@@ -619,6 +620,27 @@ describe("pi-ai: vendor reasoning and tool calls on the chat-completions wire", 
     expect(message.errorMessage).toContain("without the model finishing");
     // What arrived is kept on the failed message.
     expect(message.content[0]).toEqual({ text: "The answer is", type: "text" });
+  });
+
+  it("words an error finish reason as pi-ai does, so pi's retry can match it", async () => {
+    // OpenRouter-style vendors end a stream with `finish_reason: "error"` when
+    // their provider fails mid-stream; pi-ai's retry classifier matches its
+    // own wording, "Provider finish_reason: error".
+    const binding = fakeBinding(() =>
+      sseResponse([
+        vendorChunk({ content: "The answer is", role: "assistant" }),
+        vendorChunk({}, "error"),
+        "[DONE]"
+      ])
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const { message } = await collectEvents(
+      ai.stream(ai(groqModel("llama-3.1-8b-instant")), userContext("hi"))
+    );
+
+    expect(message.stopReason).toBe("error");
+    expect(message.errorMessage).toBe("Provider finish_reason: error");
+    expect(isRetryableAssistantError(message)).toBe(true);
   });
 
   it("completes a stream that ends with [DONE] and no finish reason", async () => {
