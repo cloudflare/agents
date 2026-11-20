@@ -19,6 +19,7 @@
 import {
   CDP_METHOD_NOT_FOUND,
   CdpProtocolError,
+  CdpTimeoutError,
   type CdpConnection
 } from "./cdp-connection";
 import type {
@@ -569,7 +570,7 @@ export class BrowserSession {
         timeoutMs
       });
     } catch (error) {
-      throw await this.#teach(state, error, method, sessionId);
+      throw await this.#teach(state, error, method, sessionId, live);
     }
     this.#observe(state, method, liveParams, result);
     if (
@@ -957,8 +958,6 @@ export class BrowserSession {
       targetId = created.targetId;
     }
     this.#setActive(state, targetId);
-    // Alongside the model's attach to it, which follows.
-    state.observer?.attach(targetId);
     return targetId;
   }
 
@@ -1048,8 +1047,21 @@ export class BrowserSession {
     state: ConnectedState,
     error: unknown,
     method: string,
-    sessionId: string | undefined
+    sessionId: string | undefined,
+    live: LiveSessionId | undefined
   ): Promise<unknown> {
+    if (error instanceof CdpTimeoutError) {
+      const targetId = [...state.attached].find(([, id]) => id === live)?.[0];
+      if (targetId && state.observer?.isBlocked(targetId)) {
+        return new Error(
+          `${error.message}. This tab isn't responding, probably because ` +
+            `of a dialog that opened before the host could answer it. ` +
+            `Reload or navigate this tab: send Page.reload with ` +
+            `sessionId: "${sessionId ?? live}", or Page.navigate.`
+        );
+      }
+      return error;
+    }
     if (!(error instanceof CdpProtocolError)) return error;
     if (
       error.code === CDP_SESSION_NOT_FOUND &&

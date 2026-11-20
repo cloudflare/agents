@@ -198,7 +198,6 @@ interface ObservedTab {
   navigations: Array<{ url: string; sameDocument?: true }>;
   dialogs: Array<{ type: string; message: string; accepted: boolean }>;
   blocked?: { url?: string };
-  setupMs?: number;
   documents: Array<{
     url: string;
     status?: number;
@@ -217,7 +216,7 @@ interface NamedRunOutput {
     tabClosed: boolean;
     tabShared: boolean;
     observed?:
-      | { available: true; connectMs: number; tabs: ObservedTab[] }
+      | { available: true; tabs: ObservedTab[] }
       | { available: false; reason: string };
     notices: string[];
   } | null;
@@ -986,32 +985,29 @@ describe("browser connector e2e", () => {
       );
     });
 
-    it("records what a page's alert() does with the observer off", async () => {
-      // Browser Run hangs the tab until it's reloaded. The local simulator
-      // did too when this was written ("hung: CDP command timed out"), but
-      // it's a different Chrome, so this logs the outcome instead of
-      // asserting it. The tab is closed either way.
-      const output = (await callAgent("runUnobserved", [
-        `async () => {
-        const { targetId } = await browser.cdp({ method: "Target.createTarget", params: { url: "${BASE_URL}/pages/ok" } });
-        const { sessionId } = await browser.attachToTarget({ targetId });
+    it("records a main document that failed to load", async () => {
+      // Nothing listens on this port.
+      const output = await runObserved(`async () => {
+        await browser.cdp({ method: "Page.navigate", params: { url: "http://localhost:18799/" }, sessionId: "active" });
         await new Promise((r) => setTimeout(r, 500));
-        await browser.cdp({ method: "Runtime.evaluate", params: { expression: "setTimeout(() => alert('probe'), 0); 1" }, sessionId });
-        await new Promise((r) => setTimeout(r, 200));
-        let outcome;
-        try {
-          const { result } = await browser.cdp({ method: "Runtime.evaluate", params: { expression: "document.title", returnByValue: true }, sessionId, timeoutMs: 3000 });
-          outcome = "answered: " + result.value;
-        } catch (error) {
-          outcome = "hung: " + String(error.message ?? error);
-        }
-        await browser.cdp({ method: "Target.closeTarget", params: { targetId } });
-        return outcome;
-      }`,
-        "dialog-probe"
-      ])) as NamedRunOutput;
-      console.log(`[probe] alert() with the observer off: ${output.result}`);
+      }`);
       expect(output.status).toBe("completed");
+      expect(observedTabs(output)[0].documents.at(-1)).toMatchObject({
+        url: "http://localhost:18799/",
+        error: expect.stringMatching(/^net::ERR_/)
+      });
+    });
+
+    it("records a same-document navigation", async () => {
+      const output = await runObserved(`async () => {
+        ${navigate("/pages/ok")}
+        await browser.cdp({ method: "Runtime.evaluate", params: { expression: "history.pushState(null, '', '/pages/next'); 1" }, sessionId: "active" });
+      }`);
+      expect(output.status).toBe("completed");
+      expect(observedTabs(output)[0].navigations.at(-1)).toEqual({
+        url: `${BASE_URL}/pages/next`,
+        sameDocument: true
+      });
     });
   });
 });

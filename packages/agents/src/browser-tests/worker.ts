@@ -48,9 +48,6 @@ const NAMED_SESSION = "e2e";
 /** The browser the host observer tests drive (the observer is on by default). */
 const OBSERVED_SESSION = "e2e-observed";
 
-/** A browser with the observer turned off, for comparison. */
-const UNOBSERVED_SESSION = "e2e-unobserved";
-
 /** Pages the observer tests navigate to, served by this Worker. */
 function servePage(url: URL): Response | undefined {
   switch (url.pathname) {
@@ -146,15 +143,6 @@ export class BrowserTestAgent extends Agent<Env> {
     });
   }
 
-  #unobservedBrowser(): Browser {
-    return new Browser({
-      provider: browserRun(this.env.BROWSER),
-      name: UNOBSERVED_SESSION,
-      store: this.#store(),
-      observer: false
-    });
-  }
-
   /**
    * Run code against the persistent browser the way `browserTool`
    * does: one session per run, the code in a Dynamic Worker. Includes the
@@ -171,17 +159,10 @@ export class BrowserTestAgent extends Agent<Env> {
     return this.#runIn(this.#observedBrowser(), code, scope);
   }
 
-  /** {@link runNamed}, on a browser created with `observer: false`. */
-  @callable()
-  async runUnobserved(code: string, scope?: string): Promise<NamedRunOutput> {
-    return this.#runIn(this.#unobservedBrowser(), code, scope);
-  }
-
-  /** Close the observer tests' browsers so they don't outlive the suite. */
+  /** Close the observer tests' browser so it doesn't outlive the suite. */
   @callable()
   async closeObserved(): Promise<void> {
     await this.#observedBrowser().close();
-    await this.#unobservedBrowser().close();
   }
 
   async #runIn(

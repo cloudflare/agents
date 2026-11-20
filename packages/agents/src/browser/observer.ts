@@ -27,7 +27,6 @@
  * says so. It follows page targets only.
  */
 
-import type { BrowserObserverConnection } from "./browser";
 import {
   CdpTimeoutError,
   type CdpConnection,
@@ -120,19 +119,21 @@ export interface BrowserObservedTab {
    * time out until it's reloaded or navigated. `url` is where it was.
    */
   blocked?: { url?: string };
-  /** From attaching to the tab until its setup finished or gave up, in ms. */
-  setupMs?: number;
 }
 
 /**
  * What a session's observer saw, or why there was nothing to see.
- * `connectMs` is how long its connection took to open, or to fail.
+ *
+ * `tabs` can leave out a tab the session worked in even when `available`
+ * is `true`: the observer couldn't attach to it or set it up, it wasn't a
+ * page, or the observer's connection closed. Read a missing tab as
+ * "unknown", not as "nothing happened there".
  *
  * @experimental The shape may change before stabilizing.
  */
 export type BrowserObserverRecord =
-  | { available: true; connectMs: number; tabs: BrowserObservedTab[] }
-  | { available: false; reason: string; connectMs?: number };
+  | { available: true; tabs: BrowserObservedTab[] }
+  | { available: false; reason: string };
 
 interface ObservedTabState {
   record: BrowserObservedTab;
@@ -142,9 +143,7 @@ interface ObservedTabState {
   loading: Map<string, BrowserObservedDocument>;
 }
 
-type Connected =
-  | { cdp: CdpConnection; connectMs: number }
-  | { cdp?: undefined; reason: string; connectMs?: number };
+type Connected = { cdp: CdpConnection } | { cdp?: undefined; reason: string };
 
 export class HostObserver {
   readonly #ready: Promise<Connected>;
@@ -159,9 +158,19 @@ export class HostObserver {
   readonly #browserName: string;
 
   /** Take a connection that is already opening; nothing waits for it here. */
-  constructor(connection: BrowserObserverConnection, browserName: string) {
+  constructor(connecting: Promise<CdpConnection>, browserName: string) {
     this.#browserName = browserName;
-    this.#ready = this.#connect(connection);
+    this.#ready = this.#connect(connecting);
+  }
+
+  /**
+   * Whether the observer found this tab blocked when it set it up: its
+   * page commands time out until it's reloaded or navigated.
+   */
+  isBlocked(targetId: string): boolean {
+    return this.#tabs.some(
+      ({ record }) => record.targetId === targetId && record.blocked
+    );
   }
 
   /**
@@ -212,15 +221,8 @@ export class HostObserver {
     workedIn: ReadonlySet<string> | undefined
   ): Promise<BrowserObserverRecord> {
     const connected = await this.#ready;
-    if (!connected.cdp) {
-      const { reason, connectMs } = connected;
-      return {
-        available: false,
-        reason,
-        ...(connectMs !== undefined ? { connectMs } : {})
-      };
-    }
-    const { cdp, connectMs } = connected;
+    if (!connected.cdp) return { available: false, reason: connected.reason };
+    const { cdp } = connected;
     try {
       await Promise.allSettled(this.#attaching.values());
       await Promise.allSettled(
@@ -238,23 +240,18 @@ export class HostObserver {
     }
     return {
       available: true,
-      connectMs,
       tabs: this.#tabs
         .filter(({ record }) => !workedIn || workedIn.has(record.targetId))
         .map(({ record }) => structuredClone(record))
     };
   }
 
-  async #connect({
-    connecting,
-    startedAt
-  }: BrowserObserverConnection): Promise<Connected> {
-    const elapsed = () => Date.now() - startedAt;
+  async #connect(connecting: Promise<CdpConnection>): Promise<Connected> {
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     const timedOut = new Promise<"timeout">((resolve) => {
       timeoutId = setTimeout(
         () => resolve("timeout"),
-        Math.max(0, OBSERVER_CONNECT_TIMEOUT_MS - elapsed())
+        OBSERVER_CONNECT_TIMEOUT_MS
       );
     });
     let outcome: CdpConnection | "timeout";
@@ -263,7 +260,7 @@ export class HostObserver {
     } catch (error) {
       const reason = `the observer couldn't connect: ${errorMessage(error)}`;
       this.#warn("connect", error);
-      return { reason, connectMs: elapsed() };
+      return { reason };
     } finally {
       clearTimeout(timeoutId);
     }
@@ -277,24 +274,25 @@ export class HostObserver {
       );
       return { reason };
     }
-    const connectMs = elapsed();
     // Closed while connecting: close() disconnects it.
     if (!this.#closing) this.#listen(outcome);
-    return { cdp: outcome, connectMs };
+    return { cdp: outcome };
   }
 
   async #attachTab(targetId: string): Promise<void> {
     const connected = await this.#ready;
     const { cdp } = connected;
     if (!cdp || this.#closing) return;
-    const startedAt = Date.now();
     let sessionId: string;
     try {
       sessionId = await cdp.attachToTarget(targetId, {
         timeoutMs: OBSERVER_COMMAND_TIMEOUT_MS
       });
     } catch (error) {
-      this.#warn(`attach to tab ${targetId}`, error);
+      // An unknown target id is the model's to hear about, not the host's.
+      if (error instanceof CdpTimeoutError) {
+        this.#warn(`attach to tab ${targetId}`, error);
+      }
       return;
     }
     const tab: ObservedTabState = {
@@ -335,13 +333,11 @@ export class HostObserver {
       // The target answered, but not as a page does (a worker, say):
       // stop following it.
       this.#forget(cdp, sessionId, tab);
-      this.#warn(`set up target ${targetId}`, errors[0]);
       return;
     }
     if (errors.length > 0) {
       await this.#checkBlocked(cdp, tab, errors[0]);
     }
-    tab.record.setupMs = Date.now() - startedAt;
   }
 
   /** Stop following a target, and leave it out of the record. */
@@ -382,23 +378,14 @@ export class HostObserver {
   }
 
   #listen(cdp: CdpConnection): void {
-    // Hear only this connection's own sessions and the browser itself:
-    // Browser Run sends its `Cloudflare.*` events to every connection,
-    // tagged with other connections' session ids.
-    const on = (method: string, handle: (event: CdpEvent) => void) =>
-      cdp.on(method, (event) => {
-        if (
-          event.sessionId === undefined ||
-          this.#tabsBySession.has(event.sessionId)
-        ) {
-          handle(event);
-        }
-      });
-    on("Page.javascriptDialogOpening", (event) => {
+    // Each handler looks the event's session up in #tabsBySession, so it
+    // ignores sessions that aren't this connection's: Browser Run tags its
+    // `Cloudflare.*` events with every connection's session ids.
+    cdp.on("Page.javascriptDialogOpening", (event) => {
       const tab = this.#tab(event);
       if (tab && event.sessionId) this.#answerDialog(cdp, tab, event);
     });
-    on("Page.frameNavigated", (event) => {
+    cdp.on("Page.frameNavigated", (event) => {
       const tab = this.#tab(event);
       const frame = asRecord(event.params.frame);
       if (!tab || !frame || frame.parentId !== undefined) return;
@@ -408,7 +395,7 @@ export class HostObserver {
         typeof frame.urlFragment === "string" ? frame.urlFragment : "";
       keepLast(tab.record.navigations, { url: frame.url + fragment });
     });
-    on("Page.navigatedWithinDocument", (event) => {
+    cdp.on("Page.navigatedWithinDocument", (event) => {
       const tab = this.#tab(event);
       const { frameId, url } = event.params;
       if (!tab || frameId !== tab.mainFrameId || typeof url !== "string") {
@@ -418,7 +405,7 @@ export class HostObserver {
     });
     // Network sends an event for every request: drop all but the main
     // frame's documents on arrival.
-    on("Network.requestWillBeSent", (event) => {
+    cdp.on("Network.requestWillBeSent", (event) => {
       const { params } = event;
       if (params.type !== "Document") return;
       const tab = this.#tab(event);
@@ -446,7 +433,7 @@ export class HostObserver {
         if (oldest !== undefined) tab.loading.delete(oldest);
       }
     });
-    on("Network.responseReceived", (event) => {
+    cdp.on("Network.responseReceived", (event) => {
       const { params } = event;
       if (params.type !== "Document") return;
       const document = this.#loading(event);
@@ -458,7 +445,7 @@ export class HostObserver {
       }
       this.#tab(event)?.loading.delete(String(params.requestId));
     });
-    on("Network.loadingFailed", (event) => {
+    cdp.on("Network.loadingFailed", (event) => {
       const { params } = event;
       if (params.type !== "Document") return;
       const document = this.#loading(event);
@@ -466,7 +453,7 @@ export class HostObserver {
       document.error = String(params.errorText ?? "failed");
       this.#tab(event)?.loading.delete(String(params.requestId));
     });
-    on("Target.detachedFromTarget", (event) => {
+    cdp.on("Target.detachedFromTarget", (event) => {
       const { sessionId } = event.params;
       if (typeof sessionId === "string") this.#tabsBySession.delete(sessionId);
     });
@@ -492,7 +479,8 @@ export class HostObserver {
         { accept: accepted },
         { sessionId: event.sessionId, timeoutMs: OBSERVER_COMMAND_TIMEOUT_MS }
       )
-      .catch((error: unknown) => this.#warn(`answer a ${type} dialog`, error));
+      // Another session on the tab may have answered first.
+      .catch(() => undefined);
     keepLast(tab.record.dialogs, {
       type,
       message: String(event.params.message ?? "").slice(
@@ -554,8 +542,12 @@ export function observerNotices(
 }
 
 function dialogEffect(dialog: BrowserObservedDialog): string {
-  if (dialog.type === "confirm") return ", so confirm() returned false";
-  if (dialog.type === "prompt") return ", so prompt() returned null";
+  if (dialog.type === "confirm") {
+    return ", so confirm() returned false. To answer OK, set `window.confirm = () => true` in the page before the step that opens it";
+  }
+  if (dialog.type === "prompt") {
+    return ', so prompt() returned null. To answer it, set `window.prompt = () => "<answer>"` in the page before the step that opens it';
+  }
   return "";
 }
 

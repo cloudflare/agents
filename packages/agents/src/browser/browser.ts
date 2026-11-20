@@ -195,22 +195,6 @@ export interface BrowserConnectOptions {
   observer?: boolean;
 }
 
-/**
- * A second CDP connection to the same browser, for a `BrowserSession`'s
- * host-only observer, opened at the same time as the main one.
- *
- * @experimental May change or go away.
- */
-export interface BrowserObserverConnection {
-  /**
-   * The connection, still opening. Whoever takes it disconnects it; it
-   * rejects when the main connection failed or this one couldn't open.
-   */
-  connecting: Promise<CdpConnection>;
-  /** When it started opening (`Date.now()`), for timings. */
-  startedAt: number;
-}
-
 export interface BrowserConnection {
   name: string;
   sessionId: string;
@@ -258,13 +242,15 @@ export interface BrowserConnection {
    */
   spec(): Promise<SearchableCdpSpec>;
   /**
-   * The host-only observer's connection, when it was asked for
-   * ({@link BrowserConnectOptions.observer}) and the browser offers one.
-   * A `BrowserSession` takes it and disconnects it when it closes.
+   * The host-only observer's connection, still opening, when it was asked
+   * for ({@link BrowserConnectOptions.observer}) and the browser offers
+   * one: a second CDP connection to the same browser, opened at the same
+   * time as `cdp`. It rejects if it couldn't open. A `BrowserSession`
+   * takes it and disconnects it when it closes.
    *
    * @experimental May change or go away.
    */
-  observer?: BrowserObserverConnection;
+  observer?: Promise<CdpConnection>;
 }
 
 /**
@@ -434,12 +420,12 @@ export class Browser extends LifecycleCapability {
    * Start opening the observer's connection alongside the main one: opened
    * after it, it would add a whole WebSocket upgrade to every session.
    */
-  #openObserver(resolved: ResolvedBrowser): BrowserObserverConnection {
+  #openObserver(resolved: ResolvedBrowser): Promise<CdpConnection> {
     const connecting = this.#open(resolved);
     // Whoever takes it handles a failure; until then, don't let it go
     // unhandled.
     connecting.catch(() => undefined);
-    return { connecting, startedAt: Date.now() };
+    return connecting;
   }
 
   /**
@@ -1011,8 +997,8 @@ export class Browser extends LifecycleCapability {
 }
 
 /** Disconnect an observer connection nobody will take. */
-function dropObserver(observer: BrowserObserverConnection | undefined): void {
-  observer?.connecting.then(
+function dropObserver(observer: Promise<CdpConnection> | undefined): void {
+  observer?.then(
     (cdp) => cdp.disconnect(),
     () => undefined
   );

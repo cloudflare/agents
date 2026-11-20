@@ -127,6 +127,21 @@ class FakeBrowserInstance {
   navigate(targetId: string, url: string): void {
     const tab = this.tabs.find((t) => t.targetId === targetId);
     if (!tab) return;
+    if (url.startsWith("https://refused.example")) {
+      // Nothing listens there: the request fails, and nothing commits.
+      this.emit(targetId, "Network.requestWillBeSent", {
+        requestId: "doc-refused",
+        type: "Document",
+        frameId: targetId,
+        request: { url }
+      });
+      this.emit(targetId, "Network.loadingFailed", {
+        requestId: "doc-refused",
+        type: "Document",
+        errorText: "net::ERR_CONNECTION_REFUSED"
+      });
+      return;
+    }
     const redirectFrom = `${url}?from=redirect`;
     const request = (requestUrl: string, extra = {}) =>
       this.emit(targetId, "Network.requestWillBeSent", {
@@ -260,6 +275,16 @@ class FakeBrowserInstance {
               navigateTo
             );
           }
+          const pushed = /^history\.pushState\(null, "", "(.*)"\)$/.exec(
+            String(params.expression)
+          )?.[1];
+          if (pushed) {
+            const target = String(this.attached.get(command.sessionId));
+            this.emit(target, "Page.navigatedWithinDocument", {
+              frameId: target,
+              url: pushed
+            });
+          }
           return {
             result: {
               result: { value: this.attached.get(command.sessionId) }
@@ -276,6 +301,8 @@ class FakeSocket {
   closed = false;
   /** Methods this socket never answers, to stall one connection. */
   silent = new Set<string>();
+  /** Methods this socket answers with an error. */
+  failing = new Set<string>();
   /** CDP sessions attached over this socket; Chrome drops them on close. */
   readonly sessions = new Set<string>();
   #listeners = new Map<string, Array<(event: unknown) => void>>();
@@ -301,7 +328,9 @@ class FakeSocket {
     if (this.silent.has(command.method)) return;
     if (!this.instance.answers(command)) return;
     queueMicrotask(() => {
-      const reply = this.instance.handle(command);
+      const reply = this.failing.has(command.method)
+        ? { error: { code: -32000, message: "Internal error" } }
+        : this.instance.handle(command);
       const attached = (reply.result as { sessionId?: unknown } | undefined)
         ?.sessionId;
       if (command.method === "Target.attachToTarget") {
@@ -334,9 +363,14 @@ function createFakeBrowser() {
    * Answer the nth WebSocket upgrade (from 1) yourself, e.g. to fail or
    * stall an observer's connection.
    */
-  const upgradeOverrides = new Map<number, () => Promise<Response>>();
+  const upgradeOverrides = new Map<
+    number,
+    (upgrade: () => Response) => Promise<Response>
+  >();
   /** Methods the nth socket (from 1) never answers. */
   const silentMethods = new Map<number, string[]>();
+  /** Methods the nth socket (from 1) answers with an error. */
+  const failingMethods = new Map<number, string[]>();
 
   const browser = {
     async fetch(input: RequestInfo | URL, init?: RequestInit) {
@@ -344,16 +378,22 @@ function createFakeBrowser() {
       const method = init?.method ?? "GET";
       const sessionId = url.match(/\/browser\/(session-[^/?]+)/)?.[1];
       if (new Headers(init?.headers).get("Upgrade") === "websocket") {
-        const override = upgradeOverrides.get(++upgrades);
-        if (override) return override();
-        const instance = sessionId ? instances.get(sessionId) : undefined;
-        if (!instance) return new Response(null, { status: 410 });
-        const socket = new FakeSocket(instance);
-        socket.silent = new Set(silentMethods.get(upgrades) ?? []);
-        sockets.push(socket);
-        const response = new Response(null);
-        Object.defineProperty(response, "webSocket", { value: socket });
-        return response;
+        const upgrade = (n: number) => {
+          const instance = sessionId ? instances.get(sessionId) : undefined;
+          if (!instance) return new Response(null, { status: 410 });
+          const socket = new FakeSocket(instance);
+          socket.silent = new Set(silentMethods.get(n) ?? []);
+          socket.failing = new Set(failingMethods.get(n) ?? []);
+          sockets.push(socket);
+          const response = new Response(null);
+          Object.defineProperty(response, "webSocket", { value: socket });
+          return response;
+        };
+        const n = ++upgrades;
+        const override = upgradeOverrides.get(n);
+        // An override can still upgrade, later, with the default.
+        if (override) return override(() => upgrade(n));
+        return upgrade(n);
       }
       if (method === "POST") {
         const id = `session-${++created}`;
@@ -391,7 +431,14 @@ function createFakeBrowser() {
     }
   };
 
-  return { browser, instances, sockets, upgradeOverrides, silentMethods };
+  return {
+    browser,
+    instances,
+    sockets,
+    upgradeOverrides,
+    silentMethods,
+    failingMethods
+  };
 }
 
 type Call = [method: string, input: Record<string, unknown>];
@@ -1322,7 +1369,6 @@ describe("BrowserSession observer", () => {
 
     expect(report?.observed).toEqual({
       available: true,
-      connectMs: expect.any(Number),
       tabs: [
         {
           targetId: target,
@@ -1337,8 +1383,7 @@ describe("BrowserSession observer", () => {
               ]
             }
           ],
-          dialogs: [],
-          setupMs: expect.any(Number)
+          dialogs: []
         }
       ]
     });
@@ -1517,8 +1562,8 @@ describe("BrowserSession observer", () => {
     ]);
     expect(report?.notices).toEqual([
       expect.stringContaining("opened an alert dialog"),
-      'The page opened a confirm dialog ("confirm?"), and the host dismissed it, so confirm() returned false.',
-      'The page opened a prompt dialog ("prompt?"), and the host dismissed it, so prompt() returned null.',
+      'The page opened a confirm dialog ("confirm?"), and the host dismissed it, so confirm() returned false. To answer OK, set `window.confirm = () => true` in the page before the step that opens it.',
+      'The page opened a prompt dialog ("prompt?"), and the host dismissed it, so prompt() returned null. To answer it, set `window.prompt = () => "<answer>"` in the page before the step that opens it.',
       'The page opened a beforeunload dialog ("beforeunload?"), and the host accepted it.'
     ]);
   });
@@ -1581,8 +1626,7 @@ describe("BrowserSession observer", () => {
     expect(evaluatedIn(results[0])).toBe(t.activeTab());
     expect(report?.observed).toEqual({
       available: false,
-      reason: expect.stringContaining("couldn't connect"),
-      connectMs: expect.any(Number)
+      reason: expect.stringContaining("couldn't connect")
     });
   });
 
@@ -1604,6 +1648,184 @@ describe("BrowserSession observer", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("records a main document that failed to load", async () => {
+    const t = setup();
+    const { report } = await observed(t, [
+      navigateActive("https://refused.example/")
+    ]);
+    expect(tabsOf(report)[0].documents).toEqual([
+      {
+        url: "https://refused.example/",
+        redirects: [],
+        error: "net::ERR_CONNECTION_REFUSED"
+      }
+    ]);
+    expect(tabsOf(report)[0].navigations).toEqual([]);
+  });
+
+  it("records a same-document navigation", async () => {
+    const t = setup();
+    const { report } = await observed(t, [
+      [
+        "send",
+        {
+          method: "Runtime.evaluate",
+          params: {
+            expression:
+              'history.pushState(null, "", "https://example.com/next")'
+          },
+          sessionId: "active"
+        }
+      ]
+    ]);
+    expect(tabsOf(report)[0].navigations).toEqual([
+      { url: "https://example.com/next", sameDocument: true }
+    ]);
+  });
+
+  it("tells the model to reload a blocked tab when its command times out", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const t = setup();
+      const instance = await t.start();
+      const stuck = instance.addTab("https://stuck.example/");
+      instance.blocked.add(stuck);
+      const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const session = t.browser.session();
+      const attaching = session.attachToTarget({ targetId: stuck });
+      await vi.advanceTimersByTimeAsync(250);
+      const { sessionId } = await attaching;
+      // The observer's setup times out, and it finds the tab blocked.
+      await vi.advanceTimersByTimeAsync(1_000);
+      const sending = session
+        .send({
+          method: "Runtime.evaluate",
+          params: { expression: "1" },
+          sessionId,
+          timeoutMs: 500
+        })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(500);
+      const error = String(await sending);
+      expect(error).toContain("CDP command timed out after 500ms");
+      expect(error).toContain("Reload or navigate this tab");
+      const closing = session.close();
+      await vi.advanceTimersByTimeAsync(3_000);
+      await closing;
+      warned.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("leaves a plain timeout alone in a tab that isn't blocked", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const t = setup();
+      t.silentMethods.set(1, ["Runtime.evaluate"]);
+      const session = t.browser.session();
+      const sending = call(session, [
+        "send",
+        {
+          method: "Runtime.evaluate",
+          params: { expression: "1" },
+          sessionId: "active",
+          timeoutMs: 500
+        }
+      ]).catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(1_000);
+      const error = String(await sending);
+      expect(error).toContain("CDP command timed out after 500ms");
+      expect(error).not.toContain("Reload");
+      const closing = session.close();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await closing;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("BrowserSession observer sockets", () => {
+  /** Let a socket that arrives late be disconnected. */
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  it("closes the first observer when connect retries on a new browser", async () => {
+    const t = setup();
+    await t.start();
+    // The stored browser is gone when the model's socket upgrades.
+    t.upgradeOverrides.set(1, async () => new Response(null, { status: 410 }));
+    const { error, report } = await t.run([evaluateActive]);
+    expect(error).toBeUndefined();
+    expect(report?.observed).toMatchObject({ available: true });
+    // The first observer (to the gone browser), then the new browser's two.
+    expect(t.sockets).toHaveLength(3);
+    const replacement = t.instances.get("session-2");
+    expect(t.sockets[1].instance).toBe(replacement);
+    expect(t.sockets[2].instance).toBe(replacement);
+    expect(t.sockets.every((socket) => socket.closed)).toBe(true);
+  });
+
+  it("closes an observer socket that arrives after the 2 s limit", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const t = setup();
+      let release = () => {};
+      t.upgradeOverrides.set(
+        2,
+        (upgrade) =>
+          new Promise<Response>((resolve) => {
+            release = () => resolve(upgrade());
+          })
+      );
+      const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const running = t.run([evaluateActive]);
+      await vi.advanceTimersByTimeAsync(2_000);
+      const { report } = await running;
+      warned.mockRestore();
+      expect(report?.observed).toMatchObject({ available: false });
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(t.sockets).toHaveLength(2);
+      expect(t.sockets.every((socket) => socket.closed)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("closes an observer socket that arrives while the session closes", async () => {
+    const t = setup();
+    let release = () => {};
+    t.upgradeOverrides.set(
+      2,
+      (upgrade) =>
+        new Promise<Response>((resolve) => {
+          release = () => resolve(upgrade());
+        })
+    );
+    const session = t.browser.session();
+    await session.send({ method: "Target.getTargets" });
+    const closing = session.close();
+    release();
+    await closing;
+    await settle();
+    expect(t.sockets).toHaveLength(2);
+    expect(t.sockets.every((socket) => socket.closed)).toBe(true);
+  });
+
+  it("closes the observer when listing the tabs fails", async () => {
+    const t = setup();
+    t.failingMethods.set(1, ["Target.getTargets"]);
+    const session = t.browser.session();
+    await expect(
+      session.send({ method: "Target.getTargets" })
+    ).rejects.toThrow();
+    await session.close();
+    await settle();
+    expect(t.sockets).toHaveLength(2);
+    expect(t.sockets.every((socket) => socket.closed)).toBe(true);
   });
 });
 
