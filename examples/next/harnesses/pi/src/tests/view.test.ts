@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
-import type { PiSessionView } from "../view";
+import type { TranscriptView } from "@earendil-works/pi-durable";
+import { projectView, type PiSessionView } from "../view";
 
 /**
  * `projectView` turns pi's conversation view into this app's, on the server
@@ -56,5 +57,25 @@ describe("the session view", () => {
         expect(text(message)).not.toContain("<summary>");
       }
     }
+  });
+
+  it("keeps a parked tool call, marked as parked", () => {
+    const view = projectView({
+      items: [],
+      docs: {
+        "pi.live": {
+          run: {},
+          tools: [
+            { callId: "a", name: "ask_person", status: "sleeping" },
+            { callId: "b", name: "search", status: "running", output: "…" },
+            { callId: "c", name: "done_tool", status: "done" }
+          ]
+        }
+      }
+    } as unknown as TranscriptView);
+    expect(view.tools).toEqual([
+      { callId: "a", name: "ask_person", output: "", parked: true },
+      { callId: "b", name: "search", output: "…", parked: false }
+    ]);
   });
 });

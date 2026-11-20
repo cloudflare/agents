@@ -454,6 +454,9 @@ function App() {
     fillGap
   } = usePiSession(session);
   const runningTools = running_.map((tool) => tool.name);
+  const parkedTools = running_
+    .filter((tool) => tool.parked)
+    .map((tool) => tool.name);
   const newestId = messages.at(-1)?.id;
   const oldestId = messages[0]?.id;
 
@@ -636,9 +639,12 @@ function App() {
                     <GearIcon size={15} className="animate-spin" />
                     {retry
                       ? `Retrying: ${retry.error}`
-                      : runningTools.length > 0
-                        ? `Running ${runningTools.join(", ")}`
-                        : "Waiting for the model"}
+                      : parkedTools.length > 0 &&
+                          parkedTools.length === runningTools.length
+                        ? `${parkedTools.join(", ")} waiting`
+                        : runningTools.length > 0
+                          ? `Running ${runningTools.join(", ")}`
+                          : "Waiting for the model"}
                   </div>
                 </Surface>
               </div>
