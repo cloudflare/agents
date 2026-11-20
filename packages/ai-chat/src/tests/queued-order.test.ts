@@ -76,6 +76,7 @@ describe("a message queued behind a running turn", () => {
     const { ws: tabA } = await connectChatWS(path);
     const { ws: tabB } = await connectChatWS(path);
     const seenA = record(tabA);
+    const seenB = record(tabB);
     const stub = (await getAgentByName(
       env.SlowStreamAgent,
       room
@@ -141,6 +142,11 @@ describe("a message queued behind a running turn", () => {
       .at(-1);
     expect(last?.queuedMessageIds).toBeUndefined();
     expect(last?.messages?.filter((m) => m.id === "u2")).toHaveLength(1);
+    // The tab that sent it was shown it as queued (with the first reply),
+    // so it is told when it joins, too.
+    const lists = seenB.filter((f) => f.type === "cf_agent_chat_messages");
+    expect(lists.some((f) => f.queuedMessageIds?.includes("u2"))).toBe(true);
+    expect(lists.at(-1)?.queuedMessageIds).toBeUndefined();
     tabA.close();
     tabB.close();
     tabC.close();

@@ -113,6 +113,7 @@ describe("a message queued behind a running turn", () => {
     const tabA = await connect(binding, room);
     const tabB = await connect(binding, room);
     const seenA = record(tabA);
+    const seenB = record(tabB);
     const stub = await agent(binding, room);
 
     send(tabA, "r1", [user("u1", "one")], SLOW);
@@ -180,6 +181,10 @@ describe("a message queued behind a running turn", () => {
       "assistant",
       "user"
     ]);
+    // The tab that sent it is never left drawing it as queued.
+    await delay(300);
+    const lists = seenB.filter((f) => f.type === "cf_agent_chat_messages");
+    expect(lists.at(-1)?.queuedMessageIds).toBeUndefined();
     tabA.close();
     tabB.close();
     tabC.close();

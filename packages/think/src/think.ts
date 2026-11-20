@@ -13232,6 +13232,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const sent = incomingMessages?.filter((m) => !queued?.has(m.id)) ?? [];
     const heldIds = new Set(this._newUserMessageIds(sent));
     const held = sent.filter((message) => heldIds.has(message.id));
+    // Lists naming queued messages once this request was shown to the
+    // other tabs.
+    let queuedViewsAtAccept = 0;
     return {
       requestId,
       admission: {
@@ -13291,6 +13294,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
         // Other tabs see the new messages as queued.
         this._broadcastMessages(connection ? [connection.id] : []);
+        queuedViewsAtAccept = this._turns.queuedViews;
         return { branchParentId: reconciledTurn.branchParentId, generation };
       },
       // The turn is at the front of the queue: its new messages join the
@@ -13316,8 +13320,15 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             return true;
           }
         );
-        // The tab that sent them draws them already.
-        if (joined) this._broadcastMessages(connection ? [connection.id] : []);
+        // The tab that sent them draws them already, unless it was since
+        // shown them as queued.
+        if (joined) {
+          this._broadcastMessages(
+            connection && this._turns.queuedViews === queuedViewsAtAccept
+              ? [connection.id]
+              : []
+          );
+        }
         return joined;
       },
       enqueue: (turn, generation, onQueued) =>
