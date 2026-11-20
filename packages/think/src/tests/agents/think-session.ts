@@ -6147,6 +6147,28 @@ export class ThinkToolsTestAgent extends Think {
     this._approveParkedInNextStepForTest = true;
   }
 
+  /**
+   * Queue the connection-less continuation once per message id, the way
+   * coalesced approvals do, and return the messages the one item answers.
+   */
+  async queueConnectionlessContinuationsForTest(
+    targetMessageIds: string[]
+  ): Promise<string[] | undefined> {
+    const self = this as unknown as {
+      _queueConnectionlessContinuation(id: string): Promise<void>;
+      _cfRunConnectionlessContinuation(): Promise<void>;
+    };
+    // Hold the item: its callback would run and remove it.
+    self._cfRunConnectionlessContinuation = () => new Promise(() => {});
+    for (const id of targetMessageIds) {
+      await self._queueConnectionlessContinuation(id);
+    }
+    const item = await this.getQueue<{ targetMessageIds: string[] }>(
+      "connectionless-continuation"
+    );
+    return item?.payload.targetMessageIds;
+  }
+
   /** Keep a resolved pause's connectionless continuation from running. */
   async holdConnectionlessContinuationForTest(): Promise<void> {
     (

@@ -258,6 +258,86 @@ export class TestChatAgent extends AIChatAgent<Env> {
   // Store captured requestId from onChatMessage options for testing
   private _capturedRequestId: string | undefined = undefined;
   private _chatMessageCallCount = 0;
+  private _failedFirstContinuation = false;
+  private _releaseHeldTurnQueue: (() => void) | null = null;
+
+  private _fallbackOnFailedContinuation = false;
+  private _handlingResponse = false;
+  private _reentrantResponseHooks = 0;
+  private _responseStatuses: string[] = [];
+
+  /**
+   * Make `onChatResponse` answer a failed continuation with a fallback
+   * message through `saveMessages`, the way an app would.
+   */
+  setFallbackOnFailedContinuationForTest(value: boolean): void {
+    this._fallbackOnFailedContinuation = value;
+  }
+
+  responseHookReportForTest(): { statuses: string[]; reentrant: number } {
+    return {
+      statuses: this._responseStatuses,
+      reentrant: this._reentrantResponseHooks
+    };
+  }
+
+  override async onChatResponse(result: ChatResponseResult): Promise<void> {
+    if (this._handlingResponse) this._reentrantResponseHooks++;
+    this._handlingResponse = true;
+    try {
+      this._responseStatuses.push(
+        `${result.continuation ? "continuation" : "turn"}:${result.status}`
+      );
+      if (
+        this._fallbackOnFailedContinuation &&
+        result.continuation &&
+        result.status === "error"
+      ) {
+        this._fallbackOnFailedContinuation = false;
+        this.setTestBody({});
+        await this.saveMessages([
+          ...this.messages,
+          {
+            id: "fallback-question",
+            role: "user",
+            parts: [{ type: "text", text: "Try again without the tool" }]
+          }
+        ]);
+      }
+    } finally {
+      this._handlingResponse = false;
+    }
+  }
+
+  /** Put a turn that does nothing at the front of the queue until released. */
+  holdTurnQueueForTest(): void {
+    const held = new Promise<void>((resolve) => {
+      this._releaseHeldTurnQueue = resolve;
+    });
+    void (
+      this as unknown as {
+        _turnQueue: {
+          enqueue(id: string, fn: () => Promise<void>): Promise<unknown>;
+        };
+      }
+    )._turnQueue.enqueue("held-for-test", () => held);
+  }
+
+  releaseTurnQueueForTest(): void {
+    this._releaseHeldTurnQueue?.();
+    this._releaseHeldTurnQueue = null;
+  }
+
+  /** The request id of the continuation waiting to run, if any. */
+  pendingContinuationRequestIdForTest(): string | null {
+    return (
+      (
+        this as unknown as {
+          _continuation: { pending: { requestId: string } | null };
+        }
+      )._continuation.pending?.requestId ?? null
+    );
+  }
 
   private _persistDelayForTest: {
     role: "user" | "assistant";
@@ -311,6 +391,24 @@ export class TestChatAgent extends AIChatAgent<Env> {
 
     if (delayMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+
+    // Every continuation fails before it produces a response.
+    if (
+      options?.continuation === true &&
+      options.body?.failContinuations === true
+    ) {
+      throw new Error("The model is unavailable");
+    }
+
+    // The first continuation fails before it produces a response.
+    if (
+      options?.continuation === true &&
+      options.body?.failFirstContinuation === true &&
+      !this._failedFirstContinuation
+    ) {
+      this._failedFirstContinuation = true;
+      throw new Error("The model is unavailable");
     }
 
     const chainedContinuationResponse =
@@ -468,6 +566,35 @@ export class TestChatAgent extends AIChatAgent<Env> {
       }
 
       return makeSSEChunkResponse(chunks);
+    }
+
+    // A hand-written stream that carries a client tool call and the answer
+    // in one step: no `start-step` between them, finish reason `stop`.
+    if (
+      options?.body?.answerInSameStepAsToolCall === true &&
+      !options.continuation
+    ) {
+      return makeDelayedSSEChunkResponse(
+        [
+          { type: "start" },
+          {
+            type: "tool-input-available",
+            toolCallId: "call_same_step",
+            toolName: "fastClientTool",
+            input: {}
+          },
+          { type: "text-start", id: "text_same_step" },
+          {
+            type: "text-delta",
+            id: "text_same_step",
+            delta: "Here is the answer."
+          },
+          { type: "text-end", id: "text_same_step" },
+          { type: "finish", finishReason: "stop" }
+        ],
+        75,
+        options.abortSignal
+      );
     }
 
     // Reproduce a client-tool result that round-trips while the original
@@ -1600,12 +1727,6 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
         _submitConcurrency: { overlappingSubmitCount: number };
       }
     )._submitConcurrency.overlappingSubmitCount;
-  }
-
-  abortActiveTurnForTest(): boolean {
-    return (
-      this as unknown as { abortActiveTurn(): boolean }
-    ).abortActiveTurn();
   }
 
   resetTurnStateForTest(): void {

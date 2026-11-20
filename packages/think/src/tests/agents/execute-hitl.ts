@@ -230,6 +230,12 @@ export class ThinkExecuteHitlAgent extends Think {
     return out;
   }
 
+  /** How many assistant messages the transcript holds. */
+  async assistantMessageCount(): Promise<number> {
+    return this.messages.filter((message) => message.role === "assistant")
+      .length;
+  }
+
   /** Text content of the last assistant message — the model's narration. */
   async lastAssistantText(): Promise<string> {
     for (let i = this.messages.length - 1; i >= 0; i--) {

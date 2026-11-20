@@ -279,6 +279,66 @@ describe("broadcast stream state machine", () => {
     }
   });
 
+  it("draws a continuation the server stores in a message of its own as that message", () => {
+    // Think stores a tool continuation as a new assistant message. A tab
+    // that only watches it must not write its text into the tool call's
+    // message: the message list that follows holds both.
+    const frames = [
+      { type: "start" },
+      { type: "text-start", id: "t1" },
+      { type: "text-delta", id: "t1", delta: "You are in Porto." },
+      { type: "text-end", id: "t1" }
+    ];
+    let state: BroadcastStreamState = idle;
+    let messages = makeMessages("where", "tool call here");
+    for (const chunkData of frames) {
+      const result = transition(state, {
+        type: "response",
+        streamId: "cont-1",
+        messageId: "fallback-id",
+        chunkData,
+        continuation: true,
+        continuationMessageId: "assistant-2"
+      });
+      state = result.state;
+      if (result.messagesUpdate) messages = result.messagesUpdate(messages);
+    }
+    // The server's list arrives before the terminal frame.
+    const stored = [...messages];
+    const done = transition(state, {
+      type: "response",
+      streamId: "cont-1",
+      messageId: "fallback-id",
+      done: true,
+      continuation: true,
+      continuationMessageId: "assistant-2"
+    });
+    messages = done.messagesUpdate!(stored);
+
+    expect(messages.map((message) => message.id)).toEqual([
+      "msg-0",
+      "msg-1",
+      "assistant-2"
+    ]);
+    expect(messages[1].parts).toMatchObject([{ text: "tool call here" }]);
+    expect(messages[2].parts).toMatchObject([{ text: "You are in Porto." }]);
+  });
+
+  it("extends the message a continuation names when the tab holds it", () => {
+    const result = transition(idle, {
+      type: "response",
+      streamId: "s1",
+      messageId: "fallback-id",
+      chunkData: { type: "text-delta", delta: " continued" },
+      continuation: true,
+      continuationMessageId: "msg-1"
+    });
+    const messages = result.messagesUpdate!(makeMessages("hi", "response"));
+
+    expect(messages).toHaveLength(2);
+    expect(messages[1].parts).toMatchObject([{ text: "response continued" }]);
+  });
+
   // ── different stream replaces accumulator ────────────────────────
 
   it("creates new accumulator when streamId changes", () => {

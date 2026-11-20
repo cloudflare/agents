@@ -50,12 +50,12 @@ import {
   isReplayChunk,
   parseProtocolMessage,
   sendIfOpen,
-  hasIncompleteToolBatch,
   ChatTurns,
   ChatTurnFibers,
   pinnedOr,
   prepareTurnMessages,
   toSaveMessagesResult,
+  type TurnFailureHost,
   type ToolInteractionOutcome,
   partAwaitsClientInteraction,
   clientResolvableToolNames,
@@ -264,7 +264,6 @@ type StreamResultStatus = {
   error?: string;
   /** `"interrupted"` for a reply cut off and handed to recovery. */
   reason?: SaveMessagesResult["reason"];
-  finishReason?: string;
 };
 
 export type ChatMessage = UIMessage;
@@ -484,7 +483,9 @@ export class AIChatAgent<
         this._chatRecoveryEngine().outsideAttempt(() =>
           this._fireAutoContinuation()
         ),
-      lastTurnReplyId: () => this._lastTurnReplyId
+      lastTurnReplyId: () => this._lastTurnReplyId,
+      continuationDropped: (event) =>
+        this._emit("chat:continuation:dropped", { ...event })
     },
     { defaultDebounceMs: AIChatAgent.MESSAGE_DEBOUNCE_MS }
   );
@@ -1884,36 +1885,6 @@ export class AIChatAgent<
     }));
   }
 
-  private _flushAwaitingStreamStartConnections() {
-    if (!this._resumableStream.hasActiveStream()) {
-      return;
-    }
-
-    this._continuation.flushAwaitingConnections((c) =>
-      this._notifyStreamResuming(c)
-    );
-  }
-
-  private _activateDeferredAutoContinuation() {
-    // Run the freshly-activated continuation through the event-driven barrier
-    // (#1650) rather than enqueuing it directly — its batch may still be
-    // incomplete (or a stream may be active), in which case it parks and
-    // re-arms instead of firing inference against a half-complete transcript.
-    this._autoContinuation.activateDeferredAndReschedule();
-  }
-
-  private _clearAllAutoContinuationState(sendNone = false) {
-    this._clearPendingAutoContinuation(sendNone);
-    this._continuation.clearDeferred();
-  }
-
-  private _clearPendingAutoContinuation(sendNone = false) {
-    if (sendNone) {
-      this._continuation.sendResumeNone();
-    }
-    this._continuation.clearPending();
-  }
-
   /**
    * The shared resume-handshake driver (Tier-2). Lazily built; the
    * `ResumableStream` / `ContinuationState` / pending set are stable after the
@@ -1973,17 +1944,10 @@ export class AIChatAgent<
       ...options,
       ...(originIds && { originMessageIds: originIds })
     });
-    // Flush connections parked during this turn's pre-stream window (#1784)
-    // into the normal STREAM_RESUMING path now that a stream exists. Safe for
-    // every turn — the awaiting set is empty unless a client reconnected before
-    // the first chunk. (Continuation-turn parks live in `_continuation` and are
-    // flushed below.)
-    this._preStream.flushOnStreamStart((c) => this._notifyStreamResuming(c));
-    if (this._continuation.pending?.requestId === requestId) {
-      this._continuation.activatePending();
-      this._flushAwaitingStreamStartConnections();
-      this._activateDeferredAutoContinuation();
-    }
+    // Connections parked on this turn's pre-stream window (#1784) or on the
+    // continuation it runs go into the normal STREAM_RESUMING path now that
+    // a stream exists.
+    this._turns.streamStarted(requestId, (c) => this._notifyStreamResuming(c));
     // Arm on START as well as finish so cleanup still has a belt-and-suspenders
     // wake if fiber recovery cannot finalize a stream. The last-activity sweep
     // threshold keeps an actively streaming run from being reclaimed before it
@@ -2011,10 +1975,7 @@ export class AIChatAgent<
 
   private _afterStreamFinished(requestId: string | null) {
     this._pendingResumeConnections.clear();
-    if (requestId === this._continuation.activeRequestId) {
-      this._continuation.activeRequestId = null;
-      this._continuation.activeConnectionId = null;
-    }
+    this._turns.streamEnded(requestId);
   }
 
   /**
@@ -2075,11 +2036,7 @@ export class AIChatAgent<
   protected _markStreamError(streamId: string) {
     const erroredRequestId = this._resumableStream.activeRequestId;
     this._resumableStream.markError(streamId);
-    this._pendingResumeConnections.clear();
-    if (erroredRequestId === this._continuation.activeRequestId) {
-      this._continuation.activeRequestId = null;
-      this._continuation.activeConnectionId = null;
-    }
+    this._afterStreamFinished(erroredRequestId);
   }
 
   /**
@@ -3019,15 +2976,6 @@ export class AIChatAgent<
     });
   }
 
-  private abortActiveTurn(): boolean {
-    if (!this._turnQueue.activeRequestId) {
-      return false;
-    }
-
-    this._abortRegistry.cancel(this._turnQueue.activeRequestId);
-    return true;
-  }
-
   /**
    * Aborts the active turn and invalidates queued continuations. Call this
    * when intercepting `CF_AGENT_CHAT_CLEAR` before the SDK sees the message —
@@ -3165,63 +3113,7 @@ export class AIChatAgent<
         this._mergeQueuedUserStartIndexByEpoch.delete(gen);
       }
 
-      if (
-        this._pendingChatResponseResults.length > 0 &&
-        !this._insideResponseHook
-      ) {
-        this._insideResponseHook = true;
-        try {
-          await this.keepAliveWhile(async () => {
-            while (this._pendingChatResponseResults.length > 0) {
-              const chatResult = this._pendingChatResponseResults.shift()!;
-              // A later turn that ends in a non-error outcome supersedes any
-              // pending terminal record (#1645) — both a successful turn and an
-              // aborted one (the conversation has moved on either way; only a
-              // fresh error should leave a terminal to replay). The
-              // client-request handler already clears on a new submit; this
-              // covers turns driven purely server-side (`saveMessages`,
-              // auto-continuation) with no client request in between, so a
-              // stale exhaustion can't replay on a later reconnect. Mirrors
-              // Think's `_recordTerminalChatStatus`, which clears on any
-              // non-error/non-interrupted status.
-              if (
-                chatResult.status === "completed" ||
-                chatResult.status === "aborted"
-              ) {
-                // Not the record of this turn's own give-up.
-                await this._clearChatTerminal(chatResult.requestId);
-              } else if (chatResult.status === "error") {
-                // A terminal (non-recovered) error — e.g. a provider 500 surfaced
-                // as a stream `error` part — has no durable trace otherwise, so a
-                // client disconnected at this moment never learns the turn failed
-                // and stays frozen on reconnect (#1645). Record it so it replays
-                // over the resume handshake (shared
-                // `ResumeHandshake._replayTerminalOnResume`). Mirrors
-                // Think's `_fireResponseHook`, which records on `error` too.
-                // Recoverable failures (deploy/eviction/stall) don't arrive here
-                // as `error` — they reach the drain loop as `aborted`, or not at
-                // all (the isolate is gone), and exhaustion records its own
-                // terminal — so this can't pre-empt recovery.
-                await this._recordChatTerminal(
-                  chatResult.requestId,
-                  chatResult.error ?? "The assistant encountered an error."
-                );
-              }
-              try {
-                // The hook is the app's, and may start a turn of its own.
-                // Neither belongs to a recovery attempt whose turn this was.
-                await this._chatRecoveryEngine().outsideAttempt(() =>
-                  this.onChatResponse(chatResult)
-                );
-              } catch (hookError) {
-                console.error("[AIChatAgent] onChatResponse threw:", hookError);
-              }
-            }
-          });
-        } finally {
-          this._insideResponseHook = false;
-        }
-      }
+      await this._drainChatResponseResults();
     }
 
     if (result!.status === "stale") {
@@ -3240,225 +3132,191 @@ export class AIChatAgent<
    * continuation would never fire. A slow batch is re-checked here and simply
    * keeps holding (event-driven) until its remaining siblings answer.
    */
-  private _onStreamingTurnFinalized(finishReason?: string): void {
+  private _onStreamingTurnFinalized(): void {
     this._streamingTurnActive = false;
+    // Whether the held continuation still has something to answer (#1618,
+    // #2171) is decided when its turn starts.
+    this._turns.replyFinalized();
+  }
 
-    // A tool result or approval can leave an auto-continuation pending while the
-    // original AI SDK stream is still active. If that stream then finishes with
-    // a normal assistant response, the continuation is stale: firing it would
-    // replay a transcript ending in assistant text. Modern Anthropic models
-    // reject that request as an unsupported assistant prefill (#1618, #2171).
-    // A sibling tool call still awaiting its result keeps the continuation:
-    // the stream's text did not answer it, and the continuation is the only
-    // record of the batch's opt-in.
+  /** Results whose terminal record was written before they were queued. */
+  private readonly _terminalRecordedResults = new WeakSet<ChatResponseResult>();
+
+  /**
+   * Deliver every queued `onChatResponse` result, one at a time. The one
+   * guarded place the hook is called from: a hook that starts a turn of its
+   * own (`saveMessages`) queues that turn's result, and this loop delivers
+   * it after the hook returns, never inside it.
+   */
+  private async _drainChatResponseResults(): Promise<void> {
     if (
-      finishReason === "stop" &&
-      this._continuation.pending &&
-      !this._hasIncompleteToolBatch()
+      this._pendingChatResponseResults.length === 0 ||
+      this._insideResponseHook
     ) {
-      this._clearPendingAutoContinuation(true);
       return;
     }
-
-    this._autoContinuation.rearmForBatch();
+    this._insideResponseHook = true;
+    try {
+      await this.keepAliveWhile(async () => {
+        while (this._pendingChatResponseResults.length > 0) {
+          const chatResult = this._pendingChatResponseResults.shift()!;
+          // A later turn that ends in a non-error outcome supersedes any
+          // pending terminal record (#1645) — both a successful turn and an
+          // aborted one (the conversation has moved on either way; only a
+          // fresh error should leave a terminal to replay). The
+          // client-request handler already clears on a new submit; this
+          // covers turns driven purely server-side (`saveMessages`,
+          // auto-continuation) with no client request in between, so a
+          // stale exhaustion can't replay on a later reconnect. Mirrors
+          // Think's `_recordTerminalChatStatus`, which clears on any
+          // non-error/non-interrupted status.
+          if (
+            chatResult.status === "completed" ||
+            chatResult.status === "aborted"
+          ) {
+            // Not the record of this turn's own give-up.
+            await this._clearChatTerminal(chatResult.requestId);
+          } else if (chatResult.status === "error") {
+            // A terminal (non-recovered) error — e.g. a provider 500 surfaced
+            // as a stream `error` part — has no durable trace otherwise, so a
+            // client disconnected at this moment never learns the turn failed
+            // and stays frozen on reconnect (#1645). Record it so it replays
+            // over the resume handshake (shared
+            // `ResumeHandshake._replayTerminalOnResume`). Mirrors
+            // Think's `_fireResponseHook`, which records on `error` too.
+            // Recoverable failures (deploy/eviction/stall) don't arrive here
+            // as `error` — they reach the drain loop as `aborted`, or not at
+            // all (the isolate is gone), and exhaustion records its own
+            // terminal — so this can't pre-empt recovery.
+            // A turn that failed before its stream recorded it already.
+            if (!this._terminalRecordedResults.delete(chatResult)) {
+              await this._recordChatTerminal(
+                chatResult.requestId,
+                chatResult.error ?? "The assistant encountered an error."
+              );
+            }
+          }
+          try {
+            // The hook is the app's, and may start a turn of its own.
+            // Neither belongs to a recovery attempt whose turn this was.
+            await this._chatRecoveryEngine().outsideAttempt(() =>
+              this.onChatResponse(chatResult)
+            );
+          } catch (hookError) {
+            console.error("[AIChatAgent] onChatResponse threw:", hookError);
+          }
+        }
+      });
+    } finally {
+      this._insideResponseHook = false;
+    }
   }
 
   /**
-   * `true` when the latest assistant message is mid-batch: it carries at least
-   * one settled tool result AND at least one tool call/approval still awaiting a
-   * client result. That is the #1649 signature — the model fanned out parallel
-   * tool calls and only some have been answered. Scoped to the leaf (the step
-   * the continuation answers) so an unrelated dangling tool in an earlier
-   * message doesn't block a legitimate follow-up continuation.
+   * Run the continuation turn for the pending continuation. The turn core
+   * owns it (`ChatTurns.runContinuationTurn`): the abort signal, the claim
+   * when the turn starts, the failure report and the settle. This supplies
+   * the queue wrapper, the turn body (`_runServerTurnReply`, the same one
+   * `saveMessages` and `continueLastTurn` run), and how a failure reaches
+   * clients and `onChatResponse`.
    */
-  private _hasIncompleteToolBatch(): boolean {
-    return hasIncompleteToolBatch(this.messages);
-  }
-
   private _fireAutoContinuation() {
-    const pending = this._continuation.pending;
-    if (!pending) return;
-    const requestId = pending.requestId;
-
     const epoch = this._turnQueue.generation;
-    // _runExclusiveChatTurn must be called synchronously so the chat turn
-    // queue is set up immediately — otherwise waitForIdle() can resolve
-    // before the continuation starts.  keepAlive() is called inside the
-    // turn to prevent hibernation while streaming, without deferring the queue
-    // registration.
-    this._runExclusiveChatTurn(
-      requestId,
-      async () => {
-        const dispose = await this.keepAlive();
-        try {
-          // Nothing to continue: the continuation was cleared, or the
-          // conversation moved on since its tool result (a newer question or
-          // reply, a regenerate, a clear).
-          const continuation = this._turns.takeContinuation();
-          if (!continuation) {
-            this._clearAllAutoContinuationState(true);
-            return;
-          }
-          const { connection, clientTools, body } = continuation;
+    void this._turns.runContinuationTurn({
+      // _runExclusiveChatTurn must be called synchronously so the chat turn
+      // queue is set up immediately, otherwise waitForIdle() can resolve
+      // before the continuation starts. keepAlive() is called inside the
+      // turn to prevent hibernation while streaming, without deferring the
+      // queue registration.
+      enqueue: (requestId, turn) =>
+        this._runExclusiveChatTurn(
+          requestId,
+          async () => {
+            const dispose = await this.keepAlive();
+            try {
+              await turn();
+            } finally {
+              dispose();
+            }
+          },
+          { epoch }
+        ),
+      // The one turn body every server-started turn runs, for the
+      // continuation's connection and tools.
+      run: (continuation, abortSignal) =>
+        this._runServerTurnReply(continuation.requestId, abortSignal, {
+          clientTools: continuation.clientTools,
+          body: continuation.body,
+          continuation: true,
+          connection: continuation.connection,
           // The reply that asked for the tool is extended while it is the
           // last message. When a message was appended after it, the answer
           // is a new reply after that message, which is left as it is.
-          const extendsReply =
+          extendsReply:
             continuation.targetMessageIds == null ||
             continuation.targetMessageIds.includes(
               this.messages.at(-1)?.id ?? ""
-            );
-
-          const abortSignal = this._abortRegistry.getSignal(requestId);
-
-          return this._tryCatchChat(async () => {
-            return agentContext.run(
-              {
-                agent: this,
-                connection,
-                request: undefined,
-                email: undefined
-              },
-              async () => {
-                const autoContinuationBody = async (
-                  takeReply: () => Promise<void>
-                ) => {
-                  let replying = false;
-                  try {
-                    await this._repairInterruptedToolsBeforeTurn({
-                      continuation: true
-                    });
-                    const response = await this.onChatMessage(
-                      async (_finishResult) => {},
-                      {
-                        requestId,
-                        abortSignal,
-                        clientTools,
-                        body,
-                        continuation: true
-                      }
-                    );
-
-                    if (response) {
-                      // The model returned a reply: this turn continues it
-                      // now.
-                      await takeReply();
-                      const replyResult = await this._reply(
-                        requestId,
-                        response,
-                        [],
-                        {
-                          continuation: extendsReply,
-                          chatMessageId: requestId,
-                          abortSignal,
-                          onStreamStart: () => {
-                            replying = true;
-                          }
-                        }
-                      );
-                      if (replyResult.status === "error") {
-                        this._clearAllAutoContinuationState(true);
-                        return;
-                      }
-                      this._activateDeferredAutoContinuation();
-                    } else {
-                      this._clearPendingAutoContinuation(true);
-                      this._activateDeferredAutoContinuation();
-                    }
-                  } catch (error) {
-                    if (
-                      !replying &&
-                      !abortSignal?.aborted &&
-                      !isDurableObjectResetError(error)
-                    ) {
-                      await this._reportContinuationFailure(requestId, error);
-                    }
-                    throw error;
-                  } finally {
-                    this._abortRegistry.remove(requestId);
-                  }
-                };
-
-                await this._runChatRecoveryFiber(
-                  requestId,
-                  true,
-                  autoContinuationBody
-                );
-              }
-            );
-          });
-        } finally {
-          dispose();
-        }
-      },
-      {
-        epoch,
-        onStale: () => this._clearAllAutoContinuationState(true)
+            )
+        }),
+      failure: this._turnFailureHost(),
+      onError: (error, { errorPrefix, reported }) => {
+        // A failure clients were told about is not logged a second time.
+        if (reported) return;
+        console.error(
+          errorPrefix ?? "[AIChatAgent] Auto-continuation failed:",
+          error
+        );
       }
-    ).catch((error) => {
-      const errorPrefix =
-        this._continuation.pending?.errorPrefix ??
-        "[AIChatAgent] Auto-continuation failed:";
-      this._clearAllAutoContinuationState(true);
-      console.error(errorPrefix, error);
     });
   }
 
   /**
-   * Report a chat request whose turn failed before it streamed: an error
-   * frame for the request and a durable terminal record, so a client that
-   * reconnects learns the outcome too.
+   * How a turn that failed before it streamed reaches clients and the app.
+   * The turn core owns the order (`reportTurnFailure`): the event, the
+   * durable terminal record, then the error frame, for a client request and
+   * a continuation alike.
+   */
+  private _turnFailureHost(): TurnFailureHost<ChatMessage> {
+    return {
+      describe: ({ error }) => {
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        this._emit("message:error", { error: errorMessage });
+        return errorMessage;
+      },
+      recordTerminal: (requestId, errorMessage) =>
+        this._recordChatTerminal(requestId, errorMessage),
+      broadcast: (frame) =>
+        this._broadcastChatMessage({
+          ...frame,
+          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+        }),
+      // Called once the turn has left the queue, so the hook may start a
+      // turn of its own. It goes through the same guarded queue as every
+      // other result. The terminal record is written already.
+      respond: (result) => {
+        this._terminalRecordedResults.add(result);
+        this._pendingChatResponseResults.push(result);
+        return this._drainChatResponseResults();
+      }
+    };
+  }
+
+  /**
+   * Report a chat request whose turn failed before it streamed: a durable
+   * terminal record, so a client that reconnects learns the outcome too,
+   * then an error frame for the request.
    */
   private async _reportTurnFailure(
     requestId: string,
     error: unknown
   ): Promise<void> {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    this._broadcastChatMessage({
-      body: errorMessage,
-      done: true,
-      error: true,
-      id: requestId,
-      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+    await this._turns.reportTurnFailure(this._turnFailureHost(), {
+      requestId,
+      error,
+      continuation: false,
+      stage: "turn"
     });
-    this._emit("message:error", { error: errorMessage });
-    await this._recordChatTerminal(requestId, errorMessage);
-  }
-
-  /**
-   * Report an auto-continuation that failed before it produced a response,
-   * the way a stream error is reported: an error frame, a durable terminal
-   * record, and `onChatResponse` with `status: "error"` for the assistant
-   * message the continuation would have extended. Called inside the turn so
-   * the response hook drains when the turn settles.
-   */
-  private async _reportContinuationFailure(
-    requestId: string,
-    error: unknown
-  ): Promise<void> {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    this._broadcastChatMessage({
-      body: errorMessage,
-      done: true,
-      error: true,
-      id: requestId,
-      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
-      continuation: true
-    });
-    const message = [...this.messages]
-      .reverse()
-      .find((candidate) => candidate.role === "assistant");
-    if (message) {
-      this._pendingChatResponseResults.push({
-        message,
-        requestId,
-        continuation: true,
-        status: "error",
-        error: errorMessage
-      });
-    } else {
-      await this._recordChatTerminal(requestId, errorMessage);
-    }
   }
 
   /**
@@ -3577,6 +3435,15 @@ export class AIChatAgent<
       clientTools: ClientToolSchema[] | undefined;
       body: Record<string, unknown> | undefined;
       continuation: boolean;
+      /** The connection whose tool result started the turn, if one did. */
+      connection?: Connection;
+      /**
+       * For a continuation: whether its reply extends the last assistant
+       * message. `false` when a message was appended after the reply it
+       * answers, so the answer is stored as a new reply. Defaults to
+       * `continuation`.
+       */
+      extendsReply?: boolean;
     }
   ): Promise<StreamResultStatus | undefined> {
     const { clientTools, body, continuation } = turn;
@@ -3586,7 +3453,7 @@ export class AIChatAgent<
       return agentContext.run(
         {
           agent: this,
-          connection: undefined,
+          connection: turn.connection,
           request: undefined,
           email: undefined
         },
@@ -3608,7 +3475,7 @@ export class AIChatAgent<
                 // The model returned a reply: this turn continues it now.
                 await takeReply();
                 outcome = await this._reply(requestId, response, [], {
-                  continuation,
+                  continuation: turn.extendsReply ?? continuation,
                   chatMessageId: requestId,
                   abortSignal
                 });
@@ -6266,7 +6133,6 @@ export class AIChatAgent<
     // than creating new blocks. Track whether we've already resumed each type.
     let continuationTextResumed = false;
     let continuationReasoningResumed = false;
-    let finishReason: string | undefined;
 
     // Cancel the reader when the abort signal fires (e.g. client pressed stop).
     // This ensures we stop broadcasting chunks even if the underlying stream
@@ -6348,7 +6214,7 @@ export class AIChatAgent<
           type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
           ...(continuation && { continuation: true })
         });
-        return { status: "completed", finishReason };
+        return { status: "completed" };
       }
 
       const chunk = decoder.decode(value);
@@ -6702,7 +6568,6 @@ export class AIChatAgent<
                 finishReason: string;
                 [key: string]: unknown;
               };
-              finishReason = chunkFinishReason;
               eventToSend = {
                 ...rest,
                 type: "finish",
@@ -6743,7 +6608,7 @@ export class AIChatAgent<
       return { status: "aborted" };
     }
 
-    return { status: "completed", finishReason };
+    return { status: "completed" };
   }
 
   // Handle plain text responses (e.g., from generateText)
@@ -6954,8 +6819,8 @@ export class AIChatAgent<
           return { status: "aborted" };
         }
         if (!response.body) {
-          // Send empty response if no body
-          this._clearPendingAutoContinuation(true);
+          // Send empty response if no body. A continuation turn that gets
+          // here never streamed, and settles as such.
           this._broadcastChatMessage({
             body: "",
             done: true,
@@ -6963,7 +6828,6 @@ export class AIChatAgent<
             type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
             ...(continuation && { continuation: true })
           });
-          this._activateDeferredAutoContinuation();
           return { status: "completed" };
         }
 
@@ -7296,7 +7160,7 @@ export class AIChatAgent<
           // TODO(phase-5): the Tier-2 streaming-codec extraction touches this
           // same region — fold this finalize hook into the extracted codec
           // rather than leaving a second seam here.
-          this._onStreamingTurnFinalized(streamResult.finishReason);
+          this._onStreamingTurnFinalized();
         }
       })
     );

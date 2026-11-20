@@ -40,6 +40,11 @@ export type BroadcastStreamEvent =
       replay?: boolean;
       replayComplete?: boolean;
       continuation?: boolean;
+      /**
+       * For a continuation: the message the server stores it in (`messageId`
+       * on the frame). Absent means the last assistant message.
+       */
+      continuationMessageId?: string;
       /** @deprecated Continuations now seed from current messages in `messagesUpdate`. */
       currentMessages?: UIMessage[];
     }
@@ -78,6 +83,9 @@ export function observedDivergesFrom(
   accumulator: StreamAccumulator,
   messages: UIMessage[]
 ): boolean {
+  // A continuation that has not adopted its message yet holds only its own
+  // chunks: there is nothing to compare until `mergeInto` seeds it.
+  if (accumulator.awaitsSeed) return false;
   const existing = messages.find((m) => m.id === accumulator.messageId);
   if (!existing) return false;
   return !textOf(accumulator.parts).startsWith(textOf(existing.parts));
@@ -128,9 +136,15 @@ export function transition(
         state.streamId !== event.streamId ||
         isReplayedStart
       ) {
+        const named =
+          event.continuation === true &&
+          event.continuationMessageId !== undefined;
         accumulator = new StreamAccumulator({
-          messageId: event.messageId,
-          continuation: event.continuation
+          messageId: named
+            ? (event.continuationMessageId as string)
+            : event.messageId,
+          continuation: event.continuation,
+          continuationMessageNamed: named
         });
       } else {
         accumulator = state.accumulator;

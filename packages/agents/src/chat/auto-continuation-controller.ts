@@ -46,9 +46,21 @@ export interface ContinuationSpec<
   clientTools: ClientToolSchema[] | undefined;
   body: Record<string, unknown> | undefined;
   errorPrefix: string;
-  /** The assistant message whose tool part the result or approval settled. */
-  targetMessageId?: string | null;
+  /**
+   * The message the result or approval is stored in: the assistant message
+   * whose tool part it settled. The continuation runs only while that
+   * message is the latest.
+   */
+  targetMessageId: string;
 }
+
+/**
+ * A {@link ContinuationSpec} before its target is known. The target comes
+ * from applying the result ({@link ToolInteractionOutcome}).
+ */
+export type ContinuationSource<
+  TConnection extends ContinuationConnection = ContinuationConnection
+> = Omit<ContinuationSpec<TConnection>, "targetMessageId">;
 
 /**
  * What applying a client tool result or approval did to its tool part:
@@ -149,12 +161,10 @@ export class AutoContinuationController<
         errorPrefix: spec.errorPrefix,
         prerequisite: null,
         // Results coalesced into one follow-up: keep every message they target.
-        targetMessageIds: c.deferred
-          ? addContinuationTarget(
-              c.deferred.targetMessageIds,
-              spec.targetMessageId
-            )
-          : addContinuationTarget(undefined, spec.targetMessageId)
+        targetMessageIds: addContinuationTarget(
+          c.deferred?.targetMessageIds,
+          spec.targetMessageId
+        )
       };
       return;
     }
@@ -202,7 +212,7 @@ export class AutoContinuationController<
   afterInteraction(
     outcome: ToolInteractionOutcome,
     autoContinue: boolean,
-    spec: () => ContinuationSpec<TConnection>
+    spec: () => ContinuationSource<TConnection>
   ): void {
     if (!autoContinue) {
       this.rearmForBatch();

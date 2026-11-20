@@ -20,6 +20,7 @@ describe("ContinuationState", () => {
       connectionId: "c1",
       requestId: "r1",
       errorPrefix: null,
+      targetMessageIds: ["assistant-1"],
       prerequisite: null,
       pastCoalesce: false
     };
@@ -39,6 +40,7 @@ describe("ContinuationState", () => {
       connectionId: "c1",
       requestId: "r1",
       errorPrefix: null,
+      targetMessageIds: ["assistant-1"],
       prerequisite: null,
       pastCoalesce: false
     };
@@ -46,6 +48,7 @@ describe("ContinuationState", () => {
       connection: conn,
       connectionId: "c1",
       errorPrefix: "[test]",
+      targetMessageIds: ["assistant-1"],
       prerequisite: null
     };
     state.activeRequestId = "ar1";
@@ -67,6 +70,7 @@ describe("ContinuationState", () => {
       connection: conn,
       connectionId: "c1",
       errorPrefix: "[test]",
+      targetMessageIds: ["assistant-1"],
       prerequisite: null
     };
     state.pending = {
@@ -74,6 +78,7 @@ describe("ContinuationState", () => {
       connectionId: "c1",
       requestId: "r1",
       errorPrefix: null,
+      targetMessageIds: ["assistant-1"],
       prerequisite: null,
       pastCoalesce: false
     };
@@ -94,6 +99,7 @@ describe("ContinuationState", () => {
       connectionId: "c1",
       requestId: "r1",
       errorPrefix: null,
+      targetMessageIds: ["assistant-1"],
       prerequisite: null,
       pastCoalesce: false
     };
@@ -101,6 +107,7 @@ describe("ContinuationState", () => {
       connection: conn,
       connectionId: "c1",
       errorPrefix: "[test]",
+      targetMessageIds: ["assistant-1"],
       prerequisite: null
     };
     state.activeRequestId = "ar1";
@@ -126,6 +133,7 @@ describe("ContinuationState", () => {
       connectionId: "c1",
       requestId: "r1",
       errorPrefix: null,
+      targetMessageIds: ["assistant-1"],
       prerequisite: null,
       pastCoalesce: false
     };
@@ -146,6 +154,7 @@ describe("ContinuationState", () => {
       connection: conn,
       connectionId: "c1",
       errorPrefix: "[test]",
+      targetMessageIds: ["assistant-1"],
       prerequisite: null
     };
     state.activeRequestId = "r1";
@@ -245,6 +254,7 @@ describe("ContinuationState", () => {
       connectionId: "c1",
       requestId: "r1",
       errorPrefix: null,
+      targetMessageIds: ["assistant-1"],
       prerequisite: null,
       pastCoalesce: false
     };
@@ -276,6 +286,7 @@ describe("ContinuationState", () => {
       clientTools: [{ name: "tool1" }],
       body: { key: "val" },
       errorPrefix: "[test]",
+      targetMessageIds: ["assistant-1"],
       prerequisite: null
     };
     state.activeRequestId = "old-active";
@@ -312,6 +323,7 @@ describe("ContinuationState", () => {
       connectionId: "c1",
       requestId: "r1",
       errorPrefix: null,
+      targetMessageIds: ["assistant-1"],
       prerequisite: null,
       pastCoalesce: false
     };
@@ -319,6 +331,7 @@ describe("ContinuationState", () => {
       connection: conn,
       connectionId: "c1",
       errorPrefix: "[test]",
+      targetMessageIds: ["assistant-1"],
       prerequisite: null
     };
 
@@ -336,6 +349,7 @@ describe("ContinuationState", () => {
       connection: conn,
       connectionId: "c1",
       errorPrefix: "[test]",
+      targetMessageIds: ["assistant-1"],
       prerequisite: prereq
     };
 
@@ -450,12 +464,5 @@ describe("continuationTargetIsLatest", () => {
         )
       ).toBe(true);
     });
-  });
-
-  it("is true for a continuation with no target", () => {
-    expect(continuationTargetIsLatest([], { targetMessageIds: null })).toBe(
-      true
-    );
-    expect(continuationTargetIsLatest([], null)).toBe(true);
   });
 });

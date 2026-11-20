@@ -127,6 +127,7 @@ export {
 
 export {
   ContinuationState,
+  addContinuationTarget,
   continuationTargetIsLatest,
   type ContinuationConnection,
   type ContinuationPending,
@@ -150,9 +151,41 @@ export { PreStreamTurns } from "./pre-stream-turns";
 export {
   AutoContinuationController,
   type AutoContinuationHost,
+  type ContinuationSource,
   type ContinuationSpec,
   type ToolInteractionOutcome
 } from "./auto-continuation-controller";
+
+/**
+ * @internal The auto-continuation turn's lifecycle, from fire to settle.
+ * `ChatTurns` exposes each function as a method. Not a public API. See
+ * `continuation-turn.ts`.
+ */
+export {
+  continuationStreamEnded,
+  continuationStreamStarted,
+  replyFinalized,
+  runContinuationTurn,
+  settleContinuationTurn,
+  transcriptEndsInAnswer,
+  type ContinuationContext,
+  type ContinuationDropped,
+  type ContinuationTurn,
+  type ContinuationTurnParts
+} from "./continuation-turn";
+
+/**
+ * @internal The report of a turn that failed before it streamed, for a
+ * client request and a continuation. Not a public API. See
+ * `turn-failure.ts`.
+ */
+export {
+  reportTurnFailure,
+  type TurnErrorFrame,
+  type TurnFailure,
+  type TurnFailureHost,
+  type TurnFailureResult
+} from "./turn-failure";
 
 /**
  * @internal The turn core shared by `@cloudflare/ai-chat` and

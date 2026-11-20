@@ -1,5 +1,5 @@
 import { env, exports } from "cloudflare:workers";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { getAgentByName } from "agents";
 import { subscribe } from "agents/observability";
 import type { UIMessage } from "ai";
@@ -918,6 +918,110 @@ describe("Think — auto-continuation", () => {
 
     await closeWS(ws);
   });
+
+  it("runs onChatResponse for a failed continuation after its turn left the queue", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    await agent.setServerApprovalToolMode(true);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    const initialDone = waitForDone(ws, 15000);
+    sendChatRequest(ws, [makeUserMessage("update my trigger")]);
+    await initialDone;
+
+    // The hook starts a turn of its own, which is only allowed once the
+    // failed turn has left the queue.
+    await agent.setFailContinuationBeforeStream(true);
+    await agent.setSaveMessagesInFailedContinuationHookForTest(true);
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_APPROVAL,
+        toolCallId: "tc-server-approval-1",
+        approved: true,
+        autoContinue: true
+      })
+    );
+
+    await waitUntil(async () => {
+      const messages = (await agent.getMessages()) as UIMessage[];
+      return messages.some((message) =>
+        message.parts.some(
+          (part) => part.type === "text" && part.text === "after the failure"
+        )
+      );
+    }, 10000);
+    expect(await agent.failedContinuationHookErrorForTest()).toBeNull();
+
+    await closeWS(ws);
+  }, 25000);
+
+  it("runs onChatResponse outside any turn for a failed continuation that another turn's settle started", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+    const reply: UIMessage = {
+      id: crypto.randomUUID(),
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-client_action",
+          toolCallId: "tc-first",
+          state: "input-available",
+          input: { action: "test" }
+        },
+        {
+          type: "tool-other_action",
+          toolCallId: "tc-second",
+          state: "approval-responded",
+          input: { action: "test" },
+          approval: { id: "approval-second", approved: true }
+        }
+      ] as UIMessage["parts"]
+    };
+    await agent.persistToolCallMessage([makeUserMessage("first"), reply]);
+    await agent.holdContinuationStartForTest();
+    const sendResult = (toolCallId: string) =>
+      ws.send(
+        JSON.stringify({
+          type: MSG_TOOL_RESULT,
+          toolCallId,
+          toolName: "client_action",
+          output: "result",
+          autoContinue: true
+        })
+      );
+
+    // The second result is deferred behind the first one's continuation.
+    // Both continuations fail before they stream. The second was started
+    // by the first one's settle, inside that turn.
+    sendResult("tc-first");
+    await waitUntil(() => agent.isContinuationStartHeldForTest(), 8000);
+    sendResult("tc-second");
+    await waitUntil(async () => {
+      const messages = (await agent.getMessages()) as UIMessage[];
+      return messages[1].parts.every(
+        (part) => "state" in part && part.state === "output-available"
+      );
+    }, 8000);
+    await agent.setFailContinuationBeforeStream(true);
+    await agent.setSaveMessagesInFailedContinuationHookForTest(true, 2);
+    await agent.releaseContinuationStartForTest();
+
+    // Its hook starts a turn of its own, which needs to be outside a turn.
+    await waitUntil(async () => {
+      const messages = (await agent.getMessages()) as UIMessage[];
+      return messages.some((message) =>
+        message.parts.some(
+          (part) => part.type === "text" && part.text === "after the failure"
+        )
+      );
+    }, 10000);
+    expect(await agent.failedContinuationHookErrorForTest()).toBeNull();
+
+    await closeWS(ws);
+  }, 25000);
 
   it("sends a failed continuation's error frame before onChatResponse returns (#2381)", async () => {
     const room = crypto.randomUUID();
@@ -3691,6 +3795,157 @@ describe("Think — tool results with nothing to continue", () => {
     expect(messages).toHaveLength(4);
     expect(messages[1].parts[0]).toMatchObject({ state: "output-available" });
     expect(messages[3]).toEqual(reply2);
+    await closeWS(ws);
+  });
+});
+
+describe("Think — the continuation turn", () => {
+  it("a continuation stopped while it waits in the queue never calls the model", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+    const toolCallId = "tc-stopped-in-queue";
+    await agent.persistToolCallMessage([
+      makeUserMessage("first"),
+      makeToolMessage(toolCallId, "client_action", "input-available")
+    ]);
+
+    // Another turn holds the queue, so the continuation the tool result
+    // fires has to wait behind it.
+    await agent.holdTurnQueueForTest();
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId,
+        toolName: "client_action",
+        output: "result",
+        autoContinue: true
+      })
+    );
+    await waitUntil(
+      async () => (await agent.pendingContinuationRequestIdForTest()) !== null
+    );
+    await delay(150);
+    const continuationId = await agent.pendingContinuationRequestIdForTest();
+    expect(continuationId).not.toBeNull();
+
+    // A stop for the continuation arrives while it waits.
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_chat_request_cancel",
+        id: continuationId
+      })
+    );
+    await delay(50);
+    await agent.releaseTurnQueueForTest();
+    await delay(400);
+
+    expect(await agent.continuationTurnCountForTest()).toBe(0);
+    expect(await agent.pendingContinuationRequestIdForTest()).toBeNull();
+    expect(await agent.getMessages()).toHaveLength(2);
+    await closeWS(ws);
+  });
+
+  it("names the message a continuation is stored in on its chunk frames", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    // A second tab that only watches: it gets the continuation as a plain
+    // broadcast and draws it from these frames.
+    const { ws } = await connectWS(room);
+    const { ws: watcher } = await connectWS(room);
+    await collectMessages(ws, 3);
+    await collectMessages(watcher, 3);
+    const toolCallId = "tc-named-message";
+    await agent.persistToolCallMessage([
+      makeUserMessage("first"),
+      makeToolMessage(toolCallId, "client_action", "input-available")
+    ]);
+    const frames: Array<Record<string, unknown>> = [];
+    watcher.addEventListener("message", (event: MessageEvent) => {
+      const frame = JSON.parse(event.data as string) as Record<string, unknown>;
+      if (frame.type === "cf_agent_use_chat_response") frames.push(frame);
+    });
+
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId,
+        toolName: "client_action",
+        output: "result",
+        autoContinue: true
+      })
+    );
+    await waitUntil(() => frames.some((frame) => frame.done === true));
+
+    const stored = (await agent.getMessages()) as UIMessage[];
+    expect(stored).toHaveLength(3);
+    const chunks = frames.filter(
+      (frame) => frame.done !== true && frame.body !== ""
+    );
+    expect(chunks.length).toBeGreaterThan(0);
+    // Think stores the continuation as a message of its own, and says so.
+    for (const chunk of chunks) {
+      expect(chunk.continuation).toBe(true);
+      expect(chunk.messageId).toBe(stored[2].id);
+    }
+    await closeWS(ws);
+    await closeWS(watcher);
+  });
+
+  it("a result for a call the reply already answered past does not continue it", async () => {
+    const room = crypto.randomUUID();
+    const dropped: string[] = [];
+    const unsubscribe = subscribe("chat", (event) => {
+      if (event.type === "chat:continuation:dropped" && event.name === room) {
+        dropped.push(event.payload.reason);
+      }
+    });
+    onTestFinished(unsubscribe);
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    // The reply called a client tool and then went on to its answer in a
+    // later step. Continuing it would send a transcript that ends in
+    // assistant text.
+    const toolCallId = "tc-answered-past";
+    const reply: UIMessage = {
+      id: crypto.randomUUID(),
+      role: "assistant",
+      parts: [
+        { type: "step-start" },
+        {
+          type: "tool-client_action",
+          toolCallId,
+          state: "input-available",
+          input: { action: "test" }
+        },
+        { type: "step-start" },
+        { type: "text", text: "Here is the answer." }
+      ] as UIMessage["parts"]
+    };
+    await agent.persistToolCallMessage([makeUserMessage("first"), reply]);
+
+    const released = waitForMessageOfType(ws, "cf_agent_stream_resume_none");
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId,
+        toolName: "client_action",
+        output: "late result",
+        autoContinue: true
+      })
+    );
+    await released;
+    await delay(300);
+
+    // The app is told the continuation was dropped, and why.
+    expect(dropped).toEqual(["answered"]);
+    expect(await agent.continuationTurnCountForTest()).toBe(0);
+    const messages = (await agent.getMessages()) as UIMessage[];
+    expect(messages).toHaveLength(2);
+    expect(messages[1].parts[1]).toMatchObject({ state: "output-available" });
     await closeWS(ws);
   });
 });
