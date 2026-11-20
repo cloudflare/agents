@@ -185,6 +185,7 @@ export type Env = {
   TestChatAgent: DurableObjectNamespace<TestChatAgent>;
   CustomSanitizeAgent: DurableObjectNamespace<CustomSanitizeAgent>;
   OverridingPersistAgent: DurableObjectNamespace<OverridingPersistAgent>;
+  OverridingPersistMergeAgent: DurableObjectNamespace<OverridingPersistMergeAgent>;
   AgentWithSuperCall: DurableObjectNamespace<AgentWithSuperCall>;
   AgentWithoutSuperCall: DurableObjectNamespace<AgentWithoutSuperCall>;
   LogOnlyOnErrorAgent: DurableObjectNamespace<LogOnlyOnErrorAgent>;
@@ -2646,6 +2647,21 @@ export class LatestMessageConcurrencyAgent extends SlowStreamAgent {
 
 export class MergeMessageConcurrencyAgent extends SlowStreamAgent {
   messageConcurrency = "merge" as const;
+}
+
+/**
+ * {@link MergeMessageConcurrencyAgent} with a `persistMessages` override
+ * that passes only the messages and the exclusions on, as an app may.
+ */
+export class OverridingPersistMergeAgent extends SlowStreamAgent {
+  messageConcurrency = "merge" as const;
+
+  override async persistMessages(
+    messages: ChatMessage[],
+    excludeBroadcastIds: string[] = []
+  ) {
+    await super.persistMessages(messages, excludeBroadcastIds);
+  }
 }
 
 export class DropMessageConcurrencyAgent extends SlowStreamAgent {

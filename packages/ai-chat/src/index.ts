@@ -464,6 +464,13 @@ export class AIChatAgent<
     isCurrent: () => boolean;
     /** The messages are a client's copy (`keepStoredReplies`). */
     clientCopy: boolean;
+    /**
+     * Messages a waiting request holds: they shape the reconcile (a
+     * client's stale copy is told apart by what follows it) and are left
+     * out of what is stored and broadcast. In the scope, so an override of
+     * `persistMessages` that does not pass its options on still holds them.
+     */
+    hold?: ReadonlySet<string>;
     open: boolean;
   }>();
 
@@ -471,9 +478,10 @@ export class AIChatAgent<
   private async _persistForTurn<T>(
     isCurrent: () => boolean,
     clientCopy: boolean,
-    persist: () => Promise<T>
+    persist: () => Promise<T>,
+    hold?: ReadonlySet<string>
   ): Promise<T> {
-    const scope = { isCurrent, clientCopy, open: true };
+    const scope = { isCurrent, clientCopy, hold, open: true };
     try {
       return await this._turnPersistScope.run(scope, persist);
     } finally {
@@ -2716,12 +2724,15 @@ export class AIChatAgent<
             // A request with new messages is not a subset of the stored
             // transcript, so it deletes nothing, as when they were stored
             // with it.
-            await this._persistForTurn(isCurrent, true, () =>
-              this.persistMessages(sent, connection ? [connection.id] : [], {
-                _deleteStaleRows:
-                  requestTrigger !== "regenerate-message" && held.length === 0,
-                _hold: heldIds
-              })
+            await this._persistForTurn(
+              isCurrent,
+              true,
+              () =>
+                this.persistMessages(sent, connection ? [connection.id] : [], {
+                  _deleteStaleRows:
+                    requestTrigger !== "regenerate-message" && held.length === 0
+                }),
+              heldIds
             );
           }
         );
@@ -2735,6 +2746,8 @@ export class AIChatAgent<
       join: async ({ messages, generation, isCurrent }) => {
         epoch = generation;
         this._noteMergeStart(concurrencyDecision);
+        // Stored already, by a join before a reset.
+        if (messages.length === 0) return isCurrent();
         await withAgentSpan(
           this,
           "persist_incoming_messages",
@@ -5072,15 +5085,7 @@ export class AIChatAgent<
     messages: UIMessage[],
     excludeBroadcastIds: string[] = [],
     /** @internal */
-    options?: {
-      _deleteStaleRows?: boolean;
-      /**
-       * Messages a waiting request holds: they shape the reconcile (a
-       * client's stale copy is told apart by what follows it) and are left
-       * out of what is stored and broadcast.
-       */
-      _hold?: ReadonlySet<string>;
-    }
+    options?: { _deleteStaleRows?: boolean }
   ) {
     const scope = this._turnPersistScope.getStore();
     const turn = scope?.open ? scope : undefined;
@@ -5097,7 +5102,7 @@ export class AIChatAgent<
     );
     // A client's copy of a reply can be behind the stored one (the tab that
     // pressed stop has one chunk fewer). It never shortens the stored reply.
-    const hold = options?._hold;
+    const hold = turn?.hold;
     const kept = turn?.clientCopy
       ? keepStoredReplies(reconciled, priorMessages)
       : reconciled;

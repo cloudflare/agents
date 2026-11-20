@@ -13305,6 +13305,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       // session under the latest leaf (the reply of the turn it waited
       // behind), and the other tabs are told.
       join: async ({ messages, isCurrent }) => {
+        // Stored already, by a join before a reset.
+        if (messages.length === 0) return isCurrent();
         const joined = await withAgentSpan(
           this,
           "persist_incoming_messages",

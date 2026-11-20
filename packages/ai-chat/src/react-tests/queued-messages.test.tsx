@@ -272,6 +272,69 @@ describe("a message queued behind a reply", () => {
     expect(view.messages.map((m) => m.id)).toEqual(["u1", "a1", "u2"]);
   });
 
+  it("setMessages sees queued messages and can clear them", async () => {
+    const { agent, list } = fakeAgent("queued-set");
+    const view = await mount(agent);
+    await act(async () => {
+      list([u1, u2], ["u2"]);
+      await sleep(30);
+    });
+    let seen: string[] = [];
+    await act(async () => {
+      view.chat!.setMessages((current) => {
+        seen = current.map((m) => m.id);
+        return current;
+      });
+      await sleep(30);
+    });
+    expect(seen).toEqual(["u1", "u2"]);
+    expect(view.messages.map((m) => m.id)).toEqual(["u1", "u2"]);
+    await act(async () => {
+      view.chat!.setMessages([]);
+      await sleep(30);
+    });
+    expect(view.messages).toEqual([]);
+  });
+
+  it("are not drawn in another chat after a switch", async () => {
+    const first = fakeAgent("queued-switch-a");
+    const second = fakeAgent("queued-switch-b");
+    const view: { messages: UIMessage[] } = { messages: [] };
+    const TestComponent = ({
+      agent
+    }: {
+      agent: ReturnType<typeof useAgent>;
+    }) => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        resume: false
+      });
+      view.messages = chat.messages;
+      return <div>{chat.messages.length}</div>;
+    };
+    const screen = await act(async () =>
+      render(<TestComponent agent={first.agent} />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      })
+    );
+    await act(async () => {
+      first.list([u1, u2], ["u2"]);
+      await sleep(30);
+    });
+    expect(view.messages.map((m) => m.id)).toEqual(["u1", "u2"]);
+    await act(async () => {
+      screen.rerender(<TestComponent agent={second.agent} />);
+      await sleep(30);
+    });
+    expect(view.messages.map((m) => m.id)).not.toContain("u2");
+  });
+
   it("goes when the server says it will not join", async () => {
     const { agent, list } = fakeAgent("queued-dropped");
     const view = await mount(agent);
