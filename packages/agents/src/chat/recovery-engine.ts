@@ -1665,15 +1665,30 @@ export class ChatRecoveryEngine {
 
   /**
    * Record that the reply this incident continues is being removed because
-   * it holds nothing. Call it before the removal.
+   * it holds nothing, and the question it answered. Call it before the
+   * removal.
    */
-  async markReplyRemoved(incidentId: string | undefined): Promise<void> {
+  async markReplyRemoved(
+    incidentId: string | undefined,
+    questionId?: string
+  ): Promise<void> {
     if (!incidentId) return;
     await this.#update(chatRecoveryIncidentKey(incidentId), (incident) =>
       !incident || incident.replyRemoved
         ? undefined
-        : { ...incident, replyRemoved: true }
+        : {
+            ...incident,
+            replyRemoved: true,
+            ...(questionId !== undefined && { replyRemovedFor: questionId })
+          }
     );
+  }
+
+  /** The question {@link markReplyRemoved} recorded, if it recorded one. */
+  async replyRemovedFor(
+    incidentId: string | undefined
+  ): Promise<string | undefined> {
+    return (await this.readIncident(incidentId))?.replyRemovedFor;
   }
 
   /**

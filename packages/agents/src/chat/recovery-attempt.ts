@@ -125,8 +125,9 @@ export interface RecoveredTurnHost<
    *   then runs {@link retryLostReply}.
    */
   settleCutOffReply?(removal: {
-    beforeRemove: () => Promise<void>;
+    beforeRemove: (questionId?: string) => Promise<void>;
     removedEarlier: boolean | "unknown";
+    removedFor: string | undefined;
   }): Promise<"removed" | undefined | void>;
   /**
    * Continue only: the leaf check and the turn of an attempt whose reply
@@ -272,8 +273,10 @@ async function runAdmittedAttempt<
   try {
     const replyRemoved =
       (await host.settleCutOffReply?.({
-        beforeRemove: () => engine.markReplyRemoved(incidentId),
-        removedEarlier: await engine.isReplyRemoved(incidentId)
+        beforeRemove: (questionId) =>
+          engine.markReplyRemoved(incidentId, questionId),
+        removedEarlier: await engine.isReplyRemoved(incidentId),
+        removedFor: await engine.replyRemovedFor(incidentId)
       })) === "removed";
     const steps =
       replyRemoved && host.retryLostReply ? host.retryLostReply : host;

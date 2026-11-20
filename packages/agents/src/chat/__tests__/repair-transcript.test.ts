@@ -709,6 +709,47 @@ describe("settleReplyBeforeRecovery, a reply that is not in the transcript", () 
     expect(order).toEqual(["record", "remove"]);
   });
 
+  it("records the question the removed reply answered", async () => {
+    const recorded: Array<string | undefined> = [];
+    const { sink } = recordingSink();
+
+    await settleReplyBeforeRecovery(
+      [
+        textMsg("u0"),
+        textMsg("a0", "assistant"),
+        textMsg("u1"),
+        reasoningOnly("a1")
+      ],
+      "a1",
+      options,
+      sink,
+      { beforeRemove: async (questionId) => void recorded.push(questionId) }
+    );
+
+    expect(recorded).toEqual(["u1"]);
+  });
+
+  it("does not answer a newer question after a removal, with no origin ids", async () => {
+    // Server-started turns schedule payloads without origin ids. The
+    // removal recorded the question, and a newer one is latest now.
+    const { sink } = recordingSink();
+    expect(
+      await settleReplyBeforeRecovery(
+        [textMsg("u1"), textMsg("u2")],
+        "a1",
+        options,
+        sink,
+        { removedEarlier: true, removedFor: "u1" }
+      )
+    ).toBeUndefined();
+    expect(
+      await settleReplyBeforeRecovery([textMsg("u1")], "a1", options, sink, {
+        removedEarlier: true,
+        removedFor: "u1"
+      })
+    ).toBe("removed");
+  });
+
   it("does not when the reply is there and a newer question follows it", async () => {
     const { sink } = recordingSink();
     expect(
