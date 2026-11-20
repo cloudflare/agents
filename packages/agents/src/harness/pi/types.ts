@@ -94,7 +94,9 @@ export type PiSessionCreateOptions = {
   /**
    * pi's agent change for the new session. For the root and `create()`, it
    * is applied over the harness's `defaults`; a fork starts with its
-   * parent's configuration, and this is applied over that.
+   * parent's configuration, and this is applied over that. As in pi, a
+   * field that is `undefined` leaves the value underneath in place, and
+   * `null` clears it.
    */
   readonly agent?: AgentChange;
   /**

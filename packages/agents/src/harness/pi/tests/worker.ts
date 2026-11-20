@@ -11,6 +11,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { num, obj, str } from "@earendil-works/pi-schema";
 import {
+  AgentDoc,
   AssistantEntry,
   createRegistry,
   defineSignal,
@@ -24,6 +25,8 @@ import {
   ROOT_CONVERSATION_ID,
   ToolResultEntry,
   UserEntry,
+  type AgentChange,
+  type AgentState,
   type ConversationInit,
   type EntryRecord,
   type Extension,
@@ -99,6 +102,8 @@ const Reminder = defineTask<
  * - `retry:` retries a failed generation once, after two seconds.
  * - `park:` ends a task cut off once (pi's `restartLimit` of 1).
  * - `turns:` starts sessions with `maxTurns: 1`.
+ * - `configured:` starts sessions with `thinkingLevel: "high"` and
+ *   `maxTurns: 5`, as well as the model.
  */
 function variantSettings(name: string) {
   const plain = name.replace(/^nowake:/, "");
@@ -386,7 +391,10 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     },
     defaults: {
       model: this.#faux.getModel(),
-      ...(this.ctx.id.name?.startsWith("turns:") ? { maxTurns: 1 } : {})
+      ...(this.ctx.id.name?.startsWith("turns:") ? { maxTurns: 1 } : {}),
+      ...(this.ctx.id.name?.startsWith("configured:")
+        ? { thinkingLevel: "high", maxTurns: 5 }
+        : {})
     }
   });
   readonly lifecycle = Lifecycle.install(this).use(this.harness);
@@ -477,6 +485,33 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   async busy(session?: string): Promise<boolean> {
     return this.harness.session(session).busy();
+  }
+
+  /**
+   * `harness.root({ agent })`, or `sessions.create({ agent })` when `create`,
+   * with `agent` setting each of the defaults' fields to `value`. Built here
+   * so an `undefined` field does not depend on RPC keeping it.
+   */
+  async createWithAgent(
+    value: "undefined" | "null",
+    create = false
+  ): Promise<string> {
+    const agent: AgentChange =
+      value === "undefined"
+        ? { model: undefined, thinkingLevel: undefined, maxTurns: undefined }
+        : { model: null, thinkingLevel: null, maxTurns: null };
+    if (create) return (await this.harness.sessions.create({ agent })).id;
+    const { session, created } = await this.harness.root({ agent });
+    if (!created) throw new Error("the root already existed");
+    return session.id;
+  }
+
+  /** A session's stored agent configuration, read through pi. */
+  async agentState(session = "1"): Promise<AgentState | undefined> {
+    const pi = await this.harness.pi();
+    const { id } = await this.harness.conversation(session);
+    const state = await pi.snapshot(AgentDoc, id, BACKGROUND_CONTEXT);
+    return state ? { ...state } : undefined;
   }
 
   /** The harness's pending Lifecycle jobs: its wake, while it has one. */

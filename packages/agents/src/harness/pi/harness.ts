@@ -202,6 +202,19 @@ export type PiHarnessOptions = {
   readonly defaults?: PiSessionDefaults;
 };
 
+/**
+ * `change` applied over `base` as pi applies an `AgentChange`: a field that is
+ * `undefined` in `change` keeps `base`'s, any other value (`null` included)
+ * replaces it. A plain spread would copy the `undefined` over `base`'s value.
+ */
+function applyAgentChange<T extends object>(base: T, change: T): T {
+  const applied = { ...base, ...change };
+  for (const key in base) {
+    if (change[key] === undefined) applied[key] = base[key];
+  }
+  return applied;
+}
+
 /** What `harness.root()` returns. */
 export type PiRootResult = {
   /** The root session. */
@@ -528,7 +541,7 @@ export class PiHarness extends LifecycleCapability {
    */
   #root(pi: Harness, options: PiSessionCreateOptions): Promise<Conversation> {
     return pi.root(BG, {
-      agent: { ...this.agentDefaults(), ...options.agent },
+      agent: this.agentOverDefaults(options.agent),
       ...(options.init ? { init: options.init } : {})
     });
   }
@@ -918,6 +931,15 @@ export class PiHarness extends LifecycleCapability {
     this.#lastClose = closed;
   }
 
+  /**
+   * @internal `agent` applied over the defaults, by pi's rule for an
+   * `AgentChange`: a field set to a value replaces the default, `null`
+   * clears it, and `undefined` leaves it in place.
+   */
+  agentOverDefaults(agent: AgentChange = {}): AgentChange {
+    return applyAgentChange(this.agentDefaults(), agent);
+  }
+
   /** @internal The per-conversation defaults supported by pi-durable. */
   agentDefaults(): AgentChange {
     const defaults = this.#options.defaults;
@@ -1119,7 +1141,7 @@ export class PiSessions {
     const conversation = await pi.createConversation(
       {
         ownership: { kind: "ownerless" },
-        agent: { ...this.#harness.agentDefaults(), ...options.agent },
+        agent: this.#harness.agentOverDefaults(options.agent),
         ...(options.init ? { init: options.init } : {})
       },
       BG

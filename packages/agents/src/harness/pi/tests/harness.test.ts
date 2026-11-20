@@ -1288,6 +1288,38 @@ describe("PiHarness's root session", () => {
     expect(await stub.rootExists()).toBe(false);
   });
 
+  for (const create of [false, true]) {
+    const target = create ? "sessions.create()" : "root()";
+
+    it(`keeps a default that ${target}'s agent leaves undefined`, async () => {
+      const stub = fresh(`configured:${crypto.randomUUID()}`);
+      const session = await stub.createWithAgent("undefined", create);
+      expect(await stub.agentState(session)).toMatchObject({
+        model: { provider: "faux", modelId: expect.any(String) },
+        thinkingLevel: "high",
+        maxTurns: 5
+      });
+      expect(await stub.prompt("hello", session)).toMatchObject({
+        status: "done",
+        text: "echo: hello"
+      });
+    });
+
+    it(`clears a default that ${target}'s agent sets to null`, async () => {
+      const stub = fresh(`configured:${crypto.randomUUID()}`);
+      const session = await stub.createWithAgent("null", create);
+      const state = await stub.agentState(session);
+      expect(state).toBeDefined();
+      expect(state).not.toHaveProperty("model");
+      expect(state).not.toHaveProperty("thinkingLevel");
+      expect(state).not.toHaveProperty("maxTurns");
+      expect(await stub.prompt("hello", session)).toMatchObject({
+        status: "unanswered",
+        reason: "no_model"
+      });
+    });
+  }
+
   it("seeds a fork after the history it copies", async () => {
     const stub = fresh();
     await stub.prompt("hello");
