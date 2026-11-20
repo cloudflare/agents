@@ -4027,6 +4027,39 @@ describe("Think — tool results with nothing to continue", () => {
     await closeWS(ws);
   });
 
+  it("a tool result's continuation runs onChatResponse with its connection", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    const done = waitForDone(ws);
+    sendChatRequest(ws, [makeUserMessage("use client tool")], {
+      clientTools: [{ name: "client_action", description: "A client tool" }]
+    });
+    await done;
+    await delay(200);
+    const continued = waitForDone(ws, 15000);
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId: "tc-client-1",
+        toolName: "client_action",
+        output: "tool output",
+        autoContinue: true
+      })
+    );
+    await continued;
+    await delay(300);
+
+    const connections = await agent.getResponseConnectionsForTest();
+    const log = await agent.getResponseLog();
+    const at = log.findIndex((result) => result.continuation);
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(connections[at]).not.toBeNull();
+    await closeWS(ws);
+  });
+
   it("a clear while the reply is being stored keeps it out of the cleared chat", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);

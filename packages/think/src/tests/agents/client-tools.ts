@@ -9,6 +9,7 @@ import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { tool } from "ai";
 import { z } from "zod";
 import { Think } from "../../think";
+import { getCurrentAgent } from "agents";
 import type {
   ChatErrorContext,
   ChatResponseResult,
@@ -1125,8 +1126,16 @@ export class ThinkClientToolsAgent extends Think {
     return this._failedContinuationHookError;
   }
 
+  private _responseConnections: Array<string | null> = [];
+
+  /** The connection `getCurrentAgent()` named in each `onChatResponse`. */
+  async getResponseConnectionsForTest(): Promise<Array<string | null>> {
+    return this._responseConnections;
+  }
+
   override async onChatResponse(result: ChatResponseResult): Promise<void> {
     this._responseLog.push(result);
+    this._responseConnections.push(getCurrentAgent().connection?.id ?? null);
     if (
       this._saveInFailedContinuationHook &&
       result.continuation &&
