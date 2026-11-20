@@ -194,6 +194,7 @@ import {
   ChatTurnFibers,
   createChatAdmissionStore,
   newUserMessageIds,
+  clientResolvableToolNames,
   chatRecoveryNames,
   type ChatAdmissionRecord,
   type ClientChatRequest,
@@ -14034,7 +14035,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
       const buildReply = () =>
         streamError || aborted
-          ? this._settleInterruptedReply(accumulator.toMessage())
+          ? this._settleInterruptedReply(accumulator.toMessage(), requestId)
           : accumulator.toMessage();
       assistantMsg = buildReply();
       let response: ChatResponseResult = {
@@ -14138,7 +14139,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             }
             const { stored, message: partial } = await this._storeLiveReply(
               accumulator,
-              () => this._settleInterruptedReply(accumulator.toMessage()),
+              () =>
+                this._settleInterruptedReply(
+                  accumulator.toMessage(),
+                  requestId
+                ),
               (message) => this._persistAssistantMessage(message),
               () => !resetSinceTurnStarted()
             );
@@ -14234,7 +14239,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           assistantMsg = (
             await this._storeLiveReply(
               accumulator,
-              () => this._settleInterruptedReply(accumulator.toMessage()),
+              () =>
+                this._settleInterruptedReply(
+                  accumulator.toMessage(),
+                  requestId
+                ),
               (message) => this._persistAssistantMessage(message),
               () => !resetSinceTurnStarted()
             )
@@ -14763,7 +14772,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             // result may have landed on it since.
             const { stored } = await this._storeLiveReply(
               accumulator,
-              () => this._settleInterruptedReply(accumulator.toMessage()),
+              () =>
+                this._settleInterruptedReply(
+                  accumulator.toMessage(),
+                  requestId
+                ),
               (message) => this._persistAssistantMessage(message, parentId),
               () => !resetSinceTurnStarted()
             );
@@ -14900,7 +14913,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           // calls it left unanswered before the reply is stored.
           const buildReply = () =>
             streamError || streamAborted
-              ? this._settleInterruptedReply(accumulator.toMessage())
+              ? this._settleInterruptedReply(accumulator.toMessage(), requestId)
               : accumulator.toMessage();
           let response: ChatResponseResult = {
             message: buildReply(),
@@ -15038,9 +15051,24 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * errored result through {@link repairInterruptedToolPart}. Call it on a
    * reply whose stream did not finish, before it is stored.
    */
-  private _settleInterruptedReply(message: UIMessage): UIMessage {
-    return this._turns.settleInterruptedReply(message, (part) =>
-      this.repairInterruptedToolPart(part)
+  private _settleInterruptedReply(
+    message: UIMessage,
+    requestId?: string
+  ): UIMessage {
+    // A turn that runs with pinned tools (a recovered turn, an agent-tool
+    // run) owns the client calls those tools name, not the stored ones.
+    const live =
+      requestId === undefined
+        ? undefined
+        : this._chatTurnFibers.requestContext(requestId);
+    const pinned =
+      live !== undefined && live.lastClientTools !== this._lastClientTools
+        ? clientResolvableToolNames(live.lastClientTools ?? undefined)
+        : undefined;
+    return this._turns.settleInterruptedReply(
+      message,
+      (part) => this.repairInterruptedToolPart(part),
+      pinned
     );
   }
 

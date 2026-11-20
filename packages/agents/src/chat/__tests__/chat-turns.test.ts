@@ -933,6 +933,20 @@ describe("ChatTurns", () => {
       expect(turns.settleInterruptedReply(reply, flip)).toBe(reply);
     });
 
+    it("settleInterruptedReply goes by a turn's pinned client tools when given them", () => {
+      const reply = toolReply("a1", "input-available") as UIMessage;
+      // The stored tools name no client tool; the turn ran with one pinned.
+      expect(turns.settleInterruptedReply(reply, flip, new Set(["x"]))).toBe(
+        reply
+      );
+      // And the reverse: a call the stored tools name, which the pinned
+      // ones do not, is settled.
+      host.clientTools = new Set(["x"]);
+      expect(
+        stateOf(turns.settleInterruptedReply(reply, flip, new Set()))
+      ).toBe("output-error");
+    });
+
     it("settleBeforeRecovery settles only the latest reply it is given", async () => {
       const messages = [
         user("u1"),

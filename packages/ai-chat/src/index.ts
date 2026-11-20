@@ -54,6 +54,7 @@ import {
   createAgentToolRunStore,
   createChatAdmissionStore,
   newUserMessageIds,
+  clientResolvableToolNames,
   chatRecoveryNames,
   type ChatAdmissionRecord,
   type ClientChatRequest,
@@ -1701,9 +1702,24 @@ export class AIChatAgent<
    * `settleInterruptedReply`): a call no client is known to own becomes an
    * errored result through {@link repairInterruptedToolPart}.
    */
-  private _settleInterruptedReply(message: UIMessage): UIMessage {
-    return this._turns.settleInterruptedReply(message, (part) =>
-      this.repairInterruptedToolPart(part)
+  private _settleInterruptedReply(
+    message: UIMessage,
+    requestId?: string
+  ): UIMessage {
+    // A turn that runs with pinned tools (a recovered turn, an agent-tool
+    // run) owns the client calls those tools name, not the stored ones.
+    const live =
+      requestId === undefined
+        ? undefined
+        : this._chatTurnFibers.requestContext(requestId);
+    const pinned =
+      live !== undefined && live.lastClientTools !== this._lastClientTools
+        ? clientResolvableToolNames(live.lastClientTools ?? undefined)
+        : undefined;
+    return this._turns.settleInterruptedReply(
+      message,
+      (part) => this.repairInterruptedToolPart(part),
+      pinned
     );
   }
 
@@ -6513,7 +6529,7 @@ export class AIChatAgent<
           }
           const partsBeforeSettle = message.parts.length;
           if (streamResult.status !== "completed") {
-            message = this._settleInterruptedReply(message);
+            message = this._settleInterruptedReply(message, id);
           }
           // The reply left `_streamingMessage` above and is not stored yet.
           // Keep it findable until it is, with no await in between.

@@ -1007,12 +1007,15 @@ export class ChatTurns<
    */
   settleInterruptedReply<TMessage extends UIMessage>(
     message: TMessage,
-    repairPart: RepairInterruptedToolPartsOptions["repairPart"]
+    repairPart: RepairInterruptedToolPartsOptions["repairPart"],
+    /**
+     * The client tools of the turn whose reply this is, when they are not
+     * the stored ones (a turn that runs with pinned tools: a recovered
+     * turn, an agent-tool run). Defaults to the host's.
+     */
+    clientToolNames: ReadonlySet<string> = this.host.clientToolNames()
   ): TMessage {
-    return settleInterruptedReply(message, {
-      repairPart,
-      clientToolNames: this.host.clientToolNames()
-    });
+    return settleInterruptedReply(message, { repairPart, clientToolNames });
   }
 
   /**
