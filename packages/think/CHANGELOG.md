@@ -1,5 +1,19 @@
 # @cloudflare/think
 
+## 0.24.0
+
+### Minor Changes
+
+- [#2819](https://github.com/cloudflare/agents/pull/2819) [`9b54e51`](https://github.com/cloudflare/agents/commit/9b54e51a2f68b8aa7b5e42ad4635351c889670c0) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Think's `@cloudflare/computer` peer is now `^0.10.0`, so upgrade Computer to 0.10 alongside Think. Its JavaScript backend is now `CodemodeBackend` from `@cloudflare/computer/backends/codemode`, and host modules such as `ws:tools` are now `codemode:tools`. See [Running code with `exec`](https://github.com/cloudflare/agents/blob/main/docs/think/tools.md#running-code-with-exec).
+
+### Patch Changes
+
+- [#2781](https://github.com/cloudflare/agents/pull/2781) [`366d5b5`](https://github.com/cloudflare/agents/commit/366d5b5baf846b4669a2ecd0e61e104aa634432b) Thanks [@github-actions](https://github.com/apps/github-actions)! - Fix Think recovering an interrupted continuation as a duplicate assistant message; recovery now rebuilds the message it continues. Think now requires `agents` >=0.34.0. See [Chat Recovery](https://github.com/cloudflare/agents/blob/main/docs/think/index.md#chat-recovery).
+
+- [#2899](https://github.com/cloudflare/agents/pull/2899) [`1a450e7`](https://github.com/cloudflare/agents/commit/1a450e71325c25ca1ec8b0013d756fe0c733b6f3) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Move off the Workers AI models retired on November 20, 2026: drop MeloTTS and `whisper-tiny-en` handling, send `@cf/google/embeddinggemma-2` its `{ input }` shape, and suggest `@cf/deepseek-ai/deepseek-v4.1-flash-1017` in examples and messages. See [Planned model deprecations](https://developers.cloudflare.com/changelog/post/2026-11-05-planned-model-deprecations/).
+
+- [#2912](https://github.com/cloudflare/agents/pull/2912) [`81726f7`](https://github.com/cloudflare/agents/commit/81726f7d18206a0864d183c219fad9fa6e7e28e6) Thanks [@github-actions](https://github.com/apps/github-actions)! - `ExtensionManager` now derives the Dynamic Worker id from a hash of the extension's code and configuration (plus the agent and context labels for extensions with a host binding, via the new `workerIdScope` option) instead of `Date.now()`, so restarting a Think Durable Object no longer creates (and bills) a new Dynamic Worker per extension. See [#2911](https://github.com/cloudflare/agents/issues/2911).
+
 ## 0.23.0
 
 ### Minor Changes
