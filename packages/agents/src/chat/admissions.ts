@@ -380,8 +380,13 @@ export class ChatAdmissions {
   }
 
   /** The user messages of every request that has no turn with a fiber yet. */
-  messageIds(): Set<string> {
-    return new Set(this.host.store.list().flatMap((r) => r.messageIds));
+  messageIds(exceptRequestId?: string): Set<string> {
+    return new Set(
+      this.host.store
+        .list()
+        .filter((r) => r.requestId !== exceptRequestId)
+        .flatMap((r) => r.messageIds)
+    );
   }
 
   /**

@@ -514,3 +514,22 @@ describe("newUserMessageIds", () => {
     expect(newUserMessageIds([m("u1")], new Set())).toEqual(["u1"]);
   });
 });
+
+describe("snapshotMessages", () => {
+  it("leaves out the user messages of requests waiting behind the turn, not its own", async () => {
+    const db = new DatabaseSync(":memory:");
+    const a = isolate(db);
+    void a.send("r1");
+    await tick();
+    void a.send("r2");
+    await tick();
+    // r2 waits behind r1, whose fiber released r1's record. A retry of r1
+    // records r1's question as its latest user message, not r2's.
+    const snapshot = a.turns.snapshotMessages(a.host.transcript, "r1");
+    expect(snapshot.map((m) => m.id)).toEqual(["u-r1"]);
+    // r2's own turn keeps its question.
+    expect(
+      a.turns.snapshotMessages(a.host.transcript, "r2").map((m) => m.id)
+    ).toEqual(["u-r1", "u-r2"]);
+  });
+});

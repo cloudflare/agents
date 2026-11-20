@@ -621,8 +621,24 @@ export class ChatTurns<
    * recovery does not read them as the conversation moving on: they wait
    * behind the turn it recovers.
    */
-  admittedMessageIds(): ReadonlySet<string> {
-    return this.admissions?.messageIds() ?? new Set();
+  admittedMessageIds(exceptRequestId?: string): ReadonlySet<string> {
+    return this.admissions?.messageIds(exceptRequestId) ?? new Set();
+  }
+
+  /**
+   * The transcript a turn's recovery snapshot records: without the user
+   * messages of other requests waiting behind it. Recovery reads the leaf
+   * the same way (it skips them), so the snapshot's latest user message is
+   * the one this turn answers, not a question queued after it.
+   */
+  snapshotMessages<TMessage extends { id: string }>(
+    messages: ReadonlyArray<TMessage>,
+    requestId: string
+  ): TMessage[] {
+    const queued = this.admittedMessageIds(requestId);
+    return queued.size === 0
+      ? [...messages]
+      : messages.filter((message) => !queued.has(message.id));
   }
 
   /**

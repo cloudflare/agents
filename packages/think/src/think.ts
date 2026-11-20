@@ -6033,7 +6033,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         recoveryRootRequestId:
           this._activeChatRecoveryRootRequestId ?? requestId,
         continuation,
-        messages: this.messages,
+        messages: this._turns.snapshotMessages(this.messages, requestId),
         lastBody: context ? context.body : this._lastBody,
         lastClientTools: context ? context.clientTools : this._lastClientTools,
         originMessageIds: this._originMessageIdsFor(requestId)
