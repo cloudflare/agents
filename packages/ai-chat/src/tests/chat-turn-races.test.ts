@@ -690,6 +690,23 @@ describe("chat turn races", () => {
     tab2.close(1000);
   });
 
+  it("a turn whose reply a clear kept out of storage does not report completed", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const agent = await getAgentByName(env.TestChatAgent, room);
+    // The app's persistMessages awaits before it stores the reply.
+    await agent.setPersistDelayForTest("assistant", 300);
+
+    const status = agent.saveUserMessageForTest("hello");
+    await delay(150);
+    send(ws, { type: MessageType.CF_AGENT_CHAT_CLEAR });
+
+    expect(await status).not.toBe("completed");
+    await agent.waitForIdleForTest();
+    expect(await agent.getPersistedMessages()).toEqual([]);
+    ws.close(1000);
+  });
+
   it("a persist that work started inside a turn's persist starts later is not held to that turn", async () => {
     const room = crypto.randomUUID();
     const { ws: tab1 } = await connectChatWS(`/agents/test-chat-agent/${room}`);

@@ -574,7 +574,12 @@ export class ChatRecoveryEngine {
       }
       return { before, after };
     };
-    const next = this.#incidentWrites.then(run, run);
+    return this.#inChain(run);
+  }
+
+  /** Run `write` on the incident chain, after every write queued before. */
+  #inChain<T>(write: () => Promise<T>): Promise<T> {
+    const next = this.#incidentWrites.then(write, write);
     this.#incidentWrites = next.catch(() => {});
     return next;
   }
@@ -993,7 +998,12 @@ export class ChatRecoveryEngine {
         adapter.onShouldKeepRecoveringError?.(error)
     });
 
-    await this.#putIncident(key, incident);
+    // Written in the incident chain, and not over a stop that landed while
+    // the budget was evaluated: the schedule that follows then reads the
+    // stop and records it (`scheduleRecovery`).
+    await this.#update(key, (current) =>
+      current && isCancelled(current) ? undefined : incident
+    );
     // Confirm the record before the caller acts on it. The next attempt may
     // run in this invocation, and if it hits a memory-limit reset, writes that
     // were not yet confirmed are discarded with it.
@@ -1895,7 +1905,9 @@ export class ChatRecoveryEngine {
 
     if (incidentKey) {
       try {
-        await this.#putIncident(incidentKey, incident);
+        // The give-up was delivered: it is the outcome, whatever was written
+        // meanwhile. Written in the incident chain all the same.
+        await this.#inChain(() => this.#putIncident(incidentKey, incident));
       } catch (writeError) {
         adapter.onGiveUpBookkeepingError("seal", writeError);
       }

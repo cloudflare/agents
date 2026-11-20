@@ -2479,11 +2479,14 @@ type ConnectionlessContinuation = {
   /** The messages the approvals' outcomes are stored in. */
   targetMessageIds: string[];
   /**
-   * The number of stops of every chat this isolate had seen when the item
-   * was pushed. An item pushed before a later stop does not run.
+   * The number of stops of every chat when the item was pushed
+   * (`connectionlessStops` in `think_config`, durable). An item pushed
+   * before a later stop does not run.
    */
   stops?: number;
 };
+/** `think_config` key of the count of stops of every chat. */
+const CONNECTIONLESS_STOPS_KEY = "connectionlessStops";
 /** Queue callback that runs one media-eviction pass. */
 const MEDIA_EVICTION_CALLBACK = "_cfEvictAgedMedia";
 /** Queue callback that runs one pending submission. */
@@ -13427,7 +13430,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * waits as a queue item until its callback runs, so that item goes too.
    */
   private _stopEveryChat(): void {
-    const stops = ++this._connectionlessStops;
+    const stops = this._connectionlessStops() + 1;
+    this._configSet(CONNECTIONLESS_STOPS_KEY, String(stops));
     this._holdForStop(this._turns.stopAll());
     // Once its callback runs, the turn core has it and has just stopped it.
     if (this._connectionlessContinuationRunning) return;
@@ -13456,8 +13460,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   /** The connection-less continuation's queue callback is running. */
   private _connectionlessContinuationRunning = false;
 
-  /** Stops of every chat in this isolate ({@link _stopEveryChat}). */
-  private _connectionlessStops = 0;
+  /**
+   * Stops of every chat ({@link _stopEveryChat}), durable so an item pushed
+   * before an eviction is still known to come before a later stop.
+   */
+  private _connectionlessStops(): number {
+    const stops = Number(this._configGet(CONNECTIONLESS_STOPS_KEY) ?? 0);
+    return Number.isFinite(stops) ? stops : 0;
+  }
 
   protected abortRequest(requestId: string, reason?: unknown): void {
     this._holdForStop(this._turns.cancel(requestId, reason));
@@ -17928,7 +17938,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       CONNECTIONLESS_CONTINUATION_CALLBACK,
       {
         targetMessageIds: [...targetMessageIds],
-        stops: this._connectionlessStops
+        stops: this._connectionlessStops()
       },
       { id: CONNECTIONLESS_CONTINUATION_QUEUE_ID }
     );
@@ -17950,11 +17960,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const latest = this.messages.at(-1)?.id;
     const targetMessageIds =
       queued?.targetMessageIds ?? (latest === undefined ? [] : [latest]);
-    // Pushed before a stop of every chat in this isolate, which has not
-    // dequeued it yet.
+    // Pushed before a stop of every chat, which has not dequeued it yet.
     if (
       queued?.stops !== undefined &&
-      queued.stops < this._connectionlessStops
+      queued.stops < this._connectionlessStops()
     ) {
       this._emit("chat:continuation:dropped", {
         requestId: null,

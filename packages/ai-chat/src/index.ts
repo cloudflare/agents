@@ -5705,9 +5705,18 @@ export class AIChatAgent<
 
       for (const line of lines) {
         if (line.startsWith("data: ") && line !== "data: [DONE]") {
+          let parsed: UIMessageChunk;
           try {
-            const data: UIMessageChunk = JSON.parse(line.slice(6));
-            await contentGate?.(data.type);
+            parsed = JSON.parse(line.slice(6));
+          } catch {
+            // Skip malformed JSON lines silently
+            continue;
+          }
+          // Outside the catch below, which skips a chunk it cannot apply:
+          // a takeover that fails fails the turn, as before the stream.
+          await contentGate?.(parsed.type);
+          try {
+            const data = parsed;
 
             // Drop replay chunks before applying or broadcasting them.
             //
@@ -6564,6 +6573,16 @@ export class AIChatAgent<
               }
             }
           );
+          // A clear that landed while the reply was being stored kept it
+          // out of the cleared chat: the turn did not complete.
+          const storedReplyId = earlyPersistedId ?? message.id;
+          if (
+            streamResult.status === "completed" &&
+            resetSinceTurnStarted() &&
+            !this.messages.some((stored) => stored.id === storedReplyId)
+          ) {
+            streamResult = { status: "aborted" };
+          }
           if (this._replyBeingStored === storing) this._replyBeingStored = null;
           // Nothing to persist (or the persist threw, or an override never
           // reached the session write): settle the stream so it is not

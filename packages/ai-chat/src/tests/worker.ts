@@ -350,6 +350,19 @@ export class TestChatAgent extends AIChatAgent<Env> {
     this._persistDelayForTest = { role, ms };
   }
 
+  /** `saveMessages` with one more user message; returns the status. */
+  async saveUserMessageForTest(text: string): Promise<string> {
+    const result = await this.saveMessages([
+      ...this.messages,
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text }]
+      }
+    ]);
+    return result.status;
+  }
+
   private _laterNoteForTest: { ms: number } | null = null;
 
   /**
