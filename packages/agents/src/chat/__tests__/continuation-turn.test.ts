@@ -1666,6 +1666,57 @@ describe("what a continuation turn runs", () => {
       expect(continued).toEqual(["a1"]);
     });
 
+    it("does not drop another tab's result that is still applying", async () => {
+      const other = makeConnection("c2");
+      let finishApply!: () => void;
+      const applied = turns.applyInteraction(
+        () =>
+          new Promise((resolve) => {
+            finishApply = () => resolve({ status: "changed", messageId: "a1" });
+          }),
+        true,
+        () => ({
+          connection: other,
+          clientTools: undefined,
+          body: undefined,
+          errorPrefix: "[test]"
+        })
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      // Tab c1 waits on nothing of its own (its result was a duplicate)
+      // and presses stop.
+      turns.cancelWaitingContinuation("c1");
+      finishApply();
+      await applied;
+      await fire();
+      await drain();
+
+      expect(host.ran).toEqual(["cont-1"]);
+      expect(host.droppedEvents).toEqual([]);
+    });
+
+    it("does not drop another tab's pending continuation", async () => {
+      const other = makeConnection("c2");
+      await turns.applyInteraction(
+        async () => ({ status: "changed", messageId: "a1" }),
+        true,
+        () => ({
+          connection: other,
+          clientTools: undefined,
+          body: undefined,
+          errorPrefix: "[test]"
+        })
+      );
+      expect([...turns.continuation.awaitingConnections.keys()]).toEqual([
+        "c2"
+      ]);
+      turns.cancelWaitingContinuation("c1");
+      await fire();
+      await drain();
+
+      expect(host.ran).toEqual(["cont-1"]);
+    });
+
     it("stops nothing for a tab that waits on nothing", async () => {
       await result("a1");
       turns.cancelWaitingContinuation("other-tab");

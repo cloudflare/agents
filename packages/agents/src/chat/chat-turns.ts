@@ -314,6 +314,14 @@ export class ChatTurns<
   /** How many stops have dropped what was waiting. */
   #stops = 0;
   /**
+   * The applies in the chain, each with the connection whose frame it is
+   * (`null` for none). A tab's continuation stop drops only its own.
+   */
+  readonly #applying = new Set<{
+    connectionId: string | null;
+    stopped: boolean;
+  }>();
+  /**
    * The request whose reply stream started last. With no turn running, a
    * stop for it is a stop of the reply a waiting continuation continues.
    */
@@ -711,7 +719,8 @@ export class ChatTurns<
       autoContinue,
       (outcome) =>
         this.autoContinuation.afterInteraction(outcome, autoContinue, spec),
-      enqueue
+      enqueue,
+      spec().connection.id
     );
   }
 
@@ -737,7 +746,8 @@ export class ChatTurns<
       async (outcome) => {
         if (outcome.status === "changed") await continueFor(outcome.messageId);
       },
-      enqueue
+      enqueue,
+      null
     );
   }
 
@@ -751,19 +761,29 @@ export class ChatTurns<
     apply: () => Promise<ToolInteractionOutcome>,
     autoContinue: boolean,
     decide: (outcome: ToolInteractionOutcome) => void | Promise<void>,
-    enqueue: (run: () => Promise<boolean>) => Promise<boolean>
+    enqueue: (run: () => Promise<boolean>) => Promise<boolean>,
+    connectionId: string | null
   ): Promise<boolean> {
     const stops = this.#stops;
+    const entry = { connectionId, stopped: false };
+    this.#applying.add(entry);
     return enqueue(async () => {
-      const outcome = await apply();
-      if (stops !== this.#stops) {
+      let outcome: ToolInteractionOutcome;
+      try {
+        outcome = await apply();
+      } finally {
+        this.#applying.delete(entry);
+      }
+      const stopLanded = stops !== this.#stops;
+      if (stopLanded || entry.stopped) {
         if (autoContinue && outcome.status === "changed") {
           this.host.continuationDropped?.({
             requestId: null,
             reason: "stopped",
-            ...(this.#stoppedTurn !== null && {
-              stoppedRequestId: this.#stoppedTurn
-            })
+            ...(stopLanded &&
+              this.#stoppedTurn !== null && {
+                stoppedRequestId: this.#stoppedTurn
+              })
           });
         }
       } else {
@@ -1089,8 +1109,11 @@ export class ChatTurns<
       void this.cancel(activeRequestId, reason);
       return;
     }
-    // A result whose frame arrived before the stop and is still applying.
-    if (this.pendingInteraction !== null) this.#dropWaiting(null);
+    // This tab's result, whose frame arrived before the stop and is still
+    // applying. Another tab's apply is left alone.
+    for (const entry of this.#applying) {
+      if (entry.connectionId === connectionId) entry.stopped = true;
+    }
   }
 
   /**
