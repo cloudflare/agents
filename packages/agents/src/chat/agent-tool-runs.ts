@@ -385,7 +385,7 @@ export class AgentToolRuns {
       incidentId: string | undefined,
       status: "skipped",
       reason: string
-    ) => Promise<void>
+    ) => Promise<unknown>
   ): Promise<boolean> {
     if (!attempt || !this.isRecoveredRunCancelled(attempt.originalRequestId)) {
       return true;

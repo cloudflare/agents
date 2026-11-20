@@ -447,15 +447,34 @@ export class AIChatAgent<
     return this._chatRecoveryEngine().activeRootRequestId;
   }
   /**
-   * Set around the persist of a client request's incoming messages. Holds
-   * the request's `isCurrent` check, which `persistMessages` reads right
-   * before it writes: `false` once the chat was reset since the request was
-   * accepted. An async scope, so an app's `persistMessages` override need
-   * not pass anything along, and no other persist is affected.
+   * Set around every persist a turn makes: a client request's incoming
+   * messages and the turn's reply. Holds the turn's `isCurrent` check,
+   * which `persistMessages` reads before each write: `false` once the chat
+   * was reset since the turn was accepted. An async scope, so an app's
+   * `persistMessages` override need not pass anything along. The scope
+   * closes when that persist returns (`open`), so work it started that
+   * calls `persistMessages` later writes as any other call does.
    */
-  private _incomingPersistScope = new AsyncLocalStorage<{
+  private _turnPersistScope = new AsyncLocalStorage<{
     isCurrent: () => boolean;
+    /** The messages are a client's copy (`keepStoredReplies`). */
+    clientCopy: boolean;
+    open: boolean;
   }>();
+
+  /** Run a turn's persist inside {@link _turnPersistScope}. */
+  private async _persistForTurn<T>(
+    isCurrent: () => boolean,
+    clientCopy: boolean,
+    persist: () => Promise<T>
+  ): Promise<T> {
+    const scope = { isCurrent, clientCopy, open: true };
+    try {
+      return await this._turnPersistScope.run(scope, persist);
+    } finally {
+      scope.open = false;
+    }
+  }
 
   /**
    * The originating user message ids of the active recovery chain (#2280),
@@ -492,7 +511,6 @@ export class AIChatAgent<
         this._chatRecoveryEngine().outsideAttempt(() =>
           this._fireAutoContinuation()
         ),
-      lastTurnReplyId: () => this._lastTurnReplyId,
       continuationDropped: (event) =>
         this._emit("chat:continuation:dropped", { ...event }),
       stopped: (requestId, reason) => this._afterStop(requestId, reason)
@@ -1090,7 +1108,6 @@ export class AIChatAgent<
           { "cloudflare.agents.component": "ai_chat" },
           () => {
             this._requestContext.restore();
-            this._restoreLastTurnReplyId();
           }
         );
 
@@ -1773,16 +1790,13 @@ export class AIChatAgent<
   protected _orphanStore(): OrphanPersistStore {
     return {
       getMessage: (id) => this.messages.find((m) => m.id === id) ?? null,
-      // A recovered partial is a turn's reply, stored late.
       appendMessage: async (message) => {
         await this.persistMessages([...this.messages, message]);
-        this._recordTurnReply(message.id);
       },
       updateMessage: async (message) => {
         await this.persistMessages(
           this.messages.map((m) => (m.id === message.id ? message : m))
         );
-        this._recordTurnReply(message.id);
       }
     };
   }
@@ -1877,35 +1891,6 @@ export class AIChatAgent<
       throw new Error(
         `[AIChatAgent] A continuation turn cannot call the model while its reply waits on a client for tool call(s) ${repaired.keptToolCallIds.join(", ")}.`
       );
-    }
-  }
-
-  /**
-   * The id of the last reply a turn stored. `continuationTargetIsLatest`
-   * reads it to tell a later turn's reply from a message appended without a
-   * turn. Stored, because a reply can wait on a client for longer than the
-   * isolate lives.
-   */
-  private _lastTurnReplyId: string | null = null;
-
-  private _recordTurnReply(messageId: string): void {
-    if (this._lastTurnReplyId === messageId) return;
-    this._lastTurnReplyId = messageId;
-    this.sql`
-      insert or replace into cf_ai_chat_request_context (key, value)
-      values ('lastTurnReplyId', ${JSON.stringify(messageId)})
-    `;
-  }
-
-  /** Load {@link _lastTurnReplyId} from SQLite. A corrupted row reads as none. */
-  private _restoreLastTurnReplyId(): void {
-    const rows = this.sql<{ value: string }>`
-      select value from cf_ai_chat_request_context where key = 'lastTurnReplyId'
-    `;
-    try {
-      if (rows[0]) this._lastTurnReplyId = JSON.parse(rows[0].value);
-    } catch {
-      // Corrupted row: the next stored reply overwrites it.
     }
   }
 
@@ -2660,7 +2645,7 @@ export class AIChatAgent<
             // was cleared: `persistMessages` can await before it
             // writes (an app's override, auto-compaction), and a
             // clear from another tab can land in that wait.
-            await this._incomingPersistScope.run({ isCurrent }, () =>
+            await this._persistForTurn(isCurrent, true, () =>
               this.persistMessages(
                 transformedMessages,
                 connection ? [connection.id] : [],
@@ -3302,15 +3287,7 @@ export class AIChatAgent<
           clientTools: this._lastClientTools,
           body: this._lastBody,
           continuation: true,
-          connection: continuation.connection,
-          // The reply that asked for the tool is extended while it is the
-          // last message. When a message was appended after it, the answer
-          // is a new reply after that message, which is left as it is.
-          extendsReply:
-            continuation.targetMessageIds == null ||
-            continuation.targetMessageIds.includes(
-              this.messages.at(-1)?.id ?? ""
-            )
+          connection: continuation.connection
         }),
       failure: this._turnFailureHost(),
       onError: (error, { errorPrefix, reported }) => {
@@ -3498,13 +3475,6 @@ export class AIChatAgent<
       continuation: boolean;
       /** The connection whose tool result started the turn, if one did. */
       connection?: Connection;
-      /**
-       * For a continuation: whether its reply extends the last assistant
-       * message. `false` when a message was appended after the reply it
-       * answers, so the answer is stored as a new reply. Defaults to
-       * `continuation`.
-       */
-      extendsReply?: boolean;
     }
   ): Promise<StreamResultStatus | undefined> {
     const { clientTools, body, continuation } = turn;
@@ -3538,7 +3508,7 @@ export class AIChatAgent<
                 // the Response exists before the provider is called, so a
                 // provider error in the stream leaves the recovery in place.
                 outcome = await this._reply(requestId, response, [], {
-                  continuation: turn.extendsReply ?? continuation,
+                  continuation,
                   chatMessageId: requestId,
                   abortSignal,
                   beforeContent: takeReply
@@ -4979,16 +4949,35 @@ export class AIChatAgent<
     discard: boolean;
   } | null = null;
 
+  /**
+   * Store `messages` as the transcript and broadcast it to every tab except
+   * `excludeBroadcastIds`. A message whose stored copy is the same is not
+   * written again. Override it to see or change what is stored; call
+   * `super.persistMessages` to write.
+   *
+   * A persist a turn makes (a client request's messages, the turn's reply)
+   * writes nothing once the chat was cleared since the turn started, checked
+   * before each write. The check follows the call through an override, and
+   * ends when that call returns: a persist started from work the override
+   * left running writes as any other call does.
+   *
+   * Appending a message while a client tool call is waiting on its result
+   * (a status note, say) moves the conversation on. When the result
+   * arrives it is stored, but the reply is not continued: the next turn
+   * reads the result. See `chat:continuation:dropped` with `moved_on`.
+   */
   async persistMessages(
     messages: UIMessage[],
     excludeBroadcastIds: string[] = [],
     /** @internal */
     options?: { _deleteStaleRows?: boolean }
   ) {
-    const incoming = this._incomingPersistScope.getStore();
-    // A client request's messages, admitted before the chat was cleared:
-    // writing them now would put the cleared history back.
-    if (incoming?.isCurrent() === false) return;
+    const scope = this._turnPersistScope.getStore();
+    const turn = scope?.open ? scope : undefined;
+    // A turn admitted before the chat was cleared: writing its messages now
+    // would put the cleared history back.
+    const reset = (): boolean => turn?.isCurrent() === false;
+    if (reset()) return;
     // Snapshot the pre-write transcript: `this.messages` is mirrored from the
     // change feed and therefore mutates as the loop below writes.
     const priorMessages = [...this.messages];
@@ -4998,7 +4987,7 @@ export class AIChatAgent<
     );
     // A client's copy of a reply can be behind the stored one (the tab that
     // pressed stop has one chunk fewer). It never shortens the stored reply.
-    const mergedMessages = incoming
+    const mergedMessages = turn?.clientCopy
       ? keepStoredReplies(reconciled, priorMessages)
       : reconciled;
 
@@ -5024,6 +5013,8 @@ export class AIChatAgent<
       cutover &&
       mergedMessages.some((message) => message.id === cutover.messageId)
     ) {
+      // One transaction, with no await before it: checked once.
+      if (reset()) return;
       this.#pendingCutover = null;
       const sync = this.#session.__DO_NOT_USE_WILL_BREAK__sync();
       const afters: Array<() => Promise<void>> = [];
@@ -5044,12 +5035,18 @@ export class AIChatAgent<
       }
       for (const after of afters) await after();
     } else {
-      for (const message of toWrite) await this.#session.upsertMessage(message);
+      // Checked before each write: one can await (auto-compaction calls a
+      // model), and a clear can land in that wait.
+      for (const message of toWrite) {
+        if (reset()) return;
+        await this.#session.upsertMessage(message);
+      }
     }
 
     // Regeneration can submit a strict subset of the server transcript. Keep
     // the old subset guard, but delete through Sessions so descendants splice
     // to their grandparent instead of breaking the active path.
+    if (reset()) return;
     if (options?._deleteStaleRows) {
       const serverIds = new Set(priorMessages.map((message) => message.id));
       const isSubsetOfServer = mergedMessages.every((message) =>
@@ -6474,65 +6471,81 @@ export class AIChatAgent<
           this._replyBeingStored = storing;
           // A reply that holds nothing (cut off while the model was still
           // reasoning) is not stored: a client would draw an empty bubble.
-          if (!replyIsEmpty(message) && !discardPartial && !resetBeforeStore) {
-            if (earlyPersistedId) {
-              // Message already exists in this.messages from the early persist.
-              // Update it in place with the final streaming state.
-              const persistedMessage: UIMessage = {
-                ...message,
-                id: earlyPersistedId
-              };
-              const existingIdx = this.messages.findIndex(
-                (msg) => msg.id === earlyPersistedId
-              );
-              const updatedMessages = [...this.messages];
+          // Every write of the reply checks for a clear since the turn
+          // started, an override's await and auto-compaction included.
+          await this._persistForTurn(
+            () => !resetSinceTurnStarted(),
+            false,
+            async () => {
+              if (
+                !replyIsEmpty(message) &&
+                !discardPartial &&
+                !resetBeforeStore
+              ) {
+                if (earlyPersistedId) {
+                  // Message already exists in this.messages from the early persist.
+                  // Update it in place with the final streaming state.
+                  const persistedMessage: UIMessage = {
+                    ...message,
+                    id: earlyPersistedId
+                  };
+                  const existingIdx = this.messages.findIndex(
+                    (msg) => msg.id === earlyPersistedId
+                  );
+                  const updatedMessages = [...this.messages];
 
-              if (existingIdx >= 0) {
-                updatedMessages[existingIdx] = persistedMessage;
-              } else {
-                updatedMessages.push(persistedMessage);
-              }
+                  if (existingIdx >= 0) {
+                    updatedMessages[existingIdx] = persistedMessage;
+                  } else {
+                    updatedMessages.push(persistedMessage);
+                  }
 
-              await this.persistMessages(updatedMessages, excludeBroadcastIds);
-            } else if (continuation) {
-              const existingIdx = this.messages.findIndex(
-                (msg) => msg.id === message.id
-              );
-              if (existingIdx >= 0) {
-                const updatedMessages = [...this.messages];
-                updatedMessages[existingIdx] = message;
-                await this.persistMessages(
-                  updatedMessages,
-                  excludeBroadcastIds
-                );
-              } else {
-                // No assistant message to append to, create new one
-                await this.persistMessages(
-                  [...this.messages, message],
-                  excludeBroadcastIds
-                );
+                  await this.persistMessages(
+                    updatedMessages,
+                    excludeBroadcastIds
+                  );
+                } else if (continuation) {
+                  const existingIdx = this.messages.findIndex(
+                    (msg) => msg.id === message.id
+                  );
+                  if (existingIdx >= 0) {
+                    const updatedMessages = [...this.messages];
+                    updatedMessages[existingIdx] = message;
+                    await this.persistMessages(
+                      updatedMessages,
+                      excludeBroadcastIds
+                    );
+                  } else {
+                    // No assistant message to append to, create new one
+                    await this.persistMessages(
+                      [...this.messages, message],
+                      excludeBroadcastIds
+                    );
+                  }
+                } else {
+                  await this.persistMessages(
+                    [...this.messages, message],
+                    excludeBroadcastIds
+                  );
+                }
+                // A tool result that arrived while the reply was being stored
+                // was applied to it in place. The store may have written the
+                // reply before that, so store it again until nothing changed.
+                const storedId = earlyPersistedId ?? message.id;
+                while (storing.dirty && !resetSinceTurnStarted()) {
+                  storing.dirty = false;
+                  await this.persistMessages(
+                    this.messages.map((stored) =>
+                      stored.id === storedId
+                        ? { ...message, id: storedId }
+                        : stored
+                    ),
+                    excludeBroadcastIds
+                  );
+                }
               }
-            } else {
-              await this.persistMessages(
-                [...this.messages, message],
-                excludeBroadcastIds
-              );
             }
-            // A tool result that arrived while the reply was being stored
-            // was applied to it in place. The store may have written the
-            // reply before that, so store it again until nothing changed.
-            const storedId = earlyPersistedId ?? message.id;
-            while (storing.dirty && !resetSinceTurnStarted()) {
-              storing.dirty = false;
-              await this.persistMessages(
-                this.messages.map((stored) =>
-                  stored.id === storedId ? { ...message, id: storedId } : stored
-                ),
-                excludeBroadcastIds
-              );
-            }
-            this._recordTurnReply(storedId);
-          }
+          );
           if (this._replyBeingStored === storing) this._replyBeingStored = null;
           // Nothing to persist (or the persist threw, or an override never
           // reached the session write): settle the stream so it is not

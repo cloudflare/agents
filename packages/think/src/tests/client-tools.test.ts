@@ -3889,8 +3889,15 @@ describe("Think — waiting on a client after an upgrade", () => {
 });
 
 describe("Think — tool results with nothing to continue", () => {
-  it("a tool result is answered after a message was appended without a turn", async () => {
+  it("a tool result is stored, not continued, once a message was appended without a turn", async () => {
     const room = crypto.randomUUID();
+    const dropped: string[] = [];
+    const unsubscribe = subscribe("chat", (event) => {
+      if (event.type === "chat:continuation:dropped" && event.name === room) {
+        dropped.push(event.payload.reason);
+      }
+    });
+    onTestFinished(unsubscribe);
     const agent = await freshAgent(room);
     const { ws } = await connectWS(room);
     await collectMessages(ws, 3);
@@ -3904,15 +3911,14 @@ describe("Think — tool results with nothing to continue", () => {
     await delay(200);
 
     // While the tool runs in the tab, the app appends a status message.
-    // No turn stores it and none answers it.
     const note = (await agent.appendNoteForTest(
       "Background job finished."
     )) as unknown as UIMessage;
     const beforeResult = (await agent.getMessages()) as UIMessage[];
     expect(beforeResult.at(-1)?.id).toBe(note.id);
 
-    // The tool result arrives, and the model answers it.
-    const continued = waitForDone(ws, 15000);
+    // The tool result arrives. It is stored, and the conversation moved
+    // on, so the model is not asked: the request would end in the note.
     ws.send(
       JSON.stringify({
         type: MSG_TOOL_RESULT,
@@ -3922,13 +3928,18 @@ describe("Think — tool results with nothing to continue", () => {
         autoContinue: true
       })
     );
-    await continued;
-    await delay(200);
+    await delay(800);
 
     const stored = (await agent.getMessages()) as UIMessage[];
-    expect(stored.length).toBe(beforeResult.length + 1);
-    expect(stored.at(-1)?.role).toBe("assistant");
-    expect(stored.find((m) => m.id === note.id)).toEqual(note);
+    expect(stored.map((m) => m.id)).toEqual(beforeResult.map((m) => m.id));
+    expect(stored.at(-1)).toEqual(note);
+    const call = stored
+      .flatMap((m) => m.parts)
+      .find(
+        (part) => "toolCallId" in part && part.toolCallId === "tc-client-1"
+      );
+    expect(call).toMatchObject({ state: "output-available" });
+    expect(dropped).toEqual(["moved_on"]);
     await closeWS(ws);
   });
 

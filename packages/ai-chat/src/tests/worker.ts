@@ -350,11 +350,35 @@ export class TestChatAgent extends AIChatAgent<Env> {
     this._persistDelayForTest = { role, ms };
   }
 
+  private _laterNoteForTest: { ms: number } | null = null;
+
+  /**
+   * Make the next `persistMessages` of a user message start work that
+   * stores a note `ms` later, the way an override's fire-and-forget does.
+   */
+  storeNoteLaterFromPersistForTest(ms: number): void {
+    this._laterNoteForTest = { ms };
+  }
+
   override async persistMessages(
     messages: ChatMessage[],
     excludeBroadcastIds: string[] = [],
     options?: { _deleteStaleRows?: boolean }
   ) {
+    const later = this._laterNoteForTest;
+    if (later && messages.at(-1)?.role === "user") {
+      this._laterNoteForTest = null;
+      setTimeout(() => {
+        void this.persistMessages([
+          ...this.messages,
+          {
+            id: "note-later",
+            role: "assistant",
+            parts: [{ type: "text", text: "Stored later." }]
+          }
+        ]);
+      }, later.ms);
+    }
     const wait = this._persistDelayForTest;
     if (wait && messages.at(-1)?.role === wait.role) {
       await new Promise((resolve) => setTimeout(resolve, wait.ms));

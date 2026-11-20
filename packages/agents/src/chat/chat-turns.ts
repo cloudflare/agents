@@ -145,12 +145,6 @@ export interface ChatTurnsHost {
    */
   fireContinuation(): void;
   /**
-   * The id of the last reply a turn stored, if the host records it. It tells
-   * a later turn's reply from a message appended without a turn. See
-   * {@link continuationTargetIsLatest}.
-   */
-  lastTurnReplyId?(): string | null;
-  /**
    * A continuation was dropped: it will not run, and nothing failed. Emit
    * the host's observability event. Optional.
    */
@@ -388,7 +382,6 @@ export class ChatTurns<
       autoContinuation: this.autoContinuation,
       aborts: this.aborts,
       messages: () => host.messages(),
-      lastTurnReplyId: () => host.lastTurnReplyId?.(),
       clientToolNames: () => host.clientToolNames(),
       streamed: new Map(),
       firing: new Set(),

@@ -514,48 +514,99 @@ describe("chat turn races", () => {
     ws.close(1000);
   });
 
-  it("a tool result is answered after a message was appended without a turn", async () => {
+  it("a tool result is stored, not continued, once a message was appended without a turn", async () => {
+    const room = crypto.randomUUID();
+    const dropped: string[] = [];
+    const unsubscribe = subscribe("chat", (event) => {
+      if (event.type === "chat:continuation:dropped" && event.name === room) {
+        dropped.push(event.payload.reason);
+      }
+    });
+    try {
+      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+      const seen = record(ws);
+      const agent = await getAgentByName(env.TestChatAgent, room);
+
+      // Turn 1 ends on a client tool call.
+      sendChatRequest(ws, "req-tool", [user1], { clientToolCall: true });
+      await waitUntil(() => responses(seen, "req-tool").some((m) => m.done));
+      await agent.waitForIdleForTest();
+      const afterTurn = (await agent.getPersistedMessages()) as ChatMessage[];
+      expect(afterTurn.map((m) => m.role)).toEqual(["user", "assistant"]);
+
+      // While the tool runs in the tab, the app appends a status message.
+      const note: ChatMessage = {
+        id: "note-1",
+        role: "assistant",
+        parts: [{ type: "text", text: "Background job finished." }]
+      };
+      await agent.persistMessages([...afterTurn, note]);
+
+      // The tool result arrives. It is stored, and the conversation moved
+      // on, so the model is not asked: the request would end in the note.
+      send(ws, toolResult("call-turn"));
+      await delay(300);
+      await agent.waitForIdleForTest();
+
+      expect(await agent.getChatMessageCallCountForTest()).toBe(1);
+      const stored = (await agent.getPersistedMessages()) as ChatMessage[];
+      expect(stored.map((m) => m.id)).toEqual([
+        afterTurn[0].id,
+        afterTurn[1].id,
+        note.id
+      ]);
+      expect(stored[1].parts.at(-1)).toMatchObject({
+        state: "output-available"
+      });
+      expect(stored[2]).toEqual(note);
+      expect(dropped).toEqual(["moved_on"]);
+      ws.close(1000);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it("a note after a reply does not let a continuation run over a call that still waits on the user", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
     const seen = record(ws);
     const agent = await getAgentByName(env.TestChatAgent, room);
 
-    // Turn 1 ends on a client tool call.
     sendChatRequest(ws, "req-tool", [user1], { clientToolCall: true });
     await waitUntil(() => responses(seen, "req-tool").some((m) => m.done));
     await agent.waitForIdleForTest();
     const afterTurn = (await agent.getPersistedMessages()) as ChatMessage[];
-    expect(afterTurn.map((m) => m.role)).toEqual(["user", "assistant"]);
-
-    // While the tool runs in the tab, the app appends a status message.
-    // No turn stores it and none answers it.
+    // The same reply also asked the user to approve a second call.
+    const reply = {
+      ...afterTurn[1],
+      parts: [
+        ...afterTurn[1].parts,
+        {
+          type: "tool-approveMe",
+          toolCallId: "call-approval",
+          state: "approval-requested",
+          input: {},
+          approval: { id: "approval-1" }
+        }
+      ]
+    } as ChatMessage;
     const note: ChatMessage = {
       id: "note-1",
       role: "assistant",
       parts: [{ type: "text", text: "Background job finished." }]
     };
-    await agent.persistMessages([...afterTurn, note]);
+    await agent.persistMessages([afterTurn[0], reply, note]);
 
-    // The tool result arrives.
     send(ws, toolResult("call-turn"));
-    await delay(300);
+    await delay(400);
     await agent.waitForIdleForTest();
 
-    // The model was asked again, and its answer is a new reply after the
-    // note, which is left as it was.
-    expect(await agent.getChatMessageCallCountForTest()).toBe(2);
     const stored = (await agent.getPersistedMessages()) as ChatMessage[];
-    expect(stored.map((m) => m.role)).toEqual([
-      "user",
-      "assistant",
-      "assistant",
-      "assistant"
-    ]);
+    expect(await agent.getChatMessageCallCountForTest()).toBe(1);
     expect(stored[1].parts.at(-1)).toMatchObject({
-      state: "output-available"
+      toolCallId: "call-approval",
+      state: "approval-requested"
     });
-    expect(stored[2]).toEqual(note);
-    expect(stored[3].parts.some((part) => part.type === "text")).toBe(true);
     ws.close(1000);
   });
 
@@ -609,6 +660,54 @@ describe("chat turn races", () => {
       expect.objectContaining({ outcome: "skipped" })
     ]);
     expect(await agent.getChatMessageCallCountForTest()).toBe(0);
+    tab1.close(1000);
+    tab2.close(1000);
+  });
+
+  it("a clear while the finished reply is being stored does not bring the transcript back", async () => {
+    const room = crypto.randomUUID();
+    const { ws: tab1 } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const { ws: tab2 } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const seen = record(tab1);
+    const agent = await getAgentByName(env.TestChatAgent, room);
+
+    sendChatRequest(tab1, "req-1", [user1]);
+    await waitUntil(() => responses(seen, "req-1").some((m) => m.done));
+    await agent.waitForIdleForTest();
+    const afterFirst = (await agent.getPersistedMessages()) as ChatMessage[];
+
+    // The app's persistMessages awaits before it stores the reply.
+    await agent.setPersistDelayForTest("assistant", 300);
+    sendChatRequest(tab1, "req-2", [...afterFirst, user2]);
+    // Tab 2 clears the chat while the reply waits to be stored.
+    await delay(150);
+    send(tab2, { type: MessageType.CF_AGENT_CHAT_CLEAR });
+    await delay(500);
+    await agent.waitForIdleForTest();
+
+    expect(await agent.getPersistedMessages()).toEqual([]);
+    tab1.close(1000);
+    tab2.close(1000);
+  });
+
+  it("a persist that work started inside a turn's persist starts later is not held to that turn", async () => {
+    const room = crypto.randomUUID();
+    const { ws: tab1 } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const { ws: tab2 } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const agent = await getAgentByName(env.TestChatAgent, room);
+    await agent.storeNoteLaterFromPersistForTest(400);
+    await agent.setPersistDelayForTest("user", 200);
+
+    sendChatRequest(tab1, "req-1", [user1]);
+    await delay(100);
+    // The request is cleared before it is stored. The note the override
+    // stores later is not part of that request.
+    send(tab2, { type: MessageType.CF_AGENT_CHAT_CLEAR });
+    await delay(600);
+    await agent.waitForIdleForTest();
+
+    const stored = (await agent.getPersistedMessages()) as ChatMessage[];
+    expect(stored.map((m) => m.id)).toEqual(["note-later"]);
     tab1.close(1000);
     tab2.close(1000);
   });
