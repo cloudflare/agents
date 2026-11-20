@@ -9,6 +9,7 @@
  * @internal Not a public API.
  */
 
+import { ChatRecoverySupersededError } from "./turn-stop";
 import type { FiberRecoveryContext } from "../index";
 import type {
   ChatRecoveryExhaustedContext,
@@ -1600,7 +1601,9 @@ export class ChatRecoveryEngine {
           !this.#ownTurnContinuedIt(current)
       );
       if (!applied) continue;
-      this.#runningAttempts.get(incident.incidentId)?.superseded.abort();
+      this.#runningAttempts
+        .get(incident.incidentId)
+        ?.superseded.abort(new ChatRecoverySupersededError());
       superseded = true;
     }
     return superseded;

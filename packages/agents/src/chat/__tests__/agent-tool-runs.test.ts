@@ -1378,7 +1378,7 @@ describe("AgentToolRuns", () => {
         [{ type: "step-start" }, { type: "reasoning", text: "thinking" }]
       ],
       ["only an empty text part", [{ type: "text", text: "" }]]
-    ] as const) {
+    ] as Array<[string, unknown[]]>) {
       it(`does not anchor a run on a reply of ${label}, which its own turn removes`, async () => {
         const { runs, store, setTranscript } = setup();
         setTranscript([

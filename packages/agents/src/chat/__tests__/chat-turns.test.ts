@@ -1,3 +1,4 @@
+import { ChatRecoverySupersededError } from "../turn-stop";
 import { ChatStreamStalledError } from "../stall-watchdog";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { UIMessage } from "ai";
@@ -542,6 +543,16 @@ describe("ChatTurns", () => {
       turns.linkExternal("r1", caller.signal);
       caller.abort("gave up");
       expect(host.stops).toEqual([{ requestId: "r1", reason: "gave up" }]);
+    });
+
+    it("a recovery attempt superseded by another turn is not a stop", () => {
+      const attempt = new AbortController();
+      const signal = turns.aborts.getSignal("r1");
+      turns.linkExternal("r1", attempt.signal);
+      attempt.abort(new ChatRecoverySupersededError());
+      // The turn ends, and nothing a user's stop does follows.
+      expect(signal?.aborted).toBe(true);
+      expect(host.stops).toEqual([]);
     });
 
     it("the runtime's own abort is not a stop", () => {

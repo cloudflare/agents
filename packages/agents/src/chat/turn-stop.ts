@@ -38,3 +38,17 @@ export function isTurnStopped(signal: AbortSignal | undefined): boolean {
     !(signal.reason instanceof ChatStreamStalledError)
   );
 }
+
+/**
+ * The reason a recovery attempt's turn is aborted with when another turn
+ * took its reply over (`ChatRecoveryEngine.supersedeScheduledRecovery`).
+ * The runtime's own abort, like a stall: it is not a user's stop, so the
+ * host's stop work (cancelling an agent-tool run, a scheduled recovery)
+ * does not run for it.
+ */
+export class ChatRecoverySupersededError extends Error {
+  constructor() {
+    super("Another turn continued this recovery's reply.");
+    this.name = "ChatRecoverySupersededError";
+  }
+}

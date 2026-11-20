@@ -197,7 +197,8 @@ function startAnchor(
 ): string | null {
   for (let i = transcript.length - 1; i >= 0; i--) {
     const message = transcript[i];
-    if (message.parts !== undefined && replyIsRemovedAsEmpty(message)) {
+    const { parts } = message;
+    if (parts !== undefined && replyIsRemovedAsEmpty({ ...message, parts })) {
       continue;
     }
     return message.id;

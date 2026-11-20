@@ -101,7 +101,7 @@ import {
   type TurnFailureHost
 } from "./turn-failure";
 import { TurnQueue } from "./turn-queue";
-import { isTurnStopped } from "./turn-stop";
+import { ChatRecoverySupersededError, isTurnStopped } from "./turn-stop";
 
 /** The transcript shape the core reads: ids for targets, parts for batches. */
 export type ChatTurnMessage = {
@@ -1128,13 +1128,22 @@ export class ChatTurns<
    */
   linkExternal(requestId: string, signal: AbortSignal | undefined): () => void {
     if (!signal) return () => {};
+    // A recovery attempt whose reply another turn took over aborts its
+    // turn's signal. That is the runtime's abort, not a user's stop.
+    const stop = () => {
+      if (signal.reason instanceof ChatRecoverySupersededError) {
+        this.runtimeAbort(() => void this.cancel(requestId, signal.reason));
+      } else {
+        void this.cancel(requestId, signal.reason);
+      }
+    };
     if (signal.aborted) {
       // The controller has to exist for the stop to land on it.
       this.aborts.getSignal(requestId);
-      this.cancel(requestId, signal.reason);
+      stop();
       return () => {};
     }
-    const listener = () => this.cancel(requestId, signal.reason);
+    const listener = stop;
     signal.addEventListener("abort", listener, { once: true });
     return () => signal.removeEventListener("abort", listener);
   }

@@ -494,7 +494,7 @@ export {
   iterateWithStallWatchdog
 } from "./stall-watchdog";
 
-export { isTurnStopped } from "./turn-stop";
+export { ChatRecoverySupersededError, isTurnStopped } from "./turn-stop";
 
 export type {
   ChatResponseResult,
