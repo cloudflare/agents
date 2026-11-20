@@ -1381,6 +1381,8 @@ export class ChatRecoveryEngine {
       superseded: AbortController;
       stopped: AbortController;
       turnRequestId?: string;
+      /** The schedule whose turn the attempt started. */
+      turnDelivery?: number;
     }
   >();
 
@@ -1478,7 +1480,10 @@ export class ChatRecoveryEngine {
     const running = attempt?.incidentId
       ? this.#runningAttempts.get(attempt.incidentId)
       : undefined;
-    if (running && requestId) running.turnRequestId = requestId;
+    if (running && requestId) {
+      running.turnRequestId = requestId;
+      running.turnDelivery = attempt?.delivery;
+    }
     let taken = false;
     const takeReply = async (): Promise<void> => {
       if (!continuation || taken) return;
@@ -1524,7 +1529,8 @@ export class ChatRecoveryEngine {
       if (
         incident.status !== "scheduled" ||
         incident.incidentId === exceptIncidentId ||
-        !continuesReply(incident, reply.id)
+        !continuesReply(incident, reply.id) ||
+        this.#ownTurnContinuedIt(incident)
       ) {
         continue;
       }
@@ -1537,6 +1543,22 @@ export class ChatRecoveryEngine {
       superseded = true;
     }
     return superseded;
+  }
+
+  /**
+   * Whether the attempt running for this incident already started the turn
+   * of the incident's current schedule. That turn continued the reply, so a
+   * later turn (a continuation armed during it) does not take the reply
+   * from it. A newer schedule, which a cut-off of that turn leaves, can be
+   * taken.
+   */
+  #ownTurnContinuedIt(incident: ChatRecoveryIncident): boolean {
+    const running = this.#runningAttempts.get(incident.incidentId);
+    return (
+      running?.turnRequestId !== undefined &&
+      running.turnDelivery !== undefined &&
+      running.turnDelivery === incident.scheduleCount
+    );
   }
 
   /** Whether a client's answer took over this incident's reply. */

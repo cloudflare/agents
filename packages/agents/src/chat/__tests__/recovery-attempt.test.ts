@@ -1126,6 +1126,67 @@ describe("a recovery callback delivered more than once", () => {
     expect(t.log.filter((entry) => entry === "turn")).toHaveLength(2);
   });
 
+  it("is completed when a continuation armed during its turn continues after it", async () => {
+    // The recovered turn ends; a continuation it armed runs outside the
+    // attempt (D64) and takes the reply before the attempt records.
+    const t = setup({
+      incident: {
+        scheduleCount: 1,
+        scheduled: {
+          callback: "_chatRecoveryContinue",
+          targetMessageId: "assistant-1"
+        }
+      },
+      duringTurn: async (harness) => {
+        await harness.engine.turnBody(true, async () => {}, "turn-request")();
+        await harness.engine.outsideAttempt(() =>
+          harness.engine.turnBody(true, (take) => take(), "cont-1")()
+        );
+      }
+    });
+    t.host.data = { ...t.host.data, delivery: 1 };
+
+    await t.run();
+
+    expect(t.log).not.toContain("client-continued");
+    expect(t.events).toContain("chat:recovery:completed");
+    expect(t.incident()).toBeUndefined();
+  });
+
+  it("is taken by a continuation once its own turn was cut off and scheduled again", async () => {
+    const t = setup({
+      incident: {
+        scheduleCount: 1,
+        scheduled: {
+          callback: "_chatRecoveryContinue",
+          targetMessageId: "assistant-1"
+        }
+      },
+      result: { status: "aborted" },
+      duringTurn: async (harness) => {
+        await harness.engine.turnBody(true, async () => {}, "turn-request")();
+        // The turn was cut off again and its routing scheduled attempt 2.
+        await harness.engine.scheduleRecovery({
+          incident: t.incident()!,
+          recoveryKind: "continue",
+          callback: "_chatRecoveryContinue",
+          data: { incidentId: INCIDENT, targetAssistantId: "assistant-1" }
+        });
+        await harness.engine.outsideAttempt(() =>
+          harness.engine.turnBody(true, (take) => take(), "cont-1")()
+        );
+      }
+    });
+    t.host.data = { ...t.host.data, delivery: 1 };
+
+    await t.run();
+
+    expect(t.incident()).toMatchObject({
+      status: "skipped",
+      reason: "continued_by_interaction"
+    });
+  });
+
   it("hands each schedule its number in the callback's payload", async () => {
     const t = setup({ incident: { scheduleCount: 4 } });
     const payloads: unknown[] = [];
