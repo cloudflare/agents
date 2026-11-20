@@ -12,6 +12,9 @@ type Stub = {
   runChatRecoveryContinueDirectForTest(
     data: Record<string, unknown>
   ): Promise<void>;
+  runChatRecoveryContinueCatchingForTest(
+    data: Record<string, unknown>
+  ): Promise<string | null>;
   getOnChatMessageCallCount(): Promise<number>;
   throwFromNextTurnForTest(message: string | null): Promise<void>;
   getRecoveryRootsSeenForTest(): Promise<Array<string | null>>;
@@ -63,9 +66,9 @@ describe("rv-recovery: an attempt that hit a platform transient", () => {
 
     // The recovered turn's onChatMessage hits a platform transient.
     await stub.throwFromNextTurnForTest("Network connection lost.");
-    await expect(
-      stub.runChatRecoveryContinueDirectForTest(data)
-    ).rejects.toThrow(/Network connection lost/);
+    expect(await stub.runChatRecoveryContinueCatchingForTest(data)).toMatch(
+      /Network connection lost/
+    );
     const afterThrow = await stub.getIncidentForTest("inc-t");
 
     // The user presses stop, by the request id it knows, while
@@ -116,9 +119,9 @@ describe("rv-recovery: an attempt that hit a platform transient", () => {
       targetAssistantId: "a1"
     };
     await stub.throwFromNextTurnForTest("Network connection lost.");
-    await expect(
-      stub.runChatRecoveryContinueDirectForTest(data)
-    ).rejects.toThrow(/Network connection lost/);
+    expect(await stub.runChatRecoveryContinueCatchingForTest(data)).toMatch(
+      /Network connection lost/
+    );
 
     const { ws } = await connectChatWS(
       `/agents/chat-recovery-test-agent/${room}`
@@ -147,9 +150,9 @@ describe("rv-recovery: an attempt that hit a platform transient", () => {
       targetAssistantId: "a1"
     };
     await stub.throwFromNextTurnForTest("Network connection lost.");
-    await expect(
-      stub.runChatRecoveryContinueDirectForTest(data)
-    ).rejects.toThrow(/Network connection lost/);
+    expect(await stub.runChatRecoveryContinueCatchingForTest(data)).toMatch(
+      /Network connection lost/
+    );
 
     // Another turn continues the same reply meanwhile (the app here; a
     // client's tool answer takes the same takeReply path).
