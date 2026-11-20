@@ -239,7 +239,8 @@ then model, then `createAI` settings.
 
 With a `sessionId`, an Anthropic model whose `baseUrl` is `api.anthropic.com` uses pi-ai's message
 threads, and AI Gateway forwards the `thread` field, so later requests send only the new messages.
-To send the whole conversation every time, set `disableContinuation: true` on the call or
+A thread expires after a few minutes idle; when Anthropic can no longer continue one, pi-ai sends
+the whole conversation again as a new thread. To send the whole conversation every time, set `disableContinuation: true` on the call or
 `compat.supportsMessageThreads: false` on the model.
 
 ## How a request travels
