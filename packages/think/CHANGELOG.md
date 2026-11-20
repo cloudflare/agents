@@ -2,6 +2,28 @@
 
 ## 0.24.0
 
+This release moves Think to Computer 0.10, and restarting a Think agent no longer creates a new Dynamic Worker for each extension.
+
+### Highlights
+
+- **Computer 0.10:** Think's `@cloudflare/computer` peer is now `^0.10.0`. Computer's JavaScript backend is now `CodemodeBackend`, and host modules such as `ws:tools` are now `codemode:tools`. See [Running code with `exec`](https://github.com/cloudflare/agents/blob/main/docs/think/tools.md#running-code-with-exec).
+- **Stable extension workers:** `ExtensionManager` derives each Dynamic Worker's id from a hash of the extension's code and configuration instead of `Date.now()`, so restarting a Think Durable Object no longer creates, and bills, a new Dynamic Worker per extension. Extensions with a host binding can add the agent and context labels with the new `workerIdScope` option.
+- **Recovery:** an interrupted continuation is recovered into the assistant message it continues, instead of as a duplicate message.
+- **Retired models:** examples and messages move off the Workers AI models retired on November 20, 2026.
+
+### Upgrading
+
+1. **Update `agents` to 0.34.0 and `@cloudflare/computer` to `^0.10.0`** with Think. Think now requires `agents` >=0.34.0.
+2. **Import the JavaScript backend as `CodemodeBackend`:**
+
+   ```diff
+   - import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
+   + import { CodemodeBackend } from "@cloudflare/computer/backends/codemode";
+   ```
+
+3. **Rename host modules from `ws:` to `codemode:`**, such as `ws:tools` to `codemode:tools` and `ws:git` to `codemode:git`, in your backend's `modules` and in any code or prompts that import them.
+4. **Check backend ids.** The backend's default id is now `codemode`. If anything refers to an id such as `js`, update it, or pass that `id` to `CodemodeBackend`.
+
 ### Minor Changes
 
 - [#2819](https://github.com/cloudflare/agents/pull/2819) [`9b54e51`](https://github.com/cloudflare/agents/commit/9b54e51a2f68b8aa7b5e42ad4635351c889670c0) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Think's `@cloudflare/computer` peer is now `^0.10.0`, so upgrade Computer to 0.10 alongside Think. Its JavaScript backend is now `CodemodeBackend` from `@cloudflare/computer/backends/codemode`, and host modules such as `ws:tools` are now `codemode:tools`. See [Running code with `exec`](https://github.com/cloudflare/agents/blob/main/docs/think/tools.md#running-code-with-exec).

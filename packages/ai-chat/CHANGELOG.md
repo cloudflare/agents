@@ -2,6 +2,8 @@
 
 ## 0.12.3
 
+This release fixes chat races across tabs and during recovery, so stop, clear, regenerate and resume do what the user asked even while another tab or a recovery is streaming. A chat request cancelled while it waits in the queue no longer runs, and when `onError` returns instead of throwing, `AIChatAgent` passes the original error on. No changes are needed to upgrade.
+
 ### Patch Changes
 
 - [#2832](https://github.com/cloudflare/agents/pull/2832) [`c31b57e`](https://github.com/cloudflare/agents/commit/c31b57e11e19ad532915fcf15dec5f1be916d5b7) Thanks [@ben-reitz](https://github.com/ben-reitz)! - When `onError` returns instead of throwing, `Agent` and `AIChatAgent` now pass the original error on, instead of `undefined` (or an unawaited promise when `onError` is async).
