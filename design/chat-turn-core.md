@@ -314,7 +314,7 @@ The code is covered by unit tests next to each core file (`packages/agents/src/c
 
 Mutation testing ran twice. The first run covered the 16 core files (2955 mutants, against the core unit tests and then the host suites). The rules it found unpinned were given tests or, where a guard could not fire, deleted. The second run covered every line changed since, in 25 files: of 1386 mutants the core unit tests kill 1172 (84.6%) and the host suites 42 more (87.6% together). 172 survive, and 25 of those run in no test. Of 171 statement mutants (a deleted step, a swapped pair of awaited steps), 21 survive the core tests.
 
-Independent reviewers, a fault-injection probe, an upgrade probe and a browser probe on deployed Workers compared the stack with `main`: D59 to D100 and [Known gaps](#known-gaps) are what they found.
+Independent reviewers, a fault-injection probe, an upgrade probe and a browser probe on deployed Workers compared the stack with `main`: D59 to D100, D109 to D112 and [Known gaps](#known-gaps) are what they found.
 
 ## Tradeoffs
 
