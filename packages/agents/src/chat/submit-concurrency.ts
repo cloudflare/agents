@@ -99,6 +99,30 @@ export class SubmitConcurrencyController {
    * epoch — releases from before the most recent `reset()` are no-ops,
    * so post-reset submits keep an accurate count.
    */
+  /**
+   * The decision of a request replayed after an isolate reset, from what
+   * was stored when it was accepted. An overlapping request gets a new
+   * sequence number, so replays supersede each other in record order, as
+   * they did before the reset.
+   */
+  restore(stored: {
+    strategy: NormalizedMessageConcurrency | null;
+    overlapping: boolean;
+    debounceUntilMs: number | null;
+  }): SubmitConcurrencyDecision {
+    let submitSequence: number | null = null;
+    if (stored.overlapping) {
+      submitSequence = ++this._submitSequence;
+      this._latestOverlappingSubmitSequence = submitSequence;
+    }
+    return {
+      action: "execute",
+      strategy: stored.strategy,
+      submitSequence,
+      debounceUntilMs: stored.debounceUntilMs
+    };
+  }
+
   beginEnqueue(): () => void {
     this._pendingEnqueueCount++;
     const epoch = this._resetEpoch;

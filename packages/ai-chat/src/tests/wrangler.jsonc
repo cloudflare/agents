@@ -105,6 +105,10 @@
         "name": "RecoverySlowStreamAgent"
       },
       {
+        "class_name": "AsyncStartAdmissionAgent",
+        "name": "AsyncStartAdmissionAgent"
+      },
+      {
         "class_name": "AIChatAgentToolParent",
         "name": "AIChatAgentToolParent"
       },
@@ -186,7 +190,8 @@
     {
       "new_sqlite_classes": [
         "NonChatRecoveryTestAgent",
-        "RecoverySlowStreamAgent"
+        "RecoverySlowStreamAgent",
+        "AsyncStartAdmissionAgent"
       ],
       "tag": "v11"
     },

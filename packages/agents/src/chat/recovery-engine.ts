@@ -191,6 +191,20 @@ export interface ChatRecoveryAdapter {
   /** Persist the evaluated incident under `key`. */
   putIncident(key: string, incident: ChatRecoveryIncident): Promise<void>;
   /**
+   * Recovery picked up the cut-off turn of these requests: the turn is
+   * recovery's now. Durable admission drops their records
+   * (`ChatTurns.turnAccepted`), which a reset between the turn's fiber and
+   * the record's delete can leave. Optional.
+   */
+  turnRecovered?(requestIds: string[]): void;
+  /**
+   * A recovery ended, or a wake found nothing more to do: the requests
+   * queued behind the turn it recovered can run
+   * (`ChatTurns.resumeAdmissions`). Called outside the attempt's scope.
+   * Optional.
+   */
+  recoverySettled?(): void;
+  /**
    * Resolve once every write issued so far is durably confirmed (Durable
    * Object `storage.sync()`). {@link ChatRecoveryEngine.beginIncident} waits
    * on it before returning: the attempt that follows can run in the same
@@ -510,6 +524,35 @@ export class ChatRecoveryEngine {
 
   constructor(private readonly adapter: ChatRecoveryAdapter) {}
 
+  /** Every incident write goes through here, so a terminal one is seen. */
+  async #putIncident(
+    key: string,
+    incident: ChatRecoveryIncident
+  ): Promise<void> {
+    await this.adapter.putIncident(key, incident);
+    if (
+      incident.status !== "detected" &&
+      incident.status !== "scheduled" &&
+      incident.status !== "attempting"
+    ) {
+      this.#settled();
+    }
+  }
+
+  async #deleteIncident(key: string): Promise<void> {
+    await this.adapter.deleteIncident(key);
+    this.#settled();
+  }
+
+  /** Tell the host a recovery settled, outside any attempt's scope. */
+  #settled(): void {
+    try {
+      this.outsideAttempt(() => this.adapter.recoverySettled?.());
+    } catch (error) {
+      console.error("[chat] recovery settle hook failed:", error);
+    }
+  }
+
   #newAttempt(): ChatRecoveryAttempt {
     return { isolate: this.#isolate, token: crypto.randomUUID() };
   }
@@ -530,7 +573,7 @@ export class ChatRecoveryEngine {
       const stored = await adapter.getIncident(key);
       const next = stored ? finishChatRecoveryAttempt(stored, attempt) : null;
       if (next) {
-        await adapter.putIncident(key, next);
+        await this.#putIncident(key, next);
         await adapter.syncStorage();
       }
     } catch {
@@ -584,7 +627,7 @@ export class ChatRecoveryEngine {
       awaitingClientInteraction:
         adapter.isAwaitingClientInteraction?.() ?? false
     });
-    await adapter.putIncident(chatRecoveryIncidentKey(incidentId), incident);
+    await this.#putIncident(chatRecoveryIncidentKey(incidentId), incident);
     await adapter.syncStorage();
 
     if (exhausted) {
@@ -599,6 +642,7 @@ export class ChatRecoveryEngine {
       await input.run();
     } finally {
       await this.#finishAttempt(incidentId, attempt);
+      this.#settled();
     }
   }
 
@@ -657,6 +701,11 @@ export class ChatRecoveryEngine {
 
     const requestId = ctx.name.slice(chatPrefix.length);
     const { snapshot, recoveryData } = wake.unwrapRecoverySnapshot(ctx);
+    adapter.turnRecovered?.(
+      snapshot?.recoveryRootRequestId
+        ? [requestId, snapshot.recoveryRootRequestId]
+        : [requestId]
+    );
     const stream = adapter.resolveRecoveryStream(requestId);
     const { streamId, streamStillActive, streamStatus } = stream;
     const partial = streamId
@@ -703,6 +752,7 @@ export class ChatRecoveryEngine {
       });
     } finally {
       if (attempt) await this.#finishAttempt(incident.incidentId, attempt);
+      this.#settled();
     }
   }
 
@@ -771,6 +821,7 @@ export class ChatRecoveryEngine {
         ctx.createdAt,
         snapshot?.originMessageIds
       );
+      this.#settled();
       return true;
     }
 
@@ -896,7 +947,7 @@ export class ChatRecoveryEngine {
         adapter.onShouldKeepRecoveringError?.(error)
     });
 
-    await adapter.putIncident(key, incident);
+    await this.#putIncident(key, incident);
     // Confirm the record before the caller acts on it. The next attempt may
     // run in this invocation, and if it hits a memory-limit reset, writes that
     // were not yet confirmed are discarded with it.
@@ -954,7 +1005,7 @@ export class ChatRecoveryEngine {
           : undefined;
       const { deferredError: _deferredError, ...rest } = stored;
       delivery = (stored.scheduleCount ?? 0) + 1;
-      await this.adapter.putIncident(key, {
+      await this.#putIncident(key, {
         ...rest,
         status: "scheduled",
         scheduleCount: delivery,
@@ -1020,7 +1071,7 @@ export class ChatRecoveryEngine {
     ) {
       return;
     }
-    await this.adapter.putIncident(key, {
+    await this.#putIncident(key, {
       ...incident,
       startedDelivery: attempt.delivery
     });
@@ -1059,7 +1110,7 @@ export class ChatRecoveryEngine {
     if (attempt >= (incident.maxAttempts ?? input.fallbackMaxAttempts)) {
       return false;
     }
-    await adapter.putIncident(key, {
+    await this.#putIncident(key, {
       ...incident,
       attempt: attempt + 1,
       status: "scheduled",
@@ -1087,7 +1138,7 @@ export class ChatRecoveryEngine {
     const incident = await adapter.getIncident(key);
     if (!incident) return 1;
     const transientRetries = (incident.transientRetries ?? 0) + 1;
-    await adapter.putIncident(key, { ...incident, transientRetries });
+    await this.#putIncident(key, { ...incident, transientRetries });
     return transientRetries;
   }
 
@@ -1518,7 +1569,7 @@ export class ChatRecoveryEngine {
     // The deferred turn ended without a reset, so nothing else will run it
     // again: the same payload has to.
     const { startedDelivery: _startedDelivery, ...rest } = incident;
-    await this.adapter.putIncident(key, { ...rest, deferredError: error });
+    await this.#putIncident(key, { ...rest, deferredError: error });
   }
 
   /**
@@ -1530,7 +1581,7 @@ export class ChatRecoveryEngine {
     const key = chatRecoveryIncidentKey(incidentId);
     const incident = await this.adapter.getIncident(key);
     if (!incident || incident.replyRemoved) return;
-    await this.adapter.putIncident(key, { ...incident, replyRemoved: true });
+    await this.#putIncident(key, { ...incident, replyRemoved: true });
   }
 
   /**
@@ -1679,10 +1730,11 @@ export class ChatRecoveryEngine {
       streamId,
       incident.firstSeenAt
     );
+    this.#settled();
 
     if (incidentKey) {
       try {
-        await adapter.putIncident(incidentKey, incident);
+        await this.#putIncident(incidentKey, incident);
       } catch (writeError) {
         adapter.onGiveUpBookkeepingError("seal", writeError);
       }
@@ -1715,9 +1767,9 @@ export class ChatRecoveryEngine {
     if (!incident) return;
 
     if (status === "completed") {
-      await adapter.deleteIncident(key);
+      await this.#deleteIncident(key);
     } else {
-      await adapter.putIncident(key, {
+      await this.#putIncident(key, {
         ...incident,
         status,
         ...(reason ? { reason } : {})
