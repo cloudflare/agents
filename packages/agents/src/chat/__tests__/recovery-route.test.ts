@@ -112,7 +112,6 @@ function setup(scenario: Scenario = {}) {
         end: () => {}
       }),
       waitUntilStable: () => Promise.resolve(true),
-      restoreRequestContext: () => {},
       reconcileAgentToolChildRuns: () => Promise.resolve(),
       trackAlarmWork: () => {},
       attemptScope: new AsyncLocalStorage<ChatRecoveryAttemptScope>(),

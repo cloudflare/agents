@@ -39,6 +39,7 @@ import {
   isPlatformTransientError
 } from "../retries";
 import type { ClientToolSchema } from "./client-tools";
+import type { PinnedTurnContext } from "./server-turn";
 import type { SaveMessagesResult } from "./lifecycle";
 import { CHAT_RECOVERY_CANCELLED_REASON } from "./recovery-engine";
 import type {
@@ -89,8 +90,18 @@ export interface RecoveredTurnHost<
 
   /** Whether the message this attempt recovers is still the latest. */
   checkLeaf(): Promise<RecoveryLeafCheck>;
-  /** Run the turn. `signal` aborts when a client stops the attempt. */
-  runTurn(signal: AbortSignal): Promise<TResult>;
+  /**
+   * Run the turn.
+   *
+   * @param signal - Aborts when a client stops the attempt.
+   * @param context - The tools and body of the request that was
+   *   interrupted, to pin on the turn. A payload that does not name one
+   *   leaves that key out, and the turn reads the stored one.
+   */
+  runTurn(
+    signal: AbortSignal,
+    context: PinnedTurnContext<ClientToolSchema>
+  ): Promise<TResult>;
 
   /**
    * Runs after the cancelled check and before the attempt is registered.
@@ -297,16 +308,16 @@ async function runAdmittedAttempt<
     }
 
     // The recovered turn runs with the tools and body of the request that
-    // was interrupted. A payload that does not name them leaves the stored
-    // ones.
-    if (data && ("lastClientTools" in data || "lastBody" in data)) {
-      turns.restoreRequestContext({
-        ...("lastClientTools" in data && {
-          lastClientTools: data.lastClientTools ?? undefined
+    // was interrupted. They go with the turn and are not written to the
+    // stored context: other turns can start before this one does, and a
+    // context written here would outlive an attempt whose turn never runs.
+    const context: PinnedTurnContext<ClientToolSchema> = {
+      ...(data &&
+        "lastClientTools" in data && {
+          clientTools: data.lastClientTools ?? null
         }),
-        ...("lastBody" in data && { lastBody: data.lastBody ?? undefined })
-      });
-    }
+      ...(data && "lastBody" in data && { body: data.lastBody ?? null })
+    };
     // How many times the incident had an attempt scheduled, before the
     // turn. If the turn is cut off again and schedules the next attempt, the
     // count moves.
@@ -319,7 +330,7 @@ async function runAdmittedAttempt<
       attempt.stopped,
       attempt.superseded
     ]);
-    const result = await host.runTurn(turnSignal);
+    const result = await host.runTurn(turnSignal, context);
 
     if (stopped()) {
       await recordStop();
