@@ -14007,6 +14007,27 @@ export class ThinkAdmissionTestAgent extends Think {
     return this.messages;
   }
 
+  /** The next admission record write fails, as SQLite's row limit would. */
+  failNextAdmissionForTest(): void {
+    const { admissions } = (this as unknown as { _turns: ChatTurns })._turns;
+    const store = (
+      admissions as unknown as {
+        host: { store: { add: (...args: unknown[]) => void } };
+      }
+    ).host.store;
+    const add = store.add;
+    store.add = () => {
+      store.add = add;
+      throw new Error("SQLITE_TOOBIG: string or blob too big");
+    };
+  }
+
+  /** Make every admission record `ms` older, as a long wait would. */
+  ageAdmissionsForTest(ms: number): void {
+    this
+      .sql`UPDATE cf_agents_chat_admissions SET created_at = created_at - ${ms}`;
+  }
+
   getAdmissionsForTest(): Array<{ requestId: string; stopped: boolean }> {
     try {
       return this.sql<{ request_id: string; stopped: number }>`

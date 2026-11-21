@@ -27,6 +27,7 @@ type AdmissionStub = {
     Array<{ requestId: string; stopped: boolean }>
   >;
   seedAdmissionForTest(requestId: string, messageIds: string[]): Promise<void>;
+  ageAdmissionsForTest(ms: number): Promise<void>;
   getModelRequestsForTest(): Promise<
     Array<Array<{ role: string; text: string }>>
   >;
@@ -188,6 +189,22 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
     expect(frames.some((f) => f.id === "r2" && f.done !== true)).toBe(true);
     expect(await restarted.getAdmissionsForTest()).toEqual([]);
     tab.close();
+  }, 40_000);
+
+  it("runs however long it waited: its question is never dropped", async () => {
+    const binding = "ThinkAdmissionTestAgent";
+    const room = crypto.randomUUID();
+    await queueBehindSlowTurn(binding, room);
+    // The turn ahead of it ran for two hours (a long agent-tool run).
+    await (await agent(binding, room)).ageAdmissionsForTest(2 * 60 * 60 * 1000);
+    await reset(binding, room);
+    const restarted = await agent(binding, room);
+    const messages = await waitFor(
+      () => restarted.getMessagesForTest(),
+      (m) => m.some((x) => textOf(x) === QUICK_REPLY)
+    );
+    expect(messages.map((m) => m.id)).toContain("u2");
+    expect(textOf(messages.at(-1)!)).toBe(QUICK_REPLY);
   }, 40_000);
 
   it("a stop by its request id while it is only a record ends it aborted", async () => {

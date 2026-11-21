@@ -265,4 +265,49 @@ describe("a message queued behind a running turn", () => {
       back.close();
     }, 40_000);
   }
+
+  it("a large message with a large body is accepted", async () => {
+    const binding = "ThinkAdmissionTestAgent";
+    const room = crypto.randomUUID();
+    const ws = await connect(binding, room);
+    const seen = record(ws);
+    send(ws, "big", [user("u-big", "漢".repeat(450_000))], {
+      ...QUICK,
+      big: "b".repeat(1_200_000)
+    });
+    await waitFor(
+      async () =>
+        seen.some(
+          (f) => f.type === MSG_CHAT_RESPONSE && f.id === "big" && f.done
+        ),
+      (ok) => ok
+    );
+    const messages = await (await agent(binding, room)).getMessagesForTest();
+    expect(messages.map((m) => m.id)).toContain("u-big");
+    ws.close();
+  }, 40_000);
+
+  it("a request whose admission record cannot be written ends with an error frame", async () => {
+    const binding = "ThinkAdmissionTestAgent";
+    const room = crypto.randomUUID();
+    const ws = await connect(binding, room);
+    const seen = record(ws);
+    await (
+      (await agent(binding, room)) as unknown as {
+        failNextAdmissionForTest(): Promise<void>;
+      }
+    ).failNextAdmissionForTest();
+    send(ws, "r1", [user("u1", "one")], QUICK);
+    const done = await waitFor(
+      async () =>
+        seen.find(
+          (f) => f.type === MSG_CHAT_RESPONSE && f.id === "r1" && f.done
+        ),
+      (f) => f !== undefined,
+      10_000
+    );
+    expect(done?.error).toBe(true);
+    expect(String(done?.body)).toContain("SQLITE_TOOBIG");
+    ws.close();
+  }, 40_000);
 });

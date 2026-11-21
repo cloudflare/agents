@@ -237,6 +237,64 @@ describe("a message queued behind a running turn", () => {
     }, 30_000);
   }
 
+  it("a request whose admission record cannot be written ends with an error frame", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/slow-stream-agent/${room}`);
+    const seen = record(ws);
+    const stub = (await getAgentByName(
+      env.SlowStreamAgent,
+      room
+    )) as unknown as {
+      failNextAdmissionForTest(): Promise<void>;
+    };
+    await stub.failNextAdmissionForTest();
+    sendChatRequest(ws, "r1", [user("u1", "one")], QUICK);
+    await waitFor(() =>
+      seen.some((f) => isUseChatResponseMessage(f) && f.id === "r1" && f.done)
+    );
+    const done = seen.find(
+      (f) => isUseChatResponseMessage(f) && f.id === "r1" && f.done
+    ) as { error?: boolean; body?: string };
+    expect(done.error).toBe(true);
+    expect(done.body).toContain("SQLITE_TOOBIG");
+    ws.close();
+  }, 30_000);
+
+  it("a large message with a large body is accepted", async () => {
+    const room = crypto.randomUUID();
+    const path = `/agents/test-chat-agent/${room}`;
+    const { ws } = await connectChatWS(path);
+    const seen = record(ws);
+    ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
+        id: "big",
+        init: {
+          method: "POST",
+          body: JSON.stringify({
+            messages: [user("u-big", "漢".repeat(450_000))],
+            big: "b".repeat(1_200_000)
+          })
+        }
+      })
+    );
+    await waitFor(
+      () =>
+        seen.some(
+          (f) => isUseChatResponseMessage(f) && f.id === "big" && f.done
+        ),
+      20_000
+    );
+    const stub = (await getAgentByName(
+      env.TestChatAgent,
+      room
+    )) as unknown as Stub;
+    expect((await stub.getPersistedMessages()).map((m) => m.id)).toContain(
+      "u-big"
+    );
+    ws.close();
+  }, 30_000);
+
   it("a clear while it waits drops it: it is never stored", async () => {
     const room = crypto.randomUUID();
     const path = `/agents/slow-stream-agent/${room}`;

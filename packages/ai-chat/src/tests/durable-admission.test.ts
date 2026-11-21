@@ -21,6 +21,7 @@ type AdmissionStub = {
   seedAdmissionForTest(requestId: string, messageIds: string[]): Promise<void>;
   seedQueuedRequestForTest(requestId: string): Promise<void>;
   getTranscriptsSeenForTest(): Promise<string[][]>;
+  ageAdmissionsForTest(ms: number): Promise<void>;
 };
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -171,6 +172,28 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
     ).toBe(true);
     expect(await restarted.getAdmissionsForTest()).toEqual([]);
     tab.close();
+  }, 40_000);
+
+  it("runs however long it waited: its question is never dropped", async () => {
+    const room = crypto.randomUUID();
+    const binding = "RecoverySlowStreamAgent";
+    const { ws } = await connectChatWS(
+      `/agents/recovery-slow-stream-agent/${room}`
+    );
+    sendChatRequest(ws, "r1", [user("u1", "one")], SLOW);
+    await delay(300);
+    sendChatRequest(ws, "r2", [user("u1", "one"), user("u2", "two")], QUICK);
+    await delay(300);
+    // The turn ahead of it ran for two hours (a long agent-tool run).
+    await (await agent(binding, room)).ageAdmissionsForTest(2 * 60 * 60 * 1000);
+    await reset(binding, room);
+    const restarted = await agent(binding, room);
+    const messages = await waitFor(
+      () => restarted.getPersistedMessages(),
+      (m) => m.some((x) => textOf(x) === QUICK_REPLY)
+    );
+    expect(messages.map((m) => m.id)).toContain("u2");
+    expect(textOf(messages.at(-1)!)).toBe(QUICK_REPLY);
   }, 40_000);
 
   it("a stop by its request id while it is only a record ends it aborted", async () => {
