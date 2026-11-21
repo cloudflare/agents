@@ -1,3 +1,4 @@
+import { ChatRecoverySupersededError } from "../turn-stop";
 import { ChatStreamStalledError } from "../stall-watchdog";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { UIMessage } from "ai";
@@ -544,6 +545,16 @@ describe("ChatTurns", () => {
       expect(host.stops).toEqual([{ requestId: "r1", reason: "gave up" }]);
     });
 
+    it("a recovery attempt superseded by another turn is not a stop", () => {
+      const attempt = new AbortController();
+      const signal = turns.aborts.getSignal("r1");
+      turns.linkExternal("r1", attempt.signal);
+      attempt.abort(new ChatRecoverySupersededError());
+      // The turn ends, and nothing a user's stop does follows.
+      expect(signal?.aborted).toBe(true);
+      expect(host.stops).toEqual([]);
+    });
+
     it("the runtime's own abort is not a stop", () => {
       const signal = turns.aborts.getSignal("r1");
       turns.runtimeAbort(
@@ -922,6 +933,20 @@ describe("ChatTurns", () => {
       expect(turns.settleInterruptedReply(reply, flip)).toBe(reply);
     });
 
+    it("settleInterruptedReply goes by a turn's pinned client tools when given them", () => {
+      const reply = toolReply("a1", "input-available") as UIMessage;
+      // The stored tools name no client tool; the turn ran with one pinned.
+      expect(turns.settleInterruptedReply(reply, flip, new Set(["x"]))).toBe(
+        reply
+      );
+      // And the reverse: a call the stored tools name, which the pinned
+      // ones do not, is settled.
+      host.clientTools = new Set(["x"]);
+      expect(
+        stateOf(turns.settleInterruptedReply(reply, flip, new Set()))
+      ).toBe("output-error");
+    });
+
     it("settleBeforeRecovery settles only the latest reply it is given", async () => {
       const messages = [
         user("u1"),
@@ -936,10 +961,52 @@ describe("ChatTurns", () => {
         emitRepaired: () => {}
       };
 
-      await turns.settleBeforeRecovery(messages, "other", flip, sink);
+      await turns.settleBeforeRecovery(() => messages, "other", flip, sink);
       expect(stored).toEqual([]);
-      await turns.settleBeforeRecovery(messages, "a1", flip, sink);
+      await turns.settleBeforeRecovery(() => messages, "a1", flip, sink);
       expect(stored).toEqual([["a1"]]);
+    });
+
+    it("settleBeforeRecovery waits for an apply in flight and reads the transcript after it", async () => {
+      let messages = [
+        user("u1"),
+        toolReply("a1", "input-available")
+      ] as UIMessage[];
+      const seen: string[] = [];
+      const sink = {
+        persist: async (changed: UIMessage[]) => {
+          seen.push(stateOf(changed[0]) ?? "");
+        },
+        remove: async () => {},
+        emitRepaired: () => {}
+      };
+      let finish!: () => void;
+      // A client's result is being applied.
+      const applying = turns.enqueueInteraction(
+        () =>
+          new Promise<boolean>((resolve) => {
+            finish = () => {
+              messages = [
+                user("u1"),
+                toolReply("a1", "output-available")
+              ] as UIMessage[];
+              resolve(true);
+            };
+          })
+      );
+      const settling = turns.settleBeforeRecovery(
+        () => messages,
+        "a1",
+        flip,
+        sink
+      );
+      await Promise.resolve();
+      finish();
+      await applying;
+      await settling;
+      // The applied result stands: the settle never writes the call back
+      // as interrupted.
+      expect(seen).not.toContain("output-error");
     });
 
     it("removes a reply the repair left empty and returns the list without it", async () => {

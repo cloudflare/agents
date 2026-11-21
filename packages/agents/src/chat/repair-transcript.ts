@@ -22,6 +22,9 @@ import type { UIMessage } from "ai";
 import { normalizeToolInput, settleInterruptedPart } from "./message-builder";
 import { cutOffReplyToSettle } from "./recovery-attempt";
 import { partAwaitsClientInteraction } from "./tool-state";
+import { replyIsEmpty } from "./reply-empty";
+
+export { replyIsEmpty };
 
 /**
  * Whether a tool part already has a settled result the provider accepts, so it
@@ -106,30 +109,18 @@ export function stripTrailingReasoning<TMessage extends UIMessage>(
 }
 
 /**
- * Whether a reply holds nothing: nothing a client can show and nothing a
- * model request can carry. That is an assistant message with no parts, or
- * with only `step-start` markers and text or reasoning parts that have no
- * text. A reply cut off while the model was still reasoning is left like
- * this once {@link stripTrailingReasoning} has run.
- *
- * Such a reply is not stored, and one that is stored is removed: a client
- * draws it as an empty bubble, and nothing can continue it.
+ * Whether the hosts remove this stored reply before the next turn: it holds
+ * nothing once its trailing reasoning is gone ({@link replyIsEmpty} of
+ * {@link stripTrailingReasoning}).
  */
-export function replyIsEmpty(message: {
+export function replyIsRemovedAsEmpty(message: {
   role: string;
   parts: ReadonlyArray<unknown>;
 }): boolean {
-  return (
-    message.role === "assistant" &&
-    message.parts.every((part) => {
-      const record = part as { type?: unknown; text?: unknown };
-      if (record.type === "step-start") return true;
-      return (
-        (record.type === "text" || record.type === "reasoning") &&
-        (typeof record.text !== "string" || record.text.length === 0)
-      );
-    })
-  );
+  if (message.role !== "assistant") return false;
+  // SAFETY: `stripTrailingReasoning` reads only the role and each part's
+  // `type`, `text` and tool call id, which any stored message carries.
+  return replyIsEmpty(stripTrailingReasoning(message as UIMessage));
 }
 
 function countReasoning(message: UIMessage): number {
@@ -548,10 +539,15 @@ export async function removeEmptyReplyToContinue(
 
 /** What is known about the removal of the reply a recovery continues. */
 export interface ReplyRemoval {
-  /** Runs before a reply that holds nothing is removed. */
-  beforeRemove?: () => Promise<void>;
+  /**
+   * Runs before a reply that holds nothing is removed, with the question
+   * the reply answered (the last user message before it).
+   */
+  beforeRemove?: (questionId?: string) => Promise<void>;
   /** Whether an earlier run of the attempt removed the reply. */
   removedEarlier?: boolean | "unknown";
+  /** The question an earlier run recorded with the removal. */
+  removedFor?: string;
   /** The user messages the interrupted request came from, when known. */
   originMessageIds?: ReadonlyArray<string>;
 }
@@ -594,13 +590,21 @@ export async function settleReplyBeforeRecovery(
     latest?.role === "user" &&
     !messages.some((message) => message.id === continueReplyId)
   ) {
-    const { removedEarlier = "unknown", originMessageIds } = removal;
-    // A latest message the interrupted request did not come from is a newer
-    // question: the conversation has moved.
+    const {
+      removedEarlier = "unknown",
+      originMessageIds,
+      removedFor
+    } = removal;
+    // A latest message other than the question the removed reply answered
+    // is a newer question: the conversation has moved. The removal records
+    // that question; a payload's origin ids say the same for a removal an
+    // older version made.
     const isItsQuestion =
-      originMessageIds === undefined ||
-      originMessageIds.length === 0 ||
-      originMessageIds.includes(latest.id);
+      removedFor !== undefined
+        ? removedFor === latest.id
+        : originMessageIds === undefined ||
+          originMessageIds.length === 0 ||
+          originMessageIds.includes(latest.id);
     return removedEarlier !== false && isItsQuestion ? "removed" : undefined;
   }
   const { beforeRemove } = removal;
@@ -608,7 +612,7 @@ export async function settleReplyBeforeRecovery(
     ? {
         ...sink,
         remove: async (ids, repaired) => {
-          await beforeRemove();
+          await beforeRemove(questionBefore(messages, continueReplyId));
           await sink.remove(ids, repaired);
         }
       }
@@ -632,6 +636,18 @@ export async function settleReplyBeforeRecovery(
     recordingSink
   );
   return result.emptyReplyIds.length > 0 ? "removed" : undefined;
+}
+
+/** The id of the last user message before `replyId`, if there is one. */
+function questionBefore(
+  messages: ReadonlyArray<UIMessage>,
+  replyId: string
+): string | undefined {
+  const at = messages.findIndex((message) => message.id === replyId);
+  for (let i = at - 1; i >= 0; i--) {
+    if (messages[i].role === "user") return messages[i].id;
+  }
+  return undefined;
 }
 
 /**

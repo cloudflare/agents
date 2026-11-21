@@ -899,4 +899,26 @@ describe("StreamAccumulator", () => {
       expect(a.parts).toHaveLength(0);
     });
   });
+
+  describe("mergeInto a continuation whose message is the first one", () => {
+    it("updates that message, not the last assistant message", () => {
+      const a = acc({
+        messageId: "greeting",
+        continuation: true,
+        existingParts: [{ type: "text", text: "Hello" }]
+      });
+      a.applyChunk({ type: "text-delta", delta: " again" } as StreamChunkData);
+      const messages: UIMessage[] = [
+        { id: "greeting", role: "assistant", parts: [] },
+        { id: "u1", role: "user", parts: [{ type: "text", text: "hi" }] },
+        { id: "a2", role: "assistant", parts: [{ type: "text", text: "Yes" }] }
+      ];
+
+      const merged = a.mergeInto(messages);
+
+      expect(merged.map((m) => m.id)).toEqual(["greeting", "u1", "a2"]);
+      expect(merged[2]).toBe(messages[2]);
+      expect(merged[0].parts.length).toBeGreaterThan(0);
+    });
+  });
 });

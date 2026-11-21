@@ -65,7 +65,16 @@ export type RecoveryAttemptData = {
 };
 
 /** What the recovered turn returned. */
-export type RecoveredTurnResult = Pick<SaveMessagesResult, "status" | "error">;
+export type RecoveredTurnResult = Pick<
+  SaveMessagesResult,
+  "status" | "error"
+> & {
+  /** For `skipped`: why the turn had nothing to do. */
+  reason?: string;
+};
+
+/** The incident's reason for a recovered turn that ended `skipped` with none. */
+export const RECOVERED_TURN_SKIPPED_REASON = "turn_skipped";
 
 /** Whether the message the attempt recovers is still the latest. */
 export type RecoveryLeafCheck =
@@ -125,8 +134,9 @@ export interface RecoveredTurnHost<
    *   then runs {@link retryLostReply}.
    */
   settleCutOffReply?(removal: {
-    beforeRemove: () => Promise<void>;
+    beforeRemove: (questionId?: string) => Promise<void>;
     removedEarlier: boolean | "unknown";
+    removedFor: string | undefined;
   }): Promise<"removed" | undefined | void>;
   /**
    * Continue only: the leaf check and the turn of an attempt whose reply
@@ -272,8 +282,10 @@ async function runAdmittedAttempt<
   try {
     const replyRemoved =
       (await host.settleCutOffReply?.({
-        beforeRemove: () => engine.markReplyRemoved(incidentId),
-        removedEarlier: await engine.isReplyRemoved(incidentId)
+        beforeRemove: (questionId) =>
+          engine.markReplyRemoved(incidentId, questionId),
+        removedEarlier: await engine.isReplyRemoved(incidentId),
+        removedFor: await engine.replyRemovedFor(incidentId)
       })) === "removed";
     const steps =
       replyRemoved && host.retryLostReply ? host.retryLostReply : host;
@@ -406,15 +418,25 @@ async function runAdmittedAttempt<
       // request: a clear, or the host cancelling every chat. (A turn cut off
       // again returned above.) The stop is the outcome, not a failure.
       const aborted = result.status === "aborted";
+      const skipped = result.status === "skipped";
       await engine.updateIncident(
         incidentId,
         result.status === "completed"
           ? "completed"
-          : result.status === "skipped" || aborted
+          : skipped || aborted
             ? "skipped"
             : "failed",
-        aborted ? CHAT_RECOVERY_CANCELLED_REASON : result.error
+        aborted
+          ? CHAT_RECOVERY_CANCELLED_REASON
+          : skipped
+            ? (result.reason ?? RECOVERED_TURN_SKIPPED_REASON)
+            : result.error
       );
+      // The recovered turn did nothing, so it sent no frame for the request
+      // the tab waits on: end that request.
+      if (skipped && data?.originalRequestId) {
+        turns.endSkippedRequest?.(data.originalRequestId);
+      }
     }
     await host.afterOutcome?.(result);
   } catch (error) {

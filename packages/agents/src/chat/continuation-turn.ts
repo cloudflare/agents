@@ -70,11 +70,6 @@ export interface ContinuationTurnParts<
   /** Names of the tools a client is known to run (the schemas it sent). */
   clientToolNames(): ReadonlySet<string>;
   /**
-   * The id of the last reply a turn stored, when the host records it. See
-   * {@link continuationTargetIsLatest}.
-   */
-  lastTurnReplyId(): string | null | undefined;
-  /**
    * The continuation turns running now, by request id, and whether each
    * one's stream has started. {@link runContinuationBody} adds and removes
    * the entry. {@link continuationStreamStarted} only flips it, so a stream
@@ -198,8 +193,8 @@ export interface ContinuationTurn<
  * check for every continuation, whatever scheduled it:
  *
  * - `moved_on`: the conversation moved on since its result was stored (a
- *   newer question or reply, a regenerate, a clear). A message appended
- *   without a turn does not count ({@link continuationTargetIsLatest});
+ *   later message of any kind, a message appended without a turn included,
+ *   a regenerate, a clear: {@link continuationTargetIsLatest});
  * - `answered`: the message it answers already went on to the model's
  *   answer ({@link transcriptEndsInAnswer});
  * - `awaiting_client`: the last message still waits on a client for a tool
@@ -211,28 +206,13 @@ export interface ContinuationTurn<
  * reads it.
  */
 function nothingToAnswer(
-  parts: Pick<
-    ContinuationTurnParts,
-    "messages" | "lastTurnReplyId" | "clientToolNames"
-  >,
+  parts: Pick<ContinuationTurnParts, "messages" | "clientToolNames">,
   continuation: Pick<ContinuationPending, "targetMessageIds">
 ): "moved_on" | "answered" | "awaiting_client" | null {
   const messages = parts.messages();
-  if (
-    !continuationTargetIsLatest(messages, continuation, parts.lastTurnReplyId())
-  ) {
-    return "moved_on";
-  }
-  // The reply it answers is the latest of its messages that is stored. A
-  // message appended after it without a turn is not the model's answer.
-  let reply = messages.length - 1;
-  while (
-    reply >= 0 &&
-    !continuation.targetMessageIds.includes(messages[reply].id)
-  ) {
-    reply--;
-  }
-  if (transcriptEndsInAnswer(messages.slice(0, reply + 1))) return "answered";
+  if (!continuationTargetIsLatest(messages, continuation)) return "moved_on";
+  // The reply it answers is the last message.
+  if (transcriptEndsInAnswer(messages)) return "answered";
   if (continuationWaitsOnClient(messages, parts.clientToolNames())) {
     return "awaiting_client";
   }

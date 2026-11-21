@@ -273,6 +273,34 @@ describe("ChatTurnFibers", () => {
     });
   }
 
+  it("gives a recovery attempt's turn its error, and does not fail the Task with it", async () => {
+    host.inRecoveryAttempt = () => true;
+    await expect(
+      fibers.run(
+        { requestId: "r1", continuation: true, snapshot: snapshot("r1") },
+        async () => {
+          throw new Error("Network connection lost.");
+        }
+      )
+    ).rejects.toThrow("Network connection lost.");
+    expect(log).not.toContain("engine:failed");
+  });
+
+  it("fails the Task of a recovery attempt's turn the isolate's memory reset ended", async () => {
+    host.inRecoveryAttempt = () => true;
+    await expect(
+      fibers.run(
+        { requestId: "r1", continuation: true, snapshot: snapshot("r1") },
+        async () => {
+          throw new Error(
+            "Durable Object's isolate exceeded its memory limit and was reset."
+          );
+        }
+      )
+    ).rejects.toThrow("memory limit");
+    expect(log).toContain("engine:failed");
+  });
+
   it("rejects with the turn's error and leaves nothing behind", async () => {
     await expect(
       fibers.run(

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   chatRecoveryNames,
   createChatAdmissionStore,
+  newUserMessageIds,
   type ChatAdmissionRecord
 } from "../admissions";
 import {
@@ -297,6 +298,30 @@ describe("durable admission", () => {
     expect(b.started).toEqual(["r3"]);
   });
 
+  it("under `latest`, a new request during recovery is not superseded by the older replays", async () => {
+    const db = new DatabaseSync(":memory:");
+    const first = isolate(db, { concurrency: "latest" });
+    void first.send("r1");
+    await tick();
+    void first.send("r2");
+    void first.send("r3");
+    await tick();
+    // After the reset recovery still owns r1's turn, so nothing is replayed
+    // until a new request arrives.
+    const b = isolate(db, {
+      concurrency: "latest",
+      recoveryPending: () => true
+    });
+    b.copyTranscript(first);
+    void b.send("r4");
+    await tick();
+    await tick();
+    await tick();
+    expect(b.started).toEqual(["r4"]);
+    expect(b.ended.get("r2")).toBe("skipped");
+    expect(b.ended.get("r3")).toBe("skipped");
+  });
+
   it("the user messages of recorded requests are known, for recovery's leaf", async () => {
     const db = new DatabaseSync(":memory:");
     const a = await queueBehindRunningTurn(db, ["r2"]);
@@ -455,5 +480,56 @@ describe("chatRecoveryNames", () => {
         liveRequestIds: new Set(["r1"])
       })
     ).toBe(true);
+  });
+});
+
+describe("newUserMessageIds", () => {
+  const m = (id: string, role = "user") => ({ id, role });
+
+  it("counts only the user messages after the last stored one", () => {
+    // Windowed history holds only a1 and u2: u0 and u1 are stored, outside
+    // the window. The request stores u3 alone.
+    expect(
+      newUserMessageIds(
+        [
+          m("u0"),
+          m("a0", "assistant"),
+          m("u1"),
+          m("a1", "assistant"),
+          m("u2"),
+          m("u3")
+        ],
+        new Set(["a1", "u2"])
+      )
+    ).toEqual(["u3"]);
+  });
+
+  it("counts every trailing user message the request sent", () => {
+    expect(
+      newUserMessageIds(
+        [m("a1", "assistant"), m("u2"), m("u3")],
+        new Set(["a1"])
+      )
+    ).toEqual(["u2", "u3"]);
+    expect(newUserMessageIds([m("u1")], new Set())).toEqual(["u1"]);
+  });
+});
+
+describe("snapshotMessages", () => {
+  it("leaves out the user messages of requests waiting behind the turn, not its own", async () => {
+    const db = new DatabaseSync(":memory:");
+    const a = isolate(db);
+    void a.send("r1");
+    await tick();
+    void a.send("r2");
+    await tick();
+    // r2 waits behind r1, whose fiber released r1's record. A retry of r1
+    // records r1's question as its latest user message, not r2's.
+    const snapshot = a.turns.snapshotMessages(a.host.transcript, "r1");
+    expect(snapshot.map((m) => m.id)).toEqual(["u-r1"]);
+    // r2's own turn keeps its question.
+    expect(
+      a.turns.snapshotMessages(a.host.transcript, "r2").map((m) => m.id)
+    ).toEqual(["u-r1", "u-r2"]);
   });
 });

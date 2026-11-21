@@ -1893,6 +1893,28 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
     };
   }
 
+  it("ends a wake whose turn the user stopped as stopped, even with the budget spent", async () => {
+    const h = makeHarness({ seedExhausted: true });
+    const incidentId = chatRecoveryIncidentId({
+      requestId: "req-1",
+      recoveryRootRequestId: "req-1",
+      latestUserMessageId: null,
+      recoveryKind: "continue"
+    });
+    await h.engine.updateIncident(incidentId, "skipped", "user_cancelled");
+    const eventsBefore = h.events.length;
+
+    expect(await h.engine.handleChatFiberRecovery(h.ctx, h.wake)).toBe(true);
+
+    expect(h.calls).not.toContain("exhaust");
+    expect(h.calls).not.toContain("dispatch");
+    expect(h.calls).not.toContain("invokeOnChatRecovery");
+    expect(h.events.slice(eventsBefore)).toEqual([]);
+    // What the cut-off turn stored is kept, and its stream is closed.
+    expect(h.persisted).toEqual(["s1"]);
+    expect(h.completed).toEqual(["s1"]);
+  });
+
   it("dispatches a non-chat fiber first and skips chat processing", async () => {
     const h = makeHarness({ nonChatHandled: true });
 

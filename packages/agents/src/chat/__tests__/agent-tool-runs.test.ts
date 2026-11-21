@@ -1051,6 +1051,31 @@ describe("AgentToolRuns", () => {
   });
 
   describe("a run whose stream is cut off in this isolate", () => {
+    it("ends with the reset's error when the chat is cleared while recovery has it", async () => {
+      const { runs, store, settled, setRecovery } = setup();
+      let closed = 0;
+      const turn = heldTurn();
+      await runs.start("run-1", START, turn.run);
+      runs.bindTurn("run-1", "req-1");
+      runs.closers.set("run-1", new Set([() => void closed++]));
+      setRecovery("in-progress");
+      turn.end({
+        requestId: "req-1",
+        status: "aborted",
+        reason: "interrupted"
+      });
+      await settled();
+      expect(store.read("run-1")?.status).toBe("running");
+
+      runs.chatReset();
+
+      expect(store.terminal("run-1")).toEqual({
+        status: "error",
+        error: "cleared"
+      });
+      expect(closed).toBe(1);
+    });
+
     it("stays open while recovery works on its turn, and is settled when recovery ends", async () => {
       const { runs, store, settled, setRecovery, setTranscript } = setup();
       let closed = 0;
@@ -1370,6 +1395,28 @@ describe("AgentToolRuns", () => {
         error: "Agent tool run was interrupted before the child could finish."
       });
     });
+
+    for (const [label, parts] of [
+      ["only step-start", [{ type: "step-start" }]],
+      [
+        "reasoning with nothing after it",
+        [{ type: "step-start" }, { type: "reasoning", text: "thinking" }]
+      ],
+      ["only an empty text part", [{ type: "text", text: "" }]]
+    ] as Array<[string, unknown[]]>) {
+      it(`does not anchor a run on a reply of ${label}, which its own turn removes`, async () => {
+        const { runs, store, setTranscript } = setup();
+        setTranscript([
+          { id: "users-question", role: "user", parts: [{}] },
+          { id: "users-answer", role: "assistant", parts: [{}] },
+          { id: "empty", role: "assistant", parts }
+        ]);
+        const turn = heldTurn();
+        await runs.start("run-1", START, turn.run);
+        turn.shouldStart();
+        expect(store.read("run-1")?.startMessageId).toBe("users-answer");
+      });
+    }
 
     it("counts what follows the run's start as the run's, after a restart", async () => {
       const { runs, store, setTranscript } = setup();

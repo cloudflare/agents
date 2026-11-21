@@ -111,6 +111,9 @@ function setup(scenario: Scenario = {}) {
     recordTerminalError: async (requestId, errorText) => {
       terminalErrors.push({ requestId, errorText });
     },
+    endSkippedRequest: (requestId) => {
+      log.push(`end-skipped:${requestId}`);
+    },
     attempts: {
       _chatRecoveryContinue: async () => {},
       _chatRecoveryRetry: async () => {}
@@ -759,7 +762,9 @@ describe("runRecoveredTurn", () => {
   it("leaves the incident to the attempt an interrupted turn scheduled", async () => {
     const t = setup({
       result: { status: "aborted" },
-      duringTurn: ({ engine }) => scheduleNext(engine)
+      duringTurn: async ({ engine }) => {
+        await scheduleNext(engine);
+      }
     });
     await t.run();
     expect(t.incident()).toMatchObject({ status: "scheduled" });
@@ -776,18 +781,39 @@ describe("runRecoveredTurn", () => {
 
   it("records a completed turn even when it scheduled another attempt", async () => {
     const t = setup({
-      duringTurn: ({ engine }) => scheduleNext(engine)
+      duringTurn: async ({ engine }) => {
+        await scheduleNext(engine);
+      }
     });
     await t.run();
     expect(t.incident()).toBeUndefined();
+  });
+
+  it("keeps a failure its turn's own routing recorded, with one event", async () => {
+    const t = setup({
+      result: { status: "error", error: "attempt saw this" },
+      // routeStreamInterruption, when onChatRecovery throws.
+      duringTurn: async ({ engine }) => {
+        await engine.updateIncident(INCIDENT, "failed", "hook threw");
+      }
+    });
+    await t.run();
+    expect(t.incident()).toMatchObject({
+      status: "failed",
+      reason: "hook threw"
+    });
+    expect(
+      t.events.filter((event) => event === "chat:recovery:failed")
+    ).toHaveLength(1);
   });
 
   it("keeps the outcome of a turn the app declined to continue, with one event", async () => {
     const t = setup({
       result: { status: "error", error: "stream broke" },
       // routeStreamInterruption, `continue: false`
-      duringTurn: ({ engine }) =>
-        engine.updateIncident(INCIDENT, "skipped", "continue_disabled")
+      duringTurn: async ({ engine }) => {
+        await engine.updateIncident(INCIDENT, "skipped", "continue_disabled");
+      }
     });
     await t.run();
     expect(t.incident()).toMatchObject({
@@ -1087,6 +1113,26 @@ describe("a recovery callback delivered more than once", () => {
     expect(t.log).toContain("turn");
   });
 
+  it("does not run a numbered payload whose incident is gone: its recovery is over", async () => {
+    // A completed recovery deletes its incident. The same payload delivered
+    // again must not continue the finished reply.
+    const t = setup({ incident: null });
+    t.host.data = { ...t.host.data, delivery: 1 };
+
+    await t.run();
+
+    expect(t.log).not.toContain("turn");
+  });
+
+  it("runs a numbered payload whose incident an older release wrote, with no count", async () => {
+    const t = setup({ incident: {} });
+    t.host.data = { ...t.host.data, delivery: 1 };
+
+    await t.run();
+
+    expect(t.log).toContain("turn");
+  });
+
   it("runs the same payload again after a deferral, which ends the turn without a reset", async () => {
     let failing = true;
     const t = setup({
@@ -1104,6 +1150,67 @@ describe("a recovery callback delivered more than once", () => {
     await t.rerun();
     expect(t.incident()).toBeUndefined();
     expect(t.log.filter((entry) => entry === "turn")).toHaveLength(2);
+  });
+
+  it("is completed when a continuation armed during its turn continues after it", async () => {
+    // The recovered turn ends; a continuation it armed runs outside the
+    // attempt (D64) and takes the reply before the attempt records.
+    const t = setup({
+      incident: {
+        scheduleCount: 1,
+        scheduled: {
+          callback: "_chatRecoveryContinue",
+          targetMessageId: "assistant-1"
+        }
+      },
+      duringTurn: async (harness) => {
+        await harness.engine.turnBody(true, async () => {}, "turn-request")();
+        await harness.engine.outsideAttempt(() =>
+          harness.engine.turnBody(true, (take) => take(), "cont-1")()
+        );
+      }
+    });
+    t.host.data = { ...t.host.data, delivery: 1 };
+
+    await t.run();
+
+    expect(t.log).not.toContain("client-continued");
+    expect(t.events).toContain("chat:recovery:completed");
+    expect(t.incident()).toBeUndefined();
+  });
+
+  it("is taken by a continuation once its own turn was cut off and scheduled again", async () => {
+    const t = setup({
+      incident: {
+        scheduleCount: 1,
+        scheduled: {
+          callback: "_chatRecoveryContinue",
+          targetMessageId: "assistant-1"
+        }
+      },
+      result: { status: "aborted" },
+      duringTurn: async (harness) => {
+        await harness.engine.turnBody(true, async () => {}, "turn-request")();
+        // The turn was cut off again and its routing scheduled attempt 2.
+        await harness.engine.scheduleRecovery({
+          incident: t.incident()!,
+          recoveryKind: "continue",
+          callback: "_chatRecoveryContinue",
+          data: { incidentId: INCIDENT, targetAssistantId: "assistant-1" }
+        });
+        await harness.engine.outsideAttempt(() =>
+          harness.engine.turnBody(true, (take) => take(), "cont-1")()
+        );
+      }
+    });
+    t.host.data = { ...t.host.data, delivery: 1 };
+
+    await t.run();
+
+    expect(t.incident()).toMatchObject({
+      status: "skipped",
+      reason: "continued_by_interaction"
+    });
   });
 
   it("hands each schedule its number in the callback's payload", async () => {
@@ -1132,6 +1239,22 @@ describe("a recovery callback delivered more than once", () => {
 });
 
 describe("what an attempt records, and in what order", () => {
+  it("gives a skipped turn's incident a reason and ends the request the tab waits on", async () => {
+    const t = setup({ result: { status: "skipped" } });
+    await t.run();
+    expect(t.incident()).toMatchObject({
+      status: "skipped",
+      reason: "turn_skipped"
+    });
+    expect(t.log).toContain(`end-skipped:${ROOT}`);
+
+    const withReason = setup({
+      result: { status: "skipped", reason: "awaiting-client" }
+    });
+    await withReason.run();
+    expect(withReason.incident()).toMatchObject({ reason: "awaiting-client" });
+  });
+
   it("records a turn the host skipped as skipped, not failed", async () => {
     const t = setup({ result: { status: "skipped" } });
     await t.run();
@@ -1209,5 +1332,91 @@ describe("what an attempt records, and in what order", () => {
     expect(attempt.stopped.aborted).toBe(true);
     expect(seen).toBe("skipped");
     attempt.end();
+  });
+});
+
+describe("incident writes that overlap", () => {
+  /**
+   * Every incident read takes a macrotask, as storage does. The first one
+   * takes longer, so the write that follows it lands last.
+   */
+  function slowReads(t: ReturnType<typeof setup>): void {
+    let reads = 0;
+    const adapter = (
+      t.engine as unknown as {
+        adapter: {
+          getIncident: (key: string) => Promise<ChatRecoveryIncident | null>;
+        };
+      }
+    ).adapter;
+    const read = adapter.getIncident.bind(adapter);
+    adapter.getIncident = async (key) => {
+      const incident = await read(key);
+      const ms = reads++ === 0 ? 10 : 1;
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      return incident ? { ...incident } : null;
+    };
+  }
+
+  it("keeps a cancel that lands while another write of the incident is under way", async () => {
+    const t = setup({ incident: { scheduleCount: 1 } });
+    slowReads(t);
+
+    // The deferral reads the incident `scheduled`, the cancel writes it
+    // `skipped`, then the deferral writes.
+    await Promise.all([
+      t.engine.recordDeferral(INCIDENT, "Network connection lost."),
+      t.engine.cancelScheduledRecovery(ROOT)
+    ]);
+
+    expect(t.incident()).toMatchObject({
+      status: "skipped",
+      reason: "user_cancelled"
+    });
+  });
+
+  it("records two stops of one incident as one outcome, with one event", async () => {
+    const t = setup({ incident: { scheduleCount: 1 } });
+    slowReads(t);
+
+    // A tab's cancel and the stop of the turn it names, at once.
+    await Promise.all([
+      t.engine.cancelScheduledRecovery(ROOT),
+      t.engine.cancelScheduledRecovery(ROOT),
+      t.engine.recordRecoveryStop(INCIDENT)
+    ]);
+
+    expect(t.incident()).toMatchObject({ reason: "user_cancelled" });
+    expect(
+      t.events.filter((event) => event === "chat:recovery:skipped")
+    ).toHaveLength(1);
+  });
+});
+
+describe("the give-up after the isolate ran out of memory", () => {
+  it("gives up on every live incident, each once, and seals it", async () => {
+    const t = setup();
+    const adapter = (t.engine as unknown as { adapter: ChatRecoveryAdapter })
+      .adapter;
+    await adapter.putIncident(chatRecoveryIncidentKey("incident-2"), {
+      ...t.incident()!,
+      incidentId: "incident-2",
+      recoveryKind: "retry"
+    });
+
+    await t.engine.sealMemoryLimitedRecovery();
+
+    expect(t.exhausted).toEqual(["out_of_memory", "out_of_memory"]);
+    expect(t.incident()).toMatchObject({
+      status: "exhausted",
+      reason: "out_of_memory"
+    });
+    expect(
+      await adapter.getIncident(chatRecoveryIncidentKey("incident-2"))
+    ).toMatchObject({ status: "exhausted", reason: "out_of_memory" });
+
+    // Sealed: a second trip gives up on nothing again.
+    await t.engine.sealMemoryLimitedRecovery();
+    expect(t.exhausted).toHaveLength(2);
   });
 });

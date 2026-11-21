@@ -1,3 +1,8 @@
+import {
+  RECENT_TERMINALS_MAX,
+  recentChatTerminal,
+  recordRecentChatTerminal
+} from "../recent-terminals";
 import { describe, it, expect } from "vitest";
 import type { Connection } from "agents";
 import {
@@ -575,5 +580,83 @@ describe("ResumeHandshake (driver → golden frames)", () => {
 
     expect(frames).toEqual([]);
     expect(state.calls.replayPending).toEqual(["req-persisting"]);
+  });
+
+  describe("a request that ended while the tab was away", () => {
+    const kvStore = () => {
+      const map = new Map<string, unknown>();
+      return {
+        get: <T>(key: string) => map.get(key) as T | undefined,
+        put: <T>(key: string, value: T) => void map.set(key, value)
+      };
+    };
+
+    it("announces and then replays the recorded terminal of a request the tab waits on", async () => {
+      const kv = kvStore();
+      // Replayed after a reset and ended superseded, with no tab connected.
+      recordRecentChatTerminal(kv, {
+        id: "req-old",
+        done: true,
+        body: "",
+        outcome: "skipped",
+        messageIds: ["u1"]
+      });
+      const frames: SentFrame[] = [];
+      const { resumableStream } = makeStream();
+      const handshake = new ResumeHandshake({
+        ...makeHost({ resumableStream }),
+        recentTerminal: (ids) => recentChatTerminal(kv, ids)
+      });
+      const conn = makeConnection("c1", frames);
+
+      await handshake.handleResumeRequest(conn, "probe-1", ["req-old"]);
+      expect(frames).toEqual([streamResumingFrame("req-old", "probe-1")]);
+
+      await handshake.handleResumeAck(conn, "req-old");
+      expect(frames[1]).toEqual({
+        body: "",
+        done: true,
+        id: "req-old",
+        type: RESPONSE_TYPE,
+        replay: true,
+        outcome: "skipped",
+        messageIds: ["u1"]
+      });
+    });
+
+    it("says idle for a tab that waits on nothing that ended", async () => {
+      const kv = kvStore();
+      recordRecentChatTerminal(kv, { id: "req-other", done: true });
+      const frames: SentFrame[] = [];
+      const { resumableStream } = makeStream();
+      const handshake = new ResumeHandshake({
+        ...makeHost({ resumableStream }),
+        recentTerminal: (ids) => recentChatTerminal(kv, ids)
+      });
+
+      await handshake.handleResumeRequest(
+        makeConnection("c1", frames),
+        "probe-1",
+        ["req-mine"]
+      );
+      expect(frames[0]).toMatchObject({ type: "cf_agent_stream_resume_none" });
+    });
+
+    it("keeps the newest terminals, a bounded number of them", () => {
+      const kv = kvStore();
+      for (let i = 0; i < RECENT_TERMINALS_MAX + 4; i++) {
+        recordRecentChatTerminal(kv, { id: `req-${i}`, done: true });
+      }
+      recordRecentChatTerminal(kv, { id: "req-5", done: true, error: true });
+      // Not a terminal frame.
+      recordRecentChatTerminal(kv, { id: "req-chunk", done: false });
+
+      expect(recentChatTerminal(kv, ["req-0"])).toBeNull();
+      expect(recentChatTerminal(kv, ["req-chunk"])).toBeNull();
+      expect(recentChatTerminal(kv, ["req-5"])).toMatchObject({ error: true });
+      expect(kv.get<unknown[]>("cf:chat-recent-terminals")?.length).toBe(
+        RECENT_TERMINALS_MAX
+      );
+    });
   });
 });

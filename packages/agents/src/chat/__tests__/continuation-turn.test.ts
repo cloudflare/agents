@@ -112,11 +112,6 @@ class FakeHost implements ChatTurnsHost {
   generateRequestId() {
     return `cont-${++this.ids}`;
   }
-  /** The last reply a turn stored, as a host that records it reports it. */
-  lastReply: string | null = null;
-  lastTurnReplyId() {
-    return this.lastReply;
-  }
   keepAliveWhile<T>(fn: () => Promise<T>) {
     return fn();
   }
@@ -371,10 +366,9 @@ describe("the continuation turn", () => {
     expect(quietTurns.continuation.pending).toBeNull();
   });
 
-  it("continues a reply that only a message appended without a turn follows", async () => {
-    // A detached run's note, stored with no turn. It is text, and it is not
-    // the model's answer to the tool result.
-    host.lastReply = "a1";
+  it("drops a continuation once a message appended without a turn follows its reply", async () => {
+    // A detached run's note, stored with no turn. Continuing past it would
+    // send the model a request that ends in assistant text.
     await result("a1");
     host.transcript = [
       ...host.transcript,
@@ -383,22 +377,24 @@ describe("the continuation turn", () => {
     await fire();
     await drain();
 
-    expect(host.ran).toEqual(["cont-1"]);
-    expect(host.droppedEvents).toEqual([]);
+    expect(host.ran).toEqual([]);
+    expect(host.droppedEvents).toEqual(["cont-1:moved_on"]);
   });
 
-  it("does not continue a reply that went on to its answer before a message was appended", async () => {
-    host.lastReply = "a1";
-    await result("a1");
+  it("does not continue a reply that still waits on an approval when a note follows it", async () => {
+    // One call answered, its sibling still waits on the user's approval.
+    // The approval must be left as it is for the user to answer.
     host.transcript = [
-      ...withAnswer(host.transcript),
+      user("u1"),
+      toolReply("a1", "output-available", "approval-requested"),
       { id: "note", role: "assistant", parts: [{ type: "text", text: "FYI" }] }
     ];
+    await result("a1");
     await fire();
     await drain();
 
     expect(host.ran).toEqual([]);
-    expect(host.droppedEvents).toEqual(["cont-1:answered"]);
+    expect(host.droppedEvents).toEqual(["cont-1:moved_on"]);
   });
 
   it("does nothing when no continuation is pending", async () => {
@@ -1447,7 +1443,6 @@ describe("what a continuation turn runs", () => {
       autoContinuation: turns.autoContinuation,
       aborts: turns.aborts,
       messages: () => host.transcript,
-      lastTurnReplyId: () => undefined,
       clientToolNames: () => new Set<string>(),
       streamed: new Map<string, boolean>(),
       firing: new Set<object>(),
@@ -1467,7 +1462,6 @@ describe("what a continuation turn runs", () => {
       autoContinuation: turns.autoContinuation,
       aborts: turns.aborts,
       messages: () => host.transcript,
-      lastTurnReplyId: () => undefined,
       clientToolNames: () => new Set<string>(),
       streamed: new Map<string, boolean>(),
       firing: new Set<object>(),
@@ -1485,6 +1479,41 @@ describe("what a continuation turn runs", () => {
 
     expect(host.ran).toEqual(["cont-1"]);
     expect(parts.streamed.size).toBe(0);
+    expect(parts.firing.size).toBe(0);
+  });
+
+  it("a connection-less continuation leaves no record behind, run or dropped", async () => {
+    const parts = {
+      continuation: turns.continuation,
+      autoContinuation: turns.autoContinuation,
+      aborts: turns.aborts,
+      messages: () => host.transcript,
+      clientToolNames: () => new Set<string>(),
+      streamed: new Map<string, boolean>(),
+      firing: new Set<object>(),
+      unscheduled: new Set<string>(),
+      dropped: () => {}
+    };
+    const run = (requestId: string, enqueue?: () => Promise<void>) =>
+      runContinuationTurn(
+        parts,
+        enqueue ? { ...host.turn(), enqueue: () => enqueue() } : host.turn(),
+        {
+          continuation: {
+            requestId,
+            connection: undefined,
+            targetMessageIds: ["a1"]
+          },
+          errorPrefix: "[free]"
+        }
+      );
+    await run("free-1");
+    expect(host.ran).toEqual(["free-1"]);
+    expect(parts.unscheduled.size).toBe(0);
+
+    // A host enqueue that fails never runs the turn.
+    await run("free-2", () => Promise.reject(new Error("no queue")));
+    expect(parts.unscheduled.size).toBe(0);
     expect(parts.firing.size).toBe(0);
   });
 
@@ -1670,6 +1699,57 @@ describe("what a continuation turn runs", () => {
 
       await apply(false);
       expect(continued).toEqual(["a1"]);
+    });
+
+    it("does not drop another tab's result that is still applying", async () => {
+      const other = makeConnection("c2");
+      let finishApply!: () => void;
+      const applied = turns.applyInteraction(
+        () =>
+          new Promise((resolve) => {
+            finishApply = () => resolve({ status: "changed", messageId: "a1" });
+          }),
+        true,
+        () => ({
+          connection: other,
+          clientTools: undefined,
+          body: undefined,
+          errorPrefix: "[test]"
+        })
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      // Tab c1 waits on nothing of its own (its result was a duplicate)
+      // and presses stop.
+      turns.cancelWaitingContinuation("c1");
+      finishApply();
+      await applied;
+      await fire();
+      await drain();
+
+      expect(host.ran).toEqual(["cont-1"]);
+      expect(host.droppedEvents).toEqual([]);
+    });
+
+    it("does not drop another tab's pending continuation", async () => {
+      const other = makeConnection("c2");
+      await turns.applyInteraction(
+        async () => ({ status: "changed", messageId: "a1" }),
+        true,
+        () => ({
+          connection: other,
+          clientTools: undefined,
+          body: undefined,
+          errorPrefix: "[test]"
+        })
+      );
+      expect([...turns.continuation.awaitingConnections.keys()]).toEqual([
+        "c2"
+      ]);
+      turns.cancelWaitingContinuation("c1");
+      await fire();
+      await drain();
+
+      expect(host.ran).toEqual(["cont-1"]);
     });
 
     it("stops nothing for a tab that waits on nothing", async () => {

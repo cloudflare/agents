@@ -240,6 +240,11 @@ export type IncomingMessage<ChatMessage extends UIMessage = UIMessage> =
       type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST;
       /** Opaque correlation id echoed by direct server responses. */
       probeId?: string;
+      /**
+       * The request ids this tab still waits on a terminal frame for, newest
+       * last. A request that ended while the tab was away is replayed.
+       */
+      requestIds?: string[];
     }
   | {
       /** Client sends tool result to server (for client-side tools) */
