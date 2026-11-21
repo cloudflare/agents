@@ -4844,8 +4844,19 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * fiber, to run again (`ChatTurns.resumeAdmissions`).
    */
   private _replayClientChatRequest(record: ChatAdmissionRecord) {
-    const stored = record.payload as StoredThinkClientRequest | undefined;
-    if (!stored || typeof stored !== "object") return null;
+    // A record whose payload cannot be read still holds the user's
+    // message: it runs as a plain new message, so the message is stored.
+    const payload = record.payload as StoredThinkClientRequest | undefined;
+    const stored: StoredThinkClientRequest =
+      payload && typeof payload === "object"
+        ? payload
+        : {
+            trigger: "submit-message",
+            clientTools: undefined,
+            body: {},
+            originMessageIds: undefined,
+            branchParentId: undefined
+          };
     const requestId = record.requestId;
     if (stored.originMessageIds) {
       this._requestOriginMessageIds.set(requestId, stored.originMessageIds);

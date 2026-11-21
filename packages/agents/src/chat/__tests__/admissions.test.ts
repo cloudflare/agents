@@ -424,9 +424,53 @@ describe("durable admission", () => {
     expect(a.turns.clientView(a.host.transcript).messages).toEqual([]);
   });
 
-  it("drops a record older than an hour, which only a rollback leaves", async () => {
+  it("a request whose record cannot be written ends with an error", async () => {
+    const turns = new ChatTurns(new Host(), {
+      defaultDebounceMs: 0,
+      admissions: {
+        store: {
+          ...createChatAdmissionStore(() => ({
+            exec: () => ({ toArray: () => [] })
+          })),
+          add: () => {
+            throw new Error("SQLITE_TOOBIG");
+          },
+          list: () => []
+        },
+        recoveryPending: async () => false,
+        recoveryOwns: async () => false,
+        replayRequest: () => null
+      }
+    });
+    const errors: string[] = [];
+    let persisted = false;
+    await turns.runClientRequest({
+      requestId: "r1",
+      isSubmitMessage: true,
+      concurrency: "queue",
+      admission: { messages: [{ id: "u1", role: "user" }], payload: null },
+      onDropped: () => {},
+      persist: async () => {
+        persisted = true;
+        return true;
+      },
+      join: async () => true,
+      enqueue: async () => "completed",
+      run: async () => {},
+      onSkipped: () => {},
+      onCancelledBeforeStart: () => {},
+      onError: (error, stage) => {
+        errors.push(`${stage}:${String(error)}`);
+      }
+    });
+    expect(errors).toEqual(["persist:Error: SQLITE_TOOBIG"]);
+    expect(persisted).toBe(false);
+  });
+
+  it("replays a record however long its request waited", async () => {
     const db = new DatabaseSync(":memory:");
     const a = await queueBehindRunningTurn(db, ["r2"]);
+    // The turn ahead of it ran for two hours (a long agent-tool run).
     db.prepare("update cf_agents_chat_admissions set created_at = ?").run(
       Date.now() - 2 * 60 * 60 * 1000
     );
@@ -434,11 +478,11 @@ describe("durable admission", () => {
     b.copyTranscript(a);
     await b.turns.resumeAdmissions();
     await tick();
-    expect(b.replayed).toEqual([]);
-    expect(b.records()).toEqual([]);
+    expect(b.started).toEqual(["r2"]);
+    expect(b.ids()).toContain("u-r2");
   });
 
-  it("a replay stores nothing once a user message nothing waits on follows the one it came after", async () => {
+  it("a replay whose conversation moved on stores its question and ends skipped", async () => {
     const db = new DatabaseSync(":memory:");
     const a = await queueBehindRunningTurn(db, ["r2"]);
     const b = isolate(db);
@@ -450,16 +494,13 @@ describe("durable admission", () => {
       { id: "u-new", role: "user", parts: [] },
       { id: "a-new", role: "assistant", parts: [] }
     );
-    let changed = 0;
-    (b.host as Host & { waitingChanged(): void }).waitingChanged = () =>
-      changed++;
     await b.turns.resumeAdmissions();
     await tick();
     expect(b.started).toEqual([]);
     expect(b.ended.get("r2")).toBe("skipped");
-    expect(b.ids()).not.toContain("u-r2");
-    // Tabs that drew it as queued are told.
-    expect(changed).toBe(1);
+    // Not lost: stored after what is there, unanswered.
+    expect(b.ids().at(-1)).toBe("u-r2");
+    expect(b.records()).toEqual([]);
   });
 
   it("a stop that lands while the replay awaits still stops the request", async () => {
@@ -578,6 +619,60 @@ describe("chatRecoveryNames", () => {
 });
 
 describe("held messages", () => {
+  const sqlOver =
+    (db: DatabaseSync, limit = Infinity) =>
+    () => ({
+      exec: (query: string, ...bindings: unknown[]) => {
+        // SQLite's row limit, smaller here: a binding over it fails the write.
+        for (const binding of bindings) {
+          if (typeof binding === "string" && binding.length > limit) {
+            throw new Error("SQLITE_TOOBIG");
+          }
+        }
+        const rows = db.prepare(query).all(...(bindings as SQLInputValue[]));
+        return { toArray: () => rows as Record<string, unknown>[] };
+      }
+    });
+
+  it("split on the size of the messages and the payload together", () => {
+    const db = new DatabaseSync(":memory:");
+    // Each part alone is under a piece, both together are over.
+    const store = createChatAdmissionStore(sqlOver(db, 500_000));
+    const text = "m".repeat(300_000);
+    const body = { big: "b".repeat(300_000) };
+    store.add({
+      requestId: "r1",
+      messages: [{ id: "u", role: "user", text } as HeldChatMessage],
+      afterUserId: null,
+      decision: { strategy: null, overlapping: false, debounceUntilMs: null },
+      payload: { body }
+    });
+    const [record] = createChatAdmissionStore(sqlOver(db)).list();
+    expect(
+      (record.messages[0] as HeldChatMessage & { text: string }).text
+    ).toBe(text);
+    expect(record.payload).toEqual({ body });
+  });
+
+  it("a new isolate deletes a split record's pieces before it lists", () => {
+    const db = new DatabaseSync(":memory:");
+    createChatAdmissionStore(sqlOver(db)).add({
+      requestId: "r1",
+      messages: [
+        { id: "u", role: "user", text: "x".repeat(600_000) } as HeldChatMessage
+      ],
+      afterUserId: null,
+      decision: { strategy: null, overlapping: false, debounceUntilMs: null },
+      payload: null
+    });
+    createChatAdmissionStore(sqlOver(db)).remove("r1");
+    expect(
+      db
+        .prepare("select count(*) as n from cf_agents_chat_admissions_messages")
+        .get()
+    ).toEqual({ n: 0 });
+  });
+
   it("round-trip a large message with a surrogate pair on a piece boundary", () => {
     const db = new DatabaseSync(":memory:");
     const store = createChatAdmissionStore(() => ({

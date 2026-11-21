@@ -32,8 +32,9 @@
  * - a record whose request has a turn that recovery knows (it had a fiber)
  *   is left to recovery. A replayed record whose conversation moved on
  *   without it (a user message nothing waits on follows the one it was
- *   accepted after: a rollback answered something newer) ends `skipped`
- *   with its messages never stored.
+ *   accepted after: a rollback answered something newer) ends `skipped`,
+ *   with its messages stored after what is there. Only a clear discards a
+ *   waiting message, and a record is replayed however old it is.
  *
  * The store is the host's, behind {@link ChatAdmissionStore}. An object
  * written by an older release has no records, and an older release never
@@ -137,14 +138,6 @@ export interface ChatAdmissionStore {
   list(): ChatAdmissionRecord[];
 }
 
-/**
- * A record older than this is dropped, not replayed: an hour, the life of a
- * recovery incident. One can only be that old if a release without durable
- * admission ran in between (a rollback), and that release has already let
- * the request go.
- */
-export const CHAT_ADMISSION_TTL_MS = 60 * 60 * 1000;
-
 /** The table admission records live in. */
 export const CHAT_ADMISSIONS_TABLE = "cf_agents_chat_admissions";
 
@@ -173,6 +166,7 @@ export function createChatAdmissionStore(
   // Records whose messages are split into pieces, so a delete touches the
   // pieces table only for them.
   const withPieces = new Set<string>();
+  let listed = false;
   let state: "unknown" | "absent" | "ready" = "unknown";
   const ensure = (): void => {
     if (state === "ready") return;
@@ -229,12 +223,21 @@ export function createChatAdmissionStore(
     add(record) {
       ensure();
       const messages = JSON.stringify(record.messages);
-      const split = messages.length > HELD_MESSAGES_PIECE;
+      const payload =
+        record.payload === undefined ? null : JSON.stringify(record.payload);
+      // The row holds the messages and the payload (client tools, body)
+      // together, so it is their combined size that must fit.
+      const split =
+        messages.length + (payload?.length ?? 0) > HELD_MESSAGES_PIECE;
       let count = 0;
       if (split) {
         withPieces.add(record.requestId);
         run(`delete from ${pieces} where request_id = ?`, record.requestId);
-        for (const piece of splitPieces(messages, HELD_MESSAGES_PIECE)) {
+        const both = JSON.stringify({
+          messages: record.messages,
+          payload: record.payload ?? null
+        });
+        for (const piece of splitPieces(both, HELD_MESSAGES_PIECE)) {
           run(
             `insert into ${pieces} (request_id, piece, data) values (?, ?, ?)`,
             record.requestId,
@@ -252,7 +255,7 @@ export function createChatAdmissionStore(
         record.requestId,
         JSON.stringify(record.messages.map((message) => message.id)),
         JSON.stringify(record.decision),
-        record.payload === undefined ? null : JSON.stringify(record.payload),
+        split ? null : payload,
         Date.now(),
         split ? null : messages,
         count,
@@ -262,7 +265,9 @@ export function createChatAdmissionStore(
     remove(requestId) {
       if (!exists()) return;
       run(`delete from ${table} where request_id = ?`, requestId);
-      if (withPieces.delete(requestId)) {
+      // Before the first list this isolate cannot know which records were
+      // split, so it deletes pieces whatever.
+      if (withPieces.delete(requestId) || !listed) {
         run(`delete from ${pieces} where request_id = ?`, requestId);
       }
     },
@@ -281,38 +286,56 @@ export function createChatAdmissionStore(
       withPieces.clear();
     },
     list() {
+      // A table that does not exist yet has no pieces either.
+      listed = true;
       if (!exists()) return [];
       return run(
         `select request_id, seq, message_ids, decision, payload, stopped,
                 created_at, messages, message_pieces, after_user_id
          from ${table} order by seq`
-      ).map((row) => ({
-        requestId: String(row.request_id),
-        seq: Number(row.seq),
-        messageIds: parseJson<string[]>(row.message_ids) ?? [],
-        messages: heldMessages(
-          Number(row.message_pieces) > 0 &&
-            withPieces.add(String(row.request_id))
-            ? run(
-                `select data from ${pieces} where request_id = ?
-                 order by piece`,
-                row.request_id
-              )
-                .map((piece) => String(piece.data))
-                .join("")
-            : row.messages
-        ),
-        afterUserId:
-          typeof row.after_user_id === "string" ? row.after_user_id : null,
-        decision: parseJson<StoredSubmitDecision>(row.decision) ?? {
-          strategy: null,
-          overlapping: false,
-          debounceUntilMs: null
-        },
-        payload: parseJson<unknown>(row.payload),
-        stopped: Number(row.stopped) === 1,
-        createdAt: Number(row.created_at)
-      }));
+      ).map((row) => {
+        const requestId = String(row.request_id);
+        let messages: unknown = row.messages;
+        let payload: unknown = parseJson<unknown>(row.payload);
+        if (Number(row.message_pieces) > 0) {
+          withPieces.add(requestId);
+          const joined = parseJson<unknown>(
+            run(
+              `select data from ${pieces} where request_id = ?
+               order by piece`,
+              requestId
+            )
+              .map((piece) => String(piece.data))
+              .join("")
+          );
+          if (Array.isArray(joined)) {
+            // Messages alone, as an earlier build of this release split them.
+            messages = joined;
+          } else if (joined && typeof joined === "object") {
+            const both = joined as { messages?: unknown; payload?: unknown };
+            messages = both.messages;
+            payload = both.payload ?? undefined;
+          }
+        }
+        return {
+          requestId,
+          seq: Number(row.seq),
+          messageIds: parseJson<string[]>(row.message_ids) ?? [],
+          messages: heldMessages(
+            typeof messages === "string" ? messages : JSON.stringify(messages)
+          ),
+          afterUserId:
+            typeof row.after_user_id === "string" ? row.after_user_id : null,
+          decision: parseJson<StoredSubmitDecision>(row.decision) ?? {
+            strategy: null,
+            overlapping: false,
+            debounceUntilMs: null
+          },
+          payload,
+          stopped: Number(row.stopped) === 1,
+          createdAt: Number(row.created_at)
+        };
+      });
     }
   };
 }
@@ -475,11 +498,6 @@ export interface ChatAdmissionsHost {
    * queue, or once it ended before it got there.
    */
   replay(record: ChatAdmissionRecord, onQueued: () => void): Promise<void>;
-  /**
-   * Records were dropped before their messages joined the transcript (too
-   * old to replay): tabs that draw those messages as waiting must be told.
-   */
-  waitingDropped?(): void;
 }
 
 /**
@@ -641,18 +659,16 @@ export class ChatAdmissions {
   }
 
   async #replay(): Promise<void> {
+    // However long a request waited (a turn ahead of it can run for hours),
+    // its record is replayed: its message lives nowhere else.
     const records: ChatAdmissionRecord[] = [];
-    let expired = false;
     for (const record of this.#orphans()) {
-      const old = Date.now() - record.createdAt > CHAT_ADMISSION_TTL_MS;
-      if (old || (await this.host.recoveryOwns(record.requestId))) {
+      if (await this.host.recoveryOwns(record.requestId)) {
         this.release(record.requestId);
-        if (old) expired = true;
         continue;
       }
       records.push(record);
     }
-    if (expired) this.host.waitingDropped?.();
     const replays = records.filter(
       (record) => !this.live.has(record.requestId)
     );

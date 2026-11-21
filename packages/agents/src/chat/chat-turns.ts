@@ -180,7 +180,7 @@ export interface ChatTurnsOptions {
 /** What durable admission needs from the host. See `admissions.ts`. */
 export interface ChatTurnsAdmissionOptions extends Omit<
   ChatAdmissionsHost,
-  "replay" | "beginReplay" | "waitingDropped"
+  "replay" | "beginReplay"
 > {
   /**
    * The request a record describes, to run again after a reset. It has no
@@ -407,7 +407,6 @@ export class ChatTurns<
               }
             }
           },
-          waitingDropped: () => host.waitingChanged?.(),
           replay: (record, onQueued) => {
             const request = admissions.replayRequest(record);
             if (!request) {
@@ -602,13 +601,14 @@ export class ChatTurns<
             request.onSkipped();
             return;
           }
+          // A replay whose conversation moved on without it (a rollback
+          // answered something newer) does not run. Its question is still
+          // stored, after what is there: a user's message is never dropped.
+          const movedOn =
+            !joined &&
+            replay !== undefined &&
+            this.#replayMovedOn(replay.record);
           if (!joined) {
-            // A replay whose conversation moved on without it (a rollback
-            // answered something newer) stores nothing.
-            if (replay && this.#replayMovedOn(replay.record)) {
-              request.onSkipped();
-              return;
-            }
             const stored = new Set(this.host.messages().map((m) => m.id));
             const fresh = held.filter((message) => !stored.has(message.id));
             if (
@@ -624,7 +624,7 @@ export class ChatTurns<
             }
             joined = true;
           }
-          if (!current) {
+          if (!current || movedOn) {
             request.onSkipped();
             return;
           }

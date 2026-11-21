@@ -2571,8 +2571,18 @@ export class AIChatAgent<
   private _replayClientChatRequest(
     record: ChatAdmissionRecord
   ): ClientChatRequest<true> | null {
-    const stored = record.payload as StoredClientChatRequest | undefined;
-    if (!stored || typeof stored !== "object") return null;
+    // A record whose payload cannot be read still holds the user's
+    // message: it runs as a plain new message, so the message is stored.
+    const payload = record.payload as StoredClientChatRequest | undefined;
+    const stored: StoredClientChatRequest =
+      payload && typeof payload === "object"
+        ? payload
+        : {
+            trigger: "submit-message",
+            clientTools: undefined,
+            body: {},
+            originMessageIds: undefined
+          };
     const requestId = record.requestId;
     if (stored.originMessageIds) {
       this._requestOriginMessageIds.set(requestId, stored.originMessageIds);
@@ -2846,6 +2856,18 @@ export class AIChatAgent<
         return true;
       },
       onSkipped: () => this._completeSkippedRequest(connection, chatMessageId),
+      // A step before the turn failed (the admission record could not be
+      // written, say): the request ends with an error frame, never silently.
+      // A failure in the turn is reported there and goes on as before.
+      onError: async (error, stage) => {
+        if (stage === "turn") throw error;
+        await this._turns.reportTurnFailure(this._turnFailureHost(), {
+          requestId: chatMessageId,
+          error,
+          continuation: false,
+          stage
+        });
+      },
       // The request was cancelled before its turn started. There is
       // no assistant message, so onChatResponse doesn't fire, and the
       // stored request context is left alone: tool continuations and

@@ -69,7 +69,6 @@ export {
  */
 export {
   CHAT_ADMISSIONS_TABLE,
-  CHAT_ADMISSION_TTL_MS,
   ChatAdmissions,
   chatRecoveryNames,
   createChatAdmissionStore,
