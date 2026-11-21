@@ -88,13 +88,18 @@ describe("a stop right after a stall", () => {
       env.ThinkTestAgent as unknown as DurableObjectNamespace<ThinkTestAgent>,
       crypto.randomUUID()
     )) as unknown as {
-      stopRightAfterStallForTest(): Promise<{
+      stopRightAfterStallForTest(
+        via?: "chat" | "save",
+        inRoute?: boolean
+      ): Promise<{
         scheduled: number;
         stepsAfterStop: number;
         done: boolean;
         error: string | null;
         responses: string[];
         activeIncidents: number;
+        activeStream: boolean;
+        routeOutcomes: string[];
       }>;
     };
     const result = await agent.stopRightAfterStallForTest();
@@ -104,5 +109,19 @@ describe("a stop right after a stall", () => {
     expect(result.activeIncidents).toBe(0);
     expect(result).toMatchObject({ done: false, error: null });
     expect(result.responses.filter((status) => status === "error")).toEqual([]);
+    // The stream it was routing is closed: no tab is offered it later.
+    expect(result.activeStream).toBe(false);
+    const saved = await agent.stopRightAfterStallForTest("save");
+    expect(saved.stepsAfterStop).toBe(0);
+    expect(saved.activeIncidents).toBe(0);
+    expect(saved.activeStream).toBe(false);
+    // A stop that lands while the stall is routed, before the incident is
+    // written: the route ends `stopped`, and that path closes the stream.
+    for (const via of ["chat", "save"] as const) {
+      const routed = await agent.stopRightAfterStallForTest(via, true);
+      expect(routed.routeOutcomes).toEqual(["stopped"]);
+      expect(routed.activeIncidents).toBe(0);
+      expect(routed.activeStream).toBe(false);
+    }
   });
 });

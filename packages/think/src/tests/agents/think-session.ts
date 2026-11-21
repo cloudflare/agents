@@ -2948,6 +2948,7 @@ export class ThinkTestAgent extends Think {
 
   /** Set to stop the request the moment the stall watchdog aborts it. */
   private _stopRightAfterStall = false;
+  _routeOutcomesForTest: string[] = [];
 
   protected override abortRequest(requestId: string, reason?: unknown): void {
     super.abortRequest(requestId, reason);
@@ -2966,22 +2967,51 @@ export class ThinkTestAgent extends Think {
    * A reply stalls, and the user stops the request right after the watchdog
    * aborted it, before recovery is scheduled.
    */
-  async stopRightAfterStallForTest(): Promise<{
+  async stopRightAfterStallForTest(
+    via: "chat" | "save" = "chat",
+    /** Stop while the stall is routed, before the incident is written. */
+    inRoute = false
+  ): Promise<{
     scheduled: number;
     stepsAfterStop: number;
     done: boolean;
     error: string | null;
     responses: string[];
     activeIncidents: number;
+    /** A resumable stream is still open once the turn ended. */
+    activeStream: boolean;
   }> {
     this._stallAfterChunks = 2;
     this._stallAttemptsRemaining = 1;
     this.chatStreamStallTimeoutMs = 50;
-    this._stopRightAfterStall = true;
+    this._stopRightAfterStall = !inRoute;
     this._responseLog = [];
+    this._routeOutcomesForTest = [];
+    const self = this as unknown as {
+      _routeStreamInterruption(input: unknown): Promise<string>;
+    };
+    const route = self._routeStreamInterruption.bind(this);
+    self._routeStreamInterruption = async (input: unknown) => {
+      if (inRoute) {
+        this.cancelChat((input as { requestId: string }).requestId, "stop");
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      const outcome = await route(input);
+      this._routeOutcomesForTest.push(outcome);
+      return outcome;
+    };
     const callback = new TestCollectingCallback();
     try {
-      await this.chat("stall, then stop", callback);
+      if (via === "chat") await this.chat("stall, then stop", callback);
+      else {
+        await this.saveMessages([
+          {
+            id: crypto.randomUUID(),
+            role: "user",
+            parts: [{ type: "text", text: "stall, then stop" }]
+          }
+        ]);
+      }
       await new Promise((resolve) => setTimeout(resolve, 50));
       const steps = this._beforeStepLog.length;
       const scheduled = recoveryWorkCountForTest(this, "_chatRecoveryContinue");
@@ -3000,9 +3030,14 @@ export class ThinkTestAgent extends Think {
         responses: this._responseLog.map((response) => response.status),
         activeIncidents: [...incidents.values()].filter((incident) =>
           ["detected", "scheduled", "attempting"].includes(incident.status)
-        ).length
+        ).length,
+        routeOutcomes: this._routeOutcomesForTest,
+        activeStream:
+          this._resumableStream.hasActiveStream() ||
+          this._resumableStream.pendingCutoverId !== null
       };
     } finally {
+      self._routeStreamInterruption = route;
       this._stopRightAfterStall = false;
       this._stallAfterChunks = null;
       this._stallAttemptsRemaining = null;

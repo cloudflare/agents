@@ -4018,6 +4018,44 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     return result.status;
   }
 
+  /**
+   * A stalling turn whose request is stopped while the stall is routed,
+   * before its incident is written. Returns the route's outcome and whether
+   * a resumable stream is still open (active, or waiting for a cutover).
+   */
+  async stopWhileStallRoutedForTest(): Promise<{
+    outcomes: string[];
+    streamOpen: boolean;
+    status: SaveMessagesResult["status"];
+  }> {
+    const self = this as unknown as {
+      _routeStreamInterruption(input: { requestId: string }): Promise<string>;
+    };
+    const route = self._routeStreamInterruption.bind(this);
+    const outcomes: string[] = [];
+    self._routeStreamInterruption = async (input) => {
+      this.abortRequest(input.requestId, "user stop");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const outcome = await route(input);
+      outcomes.push(outcome);
+      return outcome;
+    };
+    try {
+      const status = await this.driveStallingTurnForTest({ timeoutMs: 100 });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      // oxlint-disable-next-line typescript/no-explicit-any -- private field
+      const stream = (this as any)._resumableStream;
+      return {
+        outcomes,
+        streamOpen:
+          stream.hasActiveStream() || stream.pendingCutoverId !== null,
+        status
+      };
+    } finally {
+      self._routeStreamInterruption = route;
+    }
+  }
+
   private _failingTurn: {
     message: string;
     remaining: number;

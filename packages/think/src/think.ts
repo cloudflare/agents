@@ -14235,8 +14235,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         }
         if (outcome === "stopped") {
           // A user stopped the turn while it was routed: it ends stopped.
+          // Its partial is stored already, so the stream is closed here:
+          // no cutover follows.
           if (!streamFinalized) {
-            this._finishResumableStream(streamId, "aborted");
+            this._completeResumableStream(streamId, "aborted");
             streamFinalized = true;
           }
           if (!doneSent) {
@@ -14865,7 +14867,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         }
         if (outcome === "stopped") {
           // A user stopped the turn while it was routed: it ends stopped.
-          this._finishResumableStream(streamId, "aborted");
+          // Its partial is stored already, so the stream is closed here:
+          // no cutover follows.
+          this._completeResumableStream(streamId, "aborted");
           this._pendingResumeConnections.clear();
           if (!doneSent) {
             this._broadcastChat({
