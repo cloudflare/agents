@@ -284,7 +284,7 @@ describe("a message queued behind a running turn", () => {
       big: "b".repeat(1_200_000)
     });
     // It waits: another tab is shown it as queued.
-    await waitFor(
+    const shownQueued = await waitFor(
       async () =>
         watched.some(
           (f) =>
@@ -293,6 +293,7 @@ describe("a message queued behind a running turn", () => {
         ),
       (ok) => ok
     );
+    expect(shownQueued).toBe(true);
     const done = await waitFor(
       async () =>
         seen.find(
