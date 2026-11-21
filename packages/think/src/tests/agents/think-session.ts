@@ -2963,6 +2963,13 @@ export class ThinkTestAgent extends Think {
     };
   }
 
+  /** What `onChatRecovery` returns from now on. */
+  async setRecoveryHookForTest(
+    recovery: ChatRecoveryOptions | null
+  ): Promise<void> {
+    this._recoveryHookForTest = recovery;
+  }
+
   async armStallForTest(afterChunks: number, timeoutMs: number): Promise<void> {
     this._stallAfterChunks = afterChunks;
     this._stallAttemptsRemaining = 1;
@@ -3147,6 +3154,7 @@ export class ThinkTestAgent extends Think {
     inStream: boolean;
     error?: "api-call-503" | "code-update-reset" | "storage-reset";
     retryAfter?: string;
+    retryAfterMs?: string;
     abortFirst?: boolean;
     failIncidentBegin?: boolean;
   }): Promise<{
@@ -3161,8 +3169,17 @@ export class ThinkTestAgent extends Think {
         name: "AI_APICallError",
         statusCode: 503,
         isRetryable: true,
-        ...(options.retryAfter
-          ? { responseHeaders: { "retry-after": options.retryAfter } }
+        ...(options.retryAfter || options.retryAfterMs
+          ? {
+              responseHeaders: {
+                ...(options.retryAfter && {
+                  "retry-after": options.retryAfter
+                }),
+                ...(options.retryAfterMs && {
+                  "retry-after-ms": options.retryAfterMs
+                })
+              }
+            }
           : {})
       });
     } else if (options.error === "code-update-reset") {
@@ -3196,11 +3213,13 @@ export class ThinkTestAgent extends Think {
         ? "transient"
         : "fatal";
     };
-    const self = this as unknown as {
-      _beginChatRecoveryIncident(...args: unknown[]): Promise<unknown>;
+    const engine = (
+      this as unknown as { _chatRecoveryEngine(): unknown }
+    )._chatRecoveryEngine() as {
+      beginIncident(...args: unknown[]): Promise<unknown>;
     };
     if (options.failIncidentBegin) {
-      self._beginChatRecoveryIncident = async () => {
+      engine.beginIncident = async () => {
         throw new Error("incident write failed");
       };
     }
@@ -3223,7 +3242,7 @@ export class ThinkTestAgent extends Think {
         classified
       };
     } finally {
-      Reflect.deleteProperty(this, "_beginChatRecoveryIncident");
+      Reflect.deleteProperty(engine, "beginIncident");
       this._errorConfig = null;
       this._errorAttemptsRemaining = null;
       Reflect.deleteProperty(this, "classifyChatError");
@@ -3330,6 +3349,56 @@ export class ThinkTestAgent extends Think {
       };
     } finally {
       this._streamChunkDelayMs = null;
+      this._errorConfig = null;
+      this._errorAttemptsRemaining = null;
+      Reflect.deleteProperty(this, "classifyChatError");
+    }
+  }
+
+  /**
+   * A recovery attempt the user stops while it waits for a stable chat, and
+   * which then throws. The stop is the outcome, not a give-up.
+   */
+  async testStopThenThrowDuringRecoveryForTest(): Promise<{
+    incident: { status: string; reason?: string } | undefined;
+    exhaustedReasons: string[];
+  }> {
+    await this.armTransientErrorForTest({
+      classification: "transient",
+      inStream: true
+    });
+    const exhaustedReasons: string[] = [];
+    const host = this as unknown as {
+      waitUntilStable: (options?: { timeout?: number }) => Promise<boolean>;
+      onChatRecoveryExhausted?: unknown;
+    };
+    try {
+      await this.testChat("trigger transient error");
+      const [scheduled] = await this._recoveryIncidentsForTest();
+      this._errorConfig = null;
+      this._errorAttemptsRemaining = null;
+      this.chatRecovery = {
+        onExhausted: (ctx) => {
+          exhaustedReasons.push(ctx.reason ?? "");
+        }
+      };
+      host.waitUntilStable = async () => {
+        this.cancelChat(
+          scheduled?.recoveryRootRequestId ?? scheduled?.requestId ?? ""
+        );
+        throw new Error("application bug");
+      };
+      await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
+      const [incident] = await this._recoveryIncidentsForTest();
+      return {
+        incident: incident && {
+          status: incident.status,
+          reason: incident.reason
+        },
+        exhaustedReasons
+      };
+    } finally {
+      Reflect.deleteProperty(this, "waitUntilStable");
       this._errorConfig = null;
       this._errorAttemptsRemaining = null;
       Reflect.deleteProperty(this, "classifyChatError");
@@ -10106,8 +10175,10 @@ export class ThinkRecoveryTestAgent extends Think {
     interruptedAttempts?: number;
   }> {
     const { trigger = "stalled", ...identity } = input;
-    const self = this as unknown as {
-      _beginChatRecoveryIncident(
+    const engine = (
+      this as unknown as { _chatRecoveryEngine(): unknown }
+    )._chatRecoveryEngine() as {
+      beginIncident(
         i: typeof identity & { trigger: "interrupted" | "stalled" }
       ): Promise<{
         incident: {
@@ -10119,7 +10190,7 @@ export class ThinkRecoveryTestAgent extends Think {
         exhausted: boolean;
       }>;
     };
-    const { incident, exhausted } = await self._beginChatRecoveryIncident({
+    const { incident, exhausted } = await engine.beginIncident({
       ...identity,
       trigger
     });
@@ -10149,14 +10220,16 @@ export class ThinkRecoveryTestAgent extends Think {
     reason?: string
   ): Promise<void> {
     await (
-      this as unknown as {
-        _updateChatRecoveryIncident(
+      (
+        this as unknown as { _chatRecoveryEngine(): unknown }
+      )._chatRecoveryEngine() as {
+        updateIncident(
           id: string,
           status: string,
           reason?: string
         ): Promise<void>;
       }
-    )._updateChatRecoveryIncident(incidentId, status, reason);
+    ).updateIncident(incidentId, status, reason);
   }
 
   async seedIncidentForTest(incident: {
@@ -10197,7 +10270,7 @@ export class ThinkRecoveryTestAgent extends Think {
   }
 
   /**
-   * #1626: directly exercise the exhausted branch of `_routeStallToBoundedRecovery`.
+   * #1626: directly exercise the exhausted branch of `_routeStreamInterruption`.
    * Seeds an incident at the budget edge (attempt = maxAttempts, aged past the
    * 30s debounce), then routes one more stall. The route must advance the
    * incident past the budget and deliver the SAME terminal UX as deploy-recovery
@@ -10281,17 +10354,21 @@ export class ThinkRecoveryTestAgent extends Think {
     try {
       outcome = await (
         this as unknown as {
-          _routeStallToBoundedRecovery(i: {
+          _routeStreamInterruption(i: {
             requestId: string;
             streamId: string;
             partialParts: unknown[];
+            error: unknown;
+            onPartialDropped: () => void;
             persistPartial: () => Promise<string | undefined>;
           }): Promise<string>;
         }
-      )._routeStallToBoundedRecovery({
+      )._routeStreamInterruption({
         requestId,
         streamId: "stall-stream",
         partialParts: [],
+        error: new Error("stream stalled"),
+        onPartialDropped: () => {},
         persistPartial: async () => undefined
       });
     } finally {
@@ -10313,8 +10390,8 @@ export class ThinkRecoveryTestAgent extends Think {
   }
 
   /**
-   * Drive `_handleRecoveryCallbackError` (the catch path of
-   * `_chatRecoveryContinue` / `_chatRecoveryRetry`) and report the outcome.
+   * Make a recovery attempt throw (the catch path of `_chatRecoveryContinue`
+   * / `_chatRecoveryRetry`) and report the outcome.
    *
    * - A non-transient (application) throw must terminalize (fire `onExhausted`
    *   + broadcast the terminal banner, seal the incident `exhausted`) and NOT
@@ -10435,16 +10512,7 @@ export class ThinkRecoveryTestAgent extends Think {
 
     let threw = false;
     try {
-      await (
-        this as unknown as {
-          _handleRecoveryCallbackError(
-            callback: string,
-            data: unknown,
-            error: unknown
-          ): Promise<void>;
-        }
-      )._handleRecoveryCallbackError(
-        "_chatRecoveryContinue",
+      await this._runThrowingRecoveryAttemptForTest(
         {
           incidentId: begun.incidentId,
           originalRequestId: requestId,
@@ -10542,11 +10610,6 @@ export class ThinkRecoveryTestAgent extends Think {
         requestId: string,
         body: string
       ): Promise<void>;
-      _handleRecoveryCallbackError(
-        callback: string,
-        data: unknown,
-        error: unknown
-      ): Promise<void>;
     };
     const realBroadcast = self._broadcastChat.bind(this);
     self._broadcastChat = (m) => {
@@ -10577,11 +10640,7 @@ export class ThinkRecoveryTestAgent extends Think {
 
     let firstThrew = false;
     try {
-      await self._handleRecoveryCallbackError(
-        "_chatRecoveryContinue",
-        data,
-        appError
-      );
+      await this._runThrowingRecoveryAttemptForTest(data, appError);
     } catch {
       firstThrew = true;
     }
@@ -10589,11 +10648,7 @@ export class ThinkRecoveryTestAgent extends Think {
 
     let secondThrew = false;
     try {
-      await self._handleRecoveryCallbackError(
-        "_chatRecoveryContinue",
-        data,
-        appError
-      );
+      await this._runThrowingRecoveryAttemptForTest(data, appError);
     } catch {
       secondThrew = true;
     } finally {
@@ -10806,6 +10861,29 @@ export class ThinkRecoveryTestAgent extends Think {
     // What startup does after a restart: pick the streaming row back up as
     // the active stream, so recovery persists its partial.
     if (options.restore) this["_resumableStream"].restore();
+  }
+
+  /**
+   * What a tab that reconnects does to a stream a reset left with no
+   * producer, when its resume request is acknowledged before the interrupted
+   * turn's recovery has run: the stream is replayed, closed and stored.
+   */
+  async acknowledgeResumeForTest(requestId: string): Promise<boolean> {
+    const self = this as unknown as {
+      _resumableStream: {
+        replayChunks(
+          connection: { id: string; send(message: string): void },
+          requestId: string
+        ): string | null;
+      };
+      _persistOrphanedStream(streamId: string): Promise<void>;
+    };
+    const orphaned = self._resumableStream.replayChunks(
+      { id: "tab-after-reset", send: () => {} },
+      requestId
+    );
+    if (orphaned) await self._persistOrphanedStream(orphaned);
+    return orphaned !== null;
   }
 
   async getScheduledChatRecoveryCountForTest(
@@ -11132,10 +11210,29 @@ export class ThinkRecoveryTestAgent extends Think {
     this._forceStableTimeout = value;
   }
 
+  private _stableWaitError: unknown = null;
+
+  /**
+   * Run a recovery continue attempt whose wait for a stable chat throws
+   * `error`: the path production takes when an attempt throws.
+   */
+  private async _runThrowingRecoveryAttemptForTest(
+    data: Parameters<Think["_chatRecoveryContinueDetached"]>[0],
+    error: unknown
+  ): Promise<void> {
+    this._stableWaitError = error;
+    try {
+      await this._chatRecoveryContinueDetached(data);
+    } finally {
+      this._stableWaitError = null;
+    }
+  }
+
   protected override async waitUntilStable(options?: {
     timeout?: number;
   }): Promise<boolean> {
     if (this._forceStableTimeout) return false;
+    if (this._stableWaitError) throw this._stableWaitError;
     return super.waitUntilStable(options);
   }
 
@@ -11197,7 +11294,11 @@ export class ThinkRecoveryTestAgent extends Think {
     const internals = this as unknown as {
       _turnQueue: TurnQueue;
       _ensureSubmissionTable(): void;
-      _updateChatRecoveryIncident(
+      _chatRecoveryEngine(): unknown;
+    };
+    // The recovery engine writes the incident's outcome.
+    const recoveryEngine = internals._chatRecoveryEngine() as {
+      updateIncident(
         incidentId: string | undefined,
         status: string,
         reason?: string
@@ -11257,7 +11358,7 @@ export class ThinkRecoveryTestAgent extends Think {
     const session = this.session;
     const getLatestLeaf = session.getLatestLeaf.bind(session);
     const beforeStep = this.beforeStep.bind(this);
-    const updateIncident = internals._updateChatRecoveryIncident.bind(this);
+    const updateIncident = recoveryEngine.updateIncident.bind(recoveryEngine);
     const onSubmissionStatus = this.onSubmissionStatus.bind(this);
     const onChatResponse = this.onChatResponse.bind(this);
     const getModel = this.getModel.bind(this);
@@ -11292,7 +11393,7 @@ export class ThinkRecoveryTestAgent extends Think {
       }
       return beforeStep(ctx);
     };
-    internals._updateChatRecoveryIncident = async (id, status, reason) => {
+    recoveryEngine.updateIncident = async (id, status, reason) => {
       // The successor Task has been removed, but ledger completion has not
       // started. This is the exact terminal-stream / ledger handoff window.
       if (
@@ -11463,7 +11564,7 @@ export class ThinkRecoveryTestAgent extends Think {
       queue.enqueue = enqueue;
       session.getLatestLeaf = getLatestLeaf;
       this.beforeStep = beforeStep;
-      internals._updateChatRecoveryIncident = updateIncident;
+      Reflect.deleteProperty(recoveryEngine, "updateIncident");
       this.onSubmissionStatus = onSubmissionStatus;
       this.onChatResponse = onChatResponse;
       this.getModel = getModel;

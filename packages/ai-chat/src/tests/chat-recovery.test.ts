@@ -1015,6 +1015,15 @@ describe("chatRecovery", () => {
       await stub.insertInterruptedFiber("__cf_internal_chat_turn:req-mid");
 
       await stub.triggerFiberRecovery();
+      // Recovery schedules the continuation; it has not started a turn yet,
+      // so the turn queue reads idle until it does. Wait for the turn
+      // itself, then for it to finish.
+      await expect
+        .poll(() => stub.getOnChatMessageCallCount(), {
+          timeout: 10_000,
+          interval: 25
+        })
+        .toBe(1);
       await stub.waitForIdleForTest();
 
       // Progress was made: the continuation re-ran inference and produced new

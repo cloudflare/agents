@@ -938,6 +938,46 @@ export class ThinkClientToolsAgent extends Think {
     return error;
   }
 
+  private _recoveryAttemptForTest: Promise<void> | null = null;
+
+  /**
+   * Schedule a recovery continue for the latest reply and start its attempt,
+   * which then waits for the chat to settle.
+   */
+  async startRecoveryContinueForTest(): Promise<void> {
+    const reply = this.messages.filter((m) => m.role === "assistant").at(-1);
+    const incidentId = "inc-answered";
+    await this.ctx.storage.put(`cf:chat-recovery:incident:${incidentId}`, {
+      incidentId,
+      requestId: "root-answered",
+      recoveryRootRequestId: "root-answered",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+    this._recoveryAttemptForTest = this._chatRecoveryContinueDetached({
+      incidentId,
+      originalRequestId: "root-answered",
+      targetAssistantId: reply?.id
+    });
+  }
+
+  /** Wait for that attempt and return what it left on the incident. */
+  async finishRecoveryContinueForTest(): Promise<{
+    status?: string;
+    reason?: string;
+  }> {
+    await this._recoveryAttemptForTest;
+    const incident = await this.ctx.storage.get<{
+      status: string;
+      reason?: string;
+    }>("cf:chat-recovery:incident:inc-answered");
+    return { status: incident?.status, reason: incident?.reason };
+  }
+
   async setFailContinuationBeforeStream(value: boolean): Promise<void> {
     this._failContinuationBeforeStream = value;
   }

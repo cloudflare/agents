@@ -1979,11 +1979,7 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
     // SAFETY: this inert e2e fixture intercepts the existing bookkeeping seam;
     // Tasks, inference, cutover, submission settlement, and restart stay real.
     const internals = this as unknown as {
-      _updateChatRecoveryIncident(
-        id: string | undefined,
-        status: string,
-        reason?: string
-      ): Promise<void>;
+      _chatRecoveryEngine(): unknown;
       _enqueueChatRecovery(
         callback: "_chatRecoveryRetry",
         data: Record<string, unknown>,
@@ -1991,8 +1987,15 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
         delay: number
       ): Promise<void>;
     };
-    const updateIncident = internals._updateChatRecoveryIncident.bind(this);
-    internals._updateChatRecoveryIncident = async (id, status, reason) => {
+    const recoveryEngine = internals._chatRecoveryEngine() as {
+      updateIncident(
+        id: string | undefined,
+        status: string,
+        reason?: string
+      ): Promise<void>;
+    };
+    const updateIncident = recoveryEngine.updateIncident.bind(recoveryEngine);
+    recoveryEngine.updateIncident = async (id, status, reason) => {
       if (id === incidentId && status === "completed") {
         this._submissionBookkeepingPaused = true;
         // The test kills this process at the barrier; there is no live release.

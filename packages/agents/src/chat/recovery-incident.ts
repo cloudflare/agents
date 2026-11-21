@@ -135,6 +135,37 @@ export type ChatRecoveryIncident = {
    */
   attemptsInFlight?: ChatRecoveryAttempt[];
   /**
+   * What the recovery attempt scheduled for this incident will do: the
+   * callback, and for a continue the reply it targets. A turn that continues
+   * a reply reads it to tell whether this recovery was going to continue the
+   * same one. Optional for backward-compat.
+   */
+  scheduled?: {
+    callback: "_chatRecoveryContinue" | "_chatRecoveryRetry";
+    targetMessageId?: string;
+  };
+  /**
+   * How many times a recovery attempt was scheduled for this incident. A
+   * running attempt compares it before and after its turn to tell that the
+   * turn was cut off again and scheduled the next attempt. Optional for
+   * backward-compat.
+   */
+  scheduleCount?: number;
+  /**
+   * The schedule ({@link scheduleCount}) whose turn has started. A recovery
+   * callback is delivered at least once: after an isolate reset the same
+   * payload runs again. If its turn had started, that turn was cut off, and
+   * the interrupted turn's own recovery stores its partial and schedules the
+   * next attempt. The callback delivered again reads this and leaves the
+   * turn to it, so one interruption is continued once.
+   */
+  startedDelivery?: number;
+  /**
+   * The platform transient the last attempt hit, while the incident waits
+   * for that attempt to run again. Cleared by the next schedule.
+   */
+  deferredError?: string;
+  /**
    * Recoveries scheduled for this incident after a transient or rate-limited
    * stream error. Drives the retry backoff and is capped by `maxAttempts`.
    * Unlike `attempt`, it is not debounced and does not reset on progress: a
@@ -554,10 +585,25 @@ export async function recordChatTerminal(
   await storage.put(CHAT_LAST_TERMINAL_KEY, record);
 }
 
-/** Clear the durable terminal record once a later turn supersedes it (#1645). */
+/**
+ * Clear the durable terminal record once a later turn supersedes it (#1645).
+ *
+ * @param endedRequestId - The turn that just ended without an error, when
+ *   that is why the record is cleared. A record made for that same turn is
+ *   kept: recovery gave up on it while it was still running (a live stall
+ *   with the budget spent), and the turn then ended as aborted. The record
+ *   is the only trace of the give-up for a client that was away.
+ */
 export async function clearChatTerminal(
-  storage: Pick<DurableObjectStorage, "delete">
+  storage: Pick<DurableObjectStorage, "get" | "delete">,
+  endedRequestId?: string
 ): Promise<void> {
+  if (endedRequestId !== undefined) {
+    const record = await storage.get<ChatTerminalRecord>(
+      CHAT_LAST_TERMINAL_KEY
+    );
+    if (record?.requestId === endedRequestId) return;
+  }
   await storage.delete(CHAT_LAST_TERMINAL_KEY);
 }
 
@@ -877,6 +923,17 @@ export async function evaluateChatRecoveryIncident(
     ...(interruptedAttempts > 0 ? { interruptedAttempts } : {}),
     ...attemptsInFlightAfter(trigger, existing, exhausted),
     ...(transientRetries > 0 ? { transientRetries } : {}),
+    // Carried across evaluations: a running attempt compares it before and
+    // after its turn.
+    ...(existing?.scheduleCount
+      ? { scheduleCount: existing.scheduleCount }
+      : {}),
+    // Carried until the next schedule replaces the count it names: a
+    // callback delivered again while this evaluation's recovery is still
+    // deciding must not run the turn in the meantime.
+    ...(existing?.startedDelivery !== undefined
+      ? { startedDelivery: existing.startedDelivery }
+      : {}),
     ...(exhausted
       ? {
           reason: interruptedBudgetExceeded
