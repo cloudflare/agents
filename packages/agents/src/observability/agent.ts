@@ -295,6 +295,18 @@ export type AgentObservabilityEvent =
       }
     >
   | BaseEvent<
+      "chat:continuation:dropped",
+      {
+        /** The request id the continuation would have run under. */
+        requestId: string;
+        /**
+         * Why it will not run: the reply it would continue already has its
+         * answer, a newer message follows that reply, or it was stopped.
+         */
+        reason: "answered" | "moved_on" | "stopped";
+      }
+    >
+  | BaseEvent<
       "chat:transcript:repaired",
       {
         requestId?: string;

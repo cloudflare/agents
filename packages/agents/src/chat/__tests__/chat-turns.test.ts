@@ -185,36 +185,6 @@ describe("ChatTurns", () => {
     expect(host.fired).toBe(1);
   });
 
-  // ── Continuation turn start ─────────────────────────────────────────
-
-  it("takes a continuation while its message is the latest", async () => {
-    host.transcript = [user("u1"), toolReply("a1", "output-available")];
-    await turns.applyInteraction(
-      async () => ({ status: "changed", messageId: "a1" }),
-      true,
-      spec
-    );
-    const taken = turns.takeContinuation();
-    expect(taken?.requestId).toBe("cont-1");
-    expect(taken?.pastCoalesce).toBe(true);
-  });
-
-  it("takes no continuation once a newer message follows its target", async () => {
-    host.transcript = [user("u1"), toolReply("a1", "output-available")];
-    await turns.applyInteraction(
-      async () => ({ status: "changed", messageId: "a1" }),
-      true,
-      spec
-    );
-    host.transcript = [...host.transcript, user("u2")];
-    expect(turns.takeContinuation()).toBeNull();
-    expect(turns.continuation.pending?.pastCoalesce).toBe(false);
-  });
-
-  it("takes no continuation when none is pending", () => {
-    expect(turns.takeContinuation()).toBeNull();
-  });
-
   // ── Reset guard ─────────────────────────────────────────────────────
 
   it("reports a reset to the turn that was running when it happened", async () => {
