@@ -186,29 +186,19 @@ import {
   enforceRowSizeLimit,
   StreamAccumulator,
   CHAT_MESSAGE_TYPES,
-  TurnQueue,
   ResumableStream,
   createChatStreams,
-  ContinuationState,
-  PreStreamTurns,
-  AutoContinuationController,
-  continuationTargetIsLatest,
+  ChatTurns,
   type ToolInteractionOutcome,
-  TIMED_OUT,
-  awaitWithDeadline,
-  drainInteractionApplies,
   interceptAgentToolBroadcast,
   isPositionlessAgentToolChunk,
   AgentToolProgressEmitter,
-  SubmitConcurrencyController,
   createToolsFromClientSchemas,
-  AbortRegistry,
   applyToolUpdate,
   toolResultUpdate,
   crossMessageToolResultUpdate,
   toolApprovalUpdate,
   pausedExecutionUpdate,
-  hasIncompleteToolBatch,
   partAwaitsClientInteraction,
   clientResolvableToolNames,
   parseProtocolMessage,
@@ -218,8 +208,11 @@ import {
   isLateToolInputChunk,
   lateToolInputForwardChunks,
   repairInterruptedToolParts,
+  settleInterruptedReply,
+  streamChunksFinished,
   toolPartHasSettledResult,
   persistReconstructedOrphan,
+  keepStoredReplies,
   reconcileMessages,
   CHAT_RECOVERY_TASK_NAME,
   chatRecoveryTaskRunOptions,
@@ -264,13 +257,16 @@ import {
   type ChatRecoveryKind
 } from "agents/chat";
 import type { Streams } from "agents/streams";
-import { CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS } from "agents/chat";
+import {
+  CHAT_RECOVERY_CANCELLED_REASON,
+  CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
+  type RecoveryAttemptHandle
+} from "agents/chat";
 import type {
   StreamChunkData,
   ClientToolSchema,
   ClientToolExecutor,
   MessagePart,
-  SubmitConcurrencyDecision,
   ChatFiberSnapshot,
   ChatTurnOutcome,
   OrphanPersistStore
@@ -4784,8 +4780,29 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     return (await this._syncMessages()).slice();
   }
 
-  private _aborts = new AbortRegistry();
-  private _turnQueue = new TurnQueue();
+  /**
+   * The turn core shared with `@cloudflare/ai-chat`: the turn queue, abort
+   * registry, submit concurrency, continuation slots and barrier, pre-stream
+   * set and tool-result apply chain, with the rules that tie them together.
+   * The fields below that alias its parts are the same objects.
+   */
+  private readonly _turns = new ChatTurns<Connection>(
+    {
+      messages: () => this.messages,
+      isReplyStreaming: () => this._streamingAssistant !== null,
+      streamingReply: () => this._streamingAssistant?.toMessage() ?? null,
+      clientToolNames: () => this._clientResolvableToolNames(),
+      clientAnswerableToolNames: () => this._clientAnswerableToolNames(),
+      hasActiveStream: () => this._resumableStream.hasActiveStream(),
+      generateRequestId: () => crypto.randomUUID(),
+      keepAliveWhile: (fn) => this.keepAliveWhile(fn),
+      fireContinuation: () => this._fireAutoContinuation(),
+      lastTurnReplyId: () => this._lastTurnReplyId()
+    },
+    { defaultDebounceMs: Think.MESSAGE_DEBOUNCE_MS }
+  );
+  private readonly _aborts = this._turns.aborts;
+  private readonly _turnQueue = this._turns.queue;
   /**
    * The Streams capability backing `_resumableStream`: chat's in-flight
    * output lives in the shared durable chunk log, readable by any
@@ -4799,7 +4816,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   private _resumeHandshakeInstance: ResumeHandshake | null = null;
   private _lastClientTools: ClientToolSchema[] | undefined;
   private _lastBody: Record<string, unknown> | undefined;
-  private _continuation = new ContinuationState<Connection>();
+  private readonly _continuation = this._turns.continuation;
   /**
    * Accepted-but-not-yet-streamed turns and the connections parked waiting for
    * one (#1784). See {@link ResumeHandshake} `preStream`.
@@ -4811,29 +4828,29 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * `ResumableStream`) or the turn finished. Breaks if a pre-stream wait is ever
    * moved onto a durable alarm that releases the DO; if so, persist this state.
    */
-  private _preStream = new PreStreamTurns<Connection>();
+  private readonly _preStream = this._turns.preStream;
   // Shared auto-continuation barrier (#1649 / #1650): owns the coalesce timer
-  // and the double-fire guard. Parameterized by this agent's stream-active
-  // signal, apply-drain, and continuation-turn pipeline (`_fireAutoContinuation`).
-  private _autoContinuation = new AutoContinuationController<Connection>({
-    continuation: this._continuation,
-    generateRequestId: () => crypto.randomUUID(),
-    isStreamActive: () => this._streamingAssistant !== null,
-    hasPendingInteraction: () => this._pendingInteractionPromise !== null,
-    hasIncompleteToolBatch: () => this._hasIncompleteToolBatch(),
-    drainInteractionApplies: () => this._drainInteractionApplies(),
-    keepAliveWhile: <T>(fn: () => Promise<T>) => this.keepAliveWhile(fn),
-    fire: () => this._fireAutoContinuation()
-  });
+  // and the double-fire guard.
+  private readonly _autoContinuation = this._turns.autoContinuation;
   private _insideResponseHook = false;
   private _insideInferenceLoop = false;
-  private _pendingInteractionPromise: Promise<boolean> | null = null;
+  private get _pendingInteractionPromise(): Promise<boolean> | null {
+    return this._turns.pendingInteraction;
+  }
+  private set _pendingInteractionPromise(value: Promise<boolean> | null) {
+    this._turns.pendingInteraction = value;
+  }
   // Serialization tail for client-tool result/approval applies (#1649). Each
   // apply is a read-modify-write of the full message; running siblings from a
   // parallel tool batch concurrently lets last-write-wins clobber the others
   // back to `input-available`. Chaining every apply off this tail makes them
   // commit atomically in arrival order.
-  private _interactionApplyTail: Promise<void> = Promise.resolve();
+  private get _interactionApplyTail(): Promise<void> {
+    return this._turns.interactionTail;
+  }
+  private set _interactionApplyTail(value: Promise<void>) {
+    this._turns.interactionTail = value;
+  }
   // The in-flight assistant message for the active streaming turn. Until
   // `_persistAssistantMessage` writes it at a turn boundary, the message lives
   // ONLY in this accumulator — not in storage and not in `this.messages`. A
@@ -4845,6 +4862,16 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   // persist. Null when no stream is active. Mirrors `@cloudflare/ai-chat`'s
   // `_streamingMessage` handling.
   private _streamingAssistant: StreamAccumulator | null = null;
+  /**
+   * The live reply while {@link _storeLiveReply} stores it. The reply is
+   * built before the write, and the write can await. A tool result applied to
+   * the accumulator in between sets `dirty`, so the reply is stored again
+   * with it.
+   */
+  private _replyBeingStored: {
+    accumulator: StreamAccumulator;
+    dirty: boolean;
+  } | null = null;
   // Resolved pauses, by tool call id, whose outcome write or generation drop
   // may not have landed: the outcome is being written, or its own turn was
   // still streaming. See `_dropGenerationAfterResolvedPause`. Mirrored in
@@ -4852,9 +4879,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   // loaded once per isolate.
   private _deferredResolvedPauses = new Map<string, ResolvedPauseOutcome>();
   private _deferredResolvedPausesLoad: Promise<void> | undefined;
-  private _submitConcurrency = new SubmitConcurrencyController({
-    defaultDebounceMs: Think.MESSAGE_DEBOUNCE_MS
-  });
+  private readonly _submitConcurrency = this._turns.submits;
   private static MESSAGE_DEBOUNCE_MS = 750;
   private _agentToolForwarders = new Map<
     string,
@@ -7611,6 +7636,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // splice stays correct even when the override changes the message count.
     this._turnModelMessageBaseline = finalMessages.length;
     this._activeTurnTools = mergedTools;
+    this._recordUnexecutedTools(mergedTools);
 
     // `maxTurns` is an overridable per-channel default: a user `beforeTurn`
     // returning `maxSteps` still wins, then the channel cap, then the instance
@@ -13693,36 +13719,30 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           this._lastClientTools = event.clientTools as ClientToolSchema[];
           this._persistClientTools();
         }
-        this._enqueueInteractionApply(async () => {
-          const outcome = await this._applyToolResult(
-            event.toolCallId,
-            event.output,
-            event.state as "output-error" | undefined,
-            event.errorText
-          );
-          // Only a result that settled its call continues, targeted at that
-          // call's message; without autoContinue it re-arms a batch (#1650).
-          this._autoContinuation.afterInteraction(
-            outcome,
-            event.autoContinue === true,
-            () => this._continuationSpec(connection)
-          );
-        });
+        // Only a result that settled its call continues, targeted at that
+        // call's message; without autoContinue it re-arms a batch (#1650).
+        this._turns.applyInteraction(
+          () =>
+            this._applyToolResult(
+              event.toolCallId,
+              event.output,
+              event.state as "output-error" | undefined,
+              event.errorText
+            ),
+          event.autoContinue === true,
+          () => this._continuationSpec(connection),
+          (run) => this._enqueueInteractionOutcome(run)
+        );
         break;
       }
 
       case "tool-approval": {
-        this._enqueueInteractionApply(async () => {
-          const outcome = await this._applyToolApproval(
-            event.toolCallId,
-            event.approved
-          );
-          this._autoContinuation.afterInteraction(
-            outcome,
-            event.autoContinue === true,
-            () => this._continuationSpec(connection)
-          );
-        });
+        this._turns.applyInteraction(
+          () => this._applyToolApproval(event.toolCallId, event.approved),
+          event.autoContinue === true,
+          () => this._continuationSpec(connection),
+          (run) => this._enqueueInteractionOutcome(run)
+        );
         break;
       }
 
@@ -13806,335 +13826,277 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const isRegeneration = rawTrigger === "regenerate-message";
     const isSubmitMessage = !isRegeneration;
     const requestId = event.id;
-    let messagesPersisted = false;
-    let failureStage: ChatErrorContext["stage"] = "persist";
     const requestOriginIds = originMessageIds(incomingMessages);
     if (requestOriginIds) {
       this._requestOriginMessageIds.set(requestId, requestOriginIds);
     }
 
-    // ── Concurrency decision (before persisting anything) ────────
-    const concurrencyDecision =
-      this._getSubmitConcurrencyDecision(isSubmitMessage);
-
-    if (concurrencyDecision.action === "drop") {
-      this._rollbackDroppedSubmit(connection);
-      this._completeSkippedRequest(connection, requestId);
-      this._requestOriginMessageIds.delete(requestId);
-      return;
-    }
-
-    // A genuinely-new turn supersedes any pending terminal record (#1645) so a
-    // stale exhaustion can't replay over the resume handshake to a client that
-    // reconnects in the window between accepting this submit and the new turn
-    // streaming. Mirrors `@cloudflare/ai-chat`; without it a reconnect in that
-    // gap would surface the previous failed turn's error even though the user
-    // has already moved on. Completion clears it too, but only once the turn
-    // resolves — which leaves the gap open.
-    await withAgentSpan(
-      this,
-      "clear_previous_chat_state",
-      "interaction",
-      {
-        "cloudflare.agents.component": "think",
-        "cloudflare.agents.turn.request_id": requestId,
-        "cloudflare.agents.turn.trigger": "ws-chat"
-      },
-      () => this._clearChatTerminal()
-    );
-
-    // Mark this turn as accepted-but-not-yet-streamed (#1784) so a client that
-    // reconnects/re-mounts before the stream starts is parked and told to keep
-    // waiting (see _resumeHandshake / onConnect), then flushed into
-    // STREAM_RESUMING on _startResumableStream or released on settle.
-    this._preStream.begin(requestId);
-
-    const releasePendingEnqueue = this._submitConcurrency.beginEnqueue();
-    let pendingEnqueue = true;
-    const epoch = this._turnQueue.generation;
-    const releaseIfPending = () => {
-      if (!pendingEnqueue) return;
-      pendingEnqueue = false;
-      releasePendingEnqueue();
-    };
-
+    // The turn core runs the request: decide, accept (pre-stream mark and
+    // abort controller, so a cancel while it waits in the queue is not lost),
+    // persist, queue, the queued checks, then the turn. It always settles the
+    // pre-stream turn (#1784) and drops the abort controller.
     try {
-      // ── Persist client tools and body (only for accepted requests) ──
-      const requestClientTools =
-        rawClientTools && rawClientTools.length > 0
-          ? rawClientTools
-          : undefined;
-      const requestBody =
-        Object.keys(customBody).length > 0 ? customBody : undefined;
-      withAgentSpan(
-        this,
-        "persist_chat_request_context",
-        "interaction",
-        {
-          "cloudflare.agents.component": "think",
-          "cloudflare.agents.turn.request_id": requestId,
-          "cloudflare.agents.turn.trigger": "ws-chat"
+      await this._turns.runClientRequest<{
+        branchParentId: string | undefined;
+        generation: number;
+      }>({
+        requestId,
+        isSubmitMessage,
+        concurrency: this.messageConcurrency,
+        onDropped: () => {
+          this._rollbackDroppedSubmit(connection);
+          this._completeSkippedRequest(connection, requestId);
         },
-        () => {
-          if (requestClientTools) {
-            this._lastClientTools = requestClientTools;
-            this._persistClientTools();
-          } else if (rawClientTools !== undefined) {
-            this._lastClientTools = undefined;
-            this._persistClientTools();
-          }
+        // A genuinely-new turn supersedes any pending terminal record (#1645)
+        // so a stale exhaustion can't replay over the resume handshake to a
+        // client that reconnects between this submit being accepted and the
+        // new turn streaming.
+        onAccepted: () =>
+          withAgentSpan(
+            this,
+            "clear_previous_chat_state",
+            "interaction",
+            {
+              "cloudflare.agents.component": "think",
+              "cloudflare.agents.turn.request_id": requestId,
+              "cloudflare.agents.turn.trigger": "ws-chat"
+            },
+            () => this._clearChatTerminal()
+          ),
+        persist: async ({ generation, isCurrent }) => {
+          // ── Reconcile, persist, and broadcast user messages ──────────
+          //
+          // The client may post an in-flight assistant snapshot it minted
+          // optimistically (e.g. while a previous tool call is still
+          // streaming). Reconcile against the server's current active path
+          // so client IDs map onto server IDs and stale client states pick
+          // up the server's tool outputs. Without this, Session's
+          // INSERT-OR-IGNORE-by-ID would persist a duplicate orphan
+          // assistant row alongside the real server-generated one.
+          const reconciledTurn = await this._reconcileAndPersistIncoming(
+            incomingMessages,
+            { requestId, isRegeneration, isCurrent, channel: "web" }
+          );
+          if (!reconciledTurn) return null;
 
-          this._lastBody = requestBody;
-          this._persistBody();
-        }
-      );
+          this._broadcastMessages([connection.id]);
+          return { branchParentId: reconciledTurn.branchParentId, generation };
+        },
+        enqueue: (turn, generation, onQueued) =>
+          this.keepAliveWhile(async () => {
+            const result = await this._admitTurn({
+              admission: "queue",
+              trigger: "ws-chat",
+              requestId,
+              generation,
+              continuation: false,
+              channel: "web",
+              onQueued,
+              execute: turn
+            });
+            return result.status;
+          }),
+        onSkipped: () => this._completeSkippedRequest(connection, requestId),
+        // Cancelled before its turn started: the model is never called. Like
+        // a skipped request it never streamed, so only the tab that sent it
+        // was ever shown it.
+        onCancelledBeforeStart: () =>
+          this._endUnstartedRequest(connection, requestId, "aborted"),
+        run: async ({ branchParentId, generation }, abortSignal) => {
+          // The request's tools and body become the stored request context
+          // now that its turn runs. Storing them when the request was
+          // accepted would change what a continuation of the turn still
+          // running uses, and a request cancelled or skipped in the queue
+          // would leave its context behind.
+          const requestClientTools =
+            rawClientTools && rawClientTools.length > 0
+              ? rawClientTools
+              : undefined;
+          const requestBody =
+            Object.keys(customBody).length > 0 ? customBody : undefined;
+          withAgentSpan(
+            this,
+            "persist_chat_request_context",
+            "turn",
+            {
+              "cloudflare.agents.component": "think",
+              "cloudflare.agents.turn.request_id": requestId,
+              "cloudflare.agents.turn.trigger": "ws-chat"
+            },
+            () => {
+              if (requestClientTools) {
+                this._lastClientTools = requestClientTools;
+                this._persistClientTools();
+              } else if (rawClientTools !== undefined) {
+                this._lastClientTools = undefined;
+                this._persistClientTools();
+              }
 
-      // ── Reconcile, persist, and broadcast user messages ──────────
-      //
-      // The client may post an in-flight assistant snapshot it minted
-      // optimistically (e.g. while a previous tool call is still
-      // streaming). Reconcile against the server's current active path
-      // so client IDs map onto server IDs and stale client states pick
-      // up the server's tool outputs. Without this, Session's
-      // INSERT-OR-IGNORE-by-ID would persist a duplicate orphan
-      // assistant row alongside the real server-generated one.
-      const clientToolsForTurn = this._lastClientTools;
-      const bodyForTurn = this._lastBody;
-
-      const reconciledTurn = await this._reconcileAndPersistIncoming(
-        incomingMessages,
-        {
-          requestId,
-          isRegeneration,
-          isCurrent: () => this._turnQueue.generation === epoch,
-          channel: "web"
-        }
-      );
-      if (!reconciledTurn) {
-        this._completeSkippedRequest(connection, requestId);
-        return;
-      }
-      const { branchParentId } = reconciledTurn;
-
-      this._broadcastMessages([connection.id]);
-      messagesPersisted = true;
-
-      // ── Enter turn queue ────────────────────────────────────────
-      failureStage = "turn";
-      const abortSignal = this._aborts.getSignal(requestId);
-
-      await this.keepAliveWhile(async () => {
-        const turnPromise = this._admitTurn({
-          admission: "queue",
-          trigger: "ws-chat",
-          requestId,
-          generation: epoch,
-          continuation: false,
-          channel: "web",
-          onQueued: releaseIfPending,
-          execute: async () => {
-            // Superseded by a later overlapping submit (latest/merge/debounce)
-            if (
-              this._submitConcurrency.isSuperseded(
-                concurrencyDecision.submitSequence
-              )
-            ) {
-              this._completeSkippedRequest(connection, requestId);
-              return;
+              this._lastBody = requestBody;
+              this._persistBody();
             }
+          );
+          const clientToolsForTurn = this._lastClientTools;
+          const bodyForTurn = this._lastBody;
 
-            // Debounce: wait for quiet period
-            if (concurrencyDecision.debounceUntilMs !== null) {
-              await this._submitConcurrency.waitForTimestamp(
-                concurrencyDecision.debounceUntilMs
+          const chatTurnBody = async () => {
+            // Bounded compact-and-retry loop (opt-in via
+            // `contextOverflow.reactive`). A turn that overflows the
+            // context window mid-flight is compacted and re-run from the
+            // persisted partial instead of dying terminally. Each attempt
+            // re-runs the same turn (`continuation: false`) — not an
+            // auto-continuation.
+            for (let attempt = 0; ; attempt++) {
+              const result = await agentContext.run(
+                {
+                  agent: this,
+                  connection,
+                  request: undefined,
+                  email: undefined
+                },
+                () =>
+                  this._runInferenceLoop(
+                    {
+                      signal: abortSignal,
+                      clientTools: clientToolsForTurn,
+                      body: bodyForTurn,
+                      continuation: false
+                    },
+                    branchParentId
+                  )
               );
 
-              if (this._turnQueue.generation !== epoch) {
-                this._completeSkippedRequest(connection, requestId);
+              if (!result) {
+                this._broadcastChat({
+                  type: MSG_CHAT_RESPONSE,
+                  id: requestId,
+                  body: "No response was generated.",
+                  done: true
+                });
                 return;
               }
-              if (
-                this._submitConcurrency.isSuperseded(
-                  concurrencyDecision.submitSequence
-                )
-              ) {
-                this._completeSkippedRequest(connection, requestId);
-                return;
-              }
-            }
 
-            const chatTurnBody = async () => {
-              // Bounded compact-and-retry loop (opt-in via
-              // `contextOverflow.reactive`). A turn that overflows the
-              // context window mid-flight is compacted and re-run from the
-              // persisted partial instead of dying terminally. Each attempt
-              // re-runs the same turn (`continuation: false`) — not an
-              // auto-continuation.
-              for (let attempt = 0; ; attempt++) {
-                const result = await agentContext.run(
-                  {
-                    agent: this,
-                    connection,
-                    request: undefined,
-                    email: undefined
-                  },
-                  () =>
-                    this._runInferenceLoop(
-                      {
-                        signal: abortSignal,
-                        clientTools: clientToolsForTurn,
-                        body: bodyForTurn,
-                        continuation: false
-                      },
-                      branchParentId
-                    )
-                );
-
-                if (!result) {
-                  this._broadcastChat({
-                    type: MSG_CHAT_RESPONSE,
-                    id: requestId,
-                    body: "No response was generated.",
-                    done: true
-                  });
-                  return;
-                }
-
-                // The consumer suppresses a classified overflow whenever
-                // recovery is enabled; the driver (here) owns the
-                // retry-vs-terminal call so every overflow terminal is reported
-                // identically.
-                let overflowError: string | undefined;
-                let overflowRequested = false;
-                const overflowRecovery = this._overflowReactiveEnabled
-                  ? {
-                      onRetry: (error?: string) => {
-                        overflowRequested = true;
-                        overflowError = error;
-                      }
+              // The consumer suppresses a classified overflow whenever
+              // recovery is enabled; the driver (here) owns the
+              // retry-vs-terminal call so every overflow terminal is reported
+              // identically.
+              let overflowError: string | undefined;
+              let overflowRequested = false;
+              const overflowRecovery = this._overflowReactiveEnabled
+                ? {
+                    onRetry: (error?: string) => {
+                      overflowRequested = true;
+                      overflowError = error;
                     }
-                  : undefined;
-
-                await withAgentSpan(
-                  this,
-                  "persist_chat_result",
-                  "turn",
-                  {
-                    "cloudflare.agents.component": "think",
-                    "cloudflare.agents.turn.request_id": requestId,
-                    "cloudflare.agents.turn.trigger": "ws-chat",
-                    "cloudflare.agents.turn.admission": "queue",
-                    "cloudflare.agents.turn.generation": epoch,
-                    "cloudflare.agents.turn.continuation": false
-                  },
-                  () =>
-                    this._streamResult(requestId, result, abortSignal, {
-                      parentId: branchParentId,
-                      overflowRecovery
-                    })
-                );
-
-                if (overflowRequested) {
-                  if (
-                    attempt < this._overflowMaxRetries &&
-                    !abortSignal?.aborted
-                  ) {
-                    const shortened = await withAgentSpan(
-                      this,
-                      "compact_chat_history",
-                      "turn",
-                      {
-                        "cloudflare.agents.component": "think",
-                        "cloudflare.agents.turn.request_id": requestId,
-                        "cloudflare.agents.turn.trigger": "ws-chat",
-                        "cloudflare.agents.turn.admission": "queue",
-                        "cloudflare.agents.turn.generation": epoch,
-                        "cloudflare.agents.turn.continuation": false
-                      },
-                      () =>
-                        this._compactForContextOverflow("reactive", {
-                          requestId,
-                          attempt: attempt + 1
-                        })
-                    );
-                    // Compaction shortened history → retry. A no-op compaction
-                    // can't fix the overflow, so fall through to terminal.
-                    if (shortened) continue;
                   }
-                  // Budget spent, aborted, or compaction no-op: deliver
-                  // terminally (through onChatError, classified) so the turn
-                  // never loops or ends silently with no answer.
-                  const message = this._finalizeContextOverflowError(
-                    requestId,
-                    overflowError
+                : undefined;
+
+              await withAgentSpan(
+                this,
+                "persist_chat_result",
+                "turn",
+                {
+                  "cloudflare.agents.component": "think",
+                  "cloudflare.agents.turn.request_id": requestId,
+                  "cloudflare.agents.turn.trigger": "ws-chat",
+                  "cloudflare.agents.turn.admission": "queue",
+                  "cloudflare.agents.turn.generation": generation,
+                  "cloudflare.agents.turn.continuation": false
+                },
+                () =>
+                  this._streamResult(requestId, result, abortSignal, {
+                    parentId: branchParentId,
+                    overflowRecovery
+                  })
+              );
+
+              if (overflowRequested) {
+                if (
+                  attempt < this._overflowMaxRetries &&
+                  !abortSignal?.aborted
+                ) {
+                  const shortened = await withAgentSpan(
+                    this,
+                    "compact_chat_history",
+                    "turn",
+                    {
+                      "cloudflare.agents.component": "think",
+                      "cloudflare.agents.turn.request_id": requestId,
+                      "cloudflare.agents.turn.trigger": "ws-chat",
+                      "cloudflare.agents.turn.admission": "queue",
+                      "cloudflare.agents.turn.generation": generation,
+                      "cloudflare.agents.turn.continuation": false
+                    },
+                    () =>
+                      this._compactForContextOverflow("reactive", {
+                        requestId,
+                        attempt: attempt + 1
+                      })
                   );
-                  this._broadcastChat({
-                    type: MSG_CHAT_RESPONSE,
-                    id: requestId,
-                    body: message,
-                    done: true,
-                    error: true
-                  });
+                  // Compaction shortened history → retry. A no-op compaction
+                  // can't fix the overflow, so fall through to terminal.
+                  if (shortened) continue;
                 }
-                return;
+                // Budget spent, aborted, or compaction no-op: deliver
+                // terminally (through onChatError, classified) so the turn
+                // never loops or ends silently with no answer.
+                const message = this._finalizeContextOverflowError(
+                  requestId,
+                  overflowError
+                );
+                this._broadcastChat({
+                  type: MSG_CHAT_RESPONSE,
+                  id: requestId,
+                  body: message,
+                  done: true,
+                  error: true
+                });
               }
-            };
+              return;
+            }
+          };
 
-            await this._runChatRecoveryFiber(
-              requestId,
-              false,
-              chatTurnBody,
-              branchParentId
-            );
-          }
-        });
-
-        const turnResult = await turnPromise;
-
-        if (turnResult.status === "stale") {
+          await this._runChatRecoveryFiber(
+            requestId,
+            false,
+            chatTurnBody,
+            branchParentId
+          );
+        },
+        onError: async (error, stage) => {
+          const wrapped = this.onChatError(error, {
+            requestId,
+            stage,
+            messagesPersisted: stage === "turn"
+          });
+          const errorMessage =
+            wrapped instanceof Error ? wrapped.message : String(wrapped);
+          this._emit("chat:request:failed", {
+            requestId,
+            stage,
+            messagesPersisted: stage === "turn",
+            error: errorMessage
+          });
+          // Persist the terminal error before broadcasting it: the broadcast is
+          // transient, so a client disconnected at this moment (a pre-stream
+          // failure like message reconciliation) would otherwise never learn the
+          // turn failed and stay frozen on reconnect (see `_buildIdleConnectMessages`).
+          await this._recordTerminalChatStatus(
+            "error",
+            requestId,
+            errorMessage
+          );
           this._broadcastChat({
             type: MSG_CHAT_RESPONSE,
             id: requestId,
-            body: "",
+            body: errorMessage,
             done: true,
-            outcome: "skipped"
+            error: true
           });
         }
       });
-    } catch (error) {
-      const wrapped = this.onChatError(error, {
-        requestId,
-        stage: failureStage,
-        messagesPersisted
-      });
-      const errorMessage =
-        wrapped instanceof Error ? wrapped.message : String(wrapped);
-      this._emit("chat:request:failed", {
-        requestId,
-        stage: failureStage,
-        messagesPersisted,
-        error: errorMessage
-      });
-      // Persist the terminal error before broadcasting it: the broadcast is
-      // transient, so a client disconnected at this moment (a pre-stream
-      // failure like message reconciliation) would otherwise never learn the
-      // turn failed and stay frozen on reconnect (see `_buildIdleConnectMessages`).
-      await this._recordTerminalChatStatus("error", requestId, errorMessage);
-      this._broadcastChat({
-        type: MSG_CHAT_RESPONSE,
-        id: requestId,
-        body: errorMessage,
-        done: true,
-        error: true
-      });
     } finally {
-      releaseIfPending();
-      this._aborts.remove(requestId);
       this._requestOriginMessageIds.delete(requestId);
-      // Release any pre-stream parked connections (#1784). No-op when the turn
-      // streamed (flushed on _startResumableStream); covers the no-response /
-      // pre-stream-failure paths.
-      this._settlePreStreamTurn(requestId);
     }
   }
 
@@ -14147,8 +14109,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * only turn execution state.
    */
   protected resetTurnState(): void {
-    this._turnQueue.reset();
-    this._aborts.destroyAll();
+    // Queue generation, abort controllers, submit concurrency, the tool-result
+    // apply chain, the continuation slots and barrier, and parked connections.
+    this._turns.reset();
     for (const controller of this._submissionAbortControllers.values()) {
       controller.abort(new Error("Turn state reset"));
     }
@@ -14159,23 +14122,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     ).catch((error) => {
       console.error("[Think] Failed to skip pending submissions", error);
     });
-    // Tear down the event-driven auto-continuation barrier (#1650): cancel the
-    // coalesce timer and clear the double-fire guard so a reset mid-park can't
-    // leave a stale flag pinning future continuations.
-    this._autoContinuation.reset();
-    this._submitConcurrency.reset();
     this._lastTurnChannel = undefined;
-    this._pendingInteractionPromise = null;
-    // Drop the apply chain so new interactions don't serialize behind a stale
-    // (possibly hung) apply from the turn we just reset (#1649).
-    this._interactionApplyTail = Promise.resolve();
     // The streaming turn (if any) is being torn down; stop exposing its
     // accumulator so a late tool result doesn't apply to an abandoned message.
     this._streamingAssistant = null;
-    this._continuation.sendResumeNone();
-    this._continuation.clearAll();
-    this._preStream.releaseAwaiting();
-    this._preStream.reset();
   }
 
   /**
@@ -14199,7 +14149,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * without requiring the caller to know the id.
    */
   cancelChat(requestId: string, reason?: string): void {
-    this._aborts.cancel(requestId, reason);
+    this._turns.cancel(requestId, reason);
     void this.keepAliveWhile(() => this._cancelScheduledRecovery(requestId));
   }
 
@@ -14241,13 +14191,44 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     return true;
   }
 
+  /**
+   * Whether a client stopped this running recovery attempt. The cancel marked
+   * the incident when it was still scheduled; record it here otherwise, so
+   * the attempt's own outcome does not overwrite the user's stop. A
+   * submission the recovery owned settles as `aborted`.
+   */
+  private async _recoveryAttemptStopped(
+    stop: RecoveryAttemptHandle,
+    data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined
+  ): Promise<boolean> {
+    if (!stop.signal.aborted) return false;
+    if (
+      !(await this._chatRecoveryEngine().isRecoveryCancelled(data?.incidentId))
+    ) {
+      await this._updateChatRecoveryIncident(
+        data?.incidentId,
+        "skipped",
+        CHAT_RECOVERY_CANCELLED_REASON
+      );
+    }
+    if (data?.recoveredRequestId) {
+      await this._completeRecoveredSubmission(
+        data.recoveredRequestId,
+        "aborted",
+        null,
+        null
+      );
+    }
+    return true;
+  }
+
   /** Abort every in-flight chat turn on this agent. */
   cancelAllChats(): void {
     this._aborts.destroyAll();
   }
 
   protected abortRequest(requestId: string, reason?: unknown): void {
-    this._aborts.cancel(requestId, reason);
+    this._turns.cancel(requestId, reason);
   }
 
   /**
@@ -14770,8 +14751,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       }
       streamFinalized = true;
 
-      assistantMsg = accumulator.toMessage();
-      const response: ChatResponseResult = {
+      const buildReply = () =>
+        streamError || aborted
+          ? this._settleInterruptedReply(accumulator.toMessage())
+          : accumulator.toMessage();
+      assistantMsg = buildReply();
+      let response: ChatResponseResult = {
         message: assistantMsg,
         requestId,
         continuation: false,
@@ -14779,14 +14764,28 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         ...(streamError && { error: streamError })
       };
       if (accumulator.parts.length > 0) {
-        await this._rememberPendingResponseHook(response);
-        persistedAssistantId = await this._persistAssistantMessageWithCutover(
-          streamId,
-          assistantMsg,
-          undefined,
-          this._streamCutoverOptions(requestId),
-          { requestId, result: { status: aborted ? "aborted" : "completed" } }
+        const { message } = await this._storeLiveReply(
+          accumulator,
+          buildReply,
+          async (built) => {
+            response = { ...response, message: built };
+            await this._rememberPendingResponseHook(response);
+            persistedAssistantId =
+              await this._persistAssistantMessageWithCutover(
+                streamId,
+                built,
+                undefined,
+                this._streamCutoverOptions(requestId),
+                {
+                  requestId,
+                  result: { status: aborted ? "aborted" : "completed" }
+                }
+              );
+            return persistedAssistantId !== undefined;
+          }
         );
+        assistantMsg = message;
+        response = { ...response, message };
         this._broadcastMessages();
       }
       // After the transcript broadcast: `done` flips `useAgentChat` to ready,
@@ -14835,10 +14834,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           persistPartial: async () => {
             if (persistedAssistantId) return persistedAssistantId;
             if (accumulator.parts.length === 0) return undefined;
-            const partial = accumulator.toMessage();
-            if (!(await this._persistAssistantMessage(partial))) {
-              return undefined;
-            }
+            const { stored, message: partial } = await this._storeLiveReply(
+              accumulator,
+              () => this._settleInterruptedReply(accumulator.toMessage()),
+              (message) => this._persistAssistantMessage(message)
+            );
+            if (!stored) return undefined;
             assistantMsg = partial;
             persistedAssistantId = partial.id;
             this._broadcastMessages();
@@ -14902,8 +14903,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       }
       try {
         if (!assistantMsg && accumulator.parts.length > 0) {
-          assistantMsg = accumulator.toMessage();
-          await this._persistAssistantMessage(assistantMsg);
+          assistantMsg = (
+            await this._storeLiveReply(
+              accumulator,
+              () => this._settleInterruptedReply(accumulator.toMessage()),
+              (message) => this._persistAssistantMessage(message)
+            )
+          ).message;
           this._broadcastMessages();
         }
       } finally {
@@ -15066,7 +15072,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       extendLeafAssistant?: boolean;
     }
   ): Promise<StreamResultStatus> {
-    const clearGen = this._turnQueue.generation;
+    // Whether the chat was reset (cleared) since this turn was admitted. A
+    // reset before the stream started counts too.
+    const resetSinceTurnStarted = this._turns.turnResetGuard();
     const continuation = options?.continuation ?? false;
     const parentId = options?.parentId;
     const leaf = this.messages.at(-1);
@@ -15395,15 +15403,19 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           partialParts: partialMsg.parts,
           branchParentId: parentId,
           persistPartial: async () => {
-            if (
-              this._turnQueue.generation !== clearGen ||
-              accumulator.parts.length === 0
-            ) {
+            if (resetSinceTurnStarted() || accumulator.parts.length === 0) {
               return undefined;
             }
-            if (!(await this._persistAssistantMessage(partialMsg, parentId))) {
-              return undefined;
-            }
+            // The stream was cut off: settle the calls it left unanswered.
+            // Built from the accumulator now, not from `partialMsg`: a tool
+            // result may have landed on it since.
+            const { stored } = await this._storeLiveReply(
+              accumulator,
+              () => this._settleInterruptedReply(accumulator.toMessage()),
+              (message) => this._persistAssistantMessage(message, parentId),
+              () => !resetSinceTurnStarted()
+            );
+            if (!stored) return undefined;
             this._broadcastMessages();
             return partialMsg.id;
           }
@@ -15509,11 +15521,16 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       const submissionResult: SubmissionTurnResult = streamAborted
         ? { status: "aborted" }
         : { status: "completed", output };
-      if (this._turnQueue.generation === clearGen) {
+      if (!resetSinceTurnStarted()) {
         try {
-          const assistantMsg = accumulator.toMessage();
-          const response: ChatResponseResult = {
-            message: assistantMsg,
+          // A stream that was stopped or errored is cut off: settle the tool
+          // calls it left unanswered before the reply is stored.
+          const buildReply = () =>
+            streamError || streamAborted
+              ? this._settleInterruptedReply(accumulator.toMessage())
+              : accumulator.toMessage();
+          let response: ChatResponseResult = {
+            message: buildReply(),
             requestId,
             continuation,
             status: streamError
@@ -15525,15 +15542,26 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           };
 
           if (accumulator.parts.length > 0) {
-            await this._rememberPendingResponseHook(response);
-            const persistedMessageId =
-              await this._persistAssistantMessageWithCutover(
-                streamId,
-                assistantMsg,
-                parentId,
-                this._streamCutoverOptions(requestId),
-                { requestId, result: submissionResult }
-              );
+            let persistedMessageId: string | undefined;
+            const { message } = await this._storeLiveReply(
+              accumulator,
+              buildReply,
+              async (assistantMsg) => {
+                response = { ...response, message: assistantMsg };
+                await this._rememberPendingResponseHook(response);
+                persistedMessageId =
+                  await this._persistAssistantMessageWithCutover(
+                    streamId,
+                    assistantMsg,
+                    parentId,
+                    this._streamCutoverOptions(requestId),
+                    { requestId, result: submissionResult }
+                  );
+                return persistedMessageId !== undefined;
+              },
+              () => !resetSinceTurnStarted()
+            );
+            response = { ...response, message };
             if (
               !streamError &&
               !streamAborted &&
@@ -15607,6 +15635,86 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       (part) => (part as { type?: string }).type !== "step-start"
     );
     return hasMeaningfulParts ? stripped : null;
+  }
+
+  /**
+   * Settle the tool calls a cut-off reply left unanswered (the shared
+   * `settleInterruptedReply`): a call no client is known to own becomes an
+   * errored result through {@link repairInterruptedToolPart}. Call it on a
+   * reply whose stream did not finish, before it is stored.
+   */
+  private _settleInterruptedReply(message: UIMessage): UIMessage {
+    return settleInterruptedReply(message, {
+      repairPart: (part) => this.repairInterruptedToolPart(part),
+      clientToolNames: this._clientResolvableToolNames()
+    });
+  }
+
+  /**
+   * Settle and store the reply a recovery attempt is about to continue,
+   * before the attempt waits for the chat to be stable. That reply was cut
+   * off by definition. One this version stored is settled already; one an
+   * older version stored may hold a server tool call nothing will answer,
+   * and the attempt would otherwise wait on it as if a client could.
+   *
+   * Earlier replies are left alone. The conversation has moved past them, so
+   * nothing waits on them, and the turn that follows settles what they left
+   * unanswered.
+   */
+  private async _settleBeforeRecovery(continueReplyId: string): Promise<void> {
+    const leaf = this.messages.at(-1);
+    if (leaf?.id !== continueReplyId || leaf.role !== "assistant") return;
+    const settled = this._settleInterruptedReply(leaf);
+    if (settled === leaf) return;
+    this._patchCachedMessage(await this._updateMessageInHistory(settled));
+    // Broadcast whatever the repair made of the calls: a host can turn one
+    // into a text part, which carries no tool call id.
+    this._broadcastMessages();
+    const toolCallIds = leaf.parts.flatMap((part, index) => {
+      const id = (part as { toolCallId?: unknown }).toolCallId;
+      return part !== settled.parts[index] && typeof id === "string"
+        ? [id]
+        : [];
+    });
+    this._emit("chat:transcript:repaired", {
+      removedToolCalls: toolCallIds.length,
+      normalizedInputs: 0,
+      toolCallIds
+    });
+  }
+
+  /**
+   * Store the reply a live stream built. `build` reads the accumulator, and
+   * `write` stores what it returns, resolving to whether it stored anything.
+   * The write can await, and a client tool result that lands meanwhile is
+   * applied to the accumulator only (the row is not there yet), so the
+   * written copy can lack it. The reply is then stored again from the
+   * accumulator until nothing changed, while `isCurrent` holds.
+   *
+   * @returns Whether the reply was stored, and the last copy written.
+   */
+  private async _storeLiveReply(
+    accumulator: StreamAccumulator,
+    build: () => UIMessage,
+    write: (message: UIMessage) => Promise<boolean>,
+    isCurrent: () => boolean = () => true
+  ): Promise<{ stored: boolean; message: UIMessage }> {
+    const storing = { accumulator, dirty: false };
+    this._replyBeingStored = storing;
+    try {
+      let message = build();
+      const stored = await write(message);
+      while (stored && storing.dirty && isCurrent()) {
+        storing.dirty = false;
+        message = build();
+        const toPersist = this._strippedForPersist(message);
+        if (toPersist === null) break;
+        this._patchCachedMessage(await this._updateMessageInHistory(toPersist));
+      }
+      return { stored, message };
+    } finally {
+      if (this._replyBeingStored === storing) this._replyBeingStored = null;
+    }
   }
 
   /** Resolves to `false` when stripping left nothing to persist. */
@@ -15846,8 +15954,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const serverMessagesById = new Map(
       serverMessages.map((message) => [message.id, message])
     );
-    const reconciled = keepResolvedPauses(
-      reconcileMessages(incomingMessages, serverMessages, sanitizeMessage),
+    // A client's copy of a reply can be behind the stored one (the tab that
+    // pressed stop has one chunk fewer). It never shortens the stored reply.
+    const reconciled = keepStoredReplies(
+      keepResolvedPauses(
+        reconcileMessages(incomingMessages, serverMessages, sanitizeMessage),
+        serverMessages
+      ),
       serverMessages
     );
 
@@ -16032,26 +16145,25 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   protected _enqueueInteractionApply(
     apply: () => Promise<void>
   ): Promise<boolean> {
-    const run = async (): Promise<boolean> => {
+    return this._turns.enqueueInteraction(async () => {
       await apply();
       return true;
-    };
-    // `.then(run, run)` runs regardless of a predecessor's outcome so one
-    // rejected apply can't poison the rest of the batch.
-    const resultPromise = this._interactionApplyTail.then(run, run);
-    this._interactionApplyTail = resultPromise.then(
-      () => undefined,
-      () => undefined
-    );
-    this._pendingInteractionPromise = resultPromise;
-    resultPromise
-      .finally(() => {
-        if (this._pendingInteractionPromise === resultPromise) {
-          this._pendingInteractionPromise = null;
-        }
-      })
-      .catch(() => {});
-    return resultPromise;
+    });
+  }
+
+  /**
+   * Queue a client tool result or approval through
+   * {@link _enqueueInteractionApply}, the hook a subclass can wrap, and
+   * report whether its tool call was found.
+   */
+  private async _enqueueInteractionOutcome(
+    run: () => Promise<boolean>
+  ): Promise<boolean> {
+    let found = false;
+    await this._enqueueInteractionApply(async () => {
+      found = await run();
+    });
+    return found;
   }
 
   private async _applyToolResult(
@@ -16732,6 +16844,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           accParts[result.index] = result.parts[result.index];
           broadcastMessage = streaming.toMessage();
           changedMessageId = streaming.messageId;
+          // The reply may be being stored from a copy built before this.
+          if (this._replyBeingStored?.accumulator === streaming) {
+            this._replyBeingStored.dirty = true;
+          }
         }
       }
     }
@@ -16855,125 +16971,28 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
   // ── Stability + pending interactions ─────────────────────────────
 
-  protected hasPendingInteraction(): boolean {
-    const clientResolvable = this._clientResolvableToolNames();
-    // Scan the in-flight accumulator first, mirroring `@cloudflare/ai-chat`'s
-    // `_streamingMessage` check. A parallel-batch client tool can stream a
-    // pending `input-available`/`approval-requested` part into
-    // `_streamingAssistant` before the end-of-stream persist writes it to
-    // `this.messages`. The hot `waitUntilStable` loop only consults this after
-    // `waitForIdle()` (when the streaming turn has drained and the accumulator
-    // is null), so the scan is a no-op there. It matters on the same-isolate
-    // stall route, where the incident-eval callback runs mid-stream: without
-    // it Think would budget a stall that ai-chat treats as "awaiting client"
-    // (budget-free) — a self-correcting drift once the continuation re-reads
-    // persisted state, but a real asymmetry the stall watchdog would expose.
-    const streaming = this._streamingAssistant;
-    if (
-      streaming &&
-      this._messageHasPendingInteraction(
-        streaming.toMessage(),
-        clientResolvable
-      )
-    ) {
-      return true;
-    }
-    return this.messages.some(
-      (message) =>
-        message.role === "assistant" &&
-        this._messageHasPendingInteraction(message, clientResolvable)
-    );
-  }
-
   /**
-   * `true` when an auto-continuation is armed but has not yet fired (#1650): a
-   * pending continuation that has not entered its turn (`!pastCoalesce`) whose
-   * coalesce timer is still pending or whose completeness drain is in progress.
-   * Mirrors `@cloudflare/ai-chat`'s `_hasArmedContinuation`, consuming the shared
-   * controller's `isArmed()`.
+   * `true` when the chat is waiting on a client: a tool call a client still
+   * has to answer, or an approval it still has to give.
+   *
+   * Every unanswered call in the stored transcript counts, whatever its tool.
+   * A reply is stored unanswered only when its stream finished on that call,
+   * which is what a client tool does; a reply that was cut off has its dead
+   * calls settled before it is stored. In the reply streaming now, only a
+   * tool the client sent a schema for counts, because a server tool sits at
+   * `input-available` while it runs. The same check as `@cloudflare/ai-chat`.
    */
-  private _hasArmedContinuation(): boolean {
-    return this._autoContinuation.hasPendingDecision();
+  protected hasPendingInteraction(): boolean {
+    return this._turns.hasPendingInteraction();
   }
 
   protected async waitUntilStable(options?: {
     timeout?: number;
   }): Promise<boolean> {
-    const deadline =
-      options?.timeout != null ? Date.now() + options.timeout : null;
-
-    while (true) {
-      if (
-        (await this._awaitWithDeadline(
-          this._submitConcurrency.waitForIdle(() =>
-            this._turnQueue.waitForIdle()
-          ),
-          deadline
-        )) === TIMED_OUT
-      ) {
-        return false;
-      }
-
-      if (!this.hasPendingInteraction()) {
-        // An auto-continuation may be armed (#1650): the coalesce timer is
-        // still pending or its drain is in flight. Report not-stable and wait
-        // it out, mirroring `@cloudflare/ai-chat` — otherwise idle eviction /
-        // recovery could act in the ~50ms window before the held continuation
-        // fires (and the turn it enqueues then drains via the loop top).
-        if (!this._hasArmedContinuation()) {
-          return true;
-        }
-        if (
-          (await this._awaitWithDeadline(
-            new Promise<void>((resolve) =>
-              setTimeout(resolve, AutoContinuationController.COALESCE_MS)
-            ),
-            deadline
-          )) === TIMED_OUT
-        ) {
-          return false;
-        }
-        continue;
-      }
-
-      const pending = this._pendingInteractionPromise;
-      if (pending) {
-        let result: boolean | typeof TIMED_OUT;
-        try {
-          result = await this._awaitWithDeadline(pending, deadline);
-        } catch {
-          continue;
-        }
-        if (result === TIMED_OUT) {
-          return false;
-        }
-      } else {
-        if (
-          (await this._awaitWithDeadline(
-            new Promise<void>((resolve) => setTimeout(resolve, 100)),
-            deadline
-          )) === TIMED_OUT
-        ) {
-          return false;
-        }
-      }
-    }
-  }
-
-  private _awaitWithDeadline<T>(
-    promise: Promise<T>,
-    deadline: number | null
-  ): Promise<T | typeof TIMED_OUT> {
-    return awaitWithDeadline(promise, deadline);
-  }
-
-  private _messageHasPendingInteraction(
-    message: UIMessage,
-    clientResolvable: Set<string>
-  ): boolean {
-    return message.parts.some((part) =>
-      this._partAwaitsClientInteraction(part, clientResolvable)
-    );
+    return this._turns.waitUntilStable({
+      timeout: options?.timeout,
+      hasPendingInteraction: () => this.hasPendingInteraction()
+    });
   }
 
   /**
@@ -16986,6 +17005,85 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    */
   private _clientResolvableToolNames(): Set<string> {
     return clientResolvableToolNames(this._lastClientTools);
+  }
+
+  /**
+   * Every tool a client may answer: the tools the client sent a schema for,
+   * and the tools the server declares with no `execute` (an app answers
+   * those from the client, without ever sending their schema). A call for
+   * any other tool was the server's to run. Unanswered in a stored reply, it
+   * is dead: an older version stored cut-off replies as they were.
+   */
+  private _clientAnswerableToolNames(): Set<string> {
+    const names = this._clientResolvableToolNames();
+    for (const name of this._unexecutedToolNames()) names.add(name);
+    return names;
+  }
+
+  /**
+   * Names of the tools in `tools` the server does not run: no `execute`,
+   * and not run by the provider.
+   */
+  private static _unexecutedToolNamesOf(tools: ToolSet): string[] {
+    return Object.entries(tools)
+      .filter(([, definition]) => {
+        const candidate = definition as {
+          execute?: unknown;
+          type?: unknown;
+        };
+        return (
+          typeof candidate.execute !== "function" &&
+          candidate.type !== "provider" &&
+          candidate.type !== "provider-defined"
+        );
+      })
+      .map(([name]) => name)
+      .sort();
+  }
+
+  /**
+   * Store which of a turn's tools the server does not run, so the answer is
+   * there after a restart, before any turn has assembled its tools again.
+   */
+  private _recordUnexecutedTools(tools: ToolSet): void {
+    const names = Think._unexecutedToolNamesOf(tools);
+    this._unexecutedTools = names;
+    // `_configSet` skips the write when the value has not changed.
+    this._configSet("unexecutedTools", JSON.stringify(names));
+  }
+
+  /** Read once per isolate: `hasPendingInteraction()` is polled. */
+  private _unexecutedTools: string[] | undefined;
+
+  /**
+   * The tools the last turn had that the server does not run. Before the
+   * first turn on this version there is no record, so read `getTools()`:
+   * the app's own tools are where a tool without `execute` is declared.
+   */
+  private _unexecutedToolNames(): string[] {
+    if (this._unexecutedTools) return this._unexecutedTools;
+    const stored = this._configGet("unexecutedTools");
+    if (stored !== undefined) {
+      try {
+        const parsed: unknown = JSON.parse(stored);
+        if (Array.isArray(parsed)) {
+          this._unexecutedTools = parsed.filter(
+            (name): name is string => typeof name === "string"
+          );
+          return this._unexecutedTools;
+        }
+      } catch {
+        // Fall through to the app's tools.
+      }
+    }
+    try {
+      this._unexecutedTools = Think._unexecutedToolNamesOf(this.getTools());
+    } catch {
+      // `getTools()` can need turn-time context. Without it, only the
+      // client's own tools are known to be a client's.
+      this._unexecutedTools = [];
+    }
+    return this._unexecutedTools;
   }
 
   /**
@@ -18313,12 +18411,21 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         controller
       );
     }
+    // A client stops this attempt by the original request id: the only id it
+    // knows until the recovered turn streams.
+    const stop = this._turns.beginRecoveryAttempt(data?.originalRequestId);
+    const turnSignal = controller
+      ? AbortSignal.any([controller.signal, stop.signal])
+      : stop.signal;
 
     try {
       const recoveryConfig = this._resolveChatRecoveryConfig();
       const ready = await this.waitUntilStable({
         timeout: recoveryConfig.stableTimeoutMs
       });
+      // A stop that landed while the attempt waited wins over the
+      // stable-state timeout's park, reschedule or exhaustion.
+      if (await this._recoveryAttemptStopped(stop, data)) return;
       if (!ready) {
         // PARK while a CLIENT interaction is pending — the turn is waiting for
         // the human, not churning; see `_chatRecoveryContinue` for the full
@@ -18402,13 +18509,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         onTurnStarted,
         () =>
           this._retryLastUserTurn(this._lastClientTools, this._lastBody, {
-            ...(controller && { signal: controller.signal }),
+            signal: turnSignal,
             trigger: "recovery-retry",
             ...(regeneratedLeafId !== undefined && {
               branchParentId: data?.targetUserId
             })
           })
       );
+      if (await this._recoveryAttemptStopped(stop, data)) return;
       if (
         result.status !== "completed" &&
         this._takeRecoveryReschedule(data?.incidentId)
@@ -18443,6 +18551,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         error
       );
     } finally {
+      stop.end();
       this._activeChatRecoveryRootRequestId = previousRootRequestId;
       if (recoveredSubmission) {
         this._submissionAbortControllers.delete(
@@ -18621,12 +18730,24 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         controller
       );
     }
+    // A client stops this attempt by the original request id: the only id it
+    // knows until the recovered turn streams.
+    const stop = this._turns.beginRecoveryAttempt(data?.originalRequestId);
+    const turnSignal = controller
+      ? AbortSignal.any([controller.signal, stop.signal])
+      : stop.signal;
 
     try {
+      if (data?.targetAssistantId) {
+        await this._settleBeforeRecovery(data.targetAssistantId);
+      }
       const recoveryConfig = this._resolveChatRecoveryConfig();
       const ready = await this.waitUntilStable({
         timeout: recoveryConfig.stableTimeoutMs
       });
+      // A stop that landed while the attempt waited wins over the
+      // stable-state timeout's park, reschedule or exhaustion.
+      if (await this._recoveryAttemptStopped(stop, data)) return;
       if (!ready) {
         // PARK, don't burn the budget: a stable-state timeout while a CLIENT
         // interaction is pending is not churn — the turn is correctly waiting
@@ -18702,13 +18823,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         recoveredSubmission,
         onTurnStarted,
         () =>
-          this.continueLastTurn(
-            undefined,
-            controller
-              ? { signal: controller.signal, trigger: "recovery-continue" }
-              : { trigger: "recovery-continue" }
-          )
+          this.continueLastTurn(undefined, {
+            signal: turnSignal,
+            trigger: "recovery-continue"
+          })
       );
+      if (await this._recoveryAttemptStopped(stop, data)) return;
       if (
         result.status !== "completed" &&
         this._takeRecoveryReschedule(data?.incidentId)
@@ -18743,6 +18863,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         error
       );
     } finally {
+      stop.end();
       this._activeChatRecoveryRootRequestId = previousRootRequestId;
       if (recoveredSubmission) {
         this._submissionAbortControllers.delete(
@@ -18783,31 +18904,38 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
   // ── Concurrency strategies ──────────────────────────────────────
 
-  private _getSubmitConcurrencyDecision(
-    isSubmitMessage: boolean
-  ): SubmitConcurrencyDecision {
-    return this._submitConcurrency.decide({
-      concurrency: this.messageConcurrency,
-      isSubmitMessage,
-      queuedTurns: this._turnQueue.queuedCount()
-    });
+  /**
+   * Send the terminal frame of a request that ended before its turn started
+   * (skipped or cancelled in the queue) to the connection that sent it. No
+   * other connection was shown the request.
+   */
+  private _endUnstartedRequest(
+    connection: Connection,
+    requestId: string,
+    outcome: "skipped" | "aborted"
+  ): void {
+    try {
+      connection.send(
+        JSON.stringify(
+          this._withOriginMessageIds({
+            type: MSG_CHAT_RESPONSE,
+            id: requestId,
+            body: "",
+            done: true,
+            outcome
+          })
+        )
+      );
+    } catch {
+      // The connection closed before the server could answer.
+    }
   }
 
   private _completeSkippedRequest(
     connection: Connection,
     requestId: string
   ): void {
-    connection.send(
-      JSON.stringify(
-        this._withOriginMessageIds({
-          type: MSG_CHAT_RESPONSE,
-          id: requestId,
-          body: "",
-          done: true,
-          outcome: "skipped"
-        })
-      )
-    );
+    this._endUnstartedRequest(connection, requestId, "skipped");
     // A skipped turn settles out of the pre-stream set, but must NOT release
     // parked connections (#1784): a skip happens because a NEWER turn was
     // admitted (latest/merge supersede) or the queue generation advanced. The
@@ -18832,11 +18960,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     requestId: string,
     options: { releaseParked?: boolean } = {}
   ): void {
-    const idle = this._preStream.settle(requestId);
-    const releaseParked = options.releaseParked ?? true;
-    if (releaseParked && idle && !this._resumableStream.hasActiveStream()) {
-      this._preStream.releaseAwaiting();
-    }
+    this._turns.settlePreStreamTurn(requestId, options);
   }
 
   private _rollbackDroppedSubmit(connection: Connection): void {
@@ -18912,39 +19036,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    */
   private _flushResolvedPausesOnFinalize = false;
 
-  /**
-   * Drain every in-flight tool-result/approval apply, including any enqueued
-   * while we wait, so the subsequent `_hasIncompleteToolBatch()` re-check sees
-   * every result that has ALREADY arrived. Bounded by real apply activity (a
-   * storage write each), never by a fixed timer: a batch with no further
-   * results drains in the time its pending applies take and then returns. The
-   * loop re-reads `_interactionApplyTail` after each await because a sibling can
-   * extend the tail mid-drain; we stop once the tail stops advancing.
-   */
-  private _drainInteractionApplies(): Promise<void> {
-    return drainInteractionApplies(
-      () => this._continuation.pending !== null,
-      () => this._interactionApplyTail
-    );
-  }
-
-  /**
-   * `true` when the latest assistant message is mid-batch: it carries at least
-   * one settled tool result AND at least one tool call/approval still awaiting a
-   * client result. That is the #1649 signature — the model fanned out parallel
-   * tool calls and only some have been answered. Scoped to the leaf (the step
-   * the continuation answers) so an unrelated dangling tool in an earlier
-   * message doesn't block a legitimate follow-up continuation.
-   */
-  private _hasIncompleteToolBatch(): boolean {
-    return hasIncompleteToolBatch(this.messages);
-  }
-
   private _fireAutoContinuation(): void {
     const pending = this._continuation.pending;
     if (!pending) return;
 
-    const { connection, requestId, clientTools } = pending;
+    const { requestId } = pending;
+    // Created when the continuation fires, so a cancel reaches it while it
+    // waits in the queue.
     const abortSignal = this._aborts.getSignal(requestId);
 
     let reported = false;
@@ -18956,23 +19054,18 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       inheritChannel: true,
       allowNested: true,
       execute: async () => {
-        // The conversation moved on since the tool result (a newer question
-        // or reply, a clear): nothing left to continue. A message appended
+        // Read the continuation when its turn starts, so it runs with the
+        // connection and tools of the latest result. Nothing to continue when
+        // it was cleared, or when the conversation moved on since its tool
+        // result (a newer question or reply, a clear). A message appended
         // without a turn does not count.
-        if (
-          !continuationTargetIsLatest(
-            this.messages,
-            this._continuation.pending,
-            this._lastTurnReplyId()
-          )
-        ) {
+        const continuation = this._turns.takeContinuation();
+        if (!continuation) {
           this._aborts.remove(requestId);
           this._settleContinuationTurn(requestId, false);
           return;
         }
-        if (this._continuation.pending) {
-          this._continuation.pending.pastCoalesce = true;
-        }
+        const { connection, clientTools } = continuation;
         let streamed = false;
         try {
           const continuationBody = async () => {
@@ -19985,7 +20078,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         this._resumableStream.getStreamMessageId(streamId) ??
         crypto.randomUUID(),
       prepare: (message) => {
-        const prepared = this._strippedForPersist(message);
+        // A stream with no `finish` chunk was cut off: settle the calls it
+        // left unanswered. One that finished and only missed its persist
+        // keeps them: those wait for a client.
+        const prepared = this._strippedForPersist(
+          streamChunksFinished(chunks)
+            ? message
+            : this._settleInterruptedReply(message)
+        );
         persistedId = prepared?.id;
         return prepared;
       },

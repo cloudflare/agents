@@ -14,7 +14,7 @@
  *    `output-available` part back to `input-streaming` if these chunks
  *    were forwarded.)
  *
- * 2. `_applyToolResult` accepts `output-available` / `output-error` as
+ * 2. `_settleToolResult` accepts `output-available` / `output-error` as
  *    starting states and short-circuits to a no-op when the incoming
  *    result matches what the part already holds. This handles duplicate
  *    cf_agent_tool_result frames (cross-tab re-runs, WS redelivery)

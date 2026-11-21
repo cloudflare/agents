@@ -147,13 +147,15 @@ interface ChatRecoveryTestStub {
     interruptedAttempts?: number;
   }): Promise<void>;
   setForceStableTimeoutForTest(value: boolean): Promise<void>;
+  setPendingClientInteractionForTest(value: boolean | null): Promise<void>;
   setRequestContextForTest(
     body: Record<string, unknown> | undefined,
     clientTools: Array<{ name: string }>
   ): Promise<void>;
   persistPendingToolCallForTest(
     messageId: string,
-    toolName: string
+    toolName: string,
+    options?: { cutOff?: boolean }
   ): Promise<void>;
   runChatRecoveryContinueDirectForTest(
     data: Record<string, unknown>
@@ -805,15 +807,17 @@ describe("onChatRecovery", () => {
       noProgressTimeoutMs: 60_000
     });
 
-    // `previewTool` is NOT registered as a client tool — its `input-available`
-    // orphan is dead (its execute() died with the isolate), so it must NOT get
-    // the HITL exemption; it seals normally on no-progress.
+    // `previewTool` is NOT registered as a client tool, and the reply it is
+    // in was cut off: its execute() died with the isolate. The call is
+    // settled when that reply is stored, so it does NOT get the HITL
+    // exemption; the turn seals normally on no-progress.
     await agentStub.setRequestContextForTest(undefined, [
       { name: "chooseOption" }
     ]);
     await agentStub.persistPendingToolCallForTest(
       "assistant-server",
-      "previewTool"
+      "previewTool",
+      { cutOff: true }
     );
 
     const base = {
@@ -2034,6 +2038,78 @@ describe("onChatRecovery", () => {
     const incident = await agentStub.getIncidentForTest("inc-retry");
     expect(incident?.attempt).toBe(2);
     expect(incident?.status).toBe("scheduled");
+  });
+
+  it("retries a question past an earlier reply an older version stored with a dead tool call", async () => {
+    const agentStub = await getTestAgent(`retry-legacy-${crypto.randomUUID()}`);
+
+    // An older version stored a cut-off reply as it was: its server tool
+    // call still looks like it is running. The user then asked again, and
+    // that turn was interrupted before it streamed.
+    await agentStub.persistPendingToolCallForTest(
+      "assistant-legacy",
+      "previewTool"
+    );
+    await agentStub.persistMessages([
+      ...((await agentStub.getPersistedMessages()) as ChatMessage[]),
+      {
+        id: "user-retry",
+        role: "user",
+        parts: [{ type: "text", text: "Try again" }]
+      }
+    ]);
+
+    // The retry does not wait on the dead call: it settles it and answers.
+    await agentStub.runRecoveryRetryForTest({ targetUserId: "user-retry" });
+    await agentStub.waitForIdleForTest();
+
+    expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
+    const stored = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    expect(stored[0].parts[0]).toMatchObject({ state: "output-error" });
+    expect(stored.at(-1)?.role).toBe("assistant");
+  }, 8_000);
+
+  it("asks a subclass's hasPendingClientInteraction whether a client is still to answer", async () => {
+    const agentStub = await getTestAgent(
+      `stable-park-override-${crypto.randomUUID()}`
+    );
+    await agentStub.setForceStableTimeoutForTest(true);
+    // Nothing in the transcript is unanswered. The subclass says a client
+    // still has to answer something only it knows about.
+    await agentStub.setPendingClientInteractionForTest(true);
+    await agentStub.persistMessages([
+      {
+        id: "user-override",
+        role: "user",
+        parts: [{ type: "text", text: "hello" }]
+      },
+      {
+        id: "assistant-override",
+        role: "assistant",
+        parts: [{ type: "text", text: "partial" }]
+      }
+    ]);
+    await agentStub.seedIncidentForTest({
+      incidentId: "inc-override",
+      requestId: "root-override",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+    const continueData = {
+      incidentId: "inc-override",
+      originalRequestId: "root-override",
+      targetAssistantId: "assistant-override"
+    };
+    await agentStub.preScheduleRecoveryContinueForTest(continueData);
+    await agentStub.runChatRecoveryContinueDirectForTest(continueData);
+
+    const parked = await agentStub.getIncidentForTest("inc-override");
+    expect(parked?.status).toBe("skipped");
+    expect(parked?.reason).toBe("awaiting_client_interaction");
   });
 
   it("PARKS a continuation (no reschedule, no budget spent) while a CLIENT interaction is pending", async () => {

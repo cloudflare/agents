@@ -4,7 +4,8 @@ import {
   toolResultUpdate,
   crossMessageToolResultUpdate,
   toolApprovalUpdate,
-  pausedExecutionUpdate
+  pausedExecutionUpdate,
+  hasPendingToolInteraction
 } from "../tool-state";
 
 function makePart(
@@ -366,5 +367,120 @@ describe("applyToolUpdate", () => {
     expect((result!.parts[1] as Record<string, unknown>).state).toBe(
       "input-available"
     );
+  });
+});
+
+describe("hasPendingToolInteraction", () => {
+  const user = { id: "user-1", role: "user", parts: [] };
+  const call = (toolName: string, state = "input-available") => ({
+    type: `tool-${toolName}`,
+    toolCallId: `call-${toolName}`,
+    state,
+    input: {}
+  });
+  const reply = (id: string, ...parts: unknown[]) => ({
+    id,
+    role: "assistant",
+    parts
+  });
+  const pending = (input: {
+    messages: Array<{ id: string; role: string; parts: unknown[] }>;
+    streaming?: { id: string; role: string; parts: unknown[] } | null;
+    clientToolNames?: string[];
+    clientAnswerableToolNames?: string[] | null;
+  }) =>
+    hasPendingToolInteraction({
+      messages: input.messages,
+      streaming: input.streaming ?? null,
+      clientToolNames: new Set(input.clientToolNames ?? []),
+      ...(input.clientAnswerableToolNames !== undefined && {
+        clientAnswerableToolNames:
+          input.clientAnswerableToolNames === null
+            ? null
+            : new Set(input.clientAnswerableToolNames)
+      })
+    });
+
+  describe("a host that cannot tell which tools are a client's", () => {
+    it("counts every unanswered call in the latest reply", () => {
+      expect(pending({ messages: [user, reply("a1", call("ask"))] })).toBe(
+        true
+      );
+      expect(
+        pending({
+          messages: [user, reply("a1", call("ask"))],
+          clientAnswerableToolNames: null
+        })
+      ).toBe(true);
+    });
+
+    it("counts only a known client's call in a reply the conversation moved past", () => {
+      const moved = [user, reply("a1", call("ask")), { ...user, id: "user-2" }];
+      expect(pending({ messages: moved })).toBe(false);
+      expect(pending({ messages: moved, clientToolNames: ["ask"] })).toBe(true);
+    });
+  });
+
+  describe("a host that knows which tools a client may answer", () => {
+    it("does not wait on a server tool call an older version stored in the latest reply", () => {
+      expect(
+        pending({
+          messages: [user, reply("a1", call("serverSearch"))],
+          clientAnswerableToolNames: []
+        })
+      ).toBe(false);
+    });
+
+    it("waits on a tool the server declares and a client answers", () => {
+      expect(
+        pending({
+          messages: [user, reply("a1", call("askUser"))],
+          clientAnswerableToolNames: ["askUser"]
+        })
+      ).toBe(true);
+    });
+
+    it("waits on a tool the client sent a schema for", () => {
+      expect(
+        pending({
+          messages: [user, reply("a1", call("pickFile"))],
+          clientToolNames: ["pickFile"],
+          clientAnswerableToolNames: ["pickFile"]
+        })
+      ).toBe(true);
+    });
+
+    it("waits on an approval whatever the tool", () => {
+      expect(
+        pending({
+          messages: [
+            user,
+            reply("a1", call("serverSearch", "approval-requested"))
+          ],
+          clientAnswerableToolNames: []
+        })
+      ).toBe(true);
+    });
+
+    it("waits on the answerable call when the reply also holds a dead server call", () => {
+      expect(
+        pending({
+          messages: [user, reply("a1", call("serverSearch"), call("askUser"))],
+          clientAnswerableToolNames: ["askUser"]
+        })
+      ).toBe(true);
+    });
+  });
+
+  it("counts only a known client's call in the reply that is streaming", () => {
+    const streaming = reply("a1", call("serverSearch"));
+    expect(pending({ messages: [user], streaming })).toBe(false);
+    expect(
+      pending({
+        messages: [user],
+        streaming: reply("a1", call("pickFile")),
+        clientToolNames: ["pickFile"]
+      })
+    ).toBe(true);
   });
 });
