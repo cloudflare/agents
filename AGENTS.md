@@ -174,7 +174,7 @@ CI runs on every PR (`pnpm install --frozen-lockfile && pnpm run build && pnpm r
 
 ## Learned Workspace Facts
 
-- `packages/shell/` (`@cloudflare/shell`) is deprecated. Agent workspaces are a `Workspace` from `@cloudflare/computer` (github.com/cloudflare/computer); do not add new uses of Shell.
+- `@cloudflare/shell` has been removed from this repo; its last released source is at the git tag `@cloudflare/shell@0.5.0`. Agent workspaces are a `Workspace` from `@cloudflare/computer` (github.com/cloudflare/computer); do not add new uses of Shell.
 - Think's `workspace` is a Computer `Workspace`. Its workspace tools are Computer's `createAITools`, called with no options; execution backends and their modules are configured on the `Workspace`. Do not add Think options for them.
 
 ## Learned User Preferences
