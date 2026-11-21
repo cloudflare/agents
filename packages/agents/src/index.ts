@@ -5972,11 +5972,23 @@ export class Agent<
     });
 
     const child = await this.subAgent(cls as SubAgentClass<Agent>, runId);
-    const adapter = this._asAgentToolChildAdapter<Input, Output>(child);
-    const childStart = await adapter.startAgentToolRun(options.input, {
-      runId,
-      ...(eventDelivery === "terminal" ? { eventDelivery } : {})
-    });
+    // Replaced with a fresh stub when the child's isolate goes away under
+    // the tail.
+    let adapter = this._asAgentToolChildAdapter<Input, Output>(child);
+    let childStart: AgentToolRunInspection<Output> | undefined;
+    // Set when the start call itself failed. The child may still have
+    // started the run (its isolate went away under the call): an awaited
+    // run asks the child below, like a run whose tail broke.
+    let startFailure: { error: unknown } | undefined;
+    try {
+      childStart = await adapter.startAgentToolRun(options.input, {
+        runId,
+        ...(eventDelivery === "terminal" ? { eventDelivery } : {})
+      });
+    } catch (error) {
+      if (detached) throw error;
+      startFailure = { error };
+    }
     this._markAgentToolRunning(runId);
 
     if (detached) {
@@ -6020,7 +6032,9 @@ export class Agent<
         return result;
       } else {
         parentAbortListener = () => {
-          void adapter.cancelAgentToolRun(runId, options.signal?.reason);
+          void adapter
+            .cancelAgentToolRun(runId, options.signal?.reason)
+            .catch(() => {});
         };
         options.signal.addEventListener("abort", parentAbortListener, {
           once: true
@@ -6029,27 +6043,58 @@ export class Agent<
     }
 
     try {
-      if (adapter.tailAgentToolRun) {
-        const stream = await adapter.tailAgentToolRun(runId, {
-          afterSequence: -1
-        });
-        sequence = (
+      // The tail is an RPC stream from the child. It breaks when the child's
+      // isolate goes away under it (an eviction, a reset), which says
+      // nothing about the run: the child's chat recovery may be finishing
+      // its turn. The run's row decides, below.
+      let tailBroke = startFailure !== undefined;
+      // The tail ends when the child closes it, and the child closes it
+      // when the run ends. A run nothing will end (its turn's recovery was
+      // dropped, say) would hold this call for good. So the parent also
+      // asks: every no-progress window it inspects the run, which makes
+      // the child settle a run that has nothing left to finish it, and
+      // stops following a tail whose run has ended.
+      const watch = this._watchAgentToolRunWhileTailing(() => adapter, runId);
+      // How far the tail got, also when it breaks: what follows a re-attach
+      // is numbered after it.
+      const cursor = { next: sequence };
+      try {
+        if (startFailure) throw startFailure.error;
+        if (adapter.tailAgentToolRun) {
+          const stream = await adapter.tailAgentToolRun(runId, {
+            afterSequence: -1
+          });
           await this._forwardAgentToolStream(
             stream,
             options.parentToolCallId,
             runId,
             sequence,
             options.signal
-          )
-        ).next;
-      } else {
-        const chunks = await adapter.getAgentToolChunks(runId);
-        sequence = this._broadcastAgentToolChunks(
-          options.parentToolCallId,
-          runId,
-          chunks,
-          sequence
+              ? AbortSignal.any([options.signal, watch.ended])
+              : watch.ended,
+            undefined,
+            cursor
+          );
+          sequence = cursor.next;
+        } else {
+          const chunks = await adapter.getAgentToolChunks(runId);
+          sequence = this._broadcastAgentToolChunks(
+            options.parentToolCallId,
+            runId,
+            chunks,
+            sequence
+          );
+        }
+      } catch (error) {
+        if (options.signal?.aborted) throw error;
+        tailBroke = true;
+        sequence = cursor.next;
+        // The old stub may still name the instance that went away.
+        adapter = this._asAgentToolChildAdapter<Input, Output>(
+          await this.subAgent(cls as SubAgentClass<Agent>, runId)
         );
+      } finally {
+        watch.stop();
       }
 
       if (options.signal?.aborted) {
@@ -6068,8 +6113,58 @@ export class Agent<
         return result;
       }
 
-      const inspection =
-        (await adapter.inspectAgentToolRun(runId)) ?? childStart;
+      const inspected = await adapter.inspectAgentToolRun(runId);
+      if (
+        tailBroke &&
+        (inspected?.status === "running" || inspected?.status === "starting")
+      ) {
+        // The child still has the run open: it is recovering the turn. Wait
+        // for it the way a recovered parent does, within the same budgets,
+        // and hand back the run's own terminal status.
+        const reattach = await this._reattachAgentToolRunToTerminal<Output>(
+          adapter,
+          {
+            run_id: runId,
+            agent_type: agentType,
+            parent_tool_call_id: options.parentToolCallId ?? null
+          },
+          sequence,
+          this._resolvedOptions.agentToolReattachNoProgressTimeoutMs,
+          this._resolvedOptions.agentToolReattachMaxWindowMs
+        );
+        if (reattach.result) {
+          await this._finishAgentToolRun(runInfo, reattach.result, {
+            sequence: reattach.sequence,
+            completedAt: reattach.completedAt
+          });
+          return reattach.result;
+        }
+        // Budget spent with the run still open: the parent gives up, and
+        // says so. `interrupted` is not the run's outcome, and a later
+        // `runAgentTool` with the same run id re-attaches.
+        const childTornDown = await this._teardownGivenUpAgentToolChild(
+          adapter,
+          runId,
+          reattach.reason
+        );
+        const result: RunAgentToolResult<Output> = {
+          runId,
+          agentType,
+          status: "interrupted",
+          error: this._interruptedMessageForReason(reattach.reason),
+          ...(reattach.reason !== undefined ? { reason: reattach.reason } : {}),
+          childStillRunning: !childTornDown
+        };
+        await this._finishAgentToolRun(runInfo, result, {
+          sequence: reattach.sequence
+        });
+        return result;
+      }
+
+      const inspection = inspected ?? childStart;
+      // The start failed and the child has no such run: the run never
+      // began, and the failure is its error.
+      if (!inspection) throw startFailure?.error;
       const result = this._terminalResultFromInspection<Output>(
         agentType,
         inspection
@@ -6109,6 +6204,56 @@ export class Agent<
         options.signal.removeEventListener("abort", parentAbortListener);
       }
     }
+  }
+
+  /**
+   * While an awaited `runAgentTool` follows a child's tail, inspect the run
+   * once per no-progress window (`agentToolReattachNoProgressTimeoutMs`).
+   *
+   * The inspection is what bounds the wait. A child settles a run that has
+   * nothing left to finish it when it is inspected, and closes its tails.
+   * `ended` aborts when an inspection reports the run over while the tail
+   * is still open, so the caller stops following it and reads the result.
+   * A run the child reports as still open is followed further: a turn that
+   * is working, or one chat recovery is finishing, is not cut short here.
+   *
+   * @param currentAdapter - Read on every inspection: the caller swaps the
+   *   adapter when the child's isolate goes away.
+   */
+  private _watchAgentToolRunWhileTailing(
+    currentAdapter: () => AgentToolChildAdapter,
+    runId: string
+  ): { ended: AbortSignal; stop: () => void } {
+    const ended = new AbortController();
+    const everyMs = this._resolvedOptions.agentToolReattachNoProgressTimeoutMs;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let stopped = false;
+    const inspect = async () => {
+      try {
+        const inspection = await currentAdapter().inspectAgentToolRun(runId);
+        if (
+          inspection &&
+          inspection.status !== "running" &&
+          inspection.status !== "starting"
+        ) {
+          ended.abort();
+          return;
+        }
+      } catch {
+        // The child could not be asked this time. Ask again.
+      }
+      if (!stopped) timer = setTimeout(() => void inspect(), everyMs);
+    };
+    if (everyMs > 0 && Number.isFinite(everyMs)) {
+      timer = setTimeout(() => void inspect(), everyMs);
+    }
+    return {
+      ended: ended.signal,
+      stop: () => {
+        stopped = true;
+        if (timer !== undefined) clearTimeout(timer);
+      }
+    };
   }
 
   /**
@@ -7187,7 +7332,12 @@ export class Agent<
     runId: string,
     sequence: number,
     signal?: AbortSignal,
-    idleTimeoutMs?: number
+    idleTimeoutMs?: number,
+    /**
+     * Kept at the next sequence as chunks are forwarded, so a caller whose
+     * stream breaks still knows how far it got.
+     */
+    cursor?: { next: number }
   ): Promise<{
     next: number;
     ended: "done" | "idle" | "aborted";
@@ -7255,6 +7405,7 @@ export class Agent<
           typeof chunk.unstoredId === "string" ? chunk.unstoredId : undefined;
         const chunkSequence =
           lifecycle || unstoredId !== undefined ? next : next++;
+        if (cursor) cursor.next = next;
         forwarded = true;
         if (!terminalOnly || lifecycle) {
           this._broadcastAgentToolEvent(parentToolCallId, chunkSequence, {
@@ -7829,7 +7980,11 @@ export class Agent<
         } catch {
           // Fall back to a full tail if the chunk probe fails.
         }
-        nextSequence = storedCount + 1;
+        // Never below what this parent already broadcast for the run: a
+        // recovered turn streams into a stream of its own, which can hold
+        // fewer chunks than the first turn sent, and a client keys a chunk
+        // by its sequence, so a reused one is dropped as a repeat.
+        nextSequence = Math.max(nextSequence, storedCount + 1);
 
         // Defaults to a non-`done` end so a tail that throws below does NOT
         // re-arm (we only re-arm on a verified clean stream-close).

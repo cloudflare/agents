@@ -399,6 +399,12 @@ export type AgentToolChildAdapter<Input = unknown, Output = unknown> = {
     input: Input,
     options: {
       runId: string;
+      /**
+       * Aborting it cancels the run, the same as `cancelAgentToolRun`. An
+       * `AbortSignal` does not cross a Durable Object RPC call, so this
+       * works for a caller in the same isolate. A parent reaching the child
+       * over RPC cancels with `cancelAgentToolRun(runId, reason)`.
+       */
       signal?: AbortSignal;
       /**
        * `"terminal"` means no client is watching this run's chunks, so the

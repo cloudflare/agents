@@ -11,7 +11,7 @@ async function freshRecoveryAgent(name: string) {
 }
 
 /**
- * Safety net for `_rebindAgentToolChildRunRequestId` (the re-attach budget fix):
+ * Safety net for `AgentToolRuns.rebind` (the re-attach budget fix):
  * it runs on EVERY recovery continuation, so it must be an unambiguous no-op
  * whenever this recovery is NOT for a live agent-tool child run. These lock the
  * three no-op cases the docstring promises, plus the defensive newest-row
@@ -29,7 +29,10 @@ describe("agent-tool rebind: no-op safety on non-child recovery", () => {
     // The guarded SELECT throws on the missing table and is swallowed → the
     // call does not throw and creates nothing.
     await expect(
-      agent.rebindAgentToolChildRunRequestIdForTest("normal-turn-req")
+      agent.rebindAgentToolChildRunRequestIdForTest(
+        "normal-turn-req",
+        "some-earlier-req"
+      )
     ).resolves.toBeUndefined();
     expect(await agent.hasAgentToolChildRunTableForTest()).toBe(false);
   });
@@ -44,7 +47,10 @@ describe("agent-tool rebind: no-op safety on non-child recovery", () => {
       "old-settled-req"
     );
 
-    await agent.rebindAgentToolChildRunRequestIdForTest("normal-turn-req");
+    await agent.rebindAgentToolChildRunRequestIdForTest(
+      "normal-turn-req",
+      "old-settled-req"
+    );
 
     // The settled row keeps its original request id; the new turn's id is not
     // mis-attributed to the finished run.
@@ -56,20 +62,34 @@ describe("agent-tool rebind: no-op safety on non-child recovery", () => {
     ).toBeNull();
   });
 
-  it("rebinds only the newest active row when several are non-terminal (defensive)", async () => {
+  it("rebinds only the run whose row names the recovered turn", async () => {
     const agent = await freshRecoveryAgent(
       `rebind-noop-multi-${crypto.randomUUID()}`
     );
 
-    // A stale older active row plus the current run's row. (In production a
-    // child DO is named by its runId so it owns exactly one row — this asserts
-    // the defensive `ORDER BY started_at DESC` selection regardless.)
     await agent.seedAgentToolChildRunForTest("run-old", "old-req", 1_000);
     await agent.seedAgentToolChildRunForTest("run-new", "new-req", 2_000);
 
-    await agent.rebindAgentToolChildRunRequestIdForTest("recovery-req");
+    // Another turn recovered on the same agent: no run row names it, so no
+    // run is bound to it, open or not.
+    await agent.rebindAgentToolChildRunRequestIdForTest(
+      "users-recovery-req",
+      "users-req"
+    );
+    expect(await agent.getAgentToolChildRunRequestIdForTest("run-new")).toBe(
+      "new-req"
+    );
+    expect(
+      await agent.resolveAgentToolRunForRequestForTest("users-recovery-req")
+    ).toBeNull();
 
-    // Newest row was rebound; the older one is left untouched.
+    // The recovery of run-new's own turn.
+    await agent.rebindAgentToolChildRunRequestIdForTest(
+      "recovery-req",
+      "new-req"
+    );
+
+    // Its row was rebound; the other run's is left untouched.
     expect(await agent.getAgentToolChildRunRequestIdForTest("run-new")).toBe(
       "recovery-req"
     );
@@ -90,7 +110,10 @@ describe("agent-tool rebind: no-op safety on non-child recovery", () => {
     // isolate has not run the child-run ensure yet.
     await agent.seedLegacyAgentToolChildRunForTest("run-legacy", "old-req");
 
-    await agent.rebindAgentToolChildRunRequestIdForTest("recovery-req");
+    await agent.rebindAgentToolChildRunRequestIdForTest(
+      "recovery-req",
+      "old-req"
+    );
 
     expect(await agent.getAgentToolChildRunRequestIdForTest("run-legacy")).toBe(
       "recovery-req"

@@ -77,6 +77,7 @@ import {
   type TurnFailureHost
 } from "./turn-failure";
 import { TurnQueue } from "./turn-queue";
+import { isTurnStopped } from "./turn-stop";
 
 /** The transcript shape the core reads: ids for targets, parts for batches. */
 export type ChatTurnMessage = {
@@ -130,6 +131,15 @@ export interface ChatTurnsHost {
    * the host's observability event. Optional.
    */
   continuationDropped?(event: ContinuationDropped): void;
+  /**
+   * A stop landed: {@link ChatTurns.cancel} for `requestId`, or
+   * {@link ChatTurns.stopAll} (`null`). Whatever the request id names beyond
+   * a running turn is the host's to stop here, so every stop path does the
+   * same: a recovery of the request that is scheduled and not yet running,
+   * and an agent-tool run left open for that recovery. Not called for the
+   * runtime's own abort ({@link ChatTurns.runtimeAbort}). Optional.
+   */
+  stopped?(requestId: string | null, reason: unknown): void | Promise<void>;
 }
 
 export interface ChatTurnsOptions {
@@ -202,8 +212,9 @@ export interface ClientChatRequest<TPrepared> {
    */
   onSkipped(): void;
   /**
-   * The request was cancelled before its turn started. Send the `aborted`
-   * terminal frame. The model is never called.
+   * The request was cancelled before its turn started, or its turn threw
+   * after it was stopped and before it replied ({@link isTurnStopped}).
+   * Send the `aborted` terminal frame.
    */
   onCancelledBeforeStart(): void;
   /**
@@ -266,6 +277,8 @@ export class ChatTurns<
   #lastReply: string | null = null;
   /** Depth of {@link runtimeAbort} calls in progress. */
   #runtimeAborts = 0;
+  /** The signals of the turns a stop landed on. */
+  readonly #stoppedSignals = new WeakSet<AbortSignal>();
 
   /** What the continuation lifecycle (continuation-turn.ts) works on. */
   readonly #continuationParts: ContinuationTurnParts<TConnection>;
@@ -408,7 +421,14 @@ export class ChatTurns<
             request.onCancelledBeforeStart();
             return;
           }
-          await request.run(prepared, signal);
+          try {
+            await request.run(prepared, signal);
+          } catch (error) {
+            // What a stopped turn throws because of the stop is not a
+            // failure: the request ends `aborted`.
+            if (!isTurnStopped(signal)) throw error;
+            request.onCancelledBeforeStart();
+          }
         },
         generation,
         releasePendingEnqueue
@@ -709,11 +729,46 @@ export class ChatTurns<
    * watchdog, which recovery follows) runs inside {@link runtimeAbort} and
    * drops nothing.
    */
-  cancel(requestId: string, reason?: unknown): void {
+  cancel(requestId: string, reason?: unknown): Promise<void> {
+    this.#noteStopped(this.aborts.getExistingSignal(requestId));
     this.#stop(() => {
       this.aborts.cancel(requestId, reason);
       this.#recoveryAttempts.get(requestId)?.abort(reason);
     }, requestId);
+    return this.#afterStop(requestId, reason);
+  }
+
+  /**
+   * Whether the turn that owns `signal` was stopped: {@link isTurnStopped},
+   * or a stop that landed after the runtime had already aborted the signal
+   * for a stall. The signal keeps the stall as its reason, so it alone
+   * cannot say that a stop followed.
+   */
+  isStopped(signal: AbortSignal | undefined): boolean {
+    return (
+      isTurnStopped(signal) ||
+      (signal !== undefined && this.#stoppedSignals.has(signal))
+    );
+  }
+
+  #noteStopped(signal: AbortSignal | undefined): void {
+    if (signal && this.#runtimeAborts === 0) this.#stoppedSignals.add(signal);
+  }
+
+  /**
+   * Tell the host about a stop ({@link ChatTurnsHost.stopped}).
+   *
+   * @returns A promise that settles when the host's work is done. It never
+   *   rejects: a stop that could not finish its bookkeeping still stopped
+   *   the turn.
+   */
+  async #afterStop(requestId: string | null, reason: unknown): Promise<void> {
+    if (this.#runtimeAborts > 0) return;
+    try {
+      await this.host.stopped?.(requestId, reason);
+    } catch (error) {
+      console.error("[chat] failed to finish a stop:", error);
+    }
   }
 
   /**
@@ -724,13 +779,15 @@ export class ChatTurns<
    * "stop everything" covers it all the same. A result that arrives after
    * this call continues as usual.
    */
-  stopAll(reason?: unknown): void {
+  stopAll(reason?: unknown): Promise<void> {
+    for (const signal of this.aborts.signals()) this.#noteStopped(signal);
     this.#stop(() => {
       this.aborts.destroyAll(reason);
       for (const attempt of this.#recoveryAttempts.values()) {
         attempt.abort(reason);
       }
     }, null);
+    return this.#afterStop(null, reason);
   }
 
   /**
@@ -751,7 +808,7 @@ export class ChatTurns<
     const { pending, activeRequestId, activeConnectionId } = this.continuation;
     if (pending && this.continuation.awaitingConnections.has(connectionId)) {
       if (pending.pastCoalesce) {
-        this.cancel(pending.requestId, reason);
+        void this.cancel(pending.requestId, reason);
         return;
       }
       // Fired and queued, or not fired yet: its turn finds nothing to claim.
@@ -759,7 +816,7 @@ export class ChatTurns<
       return;
     }
     if (activeRequestId !== null && activeConnectionId === connectionId) {
-      this.cancel(activeRequestId, reason);
+      void this.cancel(activeRequestId, reason);
       return;
     }
     // A result whose frame arrived before the stop and is still applying.

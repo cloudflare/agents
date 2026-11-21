@@ -9,6 +9,7 @@ import {
   type ServerChatTurn,
   type ServerTurnParts
 } from "../server-turn";
+import { ChatStreamStalledError } from "../stall-watchdog";
 import { TurnQueue } from "../turn-queue";
 
 /** Let queued microtasks and the queue's own awaits run. */
@@ -392,6 +393,54 @@ describe("runServerTurn", () => {
     // A later abort finds no listener and no controller to cancel.
     controller.abort();
     expect(parts.aborts.size).toBe(0);
+  });
+
+  // A stop with a reason: the model call fails with that reason, not with
+  // an AbortError. The signal decides, not the thrown value.
+  for (const reason of [undefined, "stop reason", new Error("stop reason")]) {
+    it(`ends a turn aborted when its run throws after a stop (reason: ${String(reason)})`, async () => {
+      const caller = new AbortController();
+      const result = await runServerTurn(
+        parts,
+        turn("s1", {
+          signal: caller.signal,
+          run: async (signal) => {
+            caller.abort(reason);
+            throw signal.reason;
+          }
+        })
+      );
+      expect(result).toEqual({ status: "aborted", reason: "stopped" });
+      expect(log).toContain("s1:onAborted");
+      expect(parts.aborts.size).toBe(0);
+    });
+  }
+
+  it("still rejects with what a run throws when nothing stopped the turn", async () => {
+    await expect(
+      runServerTurn(
+        parts,
+        turn("s1", {
+          run: async () => {
+            throw new Error("boom");
+          }
+        })
+      )
+    ).rejects.toThrow("boom");
+  });
+
+  it("does not take the stall watchdog's abort for a stop", async () => {
+    await expect(
+      runServerTurn(
+        parts,
+        turn("s1", {
+          run: async () => {
+            parts.aborts.cancel("s1", new ChatStreamStalledError("stalled"));
+            throw new Error("recovery could not be scheduled");
+          }
+        })
+      )
+    ).rejects.toThrow("recovery could not be scheduled");
   });
 
   it("drops the controller and the listener when the run throws", async () => {
