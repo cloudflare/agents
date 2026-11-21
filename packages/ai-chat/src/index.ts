@@ -2017,12 +2017,13 @@ export class AIChatAgent<
       ...(exclude || []),
       ...this._pendingResumeConnections
     ];
+    this.broadcast(JSON.stringify(message), allExclusions);
     // A tab that is away when the request ends gets this frame when it
-    // resumes (`recent-terminals.ts`).
+    // resumes (`recent-terminals.ts`). After the broadcast: the record can
+    // fail, and the frame must still go out.
     if (message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE) {
       recordRecentChatTerminal(this.ctx.storage.kv, message);
     }
-    this.broadcast(JSON.stringify(message), allExclusions);
   }
 
   /**
@@ -3032,8 +3033,16 @@ export class AIChatAgent<
     });
     // A request replayed after a reset has no connection: the tab that sent
     // it may be any of them now.
-    if (connection) this._sendDirectMessage(connection, frame);
-    else this._broadcastChatMessage(frame);
+    if (!connection) {
+      this._broadcastChatMessage(frame);
+      return;
+    }
+    this._sendDirectMessage(connection, frame);
+    // Recorded like every terminal, so the tab that sent it gets it when it
+    // resumes by request id, if it was away when it was sent.
+    if (frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE) {
+      recordRecentChatTerminal(this.ctx.storage.kv, frame);
+    }
   }
 
   private _completeSkippedRequest(

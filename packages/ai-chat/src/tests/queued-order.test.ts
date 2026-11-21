@@ -157,6 +157,86 @@ describe("a message queued behind a running turn", () => {
     tabC.close();
   }, 30_000);
 
+  for (const end of ["stopped", "superseded"] as const) {
+    it(`a request ${end} while it waits ends on its tab after the tab comes back`, async () => {
+      const room = crypto.randomUUID();
+      const path =
+        end === "stopped"
+          ? `/agents/slow-stream-agent/${room}`
+          : `/agents/latest-message-concurrency-agent/${room}`;
+      const { ws: tabA } = await connectChatWS(path);
+      const { ws: tabB } = await connectChatWS(path);
+      const seenB = record(tabB);
+      sendChatRequest(tabB, "r1", [user("u1", "one")], SLOW);
+      await waitFor(() =>
+        seenB.some((f) => isUseChatResponseMessage(f) && f.id === "r1")
+      );
+      sendChatRequest(
+        tabA,
+        "r2",
+        [user("u1", "one"), user("u2", "two")],
+        QUICK
+      );
+      await delay(100);
+      if (end === "stopped") {
+        tabA.send(
+          JSON.stringify({
+            type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
+            id: "r2"
+          })
+        );
+      } else {
+        sendChatRequest(
+          tabB,
+          "r3",
+          [user("u1", "one"), user("u2", "two"), user("u3", "three")],
+          QUICK
+        );
+      }
+      await delay(50);
+      // The tab that sent r2 goes away before r2 ends.
+      tabA.close();
+      await waitFor(() =>
+        seenB.some(
+          (f) =>
+            isUseChatResponseMessage(f) &&
+            f.id === (end === "stopped" ? "r1" : "r3") &&
+            f.done === true
+        )
+      );
+      // It comes back and asks for r2 by id.
+      const { ws: back } = await connectChatWS(path);
+      const seen = record(back);
+      back.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST,
+          requestIds: ["r2"]
+        })
+      );
+      await waitFor(() =>
+        seen.some(
+          (f) =>
+            f.type === MessageType.CF_AGENT_STREAM_RESUMING && f.id === "r2"
+        )
+      );
+      back.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+          id: "r2"
+        })
+      );
+      await waitFor(() =>
+        seen.some((f) => isUseChatResponseMessage(f) && f.id === "r2" && f.done)
+      );
+      const done = seen.find(
+        (f) => isUseChatResponseMessage(f) && f.id === "r2" && f.done
+      ) as { outcome?: string };
+      expect(done.outcome).toBe(end === "stopped" ? "aborted" : "skipped");
+      tabB.close();
+      back.close();
+    }, 30_000);
+  }
+
   it("a clear while it waits drops it: it is never stored", async () => {
     const room = crypto.randomUUID();
     const path = `/agents/slow-stream-agent/${room}`;

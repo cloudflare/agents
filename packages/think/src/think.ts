@@ -17812,11 +17812,15 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       this._broadcastChat(frame);
       return;
     }
+    const sent = this._withOriginMessageIds(frame);
     try {
-      connection.send(JSON.stringify(this._withOriginMessageIds(frame)));
+      connection.send(JSON.stringify(sent));
     } catch {
       // The connection closed before the server could answer.
     }
+    // Recorded like every terminal, so the tab that sent it gets it when it
+    // resumes by request id, if it was away when it was sent.
+    recordRecentChatTerminal(this.ctx.storage.kv, sent);
   }
 
   private _completeSkippedRequest(
@@ -18901,18 +18905,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       ...(exclude || []),
       ...this._pendingResumeConnections
     ];
+    const frame = this._withOriginMessageIds(message);
+    this.broadcast(JSON.stringify(frame), allExclusions);
     // A tab that is away when the request ends gets this frame when it
-    // resumes (`recent-terminals.ts`).
+    // resumes (`recent-terminals.ts`). After the broadcast: the record can
+    // fail, and the frame must still go out.
     if (message.type === MSG_CHAT_RESPONSE) {
-      recordRecentChatTerminal(
-        this.ctx.storage.kv,
-        this._withOriginMessageIds(message)
-      );
+      recordRecentChatTerminal(this.ctx.storage.kv, frame);
     }
-    this.broadcast(
-      JSON.stringify(this._withOriginMessageIds(message)),
-      allExclusions
-    );
   }
 
   /**

@@ -12,6 +12,10 @@ import type { UIMessage } from "ai";
 
 const MSG_CHAT_REQUEST = "cf_agent_use_chat_request";
 const MSG_CHAT_RESPONSE = "cf_agent_use_chat_response";
+const MSG_CHAT_CANCEL = "cf_agent_chat_request_cancel";
+const MSG_RESUME_REQUEST = "cf_agent_stream_resume_request";
+const MSG_RESUMING = "cf_agent_stream_resuming";
+const MSG_RESUME_ACK = "cf_agent_stream_resume_ack";
 
 type AdmissionStub = {
   resetIsolateForTest(): Promise<void>;
@@ -196,4 +200,69 @@ describe("a message queued behind a running turn", () => {
     tabB.close();
     tabC.close();
   }, 40_000);
+
+  for (const end of ["stopped", "superseded"] as const) {
+    it(`a request ${end} while it waits ends on its tab after the tab comes back`, async () => {
+      const binding: Binding =
+        end === "stopped"
+          ? "ThinkAdmissionTestAgent"
+          : "ThinkLatestAdmissionTestAgent";
+      const room = crypto.randomUUID();
+      const tabA = await connect(binding, room);
+      const tabB = await connect(binding, room);
+      const seenB = record(tabB);
+      send(tabB, "r1", [user("u1", "one")], SLOW);
+      await waitFor(
+        async () =>
+          seenB.some((f) => f.type === MSG_CHAT_RESPONSE && f.id === "r1"),
+        (ok) => ok
+      );
+      send(tabA, "r2", [user("u1", "one"), user("u2", "two")], QUICK);
+      await delay(100);
+      if (end === "stopped") {
+        tabA.send(JSON.stringify({ type: MSG_CHAT_CANCEL, id: "r2" }));
+      } else {
+        send(
+          tabB,
+          "r3",
+          [user("u1", "one"), user("u2", "two"), user("u3", "three")],
+          { ...QUICK, tag: "t" }
+        );
+      }
+      await delay(50);
+      // The tab that sent r2 goes away before r2 ends.
+      tabA.close();
+      const last = end === "stopped" ? "r1" : "r3";
+      await waitFor(
+        async () =>
+          seenB.some(
+            (f) => f.type === MSG_CHAT_RESPONSE && f.id === last && f.done
+          ),
+        (ok) => ok
+      );
+      // It comes back and asks for r2 by id.
+      const back = await connect(binding, room);
+      const seen = record(back);
+      back.send(
+        JSON.stringify({ type: MSG_RESUME_REQUEST, requestIds: ["r2"] })
+      );
+      await waitFor(
+        async () => seen.some((f) => f.type === MSG_RESUMING && f.id === "r2"),
+        (ok) => ok,
+        5000
+      );
+      back.send(JSON.stringify({ type: MSG_RESUME_ACK, id: "r2" }));
+      const done = await waitFor(
+        async () =>
+          seen.find(
+            (f) => f.type === MSG_CHAT_RESPONSE && f.id === "r2" && f.done
+          ),
+        (f) => f !== undefined,
+        5000
+      );
+      expect(done?.outcome).toBe(end === "stopped" ? "aborted" : "skipped");
+      tabB.close();
+      back.close();
+    }, 40_000);
+  }
 });
