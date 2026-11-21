@@ -1521,6 +1521,42 @@ export class ChatRecoveryEngine {
     await this.adapter.putIncident(key, { ...rest, deferredError: error });
   }
 
+  /**
+   * Record that the reply this incident continues is being removed because
+   * it holds nothing. Call it before the removal.
+   */
+  async markReplyRemoved(incidentId: string | undefined): Promise<void> {
+    if (!incidentId) return;
+    const key = chatRecoveryIncidentKey(incidentId);
+    const incident = await this.adapter.getIncident(key);
+    if (!incident || incident.replyRemoved) return;
+    await this.adapter.putIncident(key, { ...incident, replyRemoved: true });
+  }
+
+  /**
+   * Whether an earlier run of this incident's attempt removed the reply it
+   * was to continue. `"unknown"` when there is no incident record to ask:
+   * the caller then goes by the transcript.
+   */
+  async isReplyRemoved(
+    incidentId: string | undefined
+  ): Promise<boolean | "unknown"> {
+    if (!incidentId) return "unknown";
+    const incident = await this.adapter.getIncident(
+      chatRecoveryIncidentKey(incidentId)
+    );
+    return incident ? incident.replyRemoved === true : "unknown";
+  }
+
+  /** Whether recovery already gave up on this incident. */
+  async isRecoverySealed(incidentId: string | undefined): Promise<boolean> {
+    if (!incidentId) return false;
+    const incident = await this.adapter.getIncident(
+      chatRecoveryIncidentKey(incidentId)
+    );
+    return incident?.status === "exhausted";
+  }
+
   /** Whether the user cancelled this incident's scheduled recovery. */
   async isRecoveryCancelled(incidentId: string | undefined): Promise<boolean> {
     if (!incidentId) return false;

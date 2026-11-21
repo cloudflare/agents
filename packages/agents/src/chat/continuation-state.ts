@@ -11,7 +11,6 @@
  */
 
 import { CHAT_MESSAGE_TYPES } from "./protocol";
-import type { ClientToolSchema } from "./client-tools";
 import { sendIfOpen, type ChatConnection } from "./connection";
 
 const MSG_STREAM_RESUME_NONE = CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE;
@@ -29,8 +28,6 @@ export interface ContinuationPending<
   connection: TConnection;
   connectionId: string | null;
   requestId: string;
-  clientTools?: ClientToolSchema[];
-  body?: Record<string, unknown>;
   errorPrefix: string | null;
   prerequisite: Promise<boolean> | null;
   pastCoalesce: boolean;
@@ -48,8 +45,6 @@ export interface ContinuationDeferred<
 > {
   connection: TConnection;
   connectionId: string | null;
-  clientTools?: ClientToolSchema[];
-  body?: Record<string, unknown>;
   errorPrefix: string;
   prerequisite: Promise<boolean> | null;
   targetMessageIds: readonly string[];
@@ -154,8 +149,6 @@ export class ContinuationState<
       connection: d.connection,
       connectionId: d.connectionId,
       requestId: generateRequestId(),
-      clientTools: d.clientTools,
-      body: d.body,
       errorPrefix: d.errorPrefix,
       prerequisite: d.prerequisite,
       pastCoalesce: false,

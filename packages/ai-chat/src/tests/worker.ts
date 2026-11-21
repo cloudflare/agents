@@ -365,6 +365,25 @@ export class TestChatAgent extends AIChatAgent<Env> {
     options?: OnChatMessageOptions
   ) {
     this._chatMessageCallCount++;
+    // What the model request would hold: tool calls with no result.
+    this._unansweredAtModelCall = this.messages.flatMap((message) =>
+      message.parts.flatMap((part) => {
+        const record = part as { toolCallId?: string; state?: string };
+        return record.toolCallId &&
+          (record.state === "input-available" ||
+            record.state === "approval-requested")
+          ? [record.toolCallId]
+          : [];
+      })
+    );
+    // Assistant messages the model request would end a turn of in reasoning.
+    this._endsInReasoningAtModelCall = this.messages
+      .filter(
+        (message) =>
+          message.role === "assistant" &&
+          message.parts.at(-1)?.type === "reasoning"
+      )
+      .map((message) => message.id);
     // Capture the body, clientTools, and requestId from options for testing
     this._capturedBody = options?.body;
     this._capturedClientTools = options?.clientTools;
@@ -459,6 +478,45 @@ export class TestChatAgent extends AIChatAgent<Env> {
                 toolName: "slowServerTool",
                 input: {}
               }
+            ]) {
+              controller.enqueue(
+                encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`)
+              );
+            }
+          },
+          cancel() {}
+        }),
+        { headers: { "Content-Type": "text/event-stream" } }
+      );
+    }
+
+    // The reply writes text, then the model's reasoning, and never
+    // finishes: only a stop, a stall or an eviction ends it.
+    if (options?.body?.reasoningThenHang === true) {
+      const encoder = new TextEncoder();
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            // `hangIn` picks where the reply hangs: in its reasoning with
+            // no text before it, or in the middle of its text.
+            const hangIn = options?.body?.hangIn;
+            const text = [
+              { type: "text-start", id: "t" },
+              { type: "text-delta", id: "t", delta: "Partial answer" }
+            ];
+            const reasoning = [
+              { type: "reasoning-start", id: "r" },
+              { type: "reasoning-delta", id: "r", delta: "Let me think" },
+              { type: "reasoning-end", id: "r" }
+            ];
+            for (const chunk of [
+              { type: "start" },
+              { type: "start-step" },
+              ...(hangIn === "reasoning"
+                ? reasoning
+                : hangIn === "text"
+                  ? text
+                  : [...text, { type: "text-end", id: "t" }, ...reasoning])
             ]) {
               controller.enqueue(
                 encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`)
@@ -954,6 +1012,30 @@ export class TestChatAgent extends AIChatAgent<Env> {
 
   abortAllRequestsForTest(): void {
     this.abortAllRequests();
+  }
+
+  private _unansweredAtModelCall: string[] = [];
+
+  private _endsInReasoningAtModelCall: string[] = [];
+
+  /** Assistant messages that ended in reasoning when the model was called. */
+  getEndsInReasoningAtModelCallForTest(): string[] {
+    return this._endsInReasoningAtModelCall;
+  }
+
+  /** The client tools stored for later turns. */
+  getStoredClientToolsForTest(): ClientToolSchema[] | undefined {
+    return this._lastClientTools;
+  }
+
+  /** Store client tools as a request that sent them would. */
+  setClientToolsForTest(clientTools: ClientToolSchema[]): void {
+    this._lastClientTools = clientTools;
+  }
+
+  /** Tool calls with no result in the transcript the last turn's model saw. */
+  getUnansweredAtModelCallForTest(): string[] {
+    return this._unansweredAtModelCall;
   }
 
   hasPendingInteractionForTest(): boolean {
@@ -1539,6 +1621,11 @@ export class CustomSanitizeAgent extends AIChatAgent<Env> {
  * - `chunkDelayMs`: delay between chunks in ms (default: 50)
  */
 export class SlowStreamAgent extends AIChatAgent<Env> {
+  /** The body later turns run with. */
+  getStoredBodyForTest(): Record<string, unknown> | undefined {
+    return this._lastBody;
+  }
+
   private _startedRequestIds: string[] = [];
   private _requestStartTimes = new Map<string, number>();
   private _chatResponseResults: ChatResponseResult[] = [];
@@ -1668,7 +1755,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
           if (format === "sse") {
             const chunk = JSON.stringify({
               type: "text-delta",
-              textDelta: `chunk-${i} `
+              delta: `chunk-${i} `
             });
             controller.enqueue(encoder.encode(`data: ${chunk}\n\n`));
           } else {
@@ -2222,7 +2309,7 @@ export class ResponseAgent extends AIChatAgent<Env> {
           if (format === "sse") {
             const chunk = JSON.stringify({
               type: "text-delta",
-              textDelta: `chunk-${i} `
+              delta: `chunk-${i} `
             });
             controller.enqueue(encoder.encode(`data: ${chunk}\n\n`));
           } else {
@@ -2731,6 +2818,33 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       }
     ]);
     this._followUpRequestId = followUp.requestId;
+  }
+
+  /**
+   * Store text (which stays buffered) then a tool call, and report how many
+   * chunks are in SQLite before and after the call.
+   */
+  async probeToolCallDurabilityForTest(): Promise<{
+    beforeCall: number;
+    afterCall: number;
+  }> {
+    const streamId = this._resumableStream.start("req-tool-call-durability");
+    const store = (chunk: Record<string, unknown>) =>
+      this._storeStreamChunk(streamId, JSON.stringify(chunk));
+    const rawCount = (): number =>
+      this.sql<{ count: number }>`
+        SELECT COALESCE(MAX(seq_to), 0) as count FROM cf_agents_stream_blocks
+        WHERE stream_id = ${streamId}
+      `[0]?.count ?? 0;
+    await store({ type: "reasoning-delta", id: "r", delta: "Let me look." });
+    const beforeCall = rawCount();
+    await store({
+      type: "tool-input-available",
+      toolCallId: "tc1",
+      toolName: "getWeather",
+      input: { city: "Paris" }
+    });
+    return { beforeCall, afterCall: rawCount() };
   }
 
   /** Holds the next onChatMessage call until released: the model is slow. */
@@ -4216,6 +4330,15 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     return this.continueLastTurn(body);
   }
 
+  async runRecoveryContinueForTest(options?: {
+    targetAssistantId?: string;
+    originMessageIds?: string[];
+    incidentId?: string;
+    originalRequestId?: string;
+  }): Promise<void> {
+    await this._chatRecoveryContinueDetached(options);
+  }
+
   async runRecoveryRetryForTest(options?: {
     targetUserId?: string;
     lastBody?: Record<string, unknown>;
@@ -4326,6 +4449,14 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
         lastClientTools?: ClientToolSchema[] | null;
       }
     );
+  }
+
+  /** The request context stored for later turns. */
+  getRequestContextForTest(): {
+    body: Record<string, unknown> | undefined;
+    clientTools: ClientToolSchema[] | undefined;
+  } {
+    return { body: this._lastBody, clientTools: this._lastClientTools };
   }
 
   setRequestContextForTest(

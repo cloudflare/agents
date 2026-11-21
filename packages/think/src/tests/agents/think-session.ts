@@ -2294,7 +2294,12 @@ export class ThinkTestAgent extends Think {
                   }
                   const { done, value } = await iterator.next();
                   if (done) return { done: true as const, value: undefined };
-                  chunkCount++;
+                  // Count from the first chunk of content. A reply cut off
+                  // before it has any (after `start` and `start-step` alone)
+                  // holds nothing and is not stored, and these tests are
+                  // about a partial reply that is.
+                  const type = (value as { type?: string } | null)?.type;
+                  if (type !== "start" && type !== "start-step") chunkCount++;
                   if (
                     midStreamHook &&
                     chunkCount === midStreamHook.afterChunks
@@ -11087,6 +11092,45 @@ export class ThinkRecoveryTestAgent extends Think {
     return { bufferedTextCount, afterToolOutputCount };
   }
 
+  /**
+   * Store text (the second chunk stays buffered) then a tool call, and
+   * report how many chunks are in SQLite before and after the call.
+   */
+  async probeToolCallDurabilityForTest(): Promise<{
+    beforeCall: number;
+    afterCall: number;
+  }> {
+    const self = this as unknown as {
+      _resumableStream: { start(id: string): string };
+      _storeChunkDurably(
+        streamId: string,
+        chunk: unknown,
+        chunkBody: string,
+        state: { chunksSinceFlush: number; hasFlushedContent: boolean }
+      ): Promise<void>;
+    };
+    const streamId = self._resumableStream.start("req-tool-call-durability");
+    const state = { chunksSinceFlush: 0, hasFlushedContent: false };
+    const store = (chunk: Record<string, unknown>): Promise<void> =>
+      self._storeChunkDurably(streamId, chunk, JSON.stringify(chunk), state);
+    const rawCount = (): number =>
+      this.sql<{ count: number }>`
+        SELECT COALESCE(MAX(seq_to), 0) as count FROM cf_agents_stream_blocks
+        WHERE stream_id = ${streamId}
+      `[0]?.count ?? 0;
+
+    await store({ type: "reasoning-delta", id: "r", delta: "Let me " });
+    await store({ type: "reasoning-delta", id: "r", delta: "look." });
+    const beforeCall = rawCount();
+    await store({
+      type: "tool-input-available",
+      toolCallId: "tc1",
+      toolName: "getWeather",
+      input: { city: "Paris" }
+    });
+    return { beforeCall, afterCall: rawCount() };
+  }
+
   /** Stream content (which durably flushes) then re-persist the same orphan,
    *  reading the recovery-progress counter at each step. Proves the production-
    *  time signal advances on new content but NOT on a reconnect/recovery
@@ -11403,6 +11447,7 @@ export class ThinkRecoveryTestAgent extends Think {
     progress?: number;
     workBaseline?: number;
     interruptedAttempts?: number;
+    replyRemoved?: boolean;
   }): Promise<void> {
     await this.ctx.storage.put(
       `cf:chat-recovery:incident:${encodeURIComponent(incident.incidentId)}`,
@@ -11908,6 +11953,13 @@ export class ThinkRecoveryTestAgent extends Think {
     lastBody?: Record<string, unknown>;
   }): Promise<void> {
     await this._chatRecoveryRetryDetached(options);
+  }
+
+  async runRecoveryContinueForTest(options?: {
+    targetAssistantId?: string;
+    originMessageIds?: string[];
+  }): Promise<void> {
+    await this._chatRecoveryContinueDetached(options);
   }
 
   async runScheduledRecoveryRetryForTest(): Promise<void> {

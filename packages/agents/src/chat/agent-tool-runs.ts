@@ -38,6 +38,7 @@
  * `@cloudflare/think`, not a public API.
  */
 
+import type { SaveMessagesResult } from "./lifecycle";
 import {
   isPositionlessAgentToolChunk,
   type AgentToolProgress,
@@ -69,7 +70,7 @@ export interface AgentToolTurnResult {
    * For `aborted`: `"interrupted"` when the reply was cut off and handed to
    * chat recovery, which may still finish it (`runServerTurn`).
    */
-  reason?: "stopped" | "interrupted";
+  reason?: SaveMessagesResult["reason"];
 }
 
 /** The parts of the host's resumable stream a run's chunks are read from. */

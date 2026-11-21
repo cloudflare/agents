@@ -214,8 +214,6 @@ describe("the continuation turn", () => {
 
   const spec = (target: TestConnection = connection) => ({
     connection: target,
-    clientTools: undefined,
-    body: undefined,
     errorPrefix: "[test]"
   });
   /** A tool result that settled a call in the message `messageId`. */
@@ -293,6 +291,21 @@ describe("the continuation turn", () => {
     expect(connection.sent).toEqual([RESUME_NONE]);
     expect(turns.continuation.pending).toBeNull();
     expect(turns.aborts.has("cont-1")).toBe(false);
+  });
+
+  it("runs nothing while the reply still waits on a client", async () => {
+    await result("a1");
+    // The reply holds an approval the user has not answered. The barrier
+    // holds a continuation until its batch is answered, so only a transcript
+    // changed underneath it gets here.
+    host.transcript = [user("u1"), toolReply("a1", "approval-requested")];
+    await fire();
+    await drain();
+
+    expect(host.ran).toEqual([]);
+    expect(host.droppedEvents).toEqual(["cont-1:awaiting_client"]);
+    expect(connection.sent).toEqual([RESUME_NONE]);
+    expect(turns.continuation.pending).toBeNull();
   });
 
   it("claims only the continuation the turn was fired for", async () => {
@@ -1199,8 +1212,6 @@ describe("what a continuation turn runs", () => {
       true,
       () => ({
         connection,
-        clientTools: undefined,
-        body: undefined,
         errorPrefix: "[test]"
       })
     );
@@ -1437,6 +1448,7 @@ describe("what a continuation turn runs", () => {
       aborts: turns.aborts,
       messages: () => host.transcript,
       lastTurnReplyId: () => undefined,
+      clientToolNames: () => new Set<string>(),
       streamed: new Map<string, boolean>(),
       firing: new Set<object>(),
       unscheduled: new Set<string>(),
@@ -1456,6 +1468,7 @@ describe("what a continuation turn runs", () => {
       aborts: turns.aborts,
       messages: () => host.transcript,
       lastTurnReplyId: () => undefined,
+      clientToolNames: () => new Set<string>(),
       streamed: new Map<string, boolean>(),
       firing: new Set<object>(),
       unscheduled: new Set<string>(),

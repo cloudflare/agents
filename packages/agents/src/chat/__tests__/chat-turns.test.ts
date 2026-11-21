@@ -1,5 +1,6 @@
 import { ChatStreamStalledError } from "../stall-watchdog";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import type { UIMessage } from "ai";
 import { AutoContinuationController } from "../auto-continuation-controller";
 import {
   ChatTurns,
@@ -799,6 +800,193 @@ describe("ChatTurns", () => {
         })
       ).rejects.toThrow("unreported");
       expect(turns.aborts.size).toBe(0);
+    });
+  });
+
+  describe("settleBeforeTurn", () => {
+    const flip = (part: UIMessage["parts"][number]) =>
+      ({ ...part, state: "output-error" }) as UIMessage["parts"][number];
+    const stateOf = (message: UIMessage) =>
+      (message.parts[0] as { state?: string }).state;
+    const noSink = {
+      persist: async () => {},
+      remove: async () => {},
+      emitRepaired: () => {}
+    };
+    const repair = (messages: UIMessage[], continuation: boolean) =>
+      turns.settleBeforeTurn(
+        messages,
+        { continuation, repairPart: flip },
+        noSink
+      );
+
+    it("settles a known client's call in a reply the conversation moved past", async () => {
+      host.clientTools = new Set(["x"]);
+      const messages = [
+        user("u1"),
+        toolReply("a1", "input-available"),
+        user("u2")
+      ] as UIMessage[];
+
+      const result = await repair(messages, false);
+
+      expect(stateOf(result.messages[1])).toBe("output-error");
+      expect(result.toolCallIds).toEqual(["call-a1"]);
+    });
+
+    it("a continuation turn keeps the host's known client call in the message it continues", async () => {
+      host.clientTools = new Set(["x"]);
+      const messages = [
+        user("u1"),
+        toolReply("a1", "input-available")
+      ] as UIMessage[];
+
+      expect(stateOf((await repair(messages, true)).messages[1])).toBe(
+        "input-available"
+      );
+      // The same call for a tool no client sent a schema for is dead.
+      host.clientTools = new Set();
+      expect(stateOf((await repair(messages, true)).messages[1])).toBe(
+        "output-error"
+      );
+    });
+
+    it("reports the calls a continuation turn kept for a client, and says so before the turn", async () => {
+      host.clientTools = new Set(["x"]);
+      const messages = [
+        user("u1"),
+        toolReply("a1", "input-available")
+      ] as UIMessage[];
+
+      expect((await repair(messages, true)).keptToolCallIds).toEqual([
+        "call-a1"
+      ]);
+      expect((await repair(messages, false)).keptToolCallIds).toEqual([]);
+
+      // The same answer without repairing anything, from the host's
+      // transcript or a given one.
+      expect(turns.continuationWaitsOnClient(messages)).toBe(true);
+      host.transcript = messages;
+      expect(turns.continuationWaitsOnClient()).toBe(true);
+      host.transcript = [...messages, user("u2")];
+      expect(turns.continuationWaitsOnClient()).toBe(false);
+      host.clientTools = new Set();
+      expect(turns.continuationWaitsOnClient(messages)).toBe(false);
+    });
+
+    it("settleBeforeTurn stores what the repair changed and reports it", async () => {
+      host.clientTools = new Set(["x"]);
+      const messages = [
+        user("u1"),
+        toolReply("a1", "input-available"),
+        user("u2")
+      ] as UIMessage[];
+      const stored: string[][] = [];
+      const events: unknown[] = [];
+      const sink = {
+        persist: async (changed: UIMessage[]) => {
+          stored.push(changed.map((message) => message.id));
+        },
+        remove: async () => {},
+        emitRepaired: (event: unknown) => void events.push(event)
+      };
+
+      const result = await turns.settleBeforeTurn(
+        messages,
+        { continuation: false, repairPart: flip },
+        sink
+      );
+
+      expect(stateOf(result.messages[1])).toBe("output-error");
+      expect(stored).toEqual([["a1"]]);
+      expect(events).toMatchObject([
+        { removedToolCalls: 1, toolCallIds: ["call-a1"] }
+      ]);
+
+      // Nothing to repair: no write and no event.
+      await turns.settleBeforeTurn(
+        result.messages,
+        { continuation: false, repairPart: flip },
+        sink
+      );
+      expect(stored).toHaveLength(1);
+      expect(events).toHaveLength(1);
+    });
+
+    it("settleInterruptedReply keeps the host's known client call", () => {
+      const reply = toolReply("a1", "input-available") as UIMessage;
+      expect(stateOf(turns.settleInterruptedReply(reply, flip))).toBe(
+        "output-error"
+      );
+      host.clientTools = new Set(["x"]);
+      expect(turns.settleInterruptedReply(reply, flip)).toBe(reply);
+    });
+
+    it("settleBeforeRecovery settles only the latest reply it is given", async () => {
+      const messages = [
+        user("u1"),
+        toolReply("a1", "input-available")
+      ] as UIMessage[];
+      const stored: string[][] = [];
+      const sink = {
+        persist: async (changed: UIMessage[]) => {
+          stored.push(changed.map((message) => message.id));
+        },
+        remove: async () => {},
+        emitRepaired: () => {}
+      };
+
+      await turns.settleBeforeRecovery(messages, "other", flip, sink);
+      expect(stored).toEqual([]);
+      await turns.settleBeforeRecovery(messages, "a1", flip, sink);
+      expect(stored).toEqual([["a1"]]);
+    });
+
+    it("removes a reply the repair left empty and returns the list without it", async () => {
+      const removed: string[][] = [];
+      const messages: UIMessage[] = [
+        { id: "u1", role: "user", parts: [{ type: "text", text: "q" }] },
+        {
+          id: "a1",
+          role: "assistant",
+          parts: [{ type: "step-start" }, { type: "reasoning", text: "hm" }]
+        },
+        { id: "u2", role: "user", parts: [{ type: "text", text: "next" }] }
+      ];
+
+      const result = await turns.settleBeforeTurn(
+        messages,
+        { continuation: false, repairPart: flip },
+        {
+          persist: async () => {
+            throw new Error("an empty reply is removed, not stored");
+          },
+          remove: async (ids) => void removed.push(ids),
+          emitRepaired: () => {}
+        }
+      );
+
+      expect(removed).toEqual([["a1"]]);
+      expect(result.messages.map((message) => message.id)).toEqual([
+        "u1",
+        "u2"
+      ]);
+    });
+
+    it("says a reply that is only reasoning has nothing to continue", () => {
+      const reasoningOnly: UIMessage = {
+        id: "a1",
+        role: "assistant",
+        parts: [{ type: "step-start" }, { type: "reasoning", text: "hm" }]
+      };
+      const answered: UIMessage = {
+        id: "a1",
+        role: "assistant",
+        parts: [{ type: "text", text: "answer" }]
+      };
+      expect(turns.replyToContinueIsEmpty([reasoningOnly])).toBe(true);
+      expect(turns.replyToContinueIsEmpty([answered])).toBe(false);
+      expect(turns.replyToContinueIsEmpty([])).toBe(false);
     });
   });
 });

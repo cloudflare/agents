@@ -38,6 +38,10 @@ interface ChatRecoveryTestStub {
     persist?: boolean;
     continue?: boolean;
   }): Promise<void>;
+  getRequestContextForTest(): Promise<{
+    body: Record<string, unknown> | undefined;
+    clientTools: unknown[] | undefined;
+  }>;
   setRequestContextForTest(
     body: Record<string, unknown> | undefined,
     clientTools: Array<{ name: string }>
@@ -50,6 +54,19 @@ interface ChatRecoveryTestStub {
     ageMs?: number
   ): Promise<void>;
   triggerInterruptedStreamCheck(): Promise<void>;
+  runRecoveryContinueForTest(options?: {
+    targetAssistantId?: string;
+    originMessageIds?: string[];
+    incidentId?: string;
+    originalRequestId?: string;
+  }): Promise<void>;
+  throwFromNextTurnForTest(message: string | null): Promise<void>;
+  seedIncidentForTest(incident: Record<string, unknown>): Promise<void>;
+  getChatRecoveryIncidentsForTest(): Promise<unknown[]>;
+  probeToolCallDurabilityForTest(): Promise<{
+    beforeCall: number;
+    afterCall: number;
+  }>;
   insertInterruptedFiber(name: string, snapshot?: unknown): Promise<void>;
   triggerFiberRecovery(): Promise<void>;
   getRecoveryContexts(): Promise<unknown[]>;
@@ -120,8 +137,10 @@ describe("continueLastTurn", () => {
 
     const result = (await agentStub.callContinueLastTurn()) as {
       status: string;
+      reason?: string;
     };
     expect(result.status).toBe("skipped");
+    expect(result.reason).toBe("nothing-to-continue");
 
     const callCount =
       (await agentStub.getOnChatMessageCallCount()) as unknown as number;
@@ -240,7 +259,262 @@ describe("continueLastTurn", () => {
     expect(allText).toContain("Continued response.");
   });
 
-  it("should merge text into existing streaming text part (not create a new block)", async () => {
+  it("stores a tool call before the tool runs, so a reset mid-run leaves a record of it", async () => {
+    const agentStub = await getTestAgent(crypto.randomUUID());
+
+    const { beforeCall, afterCall } =
+      await agentStub.probeToolCallDurabilityForTest();
+
+    // The reasoning is still in the buffer. The call brings both to storage.
+    expect(beforeCall).toBe(0);
+    expect(afterCall).toBeGreaterThan(beforeCall);
+  });
+
+  it("keeps a server tool call cut off mid-run, settled as an error that says it may have run", async () => {
+    const agentStub = await getTestAgent(crypto.randomUUID());
+    await agentStub.setRecoveryOverride({ continue: false });
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Weather?" }]
+      }
+    ] as ChatMessage[]);
+
+    await agentStub.insertInterruptedStream(
+      "tool-stream",
+      "tool-request",
+      [
+        { type: "start", messageId: "assistant-tool" },
+        { type: "start-step" },
+        { type: "reasoning-start" },
+        { type: "reasoning-delta", delta: "Let me look." },
+        { type: "reasoning-end" },
+        { type: "tool-input-start", toolCallId: "tc1", toolName: "getWeather" },
+        {
+          type: "tool-input-available",
+          toolCallId: "tc1",
+          toolName: "getWeather",
+          input: { city: "Paris" }
+        }
+      ].map((chunk, index) => ({ body: JSON.stringify(chunk), index }))
+    );
+    await agentStub.triggerInterruptedStreamCheck();
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const call = messages
+      .find((message) => message.id === "assistant-tool")
+      ?.parts.find((part) => part.type === "tool-getWeather");
+    expect(call).toMatchObject({
+      state: "output-error",
+      errorText:
+        "The tool call was interrupted before a result was recorded. The tool may still have run."
+    });
+  });
+
+  // A reply left with nothing a client can show and nothing a model request
+  // can carry is not stored, and one that is stored is removed.
+  describe("a reply that holds nothing", () => {
+    const question = {
+      id: "user-1",
+      role: "user",
+      parts: [{ type: "text", text: "Think about it" }]
+    } as ChatMessage;
+    const reasoningOnly = {
+      id: "assistant-reasoning",
+      role: "assistant",
+      parts: [
+        { type: "step-start" },
+        { type: "reasoning", text: "Let me think", state: "streaming" }
+      ]
+    } as ChatMessage;
+    const reasoningChunks = [
+      { type: "start", messageId: "assistant-partial" },
+      { type: "start-step" },
+      { type: "reasoning-start" },
+      { type: "reasoning-delta", delta: "Let me think" }
+    ];
+    const asStream = (chunks: Array<Record<string, unknown>>) =>
+      chunks.map((chunk, index) => ({ body: JSON.stringify(chunk), index }));
+
+    it("does not store a reply cut off while the model was still reasoning", async () => {
+      const agentStub = await getTestAgent(crypto.randomUUID());
+      await agentStub.setRecoveryOverride({ continue: false });
+      await agentStub.persistMessages([question]);
+
+      await agentStub.insertInterruptedStream(
+        "reasoning-stream",
+        "reasoning-request",
+        asStream(reasoningChunks)
+      );
+      await agentStub.triggerInterruptedStreamCheck();
+
+      const messages =
+        (await agentStub.getPersistedMessages()) as ChatMessage[];
+      expect(messages.map((message) => message.id)).toEqual(["user-1"]);
+    });
+
+    it("does not store a reply cut off right after its text part opened", async () => {
+      const agentStub = await getTestAgent(crypto.randomUUID());
+      await agentStub.setRecoveryOverride({ continue: false });
+      await agentStub.persistMessages([question]);
+
+      // An empty text part is not content. Stored, a continuation would
+      // write its answer into it, in front of its own reasoning.
+      await agentStub.insertInterruptedStream(
+        "empty-text-stream",
+        "empty-text-request",
+        asStream([
+          ...reasoningChunks,
+          { type: "reasoning-end" },
+          { type: "text-start" }
+        ])
+      );
+      await agentStub.triggerInterruptedStreamCheck();
+
+      const messages =
+        (await agentStub.getPersistedMessages()) as ChatMessage[];
+      expect(messages.map((message) => message.id)).toEqual(["user-1"]);
+    });
+
+    it("continueLastTurn over a stored reply that is only reasoning removes it and answers the question", async () => {
+      const agentStub = await getTestAgent(crypto.randomUUID());
+      // The previous release stored a reply stopped in its reasoning.
+      await agentStub.persistMessages([question, reasoningOnly]);
+
+      const result = await agentStub.callContinueLastTurn();
+      await agentStub.waitForIdleForTest();
+
+      expect(result.status).toBe("completed");
+      expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
+      const messages =
+        (await agentStub.getPersistedMessages()) as ChatMessage[];
+      expect(messages.map((message) => message.role)).toEqual([
+        "user",
+        "assistant"
+      ]);
+      expect(messages[1].id).not.toBe("assistant-reasoning");
+      expect(JSON.stringify(messages[1].parts)).toContain(
+        "Continued response."
+      );
+    });
+
+    it("a second run of the same continue attempt answers the question", async () => {
+      const agentStub = await getTestAgent(crypto.randomUUID());
+      await agentStub.persistMessages([question, reasoningOnly]);
+      // The first attempt removes the empty reply, then its turn fails with
+      // a platform transient (a deploy reset).
+      await agentStub.throwFromNextTurnForTest("Network connection lost.");
+      await agentStub
+        .runRecoveryContinueForTest({
+          targetAssistantId: "assistant-reasoning"
+        })
+        .catch(() => {});
+      await agentStub.waitForIdleForTest();
+      expect(
+        ((await agentStub.getPersistedMessages()) as ChatMessage[]).map(
+          (message) => message.id
+        )
+      ).toEqual(["user-1"]);
+
+      // The Task delivers the same continue payload again.
+      await agentStub.runRecoveryContinueForTest({
+        targetAssistantId: "assistant-reasoning"
+      });
+      await agentStub.waitForIdleForTest();
+
+      const messages =
+        (await agentStub.getPersistedMessages()) as ChatMessage[];
+      expect(messages.map((message) => message.role)).toEqual([
+        "user",
+        "assistant"
+      ]);
+    });
+
+    it("records the removal on the incident, so a second delivery of the payload retries", async () => {
+      const agentStub = await getTestAgent(crypto.randomUUID());
+      await agentStub.persistMessages([question, reasoningOnly]);
+      await agentStub.seedIncidentForTest({
+        incidentId: "inc-removed",
+        requestId: "req-removed",
+        recoveryKind: "continue",
+        attempt: 1,
+        maxAttempts: 6,
+        status: "scheduled",
+        firstSeenAt: Date.now(),
+        lastAttemptAt: Date.now()
+      });
+      const payload = {
+        incidentId: "inc-removed",
+        originalRequestId: "req-removed",
+        targetAssistantId: "assistant-reasoning"
+      };
+      // The first run removes the empty reply, then its retry turn fails
+      // with a platform transient.
+      await agentStub.throwFromNextTurnForTest("Network connection lost.");
+      await agentStub.runRecoveryContinueForTest(payload).catch(() => {});
+      await agentStub.waitForIdleForTest();
+      expect(await agentStub.getChatRecoveryIncidentsForTest()).toEqual([
+        expect.objectContaining({ replyRemoved: true })
+      ]);
+
+      await agentStub.runRecoveryContinueForTest(payload);
+      await agentStub.waitForIdleForTest();
+
+      const messages =
+        (await agentStub.getPersistedMessages()) as ChatMessage[];
+      expect(messages.map((message) => message.role)).toEqual([
+        "user",
+        "assistant"
+      ]);
+    });
+
+    it("a continue attempt whose reply is gone leaves a newer question alone", async () => {
+      const agentStub = await getTestAgent(crypto.randomUUID());
+      // The reply is gone and the latest message is another question, not
+      // the one the interrupted request came from.
+      await agentStub.persistMessages([
+        question,
+        {
+          id: "user-2",
+          role: "user",
+          parts: [{ type: "text", text: "Something else" }]
+        }
+      ] as ChatMessage[]);
+
+      await agentStub.runRecoveryContinueForTest({
+        targetAssistantId: "assistant-reasoning",
+        originMessageIds: ["user-1"]
+      });
+      await agentStub.waitForIdleForTest();
+
+      expect(await agentStub.getOnChatMessageCallCount()).toBe(0);
+    });
+
+    it("a recovery that would continue it removes it and answers the question again", async () => {
+      const agentStub = await getTestAgent(crypto.randomUUID());
+      await agentStub.persistMessages([question, reasoningOnly]);
+
+      await agentStub.runRecoveryContinueForTest({
+        targetAssistantId: "assistant-reasoning"
+      });
+      await agentStub.waitForIdleForTest();
+
+      expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
+      const messages =
+        (await agentStub.getPersistedMessages()) as ChatMessage[];
+      expect(messages.map((message) => message.role)).toEqual([
+        "user",
+        "assistant"
+      ]);
+      expect(messages[1].id).not.toBe("assistant-reasoning");
+      expect(JSON.stringify(messages[1].parts)).toContain(
+        "Continued response."
+      );
+    });
+  });
+
+  it("opens a new text part after the one the interruption cut off", async () => {
     const room = crypto.randomUUID();
     const agentStub = await getTestAgent(room);
     await agentStub.setRecoveryOverride({ continue: false });
@@ -277,10 +551,55 @@ describe("continueLastTurn", () => {
       (p: ChatMessage["parts"][number]) => p.type === "text"
     );
 
-    expect(textParts).toHaveLength(1);
-    expect((textParts[0] as { text: string }).text).toBe(
-      "BeginningContinued response."
-    );
+    // The cut-off part is closed and kept. The continuation writes its own.
+    expect(textParts).toEqual([
+      { type: "text", text: "Beginning", state: "done" },
+      { type: "text", text: "Continued response.", state: "done" }
+    ]);
+  });
+
+  it("puts a continuation's reasoning after the cut-off text, and its text after that", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    await agentStub.setIncludeReasoning(true);
+    // Cut off after some text, with no reasoning before it. The continuation
+    // reasons first. Its text used to be written into the old part, which
+    // left the reply as text, then reasoning.
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Tell me a story" }]
+      },
+      {
+        id: "assistant-cut-off",
+        role: "assistant",
+        parts: [
+          { type: "step-start" },
+          { type: "text", text: "Partial ", state: "streaming" }
+        ]
+      }
+    ] as ChatMessage[]);
+
+    await agentStub.callContinueLastTurn();
+    await agentStub.waitForIdleForTest();
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistant = messages.find(
+      (m: ChatMessage) => m.id === "assistant-cut-off"
+    )!;
+    expect(
+      assistant.parts.map((part) => [
+        part.type,
+        (part as { text?: string }).text
+      ])
+    ).toEqual([
+      ["step-start", undefined],
+      ["text", "Partial "],
+      ["reasoning", "Thinking about continuation."],
+      ["text", "Continued response."]
+    ]);
+    expect(assistant.parts.at(-1)?.type).not.toBe("reasoning");
   });
 
   it("should not merge text when existing text part is complete (state done)", async () => {
@@ -316,7 +635,7 @@ describe("continueLastTurn", () => {
     expect((textParts[1] as { text: string }).text).toBe("Continued response.");
   });
 
-  it("should merge reasoning into existing reasoning part during continuation", async () => {
+  it("keeps a cut-off reply's reasoning and text, and appends the continuation's after them", async () => {
     const room = crypto.randomUUID();
     const agentStub = await getTestAgent(room);
     await agentStub.setRecoveryOverride({ continue: false });
@@ -363,24 +682,17 @@ describe("continueLastTurn", () => {
       (m: ChatMessage) => m.role === "assistant"
     )!;
 
-    const reasoningParts = assistant.parts.filter(
-      (p: ChatMessage["parts"][number]) => p.type === "reasoning"
-    );
-    expect(reasoningParts).toHaveLength(1);
-    expect((reasoningParts[0] as { text: string }).text).toContain(
-      "Original thinking."
-    );
-    expect((reasoningParts[0] as { text: string }).text).toContain(
-      "Thinking about continuation."
-    );
-
-    const textParts = assistant.parts.filter(
-      (p: ChatMessage["parts"][number]) => p.type === "text"
-    );
-    expect(textParts).toHaveLength(1);
-    expect((textParts[0] as { text: string }).text).toBe(
-      "Partial answerContinued response."
-    );
+    expect(
+      assistant.parts.map((part) => [
+        part.type,
+        (part as { text?: string }).text
+      ])
+    ).toEqual([
+      ["reasoning", "Original thinking."],
+      ["text", "Partial answer"],
+      ["reasoning", "Thinking about continuation."],
+      ["text", "Continued response."]
+    ]);
   });
 
   it("should preserve orphaned continuation reasoning as a new part after completed reasoning", async () => {
@@ -651,7 +963,7 @@ describe("continueLastTurn", () => {
     expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
   });
 
-  it("does NOT repair a pending CLIENT-tool interaction on continue (per-part skip)", async () => {
+  it("does NOT repair a pending CLIENT-tool interaction on continue, and does not call the model over it", async () => {
     const room = crypto.randomUUID();
     const agentStub = await getTestAgent(room);
 
@@ -660,10 +972,27 @@ describe("continueLastTurn", () => {
     // `chooseOption` as a registered client tool, then leave it at
     // `input-available`: the shared `shouldRepair` skip leaves that part verbatim
     // so it stays pending.
-    await agentStub.setRequestContextForTest(undefined, [
+    await agentStub.setRequestContextForTest({ model: "stored" }, [
       { name: "chooseOption" }
     ]);
     await agentStub.persistMessages([
+      {
+        id: "user-0",
+        role: "user",
+        parts: [{ type: "text", text: "Earlier" }]
+      },
+      {
+        id: "assistant-earlier",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-previewTool",
+            toolCallId: "call_earlier",
+            state: "input-available",
+            input: {}
+          }
+        ] as ChatMessage["parts"]
+      },
       {
         id: "user-1",
         role: "user",
@@ -683,8 +1012,32 @@ describe("continueLastTurn", () => {
       }
     ] as ChatMessage[]);
 
-    await agentStub.callContinueLastTurn();
+    // The reply still waits on the client, so there is nothing to continue
+    // yet: the turn is skipped and the model is never called. A request built
+    // from this transcript would hold a tool call with no result.
+    const result = (await agentStub.callContinueLastTurn({
+      model: "from the skipped call"
+    })) as { requestId: string; status: string; reason?: string };
+    // The result says why, so the app can wait for the answer or settle the
+    // call itself, and it names no request: nothing ran.
+    expect(result).toEqual({
+      requestId: "",
+      status: "skipped",
+      reason: "awaiting-client"
+    });
     await agentStub.waitForIdleForTest();
+    expect(await agentStub.getOnChatMessageCallCount()).toBe(0);
+    // A skipped call leaves the chat as it found it: the stored body is not
+    // replaced by the body of a call that did nothing, and nothing is
+    // repaired, not even in the reply the chat moved past.
+    expect((await agentStub.getRequestContextForTest()).body).toEqual({
+      model: "stored"
+    });
+    expect(
+      ((await agentStub.getPersistedMessages()) as ChatMessage[])
+        .find((m) => m.id === "assistant-earlier")
+        ?.parts.at(0)
+    ).toMatchObject({ state: "input-available" });
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
     const assistant = messages.find((m) => m.id === "assistant-client")!;
@@ -697,17 +1050,118 @@ describe("continueLastTurn", () => {
     expect(toolPart?.state).toBe("input-available");
   });
 
-  it("repairs a leaf server orphan even when an abandoned client orphan sits earlier (per-part, not whole-transcript)", async () => {
+  it("removes the reasoning a cut-off reply ends in before it continues it", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+
+    // The reply ran a server tool and was cut off right after the model's
+    // reasoning for the next step. Sent as it is, Anthropic rejects the
+    // request: the assistant message's final block is a thinking block.
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Preview it" }]
+      },
+      {
+        id: "assistant-reasoning",
+        role: "assistant",
+        parts: [
+          { type: "step-start" },
+          {
+            type: "tool-previewTool",
+            toolCallId: "call_preview",
+            state: "output-available",
+            input: {},
+            output: { ok: true }
+          },
+          { type: "step-start" },
+          {
+            type: "reasoning",
+            text: "The preview worked, so",
+            state: "done",
+            providerMetadata: { anthropic: { signature: "sig" } }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ] as ChatMessage[]);
+
+    const result = await agentStub.callContinueLastTurn();
+    expect(result.status).toBe("completed");
+    await agentStub.waitForIdleForTest();
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const reply = messages.find((m) => m.id === "assistant-reasoning")!;
+    // The cut-off reasoning is gone, the tool result stays, and the
+    // continuation's answer follows it.
+    expect(reply.parts.some((part) => part.type === "reasoning")).toBe(false);
+    expect(reply.parts[1]).toMatchObject({ state: "output-available" });
+    expect(reply.parts.at(-1)).toMatchObject({ type: "text" });
+  });
+
+  it("settles an approved call that never ran in a reply the chat moved past", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+
+    // The user approved a call, then the conversation moved on without a
+    // continuation running it. The AI SDK runs an approval only in the last
+    // message, so a continuation of the later reply can never run it, and
+    // the provider would get a tool call with no result.
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Delete it" }]
+      },
+      {
+        id: "assistant-approved",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-deleteFile",
+            toolCallId: "call_approved",
+            state: "approval-responded",
+            input: {},
+            approval: { id: "approval-1", approved: true }
+          }
+        ] as ChatMessage["parts"]
+      },
+      {
+        id: "user-2",
+        role: "user",
+        parts: [{ type: "text", text: "Something else" }]
+      },
+      {
+        id: "assistant-leaf",
+        role: "assistant",
+        parts: [{ type: "text", text: "Partial answer" }]
+      }
+    ] as ChatMessage[]);
+
+    const result = await agentStub.callContinueLastTurn();
+    expect(result.status).toBe("completed");
+    await agentStub.waitForIdleForTest();
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    expect(
+      messages.find((m) => m.id === "assistant-approved")?.parts[0]
+    ).toMatchObject({
+      state: "output-error",
+      errorText:
+        "The tool call was approved but did not run before the next turn started."
+    });
+  });
+
+  it("settles an abandoned client orphan in a reply the chat moved past, and the leaf server orphan", async () => {
     const room = crypto.randomUUID();
     const agentStub = await getTestAgent(room);
 
     // `chooseOption` is a registered client tool; `previewTool` is not (server).
     // An EARLIER assistant message holds an abandoned client orphan
     // (`input-available` chooseOption), and the LEAF assistant holds a fresh dead
-    // SERVER orphan. A whole-transcript guard would skip ALL repair because a
-    // client interaction is "pending" somewhere; the per-part `shouldRepair` skip
-    // must instead leave the buried client orphan alone AND still repair the leaf
-    // server orphan so the next inference doesn't 400.
+    // SERVER orphan. The conversation moved past the earlier reply, so its call
+    // is settled too: the provider rejects a request that holds a call with no
+    // result, whoever owns it.
     await agentStub.setRequestContextForTest(undefined, [
       { name: "chooseOption" }
     ]);
@@ -762,9 +1216,9 @@ describe("continueLastTurn", () => {
       return p?.state;
     };
 
-    // Buried client orphan untouched; leaf server orphan repaired.
+    // Both are settled.
     expect(partState("assistant-buried-client", "call_buried-client")).toBe(
-      "input-available"
+      "output-error"
     );
     expect(partState("assistant-leaf-server", "call_leaf-server")).toBe(
       "output-error"
