@@ -211,7 +211,7 @@ export {
  * `@cloudflare/think`: the turn queue, abort registry, submit concurrency,
  * continuation slots and barrier, pre-stream set and tool-result apply chain,
  * with the rules that tie them together. Not a public API. See
- * `chat-turns.ts` and `design/rfc-chat-turn-core.md`.
+ * `chat-turns.ts` and `design/chat-turn-core.md`.
  */
 export {
   ChatTurns,
