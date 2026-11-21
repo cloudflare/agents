@@ -264,7 +264,9 @@ describe("a message queued behind a running turn", () => {
     const room = crypto.randomUUID();
     const path = `/agents/slow-stream-agent/${room}`;
     const { ws } = await connectChatWS(path);
+    const { ws: observer } = await connectChatWS(path);
     const seen = record(ws);
+    const watched = record(observer);
     const stub = (await getAgentByName(
       env.SlowStreamAgent,
       room
@@ -279,6 +281,10 @@ describe("a message queued behind a running turn", () => {
       [user("u1", "one"), user("u-big", "漢".repeat(450_000))],
       { ...QUICK, big: "b".repeat(1_200_000) }
     );
+    // It waits: another tab is shown it as queued.
+    await waitFor(() =>
+      watched.some((f) => f.queuedMessageIds?.includes("u-big") === true)
+    );
     await waitFor(
       () =>
         seen.some(
@@ -289,6 +295,7 @@ describe("a message queued behind a running turn", () => {
     const done = seen.find(
       (f) => isUseChatResponseMessage(f) && f.id === "big" && f.done
     ) as { error?: boolean };
+    expect(done).toBeDefined();
     expect(done.error).toBeUndefined();
     await stub.waitForIdleForTest();
     const stored = await stub.getPersistedMessages();
@@ -300,6 +307,7 @@ describe("a message queued behind a running turn", () => {
     ]);
     expect(stored[2].id).toBe("u-big");
     ws.close();
+    observer.close();
   }, 30_000);
 
   it("a clear while it waits drops it: it is never stored", async () => {

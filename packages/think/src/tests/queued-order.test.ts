@@ -270,7 +270,9 @@ describe("a message queued behind a running turn", () => {
     const binding = "ThinkAdmissionTestAgent";
     const room = crypto.randomUUID();
     const ws = await connect(binding, room);
+    const observer = await connect(binding, room);
     const seen = record(ws);
+    const watched = record(observer);
     send(ws, "r1", [user("u1", "one")], SLOW);
     await waitFor(
       async () =>
@@ -281,6 +283,16 @@ describe("a message queued behind a running turn", () => {
       ...QUICK,
       big: "b".repeat(1_200_000)
     });
+    // It waits: another tab is shown it as queued.
+    await waitFor(
+      async () =>
+        watched.some(
+          (f) =>
+            Array.isArray(f.queuedMessageIds) &&
+            (f.queuedMessageIds as string[]).includes("u-big")
+        ),
+      (ok) => ok
+    );
     const done = await waitFor(
       async () =>
         seen.find(
@@ -288,6 +300,7 @@ describe("a message queued behind a running turn", () => {
         ),
       (f) => f !== undefined
     );
+    expect(done).toBeDefined();
     expect(done?.error).toBeUndefined();
     const messages = await waitFor(
       () => agent(binding, room).then((a) => a.getMessagesForTest()),
@@ -301,6 +314,7 @@ describe("a message queued behind a running turn", () => {
     ]);
     expect(messages[2].id).toBe("u-big");
     ws.close();
+    observer.close();
   }, 40_000);
 
   it("a request whose admission record cannot be written ends with an error frame", async () => {
