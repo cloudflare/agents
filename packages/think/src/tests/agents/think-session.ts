@@ -2968,7 +2968,7 @@ export class ThinkTestAgent extends Think {
    * aborted it, before recovery is scheduled.
    */
   async stopRightAfterStallForTest(
-    via: "chat" | "save" = "chat",
+    via: "chat" | "save" | "submit" = "chat",
     /** Stop while the stall is routed, before the incident is written. */
     inRoute = false
   ): Promise<{
@@ -2982,6 +2982,11 @@ export class ThinkTestAgent extends Think {
     activeStream: boolean;
     /** What each routed stall came to. */
     routeOutcomes: string[];
+    /**
+     * The running submission's result stamp when the stream was closed
+     * (`submit` only): a reset right then reads this.
+     */
+    stampAtClose?: string | null;
   }> {
     this._stallAfterChunks = 2;
     this._stallAttemptsRemaining = 1;
@@ -3003,9 +3008,33 @@ export class ThinkTestAgent extends Think {
       return outcome;
     };
     const callback = new TestCollectingCallback();
+    let stampAtClose: string | null | undefined;
+    const stream = this._resumableStream as unknown as {
+      complete(streamId: string, outcome?: string): void;
+    };
+    const complete = stream.complete.bind(stream);
+    stream.complete = (streamId, outcome) => {
+      complete(streamId, outcome);
+      if (via === "submit" && stampAtClose === undefined) {
+        stampAtClose =
+          this.sql<{ result_status: string | null }>`
+            SELECT result_status FROM cf_think_submissions
+            WHERE status = 'running'
+          `[0]?.result_status ?? null;
+      }
+    };
     try {
       if (via === "chat") await this.chat("stall, then stop", callback);
-      else {
+      else if (via === "submit") {
+        const { submissionId } = await this.submitMessages([
+          {
+            id: crypto.randomUUID(),
+            role: "user",
+            parts: [{ type: "text", text: "stall, then stop" }]
+          }
+        ]);
+        await this.waitForSubmission(submissionId, { timeoutMs: 8000 });
+      } else {
         await this.saveMessages([
           {
             id: crypto.randomUUID(),
@@ -3034,11 +3063,13 @@ export class ThinkTestAgent extends Think {
           ["detected", "scheduled", "attempting"].includes(incident.status)
         ).length,
         routeOutcomes: this._routeOutcomesForTest,
+        stampAtClose,
         activeStream:
           this._resumableStream.hasActiveStream() ||
           this._resumableStream.pendingCutoverId !== null
       };
     } finally {
+      stream.complete = complete;
       self._routeStreamInterruption = route;
       this._stopRightAfterStall = false;
       this._stallAfterChunks = null;

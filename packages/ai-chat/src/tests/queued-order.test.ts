@@ -260,23 +260,24 @@ describe("a message queued behind a running turn", () => {
     ws.close();
   }, 30_000);
 
-  it("a large message with a large body is accepted", async () => {
+  it("a large message with a large body waits behind a turn and is answered", async () => {
     const room = crypto.randomUUID();
-    const path = `/agents/test-chat-agent/${room}`;
+    const path = `/agents/slow-stream-agent/${room}`;
     const { ws } = await connectChatWS(path);
     const seen = record(ws);
-    ws.send(
-      JSON.stringify({
-        type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
-        id: "big",
-        init: {
-          method: "POST",
-          body: JSON.stringify({
-            messages: [user("u-big", "漢".repeat(450_000))],
-            big: "b".repeat(1_200_000)
-          })
-        }
-      })
+    const stub = (await getAgentByName(
+      env.SlowStreamAgent,
+      room
+    )) as unknown as Stub;
+    sendChatRequest(ws, "r1", [user("u1", "one")], SLOW);
+    await waitFor(() =>
+      seen.some((f) => isUseChatResponseMessage(f) && f.id === "r1")
+    );
+    sendChatRequest(
+      ws,
+      "big",
+      [user("u1", "one"), user("u-big", "漢".repeat(450_000))],
+      { ...QUICK, big: "b".repeat(1_200_000) }
     );
     await waitFor(
       () =>
@@ -285,13 +286,19 @@ describe("a message queued behind a running turn", () => {
         ),
       20_000
     );
-    const stub = (await getAgentByName(
-      env.TestChatAgent,
-      room
-    )) as unknown as Stub;
-    expect((await stub.getPersistedMessages()).map((m) => m.id)).toContain(
-      "u-big"
-    );
+    const done = seen.find(
+      (f) => isUseChatResponseMessage(f) && f.id === "big" && f.done
+    ) as { error?: boolean };
+    expect(done.error).toBeUndefined();
+    await stub.waitForIdleForTest();
+    const stored = await stub.getPersistedMessages();
+    expect(stored.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "assistant"
+    ]);
+    expect(stored[2].id).toBe("u-big");
     ws.close();
   }, 30_000);
 

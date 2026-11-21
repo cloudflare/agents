@@ -14249,7 +14249,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           // Its partial is stored already, so the stream is closed here:
           // no cutover follows.
           if (!streamFinalized) {
-            this._completeResumableStream(streamId, "aborted");
+            this._completeStoppedStream(streamId, requestId);
             streamFinalized = true;
           }
           if (!doneSent) {
@@ -14880,7 +14880,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           // A user stopped the turn while it was routed: it ends stopped.
           // Its partial is stored already, so the stream is closed here:
           // no cutover follows.
-          this._completeResumableStream(streamId, "aborted");
+          this._completeStoppedStream(streamId, requestId);
           this._pendingResumeConnections.clear();
           if (!doneSent) {
             this._broadcastChat({
@@ -18785,6 +18785,21 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const requestId = this._resumableStream.activeRequestId;
     this._resumableStream.finish(streamId, outcome);
     this._afterResumableStreamEnded(requestId);
+  }
+
+  /**
+   * Close the stream of a turn a stop ended while its stall was routed. Its
+   * partial is stored already, so no cutover follows. The submission's
+   * `aborted` stamp is written in the same transaction: a reset in between
+   * would otherwise read the closed stream as a completed submission.
+   */
+  private _completeStoppedStream(streamId: string, requestId: string): void {
+    const active = this._resumableStream.activeRequestId;
+    this.ctx.storage.transactionSync(() => {
+      this._recordSubmissionTurnResult(requestId, { status: "aborted" });
+      this._resumableStream.complete(streamId, "aborted");
+    });
+    this._afterResumableStreamEnded(active);
   }
 
   /** Mark a resumable stream errored. */

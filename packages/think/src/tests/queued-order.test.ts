@@ -266,24 +266,40 @@ describe("a message queued behind a running turn", () => {
     }, 40_000);
   }
 
-  it("a large message with a large body is accepted", async () => {
+  it("a large message with a large body waits behind a turn and is answered", async () => {
     const binding = "ThinkAdmissionTestAgent";
     const room = crypto.randomUUID();
     const ws = await connect(binding, room);
     const seen = record(ws);
-    send(ws, "big", [user("u-big", "漢".repeat(450_000))], {
+    send(ws, "r1", [user("u1", "one")], SLOW);
+    await waitFor(
+      async () =>
+        seen.some((f) => f.type === MSG_CHAT_RESPONSE && f.id === "r1"),
+      (ok) => ok
+    );
+    send(ws, "big", [user("u1", "one"), user("u-big", "漢".repeat(450_000))], {
       ...QUICK,
       big: "b".repeat(1_200_000)
     });
-    await waitFor(
+    const done = await waitFor(
       async () =>
-        seen.some(
+        seen.find(
           (f) => f.type === MSG_CHAT_RESPONSE && f.id === "big" && f.done
         ),
-      (ok) => ok
+      (f) => f !== undefined
     );
-    const messages = await (await agent(binding, room)).getMessagesForTest();
-    expect(messages.map((m) => m.id)).toContain("u-big");
+    expect(done?.error).toBeUndefined();
+    const messages = await waitFor(
+      () => agent(binding, room).then((a) => a.getMessagesForTest()),
+      (m) => m.some((x) => textOf(x) === QUICK_REPLY)
+    );
+    expect(messages.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "assistant"
+    ]);
+    expect(messages[2].id).toBe("u-big");
     ws.close();
   }, 40_000);
 

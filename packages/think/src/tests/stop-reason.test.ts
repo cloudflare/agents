@@ -89,7 +89,7 @@ describe("a stop right after a stall", () => {
       crypto.randomUUID()
     )) as unknown as {
       stopRightAfterStallForTest(
-        via?: "chat" | "save",
+        via?: "chat" | "save" | "submit",
         inRoute?: boolean
       ): Promise<{
         scheduled: number;
@@ -100,6 +100,7 @@ describe("a stop right after a stall", () => {
         activeIncidents: number;
         activeStream: boolean;
         routeOutcomes: string[];
+        stampAtClose?: string | null;
       }>;
     };
     const result = await agent.stopRightAfterStallForTest();
@@ -123,5 +124,11 @@ describe("a stop right after a stall", () => {
       expect(routed.activeIncidents).toBe(0);
       expect(routed.activeStream).toBe(false);
     }
+    // A submission's stop is stamped with its stream's close, so a reset
+    // right after the close cannot read it as completed.
+    const submitted = await agent.stopRightAfterStallForTest("submit", true);
+    expect(submitted.routeOutcomes).toEqual(["stopped"]);
+    expect(submitted.stampAtClose).toBe("aborted");
+    expect(submitted.activeStream).toBe(false);
   });
 });
