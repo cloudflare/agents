@@ -58,6 +58,14 @@ function createClientToolMockModel(): LanguageModel {
               type: "tool-input-end",
               id: "tc-client-1"
             });
+            // Finalize the call so the part is `input-available`: a result
+            // only applies (and continues) for a call awaiting one.
+            controller.enqueue({
+              type: "tool-call",
+              toolCallId: "tc-client-1",
+              toolName: "client_action",
+              input: JSON.stringify({ action: "do_thing" })
+            });
             controller.enqueue({
               type: "finish",
               finishReason: "tool-calls",
@@ -1371,6 +1379,15 @@ export class ThinkClientToolsAgent extends Think {
         _repairToolTranscriptParts(m: UIMessage[]): { messages: UIMessage[] };
       }
     )._repairToolTranscriptParts(messages).messages;
+  }
+
+  /** Append a message with no turn, as an app's status message is. */
+  async appendNoteForTest(text: string): Promise<UIMessage> {
+    return this.appendMessageToHistory({
+      id: `note-${crypto.randomUUID()}`,
+      role: "assistant",
+      parts: [{ type: "text", text }]
+    });
   }
 
   async persistToolCallMessage(messages: UIMessage[]): Promise<void> {

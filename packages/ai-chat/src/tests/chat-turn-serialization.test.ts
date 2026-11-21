@@ -230,10 +230,12 @@ describe("AIChatAgent chat turn serialization", () => {
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
+    // The active turn waits on the model and writes no reply, so the tool
+    // call message stays the latest one and its continuation still applies.
     sendChatRequest(ws, "req-tool-turn", [firstUserMessage], {
-      format: "plaintext",
-      chunkCount: 10,
-      chunkDelayMs: 40
+      format: "sse",
+      responseDelayMs: 400,
+      chunkCount: 0
     });
 
     await delay(80);
@@ -283,10 +285,12 @@ describe("AIChatAgent chat turn serialization", () => {
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
+    // The active turn waits on the model and writes no reply, so the tool
+    // call messages stay the latest ones.
     sendChatRequest(ws, "req-coalesced-tool-turn", [firstUserMessage], {
-      format: "plaintext",
-      chunkCount: 10,
-      chunkDelayMs: 80
+      format: "sse",
+      responseDelayMs: 800,
+      chunkCount: 0
     });
 
     await delay(120);
@@ -411,11 +415,6 @@ describe("AIChatAgent chat turn serialization", () => {
       "call_pre_stream_tool_1",
       "testTool"
     );
-    await agentStub.persistToolCallMessage(
-      "assistant-pre-stream-tool-2",
-      "call_pre_stream_tool_2",
-      "testTool"
-    );
 
     ws.send(
       JSON.stringify({
@@ -431,6 +430,13 @@ describe("AIChatAgent chat turn serialization", () => {
       return (await agentStub.getStartedRequestIds()).length === 2;
     });
 
+    // The continuation waits on the model; the next tool call lands and is
+    // answered before its stream starts.
+    await agentStub.persistToolCallMessage(
+      "assistant-pre-stream-tool-2",
+      "call_pre_stream_tool_2",
+      "testTool"
+    );
     ws.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_TOOL_RESULT,
