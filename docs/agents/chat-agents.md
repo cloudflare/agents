@@ -282,7 +282,7 @@ export class ChatAgent extends AIChatAgent {
 A message that arrives while a turn runs waits until its own turn starts before it is stored. Each turn answers its own message, and the transcript reads `U1, A1, U2, A2`, never `U1, U2, A1`:
 
 - `this.messages`, and the messages `onChatMessage` builds its request from, gain the waiting message only when its turn starts. The turn running now never sees it.
-- Every tab sees the message at once. The message list the agent sends ends with it, and names it in `queuedMessageIds`. `useAgentChat` draws it after the reply that is streaming, and draws it once when it is stored.
+- Every tab sees the message at once. The message list the agent sends ends with it, and names it in `queuedMessageIds`. `useAgentChat` draws it after the reply that is streaming, and draws it once when it is stored. `setMessages` can hide a queued message in one tab, but it does not withdraw it: stop its request for that.
 - Under `"latest"`, `"merge"` and `"debounce"`, a superseded message is stored when its turn would have started, just before the message that superseded it. Under `"merge"` the messages are then collapsed into one.
 - A message whose request is stopped while it waits is stored at the same point, with no reply. A clear while it waits drops it: it is never stored.
 - A tool result for the reply that streams while a message waits does not continue that reply: the waiting message was sent first, so its turn runs first and reads the result (`chat:continuation:dropped` with `moved_on`).
@@ -613,7 +613,7 @@ The usual rules still apply after the reset:
 - A clear deletes every record, so nothing that was waiting runs afterwards.
 - A request a later one superseded under `"latest"`, `"merge"` or `"debounce"` stays superseded.
 - A new request that arrives before the waiting ones have run lets them go first, without waiting for the recovery. The recovery then finds the conversation has moved on, as it does for any new message.
-- A waiting request whose record is more than an hour old, or whose conversation gained a user message no waiting request holds (a release without these records ran in between and answered something newer), ends `skipped` and its message is not stored.
+- A waiting request is replayed however long it waited. One whose conversation gained a user message no waiting request holds (a release without these records ran in between and answered something newer) does not run: its message is stored after what is there, and it ends `skipped`. Only a clear discards a waiting message.
 
 A `saveMessages()` or `continueLastTurn()` call that is waiting in the queue stores nothing until its turn starts, so a reset loses nothing of it. Its caller's promise rejects with the reset, and the caller decides whether to call again.
 

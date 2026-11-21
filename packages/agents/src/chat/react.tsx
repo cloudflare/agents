@@ -3155,6 +3155,13 @@ export function useAgentChat<
         })
       );
     },
+    /**
+     * Set the messages this tab shows. It sees and returns the list the hook
+     * returns, queued messages included. A queued message it leaves out is
+     * no longer drawn here, but it is not withdrawn: the server still
+     * stores and answers it when its turn starts, and the next message list
+     * brings it back. Stop its request to keep it from being answered.
+     */
     setMessages: (messagesOrUpdater: Parameters<typeof setMessages>[0]) => {
       setMessages((currentMessages: ChatMessage[]) => {
         // The caller sees and sets the list the hook returns, queued
