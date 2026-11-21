@@ -2980,6 +2980,8 @@ export class ThinkTestAgent extends Think {
     activeIncidents: number;
     /** A resumable stream is still open once the turn ended. */
     activeStream: boolean;
+    /** What each routed stall came to. */
+    routeOutcomes: string[];
   }> {
     this._stallAfterChunks = 2;
     this._stallAttemptsRemaining = 1;
