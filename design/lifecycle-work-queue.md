@@ -139,7 +139,12 @@ Five named rules define what a job owner can and cannot rely on:
    owner's. The alarm re-arms with the held owner's jobs no sooner than
    30 s out, and then still fails, so the failure is visible. Keeping the
    times keeps an owner's order: a Queue item behind a deferred one does
-   not run first, and `list()` order does not change. Before this rule, one
+   not run first, and `list()` order does not change. The hold has a limit:
+   once a job has kept failing this way for 15 minutes (`held_since`, set at
+   its first hold and cleared by any other outcome or a push), an owner with
+   `onJobError` gets the error as a terminal failure, so a callee that never
+   recovers cannot block a Queue forever. Owners without `onJobError` keep
+   being held; their job may be their only wake. Before this rule, one
    such job stopped every job behind it, of every owner, for as long as the
    downstream kept failing.
 5. **Unreported attempts are counted durably.** Before each dispatch

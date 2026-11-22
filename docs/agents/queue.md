@@ -144,7 +144,12 @@ class MyAgent extends Agent {
 5. **Terminal failure**: after the last attempt the item is dropped, a
    `queue:error` event is emitted, and Agent's `onError` (or the Queue's
    `onError` option) observes the error.
-6. **Recovery**: an isolate that dies mid-callback wakes again on the
+6. **Downstream outages**: a callback that fails with a transient platform
+   error (a `retryable` error, a dropped connection) keeps its item and
+   holds the queue back, in order, for 30 seconds at a time. After 15
+   minutes of that, the item is dropped as a terminal failure and the
+   items behind it run.
+7. **Recovery**: an isolate that dies mid-callback wakes again on the
    Lifecycle deadman alarm and resumes the queue, so callbacks should be
    idempotent. Each death the Lifecycle does not see end counts as an attempt,
    whatever caused it (the callback exceeding the CPU or wall-time limit, a

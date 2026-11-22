@@ -152,6 +152,8 @@ export type JobStorageRow = {
   execution_started_at: number | null;
   /** Attempts that started and never reported back since the last push or progress. */
   attempts: number;
+  /** When a transient platform failure first held this job, while it still is. */
+  held_since: number | null;
   created_at: number;
 };
 
@@ -244,6 +246,7 @@ export class JobQueue {
         running INTEGER NOT NULL DEFAULT 0,
         execution_started_at INTEGER,
         attempts INTEGER NOT NULL DEFAULT 0,
+        held_since INTEGER,
         created_at INTEGER NOT NULL DEFAULT (unixepoch())
       ) WITHOUT ROWID`);
     // Tables created before attempts were counted get the column; their
@@ -256,6 +259,11 @@ export class JobQueue {
     if (!columns.some((column) => column.name === "attempts")) {
       this.#storage.sql.exec(
         "ALTER TABLE cf_agents_jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0"
+      );
+    }
+    if (!columns.some((column) => column.name === "held_since")) {
+      this.#storage.sql.exec(
+        "ALTER TABLE cf_agents_jobs ADD COLUMN held_since INTEGER"
       );
     }
     this.#tableEnsured = true;
@@ -354,7 +362,8 @@ export class JobQueue {
          recovery_loop = excluded.recovery_loop,
          running = 0,
          execution_started_at = NULL,
-         attempts = 0
+         attempts = 0,
+         held_since = NULL
        WHERE cf_agents_jobs.capability = excluded.capability`,
       id,
       capability,
@@ -502,6 +511,26 @@ export class JobQueue {
     );
   }
 
+  /**
+   * Record that a transient platform failure held this job back, keeping
+   * the time of the first hold in an unbroken run of them.
+   * @returns When the run of holds began.
+   */
+  markHeld(id: string, nowMs: number): number {
+    this.#sql(
+      `UPDATE cf_agents_jobs SET held_since = coalesce(held_since, ?)
+       WHERE id = ?`,
+      Math.floor(nowMs),
+      id
+    );
+    return (
+      this.#sql<{ held_since: number | null }>(
+        "SELECT held_since FROM cf_agents_jobs WHERE id = ?",
+        id
+      )[0]?.held_since ?? Math.floor(nowMs)
+    );
+  }
+
   delete(id: string): void {
     this.#revise(id);
     this.#sql("DELETE FROM cf_agents_jobs WHERE id = ?", id);
@@ -589,7 +618,7 @@ export class JobQueue {
       this.#sql(
         `UPDATE cf_agents_jobs
          SET time = MIN(time, ?), running = 0, execution_started_at = NULL,
-             attempts = 0
+             attempts = 0, held_since = NULL
          WHERE id = ?`,
         Math.floor(Date.now()),
         id
@@ -603,7 +632,8 @@ export class JobQueue {
     ) {
       this.#sql(
         `UPDATE cf_agents_jobs
-         SET time = ?, running = 0, execution_started_at = NULL, attempts = 0
+         SET time = ?, running = 0, execution_started_at = NULL, attempts = 0,
+             held_since = NULL
          WHERE id = ?`,
         Math.floor(outcome.rescheduleAt),
         id

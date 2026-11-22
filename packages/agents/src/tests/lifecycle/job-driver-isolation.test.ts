@@ -350,3 +350,129 @@ describe("job driver staggered holds", () => {
     });
   });
 });
+
+describe("job driver hold limit", () => {
+  it("reports a job to its owner once its callee has failed for 15 minutes", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const calls: string[] = [];
+      const errors: unknown[] = [];
+      const makeQueue = () =>
+        new Queue({
+          callbacks: {
+            bad: () => {
+              calls.push("bad");
+              throw retryableError();
+            },
+            good: () => void calls.push("good")
+          },
+          retry: QUICK,
+          onError: (error) => void errors.push(error)
+        });
+      const first = makeQueue();
+      const { lifecycle } = install(first);
+      await lifecycle.start();
+      const bad = await first.push("bad", null);
+      await first.push("good", null);
+
+      // Held: the item behind it waits.
+      await expect(lifecycle.alarm()).rejects.toThrow("restarting");
+      expect(calls).toEqual(["bad"]);
+      expect(errors).toEqual([]);
+
+      // The callee is still failing 16 minutes into the hold (a fresh
+      // isolate here, which also forgets the in-memory hold).
+      storage.sql.exec(
+        "UPDATE cf_agents_jobs SET held_since = ? WHERE id = ?",
+        Date.now() - 16 * 60_000,
+        bad.id
+      );
+      const later = makeQueue();
+      const fresh = install(later).lifecycle;
+      await fresh.start();
+      await fresh.alarm();
+
+      // The owner hears of it (Queue drops the item), and the rest runs.
+      expect(calls).toEqual(["bad", "bad", "good"]);
+      expect(errors).toMatchObject([
+        { message: "downstream object is restarting" }
+      ]);
+      expect(await later.list()).toEqual([]);
+    });
+  });
+
+  it("clears the hold clock when the owner returns a non-final outcome", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      let fail = true;
+      const make = () => {
+        const jobs = new Jobs("isolation-outcome", []);
+        jobs.onJob = () => {
+          if (fail) throw retryableError();
+          return { rescheduleAt: Date.now() + 60_000 };
+        };
+        Object.assign(jobs, { onJobError: () => undefined });
+        return jobs;
+      };
+      const jobs = make();
+      const { lifecycle } = install(jobs);
+      await lifecycle.start();
+      await jobs.push({
+        id: "flaky",
+        fn: "ok",
+        time: Date.now() - 1,
+        retry: QUICK
+      });
+      await expect(lifecycle.alarm()).rejects.toThrow("restarting");
+      const heldSince = () =>
+        [
+          ...storage.sql.exec(
+            "SELECT held_since FROM cf_agents_jobs WHERE id = 'flaky'"
+          )
+        ][0]?.held_since;
+      expect(heldSince()).toEqual(expect.any(Number));
+
+      // The callee recovers: the owner returns { rescheduleAt } (a fresh
+      // isolate here, which forgets the in-memory hold).
+      fail = false;
+      const fresh = install(make()).lifecycle;
+      await fresh.start();
+      await fresh.alarm();
+      expect(heldSince()).toBeNull();
+    });
+  });
+
+  it("starts the hold clock again after the job succeeds", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      let fail = true;
+      const queue = new Queue({
+        callbacks: {
+          flaky: () => {
+            if (fail) throw retryableError();
+          }
+        },
+        retry: QUICK
+      });
+      const { lifecycle } = install(queue);
+      await lifecycle.start();
+      const item = await queue.push("flaky", null, { id: "flaky" });
+      await expect(lifecycle.alarm()).rejects.toThrow("restarting");
+      const [held] = [
+        ...storage.sql.exec(
+          "SELECT held_since FROM cf_agents_jobs WHERE id = ?",
+          item.id
+        )
+      ];
+      expect(held?.held_since).toEqual(expect.any(Number));
+
+      // A same-id push is new intent: no hold carried over.
+      fail = false;
+      await queue.push("flaky", null, { id: "flaky" });
+      const [pushed] = [
+        ...storage.sql.exec(
+          "SELECT held_since FROM cf_agents_jobs WHERE id = ?",
+          item.id
+        )
+      ];
+      expect(pushed?.held_since).toBeNull();
+    });
+  });
+});

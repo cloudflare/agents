@@ -64,6 +64,14 @@ const SUPERSEDED = Symbol("superseded");
  */
 const MIN_UNREPORTED_ATTEMPTS = 3;
 
+/**
+ * How long a job may keep failing with transient platform errors before an
+ * owner with `onJobError` is told it failed. Until then its owner is held
+ * back in order; after it, a callee that never recovers no longer blocks
+ * the owner's other jobs forever.
+ */
+const MAX_HOLD_MS = 15 * 60_000;
+
 /** Longest wait between attempts of a job whose attempts ran out. */
 const MAX_EXHAUSTED_BACKOFF_MS = 60 * 60_000;
 
@@ -612,7 +620,14 @@ export class JobDriver {
       );
     } catch (error) {
       if (disabled()) return undefined;
-      if (isPlatformFailure(error)) {
+      const holdSpent =
+        isPlatformFailure(error) &&
+        dispatch.onJobError !== undefined &&
+        !isDurableObjectMemoryLimitReset(error) &&
+        !isDurableObjectResetError(error) &&
+        owned() &&
+        Date.now() - queue.markHeld(row.id, Date.now()) >= MAX_HOLD_MS;
+      if (isPlatformFailure(error) && !holdSpent) {
         // Carry the row out with the error rather than through a shared
         // field: an overlapping alarm's own #driveJob may already be
         // dispatching a different row by the time this unwinds to
@@ -656,8 +671,16 @@ export class JobDriver {
         );
         return failure;
       }
-      // Application failure after retry exhaustion: the owner observes it
-      // and decides advancement; default is completion.
+      // Application failure after retry exhaustion, or a transient failure
+      // that has held its owner for MAX_HOLD_MS: the owner observes it and
+      // decides advancement; default is completion.
+      if (holdSpent) {
+        console.error(
+          `Job ${row.id} (${row.capability}/${row.fn}) kept failing with ` +
+            `platform errors for ${MAX_HOLD_MS / 60_000} minutes; ` +
+            `reporting it to its owner as a failure`
+        );
+      }
       try {
         outcome = await dispatch.onJobError?.({ job, attempt }, error);
       } catch (hookError) {
