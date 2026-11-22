@@ -496,7 +496,12 @@ export class EventLog<T = unknown, S = unknown> {
     // Serialized once: the live frame and the stored chunk are the same
     // text, whatever `toJSON` does on a second call.
     const seq =
-      this.#streams.appendJson(this.#streamId, dataJson, this.#batching) + 1;
+      this.#streams.appendJson(
+        this.#streamId,
+        dataJson,
+        bytes,
+        this.#batching
+      ) + 1;
     return { seq, json: `{"seq":${seq},"data":${dataJson}}` };
   }
 
