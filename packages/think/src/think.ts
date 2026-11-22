@@ -88,7 +88,6 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { LanguageModel, ModelMessage, ToolSet, UIMessage } from "ai";
-import { tool } from "ai";
 import {
   toDeclaredSchedules,
   type ThinkScheduledTasks
@@ -98,6 +97,19 @@ import {
   resolveChannelContext,
   type ChannelEvent
 } from "./channels/runtime";
+import {
+  DEFAULT_ACTION_TIMEOUT_MS,
+  actionApprovalInputErrorEnvelope,
+  actionContextWithoutReply,
+  actionErrorEnvelope,
+  approvedActionInputs,
+  compileActionTools,
+  createActionAbortSignal,
+  normalizeActionAuthorization,
+  prepareActionOutputForModel,
+  safeStringifyActionOutput,
+  type ActionToolHost
+} from "./action-tools";
 import { defaultAttachmentText, deliverReplyAttachments } from "./attachments";
 import {
   isAction,
@@ -105,11 +117,8 @@ import {
   type ActionApprovalDescriptor,
   type ActionAuthorizationContext,
   type ActionAuthorizationDecision,
-  type ActionApprovalPolicy,
   type ActionContext,
   type ActionIdempotencyKey,
-  type ActionKind,
-  type ActionPermissionSpec,
   type CompiledActionMetadata,
   type NormalizedActionAuthorization,
   type ReplyAttachment
@@ -366,9 +375,6 @@ function turnContextWithoutModel(ctx: TurnContext): Omit<TurnContext, "model"> {
   return Object.defineProperties({}, descriptors) as Omit<TurnContext, "model">;
 }
 
-const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
-
-const ACTION_OUTPUT_MAX_CHARS = 20_000;
 const MAX_REPLY_ATTACHMENTS_PER_TURN = 32;
 const DEFERRED_RESOLVED_PAUSES_KEY = "cf_think_deferred_resolved_pauses";
 const PENDING_RESPONSE_HOOK_PREFIX = "cf_think_pending_response_hook:";
@@ -660,43 +666,6 @@ function stableJsonEqual(left: unknown, right: unknown): boolean {
   return stableStringify(left) === stableStringify(right);
 }
 
-function actionErrorEnvelope(error: unknown): {
-  error: { name: string; message: string };
-} {
-  return {
-    error: {
-      name: error instanceof Error ? error.name : "Error",
-      message: error instanceof Error ? error.message : String(error)
-    }
-  };
-}
-
-function actionAuthorizationErrorEnvelope(
-  reason: string | undefined,
-  permissions: string[]
-): {
-  error: { name: string; message: string; permissions: string[] };
-} {
-  return {
-    error: {
-      name: "ActionAuthorizationError",
-      message: reason ?? "Action is not authorized",
-      permissions
-    }
-  };
-}
-
-function actionApprovalInputErrorEnvelope(): {
-  error: { name: string; message: string };
-} {
-  return {
-    error: {
-      name: "ActionApprovalInputError",
-      message: "Approved action input cannot be changed by beforeToolCall"
-    }
-  };
-}
-
 function actionPendingErrorEnvelope(): {
   error: { name: string; message: string };
 } {
@@ -719,91 +688,6 @@ function actionKeyConflictEnvelope(
     error: {
       name: "ActionKeyConflict",
       message: `Idempotency key "${key}" for action "${actionName}" was reused with different input. This is a programming error; do not retry.`
-    }
-  };
-}
-
-function safeStringifyActionOutput(output: unknown): {
-  value?: string;
-  lossy: boolean;
-  error?: string;
-} {
-  const seen = new WeakSet<object>();
-  let lossy = false;
-  try {
-    const value = JSON.stringify(output, (_key, value: unknown) => {
-      if (typeof value === "bigint") {
-        lossy = true;
-        return `${value.toString()}n`;
-      }
-      if (typeof value === "object" && value !== null) {
-        if (seen.has(value)) {
-          lossy = true;
-          return "[Circular]";
-        }
-        seen.add(value);
-      }
-      return value;
-    });
-    return { value, lossy };
-  } catch (error) {
-    return {
-      lossy: true,
-      error: error instanceof Error ? error.message : String(error)
-    };
-  }
-}
-
-function prepareActionOutputForModel(output: unknown): unknown {
-  if (typeof output === "string") {
-    if (output.length <= ACTION_OUTPUT_MAX_CHARS) return output;
-    return `${output.slice(0, ACTION_OUTPUT_MAX_CHARS)}\n\n[truncated ${output.length - ACTION_OUTPUT_MAX_CHARS} chars]`;
-  }
-
-  const serialized = safeStringifyActionOutput(output);
-  if (serialized.error) {
-    return {
-      serialized: false,
-      error: serialized.error
-    };
-  }
-  if (serialized.value === undefined) return output;
-  if (serialized.value.length <= ACTION_OUTPUT_MAX_CHARS) {
-    if (!serialized.lossy) return output;
-    return JSON.parse(serialized.value) as unknown;
-  }
-
-  return {
-    truncated: true,
-    chars: serialized.value.length,
-    preview: `${serialized.value.slice(0, ACTION_OUTPUT_MAX_CHARS)}\n\n[truncated ${serialized.value.length - ACTION_OUTPUT_MAX_CHARS} chars]`
-  };
-}
-
-function createActionAbortSignal(
-  turnSignal: AbortSignal | undefined,
-  timeoutMs: number | undefined
-): { signal: AbortSignal; cleanup: () => void } {
-  const controller = new AbortController();
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  const abortFromTurn = () => controller.abort(turnSignal?.reason);
-
-  if (turnSignal?.aborted) {
-    abortFromTurn();
-  } else {
-    turnSignal?.addEventListener("abort", abortFromTurn, { once: true });
-    if (timeoutMs !== undefined && timeoutMs > 0) {
-      timeout = setTimeout(() => {
-        controller.abort(new Error(`Action timed out after ${timeoutMs}ms`));
-      }, timeoutMs);
-    }
-  }
-
-  return {
-    signal: controller.signal,
-    cleanup: () => {
-      if (timeout) clearTimeout(timeout);
-      turnSignal?.removeEventListener("abort", abortFromTurn);
     }
   };
 }
@@ -4109,8 +3993,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // turn that doesn't override falls back to the instance-level value.
     this._activeStallTimeoutMs = undefined;
     this._activeTurnAuthorization = { allowed: true };
-    this._activeTurnApprovedActionInputs =
-      this._approvedActionInputsFromTranscript();
+    this._activeTurnApprovedActionInputs = approvedActionInputs(this.messages);
     this._turnIsContinuation = input.continuation;
     if (this.waitForMcpConnections) {
       const timeout =
@@ -4247,7 +4130,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       tools: mergedTools,
       model: finalModel
     };
-    this._activeTurnAuthorization = this._normalizeActionAuthorization(
+    this._activeTurnAuthorization = normalizeActionAuthorization(
       await this.authorizeTurn(finalTurnContext)
     );
     // Wrap each tool's `execute` so `beforeToolCall` is consulted before
@@ -4331,19 +4214,36 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     return result;
   }
 
-  private _normalizeActionAuthorization(
-    decision: ActionAuthorizationDecision
-  ): NormalizedActionAuthorization {
-    if (typeof decision === "boolean") {
-      return { allowed: decision };
-    }
-    return {
-      allowed: decision.allowed,
-      ...(decision.reason !== undefined && { reason: decision.reason }),
-      ...(decision.grantedPermissions !== undefined && {
-        grantedPermissions: [...decision.grantedPermissions]
-      })
-    };
+  /** What the turn's compiled action tools call on this agent. */
+  readonly #actionToolHost: ActionToolHost = {
+    agent: this,
+    env: () => this.env as Cloudflare.Env,
+    requestId: () => admittedTurnContext.getStore()?.requestId ?? "",
+    isApproved: (toolCallId) =>
+      this._activeTurnApprovedActionInputs.has(toolCallId),
+    grantedPermissions: () => this._activeTurnAuthorization.grantedPermissions,
+    authorizeAction: (ctx) => this.authorizeAction(ctx),
+    recordApprovalDescriptor: (toolCallId, descriptor) =>
+      this._activeTurnActionApprovalDescriptors.set(toolCallId, descriptor),
+    recordReplyAttachment: (requestId, attachment, toolName) =>
+      this._recordReplyAttachment(requestId, attachment, toolName),
+    runLedgered: (args) => this._runLedgeredAction(args),
+    parkDurablePause: (args) => this._parkDurablePauseAction(args)
+  };
+
+  private async _compileActionTools(): Promise<ToolSet> {
+    const actions = await this.getActions();
+    this._activeTurnActionMetadata = new Map();
+    this._activeTurnActionApprovalDescriptors = new Map();
+    return compileActionTools(
+      actions,
+      this.#actionToolHost,
+      this._activeTurnActionMetadata
+    );
+  }
+
+  private _actionContextWithoutReply(ctx: ActionContext): ActionContext {
+    return actionContextWithoutReply(ctx);
   }
 
   private _emitActionLedgerEvent(event: ActionLedgerEvent): void {
@@ -4360,311 +4260,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       payload: Record<string, unknown>
     ) => void;
     emit.call(this, event.type, event.payload);
-  }
-
-  private _approvedActionInputsFromTranscript(): Map<string, unknown> {
-    const approved = new Map<string, unknown>();
-    for (const message of this.messages) {
-      for (const part of message.parts ?? []) {
-        if (typeof part !== "object" || part === null) continue;
-        const record = part as Record<string, unknown>;
-        const toolCallId =
-          typeof record.toolCallId === "string" ? record.toolCallId : undefined;
-        if (!toolCallId) continue;
-        const approval = record.approval as
-          | { approved?: unknown; descriptor?: unknown }
-          | undefined;
-        if (approval?.approved !== true) continue;
-        const descriptor = approval.descriptor as
-          | { input?: unknown; action?: unknown }
-          | undefined;
-        if (typeof descriptor?.action !== "string") continue;
-        approved.set(
-          toolCallId,
-          "input" in descriptor ? descriptor.input : record.input
-        );
-      }
-    }
-    return approved;
-  }
-
-  private async _resolveActionPermissions(
-    spec: ActionPermissionSpec<unknown> | undefined,
-    input: unknown,
-    ctx: ActionContext
-  ): Promise<string[]> {
-    if (spec === undefined) return [];
-    const policyCtx = this._actionContextWithoutReply(ctx);
-    const permissions =
-      typeof spec === "function" ? await spec({ input, ctx: policyCtx }) : spec;
-    return [...permissions];
-  }
-
-  private _actionContextWithoutReply(ctx: ActionContext): ActionContext {
-    return {
-      ...ctx,
-      attachReply: () => {}
-    };
-  }
-
-  private async _authorizeActionCall(options: {
-    actionName: string;
-    kind: ActionKind;
-    input: unknown;
-    ctx: ActionContext;
-    permissions?: ActionPermissionSpec<unknown>;
-  }): Promise<NormalizedActionAuthorization & { permissions: string[] }> {
-    const permissions = await this._resolveActionPermissions(
-      options.permissions,
-      options.input,
-      options.ctx
-    );
-    const decision = await this.authorizeAction({
-      requestId: options.ctx.requestId,
-      toolCallId: options.ctx.toolCallId,
-      action: options.actionName,
-      kind: options.kind,
-      input: options.input,
-      requiredPermissions: permissions,
-      grantedPermissions: this._activeTurnAuthorization.grantedPermissions,
-      messages: options.ctx.messages,
-      agent: this,
-      env: this.env as Cloudflare.Env
-    });
-    return {
-      ...this._normalizeActionAuthorization(decision),
-      permissions
-    };
-  }
-
-  private async _compileActionTools(): Promise<ToolSet> {
-    const actions = await this.getActions();
-    const tools: ToolSet = {};
-    this._activeTurnActionMetadata = new Map();
-    this._activeTurnActionApprovalDescriptors = new Map();
-    for (const [registrationName, descriptor] of Object.entries(actions)) {
-      if (!isAction(descriptor)) {
-        throw new Error(
-          `getActions() entry "${registrationName}" must be created with action().`
-        );
-      }
-      const toolName = descriptor.config.name ?? registrationName;
-      const kind =
-        descriptor.config.kind ??
-        (descriptor.config.approval ? "approval-gated" : "server");
-      if (kind === "approval-gated" || kind === "durable-pause") {
-        const staticPermissions = Array.isArray(descriptor.config.permissions)
-          ? [...descriptor.config.permissions]
-          : undefined;
-        this._activeTurnActionMetadata.set(toolName, {
-          actionName: toolName,
-          summary:
-            descriptor.config.approvalSummary ?? descriptor.config.description,
-          ...(staticPermissions !== undefined && {
-            permissions: staticPermissions
-          }),
-          ...(descriptor.config.approvalRisk !== undefined && {
-            risk: descriptor.config.approvalRisk
-          }),
-          kind
-        });
-      }
-      tools[toolName] = this._actionToTool(descriptor, toolName, kind);
-    }
-    return tools;
-  }
-
-  private _actionToTool(
-    descriptor: Action,
-    toolName: string,
-    kind: ActionKind
-  ): ToolSet[string] {
-    const config = descriptor.config;
-    const executeAction = config.execute as (
-      input: unknown,
-      ctx: ActionContext
-    ) => Promise<unknown> | unknown;
-    const approval = config.approval as
-      | ActionApprovalPolicy<unknown>
-      | undefined;
-    const permissions = config.permissions as
-      | ActionPermissionSpec<unknown>
-      | undefined;
-    const idempotencyKey = config.idempotencyKey as
-      | ActionIdempotencyKey<unknown>
-      | undefined;
-
-    return tool({
-      description: config.description,
-      metadata: {
-        cfThinkAction: true,
-        cfThinkActionApprovalConfigured:
-          approval !== undefined && kind !== "durable-pause"
-      },
-      inputSchema: config.inputSchema as never,
-      ...(approval !== undefined && kind !== "durable-pause"
-        ? {
-            needsApproval: async (
-              input: unknown,
-              options: {
-                toolCallId: string;
-                messages: ModelMessage[];
-              }
-            ) => {
-              const ctx: ActionContext = {
-                agent: this,
-                env: this.env as Cloudflare.Env,
-                requestId: admittedTurnContext.getStore()?.requestId ?? "",
-                toolCallId: options.toolCallId,
-                messages: options.messages,
-                signal: new AbortController().signal,
-                // No-op: approval/permission predicates must be pure and may
-                // run twice (prompt + resume). Attachments belong to execute.
-                attachReply: () => {}
-              };
-              if (
-                this._activeTurnApprovedActionInputs.has(options.toolCallId)
-              ) {
-                return true;
-              }
-              const authorization = await this._authorizeActionCall({
-                actionName: toolName,
-                kind,
-                input,
-                ctx,
-                permissions
-              });
-              if (!authorization.allowed) return false;
-              const needsApproval =
-                typeof approval === "function"
-                  ? await approval({ input, ctx })
-                  : approval;
-              if (needsApproval) {
-                this._activeTurnActionApprovalDescriptors.set(
-                  options.toolCallId,
-                  {
-                    requestId: ctx.requestId,
-                    toolCallId: options.toolCallId,
-                    action: toolName,
-                    summary: config.approvalSummary ?? config.description,
-                    input,
-                    permissions: authorization.permissions,
-                    ...(config.approvalRisk !== undefined && {
-                      risk: config.approvalRisk
-                    }),
-                    kind: "approval-gated"
-                  }
-                );
-              }
-              return needsApproval;
-            }
-          }
-        : {}),
-      execute: async (
-        input: unknown,
-        options: {
-          toolCallId?: string;
-          messages?: ModelMessage[];
-          abortSignal?: AbortSignal;
-        }
-      ): Promise<unknown> => {
-        const { signal, cleanup } = createActionAbortSignal(
-          options.abortSignal,
-          config.timeoutMs ?? DEFAULT_ACTION_TIMEOUT_MS
-        );
-        const requestId = admittedTurnContext.getStore()?.requestId ?? "";
-        const actionContext: ActionContext = {
-          agent: this,
-          env: this.env as Cloudflare.Env,
-          requestId,
-          toolCallId: options.toolCallId ?? "",
-          messages: options.messages ?? [],
-          signal,
-          attachReply: (attachment) =>
-            this._recordReplyAttachment(requestId, attachment, toolName)
-        };
-        const abortError = () =>
-          signal.reason instanceof Error
-            ? signal.reason
-            : new Error(
-                signal.reason ? String(signal.reason) : "Action aborted"
-              );
-        let onAbort: (() => void) | undefined;
-
-        try {
-          const authorization = await this._authorizeActionCall({
-            actionName: toolName,
-            kind,
-            input,
-            ctx: actionContext,
-            permissions
-          });
-          if (!authorization.allowed) {
-            return actionAuthorizationErrorEnvelope(
-              authorization.reason,
-              authorization.permissions
-            );
-          }
-          if (signal.aborted) throw abortError();
-          const abortPromise = new Promise<never>((_, reject) => {
-            onAbort = () => reject(abortError());
-            signal.addEventListener("abort", onAbort, { once: true });
-          });
-          const runAction = async () => {
-            const output = await Promise.race([
-              Promise.resolve(executeAction(input, actionContext)),
-              abortPromise
-            ]);
-            return prepareActionOutputForModel(output);
-          };
-
-          if (kind === "durable-pause") {
-            // The approval predicate gates whether to PARK (not whether an AI
-            // SDK approval is needed). Absent → always park; a function may opt
-            // a given input out of the human gate and run inline instead.
-            const shouldPark =
-              approval === undefined
-                ? true
-                : typeof approval === "function"
-                  ? await approval({
-                      input,
-                      ctx: this._actionContextWithoutReply(actionContext)
-                    })
-                  : approval;
-            if (!shouldPark) {
-              return await this._runLedgeredAction({
-                toolName,
-                idempotencyKey,
-                input,
-                ctx: actionContext,
-                runAction
-              });
-            }
-            return this._parkDurablePauseAction({
-              toolName,
-              input,
-              ctx: actionContext,
-              summary: config.approvalSummary ?? config.description,
-              permissions: authorization.permissions,
-              risk: config.approvalRisk
-            });
-          }
-
-          return await this._runLedgeredAction({
-            toolName,
-            idempotencyKey,
-            input,
-            ctx: actionContext,
-            runAction
-          });
-        } catch (error) {
-          return actionErrorEnvelope(error);
-        } finally {
-          if (onAbort) signal.removeEventListener("abort", onAbort);
-          cleanup();
-        }
-      }
-    });
   }
 
   /**
