@@ -1,4 +1,4 @@
-import type { OutboxSink } from "agents/chat";
+import type { OutboxSink } from "agents/internal";
 
 /**
  * A messenger reply this agent owes after chat recovery settles, keyed by

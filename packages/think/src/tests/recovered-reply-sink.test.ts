@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { OutboxDeliveryContext } from "agents/chat";
+import type { OutboxDeliveryContext } from "agents/internal";
 import {
   fitRecoveredReply,
   migrateLegacyRecoveredReplies,
