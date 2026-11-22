@@ -8038,10 +8038,16 @@ export class ThinkToolsTestAgent extends Think {
   }
 
   async sweepActionLedgerForTest(): Promise<{
-    effects: number;
-    decisions: number;
+    settled: number;
+    pending: number;
   }> {
-    return this._approvalsForTest().sweep({ force: true });
+    return (
+      this as unknown as {
+        _sweepApprovals: (options: {
+          force?: boolean;
+        }) => Promise<{ settled: number; pending: number }>;
+      }
+    )._sweepApprovals({ force: true });
   }
 
   /** Seed a row in the table an earlier version used, for the migration. */

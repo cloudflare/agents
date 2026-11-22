@@ -81,6 +81,16 @@ type DecisionRow = {
   settled_at: number | null;
 };
 
+/** What one {@link Approvals.sweep} deleted. */
+export type SweepResult = {
+  readonly effects: number;
+  readonly decisions: number;
+  readonly settledEffects: number;
+  readonly pendingEffects: number;
+  readonly pendingDecisions: number;
+  readonly settledDecisions: number;
+};
+
 /** @internal A recorded effect as a migration imports it. */
 export type ImportedEffect = {
   readonly key: string;
@@ -217,7 +227,7 @@ export class Approvals extends LifecycleCapability {
       await storage.put(SCHEMA_VERSION_KEY, CURRENT_SCHEMA_VERSION);
     }
     try {
-      await this.sweep();
+      if (this.#options.sweepOnStart !== false) await this.sweep();
     } catch (error) {
       // A failed sweep only delays deletion; it must not fail startup.
       console.error("[Approvals] Sweep failed:", error);
@@ -646,20 +656,26 @@ export class Approvals extends LifecycleCapability {
    * made, and acknowledged decisions, each past its retention. Runs at most
    * once an hour unless `force` is set. A decided decision is never swept.
    */
-  async sweep(options: { force?: boolean } = {}): Promise<{
-    effects: number;
-    decisions: number;
-  }> {
+  async sweep(options: { force?: boolean } = {}): Promise<SweepResult> {
     this.#ensureTables();
     const storage = this.lifecycle.storage;
     const now = Date.now();
     if (!options.force) {
       const last = (await storage.get<number>(LAST_SWEPT_KEY)) ?? 0;
-      if (now - last < SWEEP_INTERVAL_MS) return { effects: 0, decisions: 0 };
+      if (now - last < SWEEP_INTERVAL_MS) {
+        return {
+          effects: 0,
+          decisions: 0,
+          settledEffects: 0,
+          pendingEffects: 0,
+          pendingDecisions: 0,
+          settledDecisions: 0
+        };
+      }
     }
     const retention = { ...DEFAULT_RETENTION, ...this.#options.retention?.() };
     const limit = Math.max(0, Math.floor(retention.maxSweepRows));
-    let effects = this.#sweepRows(
+    const settledEffects = this.#sweepRows(
       "cf_agents_effects",
       "key",
       "status = 'settled'",
@@ -668,16 +684,16 @@ export class Approvals extends LifecycleCapability {
       now,
       limit
     );
-    effects += this.#sweepRows(
+    const pendingEffects = this.#sweepRows(
       "cf_agents_effects",
       "key",
       "status = 'pending'",
       "updated_at",
       retention.effectPendingMs,
       now,
-      limit - effects
+      limit - settledEffects
     );
-    let decisions = this.#sweepRows(
+    const pendingDecisions = this.#sweepRows(
       "cf_agents_decisions",
       "id",
       "status = 'pending'",
@@ -686,20 +702,29 @@ export class Approvals extends LifecycleCapability {
       now,
       limit
     );
-    decisions += this.#sweepRows(
+    const settledDecisions = this.#sweepRows(
       "cf_agents_decisions",
       "id",
       "status = 'settled' AND acknowledged = 1",
       "settled_at",
       retention.decisionSettledMs,
       now,
-      limit - decisions
+      limit - pendingDecisions
     );
+    const effects = settledEffects + pendingEffects;
+    const decisions = pendingDecisions + settledDecisions;
     await storage.put(LAST_SWEPT_KEY, now);
     if (effects > 0 || decisions > 0) {
       this.#emit("approvals:swept", { effects, decisions });
     }
-    return { effects, decisions };
+    return {
+      effects,
+      decisions,
+      settledEffects,
+      pendingEffects,
+      pendingDecisions,
+      settledDecisions
+    };
   }
 
   /**

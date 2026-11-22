@@ -211,7 +211,7 @@ describe("Approvals effect ledger", () => {
           Date.now() - 10_000
         );
         instance.retention = { effectPendingMs: 1000 };
-        expect(await instance.approvals.sweep({ force: true })).toEqual({
+        expect(await instance.approvals.sweep({ force: true })).toMatchObject({
           effects: 0,
           decisions: 0
         });
@@ -749,7 +749,14 @@ describe("Approvals decisions", () => {
           decisionPendingMs: 1000
         };
         const swept = await instance.approvals.sweep({ force: true });
-        expect(swept).toEqual({ effects: 1, decisions: 1 });
+        expect(swept).toEqual({
+          effects: 1,
+          decisions: 1,
+          settledEffects: 1,
+          pendingEffects: 0,
+          pendingDecisions: 1,
+          settledDecisions: 0
+        });
         expect(instance.approvals.effect("old-settled")).toBeUndefined();
         expect(instance.approvals.effect("old-pending")).toBeDefined();
         expect(instance.approvals.get("old-pending")).toBeUndefined();
@@ -757,7 +764,7 @@ describe("Approvals decisions", () => {
         expect(instance.approvals.get("decided")).toBeDefined();
 
         // Throttled: a second sweep within the hour does nothing.
-        expect(await instance.approvals.sweep()).toEqual({
+        expect(await instance.approvals.sweep()).toMatchObject({
           effects: 0,
           decisions: 0
         });

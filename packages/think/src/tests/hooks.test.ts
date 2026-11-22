@@ -923,8 +923,8 @@ describe("Think — actions compile into guarded tools", () => {
     });
 
     await expect(agent.sweepActionLedgerForTest()).resolves.toEqual({
-      effects: 2,
-      decisions: 0
+      settled: 1,
+      pending: 1
     });
 
     expect(await agent.listActionLedgerRowsForTest()).toMatchObject([

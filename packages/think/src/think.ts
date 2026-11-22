@@ -1329,6 +1329,10 @@ type ActionLedgerEvent =
         inputHash: string;
         ageMs: number;
       };
+    }
+  | {
+      type: "action:ledger:swept";
+      payload: { settled: number; pending: number };
     };
 
 type ChannelEvent =
@@ -2269,6 +2273,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               // also when a step below fails.
               this._appStartedForAdmissions = true;
               await this._migrateLegacyActionLedger();
+              await this._sweepApprovals();
               await this._sweepActionPendingApprovals();
               await this._migrateLegacyWorkflowNotifications();
               await this._replayPendingResponseHooks();
@@ -3104,6 +3109,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * `actionPendingApprovalTtlMs` fields when the capability starts.
    */
   private readonly _approvals: Approvals = new Approvals({
+    // Swept by `_sweepApprovals` once rows from an earlier version are in.
+    sweepOnStart: false,
     retention: () => ({
       effectSettledMs: this.actionLedgerRetention.settledMs,
       effectPendingMs: this.actionLedgerRetention.pendingMs,
@@ -6977,6 +6984,27 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       return `action:${actionName}:${key}`;
     }
     return ctx.toolCallId ? `tool:${ctx.toolCallId}` : null;
+  }
+
+  /**
+   * Delete expired ledger rows (at most once an hour unless `force`) and
+   * report them as `action:ledger:swept`.
+   */
+  private async _sweepApprovals(options?: {
+    force?: boolean;
+  }): Promise<{ settled: number; pending: number }> {
+    const swept = await this._approvals.sweep(options);
+    const result = {
+      settled: swept.settledEffects,
+      pending: swept.pendingEffects
+    };
+    if (swept.effects > 0 || options?.force) {
+      this._emitActionLedgerEvent({
+        type: "action:ledger:swept",
+        payload: result
+      });
+    }
+    return result;
   }
 
   /**

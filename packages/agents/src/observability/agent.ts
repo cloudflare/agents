@@ -76,32 +76,7 @@ export type AgentObservabilityEvent =
       "action:ledger:reclaimed",
       { action: string; key: string; inputHash: string; ageMs: number }
     >
-  | BaseEvent<
-      | "approvals:effect:ran"
-      | "approvals:effect:replayed"
-      | "approvals:effect:in-doubt"
-      | "approvals:effect:conflict"
-      | "approvals:effect:unrecorded",
-      { key: string; name: string; ageMs?: number }
-    >
-  | BaseEvent<
-      "approvals:effect:reclaimed",
-      { key: string; name: string; ageMs: number }
-    >
-  | BaseEvent<"approvals:swept", { effects: number; decisions: number }>
-  | BaseEvent<"approvals:decision:parked", { id: string; kind: string }>
-  | BaseEvent<
-      "approvals:decision:decided",
-      { id: string; kind: string; approved: boolean }
-    >
-  | BaseEvent<
-      "approvals:decision:settled",
-      { id: string; kind: string; error?: string }
-    >
-  | BaseEvent<
-      "approvals:decision:failed",
-      { id: string; kind: string; attempts: number; error: string }
-    >
+  | BaseEvent<"action:ledger:swept", { settled: number; pending: number }>
   | BaseEvent<
       "action:pause:created",
       { action: string; executionId: string; toolCallId: string }
