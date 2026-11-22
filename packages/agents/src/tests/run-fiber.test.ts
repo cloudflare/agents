@@ -410,6 +410,42 @@ describe("runFiber", () => {
       expect(count).toBe(1);
     });
 
+    it("runs the hook for a row whose recovery crashed twice, and drops it after the third", async () => {
+      const agent = await getAgentByName(
+        env.TestRunFiberAgent,
+        "recovery-crash-budget"
+      );
+
+      await agent.insertCrashedRecoveryFiber("crashed-2", "research", 2);
+      await agent.insertCrashedRecoveryFiber("crashed-3", "research", 3);
+      await agent.triggerRecoveryCheck();
+
+      const recovered = (await agent.getRecoveredFibers()) as unknown as {
+        id: string;
+      }[];
+      expect(recovered.map((fiber) => fiber.id)).toEqual(["crashed-2"]);
+      expect((await agent.getRunningFiberCount()) as unknown as number).toBe(0);
+    });
+
+    it("leaves framework fibers to their own recovery budget after crashes", async () => {
+      const agent = await getAgentByName(
+        env.TestRunFiberAgent,
+        "recovery-crash-framework"
+      );
+
+      await agent.insertCrashedRecoveryFiber(
+        "framework-crashed",
+        "__cf_internal_probe:turn",
+        5
+      );
+      await agent.triggerRecoveryCheck();
+
+      expect(await agent.internalRecoveredFibers()).toEqual([
+        "framework-crashed"
+      ]);
+      expect((await agent.getRunningFiberCount()) as unknown as number).toBe(0);
+    });
+
     it("evicts an aged unmanaged row whose recovery keeps throwing", async () => {
       const agent = await getAgentByName(
         env.TestRunFiberAgent,

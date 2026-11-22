@@ -12,6 +12,15 @@ export class TestRunFiberAgent extends Agent {
 
   executionLog: string[] = [];
   recoveredFibers: FiberRecoveryContext[] = [];
+  internalRecovered: string[] = [];
+
+  protected override async _handleInternalFiberRecovery(
+    ctx: FiberRecoveryContext
+  ): Promise<boolean> {
+    if (!ctx.name.startsWith("__cf_internal_probe")) return false;
+    this.internalRecovered.push(ctx.id);
+    return true;
+  }
 
   /** Resolves the in-flight `holdFiber` callback's pending promise. */
   private _releaseHeldFiber?: () => void;
@@ -634,6 +643,22 @@ export class TestRunFiberAgent extends Agent {
       INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
       VALUES (${id}, ${name}, ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
     `;
+  }
+
+  /** Insert an unmanaged interrupted fiber row that already crashed recovery `crashes` times. */
+  async insertCrashedRecoveryFiber(
+    id: string,
+    name: string,
+    crashes: number
+  ): Promise<void> {
+    this.sql`
+      INSERT INTO cf_agents_runs (id, name, snapshot, created_at, recovery_crashes)
+      VALUES (${id}, ${name}, NULL, ${Date.now()}, ${crashes})
+    `;
+  }
+
+  async internalRecoveredFibers(): Promise<string[]> {
+    return this.internalRecovered;
   }
 
   /** Insert an unmanaged interrupted fiber row with a backdated created_at. */

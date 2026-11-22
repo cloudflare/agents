@@ -100,6 +100,10 @@ const CURRENT_SCHEMA_VERSION = 2;
 // Recovery attempts on one unmanaged row that killed the isolate before
 // returning. After this many the row is dropped without running the hook.
 const MAX_RECOVERY_CRASHES = 3;
+// Framework fibers (legacy chat turns) are recovered by engines that keep
+// their own durable interruption budget and end the turn with a terminal
+// outcome; dropping their row early would skip that. They are not counted.
+const FRAMEWORK_FIBER_PREFIX = "__cf_internal";
 
 const WAKE_JOB_ID = "fibers:recover";
 const WAKE_JOB_FN = "recover";
@@ -696,11 +700,13 @@ export class Fibers extends LifecycleCapability {
         // write since the last commit (RUNTIME-FACTS: "A reset before the
         // first I/O rolls back..."), so whatever must survive it is committed
         // before the hook runs. A managed row's `interrupted` mark makes the
-        // next scan skip it. An unmanaged row counts an attempt that is only
-        // taken back if the hook returns, so a hook that keeps killing the
-        // isolate is given up on after MAX_RECOVERY_CRASHES.
+        // next scan skip it. A user's unmanaged row counts an attempt that is
+        // only taken back if the hook returns, so a hook that keeps killing
+        // the isolate is given up on after MAX_RECOVERY_CRASHES.
         const crashes = row.recovery_crashes ?? 0;
-        if (!managedRow) {
+        const counted =
+          !managedRow && !row.name.startsWith(FRAMEWORK_FIBER_PREFIX);
+        if (counted) {
           if (crashes >= MAX_RECOVERY_CRASHES) {
             this.#emit("fiber:recovery:skipped", {
               fiberId: row.id,
@@ -719,7 +725,7 @@ export class Fibers extends LifecycleCapability {
         }
         await this.lifecycle.storage.sync();
         const recovered = await this.#runRecoveryHook(ctx, managedRow);
-        if (!managedRow) {
+        if (counted) {
           // The hook returned (or threw): this attempt did not crash.
           this.#sql`
             UPDATE cf_agents_runs SET recovery_crashes = ${crashes}

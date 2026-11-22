@@ -127,7 +127,10 @@ describe("aborting recovery hook e2e", () => {
       await sleep(250);
     }
     expect(hookRuns()).toBeGreaterThanOrEqual(1);
-    expect(hookRuns()).toBeLessThanOrEqual(4);
+    // At most the crash budget (3); a log line can be lost with the
+    // isolate, so fewer is possible. The exact budget is pinned by the
+    // workers test "drops it after the third".
+    expect(hookRuns()).toBeLessThanOrEqual(3);
 
     const runs = hookRuns();
     await sleep(5000);

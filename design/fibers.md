@@ -43,7 +43,17 @@ key `cf_agents:fibers_schema_version`:
 A body runs at most once. After an eviction it never runs again: the
 recovery hook gets the last snapshot and decides. The hook runs at least
 once per interrupted row: an unmanaged row whose hook throws stays and is
-retried until `fiberRecoveryMaxAgeMs`; a managed row is marked `error`.
+retried until `fiberRecoveryMaxAgeMs`; a managed row is marked `error`. A hook that kills the isolate
+instead of returning is a different case: before running it, the scan
+commits what must survive a reset with `storage.sync()` (a reset before the
+first I/O rolls back uncommitted writes). A managed row's `interrupted` mark
+is committed, so the next scan does not run its hook again. A user's plain row
+gets an attempt in `recovery_crashes`, taken back when the hook returns or
+throws. After three attempts that never returned, the row is dropped
+without the hook (`fiber:recovery:skipped`, reason `recovery_crashed`).
+Framework fibers (`__cf_internal*`, the legacy chat turns) are not counted:
+the chat recovery engine keeps its own durable interruption budget and ends
+the turn with a terminal outcome.
 
 ### Recovery
 
