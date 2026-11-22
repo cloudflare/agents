@@ -6,8 +6,11 @@
  * `ThinkMessengerRuntime.handleFiberRecovery`.
  *
  * Durable: the Task run and the reply's recovery snapshot (one storage key
- * per run, deleted when the step ends). In memory: the live reply closure.
+ * per run, deleted when the step ends), owned by the {@link MessengerReplies}
+ * capability. In memory: the live reply closure.
  */
+
+import { LifecycleCapability } from "agents/lifecycle";
 
 import {
   isDurableObjectCodeUpdateReset,
@@ -15,7 +18,7 @@ import {
   isPlatformTransientError,
   type FiberRecoveryContext
 } from "agents";
-import type { Tasks } from "agents/tasks";
+import type { TaskStep, Tasks } from "agents/tasks";
 import type { TaskJson } from "agents/tasks";
 import type { ThinkMessengerRuntime } from "./chat-sdk";
 import { MESSENGER_REPLY_FIBER_NAME } from "./delivery";
@@ -31,25 +34,59 @@ const MESSENGER_REPLY_TASK_DEFINITION = "__cf_internal_messenger_reply";
 const runIdFor = (nonce: string) => `msgr_${nonce}`;
 
 /**
- * Register the messenger-reply Task definition on `tasks`.
+ * Messenger replies as Task runs, with the recovery snapshot each run keeps
+ * in storage until its step ends.
  *
  * @internal
  */
-export function registerMessengerReplyTask(
-  tasks: Tasks,
-  options: {
-    runtime: () => ThinkMessengerRuntime | undefined;
-    storage: DurableObjectStorage;
+export class MessengerReplies extends LifecycleCapability {
+  readonly #tasks: Tasks;
+
+  /**
+   * Registers the reply Task definition on `tasks`, so construct it once per
+   * Durable Object construction, as Tasks requires.
+   */
+  constructor(tasks: Tasks, runtime: () => ThinkMessengerRuntime | undefined) {
+    super("think-messenger-replies");
+    this.#tasks = tasks;
+    tasks.register(MESSENGER_REPLY_TASK_DEFINITION, (input, step) =>
+      this.#deliver(input as { nonce: string }, step, runtime)
+    );
   }
-): void {
-  const { storage } = options;
-  tasks.register(MESSENGER_REPLY_TASK_DEFINITION, async (input, step) => {
-    const { nonce } = input as { nonce: string };
+
+  /**
+   * Durably accept one reply run and execute it inline while this isolate
+   * lives. `accepted` is false when the idempotency key already has a run.
+   */
+  async run(input: {
+    nonce: string;
+    idempotencyKey: string;
+    metadata: Record<string, unknown>;
+  }): Promise<{ accepted: boolean }> {
+    const receipt = await this.#tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
+      MESSENGER_REPLY_TASK_DEFINITION,
+      { nonce: input.nonce },
+      {
+        runId: runIdFor(input.nonce),
+        idempotencyKey: input.idempotencyKey,
+        metadata: input.metadata as Record<string, TaskJson>
+      }
+    );
+    return { accepted: receipt.accepted };
+  }
+
+  async #deliver(
+    { nonce }: { nonce: string },
+    step: TaskStep,
+    getRuntime: () => ThinkMessengerRuntime | undefined
+  ): Promise<void> {
+    const storage = this.lifecycle.storage;
+    const tasks = this.#tasks;
     await step.do(
       "deliver",
       { retries: { limit: 1 }, timeout: "1 day" },
       async ({ signal }) => {
-        const runtime = options.runtime();
+        const runtime = getRuntime();
         if (!runtime) {
           throw new Error("Messenger runtime is unavailable");
         }
@@ -106,31 +143,5 @@ export function registerMessengerReplyTask(
         return undefined;
       }
     );
-  });
-}
-
-/**
- * Durably accept one reply run and execute it inline while this isolate
- * lives. `accepted` is false when the idempotency key already has a run.
- *
- * @internal
- */
-export async function runMessengerReplyTask(
-  tasks: Tasks,
-  input: {
-    nonce: string;
-    idempotencyKey: string;
-    metadata: Record<string, unknown>;
   }
-): Promise<{ accepted: boolean }> {
-  const receipt = await tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
-    MESSENGER_REPLY_TASK_DEFINITION,
-    { nonce: input.nonce },
-    {
-      runId: runIdFor(input.nonce),
-      idempotencyKey: input.idempotencyKey,
-      metadata: input.metadata as Record<string, TaskJson>
-    }
-  );
-  return { accepted: receipt.accepted };
 }

@@ -2,15 +2,27 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import type { LanguageModel, ToolSet } from "ai";
 import { describe, expect, it } from "vitest";
-import { ThinkConfigStore } from "../config-store";
 import { ThinkModelResolver, isWorkersAIModelId } from "../model";
 import { capabilityBlock, systemPromptForTurn } from "../system-prompt";
 
-async function withSql<T>(fn: (sql: SqlStorage) => T | Promise<T>) {
+type ConfigAccess = {
+  _configGet(key: string): string | undefined;
+  _configSet(key: string, value: string): void;
+  _configDelete(key: string): void;
+  _migrateLegacyConfigToThinkTable(): void;
+};
+
+/** A started Think agent's config store and the SQLite it writes. */
+async function withConfig<T>(
+  fn: (config: ConfigAccess, sql: SqlStorage) => T | Promise<T>
+) {
   const stub = env.BareAssistantAgent.get(
     env.BareAssistantAgent.idFromName(`periphery-${crypto.randomUUID()}`)
   );
-  return runInDurableObject(stub, (_instance, state) => fn(state.storage.sql));
+  await stub.fetch("http://x/");
+  return runInDurableObject(stub, (instance, state) =>
+    fn(instance as unknown as ConfigAccess, state.storage.sql)
+  );
 }
 
 function thinkConfigValue(sql: SqlStorage, key: string): string | undefined {
@@ -24,41 +36,39 @@ function thinkConfigValue(sql: SqlStorage, key: string): string | undefined {
 
 describe("ThinkConfigStore", () => {
   it("stores, reads and deletes keys", async () => {
-    await withSql((sql) => {
-      const store = new ThinkConfigStore(sql);
-      expect(store.get("a")).toBeUndefined();
-      store.set("a", "1");
-      expect(store.get("a")).toBe("1");
-      expect(new ThinkConfigStore(sql).get("a")).toBe("1");
-      store.delete("a");
-      expect(store.get("a")).toBeUndefined();
+    await withConfig((config, sql) => {
+      expect(config._configGet("a")).toBeUndefined();
+      config._configSet("a", "1");
+      expect(config._configGet("a")).toBe("1");
+      expect(thinkConfigValue(sql, "a")).toBe("1");
+      config._configDelete("a");
+      expect(config._configGet("a")).toBeUndefined();
     });
   });
 
   it("skips a write whose value matches the last value it saw", async () => {
-    await withSql((sql) => {
-      const store = new ThinkConfigStore(sql);
-      store.set("a", "1");
+    await withConfig((config, sql) => {
+      config._configSet("a", "1");
       sql.exec("UPDATE think_config SET value = 'other' WHERE key = 'a'");
-      store.set("a", "1");
+      config._configSet("a", "1");
       expect(thinkConfigValue(sql, "a")).toBe("other");
-      store.set("a", "2");
+      config._configSet("a", "2");
       expect(thinkConfigValue(sql, "a")).toBe("2");
     });
   });
 
   it("lifts Think's keys out of assistant_config and drops it", async () => {
-    await withSql((sql) => {
+    await withConfig((config, sql) => {
       sql.exec(`CREATE TABLE assistant_config (
         session_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
         PRIMARY KEY (session_id, key))`);
       sql.exec(
         "INSERT INTO assistant_config VALUES ('', 'lastBody', '{\"x\":1}'), ('', 'unrelated', 'y'), ('s1', 'skillsFingerprint', 'other-session')"
       );
-      const store = new ThinkConfigStore(sql);
-      expect(store.get("lastBody")).toBe('{"x":1}');
-      expect(store.get("unrelated")).toBeUndefined();
-      expect(store.get("skillsFingerprint")).toBeUndefined();
+      config._migrateLegacyConfigToThinkTable();
+      expect(config._configGet("lastBody")).toBe('{"x":1}');
+      expect(config._configGet("unrelated")).toBeUndefined();
+      expect(config._configGet("skillsFingerprint")).toBeUndefined();
       const tables = sql
         .exec<{ name: string }>(
           "SELECT name FROM sqlite_master WHERE name = 'assistant_config'"
@@ -69,17 +79,15 @@ describe("ThinkConfigStore", () => {
   });
 
   it("keeps a think_config value over the legacy one", async () => {
-    await withSql((sql) => {
-      sql.exec(
-        "CREATE TABLE think_config (key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (key))"
-      );
-      sql.exec("INSERT INTO think_config VALUES ('lastBody', 'current')");
+    await withConfig((config, sql) => {
+      config._configSet("lastBody", "current");
       sql.exec(`CREATE TABLE assistant_config__lifted_v1 (
         session_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL)`);
       sql.exec(
         "INSERT INTO assistant_config__lifted_v1 VALUES ('', 'lastBody', 'legacy')"
       );
-      expect(new ThinkConfigStore(sql).get("lastBody")).toBe("current");
+      config._migrateLegacyConfigToThinkTable();
+      expect(config._configGet("lastBody")).toBe("current");
     });
   });
 });

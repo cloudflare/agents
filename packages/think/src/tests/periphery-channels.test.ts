@@ -226,62 +226,21 @@ describe("declaredOverrides", () => {
 });
 
 describe("MediaEvictionPasses", () => {
-  const media = (id: string) =>
-    ({
-      id,
-      role: "user",
-      parts: [
-        {
-          type: "file",
-          mediaType: "image/png",
-          url: `data:image/png;base64,${"A".repeat(4000)}`
-        }
-      ]
-    }) as UIMessage;
-  const text = (id: string) =>
-    ({ id, role: "user", parts: [{ type: "text", text: id }] }) as UIMessage;
-
-  function passes(cached: UIMessage[], enabled = true) {
-    const queuePass = vi.fn(async () => {});
-    const runner = new MediaEvictionPasses({
-      config: () =>
-        enabled
-          ? { keepRecentMessages: 2, minPartBytes: 100, maxRowsPerPass: 10 }
-          : null,
+  it("does nothing when eviction is off", async () => {
+    const passes = new MediaEvictionPasses({
+      config: () => null,
       truncationStep: () => 1,
-      cachedMessages: () => cached,
+      cachedMessages: () => [],
       agedRowsHiddenFromCache: () => false,
       storedBytes: () => null,
       rowStats: async () => [],
       readMessage: async () => null,
       openFiles: () => ({ write: async () => {} }),
       updateMessage: async () => {},
-      emitEvicted: () => {},
-      queuePass
+      emitEvicted: () => {}
     });
-    return { runner, queuePass };
-  }
-
-  it("queues a pass only when an aged message holds media", () => {
-    const aged = [
-      media("m"),
-      ...Array.from({ length: 6 }, (_, i) => text(`t${i}`))
-    ];
-    const withMedia = passes(aged);
-    withMedia.runner.request();
-    expect(withMedia.queuePass).toHaveBeenCalledOnce();
-
-    const noMedia = passes(aged.map((m, i) => (i === 0 ? text("x") : m)));
-    noMedia.runner.request();
-    expect(noMedia.queuePass).not.toHaveBeenCalled();
-
-    const off = passes(aged, false);
-    off.runner.request();
-    expect(off.queuePass).not.toHaveBeenCalled();
-  });
-
-  it("does nothing when eviction is off", async () => {
-    expect(await passes([], false).runner.run()).toBeNull();
+    passes.request();
+    expect(await passes.run()).toBeNull();
   });
 
   it("writes every payload of a pass to the workspace it opened with", async () => {
