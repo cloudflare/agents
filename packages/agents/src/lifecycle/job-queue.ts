@@ -624,13 +624,17 @@ export class JobQueue {
    */
   nextAlarmTime(
     nowMs: number,
-    excludeOwners: readonly string[] = []
+    hold?: { readonly owners: readonly string[]; readonly until: number }
   ): number | null {
-    // Owners held back by a deferral are left out; the caller adds their
-    // wake back at the deferral's end.
-    const owners = excludeOwners.length
-      ? ` AND capability NOT IN (${excludeOwners.map(() => "?").join(", ")})`
-      : "";
+    // Owners held back after a failure are left out of every candidate and
+    // come back as one wake at the hold's end, if they still have a job.
+    // They bind as one JSON parameter, so any number of them fits.
+    const held = hold?.owners.length ? JSON.stringify(hold.owners) : null;
+    const owners =
+      held === null
+        ? ""
+        : " AND capability NOT IN (SELECT value FROM json_each(?))";
+    const excludeOwners = held === null ? [] : [held];
     const exclusive = this.#sql<{ time: number | null }>(
       `SELECT MIN(time) AS time FROM cf_agents_jobs WHERE exclusive = 1${owners}`,
       ...excludeOwners
@@ -669,6 +673,18 @@ export class JobQueue {
     const recheck = inFlight[0]?.recheck;
     if (recheck !== null && recheck !== undefined) {
       candidate = candidate === null ? recheck : Math.min(candidate, recheck);
+    }
+
+    if (held !== null && hold) {
+      const heldNext = this.#sql<{ time: number | null }>(
+        `SELECT MIN(time) AS time FROM cf_agents_jobs
+         WHERE capability IN (SELECT value FROM json_each(?))`,
+        held
+      )[0]?.time;
+      if (heldNext !== null && heldNext !== undefined) {
+        const wake = Math.max(heldNext, hold.until);
+        candidate = candidate === null ? wake : Math.min(candidate, wake);
+      }
     }
 
     return candidate;

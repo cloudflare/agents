@@ -874,10 +874,7 @@ export class Lifecycle<
 
     await this.#serializeAlarmWrite(async () => {
       if (this.#alarmsDisabled) return;
-      const next = this.#jobQueue.nextAlarmTime(Date.now(), deferral?.owners);
-      const alarm = deferral
-        ? Math.min(next ?? deferral.until, deferral.until)
-        : next;
+      const alarm = this.#jobQueue.nextAlarmTime(Date.now(), deferral);
       // Each setAlarm() is billed as a row written, and most queue
       // mutations leave the earliest wake where it was.
       const current = await this.#ctx.storage.getAlarm();
