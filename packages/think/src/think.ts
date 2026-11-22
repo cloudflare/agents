@@ -1213,7 +1213,7 @@ export type SubmitMessagesOptions = {
   submissionId?: string;
   idempotencyKey?: string;
   metadata?: Record<string, unknown>;
-  /** Channel id this submission belongs to. See {@link RunTurnBase.channel}. */
+  /** Channel id this submission belongs to. See the `channel` option of {@link RunTurnOptions}. */
   channel?: string;
 };
 
@@ -2743,6 +2743,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   /** Think's private keyed config rows. */
   readonly #config = new ThinkConfigStore();
 
+  /**
+   * Run the legacy `assistant_config` lift again. The config capability runs
+   * it on start; this is a test seam, not an override point.
+   * @internal
+   */
   protected _migrateLegacyConfigToThinkTable(): void {
     this.#config.migrateLegacy();
   }

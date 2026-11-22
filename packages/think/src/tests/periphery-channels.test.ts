@@ -226,6 +226,19 @@ describe("declaredOverrides", () => {
 });
 
 describe("MediaEvictionPasses", () => {
+  const media = (id: string) =>
+    ({
+      id,
+      role: "user",
+      parts: [
+        {
+          type: "file",
+          mediaType: "image/png",
+          url: `data:image/png;base64,${"A".repeat(4000)}`
+        }
+      ]
+    }) as UIMessage;
+
   it("does nothing when eviction is off", async () => {
     const passes = new MediaEvictionPasses({
       config: () => null,
@@ -272,8 +285,7 @@ describe("MediaEvictionPasses", () => {
         // An agent may swap its workspace reference mid-pass.
         workspace = "second";
       },
-      emitEvicted: () => {},
-      queuePass: async () => {}
+      emitEvicted: () => {}
     });
     const result = await passes.run();
     expect(result?.messages).toBe(2);

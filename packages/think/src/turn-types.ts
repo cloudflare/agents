@@ -25,6 +25,9 @@ import type {
 } from "agents/chat";
 import type { SessionMessage } from "agents/sessions";
 import type { DeliveryKind, MessengerContext } from "./messengers";
+// Type-only, for the `{@link Think.*}` references in this file's docs.
+// oxlint-disable-next-line no-unused-vars
+import type { Think } from "./think";
 
 /**
  * A best-effort internal `onStart` step that failed on this wake and was
