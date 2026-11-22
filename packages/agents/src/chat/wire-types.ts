@@ -84,6 +84,12 @@ export type OutgoingMessage<ChatMessage extends UIMessage = UIMessage> =
        * authoritative (#1983).
        */
       connect?: boolean;
+      /**
+       * The messages at the end of `messages` that waiting requests hold:
+       * not stored yet, they join the transcript when their turn starts. A
+       * tab draws them last, after a reply that is streaming.
+       */
+      queuedMessageIds?: string[];
     }
   | {
       /** Indicates this message is a response to a chat request */
@@ -98,6 +104,13 @@ export type OutgoingMessage<ChatMessage extends UIMessage = UIMessage> =
       error?: boolean;
       /** Whether this is a continuation (append to last assistant message) */
       continuation?: boolean;
+      /**
+       * On a continuation's chunk frames: the id of the message the server
+       * stores the continuation in. A client that draws the frames itself
+       * writes into that message, and adds it when it does not have it.
+       * Absent means the last assistant message.
+       */
+      messageId?: string;
       /** Whether this chunk is being replayed from storage (stream resumption) */
       replay?: boolean;
       /** Signals that replay of stored chunks is complete (stream is still active) */
@@ -214,6 +227,15 @@ export type IncomingMessage<ChatMessage extends UIMessage = UIMessage> =
       id: string;
     }
   | {
+      /**
+       * The user pressed stop while this tab waited for a tool continuation
+       * to start. The tab has no request id for it yet, so the server stops
+       * the continuation this connection waits on.
+       */
+      type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL;
+      continuation: true;
+    }
+  | {
       /** Client acknowledges stream resuming notification and is ready to receive chunks */
       type: MessageType.CF_AGENT_STREAM_RESUME_ACK;
       /** The request ID of the stream being resumed */
@@ -224,6 +246,11 @@ export type IncomingMessage<ChatMessage extends UIMessage = UIMessage> =
       type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST;
       /** Opaque correlation id echoed by direct server responses. */
       probeId?: string;
+      /**
+       * The request ids this tab still waits on a terminal frame for, newest
+       * last. A request that ended while the tab was away is replayed.
+       */
+      requestIds?: string[];
     }
   | {
       /** Client sends tool result to server (for client-side tools) */

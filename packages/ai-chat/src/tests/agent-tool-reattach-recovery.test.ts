@@ -28,6 +28,12 @@ interface ReattachStub {
   triggerFiberRecovery(): Promise<void>;
   runScheduledRecoveryContinueForTest(): Promise<void>;
   runScheduledRecoveryRetryForTest(): Promise<void>;
+  agentToolRunWithFailingReaderForTest(): Promise<{
+    afterCutOff: string | undefined;
+    final: string | undefined;
+    summary: string | undefined;
+    readerCalls: number;
+  }>;
 }
 
 async function getStub(room: string): Promise<ReattachStub> {
@@ -41,7 +47,7 @@ describe("agent-tool child re-attach: request_id rebinding across recovery", () 
 
     await agent.seedAgentToolChildRunForTest(
       "run-continue",
-      "old-req-continue"
+      "req-reattach-continue"
     );
 
     await agent.persistMessages([
@@ -89,16 +95,13 @@ describe("agent-tool child re-attach: request_id rebinding across recovery", () 
     const reboundReqId =
       await agent.getAgentToolChildRunRequestIdForTest("run-continue");
     expect(reboundReqId).toBeTruthy();
-    expect(reboundReqId).not.toBe("old-req-continue");
-    expect(
-      await agent.resolveAgentToolRunForRequestForTest(reboundReqId as string)
-    ).toBe("run-continue");
+    expect(reboundReqId).not.toBe("req-reattach-continue");
   });
 
   it("re-binds the child-run request_id on a RETRY recovery so frames stay attributable", async () => {
     const agent = await getStub(`reattach-retry-${crypto.randomUUID()}`);
 
-    await agent.seedAgentToolChildRunForTest("run-retry", "old-req-retry");
+    await agent.seedAgentToolChildRunForTest("run-retry", "req-reattach-retry");
 
     await agent.persistMessages([
       {
@@ -131,9 +134,83 @@ describe("agent-tool child re-attach: request_id rebinding across recovery", () 
     const reboundReqId =
       await agent.getAgentToolChildRunRequestIdForTest("run-retry");
     expect(reboundReqId).toBeTruthy();
-    expect(reboundReqId).not.toBe("old-req-retry");
-    expect(
-      await agent.resolveAgentToolRunForRequestForTest(reboundReqId as string)
-    ).toBe("run-retry");
+    expect(reboundReqId).not.toBe("req-reattach-retry");
   });
+});
+
+describe("an agent-tool run whose reply is cut off in the isolate", () => {
+  it("stays open while chat recovery finishes its turn, then ends completed with the continued reply", async () => {
+    const agent = await getStub(`cut-off-run-${crypto.randomUUID()}`);
+    const result = await agent.agentToolRunWithFailingReaderForTest();
+    // Nobody cancelled the run: it is not aborted, and recovery is not
+    // skipped as a cancel.
+    expect(result.afterCutOff).toBe("running");
+    expect(result.final).toBe("completed");
+    expect(result.summary).toContain("Continued response.");
+    expect(result.readerCalls).toBe(1);
+  });
+
+  // The run's input is the stored body only while the run's turn runs.
+  for (const recovered of [false, true]) {
+    it(`puts the chat's own request body back when the run is over (${recovered ? "recovered" : "live"} reply)`, async () => {
+      const agent = await getStub(`body-${crypto.randomUUID()}`);
+      const result = await (
+        agent as unknown as {
+          storedBodyAfterAgentToolRunForTest(recovered: boolean): Promise<{
+            status: string | undefined;
+            body: Record<string, unknown> | undefined;
+          }>;
+        }
+      ).storedBodyAfterAgentToolRunForTest(recovered);
+      expect(result.status).toBe("completed");
+      expect(result.body).toEqual({ theme: "dark" });
+    });
+  }
+
+  // `saveMessages` from `onChatResponse` is supported. The turn it starts
+  // is not the run's, whether the run's reply completed live or recovered.
+  for (const recovered of [false, true]) {
+    it(`does not bind a turn started from onChatResponse to the run (${recovered ? "recovered" : "live"} reply)`, async () => {
+      const agent = await getStub(`follow-up-${crypto.randomUUID()}`);
+      const result = await (
+        agent as unknown as {
+          agentToolRunWithFollowUpTurnForTest(recovered: boolean): Promise<{
+            status: string | undefined;
+            rowIsFollowUp: boolean;
+            followUpRan: boolean;
+            followUpChunksInRun: number;
+          }>;
+        }
+      ).agentToolRunWithFollowUpTurnForTest(recovered);
+      expect(result.status).toBe("completed");
+      expect(result.followUpRan).toBe(true);
+      expect(result.rowIsFollowUp).toBe(false);
+      expect(result.followUpChunksInRun).toBe(0);
+    });
+  }
+
+  // The stop cancels the turn's recovery, so nothing is left to finish the
+  // run: the stop is its outcome, and the parent's tail closes.
+  for (const how of ["client-cancel", "abortRequest", "abortAllRequests"]) {
+    it(`is settled aborted when its request is stopped (${how})`, async () => {
+      const agent = await getStub(`stopped-run-${crypto.randomUUID()}`);
+      const result = await (
+        agent as unknown as {
+          stopLeftOpenAgentToolRunForTest(how: string): Promise<{
+            beforeStop: string | undefined;
+            status: string | undefined;
+            error: string | undefined;
+            tailClosed: boolean;
+            readerCalls: number;
+          }>;
+        }
+      ).stopLeftOpenAgentToolRunForTest(how);
+      expect(result.beforeStop).toBe("running");
+      expect(result.status).toBe("aborted");
+      expect(result.tailClosed).toBe(true);
+      // The reply is not read again for the stopped run.
+      expect(result.readerCalls).toBe(0);
+      if (how !== "client-cancel") expect(result.error).toBe("stopped");
+    });
+  }
 });

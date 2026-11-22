@@ -99,6 +99,27 @@ describe("PiHarness on pi-durable", () => {
     expect(second).toMatchObject({ status: "done", text: "echo: hello" });
   });
 
+  it("keeps long and unusual text exactly across eviction", async () => {
+    // pi's SqliteStorage writes rows of little text as JSON arrays and longer
+    // ones bound column by column; both must round-trip through Durable
+    // Object SQLite, emoji and lone surrogates included. (Long enough for a
+    // bound row, short enough not to start compaction.)
+    const stub = fresh();
+    const odd = 'big:emoji 🦊, lone \ud800 surrogate, quote " and \\';
+    const long = `big:${"long text 🦊 ".repeat(1_500)}\udfff`;
+    const short = await stub.prompt(odd);
+    const big = await stub.prompt(long);
+    expect(short).toMatchObject({ status: "done", text: `got ${odd.length}` });
+    expect(big).toMatchObject({ status: "done", text: `got ${long.length}` });
+
+    await evictDurableObject(stub);
+    // Compared as JSON, which escapes lone surrogates: a raw one in a
+    // failure report breaks the test pool's connection.
+    expect(JSON.stringify(await stub.messages())).toBe(
+      JSON.stringify([odd, `got ${odd.length}`, long, `got ${long.length}`])
+    );
+  });
+
   it("evicts an object with nothing in flight once its wake has completed", async () => {
     const stub = fresh();
     expect((await stub.prompt("hello")).text).toBe("echo: hello");
@@ -204,6 +225,43 @@ describe("PiHarness on pi-durable", () => {
         text: "approved: run the migration"
       }
     ]);
+  });
+
+  it("lets a tool parked on a signal hibernate, then finish when it arrives", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    const op = await stub.submit("approval");
+    for (let i = 0; i < 200 && (await stub.parkedTask()) === null; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(await stub.parkedTask()).not.toBeNull();
+    // Parked on a signal only: no work and no time, so no wake job or alarm.
+    for (let i = 0; i < 200 && (await stub.wakeJobTime()) !== null; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(await stub.piWake()).toEqual({ active: false });
+    expect(await stub.wakeJobTime()).toBeNull();
+    expect(await stub.alarmTime()).toBeNull();
+
+    await abortAllDurableObjects();
+    stub = fresh(name);
+    expect(await stub.approve("approved")).toBe("delivered");
+    expect((await stub.wait(op.operationId)).text).toBe("tool said: approved");
+  });
+
+  it("settles an input as usual when the task to notify does not exist", async () => {
+    const stub = fresh();
+    const notify = { taskId: 999_999, key: "answered" };
+    const receipt = await stub.submit("hello", { notify });
+    expect(await stub.storedNotify(receipt.operationId)).toEqual(notify);
+    expect((await stub.wait(receipt.operationId)).text).toBe("echo: hello");
+  });
+
+  it("hands pi the task to notify when a continue settles", async () => {
+    const stub = fresh();
+    const notify = { taskId: 999_999, key: "answered" };
+    const receipt = await stub.continueSession(undefined, notify);
+    expect(await stub.storedNotify(receipt.operationId)).toEqual(notify);
   });
 
   it("answers follow-ups queued while a run is going, in order", async () => {
@@ -378,6 +436,36 @@ describe("PiHarness on pi-durable", () => {
     const result = await stub.wait(receipt.operationId);
     expect(result.status).toBe("unanswered");
     expect(await stub.pending()).toEqual([]);
+  });
+
+  it("keeps an onAbort: keep input queued through a session abort", async () => {
+    const stub = fresh();
+    const running = await stub.submit("gate");
+    await stub.gateStarted(1);
+    const kept = await stub.submit("one", { onAbort: "keep" });
+    const withdrawn = await stub.submit("two");
+    await stub.abort();
+
+    expect((await stub.wait(running.operationId)).status).toBe("unanswered");
+    expect(await stub.wait(withdrawn.operationId)).toMatchObject({
+      status: "unanswered",
+      reason: "aborted"
+    });
+    expect(await stub.waitWithin(kept.operationId, 300)).toBe("waiting");
+    expect(await stub.pending()).toEqual([
+      { operationId: kept.operationId, session: "1", status: "queued" }
+    ]);
+
+    // The next input places the kept one first.
+    const next = await stub.submit("three");
+    expect(await stub.wait(kept.operationId)).toMatchObject({
+      status: "done",
+      text: "echo: one"
+    });
+    expect(await stub.wait(next.operationId)).toMatchObject({
+      status: "done",
+      text: "echo: three"
+    });
   });
 
   it("watches the session's view through a run, and a late watch shows the same transcript", async () => {
@@ -867,5 +955,385 @@ describe("PiHarness after a failed run (settings.afterFailedRun)", () => {
       reason: "aborted"
     });
     expect(await stub.pending()).toEqual([]);
+  });
+});
+
+/** Poll until the fixture's parked tool or gate has recorded its task id. */
+async function parked(stub: DurableObjectStub<PiHarnessTestObject>) {
+  for (let i = 0; i < 300 && (await stub.parkedTask()) === null; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  expect(await stub.parkedTask()).not.toBeNull();
+}
+
+/** Poll until the harness has no wake job, as a call parked on a signal leaves it. */
+async function quiet(stub: DurableObjectStub<PiHarnessTestObject>) {
+  for (let i = 0; i < 300 && (await stub.wakeJobTime()) !== null; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  expect(await stub.wakeJobTime()).toBeNull();
+}
+
+describe("PiHarness with parked tool calls", () => {
+  // Without onWake, nothing but the harness arms the wake for the work a
+  // signal starts, so a crash while it runs would leave it stranded.
+  it("schedules the wake before a signal, so the woken call survives a crash", async () => {
+    const name = `nowake:${crypto.randomUUID()}`;
+    let stub = fresh(name);
+    const op = await stub.submit("approval-gate");
+    await parked(stub);
+    await quiet(stub);
+
+    expect(await stub.approve("ok")).toBe("delivered");
+    expect(await stub.wakeJobTime()).not.toBeNull();
+    expect(await stub.alarmTime()).not.toBeNull();
+    await stub.gateStarted(1);
+
+    await abortAllDurableObjects();
+    // Only the alarm can restart the call now: nothing touches the object.
+    await new Promise((resolve) => setTimeout(resolve, 4_000));
+    stub = fresh(name);
+    expect(await stub.gateRuns()).toBe(2);
+    await stub.release();
+    expect((await stub.wait(op.operationId)).text).toBe(
+      "tool said: ok after 2 runs"
+    );
+  }, 30_000);
+
+  it("wakes a call parked with a deadline from the alarm after eviction", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    const op = await stub.submit("deadline");
+    await parked(stub);
+    // A deadline is a time pi needs a wake for.
+    expect(await stub.wakeJobTime()).not.toBeNull();
+    await evictDurableObject(stub);
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    stub = fresh(name);
+    // Already answered by the time anything asks.
+    const result = await stub.waitWithin(op.operationId, 100);
+    expect(result).toMatchObject({
+      status: "done",
+      text: "tool said: woke expired"
+    });
+  }, 30_000);
+
+  it("runs a parked call's cancel() when the session is aborted after eviction", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    const op = await stub.submit("approval-gate");
+    await parked(stub);
+    await quiet(stub);
+    await evictDurableObject(stub);
+    stub = fresh(name);
+    expect(await stub.abort()).toBe(true);
+    expect(await stub.wait(op.operationId)).toMatchObject({
+      status: "unanswered",
+      reason: "aborted"
+    });
+    expect(await stub.cancels()).toBe(1);
+    expect(await stub.pending()).toEqual([]);
+    expect(await alarmCleared(stub)).toBe(true);
+  }, 30_000);
+
+  it("holds a tool call at a beforeTool gate until its signal, rerunning the hook on each open", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    const op = await stub.submit("multiply 77");
+    await parked(stub);
+    await quiet(stub);
+    expect(await stub.gateHookRuns()).toBe(1);
+    // While held, pi still counts the call as running work.
+    expect(await stub.pending()).toMatchObject([{ status: "running" }]);
+    await evictDurableObject(stub);
+    stub = fresh(name);
+    // Pi runs the gate again when it reopens, so it must be idempotent.
+    await stub.pending();
+    for (let i = 0; i < 100 && (await stub.gateHookRuns()) < 2; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(await stub.gateHookRuns()).toBe(2);
+    await quiet(stub);
+    expect(await stub.approve("go", "gate")).toBe("delivered");
+    expect((await stub.wait(op.operationId)).text).toBe("tool said: 231");
+  }, 30_000);
+
+  it("wakes a tool waiting on its subagent with the subagent's answer", async () => {
+    const stub = fresh();
+    const op = await stub.submit("subagent:hello");
+    expect((await stub.wait(op.operationId)).text).toBe(
+      "tool said: echo: hello"
+    );
+    const child = (await stub.listSessions()).find((s) => s.id !== "1");
+    expect(child).toBeDefined();
+    expect(await stub.sessionTexts(child!.id)).toEqual([
+      "hello",
+      "echo: hello"
+    ]);
+  }, 30_000);
+
+  it("wakes a tool waiting on its subagent after a crash while the subagent runs", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    const op = await stub.submit("subagent:gate");
+    await parked(stub);
+    await stub.gateStarted(1);
+    await abortAllDurableObjects();
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    stub = fresh(name);
+    await stub.release();
+    expect((await stub.wait(op.operationId)).text).toBe(
+      "tool said: tool said: released after 2 runs"
+    );
+  }, 30_000);
+
+  it("stops a subagent the waiting call owns when its session is aborted", async () => {
+    const stub = fresh();
+    const op = await stub.submit("subagent:gate");
+    await parked(stub);
+    await stub.gateStarted(1);
+    expect(await stub.abort()).toBe(true);
+    expect(await stub.wait(op.operationId)).toMatchObject({
+      status: "unanswered",
+      reason: "aborted"
+    });
+    for (let i = 0; i < 100 && (await stub.pending()).length > 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(await stub.pending()).toEqual([]);
+    const child = (await stub.listSessions()).find((s) => s.id !== "1");
+    expect(child?.busy).toBe(false);
+  }, 30_000);
+});
+
+describe("PiHarness's root session", () => {
+  /** The seeded history, as `entryTexts` shows it: the tool call has no text. */
+  const SEEDED = ["multiply 4", "", "12", "tool said: 12"];
+  /** The seeded history, as the model is sent it. */
+  const SEEDED_REQUEST = [
+    "user: multiply 4",
+    'assistant: multiply({"value":4})',
+    "toolResult: 12",
+    "assistant: tool said: 12"
+  ];
+
+  /** The last model request without its system messages. */
+  async function lastRequest(stub: DurableObjectStub<PiHarnessTestObject>) {
+    return (await stub.lastRequest()).filter(
+      (message) => !message.startsWith("system: ")
+    );
+  }
+
+  it("does not exist on a new object until its first use creates it with defaults", async () => {
+    const stub = fresh();
+    // Opening pi and reading around the root does not create it.
+    expect(await stub.pending()).toEqual([]);
+    expect(await stub.busy()).toBe(false);
+    expect(await stub.listSessions()).toEqual([]);
+    expect(await stub.rootExists()).toBe(false);
+
+    // The first prompt creates it, with the defaults' model.
+    expect(await stub.prompt("hello")).toMatchObject({
+      status: "done",
+      text: "echo: hello"
+    });
+    expect(await stub.listSessions()).toEqual([{ id: "1", busy: false }]);
+  });
+
+  it("seeds a new root in the commit that creates it, applying agent over defaults", async () => {
+    const stub = fresh();
+    expect(
+      await stub.seedRoot({ instructions: "Answer like a pirate." })
+    ).toEqual({ session: "1", created: true, initRan: true });
+    expect(await stub.messages()).toEqual(SEEDED);
+
+    // The next prompt is answered after the seeded history, on the defaults'
+    // model, with the agent's instructions.
+    expect(await stub.prompt("hello")).toMatchObject({
+      status: "done",
+      text: "echo: hello",
+      messages: [...SEEDED, "hello", "echo: hello"]
+    });
+    expect(await lastRequest(stub)).toEqual([...SEEDED_REQUEST, "user: hello"]);
+    expect(
+      (await stub.lastRequest()).some(
+        (message) =>
+          message.startsWith("system: ") &&
+          message.includes("Answer like a pirate.")
+      )
+    ).toBe(true);
+  });
+
+  it("writes nothing and runs no init when the root already exists", async () => {
+    const prompted = fresh();
+    await prompted.prompt("hello");
+    expect(await prompted.seedRoot()).toEqual({
+      session: "1",
+      created: false,
+      initRan: false
+    });
+    expect(await prompted.messages()).toEqual(["hello", "echo: hello"]);
+
+    const seeded = fresh();
+    expect(await seeded.seedRoot()).toMatchObject({ created: true });
+    expect(await seeded.seedRoot({ value: 5 })).toEqual({
+      session: "1",
+      created: false,
+      initRan: false
+    });
+    expect(await seeded.messages()).toEqual(SEEDED);
+  });
+
+  it("creates the root only once when a seed and a prompt race for it", async () => {
+    const stub = fresh();
+    const [seeded, prompted] = await Promise.all([
+      stub.seedRoot(),
+      stub.prompt("hello")
+    ]);
+    expect(prompted).toMatchObject({ status: "done", text: "echo: hello" });
+    const messages = await stub.messages();
+    if ("created" in seeded && seeded.created) {
+      expect(messages).toEqual([...SEEDED, "hello", "echo: hello"]);
+    } else {
+      expect(seeded).toEqual({ session: "1", created: false, initRan: false });
+      expect(messages).toEqual(["hello", "echo: hello"]);
+    }
+  });
+
+  it("does not create the root when init throws, so a later root() seeds it", async () => {
+    const stub = fresh();
+    expect(await stub.seedRoot({ fail: true })).toEqual({
+      error: "import failed",
+      initRan: true
+    });
+    expect(await stub.rootExists()).toBe(false);
+    expect(await stub.listSessions()).toEqual([]);
+
+    expect(await stub.seedRoot()).toEqual({
+      session: "1",
+      created: true,
+      initRan: true
+    });
+    expect(await stub.messages()).toEqual(SEEDED);
+    expect((await stub.prompt("hello")).text).toBe("echo: hello");
+  });
+
+  it("keeps the root's id when a session is created before the root", async () => {
+    const stub = fresh();
+    const other = await stub.createSession();
+    expect(other).not.toBe("1");
+    expect(await stub.rootExists()).toBe(false);
+
+    expect(await stub.seedRoot()).toEqual({
+      session: "1",
+      created: true,
+      initRan: true
+    });
+    expect(await stub.messages()).toEqual(SEEDED);
+    expect(await stub.messages(other)).toEqual([]);
+    expect(
+      (await stub.listSessions()).map((session) => session.id).sort()
+    ).toEqual(["1", other].sort());
+  });
+
+  it("seeds the root after the object restarts before its root was created", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    // pi opens in startup, with no root.
+    expect(await stub.pending()).toEqual([]);
+    expect(await stub.rootExists()).toBe(false);
+    const before = await stub.instance();
+
+    await abortAllDurableObjects();
+    stub = fresh(name);
+    // pi reopens and resumes with nothing to do, so no wake is left.
+    expect(await stub.instance()).not.toBe(before);
+    expect(await stub.rootExists()).toBe(false);
+    expect(await stub.alarmTime()).toBeNull();
+
+    expect(await stub.seedRoot()).toMatchObject({ created: true });
+    expect((await stub.prompt("hello")).messages).toEqual([
+      ...SEEDED,
+      "hello",
+      "echo: hello"
+    ]);
+  });
+
+  it("seeds a session sessions.create() makes, applying agent over defaults", async () => {
+    const stub = fresh();
+    const session = await stub.createSeededSession(5, "Answer like a pirate.");
+    expect(await stub.messages(session)).toEqual([
+      "multiply 5",
+      "",
+      "15",
+      "tool said: 15"
+    ]);
+    expect(await stub.prompt("hello", session)).toMatchObject({
+      status: "done",
+      text: "echo: hello"
+    });
+    expect(await lastRequest(stub)).toEqual([
+      "user: multiply 5",
+      'assistant: multiply({"value":5})',
+      "toolResult: 15",
+      "assistant: tool said: 15",
+      "user: hello"
+    ]);
+    expect(
+      (await stub.lastRequest()).some((message) =>
+        message.includes("Answer like a pirate.")
+      )
+    ).toBe(true);
+    // Creating a session does not create the root.
+    expect(await stub.rootExists()).toBe(false);
+  });
+
+  for (const create of [false, true]) {
+    const target = create ? "sessions.create()" : "root()";
+
+    it(`keeps a default that ${target}'s agent leaves undefined`, async () => {
+      const stub = fresh(`configured:${crypto.randomUUID()}`);
+      const session = await stub.createWithAgent("undefined", create);
+      expect(await stub.agentState(session)).toMatchObject({
+        model: { provider: "faux", modelId: expect.any(String) },
+        thinkingLevel: "high",
+        maxTurns: 5
+      });
+      expect(await stub.prompt("hello", session)).toMatchObject({
+        status: "done",
+        text: "echo: hello"
+      });
+    });
+
+    it(`clears a default that ${target}'s agent sets to null`, async () => {
+      const stub = fresh(`configured:${crypto.randomUUID()}`);
+      const session = await stub.createWithAgent("null", create);
+      const state = await stub.agentState(session);
+      expect(state).toBeDefined();
+      expect(state).not.toHaveProperty("model");
+      expect(state).not.toHaveProperty("thinkingLevel");
+      expect(state).not.toHaveProperty("maxTurns");
+      expect(await stub.prompt("hello", session)).toMatchObject({
+        status: "unanswered",
+        reason: "no_model"
+      });
+    });
+  }
+
+  it("seeds a fork after the history it copies", async () => {
+    const stub = fresh();
+    await stub.prompt("hello");
+    const fork = await stub.forkSeeded("1", 6);
+    expect(await stub.messages(fork)).toEqual([
+      "hello",
+      "echo: hello",
+      "multiply 6",
+      "",
+      "18",
+      "tool said: 18"
+    ]);
+    // The fork keeps the root's configuration, so it is answered.
+    expect((await stub.prompt("again", fork)).text).toBe("echo: again");
+    expect(await stub.messages()).toEqual(["hello", "echo: hello"]);
   });
 });

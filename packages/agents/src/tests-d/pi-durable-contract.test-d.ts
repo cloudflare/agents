@@ -9,12 +9,18 @@
  * exhaustive switches in `harness/pi/harness.ts`.
  */
 import type {
+  ConversationCreateOptions,
+  Harness,
   InputSubmissionDraft,
-  SettledSubmissionRecord
+  SettledSubmissionRecord,
+  SubmissionDraft
 } from "@earendil-works/pi-durable";
 import { expectTypeOf } from "vitest";
 import type {
+  PiContinueOptions,
+  PiOnAbort,
   PiOperationResult,
+  PiSessionCreateOptions,
   PiSubmitOptions,
   PiWhenBusy,
   PiWhenIdle
@@ -28,6 +34,10 @@ expectTypeOf<PiWhenIdle>().toEqualTypeOf<
   NonNullable<InputSubmissionDraft["whenIdle"]>
 >();
 
+expectTypeOf<PiOnAbort>().toEqualTypeOf<
+  NonNullable<InputSubmissionDraft["onAbort"]>
+>();
+
 // Every input option pi takes is exposed, apart from the ones PiHarness
 // fills in itself: `type` and `content` from the input, `requestId` from
 // `operationId`.
@@ -35,6 +45,35 @@ expectTypeOf<
   Exclude<keyof InputSubmissionDraft, "type" | "content" | "requestId">
 >().toEqualTypeOf<Exclude<keyof PiSubmitOptions, "session" | "operationId">>();
 
+// The same for a continue: every option pi takes on one, apart from `type`
+// and `requestId`.
+type ContinueSubmissionDraft = Extract<SubmissionDraft, { type: "continue" }>;
+expectTypeOf<
+  Exclude<
+    {
+      [
+        K in keyof ContinueSubmissionDraft
+      ]-?: undefined extends ContinueSubmissionDraft[K]
+        ? [ContinueSubmissionDraft[K]] extends [undefined]
+          ? never
+          : K
+        : K;
+    }[keyof ContinueSubmissionDraft],
+    "type" | "requestId"
+  >
+>().toEqualTypeOf<Exclude<keyof PiContinueOptions, "operationId">>();
+
 expectTypeOf<PiOperationResult["status"]>().toEqualTypeOf<
   SettledSubmissionRecord["status"]
+>();
+
+// Every option pi takes when it creates a conversation is exposed, apart
+// from `ownership`, which PiHarness sets: the same for the root,
+// `sessions.create()` and `sessions.fork()`.
+expectTypeOf<PiSessionCreateOptions>().toEqualTypeOf<
+  Omit<ConversationCreateOptions, "ownership">
+>();
+
+expectTypeOf<PiSessionCreateOptions>().toEqualTypeOf<
+  NonNullable<Parameters<Harness["root"]>[1]>
 >();

@@ -249,6 +249,10 @@ describe("Think — agentic loop", () => {
       errorClassification?: string;
       beforeTurnContinuations: boolean[];
       promptIncludedSeedMarker: boolean[];
+      status?: string;
+      responses?: Array<{ status: string; continuation: boolean }>;
+      terminalFrames?: Array<{ error?: boolean; outcome?: string }>;
+      terminalRecord?: string | null;
     };
 
     type OverflowAgent = {
@@ -261,6 +265,9 @@ describe("Think — agentic loop", () => {
           emitPartialBeforeOverflow?: boolean;
         }
       ): Promise<OverflowResult>;
+      testContinuationOverflow(
+        alwaysOverflow?: boolean
+      ): Promise<OverflowResult>;
       testProactive(message: string): Promise<OverflowResult>;
       testProactiveMultiFire(message: string): Promise<OverflowResult>;
       testProactiveNoOp(message: string): Promise<OverflowResult>;
@@ -271,6 +278,14 @@ describe("Think — agentic loop", () => {
       testCombinedProactiveReactive(message: string): Promise<OverflowResult>;
       testChatThrowingOverflow(message: string): Promise<OverflowResult>;
       testProgrammatic(message: string): Promise<OverflowResult>;
+      testContinueOverflow(alwaysOverflow?: boolean): Promise<OverflowResult>;
+      testRetryOverflow(
+        message: string,
+        alwaysOverflow?: boolean
+      ): Promise<OverflowResult>;
+      testProgrammaticAbortDuringCompaction(
+        message: string
+      ): Promise<OverflowResult>;
       enableOverflowRecoveryForWsTest(opts?: {
         abortDuringRecovery?: boolean;
       }): Promise<void>;
@@ -452,10 +467,146 @@ describe("Think — agentic loop", () => {
       const result =
         await agent.testProgrammaticAbortDuringRecovery("trigger overflow");
 
-      expect(result.error).toBeDefined();
+      // The caller stopped the turn: it is not told the turn failed, and
+      // onChatError does not run for it.
+      expect(result.done).toBe(false);
+      expect(result.error).toBeUndefined();
+      expect(result.errorClassification).toBeUndefined();
       expect(result.compactionCount).toBe(0);
       expect(result.compactionEvents).toBe(0);
       expect(result.modelCalls).toBe(1);
+    });
+
+    it("does not run the model again for a turn stopped while its history was compacted", async () => {
+      const room = crypto.randomUUID();
+      const agent = (await getAgentByName(
+        env.OverflowRecoveryTestAgent,
+        room
+      )) as unknown as OverflowAgent;
+
+      const result =
+        await agent.testProgrammaticAbortDuringCompaction("trigger overflow");
+
+      // The compaction ran, the stop landed during it, and the turn ended
+      // without a second model call. The caller asked for a stop: the turn
+      // reports `aborted`, onChatError does not run, and the stream the
+      // overflow left open gets its terminal frame.
+      expect(result.compactionCount).toBe(1);
+      expect(result.modelCalls).toBe(1);
+      expect(result.status).toBe("aborted");
+      expect(result.errorClassification).toBeUndefined();
+      expect(result.terminalFrames).toEqual([{ outcome: "aborted" }]);
+      // ...and onChatResponse hears of the turn once, as aborted.
+      expect(result.responses).toEqual([
+        { status: "aborted", continuation: false }
+      ]);
+    });
+
+    it("ends the stream of a continued turn whose overflow cannot be recovered", async () => {
+      const room = crypto.randomUUID();
+      const agent = (await getAgentByName(
+        env.OverflowRecoveryTestAgent,
+        room
+      )) as unknown as OverflowAgent;
+
+      const result = await agent.testContinueOverflow(true);
+
+      // No retry is left. A tab following the recovered turn gets an error
+      // `done` frame, and one that connects later finds the terminal record.
+      expect(result.status).toBe("error");
+      expect(result.errorClassification).toBe("context_overflow");
+      expect(result.terminalFrames).toEqual([{ error: true }]);
+      expect(result.terminalRecord).toBe(result.error);
+      // The failed turn fires onChatResponse once, as it did before the
+      // continuation had overflow recovery.
+      expect(result.responses).toEqual([
+        { status: "error", continuation: true }
+      ]);
+    });
+
+    it("fires onChatResponse once for a tool continuation whose overflow cannot be recovered", async () => {
+      const room = crypto.randomUUID();
+      const agent = (await getAgentByName(
+        env.OverflowRecoveryTestAgent,
+        room
+      )) as unknown as OverflowAgent;
+
+      const result = await agent.testContinuationOverflow(true);
+
+      // The continuation runs the turn body every other turn runs, so it
+      // ends the same way: classified, recorded, and reported once.
+      expect(result.errorClassification).toBe("context_overflow");
+      expect(result.terminalFrames).toEqual([{ error: true }]);
+      expect(typeof result.terminalRecord).toBe("string");
+      expect(result.responses).toEqual([
+        { status: "error", continuation: true }
+      ]);
+    });
+
+    it("ends the stream of a retried turn whose overflow cannot be recovered", async () => {
+      const room = crypto.randomUUID();
+      const agent = (await getAgentByName(
+        env.OverflowRecoveryTestAgent,
+        room
+      )) as unknown as OverflowAgent;
+
+      const result = await agent.testRetryOverflow("trigger overflow", true);
+
+      expect(result.status).toBe("error");
+      expect(result.terminalFrames).toEqual([{ error: true }]);
+      expect(result.terminalRecord).toBe(result.error);
+      expect(result.responses).toEqual([
+        { status: "error", continuation: false }
+      ]);
+    });
+
+    it("recovers a context overflow during continueLastTurn", async () => {
+      const room = crypto.randomUUID();
+      const agent = (await getAgentByName(
+        env.OverflowRecoveryTestAgent,
+        room
+      )) as unknown as OverflowAgent;
+
+      const result = await agent.testContinueOverflow();
+
+      expect(result.error).toBeUndefined();
+      expect(result.done).toBe(true);
+      expect(result.compactionCount).toBe(1);
+      expect(result.modelCalls).toBe(2);
+      expect(result.promptIncludedSeedMarker).toEqual([true, false]);
+    });
+
+    it("recovers a context overflow during a continuation turn", async () => {
+      const room = crypto.randomUUID();
+      const agent = (await getAgentByName(
+        env.OverflowRecoveryTestAgent,
+        room
+      )) as unknown as OverflowAgent;
+
+      const result = await agent.testContinuationOverflow();
+
+      // The continuation runs the same turn body as every other turn: the
+      // overflow is compacted and the model is called again.
+      expect(result.compactionCount).toBe(1);
+      expect(result.modelCalls).toBe(2);
+      expect(result.promptIncludedSeedMarker).toEqual([true, false]);
+      expect(result.terminalRecord).toBeNull();
+    });
+
+    it("recovers a context overflow during the recovery retry", async () => {
+      const room = crypto.randomUUID();
+      const agent = (await getAgentByName(
+        env.OverflowRecoveryTestAgent,
+        room
+      )) as unknown as OverflowAgent;
+
+      const result = await agent.testRetryOverflow("trigger overflow");
+
+      expect(result.error).toBeUndefined();
+      expect(result.done).toBe(true);
+      expect(result.compactionCount).toBe(1);
+      expect(result.modelCalls).toBe(2);
+      expect(result.promptIncludedSeedMarker).toEqual([true, false]);
     });
 
     it("recovers when the provider rejects doStream (top-level throw, not an in-stream error part)", async () => {

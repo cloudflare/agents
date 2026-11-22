@@ -13,6 +13,7 @@ import { camelCaseToKebabCase } from "../utils";
 import {
   ConnectionManager,
   createConnection,
+  isClosedByHost,
   isManagedWebSocket
 } from "./connection";
 import {
@@ -199,6 +200,11 @@ export class WebSockets extends LifecycleCapability {
     message: WebSocketMessage
   ): Promise<boolean> {
     if (!isManagedWebSocket(ws)) return false;
+    // A socket the host closed runs no more client messages. This covers
+    // a client that `onConnect` rejected: the close happens before the
+    // client has the upgrade response, so all it sends arrives after.
+    // Consumed, so no later capability sees the message either.
+    if (isClosedByHost(ws)) return true;
     await this.#message(createConnection(ws), message);
     return true;
   }

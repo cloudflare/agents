@@ -1,9 +1,9 @@
-import { applyImmutable } from "@earendil-works/chord/delta";
-import type { ConversationView } from "@earendil-works/pi-durable";
+import type { EntryId } from "@earendil-works/pi-durable";
 import { useAgent } from "agents/react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { PiSessionMirror } from "./mirror";
 import { PiCommandOutbox } from "./outbox";
-import { EMPTY_VIEW, projectView } from "./view";
+import { EMPTY_VIEW } from "./view";
 import type {
   ClientMessage,
   ServerMessage,
@@ -17,33 +17,41 @@ type State = SessionView & {
   readonly status: ConnectionStatus;
   /** Every registered tool, from the server's hello. */
   readonly catalog: readonly ToolInfo[];
+  /** A page of earlier or missing messages is loading. */
+  readonly loading: boolean;
 };
 
 const INITIAL_STATE: State = {
   ...EMPTY_VIEW,
   status: "connecting",
-  catalog: []
+  catalog: [],
+  loading: false
 };
 
 /**
  * One pi session over the harness's WebSocket protocol, connected with
- * `useAgent`. The server sends pi's conversation view, then pi's operations
- * for each change; this applies them and projects the view with the same
- * `projectView` the server tests use. A reconnect gets the whole view
- * again, and the client sends again every submit whose answer the
- * socket never delivered; the harness deduplicates them by operation id, so
- * each runs once.
+ * `useAgent`. Each time the socket opens, the client asks to watch the
+ * session; `PiSessionMirror` applies the server's view and operations,
+ * keeps the whole transcript the client has seen, and projects it with the
+ * same `projectView` the server tests use. A reconnect resumes after the
+ * newest entry the client has. The client sends again every submit whose
+ * answer the socket never delivered; the harness deduplicates them by
+ * operation id, so each runs once.
  */
 export function usePiSession(object: string) {
   const [state, setState] = useState<State>(INITIAL_STATE);
   // Unanswered submits, sent again each time the socket opens.
   const [outbox] = useState(() => new PiCommandOutbox());
-  // pi's view, as the server last sent it; the operations apply to it.
-  const view = useRef<ConversationView | null>(null);
-  // Another object starts from a clean slate.
-  const [stateObject, setStateObject] = useState(object);
-  if (stateObject !== object) {
-    setStateObject(object);
+  // The session as the client has it. Another object starts from a clean
+  // slate.
+  const [mirrored, setMirrored] = useState(() => ({
+    object,
+    mirror: createMirror(setState)
+  }));
+  let mirror = mirrored.mirror;
+  if (mirrored.object !== object) {
+    mirror = createMirror(setState);
+    setMirrored({ object, mirror });
     setState(INITIAL_STATE);
   }
 
@@ -51,7 +59,10 @@ export function usePiSession(object: string) {
     agent: "browser-agent",
     name: object,
     onOpen: () => setState((current) => ({ ...current, status: "open" })),
-    onClose: () => setState((current) => ({ ...current, status: "closed" })),
+    onClose: () => {
+      mirror.close();
+      setState((current) => ({ ...current, status: "closed" }));
+    },
     onMessage: (event) => {
       let message: ServerMessage;
       try {
@@ -60,20 +71,11 @@ export function usePiSession(object: string) {
         return;
       }
       outbox.receive(message);
+      mirror.receive(message);
       switch (message.type) {
         case "hello":
           setState((current) => ({ ...current, catalog: message.tools }));
           return;
-        case "view":
-        case "ops": {
-          if (message.type === "view") view.current = message.view;
-          // Operations without a view to apply to: wait for the next view.
-          else if (view.current === null) return;
-          else view.current = applyImmutable(view.current, message.ops);
-          const projected = projectView(view.current);
-          setState((current) => ({ ...current, ...projected }));
-          return;
-        }
         case "error":
           setState((current) => ({ ...current, error: message.message }));
           return;
@@ -84,15 +86,22 @@ export function usePiSession(object: string) {
   });
 
   useEffect(() => {
-    // Submits and the view belong to the last object's session.
+    // Submits belong to the last object's session.
     outbox.clear();
-    view.current = null;
   }, [object, outbox]);
+
+  // The last object's mirror stops loading pages.
+  const currentMirror = useRef(mirror);
+  useEffect(() => {
+    currentMirror.current = mirror;
+    return () => mirror.close();
+  }, [mirror]);
 
   useEffect(() => {
     if (state.status !== "open") return;
+    mirror.open((message) => agent.send(JSON.stringify(message)));
     outbox.sendPending((data) => agent.send(data));
-  }, [state.status, agent, outbox]);
+  }, [state.status, agent, mirror, outbox]);
 
   const send = useCallback(
     (message: ClientMessage) => {
@@ -124,5 +133,42 @@ export function usePiSession(object: string) {
     [send]
   );
 
-  return { ...state, submit, abort, reset };
+  /** Run one page load of this object's mirror, showing `loading` meanwhile. */
+  const load = useCallback(
+    (loading: Promise<void>) => {
+      const update = (change: (current: State) => State) => {
+        // Another object's state took this one's place.
+        if (currentMirror.current === mirror) setState(change);
+      };
+      update((current) => ({ ...current, loading: true }));
+      loading
+        // The server's `error` frame shows its failure; a dropped socket
+        // shows as the connection status, and the user can try again.
+        .catch(() => {})
+        .finally(() => update((current) => ({ ...current, loading: false })));
+    },
+    [mirror]
+  );
+
+  /** Load the page of messages before the oldest one shown. */
+  const loadEarlier = useCallback(
+    () => load(mirror.loadEarlier()),
+    [load, mirror]
+  );
+
+  /** Load the next page of messages a `gap` message stands for. */
+  const fillGap = useCallback(
+    (gap: { after: EntryId; upTo: EntryId }) => load(mirror.fillGap(gap)),
+    [load, mirror]
+  );
+
+  return { ...state, submit, abort, reset, loadEarlier, fillGap };
+}
+
+function createMirror(
+  setState: (update: (current: State) => State) => void
+): PiSessionMirror {
+  return new PiSessionMirror((view) =>
+    setState((current) => ({ ...current, ...view }))
+  );
 }

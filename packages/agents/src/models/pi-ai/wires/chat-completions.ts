@@ -61,9 +61,11 @@ const STRICT_OPENAI_COMPAT: Compat = {
   maxTokensField: "max_tokens",
   openRouterRouting: {},
   requiresAssistantAfterToolResult: false,
+  requiresNonNullAssistantContent: false,
   requiresReasoningContentOnAssistantMessages: false,
   requiresThinkingAsText: false,
   requiresToolResultName: false,
+  requiresToolsWithToolHistory: false,
   sendSessionAffinityHeaders: false,
   sessionAffinityFormat: "openai",
   supportsDeveloperRole: false,
@@ -567,7 +569,7 @@ export function streamCompletions(
 
       const prepared = workersAI
         ? prepareChatCompletionsRequest(strict, model.id)
-        : { body: strict, reasoningOff: false, warnings: [] };
+        : { body: strict, warnings: [] };
       recordWarnings(output, [...ignored, ...prepared.warnings]);
       const overridden = await options.onPayload?.(prepared.body, model);
       const payload =
@@ -616,11 +618,7 @@ export function streamCompletions(
           request.streamIdleTimeoutMs
         ).pipeThrough(sseDataStream());
         const chunks = workersAI
-          ? decoded.pipeThrough(
-              normalizeChatCompletionsStream(model.id, {
-                reasoningOff: prepared.reasoningOff
-              })
-            )
+          ? decoded.pipeThrough(normalizeChatCompletionsStream(model.id))
           : decoded;
         const reader = chunks.getReader();
         try {

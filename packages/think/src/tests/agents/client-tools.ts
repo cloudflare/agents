@@ -9,6 +9,7 @@ import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { tool } from "ai";
 import { z } from "zod";
 import { Think } from "../../think";
+import { getCurrentAgent } from "agents";
 import type {
   ChatErrorContext,
   ChatResponseResult,
@@ -57,6 +58,14 @@ function createClientToolMockModel(): LanguageModel {
             controller.enqueue({
               type: "tool-input-end",
               id: "tc-client-1"
+            });
+            // Finalize the call so the part is `input-available`: a result
+            // only applies (and continues) for a call awaiting one.
+            controller.enqueue({
+              type: "tool-call",
+              toolCallId: "tc-client-1",
+              toolName: "client_action",
+              input: JSON.stringify({ action: "do_thing" })
             });
             controller.enqueue({
               type: "finish",
@@ -923,11 +932,87 @@ export class ThinkClientToolsAgent extends Think {
   private _chainedModelCalls: number[] = [];
   private _chainedStreamLatch = new LatchForTest();
   private _continuationStartLatch: LatchForTest | null = null;
+  private _continuationTurnCount = 0;
   private _coalesceArmHeld: { requested: boolean } | null = null;
 
   override onChatError(error: unknown, ctx: ChatErrorContext): unknown {
     this._chatErrorLog.push(ctx);
     return error;
+  }
+
+  private _recoveryAttemptForTest: Promise<void> | null = null;
+
+  /**
+   * Schedule a recovery continue for the latest reply and start its attempt,
+   * which then waits for the chat to settle.
+   */
+  async startRecoveryContinueForTest(
+    context: Record<string, unknown> = {}
+  ): Promise<void> {
+    const reply = this.messages.filter((m) => m.role === "assistant").at(-1);
+    const incidentId = "inc-answered";
+    await this.ctx.storage.put(`cf:chat-recovery:incident:${incidentId}`, {
+      incidentId,
+      requestId: "root-answered",
+      recoveryRootRequestId: "root-answered",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+    this._recoveryAttemptForTest = this._chatRecoveryContinueDetached({
+      incidentId,
+      originalRequestId: "root-answered",
+      targetAssistantId: reply?.id,
+      ...context
+    });
+  }
+
+  /** Wait for that attempt and return what it left on the incident. */
+  async finishRecoveryContinueForTest(): Promise<{
+    status?: string;
+    reason?: string;
+  }> {
+    await this._recoveryAttemptForTest;
+    const incident = await this.ctx.storage.get<{
+      status: string;
+      reason?: string;
+    }>("cf:chat-recovery:incident:inc-answered");
+    return { status: incident?.status, reason: incident?.reason };
+  }
+
+  private _failNextContinuationBeforeStream = false;
+
+  /** The next continuation turn's `beforeTurn` throws, once. */
+  async failNextContinuationBeforeStreamForTest(): Promise<void> {
+    this._failNextContinuationBeforeStream = true;
+  }
+
+  /**
+   * Run a recovery continue whose payload names the tools and body of the
+   * request that was interrupted. Returns the body the recovered turn ran
+   * with and the stored body afterwards.
+   */
+  async runRecoveryContinueWithContextForTest(
+    storedBody: Record<string, unknown>,
+    lastBody: Record<string, unknown>
+  ): Promise<{ ranWith: string; storedAfter: string }> {
+    const internals = this as unknown as {
+      _lastBody: Record<string, unknown> | undefined;
+    };
+    internals._lastBody = storedBody;
+    await this.startRecoveryContinueForTest({
+      lastBody,
+      lastClientTools: null
+    });
+    await this._recoveryAttemptForTest;
+    // JSON text: an RPC return type cannot carry `unknown` values.
+    return {
+      ranWith: JSON.stringify(this._turnBodies.at(-1) ?? null),
+      storedAfter: JSON.stringify(internals._lastBody ?? null)
+    };
   }
 
   async setFailContinuationBeforeStream(value: boolean): Promise<void> {
@@ -938,10 +1023,30 @@ export class ThinkClientToolsAgent extends Think {
     return this._chatErrorLog;
   }
 
+  private _turnBodies: Array<Record<string, unknown> | null> = [];
+
+  /** The body each turn ran with, in the order the turns started. */
+  async getTurnBodiesForTest(): Promise<Array<Record<string, unknown> | null>> {
+    return this._turnBodies;
+  }
+
+  async saveMessagesForTest(text: string): Promise<string> {
+    const result = await this.saveMessages([
+      { id: crypto.randomUUID(), role: "user", parts: [{ type: "text", text }] }
+    ]);
+    return result.status;
+  }
+
   override async beforeTurn(ctx: TurnContext): Promise<TurnConfig | void> {
+    this._turnBodies.push(ctx.body ?? null);
     this._lastTurnToolNames = Object.keys(ctx.tools);
+    if (ctx.continuation) this._continuationTurnCount++;
     if (ctx.continuation) await this._continuationStartLatch?.wait();
     if (ctx.continuation && this._failContinuationBeforeStream) {
+      throw new Error("continuation failed before streaming");
+    }
+    if (ctx.continuation && this._failNextContinuationBeforeStream) {
+      this._failNextContinuationBeforeStream = false;
       throw new Error("continuation failed before streaming");
     }
     if (this._stampMetadata) {
@@ -999,8 +1104,59 @@ export class ThinkClientToolsAgent extends Think {
     this._responseHookGate = undefined;
   }
 
+  private _saveInFailedContinuationHook = false;
+  private _failedContinuationHookError: string | null = null;
+  private _saveOnFailedContinuation = 1;
+  private _failedContinuationHooks = 0;
+
+  /**
+   * Make `onChatResponse` call `saveMessages` when a continuation failed,
+   * which is only allowed once the failed turn has left the queue.
+   */
+  async setSaveMessagesInFailedContinuationHookForTest(
+    value: boolean,
+    onNthFailure = 1
+  ): Promise<void> {
+    this._saveInFailedContinuationHook = value;
+    this._saveOnFailedContinuation = onNthFailure;
+    this._failedContinuationHooks = 0;
+  }
+
+  async failedContinuationHookErrorForTest(): Promise<string | null> {
+    return this._failedContinuationHookError;
+  }
+
+  private _responseConnections: Array<string | null> = [];
+
+  /** The connection `getCurrentAgent()` named in each `onChatResponse`. */
+  async getResponseConnectionsForTest(): Promise<Array<string | null>> {
+    return this._responseConnections;
+  }
+
   override async onChatResponse(result: ChatResponseResult): Promise<void> {
     this._responseLog.push(result);
+    this._responseConnections.push(getCurrentAgent().connection?.id ?? null);
+    if (
+      this._saveInFailedContinuationHook &&
+      result.continuation &&
+      result.status === "error" &&
+      ++this._failedContinuationHooks === this._saveOnFailedContinuation
+    ) {
+      this._saveInFailedContinuationHook = false;
+      this._failContinuationBeforeStream = false;
+      try {
+        await this.saveMessages([
+          {
+            id: crypto.randomUUID(),
+            role: "user",
+            parts: [{ type: "text", text: "after the failure" }]
+          }
+        ]);
+      } catch (error) {
+        this._failedContinuationHookError =
+          error instanceof Error ? error.message : String(error);
+      }
+    }
     await this._responseHookGate;
   }
 
@@ -1014,7 +1170,45 @@ export class ThinkClientToolsAgent extends Think {
     this._useExecutableClientTool = true;
   }
 
+  /**
+   * Clear the chat while the next reply's pending response hook is being
+   * recorded, between the reset check and the reply's write.
+   */
+  async clearDuringNextReplyStoreForTest(): Promise<void> {
+    const self = this as unknown as {
+      _rememberPendingResponseHook(result: unknown): Promise<void>;
+    };
+    const original = self._rememberPendingResponseHook.bind(this);
+    self._rememberPendingResponseHook = async (result) => {
+      self._rememberPendingResponseHook = original;
+      await original(result);
+      await this.clearMessages();
+    };
+  }
+
+  private _failNextModelCallInStream = false;
+
+  /** The next model call fails inside its stream, as a provider 500 does. */
+  async failNextModelCallInStreamForTest(): Promise<void> {
+    this._failNextModelCallInStream = true;
+  }
+
   getModel(): LanguageModel {
+    if (this._failNextModelCallInStream) {
+      this._failNextModelCallInStream = false;
+      return {
+        specificationVersion: "v3",
+        provider: "test",
+        modelId: "mock-failing",
+        supportedUrls: {},
+        doGenerate() {
+          throw new Error("doGenerate not implemented");
+        },
+        doStream() {
+          return Promise.reject(new Error("provider rejected the request"));
+        }
+      } as LanguageModel;
+    }
     if (this._useChainedClientTool)
       return createChainedClientToolModel({
         holdSecondCall: () => this._chainedStreamLatch.wait(),
@@ -1064,6 +1258,16 @@ export class ThinkClientToolsAgent extends Think {
           execute: async () => ({ enabled: false })
         }),
         ...this._serverApprovalTools()
+      };
+    }
+    if (this._useDeclaredClientTool) {
+      // Declared on the server with no `execute`: a client answers it, and
+      // never sends its schema.
+      return {
+        askUser: tool({
+          description: "Ask the user a question",
+          inputSchema: z.object({ question: z.string() })
+        })
       };
     }
     if (!this._useServerApprovalTool) return {};
@@ -1318,6 +1522,7 @@ export class ThinkClientToolsAgent extends Think {
     const internal = this as unknown as {
       _lastClientTools: ClientToolSchema[] | undefined;
       _persistAssistantMessage: (msg: UIMessage) => Promise<void>;
+      _settleInterruptedReply: (msg: UIMessage) => UIMessage;
       hasPendingInteraction: () => boolean;
     };
 
@@ -1329,19 +1534,23 @@ export class ThinkClientToolsAgent extends Think {
       internal._lastClientTools = undefined;
     }
 
-    await internal._persistAssistantMessage({
-      id: crypto.randomUUID(),
-      role: "assistant",
-      parts: [
-        {
-          type: "tool-client_action",
-          toolCallId: "tc-orphan-1",
-          toolName: "client_action",
-          state: "input-available",
-          input: { action: "do_thing" }
-        } as unknown as UIMessage["parts"][number]
-      ]
-    });
+    // The reply was cut off, so it is stored the way a cut-off reply is:
+    // with the calls no client is known to own settled.
+    await internal._persistAssistantMessage(
+      internal._settleInterruptedReply({
+        id: crypto.randomUUID(),
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-client_action",
+            toolCallId: "tc-orphan-1",
+            toolName: "client_action",
+            state: "input-available",
+            input: { action: "do_thing" }
+          } as unknown as UIMessage["parts"][number]
+        ]
+      })
+    );
 
     return internal.hasPendingInteraction();
   }
@@ -1353,6 +1562,10 @@ export class ThinkClientToolsAgent extends Think {
     part: UIMessage["parts"][number]
   ): UIMessage["parts"][number] {
     const record = part as Record<string, unknown>;
+    // An app's override that fails on a part it did not expect.
+    if (record.type === "tool-throwing_repair") {
+      throw new Error("repairInterruptedToolPart failed");
+    }
     if (record.type === "tool-ask_user") {
       const input = record.input as { prompt?: unknown } | undefined;
       const prompt = typeof input?.prompt === "string" ? input.prompt : "";
@@ -1363,14 +1576,87 @@ export class ThinkClientToolsAgent extends Think {
     return super.repairInterruptedToolPart(part);
   }
 
+  /** The before-turn repair on `messages`, storing and reporting nothing. */
   async repairToolTranscriptPartsForTest(
     messages: UIMessage[]
   ): Promise<UIMessage[]> {
-    return (
-      this as unknown as {
-        _repairToolTranscriptParts(m: UIMessage[]): { messages: UIMessage[] };
-      }
-    )._repairToolTranscriptParts(messages).messages;
+    const internal = this as unknown as {
+      _turnIsContinuation: boolean;
+      _turns: {
+        settleBeforeTurn(
+          messages: UIMessage[],
+          options: {
+            continuation: boolean;
+            repairPart: (
+              part: UIMessage["parts"][number]
+            ) => UIMessage["parts"][number];
+          },
+          sink: { persist(): Promise<void>; emitRepaired(): void }
+        ): Promise<{ messages: UIMessage[] }>;
+      };
+    };
+    const repaired = await internal._turns.settleBeforeTurn(
+      messages,
+      {
+        continuation: internal._turnIsContinuation,
+        repairPart: (part) => this.repairInterruptedToolPart(part)
+      },
+      { persist: async () => {}, emitRepaired: () => {} }
+    );
+    return repaired.messages;
+  }
+
+  /**
+   * Build a model request as a continuation turn would, without going
+   * through a continuation entry point. Returns the error it throws.
+   */
+  async assembleAsContinuationForTest(): Promise<string | null> {
+    const internal = this as unknown as {
+      _turnIsContinuation: boolean;
+      _assembleModelMessages(tools: Record<string, never>): Promise<unknown>;
+    };
+    internal._turnIsContinuation = true;
+    try {
+      await internal._assembleModelMessages({});
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    } finally {
+      internal._turnIsContinuation = false;
+    }
+  }
+
+  /** The stored state of a tool call, or `missing`. */
+  async probeToolPartStateForTest(opts: {
+    toolCallId: string;
+  }): Promise<{ state: string; errorText?: string }> {
+    const messages = (await this.getMessages()) as UIMessage[];
+    const part = messages
+      .flatMap((m) => m.parts as Array<Record<string, unknown>>)
+      .find((p) => p.toolCallId === opts.toolCallId);
+    return {
+      state: (part?.state as string) ?? "missing",
+      ...(typeof part?.errorText === "string" && { errorText: part.errorText })
+    };
+  }
+
+  /** Run `continueLastTurn` and wait for the continuation turn to end. */
+  async continueLastTurnForTest(): Promise<{
+    requestId: string;
+    status: string;
+    reason?: string;
+  }> {
+    const { requestId, status, reason } = await this.continueLastTurn();
+    return { requestId, status, ...(reason !== undefined && { reason }) };
+  }
+
+  /** Append a message with no turn, as an app's status message is. */
+  async appendNoteForTest(text: string): Promise<UIMessage> {
+    return this.appendMessageToHistory({
+      id: `note-${crypto.randomUUID()}`,
+      role: "assistant",
+      parts: [{ type: "text", text }]
+    });
   }
 
   async persistToolCallMessage(messages: UIMessage[]): Promise<void> {
@@ -1530,6 +1816,26 @@ export class ThinkClientToolsAgent extends Think {
     )._submitConcurrency.overlappingSubmitCount;
   }
 
+  private _interactionAppliesSeen = 0;
+
+  /** Counts every apply, as a subclass that wraps applies would see them. */
+  protected override _enqueueInteractionApply(
+    apply: () => Promise<void>
+  ): Promise<boolean> {
+    this._interactionAppliesSeen++;
+    return super._enqueueInteractionApply(apply);
+  }
+
+  async getInteractionAppliesSeenForTest(): Promise<number> {
+    return this._interactionAppliesSeen;
+  }
+
+  private _useDeclaredClientTool = false;
+
+  async setDeclaredClientToolForTest(value: boolean): Promise<void> {
+    this._useDeclaredClientTool = value;
+  }
+
   waitUntilStableForTest(options?: { timeout?: number }): Promise<boolean> {
     return this.waitUntilStable(options);
   }
@@ -1560,9 +1866,75 @@ export class ThinkClientToolsAgent extends Think {
   }
 
   /** Park continuation turns in `beforeTurn`, before their stream starts. */
+  private _releaseHeldTurnQueue: (() => void) | null = null;
+
+  /** Put a turn that does nothing at the front of the queue until released. */
+  async holdTurnQueueForTest(): Promise<void> {
+    const held = new Promise<void>((resolve) => {
+      this._releaseHeldTurnQueue = resolve;
+    });
+    void (
+      this as unknown as {
+        _turnQueue: {
+          enqueue(id: string, fn: () => Promise<void>): Promise<unknown>;
+        };
+      }
+    )._turnQueue.enqueue("held-for-test", () => held);
+  }
+
+  async releaseTurnQueueForTest(): Promise<void> {
+    this._releaseHeldTurnQueue?.();
+    this._releaseHeldTurnQueue = null;
+  }
+
+  /** The request id of the continuation waiting to run, if any. */
+  async pendingContinuationRequestIdForTest(): Promise<string | null> {
+    return (
+      (
+        this as unknown as {
+          _continuation: { pending: { requestId: string } | null };
+        }
+      )._continuation.pending?.requestId ?? null
+    );
+  }
+
+  /** How many continuation turns reached `beforeTurn`. */
+  async continuationTurnCountForTest(): Promise<number> {
+    return this._continuationTurnCount;
+  }
+
   async holdContinuationStartForTest(): Promise<void> {
     this._continuationStartLatch = new LatchForTest();
   }
+
+  /**
+   * Hold the end-of-turn store of the next reply open, after the reply was
+   * built and before it is written, until released. Stands in for any await
+   * in that window that lets a tool result in.
+   */
+  async holdReplyStoreForTest(): Promise<void> {
+    const latch = new LatchForTest();
+    this._replyStoreLatch = latch;
+    const internal = this as unknown as {
+      _rememberPendingResponseHook(result: unknown): Promise<void>;
+    };
+    const original = internal._rememberPendingResponseHook;
+    internal._rememberPendingResponseHook = async (result: unknown) => {
+      internal._rememberPendingResponseHook = original;
+      await latch.wait();
+      return original.call(this, result);
+    };
+  }
+
+  async isReplyStoreHeldForTest(): Promise<boolean> {
+    return this._replyStoreLatch?.isWaiting ?? false;
+  }
+
+  async releaseReplyStoreForTest(): Promise<void> {
+    this._replyStoreLatch?.open();
+  }
+
+  private _replyStoreLatch: LatchForTest | undefined;
 
   async isContinuationStartHeldForTest(): Promise<boolean> {
     return this._continuationStartLatch?.isWaiting ?? false;
@@ -1678,7 +2050,7 @@ export class ThinkClientToolsAgent extends Think {
       _autoContinuation: { fireWhenStable(): void; reset(): void };
       _pendingInteractionPromise: Promise<boolean> | null;
       _interactionApplyTail: Promise<void>;
-      _hasArmedContinuation(): boolean;
+      _turns: { hasPendingDecision(): boolean };
     };
 
     // Seed an unfired pending continuation (no message-level interaction, so the
@@ -1708,7 +2080,7 @@ export class ThinkClientToolsAgent extends Think {
     internal._autoContinuation.fireWhenStable();
 
     try {
-      const hasArmedContinuation = internal._hasArmedContinuation();
+      const hasArmedContinuation = internal._turns.hasPendingDecision();
       const messageInteractionPending = this.hasPendingInteraction();
       const stable = await this.waitUntilStable({ timeout: timeoutMs });
       return { hasArmedContinuation, messageInteractionPending, stable };

@@ -200,6 +200,36 @@ describe("AIChatAgent programmatic turns via saveMessages", () => {
     ws.close(1000);
     observerWs.close(1000);
   });
+
+  it("reports skipped for a programmatic turn a chat clear cuts off mid-reply", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectSlowStream(room);
+    const { ws: observerWs } = await connectSlowStream(room);
+    await delay(50);
+    const agentStub = await getAgentByName(env.SlowStreamAgent, room);
+
+    const running = agentStub.enqueueSyntheticUserMessage("Cut off", {
+      body: { format: "plaintext", chunkCount: 20, chunkDelayMs: 50 }
+    });
+    await expect
+      .poll(async () => (await agentStub.getStartedRequestIds()).length, {
+        timeout: 3000
+      })
+      .toBe(1);
+    await delay(120);
+
+    const clearBroadcast = waitForChatClearBroadcast(observerWs);
+    ws.send(JSON.stringify({ type: MessageType.CF_AGENT_CHAT_CLEAR }));
+    await clearBroadcast;
+
+    // A clear is not the caller's stop: the same status as a clear that
+    // lands before the reply starts.
+    expect((await running).status).toBe("skipped");
+    await agentStub.waitForIdleForTest();
+    expect(await agentStub.getPersistedUserTexts()).toEqual([]);
+    ws.close(1000);
+    observerWs.close(1000);
+  });
 });
 
 // ── External AbortSignal (issue #1406) ─────────────────────────
@@ -247,6 +277,93 @@ describe("AIChatAgent saveMessages — external AbortSignal", () => {
     await delay(100);
     const count = await agentStub.getAbortControllerCount();
     expect(count).toBe(0);
+  });
+
+  it("stores nothing and never calls onChatMessage for a pre-aborted signal", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getAgentByName(env.SlowStreamAgent, room);
+
+    const result = await agentStub.testSaveMessagesWithSignal(
+      "Cancel before run",
+      {
+        preAbort: true,
+        // The model ignores its abort signal: only the turn core can keep
+        // it from running.
+        body: { format: "plaintext", chunkCount: 3, chunkDelayMs: 10 }
+      }
+    );
+
+    expect(result.status).toBe("aborted");
+    expect(await agentStub.getStartedRequestIds()).toEqual([]);
+    expect(await agentStub.getPersistedUserTexts()).toEqual([]);
+    expect(await agentStub.getChatResponseResults()).toEqual([]);
+  });
+
+  it("abortAllRequests() stops a saveMessages turn still waiting in the queue", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getAgentByName(env.SlowStreamAgent, room);
+
+    const { running, queued } =
+      await agentStub.testQueuedSaveMessagesStoppedByAbortAllRequests(150, {
+        format: "plaintext",
+        useAbortSignal: true,
+        chunkCount: 30,
+        chunkDelayMs: 50
+      });
+
+    expect(running.status).toBe("aborted");
+    // The queued turn had not started. Its controller exists from the
+    // moment saveMessages is called, so the stop reaches it: it stores
+    // nothing and the model is never called for it.
+    expect(queued.status).toBe("aborted");
+    expect(await agentStub.getStartedRequestIds()).toEqual([running.requestId]);
+    expect(await agentStub.getPersistedUserTexts()).toEqual(["Running"]);
+    expect(await agentStub.getAbortControllerCount()).toBe(0);
+  });
+
+  it("abortAllRequests() while onChatMessage is pending stops the reply of a model that ignores its signal", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getAgentByName(env.SlowStreamAgent, room);
+
+    const result = await agentStub.testSaveMessagesCancelledByAbortAllRequests(
+      "Stop before the reply starts",
+      50,
+      {
+        format: "plaintext",
+        responseDelayMs: 300,
+        chunkCount: 5,
+        chunkDelayMs: 20
+      }
+    );
+
+    expect(result.status).toBe("aborted");
+    // abortAllRequests() emptied the registry while onChatMessage was
+    // pending. The reply loop holds the turn's own signal, so it stops
+    // before the first chunk: no text of the reply is stored.
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const replyText = messages
+      .filter((message) => message.role === "assistant")
+      .flatMap((message) => message.parts)
+      .map((part) => (part.type === "text" ? part.text : ""))
+      .join("");
+    expect(replyText).toBe("");
+  });
+
+  it("says a turn its caller stopped was stopped", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getAgentByName(env.SlowStreamAgent, room);
+
+    const result = await agentStub.testSaveMessagesWithSignal("Long response", {
+      abortAfterMs: 150,
+      body: {
+        format: "plaintext",
+        useAbortSignal: true,
+        chunkCount: 30,
+        chunkDelayMs: 50
+      }
+    });
+
+    expect(result).toMatchObject({ status: "aborted", reason: "stopped" });
   });
 
   it("returns 'aborted' when aborted mid-stream and persists partial chunks", async () => {
@@ -306,6 +423,29 @@ describe("AIChatAgent saveMessages — external AbortSignal", () => {
     );
 
     expect(result.status).toBe("aborted");
+  });
+
+  it("a turn its shouldApplyMessages declines stores nothing and never runs", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getAgentByName(env.SlowStreamAgent, room);
+
+    const declined = await agentStub.testProgrammaticTurnWithShouldApply(
+      "Declined",
+      [false]
+    );
+    expect(declined.result.status).toBe("aborted");
+    expect(declined.asked).toBe(1);
+    expect(await agentStub.getStartedRequestIds()).toEqual([]);
+    expect(await agentStub.getPersistedUserTexts()).toEqual([]);
+
+    // Asked before and after the messages are worked out; two yeses run it.
+    const applied = await agentStub.testProgrammaticTurnWithShouldApply(
+      "Applied",
+      [true, true]
+    );
+    expect(applied.result.status).toBe("completed");
+    expect(applied.asked).toBe(2);
+    expect(await agentStub.getPersistedUserTexts()).toEqual(["Applied"]);
   });
 
   // Regression for issue #1406: if `runFiber` itself throws (e.g. SQLite

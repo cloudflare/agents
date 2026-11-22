@@ -11,6 +11,8 @@ import { nanoid } from "nanoid";
 import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isSocketAddressPending } from "../socket-address";
 import { chatThrottleOptions } from "./chat-throttle";
+import { dropEmptyReply } from "./reply-empty";
+import { drawQueuedLast, splitQueuedMessages } from "./queued-messages";
 import type { ChatTurnOutcome, OutgoingMessage } from "./wire-types";
 import { STREAM_RESUME_NONE_REASONS } from "./protocol";
 import { MessageType } from "./wire-types";
@@ -696,6 +698,8 @@ export function detectToolsRequiringConfirmation(
     .filter(([_name, tool]) => !tool.execute)
     .map(([name]) => name);
 }
+
+const NO_MESSAGES: never[] = [];
 
 export function useAgentChat<
   // oxlint-disable-next-line no-unused-vars -- kept for backward compat
@@ -1430,6 +1434,22 @@ export function useAgentChat<
   ]);
 
   const localResponseMessageIdsRef = useRef(new Map<string, string>());
+  /**
+   * The messages the last message list named as queued, kept out of the
+   * chat's list and drawn after it (`queued-messages.ts`).
+   */
+  const [queued, setQueued] = useState<{
+    /** The chat they belong to: a switch to another chat leaves them. */
+    chatId: string | null;
+    messages: ChatMessage[];
+  }>({ chatId: null, messages: [] });
+  const queuedMessages =
+    queued.chatId === stableChatIdRef.current ? queued.messages : NO_MESSAGES;
+  const queuedMessagesRef = useRef(queuedMessages);
+  queuedMessagesRef.current = queuedMessages;
+  const setQueuedMessages = useCallback((messages: ChatMessage[]) => {
+    setQueued({ chatId: stableChatIdRef.current, messages });
+  }, []);
   const protectedStreamingAssistantRef = useRef<{
     assistantId: string;
     anchorMessageId: string | null;
@@ -1643,6 +1663,7 @@ export function useAgentChat<
   const resetLocalChatState = useCallback(() => {
     markInitialMessagesSeeded();
     setMessages([]);
+    setQueuedMessages([]);
     setClientToolResults(new Map());
     setPendingOnToolCallIds(new Set());
     resetToolContinuation();
@@ -1659,6 +1680,7 @@ export function useAgentChat<
   }, [
     markInitialMessagesSeeded,
     setMessages,
+    setQueuedMessages,
     resetToolContinuation,
     customTransport
   ]);
@@ -2166,9 +2188,17 @@ export function useAgentChat<
             ? new Set(pendingBufferedSendIdsRef.current)
             : new Set<string>();
           pendingBufferedSendIdsRef.current.clear();
+          // Messages waiting requests hold stay out of the chat's list and
+          // are drawn after it (`queued-messages.ts`).
+          const { stored, queued } = splitQueuedMessages(
+            data.messages,
+            data.queuedMessageIds
+          );
+          setQueuedMessages(queued);
+          const queuedIds = new Set(queued.map((message) => message.id));
           setMessages((currentMessages: ChatMessage[]) => {
             let next = preserveProtectedStreamingAssistant(
-              data.messages,
+              stored,
               currentMessages
             );
             // A cross-tab observer builds the in-flight assistant via the
@@ -2207,7 +2237,10 @@ export function useAgentChat<
             }
             // Rescue sends the transport buffered while the socket was down
             // that the reconnect replay would otherwise drop.
-            return restoreBufferedSends(next, currentMessages, bufferedSendIds);
+            next = restoreBufferedSends(next, currentMessages, bufferedSendIds);
+            return queuedIds.size === 0
+              ? next
+              : next.filter((message) => !queuedIds.has(message.id));
           });
           break;
         }
@@ -2498,7 +2531,17 @@ export function useAgentChat<
                 setIsServerStreaming(false);
               }
               customTransport.handleServerTurnCompleted(data.id);
+              const openedId =
+                localResponseIds.get(data.id) ??
+                (data.continuation ? data.messageId : undefined);
               restoreProtectedStreamingAssistant(localResponseIds.get(data.id));
+              // A stream that ended with nothing in it leaves no empty
+              // bubble behind: the server stores none.
+              if (openedId !== undefined) {
+                setMessages((current: ChatMessage[]) =>
+                  dropEmptyReply(current, openedId)
+                );
+              }
               localResponseIds.delete(data.id);
               localRequestIdsRef.current.delete(data.id);
               fallbackAckedResumeRequestIdsRef.current.delete(data.id);
@@ -2645,7 +2688,10 @@ export function useAgentChat<
             error: data.error,
             replay: data.replay,
             replayComplete: data.replayComplete,
-            continuation: data.continuation
+            continuation: data.continuation,
+            continuationMessageId: data.continuation
+              ? data.messageId
+              : undefined
           });
 
           streamStateRef.current = result.state;
@@ -2706,7 +2752,8 @@ export function useAgentChat<
           agentRef.current.send(
             JSON.stringify({
               type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST,
-              probeId: idleProbeId
+              probeId: idleProbeId,
+              ...customTransport.resumeRequestIds()
             })
           );
         }
@@ -2813,7 +2860,8 @@ export function useAgentChat<
     restoreProtectedStreamingAssistant,
     resetLocalChatState,
     invalidateResumeGeneration,
-    setRecoveringRequestId
+    setRecoveringRequestId,
+    setQueuedMessages
   ]);
 
   // Own mount/chat-generation resumption so StrictMode, reconnects, tool
@@ -2958,6 +3006,11 @@ export function useAgentChat<
     })) as ChatMessage[];
   }, [chatMessages, clientToolResults]);
 
+  const displayedMessages = useMemo(
+    () => drawQueuedLast(messagesWithToolResults, queuedMessages),
+    [messagesWithToolResults, queuedMessages]
+  );
+
   // Cleanup stale entries from clientToolResults when messages change
   // to prevent memory leak in long conversations.
   useEffect(() => {
@@ -3064,7 +3117,7 @@ export function useAgentChat<
   return {
     ...useChatHelpers,
     resumeStream,
-    messages: messagesWithToolResults,
+    messages: displayedMessages,
     isServerStreaming: effectiveIsServerStreaming,
     isStreaming,
     /**
@@ -3102,12 +3155,28 @@ export function useAgentChat<
         })
       );
     },
+    /**
+     * Set the messages this tab shows. It sees and returns the list the hook
+     * returns, queued messages included. A queued message it leaves out is
+     * no longer drawn here, but it is not withdrawn: the server still
+     * stores and answers it when its turn starts, and the next message list
+     * brings it back. Stop its request to keep it from being answered.
+     */
     setMessages: (messagesOrUpdater: Parameters<typeof setMessages>[0]) => {
       setMessages((currentMessages: ChatMessage[]) => {
+        // The caller sees and sets the list the hook returns, queued
+        // messages included. Queued messages it keeps stay apart and are
+        // drawn last; the ones it leaves out go.
+        const waiting = queuedMessagesRef.current;
         const resolvedMessages =
           typeof messagesOrUpdater === "function"
-            ? messagesOrUpdater(currentMessages)
+            ? messagesOrUpdater(drawQueuedLast(currentMessages, waiting))
             : messagesOrUpdater;
+        if (waiting.length > 0) {
+          const ids = new Set(resolvedMessages.map((m) => m.id));
+          const kept = waiting.filter((m) => ids.has(m.id));
+          if (kept.length !== waiting.length) setQueuedMessages(kept);
+        }
 
         if (resolvedMessages.length === 0) {
           markInitialMessagesSeeded();
@@ -3120,7 +3189,9 @@ export function useAgentChat<
             })
           );
         }
-        return resolvedMessages;
+        if (waiting.length === 0) return resolvedMessages;
+        const queuedIds = new Set(waiting.map((m) => m.id));
+        return resolvedMessages.filter((m) => !queuedIds.has(m.id));
       });
     }
   };

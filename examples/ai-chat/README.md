@@ -30,7 +30,7 @@ npm install
 npm start
 ```
 
-Uses Workers AI (no API key needed) with `@cf/moonshotai/kimi-k2.7-code`.
+Uses Workers AI (no API key needed) with `@cf/deepseek-ai/deepseek-v4.1-flash-1017`.
 
 The Browser Run binding is configured with `remote: true`, so Kitesurf runs remotely while the rest of the Worker runs locally. No separate browser process is required.
 

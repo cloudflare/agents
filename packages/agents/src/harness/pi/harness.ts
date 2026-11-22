@@ -14,7 +14,10 @@ import {
   type ModelRef,
   type Page,
   type SettledSubmissionRecord,
+  type SignalResult,
+  type SignalToken,
   type SubmissionDraft,
+  type TaskId,
   type UserInput,
   type Wake
 } from "@earendil-works/pi-durable";
@@ -38,6 +41,7 @@ import type {
   PiPendingOperation,
   PiPromptResponse,
   PiReceipt,
+  PiSessionCreateOptions,
   PiSessionId,
   PiSessionInfo,
   PiSessionOptions,
@@ -198,6 +202,31 @@ export type PiHarnessOptions = {
   readonly defaults?: PiSessionDefaults;
 };
 
+/**
+ * `change` applied over `base` as pi applies an `AgentChange`: a field that is
+ * `undefined` in `change` keeps `base`'s, any other value (`null` included)
+ * replaces it. A plain spread would copy the `undefined` over `base`'s value.
+ */
+function applyAgentChange<T extends object>(base: T, change: T): T {
+  const applied = { ...base, ...change };
+  for (const key in base) {
+    if (change[key] === undefined) applied[key] = base[key];
+  }
+  return applied;
+}
+
+/** What `harness.root()` returns. */
+export type PiRootResult = {
+  /** The root session. */
+  readonly session: PiSession;
+  /**
+   * Whether this call created the root, so its `agent` and `init` were
+   * applied. `false` when the root already existed: something used it
+   * first, and `init` did not run.
+   */
+  readonly created: boolean;
+};
+
 type Opened = {
   readonly pi: Harness;
   readonly storage: SqliteStorage;
@@ -241,8 +270,9 @@ function signalContext(signal: AbortSignal | undefined): Context {
  *
  * What pi cannot do on a Durable Object is wake itself: its scheduler runs
  * in memory, and an evicted object has no memory. The harness is that wake,
- * with one Lifecycle job driven by `pi.wake()`. Input goes to pi once, in
- * `submit()`, after the job is scheduled. While pi has work running, the
+ * with one Lifecycle job driven by `pi.wake()`. Anything that can start
+ * work, such as `submit()`, `signal()`, `abort()` or `reset()`, goes to pi
+ * once, after the job is scheduled. While pi has work running, the
  * job waits on it, rescheduling itself as a heartbeat. While pi's tasks
  * sleep, the job is due when the first one wakes; pi tells the harness
  * through the `onWake` the factory passes to `Harness.open`. When pi has
@@ -257,7 +287,7 @@ export class PiHarness extends LifecycleCapability {
   #waiting: Promise<void> | undefined;
   /** Resolves the current wait's sleep early: `pi.wake()` changed. */
   #changed: (() => void) | undefined;
-  /** Submissions between their wake and pi's admission. */
+  /** Calls that can start work, between their wake and pi's admission. */
   #admitting = 0;
   /** Whether pi has called `onWake`, so the factory passed it. */
   #onWakeWired = false;
@@ -358,6 +388,34 @@ export class PiHarness extends LifecycleCapability {
     return new PiSession(this, id);
   }
 
+  /**
+   * The root session, creating it with `agent` and `init` in one commit
+   * when it does not exist yet, as pi's `Harness.root()` does. `agent` is
+   * applied over `defaults`. When the root already exists, nothing is
+   * written and `init` does not run; `created` says which happened.
+   *
+   * Without this call, the first use of the root creates it with
+   * `defaults`. So call it before anything else uses the root, for example
+   * to seed the root's transcript with an existing history.
+   */
+  async root(options: PiSessionCreateOptions = {}): Promise<PiRootResult> {
+    const { pi } = await this.#open();
+    // pi runs `init` only in the commit that creates the root, and runs a
+    // commit's callback once: it never retries one. `root()` resolves only
+    // once that commit is stored, and rejects if the callback throws or the
+    // commit fails. So `init` ran in a resolved call exactly when the
+    // root was created by it.
+    let created = false;
+    await this.#root(pi, {
+      ...(options.agent ? { agent: options.agent } : {}),
+      init: async (tx, id) => {
+        created = true;
+        await options.init?.(tx, id);
+      }
+    });
+    return { session: this.session(ROOT_SESSION), created };
+  }
+
   /** Submit a prompt and wait for its answer. */
   prompt(
     input: UserInput,
@@ -439,6 +497,23 @@ export class PiHarness extends LifecycleCapability {
     });
   }
 
+  /**
+   * Deliver `value` to pi task `taskId` under `key`, as pi's
+   * `Harness.signal()` does: for a tool parked on that signal, such as one
+   * waiting for a person's answer or a webhook. The wake job is scheduled
+   * first, so if the object dies while the woken call runs, the job's alarm
+   * restarts it. Call this rather than `pi().signal()`, which does not.
+   */
+  async signal<T>(
+    taskId: TaskId,
+    signal: SignalToken<T>,
+    key: string,
+    value: T
+  ): Promise<SignalResult> {
+    const { pi } = await this.#open();
+    return this.#admit(() => pi.signal(taskId, signal, key, value, BG));
+  }
+
   /** The opened pi Harness, for anything the interface does not cover. */
   async pi(): Promise<Harness> {
     return (await this.#open()).pi;
@@ -446,12 +521,29 @@ export class PiHarness extends LifecycleCapability {
 
   // ── Used by PiSession and PiSessions ─────────────────────────────────────
 
-  /** @internal */
+  /**
+   * @internal Every use of a session goes through here. The first use of
+   * the root creates it, with `defaults`.
+   */
   async conversation(session: PiSessionId): Promise<Conversation> {
     const { pi } = await this.#open();
-    const conversation = await pi.conversation(conversationId(session), BG);
+    const id = conversationId(session);
+    if (id === ROOT_CONVERSATION_ID) return this.#root(pi, {});
+    const conversation = await pi.conversation(id, BG);
     if (!conversation) throw new Error(`Unknown pi session ${session}`);
     return conversation;
+  }
+
+  /**
+   * pi's root conversation, created with `options` over `defaults` when
+   * absent. pi checks for the root and creates it in one commit, so two
+   * calls never both create it.
+   */
+  #root(pi: Harness, options: PiSessionCreateOptions): Promise<Conversation> {
+    return pi.root(BG, {
+      agent: this.agentOverDefaults(options.agent),
+      ...(options.init ? { init: options.init } : {})
+    });
   }
 
   /** @internal */
@@ -470,7 +562,9 @@ export class PiHarness extends LifecycleCapability {
       content: input,
       whenBusy: options.whenBusy ?? "followUp",
       ...(options.whenIdle ? { whenIdle: options.whenIdle } : {}),
-      ...(options.entry ? { entry: options.entry } : {})
+      ...(options.onAbort ? { onAbort: options.onAbort } : {}),
+      ...(options.entry ? { entry: options.entry } : {}),
+      ...(options.notify ? { notify: options.notify } : {})
     });
   }
 
@@ -480,7 +574,8 @@ export class PiHarness extends LifecycleCapability {
     options: PiContinueOptions
   ): Promise<PiReceipt> {
     return this.#admitDraft(session, options.operationId, {
-      type: "continue"
+      type: "continue",
+      ...(options.notify ? { notify: options.notify } : {})
     });
   }
 
@@ -514,12 +609,14 @@ export class PiHarness extends LifecycleCapability {
     if (!record || record.status === "done" || record.status === "unanswered") {
       return false;
     }
-    const outcome = await pi.abortSubmission(record.id, BG, id);
+    const outcome = await this.#admit(() =>
+      pi.abortSubmission(record.id, BG, id)
+    );
     switch (outcome) {
       case "aborted":
         return true;
       case "already_placed":
-        await (await pi.conversation(id, BG))?.abort(BG);
+        await this.abortConversation(session);
         return true;
       case "settled":
       case "not_found":
@@ -530,6 +627,28 @@ export class PiHarness extends LifecycleCapability {
         return exhaustive;
       }
     }
+  }
+
+  /**
+   * @internal Abort a session's running work and withdraw its queued
+   * inputs. Stopping a parked call runs its `cancel()`, which is work, so
+   * the wake is scheduled first.
+   */
+  async abortConversation(session: PiSessionId): Promise<void> {
+    const conversation = await this.conversation(session);
+    await this.#admit(() => conversation.abort(BG));
+  }
+
+  /**
+   * @internal Start a new context. Inputs kept behind a failed run or an
+   * abort run in it, so the wake is scheduled first.
+   */
+  async resetConversation(
+    session: PiSessionId,
+    handoff: string | undefined
+  ): Promise<void> {
+    const conversation = await this.conversation(session);
+    await this.#admit(() => conversation.reset(handoff, BG));
   }
 
   /** @internal Wait for pi to settle an operation, by its request id. */
@@ -763,7 +882,8 @@ export class PiHarness extends LifecycleCapability {
       // Called synchronously when pi begins closing, unlike `closed`, so a
       // closed pi is never handed out. It must not call pi.
       pi.subscribeClose(() => onClose(pi, closed));
-      await pi.root(BG, { agent: this.agentDefaults() });
+      // Opening creates no conversation: the root's first use creates it
+      // (see `conversation()`), so `root()` can seed it.
       // Continue whatever the last pi left, in this isolate or the last one:
       // pi reconciles tasks that were running to pending and schedules them
       // again.
@@ -809,6 +929,15 @@ export class PiHarness extends LifecycleCapability {
     // Drop it, so the next call opens pi again once this one has closed.
     this.#opening = undefined;
     this.#lastClose = closed;
+  }
+
+  /**
+   * @internal `agent` applied over the defaults, by pi's rule for an
+   * `AgentChange`: a field set to a value replaces the default, `null`
+   * clears it, and `undefined` leaves it in place.
+   */
+  agentOverDefaults(agent: AgentChange = {}): AgentChange {
+    return applyAgentChange(this.agentDefaults(), agent);
   }
 
   /** @internal The per-conversation defaults supported by pi-durable. */
@@ -918,21 +1047,20 @@ export class PiSession {
 
   /**
    * Withdraw one queued operation (or abort the run it joined), or, with no
-   * id, abort the session: pi withdraws queued inputs and aborts the
-   * running work.
+   * id, abort the session: pi withdraws queued inputs, apart from those
+   * submitted with `onAbort: "keep"`, and aborts the running work.
    */
   async abort(operationId?: string): Promise<boolean> {
     if (operationId !== undefined) {
       return this.#harness.withdraw(this.id, operationId);
     }
-    const conversation = await this.#harness.conversation(this.id);
-    await conversation.abort(BG);
+    await this.#harness.abortConversation(this.id);
     return true;
   }
 
   /** Start a new context, optionally from a handoff note. */
   async reset(handoff?: string): Promise<void> {
-    await (await this.#harness.conversation(this.id)).reset(handoff, BG);
+    await this.#harness.resetConversation(this.id, handoff);
   }
 
   /**
@@ -1004,28 +1132,43 @@ export class PiSessions {
     return this.#harness.session(id);
   }
 
-  /** A new top-level session, configured like the root. */
-  async create(): Promise<PiSession> {
+  /**
+   * A new top-level session, configured with `defaults`, then `agent`; `init`
+   * runs in the commit that creates it.
+   */
+  async create(options: PiSessionCreateOptions = {}): Promise<PiSession> {
     const pi = await this.#harness.pi();
     const conversation = await pi.createConversation(
       {
         ownership: { kind: "ownerless" },
-        agent: this.#harness.agentDefaults()
+        agent: this.#harness.agentOverDefaults(options.agent),
+        ...(options.init ? { init: options.init } : {})
       },
       BG
     );
     return this.#harness.session(String(conversation.id));
   }
 
-  /** A new session that sees `from`'s history up to its newest entry. */
-  async fork(from: PiSessionId): Promise<PiSession> {
+  /**
+   * A new session that sees `from`'s history up to its newest entry, with
+   * `from`'s configuration, then `agent`; `init` runs in the commit that
+   * creates it.
+   */
+  async fork(
+    from: PiSessionId,
+    options: PiSessionCreateOptions = {}
+  ): Promise<PiSession> {
     const conversation = await this.#harness.conversation(from);
     const newest = await conversation.entries({}, 1, undefined, BG);
     const at = newest.items[0];
     if (!at) throw new Error(`Session ${from} has no entries to fork from`);
     const fork = await conversation.fork(
       at.id,
-      { ownership: { kind: "ownerless" } },
+      {
+        ownership: { kind: "ownerless" },
+        ...(options.agent ? { agent: options.agent } : {}),
+        ...(options.init ? { init: options.init } : {})
+      },
       BG
     );
     return this.#harness.session(String(fork.id));
@@ -1033,7 +1176,8 @@ export class PiSessions {
 
   /**
    * Every conversation, including ones subagent tools own. Read from pi's
-   * storage directly: the Harness has no conversation listing.
+   * storage directly: the Harness has no conversation listing. The root is
+   * listed once it exists: its first use, or `harness.root()`, creates it.
    */
   async list(): Promise<PiSessionInfo[]> {
     const storage = await this.#harness.storage();

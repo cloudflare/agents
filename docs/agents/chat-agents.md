@@ -40,7 +40,7 @@ export class ChatAgent extends AIChatAgent {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.7-code"),
+      model: workersai("@cf/deepseek-ai/deepseek-v4.1-flash-1017"),
       messages: await convertToModelMessages(this.messages)
     });
 
@@ -166,7 +166,7 @@ async onChatMessage() {
   const workersai = createWorkersAI({ binding: this.env.AI });
 
   const result = streamText({
-    model: workersai("@cf/moonshotai/kimi-k2.7-code"),
+    model: workersai("@cf/deepseek-ai/deepseek-v4.1-flash-1017"),
     system: "You are a helpful assistant.",
     messages: await convertToModelMessages(this.messages)
   });
@@ -221,7 +221,7 @@ async onChatMessage() {
   const workersai = createWorkersAI({ binding: this.env.AI });
 
   const result = streamText({
-    model: workersai("@cf/moonshotai/kimi-k2.7-code"),
+    model: workersai("@cf/deepseek-ai/deepseek-v4.1-flash-1017"),
     messages: pruneMessages({
       messages: await convertToModelMessages(this.messages),
       reasoning: "before-last-message",
@@ -279,11 +279,19 @@ export class ChatAgent extends AIChatAgent {
 - `"drop"` — the overlapping message briefly appears (optimistic), then disappears when the server sends back the rollback.
 - `"debounce"` — same as `"latest"`, but the response waits for a quiet period before starting.
 
+A message that arrives while a turn runs waits until its own turn starts before it is stored. Each turn answers its own message, and the transcript reads `U1, A1, U2, A2`, never `U1, U2, A1`:
+
+- `this.messages`, and the messages `onChatMessage` builds its request from, gain the waiting message only when its turn starts. The turn running now never sees it.
+- Every tab sees the message at once. The message list the agent sends ends with it, and names it in `queuedMessageIds`. `useAgentChat` draws it after the reply that is streaming, and draws it once when it is stored. `setMessages` can hide a queued message in one tab, but it does not withdraw it: stop its request for that.
+- Under `"latest"`, `"merge"` and `"debounce"`, a superseded message is stored when its turn would have started, just before the message that superseded it. Under `"merge"` the messages are then collapsed into one.
+- A message whose request is stopped while it waits is stored at the same point, with no reply. A clear while it waits drops it: it is never stored.
+- A tool result for the reply that streams while a message waits does not continue that reply: the waiting message was sent first, so its turn runs first and reads the result (`chat:continuation:dropped` with `moved_on`).
+
 Notes:
 
 - This setting only applies to overlapping `sendMessage()` submits (`trigger: "submit-message"`)
 - `regenerate()`, tool continuations, approvals, clears, and programmatic `saveMessages()` calls keep the existing serialized behavior
-- `"latest"` and `"debounce"` still persist the skipped user messages in `this.messages`; they only suppress extra model turns
+- `"latest"` and `"debounce"` still persist the skipped user messages in `this.messages`; they only suppress extra model turns. They are stored when their turn would have started.
 - `"drop"` rejects the overlapping submit before it is persisted
 
 ### `waitForMcpConnections`
@@ -354,6 +362,8 @@ if (result.status === "aborted") {
   // loop terminated when the signal aborted.
 }
 ```
+
+A stopped turn ends `aborted` whatever reason the abort carries. `abort()`, `abort("moved on")` and `abort(new Error("moved on"))` are the same stop, and so are `abortRequest(id, reason)` and a client's cancel. Code that waits on the turn's `abortSignal` fails with that reason when the turn is stopped, in `onChatMessage` or in the model call. That failure is the stop: `onError` is not called for it, clients get no error frame, and `onChatResponse` reports `status: "aborted"` when a reply had started.
 
 The same `options.signal` is accepted by `continueLastTurn()`. See
 [`cloudflare/agents#1406`](https://github.com/cloudflare/agents/issues/1406)
@@ -565,12 +575,12 @@ The `destroy()` method cancels any pending chat requests and cleans up stream st
 
 ### Request Cancellation
 
-When a user clicks "stop" in the chat UI, the client sends a `CF_AGENT_CHAT_REQUEST_CANCEL` message. The server propagates this to the `abortSignal` in `options`:
+When a user clicks "stop" in the chat UI, the client sends a `CF_AGENT_CHAT_REQUEST_CANCEL` message. The server propagates this to the `abortSignal` in `options`. While a tab waits for a tool continuation to start it has no request id for it yet, so it sends the message with `continuation: true` in place of `id`, and the server stops the continuation that connection waits on:
 
 ```typescript
 async onChatMessage(_onFinish, options) {
   const result = streamText({
-    model: workersai("@cf/moonshotai/kimi-k2.7-code"),
+    model: workersai("@cf/deepseek-ai/deepseek-v4.1-flash-1017"),
     messages: await convertToModelMessages(this.messages),
     abortSignal: options?.abortSignal // Pass through for cancellation
   });
@@ -590,6 +600,22 @@ If the agent is evicted mid-stream, the fiber row survives in SQLite. On the nex
 The same bounded recovery handles an `AIChatAgent` stream that fails while the agent stays up. If the response reader throws a platform transient error, such as `Network connection lost.`, the agent keeps the partial response and schedules a continuation instead of ending the turn with an error. If the error arrives before any response part, the agent re-runs the turn instead. The agent calls `onChatRecovery` first, so returning `{ continue: false }` ends the turn with the error. Each repeated transient error waits longer before the next attempt and counts against `maxAttempts`. Other reader errors still end the turn.
 
 Durable recovery is always enabled. Use `chatRecovery` only to tune its budgets and terminal behavior.
+
+#### Requests waiting behind an interrupted turn
+
+A client request waits in the turn queue while an earlier turn finishes, and its new user message waits with it, off the transcript. The queue lives in memory, so the agent writes a small record for each accepted request: its request id, the user messages it holds, its client tools and body, and its `messageConcurrency` decision. The messages are stored when the request's turn starts. The record is deleted once the turn has started (from then on the turn's fiber is what recovery uses) or when the request ends without a turn.
+
+If the isolate resets while requests wait, the next isolate recovers the interrupted turn first. The recovered turn never sees the waiting messages. Once no interrupted turn is waiting for recovery, the waiting requests run again in the order they arrived, each as its own turn under its own request id, and each stores its message when its turn starts. So a conversation where `U2` was sent while `A1` streamed ends `U1, A1, U2, A2`, as it would with no reset. A tab that connects or loads the transcript while they wait is shown the waiting messages, and a tab that reconnects gets the stream of that request, or its terminal frame, under the request id it sent.
+
+The usual rules still apply after the reset:
+
+- A stop by the request id, sent before or after the reset, ends the request `aborted` without calling the model.
+- A clear deletes every record, so nothing that was waiting runs afterwards.
+- A request a later one superseded under `"latest"`, `"merge"` or `"debounce"` stays superseded.
+- A new request that arrives before the waiting ones have run lets them go first, without waiting for the recovery. The recovery then finds the conversation has moved on, as it does for any new message.
+- A waiting request is replayed however long it waited. One whose conversation gained a user message no waiting request holds (a release without these records ran in between and answered something newer) does not run: its message is stored after what is there, and it ends `skipped`. Only a clear discards a waiting message.
+
+A `saveMessages()` or `continueLastTurn()` call that is waiting in the queue stores nothing until its turn starts, so a reset loses nothing of it. Its caller's promise rejects with the reset, and the caller decides whether to call again.
 
 > **Assign `chatRecovery` as a class field or in the constructor — never in `onStart()`.** On every wake the SDK evaluates recovery budgets (and may seal an interrupted turn, firing `onExhausted`) _before_ your `onStart()` body runs. A config produced inside `onStart()` is therefore read as the built-in defaults at the moment recovery decides, so your `maxRecoveryWork` / `shouldKeepRecovering` / `onExhausted` silently never apply to the recovery that matters. The SDK logs a one-time warning if it detects `chatRecovery` being assigned during `onStart()`.
 
@@ -763,7 +789,7 @@ While a turn is being recovered, the agent broadcasts a `cf_agent_chat_recoverin
 
 > `@cloudflare/ai-chat` broadcasts the live signal but does not yet replay it on connect (a client connecting mid-recovery will not be re-told until it reconnects to an active stream).
 
-Transcript repairs — healing orphaned tool calls (preserving them as errored results rather than deleting them, so the record survives and the model does not silently re-run the tool) and normalizing malformed/stringified or missing tool inputs before a provider call — are emitted on the `transcript` channel.
+Transcript repairs — healing orphaned tool calls (preserving them as errored results rather than deleting them, so the record survives and the model does not silently re-run the tool) and normalizing malformed/stringified or missing tool inputs before a provider call — are emitted on the `transcript` channel as `chat:transcript:repaired`. The event is emitted for the repair before a turn and when recovery settles the reply it is about to continue. `removedReasoningParts` counts reasoning removed from the end of a reply.
 
 #### Guarding against stale recoveries
 
@@ -818,6 +844,8 @@ override async onChatResponse(result: ChatResponseResult): Promise<void> {
 
 Appends to the last assistant message by re-calling `onChatMessage` with the saved request body. The response is streamed as a continuation — appended to the existing assistant message, not a new one. No synthetic user message is created.
 
+When the message was cut off in the middle of a text or reasoning part, that part is closed as it is. The continuation's reasoning and text are added as new parts after it, in the order the model writes them, and a connected client receives `text-start` for the new text part. `Think` does the same.
+
 ```typescript
 protected continueLastTurn(
   body?: Record<string, unknown>,
@@ -828,6 +856,8 @@ protected continueLastTurn(
 The optional `options.signal` accepts an external `AbortSignal` for cancellation, matching the `saveMessages` contract.
 
 Called automatically by the default recovery path. Can also be called manually from scheduled callbacks or other entry points. The optional `body` parameter merges with the saved `_lastBody`.
+
+When the call is skipped, `status` is `"skipped"` and `reason` says why: `"nothing-to-continue"` (no assistant message), `"cleared"` (the chat was cleared), or `"awaiting-client"` (the reply still waits on a client for a tool result or an approval). A skipped call changes nothing. See [When the user moves on without answering](./client-tools-continuation.md#when-the-user-moves-on-without-answering).
 
 #### Stashing recovery data
 
@@ -988,7 +1018,7 @@ async onChatMessage() {
   const workersai = createWorkersAI({ binding: this.env.AI });
 
   const result = streamText({
-    model: workersai("@cf/moonshotai/kimi-k2.7-code"),
+    model: workersai("@cf/deepseek-ai/deepseek-v4.1-flash-1017"),
     messages: await convertToModelMessages(this.messages),
     tools: {
       getWeather: tool({
@@ -1059,7 +1089,7 @@ import { createToolsFromClientSchemas } from "@cloudflare/ai-chat";
 
 async onChatMessage(_onFinish, options) {
   const result = streamText({
-    model: workersai("@cf/moonshotai/kimi-k2.7-code"),
+    model: workersai("@cf/deepseek-ai/deepseek-v4.1-flash-1017"),
     messages: await convertToModelMessages(this.messages),
     tools: createToolsFromClientSchemas(options?.clientTools)
   });
@@ -1230,7 +1260,7 @@ export class ChatAgent extends AIChatAgent {
     const stream = createUIMessageStream({
       execute: async ({ writer }) => {
         const result = streamText({
-          model: workersai("@cf/moonshotai/kimi-k2.7-code"),
+          model: workersai("@cf/deepseek-ai/deepseek-v4.1-flash-1017"),
           messages: await convertToModelMessages(this.messages)
         });
 
@@ -1323,7 +1353,10 @@ On the server, write transient parts with `transient: true`:
 writer.write({
   transient: true,
   type: "data-thinking",
-  data: { model: "glm-4.7-flash", startedAt: new Date().toISOString() }
+  data: {
+    model: "deepseek-v4.1-flash-1017",
+    startedAt: new Date().toISOString()
+  }
 });
 ```
 
@@ -1434,7 +1467,7 @@ export class ChatAgent extends AIChatAgent {
 
   async onChatMessage() {
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.7-code"),
+      model: workersai("@cf/deepseek-ai/deepseek-v4.1-flash-1017"),
       messages: pruneMessages({
         // LLM context limit
         messages: await convertToModelMessages(this.messages),
@@ -1459,7 +1492,7 @@ import { createWorkersAI } from "workers-ai-provider";
 
 const workersai = createWorkersAI({ binding: this.env.AI });
 const result = streamText({
-  model: workersai("@cf/moonshotai/kimi-k2.7-code"),
+  model: workersai("@cf/deepseek-ai/deepseek-v4.1-flash-1017"),
   messages: await convertToModelMessages(this.messages)
 });
 ```

@@ -250,7 +250,7 @@ describe("Workers AI replay", () => {
           accountId: "replay",
           apiKey: "replay",
           fetch
-        })("@cf/moonshotai/kimi-k2.7-code")
+        })("@cf/deepseek-ai/deepseek-v4.1-flash-1017")
     });
     const parts = await collectStream(model);
     expect(textContent(parts)).toBe("Hello from Workers AI");

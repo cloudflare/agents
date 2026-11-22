@@ -13,7 +13,7 @@ PlivoAdapter bridges the audio stream to MyVoiceAgent (Durable Object)
         ↓
 STT: Workers AI Flux (@cf/deepgram/flux)
         ↓
-LLM: Workers AI Kimi K2.6 (@cf/moonshotai/kimi-k2.6)
+LLM: Workers AI DeepSeek V4.1 Flash (@cf/deepseek-ai/deepseek-v4.1-flash-1017)
         ↓
 TTS: Workers AI Deepgram Aura 2 (@cf/deepgram/aura-2-en, linear16 PCM)
         ↓

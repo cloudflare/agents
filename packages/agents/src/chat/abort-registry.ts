@@ -44,6 +44,13 @@ export class AbortRegistry {
     this.controllers.get(id)?.abort(reason);
   }
 
+  /** The signal of every controller in the registry. */
+  signals(): AbortSignal[] {
+    return [...this.controllers.values()].map(
+      (controller) => controller.signal
+    );
+  }
+
   /** Remove a controller after the request completes. */
   remove(id: string): void {
     this.controllers.delete(id);

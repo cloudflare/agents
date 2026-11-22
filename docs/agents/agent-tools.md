@@ -310,6 +310,12 @@ Override `formatDetachedCompletion(run, result)` to customize the injected text,
 or return an empty string to suppress the notification for a given outcome. An
 explicit `onFinish` takes precedence over `notify`.
 
+A notification is a message in the chat. If it lands while a client tool call
+is waiting on its result, the conversation has moved on: the tool result is
+still stored when it arrives, but the reply that asked for it is not continued.
+The model reads the result on the next turn. The agent emits
+`chat:continuation:dropped` with the reason `moved_on`.
+
 ### The `inspectAgentToolRun` contract
 
 A child's `inspectAgentToolRun(runId)` returns the run's current status snapshot,
@@ -321,6 +327,40 @@ framework's own reconcile backbone — treat `null` as "not terminal, keep
 watching within budget", never as a terminal failure. Only a non-`null`
 inspection with a terminal `status` (`completed` / `error` / `aborted`)
 finalizes a run.
+
+### Statuses a child run reports
+
+A child run is `running` until one of these ends it:
+
+| Status      | When                                                                                                                                                                                                                                                                                         |
+| ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `completed` | The run's turn finished. `output` and `summary` are set.                                                                                                                                                                                                                                     |
+| `aborted`   | The parent cancelled the run (`cancelAgentTool`, or its `signal`), or the run's turn was stopped on the child: a client of the child cancelled its request, or the child called `abortRequest`, `abortAllRequests` or (`Think`) `cancelChat`. The reason, when one was given, is in `error`. |
+| `error`     | The turn failed, its stream reported an error, the chat was cleared under it, or it was interrupted and could not be recovered.                                                                                                                                                              |
+
+The first of these to happen is the one that is recorded. A run whose reply is cut off while chat recovery can still finish it (a dropped provider connection, a stall, an eviction) stays `running` and takes the status of the recovered turn. A stop that lands while such a run waits for its recovery ends it `aborted` and cancels the recovery: the stop is the outcome, and the cut-off reply is not reported as a completed run.
+
+While an awaited `runAgentTool` follows a child, it also inspects the run once per `agentToolReattachNoProgressTimeoutMs` (default 120 seconds). The child settles a run that has nothing left to finish it when it is inspected, so the parent does not wait on a run that will never end. A run the child reports as still running is followed further, however long its turn takes.
+
+### When the child's isolate resets under the parent
+
+An awaited `runAgentTool` follows the child's run over a live stream. If the child's isolate is reset or evicted mid-run, that stream breaks. The parent does not report the break as the run's result. It reconnects to the child, which wakes it, and waits while the child's chat recovery finishes the turn. It then returns the run's own status, the same one `inspectAgentToolRun` gives.
+
+The parent stops waiting in these cases:
+
+| Case                                                                                                                                                                                    | What `runAgentTool` returns                                                            |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| The child forwards nothing for `agentToolReattachNoProgressTimeoutMs` (default 120 seconds)                                                                                             | `interrupted`, `reason: "no-progress"`, `childStillRunning: true`                      |
+| `agentToolReattachMaxWindowMs` is set and runs out                                                                                                                                      | `interrupted`, `reason: "window-exceeded"`; the child is cancelled                     |
+| The child cannot recover the turn: chat recovery is off, or its attempts are used up                                                                                                    | `error`                                                                                |
+| The reset landed before the run's turn was under way: it was still waiting in the child's queue, or had started and was not yet registered for recovery. Nothing of the run was stored. | `error`. For a turn that was still waiting, the text says so and says to run it again. |
+| The child's isolate went away under the call that starts the run, and the child has no such run                                                                                         | `error`, with the failure of that call                                                 |
+| The child cannot be reached or inspected after the break                                                                                                                                | `error`                                                                                |
+| The parent's own isolate is reset                                                                                                                                                       | Nothing. The parent's recovery re-attaches to the run on its next start, as before.    |
+
+`interrupted` is not the run's outcome. A later `runAgentTool` with the same `runId` re-attaches and collects the result.
+
+`startAgentToolRun(input, { runId, signal })` on a child accepts an `AbortSignal`. Aborting it cancels the run, the same as `cancelAgentToolRun(runId, reason)`. An `AbortSignal` does not cross a Durable Object RPC call, so `signal` works for a caller in the same isolate. A parent that reaches the child over RPC cancels with `cancelAgentToolRun`.
 
 ## Report progress and milestones
 

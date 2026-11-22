@@ -15,7 +15,7 @@ here is in `agents`.
 | `Streams` log per operation, cursors, replay | pi's conversation view (`session.watch()`), with its operations  |
 | pi's 7 session tables namespaced by adapter  | pi's own `SqliteStorage` schema, prefixed `pi_` (session store)  |
 | own event and message projections            | pi's view and operations on the wire, one projection (`view.ts`) |
-| compaction config                            | none; pi-durable has no compaction yet                           |
+| compaction config                            | pi's own compaction, on by default; shown as a summary notice    |
 
 The harness went from about 3,600 lines to under 2,000, with no other SDK
 primitive besides Lifecycle jobs. It now lives in `packages/agents` as
@@ -116,7 +116,21 @@ against it:
 - **No requests or replies.** pi-durable has no approval or permission
   primitive yet. A tool could park on a pi document and a hook, but that is
   ours to invent.
-- **No compaction.** `session.reset(handoff)` is the stand-in.
+
+## Decision: table prefixing belongs to pi
+
+pi's SQLite schema uses names such as `tasks`, `entries`, `conversations`,
+and `documents`, which can collide with other state in the same object.
+The old session store rewrote SQL identifiers using names from pi's
+exported `SQLITE_MIGRATIONS`. That rewrite was replaced in #2616.
+
+The current `openPiSessionStore()` in
+`packages/agents/src/harness/pi/session-store.ts` delegates to pi's
+`openDurableObjectSqliteStorage(storage, { prefix })` adapter from
+`@earendil-works/pi-durable/storage/sqlite/cloudflare`. The prefix defaults
+to `pi_`; the wrapper rejects prefixes starting with `_cf_` (case-insensitive),
+which Durable Objects reserve. Pi owns the schema and prefixing, so a
+storage prefix option is no longer an unresolved upstream request.
 
 ## Hard or unresolved
 
@@ -192,16 +206,6 @@ commits:
 Both read committed state only, so they are safe here. **Ask for:**
 `harness.submissionByRequest()` and `harness.conversations()`.
 
-### Table prefix is a SQL rewrite
-
-pi's SQLite schema uses bare names such as `tasks`, `entries`,
-`conversations`, and `documents`, which easily collide in an object that
-also hosts other state. The session store rewrites identifiers outside
-string literals, using the names it reads from pi's exported
-`SQLITE_MIGRATIONS`. pi's conformance suite passes against it. It breaks if
-a future pi statement puts a table name in a string literal or builds SQL
-dynamically. **Ask for:** a `tablePrefix` option on `SqliteStorage`.
-
 ### Abort needs tools that honor their signal
 
 `conversation.abort()` resolves only once the conversation is idle. A tool
@@ -211,9 +215,13 @@ check the signal. pi's abort has no grace period.
 ### Watches are per socket and in memory
 
 This is app glue in `sockets.ts`, not the harness. Each socket gets its own
-`session.watch()`. After hibernation or eviction, the host's
-`onStart` calls `sockets.reattach()`, which re-watches every socket and
-sends the whole view again, and the client replaces its state.
+`session.watch()`, with pi's default window, after the client asks with a
+`watch` message that carries where its transcript ends. The client merges
+every view into a `ConversationTranscript` (`mirror.ts`), so a new view
+never replaces what it has. After hibernation or eviction, the host's
+`onStart` calls `sockets.reattach()`, which re-watches every socket. A watch
+that ends because pi closed (the harness reopens a pi that failed) is
+re-watched from right after the last entry the socket got.
 `ctx.getWebSockets(tag)` finds sockets by tag, but nothing gives the tags of
 a socket, so the re-watch walks `sessions.list()` and looks up each
 session's tag.
@@ -254,17 +262,17 @@ schemas, and its `exec` runs on a Workspace backend. What came up:
 - **`exec`'s description assumes shells.** It is built for a choice of
   backends and talks about `npm test`. With one JavaScript backend that
   misleads the model, so the adapter replaces the description and the
-  `command` parameter's text. It documents the typed `ws:git` interface
-  rather than its `cli()`, which gives the model return values it can use
-  directly. The model still sometimes tries `node:path` first; the error
+  `command` parameter's text. It documents the typed `codemode:git`
+  interface rather than its `cli()`, which gives the model return values it
+  can use directly. The model still sometimes tries `node:path` first; the error
   names the module and it recovers.
-- **Git is opt-in twice.** The backend gets `ws:git` from
+- **Git is opt-in twice.** The backend gets `codemode:git` from
   `createGitModule()`, but every call fails until the `Workspace` gets
   `git: createGitClient()`, which needs the optional `@platformatic/vfs`
   peer. Network operations also need `createGitModule({ allowNetwork: true })`.
-- **`ws:git` paths are not the client's.** The git client's types say `dir`
-  defaults to `/`. Through `ws:git` the host resolves `dir` against the
-  module's working directory and keeps it inside the backend root. The
+- **`codemode:git` paths are not the client's.** The git client's types say
+  `dir` defaults to `/`. Through `codemode:git` the host resolves `dir`
+  against the module's working directory and keeps it inside the backend root. The
   `exec` description follows the bridge.
 - **Tool calls run in parallel.** pi runs one round's tool calls at once by
   default. In testing the model sent a `clone` and a `log` in the same
@@ -282,9 +290,9 @@ example.
 - Subagents. pi-durable's subagent tools (examples 22 and 23) should work
   unchanged as registered tools. The background variant needs the "live work
   keep-alive" above.
-- Compaction. No longer pending upstream: 0.99.2 ships `CompactionPolicy`,
-  `CompactionHooks` and the rest, wired into `HarnessOptions`. Not yet used
-  or tested here.
+- Compaction. pi compacts on its own by default; the UI shows each
+  `pi.compaction` entry as an "Earlier messages summarized" notice. The
+  example sets no `CompactionPolicy` or hooks of its own.
 - `ExecutionEnv` for pi's own `read`/`bash`/`edit`/`write`. Unused here:
   the Workspace tools come from computer instead (see "Workspace tools").
 - Session deletion. pi has no conversation delete.

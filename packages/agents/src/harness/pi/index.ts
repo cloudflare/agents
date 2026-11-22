@@ -12,6 +12,7 @@ export {
   type PiHarnessFactory,
   type PiHarnessOptions,
   type PiModel,
+  type PiRootResult,
   type PiSessionDefaults
 } from "./harness";
 export {
@@ -21,10 +22,12 @@ export {
 export { skills } from "./skills";
 export type {
   PiContinueOptions,
+  PiOnAbort,
   PiOperationResult,
   PiPendingOperation,
   PiPromptResponse,
   PiReceipt,
+  PiSessionCreateOptions,
   PiSessionId,
   PiSessionInfo,
   PiSessionOptions,

@@ -7,11 +7,11 @@
  * child's forwarded stream chunks (not a flat wall clock). But a recovered child
  * turn minted a NEW request id via `continueLastTurn` / `_retryLastUserTurn`
  * without updating `cf_agent_tool_child_runs.request_id`, so
- * `_agentToolRunForRequest` could no longer attribute the recovered turn's
+ * `AgentToolRuns.runForRequest` could no longer attribute the recovered turn's
  * broadcast frames to the run. No frames reached the parent's tail, its
  * no-progress budget (`agentToolReattachNoProgressTimeoutMs`, 120s) elapsed, and
  * a still-advancing child was abandoned as `interrupted`. The fix
- * (`_rebindAgentToolChildRunRequestId`) re-binds the row + in-memory attribution
+ * (`AgentToolRuns.rebind`) re-binds the row + in-memory attribution
  * map to the recovery turn's request id, keeping frames flowing across recovery.
  *
  * Why this is the faithful repro (and why the other task agents don't catch it):
@@ -257,7 +257,7 @@ describe("agent-tool re-attach budget under a single deploy", () => {
   // request id without re-binding `cf_agent_tool_child_runs.request_id`, so the
   // parent's re-attach tail could no longer attribute the child's frames and its
   // no-progress budget elapsed against a healthy, still-advancing child. The fix
-  // (`_rebindAgentToolChildRunRequestId`, called from `continueLastTurn` /
+  // (`AgentToolRuns.rebind`, called from `continueLastTurn` /
   // `_retryLastUserTurn`) keeps attribution alive across recovery. Deterministic
   // coverage of the rebind lives in
   // `packages/think/src/tests/agent-tool-reattach-recovery.test.ts`.

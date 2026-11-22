@@ -13,7 +13,7 @@ The example composes:
 - `WebSockets` to serve those events to the browser;
 - a `@cloudflare/computer` Workspace for durable files;
 - AI SDK `LanguageModelV4` for model calls;
-- `workers-ai-provider` for Kimi K2.7 Code through Workers AI and AI Gateway.
+- `workers-ai-provider` for DeepSeek V4.1 Flash through Workers AI and AI Gateway.
 
 The Wasm kernel is a cursor over one turn: which effect comes next and which
 tool calls are pending. Everything with size lives in the SDK's durable
@@ -31,7 +31,7 @@ or OpenAI response envelopes.
 const model = createWorkersAI({
   binding: this.env.AI,
   gateway: { id: "default" }
-})("@cf/moonshotai/kimi-k2.7-code");
+})("@cf/deepseek-ai/deepseek-v4.1-flash-1017");
 
 readonly codex = new CodexHarness({
   model,

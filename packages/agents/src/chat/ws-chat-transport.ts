@@ -207,6 +207,16 @@ export class WebSocketChatTransport<
     return this._activeServerTurnId;
   }
 
+  /**
+   * The `requestIds` field of a resume request: the server turn this tab
+   * still waits on a terminal frame for. A turn that ended while the tab was
+   * away is then replayed to it.
+   */
+  resumeRequestIds(): { requestIds?: string[] } {
+    const requestId = this._activeServerTurnId;
+    return requestId === null ? {} : { requestIds: [requestId] };
+  }
+
   private sendCancelFrame(requestId: string) {
     try {
       this.agent.send(
@@ -631,7 +641,8 @@ export class WebSocketChatTransport<
           this.agent.send(
             JSON.stringify({
               type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST,
-              probeId
+              probeId,
+              ...this.resumeRequestIds()
             })
           );
         } catch {
@@ -720,6 +731,20 @@ export class WebSocketChatTransport<
       if (completed) return false;
 
       if (requestId === null) {
+        // The continuation has not announced itself, so there is no request
+        // id to cancel. Tell the server to stop the one this connection
+        // waits on: without this the stop only ended the local stream, and
+        // the server ran the model anyway.
+        try {
+          agent.send(
+            JSON.stringify({
+              type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
+              continuation: true
+            })
+          );
+        } catch {
+          // Ignore failures (e.g. agent already disconnected)
+        }
         finish(() => readerController?.error(abortError));
         return true;
       }
@@ -802,7 +827,8 @@ export class WebSocketChatTransport<
             transport.agent.send(
               JSON.stringify({
                 type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST,
-                probeId
+                probeId,
+                ...transport.resumeRequestIds()
               })
             );
           } catch {

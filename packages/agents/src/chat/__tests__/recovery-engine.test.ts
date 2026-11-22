@@ -761,7 +761,8 @@ describe("ChatRecoveryEngine.scheduleRecovery (fake adapter)", () => {
 
     expect(fake.schedules[0]).toEqual({
       callback: "_chatRecoveryRetry",
-      data,
+      // Plus the number of this schedule, the incident's first.
+      data: { ...data, delivery: 1 },
       reason: "stable_timeout_retry",
       delaySeconds: 0
     });
@@ -1244,6 +1245,72 @@ describe("ChatRecoveryEngine.exhaustRecoveryGiveUp (fake adapter)", () => {
       text: "",
       parts: [],
       hasSettledToolResults: false
+    });
+  });
+
+  describe("sealMemoryLimitedRecovery", () => {
+    const active = (
+      fake: ReturnType<typeof makeFakeAdapter>,
+      incidents: ChatRecoveryIncident[]
+    ) => {
+      fake.adapter.listActiveIncidents = () => Promise.resolve(incidents);
+    };
+    const incident = (
+      id: string,
+      recoveryKind: "retry" | "continue"
+    ): ChatRecoveryIncident => ({
+      incidentId: id,
+      requestId: `req-${id}`,
+      recoveryRootRequestId: `root-${id}`,
+      recoveryKind,
+      attempt: 1,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: 1_000,
+      lastAttemptAt: 1_000
+    });
+
+    it("gives up every live incident, naming the out-of-memory reset", async () => {
+      const fake = makeFakeAdapter();
+      const incidents = [incident("a", "retry"), incident("b", "continue")];
+      for (const each of incidents) {
+        fake.storage.set(chatRecoveryIncidentKey(each.incidentId), each);
+      }
+      active(fake, incidents);
+
+      await new ChatRecoveryEngine(fake.adapter).sealMemoryLimitedRecovery();
+
+      expect(
+        fake.exhausts.map(({ incident: given }) => [
+          given.incidentId,
+          given.status,
+          given.reason,
+          given.recoveryKind
+        ])
+      ).toEqual([
+        ["a", "exhausted", "out_of_memory", "retry"],
+        ["b", "exhausted", "out_of_memory", "continue"]
+      ]);
+    });
+
+    it("keeps each incident's kind when its record cannot be read back", async () => {
+      // The give-up then builds the incident it reports from the callback
+      // name, which is chosen from the listed incident's kind.
+      const fake = makeFakeAdapter({ getThrows: true });
+      active(fake, [incident("a", "retry"), incident("b", "continue")]);
+
+      await new ChatRecoveryEngine(fake.adapter).sealMemoryLimitedRecovery();
+
+      expect(
+        fake.exhausts.map(({ incident: given }) => [
+          given.incidentId,
+          given.recoveryKind,
+          given.reason
+        ])
+      ).toEqual([
+        ["a", "retry", "out_of_memory"],
+        ["b", "continue", "out_of_memory"]
+      ]);
     });
   });
 });
@@ -1826,6 +1893,28 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
     };
   }
 
+  it("ends a wake whose turn the user stopped as stopped, even with the budget spent", async () => {
+    const h = makeHarness({ seedExhausted: true });
+    const incidentId = chatRecoveryIncidentId({
+      requestId: "req-1",
+      recoveryRootRequestId: "req-1",
+      latestUserMessageId: null,
+      recoveryKind: "continue"
+    });
+    await h.engine.updateIncident(incidentId, "skipped", "user_cancelled");
+    const eventsBefore = h.events.length;
+
+    expect(await h.engine.handleChatFiberRecovery(h.ctx, h.wake)).toBe(true);
+
+    expect(h.calls).not.toContain("exhaust");
+    expect(h.calls).not.toContain("dispatch");
+    expect(h.calls).not.toContain("invokeOnChatRecovery");
+    expect(h.events.slice(eventsBefore)).toEqual([]);
+    // What the cut-off turn stored is kept, and its stream is closed.
+    expect(h.persisted).toEqual(["s1"]);
+    expect(h.completed).toEqual(["s1"]);
+  });
+
   it("dispatches a non-chat fiber first and skips chat processing", async () => {
     const h = makeHarness({ nonChatHandled: true });
 
@@ -1994,6 +2083,70 @@ describe("transient recovery backoff", () => {
     expect(chatRecoveryBackoffSeconds(1, 7)).toBe(7);
     expect(chatRecoveryBackoffSeconds(4, 2)).toBe(8);
     expect(chatRecoveryBackoffSeconds(1, 600)).toBe(60);
+  });
+
+  it("reads retry-after-ms only when it is a plain number", () => {
+    const ms = (value: string, fallback?: string) =>
+      retryAfterSeconds({
+        responseHeaders: {
+          "retry-after-ms": value,
+          ...(fallback !== undefined && { "retry-after": fallback })
+        }
+      });
+    expect(ms("1500")).toBe(2);
+    expect(ms("1500.25")).toBe(2);
+    // Surrounding whitespace is not part of the value.
+    expect(ms(" 1500 ")).toBe(2);
+    // Anything else is not a delay: the seconds header is read instead.
+    expect(ms("12abc", "9")).toBe(9);
+    expect(ms("abc12", "9")).toBe(9);
+    expect(ms("1.x", "9")).toBe(9);
+    expect(ms("soon", "9")).toBe(9);
+    expect(ms("12abc")).toBeUndefined();
+  });
+
+  it("reads only the header it is looking for, and only a string value", () => {
+    expect(
+      retryAfterSeconds({
+        responseHeaders: { "x-request-id": "5000", "retry-after": "3" }
+      })
+    ).toBe(3);
+    expect(
+      retryAfterSeconds({ responseHeaders: { "retry-after": 3 } })
+    ).toBeUndefined();
+  });
+
+  it("reads the header inside the error the AI SDK throws once its own retries are used up", () => {
+    const call = (seconds: string) => ({
+      name: "AI_APICallError",
+      statusCode: 429,
+      responseHeaders: { "retry-after": seconds }
+    });
+    // A RetryError has no `cause`: the provider's errors are in `lastError`
+    // and `errors`.
+    expect(
+      retryAfterSeconds({
+        name: "AI_RetryError",
+        reason: "maxRetriesExceeded",
+        errors: [call("2"), call("4"), call("9")],
+        lastError: call("9")
+      })
+    ).toBe(9);
+    // The newest attempt that carries a header wins.
+    expect(
+      retryAfterSeconds({ errors: [call("2"), call("4"), { name: "Other" }] })
+    ).toBe(4);
+    // Wrapped once more, as a host's own error.
+    expect(
+      retryAfterSeconds({ cause: { lastError: { cause: call("6") } } })
+    ).toBe(6);
+  });
+
+  it("stops on an error that wraps itself", () => {
+    const loop: { lastError?: unknown; errors?: unknown[] } = {};
+    loop.lastError = loop;
+    loop.errors = [loop];
+    expect(retryAfterSeconds(loop)).toBeUndefined();
   });
 
   it("reads Retry-After from response headers, headers or the cause chain", () => {

@@ -114,7 +114,7 @@ function ModeToggle() {
 
 // --- WebRTC (SFU) Mode ---
 
-type LlmModel = "kimi" | "glm" | "gpt-oss-20b";
+type LlmModel = "deepseek" | "qwen";
 
 async function listAudioOutputs(): Promise<MediaDeviceInfo[] | undefined> {
   if (!navigator.mediaDevices?.enumerateDevices) return undefined;
@@ -194,28 +194,20 @@ function WebRTCApp({
       <div className="mb-4 flex items-center justify-center gap-2">
         <span className="text-xs text-kumo-secondary">LLM:</span>
         <Button
-          variant={llmModel === "glm" ? "primary" : "ghost"}
+          variant={llmModel === "qwen" ? "primary" : "ghost"}
           size="sm"
           disabled={isInCall}
-          onClick={() => onLlmModelChange("glm")}
+          onClick={() => onLlmModelChange("qwen")}
         >
-          GLM
+          Qwen
         </Button>
         <Button
-          variant={llmModel === "gpt-oss-20b" ? "primary" : "ghost"}
+          variant={llmModel === "deepseek" ? "primary" : "ghost"}
           size="sm"
           disabled={isInCall}
-          onClick={() => onLlmModelChange("gpt-oss-20b")}
+          onClick={() => onLlmModelChange("deepseek")}
         >
-          GPT-OSS 20B
-        </Button>
-        <Button
-          variant={llmModel === "kimi" ? "primary" : "ghost"}
-          size="sm"
-          disabled={isInCall}
-          onClick={() => onLlmModelChange("kimi")}
-        >
-          Kimi
+          DeepSeek
         </Button>
       </div>
 
@@ -405,7 +397,7 @@ function App() {
   );
   const [sttSettings, setSttSettings] =
     useState<SttSettings>(DEFAULT_STT_SETTINGS);
-  const [llmModel, setLlmModel] = useState<LlmModel>("glm");
+  const [llmModel, setLlmModel] = useState<LlmModel>("deepseek");
   const [outputDeviceId, setOutputDeviceId] = useState("default");
 
   const {
@@ -695,28 +687,20 @@ function App() {
         <div className="mb-4 flex items-center justify-center gap-2">
           <span className="text-xs text-kumo-secondary">LLM:</span>
           <Button
-            variant={llmModel === "glm" ? "primary" : "ghost"}
+            variant={llmModel === "qwen" ? "primary" : "ghost"}
             size="sm"
             disabled={isInCall}
-            onClick={() => setLlmModel("glm")}
+            onClick={() => setLlmModel("qwen")}
           >
-            GLM
+            Qwen
           </Button>
           <Button
-            variant={llmModel === "gpt-oss-20b" ? "primary" : "ghost"}
+            variant={llmModel === "deepseek" ? "primary" : "ghost"}
             size="sm"
             disabled={isInCall}
-            onClick={() => setLlmModel("gpt-oss-20b")}
+            onClick={() => setLlmModel("deepseek")}
           >
-            GPT-OSS 20B
-          </Button>
-          <Button
-            variant={llmModel === "kimi" ? "primary" : "ghost"}
-            size="sm"
-            disabled={isInCall}
-            onClick={() => setLlmModel("kimi")}
-          >
-            Kimi
+            DeepSeek
           </Button>
         </div>
 

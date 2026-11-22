@@ -78,7 +78,7 @@ export {
  *
  * export class MyAgent extends Think<Env> {
  *   getModel() {
- *     return createWorkersAI({ binding: this.env.AI })("@cf/moonshotai/kimi-k2.7-code");
+ *     return createWorkersAI({ binding: this.env.AI })("@cf/deepseek-ai/deepseek-v4.1-flash-1017");
  *   }
  *
  *   getTools() {

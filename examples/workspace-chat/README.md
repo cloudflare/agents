@@ -5,7 +5,7 @@ An AI chat agent with a persistent virtual filesystem. Demonstrates a `Workspace
 ## What it shows
 
 - **Workspace tools** — `createAITools()` gives the model `read`, `ls`, `find`, `grep`, `write`, `edit`, and `delete`, plus `exec` because the Workspace has a backend
-- **Code execution** — `exec` runs a JavaScript module against the workspace in a Dynamic Worker, with `node:fs/promises` and git through the `ws:git` module
+- **Code execution** — `exec` runs a JavaScript module against the workspace in a Dynamic Worker, with `node:fs/promises` and git through the `codemode:git` module
 - **Persistent storage** — Files survive across conversations (backed by Durable Object SQLite)
 - **File browser sidebar** — Browse workspace contents alongside the chat
 - **Streaming responses** — Uses Workers AI with streaming via the AI SDK
@@ -22,7 +22,7 @@ npm start
 ```typescript
 import { AIChatAgent } from "@cloudflare/ai-chat";
 import { Workspace } from "@cloudflare/computer";
-import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
+import { CodemodeBackend } from "@cloudflare/computer/backends/codemode";
 import { createGitClient } from "@cloudflare/computer/git";
 import { createGitModule } from "@cloudflare/computer/modules/git";
 import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
@@ -32,11 +32,10 @@ export class WorkspaceChatAgent extends AIChatAgent {
     storage: this.ctx.storage,
     git: createGitClient(),
     backends: [
-      new WorkerJavaScriptBackend({
-        id: "js",
+      new CodemodeBackend({
         loader: this.env.LOADER,
         access: "read-write",
-        modules: { "ws:git": createGitModule({ allowNetwork: true }) }
+        modules: { "codemode:git": createGitModule({ allowNetwork: true }) }
       })
     ]
   });

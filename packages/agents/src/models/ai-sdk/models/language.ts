@@ -137,8 +137,6 @@ export function cloudflareMetadata(
 interface BuiltRequest {
   body: Record<string, unknown>;
   warnings: SharedV4Warning[];
-  /** The body turns reasoning off via the chat template. */
-  reasoningOff?: boolean;
 }
 
 function buildRequest(
@@ -364,11 +362,7 @@ export class CloudflareLanguageModel implements LanguageModelV4 {
             .pipeThrough(sseDataStream())
             // Strict OpenAI chunks only: the compat layer absorbs Workers AI's
             // native events, heartbeats and per-delta usage.
-            .pipeThrough(
-              normalizeChatCompletionsStream(modelId, {
-                reasoningOff: request.reasoningOff
-              })
-            )
+            .pipeThrough(normalizeChatCompletionsStream(modelId))
             .pipeThrough(openAIStreamParser());
         }
 

@@ -21,7 +21,7 @@ import { getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
 
 const ai = createAI({ binding: env.AI, id: "prod", cacheTtl: 60 });
 
-ai("@cf/zai-org/glm-5.3-flash"); // Workers AI: our catalog, our compat layer
+ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017"); // Workers AI: our catalog, our compat layer
 ai(getBuiltinModel("anthropic", "claude-opus-4-8")); // their model, our transport
 ```
 
@@ -65,9 +65,12 @@ import { createAI } from "agents/models/pi-ai";
 export default {
   async fetch(_request: Request, env: { AI: Ai }) {
     const ai = createAI({ binding: env.AI });
-    const reply = await ai.complete(ai("@cf/zai-org/glm-5.3-flash"), {
-      messages: [{ role: "user", content: "Hello", timestamp: Date.now() }]
-    });
+    const reply = await ai.complete(
+      ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017"),
+      {
+        messages: [{ role: "user", content: "Hello", timestamp: Date.now() }]
+      }
+    );
     // `content` is an array of parts — text, thinking, tool calls.
     const text = reply.content
       .filter((part) => part.type === "text")
@@ -102,7 +105,7 @@ Workers AI and catalog models go to AI Gateway's
 
 ```ts
 // 1. Workers AI — ours.
-ai("@cf/zai-org/glm-5.3-flash");
+ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017");
 
 // 2. pi-ai's Cloudflare AI Gateway catalog — a string, resolved by pi, not us.
 ai("anthropic/claude-opus-4.8");
@@ -180,7 +183,7 @@ import { createModels } from "@earendil-works/pi-ai/models";
 const models = createModels();
 models.setProvider(ai.provider); // provider id: "cloudflare"
 models.getModel("cloudflare", "anthropic/claude-opus-4.8");
-models.streamSimple(ai("@cf/zai-org/glm-5.3-flash"), context);
+models.streamSimple(ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017"), context);
 ```
 
 The provider's static list is every Workers AI id pi-ai knows plus every `<provider>/<id>` in
@@ -205,7 +208,7 @@ ai("anthropic/claude-opus-4.8", {
   requestTimeoutMs: 30_000,
   retries: { maxAttempts: 3, backoff: "exponential", retryDelayMs: 500 },
   byokAlias: "team-a", // which stored BYOK key, by alias
-  fallback: ["@cf/zai-org/glm-5.3-flash"], // ids or models, in any mix
+  fallback: ["@cf/deepseek-ai/deepseek-v4.1-flash-1017"], // ids or models, in any mix
   headers: { "x-request-source": "docs" },
   sessionAffinity: "chat-42", // Workers AI prefix-cache routing
   reasoningEffort: "low", // "low" | "medium" | "high" | null
@@ -233,6 +236,12 @@ Per call, pi-ai's own options map onto the same layers: `headers` are merged las
 thinking level) is remapped through the model's own `thinkingLevelMap` — as far as the wire
 can carry it; see [thinking shapes](#thinking-shapes) for the one limit. Precedence is call,
 then model, then `createAI` settings.
+
+With a `sessionId`, an Anthropic model whose `baseUrl` is `api.anthropic.com` uses pi-ai's message
+threads, and AI Gateway forwards the `thread` field, so later requests send only the new messages.
+A thread expires after a few minutes idle; when Anthropic can no longer continue one, pi-ai sends
+the whole conversation again as a new thread. To send the whole conversation every time, set `disableContinuation: true` on the call or
+`compat.supportsMessageThreads: false` on the model.
 
 ## How a request travels
 
@@ -335,7 +344,7 @@ and are not resumed. The run id is on the `cloudflare` diagnostic as `runId`.
 ## Fallback
 
 ```ts
-ai(claude, { fallback: ["@cf/zai-org/glm-5.3-flash"] });
+ai(claude, { fallback: ["@cf/deepseek-ai/deepseek-v4.1-flash-1017"] });
 ```
 
 Legs may be Workers AI ids or models, in any mix. They are tried in order: a leg is abandoned
@@ -365,11 +374,16 @@ Image generation is Workers AI only. The knobs a model takes are the model's:
 `flux-1-schnell` takes a prompt and `steps` and nothing else, so `width`,
 `height`, `seed`, `guidance` and `negativePrompt` are dropped for it and listed
 in a `cloudflare-compat` diagnostic on the result rather than sent and ignored.
-Every other model in the catalog takes the full set.
+The FLUX.2 models (`@cf/black-forest-labs/flux-2-klein-9b`, `flux-2-klein-4b`
+and `flux-2-dev`) take `width`, `height`, `seed` and `guidance`, `steps` on
+`flux-2-dev` only, and up to four image input parts as reference images. They
+take multipart form data, which goes straight to Workers AI, so the gateway
+options do not apply to them. Every other model in the catalog takes the full
+set.
 
 ## Requirements
 
-This subpath needs `@earendil-works/pi-ai@~1.5.0`, an optional peer of `agents`. `agents`
+This subpath needs `@earendil-works/pi-ai@~1.6.0`, an optional peer of `agents`. `agents`
 takes no vendor package as a dependency, optional or otherwise. An unlisted `@cf/` id resolves with default metadata (a
 128k context window, 8192 output tokens, zero cost); pass overrides when you know better.
 

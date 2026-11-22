@@ -17,7 +17,7 @@ import {
   workersAIToolStream
 } from "./helpers";
 
-const MODEL = "@cf/zai-org/glm-4.7-flash";
+const MODEL = "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
 
 describe("pi-ai: Workers AI chat completions", () => {
   it("streams reasoning and text in the live stream shape", async () => {
@@ -178,7 +178,9 @@ describe("pi-ai: Workers AI chat completions", () => {
     expect(field(call?.input, "stream")).toBe(true);
     expect(field(call?.input, "max_tokens")).toBe(32);
     expect(field(call?.input, "temperature")).toBe(0.2);
-    expect(field(call?.input, "reasoning_effort")).toBe("low");
+    // pi's registry entry for this model supports only high and max, so
+    // "low" clamps up to the lowest effort it does support.
+    expect(field(call?.input, "reasoning_effort")).toBe("high");
     expect(field(call?.input, "chat_template_kwargs")).toEqual({
       enable_thinking: false
     });
@@ -245,6 +247,58 @@ describe("pi-ai: Workers AI chat completions", () => {
       type: "toolCall"
     });
     expect(message.usage.totalTokens).toBe(241);
+  });
+
+  it("omits `tools` when a turn has none, even after tool calls", async () => {
+    const binding = fakeBinding((_call, index) =>
+      index === 0
+        ? sseResponse(workersAIToolStream())
+        : sseResponse(workersAITextStream())
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const user = {
+      content: "Weather in London?",
+      role: "user" as const,
+      timestamp: 1
+    };
+    const first = await collectEvents(
+      ai.streamSimple(ai(MODEL), {
+        messages: [user],
+        tools: [
+          {
+            description: "Get weather",
+            name: "getWeather",
+            parameters: WEATHER_TOOL_PARAMETERS as never
+          }
+        ]
+      })
+    );
+    const call = first.message.content.find((part) => part.type === "toolCall");
+    if (call?.type !== "toolCall") throw new Error("expected a tool call");
+
+    await collectEvents(
+      ai.streamSimple(ai(MODEL), {
+        messages: [
+          user,
+          first.message,
+          {
+            content: [{ text: "London: clear", type: "text" }],
+            isError: false,
+            role: "toolResult",
+            timestamp: 2,
+            toolCallId: call.id,
+            toolName: call.name
+          }
+        ]
+      })
+    );
+
+    // vLLM 0.20+ rejects `"tools": []`; pi-ai omits it too (#11843).
+    const replay = binding.calls[1]?.input;
+    expect(field(replay, "messages.1.tool_calls.0.function.name")).toBe(
+      "getWeather"
+    );
+    expect(replay).not.toHaveProperty("tools");
   });
 
   it("turns a non-streaming JSON body into a one-shot stream", async () => {
@@ -443,6 +497,70 @@ describe("pi-ai: vendor usage on the chat-completions wire", () => {
     // `reasoning` rides on the usage object without being in pi-ai's type.
     expect((message.usage as { reasoning?: number }).reasoning).toBe(57);
     expect(message.usage.totalTokens).toBe(66);
+  });
+
+  it("reads reasoning tokens a vendor reports at the top level of usage", async () => {
+    // GitHub Copilot's spelling: `usage.reasoning_tokens`, with no
+    // `completion_tokens_details`. pi-ai's `parseChunkUsage` falls back to it.
+    const binding = fakeBinding(() =>
+      jsonResponse({
+        choices: [
+          {
+            finish_reason: "stop",
+            index: 0,
+            message: { content: "Hi!", role: "assistant" }
+          }
+        ],
+        id: "chatcmpl-r",
+        model: "llama-3.1-8b-instant",
+        object: "chat.completion",
+        usage: {
+          completion_tokens: 40,
+          prompt_tokens: 6,
+          reasoning_tokens: 32,
+          total_tokens: 46
+        }
+      })
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const message = await ai.complete(
+      ai(groqModel("llama-3.1-8b-instant")),
+      userContext("hi")
+    );
+    expect((message.usage as { reasoning?: number }).reasoning).toBe(32);
+    expect(message.usage.output).toBe(40);
+  });
+
+  it("reads cached tokens a vendor reports at the top level of usage", async () => {
+    // Kimi's spelling: `usage.cached_tokens`, with no `prompt_tokens_details`.
+    // pi-ai's `parseChunkUsage` falls back to it.
+    const binding = fakeBinding(() =>
+      jsonResponse({
+        choices: [
+          {
+            finish_reason: "stop",
+            index: 0,
+            message: { content: "Hi!", role: "assistant" }
+          }
+        ],
+        id: "chatcmpl-c",
+        model: "llama-3.1-8b-instant",
+        object: "chat.completion",
+        usage: {
+          cached_tokens: 80,
+          completion_tokens: 5,
+          prompt_tokens: 100,
+          total_tokens: 105
+        }
+      })
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const message = await ai.complete(
+      ai(groqModel("llama-3.1-8b-instant")),
+      userContext("hi")
+    );
+    expect(message.usage.cacheRead).toBe(80);
+    expect(message.usage.input).toBe(20);
   });
 });
 

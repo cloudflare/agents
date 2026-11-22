@@ -5,19 +5,35 @@ import {
   fauxToolCall,
   type AssistantMessage,
   type Message,
-  type TranscriptContext
+  type Model,
+  type TranscriptContext,
+  type Usage
 } from "@earendil-works/pi-ai";
-import { num, obj } from "@earendil-works/pi-schema";
+import { num, obj, str } from "@earendil-works/pi-schema";
 import {
+  AgentDoc,
+  AssistantEntry,
   createRegistry,
+  defineSignal,
   defineTask,
+  hook,
+  SubmissionSettled,
+  ToolTask,
   ConversationBusy,
   ConversationIdle,
   Harness,
+  ROOT_CONVERSATION_ID,
+  ToolResultEntry,
+  UserEntry,
+  type AgentChange,
+  type AgentState,
+  type ConversationInit,
   type EntryRecord,
   type Extension,
   type InputEntry,
   type LiveState,
+  type SubmissionNotify,
+  type TaskId,
   type ToolRegistration
 } from "@earendil-works/pi-durable";
 import type { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
@@ -30,6 +46,7 @@ import { TEST_TIMING } from "./timing";
 import { fauxModels, TEST_SETTINGS } from "./faux";
 import {
   PiHarness,
+  type PiOnAbort,
   type PiOperationResult,
   type PiReceipt,
   type PiWhenBusy,
@@ -85,6 +102,8 @@ const Reminder = defineTask<
  * - `retry:` retries a failed generation once, after two seconds.
  * - `park:` ends a task cut off once (pi's `restartLimit` of 1).
  * - `turns:` starts sessions with `maxTurns: 1`.
+ * - `configured:` starts sessions with `thinkingLevel: "high"` and
+ *   `maxTurns: 5`, as well as the model.
  */
 function variantSettings(name: string) {
   const plain = name.replace(/^nowake:/, "");
@@ -113,8 +132,25 @@ function textOf(content: Message["content"] | undefined): string {
  *   `gate_unsafe`, `hold` calls `hold`; `flaky` fails once with a retryable
  *   error; anything else is echoed back.
  * - `gate-fail` calls `gate`, then fails with a model error.
+ * - `approval` calls `await_approval`, `approval-gate` calls
+ *   `approval_then_gate`, `deadline` calls `await_deadline`, and
+ *   `subagent:<task>` calls `subagent` with the task.
  * - After a tool result it answers `tool said: <result>`.
  */
+/** The answer the `await_approval` tool parks on, delivered by the test. */
+const Approval = defineSignal({
+  name: "test.approval",
+  version: 1,
+  schema: obj({ text: str() })
+});
+
+/** Where `await_approval` records the task id of its parked call. */
+const PARKED_TASK_KEY = "pi-test-parked-task";
+/** How many times a parked call's `cancel()` ran. */
+const CANCELS_KEY = "pi-test-cancels";
+/** How many times the `beforeTool` gate on `multiply 77` ran. */
+const GATE_HOOK_RUNS_KEY = "pi-test-gate-hook-runs";
+
 function script(
   context: TranscriptContext,
   storage: DurableObjectStorage
@@ -153,6 +189,27 @@ function script(
       { stopReason: "toolUse" }
     );
   }
+  if (prompt === "approval") {
+    return fauxAssistantMessage([fauxToolCall("await_approval", {})], {
+      stopReason: "toolUse"
+    });
+  }
+  if (prompt === "approval-gate") {
+    return fauxAssistantMessage([fauxToolCall("approval_then_gate", {})], {
+      stopReason: "toolUse"
+    });
+  }
+  if (prompt === "deadline") {
+    return fauxAssistantMessage([fauxToolCall("await_deadline", {})], {
+      stopReason: "toolUse"
+    });
+  }
+  if (prompt.startsWith("subagent:")) {
+    return fauxAssistantMessage(
+      [fauxToolCall("subagent", { task: prompt.slice("subagent:".length) })],
+      { stopReason: "toolUse" }
+    );
+  }
   if (prompt === "hold") {
     return fauxAssistantMessage([fauxToolCall("hold", {})], {
       stopReason: "toolUse"
@@ -164,7 +221,107 @@ function script(
       { stopReason: "toolUse" }
     );
   }
+  // `big:` inputs are too long to echo at the faux provider's pace.
+  if (prompt.startsWith("big:")) {
+    return fauxAssistantMessage([fauxText(`got ${prompt.length}`)]);
+  }
   return fauxAssistantMessage([fauxText(`echo: ${prompt}`)]);
+}
+
+/** Usage for an imported assistant message, which has none: pi sums it. */
+const NO_USAGE: Usage = {
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  totalTokens: 0,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+};
+
+/**
+ * Seed a session's transcript with a history, one entry per message, as a
+ * host importing an existing chat does: the user's message, the model's
+ * tool call, the tool's result, and the model's answer. Pass it as `init`.
+ */
+function seedHistory(
+  model: Pick<Model<string>, "api" | "provider" | "id">,
+  value: number
+): ConversationInit {
+  const assistant = (
+    content: AssistantMessage["content"],
+    stopReason: AssistantMessage["stopReason"]
+  ): AssistantMessage => ({
+    role: "assistant",
+    content,
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+    usage: NO_USAGE,
+    stopReason,
+    timestamp: Date.now()
+  });
+  const callId = `imported-${value}`;
+  return async (tx, conversationId) => {
+    await tx.appendEntry(UserEntry, conversationId, {
+      model: [
+        { role: "user", content: `multiply ${value}`, timestamp: Date.now() }
+      ]
+    });
+    await tx.appendEntry(AssistantEntry, conversationId, {
+      model: [
+        assistant(
+          [
+            {
+              type: "toolCall",
+              id: callId,
+              name: "multiply",
+              arguments: { value }
+            }
+          ],
+          "toolUse"
+        )
+      ]
+    });
+    await tx.appendEntry(ToolResultEntry, conversationId, {
+      model: [
+        {
+          role: "toolResult",
+          toolCallId: callId,
+          toolName: "multiply",
+          content: [{ type: "text", text: String(value * 3) }],
+          isError: false,
+          timestamp: Date.now()
+        }
+      ],
+      data: { diagnostics: [] }
+    });
+    await tx.appendEntry(AssistantEntry, conversationId, {
+      model: [
+        assistant([{ type: "text", text: `tool said: ${value * 3}` }], "stop")
+      ]
+    });
+  };
+}
+
+/** A model request as tests compare it: each message as `role: text`. */
+function requestTexts(context: TranscriptContext): string[] {
+  return context.messages.map((message) => {
+    if (message.role === "system") {
+      return `system: ${textOf(message.content)}${JSON.stringify(message.sections ?? {})}`;
+    }
+    if (message.role === "assistant") {
+      return `assistant: ${message.content
+        .map((part) =>
+          part.type === "toolCall"
+            ? `${part.name}(${JSON.stringify(part.arguments)})`
+            : part.type === "text"
+              ? part.text
+              : ""
+        )
+        .join("")}`;
+    }
+    return `${message.role}: ${textOf(message.content)}`;
+  });
 }
 
 /**
@@ -234,7 +391,10 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     },
     defaults: {
       model: this.#faux.getModel(),
-      ...(this.ctx.id.name?.startsWith("turns:") ? { maxTurns: 1 } : {})
+      ...(this.ctx.id.name?.startsWith("turns:") ? { maxTurns: 1 } : {}),
+      ...(this.ctx.id.name?.startsWith("configured:")
+        ? { thinkingLevel: "high", maxTurns: 5 }
+        : {})
     }
   });
   readonly lifecycle = Lifecycle.install(this).use(this.harness);
@@ -243,12 +403,115 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     super(ctx, env);
     setWakeTimingForTests(this.harness, TEST_TIMING);
     this.#faux.setResponses(
-      Array.from(
-        { length: 200 },
-        () => (context: TranscriptContext) => script(context, ctx.storage)
-      )
+      Array.from({ length: 200 }, () => (context: TranscriptContext) => {
+        this.#requests.push(requestTexts(context));
+        return script(context, ctx.storage);
+      })
     );
     piHarnessInstances.track(ctx.id.name ?? "", this.harness);
+  }
+
+  /** What this instance sent the model, one request at a time. */
+  readonly #requests: string[][] = [];
+
+  /** The last model request this instance sent, each message as `role: text`. */
+  lastRequest(): string[] {
+    return this.#requests.at(-1) ?? [];
+  }
+
+  /**
+   * `harness.root()` with `seedHistory(value)` as `init`, or with an `init`
+   * that appends an entry and then throws. Reports whether `init` ran,
+   * since its function cannot cross RPC.
+   */
+  async seedRoot(
+    options: { value?: number; instructions?: string; fail?: boolean } = {}
+  ): Promise<
+    | { session: string; created: boolean; initRan: boolean }
+    | { error: string; initRan: boolean }
+  > {
+    let initRan = false;
+    const seed = seedHistory(this.#faux.getModel(), options.value ?? 4);
+    try {
+      const { session, created } = await this.harness.root({
+        ...(options.instructions
+          ? { agent: { instructions: options.instructions } }
+          : {}),
+        init: async (tx, id) => {
+          initRan = true;
+          await seed(tx, id);
+          if (options.fail) throw new Error("import failed");
+        }
+      });
+      return { session: session.id, created, initRan };
+    } catch (error) {
+      return {
+        error: error instanceof Error ? error.message : String(error),
+        initRan
+      };
+    }
+  }
+
+  /** `sessions.create()`, seeded with `seedHistory(value)`. */
+  async createSeededSession(
+    value: number,
+    instructions?: string
+  ): Promise<string> {
+    const session = await this.harness.sessions.create({
+      ...(instructions ? { agent: { instructions } } : {}),
+      init: seedHistory(this.#faux.getModel(), value)
+    });
+    return session.id;
+  }
+
+  /** `sessions.fork(from)`, with `seedHistory(value)` appended after the fork. */
+  async forkSeeded(from: string, value: number): Promise<string> {
+    const session = await this.harness.sessions.fork(from, {
+      init: seedHistory(this.#faux.getModel(), value)
+    });
+    return session.id;
+  }
+
+  /**
+   * Whether pi has the root conversation, read through `harness.pi()`, which
+   * does not create it.
+   */
+  async rootExists(): Promise<boolean> {
+    const pi = await this.harness.pi();
+    return (await pi.conversation(ROOT_CONVERSATION_ID, BACKGROUND_CONTEXT))
+      ? true
+      : false;
+  }
+
+  async busy(session?: string): Promise<boolean> {
+    return this.harness.session(session).busy();
+  }
+
+  /**
+   * `harness.root({ agent })`, or `sessions.create({ agent })` when `create`,
+   * with `agent` setting each of the defaults' fields to `value`. Built here
+   * so an `undefined` field does not depend on RPC keeping it.
+   */
+  async createWithAgent(
+    value: "undefined" | "null",
+    create = false
+  ): Promise<string> {
+    const agent: AgentChange =
+      value === "undefined"
+        ? { model: undefined, thinkingLevel: undefined, maxTurns: undefined }
+        : { model: null, thinkingLevel: null, maxTurns: null };
+    if (create) return (await this.harness.sessions.create({ agent })).id;
+    const { session, created } = await this.harness.root({ agent });
+    if (!created) throw new Error("the root already existed");
+    return session.id;
+  }
+
+  /** A session's stored agent configuration, read through pi. */
+  async agentState(session = "1"): Promise<AgentState | undefined> {
+    const pi = await this.harness.pi();
+    const { id } = await this.harness.conversation(session);
+    const state = await pi.snapshot(AgentDoc, id, BACKGROUND_CONTEXT);
+    return state ? { ...state } : undefined;
   }
 
   /** The harness's pending Lifecycle jobs: its wake, while it has one. */
@@ -317,7 +580,7 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
    */
   async remindAt(until: number): Promise<void> {
     const pi = await this.harness.pi();
-    const root = await pi.root(BACKGROUND_CONTEXT);
+    const root = await this.harness.conversation("1");
     await root.commit(
       (tx) =>
         tx.createTask(
@@ -361,16 +624,54 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     text: string,
     options: {
       whenBusy?: PiWhenBusy;
+      onAbort?: PiOnAbort;
       session?: string;
       operationId?: string;
       entry?: InputEntry;
+      notify?: { taskId: number; key: string };
     } = {}
   ): Promise<PiReceipt> {
-    return this.harness.submit(text, options);
+    const { notify, ...rest } = options;
+    return this.harness.submit(text, {
+      ...rest,
+      ...(notify
+        ? {
+            notify: {
+              key: notify.key,
+              taskId: notify.taskId as SubmissionNotify["taskId"]
+            }
+          }
+        : {})
+    });
   }
 
-  continueSession(operationId?: string): Promise<PiReceipt> {
-    return this.harness.continue(operationId ? { operationId } : {});
+  /** The `notify` pi stored with the root session's submission. */
+  async storedNotify(operationId: string) {
+    const storage = await this.harness.storage();
+    const conversation = await this.harness.conversation("1");
+    const record = await storage.submissionByRequest(
+      conversation.id,
+      operationId,
+      BACKGROUND_CONTEXT
+    );
+    return record?.notify ?? null;
+  }
+
+  continueSession(
+    operationId?: string,
+    notify?: { taskId: number; key: string }
+  ): Promise<PiReceipt> {
+    return this.harness.continue({
+      ...(operationId ? { operationId } : {}),
+      ...(notify
+        ? {
+            notify: {
+              key: notify.key,
+              taskId: notify.taskId as SubmissionNotify["taskId"]
+            }
+          }
+        : {})
+    });
   }
 
   /**
@@ -558,6 +859,34 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return this.ctx.storage.getAlarm();
   }
 
+  /** The task id of the parked `await_approval` call, once it parked. */
+  async parkedTask(): Promise<number | null> {
+    return (await this.ctx.storage.get<number>(PARKED_TASK_KEY)) ?? null;
+  }
+
+  /**
+   * Deliver the approval the parked call waits for, as a host would, under
+   * `key`: `approval` for the tools, `gate` for the `beforeTool` gate.
+   */
+  async approve(text: string, key = "approval"): Promise<string> {
+    const taskId = (await this.parkedTask()) as TaskId | null;
+    if (taskId === null) throw new Error("no parked call");
+    return this.harness.signal(taskId, Approval, key, { text });
+  }
+
+  async cancels(): Promise<number> {
+    return (await this.ctx.storage.get<number>(CANCELS_KEY)) ?? 0;
+  }
+
+  async gateHookRuns(): Promise<number> {
+    return (await this.ctx.storage.get<number>(GATE_HOOK_RUNS_KEY)) ?? 0;
+  }
+
+  /** A session's transcript, as text, by session id. */
+  async sessionTexts(session: string): Promise<string[]> {
+    return entryTexts(await this.harness.session(session).messages());
+  }
+
   /** Random per instance, so a test can tell the object was evicted. */
   readonly #instance = crypto.randomUUID();
   #releaseHold: (() => void) | undefined;
@@ -669,8 +998,151 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
         };
       }
     });
+    // Parks on the Approval signal instead of returning, holding no
+    // invocation, and runs again with the answer once it is delivered.
+    const awaitApproval: ToolRegistration<typeof NoParameters> = {
+      name: "await_approval",
+      description: "Wait for a person's approval.",
+      parameters: NoParameters,
+      replay: "safe",
+      async execute(_args, api, context) {
+        const answer = await api.readSignal(Approval, "approval", context);
+        if (answer !== undefined && "value" in answer) {
+          return { output: [{ type: "text", text: answer.value.text }] };
+        }
+        await storage.put(PARKED_TASK_KEY, api.taskId);
+        return { sleep: { signals: [Approval.key("approval")] } };
+      }
+    };
+    // Waits for approval, then for the gate: a call woken by a signal that
+    // is still running when the object dies. Counts its cancels.
+    const approvalThenGate: ToolRegistration<typeof NoParameters> = {
+      name: "approval_then_gate",
+      description: "Wait for approval, then until the test releases it.",
+      parameters: NoParameters,
+      replay: "safe",
+      async execute(_args, api, context) {
+        const answer = await api.readSignal(Approval, "approval", context);
+        if (answer === undefined || !("value" in answer)) {
+          await storage.put(PARKED_TASK_KEY, api.taskId);
+          return { sleep: { signals: [Approval.key("approval")] } };
+        }
+        const runs = ((await storage.get<number>(GATE_RUNS_KEY)) ?? 0) + 1;
+        await storage.put(GATE_RUNS_KEY, runs);
+        while (!(await storage.get<boolean>(RELEASE_KEY))) {
+          context.abortSignal?.throwIfAborted();
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        return {
+          output: [
+            { type: "text", text: `${answer.value.text} after ${runs} runs` }
+          ]
+        };
+      },
+      async cancel() {
+        await storage.put(
+          CANCELS_KEY,
+          ((await storage.get<number>(CANCELS_KEY)) ?? 0) + 1
+        );
+      }
+    };
+    // Waits for approval for at most 1.5 s.
+    const awaitDeadline: ToolRegistration<typeof NoParameters> = {
+      name: "await_deadline",
+      description: "Wait for approval, at most 1.5 s.",
+      parameters: NoParameters,
+      replay: "safe",
+      async execute(_args, api) {
+        if (api.wake !== undefined) {
+          return {
+            output: [{ type: "text", text: `woke ${api.wake.reason}` }]
+          };
+        }
+        await storage.put(PARKED_TASK_KEY, api.taskId);
+        return {
+          sleep: {
+            until: api.now() + 1_500,
+            signals: [Approval.key("approval")]
+          }
+        };
+      }
+    };
+    // Pi's subagent pattern, as the docs show it: a child owned by the
+    // call, a submission that notifies the call when it settles, and the
+    // child's answer as the result.
+    const subagent: ToolRegistration<typeof SubagentParameters> = {
+      name: "subagent",
+      description: "Delegate a task to a subagent and get its answer back.",
+      parameters: SubagentParameters,
+      replay: "safe",
+      async execute({ task }, api, context) {
+        const state = await api.readSignal(
+          SubmissionSettled,
+          "answered",
+          context
+        );
+        if (state !== undefined && "value" in state) {
+          const settled = state.value;
+          if (settled.status !== "done" || settled.type === "write") {
+            return {
+              output: [{ type: "text", text: `Subagent ${settled.status}` }],
+              isError: true
+            };
+          }
+          const answer = await api.commit(
+            (tx) => tx.entry(settled.answer),
+            context
+          );
+          return {
+            output: [
+              { type: "text", text: textOf(answer?.model?.[0]?.content) }
+            ]
+          };
+        }
+        const child = await api.commit(async (tx) => {
+          const existing = (
+            await tx.scanConversations({ ownerTaskId: api.taskId }, 1)
+          ).items[0];
+          if (existing !== undefined) return existing.id;
+          const created = await tx.createConversation({
+            ownership: { kind: "task", taskId: api.taskId }
+          });
+          return created.id;
+        }, context);
+        const handle = await api.conversation(child, context);
+        await handle?.submit(
+          {
+            type: "input",
+            content: task,
+            requestId: `subagent:${api.taskId}`,
+            notify: { taskId: api.taskId, key: "answered" }
+          },
+          context
+        );
+        await storage.put(PARKED_TASK_KEY, api.taskId);
+        return { sleep: { signals: [SubmissionSettled.key("answered")] } };
+      }
+    };
+    // Holds `multiply 77` until the test delivers the `gate` signal.
+    const multiplyGate = hook(ToolTask, {
+      beforeTool: async (call, api, context) => {
+        if (call.name !== "multiply" || call.arguments.value !== 77) {
+          return undefined;
+        }
+        await storage.put(
+          GATE_HOOK_RUNS_KEY,
+          ((await storage.get<number>(GATE_HOOK_RUNS_KEY)) ?? 0) + 1
+        );
+        if ((await api.readSignal(Approval, "gate", context)) !== undefined) {
+          return undefined;
+        }
+        await storage.put(PARKED_TASK_KEY, api.taskId);
+        return { sleep: { signals: [Approval.key("gate")] } };
+      }
+    });
     return {
       name: "test-tools",
+      hooks: [multiplyGate],
       sections: [
         {
           key: "preamble",
@@ -683,7 +1155,11 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
         holdTool(),
         multiplyTool(),
         gate("gate", "safe"),
-        gate("gate_unsafe", "unsafe")
+        gate("gate_unsafe", "unsafe"),
+        awaitApproval,
+        approvalThenGate,
+        awaitDeadline,
+        subagent
       ]
     };
   }
@@ -691,6 +1167,7 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
 const NoParameters = obj({});
 const MultiplyParameters = obj({ value: num() });
+const SubagentParameters = obj({ task: str() });
 
 /** Multiplies by three: no gating, no storage. */
 function multiplyTool(): ToolRegistration<typeof MultiplyParameters> {

@@ -13,6 +13,7 @@ export {
   AlarmStartFailureObject,
   ConcurrentStartObject,
   EvictableStartObject,
+  FetchErrorObject,
   PlainLifecycleObject,
   RetryableStartObject,
   StatefulPlainObject
@@ -21,6 +22,7 @@ import type {
   AlarmStartFailureObject,
   ConcurrentStartObject,
   EvictableStartObject,
+  FetchErrorObject,
   PlainLifecycleObject,
   RetryableStartObject,
   StatefulPlainObject
@@ -106,6 +108,7 @@ export {
   TestCaseSensitiveAgent,
   TestUserNotificationAgent,
   TestStateAgent,
+  TestFetchErrorAgent,
   TestStateAgentNoInitial,
   TestThrowingStateAgent,
   TestPersistedStateAgent,
@@ -125,6 +128,7 @@ export {
   TestAgentToolStubChild,
   TestOAuthAgent,
   TestCustomOAuthAgent,
+  McpIntegrationAgent,
   TestReadonlyAgent,
   TestProtocolMessagesAgent,
   TestCallableAgent,
@@ -196,6 +200,7 @@ import type {
   TestUserNotificationAgent,
   TestOAuthAgent,
   TestCustomOAuthAgent,
+  McpIntegrationAgent,
   TestMcpJurisdiction,
   TestAlarmInitAgent,
   TestDestroyScheduleAgent,
@@ -211,6 +216,7 @@ import type {
   TestAddMcpServerAgent,
   TestHttpMcpDedupAgent,
   TestStateAgent,
+  TestFetchErrorAgent,
   TestStateAgentNoInitial,
   TestThrowingStateAgent,
   TestPersistedStateAgent,
@@ -249,6 +255,7 @@ export type Env = {
   AlarmStartFailureObject: DurableObjectNamespace<AlarmStartFailureObject>;
   ConcurrentStartObject: DurableObjectNamespace<ConcurrentStartObject>;
   EvictableStartObject: DurableObjectNamespace<EvictableStartObject>;
+  FetchErrorObject: DurableObjectNamespace<FetchErrorObject>;
   StatefulPlainObject: DurableObjectNamespace<StatefulPlainObject>;
   ScheduledLifecycleObject: DurableObjectNamespace<ScheduledLifecycleObject>;
   SchedulerHarnessObject: DurableObjectNamespace<SchedulerHarnessObject>;
@@ -279,6 +286,7 @@ export type Env = {
   UserNotificationAgent: DurableObjectNamespace<TestUserNotificationAgent>;
   TestOAuthAgent: DurableObjectNamespace<TestOAuthAgent>;
   TestCustomOAuthAgent: DurableObjectNamespace<TestCustomOAuthAgent>;
+  McpIntegrationAgent: DurableObjectNamespace<McpIntegrationAgent>;
   TEST_MCP_JURISDICTION: DurableObjectNamespace<TestMcpJurisdiction>;
   TestAlarmInitAgent: DurableObjectNamespace<TestAlarmInitAgent>;
   TestDestroyScheduleAgent: DurableObjectNamespace<TestDestroyScheduleAgent>;
@@ -295,6 +303,7 @@ export type Env = {
   TestRpcMcpClientAgent: DurableObjectNamespace<TestRpcMcpClientAgent>;
   TestHttpMcpDedupAgent: DurableObjectNamespace<TestHttpMcpDedupAgent>;
   TestStateAgent: DurableObjectNamespace<TestStateAgent>;
+  TestFetchErrorAgent: DurableObjectNamespace<TestFetchErrorAgent>;
   TestStateAgentNoInitial: DurableObjectNamespace<TestStateAgentNoInitial>;
   TestThrowingStateAgent: DurableObjectNamespace<TestThrowingStateAgent>;
   TestPersistedStateAgent: DurableObjectNamespace<TestPersistedStateAgent>;

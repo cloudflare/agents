@@ -29,6 +29,10 @@
         "name": "AgentWithoutSuperCall"
       },
       {
+        "class_name": "LogOnlyOnErrorAgent",
+        "name": "LogOnlyOnErrorAgent"
+      },
+      {
         "class_name": "SlowStreamAgent",
         "name": "SlowStreamAgent"
       },
@@ -101,6 +105,10 @@
         "name": "RecoverySlowStreamAgent"
       },
       {
+        "class_name": "AsyncStartAdmissionAgent",
+        "name": "AsyncStartAdmissionAgent"
+      },
+      {
         "class_name": "AIChatAgentToolParent",
         "name": "AIChatAgentToolParent"
       },
@@ -117,6 +125,10 @@
       {
         "class_name": "OverridingPersistAgent",
         "name": "OverridingPersistAgent"
+      },
+      {
+        "class_name": "OverridingPersistMergeAgent",
+        "name": "OverridingPersistMergeAgent"
       }
       // Agent-tool children are addressed as facets of
       // `AIChatAgentToolParent`, so they do not need migration entries.
@@ -182,7 +194,8 @@
     {
       "new_sqlite_classes": [
         "NonChatRecoveryTestAgent",
-        "RecoverySlowStreamAgent"
+        "RecoverySlowStreamAgent",
+        "AsyncStartAdmissionAgent"
       ],
       "tag": "v11"
     },
@@ -200,6 +213,14 @@
     {
       "new_sqlite_classes": ["OverridingPersistAgent"],
       "tag": "v15"
+    },
+    {
+      "new_sqlite_classes": ["LogOnlyOnErrorAgent"],
+      "tag": "v16"
+    },
+    {
+      "new_sqlite_classes": ["OverridingPersistMergeAgent"],
+      "tag": "v17"
     }
   ]
 }

@@ -25,27 +25,48 @@
  * `@cloudflare/think`, not a public API.
  */
 
-import type { ClientToolSchema } from "./client-tools";
-import type {
-  ContinuationConnection,
-  ContinuationState
+import {
+  addContinuationTarget,
+  type ContinuationConnection,
+  type ContinuationState
 } from "./continuation-state";
 
 /**
  * The data a host supplies to schedule (or re-target) a pending/deferred
- * auto-continuation. Mirrors the fields a host writes onto
- * {@link ContinuationState.pending} — the host owns where the values come from
- * (e.g. Think hardcodes a fixed `errorPrefix` and `body: undefined`; ai-chat
- * threads them per tool-result event).
+ * auto-continuation. The tools and body the continuation turn runs with are
+ * not part of it: the turn reads the stored request context when it starts
+ * (`ChatRequestContext`), so there is one copy of them.
  */
 export interface ContinuationSpec<
   TConnection extends ContinuationConnection = ContinuationConnection
 > {
   connection: TConnection;
-  clientTools: ClientToolSchema[] | undefined;
-  body: Record<string, unknown> | undefined;
   errorPrefix: string;
+  /**
+   * The message the result or approval is stored in: the assistant message
+   * whose tool part it settled. The continuation runs only while that
+   * message is the latest.
+   */
+  targetMessageId: string;
 }
+
+/**
+ * A {@link ContinuationSpec} before its target is known. The target comes
+ * from applying the result ({@link ToolInteractionOutcome}).
+ */
+export type ContinuationSource<
+  TConnection extends ContinuationConnection = ContinuationConnection
+> = Omit<ContinuationSpec<TConnection>, "targetMessageId">;
+
+/**
+ * What applying a client tool result or approval did to its tool part:
+ * settled it (in the message `messageId`), found it already settled, or
+ * found no such part.
+ */
+export type ToolInteractionOutcome =
+  | { status: "changed"; messageId: string }
+  | { status: "unchanged" }
+  | { status: "missing" };
 
 /**
  * Host substrate the controller parameterizes over. Implemented by the agent
@@ -131,10 +152,13 @@ export class AutoContinuationController<
       c.deferred = {
         connection: spec.connection,
         connectionId: spec.connection.id,
-        clientTools: spec.clientTools,
-        body: spec.body,
         errorPrefix: spec.errorPrefix,
-        prerequisite: null
+        prerequisite: null,
+        // Results coalesced into one follow-up: keep every message they target.
+        targetMessageIds: addContinuationTarget(
+          c.deferred?.targetMessageIds,
+          spec.targetMessageId
+        )
       };
       return;
     }
@@ -142,9 +166,13 @@ export class AutoContinuationController<
     if (c.pending) {
       c.pending.connection = spec.connection;
       c.pending.connectionId = spec.connection.id;
-      c.pending.clientTools = spec.clientTools;
-      c.pending.body = spec.body;
       c.pending.errorPrefix = spec.errorPrefix;
+      // Keep the targets of results already coalesced into this continuation:
+      // a later result for an older reply must not drop a newer one's.
+      c.pending.targetMessageIds = addContinuationTarget(
+        c.pending.targetMessageIds,
+        spec.targetMessageId
+      );
       c.awaitingConnections.set(spec.connection.id, spec.connection);
       this.armTimer();
       return;
@@ -154,14 +182,34 @@ export class AutoContinuationController<
       connection: spec.connection,
       connectionId: spec.connection.id,
       requestId: this.host.generateRequestId(),
-      clientTools: spec.clientTools,
-      body: spec.body,
       errorPrefix: spec.errorPrefix,
       prerequisite: null,
-      pastCoalesce: false
+      pastCoalesce: false,
+      targetMessageIds: addContinuationTarget(undefined, spec.targetMessageId)
     };
     c.awaitingConnections.set(spec.connection.id, spec.connection);
     this.armTimer();
+  }
+
+  /**
+   * React to an applied client tool result or approval. With `autoContinue`,
+   * only a result that settled its tool part schedules a continuation
+   * (targeted at that part's message): a second tab answering the same call,
+   * or a call that no longer exists, has nothing new for the model. Without
+   * `autoContinue`, re-arm the barrier in case this result completes a batch
+   * a sibling opted in for. Call it once the apply has finished.
+   */
+  afterInteraction(
+    outcome: ToolInteractionOutcome,
+    autoContinue: boolean,
+    spec: () => ContinuationSource<TConnection>
+  ): void {
+    if (!autoContinue) {
+      this.rearmForBatch();
+      return;
+    }
+    if (outcome.status !== "changed") return;
+    this.schedule({ ...spec(), targetMessageId: outcome.messageId });
   }
 
   /**
@@ -284,6 +332,20 @@ export class AutoContinuationController<
    */
   isArmed(): boolean {
     return this._timer !== null || this._barrierActive;
+  }
+
+  /**
+   * `true` while a continuation decision is still to come, so the host is not
+   * idle or stable yet: a tool result or approval is being applied (it may
+   * schedule a continuation once it lands), or a pending continuation that
+   * has not entered its turn is armed ({@link isArmed}). A continuation that
+   * already entered its turn is covered by the host's turn queue, and one
+   * parked on an unanswered sibling by its pending-interaction check.
+   */
+  hasPendingDecision(): boolean {
+    if (this.host.hasPendingInteraction()) return true;
+    const pending = this.host.continuation.pending;
+    return pending !== null && !pending.pastCoalesce && this.isArmed();
   }
 
   /**

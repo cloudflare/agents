@@ -622,6 +622,46 @@ describe("Think — error handling", () => {
     expect(result.assistantMessages).toBe(1);
   });
 
+  it("tells the caller of saveMessages that a stalled turn was interrupted, not stopped", async () => {
+    const agent = await freshAgent(`stall-save-${crypto.randomUUID()}`);
+
+    // The turn is handed to recovery, which may still finish the reply.
+    expect(await agent.testSaveMessagesWithStall(3, 50)).toEqual({
+      status: "aborted",
+      reason: "interrupted"
+    });
+  });
+
+  it("recovers an interrupted recovery continuation into the message it continues, however often (#2780)", async () => {
+    const agent = await freshAgent(
+      `continuation-orphan-${crypto.randomUUID()}`
+    );
+    const result = await agent.testRecoverContinuationStreamForTest();
+
+    // The continuation records the message it extends and its part count.
+    const earlier = result.leaf.partTypes.length;
+    expect(earlier).toBeGreaterThan(0);
+    expect(result.recorded).toEqual({
+      messageId: result.leaf.id,
+      basePartCount: earlier
+    });
+    // Recovering its stream twice rewrites that message: the earlier parts
+    // followed by the continuation's, with no second assistant message.
+    expect(result.afterRecovery.map((m) => m.id)).toEqual([result.leaf.id]);
+    const recovered = JSON.parse(result.afterRecovery[0].partsJson) as Array<{
+      type: string;
+    }>;
+    expect(recovered.slice(0, earlier).map((p) => p.type)).toEqual(
+      result.leaf.partTypes
+    );
+    expect(recovered.slice(earlier)).toMatchObject([
+      { type: "step-start" },
+      { type: "text", text: "Hello from the assistant!" }
+    ]);
+    // The live stream then finishes into the same message.
+    expect(result.finalAssistantIds).toEqual([result.leaf.id]);
+  });
+
   it("retries the user turn when the stream stalls before its first chunk (#1941)", async () => {
     const agent = await freshAgent(`stall-first-chunk-${crypto.randomUUID()}`);
     const result = await agent.testStallRecoveryForTest({
@@ -679,6 +719,53 @@ describe("Think — error handling", () => {
       expect(recovered.scheduledContinues).toBe(0);
       expect(recovered.finalRoles).toEqual(["user", "assistant"]);
     } finally {
+      await closeWS(ws);
+    }
+  });
+
+  it("sends a WebSocket client the stream error when onChatRecovery declines to continue", async () => {
+    const room = `stall-decline-ws-${crypto.randomUUID()}`;
+    const agent = await freshAgent(room);
+    await agent.setRecoveryHookForTest({ continue: false });
+    await agent.armStallForTest(3, 50);
+    const ws = await connectThinkTestAgentWS(room);
+    try {
+      const done = waitForProtocolMessage(
+        ws,
+        (m) => m.type === "cf_agent_use_chat_response" && m.done === true
+      );
+      ws.send(
+        JSON.stringify({
+          type: "cf_agent_use_chat_request",
+          id: crypto.randomUUID(),
+          init: {
+            method: "POST",
+            body: JSON.stringify({
+              messages: [
+                {
+                  id: crypto.randomUUID(),
+                  role: "user",
+                  parts: [{ type: "text", text: "hello" }]
+                }
+              ]
+            })
+          }
+        })
+      );
+      const frame = (await done) as { error?: boolean; body?: string };
+      expect(frame.error).toBe(true);
+      expect(frame.body).toBeTruthy();
+      expect(frame.body).not.toContain("declined");
+
+      // Nothing is scheduled, and the terminal record says the same thing.
+      const recovered = await agent.runScheduledRecoveryForTest();
+      expect(recovered.scheduledContinues).toBe(0);
+      expect(recovered.scheduledRetries).toBe(0);
+      expect((await agent.getPendingChatTerminalForTest())?.body).toBe(
+        frame.body
+      );
+    } finally {
+      await agent.setRecoveryHookForTest(null);
       await closeWS(ws);
     }
   });
@@ -910,6 +997,28 @@ describe("Think — error handling", () => {
   );
 
   it.each([
+    { name: "retry-after", retryAfter: "7", inStream: false, delay: 7 },
+    { name: "retry-after", retryAfter: "7", inStream: true, delay: 7 },
+    { name: "retry-after-ms", retryAfterMs: "4200", inStream: false, delay: 5 },
+    { name: "retry-after-ms", retryAfterMs: "4200", inStream: true, delay: 5 }
+  ])(
+    "honors $name on an error classified transient (inStream: $inStream)",
+    async ({ retryAfter, retryAfterMs, inStream, delay }) => {
+      const agent = await freshAgent(`transient-wait-${crypto.randomUUID()}`);
+      const result = await agent.testTransientScenarioForTest({
+        classification: "transient",
+        inStream,
+        error: "api-call-503",
+        retryAfter,
+        retryAfterMs
+      });
+
+      expect(result.scheduled).toBe(1);
+      expect(result.delaySeconds).toBe(delay);
+    }
+  );
+
+  it.each([
     { error: "code-update-reset" as const, inStream: false },
     { error: "code-update-reset" as const, inStream: true },
     { error: "storage-reset" as const, inStream: false }
@@ -939,12 +1048,46 @@ describe("Think — error handling", () => {
     expect(result.finalText).toBe(result.textBeforeCancel);
   });
 
+  it("stops a recovery the user cancels while its continuation streams", async () => {
+    const agent = await freshAgent(
+      `transient-cancel-run-${crypto.randomUUID()}`
+    );
+    const result = await agent.testCancelDuringRunningRecoveryForTest();
+
+    expect(result.incident).toMatchObject({
+      status: "skipped",
+      reason: "user_cancelled"
+    });
+    expect(result.finalText).toBe(result.textBeforeCancel);
+  });
+
+  it("records the stop, not a give-up, when a stopped recovery attempt throws", async () => {
+    const agent = await freshAgent(
+      `transient-cancel-throw-${crypto.randomUUID()}`
+    );
+    const result = await agent.testStopThenThrowDuringRecoveryForTest();
+
+    expect(result.exhaustedReasons).toEqual([]);
+    expect(result.incident).toMatchObject({
+      status: "skipped",
+      reason: "user_cancelled"
+    });
+  });
+
   it("bounds a turn that streams a chunk and stalls on every attempt", async () => {
     const agent = await freshAgent(`stall-progress-${crypto.randomUUID()}`);
     const result = await agent.testRepeatedStallAfterProgressForTest(40);
 
     expect(result.scheduledAtEnd).toBe(0);
     expect(result.rounds).toBeLessThanOrEqual(10);
+  });
+
+  it("keeps an incident given up when the recovered turn that gave up returns", async () => {
+    const agent = await freshAgent(`stall-sealed-${crypto.randomUUID()}`);
+    const result = await agent.testRepeatedStallAfterProgressForTest(40);
+
+    expect(result.scheduledAtEnd).toBe(0);
+    expect(result.statuses).toEqual(["exhausted"]);
   });
 
   it("routes a transient WebSocket stream error into bounded recovery (#2085)", async () => {
@@ -1021,7 +1164,7 @@ describe("Think — error handling", () => {
     expect(result.finalStreamingParts).toBe(0);
   });
 
-  it("stops stall recovery when onChatRecovery declines to continue", async () => {
+  it("ends a stalled turn as its stream error when onChatRecovery declines to continue", async () => {
     const agent = await freshAgent(`stall-decline-${crypto.randomUUID()}`);
     const result = await agent.testStallRecoveryForTest({
       afterChunks: 3,
@@ -1029,8 +1172,15 @@ describe("Think — error handling", () => {
       recovery: { continue: false }
     });
 
-    expect(result.first.error).toBeUndefined();
-    expect(result.first.interruptedCalls).toBe(1);
+    // The caller gets the stall as an error, not a clean interruption and
+    // not a generic "declined" message.
+    expect(result.first.error).toBeTruthy();
+    expect(result.first.error).not.toContain("declined");
+    expect(result.first.interruptedCalls).toBe(0);
+    // A client that was away learns the same outcome.
+    expect((await agent.getPendingChatTerminalForTest())?.body).toBe(
+      result.first.error
+    );
     expect(result.scheduledContinues).toBe(0);
     expect(result.scheduledRetries).toBe(0);
     // The settled partial is still saved.
@@ -1197,7 +1347,9 @@ describe("Think — abort", () => {
       "partial4 "
     ]);
 
-    await agent.testChatWithAbort("Abort and persist", 2);
+    // After the first text chunk. A reply stopped before it has any content
+    // holds nothing and is not stored.
+    await agent.testChatWithAbort("Abort and persist", 4);
 
     const history = await agent.getStoredMessages();
     expect(history).toHaveLength(2);
@@ -1208,13 +1360,28 @@ describe("Think — abort", () => {
     };
     expect(assistantMsg.role).toBe("assistant");
     expect(assistantMsg.parts.length).toBeGreaterThan(0);
+    // Nothing will write into the text part again: it is stored closed.
+    expect(
+      (history[1] as UIMessage).parts.find((part) => part.type === "text")
+    ).toMatchObject({ state: "done" });
+  });
+
+  it("stores no reply for a turn stopped before it has any content", async () => {
+    const agent = await freshAgent("abort-empty");
+    await agent.setMultiChunkResponse(["partial1 ", "partial2 "]);
+
+    // Stopped after `start` and `start-step`: nothing a client can show.
+    await agent.testChatWithAbort("Abort before content", 2);
+
+    const history = (await agent.getStoredMessages()) as UIMessage[];
+    expect(history.map((message) => message.role)).toEqual(["user"]);
   });
 
   it("should recover and chat normally after abort", async () => {
     const agent = await freshAgent("abort-recover");
 
     await agent.setMultiChunkResponse(["a ", "b ", "c ", "d "]);
-    await agent.testChatWithAbort("Abort this", 2);
+    await agent.testChatWithAbort("Abort this", 4);
 
     await agent.clearMultiChunkResponse();
     const result = await agent.testChat("Normal after abort");
@@ -2857,12 +3024,110 @@ describe("Think — saveMessages with external AbortSignal", () => {
     expect(result.status).toBe("aborted");
     expect(result.requestId).toBeTruthy();
 
-    // The user message persists (it's saved before the abort gate),
-    // but the assistant message is either entirely missing OR has
-    // strictly fewer parts than a full response.
+    // The turn was stopped before it started: nothing is stored.
     const messages = (await agent.getStoredMessages()) as UIMessage[];
-    expect(messages.length).toBeGreaterThanOrEqual(1);
-    expect(messages[0].role).toBe("user");
+    expect(messages).toEqual([]);
+  });
+
+  it("stores nothing and never calls the model for a pre-aborted signal", async () => {
+    const agent = await freshProgrammaticAgent("ext-abort-pre-no-model");
+
+    const result = await agent.testSaveMessagesWithSignal("Cancel before run", {
+      preAbort: true
+    });
+
+    expect(result.status).toBe("aborted");
+    // No turn reached the model.
+    expect(await agent.getCapturedOptions()).toEqual([]);
+    expect(await agent.getStoredMessages()).toEqual([]);
+    expect(await agent.getResponseLog()).toEqual([]);
+    expect(await agent.getAbortControllerCount()).toBe(0);
+  });
+
+  it("a turn stopped after its messages are stored clears the terminal record of an earlier failure (#1645)", async () => {
+    const agent = await freshProgrammaticAgent("ext-abort-stored-terminal");
+
+    const result = await agent.testAbortedTurnAfterTerminalError("after-store");
+
+    // The message is in the transcript and the model was never called: the
+    // conversation moved, so the old failure is superseded.
+    expect(result).toEqual({
+      status: "aborted",
+      stored: 1,
+      modelCalls: 0,
+      after: null
+    });
+  });
+
+  it("a turn stopped before it starts leaves the terminal record of an earlier failure", async () => {
+    const agent = await freshProgrammaticAgent("ext-abort-pre-terminal");
+
+    const result = await agent.testAbortedTurnAfterTerminalError("before");
+
+    // It stored nothing and called nothing, so a client that reconnects
+    // still learns the turn before it failed.
+    expect(result).toMatchObject({
+      status: "aborted",
+      stored: 0,
+      modelCalls: 0
+    });
+    expect(result.after).toMatchObject({ requestId: "earlier-failure" });
+  });
+
+  it("abortAllRequests() stops a saveMessages turn still waiting in the queue", async () => {
+    const agent = await freshProgrammaticAgent("ext-abort-queued");
+    await agent.setDelayedChunkResponse(["a ", "b ", "c ", "d ", "e "], 50);
+
+    const { running, queued } =
+      await agent.testQueuedSaveMessagesStoppedByAbortAllRequests(100);
+
+    expect(running.status).toBe("aborted");
+    // The queued turn had not started. Its controller exists from the
+    // moment saveMessages is called, so the stop reaches it: it stores
+    // nothing and the model is never called for it.
+    expect(queued.status).toBe("aborted");
+    expect(await agent.getCapturedOptions()).toHaveLength(1);
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages.filter((message) => message.role === "user")).toHaveLength(
+      1
+    );
+    expect(await agent.getAbortControllerCount()).toBe(0);
+  });
+
+  it("a turn whose reply finished is completed when a clear lands while onChatResponse runs", async () => {
+    const agent = await freshProgrammaticAgent("clear-during-response-hook");
+
+    const result = await agent.testClearDuringResponseHook();
+
+    // The reply was stored and the hook was handed `completed`. The clear
+    // came after, and does not turn the turn into `skipped`.
+    expect(result).toEqual({ status: "completed", hookStatus: "completed" });
+  });
+
+  it("does not ask shouldApplyMessages again once the chat was reset", async () => {
+    const agent = await freshProgrammaticAgent("should-apply-reset-messages");
+
+    const { status, asked } = await agent.testShouldApplyAcrossReset(
+      [true, true],
+      "messages"
+    );
+
+    expect(status).toBe("skipped");
+    expect(asked).toBe(1);
+    expect(await agent.getStoredMessages()).toEqual([]);
+  });
+
+  it("a turn shouldApplyMessages declines reports aborted, reset or not", async () => {
+    const agent = await freshProgrammaticAgent("should-apply-reset-decline");
+
+    const { status, asked } = await agent.testShouldApplyAcrossReset(
+      [false],
+      "first-ask"
+    );
+
+    expect(status).toBe("aborted");
+    expect(asked).toBe(1);
+    expect(await agent.getStoredMessages()).toEqual([]);
   });
 
   it("returns status: 'aborted' when aborted mid-stream", async () => {
@@ -2876,6 +3141,8 @@ describe("Think — saveMessages with external AbortSignal", () => {
       await agent.testSaveMessagesAbortMidStream("Long response", 100);
 
     expect(result.status).toBe("aborted");
+    // The caller stopped it.
+    expect(result.reason).toBe("stopped");
     // The onChatResponse hook fires with status: "aborted" too.
     expect(lastResponseStatus).toBe("aborted");
     // Both user and partial assistant messages should be persisted.
@@ -3281,6 +3548,40 @@ describe("Think — chatRecovery", () => {
     ).resolves.toBe("completed");
   });
 
+  it("does not settle a submission as completed on a stream a reconnecting tab closed after a reset", async () => {
+    const agent = await freshRecoveryAgent(
+      `terminal-cut-off-${crypto.randomUUID()}`
+    );
+    await agent.seedRunningSubmissionForTest("cut-off-submission");
+    await agent.insertInterruptedStream(
+      "cut-off-stream",
+      "cut-off-submission",
+      [
+        {
+          body: JSON.stringify({ type: "start", messageId: "a-cut-off" }),
+          index: 0
+        },
+        { body: JSON.stringify({ type: "text-start", id: "t" }), index: 1 },
+        {
+          body: JSON.stringify({ type: "text-delta", id: "t", delta: "1 2" }),
+          index: 2
+        }
+      ],
+      "streaming",
+      { restore: true }
+    );
+    // The row now reads completed, but the model never finished the reply.
+    expect(await agent.acknowledgeResumeForTest("cut-off-submission")).toBe(
+      true
+    );
+
+    await agent.recoverSubmissionsOnStartForTest();
+
+    await expect(
+      agent.getSubmissionStatusForTest("cut-off-submission")
+    ).resolves.toBe("error");
+  });
+
   it.each(["retry", "continue"] as const)(
     "keeps pending %s recovery ahead of terminal-stream ledger settlement",
     async (recoveryKind) => {
@@ -3598,6 +3899,38 @@ describe("Think — onChatRecovery", () => {
     });
   });
 
+  it("does not continue a reply again when the recovery callback is delivered again after a reset cut its turn off", async () => {
+    const agent = await freshRecoveryAgent("recovery-redelivered");
+    const seed = {
+      incidentId: "req-redelivered:",
+      requestId: "req-redelivered",
+      recoveryKind: "continue" as const,
+      attempt: 1,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now(),
+      // The first delivery's turn started, then the isolate was reset. The
+      // interrupted turn's own recovery stores its partial and schedules the
+      // next attempt. The Task also runs this same step again.
+      scheduleCount: 1,
+      startedDelivery: 1
+    };
+    await agent.seedIncidentForTest(seed);
+
+    await agent.runChatRecoveryContinueForTestWith({
+      incidentId: "req-redelivered:",
+      originalRequestId: "req-redelivered",
+      delivery: 1
+    });
+
+    expect(await agent.getTurnBodies()).toHaveLength(0);
+    const incidents = (await agent.getChatRecoveryIncidentsForTest()) as Array<{
+      status: string;
+    }>;
+    expect(incidents[0]?.status).toBe("scheduled");
+  });
+
   it("continuation does not replay a trailing assistant message (assistant prefill)", async () => {
     const agent = await freshRecoveryAgent("continuation-prefill");
 
@@ -3689,6 +4022,19 @@ describe("Think — onChatRecovery", () => {
     // text) are durable before the stream completes — surviving an eviction
     // that would otherwise lose the result and re-run the (non-idempotent) tool.
     expect(afterToolOutputCount).toBeGreaterThan(bufferedTextCount);
+  });
+
+  it("stores a tool call before the tool runs, so a reset mid-run leaves a record of it", async () => {
+    const agent = await freshRecoveryAgent("tool-call-durability");
+
+    const { beforeCall, afterCall } =
+      await agent.probeToolCallDurabilityForTest();
+
+    // The second reasoning chunk is still in the buffer.
+    expect(beforeCall).toBe(1);
+    // The call is in storage before `execute()` starts. A tool can run for
+    // a long time with no further chunk.
+    expect(afterCall).toBeGreaterThan(beforeCall);
   });
 
   it("replays a pre-stream error to a reconnecting client (hydration)", async () => {
@@ -4152,7 +4498,9 @@ describe("Think — onChatRecovery", () => {
       role: "user",
       parts: [{ type: "text", text: "Render a preview" }]
     } as UIMessage);
-    await agent.persistTestMessage({
+    // The reply was cut off mid-execute(), so it is stored with that call
+    // settled.
+    await agent.persistCutOffReplyForTest({
       id: "assistant-1",
       role: "assistant",
       parts: [
@@ -4748,6 +5096,61 @@ describe("Think — onChatRecovery", () => {
     ]);
     expect(messages[0].id).toBe("u-empty-opened-stream");
     expect(await agent.getTurnCallCount()).toBe(1);
+  });
+
+  it("continues a cut-off turn whose stream a reconnecting tab closed before recovery ran", async () => {
+    const agent = await freshRecoveryAgent(
+      `tab-before-recovery-${crypto.randomUUID()}`
+    );
+    await agent.persistTestMessage({
+      id: "u-tab",
+      role: "user",
+      parts: [{ type: "text", text: "Count to 40" }]
+    });
+    await agent.insertInterruptedStream(
+      "stream-tab",
+      "req-tab",
+      [
+        {
+          body: JSON.stringify({ type: "start", messageId: "a-tab" }),
+          index: 0
+        },
+        { body: JSON.stringify({ type: "text-start", id: "t" }), index: 1 },
+        {
+          body: JSON.stringify({ type: "text-delta", id: "t", delta: "1 2 3" }),
+          index: 2
+        }
+      ],
+      "streaming",
+      { restore: true }
+    );
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-tab", {
+      __cfThinkChatFiberSnapshot: {
+        kind: "think-chat-turn",
+        version: 1,
+        requestId: "req-tab",
+        continuation: false,
+        latestMessageId: "u-tab",
+        latestMessageRole: "user",
+        latestUserMessageId: "u-tab",
+        startedAt: Date.now()
+      },
+      user: null
+    });
+
+    // The tab reconnects first. Its resume is acknowledged, which closes the
+    // stream nobody is producing and stores the partial.
+    expect(await agent.acknowledgeResumeForTest("req-tab")).toBe(true);
+
+    // Then the interrupted turn's recovery runs. The stream is closed, but
+    // the model never finished it: the turn is continued.
+    const scheduled = await agent.triggerFiberRecovery();
+    expect(scheduled.scheduledContinueCount).toBe(1);
+    const incidents = (await agent.getChatRecoveryIncidentsForTest()) as Array<{
+      status: string;
+      reason?: string;
+    }>;
+    expect(incidents[0]).toMatchObject({ status: "scheduled" });
   });
 
   it("continues a partial stream with request context from the recovered snapshot", async () => {
@@ -5912,7 +6315,14 @@ describe("Think — onChatRecovery", () => {
         return typeof type === "string" && type.startsWith("tool-");
       });
       expect(hasSettledTool).toBe(true);
-      expect(warnSpy).not.toHaveBeenCalled();
+      // The spy sees every agent in this isolate. A recovery attempt another
+      // test left behind can time out waiting for a stable chat meanwhile.
+      expect(
+        warnSpy.mock.calls.filter(
+          ([message]) =>
+            !String(message).includes("timed out waiting for stable state")
+        )
+      ).toEqual([]);
     } finally {
       warnSpy.mockRestore();
     }
@@ -5953,7 +6363,14 @@ describe("Think — onChatRecovery", () => {
       // nothing is persisted, and there is no warning.
       const messages = (await agent.getStoredMessages()) as UIMessage[];
       expect(messages).toHaveLength(0);
-      expect(warnSpy).not.toHaveBeenCalled();
+      // The spy sees every agent in this isolate. A recovery attempt another
+      // test left behind can time out waiting for a stable chat meanwhile.
+      expect(
+        warnSpy.mock.calls.filter(
+          ([message]) =>
+            !String(message).includes("timed out waiting for stable state")
+        )
+      ).toEqual([]);
     } finally {
       warnSpy.mockRestore();
     }
@@ -6127,7 +6544,9 @@ describe("Think — onChatRecovery", () => {
     expect(result.threw).toBe(true);
     expect(result.exhaustedContexts).toBe(0);
     expect(result.terminalBroadcast).toBeUndefined();
-    expect(result.incidentStatus).toBe("failed");
+    // A deferral is not an outcome: the incident stays live, so a stop
+    // or a continuation during the deferral still finds it.
+    expect(result.incidentStatus).toBe("attempting");
   });
 
   it("keeps a messenger reply pending while the platform re-runs recovery", async () => {
@@ -6141,7 +6560,9 @@ describe("Think — onChatRecovery", () => {
     });
 
     expect(result.threw).toBe(true);
-    expect(result.incidentStatus).toBe("failed");
+    // A deferral is not an outcome: the incident stays live, so a stop
+    // or a continuation during the deferral still finds it.
+    expect(result.incidentStatus).toBe("attempting");
     expect(result.messengerOutcome).toBeNull();
   });
 
@@ -6160,7 +6581,9 @@ describe("Think — onChatRecovery", () => {
     expect(result.threw).toBe(true);
     expect(result.exhaustedContexts).toBe(0);
     expect(result.terminalBroadcast).toBeUndefined();
-    expect(result.incidentStatus).toBe("failed");
+    // A deferral is not an outcome: the incident stays live, so a stop
+    // or a continuation during the deferral still finds it.
+    expect(result.incidentStatus).toBe("attempting");
   });
 
   it('re-throws "Network connection lost." (storage transient in a deploy-reset window) and does NOT terminalize (#1730)', async () => {
@@ -6178,7 +6601,9 @@ describe("Think — onChatRecovery", () => {
     expect(result.threw).toBe(true);
     expect(result.exhaustedContexts).toBe(0);
     expect(result.terminalBroadcast).toBeUndefined();
-    expect(result.incidentStatus).toBe("failed");
+    // A deferral is not an outcome: the incident stays live, so a stop
+    // or a continuation during the deferral still finds it.
+    expect(result.incidentStatus).toBe("attempting");
   });
 
   it("re-throws the SqlError shape (wrapped transient, retryable flag lost) and does NOT terminalize (#1730)", async () => {
@@ -6195,7 +6620,9 @@ describe("Think — onChatRecovery", () => {
     expect(result.threw).toBe(true);
     expect(result.exhaustedContexts).toBe(0);
     expect(result.terminalBroadcast).toBeUndefined();
-    expect(result.incidentStatus).toBe("failed");
+    // A deferral is not an outcome: the incident stays live, so a stop
+    // or a continuation during the deferral still finds it.
+    expect(result.incidentStatus).toBe("attempting");
   });
 
   it("re-throws the exact Durable Object storage-reset error through a SqlError cause and does NOT terminalize", async () => {
@@ -6211,7 +6638,9 @@ describe("Think — onChatRecovery", () => {
     expect(result.threw).toBe(true);
     expect(result.exhaustedContexts).toBe(0);
     expect(result.terminalBroadcast).toBeUndefined();
-    expect(result.incidentStatus).toBe("failed");
+    // A deferral is not an outcome: the incident stays live, so a stop
+    // or a continuation during the deferral still finds it.
+    expect(result.incidentStatus).toBe("attempting");
     expect(result.submissionStatus).toBe("running");
   });
 
@@ -6242,7 +6671,9 @@ describe("Think — onChatRecovery", () => {
     expect(result.threw).toBe(true);
     expect(result.exhaustedContexts).toBe(0);
     expect(result.terminalBroadcast).toBeUndefined();
-    expect(result.incidentStatus).toBe("failed");
+    // A deferral is not an outcome: the incident stays live, so a stop
+    // or a continuation during the deferral still finds it.
+    expect(result.incidentStatus).toBe("attempting");
   });
 
   it("leaves the recovered submission `running` on a deferral so the re-run picks it up (#1730)", async () => {
@@ -6379,7 +6810,9 @@ describe("Think — waitUntilStable", () => {
       parts: [{ type: "text", text: "Render a preview" }]
     } as UIMessage);
 
-    await agent.persistTestMessage({
+    // The reply was cut off mid-execute(), so it is stored with that call
+    // settled.
+    await agent.persistCutOffReplyForTest({
       id: "assistant-1",
       role: "assistant",
       parts: [

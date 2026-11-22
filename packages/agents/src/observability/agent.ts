@@ -295,12 +295,45 @@ export type AgentObservabilityEvent =
       }
     >
   | BaseEvent<
+      "chat:continuation:dropped",
+      {
+        /**
+         * The request id the continuation would have run under. `null` for
+         * a result a stop dropped before it had a continuation of its own.
+         */
+        requestId: string | null;
+        /**
+         * Why it will not run: the reply it would continue already has its
+         * answer, a newer message follows that reply, or it was stopped.
+         */
+        reason: "answered" | "moved_on" | "stopped" | "awaiting_client";
+        /**
+         * With `stopped`: the request id of the turn whose stop dropped it.
+         * Absent when the continuation itself was stopped.
+         */
+        stoppedRequestId?: string;
+      }
+    >
+  | BaseEvent<
       "chat:transcript:repaired",
       {
         requestId?: string;
         removedToolCalls: number;
         normalizedInputs: number;
         toolCallIds?: string[];
+        /** Reasoning parts removed from the end of assistant messages. */
+        removedReasoningParts?: number;
+        /**
+         * Assistant messages removed from the transcript because they held
+         * nothing once their trailing reasoning was gone, as they were
+         * stored. An app that wants to keep that reasoning copies it here.
+         */
+        removedMessages?: Array<{
+          id: string;
+          role: string;
+          parts: unknown[];
+          metadata?: unknown;
+        }>;
       }
     >
   | BaseEvent<

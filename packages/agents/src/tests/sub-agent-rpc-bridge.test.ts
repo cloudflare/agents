@@ -429,6 +429,79 @@ describe("facet connection operations after frame completion (issue #2055)", () 
     }
   });
 
+  it("sends a burst of messages from a live frame in at most one root call (#2820)", async () => {
+    const parentName = uniqueName();
+    const ws = await connectWS(parentName, uniqueName());
+    try {
+      const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+      const before = await parent.subAgentConnectionSendCallCount();
+      const messages = Array.from(
+        { length: 20 },
+        (_, index) => `live-burst-${index}-${crypto.randomUUID()}`
+      );
+      const delivered = waitForTextMessages(ws, new Set(messages));
+
+      const response = await callRPC(ws, "sendConnectionMessagesNow", [
+        messages
+      ]);
+      expectSuccessfulResult(response, "sent");
+
+      await expect(delivered).resolves.toEqual(messages);
+      expect(
+        (await parent.subAgentConnectionSendCallCount()) - before
+      ).toBeLessThanOrEqual(1);
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("sends a burst of messages after frame completion in one root call (#2820)", async () => {
+    const parentName = uniqueName();
+    const ws = await connectWS(parentName, uniqueName());
+    try {
+      const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+      const before = await parent.subAgentConnectionSendCallCount();
+      const messages = Array.from(
+        { length: 20 },
+        (_, index) => `detached-burst-${index}-${crypto.randomUUID()}`
+      );
+      const delivered = waitForTextMessages(ws, new Set(messages));
+
+      const response = await callRPC(ws, "sendConnectionMessagesAfterDelay", [
+        messages
+      ]);
+      expectSuccessfulResult(response, "scheduled");
+
+      await expect(delivered).resolves.toEqual(messages);
+      expect((await parent.subAgentConnectionSendCallCount()) - before).toBe(1);
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("starts a new root call rather than grow a batch past its size limit", async () => {
+    const parentName = uniqueName();
+    const ws = await connectWS(parentName, uniqueName());
+    try {
+      const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+      const before = await parent.subAgentConnectionSendCallCount();
+      const messages = ["a", "b"].map((prefix) =>
+        `${prefix}-${crypto.randomUUID()}-`.padEnd(600_000, "x")
+      );
+      const delivered = waitForTextMessages(ws, new Set(messages), 5000);
+
+      const response = await callRPC(ws, "sendConnectionMessagesAfterDelay", [
+        messages
+      ]);
+      expectSuccessfulResult(response, "scheduled");
+
+      await expect(delivered).resolves.toEqual(messages);
+      expect((await parent.subAgentConnectionSendCallCount()) - before).toBe(2);
+    } finally {
+      ws.close();
+    }
+  });
+
   it("reports a failed root-routed connection operation", async () => {
     const parentName = uniqueName();
     const ws = await connectWS(parentName, uniqueName());

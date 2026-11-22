@@ -14,7 +14,7 @@ Pi owns everything about a run: the transcript, the inbox of steers and follow-u
 npm install agents @earendil-works/pi-durable @earendil-works/pi-ai @earendil-works/pi-schema @earendil-works/chord
 ```
 
-The four Pi packages are optional peer dependencies of `agents`, at `~1.5.0`. pi-durable is experimental, and its API can change in minor releases, so `agents` supports one Pi minor at a time. A new Pi minor can also store conversations in formats the previous one cannot read: after a conversation runs on Pi 1.5, rolling your Worker back to an `agents` version on Pi 1.4 leaves that conversation unreadable. Roll forward to fix a bad deploy instead. The examples use Workers AI through the `AI` binding. To configure the binding and choose other models, refer to [Models for pi-ai](../models-pi-ai.md).
+The four Pi packages are optional peer dependencies of `agents`, at `~1.6.0`. pi-durable is experimental, and its API can change in minor releases, so `agents` supports one Pi minor at a time. A new Pi minor can also store conversations in formats the previous one cannot read: after a conversation runs on Pi 1.6, rolling your Worker back to an `agents` version on Pi 1.5 blocks its tool calls and model requests, as Pi 1.6 stores them in versions Pi 1.5 does not run. Roll forward to fix a bad deploy instead. The examples use Workers AI through the `AI` binding. To configure the binding and choose other models, refer to [Models for pi-ai](../models-pi-ai.md).
 
 ## Create the harness
 
@@ -43,7 +43,7 @@ export class Assistant extends DurableObject<Env> {
       );
     },
     defaults: {
-      model: this.ai("@cf/zai-org/glm-5.3-flash"),
+      model: this.ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017"),
       thinkingLevel: "low"
     }
   });
@@ -180,7 +180,7 @@ const { text } = await this.harness.prompt("What is 47 × 19?");
 
 // Another session, on a cheaper model.
 const session = await this.harness.sessions.create();
-await session.setModel(this.ai("@cf/zai-org/glm-5.3-flash"));
+await session.setModel(this.ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017"));
 
 // Durable once it returns; the same operation id twice is one submission.
 const receipt = await session.submit("Summarize the latest report", {
@@ -189,23 +189,25 @@ const receipt = await session.submit("Summarize the latest report", {
 const result = await session.wait(receipt.operationId);
 ```
 
-| Call                                                        | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `prompt(input)`                                             | Submits and waits: the answer, and the transcript after it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `submit(input, { operationId, whenBusy, whenIdle, entry })` | Hands the input to Pi and returns as soon as Pi has saved it, without waiting for the model. If the session is already working, the input waits until that work finishes. With `whenBusy: "steer"`, it joins the running work instead, after the current round of tool calls. With `whenBusy: "reject"`, it is not admitted: `submit` rejects with Pi's `ConversationBusy` and nothing is saved, so the same `operationId` can be submitted again later. With `whenIdle: "reject"`, an idle session refuses the input the same way, with Pi's `ConversationIdle`, so it never starts a run of its own; with `whenBusy: "steer"`, the input joins the running work or is refused, without racing the run's end. `entry` records where the input came from (see below). |
-| `wait(operationId, signal?)`                                | The operation's result once Pi settles it. Aborting `signal` stops only the wait, not the work.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `steer(input)`                                              | `submit` with `whenBusy: "steer"`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `continue({ operationId })`                                 | Starts a run on the transcript as it is, without a new message, for example after a run ended unanswered. Only an idle session takes one: a busy one rejects with Pi's `ConversationBusy`. Inputs kept behind a failed run join it. A transcript that ends in an answer has nothing to continue: the operation settles `unanswered` with reason `nothing_to_answer`.                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `abort(operationId?)`                                       | Withdraws a queued operation, or with no id, stops everything running in the session.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `pending()`                                                 | Operations Pi has not settled yet: queued, or part of the running work.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `messages()`                                                | Pi's transcript entries since the newest reset.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `watch(window?)`                                            | Pi's view of the session: the newest transcript entries, and the session's live state, such as the answer being streamed, running tools, and why the last run ended without an answer. Each change carries Pi's operations, for a client that forwards them.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `entries(query, limit)`                                     | A page of the session's transcript, including entries before its resets. Pages a transcript longer than the view's window.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `reset(handoff?)`                                           | Starts a new context, optionally from a handoff note.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `setModel(model)`                                           | Changes this session's model.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `busy()`                                                    | Whether a run is going.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| Call                                                                         | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `prompt(input)`                                                              | Submits and waits: the answer, and the transcript after it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `submit(input, { operationId, whenBusy, whenIdle, onAbort, entry, notify })` | Hands the input to Pi and returns as soon as Pi has saved it, without waiting for the model. If the session is already working, the input waits until that work finishes. With `whenBusy: "steer"`, it joins the running work instead, after the current round of tool calls. With `whenBusy: "reject"`, it is not admitted: `submit` rejects with Pi's `ConversationBusy` and nothing is saved, so the same `operationId` can be submitted again later. With `whenIdle: "reject"`, an idle session refuses the input the same way, with Pi's `ConversationIdle`, so it never starts a run of its own; with `whenBusy: "steer"`, the input joins the running work or is refused, without racing the run's end. With `onAbort: "keep"`, aborting the session leaves the input queued instead of withdrawing it, and the next input, `continue()` or `reset()` runs it first (a kept steer waits for the next input or `continue()`); use it for input its sender cannot send again, such as another agent's message. `entry` records where the input came from (see below). `notify` names a Pi task to signal when the input settles (see [Wait for a subagent](#wait-for-a-subagent)). |
+| `wait(operationId, signal?)`                                                 | The operation's result once Pi settles it. Aborting `signal` stops only the wait, not the work.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `steer(input)`                                                               | `submit` with `whenBusy: "steer"`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `continue({ operationId, notify })`                                          | Starts a run on the transcript as it is, without a new message, for example after a run ended unanswered. Only an idle session takes one: a busy one rejects with Pi's `ConversationBusy`. Inputs kept behind a failed run or an abort join it. A transcript that ends in an answer has nothing to continue: the operation settles `unanswered` with reason `nothing_to_answer`. `notify` works as it does on `submit`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `abort(operationId?)`                                                        | Withdraws a queued operation, or with no id, stops everything running in the session and withdraws its queued inputs, apart from those submitted with `onAbort: "keep"`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `pending()`                                                                  | Operations Pi has not settled yet: queued, or part of the running work.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `messages()`                                                                 | Pi's transcript entries since the newest reset.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `watch(window?)`                                                             | Pi's view of the session: the newest transcript entries, and the session's live state, such as the answer being streamed, running tools, and why the last run ended without an answer. Each change carries Pi's operations, for a client that forwards them.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `entries(query, limit)`                                                      | A page of the session's transcript, including entries before its resets. Pages a transcript longer than the view's window.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `reset(handoff?)`                                                            | Starts a new context, optionally from a handoff note. Inputs kept behind a failed run or an abort start a run in it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `setModel(model)`                                                            | Changes this session's model.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `busy()`                                                                     | Whether a run is going.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 
-`harness.prompt()`, `submit()`, `wait()`, `abort()`, `messages()` and `pending()` act on the root session, or on `{ session }`. `harness.sessions` has `create()`, `fork(from)`, `get(id)` and `list()`, which includes sessions subagents created. `ROOT_SESSION` is the root's id.
+`harness.prompt()`, `submit()`, `wait()`, `abort()`, `messages()` and `pending()` act on the root session, or on `{ session }`. `harness.sessions` has `create()`, `fork(from)`, `get(id)` and `list()`, which includes sessions subagents created. `ROOT_SESSION` is the root's id. `harness.signal()` delivers a signal to a parked tool call (see [Tools that wait](#tools-that-wait)).
+
+The root session is created on its first use, with `defaults`: the first call that works with it, such as `prompt()`, `submit()`, `messages()` or `watch()`, creates it. Until then `sessions.list()` does not include it, and Pi's own `pi.conversation(ROOT_CONVERSATION_ID)` through `harness.pi()` returns `undefined`. Pi's own `pi.root()` would create it without `defaults`, so use `harness.root()` instead. Calls that only read around it, such as `pending()`, `busy()` and `list()`, do not create it. To create it yourself, with your own configuration or history, call `harness.root()` (see [Seed a session with an existing history](#seed-a-session-with-an-existing-history)).
 
 `messages()` and `watch()` are Pi's own records, not a UI-ready chat transcript. The example below projects them into one.
 
@@ -226,6 +228,113 @@ function render(view: ConversationView): void {
 
 The window holds the newest 50 entries and grows to 100 before its oldest leave. To render a longer transcript, merge each value into Pi's `ConversationTranscript`, which pages older entries with `session.entries()`.
 
+### Seed a session with an existing history
+
+To start a session from a chat history your application already has, such as one imported from another system, write it into the session's transcript in the commit that creates the session. `harness.root()`, `sessions.create()` and `sessions.fork()` take Pi's `init` for that, and `agent` for the session's configuration:
+
+| Option  | What it is                                                                                                                                                                                                                                                                                                                   |
+| ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `agent` | Pi's `AgentChange`, such as `instructions` or `thinkingLevel`. For the root and `create()`, it is applied over `defaults`. A fork starts with the configuration of the session it forks, and `agent` is applied over that. As in Pi, a field that is `undefined` leaves the value underneath in place, and `null` clears it. |
+| `init`  | Pi's `ConversationInit`, `(tx, conversationId) => …`. It runs inside the commit that creates the session, after `agent`. Append one entry per message with `tx.appendEntry()`. If it throws, the commit fails and the session is not created.                                                                                |
+
+Use Pi's own entry kinds, so Pi treats the messages as if they had happened in the session: `UserEntry` for a user message, `AssistantEntry` for a model message, and `ToolResultEntry` for a tool result, with an empty `diagnostics` list. An assistant message needs `usage`, which Pi sums; an imported message has none, so give it zeros. Its `api`, `provider` and `model` name the model that wrote it, as on a message Pi stores itself; the example takes them from a model of `createAI`.
+
+```ts
+import type {
+  Api,
+  AssistantMessage,
+  Model,
+  Usage
+} from "@earendil-works/pi-ai";
+import {
+  AssistantEntry,
+  ToolResultEntry,
+  UserEntry,
+  type ConversationInit
+} from "@earendil-works/pi-durable";
+
+const NO_USAGE: Usage = {
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  totalTokens: 0,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+};
+
+/** The history, one entry per message, as `model` wrote it. */
+function history(model: Model<Api>): ConversationInit {
+  const answer = (
+    content: AssistantMessage["content"],
+    stopReason: AssistantMessage["stopReason"]
+  ): AssistantMessage => ({
+    role: "assistant",
+    content,
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+    usage: NO_USAGE,
+    stopReason,
+    timestamp: Date.now()
+  });
+  return async (tx, conversationId) => {
+    const timestamp = Date.now();
+    await tx.appendEntry(UserEntry, conversationId, {
+      model: [
+        { role: "user", content: "How many words is the draft?", timestamp }
+      ]
+    });
+    await tx.appendEntry(AssistantEntry, conversationId, {
+      model: [
+        answer(
+          [
+            {
+              type: "toolCall",
+              id: "call-1",
+              name: "word_count",
+              arguments: { text: "The quick brown fox" }
+            }
+          ],
+          "toolUse"
+        )
+      ]
+    });
+    await tx.appendEntry(ToolResultEntry, conversationId, {
+      model: [
+        {
+          role: "toolResult",
+          toolCallId: "call-1",
+          toolName: "word_count",
+          content: [{ type: "text", text: "4" }],
+          isError: false,
+          timestamp
+        }
+      ],
+      data: { diagnostics: [] }
+    });
+    await tx.appendEntry(AssistantEntry, conversationId, {
+      model: [
+        answer([{ type: "text", text: "The draft is 4 words long." }], "stop")
+      ]
+    });
+  };
+}
+
+// In the Durable Object:
+const { session, created } = await this.harness.root({
+  agent: { instructions: "You are an editor." },
+  init: history(this.ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017"))
+});
+if (!created) {
+  // The root already existed, so the history was not written.
+}
+await session.prompt("Make it longer.");
+```
+
+`harness.root()` returns the root session and `created`. When the root does not exist yet, it creates it with `agent` and `init` in one commit, and `created` is `true`. When it already exists, because a call used it first or an earlier `root()` created it, nothing is written, `init` does not run, and `created` is `false`. So call `root()` before anything else uses the root, and check `created` rather than assuming the history was written. A `root()` whose `init` throws creates nothing, so a later `root()` can try again.
+
+`sessions.create({ agent, init })` and `sessions.fork(from, { agent, init })` seed the session they create the same way. A fork's `init` appends after the history it copies from `from`.
+
 ### Label input the user did not type
 
 Pi records every submitted input as a `pi.user` entry, as if the user typed it. Your code often submits input of its own, such as a prompt from a scheduled job, a webhook payload or the outcome of an approval. To record where that input came from, pass `entry` with a `kind` of your own and any `data` you want to keep with it:
@@ -241,6 +350,86 @@ The model sees no difference: it still gets the text as a user message. Only the
 The kind is a label, not a permission. It records what your code said the input was, and nothing checks it. The model reads the input as if the user wrote it, so do not put anything in it that you would not let the user send.
 
 The example app folds the transcript into chat messages, ignores `kind` and `data`, and shows every input as a user message. To show labelled input differently, read them from the entry.
+
+### Tools that wait
+
+A Pi tool can park instead of returning: it returns `{ sleep: { signals, until } }`, and Pi runs it again when one of the signals arrives or the deadline passes. While it waits, the call holds no invocation, so the object can hibernate or be evicted. Deliver a signal with `harness.signal()`, for example from the request that carries a person's answer:
+
+```ts
+import { defineSignal } from "@earendil-works/pi-durable";
+import { obj, str } from "@earendil-works/pi-schema";
+
+const Answer = defineSignal({
+  name: "app.answer",
+  version: 1,
+  schema: obj({ text: str() })
+});
+
+// In the tool's execute(args, api, context): park until the answer comes.
+const answer = await api.readSignal(Answer, "answer", context);
+if (answer !== undefined && "value" in answer) {
+  return { output: [{ type: "text", text: answer.value.text }] };
+}
+await showQuestion(api.taskId, args.question);
+return { sleep: { signals: [Answer.key("answer")] } };
+
+// Later, in your agent, with the task id the question was shown with:
+await this.harness.signal(taskId, Answer, "answer", { text: "Yes" });
+```
+
+`harness.signal()` returns Pi's result: `delivered`, or `duplicate`, `invalid`, `closed` or `not_found` when the call did not take the value. It schedules the harness's wake before it hands Pi the value, so if the object dies while the woken call runs, the wake's alarm restarts it. Deliver signals through it rather than through `harness.pi()`.
+
+A tool can also give a `cancel()`, which Pi runs when a parked call is aborted, for example to cancel the work it was waiting on. A `beforeTool` hook can park a call the same way before it runs, to hold it for an approval, a rate limit or a budget. Pi runs that hook again each time it reopens, so the hook must be idempotent.
+
+While a call is parked, its run is still going: `pending()` lists its operation as `running`, `busy()` is `true`, and Pi's `pi.live` shows the call's slot as `sleeping` or `waiting`. Refer to [Tools that park](https://github.com/earendil-works/pi/tree/main/packages/durable#tools-that-park) in the pi-durable README for the rules a parking tool follows.
+
+#### Wait for a subagent
+
+To have a tool wait for another session's answer, create the session owned by the call, submit to it with `notify`, and park on Pi's `SubmissionSettled` signal under the same key. This is Pi's own subagent pattern:
+
+```ts
+import { SubmissionSettled } from "@earendil-works/pi-durable";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
+
+// Inside a tool's execute({ task }, api, context):
+const state = await api.readSignal(SubmissionSettled, "answered", context);
+if (state !== undefined && "value" in state) {
+  const settled = state.value;
+  if (settled.status !== "done" || settled.type === "write") {
+    return {
+      output: [{ type: "text", text: `Subagent ended: ${settled.status}` }],
+      isError: true
+    };
+  }
+  const answer = await api.commit((tx) => tx.entry(settled.answer), context);
+  const message = answer?.model?.[0] as AssistantMessage;
+  return { output: message.content.filter((part) => part.type === "text") };
+}
+// The call's own child: found again on a rerun, stopped with the call.
+const child = await api.commit(async (tx) => {
+  const existing = (await tx.scanConversations({ ownerTaskId: api.taskId }, 1))
+    .items[0];
+  if (existing !== undefined) return existing.id;
+  const created = await tx.createConversation({
+    ownership: { kind: "task", taskId: api.taskId }
+  });
+  return created.id;
+}, context);
+await (
+  await api.conversation(child, context)
+)?.submit(
+  {
+    type: "input",
+    content: task,
+    requestId: `subagent:${api.taskId}`,
+    notify: { taskId: api.taskId, key: "answered" }
+  },
+  context
+);
+return { sleep: { signals: [SubmissionSettled.key("answered")] } };
+```
+
+When the child's input settles, Pi delivers the settled record to the call in the same commit, and the tool runs again with it. Because the child is owned by the call, aborting the parent session stops the child too, and a rerun before the park was stored finds the same child instead of creating another. The `requestId` makes a rerun find the same submission. If the task to notify has ended or does not exist, the input still settles as usual. `session.submit()` and `session.continue()` take the same `notify` option, for a child your own code created.
 
 ### Inputs queued behind a failed run
 
@@ -266,11 +455,11 @@ harness: ({ storage, context, onWake }) =>
 | `continue`       | `wait()` returns their results as usual. If the cause persists, such as a missing model, each queued input fails in its own run.                                                                               |
 | `withdraw`       | `wait()` returns `{ status: "unanswered", reason: "run_failed" }`, and `pending()` no longer lists them.                                                                                                       |
 
-With `keep`, the kept inputs are not work to Pi: its `wake()` counts tasks, not queued inputs. The wake job completes, and the object can hibernate until the next `submit()` or `reset()`. Pass a `signal` to `wait()` if a caller should not wait that long. To withdraw a kept input, call `abort(operationId)`, which settles it `unanswered` with reason `aborted`. `session.abort()` with no id stops the whole session, which withdraws every kept input too.
+With `keep`, the kept inputs are not work to Pi: its `wake()` counts tasks, not queued inputs. The wake job completes, and the object can hibernate until the next `submit()` or `reset()`. Pass a `signal` to `wait()` if a caller should not wait that long. To withdraw a kept input, call `abort(operationId)`, which settles it `unanswered` with reason `aborted`. `session.abort()` with no id stops the whole session, which withdraws every kept input too, apart from those submitted with `onAbort: "keep"`.
 
 ## How recovery works
 
-The harness schedules one lifecycle job, driven by Pi's `wake()`. While Pi has work running, the job waits on it and refreshes itself as a heartbeat. While Pi's tasks sleep, such as a retry backoff, the job is due when the first one wakes. Pi says when through the `onWake` the factory passes to `Harness.open`, and sets no in-memory timer of its own, so the object can hibernate until then. A task that sleeps while other work runs, such as a compaction retry during a generation, is resumed from the job's wait when it is due. Without `onWake` the harness still works, but Pi's timer keeps the object in memory, and billed, while a task sleeps, and the harness logs a warning. When Pi has nothing to do, the job completes. If the object is evicted or crashes, the job is still due, so its alarm restarts the object. Pi reopens its stored state and resumes the session's work: a replay-safe tool call runs again, and an unsafe one is reported to the model as interrupted. A model request cut off mid-answer is not sent again at once: it counts as a failed attempt under `settings.retry`, and the next attempt waits out the backoff. With no retry left, the operation ends unanswered with reason `interrupted`.
+The harness schedules one lifecycle job, driven by Pi's `wake()`. While Pi has work running, the job waits on it and refreshes itself as a heartbeat. While Pi's tasks sleep, such as a retry backoff, the job is due when the first one wakes. Pi says when through the `onWake` the factory passes to `Harness.open`, and sets no in-memory timer of its own, so the object can hibernate until then. A task that sleeps while other work runs, such as a compaction retry during a generation, is resumed from the job's wait when it is due. Without `onWake` the harness still works, but Pi's timer keeps the object in memory, and billed, while a task sleeps, and the harness logs a warning. When Pi has nothing to do, the job completes. That includes a tool parked on a signal with no deadline: nothing is due, so no alarm is set, and the object sleeps until your code delivers the signal with `harness.signal()`, which opens Pi again, schedules the wake and resumes the call. If the object is evicted or crashes, the job is still due, so its alarm restarts the object. Pi reopens its stored state and resumes the session's work: a replay-safe tool call runs again, and an unsafe one is reported to the model as interrupted. A model request cut off mid-answer is not sent again at once: it counts as a failed attempt under `settings.retry`, and the next attempt waits out the backoff. With no retry left, the operation ends unanswered with reason `interrupted`.
 
 Pi shows a streaming answer and running tool output at once, but stores them in batches: with the next change that depends on them, such as the end of the answer, and at the latest after `settings.progress.persistWithinMs` (default 1,000 ms). A crash mid-stream loses up to that much of the stream, and a generation cut off before its first store leaves no partial answer in the transcript. To store every update instead, at the cost of a storage write each, set `settings: { progress: { persistWithinMs: 0 } }` in the factory's `Harness.open`.
 

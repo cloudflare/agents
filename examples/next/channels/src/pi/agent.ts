@@ -17,7 +17,7 @@ import { PiHarness } from "agents/harness/pi";
 import { createAI } from "agents/models/pi-ai";
 import { piChannelsHarness } from "./channels-harness";
 
-const MODEL_ID = "@cf/moonshotai/kimi-k2.7-code";
+const MODEL_ID = "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
 
 const PREAMBLE =
   "You are a concise assistant. Use current_time when asked about the time.";

@@ -8,7 +8,7 @@
  *
  * const ai = createAI({ binding: env.AI });
  *
- * const model = ai("@cf/moonshotai/kimi-k2.7-code"); // { providerID, id }
+ * const model = ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017"); // { providerID, id }
  * ai("anthropic/claude-opus-4.8"); // an AI Gateway catalog model
  * await OpenCodeWorkerd.create({ storage, plugins: [ai.plugin] });
  * ```

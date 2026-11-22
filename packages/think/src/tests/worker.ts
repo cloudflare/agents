@@ -44,6 +44,8 @@ export {
   ThinkScheduledTasksTestAgent,
   ThinkAsyncHookTestAgent,
   ThinkRecoveryTestAgent,
+  ThinkAdmissionTestAgent,
+  ThinkLatestAdmissionTestAgent,
   ThinkNonRecoveryTestAgent,
   ThinkAgentToolParent,
   ThinkNestedMiddleAgent,
@@ -97,6 +99,8 @@ import type {
   ThinkScheduledTasksTestAgent,
   ThinkAsyncHookTestAgent,
   ThinkRecoveryTestAgent,
+  ThinkAdmissionTestAgent,
+  ThinkLatestAdmissionTestAgent,
   ThinkNonRecoveryTestAgent,
   ThinkAgentToolParent,
   ThinkNestedMiddleAgent,
@@ -254,6 +258,8 @@ export type Env = {
   ThinkScheduledTasksTestAgent: DurableObjectNamespace<ThinkScheduledTasksTestAgent>;
   ThinkAsyncHookTestAgent: DurableObjectNamespace<ThinkAsyncHookTestAgent>;
   ThinkRecoveryTestAgent: DurableObjectNamespace<ThinkRecoveryTestAgent>;
+  ThinkAdmissionTestAgent: DurableObjectNamespace<ThinkAdmissionTestAgent>;
+  ThinkLatestAdmissionTestAgent: DurableObjectNamespace<ThinkLatestAdmissionTestAgent>;
   ThinkNonRecoveryTestAgent: DurableObjectNamespace<ThinkNonRecoveryTestAgent>;
   ThinkAgentToolParent: DurableObjectNamespace<ThinkAgentToolParent>;
   ThinkNestedMiddleAgent: DurableObjectNamespace<ThinkNestedMiddleAgent>;

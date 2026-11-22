@@ -99,7 +99,7 @@ case "$MODE" in
     run_client 2026-07-28 conformance/baseline-client-2026-07-28.yml "$@"
     ;;
   client-2025-11-25)
-    run_client 2025-11-25 conformance/baseline-client-2025-11-25.yml "$@"
+    run_client 2025-11-25 "" "$@"
     ;;
   client-2025-06-18)
     run_client 2025-06-18 "" "$@"

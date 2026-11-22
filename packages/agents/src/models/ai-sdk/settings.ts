@@ -19,6 +19,7 @@ export {
   DEFAULT_GATEWAY_ID,
   PROVIDER_OPTIONS_KEY,
   gatewayLayerOf,
+  isGatewayConfigured,
   mergeModelOptions,
   parseModelOptions,
   resolveOptions,

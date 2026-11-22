@@ -230,6 +230,20 @@ describe("AIChatAgent messageConcurrency", () => {
     expect(userTexts).toEqual(
       expect.arrayContaining(["Hello", "Second", "Third"])
     );
+    // The queued questions wait off the transcript, then join after the
+    // first reply. The turn that answers them sees them last.
+    expect(persistedMessages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "user",
+      "assistant"
+    ]);
+    const seen = await agentStub.getTranscriptsSeenForTest();
+    expect(seen).toEqual([
+      ["user-1"],
+      ["user-1", persistedMessages[1].id, "user-2", "user-3"]
+    ]);
 
     ws.close(1000);
   });
@@ -378,7 +392,77 @@ describe("AIChatAgent messageConcurrency", () => {
       expect.arrayContaining(["Hello", "Second\n\nThird"])
     );
     expect(userMessages).toHaveLength(2);
+    // One merged question, after the first reply, answered by one turn.
+    expect(persistedMessages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "assistant"
+    ]);
+    const seen = await agentStub.getTranscriptsSeenForTest();
+    expect(seen).toEqual([
+      ["user-1"],
+      ["user-1", persistedMessages[1].id, "user-3"]
+    ]);
 
+    ws.close(1000);
+  });
+
+  it("merge holds queued messages when persistMessages is overridden", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(
+      `/agents/overriding-persist-merge-agent/${room}`
+    );
+    await delay(50);
+    const agentStub = await getAgentByName(
+      env.OverridingPersistMergeAgent,
+      room
+    );
+    sendChatRequest(ws, "req-om-1", [firstUserMessage], {
+      format: "plaintext",
+      chunkCount: 15,
+      chunkDelayMs: 100
+    });
+    await delay(100);
+    sendChatRequest(ws, "req-om-2", [firstUserMessage, secondUserMessage], {
+      format: "plaintext",
+      chunkCount: 2,
+      chunkDelayMs: 10
+    });
+    await delay(50);
+    sendChatRequest(
+      ws,
+      "req-om-3",
+      [firstUserMessage, secondUserMessage, thirdUserMessage],
+      { format: "plaintext", chunkCount: 2, chunkDelayMs: 10 }
+    );
+    await waitForOverlappingSubmits(agentStub, 2);
+    // Waiting, not stored, though the override does not pass options on.
+    expect(
+      ((await agentStub.getPersistedMessages()) as ChatMessage[]).map(
+        (m) => m.id
+      )
+    ).toEqual(["user-1"]);
+    await agentStub.waitForIdleForTest();
+    const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    // Both questions join after the first reply and one turn answers them.
+    // (The override drops the delete that collapses them into one message,
+    // as it did before.)
+    expect(persisted.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "user",
+      "assistant"
+    ]);
+    expect(persisted[2].id).toBe("user-2");
+    expect(
+      persisted[3].parts.flatMap((p) => (p.type === "text" ? [p.text] : []))
+    ).toEqual(["Second\n\nThird"]);
+    expect(await agentStub.getStartedRequestIds()).toEqual([
+      "req-om-1",
+      "req-om-3"
+    ]);
     ws.close(1000);
   });
 
@@ -463,6 +547,20 @@ describe("AIChatAgent messageConcurrency", () => {
     expect(userTexts).toEqual(
       expect.arrayContaining(["Hello", "Second", "Third"])
     );
+    // The queued questions wait off the transcript, then join after the
+    // first reply. The turn that answers them sees them last.
+    expect(persistedMessages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "user",
+      "assistant"
+    ]);
+    const seen = await agentStub.getTranscriptsSeenForTest();
+    expect(seen).toEqual([
+      ["user-1"],
+      ["user-1", persistedMessages[1].id, "user-2", "user-3"]
+    ]);
 
     ws.close(1000);
   });
@@ -972,5 +1070,78 @@ describe("AIChatAgent messageConcurrency", () => {
     expect(results.every((r) => r.status === "completed")).toBe(true);
 
     ws.close(1000);
+  });
+
+  it("queue: cancelling a queued request stops it from starting (#2701)", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/slow-stream-agent/${room}`);
+    const seenMessages = recordMessages(ws);
+    const agentStub = await getAgentByName(env.SlowStreamAgent, room);
+    const firstId = "req-queued-cancel-1";
+    const secondId = "req-queued-cancel-2";
+
+    try {
+      sendChatRequest(ws, firstId, [firstUserMessage], {
+        format: "plaintext",
+        useAbortSignal: true,
+        chunkCount: 100,
+        chunkDelayMs: 100
+      });
+      await waitForActiveRequest(agentStub, firstId);
+
+      const secondDone = waitForDone(ws, secondId);
+      sendChatRequest(ws, secondId, [firstUserMessage, secondUserMessage], {
+        format: "plaintext",
+        useAbortSignal: true,
+        chunkCount: 1,
+        chunkDelayMs: 10
+      });
+      // It waits with its message on its record, not in the transcript.
+      await waitUntil(async () =>
+        (await agentStub.getQueuedMessageIdsForTest()).includes(
+          secondUserMessage.id
+        )
+      );
+      expect(
+        ((await agentStub.getPersistedMessages()) as ChatMessage[]).map(
+          (message) => message.id
+        )
+      ).toEqual([firstUserMessage.id]);
+      expect(await agentStub.getStartedRequestIds()).toEqual([firstId]);
+
+      // Cancel the queued request first, then the active one so the queued
+      // request reaches the front of the queue.
+      for (const id of [secondId, firstId]) {
+        ws.send(
+          JSON.stringify({ type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL, id })
+        );
+      }
+      await secondDone;
+      await agentStub.waitForIdleForTest();
+
+      expect(await agentStub.getStartedRequestIds()).toEqual([firstId]);
+
+      const secondTerminal = seenMessages.find(
+        (message) =>
+          isUseChatResponseMessage(message) &&
+          message.id === secondId &&
+          message.done
+      );
+      expect(secondTerminal).toMatchObject({ outcome: "aborted" });
+
+      const results =
+        (await agentStub.getChatResponseResults()) as ChatResponseResult[];
+      expect(results.map((r) => [r.requestId, r.status])).toEqual([
+        [firstId, "aborted"]
+      ]);
+
+      // The cancelled request never ran, so it must not replace the stored
+      // request context that tool continuations read.
+      expect(await agentStub.getLastBodyForTest()).toMatchObject({
+        chunkCount: 100
+      });
+    } finally {
+      ws.close(1000);
+    }
   });
 });

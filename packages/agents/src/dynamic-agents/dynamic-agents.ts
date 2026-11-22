@@ -64,6 +64,25 @@ export const CF_SUB_AGENT_TAGS_KEY = "_cf_subAgentTags";
  */
 export const CF_SUB_AGENT_DELETED_KEY = "_cf_subAgentDeleted";
 
+/** Consecutive sends queued for one sub-agent connection. */
+type PendingConnectionSends = {
+  messages: Array<string | ArrayBuffer | ArrayBufferView>;
+  size: number;
+};
+
+/**
+ * A batch takes no send that would grow it past this size (string length or
+ * byte length), so one root call stays far below the RPC message size limit.
+ * A larger send goes alone, as it did before batching.
+ */
+const MAX_CONNECTION_SEND_BATCH_SIZE = 1_000_000;
+
+function connectionSendSize(
+  message: string | ArrayBuffer | ArrayBufferView
+): number {
+  return typeof message === "string" ? message.length : message.byteLength;
+}
+
 /** Wire-frozen internal header carrying the outer URL on WS upgrades. */
 export const SUB_AGENT_OUTER_URL_HEADER = "x-cf-agents-subagent-url";
 
@@ -149,6 +168,12 @@ export class DynamicAgentsInternal extends LifecycleCapability {
 
   /** Per-connection operation queues (send/setState/close ordering). */
   #connectionOperationTails = new Map<string, Promise<void>>();
+
+  /**
+   * The newest queued send batch per connection, while it can still take
+   * sends: it has not started and nothing was queued behind it.
+   */
+  #openConnectionSendBatches = new Map<string, PendingConnectionSends>();
 
   /** One-way barrier so facet broadcasts wait for older queued operations. */
   #broadcastOperationTail?: Promise<void>;
@@ -937,6 +962,9 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     operationName: DynamicAgentConnectionOperationName,
     operation: (bridge: DynamicAgentConnectionBridgeLike) => unknown
   ): void {
+    // Anything queued now runs after the open batch, so later sends must not
+    // join that batch and overtake it.
+    this.#openConnectionSendBatches.delete(connectionId);
     const activeBridge = this.activeBridge(connectionId);
     const previousConnectionOperation =
       this.#connectionOperationTails.get(connectionId);
@@ -972,6 +1000,47 @@ export class DynamicAgentsInternal extends LifecycleCapability {
         this.#connectionOperationTails.delete(connectionId);
       }
     });
+  }
+
+  /**
+   * Route a virtual sub-agent connection send. A send that would wait behind
+   * another operation joins the waiting send batch instead, so a burst (such
+   * as a stream replay) costs one root call, not one per frame (#2820).
+   * Order is unchanged: a batch only ever holds consecutive sends.
+   */
+  routeConnectionSend(
+    connectionId: string,
+    message: string | ArrayBuffer | ArrayBufferView
+  ): void {
+    const size = connectionSendSize(message);
+    const open = this.#openConnectionSendBatches.get(connectionId);
+    if (open && open.size + size <= MAX_CONNECTION_SEND_BATCH_SIZE) {
+      open.messages.push(message);
+      open.size += size;
+      return;
+    }
+
+    const batch: PendingConnectionSends = { messages: [message], size };
+    let closed = false;
+    const close = () => {
+      closed = true;
+      if (this.#openConnectionSendBatches.get(connectionId) === batch) {
+        this.#openConnectionSendBatches.delete(connectionId);
+      }
+    };
+    this.routeConnectionOperation(connectionId, "send", (bridge) => {
+      close();
+      const [only] = batch.messages;
+      return batch.messages.length === 1
+        ? bridge.send(only)
+        : bridge.sendMany(batch.messages);
+    });
+    // An idle live frame bridge runs the operation synchronously.
+    if (closed) return;
+    this.#openConnectionSendBatches.set(connectionId, batch);
+    // The operation never runs when resolving the root fails; stop taking
+    // sends then too.
+    void this.#connectionOperationTails.get(connectionId)?.then(close);
   }
 
   /**
@@ -1115,6 +1184,17 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       return;
     }
     connection.send(message);
+  }
+
+  async sendManyToConnection(
+    connectionId: string,
+    messages: ReadonlyArray<string | ArrayBuffer | ArrayBufferView>
+  ): Promise<void> {
+    const connection = this.#host._webSockets.getConnection(connectionId);
+    if (!connection || !this.connectionHasChildTarget(connection)) {
+      return;
+    }
+    for (const message of messages) connection.send(message);
   }
 
   async closeConnection(
@@ -1585,9 +1665,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
         return state;
       },
       send(message: string | ArrayBuffer | ArrayBufferView) {
-        owner.routeConnectionOperation(meta.id, "send", (bridge) =>
-          bridge.send(message)
-        );
+        owner.routeConnectionSend(meta.id, message);
       },
       close(code?: number, reason?: string) {
         owner.routeConnectionOperation(meta.id, "close", (bridge) =>

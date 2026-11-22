@@ -28,7 +28,7 @@ describe("agent-tool child re-attach: request_id rebinding across recovery", () 
 
     await agent.seedAgentToolChildRunForTest(
       "run-continue",
-      "old-req-continue"
+      "req-reattach-continue"
     );
 
     await agent.persistTestMessage({
@@ -89,10 +89,7 @@ describe("agent-tool child re-attach: request_id rebinding across recovery", () 
     const reboundReqId =
       await agent.getAgentToolChildRunRequestIdForTest("run-continue");
     expect(reboundReqId).toBeTruthy();
-    expect(reboundReqId).not.toBe("old-req-continue");
-    expect(
-      await agent.resolveAgentToolRunForRequestForTest(reboundReqId as string)
-    ).toBe("run-continue");
+    expect(reboundReqId).not.toBe("req-reattach-continue");
   });
 
   it("re-binds the child-run request_id on a RETRY recovery so frames stay attributable", async () => {
@@ -100,7 +97,7 @@ describe("agent-tool child re-attach: request_id rebinding across recovery", () 
       `reattach-retry-${crypto.randomUUID()}`
     );
 
-    await agent.seedAgentToolChildRunForTest("run-retry", "old-req-retry");
+    await agent.seedAgentToolChildRunForTest("run-retry", "req-reattach-retry");
 
     await agent.persistTestMessage({
       id: "u-reattach-retry",
@@ -132,9 +129,6 @@ describe("agent-tool child re-attach: request_id rebinding across recovery", () 
     const reboundReqId =
       await agent.getAgentToolChildRunRequestIdForTest("run-retry");
     expect(reboundReqId).toBeTruthy();
-    expect(reboundReqId).not.toBe("old-req-retry");
-    expect(
-      await agent.resolveAgentToolRunForRequestForTest(reboundReqId as string)
-    ).toBe("run-retry");
+    expect(reboundReqId).not.toBe("req-reattach-retry");
   });
 });

@@ -105,6 +105,15 @@ type ChatStreamMetadata = {
    */
   parentMessageId?: string;
   /**
+   * Set when the stream extends an existing assistant message (`messageId`):
+   * how many parts that message held when the stream started. The stream's
+   * chunks hold only what came after, so orphan recovery replays them onto
+   * that many leading parts of the stored message, which keeps the earlier
+   * parts and makes recovering the same stream twice idempotent. Absent for a
+   * stream that produces a message of its own.
+   */
+  basePartCount?: number;
+  /**
    * Whether this stream is a continuation (appends to the last assistant
    * message rather than starting a new one). Live broadcast frames carry
    * `continuation: true`, and replay frames must too (#1733): without it a
@@ -130,6 +139,13 @@ type ChatStreamMetadata = {
    * that completed normally.
    */
   outcome?: ChatTurnOutcome;
+  /**
+   * Set when the stream was closed with no producer left: an isolate reset
+   * cut the turn off, and a reconnecting tab's resume (or recovery itself)
+   * closed the row. The row reads `completed`, but the model never finished
+   * the reply, so recovery still continues the turn.
+   */
+  cutOff?: boolean;
   /** Terminal evidence pinned until its consumer durably settles and releases it. */
 };
 
@@ -540,6 +556,7 @@ export class ResumableStream {
     options: {
       messageId?: string;
       parentMessageId?: string;
+      basePartCount?: number;
       continuation?: boolean;
       originMessageIds?: string[];
     } = {}
@@ -564,6 +581,9 @@ export class ResumableStream {
     if (options.messageId != null) metadata.messageId = options.messageId;
     if (options.parentMessageId != null) {
       metadata.parentMessageId = options.parentMessageId;
+    }
+    if (options.basePartCount != null) {
+      metadata.basePartCount = options.basePartCount;
     }
     if (this._activeIsContinuation) metadata.isContinuation = 1;
     if (seqBase > 0) metadata.seqBase = seqBase;
@@ -598,6 +618,16 @@ export class ResumableStream {
     const row = this.ops.getStream(streamId);
     if (!row) return null;
     return parseChatMetadata(row)?.messageId ?? null;
+  }
+
+  /**
+   * How many parts the message an orphaned stream extends held when the
+   * stream started, or null when the stream produces a message of its own.
+   */
+  getStreamBasePartCount(streamId: string): number | null {
+    const row = this.ops.getStream(streamId);
+    if (!row) return null;
+    return parseChatMetadata(row)?.basePartCount ?? null;
   }
 
   /**
@@ -657,12 +687,20 @@ export class ResumableStream {
     }
   }
 
-  private _recordOutcome(streamId: string, outcome?: ChatTurnOutcome): void {
-    if (outcome === undefined || outcome === "completed") return;
+  private _recordOutcome(
+    streamId: string,
+    outcome?: ChatTurnOutcome,
+    cutOff = false
+  ): void {
+    if (!cutOff && (outcome === undefined || outcome === "completed")) return;
     const row = this.ops.getStream(streamId);
     const chat = row ? parseChatMetadata(row) : null;
     if (!chat) return;
-    this.ops.setMetadata(streamId, { ...chat, outcome });
+    this.ops.setMetadata(streamId, {
+      ...chat,
+      ...(outcome !== undefined && outcome !== "completed" && { outcome }),
+      ...(cutOff && { cutOff: true })
+    });
   }
 
   /**
@@ -676,7 +714,8 @@ export class ResumableStream {
     const orphaned = streamId === this._activeStreamId && !this._isLive;
     this._recordOutcome(
       streamId,
-      outcome ?? (orphaned ? "aborted" : undefined)
+      outcome ?? (orphaned ? "aborted" : undefined),
+      orphaned
     );
     this.ops.settle(streamId, "completed", null);
     if (this._pendingCutover === streamId) this._pendingCutover = null;
@@ -920,7 +959,8 @@ export class ResumableStream {
         requestId,
         this._storedBodies(streamId),
         continuation,
-        this._seqBase(streamId)
+        this._seqBase(streamId),
+        this.getStreamMessageId(streamId) ?? undefined
       )
     ) {
       // Connection closed mid-replay — leave the stream active so the
@@ -989,7 +1029,8 @@ export class ResumableStream {
         requestId,
         this._storedBodies(row.stream_id),
         continuation,
-        chat?.seqBase
+        chat?.seqBase,
+        chat?.messageId
       )
     ) {
       return false;
@@ -1026,7 +1067,8 @@ export class ResumableStream {
         requestId,
         this._storedBodies(row.stream_id),
         continuation,
-        chat.seqBase
+        chat.seqBase,
+        chat.messageId
       )
     ) {
       return false;
@@ -1065,7 +1107,8 @@ export class ResumableStream {
       requestId,
       this._storedBodies(row.stream_id),
       chat?.isContinuation === 1,
-      chat?.seqBase
+      chat?.seqBase,
+      chat?.messageId
     );
   }
 
@@ -1073,15 +1116,24 @@ export class ResumableStream {
    * Latest chat stream row for a request regardless of status — the recovery
    * engines' stream-evidence lookup.
    */
-  latestStreamInfoForRequest(
-    requestId: string
-  ): { id: string; status: PublicStreamStatus; createdAt: number } | null {
+  latestStreamInfoForRequest(requestId: string): {
+    id: string;
+    status: PublicStreamStatus;
+    createdAt: number;
+    /**
+     * The stream was closed with no producer left (see
+     * {@link ChatStreamMetadata.cutOff}). Its `completed` status says the
+     * row is closed, not that the reply finished.
+     */
+    cutOff: boolean;
+  } | null {
     const row = this._latestChatRowByTag(requestId);
     if (!row) return null;
     return {
       id: row.stream_id,
       status: toPublicStatus(row.state),
-      createdAt: row.created_at
+      createdAt: row.created_at,
+      cutOff: parseChatMetadata(row)?.cutOff === true
     };
   }
 

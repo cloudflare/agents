@@ -66,12 +66,49 @@ export interface TransportRequest {
    * directly: AI Gateway does not accept the body.
    */
   audio?: RawAudio;
+  /**
+   * Form fields for a Workers AI model that takes its whole input as
+   * multipart form data (`multipart: { body, contentType }`, as the FLUX.2
+   * image models do). `input` is not sent. Like `audio`, the request goes to
+   * Workers AI directly: AI Gateway does not accept the body.
+   */
+  multipart?: MultipartFields;
 }
 
 /** Audio bytes and their media type, sent as a request body of their own. */
 export interface RawAudio {
   bytes: Uint8Array;
   contentType: string;
+}
+
+/** A file in a multipart form: its bytes and their media type. */
+export interface MultipartFile {
+  bytes: Uint8Array;
+  contentType: string;
+}
+
+/**
+ * The fields of a multipart form body, by name: text, or a file.
+ *
+ * @experimental This surface is experimental and may change.
+ */
+export type MultipartFields = Record<string, string | MultipartFile>;
+
+/** Builds the `FormData` a multipart request sends. */
+function multipartForm(fields: MultipartFields): FormData {
+  const form = new FormData();
+  for (const [name, value] of Object.entries(fields)) {
+    if (typeof value === "string") {
+      form.append(name, value);
+    } else {
+      form.append(
+        name,
+        new Blob([new Uint8Array(value.bytes)], { type: value.contentType }),
+        name
+      );
+    }
+  }
+  return form;
 }
 
 /**
@@ -499,6 +536,29 @@ function bindingTransport(binding: Ai): Transport {
     },
     async run(request) {
       try {
+        if (request.multipart !== undefined) {
+          // `FormData` does not expose its serialized body or boundary; a
+          // `Response` serializes it and writes the content type, boundary
+          // included. TODO: send this through the gateway once AI Gateway
+          // takes a stream body, as for raw audio below.
+          const form = new Response(multipartForm(request.multipart));
+          return await raw.run(
+            request.model,
+            {
+              multipart: {
+                body: form.body,
+                contentType: form.headers.get("content-type")
+              }
+            },
+            {
+              ...(Object.keys(request.headers).length > 0
+                ? { extraHeaders: request.headers }
+                : {}),
+              returnRawResponse: true,
+              signal: request.signal
+            }
+          );
+        }
         if (request.audio !== undefined) {
           // TODO: send this through the gateway once AI Gateway takes a stream
           // body; today the binding refuses one when `gateway` is set.
@@ -696,11 +756,42 @@ function httpTransport({ accountId, apiToken }: AccountAccess): Transport {
     }
   }
 
+  /**
+   * A multipart body goes to Workers AI's own run route too. `fetch` writes
+   * the content type with the form's boundary, so the caller's must not
+   * replace it.
+   */
+  async function runMultipart(
+    request: TransportRequest,
+    fields: MultipartFields
+  ): Promise<Response> {
+    const url = `${runBase}/run/${request.model}`;
+    const headers = withCredential(request.headers, "authorization", apiToken);
+    headers.delete("content-type");
+    try {
+      const response = await fetch(url, {
+        body: multipartForm(fields),
+        headers,
+        method: "POST",
+        signal: request.signal
+      });
+      return await bareWorkersAIAnswer(response);
+    } catch (error) {
+      throw normalizeThrownError(error, {
+        model: request.model,
+        requestBodyValues: request.input,
+        url
+      });
+    }
+  }
+
   return {
     logIdFallback() {
       return undefined;
     },
     async run(request) {
+      if (request.multipart !== undefined)
+        return runMultipart(request, request.multipart);
       if (request.audio !== undefined)
         return runRawAudio(request, request.audio);
       const workersAI = isWorkersAIId(request.model);

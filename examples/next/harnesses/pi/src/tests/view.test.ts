@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
-import type { PiSessionView } from "../view";
+import type { TranscriptView } from "@earendil-works/pi-durable";
+import { projectView, type PiSessionView } from "../view";
 
 /**
  * `projectView` turns pi's conversation view into this app's, on the server
@@ -32,5 +33,49 @@ describe("the session view", () => {
     expect(texts[0]).toBe("Context reset");
     expect(texts).toContain("after the reset");
     expect(texts).not.toContain("before the reset");
+  });
+
+  it("shows a compaction as a summary notice, not a user message", async () => {
+    const stub = env.PI_HARNESS_TEST.getByName(crypto.randomUUID());
+    await stub.wait((await stub.submit("first question")).operationId);
+    await stub.wait((await stub.submit("second question")).operationId);
+    await stub.compact();
+    const view = JSON.parse(await stub.snapshotView()) as PiSessionView;
+    const text = (message: PiSessionView["messages"][number]) =>
+      message.parts.map((part) => ("text" in part ? part.text : "")).join("");
+    const summaries = view.messages.filter(
+      (message) => message.role === "summary"
+    );
+    expect(summaries).toHaveLength(1);
+    // The faux model echoes the summarization prompt: the summary, unwrapped.
+    expect(text(summaries[0])).toMatch(/^echo: /);
+    expect(text(summaries[0])).not.toContain("<summary>");
+    // The messages it summarized still show, in place.
+    expect(view.messages.map(text)).toContain("first question");
+    for (const message of view.messages) {
+      if (message.role === "user") {
+        expect(text(message)).not.toContain("<summary>");
+      }
+    }
+  });
+
+  it("keeps a parked tool call, marked as parked", () => {
+    const view = projectView({
+      items: [],
+      docs: {
+        "pi.live": {
+          run: {},
+          tools: [
+            { callId: "a", name: "ask_person", status: "sleeping" },
+            { callId: "b", name: "search", status: "running", output: "…" },
+            { callId: "c", name: "done_tool", status: "done" }
+          ]
+        }
+      }
+    } as unknown as TranscriptView);
+    expect(view.tools).toEqual([
+      { callId: "a", name: "ask_person", output: "", parked: true },
+      { callId: "b", name: "search", output: "…", parked: false }
+    ]);
   });
 });

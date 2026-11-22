@@ -13,7 +13,10 @@
  *   - `prepare` — Think strips internal parts and may skip (`null`); ai-chat
  *     resolves the persist-target id from stream metadata;
  *   - `merge` — Think replaces the whole message; ai-chat reconciles partials
- *     so an in-place tool result isn't re-advanced by a replayed chunk; and
+ *     so an in-place tool result isn't re-advanced by a replayed chunk;
+ *   - `continues` — Think passes it for a stream that extended an existing
+ *     assistant message, so the chunks are replayed onto that message's
+ *     earlier parts, as its live accumulator did; and
  *   - broadcast (Think broadcasts after; ai-chat broadcasts inside its store's
  *     `persistMessages`).
  *
@@ -36,9 +39,28 @@ export interface PersistReconstructedOrphanOptions<
   /**
    * Id for the reconstructed message when the stream carried no provider
    * `start.messageId` to adopt. The accumulator still adopts a provider id when
-   * present.
+   * present. Unused when `continues` is set.
    */
   fallbackId: string;
+  /**
+   * Set when the stream continued an existing message that held
+   * `basePartCount` parts when the stream started. The chunks are replayed
+   * onto that message's first `basePartCount` parts and its metadata in
+   * continuation mode, as the live accumulator does: the result keeps
+   * `messageId` (a provider `start.messageId` is ignored) and the earlier
+   * parts, and persisting the same stream again rewrites the message rather
+   * than appending a copy. When the message no longer exists it was deleted
+   * (a continuation only starts from a stored message), so nothing is written:
+   * the stream is not resurrected as a message of its own.
+   */
+  continues?: {
+    messageId: string;
+    basePartCount: number;
+    /** Map each kept earlier part, e.g. close a part left streaming. */
+    settleBasePart?: (
+      part: TMessage["parts"][number]
+    ) => TMessage["parts"][number];
+  };
   /**
    * Finalize the reconstructed message before upsert — e.g. strip internal
    * parts or resolve the persist-target id. Return `null` to skip persistence
@@ -56,7 +78,7 @@ export interface PersistReconstructedOrphanOptions<
  * Reconstruct a message from `chunks` and upsert it via the store. Returns
  * `true` when a write happened (so a caller that broadcasts after — Think — can
  * gate its broadcast on it), `false` when there was nothing to persist (no
- * parts, or `prepare` returned `null`).
+ * parts, `prepare` returned `null`, or the message `continues` names is gone).
  */
 export async function persistReconstructedOrphan<
   TMessage extends UIMessage = UIMessage
@@ -66,7 +88,8 @@ export async function persistReconstructedOrphan<
 ): Promise<boolean> {
   if (chunks.length === 0) return false;
 
-  const accumulator = new StreamAccumulator({ messageId: options.fallbackId });
+  const accumulator = await createReconstructionAccumulator(options);
+  if (accumulator === null) return false;
   for (const chunk of chunks) {
     try {
       accumulator.applyChunk(JSON.parse(chunk.body) as StreamChunkData);
@@ -87,4 +110,30 @@ export async function persistReconstructedOrphan<
     await options.store.appendMessage(prepared);
   }
   return true;
+}
+
+async function createReconstructionAccumulator<TMessage extends UIMessage>(
+  options: PersistReconstructedOrphanOptions<TMessage>
+): Promise<StreamAccumulator | null> {
+  const { continues } = options;
+  if (continues === undefined) {
+    return new StreamAccumulator({ messageId: options.fallbackId });
+  }
+  const continued = await options.store.getMessage(continues.messageId);
+  if (!continued) return null;
+  const baseParts = continued.parts.slice(0, continues.basePartCount);
+  const metadata = continued.metadata;
+  return new StreamAccumulator({
+    messageId: continues.messageId,
+    continuation: true,
+    existingParts: continues.settleBasePart
+      ? baseParts.map(continues.settleBasePart)
+      : baseParts,
+    existingMetadata:
+      metadata !== null &&
+      typeof metadata === "object" &&
+      !Array.isArray(metadata)
+        ? (metadata as Record<string, unknown>)
+        : undefined
+  });
 }

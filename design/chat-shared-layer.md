@@ -25,6 +25,21 @@ packages/agents/src/chat/          ← shared foundation
   tool-output-truncation.ts        provider-executed tool payload truncation
   stream-accumulator.ts            StreamAccumulator class
   turn-queue.ts                    TurnQueue class
+  chat-turns.ts                    ChatTurns: the turn core both hosts run on (owns the queue, aborts,
+                                   submit concurrency, continuation, pre-stream set and apply chain)
+  admissions.ts                    ChatAdmissions: a client request's durable record, and its replay
+                                   after a reset
+  server-turn.ts                   runServerTurn: a turn the server starts (saveMessages, continueLastTurn,
+                                   the retry, a recovered turn, an agent-tool run, Think.chat())
+  continuation-turn.ts             the auto-continuation turn, from the fire to the settle
+  turn-failure.ts                  reportTurnFailure: the order of a failure report
+  turn-stop.ts                     isTurnStopped: whether a turn's own signal stopped it
+  turn-fiber.ts                    ChatTurnFibers: a turn body inside the host's recovery fiber
+  before-turn.ts                   what a turn settles in the transcript before the model is called
+  repair-transcript.ts             settle interrupted tool calls, strip trailing reasoning, store a repair
+  request-context.ts               ChatRequestContext: the stored client tools and body
+  agent-tool-runs.ts               AgentToolRuns: an agent-tool child run (life, cancel, tail, reconcile)
+  agent-tool-run-store.ts          the SQL store behind AgentToolRuns
   submit-concurrency.ts            SubmitConcurrencyController
   broadcast-state.ts               broadcastTransition state machine
   continuation-state.ts            ContinuationState
@@ -54,6 +69,8 @@ packages/agents/src/chat/          ← shared foundation
   recovery.ts                      chat-fiber snapshot codec
   recovery-incident.ts             incident budget math + storage helpers
   recovery-engine.ts               ChatRecoveryEngine + adapter / wake-hook seams
+  recovery-attempt.ts              runRecoveredTurn: the body of one recovery attempt
+  recovery-route.ts                routeStreamInterruption: a live stall or transient error into recovery
   recovery-task.ts                 reserved chained Task definition for continuations
   turn-task.ts                     createChatTurnTaskDefinition (chat turns as Tasks)
   recovery-codec.ts                ChatRecoveryCodec (AISDKRecoveryCodec)
@@ -72,7 +89,7 @@ packages/think/src/                ← opinionated assistant
   extensions/                      ExtensionManager, HostBridgeLoopback (standalone)
 ```
 
-The directory has a few more small helpers (throttling, chunk sizing, replay batching, transcript repair) that are not listed individually.
+The directory has a few more small helpers (throttling, chunk sizing, replay batching) that are not listed individually.
 
 **Dependency direction**: `ai-chat → agents`, `think → agents`. The shared layer resolves the circular dependency that caused the original fork.
 
@@ -137,6 +154,80 @@ class StreamAccumulator {
 - **Think server**: Uses `StreamAccumulator` in both `_streamResult` (WebSocket path) and `chat()` (RPC sub-agent path), and to rebuild orphaned partials in `_persistOrphanedStream`.
 - **ai-chat server**: `_persistOrphanedStream` rebuilds orphaned partials through `StreamAccumulator` (the orphan-persist (a) step — see [recovery-engine.ts](#recovery-enginets)). The live streaming path (`_streamSSEReply`) **still** uses `applyChunkToParts` directly: its streaming message (`_streamingMessage`) is shared by reference with `hasPendingInteraction`, `_messagesForClientSync`, and `_findAndUpdateToolPart`, making it impractical to route through the accumulator without a deeper refactoring of the shared mutable state (see "Server-side StreamAccumulator (deferred)").
 
+### chat-turns.ts
+
+**`ChatTurns`** is the turn core `AIChatAgent` and `Think` both construct. It owns the state a host needs to run one turn at a time (`TurnQueue`, `AbortRegistry`, `SubmitConcurrencyController`, `ContinuationState`, `AutoContinuationController`, `PreStreamTurns`, and the tool-result apply chain) and the rules across them. Each rule has one method, and most are thin calls into the files below.
+
+How a turn starts:
+
+- `runClientRequest()` runs one client chat request in the order both hosts follow: decide concurrency, accept (pre-stream mark and abort controller), persist, queue, the superseded and debounce checks, end a request cancelled meanwhile without calling the model, run the turn, settle. The host supplies the steps as a `ClientChatRequest`.
+- `runServerTurn()` runs a turn the server starts. See `server-turn.ts`.
+- `runContinuationTurn()` runs the turn a tool result or approval scheduled. See `continuation-turn.ts`.
+- `decideSubmit()`, `awaitSubmitTurn()` and `settlePreStreamTurn()` cover the overlapping-submit checks.
+
+While a turn runs:
+
+- `turnResetGuard()` tells a running turn whether the chat was cleared since it was admitted, so it neither streams into the cleared chat nor persists there.
+- `applyInteraction()` applies tool results and approvals one at a time. Only one that settled its call schedules a continuation, targeted at that call's message, and not when a stop landed while it was applied.
+- `settleBeforeTurn()` settles what must not reach the model and stores what changed. `continuationWaitsOnClient()` says whether a continuation has anything to continue yet. See `before-turn.ts`.
+- `settleInterruptedReply()` and `settleBeforeRecovery()` settle a cut-off reply before it is stored, and before a recovery continues it.
+- `streamStarted()`, `streamEnded()` and `replyFinalized()` are the points a host reports from its reply pipeline.
+- `reportTurnFailure()` tells clients and the app about a turn that failed before its stream. See `turn-failure.ts`.
+- `isTurnStopped()` (`turn-stop.ts`) is how every outcome decides between `aborted` and an error: the turn's own signal aborted, for anything but a stall. What a stopped turn throws is not an error.
+
+Stop, clear and idle:
+
+- `cancel(id)` stops the request's turn, queued or running, and a recovery attempt registered for it with `beginRecoveryAttempt(rootId)`. `stopAll()` stops every request, and `linkExternal()` links a caller's signal. A stop that stops the running turn drops the continuations that were waiting when it landed. `runtimeAbort()` is for an abort the runtime does itself, such as the stall watchdog, which drops nothing.
+- `reset()` tears all of it down in one synchronous step for a chat clear.
+- `waitForIdle()` and `waitUntilStable()` define idle and stable: no turn, no submit in flight, no tool result being applied, no continuation about to fire.
+
+The host passes a `ChatTurnsHost`: the transcript, whether a reply is streaming, the reply being streamed, the names of the tools a client runs, whether a resumable stream is active, `keepAliveWhile`, an id generator, and `fireContinuation`. What a turn does (the model call, streaming and persisting the reply) is still host code, in one turn body per host for every server-started turn (`AIChatAgent._runServerTurnReply`, `Think._runModelTurn`). [chat-turn-core.md](./chat-turn-core.md) has the differences that were settled on the way and what is still host code.
+
+Both hosts keep their old private field names (`_turnQueue`, `_continuation`, `_abortRegistry` / `_aborts`, and so on) as aliases of the core's parts.
+
+### admissions.ts
+
+**`ChatAdmissions`** keeps an accepted client request across an isolate reset. `runClientRequest` writes a record in `cf_agents_chat_admissions` before the request's messages, and the record is deleted when the turn's fiber is durably accepted, when recovery picks the turn up, or when the request ends. A stop is written on the record, and a clear deletes every record. `resume()` replays the records a reset left, in order and with their concurrency decisions restored, once no recovery is pending. A new request replays them first. `saveMessages` and `continueLastTurn` have no record: they store nothing until their turn starts.
+
+### server-turn.ts
+
+**`runServerTurn`** runs a turn the server starts: `saveMessages`, `continueLastTurn`, the retry, a recovered turn, an agent-tool run, and `Think.chat()`. It captures the queue generation, creates the abort controller and links the caller's signal, queues the turn, and at the front of the queue runs the host's `prepare`, `persist` and `run`, checking for a reset and a stop before each. A turn stopped before its messages are stored stores nothing, and a turn stopped before `run` never calls the model.
+
+`mapServerTurnOutcome` decides the status the caller gets. A reset gives `skipped`, a stop before any reply gives `aborted`, an error stays an error, and what the reply path reported stands. A skipped result carries a `reason`: `cleared`, `nothing-to-continue`, or `awaiting-client` for a `continueLastTurn()` whose reply still waits on a client. `pinnedOr` lets a caller pin the tools and body a turn runs with. A pinned context is this turn's only: it is never written to the stored request context. An `aborted` result says why in `reason`: `stopped`, or `interrupted` for a reply handed to recovery.
+
+### continuation-turn.ts
+
+The auto-continuation turn, from the moment it fires to the moment it settles.
+
+- `runContinuationTurn` creates the abort signal when the continuation fires, queues the turn, claims the continuation when the turn starts, runs the host's turn body, reports a failure before the stream, and settles. A continuation with no connection is the same runner with nothing to claim.
+- `claimContinuation` gives four reasons a continuation does not run: it was fired for another turn, the conversation moved on, the reply already went on to its answer (`transcriptEndsInAnswer`), or the reply still waits on a client. A dropped continuation is reported to the host with the reason (`chat:continuation:dropped`).
+- `settleContinuationTurn` releases only what the turn owns and starts the follow-up a result deferred while it ran.
+- `dropWaitingContinuations` is what a stop of the running turn calls.
+
+The tools and body a continuation runs with are not copied onto it. The host reads the stored request context when the turn starts.
+
+### before-turn.ts and repair-transcript.ts
+
+A provider rejects a request that holds a tool call with no result, and Anthropic rejects an assistant message that ends in a thinking block. These two files keep both out of a request.
+
+- `repairTranscriptBeforeTurn` settles every unanswered call in a message a later message follows, whoever owns it, and an approved call that never ran. A turn that starts a new reply treats the last message the same way. A continuation turn keeps, in the message it continues, a call to a tool the client sent a schema for and an approval request, and reports them as `keptToolCallIds`. A turn that kept any does not call the model.
+- `settleInterruptedReply` settles a reply whose stream was cut off, before it is stored. A call a client is known to own is kept.
+- `stripTrailingReasoning` removes the reasoning an assistant message ends in. It runs inside both of the above.
+- `settleInterruptedPart` (`message-builder.ts`) closes a text or reasoning part an interruption left streaming. Both hosts apply it to the message a continuation extends, so the continuation's parts follow the cut-off ones in order.
+- `replyIsEmpty` says whether a reply holds nothing a client can show and nothing a model request can carry. Such a reply is not stored. The before-turn repair and the settle before a recovery remove a stored one through the sink, and the recovery then retries the question.
+- `removeEmptyReplyToContinue` is what `continueLastTurn()` calls first: a last reply that holds nothing is removed, and the host answers the question again.
+- `chunkMustBeStoredNow` (`recovery-codec.ts`) says which stream chunks go to storage at once: a tool call, before the tool runs, and a settled tool result.
+- `interruptedToolPartAsError` is the default for the hosts' `repairInterruptedToolPart` hook. Its text says what is known about the call.
+- `persistRepairedTranscript` stores what a repair changed and emits `chat:transcript:repaired`, through a `RepairedTranscriptSink` the host supplies.
+
+### request-context.ts
+
+**`ChatRequestContext`** owns the stored client tools and body that later turns run with. A chat request replaces the context whole when its turn starts, and one that sends no client tools clears the stored ones. A tool result replaces the stored tools only when it settled its call and listed some, and not when the context was cleared or replaced while the result was applied. Every change is written through, and a value equal to what is stored is not written again. The host passes a store with `get`, `set` and `delete`.
+
+### agent-tool-runs.ts
+
+**`AgentToolRuns`** owns an agent-tool child run in both hosts, over one SQL store (`agent-tool-run-store.ts`). It starts the run and binds its request id before the turn queues, writes the terminal status once, cancels only the run's own turn, keeps a run whose reply was cut off open until chat recovery finishes its turn, and reconciles a run an earlier isolate started. It also serves what the parent reads: `inspect`, `chunks`, `tail` and progress.
+
 ### protocol.ts
 
 **`CHAT_MESSAGE_TYPES`** — plain string constants for the wire protocol message types, including `STREAM_PENDING` (`cf_agent_stream_pending`) and `CHAT_RECOVERING` (`cf_agent_chat_recovering`). Think uses these directly. The `MessageType` enum with the same values lives next to them in `wire-types.ts`; `@cloudflare/ai-chat/types` re-exports it.
@@ -157,7 +248,9 @@ Pure functions for aligning client messages with server state during persistence
 
 `reconcileMessages` and `resolveToolMergeId` are shared — both hosts call them (`Think._handleChatRequest` reconciles incoming messages; `Think._persistIncomingMessage` resolves assistant tool-merge IDs). The module also exports **`reconcileOrphanPartial(existing, incoming)`** — the orphan-persist **(c)** merge primitive (shared; ai-chat is the only consumer today). It is described with the rest of the orphan path in [recovery-engine.ts](#recovery-enginets).
 
-### recovery-engine.ts
+### recovery-engine.ts, recovery-attempt.ts and recovery-route.ts
+
+`runRecoveredTurn` (`recovery-attempt.ts`) is the body of a recovery attempt in both hosts, and `routeStreamInterruption` (`recovery-route.ts`) routes a live stall or transient error into recovery, reading `Retry-After` from the error. The engine section below describes the orchestration around them.
 
 **`ChatRecoveryEngine`** owns the **shared durable chat-recovery orchestration** — the sequence both `AIChatAgent` and `Think` run when a Durable Object wakes and finds an interrupted chat turn (a Task run for a root agent, or `runFiber` for a routed facet, that died mid-stream from hibernation, process death, or deploy churn). This state machine was previously duplicated across both packages, and the duplication was already drifting (better fixes landing in one but not the other).
 
@@ -370,3 +463,5 @@ The machine handles accumulator creation (including continuation context walking
 - Recovery continuations moved onto Tasks as chained `__cf_internal_chat_recovery` runs (#2194).
 - Sessions moved into a Lifecycle capability (`agents/sessions`, #2196). Both hosts persist through it, so row-size truncation left the message path and `enforceRowSizeLimit` now guards only non-session tables.
 - `ResumableStream` rebuilt over the Streams Lifecycle capability (`agents/streams`, #2173).
+- `ChatTurns` (`agents/chat/chat-turns.ts`) took over the turn coordination both hosts duplicated: the fields around `TurnQueue`, clear, cancel, the tool-result continuation decision, and the idle and stable waits. See [rfc-chat-turn-core.md](./rfc-chat-turn-core.md).
+- The rest of the turn loop's coordination moved into `agents/chat`: server-started turns (`server-turn.ts`), the auto-continuation turn (`continuation-turn.ts`), the recovery attempt and the live-interruption route (`recovery-attempt.ts`, `recovery-route.ts`), the turn fiber and the failure report (`turn-fiber.ts`, `turn-failure.ts`), agent-tool child runs (`agent-tool-runs.ts`), the before-turn repair (`before-turn.ts`) and the stored request context (`request-context.ts`). See [chat-turn-core.md](./chat-turn-core.md) for each difference between the hosts and what was chosen.

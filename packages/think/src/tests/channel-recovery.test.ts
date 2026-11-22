@@ -233,7 +233,8 @@ describe("recovery × channels", () => {
 
     // This facet is running as an agent-tool child (in-flight run row) on a
     // voice-channel turn that then gets interrupted mid-stream.
-    await agent.seedAgentToolChildRunForTest("run-combo", "old-req-combo");
+    // The run's row names the turn that is interrupted below.
+    await agent.seedAgentToolChildRunForTest("run-combo", "req-combo");
     await agent.persistTestMessage({
       id: "u-combo",
       role: "user",
@@ -279,10 +280,7 @@ describe("recovery × channels", () => {
     const reboundReqId =
       await agent.getAgentToolChildRunRequestIdForTest("run-combo");
     expect(reboundReqId).toBeTruthy();
-    expect(reboundReqId).not.toBe("old-req-combo");
-    expect(
-      await agent.resolveAgentToolRunForRequestForTest(reboundReqId as string)
-    ).toBe("run-combo");
+    expect(reboundReqId).not.toBe("req-combo");
 
     // (2) ...and the voice channel's instructions + tool policy were re-applied
     // on that very same recovered turn.

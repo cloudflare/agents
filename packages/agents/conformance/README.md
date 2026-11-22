@@ -23,12 +23,12 @@ Every lane tests the same Agents `MCPClientManager` backed by the SDK v2 client.
 The older lanes prove fallback interoperability rather than inferring it from
 the current protocol lane.
 
-| Command                              | Server protocol/referee selection | Scenarios | Current result                 |
-| ------------------------------------ | --------------------------------- | --------- | ------------------------------ |
-| `test:conformance:client:stateless`  | `2026-07-28`                      | 33        | 31 clean / 2 expected failures |
-| `test:conformance:client:2025-11-25` | `2025-11-25`                      | 19        | 18 clean / 1 expected failure  |
-| `test:conformance:client:2025-06-18` | `2025-06-18`                      | 5         | 5 clean                        |
-| `test:conformance:client:2025-03-26` | `2025-03-26` OAuth/backcompat     | 2         | 2 clean                        |
+| Command                              | Server protocol/referee selection | Scenarios | Current result                |
+| ------------------------------------ | --------------------------------- | --------- | ----------------------------- |
+| `test:conformance:client:stateless`  | `2026-07-28`                      | 33        | 32 clean / 1 expected failure |
+| `test:conformance:client:2025-11-25` | `2025-11-25`                      | 19        | 19 clean                      |
+| `test:conformance:client:2025-06-18` | `2025-06-18`                      | 5         | 5 clean                       |
+| `test:conformance:client:2025-03-26` | `2025-03-26` OAuth/backcompat     | 2         | 2 clean                       |
 
 The driver keeps an explicit manifest of the upstream scenarios it implements.
 A new selected scenario missing from that manifest fails before the lane runs.

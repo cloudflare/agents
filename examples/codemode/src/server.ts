@@ -58,6 +58,11 @@ export class Codemode extends AIChatAgent<Env> {
     }));
   }
 
+  @callable({ description: "Try a failed MCP server again" })
+  async reconnectMcp(serverId: string) {
+    return await this.reconnectMcpServer(serverId);
+  }
+
   @callable({ description: "Remove an MCP server" })
   async removeMcp(serverId: string) {
     await this.removeMcpServer(serverId);
@@ -80,7 +85,7 @@ export class Codemode extends AIChatAgent<Env> {
     });
 
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.7-code", {
+      model: workersai("@cf/deepseek-ai/deepseek-v4.1-flash-1017", {
         sessionAffinity: this.sessionAffinity
       }),
       instructions:

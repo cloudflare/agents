@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { Workspace, type DurableObjectStorageLike } from "@cloudflare/computer";
-import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
+import { CodemodeBackend } from "@cloudflare/computer/backends/codemode";
 import { createGitClient } from "@cloudflare/computer/git";
 import { createGitModule } from "@cloudflare/computer/modules/git";
 import { createModels } from "@earendil-works/pi-ai/models";
@@ -11,9 +11,9 @@ import { Lifecycle } from "agents/lifecycle";
 import { createAI } from "agents/models/pi-ai";
 import { WebSockets } from "agents/websockets";
 import { PiSessionSockets } from "./sockets";
-import { createWorkspaceTools, JAVASCRIPT_BACKEND } from "./workspace";
+import { createWorkspaceTools } from "./workspace";
 
-const MODEL_ID = "@cf/zai-org/glm-5.3-flash";
+const MODEL_ID = "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
 
 const PREAMBLE =
   "You are a concise playground assistant. You have a durable workspace at /workspace: read, write, edit, delete, list (ls), find and grep files there, and run JavaScript modules in it with exec, which can also use git. Paths are absolute. Use tools whenever they can answer the request, and explain their results plainly.";
@@ -24,18 +24,17 @@ export class PiAgent extends DurableObject<Env> {
   readonly ai = createAI({ binding: this.env.AI });
   // A durable filesystem on the object's SQLite, beside pi's own tables.
   // `exec` runs JavaScript modules in a fresh Dynamic Worker per call, with
-  // no network of its own. `git` turns on `workspace.git`, which the `ws:git`
+  // no network of its own. `git` turns on `workspace.git`, which the `codemode:git`
   // module calls in the host; `allowNetwork` lets it clone, fetch and push.
   readonly workspace = new Workspace({
     storage: this.ctx.storage as unknown as DurableObjectStorageLike,
     git: createGitClient(),
     backends: [
-      new WorkerJavaScriptBackend({
-        id: JAVASCRIPT_BACKEND,
+      new CodemodeBackend({
         loader: this.env.LOADER,
         root: "/workspace",
         access: "read-write",
-        modules: { "ws:git": createGitModule({ allowNetwork: true }) }
+        modules: { "codemode:git": createGitModule({ allowNetwork: true }) }
       })
     ]
   });

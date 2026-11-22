@@ -632,6 +632,8 @@ export class TestRpcMcpClientAgent extends Agent {
 
   async inspectRpcServerAfterEviction(idBefore: string) {
     try {
+      // Restore reconnects RPC servers in the background after startup.
+      await this.mcp.waitForConnections();
       const ids = Object.keys(this.mcp.mcpConnections);
       const idAfter = ids[0];
       const result = await this.mcp.callTool({

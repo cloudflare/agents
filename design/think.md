@@ -96,7 +96,7 @@ Think speaks the same protocol as `AIChatAgent`; the constants are `CHAT_MESSAGE
 | --------------- | -------------------------------- | ------------------------------------------------------------- |
 | Client → Server | `cf_agent_use_chat_request`      | Send a chat request (`{ messages, clientTools?, ...body }`)   |
 | Client → Server | `cf_agent_chat_clear`            | Clear the conversation                                        |
-| Client → Server | `cf_agent_chat_request_cancel`   | Cancel a request by ID                                        |
+| Client → Server | `cf_agent_chat_request_cancel`   | Cancel a request by ID, or the continuation this tab waits on |
 | Client → Server | `cf_agent_tool_result`           | Client tool result                                            |
 | Client → Server | `cf_agent_tool_approval`         | Tool approval or denial                                       |
 | Client → Server | `cf_agent_stream_resume_request` | Ask whether a stream can be resumed                           |

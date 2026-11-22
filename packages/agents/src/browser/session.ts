@@ -52,7 +52,7 @@ export interface BrowserSource {
    * The browser's internal hostnames, when it has any. The docs list them,
    * and {@link BrowserSession.functions} adds the hosts functions.
    */
-  readonly internalHosts?: BrowserInternalHosts;
+  readonly internalHosts?: BrowserInternalHosts | undefined;
 }
 
 export interface BrowserSessionOptions {

@@ -9,7 +9,7 @@ Telnyx, or ElevenLabs when their API keys are configured:
 - **STT**: Workers AI Flux (`@cf/deepgram/flux`) by default, Workers AI Nova 3 (`@cf/deepgram/nova-3`), AssemblyAI Universal 3.5 Pro Realtime, Telnyx STT, or ElevenLabs Scribe v2 Realtime
 - **TTS**: Deepgram Aura (`@cf/deepgram/aura-1`)
 - **Turn detection**: Flux `StartOfTurn` / `EndOfTurn` events
-- **LLM**: Kimi K2.7 Code (`@cf/moonshotai/kimi-k2.7-code`), GPT OSS 20B, or GLM 4.7 Flash
+- **LLM**: DeepSeek V4.1 Flash (`@cf/deepseek-ai/deepseek-v4.1-flash-1017`) or Qwen 3.8 27B (`@cf/qwen/qwen3.8-27b`)
 
 ## Run it
 

@@ -5,6 +5,8 @@ import type {
 import type { Connection } from "./types";
 import type { LifecycleJobs } from "./job-queue";
 
+type MaybePromise<T> = T | Promise<T>;
+
 /** Opaque address understood by a Lifecycle routing transport. */
 export type LifecycleRouteAddress = {
   /** Stable equality and storage key. */
@@ -143,7 +145,7 @@ export abstract class LifecycleCapability<Props extends object = object> {
   }
 
   /** Default startup hook; capabilities override when they own startup work. */
-  onStart(_context: CapabilityStartContext<Props>): void {}
+  onStart(_context: CapabilityStartContext<Props>): MaybePromise<void> {}
 
   /** Standard services when installed, or undefined in isolated unit tests. */
   protected get lifecycleServices(): LifecycleServices | undefined {

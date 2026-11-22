@@ -33,6 +33,7 @@ import {
   PlugsConnectedIcon,
   PlusIcon,
   CubeIcon,
+  ArrowClockwiseIcon,
   SpinnerGapIcon,
   SignInIcon,
   MoonIcon,
@@ -246,6 +247,7 @@ function SettingsPanel({
   mcpState,
   onAddMcp,
   onRemoveMcp,
+  onReconnectMcp,
   onRefreshMcpTools,
   mcpLoading
 }: {
@@ -254,6 +256,7 @@ function SettingsPanel({
   mcpState: MCPServersState;
   onAddMcp: (url: string, name?: string) => Promise<void>;
   onRemoveMcp: (serverId: string) => Promise<void>;
+  onReconnectMcp: (serverId: string) => Promise<void>;
   onRefreshMcpTools: () => void;
   mcpLoading: boolean;
 }) {
@@ -412,6 +415,16 @@ function SettingsPanel({
                                   Authorize
                                 </Button>
                               )}
+                            {server.state === "failed" && (
+                              <Button
+                                variant="secondary"
+                                size="sm"
+                                icon={<ArrowClockwiseIcon size={12} />}
+                                onClick={() => onReconnectMcp(serverId)}
+                              >
+                                Reconnect
+                              </Button>
+                            )}
                             {tools.length > 0 && (
                               <Badge
                                 variant="secondary"
@@ -429,6 +442,13 @@ function SettingsPanel({
                               <XIcon size={12} />
                             </button>
                           </div>
+                          {server.state === "failed" && server.error && (
+                            <div className="px-3 py-1.5 border-b border-kumo-line">
+                              <Text size="xs" variant="secondary">
+                                {server.error}
+                              </Text>
+                            </div>
+                          )}
                           {tools.length > 0 && (
                             <div className="divide-y divide-kumo-line max-h-32 overflow-y-auto">
                               {tools.map((tool) => (
@@ -602,6 +622,26 @@ function App() {
         window.open(result.authUrl, "oauth", "width=600,height=800");
       }
       await refreshMcpTools();
+    },
+    [agent, refreshMcpTools]
+  );
+
+  const handleReconnectMcp = useCallback(
+    async (serverId: string) => {
+      try {
+        const result = (await agent.call("reconnectMcp", [serverId])) as {
+          state: string;
+          authUrl?: string;
+        };
+        if (result.state === "authenticating" && result.authUrl) {
+          window.open(result.authUrl, "oauth", "width=600,height=800");
+        }
+      } catch (err) {
+        // Still failed: the panel shows the server's error from onMcpUpdate.
+        console.error("Reconnect failed:", err);
+      } finally {
+        await refreshMcpTools();
+      }
     },
     [agent, refreshMcpTools]
   );
@@ -802,6 +842,7 @@ function App() {
           mcpState={mcpState}
           onAddMcp={handleAddMcp}
           onRemoveMcp={handleRemoveMcp}
+          onReconnectMcp={handleReconnectMcp}
           onRefreshMcpTools={refreshMcpTools}
           mcpLoading={mcpLoading}
         />

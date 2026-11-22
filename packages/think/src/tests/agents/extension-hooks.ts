@@ -228,7 +228,7 @@ export class ThinkExtensionBeforeTurnModelAgent extends Think {
   extensionLoader = this.env.LOADER;
 
   override getModel(): ThinkModel {
-    return "@cf/meta/llama-3.1-8b-instruct";
+    return "@cf/qwen/qwen3.8-27b";
   }
 
   override beforeTurn(): TurnConfig {

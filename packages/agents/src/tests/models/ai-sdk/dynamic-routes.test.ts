@@ -126,17 +126,19 @@ describe("AI Gateway dynamic routes", () => {
     );
     const ai = createAI({ binding: asAi(binding) });
 
-    const perModel = await ai("@cf/zai-org/glm-4.7-flash", {
+    const perModel = await ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017", {
       fallback: [ROUTE]
     }).doGenerate(callOptions());
-    const perCall = await ai("@cf/zai-org/glm-4.7-flash").doGenerate(
+    const perCall = await ai(
+      "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ).doGenerate(
       callOptions({ providerOptions: { cloudflare: { fallback: [ROUTE] } } })
     );
 
     expect(binding.calls.map((call) => call.model)).toEqual([
-      "@cf/zai-org/glm-4.7-flash",
+      "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
       ROUTE,
-      "@cf/zai-org/glm-4.7-flash",
+      "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
       ROUTE
     ]);
     expect(perModel.content).toEqual(perCall.content);

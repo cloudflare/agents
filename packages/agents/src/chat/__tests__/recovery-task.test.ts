@@ -112,3 +112,32 @@ describe("chatRecoveryTaskRunOptions — dedupeKey", () => {
     expect(options.runId).toBeUndefined();
   });
 });
+
+describe("chatRecoveryTaskRunOptions — the initial key", () => {
+  const input = (delivery?: number): ChatRecoveryTaskInput => ({
+    callback: "_chatRecoveryContinue",
+    data: {
+      incidentId: "incident-1",
+      ...(delivery !== undefined && { delivery })
+    },
+    delaySeconds: 0
+  });
+
+  it("keys one schedule, so a retried enqueue of it joins its run", () => {
+    expect(chatRecoveryTaskRunOptions(input(2), "initial").idempotencyKey).toBe(
+      chatRecoveryTaskRunOptions(input(2), "initial").idempotencyKey
+    );
+  });
+
+  it("gives a later schedule of the same incident its own run", () => {
+    expect(
+      chatRecoveryTaskRunOptions(input(2), "initial").idempotencyKey
+    ).not.toBe(chatRecoveryTaskRunOptions(input(1), "initial").idempotencyKey);
+  });
+
+  it("keeps the old key for a payload with no schedule number", () => {
+    expect(chatRecoveryTaskRunOptions(input(), "initial").idempotencyKey).toBe(
+      "chat-recovery:_chatRecoveryContinue:incident-1"
+    );
+  });
+});
