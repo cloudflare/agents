@@ -332,6 +332,24 @@ describe("event log", () => {
     );
   });
 
+  it("splits a flush that would pass the row limit into blocks, losing nothing", async () => {
+    const name = crypto.randomUUID();
+    const { epoch } = await stub(name).head("big");
+    await stub(name).openBatch("big");
+    // Buffered beside the next event, together over 1.9 MB.
+    expect(await stub(name).appendSized(200_000)).toBe(1);
+    expect(await stub(name).publishText("big", "y".repeat(1_800_000))).toBe(2);
+    expect(await stub(name).rows("big")).toEqual([
+      { seq_from: 0, seq_to: 1 },
+      { seq_from: 1, seq_to: 2 }
+    ]);
+    const client = await connect(name);
+    client.subscribe("big", { epoch, seq: 0 });
+    const frames = await client.until(isType("synced"));
+    expect(events(frames).map((event) => event.seq)).toEqual([1, 2]);
+    client.close();
+  });
+
   it("keeps a connection's subscriptions across hibernation", async () => {
     const name = crypto.randomUUID();
     const client = await connect(name);

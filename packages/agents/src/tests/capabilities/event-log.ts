@@ -67,11 +67,17 @@ export class EventLogObject extends DurableObject<Cloudflare.Env> {
     streams: this.#streams
   });
 
-  /** Byte retention (300 KB) and a 1.5 MB event ceiling. */
+  /** Byte retention (300 KB) and the highest event ceiling (1.9 MB). */
   readonly #small = declareEventLog(this.#webSockets, "small", {
     streams: this.#streams,
     retention: { maxBytes: 300_000 },
-    maxEventBytes: 1_500_000
+    maxEventBytes: 1_900_000
+  });
+
+  /** The highest event ceiling (1.9 MB) with default retention. */
+  readonly #big = declareEventLog(this.#webSockets, "big", {
+    streams: this.#streams,
+    maxEventBytes: 1_900_000
   });
 
   readonly #guarded = declareEventLog(this.#webSockets, "guarded", {
@@ -90,6 +96,7 @@ export class EventLogObject extends DurableObject<Cloudflare.Env> {
     if (name === "feed") return this.#feed;
     if (name === "bare") return this.#bare;
     if (name === "small") return this.#small;
+    if (name === "big") return this.#big;
     return this.#guarded;
   }
 

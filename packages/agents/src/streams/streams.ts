@@ -46,6 +46,12 @@ const CURRENT_STREAM_SCHEMA_VERSION = 2;
  * that a replay page parses one block at a time.
  */
 const BLOCK_MAX_CHARS = 256 * 1024;
+/**
+ * Most bytes one buffered flush puts in a row; more chunks go to the next
+ * block. A buffered chunk is at most this (`appendJson` callers check), and
+ * a row this size plus its other columns fits SQLite's 2 MB limit.
+ */
+const FLUSH_ROW_MAX_BYTES = 1_900_000;
 /** Rows read per page while folding one stream's v1 chunk rows into blocks. */
 const LEGACY_FOLD_PAGE_ROWS = 500;
 
@@ -740,28 +746,48 @@ export class Streams extends LifecycleCapability {
   #flushBuffer(streamId: string): void {
     const buffer = this.#buffers.get(streamId);
     if (!buffer) return;
-    this.#buffers.delete(streamId);
     const tail = this.#liveTails.has(streamId)
       ? this.#liveTails.get(streamId)
       : this.#blockTail(streamId);
-    const block = (tail?.block ?? -1) + 1;
-    const seqTo = buffer.firstSeq + buffer.jsons.length;
-    const body = buffer.jsons.join(",");
+    let block = (tail?.block ?? -1) + 1;
     const at = Date.now();
-    this.#sql`
-      INSERT INTO cf_agents_stream_blocks
-        (stream_id, block, seq_from, seq_to, body, created_at, updated_at)
-      VALUES (${streamId}, ${block}, ${buffer.firstSeq}, ${seqTo}, ${body}, ${at}, ${at})
-    `;
-    if (this.#liveTails.has(streamId)) {
-      this.#liveTails.set(streamId, { block, seq_to: seqTo });
+    let written = 0;
+    // One block per flush, split only where the flush would pass the row
+    // limit: each chunk is at most FLUSH_ROW_MAX_BYTES (callers check), so
+    // every block fits a row.
+    let start = 0;
+    while (start < buffer.jsons.length) {
+      let end = start + 1;
+      let bytes = utf8.encode(buffer.jsons[start]).byteLength;
+      while (end < buffer.jsons.length) {
+        const next = utf8.encode(buffer.jsons[end]).byteLength + 1;
+        if (bytes + next > FLUSH_ROW_MAX_BYTES) break;
+        bytes += next;
+        end += 1;
+      }
+      const seqFrom = buffer.firstSeq + start;
+      const seqTo = buffer.firstSeq + end;
+      const body = buffer.jsons.slice(start, end).join(",");
+      this.#sql`
+        INSERT INTO cf_agents_stream_blocks
+          (stream_id, block, seq_from, seq_to, body, created_at, updated_at)
+        VALUES (${streamId}, ${block}, ${seqFrom}, ${seqTo}, ${body}, ${at}, ${at})
+      `;
+      if (this.#liveTails.has(streamId)) {
+        this.#liveTails.set(streamId, { block, seq_to: seqTo });
+      }
+      block += 1;
+      written += bytes;
+      start = end;
     }
+    // Dropped only once written: a failed write leaves the chunks buffered.
+    this.#buffers.delete(streamId);
     const totals = this.#totals.get(streamId);
     if (totals) {
       totals.chunks += buffer.jsons.length;
       // Bytes as SQLite counts them (`length(CAST(body AS BLOB))`), so
       // what a trim subtracts matches what a flush added.
-      totals.bytes += utf8.encode(body).byteLength;
+      totals.bytes += written;
     }
     this.#wake(streamId);
   }
