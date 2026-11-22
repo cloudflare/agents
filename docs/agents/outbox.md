@@ -106,7 +106,7 @@ const posts: OutboxSink<string[]> = {
 };
 ```
 
-Sending a new value clears the checkpoint. A checkpoint is at most 256 KB of JSON; `saveCheckpoint` throws past that.
+Sending a new value clears the checkpoint. A checkpoint is at most 256 KB of JSON; `saveCheckpoint` throws past that. It also throws when the attempt no longer owns the delivery, for example after it timed out and a newer attempt started, so a stepwise sink stops instead of repeating steps.
 
 ## API
 

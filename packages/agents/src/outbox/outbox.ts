@@ -617,15 +617,24 @@ export class Outbox<
             `Outbox checkpoint for "${row.sink}" is over ${MAX_OUTBOX_CHECKPOINT_BYTES} bytes`
           );
         }
-        this.#write(
+        const saved = this.#write(
           `UPDATE cf_agents_outbox SET checkpoint = ?, updated_at = ?
-           WHERE id = ? AND idempotency_key = ? AND attempts = ?`,
+           WHERE id = ? AND idempotency_key = ? AND attempts = ?
+             AND status = 'pending'`,
           json,
           Date.now(),
           row.id,
           row.idempotency_key,
           row.attempts
         );
+        // This attempt timed out and a newer one owns the value, or the
+        // value was replaced, cancelled or acknowledged: stop the sink at
+        // this step. The throw is ignored like any late throw.
+        if (saved === 0) {
+          throw new Error(
+            `Outbox attempt ${row.attempts} of ${row.sink}/${row.key} no longer owns its delivery`
+          );
+        }
       }
     };
     const timeoutMs = this.#policy(row).attemptTimeoutMs;

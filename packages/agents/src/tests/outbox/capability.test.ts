@@ -433,6 +433,37 @@ describe("Outbox capability", () => {
     });
   });
 
+  it("stops a timed-out attempt at its next checkpoint", async () => {
+    const { stub } = stubFor();
+    await runInDurableObject(stub, async (instance: OutboxHarnessObject) => {
+      const posts: string[] = [];
+      instance.outbox.register("__cf_slow_steps", {
+        retry: { attemptTimeoutMs: 100, baseDelayMs: 1, maxDelayMs: 1 },
+        deliver: async (parts: string[], delivery) => {
+          let next =
+            typeof delivery.checkpoint === "number" ? delivery.checkpoint : 0;
+          for (; next < parts.length; next++) {
+            await delivery.saveCheckpoint(next + 1);
+            // The first attempt is slow on its first post only.
+            if (delivery.attempt === 1 && next === 0) {
+              await new Promise((resolve) => setTimeout(resolve, 300));
+            }
+            posts.push(parts[next]);
+          }
+        }
+      });
+      await instance.outbox.send("__cf_slow_steps", ["a", "b", "c"], {
+        key: "k"
+      });
+      await waitFor(
+        async () =>
+          (await instance.outbox.get("__cf_slow_steps", "k")) === undefined
+      );
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(posts.sort()).toEqual(["a", "b", "c"]);
+    });
+  });
+
   it("cuts long errors, caps checkpoints, and versions each value of a key", async () => {
     const { stub } = stubFor();
     await runInDurableObject(stub, async (instance: OutboxHarnessObject) => {

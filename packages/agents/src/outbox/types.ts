@@ -78,7 +78,10 @@ export type OutboxDeliveryContext = {
    * Durably record progress inside this value (for a value delivered in
    * several steps). The next attempt reads it back as `checkpoint`. A new
    * value clears it. At most 256 KB of JSON; past that it throws, which
-   * fails the attempt.
+   * fails the attempt. It also throws once this attempt no longer owns the
+   * delivery (it timed out and a newer attempt runs, or the value was
+   * replaced, cancelled or acknowledged), so a stepwise sink stops instead
+   * of repeating steps the newer attempt takes.
    */
   readonly saveCheckpoint: (value: unknown) => Promise<void>;
 };
