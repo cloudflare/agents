@@ -78,6 +78,24 @@ describe("ThinkConfigStore", () => {
     });
   });
 
+  it("lifts legacy rows at startup, before any config read", async () => {
+    const stub = env.BareAssistantAgent.get(
+      env.BareAssistantAgent.idFromName(`periphery-${crypto.randomUUID()}`)
+    );
+    await runInDurableObject(stub, (_instance, state) => {
+      state.storage.sql.exec(`CREATE TABLE assistant_config (
+        session_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
+        PRIMARY KEY (session_id, key))`);
+      state.storage.sql.exec(
+        "INSERT INTO assistant_config VALUES ('', 'lastBody', 'legacy')"
+      );
+    });
+    await stub.fetch("http://x/");
+    await runInDurableObject(stub, (_instance, state) => {
+      expect(thinkConfigValue(state.storage.sql, "lastBody")).toBe("legacy");
+    });
+  });
+
   it("keeps a think_config value over the legacy one", async () => {
     await withConfig((config, sql) => {
       config._configSet("lastBody", "current");

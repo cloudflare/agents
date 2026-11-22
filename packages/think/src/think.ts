@@ -2217,7 +2217,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       this._emit("chat:media:evicted", {
         ...totals,
         externalizedBytes: totals.bytes
-      })
+      }),
+    queueRouted: () =>
+      this.queue("_cfEvictAgedMedia", undefined, { id: "media-eviction" })
   });
 
   private get _mediaEvictionRunning(): boolean {
@@ -2229,8 +2231,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /**
-   * Run one media-eviction pass. Passes are Lifecycle jobs now; this drains
-   * a pass an older version queued on the Agent queue.
+   * Run one media-eviction pass queued on the Agent queue: by a sub-agent
+   * facet, which has no alarm of its own, or by an older version.
    * @internal Queue callback.
    */
   async _cfEvictAgedMedia(): Promise<void> {

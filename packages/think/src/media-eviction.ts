@@ -344,7 +344,11 @@ export function evictedFilePath(
   return `/workspace/attachments/evicted/${messageId}-${index}.${extensionFor(mediaType)}`;
 }
 
-/** Totals of one eviction pass. */
+/**
+ * Totals of one eviction pass.
+ *
+ * @internal
+ */
 export interface MediaEvictionPassResult {
   messages: number;
   parts: number;
@@ -352,7 +356,11 @@ export interface MediaEvictionPassResult {
   backlogRemains: boolean;
 }
 
-/** What {@link MediaEvictionPasses} reads from and does on its agent. */
+/**
+ * What {@link MediaEvictionPasses} reads from and does on its agent.
+ *
+ * @internal
+ */
 export interface MediaEvictionPassHost {
   /** The resolved `mediaEviction` setting; `null` when eviction is off. */
   config(): ResolvedMediaEvictionConfig | null;
@@ -375,6 +383,12 @@ export interface MediaEvictionPassHost {
   openFiles(): { write(path: string, bytes: Uint8Array): Promise<void> };
   updateMessage(message: UIMessage): Promise<unknown>;
   emitEvicted(totals: Omit<MediaEvictionPassResult, "backlogRemains">): void;
+  /**
+   * Queue a pass on a routed Lifecycle (a sub-agent facet), which has no
+   * alarm of its own: the host's Queue routes the item through the root.
+   * Goes away with facets.
+   */
+  queueRouted(): Promise<unknown>;
 }
 
 /** One pass at a time: requests coalesce on this job id. */
@@ -389,6 +403,8 @@ const PASS_JOB_ID = "think-media-eviction:pass";
  * it, and the last fruitless pass. The gate in {@link request} decides from
  * memory whether a pass could evict anything before queuing one. Passes run
  * from the alarm, never inside the request or refresh that asked for them.
+ *
+ * @internal
  */
 export class MediaEvictionPasses extends LifecycleCapability {
   readonly #host: MediaEvictionPassHost;
@@ -498,11 +514,16 @@ export class MediaEvictionPasses extends LifecycleCapability {
         return;
       }
     }
-    void this.lifecycle.jobs
-      .push({ id: PASS_JOB_ID, fn: "pass", time: Date.now() })
-      .catch((error) => {
-        console.error("[Think] Failed to queue media eviction pass", error);
-      });
+    const queued = this.lifecycle.routes.source
+      ? this.#host.queueRouted()
+      : this.lifecycle.jobs.push({
+          id: PASS_JOB_ID,
+          fn: "pass",
+          time: Date.now()
+        });
+    void queued.catch((error) => {
+      console.error("[Think] Failed to queue media eviction pass", error);
+    });
   }
 
   /**

@@ -250,7 +250,8 @@ describe("MediaEvictionPasses", () => {
       readMessage: async () => null,
       openFiles: () => ({ write: async () => {} }),
       updateMessage: async () => {},
-      emitEvicted: () => {}
+      emitEvicted: () => {},
+      queueRouted: async () => {}
     });
     passes.request();
     expect(await passes.run()).toBeNull();
@@ -285,7 +286,8 @@ describe("MediaEvictionPasses", () => {
         // An agent may swap its workspace reference mid-pass.
         workspace = "second";
       },
-      emitEvicted: () => {}
+      emitEvicted: () => {},
+      queueRouted: async () => {}
     });
     const result = await passes.run();
     expect(result?.messages).toBe(2);

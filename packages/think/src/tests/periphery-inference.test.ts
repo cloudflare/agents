@@ -220,6 +220,7 @@ describe("inference stream helpers", () => {
   });
 
   it("drains a registered stream once, through either result", async () => {
+    let original: object | undefined;
     let wrapper: object | undefined;
     const invoke = createInferenceInvocation({
       config: {},
@@ -242,13 +243,18 @@ describe("inference stream helpers", () => {
         afterToolCall: async () => {},
         requestId: () => undefined,
         resolveModel: () => createMockModel("x"),
-        transformResult: (result) => (wrapper = { ...result })
+        transformResult: (result) => {
+          original = result;
+          return (wrapper = { ...result });
+        }
       }
     });
     const result = invoke();
     expect(result).toBe(wrapper);
     const drains: Promise<void>[] = [];
-    drainInferenceStream(result, (promise) => drains.push(promise));
+    // The first drain goes through the unwrapped result; the wrapper shares
+    // its finalizer, so draining it as well starts nothing new.
+    drainInferenceStream(original!, (promise) => drains.push(promise));
     drainInferenceStream(result, (promise) => drains.push(promise));
     expect(drains).toHaveLength(1);
     await drains[0];

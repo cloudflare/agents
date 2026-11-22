@@ -13626,6 +13626,25 @@ export class ThinkMediaEvictionAgent extends Think {
     return (await this.syncMessagesFromStorage()).length;
   }
 
+  /** Seed aged media on a sub-agent facet of this agent. */
+  async seedFacetMediaForTest(name: string): Promise<void> {
+    const child = await this.subAgent(ThinkMediaEvictionAgent, name);
+    await child.setMediaEvictionForTest({
+      keepRecentMessages: 2,
+      minPartBytes: 10_000
+    });
+    await child.seedMediaHistoryForTest("f");
+  }
+
+  /** A stored message of a sub-agent facet of this agent. */
+  async getFacetStoredMessageForTest(
+    name: string,
+    id: string
+  ): Promise<UIMessage | null> {
+    const child = await this.subAgent(ThinkMediaEvictionAgent, name);
+    return child.getStoredMessageForTest(id);
+  }
+
   async getStoredMessageForTest(id: string): Promise<UIMessage | null> {
     return (await this.session.getMessage(id)) as UIMessage | null;
   }
