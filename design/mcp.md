@@ -87,21 +87,22 @@ The SDK v2 client negotiates Stateless first and falls back to Legacy on the sam
 
 `MCPClientManager` (`src/mcp/client/manager.ts`) is the public API and the Lifecycle hooks; it decides nothing itself. It keeps one `MCPClientConnection` per server and hands every controller one `McpClientContext` (`context.ts`): the connections, the store, the lanes, storage, and the manager's events. Dependencies point one way, top to bottom:
 
-| Module                      | Owns                                                                                                                                                             |
-| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `servers.ts`                | Each server's life: register, connect, discover, restore, settle, reconnect, close, remove, migrate. `afterFailure` is the one place that decides retry or stop. |
-| `authorization.ts`          | Links and OAuth: entering `authenticating` (round limit, spent links), callbacks, request recovery, provider creation and storage                                |
-| `status.ts`                 | The transitions both share: stop with a recorded failure, ready, save the session                                                                                |
-| `elicitation.ts`            | Elicitation handlers and the capabilities they advertise                                                                                                         |
-| `legacy-connect.ts`         | The deprecated `connect()`                                                                                                                                       |
-| `server-store.ts`           | Every SQL statement over `cf_agents_mcp_servers`                                                                                                                 |
-| `server-lanes.ts`           | One queue of connection work per server; re-entrant for nested calls                                                                                             |
-| `authorization-turns.ts`    | One OAuth flow at a time per connection, so concurrent 401s share one client and one link                                                                        |
-| `authorization-rounds.ts`   | The step-up round count, as pure functions                                                                                                                       |
-| `oauth-callback.ts`         | Callback recognition and parsing, state checks, code exchange, response rendering                                                                                |
-| `catalog.ts`, `ai-tools.ts` | Paginated catalogs, namespaced listings and filters; AI SDK tool conversion                                                                                      |
-| `url-policy.ts`             | Stable server ids and the SSRF policy                                                                                                                            |
-| `connection.ts`             | Transport selection, the SDK client, catalogs and the connection-level state machine                                                                             |
+| Module                      | Owns                                                                                                                                                                                                              |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `servers.ts`                | Each server's life: register, connect, discover, restore, settle, reconnect, close, remove, migrate. `afterFailure` is the one place that decides retry or stop.                                                  |
+| `authorization.ts`          | Links and OAuth: entering `authenticating` (round limit, spent links), callbacks, request recovery, provider creation and storage                                                                                 |
+| `status.ts`                 | The transitions both share: stop with a recorded failure, ready, save the session                                                                                                                                 |
+| `elicitation.ts`            | Elicitation handlers and the capabilities they advertise                                                                                                                                                          |
+| `legacy-connect.ts`         | The deprecated `connect()`                                                                                                                                                                                        |
+| `server-store.ts`           | Every SQL statement over `cf_agents_mcp_servers`                                                                                                                                                                  |
+| `server-lanes.ts`           | One queue of connection work per server; re-entrant for nested calls                                                                                                                                              |
+| `authorization-turns.ts`    | One OAuth flow at a time per connection, so concurrent 401s share one client and one link                                                                                                                         |
+| `authorization-rounds.ts`   | The step-up round count, as pure functions                                                                                                                                                                        |
+| `agent-servers.ts`          | Agent's `addMcpServer()`, `reconnectMcpServer()` and `getMcpServers()` as functions over the manager: id reuse and migration, callback URL, the result or error a settled server gives, the state sent to clients |
+| `oauth-callback.ts`         | Callback recognition and parsing, state checks, code exchange, response rendering                                                                                                                                 |
+| `catalog.ts`, `ai-tools.ts` | Paginated catalogs, namespaced listings and filters; AI SDK tool conversion                                                                                                                                       |
+| `url-policy.ts`             | Stable server ids and the SSRF policy                                                                                                                                                                             |
+| `connection.ts`             | Transport selection, the SDK client, catalogs and the connection-level state machine                                                                                                                              |
 
 `servers.ts` reaches `connectToServer` and `discoverIfConnected` through the manager, so a subclass override (or a test spy) sees internal calls too.
 

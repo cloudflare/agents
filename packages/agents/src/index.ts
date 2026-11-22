@@ -1,9 +1,3 @@
-import type {
-  Prompt,
-  Resource,
-  ServerCapabilities,
-  Tool
-} from "@modelcontextprotocol/client";
 import {
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext,
   type AgentContextStore,
@@ -125,11 +119,7 @@ export {
   isDurableObjectStorageReset,
   isPlatformTransientError
 } from "./retries";
-import {
-  MCPClientManager,
-  normalizeServerId,
-  type MCPServerSettlement
-} from "./mcp/client";
+import { MCPClientManager } from "./mcp/client";
 import type {
   WorkflowCallback,
   RunWorkflowOptions,
@@ -143,7 +133,6 @@ import {
   DurableObjectOAuthClientProvider,
   type AgentMcpOAuthProvider
 } from "./mcp/client/do-oauth-client-provider";
-import type { McpClientOptions, TransportType } from "./mcp/types";
 import {
   genericObservability,
   type Observability,
@@ -159,8 +148,17 @@ import {
 } from "./observability/tracing/tracer";
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./types";
-import { RPC_DO_PREFIX, type McpRpcAgent } from "./mcp/rpc";
-import { ensureMcpServerTable, type MCPServerRow } from "./mcp/client/storage";
+import type { McpRpcAgent } from "./mcp/rpc";
+import { ensureMcpServerTable } from "./mcp/client/storage";
+import {
+  addMcpServer,
+  mcpServersState,
+  reconnectMcpServer,
+  type AddMcpServerOptions,
+  type AddMcpServerResult,
+  type AddRpcMcpServerOptions,
+  type MCPServersState
+} from "./mcp/client/agent-servers";
 import { Scheduler, setSchedulerCallbackResolver } from "./schedules/scheduler";
 import { Queue, setQueueCallbackResolver } from "./queue/queue";
 import { Workflows } from "./workflow-tracking/workflows";
@@ -431,114 +429,12 @@ export type MCPServerMessage = {
   mcp: MCPServersState;
 };
 
-export type MCPServersState = {
-  servers: {
-    [id: string]: MCPServer;
-  };
-  tools: (Tool & { serverId: string })[];
-  prompts: (Prompt & { serverId: string })[];
-  resources: (Resource & { serverId: string })[];
-};
-
-export type MCPServer = {
-  name: string;
-  server_url: string;
-  auth_url: string | null;
-  // This state is specifically about the temporary process of getting a token (if needed).
-  // Scope outside of that can't be relied upon because when the DO sleeps, there's no way
-  // to communicate a change to a non-ready state.
-  state: MCPConnectionState;
-  /** May contain untrusted content from external OAuth providers. Escape appropriately for your output context. */
-  error: string | null;
-  instructions: string | null;
-  capabilities: ServerCapabilities | null;
-};
-
-/**
- * Options for adding an MCP server
- */
-export type AddMcpServerOptions = {
-  /**
-   * Optional caller-supplied stable server id. When provided, this id is used
-   * for storage, restore, and tool-name namespacing instead of a generated
-   * `nanoid`. The value is normalized via {@link normalizeServerId} — for
-   * connector-style integrations this lets `addMcpServer` keep producing
-   * keys like `tool_github_create_pull_request`.
-   *
-   * Throws if an existing server already uses the same (normalized) id but a
-   * different name or url.
-   */
-  id?: string;
-  /** OAuth callback host (auto-derived from request if omitted) */
-  callbackHost?: string;
-  /**
-   * Custom callback URL path — bypasses the default `/agents/{class}/{name}/callback` construction.
-   * Required when `sendIdentityOnConnect` is `false` to prevent leaking the instance name.
-   * When set, the callback URL becomes `{callbackHost}/{callbackPath}`.
-   * The developer must route this path to the agent instance via `getAgentByName`.
-   * Should be a plain path (e.g., `/mcp-callback`) — do not include query strings or fragments.
-   */
-  callbackPath?: string;
-  /** Agents routing prefix (default: "agents") */
-  agentsPrefix?: string;
-  /** MCP client options */
-  client?: McpClientOptions;
-  /** Transport options */
-  transport?: {
-    /** Custom headers for authentication (e.g., bearer tokens, CF Access) */
-    headers?: HeadersInit;
-    /** Transport type: "sse", "streamable-http", or "auto" (default) */
-    type?: TransportType;
-    /**
-     * Compatibility escape hatch for a trusted legacy authorization server
-     * whose RFC 8414 issuer does not match its metadata discovery URL.
-     * Security-weakening; leave false unless the server is explicitly known.
-     */
-    skipIssuerMetadataValidation?: boolean;
-  };
-  /** Retry options for connection and reconnection attempts */
-  retry?: RetryOptions;
-};
-
-/**
- * Options for adding an MCP server via RPC (Durable Object binding)
- */
-export type AddRpcMcpServerOptions = {
-  /**
-   * Optional caller-supplied stable server id. When provided, this id is used
-   * for storage, restore, and tool-name namespacing instead of a generated
-   * `nanoid`. The value is normalized via {@link normalizeServerId}.
-   *
-   * Throws if an existing server already uses the same (normalized) id but a
-   * different name or url.
-   */
-  id?: string;
-  /** Props to pass to the McpAgent instance */
-  props?: Record<string, unknown>;
-};
-
-/** What `addMcpServer` resolves with for an HTTP or RPC server. */
-type AddMcpServerResult =
-  | {
-      id: string;
-      state: typeof MCPConnectionState.AUTHENTICATING;
-      authUrl: string;
-    }
-  | {
-      id: string;
-      state: typeof MCPConnectionState.READY;
-      authUrl?: undefined;
-    };
-
-/** How `addMcpServer` reports connect and discovery outcomes for one server. */
-type McpConnectContext = {
-  /** Server name used in error messages. */
-  readonly name: string;
-  /** Server URL used in error messages. */
-  readonly url: string;
-  /** Whether an OAuth callback URL is configured for the server. */
-  readonly oauth: "available" | "unavailable";
-};
+export type {
+  AddMcpServerOptions,
+  AddRpcMcpServerOptions,
+  MCPServer,
+  MCPServersState
+} from "./mcp/client/agent-servers";
 
 const DEFAULT_KEEP_ALIVE_INTERVAL_MS = 30_000;
 const DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS = 2_000;
@@ -676,31 +572,6 @@ registerInternalConnectionKeys(
   CF_SUB_AGENT_OUTER_URL_KEY,
   CF_SUB_AGENT_TAGS_KEY
 );
-
-/** Max length for error strings broadcast to clients. */
-const MAX_ERROR_STRING_LENGTH = 500;
-
-/**
- * Sanitize an error string before broadcasting to clients.
- * MCP error strings may contain untrusted content from external OAuth
- * providers — truncate and strip control characters to limit XSS risk.
- */
-// Regex to match C0 control characters (except \t, \n, \r) and DEL.
-const CONTROL_CHAR_RE = new RegExp(
-  // oxlint-disable-next-line no-control-regex -- intentionally matching control chars for sanitization
-  "[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]",
-  "g"
-);
-
-function sanitizeErrorString(error: string | null): string | null {
-  if (error === null) return null;
-  // Strip control characters (keep printable ASCII + common unicode)
-  let sanitized = error.replace(CONTROL_CHAR_RE, "");
-  if (sanitized.length > MAX_ERROR_STRING_LENGTH) {
-    sanitized = sanitized.substring(0, MAX_ERROR_STRING_LENGTH) + "...";
-  }
-  return sanitized;
-}
 
 /**
  * Tracks which agent constructors have already emitted the onStateUpdate
@@ -7409,19 +7280,6 @@ export class Agent<
     return this._workflows.migrateBinding(oldName, newName);
   }
 
-  private _findBindingNameForNamespace(
-    namespace: DurableObjectNamespace<McpRpcAgent>
-  ): string | undefined {
-    for (const [key, value] of Object.entries(
-      this.env as Record<string, unknown>
-    )) {
-      if (value === namespace) {
-        return key;
-      }
-    }
-    return undefined;
-  }
-
   // ==========================================
   // Workflow Lifecycle Callbacks
   // ==========================================
@@ -7635,299 +7493,22 @@ export class Agent<
     agentsPrefix?: string,
     options?: Pick<AddMcpServerOptions, "client" | "transport">
   ): Promise<AddMcpServerResult> {
-    const isHttpTransport = typeof urlOrBinding === "string";
-    const normalizedUrl = isHttpTransport
-      ? new URL(urlOrBinding).href
-      : undefined;
-
-    // Extract and normalize a caller-supplied stable id, if any. The same
-    // option field is accepted on both the HTTP and RPC option shapes.
-    let requestedId: string | undefined;
-    if (
-      typeof callbackHostOrOptions === "object" &&
-      callbackHostOrOptions !== null &&
-      typeof (callbackHostOrOptions as { id?: unknown }).id === "string"
-    ) {
-      const rawId = (callbackHostOrOptions as { id: string }).id;
-      requestedId = normalizeServerId(rawId);
-    }
-
-    const allServers = this.mcp.listServers();
-
-    const existingServer = allServers.find(
-      (s) =>
-        s.name === serverName &&
-        (!isHttpTransport || new URL(s.server_url).href === normalizedUrl)
-    );
-
-    if (requestedId) {
-      // Collision check 1: a caller-supplied id may only re-resolve to an
-      // existing server when the (name, url) also matches. Otherwise storage
-      // (INSERT OR REPLACE on id) would silently overwrite the existing row.
-      const idConflict = allServers.find((s) => {
-        if (s.id !== requestedId) return false;
-        if (s.name !== serverName) return true;
-        if (isHttpTransport) {
-          return new URL(s.server_url).href !== normalizedUrl;
-        }
-        return false;
-      });
-      if (idConflict) {
-        throw new Error(
-          `MCP server id "${requestedId}" is already in use by server "${idConflict.name}" (${idConflict.server_url}). ` +
-            `Stable ids must be unique per (name, url).`
-        );
-      }
-
-      // JIT-migrate: the same (name, url) is already registered under a
-      // different id (typically an auto-generated nanoid from a previous
-      // call that didn't supply `id`). This is the natural upgrade path —
-      // a user adds `{ id: "github" }` to an existing `addMcpServer` call.
-      // Rename the existing row + connection + OAuth keys to the new id in
-      // place so the caller's contract ("the id I get back is the id I
-      // asked for") holds and no stale storage rows are left behind.
-      if (existingServer && existingServer.id !== requestedId) {
-        await this.mcp.migrateServerId(
-          existingServer.id,
-          requestedId,
-          this.name
-        );
-        existingServer.id = requestedId;
-      }
-    }
-
-    if (existingServer && this.mcp.mcpConnections[existingServer.id]) {
-      return this._resumeMcpServer(existingServer, serverName);
-    }
-
-    // RPC transport path: second argument is a DurableObjectNamespace
-    if (typeof urlOrBinding !== "string") {
-      const rpcOpts = callbackHostOrOptions as
-        | AddRpcMcpServerOptions
-        | undefined;
-
-      const normalizedName = serverName.toLowerCase().replace(/\s+/g, "-");
-
-      // Prefer the caller-supplied stable id, falling back to the existing
-      // server's id (for restore-through-addMcpServer), then to a generated id.
-      const reconnectId = requestedId ?? existingServer?.id;
-      const { id } = await this.mcp.connect(
-        `${RPC_DO_PREFIX}${normalizedName}`,
-        {
-          reconnect: reconnectId ? { id: reconnectId } : undefined,
-          transport: {
-            type: "rpc" as TransportType,
-            namespace:
-              urlOrBinding as unknown as DurableObjectNamespace<McpRpcAgent>,
-            name: normalizedName,
-            props: rpcOpts?.props
-          }
-        }
-      );
-
-      const conn = this.mcp.mcpConnections[id];
-      if (conn && conn.connectionState === MCPConnectionState.CONNECTED) {
-        const discoverResult = await this.mcp.discoverIfConnected(id);
-        if (discoverResult && !discoverResult.success) {
-          throw new Error(
-            `Failed to discover MCP server capabilities: ${discoverResult.error}`
-          );
-        }
-      } else if (conn && conn.connectionState === MCPConnectionState.FAILED) {
-        throw new Error(
-          `Failed to connect to MCP server "${serverName}" via RPC: ${conn.connectionError}`
-        );
-      }
-
-      const bindingName = this._findBindingNameForNamespace(
-        urlOrBinding as unknown as DurableObjectNamespace<McpRpcAgent>
-      );
-      if (bindingName) {
-        this.mcp.saveRpcServerToStorage(
-          id,
-          serverName,
-          normalizedName,
-          bindingName,
-          rpcOpts?.props
-        );
-      }
-
-      return { id, state: MCPConnectionState.READY };
-    }
-
-    // HTTP transport path
-    const httpOptions = callbackHostOrOptions as
-      | string
-      | AddMcpServerOptions
-      | undefined;
-
-    let resolvedCallbackHost: string | undefined;
-    let resolvedAgentsPrefix: string;
-    let resolvedOptions:
-      | Pick<AddMcpServerOptions, "client" | "transport" | "retry">
-      | undefined;
-
-    let resolvedCallbackPath: string | undefined;
-
-    if (typeof httpOptions === "object" && httpOptions !== null) {
-      resolvedCallbackHost = httpOptions.callbackHost;
-      resolvedCallbackPath = httpOptions.callbackPath;
-      resolvedAgentsPrefix = httpOptions.agentsPrefix ?? "agents";
-      resolvedOptions = {
-        client: httpOptions.client,
-        transport: httpOptions.transport,
-        retry: httpOptions.retry
-      };
-    } else {
-      resolvedCallbackHost = httpOptions;
-      resolvedAgentsPrefix = agentsPrefix ?? "agents";
-      resolvedOptions = options;
-    }
-
-    // Enforce callbackPath when sendIdentityOnConnect is false and callbackHost is provided
-    if (
-      !this._resolvedOptions.sendIdentityOnConnect &&
-      resolvedCallbackHost &&
-      !resolvedCallbackPath
-    ) {
-      throw new Error(
-        "callbackPath is required in addMcpServer options when sendIdentityOnConnect is false — " +
-          "the default callback URL would expose the instance name. " +
-          "Provide a callbackPath and route the callback request to this agent via getAgentByName."
-      );
-    }
-
-    // Try to derive callbackHost from the current request or connection URI
-    if (!resolvedCallbackHost) {
-      const { request, connection } = getCurrentAgent();
-      if (request) {
-        const requestUrl = new URL(request.url);
-        resolvedCallbackHost = `${requestUrl.protocol}//${requestUrl.host}`;
-      } else if (connection?.uri) {
-        const connectionUrl = new URL(connection.uri);
-        resolvedCallbackHost = `${connectionUrl.protocol}//${connectionUrl.host}`;
-      }
-    }
-
-    // Build the callback URL if we have a host (needed for OAuth, optional for non-OAuth servers)
-    let callbackUrl: string | undefined;
-    if (resolvedCallbackHost) {
-      const normalizedHost = resolvedCallbackHost.replace(/\/$/, "");
-      callbackUrl = resolvedCallbackPath
-        ? `${normalizedHost}/${resolvedCallbackPath.replace(/^\//, "")}`
-        : `${normalizedHost}/${resolvedAgentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
-    }
-
-    const id = requestedId ?? existingServer?.id ?? nanoid(8);
-
-    // Only create authProvider if we have a callbackUrl (needed for OAuth servers)
-    let authProvider:
-      | ReturnType<typeof this.createMcpOAuthProvider>
-      | undefined;
-    if (callbackUrl) {
-      authProvider = this.createMcpOAuthProvider(callbackUrl);
-      authProvider.serverId = id;
-    }
-
-    // Use the transport type specified in options, or default to "auto"
-    const transportType: TransportType =
-      resolvedOptions?.transport?.type ?? "auto";
-
-    // Register server (also saves to storage)
-    await this.mcp.registerServer(id, {
-      url: normalizedUrl!,
-      name: serverName,
-      callbackUrl,
-      client: resolvedOptions?.client,
-      transport: {
-        // Static credentials for servers without OAuth (an API key, or a
-        // server behind Cloudflare Access).
-        headers: resolvedOptions?.transport?.headers,
-        authProvider,
-        type: transportType,
-        skipIssuerMetadataValidation:
-          resolvedOptions?.transport?.skipIssuerMetadataValidation
-      },
-      retry: resolvedOptions?.retry
-    });
-
-    // The server stays in storage on failure so the caller can retry.
-    return this._connectAndDiscoverMcpServer(id, {
-      name: serverName,
-      url: normalizedUrl!,
-      oauth: callbackUrl ? "available" : "unavailable"
-    });
-  }
-
-  /**
-   * Bring an already-registered server to a result for `addMcpServer`. Work
-   * already queued for it (restore, an OAuth callback, a concurrent
-   * `addMcpServer`) runs first, so a half-connected server is never reported
-   * as ready.
-   */
-  private async _resumeMcpServer(
-    server: MCPServerRow,
-    serverName: string
-  ): Promise<AddMcpServerResult> {
-    return this._mcpServerResult(
-      server.id,
-      await this.mcp.settleServer(server.id),
+    return addMcpServer(
       {
-        name: serverName,
-        url: server.server_url,
-        oauth: server.callback_url ? "available" : "unavailable"
-      }
+        manager: this.mcp,
+        env: this.env,
+        agentName: this.name,
+        agentClassName: this._ParentClass.name,
+        sendIdentityOnConnect: this._resolvedOptions.sendIdentityOnConnect,
+        createAuthProvider: (callbackUrl) =>
+          this.createMcpOAuthProvider(callbackUrl)
+      },
+      serverName,
+      urlOrBinding,
+      callbackHostOrOptions,
+      agentsPrefix,
+      options
     );
-  }
-
-  /** Connect a registered server and discover its capabilities. */
-  private async _connectAndDiscoverMcpServer(
-    id: string,
-    context: McpConnectContext
-  ): Promise<AddMcpServerResult> {
-    return this._mcpServerResult(
-      id,
-      await this.mcp.connectAndDiscover(id),
-      context
-    );
-  }
-
-  /** Translate where a server settled into `addMcpServer`'s result or error. */
-  private _mcpServerResult(
-    id: string,
-    settlement: MCPServerSettlement,
-    context: McpConnectContext
-  ): AddMcpServerResult {
-    switch (settlement.state) {
-      case MCPConnectionState.READY:
-        return { id, state: MCPConnectionState.READY };
-      case MCPConnectionState.AUTHENTICATING:
-        if (context.oauth === "unavailable") {
-          throw new Error(
-            "This MCP server requires OAuth authentication. " +
-              "Provide callbackHost in addMcpServer options to enable the OAuth flow."
-          );
-        }
-        if (!settlement.authUrl) {
-          throw new Error("OAuth configuration incomplete: missing authUrl");
-        }
-        return {
-          id,
-          state: MCPConnectionState.AUTHENTICATING,
-          authUrl: settlement.authUrl
-        };
-      case MCPConnectionState.FAILED:
-        // The server stays in storage, failed until reconnectMcpServer().
-        throw new Error(
-          settlement.phase === "connect"
-            ? `Failed to connect to MCP server at ${context.url}: ${settlement.error}`
-            : `Failed to discover MCP server capabilities: ${settlement.error}`
-        );
-      case "removed":
-        throw new Error(
-          `MCP server "${context.name}" was removed while it was connecting`
-        );
-    }
   }
 
   /**
@@ -7940,14 +7521,8 @@ export class Agent<
    * @returns The same result as `addMcpServer()`: `ready`, or
    * `authenticating` with a new `authUrl`. Throws when the attempt fails.
    */
-  async reconnectMcpServer(id: string): Promise<AddMcpServerResult> {
-    const server = this.mcp.listServers().find((s) => s.id === id);
-    if (!server) throw new Error(`MCP server "${id}" is not registered`);
-    return this._mcpServerResult(id, await this.mcp.reconnectServer(id), {
-      name: server.name,
-      url: server.server_url,
-      oauth: server.callback_url ? "available" : "unavailable"
-    });
+  reconnectMcpServer(id: string): Promise<AddMcpServerResult> {
+    return reconnectMcpServer(this.mcp, id);
   }
 
   async removeMcpServer(id: string) {
@@ -7955,39 +7530,7 @@ export class Agent<
   }
 
   getMcpServers(): MCPServersState {
-    const mcpState: MCPServersState = {
-      prompts: this.mcp.listPrompts(),
-      resources: this.mcp.listResources(),
-      servers: {},
-      tools: this.mcp.listTools()
-    };
-
-    const servers = this.mcp.listServers();
-
-    if (servers && Array.isArray(servers) && servers.length > 0) {
-      for (const server of servers) {
-        const serverConn = this.mcp.mcpConnections[server.id];
-
-        // Determine the default state when no connection exists
-        let defaultState: "authenticating" | "not-connected" = "not-connected";
-        if (!serverConn && server.auth_url) {
-          // If there's an auth_url but no connection, it's waiting for OAuth
-          defaultState = "authenticating";
-        }
-
-        mcpState.servers[server.id] = {
-          auth_url: server.auth_url,
-          capabilities: serverConn?.serverCapabilities ?? null,
-          error: sanitizeErrorString(serverConn?.connectionError ?? null),
-          instructions: serverConn?.instructions ?? null,
-          name: server.name,
-          server_url: server.server_url,
-          state: serverConn?.connectionState ?? defaultState
-        };
-      }
-    }
-
-    return mcpState;
+    return mcpServersState(this.mcp);
   }
 
   /**
