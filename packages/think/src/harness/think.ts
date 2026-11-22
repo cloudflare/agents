@@ -34,6 +34,7 @@ import {
 import { createWorkersAI } from "workers-ai-provider";
 import { anthropic } from "workers-ai-provider/anthropic";
 import { openai } from "workers-ai-provider/openai";
+import { isWorkersAIModelId } from "../model";
 import { ThinkSession } from "../session";
 import { Think as LegacyThink } from "../think";
 import type { Session, SessionMessage } from "agents/sessions";
@@ -61,14 +62,6 @@ import type {
   TurnContext,
   TurnInputMessages
 } from "../think";
-
-const WORKERS_AI_MODEL_PREFIXES = ["@cf/", "@hf/"];
-
-function isWorkersAIModelId(model: string): boolean {
-  return WORKERS_AI_MODEL_PREFIXES.some(
-    (prefix) => model.startsWith(prefix) && model.length > prefix.length
-  );
-}
 
 function toInput(
   input: Exclude<TurnInputMessages, (current: UIMessage[]) => unknown>
