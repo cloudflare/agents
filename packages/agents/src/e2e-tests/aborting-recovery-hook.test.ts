@@ -49,10 +49,12 @@ describe("aborting recovery hook e2e", () => {
   it("marks the fiber interrupted once and keeps serving requests", async () => {
     wrangler = startWrangler(harness);
     // The hook logs a line each time it runs; storage would roll back.
-    let hookRuns = 0;
+    // Count over the whole output, so a marker split across chunks counts.
+    let output = "";
     wrangler.stdout?.on("data", (data: Buffer) => {
-      hookRuns += data.toString().split("[aborting-hook] ran").length - 1;
+      output += data.toString();
     });
+    const hookRuns = () => output.split("[aborting-hook] ran").length - 1;
     await waitForReady(harness);
 
     const fiberId = (await callAgentByPath(
@@ -78,12 +80,16 @@ describe("aborting recovery hook e2e", () => {
 
     // The hook ran, and it is not run again on later startups: the count
     // stays put while requests keep being served.
-    expect(hookRuns).toBeGreaterThanOrEqual(1);
-    const runs = hookRuns;
+    // stdout can trail the status reply, so wait for the marker.
+    for (let attempt = 0; attempt < 20 && hookRuns() === 0; attempt++) {
+      await sleep(250);
+    }
+    expect(hookRuns()).toBeGreaterThanOrEqual(1);
+    const runs = hookRuns();
     await sleep(5000);
     expect(
       await callAgentByPath(harness, AGENT_PATH, "fiberStatus", [fiberId])
     ).toBe("interrupted");
-    expect(hookRuns).toBe(runs);
+    expect(hookRuns()).toBe(runs);
   });
 });
