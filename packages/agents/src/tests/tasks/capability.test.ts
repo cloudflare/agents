@@ -129,6 +129,64 @@ describe("Tasks#register", () => {
 });
 
 describe("Tasks capability", () => {
+  it("refuses to join a run started with a different input", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const first = await instance.tasks.run(
+        "pipeline",
+        { label: "a", tags: { x: 1, y: 2 } },
+        { idempotencyKey: "K" }
+      );
+
+      // A caller bug reusing the key for other work must not silently get
+      // the old run back.
+      await expect(
+        instance.tasks.run("pipeline", { label: "b" }, { idempotencyKey: "K" })
+      ).rejects.toThrow(/different input/);
+      await expect(
+        instance.tasks.run("pipeline", { label: "b" }, { runId: first.runId })
+      ).rejects.toThrow(/different input/);
+
+      // A fresh run ID next to the reused key names the key, and the error
+      // has a stable name callers can branch on.
+      const conflict = await instance.tasks
+        .run(
+          "pipeline",
+          { label: "b" },
+          { runId: "fresh", idempotencyKey: "K" }
+        )
+        .catch((error: unknown) => error);
+      expect(conflict).toMatchObject({
+        name: "TaskInputConflictError",
+        message: expect.stringContaining("reused idempotency key")
+      });
+
+      // Input too deeply nested to sort is compared as stored.
+      let deep: Record<string, unknown> = {};
+      for (let i = 0; i < 5_000; i++) deep = { d: deep };
+      const deepRun = await instance.tasks.run(
+        "pipeline",
+        { label: "deep", tags: deep as unknown as Record<string, number> },
+        { idempotencyKey: "deep" }
+      );
+      expect(
+        await instance.tasks.run(
+          "pipeline",
+          { label: "deep", tags: deep as unknown as Record<string, number> },
+          { idempotencyKey: "deep" }
+        )
+      ).toMatchObject({ accepted: false, runId: deepRun.runId });
+
+      // The same data in another key order is the same input.
+      const joined = await instance.tasks.run(
+        "pipeline",
+        { tags: { y: 2, x: 1 }, label: "a" },
+        { idempotencyKey: "K" }
+      );
+      expect(joined).toMatchObject({ accepted: false, runId: first.runId });
+    });
+  });
+
   it("accepts runs durably and deduplicates acceptance", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {

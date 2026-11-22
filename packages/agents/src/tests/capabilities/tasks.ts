@@ -32,7 +32,10 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
   readonly tasks = new Tasks({
     definitions: {
       /** Two journaled steps, then a host-context probe in the return value. */
-      pipeline: async (input: { label: string }, step: TaskStep) => {
+      pipeline: async (
+        input: { label: string; tags?: Record<string, number> },
+        step: TaskStep
+      ) => {
         const first = await step.do("first", () => {
           this.stepRuns.push("pipeline:first");
           return `first:${input.label}`;
