@@ -2,6 +2,8 @@
  * A stable string form of a value: object keys sorted, so two objects with
  * the same entries in another order give the same string. Meant for JSON
  * values; a `Date` is written as its ISO time so two dates tell apart.
+ *
+ * @internal
  */
 export function stableStringify(value: unknown): string {
   if (value === undefined) return "undefined";
@@ -29,6 +31,8 @@ export function stableStringify(value: unknown): string {
  * A 128-bit hash of {@link stableStringify}. Not cryptographic: it tells
  * inputs apart, it does not hide them. The same function Think's action
  * ledger used, so rows it wrote still match.
+ *
+ * @internal
  */
 export function stableHash(value: unknown): string {
   const input = stableStringify(value);

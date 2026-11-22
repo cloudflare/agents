@@ -27,7 +27,11 @@ import type { SchedulerEventType } from "./options";
 
 type MaybePromise<T> = T | Promise<T>;
 
-/** What a declared schedule's `run` receives for one occurrence. */
+/**
+ * What a declared schedule's `run` receives for one occurrence.
+ *
+ * @internal
+ */
 export type DeclaredScheduleContext = {
   /** The declared name. */
   name: string;
@@ -46,7 +50,11 @@ export type DeclaredScheduleContext = {
   metadata?: Record<string, unknown>;
 };
 
-/** One named, recurring piece of work. */
+/**
+ * One named, recurring piece of work.
+ *
+ * @internal
+ */
 export type DeclaredSchedule = {
   /**
    * When it runs: `every 5 minutes`, `every 2 hours`, `every day at 09:00`,
@@ -65,15 +73,27 @@ export type DeclaredSchedule = {
   run(context: DeclaredScheduleContext): void | Promise<void>;
 };
 
-/** Declared schedules by name. Names use letters, digits, `_` and `-`. */
+/**
+ * Declared schedules by name. Names use letters, digits, `_` and `-`.
+ *
+ * @internal
+ */
 export type DeclaredSchedules = Record<string, DeclaredSchedule>;
 
-/** A declaration, or a function that returns one (read on every run). */
+/**
+ * A declaration, or a function that returns one (read on every run).
+ *
+ * @internal
+ */
 export type DeclaredSchedulesSource =
   | DeclaredSchedules
   | (() => MaybePromise<DeclaredSchedules>);
 
-/** Options for {@link Scheduler.declare}. */
+/**
+ * Options for {@link Scheduler.declare}.
+ *
+ * @internal
+ */
 export type DeclareSchedulesOptions = {
   /**
    * Which declaration this is. Each group reconciles only its own names, so
@@ -94,7 +114,11 @@ export type DeclareSchedulesOptions = {
   idempotencyKeyPrefix?: string;
 };
 
-/** One armed declared schedule, as {@link Scheduler.listDeclared} reports it. */
+/**
+ * One armed declared schedule, as {@link Scheduler.listDeclared} reports it.
+ *
+ * @internal
+ */
 export type DeclaredScheduleInfo = {
   name: string;
   /** The group it was declared in, when not the application's. */

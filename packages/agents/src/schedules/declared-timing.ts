@@ -8,21 +8,37 @@ type Digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9";
 type Hour = `0${Digit}` | `1${Digit}` | "20" | "21" | "22" | "23";
 type Minute = `${"0" | "1" | "2" | "3" | "4" | "5"}${Digit}`;
 
-/** A wall-clock time of day, `HH:mm` on a 24-hour clock. */
+/**
+ * A wall-clock time of day, `HH:mm` on a 24-hour clock.
+ *
+ * @internal
+ */
 export type ScheduleTime = `${Hour}:${Minute}`;
 
-/** A fixed interval: `every 5 minutes`, `every 1 hour`. */
+/**
+ * A fixed interval: `every 5 minutes`, `every 1 hour`.
+ *
+ * @internal
+ */
 export type IntervalScheduleExpression =
   | `every ${number} minute${"" | "s"}`
   | `every ${number} hour${"" | "s"}`;
 
-/** A time of day on some days, in a timezone supplied separately. */
+/**
+ * A time of day on some days, in a timezone supplied separately.
+ *
+ * @internal
+ */
 export type WallClockScheduleExpression =
   | `every day at ${ScheduleTime}`
   | `every weekday at ${ScheduleTime}`
   | `every week on ${string} at ${ScheduleTime}`;
 
-/** Every expression a declared schedule accepts. */
+/**
+ * Every expression a declared schedule accepts.
+ *
+ * @internal
+ */
 export type DeclaredScheduleExpression =
   | IntervalScheduleExpression
   | WallClockScheduleExpression

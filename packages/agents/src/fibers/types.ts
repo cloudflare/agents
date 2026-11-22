@@ -1,7 +1,6 @@
 /**
  * Context passed to the `runFiber` callback. Provides checkpoint
- * and identity for durable execution.
- */
+ * and identity for durable execution. */
 export type FiberContext = {
   /** Unique identifier for this fiber execution. */
   id: string;
@@ -81,8 +80,7 @@ export type DeleteFibersOptions = {
 
 /**
  * Context passed to the `onFiberRecovered` hook when an interrupted
- * fiber is detected after DO restart.
- */
+ * fiber is detected after DO restart. */
 export type FiberRecoveryContext = {
   /** Fiber ID. */
   id: string;

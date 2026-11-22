@@ -1,6 +1,8 @@
 # Declared schedules
 
-Recurring work that is part of the program (a weekly report, an hourly cleanup) is declared in code, not created at runtime. `Scheduler.declare()` takes a set of named entries and keeps storage in line with it. Think's `getScheduledTasks()` is built on it. User docs: [docs/agents/scheduling.md](../docs/agents/scheduling.md#declared-schedules).
+**Internal.** Not a public API. Nothing new from the slim-hosts work is exposed to apps until it has shipped inside `Think` and `AIChatAgent` for a release and is shown correct ([rfc-slim-hosts.md](./rfc-slim-hosts.md#exposure)). Sibling packages import it from `agents/internal`.
+
+Recurring work that is part of the program (a weekly report, an hourly cleanup) is declared in code, not created at runtime. `declareSchedules(scheduler, source, options)` takes a set of named entries and keeps storage in line with it. Think's `getScheduledTasks()` is built on it.
 
 ## How it works
 
@@ -22,7 +24,7 @@ When a job is due, the Scheduler reads the group's declaration again (the `run` 
 - Durable: one job per name. In memory: the declaration and `run`.
 - At least once per occurrence. The context carries `occurrenceKey` and `idempotencyKey` for the caller's own dedupe.
 - One run per name at a time, up to the hung timeout.
-- Root only. On a routed Lifecycle (a facet) `declare()` arms nothing and warns once.
+- Root only. On a routed Lifecycle (a facet) `declareSchedules()` arms nothing and warns once.
 - Groups keep a library's names (Think uses `"think"`) apart from the application's on one Scheduler.
 
 ## Key decisions
@@ -30,10 +32,10 @@ When a job is due, the Scheduler reads the group's declaration again (the `run` 
 - **Jobs, not rows.** Think's version kept `cf_think_scheduled_tasks` (hashes, `schedule_id`, `next_run_at`) beside a one-shot Agent schedule and had to repair the states where the two disagreed. With the job as the only record those states do not exist.
 - **Retry through the job queue.** The Lifecycle driver already retries, separates platform failures (kept for the next alarm) from application failures, and lets `onJobError` return the next time. Think wrapped the action in its own in-process retry instead.
 - **Root only, no opt-in.** Think had `getScheduledTasksScope()` because a facet shares the root's alarm and a static declaration armed once per live facet (#1877). Sub-agents that need their own schedules are their own Durable Objects, so the opt-in is gone.
-- **Migration (Scheduler schema version 3).** On start, `cf_think_scheduled_tasks` rows and the root's `_runDeclaredScheduledTask` jobs (its own and its facets') are read, each root task's exact next occurrence (the table's `next_run_at`, else the job payload's `scheduledFor`, never the rounded job time) is kept under `cf_agents:declared_schedules_legacy_next`, the old jobs are deleted and the table dropped. Think's first `declare()` (group `"think"`) arms each still-declared name at its kept occurrence, so Think's idempotency keys match across the upgrade, then deletes the key. One way.
+- **Migration (Scheduler schema version 3).** On start, `cf_think_scheduled_tasks` rows and the root's `_runDeclaredScheduledTask` jobs (its own and its facets') are read, each root task's exact next occurrence (the table's `next_run_at`, else the job payload's `scheduledFor`, never the rounded job time) is kept under `cf_agents:declared_schedules_legacy_next`, the old jobs are deleted and the table dropped. Think's first `declareSchedules()` (group `"think"`) arms each still-declared name at its kept occurrence, so Think's idempotency keys match across the upgrade, then deletes the key. One way.
 
 ## Tradeoffs
 
-- Declared schedules are not `Schedule`s: `list()`, `get()` and `cancel()` do not see them. `listDeclared()` is the read path. Cancelling one means removing it from the declaration.
+- Declared schedules are not `Schedule`s: `list()`, `get()` and `cancel()` do not see them. `listDeclaredSchedules(scheduler)` is the read path. Cancelling one means removing it from the declaration.
 - A `run` longer than the hung timeout can be taken over by the next alarm and run twice. Same rule as `every()` intervals.
 - Changing a task's timing in the same deploy that upgrades from Think's table uses the old next run time once.

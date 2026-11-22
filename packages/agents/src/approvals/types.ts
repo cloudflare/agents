@@ -1,4 +1,8 @@
-/** Options for one {@link Approvals.once} call. */
+/**
+ * Options for one {@link Approvals.once} call.
+ *
+ * @internal
+ */
 export type EffectOptions<T> = {
   /**
    * The effect's identity. One key runs once: a later call with the same
@@ -25,7 +29,11 @@ export type EffectOptions<T> = {
   readonly context?: Record<string, unknown>;
 };
 
-/** What {@link Approvals.once} did. */
+/**
+ * What {@link Approvals.once} did.
+ *
+ * @internal
+ */
 export type EffectOutcome<T> =
   /** This call ran the effect and recorded its value. */
   | { readonly status: "ran"; readonly value: T }
@@ -46,7 +54,11 @@ export type EffectOutcome<T> =
    */
   | { readonly status: "unrecorded"; readonly value: T };
 
-/** A recorded effect, as {@link Approvals.effect} returns it. */
+/**
+ * A recorded effect, as {@link Approvals.effect} returns it.
+ *
+ * @internal
+ */
 export type EffectRecord = {
   readonly key: string;
   readonly name: string;
@@ -60,7 +72,11 @@ export type EffectRecord = {
   readonly updatedAt: number;
 };
 
-/** Options for {@link Approvals.park}. */
+/**
+ * Options for {@link Approvals.park}.
+ *
+ * @internal
+ */
 export type ParkOptions = {
   /** The decision's id. Default: generated, `decision_<uuid>`. */
   readonly id?: string;
@@ -72,7 +88,11 @@ export type ParkOptions = {
   readonly descriptor?: unknown;
 };
 
-/** A decision someone made. */
+/**
+ * A decision someone made.
+ *
+ * @internal
+ */
 export type Verdict =
   | { readonly approved: true; readonly data?: unknown }
   | {
@@ -81,10 +101,18 @@ export type Verdict =
       readonly data?: unknown;
     };
 
-/** Where a decision is. */
+/**
+ * Where a decision is.
+ *
+ * @internal
+ */
 export type DecisionStatus = "pending" | "decided" | "settled";
 
-/** A parked decision and what became of it. */
+/**
+ * A parked decision and what became of it.
+ *
+ * @internal
+ */
 export type Decision = {
   readonly id: string;
   readonly kind: string;
@@ -107,7 +135,11 @@ export type Decision = {
   readonly settledAt: number | undefined;
 };
 
-/** What {@link Approvals.decide} did. */
+/**
+ * What {@link Approvals.decide} did.
+ *
+ * @internal
+ */
 export type DecideResult =
   /** This call decided it; the continuation ran and its outcome is recorded. */
   | { readonly status: "settled"; readonly decision: Decision }
@@ -115,7 +147,11 @@ export type DecideResult =
   | { readonly status: "already-decided"; readonly decision: Decision }
   | { readonly status: "not-found" };
 
-/** How long records are kept. `false` keeps them until deleted. */
+/**
+ * How long records are kept. `false` keeps them until deleted.
+ *
+ * @internal
+ */
 export type ApprovalsRetention = {
   /** Recorded effects. Deleting one ends the run-once guarantee for its key. Default: 30 days. */
   readonly effectSettledMs?: number | false;
@@ -129,7 +165,11 @@ export type ApprovalsRetention = {
   readonly maxSweepRows?: number;
 };
 
-/** Options for an {@link Approvals} capability. */
+/**
+ * Options for an {@link Approvals} capability.
+ *
+ * @internal
+ */
 export type ApprovalsOptions = {
   /**
    * Run what a decision lets go on, and return its outcome (JSON). Called
@@ -172,7 +212,11 @@ export type ApprovalsOptions = {
   readonly resumeAfterMs?: number;
 };
 
-/** Events the capability emits on `lifecycle.events`. */
+/**
+ * Events the capability emits on `lifecycle.events`.
+ *
+ * @internal
+ */
 export type ApprovalsEventType =
   | "approvals:effect:ran"
   | "approvals:effect:replayed"

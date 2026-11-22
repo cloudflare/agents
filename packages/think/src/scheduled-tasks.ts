@@ -10,23 +10,51 @@ import type {
   DeclaredSchedule,
   DeclaredScheduleContext,
   DeclaredScheduleExpression,
-  DeclaredSchedules,
-  IntervalScheduleExpression,
-  ScheduleTime,
-  WallClockScheduleExpression
-} from "agents/schedules";
+  DeclaredSchedules
+} from "agents/internal";
 
-export type ThinkTime = ScheduleTime;
-export type ThinkIntervalSchedule = IntervalScheduleExpression;
-export type ThinkWallClockSchedule = WallClockScheduleExpression;
-export type ThinkScheduledTaskSchedule = DeclaredScheduleExpression;
+// Think's public schedule types are its own, written out, so its published
+// types never name the internal declared-schedule types they match.
+type Digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9";
+type Hour = `0${Digit}` | `1${Digit}` | "20" | "21" | "22" | "23";
+type Minute = `${"0" | "1" | "2" | "3" | "4" | "5"}${Digit}`;
+export type ThinkTime = `${Hour}:${Minute}`;
+export type ThinkIntervalSchedule =
+  | `every ${number} minute${"" | "s"}`
+  | `every ${number} hour${"" | "s"}`;
+export type ThinkWallClockSchedule =
+  | `every day at ${ThinkTime}`
+  | `every weekday at ${ThinkTime}`
+  | `every week on ${string} at ${ThinkTime}`;
+export type ThinkScheduledTaskSchedule =
+  | ThinkIntervalSchedule
+  | ThinkWallClockSchedule
+  | `${ThinkWallClockSchedule} in ${string}`;
 
-export type ThinkScheduledTaskContext = Omit<
-  DeclaredScheduleContext,
-  "name"
-> & {
+export type ThinkScheduledTaskContext = {
   taskId: string;
+  scheduledFor: number;
+  scheduledForDate: Date;
+  occurrenceKey: string;
+  idempotencyKey: string;
+  schedule: string;
+  scheduleKind: "interval" | "wall-clock";
+  timezone?: string;
+  metadata?: Record<string, unknown>;
 };
+
+// The two sets of types must stay the same shape.
+type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+const _sameSchedule: Same<
+  ThinkScheduledTaskSchedule,
+  DeclaredScheduleExpression
+> = true;
+const _sameContext: Same<
+  ThinkScheduledTaskContext,
+  Omit<DeclaredScheduleContext, "name"> & { taskId: string }
+> = true;
+void _sameSchedule;
+void _sameContext;
 
 type ThinkScheduledTaskPromptAction = {
   prompt: string | (() => string | Promise<string>);

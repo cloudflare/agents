@@ -103,6 +103,8 @@ function isTerminalToolState(state: unknown): boolean {
 /**
  * The reply a host is streaming or storing now, whose parts an update may
  * change in place.
+ *
+ * @internal
  */
 export type InFlightToolReply<TMessage> = {
   readonly id: string;
@@ -114,7 +116,11 @@ export type InFlightToolReply<TMessage> = {
   readonly changed: () => void;
 };
 
-/** Where {@link applyToolPartUpdate} finds, writes and announces the part. */
+/**
+ * Where {@link applyToolPartUpdate} finds, writes and announces the part.
+ *
+ * @internal
+ */
 export type ToolPartTarget<TMessage extends { id: string; parts: unknown[] }> =
   {
     /** The reply in flight, or `null`. */
@@ -146,6 +152,8 @@ export type ToolPartTarget<TMessage extends { id: string; parts: unknown[] }> =
  * @returns `changed` with the message a continuation answers (the reply in
  *   flight when it holds the call), `unchanged` when the part was found and
  *   already settled, or `missing`.
+ *
+ * @internal
  */
 export async function applyToolPartUpdate<
   TMessage extends { id: string; parts: unknown[] }
@@ -383,6 +391,8 @@ export function toolPartName(
  * Names of the tools in `tools` the server does not run: no `execute`, and
  * not run by the provider. An app answers a call to one of them from the
  * client, sorted so the list can be compared and stored.
+ *
+ * @internal
  */
 export function unexecutedToolNames(tools: Record<string, unknown>): string[] {
   return Object.entries(tools)

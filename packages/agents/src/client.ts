@@ -20,16 +20,6 @@ import {
 import type { AgentTransport } from "./websockets/transport-protocol";
 
 export type { AgentTransport } from "./websockets/transport-protocol";
-export {
-  followEventLog,
-  type EventLogHandlers,
-  type EventLogSocket,
-  type EventLogSubscription
-} from "./event-log-client";
-export type {
-  EventLogCursor,
-  EventLogEntry
-} from "./websockets/event-log-protocol";
 
 export class AgentConnectionError extends Error {
   code: number;

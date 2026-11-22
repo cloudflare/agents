@@ -27,7 +27,11 @@ import type {
   WorkflowTrackingRow
 } from "../workflow-types";
 
-/** Who started the workflows: a top-level agent, or a facet by its path. */
+/**
+ * Who started the workflows: a top-level agent, or a facet by its path.
+ *
+ * @internal
+ */
 export type WorkflowOwner =
   | {
       readonly kind: "agent";
@@ -40,6 +44,7 @@ export type WorkflowOwner =
       readonly path: ReadonlyArray<AgentPathStep>;
     };
 
+/** @internal */
 export type WorkflowsOptions = {
   /** The Worker env holding the Workflow and agent namespace bindings. */
   readonly env: object;
@@ -47,6 +52,7 @@ export type WorkflowsOptions = {
   readonly owner: () => WorkflowOwner;
 };
 
+/** @internal */
 export type WorkflowFilter = Omit<
   WorkflowQueryCriteria,
   "limit" | "cursor" | "orderBy"
@@ -69,7 +75,11 @@ const RETRY = {
 
 type SqlValue = string | number | boolean | null;
 
-/** The options `workflow.create()` gets: owner identity rides in the params. */
+/**
+ * The options `workflow.create()` gets: owner identity rides in the params.
+ *
+ * @internal
+ */
 export function workflowCreateOptions(args: {
   workflowId: string;
   workflowName: string;
@@ -175,6 +185,7 @@ function whereClause(filter: WorkflowFilter): {
   return { sql, params };
 }
 
+/** @internal */
 export class Workflows extends LifecycleCapability {
   readonly #options: WorkflowsOptions;
   #tableReady = false;

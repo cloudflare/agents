@@ -1,10 +1,11 @@
 import { DurableObject, RpcTarget } from "cloudflare:workers";
 import { Lifecycle } from "../../lifecycle";
+import { WebSockets } from "../../websockets";
 import {
-  WebSockets,
+  declareEventLog,
   type EventLog,
   type EventLogBatch
-} from "../../websockets";
+} from "../../internal";
 
 type StoredRow = {
   seq_from: number;
@@ -50,19 +51,19 @@ export class EventLogObject extends DurableObject<Cloudflare.Env> {
     }
   });
 
-  readonly #feed: EventLog<unknown, { at: number }> = this.#webSockets.log<
+  readonly #feed: EventLog<unknown, { at: number }> = declareEventLog<
     unknown,
     { at: number }
-  >("feed", {
+  >(this.#webSockets, "feed", {
     retention: { maxEvents: 5 },
     batching: { maxEvents: 3, maxDelayMs: 60_000 },
     maxEventBytes: 600_000,
     snapshot: (): { at: number } => ({ at: this.#feed.head.seq })
   });
 
-  readonly #bare = this.#webSockets.log("bare");
+  readonly #bare = declareEventLog(this.#webSockets, "bare");
 
-  readonly #guarded = this.#webSockets.log("guarded", {
+  readonly #guarded = declareEventLog(this.#webSockets, "guarded", {
     canSubscribe: (connection) =>
       new URL(connection.uri ?? "https://x").searchParams.has("allow")
   });

@@ -1,10 +1,12 @@
 # Event logs
 
-How the WebSockets capability numbers, stores, and replays outbound events. User docs: [docs/agents/event-logs.md](../docs/agents/event-logs.md). Code: `packages/agents/src/websockets/event-log.ts`, `event-log-protocol.ts`, `packages/agents/src/event-log-client.ts`.
+**Internal.** Not a public API. Nothing new from the slim-hosts work is exposed to apps until it has shipped inside `Think` and `AIChatAgent` for a release and is shown correct ([rfc-slim-hosts.md](./rfc-slim-hosts.md#exposure)). Sibling packages import it from `agents/internal`.
+
+How the WebSockets capability numbers, stores, and replays outbound events. Code: `packages/agents/src/websockets/event-log.ts`, `event-log-protocol.ts`, `packages/agents/src/event-log-client.ts`.
 
 ## How it works
 
-`WebSockets.log(name, options)` returns an `EventLog`. Each event gets the log's next `seq` (from 1, only growing), is stored in SQLite, and goes to the connections following the log. A client follows with a subscribe frame carrying its cursor, `{ epoch, seq }`, the last event it applied. The server answers in one synchronous block, so no publish can land between replay and live:
+`declareEventLog(webSockets, name, options)` returns an `EventLog`. Each event gets the log's next `seq` (from 1, only growing), is stored in SQLite, and goes to the connections following the log. A client follows with a subscribe frame carrying its cursor, `{ epoch, seq }`, the last event it applied. The server answers in one synchronous block, so no publish can land between replay and live:
 
 - it replays every retained event after the cursor, then sends `synced`, or
 - it sends `resync` with the host's snapshot and the head `seq`, when the cursor is absent, from another epoch, ahead of the head, before the oldest retained event, or inside a gap.

@@ -151,6 +151,32 @@ function isRpcRequest(value: unknown): value is RpcRequest {
  * broadcasts changes with `broadcastState()`. Per-connection readonly
  * and no-protocol flags live here as well, for every host.
  */
+let declareEventLogOn: <T, S>(
+  webSockets: WebSockets,
+  name: string,
+  options: EventLogOptions<S>
+) => EventLog<T, S>;
+
+/**
+ * Declare a replayable event log on `webSockets`. Every event it publishes
+ * gets the log's next seq, is stored, and goes to the connections following
+ * it. A client follows with `followEventLog()`, and on reconnect gets the
+ * events it missed, or a resync from `options.snapshot` when they are gone.
+ *
+ * Declare logs where you construct the capability: a client's subscribe
+ * frame can arrive in a fresh isolate, and a log declared later does not
+ * exist yet then. Declaring a name twice throws.
+ *
+ * @internal Sibling-package support (`agents/internal`). Not a public API.
+ */
+export function declareEventLog<T = unknown, S = unknown>(
+  webSockets: WebSockets,
+  name: string,
+  options: EventLogOptions<S> = {}
+): EventLog<T, S> {
+  return declareEventLogOn<T, S>(webSockets, name, options);
+}
+
 export class WebSockets extends LifecycleCapability {
   /** Claims every upgrade, so Lifecycle dispatches it after all others. */
   override readonly claims = "catch-all";
@@ -270,33 +296,23 @@ export class WebSockets extends LifecycleCapability {
 
   // ── Event logs ─────────────────────────────────────────────────────────
 
-  /**
-   * Declare a replayable event log. Every event it publishes gets the
-   * log's next seq, is stored, and goes to the connections following it.
-   * A client follows with `followEventLog()` (`agents/client`) or
-   * `useEventLog()` (`agents/react`), and on reconnect gets the events it
-   * missed, or a resync from `options.snapshot` when they are gone.
-   *
-   * Declare logs where you construct the capability: a client's subscribe
-   * frame can arrive in a fresh isolate, and a log declared later does not
-   * exist yet then. Declaring a name twice throws.
-   *
-   * @experimental The API surface may change before stabilizing.
-   */
-  log<T = unknown, S = unknown>(
-    name: string,
-    options: EventLogOptions<S> = {}
-  ): EventLog<T, S> {
-    if (this.#logs.has(name)) {
-      throw new Error(`Event log "${name}" is already declared`);
-    }
-    const log = new EventLog<T, S>(name, options, {
-      sql: () => this.lifecycle.storage.sql,
-      connections: () => this.getConnections(),
-      emit: (type, payload) => this.lifecycle.events.emit(type, payload)
-    });
-    this.#logs.set(name, log);
-    return log;
+  static {
+    declareEventLogOn = <T, S>(
+      webSockets: WebSockets,
+      name: string,
+      options: EventLogOptions<S>
+    ): EventLog<T, S> => {
+      if (webSockets.#logs.has(name)) {
+        throw new Error(`Event log "${name}" is already declared`);
+      }
+      const log = new EventLog<T, S>(name, options, {
+        sql: () => webSockets.lifecycle.storage.sql,
+        connections: () => webSockets.getConnections(),
+        emit: (type, payload) => webSockets.lifecycle.events.emit(type, payload)
+      });
+      webSockets.#logs.set(name, log);
+      return log;
+    };
   }
 
   /** Answer a subscribe or unsubscribe frame from a client. */

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { followEventLog } from "../../client";
+import { followEventLog } from "../../internal";
 
 /**
  * A live frame that skips seqs makes the follower re-subscribe. Until the

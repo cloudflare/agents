@@ -81,7 +81,11 @@ type DecisionRow = {
   settled_at: number | null;
 };
 
-/** What one {@link Approvals.sweep} deleted. */
+/**
+ * What one {@link Approvals.sweep} deleted.
+ *
+ * @internal
+ */
 export type SweepResult = {
   readonly effects: number;
   readonly decisions: number;
@@ -190,6 +194,8 @@ function resumeJobId(id: string): string {
  * verdict and outcome; one recovery job per unfinished decision. In memory:
  * the running effects and continuations (so callers in the same isolate
  * share them) and {@link wait} waiters.
+ *
+ * @internal
  */
 export class Approvals extends LifecycleCapability {
   readonly #options: ApprovalsOptions;

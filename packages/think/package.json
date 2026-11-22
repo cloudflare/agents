@@ -47,7 +47,7 @@
     "@ai-sdk/react": "^4.0.0",
     "@chat-adapter/telegram": "^4.29.0",
     "@cloudflare/computer": "^0.10.0",
-    "agents": ">=0.34.0 <1.0.0",
+    "agents": ">=0.34.1 <1.0.0",
     "ai": "^7.0.0",
     "react": "^19.0.0",
     "zod": "^4.0.0"

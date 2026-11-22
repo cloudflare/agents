@@ -69,10 +69,14 @@ import type {
   TurnQueue
 } from "agents/chat";
 import type { Schedule } from "agents";
-import type { DeclaredScheduleInfo } from "agents/schedules";
+import {
+  declareSchedules,
+  listDeclaredSchedules,
+  type DeclaredScheduleInfo
+} from "agents/internal";
 import type { Session } from "../../think";
 import type { ContextConfig } from "agents/context";
-import { stableHash, type Approvals } from "agents/approvals";
+import { stableHash, type Approvals } from "agents/internal";
 import { z } from "zod";
 import { WorkspaceFiles } from "../../workspace-files";
 
@@ -10589,7 +10593,7 @@ export class ThinkScheduledTasksTestAgent extends ThinkProgrammaticTestAgent {
   }
 
   async listDeclaredForTest(): Promise<DeclaredScheduleInfo[]> {
-    return this.scheduler.listDeclared();
+    return listDeclaredSchedules(this.scheduler);
   }
 
   /**
@@ -10603,7 +10607,7 @@ export class ThinkScheduledTasksTestAgent extends ThinkProgrammaticTestAgent {
   ): Promise<number> {
     const occurrence =
       scheduledFor ??
-      this.scheduler.listDeclared().find((info) => info.name === taskId)
+      listDeclaredSchedules(this.scheduler).find((info) => info.name === taskId)
         ?.nextRunAt;
     if (occurrence === undefined) throw new Error(`No declared ${taskId}`);
     this.ctx.storage.sql.exec(
@@ -10624,7 +10628,7 @@ export class ThinkScheduledTasksTestAgent extends ThinkProgrammaticTestAgent {
 
   /** The application's own declaration, beside Think's. */
   async declareAppScheduleForTest(): Promise<void> {
-    await this.scheduler.declare({
+    await declareSchedules(this.scheduler, {
       cleanup: { schedule: "every 1 hour", run() {} }
     });
   }

@@ -7,7 +7,8 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render as _render, cleanup } from "vitest-browser-react";
 import { useState } from "react";
-import { useAgent, useEventLog } from "../react";
+import { useAgent } from "../react";
+import { useEventLog } from "../internal/react";
 import { getTestWorkerHost } from "./test-config";
 
 const render: typeof _render = async (...args) => {

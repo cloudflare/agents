@@ -59,7 +59,11 @@ const REPORT_BATCH = 50;
 const PURGE_BATCH = 100;
 const DEFAULT_MAX_ATTEMPTS = 3;
 
-/** Options for an {@link Inbox}. */
+/**
+ * Options for an {@link Inbox}.
+ *
+ * @internal
+ */
 export interface InboxOptions<Handlers extends InboxHandlers> {
   /**
    * The handler for each kind of request, called with the payload and the
@@ -96,7 +100,11 @@ export interface InboxOptions<Handlers extends InboxHandlers> {
   readonly retain?: boolean;
 }
 
-/** How a handler, or {@link Inbox.settle}, ends a request. */
+/**
+ * How a handler, or {@link Inbox.settle}, ends a request.
+ *
+ * @internal
+ */
 export class InboxSettlement {
   /** @internal Use the static helpers on {@link Inbox}. */
   constructor(
@@ -128,7 +136,7 @@ const OPEN: ReadonlySet<InboxStatus> = new Set(["pending", "running"]);
 /**
  * Durable requests for a Lifecycle Object. Install with `Lifecycle.use()`.
  *
- * @experimental The API surface may change before stabilizing.
+ * @internal Not a public API (sibling-package support through `agents/internal`).
  */
 export class Inbox<
   Handlers extends InboxHandlers = InboxHandlers

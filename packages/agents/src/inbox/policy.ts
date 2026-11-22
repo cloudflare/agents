@@ -1,6 +1,10 @@
 import type { InboxPolicy, InboxRequest } from "./types";
 
-/** A policy as the record stores it. */
+/**
+ * A policy as the record stores it.
+ *
+ * @internal
+ */
 export type NormalizedPolicy = {
   readonly name: InboxRequest["policy"];
   /** For `debounce`, the quiet period; otherwise `null`. */
@@ -12,6 +16,8 @@ export type NormalizedPolicy = {
  *
  * @throws For a name that is not a policy, or a debounce that is not a
  *   finite number of milliseconds at least 0.
+ *
+ * @internal
  */
 export function normalizePolicy(
   policy: InboxPolicy | undefined
@@ -39,6 +45,8 @@ export function normalizePolicy(
  * superseded at the front of the lane), or is dropped at once.
  *
  * @param busy - The lane has an open request.
+ *
+ * @internal
  */
 export function arrival(
   policy: NormalizedPolicy,

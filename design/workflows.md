@@ -1,5 +1,7 @@
 # Workflows
 
+**Internal.** Not a public API. Nothing new from the slim-hosts work is exposed to apps until it has shipped inside `Think` and `AIChatAgent` for a release and is shown correct ([rfc-slim-hosts.md](./rfc-slim-hosts.md#exposure)). It is not exported at all: `Agent` installs it and delegates its public methods to it.
+
 `Agent.runWorkflow()` starts a [Cloudflare Workflow](https://developers.cloudflare.com/workflows/) instance on the agent's behalf, and the agent keeps a record of every instance it started. The control methods (`sendWorkflowEvent`, `approveWorkflow`, `rejectWorkflow`, `terminateWorkflow`, `pauseWorkflow`, `resumeWorkflow`, `restartWorkflow`, `getWorkflowStatus`) and the record queries (`getWorkflow`, `getWorkflows`, `deleteWorkflow`, `deleteWorkflows`, `migrateWorkflowBinding`) are one-line delegates to the `Workflows` Lifecycle capability in `packages/agents/src/workflow-tracking/`. The hooks stay on Agent: `onWorkflowCallback`, `onWorkflowProgress`, `onWorkflowComplete`, `onWorkflowError`, `onWorkflowEvent`, and the `_workflow_*` RPC methods `AgentWorkflow` calls. `AgentWorkflow` itself is in `src/workflows.ts`.
 
 The capability is internal. Agent installs it with the Worker env and a function that names the owner: a top-level agent by class and name, or a facet by its path from the root.

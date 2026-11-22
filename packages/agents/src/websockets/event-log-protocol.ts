@@ -3,26 +3,44 @@
  * what the server answers. Browser-safe — imported by the client too.
  */
 
-/** Where a client is in a log: the log's epoch and the last seq it applied. */
+/**
+ * Where a client is in a log: the log's epoch and the last seq it applied.
+ *
+ * @internal
+ */
 export type EventLogCursor = {
   readonly epoch: string;
   readonly seq: number;
 };
 
-/** One sequenced event as it travels on the wire. */
+/**
+ * One sequenced event as it travels on the wire.
+ *
+ * @internal
+ */
 export type EventLogEntry<T = unknown> = {
   readonly seq: number;
   readonly data: T;
 };
 
+/** @internal */
 export const EVENT_LOG_SUBSCRIBE = "cf_agent_log_subscribe";
+/** @internal */
 export const EVENT_LOG_UNSUBSCRIBE = "cf_agent_log_unsubscribe";
+/** @internal */
 export const EVENT_LOG_EVENTS = "cf_agent_log_events";
+/** @internal */
 export const EVENT_LOG_SYNCED = "cf_agent_log_synced";
+/** @internal */
 export const EVENT_LOG_RESYNC = "cf_agent_log_resync";
+/** @internal */
 export const EVENT_LOG_ERROR = "cf_agent_log_error";
 
-/** Client to server: follow a log, from a cursor when the client has one. */
+/**
+ * Client to server: follow a log, from a cursor when the client has one.
+ *
+ * @internal
+ */
 export type EventLogSubscribeFrame = {
   readonly type: typeof EVENT_LOG_SUBSCRIBE;
   readonly log: string;
@@ -36,7 +54,11 @@ export type EventLogSubscribeFrame = {
   readonly id?: string;
 };
 
-/** Client to server: stop following a log. */
+/**
+ * Client to server: stop following a log.
+ *
+ * @internal
+ */
 export type EventLogUnsubscribeFrame = {
   readonly type: typeof EVENT_LOG_UNSUBSCRIBE;
   readonly log: string;
@@ -45,6 +67,8 @@ export type EventLogUnsubscribeFrame = {
 /**
  * Server to client: events in seq order. A replay frame carries the
  * subscribe's `id`; a live frame carries none and is for every follower.
+ *
+ * @internal
  */
 export type EventLogEventsFrame<T = unknown> = {
   readonly type: typeof EVENT_LOG_EVENTS;
@@ -53,7 +77,11 @@ export type EventLogEventsFrame<T = unknown> = {
   readonly id?: string;
 };
 
-/** Server to client: replay is done; events from here on are live. */
+/**
+ * Server to client: replay is done; events from here on are live.
+ *
+ * @internal
+ */
 export type EventLogSyncedFrame = {
   readonly type: typeof EVENT_LOG_SYNCED;
   readonly log: string;
@@ -66,6 +94,8 @@ export type EventLogSyncedFrame = {
  * Server to client: the cursor cannot be replayed. Drop local state and
  * rebuild from `snapshot` (absent when the log has no snapshot); the cursor
  * becomes `{ epoch, seq }`, and events from here on are live.
+ *
+ * @internal
  */
 export type EventLogResyncFrame<S = unknown> = {
   readonly type: typeof EVENT_LOG_RESYNC;
@@ -77,7 +107,11 @@ export type EventLogResyncFrame<S = unknown> = {
   readonly id?: string;
 };
 
-/** Server to client: the subscription was refused. */
+/**
+ * Server to client: the subscription was refused.
+ *
+ * @internal
+ */
 export type EventLogErrorFrame = {
   readonly type: typeof EVENT_LOG_ERROR;
   readonly log: string;
@@ -85,10 +119,12 @@ export type EventLogErrorFrame = {
   readonly id?: string;
 };
 
+/** @internal */
 export type EventLogClientFrame =
   | EventLogSubscribeFrame
   | EventLogUnsubscribeFrame;
 
+/** @internal */
 export type EventLogServerFrame =
   | EventLogEventsFrame
   | EventLogSyncedFrame
@@ -108,7 +144,11 @@ function isCursor(value: unknown): value is EventLogCursor {
   );
 }
 
-/** Narrow a parsed client frame to an event log frame, or undefined. */
+/**
+ * Narrow a parsed client frame to an event log frame, or undefined.
+ *
+ * @internal
+ */
 export function parseEventLogClientFrame(
   value: unknown
 ): EventLogClientFrame | undefined {
@@ -127,7 +167,11 @@ export function parseEventLogClientFrame(
   };
 }
 
-/** Narrow a parsed server frame to an event log frame, or undefined. */
+/**
+ * Narrow a parsed server frame to an event log frame, or undefined.
+ *
+ * @internal
+ */
 export function parseEventLogServerFrame(
   value: unknown
 ): EventLogServerFrame | undefined {

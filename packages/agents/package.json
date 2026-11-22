@@ -198,11 +198,6 @@
       "import": "./dist/tasks/index.js",
       "require": "./dist/tasks/index.js"
     },
-    "./approvals": {
-      "types": "./dist/approvals/index.d.ts",
-      "import": "./dist/approvals/index.js",
-      "require": "./dist/approvals/index.js"
-    },
     "./lifecycle": {
       "types": "./dist/lifecycle/index.d.ts",
       "import": "./dist/lifecycle/index.js",
@@ -328,10 +323,10 @@
       "import": "./dist/queue/index.js",
       "require": "./dist/queue/index.js"
     },
-    "./inbox": {
-      "types": "./dist/inbox/index.d.ts",
-      "import": "./dist/inbox/index.js",
-      "require": "./dist/inbox/index.js"
+    "./internal": {
+      "types": "./dist/internal/index.d.ts",
+      "import": "./dist/internal/index.js",
+      "require": "./dist/internal/index.js"
     },
     "./schedules": {
       "types": "./dist/schedules/index.d.ts",
