@@ -309,6 +309,34 @@ describe("Think — unacknowledged resume offers", () => {
   );
 });
 
+describe("Think — message lists inside a facet", () => {
+  it("sends the list on connect and after a turn to a sub-agent's socket", async () => {
+    const parentRoom = crypto.randomUUID();
+    const childRoom = crypto.randomUUID();
+    const parent = await freshAgent(parentRoom);
+    const { ws } = await connectSubAgentWS(parentRoom, childRoom);
+    try {
+      const onConnect = await collectMessages(ws);
+      expect(onConnect).toContainEqual(
+        expect.objectContaining({ type: MSG_CHAT_MESSAGES, connect: true })
+      );
+
+      const child = await getSubAgentByName(parent, ThinkTestAgent, childRoom);
+      const frames = collectMessages(ws);
+      const result = await child.testChat("hello from the facet");
+      expect(result.done).toBe(true);
+      const lists = (await frames).filter(
+        (frame) => frame.type === MSG_CHAT_MESSAGES
+      );
+      expect(lists.length).toBeGreaterThan(0);
+      const last = lists[lists.length - 1].messages as Array<{ role: string }>;
+      expect(last.map((message) => message.role)).toContain("user");
+    } finally {
+      await closeWS(ws);
+    }
+  });
+});
+
 describe("Think — sub-agent stream frame ordering", () => {
   it("delivers STREAM_RESUMING before a later terminal broadcast", async () => {
     const parentRoom = crypto.randomUUID();
