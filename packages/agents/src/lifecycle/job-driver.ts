@@ -415,7 +415,8 @@ export class JobDriver {
   /**
    * Dispatch one due row to its owner with retry and failure policy.
    *
-   * Each attempt is counted in the row and synced before `onJob` runs, so
+   * Each attempt is counted in the row, and its write started, before
+   * `onJob` runs, so
    * an attempt that takes its isolate down (CPU or wall-time limit, reset)
    * still counts; once the count reaches `maxAttempts` the job goes to
    * `onJobError` instead of running again. Without that, such a job re-ran
@@ -430,7 +431,7 @@ export class JobDriver {
     row: JobStorageRow,
     claim: JobClaim
   ): Promise<AttributedPlatformFailure | undefined> {
-    const { queue, resolveDispatch, disabled, storage } = this.#options;
+    const { queue, resolveDispatch, disabled } = this.#options;
     // Whether the job is still the one this dispatch claimed: no cancel,
     // push, reschedule or hung takeover changed it since.
     const owned = () => queue.isCurrent(claim);
@@ -511,7 +512,12 @@ export class JobDriver {
             if (local > 1 && !owned()) return SUPERSEDED;
             attempt += 1;
             queue.setAttempts(row.id, attempt);
-            await storage.sync();
+            // One macrotask lets the output gate start writing the count, and
+            // a write that started survives a CPU-limit kill or abort that
+            // follows. Awaiting microtasks is not enough, and
+            // `storage.sync()` costs a durable round trip (about 38 ms) per
+            // dispatch (RUNTIME-FACTS, 22 Nov).
+            await new Promise((resolve) => setTimeout(resolve, 0));
             try {
               return await dispatch.onJob({ job, attempt });
             } catch (error) {
