@@ -5,7 +5,7 @@
  * logged and never fails the turn.
  */
 
-import type { ReplyAttachment } from "./think";
+import type { ReplyAttachment } from "./actions";
 
 type RenderedAttachment = string | { markdown: string } | undefined;
 

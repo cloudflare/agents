@@ -126,3 +126,47 @@ export function turnMetadataFromMessages(
     ? (turnMetadata as Record<string, unknown>)
     : undefined;
 }
+
+/**
+ * How to store a message the client posted, or `null` to skip it because
+ * the server already holds the same stored form. The client posts its whole
+ * transcript on every request, so skipping unchanged rows is what keeps a
+ * turn's storage traffic independent of transcript length.
+ *
+ * Reserved metadata is server-owned: the client's copy is ignored, a stored
+ * row keeps its own, and a new user message gets `channel` when the caller
+ * supplies one. A message with no reserved metadata to keep is written as
+ * the client sent it.
+ */
+export function incomingMessageWrite(
+  sanitized: UIMessage,
+  original: UIMessage,
+  prior: UIMessage | undefined,
+  channel: string | undefined
+): { message: UIMessage; source: "client" | "server" } | null {
+  const incoming = stripReservedMetadata(sanitized);
+  if (
+    prior &&
+    JSON.stringify(stripReservedMetadata(prior)) === JSON.stringify(incoming)
+  ) {
+    return null;
+  }
+  const reserved = prior
+    ? reservedMetadataOf(prior)
+    : incoming.role === "user" && channel
+      ? { channel }
+      : undefined;
+  if (!reserved) {
+    return { message: original, source: "client" };
+  }
+  return {
+    message: {
+      ...incoming,
+      metadata: {
+        ...(incoming.metadata as Record<string, unknown> | undefined),
+        ...reserved
+      }
+    },
+    source: "server"
+  };
+}

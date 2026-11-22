@@ -87,14 +87,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import type {
-  FlexibleSchema,
-  InferSchema,
-  LanguageModel,
-  ModelMessage,
-  ToolSet,
-  UIMessage
-} from "ai";
+import type { LanguageModel, ModelMessage, ToolSet, UIMessage } from "ai";
 import { tool } from "ai";
 import {
   toDeclaredSchedules,
@@ -106,6 +99,21 @@ import {
   type ChannelEvent
 } from "./channels/runtime";
 import { defaultAttachmentText, deliverReplyAttachments } from "./attachments";
+import {
+  isAction,
+  type Action,
+  type ActionApprovalDescriptor,
+  type ActionAuthorizationContext,
+  type ActionAuthorizationDecision,
+  type ActionApprovalPolicy,
+  type ActionContext,
+  type ActionIdempotencyKey,
+  type ActionKind,
+  type ActionPermissionSpec,
+  type CompiledActionMetadata,
+  type NormalizedActionAuthorization,
+  type ReplyAttachment
+} from "./actions";
 import { ThinkConfigStore } from "./config-store";
 import { wrapToolsWithDecision } from "./tool-decision";
 import {
@@ -120,7 +128,7 @@ import {
   modelMessagesFromHistory,
   withContextReminder
 } from "./inference/model-messages";
-import { isThinkFinalAnswerToolName } from "./inference/structured-output";
+import { withoutFinalAnswerParts } from "./inference/structured-output";
 import type { TelemetryIdentity } from "./inference/telemetry";
 import {
   createInferenceInvocation,
@@ -132,13 +140,17 @@ import {
   runMessengerReplyTask
 } from "./messengers/reply-task";
 import { ThinkModelResolver } from "./model";
+import {
+  ThinkTranscriptCache,
+  cachedMessageBytes,
+  type HydrationResult
+} from "./transcript-cache";
 import { declaredOverrides } from "./overrides";
 import {
   RESERVED_MESSAGE_METADATA_KEYS,
   channelFromMessages,
-  reservedMetadataOf,
+  incomingMessageWrite,
   stampTurnContext,
-  stripReservedMetadata,
   turnMetadataFromMessages
 } from "./turn-metadata";
 import { ThinkSkills } from "./skills-runtime";
@@ -913,6 +925,20 @@ type ThinkRecoveryClassification = { retryTargetUserId: string | null };
 // `setChatRecovering` / `buildChatRecoveringFrame` helpers.)
 
 export type { MediaEvictionConfig } from "./media-eviction";
+export { action, isAction } from "./actions";
+export type {
+  Action,
+  ActionApprovalDescriptor,
+  ActionApprovalPolicy,
+  ActionAuthorizationContext,
+  ActionAuthorizationDecision,
+  ActionConfig,
+  ActionContext,
+  ActionIdempotencyKey,
+  ActionKind,
+  ActionPermissionSpec,
+  ReplyAttachment
+} from "./actions";
 export { defaultContextOverflowClassifier } from "./turn-types";
 export type {
   ActiveTurn,
@@ -985,100 +1011,6 @@ import type {
   TurnTrigger
 } from "./turn-types";
 
-const ACTION_BRAND: unique symbol = Symbol.for(
-  "cf.think.action"
-) as typeof ACTION_BRAND;
-
-export type ActionKind =
-  | "server"
-  | "client"
-  | "approval-gated"
-  | "durable-pause"
-  | "delegated-agent";
-
-export interface ActionContext {
-  /** The agent instance currently executing the action. */
-  agent: Think;
-  env: Cloudflare.Env;
-  /** Current turn request id. */
-  requestId: string;
-  toolCallId: string;
-  /** Model messages visible to the tool call. */
-  messages: ReadonlyArray<ModelMessage>;
-  /** Combined action timeout and turn abort signal. */
-  signal: AbortSignal;
-  /**
-   * Record an advisory delivery hint for this turn's final reply (voice note,
-   * card, email draft, ...). Does not change the model-visible tool output.
-   * No-op for approval/permission/idempotency policy evaluation and for
-   * durable-pause approved-action resumes (their reply is delivered by a
-   * later continuation turn in v1).
-   */
-  attachReply(attachment: ReplyAttachment): void;
-}
-
-/**
- * The attachment shape accepted by {@link ActionContext.attachReply}. An open
- * union: the named variants give autocomplete for common channels, and the
- * trailing `{ type: string; [k]: unknown }` keeps it extensible. Advisory only
- * — surfaces that don't recognize a `type` ignore it.
- */
-export type ReplyAttachment =
-  | { type: "voice_note" }
-  | { type: "email_draft"; subject?: string; to?: string[] }
-  | { type: "card"; payload: unknown }
-  | { type: string; [k: string]: unknown };
-
-export type ActionApprovalPolicy<Input> =
-  | boolean
-  | ((args: {
-      input: Input;
-      ctx: ActionContext;
-    }) => boolean | Promise<boolean>);
-
-export type ActionPermissionSpec<Input> =
-  | readonly string[]
-  | ((args: {
-      input: Input;
-      ctx: ActionContext;
-    }) => readonly string[] | Promise<readonly string[]>);
-
-export type ActionIdempotencyKey<Input> =
-  | string
-  | ((args: { input: Input; ctx: ActionContext }) => string | Promise<string>);
-
-export type ActionAuthorizationDecision =
-  | boolean
-  | {
-      allowed: boolean;
-      reason?: string;
-      grantedPermissions?: readonly string[];
-    };
-
-export interface ActionAuthorizationContext {
-  requestId: string;
-  toolCallId: string;
-  action: string;
-  kind: ActionKind;
-  input: unknown;
-  requiredPermissions: readonly string[];
-  grantedPermissions?: readonly string[];
-  messages: ReadonlyArray<ModelMessage>;
-  agent: Think;
-  env: Cloudflare.Env;
-}
-
-export interface ActionApprovalDescriptor {
-  requestId: string;
-  toolCallId: string;
-  action: string;
-  summary: string;
-  input: unknown;
-  permissions: string[];
-  risk?: "low" | "medium" | "high";
-  kind: "approval-gated" | "durable-pause";
-}
-
 /**
  * A single approval awaiting a human decision, unified across pause backends so
  * dashboards/voice/messenger can list and reconcile everything pending with one
@@ -1100,84 +1032,6 @@ export interface RejectExecutionOptions {
    */
   autoContinue?: boolean;
 }
-
-export interface ActionConfig<
-  InputSchema extends FlexibleSchema = FlexibleSchema,
-  Output = unknown
-> {
-  /** Defaults to the registration key when returned from getActions(). */
-  name?: string;
-  description: string;
-  inputSchema: InputSchema;
-  /** Reserved metadata; output validation is not enforced yet. */
-  outputSchema?: FlexibleSchema<Output>;
-  /**
-   * Stable key used to replay settled action results without re-running side
-   * effects. Use domain identifiers that survive recovery retries (for example,
-   * an order id or inbound event id); avoid request ids, timestamps, and random
-   * values.
-   */
-  idempotencyKey?: ActionIdempotencyKey<InferSchema<InputSchema>>;
-  permissions?: ActionPermissionSpec<InferSchema<InputSchema>>;
-  approval?: ActionApprovalPolicy<InferSchema<InputSchema>>;
-  approvalSummary?: string;
-  approvalRisk?: "low" | "medium" | "high";
-  timeoutMs?: number;
-  kind?: ActionKind;
-  execute(
-    input: InferSchema<InputSchema>,
-    ctx: ActionContext
-  ): Promise<Output> | Output;
-}
-
-export interface Action<
-  InputSchema extends FlexibleSchema = FlexibleSchema,
-  Output = unknown
-> {
-  readonly [ACTION_BRAND]: true;
-  readonly config: ActionConfig<InputSchema, Output>;
-}
-
-export function action<
-  const InputSchema extends FlexibleSchema,
-  Output = unknown
->(config: ActionConfig<InputSchema, Output>): Action<InputSchema, Output> {
-  if (config.kind === "durable-pause" && config.approval === false) {
-    throw new Error(
-      `Action "${config.name ?? "(anonymous)"}": kind "durable-pause" with ` +
-        `approval: false never parks for approval, defeating the purpose. ` +
-        `Use kind "server" for an inline action, or omit approval (or set a ` +
-        `predicate) to gate when it parks.`
-    );
-  }
-  const descriptor: Action<InputSchema, Output> = {
-    [ACTION_BRAND]: true,
-    config: Object.freeze({ ...config })
-  };
-  return Object.freeze(descriptor);
-}
-
-export function isAction(value: unknown): value is Action {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    (value as { [ACTION_BRAND]?: unknown })[ACTION_BRAND] === true
-  );
-}
-
-type CompiledActionMetadata = {
-  actionName: string;
-  summary: string;
-  permissions?: string[];
-  risk?: "low" | "medium" | "high";
-  kind: "approval-gated" | "durable-pause";
-};
-
-type NormalizedActionAuthorization = {
-  allowed: boolean;
-  reason?: string;
-  grantedPermissions?: readonly string[];
-};
 
 type TurnAdmission = "queue" | "submit" | "execute-submission";
 
@@ -1415,16 +1269,6 @@ function workflowNotificationItemId(
 
 function submissionRunItemId(submissionId: string): string {
   return `submission:${submissionId}`;
-}
-
-const cachedMessageEncoder = new TextEncoder();
-
-/**
- * A cached message's size in the unit the hydration budget is measured in:
- * UTF-8 bytes of its serialized form, not UTF-16 code units.
- */
-function cachedMessageBytes(message: UIMessage): number {
-  return cachedMessageEncoder.encode(JSON.stringify(message)).byteLength;
 }
 
 /**
@@ -1807,7 +1651,24 @@ export class Think<
   }
 
   /** Cached messages, kept in sync with session storage. */
-  private _cachedMessages: UIMessage[] = [];
+  readonly #transcript = new ThinkTranscriptCache({
+    budget: () => this.hydrationByteBudget,
+    readAll: () => this._readMessagesFromStorage(),
+    readRecent: async (budget) => {
+      const recent = await this.session.getRecentHistory(budget);
+      return { ...recent, messages: recent.messages as UIMessage[] };
+    },
+    emitWindowed: (payload) => this._emit("chat:hydration:windowed", payload),
+    refreshed: () => this._scheduleMediaEvictionPass()
+  });
+
+  private get _cachedMessages(): UIMessage[] {
+    return this.#transcript.messages;
+  }
+
+  private set _cachedMessages(messages: UIMessage[]) {
+    this.#transcript.messages = messages;
+  }
   private _unsubscribeSessionChanges: (() => void) | undefined;
 
   /**
@@ -2386,8 +2247,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
   /** Replace the live cache with a durable storage snapshot. */
   private _replaceCachedMessages(messages: UIMessage[]): UIMessage[] {
-    this._cachedMessages = messages;
-    return this._cachedMessages;
+    return this.#transcript.replace(messages);
   }
 
   /**
@@ -2395,132 +2255,26 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * active. `truncated` means `this.messages` is a bounded recent window of
    * a larger stored transcript.
    */
-  protected _lastHydration: {
-    truncated: boolean;
-    totalContentBytes: number;
-    hydratedMessages: number;
-  } | null = null;
-
-  private _warnedHydrationWindowed = false;
-
-  /**
-   * `true` while `this.messages` holds every message on the active path.
-   * That is the common case: the default `hydrationByteBudget` admits whole
-   * transcripts, and the Sessions change feed patches the cache after every
-   * durable write. Set by `_syncMessages()`; `false` when the last refresh
-   * was windowed, failed, or has not run yet. Readers that need the complete
-   * path — reconciliation, tool-update lookups — consult it to decide whether
-   * the cache can answer or storage must be read.
-   */
-  private _cacheCoversActivePath = false;
-
-  /**
-   * Serialized bytes the cache has grown by since the last refresh — new
-   * messages and updates that enlarged existing ones, measured as UTF-8 the
-   * way the budget is. The hydration budget was measured at that refresh;
-   * once the growth since would carry the cache past it, the cache stops
-   * claiming to cover the path, so the next boundary re-reads storage and
-   * re-windows (#1710).
-   */
-  private _cachedBytesSinceSync = 0;
-
-  private _noteCachedGrowth(bytes: number): void {
-    const budget = this.hydrationByteBudget;
-    if (
-      bytes <= 0 ||
-      !Number.isFinite(budget) ||
-      budget <= 0 ||
-      !this._lastHydration
-    ) {
-      return;
-    }
-    this._cachedBytesSinceSync += bytes;
-    if (
-      this._lastHydration.totalContentBytes + this._cachedBytesSinceSync >
-      budget
-    ) {
-      this._cacheCoversActivePath = false;
-    }
+  protected get _lastHydration(): HydrationResult | null {
+    return this.#transcript.lastHydration;
   }
 
-  /**
-   * Snapshot of the last `chat:hydration:windowed` emit, used to emit on
-   * CHANGE rather than on every safe-boundary sync — a chronically
-   * oversized session syncs many times per turn and would otherwise spam
-   * identical events.
-   */
-  private _lastWindowedEmit: {
-    totalContentBytes: number;
-    hydratedMessages: number;
-  } | null = null;
+  /** Whether `this.messages` holds every message on the active path. */
+  private get _cacheCoversActivePath(): boolean {
+    return this.#transcript.coversActivePath;
+  }
 
-  /**
-   * Refresh the live cache from durable storage at a safe boundary.
-   *
-   * Bounded by `hydrationByteBudget`: oversized transcripts hydrate as a
-   * recent window instead of exhausting the isolate's memory (#1710). The
-   * budget is a hard ceiling with no message-count floor beneath it — a floor
-   * that admitted rows regardless of size would defeat the bound it sits
-   * under. A window of unusually large messages can therefore be shorter than
-   * `MODEL_RECENT_WINDOW`; `getHistory()` still reads the full path.
-   */
-  private async _syncMessages(): Promise<UIMessage[]> {
-    // A refresh that throws leaves the cache unreliable until the next one.
-    this._cacheCoversActivePath = false;
-    this._cachedBytesSinceSync = 0;
-    const budget = this.hydrationByteBudget;
-    if (!Number.isFinite(budget) || budget <= 0) {
-      this._lastHydration = null;
-      this._lastWindowedEmit = null;
-      const full = this._replaceCachedMessages(
-        await this._readMessagesFromStorage()
-      );
-      this._cacheCoversActivePath = true;
-      this._scheduleMediaEvictionPass();
-      return full;
-    }
+  private set _cacheCoversActivePath(covers: boolean) {
+    this.#transcript.coversActivePath = covers;
+  }
 
-    const recent = await this.session.getRecentHistory(budget);
-    this._lastHydration = {
-      truncated: recent.truncated,
-      totalContentBytes: recent.totalContentBytes,
-      hydratedMessages: recent.messages.length
-    };
-    if (recent.truncated) {
-      if (!this._warnedHydrationWindowed) {
-        this._warnedHydrationWindowed = true;
-        console.warn(
-          `[Think] Stored transcript (${recent.totalContentBytes} bytes) ` +
-            `exceeds hydrationByteBudget (${budget} bytes); hydrated the ` +
-            `most recent ${recent.messages.length} message(s) instead of ` +
-            "the full history. Durable storage is untouched. Compact the " +
-            "session (or enable media eviction) to shrink it."
-        );
-      }
-      const changed =
-        this._lastWindowedEmit === null ||
-        this._lastWindowedEmit.totalContentBytes !== recent.totalContentBytes ||
-        this._lastWindowedEmit.hydratedMessages !== recent.messages.length;
-      if (changed) {
-        this._lastWindowedEmit = {
-          totalContentBytes: recent.totalContentBytes,
-          hydratedMessages: recent.messages.length
-        };
-        this._emit("chat:hydration:windowed", {
-          totalContentBytes: recent.totalContentBytes,
-          budgetBytes: budget,
-          hydratedMessages: recent.messages.length
-        });
-      }
-    } else {
-      this._lastWindowedEmit = null;
-    }
-    const hydrated = this._replaceCachedMessages(
-      recent.messages as UIMessage[]
-    );
-    this._cacheCoversActivePath = !recent.truncated;
-    this._scheduleMediaEvictionPass();
-    return hydrated;
+  private _noteCachedGrowth(bytes: number): void {
+    this.#transcript.noteGrowth(bytes);
+  }
+
+  /** Refresh the live cache from durable storage at a safe boundary. */
+  private _syncMessages(): Promise<UIMessage[]> {
+    return this.#transcript.sync();
   }
 
   /** Patch a message that is already present in the live cache. */
@@ -10573,7 +10327,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * cannot drift between the live and recovery writes.
    */
   private _strippedForPersist(msg: UIMessage): UIMessage | null {
-    const stripped = this._stripInternalFinalAnswerParts(msg);
+    const stripped = withoutFinalAnswerParts(msg);
     // A reply that holds nothing a client can show and nothing a model
     // request can carry is not stored (the shared `replyIsEmpty`): one cut
     // off while the model was still reasoning, or one that was only an
@@ -10828,28 +10582,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * the static (`tool-<name>`) and dynamic (`dynamic-tool`) part shapes the AI
    * SDK can emit.
    */
-  private _stripInternalFinalAnswerParts(msg: UIMessage): UIMessage {
-    const parts = msg.parts.filter((part) => {
-      const candidate = part as { type?: string; toolName?: string };
-      if (
-        typeof candidate.type === "string" &&
-        candidate.type.startsWith("tool-") &&
-        isThinkFinalAnswerToolName(candidate.type.slice("tool-".length))
-      ) {
-        return false;
-      }
-      if (
-        candidate.type === "dynamic-tool" &&
-        typeof candidate.toolName === "string" &&
-        isThinkFinalAnswerToolName(candidate.toolName)
-      ) {
-        return false;
-      }
-      return true;
-    });
-    return parts.length === msg.parts.length ? msg : { ...msg, parts };
-  }
-
   /**
    * Turn-start persistence of the client's transcript: reconcile the posted
    * messages against the server's active path, write only what changed, and
@@ -10953,52 +10685,27 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
   /**
    * Persist an incoming message after batch reconciliation has resolved
-   * assistant IDs (one-to-one against server rows) and merged any
-   * server-owned tool outputs.
-   *
-   * A message whose stored form is what the server already holds is skipped
-   * outright. The client posts its whole transcript on every request, so
-   * without this every prior message would cost Sessions an existence read
-   * plus a full-row compare (and, for media, a decode and hash of every
-   * payload) per turn — reads spent discovering nothing changed.
-   *
-   * Reserved metadata (`channel`, `turnMetadata`) is server-owned. The client's
-   * copy is ignored, a stored row keeps its own, and a new user message gets
-   * `channel` when the caller supplies one.
+   * assistant IDs and merged server-owned tool outputs. An unchanged message
+   * is skipped (see `incomingMessageWrite`).
    */
   private async _persistIncomingMessage(
     msg: UIMessage,
     serverMessagesById?: ReadonlyMap<string, UIMessage>,
     channel?: string
   ): Promise<void> {
-    const prior = serverMessagesById?.get(msg.id);
-    const incoming = stripReservedMetadata(sanitizeMessage(msg));
-    if (
-      prior &&
-      JSON.stringify(stripReservedMetadata(prior)) === JSON.stringify(incoming)
-    ) {
-      return;
-    }
-    const reserved = prior
-      ? reservedMetadataOf(prior)
-      : incoming.role === "user" && channel
-        ? { channel }
-        : undefined;
-    if (!reserved) {
-      await this._upsertMessageInHistory(msg, undefined, "client");
-      return;
-    }
-    await this._upsertMessageInHistory(
-      {
-        ...incoming,
-        metadata: {
-          ...(incoming.metadata as Record<string, unknown> | undefined),
-          ...reserved
-        }
-      },
-      undefined,
-      "server"
+    const write = incomingMessageWrite(
+      sanitizeMessage(msg),
+      msg,
+      serverMessagesById?.get(msg.id),
+      channel
     );
+    if (write) {
+      await this._upsertMessageInHistory(
+        write.message,
+        undefined,
+        write.source
+      );
+    }
   }
 
   /** Write the request context to `think_config`. */
