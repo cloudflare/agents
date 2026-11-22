@@ -22,7 +22,7 @@ interface ChatRecoveryTestStub {
     requestId: string,
     chunks: Array<{ body: string; index: number }>,
     ageMs?: number,
-    metadata?: { messageId?: string }
+    metadata?: { messageId?: string; continuation?: boolean }
   ): Promise<void>;
   insertInterruptedFiber(name: string, snapshot?: unknown): Promise<void>;
   insertLegacyChatFiberForTest(
@@ -1356,7 +1356,8 @@ describe("onChatRecovery", () => {
     ] as ChatMessage[]);
 
     // Continuation stream: metadata records the cloned last-assistant id, so
-    // recovery reuses it and appends onto assistant-one.
+    // recovery reuses it and appends onto assistant-one. No continuation
+    // flag and no base part count: a row imported from 0.8.4 looks like this.
     await agentStub.insertInterruptedStream(
       "stream-cont",
       "req-cont",

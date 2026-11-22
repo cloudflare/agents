@@ -630,6 +630,13 @@ export class ResumableStream {
     return parseChatMetadata(row)?.basePartCount ?? null;
   }
 
+  /** Whether a stream was started for a continuation of an earlier turn. */
+  getStreamIsContinuation(streamId: string): boolean {
+    const row = this.ops.getStream(streamId);
+    if (!row) return false;
+    return parseChatMetadata(row)?.isContinuation === 1;
+  }
+
   /**
    * The message an orphaned stream's assistant message is a child of, or null
    * when the stream appends to the latest leaf or predates parent tracking.

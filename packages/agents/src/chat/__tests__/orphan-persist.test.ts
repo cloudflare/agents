@@ -75,6 +75,39 @@ describe("persistReconstructedOrphan", () => {
     });
   });
 
+  it("leaves the store's own copy of the continued message as it was", async () => {
+    const stored = {
+      id: "leaf",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-t",
+          toolCallId: "c1",
+          state: "input-available",
+          input: {}
+        }
+      ]
+    } as unknown as UIMessage;
+    const { store, messages } = memoryStore([stored]);
+
+    await persistReconstructedOrphan(
+      chunks({ type: "tool-output-available", toolCallId: "c1", output: 1 }),
+      {
+        store,
+        fallbackId: "fallback",
+        prepare: (message) => message,
+        merge: (_existing, incoming) => incoming,
+        continues: { messageId: "leaf", basePartCount: 1 }
+      }
+    );
+
+    // The host compares against its copy to decide whether to write.
+    expect(stored.parts[0]).toMatchObject({ state: "input-available" });
+    expect(messages.get("leaf")?.parts[0]).toMatchObject({
+      state: "output-available"
+    });
+  });
+
   it("writes nothing for a continuation whose message was deleted, however often", async () => {
     const { store, messages } = memoryStore();
 

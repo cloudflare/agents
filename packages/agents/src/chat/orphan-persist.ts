@@ -121,8 +121,13 @@ async function createReconstructionAccumulator<TMessage extends UIMessage>(
   }
   const continued = await options.store.getMessage(continues.messageId);
   if (!continued) return null;
-  const baseParts = continued.parts.slice(0, continues.basePartCount);
-  const metadata = continued.metadata;
+  // A copy: chunks mutate the parts they apply to, and these are the
+  // store's own (a host's cached transcript), which it compares against to
+  // decide whether to write.
+  const baseParts = structuredClone(
+    continued.parts.slice(0, continues.basePartCount)
+  );
+  const metadata = structuredClone(continued.metadata);
   return new StreamAccumulator({
     messageId: continues.messageId,
     continuation: true,
