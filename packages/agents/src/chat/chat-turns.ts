@@ -26,7 +26,7 @@
  *   {@link waitUntilStable}).
  *
  * What a turn does (call the model, stream and persist the reply) stays with
- * the host, behind {@link ChatTurnsHost}. See `design/rfc-chat-turn-core.md`.
+ * the host, behind {@link ChatTurnsHost}. See `design/chat-turn-core.md`.
  *
  * @internal Sibling-package support for `@cloudflare/ai-chat` and
  * `@cloudflare/think`, not a public API.

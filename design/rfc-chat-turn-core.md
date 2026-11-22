@@ -2,6 +2,8 @@
 
 Status: accepted. Phase 1 and the client-request part of Phase 2 are implemented. The rest of Phase 2 and Phases 3 to 5 are the plan.
 
+See also: [chat-turn-core.md](./chat-turn-core.md) is the design doc for the turn core as it is implemented. It has every difference settled after this RFC was accepted, what still differs, and the known gaps. This RFC is the decision as it was accepted and is not updated.
+
 Related:
 
 - [chat-shared-layer.md](./chat-shared-layer.md) describes what `agents/chat` shares today.
