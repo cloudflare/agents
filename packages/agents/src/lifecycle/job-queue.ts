@@ -455,10 +455,14 @@ export class JobQueue {
     )[0];
   }
 
+  /**
+   * Mark a claimed job running and count the attempt it starts, in the one
+   * write a claim already made, so counting attempts costs no extra row.
+   */
   markRunning(id: string, nowMs: number): void {
     this.#sql(
       `UPDATE cf_agents_jobs
-       SET running = 1, execution_started_at = ?
+       SET running = 1, execution_started_at = ?, attempts = attempts + 1
        WHERE id = ?`,
       Math.floor(nowMs),
       id

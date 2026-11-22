@@ -563,7 +563,9 @@ export class JobDriver {
             // run the job this dispatch captured again.
             if (local > 1 && !owned()) return SUPERSEDED;
             attempt = prior + local;
-            queue.setAttempts(row.id, prior + 1);
+            // The claim counted the first try; a retry counts again after
+            // the failure before it took its count off.
+            if (local > 1) queue.setAttempts(row.id, prior + 1);
             // One macrotask lets the output gate start writing the count, and
             // a write that started survives a CPU-limit kill or abort that
             // follows. Awaiting microtasks is not enough, and
