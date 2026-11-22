@@ -112,8 +112,6 @@
         "class_name": "AIChatAgentToolParent",
         "name": "AIChatAgentToolParent"
       },
-      // Test-harness-only binding: production only needs to export this
-      // facet class, but vitest-pool-workers needs it here for ctx.exports.
       {
         "class_name": "AIChatAgentToolChild",
         "name": "AIChatAgentToolChild"
@@ -130,8 +128,6 @@
         "class_name": "OverridingPersistMergeAgent",
         "name": "OverridingPersistMergeAgent"
       }
-      // Agent-tool children are addressed as facets of
-      // `AIChatAgentToolParent`, so they do not need migration entries.
     ]
   },
   "main": "worker.ts",
@@ -221,6 +217,10 @@
     {
       "new_sqlite_classes": ["OverridingPersistMergeAgent"],
       "tag": "v17"
+    },
+    {
+      "new_sqlite_classes": ["AIChatAgentToolChild", "StuckAgentToolChild"],
+      "tag": "v18"
     }
   ]
 }

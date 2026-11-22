@@ -15,8 +15,10 @@
   },
   "durable_objects": {
     "bindings": [
-      // Only `Assistant` is bound top-level.
-      { "class_name": "Assistant", "name": "Assistant" }
+      { "class_name": "Assistant", "name": "Assistant" },
+      // Each agent-tool run's child is an ordinary Durable Object.
+      { "class_name": "Researcher", "name": "Researcher" },
+      { "class_name": "Planner", "name": "Planner" }
     ]
   },
   "main": "src/server.ts",
@@ -24,6 +26,10 @@
     {
       "new_sqlite_classes": ["Assistant"],
       "tag": "v1"
+    },
+    {
+      "new_sqlite_classes": ["Researcher", "Planner"],
+      "tag": "v2"
     }
   ],
   "name": "agents-as-tools-example"

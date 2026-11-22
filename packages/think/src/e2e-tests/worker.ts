@@ -6,7 +6,7 @@
 import { createWorkersAI } from "workers-ai-provider";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createAnthropic } from "@ai-sdk/anthropic";
-import { Agent, callable, routeAgentRequest } from "agents";
+import { Agent, callable, getAgentByName, routeAgentRequest } from "agents";
 import type { FiberContext } from "agents";
 import {
   CHAT_RECOVERY_TASK_NAME,
@@ -800,10 +800,10 @@ export class ThinkTaskParentE2EAgent extends Think<Env> {
       hasFiberRows: boolean;
     } | null = null;
     try {
-      const childStub = await this.subAgent(
-        ThinkToolRollbackE2EAgent,
+      const childStub = (await this.getAgentToolChild(
         CHILD_TASK_RUN_ID
-      );
+      )) as unknown as ThinkToolRollbackE2EAgent | null;
+      if (!childStub) throw new Error("no child for CHILD_TASK_RUN_ID");
       const ledger = await childStub.getLedgerStatus();
       child = {
         totalExecutions: ledger.totalExecutions,
@@ -907,10 +907,10 @@ export class ThinkAgentToolNaturalParentE2EAgent extends Think<Env> {
       hasFiberRows: boolean;
     } | null = null;
     try {
-      const childStub = await this.subAgent(
-        ThinkToolRollbackE2EAgent,
+      const childStub = (await this.getAgentToolChild(
         NATURAL_CHILD_TASK_RUN_ID
-      );
+      )) as unknown as ThinkToolRollbackE2EAgent | null;
+      if (!childStub) throw new Error("no child for NATURAL_CHILD_TASK_RUN_ID");
       const ledger = await childStub.getLedgerStatus();
       child = {
         totalExecutions: ledger.totalExecutions,
@@ -1097,10 +1097,10 @@ export class ThinkSlowChildParentE2EAgent extends Think<Env> {
       hasFiberRows: boolean;
     } | null = null;
     try {
-      const childStub = await this.subAgent(
-        ThinkSlowChildE2EAgent,
+      const childStub = (await this.getAgentToolChild(
         NATURAL_CHILD_TASK_RUN_ID
-      );
+      )) as unknown as ThinkSlowChildE2EAgent | null;
+      if (!childStub) throw new Error("no child for NATURAL_CHILD_TASK_RUN_ID");
       const ledger = await childStub.getLedgerStatus();
       child = {
         maxIndex: ledger.maxIndex,
@@ -1193,15 +1193,19 @@ export class ThinkRecoveryHelperParent extends Agent<Env> {
   ): Promise<string> {
     // #1630: a parent that re-attaches to a still-running child after a deploy
     // must follow it to its REAL terminal instead of abandoning it as
-    // `interrupted`. The child facet is named by `runId` (runAgentTool resolves
-    // it via subAgent(cls, runId)), so configure it to self-heal (continue) on
-    // recovery BEFORE starting the run — the re-attached parent then collects
-    // `completed`, not an abandoned interrupt.
-    const child = await this.subAgent(ThinkRecoveryHelperAgent, runId);
+    // `interrupted`. The run names its child, so configure the child to
+    // self-heal (continue) on recovery BEFORE starting the run — the
+    // re-attached parent then collects `completed`, not an abandoned interrupt.
+    const childName = `helper-${runId}`;
+    const child = await getAgentByName(
+      this.env.ThinkRecoveryHelperAgent,
+      childName
+    );
     await child.setRecoveryBehavior("continue");
 
     void this.runAgentTool(ThinkRecoveryHelperAgent, {
       runId,
+      childName,
       input: prompt
     }).catch((error) => {
       console.error("[test] helper agent-tool run failed:", error);

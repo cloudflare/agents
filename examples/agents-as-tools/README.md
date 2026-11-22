@@ -14,7 +14,7 @@ This example now uses the shipped primitives:
   back into the chat when it finishes (see `research_background`).
 - `this.cancelAgentTool(runId)` to stop a background run early.
 - `useAgentToolEvents({ agent })` to collect `agent-tool-event` frames in React.
-- `clearAgentToolRuns()` to delete retained child facets when the chat is
+- `clearAgentToolRuns()` to delete retained child agents when the chat is
   cleared.
 
 For the general API guide, see [`docs/agents/agent-tools.md`](../../docs/agents/agent-tools.md).
@@ -54,7 +54,7 @@ Browser ──ws──▶ Assistant DO ──┬──▶ chat stream
                                 └──▶ agent-tool-event frames
                                            │
                                            ▼
-                                Researcher / Planner facet
+                                Researcher / Planner (own Durable Object)
 ```
 
 The important pieces are:
@@ -74,9 +74,10 @@ The important pieces are:
   framework injects the result back into the chat (durably, even across parent
   eviction or reconnect) so the model reacts to it. `cancelBackground(runId)`
   stops it early.
-- **Drill-in.** Each panel has an open button that connects directly to
-  `/sub/{agent}/{runId}` with `useAgentChat`; it is the child agent's real chat,
-  not a synthetic event viewer.
+- **Drill-in.** Each panel has an open button that connects to
+  `agent-tool-runs/{runId}` under the parent with `useAgentChat`. The parent
+  forwards it to the run's child, so it is the child agent's real chat, not a
+  synthetic event viewer.
 - **Retention and cleanup.** Runs are retained for refresh replay until the user
   clears the chat, which calls the framework cleanup API.
 - **Parent recovery.** If the parent restarts while child runs are still marked
@@ -95,18 +96,10 @@ The important pieces are:
 - `Planner extends Think` uses a simulated `inspect_file` tool and writes an
   implementation plan.
 
-The example also keeps the production sub-agent gate:
-
-```ts
-override async onBeforeSubAgent(_request, child) {
-  if (!this.hasAgentToolRun(child.className, child.name)) {
-    return new Response("Not found", { status: 404 });
-  }
-}
-```
-
-That prevents callers from inventing arbitrary child names and opening empty
-facets.
+Each run's child is an ordinary Durable Object of its class (`Researcher`,
+`Planner`), bound in `wrangler.jsonc`, under a random name the parent records
+with the run. A client reaches it only through the parent's
+`agent-tool-runs/{runId}` path, and the parent forwards only runs it started.
 
 ## Client
 
@@ -123,13 +116,13 @@ part appears, the renderer looks up child runs with the same `toolCallId` and
 renders a panel for each run. `agentTools.unboundRuns` powers the Background
 runs panel for detached helpers that are not attached to a parent tool call.
 
-For drill-in, the panel opens a direct sub-agent connection:
+For drill-in, the panel connects to the run's child through the parent:
 
 ```ts
 const helperAgent = useAgent({
   agent: "Assistant",
   name: USER,
-  sub: [{ agent: helperType, name: runId }]
+  path: `agent-tool-runs/${runId}`
 });
 const { messages, sendMessage } = useAgentChat({ agent: helperAgent });
 ```

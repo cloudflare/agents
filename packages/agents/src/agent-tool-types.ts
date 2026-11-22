@@ -292,6 +292,14 @@ export type RunAgentToolOptions<
 > = {
   input: Input;
   runId?: string;
+  /**
+   * The name of the child Durable Object that runs this run. Defaults to a
+   * random UUID, so the child is reachable only through this parent. Pass a
+   * name to send several runs to the same child, which keeps its own
+   * messages and state between them. Ignored when `runId` names a run this
+   * parent already recorded: that run keeps its child.
+   */
+  childName?: string;
   parentToolCallId?: string;
   displayOrder?: number;
   signal?: AbortSignal;

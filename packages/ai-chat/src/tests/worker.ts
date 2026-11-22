@@ -12,6 +12,7 @@ import type {
 import {
   Agent,
   type AgentContext,
+  getAgentByName,
   getCurrentAgent,
   routeAgentRequest
 } from "agents";
@@ -7050,13 +7051,9 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
 }
 
 export class StuckAgentToolChild extends Agent<Env> {
-  override async _cf_initAsFacet(
-    _name: string,
-    _parentPath: ReadonlyArray<{ className: string; name: string }> = [],
-    _identityName = _name
-  ): Promise<void> {
+  override async __unsafe_ensureInitialized(): Promise<void> {
     await new Promise<void>(() => {
-      // Intentionally never resolves: simulates a child facet wedged in startup.
+      // Intentionally never resolves: simulates a child wedged in startup.
     });
   }
 
@@ -7079,6 +7076,25 @@ type AgentToolFinishForTest = {
   run: AgentToolRunInfo;
   result: AgentToolLifecycleResult;
 };
+
+/** The child name the test parent gives each run, so a test can reach it first. */
+function agentToolChildNameForTest(runId: string): string {
+  return `child-${runId}`;
+}
+
+/**
+ * The child of a run the test parent started. The stub is typed as the
+ * class: every method a test calls on it is async.
+ */
+async function agentToolChildForTest<T extends Agent>(
+  namespace: DurableObjectNamespace<T>,
+  runId: string
+): Promise<T> {
+  return (await getAgentByName(
+    namespace,
+    agentToolChildNameForTest(runId)
+  )) as unknown as T;
+}
 
 export class AIChatAgentToolParent extends Agent<Env> {
   private events: AgentToolEventMessage[] = [];
@@ -7343,6 +7359,7 @@ export class AIChatAgentToolParent extends Agent<Env> {
     this.finishes = [];
     return this.runAgentTool(AIChatAgentToolChild, {
       runId,
+      childName: agentToolChildNameForTest(runId),
       parentToolCallId: "test-tool-call",
       input,
       inputPreview: input.prompt
@@ -7419,6 +7436,7 @@ export class AIChatAgentToolParent extends Agent<Env> {
     try {
       const result = await this.runAgentTool(AIChatAgentToolChild, {
         runId,
+        childName: agentToolChildNameForTest(runId),
         parentToolCallId: "test-tool-call",
         input: { prompt: "recovers on a shorter stream" },
         inputPreview: "recovers on a shorter stream"
@@ -7471,6 +7489,7 @@ export class AIChatAgentToolParent extends Agent<Env> {
       const result = await Promise.race([
         this.runAgentTool(AIChatAgentToolChild, {
           runId,
+          childName: agentToolChildNameForTest(runId),
           parentToolCallId: "test-tool-call",
           input: { prompt: "never closes" },
           inputPreview: "never closes"
@@ -7528,6 +7547,7 @@ export class AIChatAgentToolParent extends Agent<Env> {
     try {
       const result = await this.runAgentTool(AIChatAgentToolChild, {
         runId,
+        childName: agentToolChildNameForTest(runId),
         parentToolCallId: "test-tool-call",
         input: { prompt: "never recovers" },
         inputPreview: "never recovers"
@@ -7583,6 +7603,7 @@ export class AIChatAgentToolParent extends Agent<Env> {
     try {
       const result = await this.runAgentTool(AIChatAgentToolChild, {
         runId,
+        childName: agentToolChildNameForTest(runId),
         parentToolCallId: "test-tool-call",
         input: { prompt: "start call fails" },
         inputPreview: "start call fails"
@@ -7611,11 +7632,15 @@ export class AIChatAgentToolParent extends Agent<Env> {
     const runId = crypto.randomUUID();
     const running = this.runAgentTool(AIChatAgentToolChild, {
       runId,
+      childName: agentToolChildNameForTest(runId),
       parentToolCallId: "test-tool-call",
       input: { prompt: "work through a reset", chunkDelayMs: 100 },
       inputPreview: "work through a reset"
     });
-    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    const child = await agentToolChildForTest<AIChatAgentToolChild>(
+      this.env.AIChatAgentToolChild,
+      runId
+    );
     // Reset once the run's reply is streaming: a turn that had not
     // started cannot be recovered.
     const streaming = Date.now() + 5000;
@@ -7630,7 +7655,10 @@ export class AIChatAgentToolParent extends Agent<Env> {
     const deadline = Date.now() + 10_000;
     let inspection: { status: string; error?: string } | null = null;
     while (Date.now() < deadline) {
-      const fresh = await this.subAgent(AIChatAgentToolChild, runId);
+      const fresh = await agentToolChildForTest<AIChatAgentToolChild>(
+        this.env.AIChatAgentToolChild,
+        runId
+      );
       inspection = await fresh.inspectAgentToolRun(runId);
       if (
         inspection &&
@@ -7665,10 +7693,14 @@ export class AIChatAgentToolParent extends Agent<Env> {
   ): Promise<{ result: RunAgentToolResult; events: AgentToolEventMessage[] }> {
     this.events = [];
     this.finishes = [];
-    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    const child = await agentToolChildForTest<AIChatAgentToolChild>(
+      this.env.AIChatAgentToolChild,
+      runId
+    );
     await child.armAttachRaceInjectionForTest(runId, raceBody);
     const result = await this.runAgentTool(AIChatAgentToolChild, {
       runId,
+      childName: agentToolChildNameForTest(runId),
       parentToolCallId: "test-tool-call",
       input,
       inputPreview: input.prompt
@@ -7691,10 +7723,14 @@ export class AIChatAgentToolParent extends Agent<Env> {
   ): Promise<{ result: RunAgentToolResult; events: AgentToolEventMessage[] }> {
     this.events = [];
     this.finishes = [];
-    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    const child = await agentToolChildForTest<AIChatAgentToolChild>(
+      this.env.AIChatAgentToolChild,
+      runId
+    );
     await child.armProgressInjectionForTest(runId, progressBody, milestoneBody);
     const result = await this.runAgentTool(AIChatAgentToolChild, {
       runId,
+      childName: agentToolChildNameForTest(runId),
       parentToolCallId: "test-tool-call",
       input,
       inputPreview: input.prompt
@@ -7711,16 +7747,16 @@ export class AIChatAgentToolParent extends Agent<Env> {
     liveSequenceAfterDrain: number | undefined;
     postRestart: { sequence: number; body: string } | null;
   }> {
-    const child = await this.subAgent(
-      AIChatAgentToolChild,
+    const child = await agentToolChildForTest<AIChatAgentToolChild>(
+      this.env.AIChatAgentToolChild,
       crypto.randomUUID()
     );
     return child.coldCounterReattachForwardsForTest(afterSequence);
   }
 
   async progressDuringChildDrainForTest(): Promise<string[]> {
-    const child = await this.subAgent(
-      AIChatAgentToolChild,
+    const child = await agentToolChildForTest<AIChatAgentToolChild>(
+      this.env.AIChatAgentToolChild,
       crypto.randomUUID()
     );
     return child.progressDuringDrainForTest();
@@ -7729,8 +7765,8 @@ export class AIChatAgentToolParent extends Agent<Env> {
   async skippedChunkChildReattachForTest(): Promise<
     Array<{ sequence: number; delta?: string; unstored: boolean }>
   > {
-    const child = await this.subAgent(
-      AIChatAgentToolChild,
+    const child = await agentToolChildForTest<AIChatAgentToolChild>(
+      this.env.AIChatAgentToolChild,
       crypto.randomUUID()
     );
     return child.skippedChunkReattachForTest();
@@ -7740,8 +7776,8 @@ export class AIChatAgentToolParent extends Agent<Env> {
     drained: number[];
     postRestart: { sequence: number; body: string } | null;
   }> {
-    const child = await this.subAgent(
-      AIChatAgentToolChild,
+    const child = await agentToolChildForTest<AIChatAgentToolChild>(
+      this.env.AIChatAgentToolChild,
       crypto.randomUUID()
     );
     return child.broadcastDuringInspectionForTest();
@@ -7751,8 +7787,8 @@ export class AIChatAgentToolParent extends Agent<Env> {
     reported: string | undefined;
     stored: string | undefined;
   }> {
-    const child = await this.subAgent(
-      AIChatAgentToolChild,
+    const child = await agentToolChildForTest<AIChatAgentToolChild>(
+      this.env.AIChatAgentToolChild,
       crypto.randomUUID()
     );
     return child.inspectStaleRunReadOnlyForTest();
@@ -7763,8 +7799,8 @@ export class AIChatAgentToolParent extends Agent<Env> {
     assistantText: string;
     inspection: AgentToolRunInspection | null;
   }> {
-    const child = await this.subAgent(
-      AIChatAgentToolChild,
+    const child = await agentToolChildForTest<AIChatAgentToolChild>(
+      this.env.AIChatAgentToolChild,
       crypto.randomUUID()
     );
     return child.reconcileEvictedErroredRunForTest();
@@ -7774,8 +7810,8 @@ export class AIChatAgentToolParent extends Agent<Env> {
     afterRebind: boolean;
     afterClose: boolean;
   }> {
-    const child = await this.subAgent(
-      AIChatAgentToolChild,
+    const child = await agentToolChildForTest<AIChatAgentToolChild>(
+      this.env.AIChatAgentToolChild,
       crypto.randomUUID()
     );
     return child.terminalOnlyRunAfterRecoveredTurnForTest();
@@ -7788,8 +7824,8 @@ export class AIChatAgentToolParent extends Agent<Env> {
   async cancelledTailerStarvationChildForTest(): Promise<{
     siblingBodyAfterCancel: string | null;
   }> {
-    const child = await this.subAgent(
-      AIChatAgentToolChild,
+    const child = await agentToolChildForTest<AIChatAgentToolChild>(
+      this.env.AIChatAgentToolChild,
       crypto.randomUUID()
     );
     return child.cancelledTailerStarvationForTest();
@@ -7810,6 +7846,7 @@ export class AIChatAgentToolParent extends Agent<Env> {
     try {
       return await this.runAgentTool(AIChatAgentToolChild, {
         runId,
+        childName: agentToolChildNameForTest(runId),
         parentToolCallId: "test-tool-call",
         input,
         signal: controller.signal
@@ -7840,13 +7877,17 @@ export class AIChatAgentToolParent extends Agent<Env> {
   ): Promise<RunAgentToolResult> {
     this.events = [];
     this.finishes = [];
-    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    const child = await agentToolChildForTest<AIChatAgentToolChild>(
+      this.env.AIChatAgentToolChild,
+      runId
+    );
     const timer = setTimeout(() => {
       void child.broadcastUnrelatedErrorForTest(`unrelated-turn-${runId}`);
     }, injectAfterMs);
     try {
       return await this.runAgentTool(AIChatAgentToolChild, {
         runId,
+        childName: agentToolChildNameForTest(runId),
         parentToolCallId: "test-tool-call",
         input,
         inputPreview: input.prompt
@@ -7861,7 +7902,10 @@ export class AIChatAgentToolParent extends Agent<Env> {
    * negatively-cached entries for unrelated turns were swept on completion.
    */
   async childAgentToolRunsMapSizeForTest(runId: string): Promise<number> {
-    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    const child = await agentToolChildForTest<AIChatAgentToolChild>(
+      this.env.AIChatAgentToolChild,
+      runId
+    );
     return child.agentToolRunsByRequestIdSizeForTest();
   }
 
@@ -7873,7 +7917,10 @@ export class AIChatAgentToolParent extends Agent<Env> {
     runId: string,
     requestId: string
   ): Promise<{ running: string | null; unknown: string | null }> {
-    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    const child = await agentToolChildForTest<AIChatAgentToolChild>(
+      this.env.AIChatAgentToolChild,
+      runId
+    );
     return child.resolveAgentToolRunAfterRestartForTest(runId, requestId);
   }
 
@@ -7887,8 +7934,8 @@ export class AIChatAgentToolParent extends Agent<Env> {
    * asks for a stream error, and a third. Returns the second run's outcome.
    */
   async startThreeChildRunsForTest(): Promise<AgentToolRunInspection> {
-    const child = await this.subAgent(
-      AIChatAgentToolChild,
+    const child = await agentToolChildForTest<AIChatAgentToolChild>(
+      this.env.AIChatAgentToolChild,
       crypto.randomUUID()
     );
     const errorRunId = crypto.randomUUID();
@@ -7911,7 +7958,10 @@ export class AIChatAgentToolParent extends Agent<Env> {
     input: AgentToolInput,
     runId = crypto.randomUUID()
   ): Promise<AgentToolRunInspection> {
-    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    const child = await agentToolChildForTest<AIChatAgentToolChild>(
+      this.env.AIChatAgentToolChild,
+      runId
+    );
     await child.startAgentToolRun(input, { runId });
     return this.waitForTerminalInspectionForTest(child, runId);
   }
@@ -7925,10 +7975,10 @@ export class AIChatAgentToolParent extends Agent<Env> {
   ): void {
     this.sql`
       INSERT INTO cf_agent_tool_runs (
-        run_id, parent_tool_call_id, agent_type, input_preview,
+        child_name, run_id, parent_tool_call_id, agent_type, input_preview,
         input_redacted, status, display_metadata, display_order, started_at
       ) VALUES (
-        ${runId}, 'test-tool-call', ${agentType},
+        ${agentToolChildNameForTest(runId)}, ${runId}, 'test-tool-call', ${agentType},
         ${JSON.stringify(inputPreview)}, 1, ${status},
         ${JSON.stringify({ name: "test child" })}, 0, ${startedAt}
       )
@@ -7962,7 +8012,10 @@ export class AIChatAgentToolParent extends Agent<Env> {
     input: AgentToolInput,
     runId: string
   ): Promise<AgentToolRunInspection> {
-    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    const child = await agentToolChildForTest<AIChatAgentToolChild>(
+      this.env.AIChatAgentToolChild,
+      runId
+    );
     const started = await child.startAgentToolRun(input, { runId });
     this.insertRecoverableParentRunForTest(
       runId,
@@ -8045,7 +8098,10 @@ export class AIChatAgentToolParent extends Agent<Env> {
     finishes: AgentToolFinishForTest[];
     status: string | null;
   }> {
-    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    const child = await agentToolChildForTest<AIChatAgentToolChild>(
+      this.env.AIChatAgentToolChild,
+      runId
+    );
     // Short delay: still running when reconciliation starts, then terminal a
     // moment later — within the generous re-attach budget.
     const started = await child.startAgentToolRun(
@@ -8084,7 +8140,10 @@ export class AIChatAgentToolParent extends Agent<Env> {
     elapsedMs: number;
     status: string | null;
   }> {
-    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    const child = await agentToolChildForTest<AIChatAgentToolChild>(
+      this.env.AIChatAgentToolChild,
+      runId
+    );
     const started = await child.startAgentToolRun(
       { prompt: "stuck tailable child", delayMs: 60_000 },
       { runId }
@@ -8348,7 +8407,10 @@ export class AIChatAgentToolParent extends Agent<Env> {
   }
 
   async inspectChild(runId: string): Promise<AgentToolRunInspection | null> {
-    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    const child = await agentToolChildForTest<AIChatAgentToolChild>(
+      this.env.AIChatAgentToolChild,
+      runId
+    );
     return child.inspectAgentToolRun(runId);
   }
 
@@ -8356,12 +8418,18 @@ export class AIChatAgentToolParent extends Agent<Env> {
     runId: string,
     afterSequence?: number
   ): Promise<AgentToolStoredChunk[]> {
-    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    const child = await agentToolChildForTest<AIChatAgentToolChild>(
+      this.env.AIChatAgentToolChild,
+      runId
+    );
     return child.getAgentToolChunks(runId, { afterSequence });
   }
 
   async getChildMessages(runId: string): Promise<ChatMessage[]> {
-    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    const child = await agentToolChildForTest<AIChatAgentToolChild>(
+      this.env.AIChatAgentToolChild,
+      runId
+    );
     return child.listMessagesForTest();
   }
 
@@ -8369,7 +8437,10 @@ export class AIChatAgentToolParent extends Agent<Env> {
     input: AgentToolInput,
     runId = crypto.randomUUID()
   ): Promise<AgentToolRunInspection | null> {
-    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    const child = await agentToolChildForTest<AIChatAgentToolChild>(
+      this.env.AIChatAgentToolChild,
+      runId
+    );
     await child.startAgentToolRun(input, { runId });
     await child.cancelAgentToolRun(runId, "test abort");
     return child.inspectAgentToolRun(runId);
@@ -8382,8 +8453,8 @@ export class AIChatAgentToolParent extends Agent<Env> {
     path: "continue" | "retry",
     withAssistantTurn: boolean
   ): Promise<{ before: string | null; after: string | null }> {
-    const child = await this.subAgent(
-      AIChatAgentToolChild,
+    const child = await agentToolChildForTest<AIChatAgentToolChild>(
+      this.env.AIChatAgentToolChild,
       crypto.randomUUID()
     );
     return child.reconcileStaleChildRunViaRecoveryForTest(
@@ -8393,7 +8464,10 @@ export class AIChatAgentToolParent extends Agent<Env> {
   }
 
   private async _freshChildForTest() {
-    return this.subAgent(AIChatAgentToolChild, crypto.randomUUID());
+    return agentToolChildForTest<AIChatAgentToolChild>(
+      this.env.AIChatAgentToolChild,
+      crypto.randomUUID()
+    );
   }
 
   async childRunWithDateInputForTest() {
@@ -8449,8 +8523,8 @@ export class AIChatAgentToolParent extends Agent<Env> {
     abortedAfter: boolean;
     childStatus: string | null;
   }> {
-    const child = await this.subAgent(
-      AIChatAgentToolChild,
+    const child = await agentToolChildForTest<AIChatAgentToolChild>(
+      this.env.AIChatAgentToolChild,
       crypto.randomUUID()
     );
     return child.cancelAgentToolRunAbortsRecoveryForTest();
@@ -8495,6 +8569,7 @@ export class AIChatAgentToolParent extends Agent<Env> {
 
     const result = await this.runAgentTool(AIChatAgentToolChild, {
       runId,
+      childName: agentToolChildNameForTest(runId),
       parentToolCallId: "test-tool-call",
       input,
       signal

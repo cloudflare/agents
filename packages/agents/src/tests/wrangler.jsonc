@@ -229,8 +229,7 @@
         "class_name": "TestAgentToolReplayAgent",
         "name": "TestAgentToolReplayAgent"
       },
-      // Facet-only agent-tool child fixture (test-harness binding only; not in
-      // new_sqlite_classes). Drives deterministic live-vs-replay dedupe.
+      // Agent-tool child fixture. Drives deterministic live-vs-replay dedupe.
       {
         "class_name": "TestAgentToolStubChild",
         "name": "TestAgentToolStubChild"
@@ -545,6 +544,7 @@
         "TestOnStartScheduleExplicitFalseAgent",
         "TestWorkflowAgent",
         "TestAgentToolReplayAgent",
+        "TestAgentToolStubChild",
         "TestAddMcpServerAgent",
         "TestRpcMcpClientAgent",
         "TestHttpMcpDedupAgent",

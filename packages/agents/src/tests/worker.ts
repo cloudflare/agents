@@ -221,6 +221,7 @@ import type {
   TestTaskAgent,
   TestWorkflowAgent,
   TestAgentToolReplayAgent,
+  TestAgentToolStubChild,
   TestAddMcpServerAgent,
   TestHttpMcpDedupAgent,
   TestStateAgent,
@@ -311,6 +312,7 @@ export type Env = {
   TestTaskAgent: DurableObjectNamespace<TestTaskAgent>;
   TestWorkflowAgent: DurableObjectNamespace<TestWorkflowAgent>;
   TestAgentToolReplayAgent: DurableObjectNamespace<TestAgentToolReplayAgent>;
+  TestAgentToolStubChild: DurableObjectNamespace<TestAgentToolStubChild>;
   TestAddMcpServerAgent: DurableObjectNamespace<TestAddMcpServerAgent>;
   TestRpcMcpClientAgent: DurableObjectNamespace<TestRpcMcpClientAgent>;
   TestHttpMcpDedupAgent: DurableObjectNamespace<TestHttpMcpDedupAgent>;

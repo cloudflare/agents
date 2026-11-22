@@ -57,6 +57,7 @@ export type {
 import { signAgentHeaders, type SendEmailOptions } from "./email";
 import { sendAgentEmail } from "./email-send";
 export type { EmailSendBinding, SendEmailOptions } from "./email";
+export type { AgentToolChildStub } from "./agent-runs/child";
 import { nanoid } from "nanoid";
 import { EmailMessage } from "cloudflare:email";
 import {
@@ -86,6 +87,11 @@ import {
   type CurrentAgentContext
 } from "./lifecycle/current-agent";
 import { getAgentByName, type AgentOptions } from "./agent-routing";
+import {
+  agentToolChildStub,
+  type AgentToolChildStub
+} from "./agent-runs/child";
+import { AgentToolRunRoute } from "./agent-runs/route";
 import { WebSockets } from "./websockets";
 import {
   ensureConnectionWrapped,
@@ -372,6 +378,9 @@ export type {
 } from "./mcp/client/agent-servers";
 
 const DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS = 2_000;
+/** The error of an open run whose child was a facet (before child names). */
+const FACET_ERA_AGENT_TOOL_RUN_ERROR =
+  "This agent tool run was started by an earlier version of the agents SDK, which ran its child as a facet. It cannot be followed after the upgrade; run it again.";
 const DEFAULT_AGENT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS = 5_000;
 // Durable marker that this agent is condemned: written before teardown begins
 // (and by `_cf_scheduleDestroy`, which defers teardown to an alarm invocation
@@ -1024,6 +1033,11 @@ export class Agent<
       addColumnIfNotExists(
         "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached INTEGER NOT NULL DEFAULT 0"
       );
+      // The name of the run's child Durable Object, minted with the row. A
+      // row without one is from when the child was a facet.
+      addColumnIfNotExists(
+        "ALTER TABLE cf_agent_tool_runs ADD COLUMN child_name TEXT"
+      );
       addColumnIfNotExists(
         "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached_on_finish TEXT"
       );
@@ -1318,6 +1332,8 @@ export class Agent<
       .use(this._queue)
       .use(this.mcp)
       .use(this._state)
+      // Before WebSockets, which claims every upgrade.
+      .use(new AgentToolRunRoute(this.ctx))
       .use(this._webSockets)
       .use(this.tasks)
       .use(this._fibers)
@@ -3552,7 +3568,15 @@ export class Agent<
       );
     }
 
-    const existing = this._readAgentToolRun(runId);
+    let existing = this._readAgentToolRun(runId);
+    if (existing && !this._isAgentToolRowHardTerminal(existing.status)) {
+      // A run from when the child was a facet cannot be followed: it ends
+      // `error` here, and is returned like any finished run.
+      await this._runDeferredAgentToolFinishHooks(
+        await this._failFacetEraAgentToolRuns(runId)
+      );
+      existing = this._readAgentToolRun(runId);
+    }
     if (existing) {
       // Detached re-dispatch (e.g. chat recovery re-running the dispatching
       // turn) is idempotent by runId: re-arm the durable backbone for a still
@@ -3577,10 +3601,7 @@ export class Agent<
       ) {
         if (existing.status === "completed" && existing.output_json == null) {
           try {
-            const child = await this.subAgent(
-              cls as SubAgentClass<Agent>,
-              runId
-            );
+            const child = await this._agentToolChild(agentType, runId);
             const adapter = this._asAgentToolChildAdapter<Input, Output>(child);
             const inspection = await adapter.inspectAgentToolRun(runId);
             if (inspection?.status === "completed") {
@@ -3612,7 +3633,7 @@ export class Agent<
       let reattachReason: AgentToolInterruptedReason | undefined;
       let childTornDown = false;
       try {
-        const child = await this.subAgent(cls as SubAgentClass<Agent>, runId);
+        const child = await this._agentToolChild(agentType, runId);
         const adapter = this._asAgentToolChildAdapter<Input, Output>(child);
         const reattach = await this._reattachAgentToolRunToTerminal<Output>(
           adapter,
@@ -3702,14 +3723,15 @@ export class Agent<
         input_redacted, status, display_metadata, display_order, started_at,
         detached, detached_on_finish, detached_notify_source,
         detached_max_budget_at, detached_no_progress_budget_ms,
-        detached_on_milestones, event_delivery
+        detached_on_milestones, event_delivery, child_name
       ) VALUES (
         ${runId}, ${options.parentToolCallId ?? null}, ${agentType},
         ${inputPreviewJson}, 1, 'starting', ${displayJson}, ${displayOrder},
         ${startedAt}, ${detached ? 1 : 0}, ${detached?.onFinishName ?? null},
         ${detached?.notifySource ?? null}, ${detachedMaxBudgetAt},
         ${detachedNoProgressBudgetMs}, ${detachedOnMilestonesJson},
-        ${eventDelivery === "terminal" ? "terminal" : null}
+        ${eventDelivery === "terminal" ? "terminal" : null},
+        ${options.childName ?? crypto.randomUUID()}
       )
     `;
 
@@ -3736,7 +3758,7 @@ export class Agent<
       display: options.display
     });
 
-    const child = await this.subAgent(cls as SubAgentClass<Agent>, runId);
+    const child = await this._agentToolChild(agentType, runId);
     // Replaced with a fresh stub when the child's isolate goes away under
     // the tail.
     let adapter = this._asAgentToolChildAdapter<Input, Output>(child);
@@ -3772,9 +3794,7 @@ export class Agent<
       // Surface runaway accumulation: detached runs hold a slot for their whole
       // life with no observer to notice a leak.
       this._maybeWarnDetachedLiveCount();
-      this.ctx.waitUntil(
-        this._detachedFastPath<Input, Output>(runInfo, cls, runId)
-      );
+      this.ctx.waitUntil(this._detachedFastPath<Input, Output>(runInfo, runId));
       return { runId, agentType, status: "running" };
     }
 
@@ -3856,7 +3876,7 @@ export class Agent<
         sequence = cursor.next;
         // The old stub may still name the instance that went away.
         adapter = this._asAgentToolChildAdapter<Input, Output>(
-          await this.subAgent(cls as SubAgentClass<Agent>, runId)
+          await this._agentToolChild(agentType, runId)
         );
       } finally {
         watch.stop();
@@ -4037,7 +4057,7 @@ export class Agent<
         ? reason.message
         : String(reason ?? "cancelled by parent");
     try {
-      const child = await this._cf_resolveSubAgent(row.agent_type, runId);
+      const child = await this._agentToolChild(row.agent_type, runId);
       const adapter = this._asAgentToolChildAdapter(child);
       await adapter.cancelAgentToolRun(runId, reason);
     } catch {
@@ -4168,11 +4188,10 @@ export class Agent<
    */
   private async _detachedFastPath<Input, Output>(
     runInfo: AgentToolRunInfo,
-    cls: ChatCapableAgentClass,
     runId: string
   ): Promise<void> {
     try {
-      const child = await this.subAgent(cls as SubAgentClass<Agent>, runId);
+      const child = await this._agentToolChild(runInfo.agentType, runId);
       const adapter = this._asAgentToolChildAdapter<Input, Output>(child);
       let sequence = 1;
       if (adapter.tailAgentToolRun) {
@@ -4482,7 +4501,7 @@ export class Agent<
       const runId = row.run_id;
       let inspection: AgentToolRunInspection | null = null;
       try {
-        const child = await this._cf_resolveSubAgent(row.agent_type, runId);
+        const child = await this._agentToolChild(row.agent_type, runId);
         const adapter = this._asAgentToolChildAdapter(child);
         inspection = await adapter.inspectAgentToolRun(runId);
       } catch {
@@ -4560,7 +4579,7 @@ export class Agent<
       ) {
         let childTornDown = false;
         try {
-          const child = await this._cf_resolveSubAgent(row.agent_type, runId);
+          const child = await this._agentToolChild(row.agent_type, runId);
           const adapter = this._asAgentToolChildAdapter(child);
           await adapter.cancelAgentToolRun(
             runId,
@@ -4649,16 +4668,16 @@ export class Agent<
 
     for (const row of retained) {
       try {
-        const cls = this._agentToolClassByName(row.agent_type);
+        const child = await this._agentToolChild(row.agent_type, row.run_id);
         if (row.status === "starting" || row.status === "running") {
-          const child = await this.subAgent(cls, row.run_id);
           const adapter = this._asAgentToolChildAdapter(child);
           await adapter.cancelAgentToolRun(
             row.run_id,
             "clearing agent tool run"
           );
         }
-        await this.deleteSubAgent(cls, row.run_id);
+        // Wipes the child's storage on its next wake.
+        await child._cf_scheduleDestroy();
       } catch {
         // Cleanup is intentionally idempotent.
       }
@@ -4982,7 +5001,7 @@ export class Agent<
     timeoutMs?: number
   ): Promise<number> {
     const deadline = this._agentToolRecoveryDeadline(timeoutMs);
-    const resolving = this._cf_resolveSubAgent(row.agent_type, row.run_id);
+    const resolving = this._agentToolChild(row.agent_type, row.run_id);
     const child =
       deadline === undefined
         ? await resolving
@@ -5508,13 +5527,88 @@ export class Agent<
     return candidate as AgentToolChildAdapter<Input, Output>;
   }
 
-  private _agentToolClassByName(className: string): SubAgentClass<Agent> {
-    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
-    const cls = ctx.exports?.[className];
-    if (!cls) {
-      throw new Error(`Agent tool class "${className}" is not exported.`);
+  /**
+   * The child of a run: an ordinary Durable Object of the run's class,
+   * under the name minted when the run was recorded.
+   */
+  private async _agentToolChild(
+    agentType: string,
+    runId: string
+  ): Promise<DurableObjectStub<Agent>> {
+    const childName = this.sql<{ child_name: string | null }>`
+      SELECT child_name FROM cf_agent_tool_runs WHERE run_id = ${runId}
+    `[0]?.child_name;
+    if (!childName) throw new Error(FACET_ERA_AGENT_TOOL_RUN_ERROR);
+    return agentToolChildStub(this.ctx, agentType, childName);
+  }
+
+  /**
+   * The child of a run this agent started, as a stub for RPC (for example
+   * to read its messages), or `null` when there is no such run.
+   */
+  async getAgentToolChild<T extends Agent = Agent>(
+    runId: string
+  ): Promise<AgentToolChildStub<T> | null> {
+    const row = this._readAgentToolRun(runId);
+    if (!row) return null;
+    try {
+      return (await this._agentToolChild(
+        row.agent_type,
+        runId
+      )) as unknown as AgentToolChildStub<T>;
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message === FACET_ERA_AGENT_TOOL_RUN_ERROR
+      ) {
+        return null;
+      }
+      throw error;
     }
-    return cls as unknown as SubAgentClass<Agent>;
+  }
+
+  /**
+   * Runs started before agent-tool children were ordinary Durable Objects
+   * ran their child as a facet, which is no longer reached. An open one
+   * ends `error` with an event, `onAgentToolFinish`, and (detached) its
+   * `onFinish`, so the parent learns how it ended.
+   */
+  private async _failFacetEraAgentToolRuns(
+    onlyRunId?: string
+  ): Promise<DeferredAgentToolFinish[]> {
+    const deferred: DeferredAgentToolFinish[] = [];
+    const rows = this.sql<{ run_id: string; detached: number }>`
+      SELECT run_id, detached FROM cf_agent_tool_runs
+      WHERE child_name IS NULL
+        AND status IN ('starting', 'running', 'interrupted')
+        AND (${onlyRunId ?? null} IS NULL OR run_id = ${onlyRunId ?? null})
+      ORDER BY started_at ASC
+    `;
+    for (const { run_id: runId, detached } of rows) {
+      const row = this._readAgentToolRun(runId);
+      if (!row) continue;
+      const result: RunAgentToolResult = {
+        runId,
+        agentType: row.agent_type,
+        status: "error",
+        error: FACET_ERA_AGENT_TOOL_RUN_ERROR
+      };
+      if (detached === 1) {
+        try {
+          await this._deliverDetachedTerminal(runId, "finish", result);
+        } catch {
+          // The row is settled; a failed onFinish was reported to onError.
+        }
+        continue;
+      }
+      const finish = await this._finishAgentToolRun(
+        this._agentToolRunInfoFromRow(row),
+        result,
+        { sequence: 1, deferFinishHook: true }
+      );
+      if (finish) deferred.push(finish);
+    }
+    return deferred;
   }
 
   private async _replayAndInterruptAgentToolRun<Output>(
@@ -6137,7 +6231,7 @@ export class Agent<
     timeoutMs = DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS
   ): Promise<AgentToolRecoveryInspection> {
     const inspect = (async (): Promise<AgentToolRecoveryInspection> => {
-      const child = await this._cf_resolveSubAgent(row.agent_type, row.run_id);
+      const child = await this._agentToolChild(row.agent_type, row.run_id);
       const adapter = this._asAgentToolChildAdapter(child);
       const inspection = await adapter.inspectAgentToolRun(row.run_id);
       return { status: "inspected", adapter, inspection };
@@ -6174,6 +6268,9 @@ export class Agent<
 
     const recovery = (async () => {
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      await this._runDeferredAgentToolFinishHooks(
+        await this._failFacetEraAgentToolRuns()
+      );
       const recoveredAgentToolFinishes = await this._reconcileAgentToolRuns({
         deferFinishHooks: true,
         childInspectionTimeoutMs: options?.childInspectionTimeoutMs,

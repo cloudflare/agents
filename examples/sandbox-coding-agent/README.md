@@ -6,8 +6,8 @@ This is the Cloudflare-native take on the ["agent harness"](https://ai-sdk.dev/d
 
 ## What it demonstrates
 
-- **Agents as tools / sub-agents.** The orchestrator exposes `agentTool(ClaudeCodeAgent, …)` so its planning loop can delegate work. When it does, the framework spawns the sub-agent as a _facet_, forwards its chat chunks to the parent as `agent-tool-event` frames, and surfaces its `reportProgress` on a live bar — all on the same WebSocket.
-- **One container per task.** A sub-agent runs as a facet whose `this.name` is the agent-tool **run id** (`agent-tool:<toolCallId>`); we hash the orchestrator's name plus that run id into a DNS-safe sandbox id so `getSandbox(env.Sandbox, …)` gives every delegated task its _own_ isolated container with the repo checked out. The orchestrator destroys the container as soon as the run finishes (`onAgentToolFinish`) and when you clear runs.
+- **Agents as tools / sub-agents.** The orchestrator exposes `agentTool(ClaudeCodeAgent, …)` so its planning loop can delegate work. When it does, the framework starts the sub-agent as its own Durable Object, forwards its chat chunks to the parent as `agent-tool-event` frames, and surfaces its `reportProgress` on a live bar — all on the same WebSocket.
+- **One container per task.** Each agent-tool run gets its own `ClaudeCodeAgent` Durable Object under a name the orchestrator mints; we hash that name into a DNS-safe sandbox id so `getSandbox(env.Sandbox, …)` gives every delegated task its _own_ isolated container with the repo checked out. The orchestrator asks the child to release the container as soon as the run finishes (`onAgentToolFinish`) and when you clear runs.
 - **Parallel fan-out.** `delegate_parallel` dispatches several tasks at once (or competing attempts at one task) via `runAgentTool`, each in its own container, then compares the diffs.
 - **Think owns the planning loop; Claude Code owns the coding loop.** The orchestrator's loop runs on Workers AI; each sub-agent drives the Claude Code CLI headless inside its container and maps its `stream-json` output into AI SDK `UIMessage` chunks.
 - **No credentials in the container.** The Sandbox intercepts Claude Code's egress to `api.anthropic.com` and forwards it through the `env.AI.gateway()` binding, which authenticates via your Cloudflare account. The only config is a plaintext gateway id. This does **not** make the container harmless: anything running in it can spend through your gateway (see [Security](#security)).
@@ -87,7 +87,7 @@ CodingOrchestrator (Think, Durable Object)  ── planning loop on Workers AI
         │  getTools(): delegate_coding_task = agentTool(ClaudeCodeAgent, …)
         │              delegate_parallel    = runAgentTool fan-out
         ▼
-ClaudeCodeAgent (AIChatAgent facet, name = runId)   ── one per delegated task
+ClaudeCodeAgent (AIChatAgent, one Durable Object per run)   ── one per delegated task
         │  sandboxFor(env, orchestratorName, this.name)  (destroyed on finish)
         ▼
 Sandbox container (@cloudflare/sandbox) — `claude -p` against the aywson checkout
@@ -162,7 +162,7 @@ This example has **three independent durable lifecycles**, each with its own evi
 
 ```
 CodingOrchestrator (Think DO)        chat + planning loop      ← SQLite-backed
-  └─ ClaudeCodeAgent (facet DO)      one per delegated task    ← SQLite-backed
+  └─ ClaudeCodeAgent (Durable Object) one per delegated task   ← SQLite-backed
        └─ Sandbox (container DO)     claude -p + the checkout  ← disk is EPHEMERAL
 ```
 
@@ -177,8 +177,8 @@ The two Durable Objects are SQLite-backed and recover well. The container is the
 | Run `interrupted`, child still working   | unaffected                                        | child keeps running                       | kept; destroyed by the wake sweep  |
 | Container sleep (`sleepAfter`, 15m idle) | unaffected                                        | n/a                                       | **gone** — fresh disk on next wake |
 
-- **Hibernation is fine.** Both agents use the WebSocket Hibernation API and always-on durable chat recovery. We persist Claude's session id and the last turn's outcome (`lastResult`, including any error) in the facet DO's storage, so between-turn state is durable.
-- **Mid-turn eviction is only partially recovered.** The sub-agent's "model call" is `runClaudeCode` — a loop reading `sandbox.streamProcessLogs(...)`. If the facet DO is evicted mid-turn, the `claude -p` process keeps running **orphaned** in the container and the tail of that turn is lost; recovery re-enters `onChatMessage` and starts a _new_ `claude -p --resume` rather than re-attaching to the live process (the framework's "child runtime is not live-tailable" case). Hence **resume is between turns, not mid-turn.**
+- **Hibernation is fine.** Both agents use the WebSocket Hibernation API and always-on durable chat recovery. We persist Claude's session id and the last turn's outcome (`lastResult`, including any error) in the sub-agent's storage, so between-turn state is durable.
+- **Mid-turn eviction is only partially recovered.** The sub-agent's "model call" is `runClaudeCode` — a loop reading `sandbox.streamProcessLogs(...)`. If the sub-agent is evicted mid-turn, the `claude -p` process keeps running **orphaned** in the container and the tail of that turn is lost; recovery re-enters `onChatMessage` and starts a _new_ `claude -p --resume` rather than re-attaching to the live process (the framework's "child runtime is not live-tailable" case). Hence **resume is between turns, not mid-turn.**
 - **The container disk is ephemeral — the real gap.** After `sleepAfter` (15m idle) the container stops and Cloudflare Containers cold-start a clean filesystem from the image. Two things live only on that disk:
   1. the repo + Claude's edits — `ensureWorkspace` papers over the repo with an idempotent re-clone, but **uncommitted edits from prior turns are lost**;
   2. Claude's native session (`~/.claude/…`) — we persist the session _id_ and pass `--resume`, but the session _data_ was on the disk, so after a sleep `--resume` points at a session the fresh container has never seen.

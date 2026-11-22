@@ -3,7 +3,7 @@
  *
  * Demonstrates the framework `runAgentTool` / `agentTool` APIs: a parent Think
  * agent dispatches retained Think sub-agents, streams their chat chunks into
- * the parent UI as `agent-tool-event` frames, and keeps the child facets
+ * the parent UI as `agent-tool-event` frames, and keeps the child agents
  * available for replay and drill-in.
  */
 
@@ -292,23 +292,6 @@ export class Assistant extends Think<Env> {
         }
       })
     };
-  }
-
-  override async onBeforeSubAgent(
-    _request: Request,
-    child: { className: string; name: string }
-  ): Promise<Response | void> {
-    if (child.className !== "Researcher" && child.className !== "Planner") {
-      return new Response(`Unknown agent tool class: ${child.className}`, {
-        status: 404
-      });
-    }
-    if (!this.hasAgentToolRun(child.className, child.name)) {
-      return new Response(
-        `Agent tool ${child.className}/${child.name} not found`,
-        { status: 404 }
-      );
-    }
   }
 
   @callable()

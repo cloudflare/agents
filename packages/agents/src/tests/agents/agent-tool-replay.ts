@@ -1,4 +1,9 @@
-import { Agent, callable, type Connection } from "../../index.ts";
+import {
+  Agent,
+  callable,
+  getAgentByName,
+  type Connection
+} from "../../index.ts";
 import type {
   AgentToolEvent,
   AgentToolEventMessage,
@@ -63,6 +68,7 @@ type AgentToolInternals = {
     completedAt?: number
   ): Promise<void>;
   _armDetachedBackbone(options?: { resetCadence?: boolean }): Promise<void>;
+  _scheduleAgentToolRunRecovery(): Promise<void>;
 };
 
 type DetachedDeliveryLogEntry = {
@@ -77,7 +83,20 @@ type DetachedBackboneSchedule = {
   payload: unknown;
 };
 
+/** The child name a seeded run row records. */
+function childNameForTest(runId: string): string {
+  return `child-${runId}`;
+}
+
 export class TestAgentToolReplayAgent extends Agent {
+  /** The stub child of a seeded run, an ordinary Durable Object. */
+  private _stubChildForTest(runId: string) {
+    return getAgentByName(
+      this.env.TestAgentToolStubChild,
+      childNameForTest(runId)
+    );
+  }
+
   private get _agentTool(): AgentToolInternals {
     return this as unknown as AgentToolInternals;
   }
@@ -96,9 +115,9 @@ export class TestAgentToolReplayAgent extends Agent {
   ): void {
     this.sql`
       INSERT INTO cf_agent_tool_runs (
-        run_id, parent_tool_call_id, agent_type, status, display_order, started_at
+        child_name, run_id, parent_tool_call_id, agent_type, status, display_order, started_at
       ) VALUES (
-        ${runId}, ${`call-${runId}`}, 'Child', 'starting', 0, ${Date.now()}
+        ${childNameForTest(runId)}, ${runId}, ${`call-${runId}`}, 'Child', 'starting', 0, ${Date.now()}
       )
     `;
     this._agentTool._updateAgentToolTerminal(runId, {
@@ -217,11 +236,11 @@ export class TestAgentToolReplayAgent extends Agent {
   ): void {
     this.sql`
       INSERT INTO cf_agent_tool_runs (
-        run_id, parent_tool_call_id, agent_type, status, display_order,
+        child_name, run_id, parent_tool_call_id, agent_type, status, display_order,
         started_at, detached, detached_on_finish, detached_notify_source,
         detached_max_budget_at
       ) VALUES (
-        ${runId}, ${null}, 'Child', 'running', 0, ${Date.now()}, 1,
+        ${childNameForTest(runId)}, ${runId}, ${null}, 'Child', 'running', 0, ${Date.now()}, 1,
         ${onFinishName}, ${notifySource ?? null}, ${maxBudgetAt ?? null}
       )
     `;
@@ -239,11 +258,11 @@ export class TestAgentToolReplayAgent extends Agent {
   ): void {
     this.sql`
       INSERT INTO cf_agent_tool_runs (
-        run_id, parent_tool_call_id, agent_type, status, display_order,
+        child_name, run_id, parent_tool_call_id, agent_type, status, display_order,
         started_at, detached, detached_on_finish, detached_max_budget_at,
         detached_no_progress_budget_ms, last_progress_at
       ) VALUES (
-        ${runId}, ${null}, 'Child', 'running', 0, ${Date.now()}, 1,
+        ${childNameForTest(runId)}, ${runId}, ${null}, 'Child', 'running', 0, ${Date.now()}, 1,
         'onDetachedDone', ${null}, ${noProgressBudgetMs}, ${lastProgressAt}
       )
     `;
@@ -253,10 +272,10 @@ export class TestAgentToolReplayAgent extends Agent {
   seedAwaitedRunForTest(runId: string): void {
     this.sql`
       INSERT INTO cf_agent_tool_runs (
-        run_id, parent_tool_call_id, agent_type, status, display_order,
+        child_name, run_id, parent_tool_call_id, agent_type, status, display_order,
         started_at, detached
       ) VALUES (
-        ${runId}, ${null}, 'TestAgentToolStubChild', 'running', 0,
+        ${childNameForTest(runId)}, ${runId}, ${null}, 'TestAgentToolStubChild', 'running', 0,
         ${Date.now()}, 0
       )
     `;
@@ -430,6 +449,82 @@ export class TestAgentToolReplayAgent extends Agent {
     });
   }
 
+  /**
+   * Seed open runs as an earlier version wrote them, with no child name
+   * (their child was a facet), then run startup recovery.
+   */
+  async recoverFacetEraRunsForTest(ids: {
+    awaited: string;
+    detached: string;
+  }): Promise<{
+    rows: Array<{ runId: string; status: string; error: string | null }>;
+    events: AgentToolEventMessage[];
+  }> {
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, parent_tool_call_id, agent_type, status, display_order,
+        started_at, detached
+      ) VALUES (
+        ${ids.awaited}, ${`call-${ids.awaited}`}, 'TestAgentToolStubChild',
+        'running', 0, ${Date.now()}, 0
+      )
+    `;
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, parent_tool_call_id, agent_type, status, display_order,
+        started_at, detached, detached_on_finish
+      ) VALUES (
+        ${ids.detached}, ${null}, 'TestAgentToolStubChild', 'running', 0,
+        ${Date.now()}, 1, 'onDetachedDone'
+      )
+    `;
+    const events = await this._captureBroadcastsForTest(() =>
+      this._agentTool._scheduleAgentToolRunRecovery()
+    );
+    const rows = this.sql<{
+      run_id: string;
+      status: string;
+      error_message: string | null;
+    }>`
+      SELECT run_id, status, error_message FROM cf_agent_tool_runs
+      WHERE run_id IN (${ids.awaited}, ${ids.detached})
+      ORDER BY run_id
+    `.map((row) => ({
+      runId: row.run_id,
+      status: row.status,
+      error: row.error_message
+    }));
+    return { rows, events };
+  }
+
+  /** Re-issue a run id an earlier version left open, with no child name. */
+  async reissueFacetEraRunForTest(runId: string): Promise<RunAgentToolResult> {
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, parent_tool_call_id, agent_type, status, display_order,
+        started_at, detached
+      ) VALUES (
+        ${runId}, ${`call-${runId}`}, 'TestAgentToolStubChild', 'running', 0,
+        ${Date.now()}, 0
+      )
+    `;
+    return this.runAgentTool<StubRunInput>(TestAgentToolStubChild, {
+      runId,
+      input: { chunkBodies: [] }
+    });
+  }
+
+  /** The child a run reached, through the parent's route, as HTTP. */
+  async fetchRunChildForTest(path: string): Promise<{
+    status: number;
+    body: string;
+  }> {
+    const response = await this.fetch(
+      new Request(`https://agent.test/agents/x/y/${path}`)
+    );
+    return { status: response.status, body: await response.text() };
+  }
+
   /** Run `action` and return every `agent-tool-event` frame it broadcasts. */
   private async _captureBroadcastsForTest(
     action: () => Promise<unknown>
@@ -517,7 +612,7 @@ export class TestAgentToolReplayAgent extends Agent {
     kinds: AgentToolEvent["kind"][];
     inspectReconcile: (boolean | undefined)[];
   }> {
-    const child = await this.subAgent(TestAgentToolStubChild, options.runId);
+    const child = await this._stubChildForTest(options.runId);
     await child.startAgentToolRun(
       {
         chunkBodies: options.chunkBodies,
@@ -528,10 +623,10 @@ export class TestAgentToolReplayAgent extends Agent {
     );
     this.sql`
       INSERT INTO cf_agent_tool_runs (
-        run_id, parent_tool_call_id, agent_type, status, summary,
+        child_name, run_id, parent_tool_call_id, agent_type, status, summary,
         display_order, started_at, completed_at, detached
       ) VALUES (
-        ${options.runId}, ${`call-${options.runId}`}, 'TestAgentToolStubChild',
+        ${childNameForTest(options.runId)}, ${options.runId}, ${`call-${options.runId}`}, 'TestAgentToolStubChild',
         'completed', 'done', 0, ${Date.now()}, ${Date.now()}, 0
       )
     `;
@@ -555,40 +650,40 @@ export class TestAgentToolReplayAgent extends Agent {
   }): Promise<{ elapsedMs: number; frames: AgentToolEventMessage[] }> {
     const startedAt = Date.now();
     for (const runId of [options.stalledRunId, options.healthyRunId]) {
-      const child = await this.subAgent(TestAgentToolStubChild, runId);
+      const child = await this._stubChildForTest(runId);
       await child.startAgentToolRun(
         { chunkBodies: [JSON.stringify({ type: "text-start", id: "t" })] },
         { runId }
       );
       this.sql`
         INSERT INTO cf_agent_tool_runs (
-          run_id, parent_tool_call_id, agent_type, status, summary,
+          child_name, run_id, parent_tool_call_id, agent_type, status, summary,
           display_order, started_at, completed_at, detached
         ) VALUES (
-          ${runId}, ${`call-${runId}`}, 'TestAgentToolStubChild',
+          ${childNameForTest(runId)}, ${runId}, ${`call-${runId}`}, 'TestAgentToolStubChild',
           'completed', 'done', 0, ${startedAt}, ${startedAt}, 0
         )
       `;
     }
 
     const self = this as unknown as {
-      _cf_resolveSubAgent(className: string, name: string): Promise<unknown>;
+      _agentToolChild(agentType: string, runId: string): Promise<unknown>;
     };
-    const original = self._cf_resolveSubAgent.bind(this);
-    self._cf_resolveSubAgent = async (className, name) => {
+    const original = self._agentToolChild.bind(this);
+    self._agentToolChild = async (agentType, name) => {
       if (name === options.stalledRunId) {
         await new Promise((resolve) =>
           setTimeout(resolve, options.resolveDelayMs)
         );
       }
-      return original(className, name);
+      return original(agentType, name);
     };
     const replayStartedAt = Date.now();
     try {
       const frames = await this._captureReplayForTest();
       return { elapsedMs: Date.now() - replayStartedAt, frames };
     } finally {
-      self._cf_resolveSubAgent = original;
+      self._agentToolChild = original;
     }
   }
 
@@ -605,7 +700,7 @@ export class TestAgentToolReplayAgent extends Agent {
     seen: AgentToolEventMessage[];
     recovery: AgentToolEventMessage[];
   }> {
-    const child = await this.subAgent(TestAgentToolStubChild, options.runId);
+    const child = await this._stubChildForTest(options.runId);
     await child.startAgentToolRun(
       {
         chunkBodies: options.storedChunkBodies,
@@ -615,10 +710,10 @@ export class TestAgentToolReplayAgent extends Agent {
     );
     this.sql`
       INSERT INTO cf_agent_tool_runs (
-        run_id, parent_tool_call_id, agent_type, status, display_order,
+        child_name, run_id, parent_tool_call_id, agent_type, status, display_order,
         started_at, detached
       ) VALUES (
-        ${options.runId}, ${`call-${options.runId}`}, 'TestAgentToolStubChild',
+        ${childNameForTest(options.runId)}, ${options.runId}, ${`call-${options.runId}`}, 'TestAgentToolStubChild',
         'running', 0, ${Date.now()}, 0
       )
     `;
@@ -638,6 +733,10 @@ export class TestAgentToolReplayAgent extends Agent {
  * wakes a hibernated DO can still replay them via `getAgentToolChunks`.
  */
 export class TestAgentToolStubChild extends Agent {
+  override onRequest(request: Request): Response {
+    return new Response(`child ${this.name} ${new URL(request.url).pathname}`);
+  }
+
   private _ensureTables(): void {
     this.sql`
       CREATE TABLE IF NOT EXISTS cf_test_stub_chunks (

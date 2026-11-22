@@ -25,6 +25,7 @@
   "durable_objects": {
     "bindings": [
       { "class_name": "CodingOrchestrator", "name": "CodingOrchestrator" },
+      { "class_name": "ClaudeCodeAgent", "name": "ClaudeCodeAgent" },
       { "class_name": "Sandbox", "name": "Sandbox" }
     ]
   },
@@ -40,6 +41,10 @@
     {
       "new_sqlite_classes": ["CodingOrchestrator", "Sandbox"],
       "tag": "v1"
+    },
+    {
+      "new_sqlite_classes": ["ClaudeCodeAgent"],
+      "tag": "v2"
     }
   ]
 }
