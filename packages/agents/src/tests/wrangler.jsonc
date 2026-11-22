@@ -256,6 +256,14 @@
         "name": "TestStateAgentNoInitial"
       },
       {
+        "class_name": "TestSlowConnectAgent",
+        "name": "TestSlowConnectAgent"
+      },
+      {
+        "class_name": "TestResetAgent",
+        "name": "TestResetAgent"
+      },
+      {
         "class_name": "TestThrowingStateAgent",
         "name": "TestThrowingStateAgent"
       },
@@ -555,6 +563,8 @@
         "TestHttpMcpDedupAgent",
         "TestStateAgent",
         "TestStateAgentNoInitial",
+        "TestSlowConnectAgent",
+        "TestResetAgent",
         "TestThrowingStateAgent",
         "TestPersistedStateAgent",
         "TestBothHooksAgent",

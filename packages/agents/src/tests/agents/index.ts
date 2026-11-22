@@ -15,6 +15,8 @@ export {
 export {
   TestStateAgent,
   TestStateAgentNoInitial,
+  TestSlowConnectAgent,
+  TestResetAgent,
   TestThrowingStateAgent,
   TestPersistedStateAgent,
   TestBothHooksAgent,

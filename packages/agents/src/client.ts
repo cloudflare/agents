@@ -12,6 +12,7 @@ import type {
   SerializableValue
 } from "./serializable";
 import { MessageType } from "./types";
+import { reconnectDefaults, reconnectTimingFor } from "./reconnect-timing";
 import { camelCaseToKebabCase, isInternalJsStubProp } from "./utils";
 import {
   boundCapnWebSocket,
@@ -651,11 +652,13 @@ export class AgentClient<
     const classifyReconnect = closeClassifier.shouldReconnectOnClose;
 
     // If basePath is provided, use it directly; otherwise construct from agent/name
+    const timingDefaults = reconnectDefaults();
     const socketOptions = options.basePath
       ? {
           basePath: options.basePath,
           path: options.path,
           ...options,
+          ...reconnectTimingFor(options, timingDefaults),
           ...socketClass,
           shouldReconnectOnClose: classifyReconnect
         }
@@ -665,6 +668,7 @@ export class AgentClient<
           room: options.name || "default",
           path: options.path,
           ...options,
+          ...reconnectTimingFor(options, timingDefaults),
           ...socketClass,
           shouldReconnectOnClose: classifyReconnect
         };

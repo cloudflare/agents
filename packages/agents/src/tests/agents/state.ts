@@ -1,4 +1,9 @@
-import { Agent, type AgentContext, type Connection } from "../../index.ts";
+import {
+  Agent,
+  callable,
+  type AgentContext,
+  type Connection
+} from "../../index.ts";
 import { MCPConnectionState } from "../../mcp/client/connection.ts";
 
 // Test Agent for state management tests
@@ -186,6 +191,24 @@ export class TestStateAgent extends Agent<Cloudflare.Env, TestState> {
     this.ctx.storage.sql.exec(
       `INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('cf_state_was_changed', 'true')`
     );
+  }
+}
+
+/**
+ * An Agent whose `onConnect` takes longer than PartySocket's original 4 s
+ * handshake timeout, as one that awaits a slow lookup would.
+ */
+export class TestSlowConnectAgent extends Agent {
+  async onConnect(): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, 6000));
+  }
+}
+
+/** An Agent a client can reset, as a crash would (its sockets close with 1006). */
+export class TestResetAgent extends Agent {
+  @callable()
+  resetForTest(): void {
+    this.ctx.abort("reset by test");
   }
 }
 
