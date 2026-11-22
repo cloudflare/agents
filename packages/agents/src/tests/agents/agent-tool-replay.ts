@@ -497,6 +497,22 @@ export class TestAgentToolReplayAgent extends Agent {
     return { rows, events };
   }
 
+  /**
+   * Put the run table back as schema version 14 left it (no `child_name`),
+   * then run the schema migration. Returns whether the column is back.
+   */
+  migrateRunTableFromVersion14ForTest(): boolean {
+    this.ctx.storage.sql.exec(
+      "ALTER TABLE cf_agent_tool_runs DROP COLUMN child_name"
+    );
+    this.ctx.storage.kv.put("cf_agents:schema_version", 14);
+    (this as unknown as { _ensureSchema(): void })._ensureSchema();
+    return this.ctx.storage.sql
+      .exec<{ name: string }>("PRAGMA table_info(cf_agent_tool_runs)")
+      .toArray()
+      .some((column) => column.name === "child_name");
+  }
+
   /** Re-issue a run id an earlier version left open, with no child name. */
   async reissueFacetEraRunForTest(runId: string): Promise<RunAgentToolResult> {
     this.sql`

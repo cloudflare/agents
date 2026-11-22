@@ -82,4 +82,12 @@ describe("agent-tool run child", () => {
       error: expect.stringContaining("earlier version")
     });
   });
+
+  it("adds the child name column to a run table from schema version 14", async () => {
+    const parent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `schema-14-${crypto.randomUUID()}`
+    );
+    expect(await parent.migrateRunTableFromVersion14ForTest()).toBe(true);
+  });
 });

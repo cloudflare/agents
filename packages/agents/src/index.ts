@@ -450,7 +450,7 @@ type AgentToolRecoveryInspection =
  * every capability uses for its own schema version) and checks it on wake to
  * skip DDL on established DOs.
  */
-const CURRENT_SCHEMA_VERSION = 14;
+const CURRENT_SCHEMA_VERSION = 15;
 const SCHEMA_VERSION_KEY = "cf_agents:schema_version";
 
 // Before the State capability owned `cf_agents_state`, Agent kept its schema
