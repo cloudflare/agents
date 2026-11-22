@@ -293,7 +293,7 @@ export type RunAgentToolOptions<
   input: Input;
   runId?: string;
   /**
-   * The name of the child Durable Object that runs this run. Defaults to a
+   * @internal The name of the child Durable Object that runs this run. Defaults to a
    * random UUID that only this parent knows until a client drills in. Pass a
    * name to send several runs to the same child, which keeps its messages
    * and state between them. The name is global to the child's namespace:
