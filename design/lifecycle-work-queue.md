@@ -138,20 +138,23 @@ Five named rules define what a job owner can and cannot rely on:
    failure is visible. Before this rule, one such job kept its old due
    time, headed the due list on every alarm and stopped every job behind
    it for as long as the downstream kept failing.
-5. **Attempts are counted durably, before `onJob` runs.** The row's
-   `attempts` column is written before each dispatch attempt, and the
-   driver yields one macrotask so the write starts before `onJob` runs;
-   `context.attempt` reads it. A started write survives a CPU-limit kill or
+5. **Unreported attempts are counted durably.** Before each dispatch
+   attempt the driver adds one to the row's `attempts` column and yields
+   one macrotask so the write starts; when the attempt ends in any way the
+   driver sees (a result, an application error, a platform failure) it
+   takes the one off again. A started write survives a CPU-limit kill or
    `ctx.abort()` that follows; `storage.sync()` would also work but costs
-   about 38 ms per dispatch. An attempt that takes its isolate down
-   (CPU limit, the 15-minute alarm wall-time limit, a reset) is still
-   counted, so the next alarm continues the count. When a job starts with
-   its count at `maxAttempts`, an owner with `onJobError` gets a
-   `JobAttemptsExhaustedError` and decides the outcome; an owner without
-   one keeps its job (it may be the owner's only wake), and each further
-   attempt first moves the job out by 30 s, doubling to an hour. An
-   attempt that ends in a platform failure is uncounted. A push or a
-   non-final outcome (`rescheduleAt`, `"yield"`) starts the count at zero.
+   about 38 ms per dispatch. So the column counts only attempts that took
+   their isolate down (CPU limit, the 15-minute alarm wall-time limit, a
+   reset), and `context.attempt` is that count plus this invocation's
+   attempt. When a job starts with `max(maxAttempts, 3)` of them, an owner
+   with `onJobError` gets a `JobAttemptsExhaustedError` and decides the
+   outcome; an owner without one keeps its job (it may be the owner's only
+   wake), and each further attempt first moves the job out by 30 s,
+   doubling to an hour. The floor of 3 is for deploys: a reset mid-attempt
+   also goes unreported, and a one-attempt job must survive one. A push or
+   a non-final outcome (`rescheduleAt`, `"yield"`) starts the count at
+   zero. Retries within one invocation stay bounded by `maxAttempts`.
    Without this, a job that exceeded the CPU limit ran again every 30 s
    forever with `attempt: 1` (measured on a deployed Worker, 22 Nov 2026).
 
@@ -185,8 +188,8 @@ and `Lifecycle` wires them to the host and capabilities through the narrow
    - stop if alarms were disabled mid-phase (host teardown);
    - a single-flight job whose previous run is in flight is skipped until it
      crosses its hung timeout, then forcibly re-run;
-   - a job whose durable attempt count already reached `maxAttempts` goes
-     to `onJobError` (or, with no `onJobError`, is backed off and run once);
+   - a job with `max(maxAttempts, 3)` unreported attempts goes to
+     `onJobError` (or, with no `onJobError`, is backed off and run once);
    - dispatch `onJob` inside `tryN` using the job's retry options (defaults
      3 attempts / 100 ms base / 3000 ms cap), counting each attempt in the
      row and yielding one macrotask first;

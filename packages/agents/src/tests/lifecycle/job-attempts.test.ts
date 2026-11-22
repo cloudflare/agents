@@ -35,6 +35,10 @@ class Jobs extends LifecycleCapability {
   get(id: string) {
     return this.lifecycle.jobs.get(id);
   }
+
+  cancel(id: string) {
+    return this.lifecycle.jobs.cancel(id);
+  }
 }
 
 /** An owner with no onJobError: its job is its only wake. */
@@ -131,6 +135,82 @@ describe("durable job attempts", () => {
       // another isolate death would not bring it back for 30 s.
       expect(jobs.attempts).toEqual([4]);
       expect(jobs.timeSeen).toBeGreaterThanOrEqual(before + 30_000);
+    });
+  });
+
+  it("gives a one-attempt job more than one unreported attempt", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      // A deploy that resets the isolate mid-attempt also leaves the attempt
+      // unreported. A one-shot with maxAttempts 1 must still run again.
+      const jobs = new Jobs();
+      const { lifecycle } = install(jobs);
+      await lifecycle.start();
+      await jobs.push({
+        id: "job",
+        fn: "run",
+        time: Date.now() + 60_000,
+        retry: { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 }
+      });
+      interrupted(storage, "job", 2);
+
+      await lifecycle.alarm();
+
+      expect(jobs.attempts).toEqual([3]);
+      expect(jobs.failures).toEqual([]);
+    });
+  });
+
+  it("keeps the in-invocation retry budget when a platform error comes first", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const jobs = new Jobs();
+      const { lifecycle } = install(jobs);
+      await lifecycle.start();
+      const errors = [
+        Object.assign(new Error("Network connection lost."), {
+          retryable: true
+        }),
+        new Error("application failure"),
+        new Error("application failure")
+      ];
+      jobs.failWith = () => errors.shift() ?? new Error("application failure");
+      await jobs.push({
+        id: "job",
+        fn: "run",
+        time: Date.now() + 60_000,
+        retry: QUICK
+      });
+      interrupted(storage, "job", 1);
+
+      await lifecycle.alarm();
+
+      // Three tries in this invocation, numbered after the one unreported
+      // attempt, then the owner hears of the last application error.
+      expect(jobs.attempts).toEqual([2, 3, 4]);
+      expect(jobs.failures).toEqual([{ attempt: 4, name: "Error" }]);
+    });
+  });
+
+  it("does not start a job cancelled while its attempt count is written", async () => {
+    await withCapabilityHarness(async ({ install }) => {
+      const jobs = new Jobs();
+      const { lifecycle } = install(jobs);
+      await lifecycle.start();
+      const now = Date.now();
+      await jobs.push({ id: "a", fn: "run", time: now - 2 });
+      await jobs.push({ id: "b", fn: "run", time: now - 1 });
+      const ran: string[] = [];
+      jobs.onJob = ({ job }: LifecycleJobContext) => {
+        ran.push(job.id);
+        // Runs during b's write wait: the timer is set before b's.
+        if (job.id === "a") {
+          setTimeout(() => void jobs.cancel("b"), 0);
+        }
+      };
+
+      await lifecycle.alarm();
+
+      expect(ran).toEqual(["a"]);
+      expect(jobs.get("b")).toBeUndefined();
     });
   });
 

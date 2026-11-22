@@ -101,14 +101,13 @@ export type LifecycleJobContext = {
   /** The due job being executed. */
   readonly job: LifecycleJob;
   /**
-   * 1-indexed dispatch attempt, counted durably before `onJob` runs. It
-   * carries across alarm invocations: an attempt that never reported back
-   * (the isolate was reset, or exceeded its CPU or wall-time limit) stays
-   * counted, so the next invocation runs attempt 2. A push or a non-final
-   * outcome (`rescheduleAt`, `"yield"`) starts the count again. An attempt
-   * that ended in a platform failure (a deploy, a dropped connection, a
-   * memory-limit reset) is not counted. A number can repeat when its write
-   * was lost with the isolate; it is not a deduplication key.
+   * 1-indexed dispatch attempt: this invocation's attempt plus the earlier
+   * attempts that never reported back (the isolate was reset, or exceeded
+   * its CPU or wall-time limit). Those are counted durably before `onJob`
+   * runs, so after such an attempt the next invocation runs attempt 2. A
+   * push or a non-final outcome (`rescheduleAt`, `"yield"`) starts the count
+   * again. A number can repeat when its write was lost with the isolate; it
+   * is not a deduplication key.
    */
   readonly attempt: number;
 };
@@ -151,7 +150,7 @@ export type JobStorageRow = {
   recovery_loop: number;
   running: number;
   execution_started_at: number | null;
-  /** Dispatch attempts counted since the job was pushed or last progressed. */
+  /** Attempts that started and never reported back since the last push or progress. */
   attempts: number;
   created_at: number;
 };
@@ -597,10 +596,13 @@ export class JobQueue {
       return;
     }
     if (outcome === "yield") {
+      // Due again at once, even if the driver moved it out before running.
       this.#sql(
         `UPDATE cf_agents_jobs
-         SET running = 0, execution_started_at = NULL, attempts = 0
+         SET time = MIN(time, ?), running = 0, execution_started_at = NULL,
+             attempts = 0
          WHERE id = ?`,
+        Math.floor(Date.now()),
         id
       );
       return;

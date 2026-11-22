@@ -56,6 +56,14 @@ const DEADMAN_ALARM_DELAY_MS = 30_000;
 /** A retry found its job cancelled or replaced, so it did not run. */
 const SUPERSEDED = Symbol("superseded");
 
+/**
+ * Attempts that may end with their isolate (no error reported) before the
+ * job counts as exhausted, at least. A deploy that resets the isolate also
+ * leaves an attempt unreported, so a job with `maxAttempts: 1` still gets a
+ * few before its owner is told it failed.
+ */
+const MIN_UNREPORTED_ATTEMPTS = 3;
+
 /** Longest wait between attempts of a job whose attempts ran out. */
 const MAX_EXHAUSTED_BACKOFF_MS = 60 * 60_000;
 
@@ -74,9 +82,9 @@ function exhaustedBackoffMs(over: number): number {
  */
 function attemptsExhaustedError(row: JobStorageRow): Error {
   const error = new Error(
-    `Job ${row.id} (${row.capability}/${row.fn}) used its ${row.attempts} ` +
-      `attempts without finishing; each ended with its isolate (a reset, or ` +
-      `the CPU or wall-time limit)`
+    `Job ${row.id} (${row.capability}/${row.fn}) started ${row.attempts} ` +
+      `attempts that never reported back; each ended with its isolate (a ` +
+      `reset, or the CPU or wall-time limit)`
   );
   error.name = "JobAttemptsExhaustedError";
   return error;
@@ -415,12 +423,15 @@ export class JobDriver {
   /**
    * Dispatch one due row to its owner with retry and failure policy.
    *
-   * Each attempt is counted in the row, and its write started, before
-   * `onJob` runs, so
-   * an attempt that takes its isolate down (CPU or wall-time limit, reset)
-   * still counts; once the count reaches `maxAttempts` the job goes to
-   * `onJobError` instead of running again. Without that, such a job re-ran
-   * on every fallback alarm forever (RUNTIME-FACTS, 22 Nov).
+   * The row's `attempts` column counts attempts that started and never
+   * reported back. Each attempt adds one, and the write is started, before
+   * `onJob` runs; any end the driver sees (a result, an application error,
+   * a platform failure) takes it off again. So only an attempt that took its
+   * isolate down (CPU or wall-time limit, reset) stays counted. Once
+   * `max(maxAttempts, 3)` have, the job goes to `onJobError` instead of
+   * running again. Without that, such a job re-ran on every fallback alarm
+   * forever (RUNTIME-FACTS, 22 Nov). Application retries within one
+   * invocation are bounded by `maxAttempts` as before.
    *
    * @returns A transient platform failure this job was deferred on, for
    * the alarm to report once every other due job had its turn. A reset or
@@ -448,7 +459,8 @@ export class JobDriver {
 
     const maxAttempts = job.retry?.maxAttempts ?? DEFAULT_JOB_RETRY.maxAttempts;
     const prior = row.attempts ?? 0;
-    if (prior >= maxAttempts && dispatch.onJobError) {
+    const unreportedLimit = Math.max(maxAttempts, MIN_UNREPORTED_ATTEMPTS);
+    if (prior >= unreportedLimit && dispatch.onJobError) {
       // Every attempt so far ended with its isolate; running it again would
       // most likely end the same way. The owner decides what happens.
       let outcome: LifecycleJobOutcome | void = undefined;
@@ -464,14 +476,14 @@ export class JobDriver {
       queue.applyOutcome(claim, outcome ?? undefined);
       return undefined;
     }
-    if (prior >= maxAttempts) {
+    if (prior >= unreportedLimit) {
       // An owner without onJobError keeps its job: deleting it would lose
       // the owner's only wake. Run one attempt at a time, each starting
       // further out, so a job that keeps taking its isolate down costs one
       // attempt per backoff instead of one every deadman delay.
       queue.setTime(
         row.id,
-        Date.now() + exhaustedBackoffMs(prior - maxAttempts)
+        Date.now() + exhaustedBackoffMs(prior - unreportedLimit)
       );
     }
     let attempt = prior;
@@ -504,31 +516,32 @@ export class JobDriver {
     try {
       outcome = await this.#alarmScope.run({ executing: row }, () =>
         tryN(
-          Math.max(1, maxAttempts - prior),
+          maxAttempts,
           async (local) => {
             // A retry waits in tryN's backoff, and requests run meanwhile.
             // A cancel or same-id push made then is newer intent: do not
             // run the job this dispatch captured again.
             if (local > 1 && !owned()) return SUPERSEDED;
-            attempt += 1;
-            queue.setAttempts(row.id, attempt);
+            attempt = prior + local;
+            queue.setAttempts(row.id, prior + 1);
             // One macrotask lets the output gate start writing the count, and
             // a write that started survives a CPU-limit kill or abort that
             // follows. Awaiting microtasks is not enough, and
             // `storage.sync()` costs a durable round trip (about 38 ms) per
             // dispatch (RUNTIME-FACTS, 22 Nov).
             await new Promise((resolve) => setTimeout(resolve, 0));
+            // The wait let requests run: a cancel or same-id push made
+            // meanwhile is newer intent.
+            if (disabled() || !owned()) return SUPERSEDED;
             try {
               return await dispatch.onJob({ job, attempt });
             } catch (error) {
-              // A platform failure is not the job's: uncount it.
-              if (isPlatformFailure(error)) {
-                attempt -= 1;
-                try {
-                  if (owned()) queue.setAttempts(row.id, attempt);
-                } catch {
-                  // a condemned isolate's storage; the count stays
-                }
+              // The attempt reported back: it no longer counts as one that
+              // ended with its isolate.
+              try {
+                if (owned()) queue.setAttempts(row.id, prior);
+              } catch {
+                // a condemned isolate's storage; the count stays
               }
               throw error;
             }
