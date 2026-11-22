@@ -1725,7 +1725,7 @@ export class ThinkClientToolsAgent extends Think {
     const ownerId = await this._seedMeasuredTranscript(transcript);
     const internal = this as unknown as {
       _applyToolUpdateToMessages(update: ToolPartUpdate): Promise<unknown>;
-      _cacheCoversActivePath: boolean;
+      _cfTranscript: { coversActivePath: boolean };
     };
     this.#billed.start();
     await internal._applyToolUpdateToMessages(
@@ -1740,7 +1740,7 @@ export class ThinkClientToolsAgent extends Think {
     return {
       ...billed,
       state: part?.state,
-      cacheCoversPath: internal._cacheCoversActivePath
+      cacheCoversPath: internal._cfTranscript.coversActivePath
     };
   }
 
@@ -2026,14 +2026,16 @@ export class ThinkClientToolsAgent extends Think {
     const internal = this as unknown as {
       _continuation: { pending: unknown };
       _autoContinuation: { reset(): void };
-      _pendingInteractionPromise: Promise<boolean> | null;
-      _interactionApplyTail: Promise<void>;
+      _turns: {
+        pendingInteraction: Promise<boolean> | null;
+        interactionTail: Promise<void>;
+      };
     };
     // reset() cancels the coalesce timer and clears the double-fire guard.
     internal._autoContinuation.reset();
     internal._continuation.pending = null;
-    internal._pendingInteractionPromise = null;
-    internal._interactionApplyTail = Promise.resolve();
+    internal._turns.pendingInteraction = null;
+    internal._turns.interactionTail = Promise.resolve();
   }
 
   /**
@@ -2060,9 +2062,11 @@ export class ThinkClientToolsAgent extends Think {
         awaitingConnections: Map<string, unknown>;
       };
       _autoContinuation: { fireWhenStable(): void; reset(): void };
-      _pendingInteractionPromise: Promise<boolean> | null;
-      _interactionApplyTail: Promise<void>;
-      _turns: { hasPendingDecision(): boolean };
+      _turns: {
+        pendingInteraction: Promise<boolean> | null;
+        interactionTail: Promise<void>;
+        hasPendingDecision(): boolean;
+      };
     };
 
     // Seed an unfired pending continuation (no message-level interaction, so the
@@ -2087,8 +2091,8 @@ export class ThinkClientToolsAgent extends Think {
     const drainGate = new Promise<void>((resolve) => {
       releaseDrain = resolve;
     });
-    internal._pendingInteractionPromise = new Promise<boolean>(() => {});
-    internal._interactionApplyTail = drainGate;
+    internal._turns.pendingInteraction = new Promise<boolean>(() => {});
+    internal._turns.interactionTail = drainGate;
     internal._autoContinuation.fireWhenStable();
 
     try {
@@ -2101,9 +2105,9 @@ export class ThinkClientToolsAgent extends Think {
       // without firing, then release the drain and reset the barrier.
       internal._continuation.pending = null;
       internal._continuation.awaitingConnections.clear();
-      internal._pendingInteractionPromise = null;
+      internal._turns.pendingInteraction = null;
       releaseDrain();
-      internal._interactionApplyTail = Promise.resolve();
+      internal._turns.interactionTail = Promise.resolve();
       internal._autoContinuation.reset();
     }
   }
