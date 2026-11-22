@@ -10,7 +10,6 @@
  */
 
 import { ChatRecoverySupersededError } from "./turn-stop";
-import type { FiberRecoveryContext } from "../index";
 import type {
   ChatRecoveryExhaustedContext,
   ChatRecoveryOptions,
@@ -167,19 +166,6 @@ export interface ChatRecoveryAdapter {
    * has no such state and omits it.
    */
   ensureInteractionStateLoaded?(): void;
-  /**
-   * Optional: give the package a chance to handle a NON-chat fiber before chat
-   * recovery inspects it. Returns `true` if the package fully consumed the
-   * fiber, in which case the engine tells the caller to skip chat-recovery
-   * processing for it. `Think` uses this for its messenger/workflow reply fibers
-   * (`think:messenger-reply`); `AIChatAgent` has no non-chat fibers and omits it
-   * (the engine then treats every recovered fiber as a chat-recovery candidate).
-   *
-   * Ordering invariant: the engine dispatches this FIRST, before the
-   * chat-fiber-name gate, so a non-chat fiber is never misclassified as an
-   * orphaned chat turn.
-   */
-  tryHandleNonChatFiberRecovery?(ctx: FiberRecoveryContext): Promise<boolean>;
   /** Monotonic forward-progress marker for the no-progress budget. */
   readProgress(): Promise<number>;
   /**
@@ -457,27 +443,35 @@ export interface DispatchRecoveredTurnInput<TClassify> {
 }
 
 /**
- * The wake-dispatch host operations the engine drives when an interrupted CHAT
- * fiber is detected on restart — the divergent organs the frame-collapse map
- * flagged. Kept SEPARATE from {@link ChatRecoveryAdapter} (and passed per call to
- * {@link ChatRecoveryEngine.handleChatFiberRecovery}) so the incident/give-up
+ * A chat turn whose isolate died before it finished, as its record left it.
+ *
+ * @internal
+ */
+export interface InterruptedChatTurn {
+  /** The turn's request id. */
+  requestId: string;
+  /** The snapshot taken when the turn started, or `null` when none survived. */
+  snapshot: ChatFiberSnapshot | null;
+  /** What the turn last passed to `stash()`, or `null`. */
+  recoveryData: unknown;
+  /** When the turn's run was created. */
+  createdAt: number;
+}
+
+/**
+ * The host operations the engine drives when it recovers an interrupted chat
+ * turn. Kept SEPARATE from {@link ChatRecoveryAdapter} (and passed per call to
+ * {@link ChatRecoveryEngine.recoverInterruptedTurn}) so the incident/give-up
  * adapter stays focused, and generic over `TClassify` so the
  * `classifyRecoveredTurn` → `dispatchRecoveredTurn` handoff is type-safe without a
  * class-level generic.
  *
- * The engine owns the wake LIFECYCLE (gate → parse → unwrap → stream → partial →
- * classify → begin-incident → exhausted-branch → onChatRecovery → persist →
- * complete → dispatch → catch→failed) and the shared persist clause; these hooks
- * own the package-specific I/O and the retry/continue/skip decision.
+ * The engine owns the LIFECYCLE (stream → partial → classify → begin-incident →
+ * exhausted-branch → onChatRecovery → persist → complete → dispatch →
+ * catch→failed) and the shared persist clause; these hooks own the
+ * package-specific I/O and the retry/continue/skip decision.
  */
 export interface ChatFiberWakeHooks<TClassify> {
-  /** The chat-fiber name prefix (`CHAT_FIBER_NAME + ":"`) gating the wake path. */
-  chatFiberPrefix(): string;
-  /** Decode the fiber snapshot into the recovery snapshot + checkpointed user data. */
-  unwrapRecoverySnapshot(ctx: FiberRecoveryContext): {
-    snapshot: ChatFiberSnapshot | null;
-    recoveryData: unknown;
-  };
   /**
    * Classify the recovered turn as a `retry` or `continue` and return any
    * package-specific detail the dispatch decision needs (e.g. the pre-stream
@@ -710,60 +704,30 @@ export class ChatRecoveryEngine {
   }
 
   /**
-   * Open or re-evaluate the recovery incident for `input`, persist the result,
-   * and broadcast its lifecycle events. Returns the incident, the resolved
-   * config, and whether the budget is now exhausted.
-   */
-  /**
-   * Dispatch a recovered fiber to the package's non-chat handler (the
-   * messenger/workflow seam) before any chat-recovery processing. Returns `true`
-   * when the package consumed the fiber — the caller must then skip chat
-   * recovery for it. The engine owns the *ordering* (this runs before the
-   * chat-fiber gate); the *behavior* is adapter-owned. No-op (`false`) when the
-   * adapter omits {@link ChatRecoveryAdapter.tryHandleNonChatFiberRecovery}.
-   */
-  async handleNonChatFiber(ctx: FiberRecoveryContext): Promise<boolean> {
-    return (await this.adapter.tryHandleNonChatFiberRecovery?.(ctx)) ?? false;
-  }
-
-  /**
-   * The shared wake-recovery LIFECYCLE for an interrupted chat fiber. Both
-   * packages drove this exact frame; the divergent organs are the
-   * {@link ChatFiberWakeHooks}. In order:
+   * The shared recovery LIFECYCLE for an interrupted chat turn: the replay of
+   * a chat-turn Task run whose isolate died, or a legacy chat fiber row an
+   * older version left. Both packages drove this exact frame; the divergent
+   * organs are the {@link ChatFiberWakeHooks}. In order:
    *
-   * 1. non-chat dispatch ({@link handleNonChatFiber}) FIRST, then the chat-fiber
-   *    name gate — a non-chat fiber is never misread as an orphaned chat turn;
-   * 2. parse the request id, unwrap the snapshot, resolve the orphaned stream +
-   *    reconstruct its partial;
-   * 3. classify the turn (retry/continue + package detail) and open the incident;
-   * 4. if the budget is already exhausted, persist the settled partial (so
+   * 1. resolve the orphaned stream + reconstruct its partial;
+   * 2. classify the turn (retry/continue + package detail) and open the incident;
+   * 3. if the budget is already exhausted, persist the settled partial (so
    *    non-idempotent tool results are not discarded — #1631) and terminalize
    *    BEFORE consulting `onChatRecovery`;
-   * 5. otherwise, inside a `failed`-on-throw guard: invoke `onChatRecovery`,
+   * 4. otherwise, inside a `failed`-on-throw guard: invoke `onChatRecovery`,
    *    apply the shared persist gate (base eligibility AND `persist !== false ||
    *    settled tool results`), complete the live stream, then hand the
    *    retry/continue/skip DECISION to {@link ChatFiberWakeHooks.dispatchRecoveredTurn}.
    *
-   * Returns `true` when the fiber was a chat (or non-chat) recovery the engine
-   * handled, `false` when it was not a chat fiber (the caller keeps looking). Any
-   * throw after the incident opens flips it to `failed` so it is never left
-   * leaking in `attempting`.
+   * Any throw after the incident opens flips it to `failed` so it is never
+   * left leaking in `attempting`.
    */
-  async handleChatFiberRecovery<TClassify>(
-    ctx: FiberRecoveryContext,
+  async recoverInterruptedTurn<TClassify>(
+    turn: InterruptedChatTurn,
     wake: ChatFiberWakeHooks<TClassify>
-  ): Promise<boolean> {
+  ): Promise<void> {
     const { adapter } = this;
-
-    // Ordering invariant: non-chat (messenger/workflow) fibers dispatch BEFORE
-    // the chat-fiber gate.
-    if (await this.handleNonChatFiber(ctx)) return true;
-
-    const chatPrefix = wake.chatFiberPrefix();
-    if (!ctx.name.startsWith(chatPrefix)) return false;
-
-    const requestId = ctx.name.slice(chatPrefix.length);
-    const { snapshot, recoveryData } = wake.unwrapRecoverySnapshot(ctx);
+    const { requestId, snapshot, recoveryData, createdAt } = turn;
     adapter.turnRecovered?.(
       snapshot?.recoveryRootRequestId
         ? [requestId, snapshot.recoveryRootRequestId]
@@ -785,7 +749,7 @@ export class ChatRecoveryEngine {
     });
     const recoveryRootRequestId = snapshot?.recoveryRootRequestId ?? requestId;
 
-    // A recovered fiber is a run whose isolate died before it finished. The
+    // An interrupted turn is a run whose isolate died before it finished. The
     // replay is itself an attempt: it counts the death and records itself so
     // that its own death, if it dies too, is counted by the next isolate
     // (#2613).
@@ -817,11 +781,11 @@ export class ChatRecoveryEngine {
       } finally {
         this.#settled();
       }
-      return true;
+      return;
     }
     try {
-      return await this.#replayRecoveredTurn(wake, {
-        ctx,
+      await this.#replayRecoveredTurn(wake, {
+        createdAt,
         incident,
         config,
         exhausted,
@@ -842,11 +806,11 @@ export class ChatRecoveryEngine {
     }
   }
 
-  /** The part of {@link handleChatFiberRecovery} that runs after the incident opened. */
+  /** The part of {@link recoverInterruptedTurn} that runs after the incident opened. */
   async #replayRecoveredTurn<TClassify>(
     wake: ChatFiberWakeHooks<TClassify>,
     input: {
-      ctx: FiberRecoveryContext;
+      createdAt: number;
       incident: ChatRecoveryIncident;
       config: ResolvedChatRecoveryConfig;
       exhausted: boolean;
@@ -861,10 +825,10 @@ export class ChatRecoveryEngine {
       streamStatus: ChatStreamStatus | undefined;
       partial: RecoveryPartial;
     }
-  ): Promise<boolean> {
+  ): Promise<void> {
     const { adapter } = this;
     const {
-      ctx,
+      createdAt,
       incident,
       config,
       exhausted,
@@ -904,11 +868,11 @@ export class ChatRecoveryEngine {
         config,
         partial,
         streamId,
-        ctx.createdAt,
+        createdAt,
         snapshot?.originMessageIds
       );
       this.#settled();
-      return true;
+      return;
     }
 
     // Any throw after the incident opens (user `onChatRecovery`, orphan
@@ -925,7 +889,7 @@ export class ChatRecoveryEngine {
           partial,
           snapshot,
           recoveryData,
-          createdAt: ctx.createdAt
+          createdAt
         })) ?? {};
 
       if (
@@ -957,8 +921,6 @@ export class ChatRecoveryEngine {
         streamStatus,
         detail
       });
-
-      return true;
     } catch (error) {
       await this.updateIncident(
         incident.incidentId,

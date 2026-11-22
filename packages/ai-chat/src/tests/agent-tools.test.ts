@@ -613,7 +613,7 @@ describe("AIChatAgent as an agent-tool child", () => {
     );
     expect(result).toEqual({
       mirrored: 1,
-      recoveries: ["__cf_internal_chat_turn:req-orphan"],
+      recoveries: ["req-orphan"],
       state: "completed"
     });
   });

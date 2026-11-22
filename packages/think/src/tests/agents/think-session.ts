@@ -93,6 +93,73 @@ export type RpcJsonObject = Record<
   | ReadonlyArray<string | number | boolean | null>
 >;
 
+/**
+ * Leave an interrupted turn the way production leaves one. A chat turn
+ * (`CHAT_FIBER_NAME:<requestId>`) is a chat-turn Task run whose closure died
+ * with its isolate, plus the snapshot it stored; anything else is a fiber
+ * row. A restart replays the run as Tasks does any unfinished run, and
+ * {@link recoverInterruptedTurnsForTest} replays it at once.
+ */
+async function insertInterruptedTurnForTest(
+  agent: Think,
+  storage: DurableObjectStorage,
+  name: string,
+  snapshot?: unknown
+): Promise<void> {
+  const prefix = `${Think.CHAT_FIBER_NAME}:`;
+  if (!name.startsWith(prefix)) {
+    agent.sql`
+      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
+      VALUES (${`fiber-${crypto.randomUUID()}`}, ${name},
+              ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
+    `;
+    return;
+  }
+  const nonce = crypto.randomUUID();
+  const runId = `chat_${nonce}`;
+  const requestId = name.slice(prefix.length);
+  if (snapshot) {
+    await storage.put(`__cf_chat_turn_snapshot:${runId}`, snapshot);
+  }
+  // Make sure the Tasks tables exist before writing a row into them.
+  await agent.tasks.get(runId);
+  const now = Date.now();
+  agent.sql`
+    INSERT INTO cf_agents_task_runs
+      (run_id, definition, input, state, metadata, idempotency_key, retain,
+       attempt, next_at, cancel_requested, created_at, updated_at)
+    VALUES
+      (${runId}, ${Think.CHAT_FIBER_NAME},
+       ${JSON.stringify({ requestId, continuation: false, nonce })}, 'pending',
+       ${JSON.stringify({ requestId })}, NULL, 0, 0, ${now}, 0, ${now}, ${now})
+  `;
+}
+
+/**
+ * Replay what {@link insertInterruptedTurnForTest} left, as a wake does: each
+ * unfinished chat-turn Task run runs again with no live closure, which hands
+ * its turn to chat recovery, then the fiber scan recovers fiber rows.
+ */
+async function recoverInterruptedTurnsForTest(agent: Think): Promise<void> {
+  const runs = agent.sql<{ run_id: string; input: string; metadata: string }>`
+    SELECT run_id, input, metadata FROM cf_agents_task_runs
+    WHERE definition = ${Think.CHAT_FIBER_NAME} AND state = 'pending'
+    ORDER BY created_at
+  `;
+  for (const run of runs) {
+    // Accepted again under its id, so this invocation runs it.
+    agent.sql`DELETE FROM cf_agents_task_runs WHERE run_id = ${run.run_id}`;
+    await agent.tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
+      Think.CHAT_FIBER_NAME,
+      JSON.parse(run.input),
+      { runId: run.run_id, retain: false, metadata: JSON.parse(run.metadata) }
+    );
+  }
+  await (
+    agent as unknown as { _checkRunFibers(): Promise<void> }
+  )._checkRunFibers();
+}
+
 function recoveryTransportCountsForTest(
   agent: Think,
   callback: string
@@ -5099,23 +5166,17 @@ export class ThinkTestAgent extends Think {
     return log.length > 0 ? log[log.length - 1].system : null;
   }
 
-  /** Insert a fiber-ledger row so `_checkRunFibers` finds it interrupted. */
+  /** Leave an interrupted turn (see `insertInterruptedTurnForTest`). */
   async insertInterruptedFiber(
     name: string,
     snapshot?: unknown
   ): Promise<void> {
-    const id = `fiber-${crypto.randomUUID()}`;
-    this.sql`
-      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
-      VALUES (${id}, ${name}, ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
-    `;
+    await insertInterruptedTurnForTest(this, this.ctx.storage, name, snapshot);
   }
 
-  /** Drive this facet's own fiber-recovery scan, exactly as a real wake would. */
+  /** Replay this agent's interrupted turns, as a wake does. */
   async triggerFiberRecovery(): Promise<void> {
-    await (
-      this as unknown as { _checkRunFibers(): Promise<void> }
-    )._checkRunFibers();
+    await recoverInterruptedTurnsForTest(this);
   }
 }
 
@@ -8379,24 +8440,22 @@ export class ThinkToolsTestAgent extends Think {
     );
   }
 
+  /**
+   * Leave an interrupted turn: a chat turn (`CHAT_FIBER_NAME:<requestId>`)
+   * as a chat-turn Task run, anything else as a fiber row.
+   */
   async insertInterruptedFiber(
     name: string,
     snapshot?: unknown
   ): Promise<void> {
-    const id = `fiber-${crypto.randomUUID()}`;
-    this.sql`
-      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
-      VALUES (${id}, ${name}, ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
-    `;
+    await insertInterruptedTurnForTest(this, this.ctx.storage, name, snapshot);
   }
 
   async triggerFiberRecovery(): Promise<{
     scheduledContinueCount: number;
     scheduledRetryCount: number;
   }> {
-    await (
-      this as unknown as { _checkRunFibers(): Promise<void> }
-    )._checkRunFibers();
+    await recoverInterruptedTurnsForTest(this);
     // Read recovery state synchronously inside the same invocation: an
     // immediate alarm may consume it after this RPC releases the object.
     return {
@@ -9781,7 +9840,6 @@ export class ThinkProgrammaticTestAgent extends Think {
         storeChunk(streamId: string, body: string): unknown;
         flushBuffer(): void;
       };
-      _checkRunFibers(): Promise<void>;
     };
     const streamId = internals._resumableStream.start(input.requestId);
     for (const chunk of input.chunks) {
@@ -9801,13 +9859,13 @@ export class ThinkProgrammaticTestAgent extends Think {
       },
       user: null
     };
-    this.sql`
-      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
-      VALUES (${`fiber-${crypto.randomUUID()}`},
-              ${`${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${input.requestId}`},
-              ${JSON.stringify(snapshot)}, ${Date.now()})
-    `;
-    await internals._checkRunFibers();
+    await insertInterruptedTurnForTest(
+      this,
+      this.ctx.storage,
+      `${Think.CHAT_FIBER_NAME}:${input.requestId}`,
+      snapshot
+    );
+    await recoverInterruptedTurnsForTest(this);
     return {
       scheduledContinueCount: recoveryWorkCountForTest(
         this,
@@ -10875,6 +10933,16 @@ export class ThinkRecoveryTestAgent extends Think {
     return this.sql<{ id: string; name: string }>`
       SELECT id, name FROM cf_agents_runs
     `;
+  }
+
+  /** Chat-turn Task runs that have not finished: live or interrupted turns. */
+  async getUnfinishedChatTurnCountForTest(): Promise<number> {
+    const rows = this.sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM cf_agents_task_runs
+      WHERE definition = ${Think.CHAT_FIBER_NAME}
+        AND state IN ('pending', 'running', 'waiting')
+    `;
+    return rows[0]?.count ?? 0;
   }
 
   async getTurnCallCount(): Promise<number> {
@@ -12134,24 +12202,22 @@ export class ThinkRecoveryTestAgent extends Think {
     )._completeResumableStream(streamId);
   }
 
+  /**
+   * Leave an interrupted turn: a chat turn (`CHAT_FIBER_NAME:<requestId>`)
+   * as a chat-turn Task run, anything else as a fiber row.
+   */
   async insertInterruptedFiber(
     name: string,
     snapshot?: unknown
   ): Promise<void> {
-    const id = `fiber-${crypto.randomUUID()}`;
-    this.sql`
-      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
-      VALUES (${id}, ${name}, ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
-    `;
+    await insertInterruptedTurnForTest(this, this.ctx.storage, name, snapshot);
   }
 
   async triggerFiberRecovery(): Promise<{
     scheduledContinueCount: number;
     scheduledRetryCount: number;
   }> {
-    await (
-      this as unknown as { _checkRunFibers(): Promise<void> }
-    )._checkRunFibers();
+    await recoverInterruptedTurnsForTest(this);
     // Read recovery state synchronously inside the same invocation: an
     // immediate alarm may consume it after this RPC releases the object.
     return {
@@ -12166,10 +12232,18 @@ export class ThinkRecoveryTestAgent extends Think {
   async triggerFiberRecoveryWithTransportForTest(
     callback: string
   ): Promise<{ tasks: number; schedules: number }> {
-    await (
-      this as unknown as { _checkRunFibers(): Promise<void> }
-    )._checkRunFibers();
+    await recoverInterruptedTurnsForTest(this);
     return recoveryTransportCountsForTest(this, callback);
+  }
+
+  /** Leave a chat turn's fiber row, as a version before Tasks did. */
+  insertLegacyChatFiberForTest(requestId: string, snapshot?: unknown): void {
+    this.sql`
+      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
+      VALUES (${`fiber-${crypto.randomUUID()}`},
+              ${`${Think.CHAT_FIBER_NAME}:${requestId}`},
+              ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
+    `;
   }
 
   async persistTestMessage(msg: UIMessage): Promise<void> {

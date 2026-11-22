@@ -735,23 +735,26 @@ export class TanStackAgent extends Agent<Env> {
   protected override async _handleInternalFiberRecovery(
     ctx: FiberRecoveryContext
   ): Promise<boolean> {
-    return this._engine().handleChatFiberRecovery<TanStackClassify>(
-      ctx,
+    if (!ctx.name.startsWith(TanStackAgent.FIBER_PREFIX)) return false;
+    const { snapshot, user } = unwrapChatFiberSnapshot(
+      TanStackAgent.SNAPSHOT_KEY,
+      ctx.snapshot,
+      "tanstack-turn"
+    );
+    await this._engine().recoverInterruptedTurn<TanStackClassify>(
+      {
+        requestId: ctx.name.slice(TanStackAgent.FIBER_PREFIX.length),
+        snapshot,
+        recoveryData: user,
+        createdAt: ctx.createdAt
+      },
       this._wakeHooks()
     );
+    return true;
   }
 
   private _wakeHooks(): ChatFiberWakeHooks<TanStackClassify> {
     return {
-      chatFiberPrefix: () => TanStackAgent.FIBER_PREFIX,
-      unwrapRecoverySnapshot: (ctx) => {
-        const { snapshot, user } = unwrapChatFiberSnapshot(
-          TanStackAgent.SNAPSHOT_KEY,
-          ctx.snapshot,
-          "tanstack-turn"
-        );
-        return { snapshot, recoveryData: user };
-      },
       classifyRecoveredTurn: (input: ClassifyRecoveredTurnInput) => {
         // A surviving partial drives a `continue`; an empty partial (crash
         // before the first delta flushed) falls back to a `retry`.

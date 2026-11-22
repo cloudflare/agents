@@ -11,6 +11,7 @@ import {
   type ChatRecoveryScheduleCallback,
   type ChatRecoveryScheduleReason,
   type DispatchRecoveredTurnInput,
+  type InterruptedChatTurn,
   type RecoveryPartial,
   type ResolvedRecoveryStream
 } from "../recovery-engine";
@@ -21,7 +22,6 @@ import type {
   ResolvedChatRecoveryConfig
 } from "../lifecycle";
 import type { ChatFiberSnapshot } from "../recovery";
-import type { FiberRecoveryContext } from "../../index";
 import {
   CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
   chatRecoveryIncidentId,
@@ -1594,55 +1594,6 @@ describe("runChatRecoveryExhaustion", () => {
 });
 
 /**
- * Layer-2 seam test for the non-chat fiber dispatch (slice 3c). `Think` routes
- * its messenger/workflow reply fibers through `tryHandleNonChatFiberRecovery`
- * before chat recovery; `AIChatAgent` omits the hook (every fiber is a chat
- * candidate). The engine owns only the dispatch + the "handled? skip chat
- * recovery" contract.
- */
-describe("ChatRecoveryEngine.handleNonChatFiber (fake adapter)", () => {
-  // A minimal subset of the adapter — `handleNonChatFiber` only touches the one
-  // hook, so the other methods are never called here.
-  function engineWithHook(
-    hook?: ChatRecoveryAdapter["tryHandleNonChatFiberRecovery"]
-  ) {
-    const adapter = {
-      tryHandleNonChatFiberRecovery: hook
-    } as unknown as ChatRecoveryAdapter;
-    return new ChatRecoveryEngine(adapter);
-  }
-
-  const ctx: FiberRecoveryContext = {
-    id: "fiber-1",
-    name: "think:messenger-reply",
-    snapshot: null,
-    createdAt: 0,
-    recoveryReason: "interrupted"
-  };
-
-  it("returns true when the package's hook consumes the fiber", async () => {
-    const seen: FiberRecoveryContext[] = [];
-    const engine = engineWithHook(async (c) => {
-      seen.push(c);
-      return true;
-    });
-
-    expect(await engine.handleNonChatFiber(ctx)).toBe(true);
-    expect(seen).toEqual([ctx]);
-  });
-
-  it("returns false when the hook declines the fiber (falls through to chat recovery)", async () => {
-    const engine = engineWithHook(async () => false);
-    expect(await engine.handleNonChatFiber(ctx)).toBe(false);
-  });
-
-  it("returns false when the adapter omits the hook (AIChatAgent shape)", async () => {
-    const engine = engineWithHook(undefined);
-    expect(await engine.handleNonChatFiber(ctx)).toBe(false);
-  });
-});
-
-/**
  * Shared settled-tool-results predicate (slice 4d-2). Both packages' private
  * copies were byte-equivalent; this pins the lifted single source of truth that
  * the engine's persist gate now consults.
@@ -1684,7 +1635,7 @@ describe("partialHasSettledToolResults", () => {
 
 /**
  * Layer-2 seam test for the wake-recovery lifecycle (slice 4d-2). The engine owns
- * the FRAME (non-chat dispatch → chat gate → unwrap → stream/partial → classify →
+ * the FRAME (stream/partial → classify →
  * begin-incident → exhausted-branch → onChatRecovery → persist → complete →
  * dispatch → catch→failed) and the shared persist clause; the {@link
  * ChatFiberWakeHooks} own the divergent organs. These tests pin the ordering, the
@@ -1692,13 +1643,10 @@ describe("partialHasSettledToolResults", () => {
  * short-circuit, and the failed-on-throw guard — the exact contract `AIChatAgent`
  * and `Think` now delegate.
  */
-describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)", () => {
+describe("ChatRecoveryEngine.recoverInterruptedTurn (fake adapter + wake hooks)", () => {
   type TestDetail = { tag: string };
 
   type HarnessOptions = {
-    name?: string;
-    /** When set, the adapter's non-chat hook consumes the fiber first. */
-    nonChatHandled?: boolean;
     snapshot?: ChatFiberSnapshot | null;
     stream?: ResolvedRecoveryStream;
     partial?: RecoveryPartial;
@@ -1742,14 +1690,6 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
     const adapter: ChatRecoveryAdapter = {
       resolveConfig: () => config,
       now: () => NOW,
-      ...(options.nonChatHandled
-        ? {
-            tryHandleNonChatFiberRecovery: () => {
-              calls.push("nonChat");
-              return Promise.resolve(true);
-            }
-          }
-        : {}),
       sweepStaleIncidents: () => {
         calls.push("sweep");
         return Promise.resolve();
@@ -1798,11 +1738,6 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
     };
 
     const wake: ChatFiberWakeHooks<TestDetail> = {
-      chatFiberPrefix: () => "chat:",
-      unwrapRecoverySnapshot: () => {
-        calls.push("unwrap");
-        return { snapshot: options.snapshot ?? null, recoveryData: null };
-      },
       classifyRecoveredTurn: () => {
         calls.push("classify");
         return {
@@ -1871,17 +1806,16 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
       });
     }
 
-    const ctx: FiberRecoveryContext = {
-      id: "fiber-1",
-      name: options.name ?? "chat:req-1",
-      snapshot: null,
-      createdAt: 4242,
-      recoveryReason: "interrupted"
+    const turn: InterruptedChatTurn = {
+      requestId: "req-1",
+      snapshot: options.snapshot ?? null,
+      recoveryData: null,
+      createdAt: 4242
     };
 
     return {
       engine: new ChatRecoveryEngine(adapter),
-      ctx,
+      turn,
       wake,
       calls,
       events,
@@ -1904,7 +1838,7 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
     await h.engine.updateIncident(incidentId, "skipped", "user_cancelled");
     const eventsBefore = h.events.length;
 
-    expect(await h.engine.handleChatFiberRecovery(h.ctx, h.wake)).toBe(true);
+    await h.engine.recoverInterruptedTurn(h.turn, h.wake);
 
     expect(h.calls).not.toContain("exhaust");
     expect(h.calls).not.toContain("dispatch");
@@ -1915,33 +1849,15 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
     expect(h.completed).toEqual(["s1"]);
   });
 
-  it("dispatches a non-chat fiber first and skips chat processing", async () => {
-    const h = makeHarness({ nonChatHandled: true });
-
-    expect(await h.engine.handleChatFiberRecovery(h.ctx, h.wake)).toBe(true);
-    // The non-chat hook ran; the chat path never did.
-    expect(h.calls).toContain("nonChat");
-    expect(h.calls).not.toContain("classify");
-    expect(h.calls).not.toContain("dispatch");
-  });
-
-  it("returns false (not a chat fiber) when the name lacks the prefix", async () => {
-    const h = makeHarness({ name: "think:messenger-reply" });
-    expect(await h.engine.handleChatFiberRecovery(h.ctx, h.wake)).toBe(false);
-    expect(h.calls).not.toContain("classify");
-    expect(h.calls).not.toContain("put");
-  });
-
   it("drives the wake lifecycle in order and threads the classification detail", async () => {
     const detail: TestDetail = { tag: "carry-me" };
     const h = makeHarness({ recoveryKind: "retry", detail });
 
-    expect(await h.engine.handleChatFiberRecovery(h.ctx, h.wake)).toBe(true);
+    await h.engine.recoverInterruptedTurn(h.turn, h.wake);
 
     const order = (label: string) => h.calls.indexOf(label);
-    // unwrap → resolveStream → getPartial → classify → begin(put) →
+    // resolveStream → getPartial → classify → begin(put) →
     // onChatRecovery → shouldPersist → complete → dispatch.
-    expect(order("unwrap")).toBeLessThan(order("resolveStream"));
     expect(order("resolveStream")).toBeLessThan(order("classify"));
     expect(order("classify")).toBeLessThan(order("put"));
     expect(order("put")).toBeLessThan(order("invokeOnChatRecovery"));
@@ -1958,7 +1874,7 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
 
   it("persists with the default clause (persist undefined) when the base gate is open", async () => {
     const h = makeHarness({ basePersist: true, onChatRecovery: {} });
-    await h.engine.handleChatFiberRecovery(h.ctx, h.wake);
+    await h.engine.recoverInterruptedTurn(h.turn, h.wake);
     expect(h.persisted).toEqual(["s1"]);
   });
 
@@ -1972,7 +1888,7 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
         hasSettledToolResults: false
       }
     });
-    await h.engine.handleChatFiberRecovery(h.ctx, h.wake);
+    await h.engine.recoverInterruptedTurn(h.turn, h.wake);
     expect(h.persisted).toEqual([]);
   });
 
@@ -1988,7 +1904,7 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
         hasSettledToolResults: true
       }
     });
-    await h.engine.handleChatFiberRecovery(h.ctx, h.wake);
+    await h.engine.recoverInterruptedTurn(h.turn, h.wake);
     expect(h.persisted).toEqual(["s1"]);
   });
 
@@ -2002,7 +1918,7 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
         hasSettledToolResults: true
       }
     });
-    await h.engine.handleChatFiberRecovery(h.ctx, h.wake);
+    await h.engine.recoverInterruptedTurn(h.turn, h.wake);
     expect(h.persisted).toEqual([]);
   });
 
@@ -2010,7 +1926,7 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
     const h = makeHarness({
       stream: { streamId: "s1", streamStillActive: false }
     });
-    await h.engine.handleChatFiberRecovery(h.ctx, h.wake);
+    await h.engine.recoverInterruptedTurn(h.turn, h.wake);
     expect(h.completed).toEqual([]);
     // Dispatch still runs (the decision owns the not-active case).
     expect(h.calls).toContain("dispatch");
@@ -2019,10 +1935,10 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
   it("terminalizes the exhausted budget BEFORE onChatRecovery and skips dispatch", async () => {
     const h = makeHarness({ seedExhausted: true });
 
-    expect(await h.engine.handleChatFiberRecovery(h.ctx, h.wake)).toBe(true);
+    await h.engine.recoverInterruptedTurn(h.turn, h.wake);
 
     // Exhausted path: persist gate (no options) + exhaustChatRecovery, with the
-    // fiber's createdAt; never consults onChatRecovery or dispatch.
+    // turn's createdAt; never consults onChatRecovery or dispatch.
     expect(h.calls).toContain("exhaust");
     expect(h.exhausted[0]?.createdAt).toBe(4242);
     expect(h.calls).not.toContain("invokeOnChatRecovery");
@@ -2033,7 +1949,7 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
     const h = makeHarness({ dispatchThrows: true });
 
     await expect(
-      h.engine.handleChatFiberRecovery(h.ctx, h.wake)
+      h.engine.recoverInterruptedTurn(h.turn, h.wake)
     ).rejects.toThrow("dispatch boom");
 
     // The incident was sealed `failed` (not left leaking in `attempting`).
@@ -2050,7 +1966,7 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
     // (T2-3b). The run completing + dispatching is the proof.
     const h = makeHarness({ omitOptionalHooks: true });
 
-    expect(await h.engine.handleChatFiberRecovery(h.ctx, h.wake)).toBe(true);
+    await h.engine.recoverInterruptedTurn(h.turn, h.wake);
 
     // `invokeOnChatRecovery` was omitted, so it is never called and the engine
     // proceeds with empty options (`{}`) — which still flow through to dispatch.
@@ -2066,7 +1982,7 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
     // `?? false` default on the give-up-adjacent path.
     const h = makeHarness({ omitOptionalHooks: true, seedExhausted: true });
 
-    expect(await h.engine.handleChatFiberRecovery(h.ctx, h.wake)).toBe(true);
+    await h.engine.recoverInterruptedTurn(h.turn, h.wake);
     expect(h.calls).toContain("exhaust");
     expect(h.calls).not.toContain("dispatch");
   });

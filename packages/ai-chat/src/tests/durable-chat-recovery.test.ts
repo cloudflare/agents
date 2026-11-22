@@ -25,6 +25,10 @@ interface ChatRecoveryTestStub {
     metadata?: { messageId?: string }
   ): Promise<void>;
   insertInterruptedFiber(name: string, snapshot?: unknown): Promise<void>;
+  insertLegacyChatFiberForTest(
+    requestId: string,
+    snapshot?: unknown
+  ): Promise<void>;
   triggerFiberRecovery(): Promise<void>;
   persistMessages(messages: unknown[]): Promise<void>;
   runRecoveryRetryForTest(options?: {
@@ -350,6 +354,29 @@ describe("onChatRecovery", () => {
     expect(typeof match!.createdAt).toBe("number");
     expect(match!.createdAt).toBeGreaterThanOrEqual(before);
     expect(match!.createdAt).toBeLessThanOrEqual(Date.now());
+  });
+
+  it("recovers a chat turn's fiber row an older version left", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+
+    await agentStub.setRecoveryOverride({ continue: false });
+    await agentStub.insertInterruptedStream(
+      "stream-legacy",
+      "req-legacy",
+      makeChunks(["Hi"])
+    );
+    await agentStub.insertLegacyChatFiberForTest("req-legacy");
+    await agentStub.triggerFiberRecovery();
+
+    const contexts = (await agentStub.getRecoveryContexts()) as Array<{
+      requestId: string;
+      partialText: string;
+    }>;
+    expect(contexts).toEqual([
+      expect.objectContaining({ requestId: "req-legacy", partialText: "Hi" })
+    ]);
+    expect(await agentStub.getRunFiberCountForTest()).toBe(0);
   });
 
   it("passes incident metadata and exhausts after maxAttempts", async () => {

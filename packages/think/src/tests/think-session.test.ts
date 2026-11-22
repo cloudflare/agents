@@ -3780,6 +3780,34 @@ describe("Think — onChatRecovery", () => {
     expect(ctx.createdAt).toBeLessThanOrEqual(Date.now());
   });
 
+  it("recovers a chat turn's fiber row an older version left", async () => {
+    const agent = await freshRecoveryAgent(crypto.randomUUID());
+
+    await agent.setRecoveryOverride({ continue: false });
+    await agent.insertInterruptedStream("stream-legacy", "req-legacy", [
+      {
+        body: JSON.stringify({ type: "start", messageId: "assistant-legacy" }),
+        index: 0
+      },
+      { body: JSON.stringify({ type: "text-start" }), index: 1 },
+      {
+        body: JSON.stringify({ type: "text-delta", delta: "Legacy" }),
+        index: 2
+      }
+    ]);
+    await agent.insertLegacyChatFiberForTest("req-legacy");
+    await agent.triggerFiberRecovery();
+
+    const contexts = await agent.getRecoveryContexts();
+    expect(contexts).toEqual([
+      expect.objectContaining({
+        incidentId: "req-legacy:",
+        streamId: "stream-legacy",
+        partialText: "Legacy"
+      })
+    ]);
+  });
+
   it("exhausts chat recovery after the configured max attempts", async () => {
     const agent = await freshRecoveryAgent("recovery-exhaustion");
 
