@@ -40,6 +40,30 @@ export function isTerminalCloseEvent(event: CloseEvent): boolean {
   return event.code === 1008 || (event.code >= 4000 && event.code <= 4999);
 }
 
+/**
+ * Defaults for PartySocket's handshake timeout and reconnect delays,
+ * applied before the caller's options so those win.
+ *
+ * - `connectionTimeout` 15 s (PartySocket: 4 s). The server returns the
+ *   101 only after its startup and `onConnect` finish; a 101 later than
+ *   the timeout is never connected, the client retries and gives up the
+ *   same way every time.
+ * - `minReconnectionDelay` picked per client between 1 and 5 s
+ *   (PartySocket: a fixed 3 s). A reset of the object drops all its
+ *   sockets at once, and clients on one fixed schedule all reconnect at
+ *   the same moments.
+ * @internal
+ */
+export function reconnectDefaults(): {
+  connectionTimeout: number;
+  minReconnectionDelay: number;
+} {
+  return {
+    connectionTimeout: 15_000,
+    minReconnectionDelay: 1000 + Math.floor(Math.random() * 4000)
+  };
+}
+
 type ReconnectingSocket = { shouldReconnect: boolean; retryCount: number };
 
 /**
@@ -653,6 +677,7 @@ export class AgentClient<
     // If basePath is provided, use it directly; otherwise construct from agent/name
     const socketOptions = options.basePath
       ? {
+          ...reconnectDefaults(),
           basePath: options.basePath,
           path: options.path,
           ...options,
@@ -660,6 +685,7 @@ export class AgentClient<
           shouldReconnectOnClose: classifyReconnect
         }
       : {
+          ...reconnectDefaults(),
           party: agentNamespace,
           prefix: "agents",
           room: options.name || "default",

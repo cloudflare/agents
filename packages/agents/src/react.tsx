@@ -20,6 +20,7 @@ import {
   createCloseClassifier,
   nativeCall,
   NativeCallQueue,
+  reconnectDefaults,
   splitCallOptions
 } from "./client";
 import {
@@ -692,6 +693,9 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   // `destination` records which socket destination the identity came from,
   // so an address change can stop exposing the previous agent's identity
   // before the new socket reports its own.
+  // Picked once per hook: PartySocket recreates the socket when these
+  // options change.
+  const [reconnectTiming] = useState(reconnectDefaults);
   const [identity, setIdentity] = useState(() => ({
     name: leafName,
     agent: camelCaseToKebabCase(leafAgent),
@@ -750,6 +754,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
 
   const socketOptions = options.basePath
     ? {
+        ...reconnectTiming,
         basePath: options.basePath,
         path: combinedPath || undefined,
         query: socketQuery,
@@ -758,6 +763,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
         shouldReconnectOnClose: classifyReconnect
       }
     : {
+        ...reconnectTiming,
         party: agentNamespace,
         prefix: "agents",
         room: options.name || "default",
