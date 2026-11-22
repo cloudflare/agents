@@ -103,6 +103,8 @@ export function matchAgentToolRunRequest(
  *
  * @param child - The child's class and name for a run id, or `null` when
  *   the parent has no such run (or it predates child names).
+ * @returns The child's response, or `undefined` when no candidate in the
+ *   path is a run of this parent, so the agent handles the request itself.
  */
 export async function forwardAgentToolRunRequest(
   ctx: DurableObjectState,
@@ -121,5 +123,7 @@ export async function forwardAgentToolRunRequest(
     );
     return stub.fetch(new Request(match.url, request));
   }
-  return new Response("Agent tool run not found", { status: 404 });
+  // No candidate is a run: the segment belongs to the agent's own name or
+  // one of its own routes, so the request is the agent's.
+  return undefined;
 }

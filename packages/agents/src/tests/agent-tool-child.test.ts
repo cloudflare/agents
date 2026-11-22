@@ -37,7 +37,11 @@ describe("agent-tool run child", () => {
     const missing = await parent.fetchRunChildForTest(
       "agent-tool-runs/no-such-run/hello"
     );
-    expect(missing.status).toBe(404);
+    // Not a run of this parent: the parent's own `onRequest` answers.
+    expect(missing).toEqual({
+      status: 200,
+      body: "parent /agents/x/y/agent-tool-runs/no-such-run/hello"
+    });
   });
 
   it("ends open runs from when the child was a facet with an error the parent sees", async () => {
@@ -151,6 +155,20 @@ describe("agent-tool run child", () => {
     );
     expect(routed.status).toBe(200);
     expect(routed.body.split(" ")[2]).toBe("/hello");
+  });
+
+  it("leaves the parent's own paths under a name that is the route segment", async () => {
+    const parent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      "agent-tool-runs"
+    );
+    const own = await parent.fetchPathForTest(
+      "agents/test-agent-tool-replay-agent/agent-tool-runs/settings"
+    );
+    expect(own).toEqual({
+      status: 200,
+      body: "parent /agents/test-agent-tool-replay-agent/agent-tool-runs/settings"
+    });
   });
 
   it("ends a facet-era run that is only interrupted at startup", async () => {

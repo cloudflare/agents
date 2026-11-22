@@ -92,6 +92,10 @@ function childNameForTest(runId: string): string {
 }
 
 export class TestAgentToolReplayAgent extends Agent {
+  override onRequest(request: Request): Response {
+    return new Response(`parent ${new URL(request.url).pathname}`);
+  }
+
   /** The stub child of a seeded run, an ordinary Durable Object. */
   private _stubChildForTest(runId: string) {
     return getAgentByName(
