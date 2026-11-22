@@ -136,9 +136,11 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
       type === "chat:recovery:completed" &&
       this._recoveryMode() === "later"
     ) {
-      const internal = this as unknown as { _cachedMessages: UIMessage[] };
-      internal._cachedMessages = [
-        ...internal._cachedMessages,
+      const internal = this as unknown as {
+        _transcript: { messages: UIMessage[] };
+      };
+      internal._transcript.messages = [
+        ...internal._transcript.messages,
         {
           id: crypto.randomUUID(),
           role: "assistant",

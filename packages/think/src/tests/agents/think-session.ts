@@ -1,4 +1,5 @@
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
+import { deliverReplyAttachments } from "../../attachments";
 import { hasToolCall, Output, tool } from "ai";
 import { action, skills, Think, type ThinkSession } from "../../think";
 import { Agent } from "agents";
@@ -2027,13 +2028,12 @@ export class ThinkTestAgent extends Think {
   async renderAttachmentsForTest(
     attachments: import("../../think").ReplyAttachment[]
   ): Promise<UIMessage[]> {
-    await (
-      this as unknown as {
-        _renderChannelAttachments(
-          a: import("../../think").ReplyAttachment[]
-        ): Promise<void>;
-      }
-    )._renderChannelAttachments(attachments);
+    // The post-turn step that delivers attachments to the active channel.
+    await deliverReplyAttachments(
+      attachments,
+      (attachment) => this.renderAttachment(attachment),
+      (rendered) => this.deliverNotice(rendered, { kind: "interim" })
+    );
     return this.getMessages();
   }
 
@@ -2477,10 +2477,12 @@ export class ThinkTestAgent extends Think {
     // SAFETY: This test-only method drives Think's private resume and
     // broadcast paths with a real connection returned by this Agent instance.
     const internals = this as unknown as {
-      _notifyStreamResuming(connection: Connection): void;
+      _resumeHandshake(): {
+        notifyStreamResuming(connection: Connection): void;
+      };
       _frames: { broadcast(message: Record<string, unknown>): void };
     };
-    internals._notifyStreamResuming(connection);
+    internals._resumeHandshake().notifyStreamResuming(connection);
     if (close === "finish") {
       this._finishResumableStream(streamId);
       this._resumableStream.finalizePending();
@@ -2511,9 +2513,13 @@ export class ThinkTestAgent extends Think {
     // real connection returned by this Agent instance.
     (
       this as unknown as {
-        _notifyStreamResuming(connection: Connection): void;
+        _resumeHandshake(): {
+          notifyStreamResuming(connection: Connection): void;
+        };
       }
-    )._notifyStreamResuming(connection);
+    )
+      ._resumeHandshake()
+      .notifyStreamResuming(connection);
     this._resumableStream.complete(streamId);
     this.broadcast(
       JSON.stringify({
@@ -7378,11 +7384,10 @@ export class ThinkToolsTestAgent extends Think {
   /** Keep only the newest `count` messages in memory, as a windowed hydration. */
   async windowCachedMessagesForTest(count: number): Promise<void> {
     const self = this as unknown as {
-      _cachedMessages: UIMessage[];
-      _cacheCoversActivePath: boolean;
+      _transcript: { messages: UIMessage[]; coversActivePath: boolean };
     };
-    self._cachedMessages = self._cachedMessages.slice(-count);
-    self._cacheCoversActivePath = false;
+    self._transcript.messages = self._transcript.messages.slice(-count);
+    self._transcript.coversActivePath = false;
   }
 
   /** Reconcile and persist a client transcript, as a chat request does. */
@@ -11143,9 +11148,9 @@ export class ThinkRecoveryTestAgent extends Think {
    * reset in `_beginChatRecoveryIncident`.
    */
   async addAssistantMessageForTest(id: string): Promise<void> {
-    const self = this as unknown as { _cachedMessages: UIMessage[] };
-    self._cachedMessages = [
-      ...self._cachedMessages,
+    const self = this as unknown as { _transcript: { messages: UIMessage[] } };
+    self._transcript.messages = [
+      ...self._transcript.messages,
       {
         id,
         role: "assistant",
@@ -11173,8 +11178,8 @@ export class ThinkRecoveryTestAgent extends Think {
    *  messages from the live cache. Used to prove the recovery progress signal
    *  is compaction-immune (#1628). */
   async dropAssistantMessagesForTest(): Promise<void> {
-    const self = this as unknown as { _cachedMessages: UIMessage[] };
-    self._cachedMessages = self._cachedMessages.filter(
+    const self = this as unknown as { _transcript: { messages: UIMessage[] } };
+    self._transcript.messages = self._transcript.messages.filter(
       (m) => m.role !== "assistant"
     );
   }
@@ -11631,9 +11636,9 @@ export class ThinkRecoveryTestAgent extends Think {
     // A user message must be the latest leaf so `latestUserMessageId` resolves
     // to the same identity the route computes.
     const userId = `user-${crypto.randomUUID()}`;
-    const self = this as unknown as { _cachedMessages: UIMessage[] };
-    self._cachedMessages = [
-      ...self._cachedMessages,
+    const self = this as unknown as { _transcript: { messages: UIMessage[] } };
+    self._transcript.messages = [
+      ...self._transcript.messages,
       { id: userId, role: "user", parts: [{ type: "text", text: "hi" }] }
     ];
     const requestId = `stall-exhaust-${crypto.randomUUID()}`;
@@ -12131,10 +12136,10 @@ export class ThinkRecoveryTestAgent extends Think {
   ): Promise<void> {
     const internals = this as unknown as {
       _lastClientTools?: ClientToolSchema[];
-      _persistClientTools(): void;
+      _requestContext: { persist(): void };
     };
     internals._lastClientTools = clientTools;
-    internals._persistClientTools();
+    internals._requestContext.persist();
     internals._lastClientTools = undefined;
   }
 
@@ -13399,7 +13404,7 @@ export class ThinkWindowedHydrationAgent extends Think {
   }> {
     const internal = this as unknown as {
       _applyToolUpdateToMessages(update: ToolPartUpdate): Promise<unknown>;
-      _cacheCoversActivePath: boolean;
+      _transcript: { coversActivePath: boolean };
     };
     await this.session.appendMessage({
       id: "grow-user",
@@ -13420,14 +13425,14 @@ export class ThinkWindowedHydrationAgent extends Think {
       ]
     } as unknown as UIMessage);
     await this.syncMessagesFromStorage();
-    const coversAfterSync = internal._cacheCoversActivePath;
+    const coversAfterSync = internal._transcript.coversActivePath;
 
     // A 70 KB result on a message the cache already holds: an update, not an
     // append, and alone larger than the budget.
     await internal._applyToolUpdateToMessages(
       toolResultUpdate("tc-grow", "y".repeat(70_000))
     );
-    const coversAfterUpdate = internal._cacheCoversActivePath;
+    const coversAfterUpdate = internal._transcript.coversActivePath;
 
     // Reset by refreshing (the update re-windows), then grow by an append
     // of 40 000 two-byte characters: 40 KB of string length, 80 KB stored.
@@ -13438,7 +13443,7 @@ export class ThinkWindowedHydrationAgent extends Think {
       role: "user",
       parts: [{ type: "text", text: "é".repeat(40_000) }]
     });
-    const coversAfterMultibyteAppend = internal._cacheCoversActivePath;
+    const coversAfterMultibyteAppend = internal._transcript.coversActivePath;
 
     return { coversAfterSync, coversAfterUpdate, coversAfterMultibyteAppend };
   }
@@ -13479,7 +13484,7 @@ export class ThinkWindowedHydrationAgent extends Think {
     const inCache = this.messages.some((m) => m.id === "old-owner");
     const internal = this as unknown as {
       _applyToolUpdateToMessages(update: ToolPartUpdate): Promise<unknown>;
-      _cacheCoversActivePath: boolean;
+      _transcript: { coversActivePath: boolean };
     };
     await internal._applyToolUpdateToMessages(
       toolResultUpdate("tc-old", "late result")
@@ -13491,7 +13496,7 @@ export class ThinkWindowedHydrationAgent extends Think {
     ) as { state?: string } | undefined;
     return {
       inCache,
-      cacheCoversPath: internal._cacheCoversActivePath,
+      cacheCoversPath: internal._transcript.coversActivePath,
       storedState: part?.state
     };
   }
@@ -13826,10 +13831,12 @@ export class ThinkMediaEvictionAutoAgent extends ThinkMediaEvictionAgent {
       await new Promise((resolve) => setTimeout(resolve, 150));
       return rows;
     };
-    const internal = this as unknown as { _mediaEvictionRunning: boolean };
+    const internal = this as unknown as {
+      _mediaEviction: { running: boolean };
+    };
     const pass = this._evictAgedMediaBestEffort();
     await new Promise((resolve) => setTimeout(resolve, 0));
-    const runningAtAppend = internal._mediaEvictionRunning;
+    const runningAtAppend = internal._mediaEviction.running;
     for (let i = 0; i < 4; i++) {
       await this.appendMessageToHistory({
         id: `fpost-${i}`,

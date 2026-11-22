@@ -1535,7 +1535,7 @@ export class Think<
   }
 
   /** Cached messages, kept in sync with session storage. */
-  readonly #transcript = new ThinkTranscriptCache({
+  private readonly _transcript = new ThinkTranscriptCache({
     budget: () => this.hydrationByteBudget,
     readAll: () => this._readMessagesFromStorage(),
     readRecent: async (budget) => {
@@ -1543,15 +1543,15 @@ export class Think<
       return { ...recent, messages: recent.messages as UIMessage[] };
     },
     emitWindowed: (payload) => this._emit("chat:hydration:windowed", payload),
-    refreshed: () => this._scheduleMediaEvictionPass()
+    refreshed: () => this._mediaEviction.request()
   });
 
   private get _cachedMessages(): UIMessage[] {
-    return this.#transcript.messages;
+    return this._transcript.messages;
   }
 
   private set _cachedMessages(messages: UIMessage[]) {
-    this.#transcript.messages = messages;
+    this._transcript.messages = messages;
   }
   private _unsubscribeSessionChanges: (() => void) | undefined;
 
@@ -1672,8 +1672,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     super(ctx, env);
 
     this.lifecycle.use(this.sessions);
-    this.lifecycle.use(this.#config);
-    this.lifecycle.use(this.#mediaEviction);
+    this.lifecycle.use(this._config);
+    this.lifecycle.use(this._mediaEviction);
     this.lifecycle.use(this.streams);
     this.lifecycle.use(this._approvals);
     this._registerChatTurnTaskDefinition();
@@ -1725,9 +1725,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           this._unsubscribeSessionChanges = this.sessions
             .session(this.session.sessionId)
             .mirror<UIMessage>({
-              get: () => this._cachedMessages,
+              get: () => this._transcript.messages,
               set: (messages) => {
-                this._replaceCachedMessages(messages);
+                this._transcript.replace(messages);
               },
               transform: (message) => message as UIMessage,
               intercept: async (event) => {
@@ -1738,23 +1738,23 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
                     if (event.inserted && event.parentId === undefined) {
                       return false;
                     }
-                    await this._syncMessages();
+                    await this._transcript.sync();
                     return true;
                   case "import":
                     // A row the cache never saw. Re-derive at the next safe
                     // boundary instead of mirroring a migration row by row.
-                    this._cacheCoversActivePath = false;
+                    this._transcript.coversActivePath = false;
                     return true;
                   case "clear":
-                    this._replaceCachedMessages([]);
-                    this._cacheCoversActivePath = true;
+                    this._transcript.replace([]);
+                    this._transcript.coversActivePath = true;
                     return true;
                   case "compaction":
                   case "delete":
-                    await this._syncMessages();
+                    await this._transcript.sync();
                     return true;
                   case "compact":
-                    await this._syncMessages();
+                    await this._transcript.sync();
                     await this.#contextBlocks?.refreshSystemPrompt();
                     return true;
                   default:
@@ -1770,8 +1770,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
                 // where an eviction pass becomes worth scheduling; the gate
                 // decides from memory. It also grows the cache past what the
                 // last refresh measured.
-                this._noteCachedGrowth(cachedMessageBytes(message));
-                this.#mediaEviction.noteAppend();
+                this._transcript.noteGrowth(cachedMessageBytes(message));
+                this._mediaEviction.noteAppend();
               }
             });
 
@@ -1784,7 +1784,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       // recent window on oversized transcripts), but even the budgeted read
       // can fail — and that failure must not escape onStart, or the DO is
       // bricked (#1710). Degrade to an empty in-memory view; persisted
-      // history is untouched and the next safe-boundary `_syncMessages()`
+      // history is untouched and the next safe-boundary `_transcript.sync()`
       // retries.
       this._onStartDegradations = [];
       await this._withAgentSpan(
@@ -1794,7 +1794,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         async () => {
           const hydrated = await this._runBestEffortOnStartStep(
             "transcript-hydration",
-            () => this._syncMessages(),
+            () => this._transcript.sync(),
             "The agent is starting with an empty in-memory message view; " +
               "persisted history is untouched. If the error is SQLITE_NOMEM, " +
               "the stored transcript is too large to hydrate (often inline " +
@@ -1802,7 +1802,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               "to recover."
           );
           if (!hydrated) {
-            this._replaceCachedMessages([]);
+            this._transcript.replace([]);
           }
         }
       );
@@ -1917,7 +1917,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    *
    * Storage remains the durable source of truth, but runtime logic should read
    * through this cache so in-flight turns, tool updates, and recovery state all
-   * observe the same message list. Use `_syncMessages()` only at safe
+   * observe the same message list. Use `_transcript.sync()` only at safe
    * boundaries where a full storage reread cannot drop in-flight state.
    *
    * When the stored transcript exceeds `hydrationByteBudget`, this view is a
@@ -1925,13 +1925,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * full history remains readable via `session.getHistory()`.
    */
   get messages(): UIMessage[] {
-    return this._cachedMessages;
+    return this._transcript.messages;
   }
 
   /**
    * Read the durable message path from session storage.
    *
-   * Intentionally UNBUDGETED — unlike the cache refresh in `_syncMessages`,
+   * Intentionally UNBUDGETED — unlike the cache refresh in `_transcript.sync()`,
    * which routes through `session.getRecentHistory(hydrationByteBudget)`, this
    * returns the full active path. Its caller, message reconciliation, must see
    * every message: it diffs incoming client messages against the complete
@@ -1951,20 +1951,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    */
   private async _readMessagesFromStorage(): Promise<UIMessage[]> {
     return (await this.session.getHistory()) as UIMessage[];
-  }
-
-  /**
-   * Tool-call ids that still have no recorded result (the shared
-   * `unsettledToolCallIds`). After repair this should be empty; a non-empty
-   * result means the backstop (`ignoreIncompleteToolCalls`) will drop those
-   * calls — i.e. repair missed a shape and should be extended.
-   *
-   * A continuation turn that keeps a call for a client never gets here: it
-   * does not call the model, and `_assembleModelMessages` refuses to build
-   * a request over one.
-   */
-  private _incompleteToolCallIds(messages: UIMessage[]): string[] {
-    return unsettledToolCallIds(messages);
   }
 
   /**
@@ -2030,7 +2016,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       // The broadcast carries the whole list, so every tab drops it.
       remove: async (ids) => {
         await this.session.deleteMessages(ids);
-        await this._syncMessages();
+        await this._transcript.sync();
         this._broadcastMessages();
       },
       emitRepaired: (event) => this._emit("chat:transcript:repaired", event)
@@ -2087,13 +2073,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /** Aged-media eviction passes (see `mediaEviction`). */
-  readonly #mediaEviction = new MediaEvictionPasses({
+  private readonly _mediaEviction = new MediaEvictionPasses({
     config: () => resolveMediaEvictionConfig(this.mediaEviction),
     truncationStep: () => this.truncationStep,
-    cachedMessages: () => this._cachedMessages,
+    cachedMessages: () => this._transcript.messages,
     agedRowsHiddenFromCache: () =>
       this._lastHydration?.truncated === true ||
-      this._cachedMessages.some((message) =>
+      this._transcript.messages.some((message) =>
         isCompactionMessage(message as SessionMessage)
       ),
     storedBytes: () => this._lastHydration?.totalContentBytes ?? null,
@@ -2115,14 +2101,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       })
   });
 
-  private get _mediaEvictionRunning(): boolean {
-    return this.#mediaEviction.running;
-  }
-
-  private _scheduleMediaEvictionPass(): void {
-    this.#mediaEviction.request();
-  }
-
   /**
    * Run one media-eviction pass queued on the Agent queue: by a sub-agent
    * facet, which has no alarm of its own, or by an older version.
@@ -2134,12 +2112,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
   /** Run one bounded eviction pass now. @internal Exposed for tests. */
   protected _evictAgedMediaBestEffort(): Promise<MediaEvictionPassResult | null> {
-    return this.#mediaEviction.run();
-  }
-
-  /** Replace the live cache with a durable storage snapshot. */
-  private _replaceCachedMessages(messages: UIMessage[]): UIMessage[] {
-    return this.#transcript.replace(messages);
+    return this._mediaEviction.run();
   }
 
   /**
@@ -2148,33 +2121,26 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * a larger stored transcript.
    */
   protected get _lastHydration(): HydrationResult | null {
-    return this.#transcript.lastHydration;
+    return this._transcript.lastHydration;
   }
 
   /** Whether `this.messages` holds every message on the active path. */
   private get _cacheCoversActivePath(): boolean {
-    return this.#transcript.coversActivePath;
+    return this._transcript.coversActivePath;
   }
 
   private set _cacheCoversActivePath(covers: boolean) {
-    this.#transcript.coversActivePath = covers;
-  }
-
-  private _noteCachedGrowth(bytes: number): void {
-    this.#transcript.noteGrowth(bytes);
-  }
-
-  /** Refresh the live cache from durable storage at a safe boundary. */
-  private _syncMessages(): Promise<UIMessage[]> {
-    return this.#transcript.sync();
+    this._transcript.coversActivePath = covers;
   }
 
   /** Patch a message that is already present in the live cache. */
   private _patchCachedMessage(message: UIMessage): void {
-    const index = this._cachedMessages.findIndex((m) => m.id === message.id);
+    const index = this._transcript.messages.findIndex(
+      (m) => m.id === message.id
+    );
     if (index === -1) return;
-    const previous = this._cachedMessages[index];
-    this._cachedMessages[index] = message;
+    const previous = this._transcript.messages[index];
+    this._transcript.messages[index] = message;
     this._noteCachedReplacement(previous, message);
   }
 
@@ -2187,8 +2153,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   private _noteCachedReplacement(previous: UIMessage, next: UIMessage): void {
     const grew = cachedMessageBytes(next) - cachedMessageBytes(previous);
     if (grew > 0) {
-      this._noteCachedGrowth(grew);
-      this.#mediaEviction.invalidate();
+      this._transcript.noteGrowth(grew);
+      this._mediaEviction.invalidate();
     }
   }
 
@@ -2262,7 +2228,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
   /** Refresh Think's live message cache from the durable session path. */
   protected async syncMessagesFromStorage(): Promise<UIMessage[]> {
-    return (await this._syncMessages()).slice();
+    return (await this._transcript.sync()).slice();
   }
 
   /**
@@ -2284,8 +2250,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       // Fired from a timer that may have been armed inside a recovered turn.
       // The continuation is its own turn, not the recovery attempt's.
       fireContinuation: () =>
-        this._chatRecoveryEngine().outsideAttempt(() =>
-          this._fireAutoContinuation()
+        this._chatRecoveryEngine().outsideAttempt(
+          () => void this._turns.runContinuationTurn(this._continuationTurn())
         ),
       continuationDropped: (event) =>
         this._emit("chat:continuation:dropped", { ...event }),
@@ -2343,17 +2309,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    */
   private _recoveryLeaf(): Promise<{ id: string; role: string } | null> {
     return this.session.getLatestLeaf();
-  }
-
-  /**
-   * User messages a client request stores: the ones at the end of what it
-   * sent that are not stored yet.
-   */
-  private _newUserMessageIds(messages: UIMessage[]): string[] {
-    return newUserMessageIds(
-      messages,
-      new Set(this.messages.map((message) => message.id))
-    );
   }
 
   /**
@@ -2455,9 +2410,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * `think_config`, skipping a value equal to what is stored.
    */
   private readonly _requestContext = new ChatRequestContext({
-    get: (key) => this._configGet(key),
-    set: (key, json) => this._configSet(key, json),
-    delete: (key) => this._configDelete(key)
+    get: (key) => this._config.get(key),
+    set: (key, json) => this._config.set(key, json),
+    delete: (key) => this._config.delete(key)
   });
   private get _lastClientTools(): ClientToolSchema[] | undefined {
     return this._requestContext.clientTools;
@@ -2608,7 +2563,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    */
   configure<T = Record<string, unknown>>(config: T): void {
     const json = JSON.stringify(config);
-    this._configSet("_think_config", json);
+    this._config.set("_think_config", json);
     this.#configCache = config;
   }
 
@@ -2622,7 +2577,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    */
   getConfig<T = Record<string, unknown>>(): T | null {
     if (this.#configCache !== null) return this.#configCache as T;
-    const raw = this._configGet("_think_config");
+    const raw = this._config.get("_think_config");
     if (raw !== undefined) {
       this.#configCache = JSON.parse(raw);
       return this.#configCache as T;
@@ -2636,7 +2591,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   readonly #messengerReplies: MessengerReplies;
 
   /** Think's private keyed config rows. */
-  readonly #config = new ThinkConfigStore();
+  private readonly _config = new ThinkConfigStore();
 
   /**
    * Run the legacy `assistant_config` lift again. The config capability runs
@@ -2644,19 +2599,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * @internal
    */
   protected _migrateLegacyConfigToThinkTable(): void {
-    this.#config.migrateLegacy();
-  }
-
-  private _configSet(key: string, value: string): void {
-    this.#config.set(key, value);
-  }
-
-  private _configGet(key: string): string | undefined {
-    return this.#config.get(key);
-  }
-
-  private _configDelete(key: string): void {
-    this.#config.delete(key);
+    this._config.migrateLegacy();
   }
 
   // ── Configuration overrides ─────────────────────────────────────
@@ -2951,23 +2894,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     }
   }
 
-  private _stampChannel(
-    messages: UIMessage[],
-    channel: string | undefined,
-    turnMetadata?: Record<string, unknown>
-  ): UIMessage[] {
-    return stampTurnContext(messages, channel, turnMetadata);
-  }
-
-  /** Re-resolve the channel for a continuation from the latest user message. */
-  private _channelFromLatestUserMessage(): string | undefined {
-    return channelFromMessages(this.messages);
-  }
-
   private _channelForAutoContinuation(): string | undefined {
     return this._lastTurnChannel
       ? this._lastTurnChannel.channel
-      : this._channelFromLatestUserMessage();
+      : channelFromMessages(this.messages);
   }
 
   /**
@@ -3915,8 +3845,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     return modelMessagesFromHistory(await this._turnHistory(), {
       tools,
       truncationStep: this.truncationStep,
-      incompleteToolCallIds: (messages) =>
-        this._incompleteToolCallIds(messages),
+      incompleteToolCallIds: (messages) => unsettledToolCallIds(messages),
       onIncompleteToolCalls: (toolCallIds) =>
         this._emit("chat:transcript:repaired", {
           removedToolCalls: toolCallIds.length,
@@ -4242,10 +4171,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     );
   }
 
-  private _actionContextWithoutReply(ctx: ActionContext): ActionContext {
-    return actionContextWithoutReply(ctx);
-  }
-
   private _emitActionLedgerEvent(event: ActionLedgerEvent): void {
     const emit = this._emit as unknown as (
       type: string,
@@ -4282,7 +4207,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       toolName,
       idempotencyKey,
       input,
-      this._actionContextWithoutReply(ctx)
+      actionContextWithoutReply(ctx)
     );
     // A failed run takes back the reply attachments it recorded.
     const attachmentCount = this._activeTurnReplyAttachments.length;
@@ -4757,7 +4682,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               : this._normalizeChatMessages(userMessage)
         }),
         persist: async (resolved) => {
-          for (const msg of this._stampChannel(
+          for (const msg of stampTurnContext(
             resolved,
             options?.channel,
             options?.metadata
@@ -6444,7 +6369,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   ): Promise<SubmitMessagesResult> {
     // Persist the channel on the user messages so the drained turn re-resolves
     // it from history (the model turn runs later in the submission drain).
-    messages = this._stampChannel(messages, options?.channel);
+    messages = stampTurnContext(messages, options?.channel);
     return this._admitTurn({
       admission: "submit",
       trigger: "submission",
@@ -7240,7 +7165,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         }),
       persist: async (resolved) => {
         options?.onApplyingMessages?.();
-        for (const msg of this._stampChannel(resolved, channel)) {
+        for (const msg of stampTurnContext(resolved, channel)) {
           await this._appendMessageToHistory(msg);
         }
         options?.onMessagesApplied?.();
@@ -7731,7 +7656,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // retry re-applies per-channel policy, exactly like `continueLastTurn`. The
     // `metadata.channel` stamp survives the interruption; without this the
     // retried turn would silently fall back to the default policy.
-    const channel = options?.channel ?? this._channelFromLatestUserMessage();
+    const channel = options?.channel ?? channelFromMessages(this.messages);
     const workflowPrompt = this._recoveredWorkflowPrompt();
 
     const { output: _output, ...result } = await this._runServerTurn(
@@ -8003,7 +7928,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // drew them and sent them back.
     const queued = incomingMessages ? this._turns.queuedMessageIds() : null;
     const sent = incomingMessages?.filter((m) => !queued?.has(m.id)) ?? [];
-    const heldIds = new Set(this._newUserMessageIds(sent));
+    const heldIds = new Set(
+      newUserMessageIds(
+        sent,
+        new Set(this.messages.map((message) => message.id))
+      )
+    );
     const held = sent.filter((message) => heldIds.has(message.id));
     // Lists naming queued messages once this request was shown to the
     // other tabs.
@@ -8089,7 +8019,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               await this._persistIncomingMessage(message, undefined, "web");
             }
             if (!isCurrent()) return false;
-            if (!this._cacheCoversActivePath) await this._syncMessages();
+            if (!this._transcript.coversActivePath)
+              await this._transcript.sync();
             return true;
           }
         );
@@ -8222,14 +8153,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * without requiring the caller to know the id.
    */
   cancelChat(requestId: string, reason?: string): void {
-    this._holdForStop(this._turns.cancel(requestId, reason));
-  }
-
-  /**
-   * Hold the isolate while a stop finishes its bookkeeping. The stop itself
-   * already happened, synchronously, when `settled` was created.
-   */
-  private _holdForStop(settled: Promise<void>): void {
+    const settled = this._turns.cancel(requestId, reason);
     void this.keepAliveWhile(() => settled);
   }
 
@@ -8276,11 +8200,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * carries the new count and runs.
    */
   private _stopEveryChat(): void {
-    this._configSet(
+    this._config.set(
       CONNECTIONLESS_STOPS_KEY,
       String(this._connectionlessStops() + 1)
     );
-    this._holdForStop(this._turns.stopAll());
+    const settled = this._turns.stopAll();
+    void this.keepAliveWhile(() => settled);
   }
 
   /**
@@ -8288,12 +8213,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * before an eviction is still known to come before a later stop.
    */
   private _connectionlessStops(): number {
-    const stops = Number(this._configGet(CONNECTIONLESS_STOPS_KEY) ?? 0);
+    const stops = Number(this._config.get(CONNECTIONLESS_STOPS_KEY) ?? 0);
     return Number.isFinite(stops) ? stops : 0;
   }
 
   protected abortRequest(requestId: string, reason?: unknown): void {
-    this._holdForStop(this._turns.cancel(requestId, reason));
+    const settled = this._turns.cancel(requestId, reason);
+    void this.keepAliveWhile(() => settled);
   }
 
   /**
@@ -10191,8 +10117,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         // append lands in place; a branch append already forced a full
         // refresh), so a cache that covers the path is current. Only a
         // windowed or unhydrated cache needs storage to re-derive its view.
-        if (!this._cacheCoversActivePath) {
-          await this._syncMessages();
+        if (!this._transcript.coversActivePath) {
+          await this._transcript.sync();
         }
         return true;
       }
@@ -10211,7 +10137,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * change feed while the caller is still iterating.
    */
   private async _serverTranscriptForReconcile(): Promise<UIMessage[]> {
-    if (this._cacheCoversActivePath) return [...this._cachedMessages];
+    if (this._transcript.coversActivePath)
+      return [...this._transcript.messages];
     return this._readMessagesFromStorage();
   }
 
@@ -10238,11 +10165,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         write.source
       );
     }
-  }
-
-  /** Write the request context to `think_config`. */
-  private _persistClientTools(): void {
-    this._requestContext.persist();
   }
 
   // ── Tool state updates (shared primitives from agents/chat) ─────
@@ -11094,7 +11016,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const names = unexecutedToolNames(tools);
     this._unexecutedTools = names;
     // `_configSet` skips the write when the value has not changed.
-    this._configSet("unexecutedTools", JSON.stringify(names));
+    this._config.set("unexecutedTools", JSON.stringify(names));
   }
 
   /** Read once per isolate: `hasPendingInteraction()` is polled. */
@@ -11107,7 +11029,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    */
   private _unexecutedToolNames(): string[] {
     if (this._unexecutedTools) return this._unexecutedTools;
-    const stored = this._configGet("unexecutedTools");
+    const stored = this._config.get("unexecutedTools");
     if (stored !== undefined) {
       try {
         const parsed: unknown = JSON.parse(stored);
@@ -12417,22 +12339,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // before the successor streams. Leave it parked: the successor flushes it on
     // stream start, or the final surviving turn's settle releases it. (Chat
     // clear releases parked connections explicitly via `resetTurnState`.)
-    this._settlePreStreamTurn(requestId, { releaseParked: false });
-  }
-
-  /**
-   * Mark an accepted turn (#1784) as settled. When `releaseParked` (the default)
-   * and no accepted turn remains in flight and no stream is active, release every
-   * connection parked on the pre-stream window with STREAM_RESUME_NONE. No-op once
-   * they were flushed into STREAM_RESUMING on stream start. Skip paths pass
-   * `releaseParked: false` so a parked client survives onto the successor turn
-   * (see `_completeSkippedRequest`).
-   */
-  private _settlePreStreamTurn(
-    requestId: string,
-    options: { releaseParked?: boolean } = {}
-  ): void {
-    this._turns.settlePreStreamTurn(requestId, options);
+    this._turns.settlePreStreamTurn(requestId, { releaseParked: false });
   }
 
   private _rollbackDroppedSubmit(connection: Connection): void {
@@ -12496,16 +12403,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * inference.
    */
   private _flushResolvedPausesOnFinalize = false;
-
-  /**
-   * Run the continuation turn for the pending continuation. The turn core
-   * owns it (`ChatTurns.runContinuationTurn`): the abort signal, the claim
-   * when the turn starts, the order of the steps, the failure report and
-   * the settle.
-   */
-  private _fireAutoContinuation(): void {
-    void this._turns.runContinuationTurn(this._continuationTurn());
-  }
 
   /**
    * How a turn that failed before it streamed reaches clients and the app.
