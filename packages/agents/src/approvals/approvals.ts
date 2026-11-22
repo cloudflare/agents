@@ -790,6 +790,30 @@ export class Approvals extends LifecycleCapability {
       if (!row) throw new Error(`Approvals: no decision "${id}"`);
       if (row.status === "settled") return this.#toDecision(row);
       const decision = this.#toDecision(row);
+      const attempts = row.attempts + 1;
+      if (row.attempts >= MAX_CONTINUATION_ATTEMPTS) {
+        // Earlier attempts were cut off (the isolate ended inside them):
+        // give up instead of running a continuation that kills the object.
+        this.#write(
+          `UPDATE cf_agents_decisions
+           SET status = 'settled', error = ?, settled_at = ?
+           WHERE id = ? AND status = 'decided'`,
+          [
+            `The continuation did not finish in ${MAX_CONTINUATION_ATTEMPTS} attempts.`,
+            Date.now(),
+            id
+          ]
+        );
+        return this.#afterSettle(id, row.kind, delivery);
+      }
+      // Count the attempt before running it, and make the count durable: a
+      // reset before the continuation's first I/O otherwise rolls it back,
+      // and a continuation that keeps killing the isolate never gives up.
+      this.#write("UPDATE cf_agents_decisions SET attempts = ? WHERE id = ?", [
+        attempts,
+        id
+      ]);
+      await this.lifecycle.storage.sync();
       let outcomeJson: string | null;
       try {
         const onDecided = this.#options.onDecided;
@@ -798,12 +822,7 @@ export class Approvals extends LifecycleCapability {
           : undefined;
         outcomeJson = toJson(outcome, "outcome");
       } catch (error) {
-        const attempts = row.attempts + 1;
         if (attempts < MAX_CONTINUATION_ATTEMPTS) {
-          this.#write(
-            "UPDATE cf_agents_decisions SET attempts = ? WHERE id = ?",
-            [attempts, id]
-          );
           this.#emit("approvals:decision:failed", {
             id,
             kind: row.kind,
@@ -814,9 +833,9 @@ export class Approvals extends LifecycleCapability {
         }
         this.#write(
           `UPDATE cf_agents_decisions
-           SET status = 'settled', error = ?, attempts = ?, settled_at = ?
+           SET status = 'settled', error = ?, settled_at = ?
            WHERE id = ? AND status = 'decided'`,
-          [errorMessage(error), attempts, Date.now(), id]
+          [errorMessage(error), Date.now(), id]
         );
         return this.#afterSettle(id, row.kind, delivery);
       }

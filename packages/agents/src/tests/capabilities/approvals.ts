@@ -33,6 +33,10 @@ export class ApprovalsHarnessObject extends DurableObject<Cloudflare.Env> {
   readonly approvals: Approvals = new Approvals({
     onDecided: async (decision: Decision): Promise<unknown> => {
       this.continued.push(decision.id);
+      // Set through storage so every new instance crashes too.
+      if (this.ctx.storage.kv.get("crash-continuation")) {
+        this.ctx.abort("continuation crashed");
+      }
       await this.#gate;
       if (this.failuresBeforeSuccess > 0) {
         this.failuresBeforeSuccess -= 1;
@@ -87,6 +91,25 @@ export class ApprovalsHarnessObject extends DurableObject<Cloudflare.Env> {
       await new Promise((resolve) => setTimeout(resolve, 1));
     }
     return id;
+  }
+
+  /** Park and decide a decision whose continuation ends the isolate. */
+  async decideCrashing(): Promise<string> {
+    this.ctx.storage.kv.put("crash-continuation", true);
+    const { id } = this.approvals.park({ kind: "action", subject: { n: 1 } });
+    void this.approvals.decide(id, { approved: true }).catch(() => {});
+    return id;
+  }
+
+  attempts(id: string): number {
+    return Number(
+      [
+        ...this.ctx.storage.sql.exec(
+          "SELECT attempts FROM cf_agents_decisions WHERE id = ?",
+          id
+        )
+      ][0]?.attempts ?? -1
+    );
   }
 
   /** End the isolate the way the runtime does: memory goes, storage stays. */

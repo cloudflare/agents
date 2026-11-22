@@ -678,6 +678,31 @@ describe("Approvals decisions", () => {
     );
   });
 
+  it("gives up on a continuation that keeps ending the isolate", async () => {
+    const name = crypto.randomUUID();
+    let stub = env.ApprovalsHarnessObject.getByName(name);
+    const id = await stub.decideCrashing().catch(() => "");
+    stub = env.ApprovalsHarnessObject.getByName(name);
+    const parkedId =
+      id ||
+      (await runInDurableObject(stub, (_i, state) => {
+        const [row] = [
+          ...state.storage.sql.exec("SELECT id FROM cf_agents_decisions")
+        ];
+        return String(row.id);
+      }));
+    for (let n = 0; n < 4; n++) {
+      stub = env.ApprovalsHarnessObject.getByName(name);
+      await runInDurableObject(stub, (_i, state) => {
+        backdateDecisionJob(state.storage, parkedId);
+      });
+      await runDurableObjectAlarm(stub).catch(() => {});
+    }
+    stub = env.ApprovalsHarnessObject.getByName(name);
+    expect(await stub.attempts(parkedId)).toBe(3);
+    expect(await stub.status(parkedId)).toBe("settled");
+  });
+
   it("finishes a continuation a real reset cut off", async () => {
     const name = crypto.randomUUID();
     let stub = env.ApprovalsHarnessObject.getByName(name);
