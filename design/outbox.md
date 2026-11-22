@@ -85,7 +85,7 @@ Values are capped at 1 MB of JSON because SQLite rows stop at 2 MB.
 ## Tradeoffs
 
 - One job per pending delivery. A burst of thousands of deliveries is thousands of job rows. Every current user sends a handful.
-- An attempt that crashes its isolate waits one attempt timeout before the next attempt.
+- An attempt that dies with its isolate runs again at the next start, or after one attempt timeout if nothing starts the object first. A memory-limit strike that backs the wake off is the exception: the delivery keeps the breaker's backoff.
 - The attempt timeout does not cancel the sink. Two attempts of one value can overlap, which at-least-once already allows.
 - `last_error` is cut at 4,000 characters and checkpoints stop at 256 KB, so a row stays under SQLite's 2 MB limit beside a 1 MB value.
 - Failed rows are kept for seven days, then deleted without notice. `onGiveUp` and `outbox:give_up` are the reporting path.

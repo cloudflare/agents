@@ -606,6 +606,77 @@ describe("Outbox capability", () => {
     });
   });
 
+  it("keeps a timed-out attempt's progress while the value backs off", async () => {
+    const { stub } = stubFor();
+    await runInDurableObject(stub, async (instance: OutboxHarnessObject) => {
+      let finishStep: (() => void) | undefined;
+      let saved: Promise<void> | undefined;
+      instance.outbox.register("__cf_backoff_step", {
+        deliver: (_payload: string, delivery) => {
+          if (delivery.attempt > 1) return new Promise<void>(() => {});
+          return new Promise<void>(() => {
+            finishStep = () => {
+              saved = delivery.saveCheckpoint(1);
+            };
+          });
+        },
+        retry: { attemptTimeoutMs: 20, baseDelayMs: 60_000, maxDelayMs: 60_000 }
+      });
+      await instance.outbox.send("__cf_backoff_step", "x", { key: "k" });
+      await waitFor(
+        async () =>
+          (await instance.outbox.get("__cf_backoff_step", "k"))?.lastError !==
+          null
+      );
+      finishStep?.();
+      await saved;
+      const row = instance.sql(
+        "SELECT checkpoint FROM cf_agents_outbox WHERE key = 'k'"
+      ) as Array<{ checkpoint: string }>;
+      expect(row[0]?.checkpoint).toBe("1");
+      await instance.outbox.cancel("__cf_backoff_step", "k");
+    });
+  });
+
+  it("keeps the memory breaker's backoff when the object starts in the cooldown", async () => {
+    const { stub } = stubFor();
+    await runInDurableObject(stub, async (instance: OutboxHarnessObject) => {
+      const delivery = await instance.outbox.send(
+        "record",
+        { value: "a" },
+        { key: "k", hold: true }
+      );
+      instance.sql(
+        `UPDATE cf_agents_outbox SET status = 'pending', attempts = 1,
+           first_attempt_at = ?, claim = 'dead', next_at = ? WHERE id = ?`,
+        Date.now(),
+        Date.now() + 60_000,
+        delivery.id
+      );
+      const cooldown = Date.now() + 30_000;
+      await instance.outbox.onMemoryLimit({
+        sealed: false,
+        nextTime: cooldown,
+        executing: {
+          id: `outbox:${delivery.id}`,
+          capability: "outbox",
+          fn: "deliver",
+          time: Date.now(),
+          payload: { id: delivery.id },
+          retry: { maxAttempts: 1 },
+          singleflight: false,
+          exclusive: false,
+          recoveryLoop: false,
+          createdAt: Date.now()
+        }
+      });
+      await instance.outbox.onStart();
+      expect((await instance.outbox.get("record", "k"))?.nextAt).toBe(cooldown);
+      expect(instance.attempts).toEqual([]);
+      await instance.outbox.cancel("record", "k");
+    });
+  });
+
   it("cuts long errors, caps checkpoints, and versions each value of a key", async () => {
     const { stub } = stubFor();
     await runInDurableObject(stub, async (instance: OutboxHarnessObject) => {

@@ -98,7 +98,12 @@ type OutboxJobPayload = {
 type OutboxRouteMessage =
   | { readonly type: "wake"; readonly id: string; readonly time: number | null }
   | { readonly type: "dispatch"; readonly id: string }
-  | { readonly type: "sealed"; readonly id: string };
+  | { readonly type: "sealed"; readonly id: string }
+  | {
+      readonly type: "backoff";
+      readonly id: string;
+      readonly nextTime: number;
+    };
 
 function isOutboxJobPayload(value: unknown): value is OutboxJobPayload {
   return (
@@ -275,8 +280,37 @@ export class Outbox<
    */
   async onMemoryLimit(context: MemoryLimitContext): Promise<void> {
     const job = context.executing;
-    if (!context.sealed || job?.capability !== this.capabilityId) return;
+    if (job?.capability !== this.capabilityId) return;
     if (!isOutboxJobPayload(job.payload)) return;
+    if (!context.sealed) {
+      // The breaker backed the wake off. Drop the dead attempt's claim and
+      // take its backoff time, so a start in the cooldown does not run the
+      // delivery again early.
+      if (context.nextTime === undefined) return;
+      if (!job.payload.owner_path) {
+        this.#backoff(job.payload.id, context.nextTime);
+        return;
+      }
+      try {
+        await this.lifecycle.routes.to(
+          {
+            key: job.payload.owner_path_key ?? job.payload.owner_path,
+            data: job.payload.owner_path
+          },
+          {
+            type: "backoff",
+            id: job.payload.id,
+            nextTime: context.nextTime
+          } satisfies OutboxRouteMessage
+        );
+      } catch (error) {
+        console.error(
+          `[Outbox] could not report a memory-limit backoff for delivery ${job.payload.id}`,
+          error
+        );
+      }
+      return;
+    }
     if (!job.payload.owner_path) {
       await this.#sealed(job.payload.id);
       return;
@@ -295,6 +329,17 @@ export class Outbox<
         error
       );
     }
+  }
+
+  #backoff(id: string, nextTime: number): void {
+    this.#write(
+      `UPDATE cf_agents_outbox
+       SET claim = NULL, next_at = ?, updated_at = ?
+       WHERE id = ? AND status = 'pending'`,
+      nextTime,
+      Date.now(),
+      id
+    );
   }
 
   async #sealed(id: string): Promise<void> {
@@ -324,6 +369,9 @@ export class Outbox<
         return this.#dispatch(message.id, false);
       case "sealed":
         await this.#sealed(message.id);
+        return true;
+      case "backoff":
+        this.#backoff(message.id, message.nextTime);
         return true;
       default:
         throw new Error("Unknown routed Outbox message");
@@ -666,15 +714,19 @@ export class Outbox<
         }
         const saved = this.#write(
           `UPDATE cf_agents_outbox SET checkpoint = ?, updated_at = ?
-           WHERE id = ? AND idempotency_key = ? AND claim IS ?
+           WHERE id = ? AND idempotency_key = ?
+             AND (claim IS ? OR (claim IS NULL AND attempts = ?))
              AND status IN ('pending', 'failed')`,
           json,
           Date.now(),
           row.id,
           row.idempotency_key,
-          row.claim
+          row.claim,
+          row.attempts
         );
-        // A newer attempt owns the value, or the value was replaced,
+        // While the value backs off after this attempt timed out (claim
+        // dropped, no newer attempt counted yet), the attempt may still
+        // record progress. A newer attempt owns the value, or the value was replaced,
         // cancelled, acknowledged or retried: stop the sink at this step.
         // The throw is ignored like any late throw. An attempt that timed
         // out and gave up with no newer attempt keeps its claim, so it may
