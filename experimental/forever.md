@@ -449,7 +449,7 @@ Workerd persists both SQLite and alarm state to disk. Local development and prod
 1. Fiber is running, `keepAlive()` sets an alarm
 2. Process is killed (SIGKILL, code update, `Ctrl-C`)
 3. Process restarts — the first request triggers startup → the fiber recovery scan → recovery → `onStart()`
-4. Nothing is left to recover, so the `fibers:recover` wake is cancelled rather than run as an empty scan
+4. Nothing is left to recover, so the `fibers:recover` wake is cancelled rather than run as an empty scan. If a hook failed and its row was kept, the wake stays armed instead and the next scan retries it
 
 The E2E test in `packages/agents/src/e2e-tests/` validates this: it starts wrangler, spawns a fiber, kills the process with SIGKILL, restarts with the same persist directory, and verifies the fiber recovers automatically.
 
