@@ -2198,9 +2198,11 @@ describe("WorkerTransport", () => {
 
     it("keeps a deleted session deleted after a restart", async () => {
       let stored: TransportState | undefined;
+      let writes = 0;
       const storage = {
         get: () => stored,
         set: (state: TransportState) => {
+          writes++;
           stored = state;
         }
       };
@@ -2254,6 +2256,17 @@ describe("WorkerTransport", () => {
         })
       );
       expect(deleted.status).toBe(200);
+
+      // A repeated DELETE is refused and stores nothing more.
+      const writesAfterDelete = writes;
+      const repeated = await restarted.handleRequest(
+        new Request("http://example.com/", {
+          method: "DELETE",
+          headers: sessionHeaders
+        })
+      );
+      expect(repeated.status).toBe(404);
+      expect(writes).toBe(writesAfterDelete);
 
       // A restart after it does not.
       const afterDelete = await setupTransport(createTestServer(), options);

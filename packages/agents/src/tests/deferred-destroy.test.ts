@@ -134,10 +134,10 @@ describe("deferred destroy (#1625)", () => {
     // condemnation by up to keepAliveIntervalMs each reschedule.
     await runInDurableObject(stub, async (instance, ctx) => {
       const agent = instance as unknown as {
-        _keepAliveRefs: number;
+        _keepAlive: { acquire(): Promise<() => void> };
         _syncHostJobs(): Promise<void>;
       };
-      agent._keepAliveRefs = 1;
+      const release = await agent._keepAlive.acquire();
       await ctx.storage.put(DESTROY_PENDING_KEY, true);
       await ctx.storage.setAlarm(Date.now() + 86_400_000);
 
@@ -150,7 +150,7 @@ describe("deferred destroy (#1625)", () => {
       expect(alarm! - before).toBeLessThan(5_000);
 
       // Leave nothing pending behind for this DO.
-      agent._keepAliveRefs = 0;
+      release();
       await ctx.storage.delete(DESTROY_PENDING_KEY);
       await ctx.storage.deleteAlarm();
     });
@@ -361,6 +361,14 @@ describe("deferred destroy (#1625)", () => {
         ).toBeDefined();
       });
       await expectTeardownCompleted(namespace, name);
+
+      // The teardown removed what the request stored, not only the marker.
+      const after = await getAgentByName(namespace, name);
+      await runInDurableObject(after, async (_instance, state) => {
+        expect(await state.storage.get("props"), request.method).toBe(
+          undefined
+        );
+      });
     }
   });
 });

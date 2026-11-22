@@ -173,8 +173,10 @@ export class WorkerTransport extends WebStandardStreamableHTTPServerTransport {
     // restore the session from storage and answer for it again. A transport
     // without sessions has nothing to end: the SDK accepts its DELETE too,
     // and storing that would make every later transport answer 404.
+    // A DELETE the SDK refused changed nothing, so it stores nothing.
     if (
       request.method === "DELETE" &&
+      response.ok &&
       this.sessionId !== undefined &&
       this.isClosed()
     ) {
