@@ -390,4 +390,61 @@ describe("Sessions lift of a legacy flat message table", () => {
       ).toMatchObject({ table: "legacy_flat_messages", source: 1, copied: 0 });
     });
   });
+
+  it("lifts a row before an id held by a different message", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      await instance.sessions
+        .session()
+        .appendMessage(message("x", "squatter", "user"));
+      instance.seedLegacy(
+        flatTable([
+          { id: "a", body: JSON.stringify(message("a", "one", "user")), at: 1 },
+          {
+            id: "x",
+            body: JSON.stringify(message("x", "legacy", "user")),
+            at: 2
+          }
+        ])
+      );
+    });
+    await evictDurableObject(stub);
+
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      // `x` is not a copy, so it does not mark how far an earlier lift got.
+      const ids = (await instance.sessions.session().getHistory()).map(
+        (m) => m.id
+      );
+      expect(ids).toContain("a");
+      expect(instance.tableNames()).toContain("legacy_flat_messages");
+    });
+  });
+
+  it("lifts a table whose ids together pass the bound-value limit", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    // About 9 MB of ids: one query binding all of them throws SQLITE_TOOBIG
+    // (the limit measured on a deployed object is about 8 MB).
+    const ids = Array.from(
+      { length: 1800 },
+      (_, i) => `${String(i).padStart(5, "0")}-${"i".repeat(5000)}`
+    );
+    await runInDurableObject(stub, (instance: SessionHarnessObject) => {
+      instance.seedLegacy(
+        flatTable(
+          ids.map((id, i) => ({
+            id,
+            body: JSON.stringify(message(id, "m", "user")),
+            at: i + 1
+          }))
+        )
+      );
+    });
+    await evictDurableObject(stub);
+
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const history = await instance.sessions.session().getHistory();
+      expect(history).toHaveLength(ids.length);
+      expect(instance.tableNames()).not.toContain("legacy_flat_messages");
+    });
+  });
 });

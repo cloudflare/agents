@@ -370,9 +370,11 @@ export class SessionsCore {
    *
    * Order is read first as ids and sizes alone, then bodies are fetched in
    * windows bounded by row count and bytes, so a large transcript never sits
-   * in the isolate at once. The table is dropped only when every row landed:
-   * a row that cannot be parsed or imported keeps it, and the next start
-   * tries again (`importMessage` ignores ids it already has).
+   * in the isolate at once, and no query binds more than one window of ids.
+   * The table is dropped only when every row has a copy holding the same
+   * payload: a row that cannot be parsed, or whose id another message holds,
+   * keeps it, and the next start tries again (`importMessage` ignores ids it
+   * already has).
    *
    * @returns `false` when rows were left behind.
    */
@@ -380,102 +382,90 @@ export class SessionsCore {
     const source = this.#legacyFlatMessages;
     if (!source || !this.#tableExists(source.table)) return true;
     const { table } = source;
-    const order = this.io.sql<{
-      id: string;
-      bytes: number;
-      created_at: string | number | null;
-    }>(
-      `SELECT id, LENGTH(CAST(message AS BLOB)) AS bytes, created_at
-       FROM ${table}
-       ORDER BY created_at ASC, rowid ASC`,
-      []
-    );
+    const order = this.io
+      .sql<{
+        id: string;
+        bytes: number;
+        created_at: string | number | null;
+      }>(
+        `SELECT id, LENGTH(CAST(message AS BLOB)) AS bytes, created_at
+         FROM ${table}
+         ORDER BY created_at ASC, rowid ASC`,
+        []
+      )
+      .map((row, index) => ({ ...row, index }));
+    const parse = (body: string, id: string): SessionMessage | undefined => {
+      try {
+        return source.parse(JSON.parse(body), id);
+      } catch {
+        return undefined;
+      }
+    };
 
-    // Rows an earlier start already lifted. A row that lands now must not
-    // go before one of them: importing it would fork the chain, and the
-    // rows after it would leave the active path. Such a row stays in the
-    // table, recoverable, and keeps the table.
-    const lifted = new Set(
+    // Rows an earlier start already lifted: present under their id with
+    // the same payload. A row that lands now must not go before one of
+    // them: importing it would fork the chain, and the rows after it would
+    // leave the active path. Such a row stays in the table, recoverable.
+    const present = new Set(
       this.io
         .sql<{ id: string }>(
-          `SELECT id FROM cf_agents_session_messages
-           WHERE session_id = '' AND id IN (SELECT value FROM json_each(?))`,
-          [JSON.stringify(order.map((row) => row.id))]
+          `SELECT legacy.id AS id FROM ${table} AS legacy
+           JOIN cf_agents_session_messages AS lifted
+             ON lifted.session_id = '' AND lifted.id = legacy.id`,
+          []
         )
         .map((row) => row.id)
     );
     let lastLifted = -1;
-    order.forEach((row, i) => {
-      if (lifted.has(row.id)) lastLifted = i;
-    });
+    if (present.size > 0) {
+      this.#forEachLegacyRow(
+        table,
+        order.filter((row) => present.has(row.id)),
+        (row, body) => {
+          const message = body === undefined ? undefined : parse(body, row.id);
+          if (message && this.#holdsMessage("", message)) {
+            lastLifted = Math.max(lastLifted, row.index);
+          }
+        }
+      );
+    }
 
     let parentId: string | null = null;
     let imported = 0;
     let skipped = 0;
-    let index = 0;
-    while (index < order.length) {
-      const window: typeof order = [];
-      let bytes = 0;
-      while (
-        index < order.length &&
-        window.length < LEGACY_LIFT_WINDOW_ROWS &&
-        (window.length === 0 ||
-          bytes + order[index].bytes <= LEGACY_LIFT_WINDOW_BYTES)
-      ) {
-        bytes += order[index].bytes;
-        window.push(order[index]);
-        index++;
+    this.#forEachLegacyRow(table, order, (row, body) => {
+      if (!present.has(row.id) && row.index < lastLifted) {
+        skipped++;
+        return;
       }
-      const bodies = new Map(
-        this.io
-          .sql<{ id: string; message: string }>(
-            `SELECT id, message FROM ${table}
-             WHERE id IN (SELECT value FROM json_each(?))`,
-            [JSON.stringify(window.map((row) => row.id))]
-          )
-          .map((row) => [row.id, row.message] as const)
-      );
-
-      const windowStart = index - window.length;
-      for (const [offset, row] of window.entries()) {
-        if (!lifted.has(row.id) && windowStart + offset < lastLifted) {
-          skipped++;
-          continue;
-        }
-        const body = bodies.get(row.id);
-        if (body === undefined) {
-          skipped++;
-          continue;
-        }
-        try {
-          const message = source.parse(JSON.parse(body), row.id);
-          if (!message) {
-            skipped++;
-            continue;
-          }
-          const parsedTime =
-            typeof row.created_at === "number"
-              ? row.created_at
-              : Date.parse(String(row.created_at ?? ""));
-          const inserted = this.importMessage("", message, {
-            parentId,
-            createdAt: Number.isFinite(parsedTime) ? parsedTime : imported
-          });
-          parentId = message.id;
-          // An id already taken counts as copied only when it holds this
-          // payload: dropping the table must not lose a row whose id some
-          // other message occupies.
-          if (!inserted && !this.#holdsMessage("", message)) {
-            skipped++;
-            continue;
-          }
-          imported++;
-        } catch (error) {
-          console.error(`[Sessions] Failed to lift message ${row.id}:`, error);
-          skipped++;
-        }
+      const message = body === undefined ? undefined : parse(body, row.id);
+      if (!message) {
+        skipped++;
+        return;
       }
-    }
+      try {
+        const parsedTime =
+          typeof row.created_at === "number"
+            ? row.created_at
+            : Date.parse(String(row.created_at ?? ""));
+        const inserted = this.importMessage("", message, {
+          parentId,
+          createdAt: Number.isFinite(parsedTime) ? parsedTime : imported
+        });
+        parentId = message.id;
+        // An id already taken counts as copied only when it holds this
+        // payload: dropping the table must not lose a row whose id some
+        // other message occupies.
+        if (!inserted && !this.#holdsMessage("", message)) {
+          skipped++;
+          return;
+        }
+        imported++;
+      } catch (error) {
+        console.error(`[Sessions] Failed to lift message ${row.id}:`, error);
+        skipped++;
+      }
+    });
 
     if (skipped === 0 && imported === order.length) {
       this.io.sqlWrite(`DROP TABLE ${table}`, []);
@@ -492,6 +482,42 @@ export class SessionsCore {
       copied: imported
     });
     return false;
+  }
+
+  /**
+   * Visit `rows`, in order, with their bodies, fetched in windows bounded
+   * by row count and summed bytes, so one query binds one window of ids.
+   */
+  #forEachLegacyRow<Row extends { id: string; bytes: number }>(
+    table: string,
+    rows: readonly Row[],
+    visit: (row: Row, body: string | undefined) => void
+  ): void {
+    let next = 0;
+    while (next < rows.length) {
+      const window: Row[] = [];
+      let bytes = 0;
+      while (
+        next < rows.length &&
+        window.length < LEGACY_LIFT_WINDOW_ROWS &&
+        (window.length === 0 ||
+          bytes + rows[next].bytes <= LEGACY_LIFT_WINDOW_BYTES)
+      ) {
+        bytes += rows[next].bytes;
+        window.push(rows[next]);
+        next++;
+      }
+      const bodies = new Map(
+        this.io
+          .sql<{ id: string; message: string }>(
+            `SELECT id, message FROM ${table}
+             WHERE id IN (SELECT value FROM json_each(?))`,
+            [JSON.stringify(window.map((row) => row.id))]
+          )
+          .map((row) => [row.id, row.message] as const)
+      );
+      for (const row of window) visit(row, bodies.get(row.id));
+    }
   }
 
   /** Whether the stored row with `message.id` holds exactly `message`. */
