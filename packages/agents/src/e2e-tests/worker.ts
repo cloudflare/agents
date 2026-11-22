@@ -1166,3 +1166,54 @@ export class CutoverKillAgent extends Agent<Record<string, unknown>> {
     };
   }
 }
+
+// ── AbortingRecoveryHookAgent (a recovery hook that kills the isolate) ───
+//
+// A managed fiber aborts the isolate mid-body; its recovery hook aborts it
+// again before any I/O. The scan must commit the `interrupted` mark before
+// it runs the hook, or the reset rolls the mark back and every startup runs
+// the hook again, so the agent never serves another request.
+
+export class AbortingRecoveryHookAgent extends Agent<Record<string, unknown>> {
+  static options = { keepAliveIntervalMs: 2_000 };
+
+  override async onFiberRecovered(ctx: RunFiberRecoveryContext): Promise<void> {
+    if (ctx.name !== "aborting-hook" && ctx.name !== "aborting-plain") return;
+    // No storage writes here: the scan's own commit is what is under test.
+    // The log line is how the test counts runs; it survives the reset.
+    console.log("[aborting-hook] ran");
+    this.ctx.abort("recovery hook aborts");
+  }
+
+  @callable()
+  async startAbortingFiber(): Promise<string> {
+    const result = await this.startFiber("aborting-hook", async () => {
+      await fiberSleep(300);
+      this.ctx.abort("fiber body aborts");
+    });
+    return result.fiberId;
+  }
+
+  @callable()
+  startAbortingPlainFiber(): string {
+    void this.runFiber("aborting-plain", async () => {
+      await fiberSleep(300);
+      this.ctx.abort("fiber body aborts");
+    }).catch(() => {});
+    return "started";
+  }
+
+  @callable()
+  runRowCount(): number {
+    return (
+      this.sql<{
+        count: number;
+      }>`SELECT COUNT(*) AS count FROM cf_agents_runs`[0]?.count ?? 0
+    );
+  }
+
+  @callable()
+  async fiberStatus(fiberId: string): Promise<string | null> {
+    return (await this.inspectFiber(fiberId))?.status ?? null;
+  }
+}

@@ -56,6 +56,10 @@
       {
         "name": "CutoverKillAgent",
         "class_name": "CutoverKillAgent"
+      },
+      {
+        "name": "AbortingRecoveryHookAgent",
+        "class_name": "AbortingRecoveryHookAgent"
       }
     ]
   },
@@ -87,6 +91,10 @@
     {
       "tag": "v6",
       "new_sqlite_classes": ["CutoverKillAgent"]
+    },
+    {
+      "tag": "v7",
+      "new_sqlite_classes": ["AbortingRecoveryHookAgent"]
     }
   ]
 }

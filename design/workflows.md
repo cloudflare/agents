@@ -2,9 +2,11 @@
 
 **Internal.** Not a public API. Nothing new from the slim-hosts work is exposed to apps until it has shipped inside `Think` and `AIChatAgent` for a release and is shown correct ([rfc-slim-hosts.md](./rfc-slim-hosts.md#exposure)). It is not exported at all: `Agent` installs it and delegates its public methods to it.
 
+It tracks and controls [Cloudflare Workflows](https://developers.cloudflare.com/workflows/) instances. Workflows is a separate product: the instances run on the Workflows service, not in the agent's Durable Object. This module is not an execution engine. It starts instances, sends them events, pauses, resumes, terminates and restarts them, and keeps a local record of each one. For durable multi-step work that runs inside the Durable Object (steps journaled in its SQLite, retries, durable sleeps), use [Tasks](./rfc-fibers.md) instead. Use Workflows when the work should run outside the object, for long or heavy pipelines, or when you already have a Workflow.
+
 `Agent.runWorkflow()` starts a [Cloudflare Workflow](https://developers.cloudflare.com/workflows/) instance on the agent's behalf, and the agent keeps a record of every instance it started. The control methods (`sendWorkflowEvent`, `approveWorkflow`, `rejectWorkflow`, `terminateWorkflow`, `pauseWorkflow`, `resumeWorkflow`, `restartWorkflow`, `getWorkflowStatus`) and the record queries (`getWorkflow`, `getWorkflows`, `deleteWorkflow`, `deleteWorkflows`, `migrateWorkflowBinding`) are one-line delegates to the `Workflows` Lifecycle capability in `packages/agents/src/workflow-tracking/`. The hooks stay on Agent: `onWorkflowCallback`, `onWorkflowProgress`, `onWorkflowComplete`, `onWorkflowError`, `onWorkflowEvent`, and the `_workflow_*` RPC methods `AgentWorkflow` calls. `AgentWorkflow` itself is in `src/workflows.ts`.
 
-The capability is internal. Agent installs it with the Worker env and a function that names the owner: a top-level agent by class and name, or a facet by its path from the root.
+Agent installs it with the Worker env and a function that names the owner: a top-level agent by class and name, or a facet by its path from the root.
 
 ## How it works
 
@@ -36,4 +38,5 @@ On start the capability warns about rows whose binding is not in env any more, u
 ## Tradeoffs
 
 - `approveWorkflow()` and `rejectWorkflow()` send their event through the capability, not through `this.sendWorkflowEvent()`. A subclass override of `sendWorkflowEvent()` no longer sees approvals.
+- The control methods read the record through the capability, not `this.getWorkflow()`, so a subclass override of `getWorkflow()` changes what it returns, not which instance a control call acts on.
 - Pagination is keyset on `(created_at, workflow_id)`. `total` counts every match and ignores the cursor.

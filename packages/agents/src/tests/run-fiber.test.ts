@@ -410,6 +410,71 @@ describe("runFiber", () => {
       expect(count).toBe(1);
     });
 
+    it("runs the hook for a row whose recovery crashed twice, and drops it after the third", async () => {
+      const agent = await getAgentByName(
+        env.TestRunFiberAgent,
+        "recovery-crash-budget"
+      );
+
+      await agent.insertCrashedRecoveryFiber("crashed-2", "research", 2);
+      await agent.insertCrashedRecoveryFiber("crashed-3", "research", 3);
+      await agent.triggerRecoveryCheck();
+
+      const recovered = (await agent.getRecoveredFibers()) as unknown as {
+        id: string;
+      }[];
+      expect(recovered.map((fiber) => fiber.id)).toEqual(["crashed-2"]);
+      expect((await agent.getRunningFiberCount()) as unknown as number).toBe(0);
+    });
+
+    it("runs a fiber named like a released AIChatAgent's chat turn", async () => {
+      // @cloudflare/ai-chat 0.7.x calls the public runFiber() with this name.
+      const agent = await getAgentByName(
+        env.TestRunFiberAgent,
+        "legacy-chat-turn-name"
+      );
+      await expect(
+        agent.runNamedFiber("__cf_internal_chat_turn:legacy")
+      ).resolves.toBe("ran");
+    });
+
+    it("counts a __cf_internal fiber no chat host owns, and drops it after three crashes", async () => {
+      const agent = await getAgentByName(
+        env.TestRunFiberAgent,
+        "recovery-crash-unowned-internal"
+      );
+
+      await agent.insertCrashedRecoveryFiber(
+        "unowned-crashed",
+        "__cf_internal_other:turn",
+        3
+      );
+      await agent.triggerRecoveryCheck();
+
+      expect(await agent.internalRecoveredFibers()).toEqual([]);
+      expect((await agent.getRecoveredFibers()) as unknown as []).toEqual([]);
+      expect((await agent.getRunningFiberCount()) as unknown as number).toBe(0);
+    });
+
+    it("leaves framework fibers to their own recovery budget after crashes", async () => {
+      const agent = await getAgentByName(
+        env.TestRunFiberAgent,
+        "recovery-crash-framework"
+      );
+
+      await agent.insertCrashedRecoveryFiber(
+        "framework-crashed",
+        "__cf_internal_probe:turn",
+        5
+      );
+      await agent.triggerRecoveryCheck();
+
+      expect(await agent.internalRecoveredFibers()).toEqual([
+        "framework-crashed"
+      ]);
+      expect((await agent.getRunningFiberCount()) as unknown as number).toBe(0);
+    });
+
     it("evicts an aged unmanaged row whose recovery keeps throwing", async () => {
       const agent = await getAgentByName(
         env.TestRunFiberAgent,
@@ -828,6 +893,11 @@ describe("runFiber", () => {
       });
       expect(listed.some((fiber) => fiber.fiberId === result.fiberId)).toBe(
         true
+      );
+
+      // An empty status filter matches nothing.
+      await expect(agent.listManagedFibers({ status: [] })).resolves.toEqual(
+        []
       );
 
       await expect(agent.deleteManagedFibers()).resolves.toBeGreaterThanOrEqual(

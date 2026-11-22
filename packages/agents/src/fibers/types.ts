@@ -145,4 +145,6 @@ export type FiberRunRow = {
   completed_at: number | null;
   outcome: "completed" | "error" | "aborted" | null;
   error_message: string | null;
+  /** Recovery attempts that killed the isolate before the hook returned. */
+  recovery_crashes: number | null;
 };

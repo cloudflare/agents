@@ -133,7 +133,10 @@ function withText(message: AssistantMessage, text: string): AssistantMessage {
 }
 
 export class PiAgent extends Agent<Env> {
-  static readonly FIBER_PREFIX = "__cf_internal_pi_turn:";
+  // Agent exempts `${CHAT_FIBER_NAME}:<id>` fibers from its recovery crash
+  // budget: the chat engine keeps its own.
+  static readonly CHAT_FIBER_NAME = "__cf_internal_pi_turn";
+  static readonly FIBER_PREFIX = `${PiAgent.CHAT_FIBER_NAME}:`;
   static readonly SNAPSHOT_KEY = "__cfPiFiberSnapshot";
 
   // Recovery is keyed off the live config; assigned as a class field (NOT in

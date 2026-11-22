@@ -1264,6 +1264,16 @@ export class Agent<
 
     this._fibers = new Fibers({
       handleInternalRecovery: (ctx) => this._handleInternalFiberRecovery(ctx),
+      // A chat host (AIChatAgent, Think, released versions included) names
+      // its legacy turn fibers `${CHAT_FIBER_NAME}:<id>` and recovers them
+      // with its own durable budget. Nothing else is exempt.
+      ownsRecoveryBudget: (name) => {
+        const chatFiber = (this.constructor as { CHAT_FIBER_NAME?: unknown })
+          .CHAT_FIBER_NAME;
+        return (
+          typeof chatFiber === "string" && name.startsWith(`${chatFiber}:`)
+        );
+      },
       onRecovered: (ctx) => this.onFiberRecovered(ctx),
       heartbeatMs: this._resolvedOptions.keepAliveIntervalMs,
       recoveryHookTimeoutMs: this._resolvedOptions.fiberRecoveryHookTimeoutMs,
@@ -2438,6 +2448,9 @@ export class Agent<
 
   /**
    * Run a fiber whose framework recovery data wraps the user's checkpoints.
+   * Released `@cloudflare/ai-chat` and `@cloudflare/think` versions call it
+   * for sub-agent turns, and they accept newer `agents` releases, so it
+   * stays while those versions are in range.
    * @internal
    */
   protected _runFiberWithStashWrapper<T>(
@@ -6752,7 +6765,9 @@ export class Agent<
       {
         manager: this.mcp,
         env: this.env,
-        agentName: this.name,
+        // Read only where it is used: a cold native call on an agent whose
+        // stored name is not loaded yet can still register a server.
+        agentName: () => this.name,
         agentClassName: this._ParentClass.name,
         sendIdentityOnConnect: this._resolvedOptions.sendIdentityOnConnect,
         createAuthProvider: (callbackUrl) =>

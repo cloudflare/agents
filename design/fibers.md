@@ -7,8 +7,9 @@ an interruption to a recovery hook. `Agent.runFiber()`, `startFiber()`,
 `stash()`, `inspectFiber()`, `listFibers()`, `cancelFiber()`,
 `resolveFiber()`, `deleteFibers()` and the `onFiberRecovered()` hook are the
 public API. Since this change they are one-line delegates to the `Fibers`
-Lifecycle capability in `packages/agents/src/fibers/`. The capability is
-internal: Agent installs it, nothing else does yet.
+Lifecycle capability in `packages/agents/src/fibers/`. It is an internal
+module (`@internal`, no package export): Agent installs it, and a plain
+Durable Object that wants durable background work should use Tasks.
 
 [Tasks](./rfc-fibers.md) is the replayable engine: a named handler re-runs
 from its step journal. Fibers are the other shape and stay separate (see
@@ -42,7 +43,19 @@ key `cf_agents:fibers_schema_version`:
 A body runs at most once. After an eviction it never runs again: the
 recovery hook gets the last snapshot and decides. The hook runs at least
 once per interrupted row: an unmanaged row whose hook throws stays and is
-retried until `fiberRecoveryMaxAgeMs`; a managed row is marked `error`.
+retried until `fiberRecoveryMaxAgeMs`; a managed row is marked `error`. A hook that kills the isolate
+instead of returning is a different case: before running it, the scan
+commits what must survive a reset with `storage.sync()` (a reset before the
+first I/O rolls back uncommitted writes). A managed row's `interrupted` mark
+is committed, so the next scan does not run its hook again. A user's plain row
+gets an attempt in `recovery_crashes`, taken back when the hook returns or
+throws. After three attempts that never returned, the row is dropped
+without the hook (`fiber:recovery:skipped`, reason `recovery_crashed`).
+Only a chat host's legacy turn fibers are not counted: names
+`${CHAT_FIBER_NAME}:<id>`, where the host class sets `static CHAT_FIBER_NAME`
+(AIChatAgent, Think). Their chat recovery engine keeps its own durable
+interruption budget and ends the turn with a terminal outcome. Any other
+name, `__cf_internal*` included, is counted.
 
 ### Recovery
 
@@ -54,7 +67,10 @@ then marks managed ledger rows with no run row (accepted, never started)
 `interrupted` and recovers them the same way. One scan runs at a time; a
 caller that arrives during a scan joins it. So a user `onFiberRecovered()` that never
 returns holds every later recovery wake, as it already held startup.
-Only the internal hook has a timeout.
+Only the internal hook has a timeout. The wake is a Lifecycle job, so a slow hook also
+delays the host's `onAlarm` and other jobs in the same alarm; the old
+housekeeping scan ran after `onAlarm` in the same alarm and waited on the hook
+the same way.
 
 Agent runs a scan during startup, before the user's `onStart()`, so chat
 recovery sees its budgets before user code changes them.

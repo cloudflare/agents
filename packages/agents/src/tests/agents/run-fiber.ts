@@ -9,9 +9,21 @@ import type {
 
 export class TestRunFiberAgent extends Agent {
   static options = { keepAliveIntervalMs: 2_000 };
+  // Stands in for a chat host's turn-fiber name, whose recovery owns its
+  // own budget.
+  static readonly CHAT_FIBER_NAME = "__cf_internal_probe";
 
   executionLog: string[] = [];
   recoveredFibers: FiberRecoveryContext[] = [];
+  internalRecovered: string[] = [];
+
+  protected override async _handleInternalFiberRecovery(
+    ctx: FiberRecoveryContext
+  ): Promise<boolean> {
+    if (!ctx.name.startsWith("__cf_internal_probe")) return false;
+    this.internalRecovered.push(ctx.id);
+    return true;
+  }
 
   /** Resolves the in-flight `holdFiber` callback's pending promise. */
   private _releaseHeldFiber?: () => void;
@@ -634,6 +646,27 @@ export class TestRunFiberAgent extends Agent {
       INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
       VALUES (${id}, ${name}, ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
     `;
+  }
+
+  /** Insert an unmanaged interrupted fiber row that already crashed recovery `crashes` times. */
+  async insertCrashedRecoveryFiber(
+    id: string,
+    name: string,
+    crashes: number
+  ): Promise<void> {
+    this.sql`
+      INSERT INTO cf_agents_runs (id, name, snapshot, created_at, recovery_crashes)
+      VALUES (${id}, ${name}, NULL, ${Date.now()}, ${crashes})
+    `;
+  }
+
+  async runNamedFiber(name: string): Promise<string> {
+    await this.runFiber(name, async () => {});
+    return "ran";
+  }
+
+  async internalRecoveredFibers(): Promise<string[]> {
+    return this.internalRecovered;
   }
 
   /** Insert an unmanaged interrupted fiber row with a backdated created_at. */
