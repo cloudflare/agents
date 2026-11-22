@@ -47,6 +47,7 @@ import type {
   TaskCallbacks,
   TaskHandlers,
   TaskInput,
+  TaskJson,
   TaskOutput,
   TaskReceipt,
   TaskRunOptions,
@@ -103,7 +104,8 @@ export function setTaskRoutedMemoryLimitHandler(
 }
 
 const FIBER_SCHEMA_VERSION_KEY = "cf_agents:tasks_schema_version";
-const CURRENT_FIBER_SCHEMA_VERSION = 1;
+/** 2 adds `cf_agents_task_checkpoint`. */
+const CURRENT_FIBER_SCHEMA_VERSION = 2;
 
 const DEFAULT_STEP_POLICY: ResolvedStepPolicy = {
   retryLimit: 5,
@@ -687,7 +689,10 @@ export class Tasks<
   async __DO_NOT_USE_WILL_BREAK__runAttached(
     definition: string,
     input: unknown,
-    options?: TaskRunOptions
+    options?: TaskRunOptions & {
+      /** Handed to this first attempt as `step.local`; never stored. */
+      local?: unknown;
+    }
   ): Promise<TaskReceipt> {
     const receipt = await this.#acceptReserved(
       definition,
@@ -695,7 +700,9 @@ export class Tasks<
       options,
       "attached"
     );
-    if (receipt.accepted) await this.#executeRun(receipt.runId);
+    if (receipt.accepted) {
+      await this.#executeRun(receipt.runId, options?.local);
+    }
     return receipt;
   }
 
@@ -1165,7 +1172,7 @@ export class Tasks<
   // ── Execution ────────────────────────────────────────────────────────────
 
   /** Claim and drive one due run to its next durable boundary. */
-  async #executeRun(runId: string): Promise<void> {
+  async #executeRun(runId: string, local?: unknown): Promise<void> {
     if (this.#active.has(runId)) return;
     const row = this.#store.getRun(runId);
     if (!row || TERMINAL_STATES.has(row.state)) return;
@@ -1237,7 +1244,8 @@ export class Tasks<
       attempt,
       controller,
       interrupted,
-      now
+      now,
+      local
     );
     this.#active.set(runId, { generation, controller, promise });
     try {
@@ -1255,7 +1263,8 @@ export class Tasks<
     attempt: number,
     controller: AbortController,
     interrupted: { name: string; attempt: number } | null,
-    claimedAtMs: number
+    claimedAtMs: number,
+    local: unknown
   ): Promise<void> {
     const runId = row.run_id;
     const input = deserializeTaskValue(row.input);
@@ -1266,9 +1275,17 @@ export class Tasks<
       controller,
       claimedAtMs
     );
+    const store = this.#store;
     const step = new ReplayStep(engine, {
       startsLive: attempt === 1,
-      interrupted
+      interrupted,
+      local,
+      createdAt: row.created_at,
+      checkpoint: {
+        get: <T extends TaskJson>(key: string) =>
+          store.getCheckpoint(runId, key) as T | undefined,
+        set: (key, value) => store.setCheckpoint(runId, generation, key, value)
+      }
     });
 
     try {
@@ -1511,7 +1528,9 @@ export class Tasks<
     runId: string,
     row: TaskRunRow | undefined
   ): Promise<void> {
+    // Nothing reads a settled run's checkpoint.
     if (row?.retain === 0) this.#store.deleteRun(runId);
+    else this.#store.deleteCheckpoint(runId);
     await this.#syncWake(runId);
   }
 

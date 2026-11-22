@@ -2,17 +2,17 @@
  * The chat-turn Task definition, shared by `AIChatAgent` and `Think`.
  *
  * Every chat turn runs as one journaled step on the `tasks` capability. A
- * live turn executes its closure under the fiber stash context (so
- * `this.stash()` keeps persisting the recovery snapshot into host storage);
- * a replay whose closure is gone — the producing isolate died — hands the
- * turn's stored snapshot to the host's chat recovery. Hosts supply their
+ * live turn executes its closure (the run's `local`) under the fiber stash
+ * context, so `this.stash()` writes the recovery snapshot into the run's
+ * checkpoint; a replay whose closure is gone (the producing isolate died)
+ * hands that snapshot to the host's chat recovery. Hosts supply their
  * protected internals through {@link ChatTurnTaskHooks}; the turn logic, the
  * snapshot key vocabulary, and the settle plumbing live here once.
  */
 
-import type { TaskStep } from "../tasks";
+import type { TaskJson, TaskStep } from "../tasks";
 
-/** One live turn closure, registered under its nonce while this isolate runs it. */
+/** One live turn closure: the `local` value of the turn's run in this isolate. */
 export type ChatTurnClosureEntry = {
   /** The snapshot persisted at claim, before the turn produces anything. */
   readonly initial: unknown;
@@ -29,10 +29,8 @@ export type ChatTurnClosureEntry = {
 
 /** The host internals one chat-turn definition runs against. */
 export type ChatTurnTaskHooks = {
+  /** Where turns before checkpoints kept their snapshot. */
   readonly storage: DurableObjectStorage;
-  /** The run row's creation time, for recovery staleness accounting. */
-  getRunCreatedAt(runId: string): Promise<number | null>;
-  getLiveClosure(nonce: string): ChatTurnClosureEntry | undefined;
   keepAliveWhile<T>(fn: () => Promise<T>): Promise<T>;
   /** The host's fiber stash context, so `this.stash()` keeps working. */
   withStash<T>(
@@ -57,9 +55,15 @@ export type ChatTurnTaskHooks = {
   }): Promise<void>;
 };
 
-/** Durable snapshot key for one chat turn's stash envelope. */
-function turnSnapshotKey(runId: string): string {
-  return `__cf_chat_turn_snapshot:${runId}`;
+/** The checkpoint entry holding a turn's stash envelope. */
+const SNAPSHOT = "snapshot";
+
+/**
+ * The storage key a turn accepted before checkpoints kept its snapshot
+ * under. Read once by its recovery, then deleted.
+ */
+function legacySnapshotKey(nonce: string): string {
+  return `__cf_chat_turn_snapshot:chat_${nonce}`;
 }
 
 /**
@@ -78,36 +82,27 @@ export function createChatTurnTaskDefinition(
       "model-turn",
       { retries: { limit: 1 }, timeout: "1 day" },
       async ({ signal }) => {
-        const runId = `chat_${nonce}`;
-        const snapshotKey = turnSnapshotKey(runId);
-        const entry = hooks.getLiveClosure(nonce);
+        const entry = step.local as ChatTurnClosureEntry | undefined;
         if (!entry) {
           // Replay after an unclean interruption: the producing isolate is
-          // gone. The durably persisted turn snapshot plus stream evidence
-          // drive user-visible recovery.
-          const persisted = await hooks.storage.get(snapshotKey);
-          const createdAt = (await hooks.getRunCreatedAt(runId)) ?? Date.now();
+          // gone. The turn's last snapshot plus stream evidence drive
+          // user-visible recovery.
+          const legacyKey = legacySnapshotKey(nonce);
+          const persisted =
+            step.checkpoint.get(SNAPSHOT) ??
+            (await hooks.storage.get(legacyKey)) ??
+            null;
           await hooks.recover({
             requestId,
-            persisted: persisted ?? null,
-            createdAt
+            persisted,
+            createdAt: step.createdAt
           });
-          await hooks.storage.delete(snapshotKey);
+          await hooks.storage.delete(legacyKey);
           return undefined;
         }
-        // SAFETY: chat fiber snapshots are the same JSON envelopes the
-        // legacy stash wrapper persisted; storage round-trips them.
-        //
-        // The initial snapshot is awaited; every later stash write and the
-        // final delete are fire-and-forget. That is safe because Durable
-        // Object storage applies same-key operations in issuance order and
-        // reads see unconfirmed writes, so the delete below can never be
-        // overtaken by an earlier stash put — and the output gate holds
-        // client-visible chunks until prior writes flush. A crash mid-turn
-        // loses only the unflushed tail of stash writes, which recovery
-        // tolerates by design: the snapshot is a hint, stream cursors are
-        // the evidence.
-        await hooks.storage.put(snapshotKey, entry.initial);
+        // SAFETY: chat fiber snapshots are JSON envelopes, as fiber stash
+        // data always was.
+        step.checkpoint.set(SNAPSHOT, entry.initial as TaskJson);
         try {
           const value = await hooks.keepAliveWhile(() =>
             hooks.withStash(
@@ -115,9 +110,7 @@ export function createChatTurnTaskDefinition(
                 id: nonce,
                 signal,
                 stash: (data) =>
-                  void hooks.storage
-                    .put(snapshotKey, entry.wrap(data))
-                    .catch(() => {})
+                  step.checkpoint.set(SNAPSHOT, entry.wrap(data) as TaskJson)
               },
               () => entry.run()
             )
@@ -126,8 +119,6 @@ export function createChatTurnTaskDefinition(
         } catch (error) {
           entry.settle.reject(error);
           throw error;
-        } finally {
-          void hooks.storage.delete(snapshotKey).catch(() => {});
         }
         return undefined;
       }

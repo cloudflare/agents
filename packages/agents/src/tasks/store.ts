@@ -1,6 +1,6 @@
 /**
- * Storage layer for the Tasks capability: owns the `cf_agents_task_runs` and
- * `cf_agents_task_steps` tables — DDL, row access, generation-fenced writes,
+ * Storage layer for the Tasks capability: owns the `cf_agents_task_runs`,
+ * `cf_agents_task_steps` and `cf_agents_task_checkpoint` tables — DDL, row access, generation-fenced writes,
  * and the snapshot projection. The engine in `tasks.ts` holds the state
  * machine; every byte that touches SQLite goes through here.
  */
@@ -81,8 +81,55 @@ export class TaskStore {
   }
 
   deleteRun(runId: string): void {
+    this.deleteCheckpoint(runId);
     this.sql`DELETE FROM cf_agents_task_steps WHERE run_id = ${runId}`;
     this.sql`DELETE FROM cf_agents_task_runs WHERE run_id = ${runId}`;
+  }
+
+  /** A checkpoint entry of a run, or `undefined`. */
+  getCheckpoint(runId: string, key: string): TaskJson | undefined {
+    const rows = this.sql<{ value: string }>`
+      SELECT value FROM cf_agents_task_checkpoint
+      WHERE run_id = ${runId} AND key = ${key}
+    `;
+    return rows[0] === undefined
+      ? undefined
+      : (JSON.parse(rows[0].value) as TaskJson);
+  }
+
+  /**
+   * Write or remove a checkpoint entry for the attempt holding `generation`.
+   * A superseded attempt writes nothing.
+   */
+  setCheckpoint(
+    runId: string,
+    generation: string,
+    key: string,
+    value: TaskJson | undefined
+  ): void {
+    if (value === undefined) {
+      this.write(
+        `DELETE FROM cf_agents_task_checkpoint
+         WHERE run_id = ? AND key = ? AND EXISTS (
+           SELECT 1 FROM cf_agents_task_runs
+           WHERE run_id = ? AND generation = ?
+         )`,
+        [runId, key, runId, generation]
+      );
+      return;
+    }
+    this.write(
+      `INSERT INTO cf_agents_task_checkpoint (run_id, key, value)
+       SELECT ?, ?, ? WHERE EXISTS (
+         SELECT 1 FROM cf_agents_task_runs WHERE run_id = ? AND generation = ?
+       )
+       ON CONFLICT (run_id, key) DO UPDATE SET value = excluded.value`,
+      [runId, key, JSON.stringify(value), runId, generation]
+    );
+  }
+
+  deleteCheckpoint(runId: string): void {
+    this.sql`DELETE FROM cf_agents_task_checkpoint WHERE run_id = ${runId}`;
   }
 
   ensureTables(): void {
@@ -148,6 +195,13 @@ export class TaskStore {
         updated_at INTEGER NOT NULL,
         completed_at INTEGER,
         PRIMARY KEY (run_id, step_name)
+      ) WITHOUT ROWID`);
+    rawSql(`
+      CREATE TABLE IF NOT EXISTS cf_agents_task_checkpoint (
+        run_id TEXT NOT NULL,
+        key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        PRIMARY KEY (run_id, key)
       ) WITHOUT ROWID`);
   }
 

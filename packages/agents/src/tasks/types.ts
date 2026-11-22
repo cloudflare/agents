@@ -163,6 +163,23 @@ export interface TaskStep {
    */
   status(message: string): Promise<void>;
 
+  /**
+   * @internal The value the caller passed as `local` when it started this
+   * run in this isolate (`runAttached`). `undefined` on an attempt after a
+   * reset: decide "live or recover" on it, never on the attempt number.
+   */
+  readonly local: unknown;
+
+  /**
+   * @internal State the next attempt reads, owned by the run. `step.do()` is
+   * for work that must not repeat; the checkpoint is for state a later
+   * attempt needs. Deleted when the run settles.
+   */
+  readonly checkpoint: TaskCheckpoint;
+
+  /** @internal When the run was accepted. */
+  readonly createdAt: number;
+
   /** The stable external deduplication key `step.do(name, ...)` would get. */
   idempotencyKey(name: string): string;
 }
@@ -172,6 +189,17 @@ export interface TaskStep {
  *
  * @experimental The API surface may change before stabilizing.
  */
+/**
+ * @internal A run's keyed state. Writes are synchronous and belong to the
+ * attempt that makes them: once a newer attempt claimed the run, a write is
+ * dropped.
+ */
+export interface TaskCheckpoint {
+  get<T extends TaskJson>(key: string): T | undefined;
+  /** `undefined` removes the entry. */
+  set(key: string, value: TaskJson | undefined): void;
+}
+
 export type TaskRunState =
   | "pending"
   | "running"

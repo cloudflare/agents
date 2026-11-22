@@ -61,7 +61,9 @@ async function insertInterruptedTurnForTest(
   agent: AIChatAgent,
   storage: DurableObjectStorage,
   name: string,
-  snapshot?: unknown
+  snapshot?: unknown,
+  /** Keep the snapshot where turns before checkpoints did. */
+  legacySnapshot = false
 ): Promise<void> {
   const prefix = `${AIChatAgent.CHAT_FIBER_NAME}:`;
   if (!name.startsWith(prefix)) {
@@ -75,11 +77,17 @@ async function insertInterruptedTurnForTest(
   const nonce = crypto.randomUUID();
   const runId = `chat_${nonce}`;
   const requestId = name.slice(prefix.length);
-  if (snapshot) {
+  if (snapshot && legacySnapshot) {
     await storage.put(`__cf_chat_turn_snapshot:${runId}`, snapshot);
   }
   // Make sure the Tasks tables exist before writing a row into them.
   await agent.tasks.get(runId);
+  if (snapshot && !legacySnapshot) {
+    agent.sql`
+      INSERT INTO cf_agents_task_checkpoint (run_id, key, value)
+      VALUES (${runId}, 'snapshot', ${JSON.stringify(snapshot)})
+    `;
+  }
   const now = Date.now();
   agent.sql`
     INSERT INTO cf_agents_task_runs
@@ -5123,9 +5131,16 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
    */
   async insertInterruptedFiber(
     name: string,
-    snapshot?: unknown
+    snapshot?: unknown,
+    legacySnapshot?: boolean
   ): Promise<void> {
-    await insertInterruptedTurnForTest(this, this.ctx.storage, name, snapshot);
+    await insertInterruptedTurnForTest(
+      this,
+      this.ctx.storage,
+      name,
+      snapshot,
+      legacySnapshot
+    );
   }
 
   /** Replay every interrupted turn, as a wake does. */
@@ -5351,7 +5366,7 @@ export class RecoveryThrowingAgent extends AIChatAgent<Env> {
     thrown: string | null;
     onErrorSeen: string[];
     liveRecoveryTurns: number;
-    liveClosures: number;
+    checkpointEntries: number;
     fibers: number;
     abortControllers: number;
     queueIdle: boolean;
@@ -5371,10 +5386,7 @@ export class RecoveryThrowingAgent extends AIChatAgent<Env> {
       this._shouldThrow = false;
     }
     const internals = this as unknown as {
-      _chatTurnFibers: {
-        liveTurns: Map<string, unknown>;
-        liveClosures: Map<string, unknown>;
-      };
+      _chatTurnFibers: { liveTurns: Map<string, unknown> };
       _abortRegistry: { size: number };
       _turnQueue: { isActive: boolean };
     };
@@ -5382,7 +5394,9 @@ export class RecoveryThrowingAgent extends AIChatAgent<Env> {
       thrown,
       onErrorSeen: [...this._onErrorSeen],
       liveRecoveryTurns: internals._chatTurnFibers.liveTurns.size,
-      liveClosures: internals._chatTurnFibers.liveClosures.size,
+      checkpointEntries: this.sql<{ n: number }>`
+        SELECT COUNT(*) AS n FROM cf_agents_task_checkpoint
+      `[0].n,
       fibers: this.getActiveFibers().length,
       abortControllers: internals._abortRegistry.size,
       queueIdle: !internals._turnQueue.isActive

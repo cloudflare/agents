@@ -52,7 +52,11 @@ interface ChatTestStub {
     chunks: Array<{ body: string; index: number }>,
     ageMs?: number
   ): Promise<void>;
-  insertInterruptedFiber(name: string, snapshot?: unknown): Promise<void>;
+  insertInterruptedFiber(
+    name: string,
+    snapshot?: unknown,
+    legacySnapshot?: boolean
+  ): Promise<void>;
   triggerFiberRecovery(): Promise<void>;
   setChatRecoveryConfigForTest(config: {
     maxAttempts?: number;
@@ -413,9 +417,10 @@ describe("chatRecovery", () => {
         "Simulated onChatMessage error"
       ]);
       expect(outcome.thrown).toBe("onError(Simulated onChatMessage error)");
-      // The recovery fiber, the turn queue and the abort registry are clean.
+      // The recovery fiber, the turn's checkpoint, the turn queue and the
+      // abort registry are clean.
       expect(outcome.liveRecoveryTurns).toBe(0);
-      expect(outcome.liveClosures).toBe(0);
+      expect(outcome.checkpointEntries).toBe(0);
       expect(outcome.fibers).toBe(0);
       expect(outcome.abortControllers).toBe(0);
       expect(outcome.queueIdle).toBe(true);
@@ -554,61 +559,68 @@ describe("chatRecovery", () => {
       ws.close(1000);
     });
 
-    it("stashed data round-trips through fiber recovery via onChatRecovery", async () => {
-      const room = crypto.randomUUID();
-      const stub = (await getAgentByName(
-        env.ChatRecoveryTestAgent,
-        room
-      )) as unknown as ChatTestStub;
+    it.each([
+      ["the run's checkpoint", false],
+      ["storage, as a turn accepted before checkpoints left it", true]
+    ])(
+      "stashed data in %s round-trips through fiber recovery via onChatRecovery",
+      async (_where, legacySnapshot) => {
+        const room = crypto.randomUUID();
+        const stub = (await getAgentByName(
+          env.ChatRecoveryTestAgent,
+          room
+        )) as unknown as ChatTestStub;
 
-      await stub.setRecoveryOverride({ continue: false });
+        await stub.setRecoveryOverride({ continue: false });
 
-      await stub.persistMessages([
-        {
-          id: "user-1",
-          role: "user",
-          parts: [{ type: "text", text: "Hello" }]
-        }
-      ] as ChatMessage[]);
+        await stub.persistMessages([
+          {
+            id: "user-1",
+            role: "user",
+            parts: [{ type: "text", text: "Hello" }]
+          }
+        ] as ChatMessage[]);
 
-      const stashedData = {
-        responseId: "openai-resp-xyz",
-        provider: "openai",
-        model: "gpt-4"
-      };
+        const stashedData = {
+          responseId: "openai-resp-xyz",
+          provider: "openai",
+          model: "gpt-4"
+        };
 
-      await stub.insertInterruptedStream("stream-stash", "req-stash", [
-        {
-          body: JSON.stringify({
-            type: "start",
-            messageId: "assistant-stash"
-          }),
-          index: 0
-        },
-        { body: JSON.stringify({ type: "text-start" }), index: 1 },
-        {
-          body: JSON.stringify({
-            type: "text-delta",
-            delta: "Partial with stash"
-          }),
-          index: 2
-        }
-      ]);
-      await stub.insertInterruptedFiber(
-        "__cf_internal_chat_turn:req-stash",
-        stashedData
-      );
+        await stub.insertInterruptedStream("stream-stash", "req-stash", [
+          {
+            body: JSON.stringify({
+              type: "start",
+              messageId: "assistant-stash"
+            }),
+            index: 0
+          },
+          { body: JSON.stringify({ type: "text-start" }), index: 1 },
+          {
+            body: JSON.stringify({
+              type: "text-delta",
+              delta: "Partial with stash"
+            }),
+            index: 2
+          }
+        ]);
+        await stub.insertInterruptedFiber(
+          "__cf_internal_chat_turn:req-stash",
+          stashedData,
+          legacySnapshot
+        );
 
-      await stub.triggerFiberRecovery();
+        await stub.triggerFiberRecovery();
 
-      const contexts = await stub.getRecoveryContexts();
-      expect(contexts.length).toBeGreaterThanOrEqual(1);
+        const contexts = await stub.getRecoveryContexts();
+        expect(contexts.length).toBeGreaterThanOrEqual(1);
 
-      const lastCtx = contexts[contexts.length - 1];
-      expect(lastCtx.recoveryData).toEqual(stashedData);
-      expect(lastCtx.partialText).toBe("Partial with stash");
-      expect(lastCtx.streamId).toBe("stream-stash");
-    });
+        const lastCtx = contexts[contexts.length - 1];
+        expect(lastCtx.recoveryData).toEqual(stashedData);
+        expect(lastCtx.partialText).toBe("Partial with stash");
+        expect(lastCtx.streamId).toBe("stream-stash");
+      }
+    );
   });
 
   describe("recovery preserves settled work (#1631)", () => {

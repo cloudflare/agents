@@ -2982,21 +2982,22 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     return this._chatTurnFibers.liveTurns;
   }
 
-  private get _liveChatTurnClosures() {
-    return this._chatTurnFibers.liveClosures;
-  }
-
   /** Runs each chat turn as a durable fiber. Shared with `AIChatAgent`. */
   private readonly _chatTurnFibers = new ChatTurnFibers({
     fiberName: (this.constructor as typeof Think).CHAT_FIBER_NAME,
     snapshotKey: "__cfThinkChatFiberSnapshot",
     generateId: () => crypto.randomUUID(),
     turnSignal: (requestId) => this._turns.aborts.getExistingSignal(requestId),
-    runTask: ({ requestId, continuation, nonce }) =>
+    runTask: ({ requestId, continuation, nonce }, local) =>
       this.tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
         (this.constructor as typeof Think).CHAT_FIBER_NAME,
         { requestId, continuation, nonce },
-        { runId: `chat_${nonce}`, retain: false, metadata: { requestId } }
+        {
+          runId: `chat_${nonce}`,
+          retain: false,
+          metadata: { requestId },
+          local
+        }
       ),
     captureContext: () => {
       const ambient = agentContext.getStore();
@@ -3019,9 +3020,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       chatFiberName,
       createChatTurnTaskDefinition({
         storage: this.ctx.storage,
-        getRunCreatedAt: async (runId) =>
-          (await this.tasks.get(runId))?.createdAt ?? null,
-        getLiveClosure: (nonce) => this._liveChatTurnClosures.get(nonce),
         keepAliveWhile: (fn) => this.keepAliveWhile(fn),
         withStash: (context, fn) => this._withFiberStash(context, fn),
         recover: (turn) => this._recoverChatTurn(turn)

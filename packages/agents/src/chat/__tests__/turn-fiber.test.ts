@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { createChatFiberSnapshot } from "../recovery";
 import { ChatTurnFibers, type ChatTurnFiberHost } from "../turn-fiber";
+import type { ChatTurnClosureEntry } from "../turn-task";
 
 const snapshot = (requestId: string) =>
   createChatFiberSnapshot({
@@ -24,10 +25,9 @@ describe("ChatTurnFibers", () => {
       snapshotKey: "__snapshot",
       generateId: () => "nonce-1",
       turnSignal: () => turnSignal,
-      // The Task runs the registered closure and settles the caller.
-      runTask: async ({ requestId, continuation, nonce }) => {
+      // The Task runs the closure it was given and settles the caller.
+      runTask: async ({ requestId, continuation, nonce }, closure) => {
         log.push(`task:${requestId}:${continuation}:${nonce}`);
-        const closure = fibers.liveClosures.get(nonce)!;
         try {
           closure.settle.resolve(await closure.run());
         } catch (error) {
@@ -53,8 +53,7 @@ describe("ChatTurnFibers", () => {
     const value = await fibers.run(
       { requestId: "r1", continuation: true, snapshot: snapshot("r1") },
       async (takeReply) => {
-        liveDuringRun =
-          fibers.liveTurns.has("r1") && fibers.liveClosures.has("nonce-1");
+        liveDuringRun = fibers.liveTurns.has("r1");
         log.push("model");
         // The model returned a reply: the turn takes it.
         await takeReply();
@@ -73,7 +72,6 @@ describe("ChatTurnFibers", () => {
       "run"
     ]);
     expect(fibers.liveTurns.size).toBe(0);
-    expect(fibers.liveClosures.size).toBe(0);
   });
 
   it("names the turn's request id to the recovery engine, so a stop by it reaches a recovery attempt", async () => {
@@ -134,10 +132,16 @@ describe("ChatTurnFibers", () => {
     let envelope: unknown;
     // One snapshot for the run and the expectation: it carries a timestamp.
     const turnSnapshot = snapshot("r1");
+    let closure!: ChatTurnClosureEntry;
+    const runTask = host.runTask;
+    host.runTask = (input, local) => {
+      closure = local;
+      return runTask(input, local);
+    };
     await fibers.run(
       { requestId: "r1", continuation: false, snapshot: turnSnapshot },
       async () => {
-        envelope = fibers.liveClosures.get("nonce-1")!.wrap({ step: 2 });
+        envelope = closure.wrap({ step: 2 });
         expect(fibers.liveTurns.get("r1")?.recoveryData).toEqual({ step: 2 });
       }
     );
@@ -191,8 +195,8 @@ describe("ChatTurnFibers", () => {
     const onUnhandled = (reason: unknown) => void unhandled.push(reason);
     process.on("unhandledRejection", onUnhandled);
     try {
-      host.runTask = async ({ nonce }) => {
-        fibers.liveClosures.get(nonce)!.settle.reject(new Error("turn failed"));
+      host.runTask = async (_input, closure) => {
+        closure.settle.reject(new Error("turn failed"));
         throw new Error("task failed");
       };
       await expect(
@@ -278,6 +282,5 @@ describe("ChatTurnFibers", () => {
       )
     ).rejects.toThrow("boom");
     expect(fibers.liveTurns.size).toBe(0);
-    expect(fibers.liveClosures.size).toBe(0);
   });
 });

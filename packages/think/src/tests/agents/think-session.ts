@@ -132,7 +132,6 @@ export type RpcJsonObject = Record<
  */
 async function insertInterruptedTurnForTest(
   agent: Think,
-  storage: DurableObjectStorage,
   name: string,
   snapshot?: unknown
 ): Promise<void> {
@@ -148,11 +147,14 @@ async function insertInterruptedTurnForTest(
   const nonce = crypto.randomUUID();
   const runId = `chat_${nonce}`;
   const requestId = name.slice(prefix.length);
-  if (snapshot) {
-    await storage.put(`__cf_chat_turn_snapshot:${runId}`, snapshot);
-  }
   // Make sure the Tasks tables exist before writing a row into them.
   await agent.tasks.get(runId);
+  if (snapshot) {
+    agent.sql`
+      INSERT INTO cf_agents_task_checkpoint (run_id, key, value)
+      VALUES (${runId}, 'snapshot', ${JSON.stringify(snapshot)})
+    `;
+  }
   const now = Date.now();
   agent.sql`
     INSERT INTO cf_agents_task_runs
@@ -5268,7 +5270,7 @@ export class ThinkTestAgent extends Think {
     name: string,
     snapshot?: unknown
   ): Promise<void> {
-    await insertInterruptedTurnForTest(this, this.ctx.storage, name, snapshot);
+    await insertInterruptedTurnForTest(this, name, snapshot);
   }
 
   /** Replay this agent's interrupted turns, as a wake does. */
@@ -8597,7 +8599,7 @@ export class ThinkToolsTestAgent extends Think {
     name: string,
     snapshot?: unknown
   ): Promise<void> {
-    await insertInterruptedTurnForTest(this, this.ctx.storage, name, snapshot);
+    await insertInterruptedTurnForTest(this, name, snapshot);
   }
 
   async triggerFiberRecovery(): Promise<{
@@ -10011,7 +10013,6 @@ export class ThinkProgrammaticTestAgent extends Think {
     };
     await insertInterruptedTurnForTest(
       this,
-      this.ctx.storage,
       `${Think.CHAT_FIBER_NAME}:${input.requestId}`,
       snapshot
     );
@@ -12358,7 +12359,7 @@ export class ThinkRecoveryTestAgent extends Think {
     name: string,
     snapshot?: unknown
   ): Promise<void> {
-    await insertInterruptedTurnForTest(this, this.ctx.storage, name, snapshot);
+    await insertInterruptedTurnForTest(this, name, snapshot);
   }
 
   async triggerFiberRecovery(): Promise<{
