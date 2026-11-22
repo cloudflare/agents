@@ -8,6 +8,10 @@
  * async context of the call that enqueued it. After a reset a record has no
  * closure; {@link ChatLaneOptions.replay} decides what it does then.
  *
+ * `reset()` invalidates queued turns; it does not stop a turn whose closure
+ * is running. That turn ends with its closure, as with the in-memory queue
+ * before; stopping it is the abort registry's job.
+ *
  * The surface is the one the hosts already use (`generation`,
  * `activeRequestId`, `enqueue(requestId, fn, { generation })`, `reset`,
  * `waitForIdle`, `queuedCount`), so a host's admission wrapper does not
@@ -63,6 +67,8 @@ export interface ChatLaneOptions {
 }
 
 const LANE = "chat";
+/** Runs a turn left by resets gets before it ends `error`. */
+const MAX_REPLAYS = 3;
 
 /** @internal */
 export class ChatLane {
@@ -180,7 +186,11 @@ export class ChatLane {
   async #run(payload: ChatLanePayload, run: InboxRun): Promise<unknown> {
     const turn = run.local as LaneTurn | undefined;
     if (!turn) {
-      // Found after a reset: the closure is gone.
+      // Found after a reset: the closure is gone. A turn whose runs keep
+      // killing the isolate stops being replayed.
+      if (run.attempt > MAX_REPLAYS) {
+        return Inbox.failed(`Interrupted ${run.attempt - 1} times`);
+      }
       return (await this.#replay?.(payload, run)) ?? Inbox.skipped("reset");
     }
     if (turn.generation !== this.#generation) {

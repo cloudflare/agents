@@ -66,7 +66,7 @@ import type {
   ClientToolSchema,
   ResumableStream,
   ToolPartUpdate,
-  TurnQueue
+  ChatLane
 } from "agents/chat";
 import type { Schedule } from "agents";
 import type { DeclaredScheduleInfo } from "agents/schedules";
@@ -12598,7 +12598,7 @@ export class ThinkRecoveryTestAgent extends Think {
     // SAFETY: this inert fixture reaches Think's private startup/bookkeeping
     // seams without exposing production test hooks. These are their signatures.
     const internals = this as unknown as {
-      _turnQueue: TurnQueue;
+      _turnQueue: ChatLane;
       _ensureSubmissionTable(): void;
       _chatRecoveryEngine(): unknown;
     };
@@ -12825,6 +12825,11 @@ export class ThinkRecoveryTestAgent extends Think {
       let successorQueuedBehindBlocker = false;
       if (foreignResult) {
         await successorQueued.promise;
+        // The lane starts a turn once its record is written, so the blocker
+        // may not have started the moment the successor is queued.
+        for (let i = 0; i < 100 && queue.activeRequestId !== blockerId; i++) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
         successorQueuedBehindBlocker =
           queue.activeRequestId === blockerId && queue.queuedCount() === 2;
         releaseQueueBlocker.resolve();

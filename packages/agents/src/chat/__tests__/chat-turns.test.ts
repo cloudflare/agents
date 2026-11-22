@@ -3,6 +3,7 @@ import { ChatStreamStalledError } from "../stall-watchdog";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { UIMessage } from "ai";
 import { AutoContinuationController } from "../auto-continuation-controller";
+import { bindTestLane } from "./test-lane";
 import {
   ChatTurns,
   type ChatTurnMessage,
@@ -86,6 +87,7 @@ describe("ChatTurns", () => {
     vi.useFakeTimers();
     host = new FakeHost();
     turns = new ChatTurns(host, { defaultDebounceMs: 750 });
+    bindTestLane(turns.queue);
   });
 
   afterEach(() => {

@@ -27,6 +27,15 @@ import {
 } from "../continuation-turn";
 import { CHAT_MESSAGE_TYPES } from "../protocol";
 import { ChatStreamStalledError } from "../stall-watchdog";
+import { bindTestLane } from "./test-lane";
+
+/** Turns whose lane runs on an in-memory inbox. */
+function bindTurns<T extends { queue: Parameters<typeof bindTestLane>[0] }>(
+  turns: T
+): T {
+  bindTestLane(turns.queue);
+  return turns;
+}
 
 const COALESCE = AutoContinuationController.COALESCE_MS;
 const RESUME_NONE = JSON.stringify({
@@ -225,7 +234,9 @@ describe("the continuation turn", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     host = new FakeHost();
-    turns = new ChatTurns<TestConnection>(host, { defaultDebounceMs: 750 });
+    turns = bindTurns(
+      new ChatTurns<TestConnection>(host, { defaultDebounceMs: 750 })
+    );
     host.turns = turns;
     connection = makeConnection("c1");
     host.transcript = [user("u1"), toolReply("a1", "output-available")];
@@ -347,9 +358,11 @@ describe("the continuation turn", () => {
   it("drops a continuation for a host that does not listen for drops", async () => {
     const quiet = new FakeHost();
     Object.assign(quiet, { continuationDropped: undefined });
-    const quietTurns = new ChatTurns<TestConnection>(quiet, {
-      defaultDebounceMs: 750
-    });
+    const quietTurns = bindTurns(
+      new ChatTurns<TestConnection>(quiet, {
+        defaultDebounceMs: 750
+      })
+    );
     quiet.turns = quietTurns;
     quiet.transcript = [user("u1"), toolReply("a1", "output-available")];
     await quietTurns.applyInteraction(
@@ -1217,7 +1230,9 @@ describe("what a continuation turn runs", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     host = new FakeHost();
-    turns = new ChatTurns<TestConnection>(host, { defaultDebounceMs: 750 });
+    turns = bindTurns(
+      new ChatTurns<TestConnection>(host, { defaultDebounceMs: 750 })
+    );
     host.turns = turns;
     connection = makeConnection("c1");
     host.transcript = [user("u1"), toolReply("a1", "output-available")];
@@ -1615,9 +1630,11 @@ describe("what a continuation turn runs", () => {
     it("drops a result still being applied at a stop for a host that does not listen for drops", async () => {
       const quiet = new FakeHost();
       Object.assign(quiet, { continuationDropped: undefined });
-      const quietTurns = new ChatTurns<TestConnection>(quiet, {
-        defaultDebounceMs: 750
-      });
+      const quietTurns = bindTurns(
+        new ChatTurns<TestConnection>(quiet, {
+          defaultDebounceMs: 750
+        })
+      );
       quiet.turns = quietTurns;
       let finishApply!: () => void;
       const applied = quietTurns.applyInteraction(

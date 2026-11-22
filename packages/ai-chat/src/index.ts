@@ -995,6 +995,8 @@ export class AIChatAgent<
     super(ctx, env);
     this.lifecycle.use(this.sessions);
     this.lifecycle.use(this.streams);
+    // The chat turn queue keeps its records in its own inbox lane.
+    this.lifecycle.use(this._turns.queue.inbox);
     this._registerChatTurnTaskDefinition();
     this._registerChatRecoveryTaskDefinition();
     this._withAgentSpan(

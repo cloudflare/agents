@@ -15,6 +15,15 @@ import {
   type ClientChatRequest
 } from "../chat-turns";
 import type { MessageConcurrency } from "../lifecycle";
+import { bindTestLane } from "./test-lane";
+
+/** Turns whose lane runs on an in-memory inbox. */
+function bindTurns<T extends { queue: Parameters<typeof bindTestLane>[0] }>(
+  turns: T
+): T {
+  bindTestLane(turns.queue);
+  return turns;
+}
 
 /** A host reduced to a transcript. */
 class Host implements ChatTurnsHost {
@@ -114,18 +123,20 @@ function isolate(
     onCancelledBeforeStart: () => ended.set(requestId, "aborted")
   });
 
-  const turns: ChatTurns = new ChatTurns(host, {
-    defaultDebounceMs: 0,
-    admissions: {
-      store,
-      recoveryPending: async () => options.recoveryPending?.() ?? false,
-      recoveryOwns: async (id) => (await options.recoveryOwns?.(id)) ?? false,
-      replayRequest: (record) => {
-        replayed.push(record);
-        return request(record.requestId);
+  const turns: ChatTurns = bindTurns(
+    new ChatTurns(host, {
+      defaultDebounceMs: 0,
+      admissions: {
+        store,
+        recoveryPending: async () => options.recoveryPending?.() ?? false,
+        recoveryOwns: async (id) => (await options.recoveryOwns?.(id)) ?? false,
+        replayRequest: (record) => {
+          replayed.push(record);
+          return request(record.requestId);
+        }
       }
-    }
-  });
+    })
+  );
 
   return {
     turns,
@@ -425,23 +436,25 @@ describe("durable admission", () => {
   });
 
   it("a request whose record cannot be written ends with an error", async () => {
-    const turns = new ChatTurns(new Host(), {
-      defaultDebounceMs: 0,
-      admissions: {
-        store: {
-          ...createChatAdmissionStore(() => ({
-            exec: () => ({ toArray: () => [] })
-          })),
-          add: () => {
-            throw new Error("SQLITE_TOOBIG");
+    const turns = bindTurns(
+      new ChatTurns(new Host(), {
+        defaultDebounceMs: 0,
+        admissions: {
+          store: {
+            ...createChatAdmissionStore(() => ({
+              exec: () => ({ toArray: () => [] })
+            })),
+            add: () => {
+              throw new Error("SQLITE_TOOBIG");
+            },
+            list: () => []
           },
-          list: () => []
-        },
-        recoveryPending: async () => false,
-        recoveryOwns: async () => false,
-        replayRequest: () => null
-      }
-    });
+          recoveryPending: async () => false,
+          recoveryOwns: async () => false,
+          replayRequest: () => null
+        }
+      })
+    );
     const errors: string[] = [];
     let persisted = false;
     await turns.runClientRequest({
