@@ -66,6 +66,13 @@ export class OutboxHarnessObject extends DurableObject<Cloudflare.Env> {
           });
         }
       },
+      // Takes the object down before any I/O of its own.
+      abort: {
+        deliver: () => {
+          this.ctx.abort("sink takes the object down");
+        },
+        retry: { maxAttempts: 2, attemptTimeoutMs: 200 }
+      },
       steps: {
         // Delivers each part in order; a failure resumes after the last
         // part it posted.

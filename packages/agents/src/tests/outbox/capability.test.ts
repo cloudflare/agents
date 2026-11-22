@@ -511,6 +511,31 @@ describe("Outbox capability", () => {
     });
   });
 
+  it("counts an attempt whose sink aborts the object before any I/O", async () => {
+    const { name, stub } = stubFor();
+    await runInDurableObject(stub, async (instance: OutboxHarnessObject) => {
+      await instance.outbox.send("abort", "x", { key: "k" });
+    });
+    // Each attempt resets the object; the counted attempts make it give up.
+    const deadline = Date.now() + 25_000;
+    let status: string | undefined;
+    while (Date.now() < deadline && status !== "failed") {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      try {
+        // A stub to an aborted object stays broken; take a fresh one.
+        const d = await runInDurableObject(
+          env.OutboxHarnessObject.getByName(name),
+          async (instance: OutboxHarnessObject) =>
+            instance.outbox.get("abort", "k")
+        );
+        status = d?.status;
+      } catch {
+        // The object was resetting.
+      }
+    }
+    expect(status).toBe("failed");
+  }, 30_000);
+
   it("cuts long errors, caps checkpoints, and versions each value of a key", async () => {
     const { stub } = stubFor();
     await runInDurableObject(stub, async (instance: OutboxHarnessObject) => {

@@ -592,6 +592,15 @@ export class Outbox<
       id,
       row.idempotency_key
     );
+    // Make the count durable before the sink runs. Without this, a sink that
+    // takes the isolate down before its first I/O rolls the write back with
+    // it, and the attempt is never counted (measured on a deployed Worker,
+    // see design/outbox.md).
+    await this.lifecycle.storage.sync();
+    if (this.#active.has(id)) {
+      // Another dispatch claimed it while this one waited.
+      return this.#wakeOutcome(id);
+    }
     const run = this.#attempt(claimed).finally(() => {
       if (this.#active.get(id) === run) this.#active.delete(id);
     });

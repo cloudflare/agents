@@ -60,7 +60,7 @@ Events go to the `agents:outbox` diagnostics channel: `outbox:send`, `outbox:del
 
 **No order between keys.** Each key backs off on its own. Ordering across keys would mean one failing value blocks every other value behind it, which is the wrong default for notifications. A sink that needs order can carry a sequence in the value, or use one key per target so newer values replace older ones.
 
-**The attempt counts before the sink runs.** A value that takes the isolate down every time would otherwise loop forever, because the failure is never recorded. Counting first means the crash loop runs out of attempts like any other failure. The cost is that an attempt cut short by an unrelated reset also counts.
+**The attempt counts before the sink runs.** A value that takes the isolate down every time would otherwise loop forever, because the failure is never recorded. Counting first means the crash loop runs out of attempts like any other failure. The cost is that an attempt cut short by an unrelated reset also counts. The count is written and then `storage.sync()` is awaited before the sink starts: on a deployed Worker, a sink that aborted the object before any I/O of its own rolled the uncommitted count back every time, so the delivery stayed at zero attempts and crash-looped the alarm.
 
 **Replacing a value starts it over.** The attempt count, the give-up window and the checkpoint reset, and the value gets a new idempotency key. A new value is new intent. An attempt already running finishes with the old value, and its acknowledgement cannot delete the new one. The new value waits for that attempt in this isolate, but only until the attempt's timeout: after it, the old attempt may still be running while the new value is delivered.
 
