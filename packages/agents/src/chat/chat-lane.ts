@@ -6,7 +6,7 @@
  * and the record of a turn waiting to run survives the isolate. The turn's
  * closure rides beside the record as its `local` value: it runs in the
  * async context of the call that enqueued it. After a reset a record has no
- * closure; {@link ChatLaneOptions.replay} decides what it does then.
+ * closure, and the turn ends `skipped`, as `TurnQueue`'s did.
  *
  * The surface is the one the hosts already use (`generation`,
  * `activeRequestId`, `enqueue(requestId, fn, { generation })`, `reset`,
@@ -18,12 +18,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import {
-  Inbox,
-  type InboxRequest,
-  type InboxRun,
-  type InboxSettlement
-} from "../inbox";
+import { Inbox, type InboxRequest, type InboxRun } from "../inbox";
 
 /** What a queued turn ended as, as `TurnQueue` reported it. */
 export type LaneTurnResult<T> =
@@ -34,8 +29,6 @@ export type LaneTurnResult<T> =
 export type ChatLanePayload = {
   /** The request id the turn answers. */
   requestId: string;
-  /** Data the host needs to run the turn again after a reset. */
-  replay?: unknown;
 };
 
 /** The closure and bookkeeping a turn keeps in memory beside its record. */
@@ -50,18 +43,6 @@ type LaneTurn = {
   started: boolean;
 };
 
-/** @internal */
-export interface ChatLaneOptions {
-  /**
-   * A turn found after a reset, with no closure: run it again from its
-   * record, or end it. Defaults to ending it `skipped`.
-   */
-  replay?(
-    payload: ChatLanePayload,
-    run: InboxRun
-  ): Promise<InboxSettlement | void>;
-}
-
 const LANE = "chat";
 
 /** @internal */
@@ -74,16 +55,11 @@ export class ChatLane {
   #active: { requestId: string; generation: number } | null = null;
   readonly #counts = new Map<number, number>();
   readonly #idle = new Set<() => void>();
-  readonly #replay: ChatLaneOptions["replay"];
 
-  constructor(options: ChatLaneOptions = {}) {
-    this.#replay = options.replay;
+  constructor() {
     this.inbox = new Inbox({
       name: "chat",
       retain: false,
-      // A turn's own recovery budgets decide when an interrupted turn gives
-      // up, not a count of runs.
-      maxAttempts: Number.MAX_SAFE_INTEGER,
       handlers: { turn: (payload, run) => this.#run(payload, run) },
       onStatus: (request) => this.#onStatus(request)
     });
@@ -120,7 +96,7 @@ export class ChatLane {
   enqueue<T>(
     requestId: string,
     fn: () => Promise<T>,
-    options: { generation?: number; replay?: unknown } = {}
+    options: { generation?: number } = {}
   ): Promise<LaneTurnResult<T>> {
     const generation = options.generation ?? this.#generation;
     this.#counts.set(generation, this.queuedCount(generation) + 1);
@@ -152,10 +128,7 @@ export class ChatLane {
       this.inbox
         .submit(
           "turn",
-          {
-            requestId,
-            ...(options.replay !== undefined && { replay: options.replay })
-          },
+          { requestId },
           { id, lane: LANE, start: "now", local: turn }
         )
         .catch(turn.reject);
@@ -177,12 +150,10 @@ export class ChatLane {
     }
   }
 
-  async #run(payload: ChatLanePayload, run: InboxRun): Promise<unknown> {
+  async #run(_payload: ChatLanePayload, run: InboxRun): Promise<unknown> {
     const turn = run.local as LaneTurn | undefined;
-    if (!turn) {
-      // Found after a reset: the closure is gone.
-      return (await this.#replay?.(payload, run)) ?? Inbox.skipped("reset");
-    }
+    // Found after a reset: the closure is gone.
+    if (!turn) return Inbox.skipped("reset");
     if (turn.generation !== this.#generation) {
       turn.resolve({ status: "stale" });
       return Inbox.skipped("stale");

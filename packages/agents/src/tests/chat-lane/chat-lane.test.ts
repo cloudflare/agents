@@ -91,28 +91,22 @@ describe("ChatLane", () => {
     });
   });
 
-  it("hands a turn left by a reset to replay, with its stored data", async () => {
+  it("ends the turns a reset left, and keeps no rows for them", async () => {
     const stub = harness();
     await runInDurableObject(stub, async (h: ChatLaneHarnessObject) => {
       const gate = h.gate();
-      void h.lane
-        .enqueue("a", () => gate.promise, { replay: { question: "q1" } })
-        .catch(() => {});
-      void h.lane
-        .enqueue("b", async () => {}, { replay: { question: "q2" } })
-        .catch(() => {});
+      void h.lane.enqueue("a", () => gate.promise).catch(() => {});
+      void h.lane.enqueue("b", async () => {}).catch(() => {});
       await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(h.lane.inbox.list()).toHaveLength(2);
     });
     await evictDurableObject(stub);
     await runInDurableObject(stub, async (h: ChatLaneHarnessObject) => {
       await h.lane.inbox.wait("missing");
-      for (let i = 0; i < 100 && h.replays.length < 2; i++) {
+      for (let i = 0; i < 100 && h.lane.inbox.list().length > 0; i++) {
         await new Promise((resolve) => setTimeout(resolve, 25));
       }
-      expect(h.replays).toEqual([
-        { requestId: "a", replay: { question: "q1" } },
-        { requestId: "b", replay: { question: "q2" } }
-      ]);
+      expect(h.lane.inbox.list()).toEqual([]);
     });
   });
 });
