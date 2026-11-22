@@ -176,9 +176,11 @@ export class Outbox<
 
   // ── Lifecycle hooks ──────────────────────────────────────────────────────
 
-  /** Create the table, purge old failures, and re-arm every pending wake. */
+  /** Purge old failures and re-arm every pending wake. */
   async onStart(): Promise<void> {
-    this.#ensureTable();
+    // The table is created by the first send, so an object that never
+    // sends carries none.
+    if (!this.#hasTable()) return;
     this.#write(
       `DELETE FROM cf_agents_outbox WHERE status = 'failed' AND updated_at < ?`,
       Date.now() - FAILED_RETENTION_MS
@@ -271,6 +273,7 @@ export class Outbox<
     }
     const key = options.key ?? nanoid();
     const now = Date.now();
+    this.#ensureTable();
     const status: OutboxDeliveryStatus = options.hold ? "held" : "pending";
     this.#write(
       `INSERT INTO cf_agents_outbox
@@ -786,8 +789,20 @@ export class Outbox<
     this.#tableEnsured = true;
   }
 
+  #hasTable(): boolean {
+    if (this.#tableEnsured) return true;
+    this.#tableEnsured =
+      this.lifecycle.storage.sql
+        .exec(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'cf_agents_outbox'"
+        )
+        .toArray().length > 0;
+    return this.#tableEnsured;
+  }
+
+  /** Reads see no rows until the first send creates the table. */
   #sql<T>(query: string, ...params: (string | number | null)[]): T[] {
-    this.#ensureTable();
+    if (!this.#hasTable()) return [];
     try {
       // SAFETY: T names the columns the query selects from this table.
       return [...this.lifecycle.storage.sql.exec(query, ...params)] as T[];
@@ -797,7 +812,7 @@ export class Outbox<
   }
 
   #write(query: string, ...params: (string | number | null)[]): number {
-    this.#ensureTable();
+    if (!this.#hasTable()) return 0;
     try {
       return this.lifecycle.storage.sql.exec(query, ...params).rowsWritten;
     } catch (cause) {

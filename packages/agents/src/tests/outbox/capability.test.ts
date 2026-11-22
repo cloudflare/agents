@@ -228,6 +228,22 @@ describe("Outbox capability", () => {
     });
   });
 
+  it("creates no table until the first send", async () => {
+    const { stub } = stubFor();
+    await runInDurableObject(stub, async (instance: OutboxHarnessObject) => {
+      const table = () =>
+        instance.sql(
+          "SELECT name FROM sqlite_master WHERE name = 'cf_agents_outbox'"
+        );
+      expect(await instance.outbox.list()).toEqual([]);
+      expect(await instance.outbox.get("record", "k")).toBeUndefined();
+      expect(await instance.outbox.cancel("record", "k")).toBe(false);
+      expect(table()).toEqual([]);
+      await instance.outbox.send("record", { value: "a" }, { hold: true });
+      expect(table()).toHaveLength(1);
+    });
+  });
+
   it("cancels, lists by sink and status, and validates sends", async () => {
     const { stub } = stubFor();
     await runInDurableObject(stub, async (instance: OutboxHarnessObject) => {
