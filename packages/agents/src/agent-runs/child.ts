@@ -2,9 +2,10 @@
  * How a parent reaches the child of an agent-tool run.
  *
  * The child is an ordinary named Durable Object: the namespace of its
- * exported class, under a name the parent mints when it records the run.
- * The name is random, so the child is reachable only through a parent
- * that holds the run row (see {@link forwardAgentToolRunRequest}).
+ * exported class, under a name the parent mints when it records the run
+ * (or the caller's `childName`). Clients drill in through the parent (see
+ * {@link forwardAgentToolRunRequest}); the child class is a declared
+ * Durable Object, so the Worker's routing can reach it by name too.
  */
 
 import { getAgentByName } from "../agent-routing";
