@@ -582,6 +582,7 @@ import {
 import {
   legacyWorkflowNotification,
   migrateWorkflowNotificationTable,
+  sendWorkflowNotification,
   WORKFLOW_NOTIFICATION_SINK,
   workflowNotificationKey,
   workflowNotificationSink,
@@ -6084,24 +6085,22 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       ...(status === "completed" && { output }),
       ...(error && { error })
     };
-    void this._outbox
-      .send(
-        WORKFLOW_NOTIFICATION_SINK,
-        {
-          workflowName: workflowPrompt.workflow.name,
-          workflowId: workflowPrompt.workflow.id,
-          event: { type: workflowPrompt.workflow.eventType, payload }
-        } satisfies WorkflowNotification,
-        {
-          key: workflowNotificationKey(
-            submission.submissionId,
-            workflowPrompt.workflow.eventType
-          )
-        }
+    void sendWorkflowNotification(
+      (notification, key) =>
+        this._outbox.send(WORKFLOW_NOTIFICATION_SINK, notification, { key }),
+      {
+        workflowName: workflowPrompt.workflow.name,
+        workflowId: workflowPrompt.workflow.id,
+        event: { type: workflowPrompt.workflow.eventType, payload }
+      },
+      workflowNotificationKey(
+        submission.submissionId,
+        workflowPrompt.workflow.eventType
       )
-      .catch((error) => {
-        console.error("[Think] Failed to queue workflow notification", error);
-      });
+    ).catch((error: unknown) => {
+      console.error("[Think] Failed to queue workflow notification", error);
+      void Promise.resolve(this.onError(error)).catch(() => {});
+    });
     return true;
   }
 

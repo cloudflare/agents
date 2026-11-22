@@ -6,6 +6,7 @@
  */
 export {
   Outbox,
+  OutboxPayloadTooLargeError,
   MAX_OUTBOX_CHECKPOINT_BYTES,
   MAX_OUTBOX_PAYLOAD_BYTES
 } from "./outbox";

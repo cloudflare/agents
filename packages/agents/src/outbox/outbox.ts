@@ -117,6 +117,14 @@ function parseJson(text: string | null): unknown {
   return text === null ? undefined : JSON.parse(text);
 }
 
+/**
+ * A value too large for one delivery row.
+ * @internal
+ */
+export class OutboxPayloadTooLargeError extends Error {
+  override readonly name = "OutboxPayloadTooLargeError";
+}
+
 function errorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return message.length > MAX_ERROR_CHARS
@@ -1034,7 +1042,7 @@ export class Outbox<
       json !== null &&
       encoder.encode(json).byteLength > MAX_OUTBOX_PAYLOAD_BYTES
     ) {
-      throw new Error(
+      throw new OutboxPayloadTooLargeError(
         `Outbox payload for "${sink}" is over ${MAX_OUTBOX_PAYLOAD_BYTES} bytes`
       );
     }

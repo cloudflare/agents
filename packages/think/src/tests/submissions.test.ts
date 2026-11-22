@@ -1376,6 +1376,48 @@ describe("Think durable submissions", () => {
     ]);
   });
 
+  it("tells the workflow a terminal event too large to deliver failed", async () => {
+    const agent = await freshAgent();
+    await agent.insertSubmissionForTest({
+      submissionId: "sub-workflow-large",
+      metadata: {
+        [workflowPromptMetadataKey]: {
+          workflow: {
+            name: "TEST_WORKFLOW",
+            id: "workflow-large",
+            stepName: "draft-report",
+            eventType: "think-prompt-large"
+          },
+          output: { schema: { type: "object" } },
+          fingerprint: "fingerprint"
+        }
+      }
+    });
+
+    await agent.cancelSubmissionForTest(
+      "sub-workflow-large",
+      "x".repeat(1_100_000)
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await agent.drainWorkflowNotificationsForTest();
+
+    await expect(agent.getWorkflowEventsForTest()).resolves.toEqual([
+      {
+        workflowName: "TEST_WORKFLOW",
+        workflowId: "workflow-large",
+        event: {
+          type: "think-prompt-large",
+          payload: {
+            submissionId: "sub-workflow-large",
+            status: "error",
+            error:
+              "The submission's output is too large to deliver to the workflow (over 1 MB of JSON)."
+          }
+        }
+      }
+    ]);
+  });
+
   it("captures workflow structured output in terminal notifications", async () => {
     const agent = await freshAgent();
     // The structured workflow turn now terminates by calling the synthetic

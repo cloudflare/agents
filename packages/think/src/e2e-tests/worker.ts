@@ -2456,11 +2456,19 @@ export class ThinkWorkflowRecoveryE2EAgent extends Think<Env> {
   async getNotificationStats(): Promise<{ total: number; delivered: number }> {
     const delivered =
       (await this.ctx.storage.get<number>("e2e:delivered_notifications")) ?? 0;
-    const pending =
+    const queued =
       this.sql<{ c: number }>`
         SELECT COUNT(*) as c FROM cf_agents_jobs
         WHERE capability = 'queue' AND fn = '_cfDeliverWorkflowNotification'
       `[0]?.c ?? 0;
+    const pending =
+      queued +
+      (
+        await this._outbox.list({
+          sink: "__cf_think_workflow_notification",
+          status: ["pending", "held"]
+        })
+      ).length;
     return { total: delivered + pending, delivered };
   }
 

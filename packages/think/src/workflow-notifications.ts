@@ -1,4 +1,4 @@
-import type { OutboxSink } from "agents/chat";
+import { OutboxPayloadTooLargeError, type OutboxSink } from "agents/chat";
 
 /**
  * The workflow event a terminal submission owes, delivered through the
@@ -46,6 +46,42 @@ export function workflowNotificationSink(
       );
     }
   };
+}
+
+/**
+ * Store a notification for delivery. One whose output is too large for
+ * the Outbox is replaced by an error notification under the same key, so
+ * the workflow's `step.prompt()` fails instead of waiting for an event that
+ * never comes.
+ */
+export async function sendWorkflowNotification(
+  send: (notification: WorkflowNotification, key: string) => Promise<unknown>,
+  notification: WorkflowNotification,
+  key: string
+): Promise<void> {
+  try {
+    await send(notification, key);
+  } catch (error) {
+    if (!(error instanceof OutboxPayloadTooLargeError)) throw error;
+    const { submissionId } = (notification.event.payload ?? {}) as {
+      submissionId?: string;
+    };
+    await send(
+      {
+        ...notification,
+        event: {
+          type: notification.event.type,
+          payload: {
+            submissionId,
+            status: "error",
+            error:
+              "The submission's output is too large to deliver to the workflow (over 1 MB of JSON)."
+          }
+        }
+      },
+      key
+    );
+  }
 }
 
 /**
@@ -105,14 +141,23 @@ export async function migrateWorkflowNotificationTable(
     } catch {
       continue;
     }
-    await send(
-      {
-        workflowName: row.workflow_name,
-        workflowId: row.workflow_id,
-        event: { type: row.event_type, payload }
-      },
-      workflowNotificationKey(row.submission_id, row.event_type)
-    );
+    try {
+      await sendWorkflowNotification(
+        send,
+        {
+          workflowName: row.workflow_name,
+          workflowId: row.workflow_id,
+          event: { type: row.event_type, payload }
+        },
+        workflowNotificationKey(row.submission_id, row.event_type)
+      );
+    } catch (error) {
+      // One bad row does not hold back the rest on every start.
+      console.error(
+        `[Think] could not migrate the workflow notification for submission ${row.submission_id}`,
+        error
+      );
+    }
   }
   storage.sql.exec("DROP TABLE cf_think_workflow_notifications");
 }
