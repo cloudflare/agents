@@ -962,6 +962,9 @@ const recoveredTurnAcceptanceContext = new AsyncLocalStorage<{
 // A `runTurn` continuation dispatched through an overridden `continueLastTurn`:
 // the base method, when the override delegates to it, records the full result
 // (with structured output) for that `runTurn` call alone.
+/** Set while `onChatResponse` runs, to the agent running it. */
+const responseHookContext = new AsyncLocalStorage<unknown>();
+
 const continuationOutputContext = new AsyncLocalStorage<{
   agent: unknown;
   taken: boolean;
@@ -2462,7 +2465,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   // Shared auto-continuation barrier (#1649 / #1650): owns the coalesce timer
   // and the double-fire guard.
   private readonly _autoContinuation = this._turns.autoContinuation;
-  private _insideResponseHook = false;
   private _insideInferenceLoop = false;
   private get _pendingInteractionPromise(): Promise<boolean> | null {
     return this._turns.pendingInteraction;
@@ -12610,18 +12612,18 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       result.requestId,
       result.error ?? "The assistant was interrupted."
     );
-    if (this._insideResponseHook) return;
-    this._insideResponseHook = true;
+    // A hook a hook started (a turn it ran) is skipped. The guard follows
+    // the call chain, not the instance: an owed hook the Outbox fires beside
+    // a live turn's hook runs too.
+    if (responseHookContext.getStore() === this) return;
     try {
       // The hook is the app's. Nothing it starts belongs to a recovery
       // attempt whose turn this was.
       await this._chatRecoveryEngine().outsideAttempt(() =>
-        this.onChatResponse(result)
+        responseHookContext.run(this, () => this.onChatResponse(result))
       );
     } catch (err) {
       console.error("[Think] onChatResponse error:", err);
-    } finally {
-      this._insideResponseHook = false;
     }
   }
 
