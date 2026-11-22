@@ -66,9 +66,9 @@ function waitForClose(
 }
 
 /**
- * Wait for the root's mirrored fiber wakes to reach `expected`. The facet
- * routes its wake to the root around the fiber body, after the call that
- * started or released the fiber has already returned.
+ * Wait for the root's mirrored fiber wakes to reach `expected`. Arming
+ * happens before the fiber body starts, but removing the wake when a fiber
+ * settles is routed to the root after the call that released it returns.
  */
 async function expectFiberWakeOwners(
   agent: { fiberWakeOwners(): Promise<string[]> },
