@@ -27,13 +27,8 @@ export type {
   SubAgentPathMatch
 } from "./sub-routing";
 import {
-  isClosedWebSocketSendError,
-  registerFacetStreamingDelivery,
-  sendFacetRpcResponseIfOpen,
-  sendFacetStreamingResponse,
   DynamicAgentConnectionBridge as SubAgentConnectionBridge,
-  dynamicAgentRpcReplyContext as subAgentRpcReplyContext,
-  waitForFacetStreamingResponseDeliveries
+  dynamicAgentRpcReplyContext as subAgentRpcReplyContext
 } from "./dynamic-agents/bridges";
 import {
   CF_SUB_AGENT_OUTER_URL_KEY,
@@ -271,16 +266,12 @@ export type {
   WSMessage
 } from "./lifecycle/durable-object-lifecycle";
 export { MessageType } from "./types";
-
-/**
- * RPC request message from client
- */
-export type RPCRequest = {
-  type: "rpc";
-  id: string;
-  method: string;
-  args: unknown[];
-};
+import { dispatchCallableRpc, isRPCRequest } from "./callable-rpc";
+export {
+  StreamingResponse,
+  type RPCRequest,
+  type RPCResponse
+} from "./callable-rpc";
 
 /**
  * State update message from client
@@ -289,60 +280,6 @@ export type StateUpdateMessage = {
   type: MessageType.CF_AGENT_STATE;
   state: unknown;
 };
-
-/**
- * RPC response message to client
- */
-export type RPCResponse = {
-  type: MessageType.RPC;
-  id: string;
-} & (
-  | {
-      success: true;
-      result: unknown;
-      done?: false;
-    }
-  | {
-      success: true;
-      result: unknown;
-      done: true;
-    }
-  | {
-      success: false;
-      error: string;
-    }
-);
-
-function sendRpcResponseIfOpen(
-  connection: Connection,
-  response: RPCResponse
-): boolean {
-  try {
-    connection.send(JSON.stringify(response));
-    return true;
-  } catch (error) {
-    if (isClosedWebSocketSendError(error)) return false;
-    throw error;
-  }
-}
-
-/**
- * Type guard for RPC request messages
- */
-function isRPCRequest(msg: unknown): msg is RPCRequest {
-  return (
-    typeof msg === "object" &&
-    msg !== null &&
-    "type" in msg &&
-    msg.type === MessageType.RPC &&
-    "id" in msg &&
-    typeof msg.id === "string" &&
-    "method" in msg &&
-    typeof msg.method === "string" &&
-    "args" in msg &&
-    Array.isArray((msg as RPCRequest).args)
-  );
-}
 
 /**
  * Type guard for state update messages
@@ -354,7 +291,6 @@ export {
 } from "./callable-decorator";
 import {
   decoratedMethods,
-  getCallableMetadata,
   isCallableMethod,
   type CallableMetadata
 } from "./callable-decorator";
@@ -1469,88 +1405,10 @@ export class Agent<
           }
 
           if (isRPCRequest(parsed)) {
-            try {
-              const { id, method, args } = parsed;
-
-              // Check if method exists and is callable
-              const methodFn = this[method as keyof this];
-              if (typeof methodFn !== "function") {
-                throw new Error(`Method ${method} does not exist`);
-              }
-
-              if (!this._isCallable(method)) {
-                throw new Error(`Method ${method} is not callable`);
-              }
-
-              const metadata = getCallableMetadata(methodFn as Function);
-
-              // For streaming methods, pass a StreamingResponse object
-              if (metadata?.streaming) {
-                const stream = new StreamingResponse(connection, id);
-                if (replyBridge) {
-                  registerFacetStreamingDelivery(stream, replyBridge);
-                }
-
-                this._emit("rpc", { method, streaming: true });
-
-                try {
-                  await methodFn.apply(this, [stream, ...args]);
-                } catch (err) {
-                  console.error(`Error in streaming method "${method}":`, err);
-                  this._emit("rpc:error", {
-                    method,
-                    error: err instanceof Error ? err.message : String(err)
-                  });
-                  // Auto-close stream with error if method throws before closing
-                  if (!stream.isClosed) {
-                    stream.error(
-                      err instanceof Error ? err.message : String(err)
-                    );
-                  }
-                }
-                await waitForFacetStreamingResponseDeliveries(stream);
-                return;
-              }
-
-              // For regular methods, execute and send response
-              const result = await methodFn.apply(this, args);
-
-              this._emit("rpc", { method, streaming: metadata?.streaming });
-
-              const response: RPCResponse = {
-                done: true,
-                id,
-                result,
-                success: true,
-                type: MessageType.RPC
-              };
-              if (replyBridge) {
-                await sendFacetRpcResponseIfOpen(replyBridge, response)
-                  .completion;
-              } else {
-                sendRpcResponseIfOpen(connection, response);
-              }
-            } catch (e) {
-              const response: RPCResponse = {
-                error:
-                  e instanceof Error ? e.message : "Unknown error occurred",
-                id: parsed.id,
-                success: false,
-                type: MessageType.RPC
-              };
-              if (replyBridge) {
-                await sendFacetRpcResponseIfOpen(replyBridge, response)
-                  .completion;
-              } else {
-                sendRpcResponseIfOpen(connection, response);
-              }
-
-              console.error("RPC error:", e);
-              this._emit("rpc:error", {
-                method: parsed.method,
-                error: e instanceof Error ? e.message : String(e)
-              });
-            }
+            await dispatchCallableRpc(this, connection, parsed, {
+              replyBridge,
+              emit: (type, payload) => this._emit(type, payload)
+            });
             return;
           }
 
@@ -7234,92 +7092,4 @@ export async function routeAgentEmail<
     _secureRouted: routingInfo._secureRouted,
     _bridge: bridge
   });
-}
-
-/**
- * A wrapper for streaming responses in callable methods
- */
-export class StreamingResponse {
-  private _connection: Connection;
-  private _id: string;
-  private _closed = false;
-
-  constructor(connection: Connection, id: string) {
-    this._connection = connection;
-    this._id = id;
-  }
-
-  private _send(response: RPCResponse): boolean {
-    const facetSent = sendFacetStreamingResponse(this, response);
-    if (facetSent !== null) return facetSent;
-    return sendRpcResponseIfOpen(this._connection, response);
-  }
-
-  /**
-   * Whether the stream has been closed (via end() or error())
-   */
-  get isClosed(): boolean {
-    return this._closed;
-  }
-
-  /**
-   * Send a chunk of data to the client
-   * @param chunk The data to send
-   * @returns false if stream is already closed (no-op), true if sent
-   */
-  send(chunk: unknown): boolean {
-    if (this._closed) {
-      console.warn(
-        "StreamingResponse.send() called after stream was closed - data not sent"
-      );
-      return false;
-    }
-    const response: RPCResponse = {
-      done: false,
-      id: this._id,
-      result: chunk,
-      success: true,
-      type: MessageType.RPC
-    };
-    return this._send(response);
-  }
-
-  /**
-   * End the stream and send the final chunk (if any)
-   * @param finalChunk Optional final chunk of data to send
-   * @returns false if stream is already closed (no-op), true if sent
-   */
-  end(finalChunk?: unknown): boolean {
-    if (this._closed) {
-      return false;
-    }
-    this._closed = true;
-    const response: RPCResponse = {
-      done: true,
-      id: this._id,
-      result: finalChunk,
-      success: true,
-      type: MessageType.RPC
-    };
-    return this._send(response);
-  }
-
-  /**
-   * Send an error to the client and close the stream
-   * @param message Error message to send
-   * @returns false if stream is already closed (no-op), true if sent
-   */
-  error(message: string): boolean {
-    if (this._closed) {
-      return false;
-    }
-    this._closed = true;
-    const response: RPCResponse = {
-      error: message,
-      id: this._id,
-      success: false,
-      type: MessageType.RPC
-    };
-    return this._send(response);
-  }
 }

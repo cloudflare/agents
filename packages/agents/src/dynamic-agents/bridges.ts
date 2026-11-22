@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { RpcTarget } from "cloudflare:workers";
 import type { Connection } from "../lifecycle/durable-object-lifecycle";
-import type { RPCResponse, StreamingResponse } from "../index";
+import type { RPCResponse, StreamingResponse } from "../callable-rpc";
 import type {
   RootFacetRpcSurface,
   DynamicAgentConnectionBridgeLike
