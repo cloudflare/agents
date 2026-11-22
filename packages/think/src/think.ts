@@ -384,7 +384,6 @@ function messageText(message: UIMessage | undefined): string {
     .join("");
 }
 
-
 /** A live stream interruption (stall or transient error) to route to recovery. */
 type StreamInterruptionRoute = {
   requestId: string;
