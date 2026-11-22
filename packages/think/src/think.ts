@@ -1124,7 +1124,6 @@ type ActionReplyEvent = {
   payload: { action?: string; attachmentType: string };
 };
 
-
 export type SubmitMessagesOptions = {
   submissionId?: string;
   idempotencyKey?: string;
