@@ -2,7 +2,7 @@
  * The chat-turn Task definition, shared by `AIChatAgent` and `Think`.
  *
  * Every chat turn runs as one journaled step on the `tasks` capability. A
- * live turn executes its closure under the fiber stash context (so
+ * live turn executes its closure under the fiber stash context (`withFiberStash`, so
  * `this.stash()` keeps persisting the recovery snapshot into host storage);
  * a replay whose closure is gone — the producing isolate died — hands the
  * turn's stored snapshot to the host's chat recovery. Hosts supply their
@@ -10,6 +10,7 @@
  * snapshot key vocabulary, and the settle plumbing live here once.
  */
 
+import { withFiberStash } from "../fibers/fibers";
 import type { TaskStep } from "../tasks";
 
 /** One live turn closure, registered under its nonce while this isolate runs it. */
@@ -34,15 +35,6 @@ export type ChatTurnTaskHooks = {
   getRunCreatedAt(runId: string): Promise<number | null>;
   getLiveClosure(nonce: string): ChatTurnClosureEntry | undefined;
   keepAliveWhile<T>(fn: () => Promise<T>): Promise<T>;
-  /** The host's fiber stash context, so `this.stash()` keeps working. */
-  withStash<T>(
-    context: {
-      id: string;
-      signal: AbortSignal;
-      stash: (data: unknown) => void;
-    },
-    fn: () => Promise<T>
-  ): Promise<T>;
   /**
    * Recover the turn of a run replayed after its isolate died
    * (`ChatRecoveryEngine.recoverInterruptedTurn` behind it).
@@ -110,7 +102,7 @@ export function createChatTurnTaskDefinition(
         await hooks.storage.put(snapshotKey, entry.initial);
         try {
           const value = await hooks.keepAliveWhile(() =>
-            hooks.withStash(
+            withFiberStash(
               {
                 id: nonce,
                 signal,

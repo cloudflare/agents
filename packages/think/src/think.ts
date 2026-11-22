@@ -3130,7 +3130,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           (await this.tasks.get(runId))?.createdAt ?? null,
         getLiveClosure: (nonce) => this._liveChatTurnClosures.get(nonce),
         keepAliveWhile: (fn) => this.keepAliveWhile(fn),
-        withStash: (context, fn) => this._withFiberStash(context, fn),
         recover: (turn) => this._recoverChatTurn(turn)
       })
     );
