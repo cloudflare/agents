@@ -423,10 +423,42 @@ describe("Scheduler declared schedules", () => {
     expect(
       keys.some((key) =>
         key.startsWith(
-          `schedule:SchedulerHarnessObject:${name}:library:report:`
+          `schedule-group:library:SchedulerHarnessObject:${name}:report:`
         )
       )
     ).toBe(true);
+  });
+
+  it("keeps a group's keys apart from an object whose name holds a colon", async () => {
+    const keys: string[] = [];
+    const run = (context: DeclaredScheduleContext) => {
+      keys.push(context.idempotencyKey);
+    };
+    const base = crypto.randomUUID();
+    const occurrences: number[] = [];
+    for (const [name, group] of [
+      [`${base}:library`, undefined],
+      [base, "library"]
+    ] as const) {
+      const stub = env.SchedulerHarnessObject.getByName(name);
+      occurrences.push(
+        await runInDurableObject(
+          stub,
+          async (instance: SchedulerHarnessObject, state) => {
+            await declareSchedules(
+              instance.scheduler,
+              { report: { schedule: "every day at 09:00 in UTC", run } },
+              group ? { group } : {}
+            );
+            return makeDue(state.storage, group ? `${group}:report` : "report");
+          }
+        )
+      );
+      await runDurableObjectAlarm(stub);
+    }
+    expect(occurrences[0]).toBe(occurrences[1]);
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).not.toBe(keys[1]);
   });
 
   it("uses a class-qualified default idempotency key and accepts any valid name", async () => {

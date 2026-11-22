@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { declareSchedules } from "../../internal";
+import { declareSchedules, listDeclaredSchedules } from "../../internal";
 import type { SchedulerHarnessObject } from "../capabilities/scheduler";
 
 describe("declared schedules and startup", () => {
@@ -30,6 +30,24 @@ describe("declared schedules and startup", () => {
       ]);
       expect(outcome).toBe("started");
       await early;
+    });
+  });
+
+  // The constructor's call waits for startup and so reaches the chain after
+  // onStart's later call. It must not undo it.
+  it("keeps onStart's declaration over an earlier one made before startup", async () => {
+    const stub = env.SchedulerHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SchedulerHarnessObject) => {
+      (instance as unknown as { onStart: () => Promise<void> }).onStart =
+        async () => {
+          await declareSchedules(instance.scheduler, {});
+        };
+      const early = declareSchedules(instance.scheduler, {
+        digest: { schedule: "every 1 hour", run() {} }
+      });
+      await instance.lifecycle.start();
+      await early;
+      expect(listDeclaredSchedules(instance.scheduler)).toEqual([]);
     });
   });
 });

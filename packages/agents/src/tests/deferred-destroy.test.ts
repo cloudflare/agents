@@ -100,21 +100,26 @@ describe("deferred destroy (#1625)", () => {
     expect(await fresh.getSchedules()).toHaveLength(0);
   });
 
-  it("_syncHostJobs keeps the destroy alarm armed instead of deleting it as no-work", async () => {
+  it("a start re-arms the destroy alarm for a marker left behind", async () => {
     const stub = await getAgentByName(
       env.TestScheduleAgent,
       crypto.randomUUID()
     );
-    // No schedules, no keepAlive leases — without the pending-destroy guard,
-    // _syncHostJobs's "no work pending" branch would delete the alarm
-    // armed by _cf_scheduleDestroy and the teardown would never land.
+    // No schedules, no keepAlive leases: only the marker keeps the wake, so
+    // without it the teardown would never land.
     await runInDurableObject(stub, async (instance, ctx) => {
       await ctx.storage.put(DESTROY_PENDING_KEY, true);
       await ctx.storage.setAlarm(Date.now() + 86_400_000);
+      const before = Date.now();
       await (
-        instance as unknown as { _syncHostJobs(): Promise<void> }
-      )._syncHostJobs();
-      expect(await ctx.storage.getAlarm()).not.toBeNull();
+        instance as unknown as {
+          _deferredDestroy: { onStart(): Promise<void> };
+        }
+      )._deferredDestroy.onStart();
+      // Pulled in from tomorrow to now: the marker's wake, not a leftover.
+      const alarm = await ctx.storage.getAlarm();
+      expect(alarm).not.toBeNull();
+      expect(alarm! - before).toBeLessThan(5_000);
       // Leave no pending destroy behind for this DO (the test asserts the
       // guard only): clear the marker and alarm.
       await ctx.storage.delete(DESTROY_PENDING_KEY);
@@ -122,37 +127,59 @@ describe("deferred destroy (#1625)", () => {
     });
   });
 
-  it("_syncHostJobs keeps the destroy alarm immediate even while a keepAlive lease is held", async () => {
+  it("a pending destroy owns the alarm while a keepAlive lease is held", async () => {
     const stub = await getAgentByName(
       env.TestScheduleAgent,
       crypto.randomUUID()
     );
-    // With an active keepAlive ref (and no pending destroy), _syncHostJobs
-    // would push the alarm out to now + keepAliveIntervalMs. The pending-destroy
-    // guard must win so teardown still lands immediately instead of waiting a
-    // full heartbeat — otherwise a keepAlive-holding agent delays its own
-    // condemnation by up to keepAliveIntervalMs each reschedule.
+    // The destroy wake is exclusive: while it is pending, ordinary jobs (a
+    // held keep-alive's heartbeat) do not set the alarm.
     await runInDurableObject(stub, async (instance, ctx) => {
       const agent = instance as unknown as {
         _keepAlive: { acquire(): Promise<() => void> };
-        _syncHostJobs(): Promise<void>;
+        _deferredDestroy: { onStart(): Promise<void> };
       };
       const release = await agent._keepAlive.acquire();
-      await ctx.storage.put(DESTROY_PENDING_KEY, true);
-      await ctx.storage.setAlarm(Date.now() + 86_400_000);
-
-      const before = Date.now();
-      await agent._syncHostJobs();
-      const alarm = await ctx.storage.getAlarm();
-      expect(alarm).not.toBeNull();
-      // Immediate (within a small window of `before`), NOT pushed out to the
-      // keepAlive horizon (default 30s).
-      expect(alarm! - before).toBeLessThan(5_000);
+      // The teardown is due after the heartbeat (~30s): only exclusivity
+      // keeps the earlier heartbeat from taking the alarm.
+      const destroyAt = Date.now() + 120_000;
+      await ctx.storage.put(DESTROY_PENDING_KEY, destroyAt);
+      await agent._deferredDestroy.onStart();
+      expect(await ctx.storage.getAlarm()).toBe(destroyAt);
 
       // Leave nothing pending behind for this DO.
       release();
       await ctx.storage.delete(DESTROY_PENDING_KEY);
       await ctx.storage.deleteAlarm();
+    });
+  });
+
+  it("host jobs left by earlier releases complete when they fire", async () => {
+    const stub = await getAgentByName(
+      env.TestScheduleAgent,
+      crypto.randomUUID()
+    );
+    await runInDurableObject(stub, async (_instance, ctx) => {
+      for (const [id, fn] of [
+        ["cf:keep-alive", "keepAlive"],
+        ["cf:housekeeping", "housekeeping"],
+        ["cf:destroy", "destroy"]
+      ]) {
+        ctx.storage.sql.exec(
+          "INSERT INTO cf_agents_jobs (id, capability, fn, time) VALUES (?, 'host', ?, ?)",
+          id,
+          fn,
+          Date.now() - 1_000
+        );
+      }
+      await ctx.storage.setAlarm(Date.now() + 10);
+    });
+    await runDurableObjectAlarm(stub);
+    await runInDurableObject(stub, async (_instance, ctx) => {
+      const left = ctx.storage.sql
+        .exec("SELECT id FROM cf_agents_jobs WHERE capability = 'host'")
+        .toArray();
+      expect(left).toEqual([]);
     });
   });
 

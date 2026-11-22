@@ -10,7 +10,7 @@ Code: `packages/agents/src/schedules/declared.ts` (reconcile, run, migration) an
 
 Each declared name is one job in the Lifecycle job queue with id `declared:<name>` (`declared:<group>:<name>` outside the application's group), fn `declared`, `singleflight: true`. The payload holds the parsed timing and the occurrence it runs: `{ name, group?, schedule, retry?, scheduledFor }`. The due time is normally `scheduledFor`, but a late alarm or the memory-limit breaker's backoff moves only the due time, so the occurrence's keys never change under a replay. There is no table of its own and no second record to keep in step.
 
-`declare(source, options)` runs after any earlier call has finished (one promise chain per Scheduler), so an older function source that resolves late cannot undo a newer declaration. Then:
+`declare(source, options)` runs after any earlier call has finished (one promise chain per Scheduler), so an older function source that resolves late cannot undo a newer declaration. Calls are numbered when made, and a group keeps its newest accepted call: a call from a constructor, which waits for startup, reaches the chain after the `onStart()` call made later, and is then dropped instead of undoing it. Then:
 
 1. Read and parse every entry. A bad name, expression or timezone rejects the call before any write, and the group's last accepted declaration stays active. With none, the rejected one is kept so each occurrence reads it again.
 2. For each name, keep a job whose timing and retry are unchanged (re-pushing it in place when the Scheduler's resolved retry defaults changed). Otherwise push the job (same id, so it replaces) at the next occurrence from now.
@@ -22,7 +22,7 @@ When a job is due, the Scheduler reads the group's declaration again (the `run` 
 ## Guarantees
 
 - Durable: one job per name. In memory: the declaration and `run`.
-- At least once per occurrence. The context carries `occurrenceKey` and `idempotencyKey` for the caller's own dedupe.
+- At least once per occurrence. The context carries `occurrenceKey` and `idempotencyKey` for the caller's own dedupe. The default key prefix is `schedule:<class>:<object>`, or `schedule-group:<group>:<class>:<object>` for a named group, so an object name containing colons cannot make one equal the other.
 - One run per name at a time, up to the hung timeout.
 - Root only. On a routed Lifecycle (a facet) `declareSchedules()` arms nothing and warns once.
 - Groups keep a library's names (Think uses `"think"`) apart from the application's on one Scheduler.
