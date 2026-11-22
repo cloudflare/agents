@@ -427,6 +427,17 @@ describe("runFiber", () => {
       expect((await agent.getRunningFiberCount()) as unknown as number).toBe(0);
     });
 
+    it("runs a fiber named like a released AIChatAgent's chat turn", async () => {
+      // @cloudflare/ai-chat 0.7.x calls the public runFiber() with this name.
+      const agent = await getAgentByName(
+        env.TestRunFiberAgent,
+        "legacy-chat-turn-name"
+      );
+      await expect(
+        agent.runNamedFiber("__cf_internal_chat_turn:legacy")
+      ).resolves.toBe("ran");
+    });
+
     it("leaves framework fibers to their own recovery budget after crashes", async () => {
       const agent = await getAgentByName(
         env.TestRunFiberAgent,
