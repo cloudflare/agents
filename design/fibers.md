@@ -51,9 +51,11 @@ is committed, so the next scan does not run its hook again. A user's plain row
 gets an attempt in `recovery_crashes`, taken back when the hook returns or
 throws. After three attempts that never returned, the row is dropped
 without the hook (`fiber:recovery:skipped`, reason `recovery_crashed`).
-Framework fibers (`__cf_internal*`, the legacy chat turns) are not counted:
-the chat recovery engine keeps its own durable interruption budget and ends
-the turn with a terminal outcome.
+Only a chat host's legacy turn fibers are not counted: names
+`${CHAT_FIBER_NAME}:<id>`, where the host class sets `static CHAT_FIBER_NAME`
+(AIChatAgent, Think). Their chat recovery engine keeps its own durable
+interruption budget and ends the turn with a terminal outcome. Any other
+name, `__cf_internal*` included, is counted.
 
 ### Recovery
 

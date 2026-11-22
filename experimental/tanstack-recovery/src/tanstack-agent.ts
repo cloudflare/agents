@@ -151,7 +151,10 @@ function replyFor(userText: string): string {
 }
 
 export class TanStackAgent extends Agent<Env> {
-  static readonly FIBER_PREFIX = "__cf_internal_tanstack_turn:";
+  // Agent exempts `${CHAT_FIBER_NAME}:<id>` fibers from its recovery crash
+  // budget: the chat engine keeps its own.
+  static readonly CHAT_FIBER_NAME = "__cf_internal_tanstack_turn";
+  static readonly FIBER_PREFIX = `${TanStackAgent.CHAT_FIBER_NAME}:`;
   static readonly SNAPSHOT_KEY = "__cfTanStackFiberSnapshot";
 
   // Recovery is keyed off the live config; assigned as a class field (NOT in
