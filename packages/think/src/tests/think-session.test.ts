@@ -3273,7 +3273,7 @@ describe("Think — body persistence", () => {
 // ── chatRecovery ────────────────────────────────────────
 
 describe("Think — chatRecovery", () => {
-  it("hands off facet recovery after durable fiber creation and before turn completion", async () => {
+  it("hands off facet recovery after the durable turn run exists and before turn completion", async () => {
     const agent = await freshRecoveryAgent(crypto.randomUUID());
     await expect(agent.facetRecoveryAcceptanceForTest()).resolves.toEqual({
       acceptedBeforeCompletion: true,

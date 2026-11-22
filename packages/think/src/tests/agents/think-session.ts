@@ -12873,13 +12873,13 @@ export class ThinkRecoveryTestAgent extends Think {
     }
   }
 
-  /** Exercise the facet legacy-fiber branch without requiring facet routing. */
+  /** Exercise a facet's turn acceptance without requiring facet routing. */
   async facetRecoveryAcceptanceForTest(): Promise<{
     acceptedBeforeCompletion: boolean;
     durableAtAcceptance: boolean;
   }> {
     // SAFETY: these private methods are the real acceptance and fiber seams;
-    // overriding only the path selects the facet engine in this inert fixture.
+    // overriding only the path makes this inert fixture a facet.
     const internals = this as unknown as {
       _runRecoveredTurnAfterAcceptance<T>(
         row: null,
@@ -12904,10 +12904,14 @@ export class ThinkRecoveryTestAgent extends Think {
         null,
         () => {
           accepted = true;
-          durableAtAcceptance = this.sql<{ snapshot: string | null }>`
-            SELECT snapshot FROM cf_agents_runs
-            WHERE name = ${ThinkRecoveryTestAgent.CHAT_FIBER_NAME + ":" + requestId}
-          `.some((row) => row.snapshot !== null);
+          // A facet's turn is a chat-turn Task run, like a root agent's.
+          durableAtAcceptance =
+            this.sql<{ run_id: string }>`
+              SELECT run_id FROM cf_agents_task_runs
+              WHERE definition = ${ThinkRecoveryTestAgent.CHAT_FIBER_NAME}
+                AND state = 'running'
+                AND metadata = ${JSON.stringify({ requestId })}
+            `.length === 1;
         },
         () =>
           internals._runChatRecoveryFiber(requestId, false, async () => ({
