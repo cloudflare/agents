@@ -655,7 +655,7 @@ export class Inbox<
     this.#rows.restore(
       record,
       crypto.randomUUID(),
-      metadataJson(record.metadata)
+      record.metadata === undefined ? null : JSON.stringify(record.metadata)
     );
     if (OPEN.has(record.status)) {
       void this.#pushWake(record.lane ?? record.kind, Date.now());
@@ -968,9 +968,11 @@ export class Inbox<
     // The attempt must be durable before user code runs: a reset before the
     // next I/O rolls back unconfirmed writes, and a handler that kills its
     // isolate would then never use up its attempts.
-    await this.#services.storage.sync();
     let outcome: InboxSettlement;
     try {
+      await this.#services.storage.sync();
+      // A cancel or clear while the attempt was written ended it already.
+      if (!this.#rows.holds(token, attempt)) return;
       const started = this.#read(request.id);
       await this.#notify(started);
       // A cancel or clear during the report ended it already.

@@ -436,4 +436,46 @@ describe("Inbox terminal reports and records", () => {
       }
     );
   });
+
+  it("imports a record whose metadata is over the admission limit", async () => {
+    await runInDurableObject(
+      harness(),
+      async (instance: InboxHarnessObject) => {
+        const big = "x".repeat(150_000);
+        expect(
+          await instance.inbox.import({
+            id: "old-big",
+            kind: "echo",
+            status: "completed",
+            attempt: 1,
+            metadata: { schema: big },
+            createdAt: 1,
+            settledAt: 2
+          })
+        ).toBe(true);
+        expect(instance.inbox.get("old-big")?.metadata).toEqual({
+          schema: big
+        });
+      }
+    );
+  });
+
+  it("reports a request cancelled right after an immediate start once", async () => {
+    await runInDurableObject(
+      harness(),
+      async (instance: InboxHarnessObject) => {
+        const { request } = await instance.inbox.submit(
+          "echo",
+          { value: "a" },
+          {
+            start: "now"
+          }
+        );
+        await instance.inbox.cancel(request.id);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(count(instance, request.id, "aborted")).toBe(1);
+        expect(instance.calls).toEqual([]);
+      }
+    );
+  });
 });

@@ -37,7 +37,7 @@ const OPEN = "('pending', 'running')";
 const TERMINAL = "('completed', 'error', 'aborted', 'skipped')";
 const OPEN_SET: ReadonlySet<InboxStatus> = new Set(["pending", "running"]);
 
-type Field = "payload" | "result" | "progress";
+type Field = "payload" | "result" | "progress" | "metadata";
 
 type Row = {
   id: string;
@@ -50,6 +50,7 @@ type Row = {
   payload: string | null;
   payload_parts: number;
   metadata: string | null;
+  metadata_parts: number | null;
   progress: string | null;
   progress_parts: number;
   result: string | null;
@@ -149,6 +150,7 @@ export class InboxStore {
         payload TEXT,
         payload_parts INTEGER NOT NULL DEFAULT 0,
         metadata TEXT,
+        metadata_parts INTEGER NOT NULL DEFAULT 0,
         progress TEXT,
         progress_parts INTEGER NOT NULL DEFAULT 0,
         result TEXT,
@@ -165,6 +167,18 @@ export class InboxStore {
         started_at INTEGER,
         settled_at INTEGER
       )`);
+    // A table created before imported metadata could be split has no
+    // metadata_parts column.
+    const columns = this.#storage.sql
+      .exec(`PRAGMA table_info(${this.#table})`)
+      .toArray()
+      .map((column) => String(column.name));
+    if (!columns.includes("metadata_parts")) {
+      this.#storage.sql.exec(
+        `ALTER TABLE ${this.#table}
+         ADD COLUMN metadata_parts INTEGER NOT NULL DEFAULT 0`
+      );
+    }
     this.#storage.sql.exec(
       `CREATE INDEX IF NOT EXISTS ${this.#table}_lane_idx
        ON ${this.#table} (lane, status, seq)`
@@ -422,15 +436,17 @@ export class InboxStore {
     const payload = this.#place(token, "payload", json(record.payload));
     const result = this.#place(token, "result", json(record.result));
     const progress = this.#place(token, "progress", json(record.progress));
+    // Imported metadata predates the admission limit, so it may be split.
+    const meta = this.#place(token, "metadata", metadata, INBOX_METADATA_LIMIT);
     const open = OPEN_SET.has(record.status);
     this.#sql(
       `INSERT INTO ${this.#table}
          (id, token, kind, lane, seq, status, idempotency_key, payload,
-          payload_parts, metadata, progress, progress_parts, result,
-          result_parts, error, policy, attempt, notified, created_at,
-          started_at, settled_at)
+          payload_parts, metadata, metadata_parts, progress, progress_parts,
+          result, result_parts, error, policy, attempt, notified,
+          created_at, started_at, settled_at)
        SELECT ?, ?, ?, ?, coalesce(max(seq), 0) + 1, ?, ?, ?, ?, ?, ?, ?, ?,
-              ?, ?, 'queue', ?, ?, ?, ?, ?
+              ?, ?, ?, 'queue', ?, ?, ?, ?, ?
        FROM ${this.#table}`,
       record.id,
       token,
@@ -440,7 +456,8 @@ export class InboxStore {
       record.idempotencyKey ?? null,
       payload.inline,
       payload.parts,
-      metadata,
+      meta.inline,
+      meta.parts,
       progress.inline,
       progress.parts,
       result.inline,
@@ -593,14 +610,15 @@ export class InboxStore {
   #place(
     token: string,
     field: Field,
-    json: string | null
+    json: string | null,
+    limit = INLINE_LIMIT
   ): { inline: string | null; parts: number } {
     this.#sql(
       `DELETE FROM ${this.#parts} WHERE token = ? AND field = ?`,
       token,
       field
     );
-    if (json === null || json.length <= INLINE_LIMIT) {
+    if (json === null || json.length <= limit) {
       return { inline: json, parts: 0 };
     }
     const pieces = splitPieces(json, PIECE);
@@ -635,7 +653,11 @@ export class InboxStore {
       row.progress_parts > 0
         ? this.#joinParts(row.token, "progress")
         : row.progress;
-    const metadata = parseJson(row.metadata);
+    const metadata = parseJson(
+      (row.metadata_parts ?? 0) > 0
+        ? this.#joinParts(row.token, "metadata")
+        : row.metadata
+    );
     const merged = parseJson(row.merged);
     // Rows written before entries carried their seq hold bare ids, oldest
     // first; they sort ahead of every entry that has one.
