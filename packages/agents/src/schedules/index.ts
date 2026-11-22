@@ -7,6 +7,20 @@
 export { Scheduler } from "./scheduler";
 export type { SchedulerEventType, SchedulerOptions } from "./options";
 export type {
+  DeclaredSchedule,
+  DeclaredScheduleContext,
+  DeclaredScheduleInfo,
+  DeclaredSchedules,
+  DeclaredSchedulesSource,
+  DeclareSchedulesOptions
+} from "./declared";
+export type {
+  DeclaredScheduleExpression,
+  IntervalScheduleExpression,
+  ScheduleTime,
+  WallClockScheduleExpression
+} from "./declared-timing";
+export type {
   Schedule,
   ScheduleCriteria,
   ScheduleOptions,

@@ -400,7 +400,6 @@ path.
 | `getSystemPrompt()`        | `"You are a helpful assistant."` | Instructions at the top of the system prompt, above context blocks. The default is used only with no context blocks                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `getTools()`               | `{}`                             | AI SDK `ToolSet` for the agentic loop                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `getScheduledTasks()`      | `{}`                             | Code-declared recurring prompts or handlers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `getScheduledTasksScope()` | `"root"`                         | Which instances arm the declared tasks — `"root"` (top-level agent only) or `"all"` (sub-agents too)                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `getDefaultTimezone()`     | `undefined`                      | Default timezone for wall-clock scheduled tasks                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `getMessengers()`          | `{}`                             | Messenger ingress and delivery declarations — see [Messengers](./messengers.md)                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `getActions()`             | `{}`                             | Server actions (idempotency, approvals, authorization) compiled into tools — see [Actions](./actions.md)                                                                                                                                                                                                                                                                                                                                                                                                                    |
@@ -768,8 +767,8 @@ export class MyAgent extends Think<Env> {
 
 Use `getScheduledTasks()` when code should create recurring Think turns or
 deterministic scheduled handlers. Think reconciles the declarations on startup,
-stores a durable one-shot schedule for the next occurrence, and re-arms the next
-occurrence after each run.
+keeps one pending occurrence per task, and arms the next occurrence after each
+run.
 
 ```typescript
 import { Think } from "@cloudflare/think";
@@ -828,36 +827,23 @@ work such as creating a Workflow run or writing a run ledger. Delivery is
 at-least-once; use `idempotencyKey` or `occurrenceKey` for your own durable
 idempotency.
 
-Declared tasks are armed on the **root agent only**. Because
-`getScheduledTasks()` is normally a static declaration, it returns the same
-tasks on every instance of the class, so arming it on sub-agents as well would
-dispatch each occurrence once per live sub-agent on top of the root. Override
-`getScheduledTasksScope()` to return `"all"` when a class genuinely declares
-different tasks per sub-agent — each sub-agent then owns an independent
-schedule.
+Declared tasks are armed on the root agent only. A sub-agent that declares
+tasks arms none of them and logs a warning. To run a schedule per user, give
+each user their own Durable Object and declare the task there.
 
-```typescript
-export class PerUserAgent extends Think<Env> {
-  getScheduledTasksScope() {
-    return "all" as const;
-  }
-
-  async getScheduledTasks(): Promise<ThinkScheduledTasks> {
-    const reminder = await this.getReminderForThisUser();
-    return reminder ? { reminder } : {};
-  }
-}
-```
-
-Static declarations reconcile on startup. If `getScheduledTasks()` reads
-product-owned data that can change while the Durable Object is live, call
-`internal_reconcileScheduledTasks()` after updating that data. During
-reconciliation Think records the task row before creating the underlying Agent
-schedule, so a missing `schedule_id` is only a pending reconcile state and is
-repaired on the next reconcile. The task `retry` option retries the prompt or
-handler action before the failure is logged. The next occurrence is still
-scheduled after the action succeeds or exhausts its retries, so failed
-occurrences do not block future runs.
+Think hands the declaration to the Scheduler's
+[declared schedules](https://github.com/cloudflare/agents/blob/main/docs/agents/scheduling.md#declared-schedules): each task is
+one job holding its next occurrence, in the Scheduler group `"think"`, and
+`this.scheduler.listDeclared()` shows them. A subclass can also call
+`this.scheduler.declare()` itself; Think's reconcile only touches its own
+group. Static declarations reconcile on startup. A changed schedule, timezone or
+`retry` re-arms the task from now; a changed prompt, handler or `metadata`
+keeps the pending occurrence. If `getScheduledTasks()` reads product-owned data
+that can change while the Durable Object is live, call
+`internal_reconcileScheduledTasks()` after updating that data. The task `retry`
+option retries the prompt or handler action before the failure goes to
+`onError()`. The next occurrence is still scheduled after the action succeeds
+or exhausts its retries, so failed occurrences do not block future runs.
 
 ## Fetch tool
 

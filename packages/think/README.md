@@ -358,7 +358,6 @@ Script execution requires a Worker Loader binding:
 | `getTools()`               | `{}`                               | AI SDK `ToolSet` for the agentic loop                                                                                                                                                                                        |
 | `getMessengers()`          | `{}`                               | Messenger ingress and delivery declarations                                                                                                                                                                                  |
 | `getScheduledTasks()`      | `{}`                               | Code-declared recurring prompts                                                                                                                                                                                              |
-| `getScheduledTasksScope()` | `"root"`                           | Which instances arm declared tasks — `"root"` or `"all"` (sub-agents too)                                                                                                                                                    |
 | `getDefaultTimezone()`     | `undefined`                        | Default timezone for wall-clock schedules                                                                                                                                                                                    |
 | `maxSteps`                 | `10`                               | Max tool-call rounds per turn (property)                                                                                                                                                                                     |
 | `sendReasoning`            | `true`                             | Send reasoning chunks to chat clients                                                                                                                                                                                        |
@@ -476,9 +475,8 @@ turn. See the
 ### Scheduled tasks
 
 Use `getScheduledTasks()` for code-declared recurring prompts or deterministic
-scheduled handlers. Think reconciles these declarations on startup, stores
-durable one-shot schedules for the next occurrence, and re-arms the next
-occurrence after each run.
+scheduled handlers. Think reconciles these declarations on startup, keeps one
+pending occurrence per task, and arms the next occurrence after each run.
 
 ```ts
 import { Think } from "@cloudflare/think";
@@ -539,23 +537,18 @@ work such as creating a Workflow run or writing a run ledger. Delivery is
 at-least-once; use `idempotencyKey` or `occurrenceKey` for your own durable
 idempotency.
 
-Declared tasks are armed on the **root agent only**. Because
-`getScheduledTasks()` is normally a static declaration, it returns the same
-tasks on every instance of the class, so arming it on sub-agents as well would
-dispatch each occurrence once per live sub-agent on top of the root. Override
-`getScheduledTasksScope()` to return `"all"` when a class genuinely declares
-different tasks per sub-agent — each sub-agent then owns an independent
-schedule.
+Declared tasks are armed on the root agent only. A sub-agent that declares
+tasks arms none of them and logs a warning.
 
-Static declarations reconcile on startup. If `getScheduledTasks()` reads
-product-owned data that can change while the Durable Object is live, call
-`internal_reconcileScheduledTasks()` after updating that data. During
-reconciliation Think records the task row before creating the underlying Agent
-schedule, so a `schedule_id` may be temporarily empty if the object is
-interrupted mid-reconcile; the next reconcile repairs that pending row. The
-task `retry` option retries the prompt or handler action before the failure is
-logged. The next occurrence is still scheduled after the action succeeds or
-exhausts its retries, so failed occurrences do not block future runs.
+Think hands the declaration to the Scheduler's declared schedules
+(`this.scheduler.declare()`, group `"think"`): each task is one job holding its
+next occurrence, and `this.scheduler.listDeclared()` shows them. Static declarations reconcile
+on startup. If `getScheduledTasks()` reads product-owned data that can change
+while the Durable Object is live, call `internal_reconcileScheduledTasks()`
+after updating that data. The task `retry` option retries the prompt or
+handler action before the failure goes to `onError()`. The next occurrence is
+still scheduled after the action succeeds or exhausts its retries, so failed
+occurrences do not block future runs.
 
 ### Lifecycle hooks
 

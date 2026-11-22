@@ -346,6 +346,109 @@ async syncData() {
 - Rate-limited API polling with precise control
 - Real-time data synchronization
 
+## Declared schedules
+
+Some recurring work is part of the program rather than something a user asks
+for: a nightly digest, a cleanup every hour. Declare it with
+`scheduler.declare()` and the Scheduler keeps storage in line with the
+declaration. Call it on every start:
+
+```typescript
+import { DurableObject } from "cloudflare:workers";
+import { Lifecycle } from "agents/lifecycle";
+import { Scheduler } from "agents/schedules";
+
+export class DigestObject extends DurableObject<Env> {
+  readonly scheduler = new Scheduler();
+  readonly lifecycle = Lifecycle.install(this).use(this.scheduler);
+
+  async onStart() {
+    await this.scheduler.declare(
+      {
+        weeklyReport: {
+          schedule: "every week on monday at 09:00",
+          run: (occurrence) => this.sendReport(occurrence.idempotencyKey)
+        },
+        cleanup: {
+          schedule: "every 1 hour",
+          retry: { maxAttempts: 5 },
+          run: () => this.deleteExpiredRows()
+        }
+      },
+      { defaultTimezone: "Europe/London" }
+    );
+  }
+
+  async sendReport(key: string) {
+    // ...
+  }
+
+  async deleteExpiredRows() {
+    // ...
+  }
+}
+```
+
+The expressions are `every <n> minutes`, `every <n> hours`,
+`every day at HH:mm`, `every weekday at HH:mm` and
+`every week on monday,thursday at HH:mm`. A wall-clock expression needs a
+timezone: inline (`every day at 08:00 in America/New_York`), as the entry's
+`timezone`, or from the `defaultTimezone` option.
+
+What `declare()` does:
+
+- A new name is armed at its next occurrence.
+- A name whose expression, timezone or `retry` changed is re-armed from now.
+  Changing `run` or `metadata` keeps the pending occurrence.
+- A name no longer declared is cancelled.
+- An invalid entry (a bad name, expression or timezone) rejects the call and
+  changes nothing. The last declaration that was accepted keeps running.
+  A function source is read again at each occurrence, so if its data turns
+  invalid later, that occurrence fails (and goes to `onError`) and the next
+  one is still armed.
+- Calls apply in order. A slow function source cannot undo a later call.
+- Each `group` is its own declaration. A library that declares schedules on
+  your Scheduler passes its own `group`, so your `declare()` calls never
+  cancel its names and its calls never cancel yours.
+
+When an occurrence is due, the Scheduler reads the declaration again and
+calls `run` with the occurrence: `name`, `scheduledFor`, `occurrenceKey`
+(`<name>:<scheduledFor>`), `idempotencyKey` (`<prefix>:<occurrenceKey>`, where
+the prefix defaults to `schedule:<class name>:<object name>`, plus
+`:<group>` for a named group, and the `idempotencyKeyPrefix` option replaces
+it), the normalized `schedule`,
+`scheduleKind`, `timezone` and `metadata`. Pass a function as the declaration
+when it depends on data that changes, and call `declare()` again after the
+data changes.
+
+Guarantees:
+
+- Call `declare()` during startup (a constructor or `onStart()`). When an
+  alarm wakes the object and finds a declared job whose group nothing has
+  declared in that isolate, it deletes the job: that is how a group you stop
+  declaring is retired, and why a `declare()` made only from a request
+  handler loses its schedules on a cold start.
+- Each name is one job in the Lifecycle job queue, holding the next
+  occurrence and the parsed timing. If the alarm fires late or backs off,
+  `scheduledFor` and the keys stay those of the intended occurrence. It survives eviction and deploys.
+  The declaration and the `run` functions live in memory and come back with
+  the next `declare()`.
+- At least once per occurrence. A reset during `run` runs that occurrence
+  again, so use `idempotencyKey` for effects outside the object.
+- One run per name at a time. A run longer than `hungScheduleTimeoutSeconds`
+  is treated as hung and may be started again.
+- `run` is retried with the entry's `retry` (the Scheduler's default
+  otherwise). After the last failed attempt the error goes to `onError` and
+  the next occurrence is still armed, so a failing task keeps its schedule.
+- A late alarm runs the intended occurrence once. Missed occurrences are not
+  backfilled.
+- A `run` that calls `declare()` and changes its own entry keeps that change;
+  the finished occurrence does not overwrite it.
+- Declared schedules are separate from `set()` and `every()` schedules:
+  `list()` does not show them, `listDeclared()` does.
+- On a sub-agent nothing is armed and the Scheduler logs a warning. Declared
+  schedules run on a top-level Durable Object.
+
 ## Keeping the Agent Alive
 
 Durable Objects are evicted after a period of inactivity (typically 70-140 seconds with no incoming requests, WebSocket messages, or alarms). During long-running operations — streaming LLM responses, waiting on external APIs, running multi-step computations — the agent can be evicted mid-flight.
@@ -900,6 +1003,28 @@ Read and cancel schedules — the primitive's equivalents of
 and [`cancelSchedule()`](#cancelschedule) below. (Internal synchronous
 variants on the Scheduler back Agent's deprecated `getSchedule()` and
 `getSchedules()`; they are not part of the primitive's contract.)
+
+#### declare()
+
+```typescript
+async declare(source, options?): Promise<void>
+```
+
+Declare named recurring schedules and reconcile storage to them. `source` is
+a `DeclaredSchedules` object or a function returning one. `options` takes
+`group` (default: the application's), `defaultTimezone` (a string or a
+function) and `idempotencyKeyPrefix` (default
+`schedule:<class name>:<object name>`). See [Declared schedules](#declared-schedules).
+
+#### listDeclared()
+
+```typescript
+listDeclared(): DeclaredScheduleInfo[]
+```
+
+The armed declared schedules of every group (`name`, `group` when not the
+application's, `schedule`, `scheduleKind`, `timezone`, `nextRunAt` in epoch
+milliseconds), ordered by next occurrence.
 
 ### Agent methods
 

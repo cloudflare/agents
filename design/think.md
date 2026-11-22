@@ -161,7 +161,7 @@ These have their own user docs under `docs/think/`:
 
 - **Actions** (`getActions()`, `action()`): tools with an idempotency ledger (`cf_think_action_ledger`), approvals (`cf_think_action_pending_approvals`), and authorization.
 - **Channels and messengers**: per-surface policy (`configureChannels()`) and Chat SDK webhook ingress with durable reply delivery.
-- **Scheduled tasks**: `getScheduledTasks()` reconciled into `cf_think_scheduled_tasks` on startup, on the root agent only unless `getScheduledTasksScope()` returns `"all"`.
+- **Scheduled tasks**: `getScheduledTasks()` mapped onto the Scheduler's declared schedules (`scheduler.declare()`, see [declared-schedules.md](./declared-schedules.md)) on startup, on the root agent only. Prompt tasks become durable submissions.
 - **Agent tools**: running Think or `AIChatAgent` children as tools, with run state in `cf_agent_tool_child_runs` and `cf_agent_tool_milestones`. See [agent-tools.md](./agent-tools.md).
 - **Skills**: `getSkills()` and `getSkillScriptRunner()` over `agents/skills`; `skills.workspace(this.workspace)` reads skills from Workspace files. See [skills.md](./skills.md).
 
@@ -182,7 +182,6 @@ Actions can record advisory delivery metadata for the current reply with `ctx.at
 | `cf_agents_task_runs` / `cf_agents_task_steps`            | Tasks (inherited) | Chat-turn, recovery, and messenger-reply runs               |
 | `think_config`                                            | Think             | `configure()` blob, client tools, request body, skill state |
 | `cf_think_submissions`                                    | Think             | Durable submissions                                         |
-| `cf_think_scheduled_tasks`                                | Think             | Declarative scheduled task state                            |
 | `cf_think_action_ledger` / `_pending_approvals`           | Think             | Action idempotency and approvals                            |
 | `cf_agent_tool_child_runs` / `cf_agent_tool_milestones`   | Think             | Agent-tool runs                                             |
 

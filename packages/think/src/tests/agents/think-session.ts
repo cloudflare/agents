@@ -67,6 +67,7 @@ import type {
   TurnQueue
 } from "agents/chat";
 import type { Schedule } from "agents";
+import type { DeclaredScheduleInfo } from "agents/schedules";
 import type { Session } from "../../think";
 import type { ContextConfig } from "agents/context";
 import { z } from "zod";
@@ -10327,23 +10328,6 @@ type ScheduledTaskConfigForTest = {
   metadata?: Record<string, unknown>;
 };
 
-type DeclaredScheduledTaskRowForTest = {
-  owner_key: string;
-  task_id: string;
-  schedule_hash: string;
-  task_hash: string;
-  schedule_id: string | null;
-  next_run_at: number | null;
-  created_at: number;
-  updated_at: number;
-};
-
-type DeclaredScheduledTaskPayloadForTest = {
-  taskId: string;
-  scheduleHash: string;
-  scheduledFor: number;
-};
-
 type ScheduledTaskHandlerEventForTest = {
   taskId: string;
   scheduledFor: number;
@@ -10359,13 +10343,6 @@ type ScheduledTaskHandlerEventForTest = {
 export class ThinkScheduledTasksTestAgent extends ThinkProgrammaticTestAgent {
   override async getDefaultTimezone(): Promise<string | undefined> {
     return this.ctx.storage.get<string>("scheduledTasksDefaultTimezone");
-  }
-
-  override async getScheduledTasksScope(): Promise<"root" | "all"> {
-    return (
-      (await this.ctx.storage.get<"root" | "all">("scheduledTasksScope")) ??
-      "root"
-    );
   }
 
   override async getScheduledTasks(): Promise<ThinkScheduledTasks> {
@@ -10442,10 +10419,6 @@ export class ThinkScheduledTasksTestAgent extends ThinkProgrammaticTestAgent {
     await this.ctx.storage.put("scheduledTasksDefaultTimezone", timezone);
   }
 
-  async setScheduledTasksScopeForTest(scope: "root" | "all"): Promise<void> {
-    await this.ctx.storage.put("scheduledTasksScope", scope);
-  }
-
   async reconcileScheduledTasksForTest(): Promise<void> {
     await this.internal_reconcileScheduledTasks();
   }
@@ -10459,97 +10432,59 @@ export class ThinkScheduledTasksTestAgent extends ThinkProgrammaticTestAgent {
     }
   }
 
-  async validateScheduleForTest(
-    schedule: string,
-    options: { timezone?: string; defaultTimezone?: string } = {}
-  ): Promise<string | null> {
-    return (
-      this as unknown as {
-        _declaredScheduleValidationError: (
-          schedule: string,
-          timezone?: string,
-          defaultTimezone?: string
-        ) => string | null;
-      }
-    )._declaredScheduleValidationError(
-      schedule,
-      options.timezone,
-      options.defaultTimezone
-    );
-  }
-
-  async nextScheduleTimeForTest(
-    schedule: string,
-    nowIso: string,
-    options: {
-      timezone?: string;
-      defaultTimezone?: string;
-      previousScheduledFor?: number;
-    } = {}
-  ): Promise<number> {
-    return (
-      this as unknown as {
-        _nextDeclaredScheduleTimeForConfig: (
-          schedule: string,
-          now: Date,
-          options?: {
-            taskTimezone?: string;
-            defaultTimezone?: string;
-            previousScheduledFor?: number;
-          }
-        ) => Date;
-      }
-    )
-      ._nextDeclaredScheduleTimeForConfig(schedule, new Date(nowIso), {
-        taskTimezone: options.timezone,
-        defaultTimezone: options.defaultTimezone,
-        previousScheduledFor: options.previousScheduledFor
-      })
-      .getTime();
-  }
-
-  async countDateTimeFormatConstructionsForTest(
-    schedule: string,
-    nowIso: string,
-    timezone: string
-  ): Promise<number> {
-    const original = Intl.DateTimeFormat;
-    let constructions = 0;
-    Intl.DateTimeFormat = new Proxy(original, {
-      construct(target, args, newTarget) {
-        constructions++;
-        return Reflect.construct(target, args, newTarget);
-      }
-    });
-    // The work runs synchronously, so restore the original before yielding to
-    // keep other work in the isolate out of the count.
-    let result: Promise<number>;
+  async reconcileScheduledTasksWarningsForTest(): Promise<string[]> {
+    const warnings: string[] = [];
+    const original = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    };
     try {
-      result = this.nextScheduleTimeForTest(schedule, nowIso, { timezone });
+      await this.reconcileScheduledTasksForTest();
     } finally {
-      Intl.DateTimeFormat = original;
+      console.warn = original;
     }
-    await result;
-    return constructions;
+    return warnings;
   }
 
-  async listDeclaredScheduledTaskRowsForTest(): Promise<
-    DeclaredScheduledTaskRowForTest[]
-  > {
-    const ownerKey = (
-      this as unknown as { _declaredScheduleOwnerKey(): string }
-    )._declaredScheduleOwnerKey();
-    return this.sql<DeclaredScheduledTaskRowForTest>`
-      SELECT owner_key, task_id, schedule_hash, task_hash, schedule_id,
-             next_run_at, created_at, updated_at
-      FROM cf_think_scheduled_tasks
-      WHERE owner_key = ${ownerKey}
-      ORDER BY task_id ASC
-    `;
+  async listDeclaredForTest(): Promise<DeclaredScheduleInfo[]> {
+    return this.scheduler.listDeclared();
+  }
+
+  /**
+   * Make a declared task's pending occurrence due and run the alarm that
+   * dispatches it. With `scheduledFor`, deliver that occurrence instead (an
+   * at-least-once redelivery). Returns the occurrence that ran.
+   */
+  async runDeclaredNowForTest(
+    taskId: string,
+    scheduledFor?: number
+  ): Promise<number> {
+    const occurrence =
+      scheduledFor ??
+      this.scheduler.listDeclared().find((info) => info.name === taskId)
+        ?.nextRunAt;
+    if (occurrence === undefined) throw new Error(`No declared ${taskId}`);
+    this.ctx.storage.sql.exec(
+      `UPDATE cf_agents_jobs
+       SET time = ?, payload = json_set(payload, '$.declared.scheduledFor', ?)
+       WHERE id = ?`,
+      Date.now() - 5_000,
+      occurrence,
+      `declared:think:${taskId}`
+    );
+    await this.alarm();
+    return occurrence;
   }
 
   async listSchedulesForTest(): Promise<Schedule<unknown>[]> {
     return this.listSchedules();
+  }
+
+  /** The application's own declaration, beside Think's. */
+  async declareAppScheduleForTest(): Promise<void> {
+    await this.scheduler.declare({
+      cleanup: { schedule: "every 1 hour", run() {} }
+    });
   }
 
   async listScheduledTaskHandlerEventsForTest(): Promise<
@@ -10560,24 +10495,6 @@ export class ThinkScheduledTasksTestAgent extends ThinkProgrammaticTestAgent {
         "scheduledTaskHandlerEvents"
       )) ?? []
     );
-  }
-
-  async clearDeclaredScheduleIdForTest(taskId: string): Promise<void> {
-    const row = (
-      this as unknown as {
-        _readDeclaredScheduledTaskRow(
-          taskId: string
-        ): DeclaredScheduledTaskRowForTest | null;
-      }
-    )._readDeclaredScheduledTaskRow(taskId);
-    if (!row) throw new Error("No declared schedule row");
-    if (row.schedule_id) await this.cancelSchedule(row.schedule_id);
-    this.sql`
-      UPDATE cf_think_scheduled_tasks
-      SET schedule_id = NULL
-      WHERE owner_key = ${row.owner_key}
-        AND task_id = ${taskId}
-    `;
   }
 
   async createUnrelatedScheduleForTest(): Promise<string> {
@@ -10591,31 +10508,6 @@ export class ThinkScheduledTasksTestAgent extends ThinkProgrammaticTestAgent {
   }
 
   async noopScheduledTaskForTest(): Promise<void> {}
-
-  async getFirstDeclaredPayloadForTest(): Promise<DeclaredScheduledTaskPayloadForTest> {
-    const [row] = await this.listDeclaredScheduledTaskRowsForTest();
-    if (!row?.schedule_id) throw new Error("No declared schedule row");
-    const schedule = await this.getScheduleById(row.schedule_id);
-    if (!schedule) throw new Error("Declared schedule row has no schedule");
-    return schedule.payload as DeclaredScheduledTaskPayloadForTest;
-  }
-
-  async runDeclaredPayloadForTest(
-    payload: DeclaredScheduledTaskPayloadForTest
-  ): Promise<void> {
-    await this._runDeclaredScheduledTask(payload);
-  }
-
-  async runDeclaredPayloadErrorForTest(
-    payload: DeclaredScheduledTaskPayloadForTest
-  ): Promise<string> {
-    try {
-      await this.runDeclaredPayloadForTest(payload);
-      return "";
-    } catch (error) {
-      return error instanceof Error ? error.message : String(error);
-    }
-  }
 
   async setChildScheduledTasksForTest(
     name: string,
@@ -10633,38 +10525,6 @@ export class ThinkScheduledTasksTestAgent extends ThinkProgrammaticTestAgent {
     await child.setDefaultTimezoneForTest(timezone);
   }
 
-  async setChildScheduledTasksScopeForTest(
-    name: string,
-    scope: "root" | "all"
-  ): Promise<void> {
-    const child = await this.subAgent(ThinkScheduledTasksTestAgent, name);
-    await child.setScheduledTasksScopeForTest(scope);
-  }
-
-  /**
-   * Force the child facet to restart, so the next `subAgent()` call replays
-   * its `onStart` — including the declared-task reconcile step. Storage is
-   * left intact, unlike `deleteSubAgent`.
-   */
-  async restartChildForTest(name: string): Promise<void> {
-    this.abortSubAgent(ThinkScheduledTasksTestAgent, name, "restart-for-test");
-  }
-
-  async runChildDeclaredPayloadForTest(
-    name: string,
-    payload: DeclaredScheduledTaskPayloadForTest
-  ): Promise<void> {
-    const child = await this.subAgent(ThinkScheduledTasksTestAgent, name);
-    await child.runDeclaredPayloadForTest(payload);
-  }
-
-  async getChildFirstDeclaredPayloadForTest(
-    name: string
-  ): Promise<DeclaredScheduledTaskPayloadForTest> {
-    const child = await this.subAgent(ThinkScheduledTasksTestAgent, name);
-    return child.getFirstDeclaredPayloadForTest();
-  }
-
   async listChildScheduledTaskHandlerEventsForTest(
     name: string
   ): Promise<ScheduledTaskHandlerEventForTest[]> {
@@ -10677,11 +10537,18 @@ export class ThinkScheduledTasksTestAgent extends ThinkProgrammaticTestAgent {
     await child.reconcileScheduledTasksForTest();
   }
 
-  async listChildDeclaredScheduledTaskRowsForTest(
+  async listChildDeclaredForTest(
     name: string
-  ): Promise<DeclaredScheduledTaskRowForTest[]> {
+  ): Promise<DeclaredScheduleInfo[]> {
     const child = await this.subAgent(ThinkScheduledTasksTestAgent, name);
-    return child.listDeclaredScheduledTaskRowsForTest();
+    return child.listDeclaredForTest();
+  }
+
+  async reconcileChildScheduledTasksWarningsForTest(
+    name: string
+  ): Promise<string[]> {
+    const child = await this.subAgent(ThinkScheduledTasksTestAgent, name);
+    return child.reconcileScheduledTasksWarningsForTest();
   }
 
   async listChildSchedulesForTest(name: string): Promise<Schedule<unknown>[]> {
