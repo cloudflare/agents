@@ -70,6 +70,7 @@ Install each capability with `lifecycle.use()`. Capabilities marked experimental
 | `Sessions`         | `agents/sessions`   | Experimental | [Sessions](./sessions.md)                                       |
 | `Streams`          | `agents/streams`    | Experimental | [Streams](./streams.md)                                         |
 | `Tasks`            | `agents/tasks`      | Experimental | [Tasks](./tasks.md)                                             |
+| `Approvals`        | `agents/approvals`  | Experimental | [Approvals](./approvals.md)                                     |
 
 Building your own harness? Sessions stores the conversation, Streams holds durable incremental output, and Tasks runs replayable background work. [Models](./models.md) and [Models for pi-ai](./models-pi-ai.md) give you one provider for Workers AI and third-party models. [Context](./context.md) and [Workspace](https://github.com/cloudflare/agents/blob/main/docs/shell/index.md) are also available.
 

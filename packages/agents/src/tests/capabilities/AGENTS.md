@@ -26,6 +26,10 @@ per capability, all registered in the shared workers project
   execution from journal hits, `TaskBatchHarnessObject` (alarm batch
   bound), and the `seedTaskRun()` / `seedTaskStep()` /
   `backdateTaskWake()` helpers that fabricate interrupted or due runs.
+- `approvals.ts` — `ApprovalsHarnessObject` (Approvals as the only
+  capability; its continuation runs a side effect through `once()` and
+  counts real runs) and `backdateDecisionJob()`, which makes a decision's
+  recovery job due so a test drives it with a real alarm.
 - `streams.ts` — `StreamHarnessObject` (Streams as the only capability) and
   `TaskStreamComposeObject` (the checkpointed-cursor contract with Tasks,
   including recovery from stream evidence).
