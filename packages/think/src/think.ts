@@ -1190,7 +1190,6 @@ type ActionLedgerEvent =
       payload: { settled: number; pending: number };
     };
 
-
 type ActionPauseEvent =
   | {
       type: "action:pause:created";
