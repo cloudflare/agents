@@ -566,6 +566,46 @@ describe("Outbox capability", () => {
     });
   });
 
+  it("retries at once on start an attempt the previous isolate left running", async () => {
+    const { stub } = stubFor();
+    await runInDurableObject(stub, async (instance: OutboxHarnessObject) => {
+      const delivery = await instance.outbox.send(
+        "record",
+        { value: "a" },
+        { key: "k", hold: true }
+      );
+      // What a reset mid-attempt leaves: counted, claimed, wake at the timeout.
+      instance.sql(
+        `UPDATE cf_agents_outbox SET status = 'pending', attempts = 1,
+           first_attempt_at = ?, claim = 'dead', next_at = ? WHERE id = ?`,
+        Date.now(),
+        Date.now() + 60_000,
+        delivery.id
+      );
+      await instance.outbox.onStart();
+      await waitFor(() => drained(instance), 2_000);
+      expect(instance.attempts.map((attempt) => attempt.attempt)).toEqual([2]);
+    });
+  });
+
+  it("leaves a backing-off row at its backoff on start", async () => {
+    const { stub } = stubFor();
+    await runInDurableObject(stub, async (instance: OutboxHarnessObject) => {
+      instance.failures = 1;
+      await instance.outbox.send(
+        "record",
+        { value: "a" },
+        { key: "k", retry: { baseDelayMs: 60_000, maxDelayMs: 120_000 } }
+      );
+      await waitFor(() => instance.attempts.length === 1);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await instance.outbox.onStart();
+      const row = await instance.outbox.get("record", "k");
+      expect(row?.nextAt).toBeGreaterThan(Date.now() + 30_000);
+      await instance.outbox.cancel("record", "k");
+    });
+  });
+
   it("cuts long errors, caps checkpoints, and versions each value of a key", async () => {
     const { stub } = stubFor();
     await runInDurableObject(stub, async (instance: OutboxHarnessObject) => {

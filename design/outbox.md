@@ -6,7 +6,7 @@ The `Outbox` capability (`packages/agents/src/outbox`) delivers a value to a nam
 
 ## How it works
 
-A delivery is a row in `cf_agents_outbox`, unique on `(sink, key)`. `send(sink, payload, { key })` inserts the row, or replaces the value of an existing one, and pushes one Lifecycle job (`outbox:<id>`) due now. The row is the source of truth. The job only wakes it, and startup re-pushes a job for every pending row.
+A delivery is a row in `cf_agents_outbox`, unique on `(sink, key)`. `send(sink, payload, { key })` inserts the row, or replaces the value of an existing one, and pushes one Lifecycle job (`outbox:<id>`) due now. The row is the source of truth. The job only wakes it, and startup re-pushes a job for every pending row. A pending row that still holds a claim at startup belongs to an attempt that died with the previous isolate; startup clears the claim and makes it due at once, so a reset mid-attempt retries right away instead of after the attempt timeout.
 
 When the job fires, the Outbox:
 

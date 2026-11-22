@@ -233,6 +233,14 @@ export class Outbox<
       `DELETE FROM cf_agents_outbox WHERE status = 'failed' AND updated_at < ?`,
       Date.now() - FAILED_RETENTION_MS
     );
+    // A claim on a pending row at start belongs to an attempt that died
+    // with the previous isolate: nothing runs it now, so try again at once
+    // instead of waiting out its timeout. Its attempt is already counted.
+    this.#write(
+      `UPDATE cf_agents_outbox SET next_at = ?, claim = NULL
+       WHERE status = 'pending' AND claim IS NOT NULL`,
+      Date.now()
+    );
     for (const row of this.#sql<{ id: string }>(
       `SELECT id FROM cf_agents_outbox WHERE status = 'pending'`
     )) {
@@ -758,7 +766,7 @@ export class Outbox<
     const nextAt = now + delay;
     const changed = this.#write(
       `UPDATE cf_agents_outbox
-       SET next_at = ?, last_error = ?, updated_at = ?
+       SET next_at = ?, last_error = ?, claim = NULL, updated_at = ?
        WHERE id = ? AND idempotency_key = ? AND claim IS ?
          AND status = 'pending'`,
       nextAt,
