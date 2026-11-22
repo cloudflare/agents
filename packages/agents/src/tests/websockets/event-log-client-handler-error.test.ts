@@ -104,4 +104,40 @@ describe("followEventLog handler errors", () => {
     expect(seen).toEqual([1, 2]);
     error.mockRestore();
   });
+
+  it("logs instead of throwing where reportError is missing", () => {
+    const original = globalThis.reportError;
+    // A runtime without reportError, as Node 24.
+    (globalThis as { reportError?: unknown }).reportError = undefined;
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const socket = new FakeSocket();
+      const seen: number[] = [];
+      followEventLog(socket, "feed", {
+        onEvent: (_data, seq) => {
+          seen.push(seq);
+          if (seq === 1) throw new Error("handler bug");
+        },
+        onResync: () => {}
+      });
+      const id = socket.sent[0].id as string;
+      socket.deliver({
+        type: "cf_agent_log_resync",
+        log: "feed",
+        epoch: "e",
+        seq: 0,
+        id
+      });
+      socket.deliver({
+        type: "cf_agent_log_events",
+        log: "feed",
+        events: [1, 2].map((seq) => ({ seq, data: seq }))
+      });
+      expect(seen).toEqual([1, 2]);
+      expect(log).toHaveBeenCalled();
+    } finally {
+      globalThis.reportError = original;
+      log.mockRestore();
+    }
+  });
 });

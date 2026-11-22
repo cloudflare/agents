@@ -59,14 +59,16 @@ export type EventLogSubscription = {
 
 const OPEN = 1;
 
-/** `reportError` where the runtime has it, else an uncaught throw later. */
+/**
+ * `reportError` where the runtime has it (browsers, workerd), so error
+ * listeners see the throw; elsewhere (Node) a log, never a throw that
+ * would end the process.
+ */
 function reportHandlerError(error: unknown): void {
   if (typeof globalThis.reportError === "function") {
     globalThis.reportError(error);
   } else {
-    queueMicrotask(() => {
-      throw error;
-    });
+    console.error("[followEventLog] onEvent threw:", error);
   }
 }
 
