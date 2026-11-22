@@ -90,7 +90,7 @@ export type DeclaredSchedulesSource =
   | (() => MaybePromise<DeclaredSchedules>);
 
 /**
- * Options for {@link Scheduler.declare}.
+ * Options for `declareSchedules()`.
  *
  * @internal
  */
@@ -108,14 +108,14 @@ export type DeclareSchedulesOptions = {
     | undefined;
   /**
    * Prefix of each occurrence's `idempotencyKey`. Default:
-   * `schedule:<class name>:<object name>`, then `:<group>` outside the
-   * application's group.
+   * `schedule:<class name>:<object name>`, or
+   * `schedule-group:<group>:<class name>:<object name>` for a named group.
    */
   idempotencyKeyPrefix?: string;
 };
 
 /**
- * One armed declared schedule, as {@link Scheduler.listDeclared} reports it.
+ * One armed declared schedule, as `listDeclaredSchedules()` reports it.
  *
  * @internal
  */
@@ -236,6 +236,9 @@ export class DeclaredScheduleSet {
   readonly #declarations = new Map<string, Declaration>();
   /** Reconciles run one at a time, so an older one cannot undo a newer one. */
   #reconciling: Promise<unknown> = Promise.resolve();
+  /** Calls are numbered when made; a group keeps its newest accepted one. */
+  #calls = 0;
+  readonly #accepted = new Map<string, number>();
   #warnedRouted = false;
 
   constructor(config: DeclaredScheduleConfig) {
@@ -261,16 +264,24 @@ export class DeclaredScheduleSet {
     }
     // Wait for startup outside the chain: a call made before startup must
     // not hold up one made by onStart, which startup itself is waiting on.
+    // The call's number keeps its place: if onStart's later call is applied
+    // first, this one is then dropped rather than undoing it.
+    const call = ++this.#calls;
     return this.#lifecycle.ready().then(() => {
       const reconcile = this.#reconciling.then(() =>
-        this.#reconcile(group, { source, options })
+        this.#reconcile(group, { source, options }, call)
       );
       this.#reconciling = reconcile.catch(() => {});
       return reconcile;
     });
   }
 
-  async #reconcile(group: string, candidate: Declaration): Promise<void> {
+  async #reconcile(
+    group: string,
+    candidate: Declaration,
+    call: number
+  ): Promise<void> {
+    if ((this.#accepted.get(group) ?? 0) > call) return;
     if (this.#lifecycle.routes.source) {
       this.#declarations.set(group, candidate);
       await this.#warnRouted(candidate);
@@ -289,6 +300,7 @@ export class DeclaredScheduleSet {
       throw error;
     }
     this.#declarations.set(group, candidate);
+    this.#accepted.set(group, call);
 
     const jobs = this.#lifecycle.jobs;
     const legacyNext =
@@ -391,12 +403,11 @@ export class DeclaredScheduleSet {
     const occurrenceKey = `${stored.name}:${scheduledFor}`;
     const prefix =
       declaration.options.idempotencyKeyPrefix ??
-      [
-        "schedule",
-        this.#lifecycle.className,
-        this.#lifecycle.name,
-        ...(group === DEFAULT_GROUP ? [] : [group])
-      ].join(":");
+      // A named group gets its own namespace, so no object name (which may
+      // hold colons) can make an application key equal a group's.
+      (group === DEFAULT_GROUP
+        ? `schedule:${this.#lifecycle.className}:${this.#lifecycle.name}`
+        : `schedule-group:${group}:${this.#lifecycle.className}:${this.#lifecycle.name}`);
     const runContext: DeclaredScheduleContext = {
       name: stored.name,
       scheduledFor,

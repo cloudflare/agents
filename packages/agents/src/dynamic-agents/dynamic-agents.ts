@@ -307,7 +307,6 @@ export class DynamicAgentsInternal extends LifecycleCapability {
         prefix
       );
     }
-    await this.#host._syncHostJobs();
   }
 
   /**

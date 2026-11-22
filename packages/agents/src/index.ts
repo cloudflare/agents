@@ -71,7 +71,6 @@ import {
   type Connection,
   type ConnectionContext,
   Lifecycle,
-  type LifecycleJobOutcome,
   setLifecycleEventSink,
   setLifecycleHostInvoker,
   setLifecycleRouteTransport,
@@ -154,6 +153,7 @@ import {
 } from "./mcp/client/agent-servers";
 import { Scheduler, setSchedulerCallbackResolver } from "./schedules/scheduler";
 import { KeepAlive } from "./lifecycle/keep-alive";
+import { DeferredDestroy } from "./lifecycle/deferred-destroy";
 import { Queue, setQueueCallbackResolver } from "./queue/queue";
 import {
   runInInvocation,
@@ -374,36 +374,6 @@ export type {
 
 const DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS = 2_000;
 const DEFAULT_AGENT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS = 5_000;
-// Durable marker that this agent is condemned: written before teardown begins
-// (and by `_cf_scheduleDestroy`, which defers teardown to an alarm invocation
-// with its own execution budget, #1625). The final `deleteAll()` in `destroy()`
-// removes it, so "marker present" always means an unfinished teardown that the
-// next wake must complete instead of resuming normal work.
-//
-// Scope: the marker is only consulted on alarm-driven paths (`alarm()` and
-// `_syncHostJobs()`). It deliberately does NOT gate request entrypoints
-// (`onRequest`/`onMessage`/RPC) — a request that lands between scheduling and
-// the teardown alarm runs normally and `_ensureSchema()` recreates tables. For
-// the MCP session-DELETE use case this is benign: the session id is unique and
-// is never addressed again after DELETE, so no further request reaches a
-// condemned session DO before its teardown alarm fires.
-const DESTROY_PENDING_KEY = "cf_agents_destroy_pending";
-
-// Stable ids for Agent-owned host jobs in the Lifecycle job queue.
-const HOST_JOB_KEEP_ALIVE_ID = "cf:keep-alive";
-// Fiber recovery's wake before the Fibers capability owned it.
-const HOST_JOB_HOUSEKEEPING_ID = "cf:housekeeping";
-const HOST_JOB_DESTROY_ID = "cf:destroy";
-// Delay before the deferred-teardown alarm fires (#1625). `_cf_scheduleDestroy`
-// is awaited by an HTTP handler (the MCP session-DELETE) that then returns its
-// response. The teardown alarm runs `destroy()`, which ends in
-// `ctx.abort("destroyed")` — and an immediate (`Date.now()`) alarm fires and
-// aborts the isolate fast enough to race the still-in-flight RPC response,
-// surfacing to the caller as a 500 instead of the intended 204 (observed
-// against a real deployment; the local test runtime does not exhibit it). A
-// small delay lets the response flush before the abort. Teardown latency of a
-// second is irrelevant for an already-abandoned session.
-const DESTROY_ALARM_DELAY_MS = 1_000;
 // How long a detached terminal-delivery claim is leased before another delivery
 // path (a backbone reconcile racing the warm fast path, or a re-delivery after
 // a crash mid-handler) may re-claim it. Guards against a double-fire on the
@@ -667,6 +637,9 @@ export class Agent<
 
   /** @internal Holds behind keepAlive(); see {@link KeepAlive}. */
   readonly _keepAlive: KeepAlive;
+
+  /** @internal The durable destroy marker and its alarm (#1625). */
+  private readonly _deferredDestroy = new DeferredDestroy();
 
   /** @internal The extracted dynamic-agent (facet) machinery. */
   private _dynamicAgentsInstance: DynamicAgentsInternal | undefined;
@@ -1328,6 +1301,7 @@ export class Agent<
     this.lifecycle
       .use(this.scheduler)
       .use(this._keepAlive)
+      .use(this._deferredDestroy)
       .use(this._queue)
       .use(this.mcp)
       .use(this._state)
@@ -1366,8 +1340,6 @@ export class Agent<
     this.onAlarm = async () => {
       if (this._destroyed) return;
       await _onAlarm();
-      if (this._destroyed) return;
-      await this._syncHostJobs();
     };
 
     const _onRequest = this.onRequest.bind(this);
@@ -1655,9 +1627,7 @@ export class Agent<
               runIds: startupAgentToolRunIds
             });
 
-            // Re-sync the host jobs on every wake so keep-alive and destroy
-            // state left by a dead process re-arms its wake.
-            await this._syncHostJobs();
+            await this._dropFacetHostJobs();
             return result;
           });
         }
@@ -2601,95 +2571,27 @@ export class Agent<
   }
 
   /**
-   * Synchronize Agent-owned host jobs with current durable state.
-   *
-   * Keep-alive refs hold a `cf:keep-alive` job and a pending destroy holds
-   * `cf:destroy`. Fiber recovery owns its own wake (the `Fibers`
-   * capability); a `cf:housekeeping` job left by an older release is
-   * cancelled. Queue mutations re-arm the physical alarm automatically.
-   * @internal
+   * Agent pushes no host jobs, but earlier releases could leave some in a
+   * facet's queue (#2299). A facet has no alarm, so they would only fail
+   * every re-arm: drop them. On the root they complete when they fire.
    */
-  private async _syncHostJobs(): Promise<void> {
-    if (this._destroyed) return;
-    if (this._isFacet) {
-      // A facet has no alarm slot (`setAlarm()` throws): the root holds its
-      // keepAlive refs and mirrors fiber wakes, and facets never write the
-      // destroy marker. Earlier releases could persist a host job here
-      // before the re-arm threw; drop it so it cannot re-arm again.
-      const work = this.lifecycle.jobs;
-      for (const id of [
-        HOST_JOB_DESTROY_ID,
-        HOST_JOB_KEEP_ALIVE_ID,
-        HOST_JOB_HOUSEKEEPING_ID
-      ]) {
-        if (work.get(id)) await work.cancel(id);
-      }
-      return;
-    }
-    await this._withAgentSpan("schedule_agent_alarm", "alarm", {}, async () => {
-      const work = this.lifecycle.jobs;
-
-      // A pending destroy (#1625) must keep its wake armed and exclusive
-      // through any re-sync — including markers written by a pre-job-queue
-      // release — so a keepAlive-holding agent cannot delay its own
-      // condemnation. The durable marker stays authoritative; the job is
-      // re-derived from it.
-      const pendingDestroy = await this._pendingDestroyAlarm();
-      if (pendingDestroy !== null) {
-        await work.push({
-          id: HOST_JOB_DESTROY_ID,
-          fn: "destroy",
-          time: pendingDestroy,
-          exclusive: true
-        });
-        return;
-      }
-      if (work.get(HOST_JOB_DESTROY_ID)) {
-        await work.cancel(HOST_JOB_DESTROY_ID);
-      }
-
-      if (work.get(HOST_JOB_HOUSEKEEPING_ID)) {
-        await work.cancel(HOST_JOB_HOUSEKEEPING_ID);
-      }
-    });
+  private async _dropFacetHostJobs(): Promise<void> {
+    if (!this._isFacet) return;
+    const work = this.lifecycle.jobs;
+    for (const job of work.list()) await work.cancel(job.id);
   }
 
-  /** Lifecycle alarm callback; Agent re-syncs its host jobs after it. */
+  /** Lifecycle alarm callback; user alarm work runs in its override. */
   onAlarm(): void {}
 
   /**
-   * Drive one Agent-owned host job from the Lifecycle queue.
-   * @internal Dispatched by Lifecycle's alarm event loop; extensions add
-   * job fns through {@link _onHostJob}.
+   * Agent pushes no host jobs. The `destroy`, `keepAlive` and `housekeeping`
+   * jobs of earlier releases complete when they fire.
+   * @internal
    */
-  onJob(
-    context: LifecycleJobContext
-  ): LifecycleJobOutcome | void | Promise<LifecycleJobOutcome | void> {
-    return this._onHostJob(context.job.fn, context);
-  }
-
-  /**
-   * @internal Dispatch one host job fn. Agent extensions (Think) override
-   * this to add fns and delegate unknown ones to `super`.
-   */
-  protected _onHostJob(
-    fn: string,
-    _context: LifecycleJobContext
-  ): LifecycleJobOutcome | void | Promise<LifecycleJobOutcome | void> {
-    switch (fn) {
-      case "keepAlive":
-        // A heartbeat from before the KeepAlive capability; let it go.
-        return undefined;
-      case "housekeeping":
-        // Left by an older release; fiber recovery has its own wake now.
-        return undefined;
-      case "destroy":
-        // The alarm preamble consumes pending destroys before the event
-        // loop runs; a surviving job is stale.
-        return undefined;
-      default:
-        console.warn(`Unknown Agent host job fn ${JSON.stringify(fn)}`);
-        return undefined;
+  onJob({ job }: LifecycleJobContext): void {
+    if (!["destroy", "keepAlive", "housekeeping"].includes(job.fn)) {
+      console.warn(`Unknown Agent host job fn ${JSON.stringify(job.fn)}`);
     }
   }
 
@@ -2736,7 +2638,7 @@ export class Agent<
     // alarm precisely so teardown runs here, with this invocation's full
     // execution budget) and the convergence point for a destroy that a
     // previous invocation started but couldn't finish.
-    if (await this._hasPendingDestroy()) {
+    if ((await this._deferredDestroy.pendingAt()) !== null) {
       await this.destroy();
       return;
     }
@@ -6310,14 +6212,9 @@ export class Agent<
       return;
     }
 
-    // Persist the teardown decision FIRST, so a destroy that gets cut short
-    // (e.g. the runtime cancelling a request-scoped `waitUntil` it was riding
-    // on, #1625) is finished by the next wake — see the `alarm()` preamble —
-    // instead of leaving a half-deleted agent whose tables get silently
-    // recreated by the constructor. The marker is removed by the
-    // `deleteAll()` below, which is also why it is a KV record rather than a
-    // SQL row: it must outlive live-resource disposal.
-    await this.ctx.storage.put(DESTROY_PENDING_KEY, true);
+    // Record the teardown FIRST, so one cut short (#1625) is finished by the
+    // next alarm; `deleteAll()` below removes the record.
+    await this._deferredDestroy.begin();
     await this.lifecycle.disableAlarms();
 
     await this.lifecycle.dispose();
@@ -6363,7 +6260,7 @@ export class Agent<
     // /facet bootstrap, and `destroy()` below branches on the in-memory
     // `_isFacet`. Without this, an RPC landing before init would see it as
     // `false`, fall through to `destroy()`'s top-level path, and write the
-    // destroy marker on a facet — which the `alarm()`/`_syncHostJobs()`
+    // destroy marker on a facet — which the `alarm()` preamble
     // guards forbid (only top-level agents write it; facet teardown is
     // root-coordinated via `ctx.facets.delete`). Mirrors the other internal
     // RPC entrypoints (`_workflow_*`). We must NOT push this into `destroy()`
@@ -6376,36 +6273,7 @@ export class Agent<
       await this.destroy();
       return;
     }
-    // Future, not immediate: see DESTROY_ALARM_DELAY_MS — an immediate alarm
-    // aborts the isolate fast enough to race this RPC's response back to the
-    // DELETE handler, turning the intended 204 into a 500.
-    const destroyAt = Date.now() + DESTROY_ALARM_DELAY_MS;
-    await this.ctx.storage.put(DESTROY_PENDING_KEY, destroyAt);
-    // The exclusive job arms the wake; the durable marker above remains the
-    // authority the alarm preamble consumes before Lifecycle startup.
-    await this.lifecycle.jobs.push({
-      id: HOST_JOB_DESTROY_ID,
-      fn: "destroy",
-      time: destroyAt,
-      exclusive: true
-    });
-  }
-
-  /**
-   * Whether a (deferred or interrupted) destroy is pending. Reads the
-   * durable marker directly — the in-memory `_isFacet` flag may not be
-   * hydrated yet at the call sites, but facets never write the marker.
-   */
-  private async _pendingDestroyAlarm(): Promise<number | null> {
-    const pending = await this.ctx.storage.get<boolean | number>(
-      DESTROY_PENDING_KEY
-    );
-    if (typeof pending === "number") return pending;
-    return pending === true ? Date.now() : null;
-  }
-
-  private async _hasPendingDestroy(): Promise<boolean> {
-    return (await this._pendingDestroyAlarm()) !== null;
+    await this._deferredDestroy.schedule();
   }
 
   /**

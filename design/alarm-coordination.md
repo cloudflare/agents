@@ -113,11 +113,10 @@ compatibility bridge.
 
 Agent installs Scheduler with policy options only, plus a composition-root
 callback resolver for its historical name-based scheduling methods.
-Keep-alive holds are the `KeepAlive` capability's single job. Agent's own
-alarm work is pushed as a host job, the exclusive `cf:destroy` derived from
-the durable destroy marker, synchronized with durable state by
-`_syncHostJobs()` on startup, on state changes, and after each alarm. Fiber
-recovery is the `Fibers` capability's own job (see [fibers.md](./fibers.md)).
-Think adds
-`think:workflow-notifications` the same way. The host `getNextAlarm()`
+Keep-alive holds are the `KeepAlive` capability's single job. Deferred
+teardown (#1625) is the internal `DeferredDestroy` capability
+(`lifecycle/deferred-destroy.ts`): the durable destroy marker and one
+exclusive wake job, re-armed from the marker on every start. Agent pushes no
+host jobs. Fiber recovery is the `Fibers` capability's own
+job (see [fibers.md](./fibers.md)). The host `getNextAlarm()`
 contribution and Agent-owned breaker no longer exist.

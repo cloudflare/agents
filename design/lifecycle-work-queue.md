@@ -216,24 +216,24 @@ deduplicates still calls `jobs.rearm()` so a lost alarm recovers.
 
 ## Host-owned jobs
 
-Agent's pull contributions became pushed jobs, synchronized with durable
-state by `_syncHostJobs()` (called on startup, on state changes that used to
-trigger an alarm recalculation, and after each alarm):
+Agent's pull contributions became pushed jobs, and then moved into
+capabilities. Agent pushes none now. Jobs earlier releases left under the
+`host` owner complete when they fire; on a facet, which has no alarm, Agent
+drops them on start (#2299):
 
 - `cf:keep-alive` — gone. Keep-alive is the `KeepAlive` capability
   (`lifecycle/keep-alive.ts`): one `keep-alive:heartbeat` job held while holds
   are open, re-timed every `keepAliveIntervalMs`, cancelled at zero holds. A
   routed Lifecycle takes its hold on the root's KeepAlive through
-  `routes.toRoot`. A leftover `cf:keep-alive` job completes when it fires.
+  `routes.toRoot`.
 - `cf:housekeeping` — no longer pushed. Fiber recovery moved to the
   `Fibers` capability's own `fibers:recover` job ([fibers.md](./fibers.md));
-  a leftover `cf:housekeeping` job is cancelled or completes as a no-op.
-- `cf:destroy` — exclusive; re-derived from the durable `DESTROY_PENDING_KEY`
-  marker on every sync (covering markers written by pre-queue releases), so
-  a keepAlive-holding agent cannot delay its own condemnation. The marker
-  stays authoritative: Agent's alarm preamble consumes it before Lifecycle
-  startup.
-- `think:workflow-notifications` — Think's wake for its notification drain,
-  replacing the removed `_getExtensionAlarm()`.
-
-Agent's `onAlarm` wrapper re-syncs the host jobs after every alarm.
+  nothing replaces the old job.
+- `cf:destroy` — moved to the internal `DeferredDestroy` capability
+  (`lifecycle/deferred-destroy.ts`) as `deferred-destroy:wake`: exclusive,
+  re-armed from the durable `cf_agents_destroy_pending` marker on every start
+  (markers written by earlier releases included), so a keepAlive-holding
+  agent cannot delay its own condemnation. The marker stays authoritative:
+  Agent's alarm preamble reads it before Lifecycle startup.
+- `think:workflow-notifications` — gone; Think's notifications are Outbox
+  deliveries.

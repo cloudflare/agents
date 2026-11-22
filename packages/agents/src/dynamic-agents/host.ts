@@ -46,7 +46,6 @@ export interface DynamicAgentHostPort {
     target: LifecycleRouteAddress | undefined,
     envelope: LifecycleRouteEnvelope
   ): Promise<unknown>;
-  _syncHostJobs(): Promise<void>;
   readonly scheduler: {
     __DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(prefix: string): Promise<void>;
   };
