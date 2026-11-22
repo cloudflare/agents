@@ -361,6 +361,8 @@ export class Tasks<
    * Durably accept one run of a declared definition and return a receipt
    * without waiting for terminal state. The same `idempotencyKey` or `runId`
    * joins the existing run (`accepted: false`) instead of creating a second.
+   * A reused one with a different input throws an error named
+   * `TaskInputConflictError`; object key order does not count as different.
    */
   async run<Name extends keyof Handlers & string>(
     definition: Name,
@@ -1010,10 +1012,12 @@ export class Tasks<
       `metadata for Task definition "${definition}"`
     );
 
-    const existing =
-      (options.runId !== undefined
+    const byRunId =
+      options.runId !== undefined
         ? this.#store.getRun(options.runId)
-        : undefined) ??
+        : undefined;
+    const existing =
+      byRunId ??
       (options.idempotencyKey !== undefined
         ? this.#store.getRunByKey(options.idempotencyKey)
         : undefined);
@@ -1046,13 +1050,16 @@ export class Tasks<
       // is the same input.
       if (
         inputMustMatch &&
+        existing.input !== inputJson &&
         canonicalJson(existing.input) !== canonicalJson(inputJson)
       ) {
-        throw new Error(
+        const error = new Error(
           `Task run "${existing.run_id}" was started with a different input; ` +
-            `a reused ${options.runId !== undefined ? "run ID" : "idempotency key"} ` +
+            `a reused ${byRunId ? "run ID" : "idempotency key"} ` +
             `must carry the same input`
         );
+        error.name = "TaskInputConflictError";
+        throw error;
       }
       // A prior accept can throw after already durably inserting this row —
       // most likely here, on the wake mirror, rather than on the insert
@@ -1503,6 +1510,17 @@ export class Tasks<
  */
 function canonicalJson(json: string | null): string | null {
   if (json === null) return null;
+  // Deeply nested input can exhaust the stack while sorting; compare it as
+  // stored instead.
+  try {
+    return sortedJson(json);
+  } catch (error) {
+    if (error instanceof RangeError) return json;
+    throw error;
+  }
+}
+
+function sortedJson(json: string): string {
   const sort = (value: unknown): unknown => {
     if (Array.isArray(value)) return value.map(sort);
     if (value !== null && typeof value === "object") {
