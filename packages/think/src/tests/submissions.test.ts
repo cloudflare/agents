@@ -211,7 +211,12 @@ type ThinkSubmissionTestStub = {
     requestId: string,
     createdAt: number
   ): Promise<void>;
-  drainWorkflowNotificationsForTest(): Promise<void>;
+  drainWorkflowNotificationsForTest(timeoutMs?: number): Promise<void>;
+  migrateLegacyWorkflowNotificationTableForTest(row: {
+    submissionId: string;
+    eventType: string;
+    payload: unknown;
+  }): Promise<void>;
   insertWorkflowNotificationForTest(options: {
     notificationId: string;
     submissionId: string;
@@ -219,7 +224,7 @@ type ThinkSubmissionTestStub = {
     workflowId?: string;
     eventType?: string;
     payload?: unknown;
-    firstFailedAt?: number;
+    maxAttempts?: number;
   }): Promise<void>;
   listWorkflowNotificationsForTest(): Promise<
     Array<{
@@ -1807,7 +1812,30 @@ describe("Think durable submissions", () => {
     await expect(agent.listWorkflowNotificationsForTest()).resolves.toEqual([]);
   });
 
-  it("gives up on a workflow notification once its first failure is twelve hours old", async () => {
+  it("delivers rows left in the retired workflow notification table", async () => {
+    const agent = await freshAgent();
+    await agent.migrateLegacyWorkflowNotificationTableForTest({
+      submissionId: "sub-legacy",
+      eventType: "think-prompt-legacy",
+      payload: { submissionId: "sub-legacy", status: "completed" }
+    });
+
+    await agent.drainWorkflowNotificationsForTest();
+
+    await expect(agent.getWorkflowEventsForTest()).resolves.toEqual([
+      {
+        workflowName: "TEST_WORKFLOW",
+        workflowId: "workflow-legacy",
+        event: {
+          type: "think-prompt-legacy",
+          payload: { submissionId: "sub-legacy", status: "completed" }
+        }
+      }
+    ]);
+    await expect(agent.listWorkflowNotificationsForTest()).resolves.toEqual([]);
+  });
+
+  it("gives up on a workflow notification and reports it to onError", async () => {
     const agent = await freshAgent();
     await agent.setWorkflowEventFailuresForTest(1);
     await agent.insertWorkflowNotificationForTest({
@@ -1816,13 +1844,11 @@ describe("Think durable submissions", () => {
       workflowName: "TEST_WORKFLOW",
       workflowId: "workflow-give-up",
       eventType: "think-prompt-give-up",
-      firstFailedAt: Date.now() - 13 * 60 * 60 * 1000
+      maxAttempts: 1
     });
 
     await agent.drainWorkflowNotificationsForTest();
 
-    // No retry was scheduled and nothing was delivered; the failure went to
-    // the terminal error path instead of another backoff round.
     await expect(agent.getWorkflowEventsForTest()).resolves.toEqual([]);
     await expect(agent.listWorkflowNotificationsForTest()).resolves.toEqual([]);
     const errors = await agent.getErrorsForTest();

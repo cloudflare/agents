@@ -153,6 +153,7 @@ import {
 } from "./mcp/client/agent-servers";
 import { Scheduler, setSchedulerCallbackResolver } from "./schedules/scheduler";
 import { KeepAlive } from "./lifecycle/keep-alive";
+import { Outbox } from "./outbox/outbox";
 import { Queue, setQueueCallbackResolver } from "./queue/queue";
 import {
   runInInvocation,
@@ -728,6 +729,12 @@ export class Agent<
    * getQueue()/getQueues() methods are its surface.
    */
   private readonly _queue: Queue;
+
+  /**
+   * @internal Delivery-until-acknowledged capability. Framework hosts
+   * register their `__cf` sinks on it from their constructors.
+   */
+  protected readonly _outbox = new Outbox();
 
   /**
    * Durable replayable execution capability installed into this Agent's
@@ -1316,6 +1323,7 @@ export class Agent<
       .use(this.scheduler)
       .use(this._keepAlive)
       .use(this._queue)
+      .use(this._outbox)
       .use(this.mcp)
       .use(this._state)
       .use(this._webSockets)

@@ -21,6 +21,22 @@ export class CounterSubAgent extends Agent {
   private _heldKeepAliveDisposers: Array<() => void> = [];
   private _constructorName = this.name;
 
+  constructor(...args: ConstructorParameters<typeof Agent>) {
+    super(...args);
+    // Logs like scheduledCallback so the same reader works.
+    this._outbox.register("__cf_test_outbox_log", {
+      deliver: (payload: { value: string }, delivery) =>
+        this.scheduledCallback(payload, {
+          id: delivery.key,
+          callback: "outbox"
+        })
+    });
+  }
+
+  async outboxSend(key: string, value: string): Promise<void> {
+    await this._outbox.send("__cf_test_outbox_log", { value }, { key });
+  }
+
   onStart() {
     this.sql`
       CREATE TABLE IF NOT EXISTS counter (
@@ -1550,6 +1566,24 @@ export class TestSubAgentParent extends Agent {
   ): Promise<string> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.scheduleDelayedCallback(delaySeconds, value, options);
+  }
+
+  async subAgentOutboxSend(
+    subAgentName: string,
+    key: string,
+    value: string
+  ): Promise<void> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    await child.outboxSend(key, value);
+  }
+
+  async rootOutboxJobs(): Promise<
+    Array<{ id: string; ownerPath: string | null }>
+  > {
+    return this.sql<{ id: string; owner_path: string | null }>`
+      SELECT id, json_extract(payload, '$.owner_path') AS owner_path
+      FROM cf_agents_jobs WHERE capability = 'outbox'
+    `.map((row) => ({ id: row.id, ownerPath: row.owner_path }));
   }
 
   async subAgentQueue(subAgentName: string, value: string): Promise<string> {

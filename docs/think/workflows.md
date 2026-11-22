@@ -136,8 +136,10 @@ Object RPC open.
 2. Think runs the submitted turn through the normal submission queue.
 3. When the submission reaches `completed`, `error`, `aborted`, or `skipped`,
    Think records a pending workflow notification.
-4. Think drains the notification outbox with `sendWorkflowEvent()` and Durable
-   Object alarms until delivery succeeds.
+4. Think delivers the notification with `sendWorkflowEvent()` through the
+   [Outbox](https://github.com/cloudflare/agents/blob/main/docs/agents/outbox.md),
+   retrying with backoff until the Workflow accepts it. Delivery gives up
+   twelve hours after the first attempt and reports the failure to `onError`.
 5. `step.waitForEvent("<name>:wait", ...)` resumes the Workflow.
 6. `step.prompt()` validates the structured output or throws a typed error.
 
@@ -215,8 +217,8 @@ Use `submitMessages()` for durable one-off turns where the caller can inspect
 submission status later.
 
 Use `startFiber()` for app-owned idempotent Agent jobs that need recovery inside
-the Agent. Think's workflow notification delivery does not use fibers; it uses a
-private outbox because it needs to store an event until delivery succeeds.
+the Agent. Think's workflow notification delivery does not use fibers; it uses
+the Outbox, which stores an event until delivery succeeds.
 
 Use Workflows when the process has multiple deterministic steps, long waits, or
 human approval.

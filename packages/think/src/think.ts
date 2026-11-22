@@ -200,7 +200,6 @@ import type {
   AgentToolStoredChunk,
   Connection,
   FiberRecoveryContext,
-  RetryOptions,
   SubAgentClass,
   WSMessage
 } from "agents";
@@ -580,6 +579,14 @@ import {
   type MediaEvictionConfig,
   type MediaEvictionPassResult
 } from "./media-eviction";
+import {
+  legacyWorkflowNotification,
+  migrateWorkflowNotificationTable,
+  WORKFLOW_NOTIFICATION_SINK,
+  workflowNotificationKey,
+  workflowNotificationSink,
+  type WorkflowNotification
+} from "./workflow-notifications";
 import { createFetchTools } from "./tools/fetch";
 import type { CreateFetchToolsOptions, FetchToolEvent } from "./tools/fetch";
 import { truncatePausedExecutionOutput } from "./tools/execute";
@@ -1107,23 +1114,6 @@ export type SubmitMessagesOptions = {
 };
 
 const THINK_WORKFLOW_PROMPT_METADATA_KEY = "__thinkWorkflowPrompt";
-/** Queue callback that delivers one terminal-submission workflow event. */
-const WORKFLOW_NOTIFICATION_CALLBACK = "_cfDeliverWorkflowNotification";
-/**
- * A workflow notification never retries in-process: a failed delivery
- * schedules its own retry with backoff (see `_cfDeliverWorkflowNotification`)
- * so the alarm loop is not held while a workflow is unreachable.
- */
-const WORKFLOW_NOTIFICATION_RETRY: RetryOptions = { maxAttempts: 1 };
-/** Longest wait between two delivery attempts of one workflow notification. */
-const WORKFLOW_NOTIFICATION_MAX_BACKOFF_SECONDS = 10 * 60;
-/**
- * How long delivery of one workflow notification keeps being retried after
- * its first failure. Long enough to ride out an outage of the workflow
- * binding; a target still failing after this is treated as permanently
- * unreachable rather than waking the object every ten minutes forever.
- */
-const WORKFLOW_NOTIFICATION_GIVE_UP_MS = 12 * 60 * 60 * 1000;
 /** Queue callback that runs one connection-less continuation turn. */
 const CONNECTIONLESS_CONTINUATION_CALLBACK = "_cfRunConnectionlessContinuation";
 const CONNECTIONLESS_CONTINUATION_QUEUE_ID = "connectionless-continuation";
@@ -1143,13 +1133,6 @@ const CONNECTIONLESS_STOPS_KEY = "connectionlessStops";
 /** Queue callback that runs one media-eviction pass. */
 /** Queue callback that runs one pending submission. */
 const SUBMISSION_RUN_CALLBACK = "_cfRunSubmission";
-
-function workflowNotificationItemId(
-  submissionId: string,
-  eventType: string
-): string {
-  return `workflow-notification:${submissionId}:${eventType}`;
-}
 
 function submissionRunItemId(submissionId: string): string {
   return `submission:${submissionId}`;
@@ -1276,17 +1259,6 @@ type ThinkSubmissionRow = {
   result_status: SubmissionTurnResult["status"] | null;
   output_json: string | null;
   message_id: string | null;
-};
-
-/** Payload of one queued workflow notification. */
-type WorkflowNotificationPayload = {
-  workflowName: string;
-  workflowId: string;
-  event: { type: string; payload: unknown };
-  /** Failed deliveries so far; drives the retry backoff. */
-  attempts?: number;
-  /** Epoch ms of the first failed delivery; bounds the retry window. */
-  firstFailedAt?: number;
 };
 
 // Lifecycle / result types are shared with `@cloudflare/ai-chat` via
@@ -1683,6 +1655,18 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       () => this._messengerRuntime
     );
     this.lifecycle.use(this.#messengerReplies);
+    this._outbox.register(
+      WORKFLOW_NOTIFICATION_SINK,
+      workflowNotificationSink(
+        ({ workflowName, workflowId, event }) =>
+          this.sendWorkflowEvent(
+            workflowName as string & {},
+            workflowId,
+            event
+          ),
+        (error) => this.onError(error)
+      )
+    );
 
     const _onStart = this.onStart.bind(this);
     const startThink = async (
@@ -1881,7 +1865,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               await this._migrateLegacyActionLedger();
               await this._sweepApprovals();
               await this._sweepActionPendingApprovals();
-              await this._migrateLegacyWorkflowNotifications();
+              await migrateWorkflowNotificationTable(
+                this.ctx.storage,
+                (notification, key) =>
+                  this._outbox.send(WORKFLOW_NOTIFICATION_SINK, notification, {
+                    key
+                  })
+              );
               await this._replayPendingResponseHooks();
               await this._replayMessengerRecoveryDeliveries();
               await this._recoverSubmissionsOnStart();
@@ -6094,23 +6084,24 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       ...(status === "completed" && { output }),
       ...(error && { error })
     };
-    void this.queue(
-      WORKFLOW_NOTIFICATION_CALLBACK,
-      {
-        workflowName: workflowPrompt.workflow.name,
-        workflowId: workflowPrompt.workflow.id,
-        event: { type: workflowPrompt.workflow.eventType, payload }
-      } satisfies WorkflowNotificationPayload,
-      {
-        id: workflowNotificationItemId(
-          submission.submissionId,
-          workflowPrompt.workflow.eventType
-        ),
-        retry: WORKFLOW_NOTIFICATION_RETRY
-      }
-    ).catch((error) => {
-      console.error("[Think] Failed to queue workflow notification", error);
-    });
+    void this._outbox
+      .send(
+        WORKFLOW_NOTIFICATION_SINK,
+        {
+          workflowName: workflowPrompt.workflow.name,
+          workflowId: workflowPrompt.workflow.id,
+          event: { type: workflowPrompt.workflow.eventType, payload }
+        } satisfies WorkflowNotification,
+        {
+          key: workflowNotificationKey(
+            submission.submissionId,
+            workflowPrompt.workflow.eventType
+          )
+        }
+      )
+      .catch((error) => {
+        console.error("[Think] Failed to queue workflow notification", error);
+      });
     return true;
   }
 
@@ -6127,106 +6118,16 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /**
-   * Deliver one workflow notification. Runs from the queue on first
-   * delivery; a failed delivery schedules this same callback again with
-   * exponential backoff (2s doubling, capped at ten minutes) so a
-   * temporarily unreachable workflow still gets its terminal event. Once
-   * the first failure is twelve hours old delivery gives up by throwing:
-   * the dispatching capability reports it through its error event and the
-   * Agent's `onError`.
+   * TEMPORARY: a workflow notification queued or scheduled by an earlier
+   * release moves into the Outbox when it fires. Remove in the next minor
+   * release, with `migrateWorkflowNotificationTable`.
    * @internal Queue and schedule callback.
    */
   async _cfDeliverWorkflowNotification(
-    payload: WorkflowNotificationPayload
+    payload: WorkflowNotification
   ): Promise<void> {
-    try {
-      await this.sendWorkflowEvent(
-        payload.workflowName as string & {},
-        payload.workflowId,
-        payload.event
-      );
-    } catch (error) {
-      const attempts = (payload.attempts ?? 0) + 1;
-      const firstFailedAt = payload.firstFailedAt ?? Date.now();
-      if (Date.now() - firstFailedAt >= WORKFLOW_NOTIFICATION_GIVE_UP_MS) {
-        const summary =
-          `Workflow notification for submission ${JSON.stringify(
-            (payload.event.payload as { submissionId?: string })?.submissionId
-          )} (${payload.workflowName}/${payload.workflowId}, ${payload.event.type}) ` +
-          `could not be delivered after ${attempts} attempts over 12h; giving up`;
-        console.error(`[Think] ${summary}`, error);
-        // Deliberately no `cause`: the dispatching capability preserves any
-        // error whose cause chain is a platform-class failure, which would
-        // keep the item alive past this cutoff.
-        throw new Error(summary);
-      }
-      const delaySeconds = Math.min(
-        WORKFLOW_NOTIFICATION_MAX_BACKOFF_SECONDS,
-        2 ** Math.min(attempts, 20)
-      );
-      console.error(
-        `[Think] Workflow notification delivery failed (attempt ${attempts}); ` +
-          `retrying in ${delaySeconds}s`,
-        error
-      );
-      await this.schedule(delaySeconds, WORKFLOW_NOTIFICATION_CALLBACK, {
-        ...payload,
-        attempts,
-        firstFailedAt
-      } satisfies WorkflowNotificationPayload);
-    }
-  }
-
-  /**
-   * Move undelivered rows of the retired `cf_think_workflow_notifications`
-   * outbox into the queue and drop the table. Idempotent: a missing table
-   * means a fresh object or a completed migration.
-   *
-   * TEMPORARY: one-shot upgrade path for objects that were mid-delivery when
-   * this release landed. Remove in the next minor release, once every
-   * deployed object has started on this version and migrated.
-   */
-  private async _migrateLegacyWorkflowNotifications(): Promise<void> {
-    const tables = this.ctx.storage.sql
-      .exec(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='cf_think_workflow_notifications'"
-      )
-      .toArray();
-    if (tables.length === 0) return;
-
-    const rows = this.sql<{
-      submission_id: string;
-      workflow_name: string;
-      workflow_id: string;
-      event_type: string;
-      payload_json: string;
-    }>`
-      SELECT submission_id, workflow_name, workflow_id, event_type, payload_json
-      FROM cf_think_workflow_notifications
-      WHERE delivered_at IS NULL
-      ORDER BY created_at ASC, notification_id ASC
-    `;
-    for (const row of rows) {
-      let payload: unknown;
-      try {
-        payload = JSON.parse(row.payload_json);
-      } catch {
-        continue;
-      }
-      await this.queue(
-        WORKFLOW_NOTIFICATION_CALLBACK,
-        {
-          workflowName: row.workflow_name,
-          workflowId: row.workflow_id,
-          event: { type: row.event_type, payload }
-        } satisfies WorkflowNotificationPayload,
-        {
-          id: workflowNotificationItemId(row.submission_id, row.event_type),
-          retry: WORKFLOW_NOTIFICATION_RETRY
-        }
-      );
-    }
-    this.sql`DROP TABLE cf_think_workflow_notifications`;
+    const { notification, key } = legacyWorkflowNotification(payload);
+    await this._outbox.send(WORKFLOW_NOTIFICATION_SINK, notification, { key });
   }
 
   async inspectSubmission(

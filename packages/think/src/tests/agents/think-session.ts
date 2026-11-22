@@ -79,6 +79,10 @@ import type { ContextConfig } from "agents/context";
 import { stableHash, type Approvals } from "agents/internal";
 import { z } from "zod";
 import { WorkspaceFiles } from "../../workspace-files";
+import {
+  migrateWorkflowNotificationTable,
+  WORKFLOW_NOTIFICATION_SINK
+} from "../../workflow-notifications";
 
 /**
  * Send one chat wire message through the real protocol dispatch, as a socket
@@ -10017,10 +10021,25 @@ export class ThinkProgrammaticTestAgent extends Think {
   }
 
   /** Wait until the alarm loop has delivered every queued workflow notification. */
-  async drainWorkflowNotificationsForTest(): Promise<void> {
+  async drainWorkflowNotificationsForTest(timeoutMs = 10_000): Promise<void> {
     await this._waitForQueueDrainForTest("_cfDeliverWorkflowNotification");
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const pending = await this._outbox.list({
+        sink: "__cf_think_workflow_notification",
+        status: "pending"
+      });
+      if (pending.length === 0) return;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error("workflow notifications did not drain in time");
   }
 
+  /**
+   * Queue a workflow notification. Without `maxAttempts` it is a queue item
+   * in the shape earlier releases wrote, which moves into the Outbox when
+   * it fires; with it, an Outbox delivery with that attempt budget.
+   */
   async insertWorkflowNotificationForTest(options: {
     notificationId: string;
     submissionId: string;
@@ -10028,29 +10047,66 @@ export class ThinkProgrammaticTestAgent extends Think {
     workflowId?: string;
     eventType?: string;
     payload?: unknown;
-    firstFailedAt?: number;
+    maxAttempts?: number;
   }): Promise<void> {
-    await this.queue(
-      "_cfDeliverWorkflowNotification",
-      {
-        workflowName: options.workflowName ?? "TEST_WORKFLOW",
-        workflowId: options.workflowId ?? "workflow-1",
-        event: {
-          type: options.eventType ?? "think-prompt-test",
-          payload: options.payload ?? {
-            submissionId: options.submissionId,
-            status: "error"
-          }
-        },
-        ...(options.firstFailedAt !== undefined && {
-          firstFailedAt: options.firstFailedAt
-        })
-      },
-      // Same policy as production pushes: no in-process retries.
-      { id: options.notificationId, retry: { maxAttempts: 1 } }
+    const notification = {
+      workflowName: options.workflowName ?? "TEST_WORKFLOW",
+      workflowId: options.workflowId ?? "workflow-1",
+      event: {
+        type: options.eventType ?? "think-prompt-test",
+        payload: options.payload ?? {
+          submissionId: options.submissionId,
+          status: "error"
+        }
+      }
+    };
+    if (options.maxAttempts !== undefined) {
+      await this._outbox.send(
+        "__cf_think_workflow_notification",
+        notification,
+        {
+          key: options.notificationId,
+          retry: { maxAttempts: options.maxAttempts }
+        }
+      );
+      return;
+    }
+    await this.queue("_cfDeliverWorkflowNotification", notification, {
+      id: options.notificationId,
+      retry: { maxAttempts: 1 }
+    });
+  }
+
+  /**
+   * Write one undelivered row into the retired
+   * `cf_think_workflow_notifications` table, then run its migration.
+   */
+  async migrateLegacyWorkflowNotificationTableForTest(row: {
+    submissionId: string;
+    eventType: string;
+    payload: unknown;
+  }): Promise<void> {
+    this.sql`
+      CREATE TABLE cf_think_workflow_notifications (
+        notification_id TEXT PRIMARY KEY, submission_id TEXT,
+        workflow_name TEXT, workflow_id TEXT, event_type TEXT,
+        payload_json TEXT, created_at INTEGER, delivered_at INTEGER
+      )
+    `;
+    this.sql`
+      INSERT INTO cf_think_workflow_notifications VALUES (
+        'n-1', ${row.submissionId}, 'TEST_WORKFLOW', 'workflow-legacy',
+        ${row.eventType}, ${JSON.stringify(row.payload)}, ${Date.now()}, NULL
+      )
+    `;
+    await migrateWorkflowNotificationTable(
+      this.ctx.storage,
+      (notification, key) =>
+        this._outbox.send(WORKFLOW_NOTIFICATION_SINK, notification, { key })
     );
   }
 
+  /** Workflow notifications not yet delivered: legacy queue items and Outbox rows. */
   async listWorkflowNotificationsForTest(): Promise<
     Array<{
       notificationId: string;
@@ -10060,27 +10116,34 @@ export class ThinkProgrammaticTestAgent extends Think {
       payload: unknown;
     }>
   > {
+    type Notification = {
+      workflowName: string;
+      workflowId: string;
+      event: { type: string; payload?: unknown };
+    };
     const items = this.sql<{ id: string; payload: string }>`
       SELECT id, payload FROM cf_agents_jobs
       WHERE capability = 'queue' AND fn = '_cfDeliverWorkflowNotification'
       ORDER BY time ASC
     `;
-    return items.map((row) => {
-      const envelope = JSON.parse(row.payload) as {
-        payload: {
-          workflowName: string;
-          workflowId: string;
-          event: { type: string; payload?: unknown };
-        };
-      };
-      return {
-        notificationId: row.id,
-        workflowName: envelope.payload.workflowName,
-        workflowId: envelope.payload.workflowId,
-        eventType: envelope.payload.event.type,
-        payload: envelope.payload.event.payload
-      };
-    });
+    const queued = items.map((row) => ({
+      id: row.id,
+      notification: (JSON.parse(row.payload) as { payload: Notification })
+        .payload
+    }));
+    const pending = (
+      await this._outbox.list<Notification>({
+        sink: "__cf_think_workflow_notification",
+        status: ["pending", "held"]
+      })
+    ).map((delivery) => ({ id: delivery.key, notification: delivery.payload }));
+    return [...queued, ...pending].map(({ id, notification }) => ({
+      notificationId: id,
+      workflowName: notification.workflowName,
+      workflowId: notification.workflowId,
+      eventType: notification.event.type,
+      payload: notification.event.payload
+    }));
   }
 
   async insertMalformedSubmissionForTest(options: {

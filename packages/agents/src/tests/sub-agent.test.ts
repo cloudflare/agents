@@ -499,6 +499,33 @@ describe("SubAgent", () => {
     expect(await agent.rootQueueRows()).toEqual([]);
   });
 
+  it("delivers an Outbox value sent from a sub-agent inside the child", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    // The row stays on the facet; only its wake is mirrored to the root,
+    // which owns the alarm and routes the dispatch back.
+    await agent.subAgentOutboxSend("outbox-child", "k1", "hello");
+
+    const deadline = Date.now() + 5_000;
+    let log = await agent.subAgentScheduleLog("outbox-child");
+    while (log.length === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      log = await agent.subAgentScheduleLog("outbox-child");
+    }
+    expect(log).toEqual([
+      {
+        value: "hello",
+        agentName: "outbox-child",
+        currentAgentName: "outbox-child",
+        parentClass: "TestSubAgentParent",
+        scheduleId: "k1",
+        callback: "outbox"
+      }
+    ]);
+    await expect(agent.rootOutboxJobs()).resolves.toEqual([]);
+  });
+
   it("deleteSubAgent removes the sub-agent's pending queue items from the root", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);

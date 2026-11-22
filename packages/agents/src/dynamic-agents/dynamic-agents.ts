@@ -288,8 +288,8 @@ export class DynamicAgentsInternal extends LifecycleCapability {
 
   /**
    * Clean root-owned bookkeeping for a sub-tree of facets: bulk-cancel
-   * schedules, queue items, and routed Task and fiber wake mirrors under
-   * the owner-path prefix.
+   * schedules, queue items, and routed Task, fiber and Outbox wake mirrors
+   * under the owner-path prefix.
    */
   async cleanupPrefix(ownerPath: ReadonlyArray<AgentPathStep>): Promise<void> {
     const prefix = agentPathKey(ownerPath);
@@ -304,6 +304,9 @@ export class DynamicAgentsInternal extends LifecycleCapability {
         prefix
       );
       await this.#host._fibers.__DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(
+        prefix
+      );
+      await this.#host._outbox.__DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(
         prefix
       );
     }
