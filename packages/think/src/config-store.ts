@@ -1,10 +1,14 @@
 /**
- * Think's private keyed config rows, in the `think_config` table.
+ * Think's private keyed config rows, in the `think_config` table, as a
+ * Lifecycle capability that owns the table and its one migration (lifting
+ * Think's keys out of the legacy `assistant_config` table).
  *
  * Durable: every row. In memory: the last value each key was seen to hold in
  * this isolate, so a write of an unchanged value skips the row. Only this
- * object writes the table, which is what makes the memo safe.
+ * capability writes the table, which is what makes the memo safe.
  */
+
+import { LifecycleCapability } from "agents/lifecycle";
 
 /** Keys Think reads that older versions stored in `assistant_config`. */
 const LEGACY_CONFIG_KEYS = [
@@ -15,13 +19,21 @@ const LEGACY_CONFIG_KEYS = [
 ] as const;
 
 /** @internal */
-export class ThinkConfigStore {
-  readonly #sql: SqlStorage;
+export class ThinkConfigStore extends LifecycleCapability {
   #ready = false;
   readonly #memo = new Map<string, string | undefined>();
 
-  constructor(sql: SqlStorage) {
-    this.#sql = sql;
+  constructor() {
+    super("think-config");
+  }
+
+  /** Create the table and lift legacy rows before anything reads them. */
+  override onStart(): void {
+    this.#ensureTable();
+  }
+
+  get #sql(): SqlStorage {
+    return this.lifecycle.storage.sql;
   }
 
   /** The stored value of `key`, or `undefined`. Always reads the row. */

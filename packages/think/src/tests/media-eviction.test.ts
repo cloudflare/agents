@@ -289,6 +289,76 @@ describe("mediaEviction — aged media leaves the conversation (#1710)", () => {
     );
   });
 
+  it("evicts aged media on a sub-agent facet", async () => {
+    const parent = (await getAgentByName(
+      env.ThinkMediaEvictionAgent,
+      uniqueName("evict-facet")
+    )) as unknown as {
+      seedFacetMediaForTest(...names: string[]): Promise<void>;
+      getFacetStoredMessageForTest(
+        name: string,
+        id: string
+      ): Promise<UIMessage | null>;
+    };
+    await parent.seedFacetMediaForTest("child");
+    await vi.waitFor(
+      async () => {
+        const message = await parent.getFacetStoredMessageForTest(
+          "child",
+          "f0"
+        );
+        expect(JSON.stringify(message)).toContain("[evicted image/png,");
+      },
+      { timeout: 10_000, interval: 100 }
+    );
+  });
+
+  it("evicts aged media on sibling facets that queue passes together", async () => {
+    const parent = (await getAgentByName(
+      env.ThinkMediaEvictionAgent,
+      uniqueName("evict-facets")
+    )) as unknown as {
+      seedFacetMediaForTest(...names: string[]): Promise<void>;
+      getFacetStoredMessageForTest(
+        name: string,
+        id: string
+      ): Promise<UIMessage | null>;
+    };
+    await parent.seedFacetMediaForTest("left", "right");
+    await vi.waitFor(
+      async () => {
+        for (const name of ["left", "right"]) {
+          const message = await parent.getFacetStoredMessageForTest(name, "f0");
+          expect(JSON.stringify(message)).toContain("[evicted image/png,");
+        }
+      },
+      { timeout: 10_000, interval: 100 }
+    );
+  });
+
+  it("evicts on facets of different classes with the same name", async () => {
+    const parent = (await getAgentByName(
+      env.ThinkMediaEvictionAgent,
+      uniqueName("evict-facets-same-name")
+    )) as unknown as {
+      seedFacetMediaForTest(...names: string[]): Promise<void>;
+      getFacetStoredMessageForTest(
+        name: string,
+        id: string
+      ): Promise<UIMessage | null>;
+    };
+    await parent.seedFacetMediaForTest("a", "auto:a");
+    await vi.waitFor(
+      async () => {
+        for (const name of ["a", "auto:a"]) {
+          const message = await parent.getFacetStoredMessageForTest(name, "f0");
+          expect(JSON.stringify(message)).toContain("[evicted image/png,");
+        }
+      },
+      { timeout: 10_000, interval: 100 }
+    );
+  });
+
   it("re-arms a fruitless pass on a windowed cache once appends age a protected row", async () => {
     const agent = (await getAgentByName(
       env.ThinkMediaEvictionAutoAgent,

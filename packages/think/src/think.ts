@@ -135,10 +135,7 @@ import {
   drainInferenceStream,
   streamErrorToString
 } from "./inference/invocation";
-import {
-  registerMessengerReplyTask,
-  runMessengerReplyTask
-} from "./messengers/reply-task";
+import { MessengerReplies } from "./messengers/reply-task";
 import { ThinkModelResolver } from "./model";
 import {
   ThinkTranscriptCache,
@@ -1216,7 +1213,7 @@ export type SubmitMessagesOptions = {
   submissionId?: string;
   idempotencyKey?: string;
   metadata?: Record<string, unknown>;
-  /** Channel id this submission belongs to. See {@link RunTurnBase.channel}. */
+  /** Channel id this submission belongs to. See the `channel` option of {@link RunTurnOptions}. */
   channel?: string;
 };
 
@@ -1255,7 +1252,6 @@ type ConnectionlessContinuation = {
 /** `think_config` key of the count of stops of every chat. */
 const CONNECTIONLESS_STOPS_KEY = "connectionlessStops";
 /** Queue callback that runs one media-eviction pass. */
-const MEDIA_EVICTION_CALLBACK = "_cfEvictAgedMedia";
 /** Queue callback that runs one pending submission. */
 const SUBMISSION_RUN_CALLBACK = "_cfRunSubmission";
 
@@ -1787,14 +1783,17 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     super(ctx, env);
 
     this.lifecycle.use(this.sessions);
+    this.lifecycle.use(this.#config);
+    this.lifecycle.use(this.#mediaEviction);
     this.lifecycle.use(this.streams);
     this.lifecycle.use(this._approvals);
     this._registerChatTurnTaskDefinition();
     this._registerChatRecoveryTaskDefinition();
-    registerMessengerReplyTask(this.tasks, {
-      runtime: () => this._messengerRuntime,
-      storage: this.ctx.storage
-    });
+    this.#messengerReplies = new MessengerReplies(
+      this.tasks,
+      () => this._messengerRuntime
+    );
+    this.lifecycle.use(this.#messengerReplies);
 
     const _onStart = this.onStart.bind(this);
     const startThink = async (
@@ -2219,8 +2218,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         ...totals,
         externalizedBytes: totals.bytes
       }),
-    queuePass: () =>
-      this.queue(MEDIA_EVICTION_CALLBACK, undefined, { id: "media-eviction" })
+    // Every facet shares the root's queue, so each names its pass by its
+    // path (class and name at each level).
+    queueRouted: () =>
+      this.queue("_cfEvictAgedMedia", undefined, {
+        id: `media-eviction:${JSON.stringify(this.selfPath)}`
+      })
   });
 
   private get _mediaEvictionRunning(): boolean {
@@ -2232,7 +2235,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /**
-   * Run one media-eviction pass.
+   * Run one media-eviction pass queued on the Agent queue: by a sub-agent
+   * facet, which has no alarm of its own, or by an older version.
    * @internal Queue callback.
    */
   async _cfEvictAgedMedia(): Promise<void> {
@@ -2739,9 +2743,17 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
   // ── Config storage helpers (think_config table) ─────────────────
 
-  /** Think's private keyed config rows. */
-  readonly #config = new ThinkConfigStore(this.ctx.storage.sql);
+  /** Messenger replies as Task runs. */
+  readonly #messengerReplies: MessengerReplies;
 
+  /** Think's private keyed config rows. */
+  readonly #config = new ThinkConfigStore();
+
+  /**
+   * Run the legacy `assistant_config` lift again. The config capability runs
+   * it on start; this is a test seam, not an override point.
+   * @internal
+   */
   protected _migrateLegacyConfigToThinkTable(): void {
     this.#config.migrateLegacy();
   }
@@ -3303,7 +3315,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     idempotencyKey: string;
     metadata: Record<string, unknown>;
   }): Promise<{ accepted: boolean }> {
-    return runMessengerReplyTask(this.tasks, input);
+    return this.#messengerReplies.run(input);
   }
 
   private _runChatRecoveryFiber<T>(

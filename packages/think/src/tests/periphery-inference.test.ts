@@ -1,5 +1,7 @@
 import type { ModelMessage, UIMessage } from "ai";
 import { describe, expect, it, vi } from "vitest";
+import { createInferenceInvocation } from "../inference/invocation";
+import { createMockModel } from "./agents/think-session";
 import {
   drainInferenceStream,
   streamErrorToString
@@ -215,5 +217,83 @@ describe("inference stream helpers", () => {
     const waitUntil = vi.fn();
     drainInferenceStream({}, waitUntil);
     expect(waitUntil).not.toHaveBeenCalled();
+  });
+
+  it("drains a registered stream once, through either result", async () => {
+    let original: object | undefined;
+    let wrapper: object | undefined;
+    const invoke = createInferenceInvocation({
+      config: {},
+      model: createMockModel("hello"),
+      system: "s",
+      messages: [{ role: "user", content: "hi" }],
+      tools: {},
+      maxSteps: 1,
+      sendReasoning: false,
+      continuation: false,
+      telemetry: { className: "T", agentId: "a", conversationId: "c" },
+      invocationBounded: false,
+      storeMessages: false,
+      storeTools: false,
+      hooks: {
+        compactBeforeStep: async () => undefined,
+        beforeStep: () => undefined,
+        onChunk: async () => {},
+        onStepEnd: async () => {},
+        afterToolCall: async () => {},
+        requestId: () => undefined,
+        resolveModel: () => createMockModel("x"),
+        transformResult: (result) => {
+          original = result;
+          return (wrapper = { ...result });
+        }
+      }
+    });
+    const result = invoke();
+    expect(result).toBe(wrapper);
+    const drains: Promise<void>[] = [];
+    // The first drain goes through the unwrapped result; the wrapper shares
+    // its finalizer, so draining it as well starts nothing new.
+    drainInferenceStream(original!, (promise) => drains.push(promise));
+    drainInferenceStream(result, (promise) => drains.push(promise));
+    expect(drains).toHaveLength(1);
+    await drains[0];
+  });
+
+  it("registers the wrapped result for draining too", () => {
+    let original: object | undefined;
+    const result = createInferenceInvocation({
+      config: {},
+      model: createMockModel("hello"),
+      system: "s",
+      messages: [{ role: "user", content: "hi" }],
+      tools: {},
+      maxSteps: 1,
+      sendReasoning: false,
+      continuation: false,
+      telemetry: { className: "T", agentId: "a", conversationId: "c" },
+      invocationBounded: false,
+      storeMessages: false,
+      storeTools: false,
+      hooks: {
+        compactBeforeStep: async () => undefined,
+        beforeStep: () => undefined,
+        onChunk: async () => {},
+        onStepEnd: async () => {},
+        afterToolCall: async () => {},
+        requestId: () => undefined,
+        resolveModel: () => createMockModel("x"),
+        transformResult: (r) => {
+          original = r;
+          return { ...r };
+        }
+      }
+    })();
+    const drains: Promise<void>[] = [];
+    // The wrapper first: it must have its own registration.
+    drainInferenceStream(result, (promise) => drains.push(promise));
+    expect(drains).toHaveLength(1);
+    drainInferenceStream(original!, (promise) => drains.push(promise));
+    expect(drains).toHaveLength(1);
   });
 });

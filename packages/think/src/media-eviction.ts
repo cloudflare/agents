@@ -29,6 +29,7 @@
  */
 
 import type { UIMessage } from "ai";
+import { LifecycleCapability } from "agents/lifecycle";
 import {
   MODEL_RECENT_WINDOW,
   mediaEvictionCutoff
@@ -343,7 +344,11 @@ export function evictedFilePath(
   return `/workspace/attachments/evicted/${messageId}-${index}.${extensionFor(mediaType)}`;
 }
 
-/** Totals of one eviction pass. */
+/**
+ * Totals of one eviction pass.
+ *
+ * @internal
+ */
 export interface MediaEvictionPassResult {
   messages: number;
   parts: number;
@@ -351,7 +356,11 @@ export interface MediaEvictionPassResult {
   backlogRemains: boolean;
 }
 
-/** What {@link MediaEvictionPasses} reads from and does on its agent. */
+/**
+ * What {@link MediaEvictionPasses} reads from and does on its agent.
+ *
+ * @internal
+ */
 export interface MediaEvictionPassHost {
   /** The resolved `mediaEviction` setting; `null` when eviction is off. */
   config(): ResolvedMediaEvictionConfig | null;
@@ -374,19 +383,30 @@ export interface MediaEvictionPassHost {
   openFiles(): { write(path: string, bytes: Uint8Array): Promise<void> };
   updateMessage(message: UIMessage): Promise<unknown>;
   emitEvicted(totals: Omit<MediaEvictionPassResult, "backlogRemains">): void;
-  /** Queue one pass on the agent's job queue, coalesced by a stable id. */
-  queuePass(): Promise<unknown>;
+  /**
+   * Queue a pass on a routed Lifecycle (a sub-agent facet), which has no
+   * alarm of its own: the host's Queue routes the item through the root.
+   * Goes away with facets.
+   */
+  queueRouted(): Promise<unknown>;
 }
 
+/** One pass at a time: requests coalesce on this job id. */
+const PASS_JOB_ID = "think-media-eviction:pass";
+
 /**
- * Schedules and runs bounded media-eviction passes for one agent.
+ * Schedules and runs bounded media-eviction passes for one agent, as a
+ * Lifecycle capability that owns the pass job.
  *
+ * Durable: the pending pass job (one id, so repeated requests coalesce).
  * In memory only: whether a pass is running, a request that arrived during
- * it, and the last fruitless pass. A pass is one queue item, so repeated
- * requests coalesce; the gate below decides from memory whether a pass could
- * evict anything before queuing one.
+ * it, and the last fruitless pass. The gate in {@link request} decides from
+ * memory whether a pass could evict anything before queuing one. Passes run
+ * from the alarm, never inside the request or refresh that asked for them.
+ *
+ * @internal
  */
-export class MediaEvictionPasses {
+export class MediaEvictionPasses extends LifecycleCapability {
   readonly #host: MediaEvictionPassHost;
   #running = false;
   /**
@@ -413,7 +433,13 @@ export class MediaEvictionPasses {
   #fruitless: { storedBytes: number; appendsSince: number } | null = null;
 
   constructor(host: MediaEvictionPassHost) {
+    super("think-media-eviction");
     this.#host = host;
+  }
+
+  /** Run the queued pass. A failed pass logs and ends; the next request retries. */
+  async onJob(): Promise<void> {
+    await this.run();
   }
 
   /** Whether a pass is running now. */
@@ -488,7 +514,14 @@ export class MediaEvictionPasses {
         return;
       }
     }
-    void this.#host.queuePass().catch((error) => {
+    const queued = this.lifecycle.routes.source
+      ? this.#host.queueRouted()
+      : this.lifecycle.jobs.push({
+          id: PASS_JOB_ID,
+          fn: "pass",
+          time: Date.now()
+        });
+    void queued.catch((error) => {
       console.error("[Think] Failed to queue media eviction pass", error);
     });
   }

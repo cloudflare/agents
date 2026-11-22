@@ -13626,6 +13626,50 @@ export class ThinkMediaEvictionAgent extends Think {
     return (await this.syncMessagesFromStorage()).length;
   }
 
+  /**
+   * Seed aged media on sub-agent facets of this agent, all before any pass
+   * runs. A name prefixed `auto:` is a `ThinkMediaEvictionAutoAgent` facet.
+   */
+  async seedFacetMediaForTest(...names: string[]): Promise<void> {
+    const children = await Promise.all(
+      names.map((name) => this._facetForTest(name))
+    );
+    await Promise.all(
+      children.map((child) =>
+        child.setMediaEvictionForTest({
+          keepRecentMessages: 2,
+          minPartBytes: 10_000
+        })
+      )
+    );
+    await Promise.all(
+      children.map((child) => child.seedMediaHistoryForTest("f"))
+    );
+  }
+
+  /** A stored message of a sub-agent facet of this agent. */
+  async getFacetStoredMessageForTest(
+    name: string,
+    id: string
+  ): Promise<UIMessage | null> {
+    return (await this._facetForTest(name)).getStoredMessageForTest(id);
+  }
+
+  private async _facetForTest(
+    name: string
+  ): Promise<
+    Pick<
+      ThinkMediaEvictionAgent,
+      | "setMediaEvictionForTest"
+      | "seedMediaHistoryForTest"
+      | "getStoredMessageForTest"
+    >
+  > {
+    return name.startsWith("auto:")
+      ? this.subAgent(ThinkMediaEvictionAutoAgent, name.slice("auto:".length))
+      : this.subAgent(ThinkMediaEvictionAgent, name);
+  }
+
   async getStoredMessageForTest(id: string): Promise<UIMessage | null> {
     return (await this.session.getMessage(id)) as UIMessage | null;
   }
