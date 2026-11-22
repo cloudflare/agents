@@ -129,6 +129,34 @@ describe("Tasks#register", () => {
 });
 
 describe("Tasks capability", () => {
+  it("refuses to join a run started with a different input", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const first = await instance.tasks.run(
+        "pipeline",
+        { label: "a", tags: { x: 1, y: 2 } },
+        { idempotencyKey: "K" }
+      );
+
+      // A caller bug reusing the key for other work must not silently get
+      // the old run back.
+      await expect(
+        instance.tasks.run("pipeline", { label: "b" }, { idempotencyKey: "K" })
+      ).rejects.toThrow(/different input/);
+      await expect(
+        instance.tasks.run("pipeline", { label: "b" }, { runId: first.runId })
+      ).rejects.toThrow(/different input/);
+
+      // The same data in another key order is the same input.
+      const joined = await instance.tasks.run(
+        "pipeline",
+        { tags: { y: 2, x: 1 }, label: "a" },
+        { idempotencyKey: "K" }
+      );
+      expect(joined).toMatchObject({ accepted: false, runId: first.runId });
+    });
+  });
+
   it("accepts runs durably and deduplicates acceptance", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {

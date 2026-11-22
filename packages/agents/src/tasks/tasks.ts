@@ -368,7 +368,7 @@ export class Tasks<
     options?: TaskRunOptions
   ): Promise<TaskReceipt> {
     this.#validateDefinitionName(definition);
-    return this.#accept(definition, input, options);
+    return this.#accept(definition, input, options, "warm", true);
   }
 
   /**
@@ -985,7 +985,8 @@ export class Tasks<
     definition: string,
     input: unknown,
     options: TaskRunOptions = {},
-    startMode: TaskStartMode = "warm"
+    startMode: TaskStartMode = "warm",
+    inputMustMatch = false
   ): Promise<TaskReceipt> {
     await this.lifecycle.ready();
     if (options.runId !== undefined && options.runId.length === 0) {
@@ -1040,12 +1041,19 @@ export class Tasks<
             `refusing to join it with conflicting key "${options.idempotencyKey}"`
         );
       }
-      // A prior accept can throw after already durably inserting this row —
-      // most likely here, on the wake mirror, rather than on the insert
-      // itself — so a caller retrying the same runId or idempotencyKey
-      // after a failure needs this join to repair a missing or stale
-      // mirror, not just report accepted:false against a row nothing will
-      // ever wake.
+      // Joining a run that was started with other input would drop the
+      // caller's work without a word. The same data in another key order
+      // is the same input.
+      if (
+        inputMustMatch &&
+        canonicalJson(existing.input) !== canonicalJson(inputJson)
+      ) {
+        throw new Error(
+          `Task run "${existing.run_id}" was started with a different input; ` +
+            `a reused ${options.runId !== undefined ? "run ID" : "idempotency key"} ` +
+            `must carry the same input`
+        );
+      }
       // A prior accept can throw after already durably inserting this row —
       // most likely here, on the wake mirror, rather than on the insert
       // itself — so a caller retrying the same runId or idempotencyKey
@@ -1487,4 +1495,24 @@ export class Tasks<
   #emit(type: TaskEventType | string, payload: Record<string, unknown>): void {
     this.lifecycle.events.emit(type, payload);
   }
+}
+
+/**
+ * Stored JSON text in a form where object keys are sorted at every depth,
+ * so two serializations of the same data compare equal.
+ */
+function canonicalJson(json: string | null): string | null {
+  if (json === null) return null;
+  const sort = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(sort);
+    if (value !== null && typeof value === "object") {
+      return Object.fromEntries(
+        Object.keys(value)
+          .sort()
+          .map((key) => [key, sort((value as Record<string, unknown>)[key])])
+      );
+    }
+    return value;
+  };
+  return JSON.stringify(sort(JSON.parse(json)));
 }
