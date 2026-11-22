@@ -541,6 +541,15 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
         expect(runs).toEqual([]);
         expect(steps).toEqual([]);
         expect(wakes).toEqual([]);
+        // A sealed strike is a terminal failure the host never saw a
+        // handler for: it reaches onError with the run it belongs to.
+        expect(instance.runErrorRuns).toEqual([
+          {
+            runId,
+            definition: "oomStepLoop",
+            name: "TaskMemoryLimitSealed"
+          }
+        ]);
 
         const retried = await instance.tasks.run("oomStepLoop", undefined, {
           idempotencyKey: key
