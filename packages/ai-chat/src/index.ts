@@ -28,6 +28,11 @@ import {
 import { MessageType, type OutgoingMessage } from "./types";
 import { autoTransformMessages } from "./ai-chat-v5-migration";
 import {
+  hydrateMessages,
+  liftLegacyMessages,
+  transcriptJson
+} from "./transcript";
+import {
   keepStoredReplies,
   reconcileMessages,
   reconcileOrphanPartial,
@@ -73,7 +78,12 @@ import {
   type ChatFiberSnapshot,
   type ChatTurnOutcome
 } from "agents/chat";
-import { ResumableStream, createChatStreams } from "agents/chat";
+import {
+  ResumableStream,
+  createChatStreams,
+  mergeQueuedUserMessages,
+  truncateProviderToolPayloads
+} from "agents/chat";
 import type { Streams } from "agents/streams";
 import { Sessions, type Session, type SessionMessage } from "agents/sessions";
 import {
@@ -283,19 +293,6 @@ type StreamResultStatus = {
 export type ChatMessage = UIMessage;
 
 /**
- * Provider-executed tool fields that contain opaque replay tokens and must be
- * persisted exactly as returned by the provider.
- */
-const PROVIDER_TOOL_OPAQUE_STRING_KEY_PREFIX = "encrypted";
-
-/**
- * Max string length preserved in `input`/`output` of provider-executed tool
- * parts (e.g. Anthropic code_execution / text_editor). Strings exceeding this
- * limit are truncated with a marker so persisted messages stay small.
- */
-const PROVIDER_TOOL_MAX_STRING_LENGTH = 500;
-
-/**
  * Whether a response-reader error is a platform transient that bounded chat
  * recovery can retry. A deploy or storage reset is excluded: the isolate is
  * going away, and the restart's own recovery owns the turn.
@@ -318,32 +315,6 @@ type StreamInterruptionRoute = {
   /** Skip persisting the partial (`onChatRecovery` returned `persist: false`). */
   discardPartial: () => Promise<void>;
 };
-
-/**
- * Validates that a parsed message has the minimum required structure.
- * Returns false for messages that would cause runtime errors downstream
- * (e.g. in convertToModelMessages or the UI layer).
- *
- * Checks:
- * - `id` is a non-empty string
- * - `role` is one of the valid roles
- * - `parts` is an array (may be empty — the AI SDK enforces nonempty
- *   on incoming messages, but we are lenient on persisted data)
- */
-function isValidMessageStructure(msg: unknown): msg is UIMessage {
-  if (typeof msg !== "object" || msg === null) return false;
-  const m = msg as Record<string, unknown>;
-
-  if (typeof m.id !== "string" || m.id.length === 0) return false;
-
-  if (m.role !== "user" && m.role !== "assistant" && m.role !== "system") {
-    return false;
-  }
-
-  if (!Array.isArray(m.parts)) return false;
-
-  return true;
-}
 
 /**
  * Schema for a client-defined tool sent from the browser.
@@ -423,10 +394,6 @@ const decoder = new TextDecoder();
  * Extension of Agent with built-in chat capabilities
  * @template Env Environment type containing bindings
  */
-/** Bounds for one window of the legacy lift: rows and their summed bytes. */
-const LEGACY_LIFT_WINDOW_ROWS = 25;
-const LEGACY_LIFT_WINDOW_BYTES = 4 * 1024 * 1024;
-
 /**
  * What `AIChatAgent` stores with a client request's admission record, to run
  * it again after an isolate reset. See `ChatTurns.resumeAdmissions`.
@@ -1173,8 +1140,11 @@ export class AIChatAgent<
         "startup",
         { "cloudflare.agents.component": "ai_chat" },
         async (update) => {
-          await this._migrateLegacyMessages();
-          await this._hydrateMessages();
+          await liftLegacyMessages(this.ctx.storage.sql, this.#session);
+          this.messages = await hydrateMessages(
+            this.#session,
+            this.hydrationByteBudget
+          );
           update({
             "cloudflare.agents.chat.messages.loaded": this.messages.length
           });
@@ -1499,7 +1469,7 @@ export class AIChatAgent<
       return this._tryCatchChat(async () => {
         const url = new URL(request.url);
         if (url.pathname.split("/").pop() === "get-messages") {
-          return new Response(this.#streamMessagesAsJson(), {
+          return new Response(transcriptJson(this.#session), {
             headers: { "content-type": "application/json" }
           });
         }
@@ -2094,144 +2064,6 @@ export class AIChatAgent<
   }
 
   /**
-   * Lift ai-chat's legacy flat table into the default Sessions chain.
-   *
-   * Runs in `onStart` (before hydration), not in the constructor: the lift is
-   * an async import through Sessions, and the constructor does no session
-   * storage work at all.
-   *
-   * Order is read first as ids alone, then message bodies are fetched in
-   * windows bounded by row count and bytes, so a large transcript never sits
-   * in the isolate at once. Once every readable row has a copy the legacy
-   * table is DROPPED rather than renamed: keeping it would leave the object
-   * holding its history twice.
-   */
-  private async _migrateLegacyMessages(): Promise<void> {
-    const present =
-      this.ctx.storage.sql
-        .exec(
-          `SELECT name FROM sqlite_master
-           WHERE type = 'table' AND name = 'cf_ai_chat_agent_messages'`
-        )
-        .toArray().length > 0;
-    if (!present) return;
-
-    // Ids and sizes only: the ordering pass must not carry message bodies.
-    const order = this.sql<{
-      id: string;
-      bytes: number;
-      created_at: string | number | null;
-    }>`
-      SELECT id, LENGTH(CAST(message AS BLOB)) AS bytes, created_at
-      FROM cf_ai_chat_agent_messages
-      ORDER BY created_at ASC, rowid ASC
-    `;
-
-    let parentId: string | null = null;
-    let imported = 0;
-    let skipped = 0;
-    let index = 0;
-    while (index < order.length) {
-      const window: typeof order = [];
-      let bytes = 0;
-      while (
-        index < order.length &&
-        window.length < LEGACY_LIFT_WINDOW_ROWS &&
-        (window.length === 0 ||
-          bytes + order[index].bytes <= LEGACY_LIFT_WINDOW_BYTES)
-      ) {
-        bytes += order[index].bytes;
-        window.push(order[index]);
-        index++;
-      }
-      const ids = JSON.stringify(window.map((row) => row.id));
-      const bodies = new Map(
-        this.sql<{ id: string; message: string }>`
-          SELECT id, message FROM cf_ai_chat_agent_messages
-          WHERE id IN (SELECT value FROM json_each(${ids}))
-        `.map((row) => [row.id, row.message] as const)
-      );
-
-      for (const row of window) {
-        const body = bodies.get(row.id);
-        if (body === undefined) {
-          skipped++;
-          continue;
-        }
-        try {
-          const parsed: unknown = JSON.parse(body);
-          const message = autoTransformMessages([parsed])[0];
-          if (!message || !isValidMessageStructure(message)) {
-            console.warn(
-              `[AIChatAgent] Skipping invalid legacy message ${row.id}: ` +
-                "missing or malformed id, role, or parts"
-            );
-            skipped++;
-            continue;
-          }
-          const parsedTime =
-            typeof row.created_at === "number"
-              ? row.created_at
-              : Date.parse(String(row.created_at ?? ""));
-          await this.#session.importMessage(message, {
-            parentId,
-            createdAt: Number.isFinite(parsedTime) ? parsedTime : imported
-          });
-          parentId = message.id;
-          imported++;
-        } catch (error) {
-          console.error(`Failed to migrate message ${row.id}:`, error);
-          skipped++;
-        }
-      }
-    }
-
-    // Drop the source ONLY when every row actually landed. A skipped row is
-    // one that could not be parsed or imported, and dropping the table then
-    // would delete it permanently — accounting for a row is not the same as
-    // migrating it. The lift is idempotent (`importMessage` ignores ids it
-    // already has), so leaving the table means a later start retries the rows
-    // that failed rather than losing them.
-    if (skipped === 0 && imported === order.length) {
-      this.ctx.storage.sql.exec("DROP TABLE cf_ai_chat_agent_messages");
-      return;
-    }
-    console.error(
-      `[AIChatAgent] Legacy lift imported ${imported} of ${order.length} rows ` +
-        `(${skipped} skipped); leaving cf_ai_chat_agent_messages in place so ` +
-        "they remain recoverable."
-    );
-  }
-
-  /**
-   * Hydrate `this.messages` once per wake, bounded by
-   * {@link hydrationByteBudget}. This is the only transcript read on the
-   * startup path; every later change arrives through the Sessions change
-   * feed.
-   */
-  private async _hydrateMessages(): Promise<void> {
-    const budget = this.hydrationByteBudget;
-    const stored =
-      Number.isFinite(budget) && budget > 0
-        ? (await this.#session.getRecentHistory(budget)).messages
-        : await this.#session.getHistory();
-
-    const messages: UIMessage[] = [];
-    for (const message of stored as unknown[]) {
-      if (!isValidMessageStructure(message)) {
-        console.warn(
-          `[AIChatAgent] Skipping invalid message ${(message as { id?: unknown } | null)?.id}: ` +
-            "missing or malformed id, role, or parts"
-        );
-        continue;
-      }
-      messages.push(message);
-    }
-    // Automatic migration following https://jhak.im/blog/ai-sdk-migration-handling-previously-saved-messages
-    this.messages = autoTransformMessages(messages);
-  }
-
-  /**
    * Mirror `this.messages` from the Sessions change feed. Every durable write
    * dispatches here synchronously, so write sites never hand-patch the
    * cache.
@@ -2253,44 +2085,6 @@ export class AIChatAgent<
   #messageForCache(message: SessionMessage): UIMessage {
     const stored = message as UIMessage;
     return autoTransformMessages([stored])[0] ?? stored;
-  }
-
-  /**
-   * Serialize the whole transcript as a JSON array of messages without ever
-   * holding it in one string: `historyBatches()` yields bounded batches and
-   * each batch is encoded straight into the response body.
-   */
-  #streamMessagesAsJson(): ReadableStream<Uint8Array> {
-    const encoder = new TextEncoder();
-    const batches = this.#session.historyBatches();
-    let opened = false;
-    let first = true;
-    return new ReadableStream<Uint8Array>({
-      pull: async (controller) => {
-        if (!opened) {
-          opened = true;
-          controller.enqueue(encoder.encode("["));
-          return;
-        }
-        const next = await batches.next();
-        if (next.done) {
-          controller.enqueue(encoder.encode("]"));
-          controller.close();
-          return;
-        }
-        let chunk = "";
-        for (const message of autoTransformMessages(
-          next.value as UIMessage[]
-        )) {
-          chunk += `${first ? "" : ","}${JSON.stringify(message)}`;
-          first = false;
-        }
-        if (chunk.length > 0) controller.enqueue(encoder.encode(chunk));
-      },
-      cancel: async () => {
-        await batches.return?.(undefined);
-      }
-    });
   }
 
   /**
@@ -2347,7 +2141,13 @@ export class AIChatAgent<
   private async _mergeQueuedUserMessages(
     epoch = this._turnQueue.generation
   ): Promise<void> {
-    const mergedMessages = this._getMergedQueuedUserMessages(epoch);
+    const start = this._mergeQueuedUserStartIndexByEpoch.get(epoch);
+    if (start === undefined) return;
+    const mergedMessages = mergeQueuedUserMessages(
+      this.messages,
+      start,
+      (message) => console.warn(`[AIChatAgent] ${message}`)
+    );
     if (!mergedMessages) {
       return;
     }
@@ -2355,109 +2155,6 @@ export class AIChatAgent<
     await this.persistMessages(mergedMessages, [], {
       _deleteStaleRows: true
     });
-  }
-
-  private _getMergedQueuedUserMessages(epoch: number): UIMessage[] | null {
-    const queuedUserStart = this._mergeQueuedUserStartIndexByEpoch.get(epoch);
-    if (queuedUserStart === undefined) {
-      return null;
-    }
-
-    let queuedUserEnd = queuedUserStart;
-    while (this.messages[queuedUserEnd]?.role === "user") {
-      queuedUserEnd++;
-    }
-
-    if (
-      queuedUserEnd === queuedUserStart &&
-      queuedUserStart < this.messages.length
-    ) {
-      console.warn(
-        `[AIChatAgent] merge: expected user messages at index ${queuedUserStart} ` +
-          `but found role="${this.messages[queuedUserStart]?.role}"; skipping merge`
-      );
-    }
-
-    const queuedUserMessages = this.messages.slice(
-      queuedUserStart,
-      queuedUserEnd
-    );
-    if (queuedUserMessages.length < 2) {
-      return null;
-    }
-
-    return [
-      ...this.messages.slice(0, queuedUserStart),
-      AIChatAgent._mergeUserMessages(queuedUserMessages),
-      ...this.messages.slice(queuedUserEnd)
-    ];
-  }
-
-  private static _mergeUserMessages(messages: UIMessage[]): UIMessage {
-    const [firstMessage, ...remainingMessages] = messages;
-    if (!firstMessage) {
-      throw new Error("cannot merge an empty message list");
-    }
-
-    let mergedParts = AIChatAgent._cloneMessageParts(firstMessage.parts);
-    for (const message of remainingMessages) {
-      AIChatAgent._appendMergedText(mergedParts, "\n\n");
-      mergedParts = AIChatAgent._mergeMessageParts(mergedParts, message.parts);
-    }
-
-    const lastMessage = messages[messages.length - 1] ?? firstMessage;
-    return {
-      ...lastMessage,
-      parts: mergedParts
-    };
-  }
-
-  private static _mergeMessageParts(
-    currentParts: UIMessage["parts"],
-    nextParts: UIMessage["parts"]
-  ): UIMessage["parts"] {
-    const mergedParts = AIChatAgent._cloneMessageParts(currentParts);
-
-    for (const part of nextParts) {
-      if (part.type === "text") {
-        AIChatAgent._appendMergedText(mergedParts, part.text);
-        continue;
-      }
-
-      mergedParts.push(part);
-    }
-
-    return mergedParts;
-  }
-
-  private static _cloneMessageParts(
-    parts: UIMessage["parts"]
-  ): UIMessage["parts"] {
-    return [...parts];
-  }
-
-  private static _appendMergedText(
-    parts: UIMessage["parts"],
-    text: string
-  ): void {
-    if (text.length === 0) {
-      return;
-    }
-
-    const lastPart = parts[parts.length - 1];
-    if (lastPart?.type === "text") {
-      parts[parts.length - 1] = {
-        ...lastPart,
-        text: lastPart.text + text
-      };
-      return;
-    }
-
-    const textPart: TextUIPart = {
-      type: "text",
-      text
-    };
-    parts.push(textPart);
   }
 
   private _setRequestContext(
@@ -5306,7 +5003,7 @@ export class AIChatAgent<
   private _sanitizeMessageForPersistence(message: UIMessage): UIMessage {
     // ai-chat-specific: truncate large payloads in provider-executed tool parts
     const parts = message.parts.map((part) =>
-      AIChatAgent._truncateProviderExecutedToolPayloads(part)
+      truncateProviderToolPayloads(part)
     ) as UIMessage["parts"];
 
     // Run user-overridable hook last
@@ -5314,102 +5011,6 @@ export class AIChatAgent<
       ...message,
       parts
     });
-  }
-
-  /**
-   * Truncates large string values in `input` and `output` of tool parts that
-   * were executed server-side by the provider (e.g. Anthropic code_execution,
-   * text_editor). These payloads can be 200KB+ and are dead weight once the
-   * model has consumed the result.
-   *
-   * Anthropic web tools are excluded because their outputs are replayed on
-   * subsequent turns. Within other tool payloads, opaque encrypted fields are
-   * always preserved verbatim.
-   */
-  private static _truncateProviderExecutedToolPayloads<
-    T extends UIMessage["parts"][number]
-  >(part: T): T {
-    const record = part as Record<string, unknown>;
-    if (!record.providerExecuted) return part;
-    if (AIChatAgent._shouldPreserveProviderToolPayload(record)) return part;
-
-    const result = { ...record };
-
-    if (result.input !== undefined) {
-      result.input = AIChatAgent._truncateLargeStrings(result.input);
-    }
-    if (result.output !== undefined) {
-      result.output = AIChatAgent._truncateLargeStrings(result.output);
-    }
-
-    return result as T;
-  }
-
-  /**
-   * Recursively walks a value and truncates any string exceeding
-   * `PROVIDER_TOOL_MAX_STRING_LENGTH`, appending a size marker.
-   *
-   * The total output (content + marker) is kept within the threshold so
-   * re-running this function on already-truncated data is a no-op. Strings
-   * under opaque encrypted keys are preserved verbatim.
-   */
-  private static _truncateLargeStrings(
-    value: unknown,
-    preserveOpaqueStrings = false
-  ): unknown {
-    if (typeof value === "string") {
-      if (preserveOpaqueStrings) return value;
-      if (value.length > PROVIDER_TOOL_MAX_STRING_LENGTH) {
-        const marker = `… [truncated, original length: ${value.length}]`;
-        const contentLength = Math.max(
-          0,
-          PROVIDER_TOOL_MAX_STRING_LENGTH - marker.length
-        );
-        return value.slice(0, contentLength) + marker;
-      }
-      return value;
-    }
-    if (Array.isArray(value)) {
-      return value.map((v) =>
-        AIChatAgent._truncateLargeStrings(v, preserveOpaqueStrings)
-      );
-    }
-    if (value !== null && typeof value === "object") {
-      const result: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(value)) {
-        result[k] = AIChatAgent._truncateLargeStrings(
-          v,
-          preserveOpaqueStrings || AIChatAgent._isOpaqueReplayFieldKey(k)
-        );
-      }
-      return result;
-    }
-    return value;
-  }
-
-  private static _shouldPreserveProviderToolPayload(
-    part: Record<string, unknown>
-  ): boolean {
-    const toolName = AIChatAgent._getToolNameFromPart(part);
-    return toolName === "web_search" || toolName === "web_fetch";
-  }
-
-  private static _getToolNameFromPart(
-    part: Record<string, unknown>
-  ): string | undefined {
-    if (typeof part.toolName === "string") {
-      return part.toolName;
-    }
-
-    if (typeof part.type === "string" && part.type.startsWith("tool-")) {
-      return part.type.slice("tool-".length);
-    }
-
-    return undefined;
-  }
-
-  private static _isOpaqueReplayFieldKey(key: string): boolean {
-    return key.startsWith(PROVIDER_TOOL_OPAQUE_STRING_KEY_PREFIX);
   }
 
   /**
