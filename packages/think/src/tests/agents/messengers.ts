@@ -126,11 +126,12 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
       type === "chat:recovery:completed" &&
       typeof payload?.incidentId === "string"
     ) {
-      this._stagedAtCompletion = this.ctx.storage
+      this._stagedAtCompletion = this._outbox
         .get<{ outcome?: string }>(
-          `cf_think_messenger_recovery:${payload.incidentId}`
+          "__cf_think_messenger_recovery",
+          payload.incidentId
         )
-        .then((delivery) => delivery?.outcome ?? null);
+        .then((delivery) => delivery?.payload.outcome ?? null);
     }
     if (
       type === "chat:recovery:completed" &&
@@ -354,107 +355,113 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
 
   private _failPostForTest: string | null = null;
 
+  /** Wait until the Outbox holds no pending recovered reply. */
+  private async _drainRecoveredRepliesForTest(): Promise<void> {
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      const pending = await this._outbox.list({
+        sink: "__cf_think_messenger_recovery",
+        status: "pending"
+      });
+      if (pending.length === 0) return;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error("recovered replies did not drain in time");
+  }
+
   /**
-   * Deliver a settled recovered reply whose record says `posted` posts
-   * already went out, through the live path (`replay: false`) or the start
-   * replay. `failPost` rejects that post once. Returns the retry it
-   * scheduled, if any, and whether the record is still pending.
+   * Deliver a settled recovered reply. `replay` stores it the way earlier
+   * releases did, with `posted` posts already made, and runs the start
+   * migration; otherwise it is held and released like a live settle.
+   * `failPost` rejects that post once. Returns whether the reply is still
+   * in the Outbox once nothing is pending.
    */
   async deliverSettledRecoveryForTest(options: {
     text: string;
     posted?: number;
     failPost?: string;
     replay?: boolean;
-  }): Promise<{
-    retry: { key: string; attempts: number } | undefined;
-    pending: { posted?: number } | undefined;
-  }> {
+  }): Promise<{ pending: boolean }> {
     const incidentId = `${crypto.randomUUID()}:user-1`;
-    const key = `cf_think_messenger_recovery:${incidentId}`;
-    await this.ctx.storage.put(key, {
+    const reply = {
       messengerId: "fake",
       threadId: "fake:dm-split",
       partialText: "",
-      outcome: "completed",
+      outcome: "completed" as const,
       text: options.text,
       ...(options.posted !== undefined && { posted: options.posted })
-    });
+    };
     this._failPostForTest = options.failPost ?? null;
     const internal = this as unknown as {
       _settleMessengerRecovery(
         incidentId: string,
         outcome: "completed" | "interrupted"
       ): void;
-      _replayMessengerRecoveryDeliveries(): Promise<void>;
+      _releaseOrphanedMessengerRecoveries(): Promise<void>;
     };
-    const retryFor = () =>
-      this.getSchedules()
-        .filter(
-          (schedule) =>
-            schedule.callback === "_cfRetryMessengerRecoveryDelivery"
-        )
-        .map(
-          (schedule) =>
-            schedule.payload as unknown as { key: string; attempts: number }
-        )
-        .find((payload) => payload.key === key);
     if (options.replay) {
-      await internal._replayMessengerRecoveryDeliveries();
+      await this.ctx.storage.put(
+        `cf_think_messenger_recovery:${incidentId}`,
+        reply
+      );
+      await internal._releaseOrphanedMessengerRecoveries();
     } else {
+      await this._outbox.send("__cf_think_messenger_recovery", reply, {
+        key: incidentId,
+        hold: true
+      });
       internal._settleMessengerRecovery(incidentId, "completed");
-      const deadline = Date.now() + 5_000;
-      while (
-        Date.now() < deadline &&
-        !retryFor() &&
-        (await this.ctx.storage.get(key)) !== undefined
-      ) {
-        await new Promise((resolve) => setTimeout(resolve, 20));
-      }
     }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await this._drainRecoveredRepliesForTest();
     return {
-      retry: retryFor(),
-      pending: await this.ctx.storage.get<{ posted?: number }>(key)
+      pending:
+        (await this._outbox.get(
+          "__cf_think_messenger_recovery",
+          incidentId
+        )) !== undefined
     };
   }
 
   private _slowPostsForTest = false;
 
   /**
-   * Deliver one settled recovered reply from the start replay and a
-   * scheduled retry at once, with every post slow enough to overlap.
+   * Release one held recovered reply from the start pass and a live settle
+   * at once, with every post slow enough to overlap.
    */
   async deliverRecoveryConcurrentlyForTest(text: string): Promise<boolean> {
-    const key = `cf_think_messenger_recovery:${crypto.randomUUID()}:user-1`;
-    await this.ctx.storage.put(key, {
-      messengerId: "fake",
-      threadId: "fake:dm-split",
-      partialText: "",
-      outcome: "completed",
-      text
-    });
+    const incidentId = `${crypto.randomUUID()}:user-1`;
+    await this._outbox.send(
+      "__cf_think_messenger_recovery",
+      {
+        messengerId: "fake",
+        threadId: "fake:dm-split",
+        partialText: "",
+        outcome: "completed",
+        text
+      },
+      { key: incidentId, hold: true }
+    );
     this._slowPostsForTest = true;
     try {
-      await Promise.all([
-        (
-          this as unknown as {
-            _replayMessengerRecoveryDeliveries(): Promise<void>;
-          }
-        )._replayMessengerRecoveryDeliveries(),
-        this._cfRetryMessengerRecoveryDelivery({ key, attempts: 1 })
-      ]);
+      const internal = this as unknown as {
+        _settleMessengerRecovery(
+          incidentId: string,
+          outcome: "completed" | "interrupted"
+        ): void;
+        _releaseOrphanedMessengerRecoveries(): Promise<void>;
+      };
+      internal._settleMessengerRecovery(incidentId, "completed");
+      await internal._releaseOrphanedMessengerRecoveries();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await this._drainRecoveredRepliesForTest();
     } finally {
       this._slowPostsForTest = false;
     }
-    return (await this.ctx.storage.get(key)) === undefined;
-  }
-
-  /** Run a scheduled recovered-reply retry now. */
-  async runMessengerRecoveryRetryForTest(payload: {
-    key: string;
-    attempts: number;
-  }): Promise<boolean> {
-    await this._cfRetryMessengerRecoveryDelivery(payload);
-    return (await this.ctx.storage.get(payload.key)) === undefined;
+    return (
+      (await this._outbox.get("__cf_think_messenger_recovery", incidentId)) ===
+      undefined
+    );
   }
 
   async getRecorded(kind: "prompt" | "post" | "edit"): Promise<string[]> {
@@ -472,7 +479,7 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     return (await this._stagedAtCompletion) ?? null;
   }
 
-  /** A pending reply whose incident settled while nothing was delivering it. */
+  /** A held reply whose incident settled while nothing was delivering it. */
   async replayOrphanedMessengerDeliveryForTest(options?: {
     activeIncident?: boolean;
   }): Promise<boolean> {
@@ -483,18 +490,21 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
         { incidentId, status: "scheduled" }
       );
     }
-    const key = `cf_think_messenger_recovery:${incidentId}`;
-    await this.ctx.storage.put(key, {
-      messengerId: "fake",
-      threadId: "fake:dm-orphan",
-      partialText: ""
-    });
+    await this._outbox.send(
+      "__cf_think_messenger_recovery",
+      { messengerId: "fake", threadId: "fake:dm-orphan", partialText: "" },
+      { key: incidentId, hold: true }
+    );
     await (
       this as unknown as {
-        _replayMessengerRecoveryDeliveries(): Promise<void>;
+        _releaseOrphanedMessengerRecoveries(): Promise<void>;
       }
-    )._replayMessengerRecoveryDeliveries();
-    return (await this.ctx.storage.get(key)) === undefined;
+    )._releaseOrphanedMessengerRecoveries();
+    await this._drainRecoveredRepliesForTest();
+    return (
+      (await this._outbox.get("__cf_think_messenger_recovery", incidentId)) ===
+      undefined
+    );
   }
 
   async getAdapterCalls(): Promise<Array<{ kind: string; content: string }>> {

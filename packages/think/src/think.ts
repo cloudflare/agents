@@ -377,50 +377,12 @@ function turnContextWithoutModel(ctx: TurnContext): Omit<TurnContext, "model"> {
 const MAX_REPLY_ATTACHMENTS_PER_TURN = 32;
 const DEFERRED_RESOLVED_PAUSES_KEY = "cf_think_deferred_resolved_pauses";
 const PENDING_RESPONSE_HOOK_PREFIX = "cf_think_pending_response_hook:";
-const MESSENGER_RECOVERY_PREFIX = "cf_think_messenger_recovery:";
-
-/**
- * A messenger reply this agent owes after chat recovery settles, keyed by the
- * recovery incident. `outcome` is set once the incident settles, so a reset
- * between settling and posting re-delivers on the next start.
- */
-type MessengerRecoveryDelivery = {
-  messengerId: string;
-  threadId: string;
-  partialText: string;
-  outcome?: "completed" | "interrupted";
-  text?: string;
-  /**
-   * Posts of the reply already attempted. Advanced before each post, so a
-   * reset mid-post resumes after it rather than posting it twice.
-   */
-  posted?: number;
-};
-
-const MESSENGER_RECOVERY_RETRY_CALLBACK = "_cfRetryMessengerRecoveryDelivery";
-const MESSENGER_RECOVERY_MAX_RETRIES = 8;
 
 function messageText(message: UIMessage | undefined): string {
   return (message?.parts ?? [])
     .filter((p): p is { type: "text"; text: string } => p.type === "text")
     .map((p) => p.text)
     .join("");
-}
-
-function settleMessengerRecoveryDelivery(
-  delivery: MessengerRecoveryDelivery,
-  outcome: "completed" | "interrupted",
-  text?: string
-): MessengerRecoveryDelivery {
-  if (outcome !== "completed") return { ...delivery, outcome };
-  const recovered = text ?? "";
-  return {
-    ...delivery,
-    outcome,
-    text: recovered.startsWith(delivery.partialText)
-      ? recovered.slice(delivery.partialText.length)
-      : recovered
-  };
 }
 
 type PendingResponseHook = {
@@ -579,6 +541,13 @@ import {
   type MediaEvictionConfig,
   type MediaEvictionPassResult
 } from "./media-eviction";
+import {
+  migrateLegacyRecoveredReplies,
+  RECOVERED_REPLY_SINK,
+  recoveredReplySink,
+  settleRecoveredReply,
+  type RecoveredMessengerReply
+} from "./messengers/recovered-reply";
 import {
   legacyWorkflowNotification,
   migrateWorkflowNotificationTable,
@@ -1657,6 +1626,19 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     );
     this.lifecycle.use(this.#messengerReplies);
     this._outbox.register(
+      RECOVERED_REPLY_SINK,
+      recoveredReplySink(async (input) => {
+        const parent = this.parentPath.at(-1);
+        // `parentAgent` resolves the parent by class name only.
+        const host = parent
+          ? await this.parentAgent({
+              name: parent.className
+            } as unknown as SubAgentClass<Think>)
+          : this;
+        return host._cf_deliverRecoveredMessengerReply(input);
+      })
+    );
+    this._outbox.register(
       WORKFLOW_NOTIFICATION_SINK,
       workflowNotificationSink(
         ({ workflowName, workflowId, event }) =>
@@ -1874,7 +1856,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
                   })
               );
               await this._replayPendingResponseHooks();
-              await this._replayMessengerRecoveryDeliveries();
+              await this._releaseOrphanedMessengerRecoveries();
               await this._recoverSubmissionsOnStart();
               // Requests an earlier isolate accepted and never started run
               // again, once no interrupted turn waits for recovery.
@@ -12751,10 +12733,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   private _messengerRecoveryClaims = new Set<string>();
 
   /**
-   * An interrupted messenger turn that recovery will continue: record where
-   * the recovered answer goes before the continuation is scheduled, so the
+   * An interrupted messenger turn that recovery will continue: hold the
+   * reply in the Outbox before the continuation is scheduled, so the
    * messenger delivery can skip its apology (#2106). A continuation attempt
-   * of the same incident keeps the existing record.
+   * of the same incident replaces the held reply.
    */
   private async _claimMessengerRecoveryDelivery(
     requestId: string,
@@ -12763,23 +12745,24 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   ): Promise<void> {
     const context = this._activeMessengerContext();
     if (!context) return;
-    const delivery: MessengerRecoveryDelivery = {
-      messengerId: context.messengerId,
-      threadId: context.thread.id,
-      partialText
-    };
-    await this.ctx.storage.put(
-      MESSENGER_RECOVERY_PREFIX + incidentId,
-      delivery
+    await this._outbox.send(
+      RECOVERED_REPLY_SINK,
+      {
+        messengerId: context.messengerId,
+        threadId: context.thread.id,
+        partialText
+      } satisfies RecoveredMessengerReply,
+      { key: incidentId, hold: true }
     );
     this._messengerRecoveryClaims.add(requestId);
   }
 
   /**
-   * Durably record a messenger reply's outcome before its recovery incident
-   * settles: once the incident is terminal, nothing re-emits the event that
-   * would settle the reply after a reset. The recovered text is read before
-   * any await, so a later turn cannot replace it.
+   * Record a messenger reply's outcome on the held reply before its
+   * recovery incident settles: once the incident is terminal, nothing
+   * re-emits the event that would settle the reply after a reset. The
+   * recovered text is read before any await, so a later turn cannot
+   * replace it.
    */
   private async _stageMessengerRecoveryOutcome(
     data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined,
@@ -12788,16 +12771,19 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     if (!data?.incidentId) return;
     const text =
       status === "completed" ? this._recoveredReplyText(data) : undefined;
-    const key = MESSENGER_RECOVERY_PREFIX + data.incidentId;
-    const delivery = await this.ctx.storage.get<MessengerRecoveryDelivery>(key);
-    if (!delivery || delivery.outcome) return;
-    await this.ctx.storage.put(
-      key,
-      settleMessengerRecoveryDelivery(
-        delivery,
+    const held = await this._outbox.get<RecoveredMessengerReply>(
+      RECOVERED_REPLY_SINK,
+      data.incidentId
+    );
+    if (held?.status !== "held" || held.payload.outcome) return;
+    await this._outbox.send(
+      RECOVERED_REPLY_SINK,
+      settleRecoveredReply(
+        held.payload,
         text === undefined ? "interrupted" : "completed",
         text
-      )
+      ),
+      { key: data.incidentId, hold: true }
     );
   }
 
@@ -12817,9 +12803,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     return messageText(reply);
   }
 
-  /** Incidents whose messenger reply is being delivered by this isolate. */
-  private _settlingMessengerRecoveries = new Set<string>();
-
+  /** Release the held reply of a settled recovery incident to the Outbox. */
   private _settleMessengerRecovery(
     incidentId: string,
     outcome: "completed" | "interrupted"
@@ -12830,151 +12814,48 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             this.messages.filter((m) => m.role === "assistant").at(-1)
           )
         : undefined;
-    if (this._settlingMessengerRecoveries.has(incidentId)) return;
-    this._settlingMessengerRecoveries.add(incidentId);
-    const key = MESSENGER_RECOVERY_PREFIX + incidentId;
-    void this.keepAliveWhile(async () => {
-      let delivery = await this.ctx.storage.get<MessengerRecoveryDelivery>(key);
-      if (!delivery) return;
-      if (!delivery.outcome) {
-        delivery = settleMessengerRecoveryDelivery(delivery, outcome, text);
-        await this.ctx.storage.put(key, delivery);
-      }
-      await this._deliverMessengerRecovery(key);
-    })
-      .catch((error: unknown) =>
-        this._retryMessengerRecoveryDeliveryLater(key, 0, error)
+    void this._outbox
+      .release<RecoveredMessengerReply>(
+        RECOVERED_REPLY_SINK,
+        incidentId,
+        (reply) =>
+          reply.outcome ? reply : settleRecoveredReply(reply, outcome, text)
       )
-      .finally(() => {
-        this._settlingMessengerRecoveries.delete(incidentId);
+      .catch((error: unknown) => {
+        console.error("[Think] failed to release a recovered reply", error);
       });
   }
 
-  /** The latest delivery of each recovered reply key, in call order. */
-  private _messengerRecoveryDeliveries = new Map<string, Promise<void>>();
-
   /**
-   * Deliver a recovered reply after any delivery of the same key already
-   * running in this isolate: startup replay, live settlement and scheduled
-   * retries interleave across awaits, and each must see the cursor the
-   * previous one advanced.
-   */
-  private async _deliverMessengerRecovery(key: string): Promise<void> {
-    const previous = this._messengerRecoveryDeliveries.get(key);
-    const run = (previous ?? Promise.resolve()).then(() =>
-      this._postMessengerRecovery(key)
-    );
-    const tail = run.catch(() => {});
-    this._messengerRecoveryDeliveries.set(key, tail);
-    try {
-      await run;
-    } finally {
-      if (this._messengerRecoveryDeliveries.get(key) === tail) {
-        this._messengerRecoveryDeliveries.delete(key);
-      }
-    }
-  }
-
-  /**
-   * Post a settled recovered reply, one post at a time, then drop its record.
-   * Each post goes out at most once: the cursor advances before it, and a
-   * rejected post may still have landed (a timeout after the platform
-   * accepted it), so the retry resumes with the next post.
-   */
-  private async _postMessengerRecovery(key: string): Promise<void> {
-    let delivery = await this.ctx.storage.get<MessengerRecoveryDelivery>(key);
-    if (!delivery?.outcome) return;
-    const input = {
-      messengerId: delivery.messengerId,
-      threadId: delivery.threadId,
-      outcome: delivery.outcome,
-      ...(delivery.text !== undefined && { text: delivery.text }),
-      partialPosted: delivery.partialText.trim().length > 0
-    };
-    const parent = this.parentPath.at(-1);
-    // `parentAgent` resolves the parent by class name only.
-    const host = parent
-      ? await this.parentAgent({
-          name: parent.className
-        } as unknown as SubAgentClass<Think>)
-      : this;
-    let chunks: number | undefined;
-    for (;;) {
-      delivery = await this.ctx.storage.get<MessengerRecoveryDelivery>(key);
-      if (!delivery?.outcome) return;
-      const posted = delivery.posted ?? 0;
-      if (chunks !== undefined && posted >= chunks) break;
-      await this.ctx.storage.put(key, { ...delivery, posted: posted + 1 });
-      ({ chunks } = await host._cf_deliverRecoveredMessengerReply({
-        ...input,
-        chunk: posted
-      }));
-    }
-    await this.ctx.storage.delete(key);
-  }
-
-  /** Retry a recovered messenger reply whose live delivery failed. */
-  private async _retryMessengerRecoveryDeliveryLater(
-    key: string,
-    attempts: number,
-    error: unknown
-  ): Promise<void> {
-    if (attempts >= MESSENGER_RECOVERY_MAX_RETRIES) {
-      console.error(
-        `[Think] recovered messenger reply delivery failed ${attempts + 1} times; the next wake replays it`,
-        error
-      );
-      return;
-    }
-    const delaySeconds = 2 ** (attempts + 1);
-    console.error(
-      `[Think] recovered messenger reply delivery failed; retrying in ${delaySeconds}s`,
-      error
-    );
-    try {
-      await this.schedule(delaySeconds, MESSENGER_RECOVERY_RETRY_CALLBACK, {
-        key,
-        attempts: attempts + 1
-      });
-    } catch (scheduleError) {
-      console.error(
-        "[Think] failed to schedule a recovered messenger reply retry",
-        scheduleError
-      );
-    }
-  }
-
-  /**
-   * Retry delivering a recovered messenger reply (see
-   * {@link _retryMessengerRecoveryDeliveryLater}).
+   * TEMPORARY: a recovered-reply retry scheduled by an earlier release. The
+   * reply itself moved into the Outbox at startup, which retries it. Remove
+   * in the next minor release.
    * @internal Schedule callback.
    */
-  async _cfRetryMessengerRecoveryDelivery(payload: {
-    key: string;
-    attempts: number;
-  }): Promise<void> {
-    try {
-      await this._deliverMessengerRecovery(payload.key);
-    } catch (error) {
-      await this._retryMessengerRecoveryDeliveryLater(
-        payload.key,
-        payload.attempts,
-        error
-      );
-    }
-  }
+  async _cfRetryMessengerRecoveryDelivery(): Promise<void> {}
 
-  private async _replayMessengerRecoveryDeliveries(): Promise<void> {
-    const pending = await this.ctx.storage.list<MessengerRecoveryDelivery>({
-      prefix: MESSENGER_RECOVERY_PREFIX
+  /**
+   * On start, release held replies whose incident settled while an
+   * earlier isolate held them: nothing will settle them again. A reply
+   * whose incident is still recovering stays held.
+   */
+  private async _releaseOrphanedMessengerRecoveries(): Promise<void> {
+    await migrateLegacyRecoveredReplies(
+      this.ctx.storage,
+      (reply, incidentId, hold) =>
+        this._outbox.send(RECOVERED_REPLY_SINK, reply, {
+          key: incidentId,
+          hold
+        })
+    );
+    const held = await this._outbox.list<RecoveredMessengerReply>({
+      sink: RECOVERED_REPLY_SINK,
+      status: "held"
     });
-    for (const [key, delivery] of pending) {
-      if (!delivery.outcome) {
-        // Settled while an earlier isolate was delivering: the incident is
-        // gone or gave up, and no event will settle this record again.
+    for (const { key, payload } of held) {
+      if (!payload.outcome) {
         const incident = await this.ctx.storage.get<ChatRecoveryIncident>(
-          CHAT_RECOVERY_INCIDENT_KEY_PREFIX +
-            encodeURIComponent(key.slice(MESSENGER_RECOVERY_PREFIX.length))
+          CHAT_RECOVERY_INCIDENT_KEY_PREFIX + encodeURIComponent(key)
         );
         if (
           incident &&
@@ -12983,16 +12864,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         ) {
           continue;
         }
-        await this.ctx.storage.put(
-          key,
-          settleMessengerRecoveryDelivery(delivery, "interrupted")
-        );
       }
-      try {
-        await this._deliverMessengerRecovery(key);
-      } catch (error) {
-        await this._retryMessengerRecoveryDeliveryLater(key, 0, error);
-      }
+      await this._outbox.release<RecoveredMessengerReply>(
+        RECOVERED_REPLY_SINK,
+        key,
+        (reply) =>
+          reply.outcome ? reply : settleRecoveredReply(reply, "interrupted")
+      );
     }
   }
 

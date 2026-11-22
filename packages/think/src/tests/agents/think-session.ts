@@ -11853,13 +11853,12 @@ export class ThinkRecoveryTestAgent extends Think {
       `;
     }
 
-    const messengerKey = `cf_think_messenger_recovery:${begun.incidentId}`;
     if (input.seedMessengerDelivery) {
-      await this.ctx.storage.put(messengerKey, {
-        messengerId: "fake",
-        threadId: "fake:thread",
-        partialText: ""
-      });
+      await this._outbox.send(
+        "__cf_think_messenger_recovery",
+        { messengerId: "fake", threadId: "fake:thread", partialText: "" },
+        { key: begun.incidentId, hold: true }
+      );
     }
 
     let terminalBroadcast: string | undefined;
@@ -11930,8 +11929,12 @@ export class ThinkRecoveryTestAgent extends Think {
           setTimeout(resolve, 50)
         ).then(
           async () =>
-            (await this.ctx.storage.get<{ outcome?: string }>(messengerKey))
-              ?.outcome ?? null
+            (
+              await this._outbox.get<{ outcome?: string }>(
+                "__cf_think_messenger_recovery",
+                begun.incidentId
+              )
+            )?.payload.outcome ?? null
         )
       })
     };

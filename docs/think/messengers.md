@@ -267,8 +267,9 @@ stall watchdog or by a model error that `classifyChatError` marks as
 recovery and posts the rest of the answer to the thread as a new message once
 the continuation finishes. This works whether the conversation target is the
 root agent or a per-thread sub-agent. If recovery gives up, Think posts the
-configured interruption message instead. A reset after recovery finishes but
-before the post lands can post the recovered text twice.
+configured interruption message instead. If a post fails, Think retries the
+rest of the reply with backoff for up to twelve hours. It does not send the
+failed post again, because the platform may have accepted it.
 
 Delivery errors use a generic user-facing message by default so internal
 exception details are not posted into external chats. Override

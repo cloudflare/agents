@@ -1418,7 +1418,7 @@ describe("think messengers core", () => {
         replay: true
       });
 
-      expect(result.pending).toBeUndefined();
+      expect(result.pending).toBe(false);
       expect(
         (await agent.getAdapterCalls()).map((call) => call.content)
       ).toEqual(["two", "three"]);
@@ -1434,13 +1434,8 @@ describe("think messengers core", () => {
         failPost: "two"
       });
 
-      expect(result.retry?.attempts).toBe(1);
-      expect(result.pending?.posted).toBe(2);
-      expect(result.retry).toBeDefined();
-      if (!result.retry) return;
-      expect(await agent.runMessengerRecoveryRetryForTest(result.retry)).toBe(
-        true
-      );
+      // The Outbox retried after the rejected post and resumed after it.
+      expect(result.pending).toBe(false);
       expect(
         (await agent.getAdapterCalls()).map((call) => call.content)
       ).toEqual(["one", "three"]);
