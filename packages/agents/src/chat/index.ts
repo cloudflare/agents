@@ -597,15 +597,3 @@ export {
   type ChatRecentTerminal,
   type RecentTerminalsKv
 } from "./recent-terminals";
-
-/**
- * @internal Deliver-until-acknowledged storage the chat hosts register their
- * framework sinks on (`Agent._outbox`). Sibling-package support, not a
- * public API.
- */
-export type {
-  OutboxDelivery,
-  OutboxDeliveryContext,
-  OutboxRetryPolicy,
-  OutboxSink
-} from "../outbox";

@@ -14,6 +14,7 @@
 
 export * from "../inbox";
 export * from "../approvals";
+export * from "../outbox";
 export {
   KeepAlive,
   DEFAULT_KEEP_ALIVE_INTERVAL_MS,
