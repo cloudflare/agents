@@ -18818,15 +18818,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /**
-   * @deprecated Streams are reclaimed at cutover and on the next stream
-   * start; no alarm is armed any more. Kept so a cleanup alarm persisted by
-   * an earlier version still resolves to a callback when it fires.
-   */
-  async _cleanupStreamBuffers(): Promise<void> {
-    this._resumableStream.reclaim();
-  }
-
-  /**
    * The message an orphaned stream's assistant message branches from, so the
    * reconstructed message lands where the live turn would have persisted it:
    * a regeneration beside the response it replaces, not under it. Undefined
