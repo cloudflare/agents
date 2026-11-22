@@ -1178,7 +1178,17 @@ export class AbortingRecoveryHookAgent extends Agent<Record<string, unknown>> {
   static options = { keepAliveIntervalMs: 2_000 };
 
   override async onFiberRecovered(ctx: RunFiberRecoveryContext): Promise<void> {
-    if (ctx.name === "aborting-hook") this.ctx.abort("recovery hook aborts");
+    if (ctx.name !== "aborting-hook") return;
+    // Count the run durably, then kill the isolate before any other I/O.
+    const runs = this.ctx.storage.kv.get<number>("hookRuns") ?? 0;
+    this.ctx.storage.kv.put("hookRuns", runs + 1);
+    await this.ctx.storage.sync();
+    this.ctx.abort("recovery hook aborts");
+  }
+
+  @callable()
+  hookRuns(): number {
+    return this.ctx.storage.kv.get<number>("hookRuns") ?? 0;
   }
 
   @callable()

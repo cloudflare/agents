@@ -71,10 +71,18 @@ describe("aborting recovery hook e2e", () => {
     }
     expect(status).toBe("interrupted");
 
-    // Later requests are served: the hook is not run on every startup.
-    await sleep(3000);
+    // The hook ran, and it is not run again on later startups: the count
+    // stays put while requests keep being served.
+    const runs = (await callAgentByPath(
+      harness,
+      AGENT_PATH,
+      "hookRuns"
+    )) as number;
+    expect(runs).toBeGreaterThanOrEqual(1);
+    await sleep(5000);
     expect(
       await callAgentByPath(harness, AGENT_PATH, "fiberStatus", [fiberId])
     ).toBe("interrupted");
+    expect(await callAgentByPath(harness, AGENT_PATH, "hookRuns")).toBe(runs);
   });
 });
