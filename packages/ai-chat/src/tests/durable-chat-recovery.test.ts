@@ -3091,10 +3091,21 @@ describe("stall watchdog (chatStreamStallTimeoutMs)", () => {
     const agentStub = await getTestAgent(room);
 
     // The model streams a partial then hangs; the watchdog trips after the gap.
-    const status = await agentStub.driveStallingTurnForTest({
-      timeoutMs: 150,
-      hangTurns: 1
+    const stalled: unknown[] = [];
+    const unsubscribe = subscribe("chat", (event) => {
+      if (event.type === "chat:stream:stalled") stalled.push(event.payload);
     });
+    let status: string;
+    try {
+      status = await agentStub.driveStallingTurnForTest({
+        timeoutMs: 150,
+        hangTurns: 1
+      });
+    } finally {
+      unsubscribe();
+    }
+    // The stall is observable, as in `Think`.
+    expect(stalled).toEqual([expect.objectContaining({ timeoutMs: 150 })]);
 
     // This attempt did not terminalize — the scheduled continuation owns the
     // real outcome, so the server-side turn reports "aborted".
