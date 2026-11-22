@@ -1126,7 +1126,9 @@ export class Lifecycle<
    * Re-arm, optionally around a deferral: the held owners' jobs wake no
    * sooner than its end, every other job at its own time.
    */
-  async #rearm(deferral?: JobDeferral): Promise<void> {
+  async #rearm(
+    deferral: JobDeferral | undefined = this.#jobDriver.currentDeferral()
+  ): Promise<void> {
     if (this.#alarmsDisabled) return;
     if (this.#status === "starting") {
       this.#rearmRequestedDuringStart = true;
