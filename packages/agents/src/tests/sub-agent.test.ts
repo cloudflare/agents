@@ -65,6 +65,22 @@ function waitForClose(
   });
 }
 
+/**
+ * Wait for the root's mirrored fiber wakes to reach `expected`. The facet
+ * routes its wake to the root around the fiber body, after the call that
+ * started or released the fiber has already returned.
+ */
+async function expectFiberWakeOwners(
+  agent: { fiberWakeOwners(): Promise<string[]> },
+  expected: number
+) {
+  for (let attempt = 0; attempt < 50; attempt++) {
+    if ((await agent.fiberWakeOwners()).length === expected) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  expect(await agent.fiberWakeOwners()).toHaveLength(expected);
+}
+
 async function expectRootKeepAliveRefCount(
   agent: { getRootKeepAliveRefCount(): Promise<number> },
   expected: number
@@ -1123,18 +1139,18 @@ describe("SubAgent", () => {
     // The mirrored wake is the heartbeat; the fiber takes no keepAlive ref.
     await expectRootKeepAliveRefCount(agent, 0);
     expect(await agent.subAgentRunningFiberCount("fiber-child")).toBe(1);
-    expect(await agent.fiberWakeOwners()).toHaveLength(1);
+    await expectFiberWakeOwners(agent, 1);
 
     // The root alarm may check the active fiber, but the child knows it
     // runs there, so recovery must not run.
     await drainDueFiberWakes(agent);
     expect(await agent.subAgentRecoveredFibers("fiber-child")).toEqual([]);
-    expect(await agent.fiberWakeOwners()).toHaveLength(1);
+    await expectFiberWakeOwners(agent, 1);
 
     await agent.subAgentReleaseHeldFiber("fiber-child");
 
     expect(await agent.subAgentRunningFiberCount("fiber-child")).toBe(0);
-    expect(await agent.fiberWakeOwners()).toEqual([]);
+    await expectFiberWakeOwners(agent, 0);
     await expectRootKeepAliveRefCount(agent, 0);
   });
 
@@ -1160,7 +1176,7 @@ describe("SubAgent", () => {
       await drainDueFiberWakes(agent);
 
       expect(await agent.subAgentRunningFiberCount("cleanup-child")).toBe(0);
-      expect(await agent.fiberWakeOwners()).toEqual([]);
+      await expectFiberWakeOwners(agent, 0);
       expect(await agent.subAgentRecoveredFibers("cleanup-child")).toEqual([]);
     }
   );
@@ -1179,7 +1195,7 @@ describe("SubAgent", () => {
     expect(await agent.subAgentRunningFiberCount("managed-fiber-child")).toBe(
       1
     );
-    expect(await agent.fiberWakeOwners()).toHaveLength(1);
+    await expectFiberWakeOwners(agent, 1);
     await expect(
       agent.subAgentManagedFiber("managed-fiber-child", fiberId)
     ).resolves.toMatchObject({
@@ -1189,7 +1205,7 @@ describe("SubAgent", () => {
     });
 
     await agent.subAgentReleaseHeldFiber("managed-fiber-child");
-    expect(await agent.fiberWakeOwners()).toEqual([]);
+    await expectFiberWakeOwners(agent, 0);
     await expect(
       agent.subAgentManagedFiber("managed-fiber-child", fiberId)
     ).resolves.toMatchObject({
