@@ -437,6 +437,7 @@ describe("Outbox capability", () => {
     const { stub } = stubFor();
     await runInDurableObject(stub, async (instance: OutboxHarnessObject) => {
       const posts: string[] = [];
+      const attemptsSeenBySecondPost: number[] = [];
       instance.outbox.register("__cf_slow_steps", {
         retry: { attemptTimeoutMs: 100, baseDelayMs: 1, maxDelayMs: 1 },
         deliver: async (parts: string[], delivery) => {
@@ -448,6 +449,8 @@ describe("Outbox capability", () => {
             if (delivery.attempt === 1 && next === 0) {
               await new Promise((resolve) => setTimeout(resolve, 300));
             }
+            if (parts[next] === "b")
+              attemptsSeenBySecondPost.push(delivery.attempt);
             posts.push(parts[next]);
           }
         }
@@ -460,6 +463,8 @@ describe("Outbox capability", () => {
           (await instance.outbox.get("__cf_slow_steps", "k")) === undefined
       );
       await new Promise((resolve) => setTimeout(resolve, 500));
+      // The second attempt posted the rest while the first still waited.
+      expect(attemptsSeenBySecondPost).toEqual([2]);
       expect(posts.sort()).toEqual(["a", "b", "c"]);
     });
   });
@@ -535,6 +540,31 @@ describe("Outbox capability", () => {
     }
     expect(status).toBe("failed");
   }, 30_000);
+
+  it("lets a timed-out last attempt that gave up still finish and acknowledge", async () => {
+    const { stub } = stubFor();
+    await runInDurableObject(stub, async (instance: OutboxHarnessObject) => {
+      let finish: (() => void) | undefined;
+      instance.outbox.register("__cf_last", {
+        deliver: async (_payload: string, delivery) => {
+          await new Promise<void>((resolve) => {
+            finish = resolve;
+          });
+          await delivery.saveCheckpoint(1);
+        },
+        retry: { attemptTimeoutMs: 20, maxAttempts: 1 }
+      });
+      await instance.outbox.send("__cf_last", "x", { key: "k" });
+      await waitFor(
+        async () =>
+          (await instance.outbox.get("__cf_last", "k"))?.status === "failed"
+      );
+      finish?.();
+      await waitFor(
+        async () => (await instance.outbox.get("__cf_last", "k")) === undefined
+      );
+    });
+  });
 
   it("cuts long errors, caps checkpoints, and versions each value of a key", async () => {
     const { stub } = stubFor();

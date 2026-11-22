@@ -659,16 +659,18 @@ export class Outbox<
         const saved = this.#write(
           `UPDATE cf_agents_outbox SET checkpoint = ?, updated_at = ?
            WHERE id = ? AND idempotency_key = ? AND claim IS ?
-             AND status = 'pending'`,
+             AND status IN ('pending', 'failed')`,
           json,
           Date.now(),
           row.id,
           row.idempotency_key,
           row.claim
         );
-        // This attempt timed out and a newer one owns the value, or the
-        // value was replaced, cancelled or acknowledged: stop the sink at
-        // this step. The throw is ignored like any late throw.
+        // A newer attempt owns the value, or the value was replaced,
+        // cancelled, acknowledged or retried: stop the sink at this step.
+        // The throw is ignored like any late throw. An attempt that timed
+        // out and gave up with no newer attempt keeps its claim, so it may
+        // still finish and acknowledge the value.
         if (saved === 0) {
           throw new Error(
             `Outbox attempt ${row.attempts} of ${row.sink}/${row.key} no longer owns its delivery`
