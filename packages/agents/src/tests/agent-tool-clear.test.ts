@@ -32,3 +32,23 @@ describe("clearing agent-tool runs: a facet-era run", () => {
     expect(await parent.clearFacetEraRunForTest("old-facet-run")).toBe(false);
   });
 });
+
+describe("clearing agent-tool runs: the child's own runs and open work", () => {
+  it("asks a child it destroys to clear its own runs first", async () => {
+    const parent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `clear-nested-${crypto.randomUUID()}`
+    );
+    expect(await parent.clearAsksChildToClearForTest("nested-run")).toBe(true);
+  });
+
+  it("cancels an interrupted run whose child is still working", async () => {
+    const parent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `clear-interrupted-${crypto.randomUUID()}`
+    );
+    expect(
+      await parent.clearCancelsInterruptedRunForTest("interrupted-run")
+    ).toBe("aborted");
+  });
+});

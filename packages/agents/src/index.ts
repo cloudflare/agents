@@ -329,6 +329,7 @@ type AgentToolRunStorageRow = {
   detached_no_progress_budget_ms?: number | null;
   last_progress_at?: number | null;
   detached_on_milestones?: string | null;
+  child_name?: string | null;
 };
 
 type DeferredAgentToolFinish = () => Promise<void>;
@@ -4149,6 +4150,16 @@ export class Agent<
     return status === "completed" || status === "error" || status === "aborted";
   }
 
+  /** Whether an open run is from when the child was a facet. */
+  private _hasFacetEraAgentToolRuns(): boolean {
+    const rows = this.sql<{ n: number }>`
+      SELECT COUNT(*) AS n FROM cf_agent_tool_runs
+      WHERE child_name IS NULL
+        AND status IN ('starting', 'running', 'interrupted')
+    `;
+    return (rows[0]?.n ?? 0) > 0;
+  }
+
   private _hasOutstandingDetachedRuns(): boolean {
     const rows = this.sql<{ n: number }>`
       SELECT COUNT(*) AS n FROM cf_agent_tool_runs
@@ -4499,7 +4510,7 @@ export class Agent<
              started_at, completed_at, detached, detached_on_finish,
              detached_notify_source, detached_max_budget_at,
              detached_no_progress_budget_ms, last_progress_at,
-             detached_on_milestones,
+             detached_on_milestones, child_name,
              finish_claimed_at, finish_delivered_at, give_up_claimed_at,
              give_up_delivered_at
       FROM cf_agent_tool_runs
@@ -4509,6 +4520,17 @@ export class Agent<
 
     for (const row of rows) {
       const runId = row.run_id;
+      if (row.child_name === null) {
+        // From when the child was a facet: there is no child to ask, so a
+        // finish whose callback failed is delivered again from the row.
+        await this._deliverDetachedTerminal(runId, "finish", {
+          runId,
+          agentType: row.agent_type,
+          status: "error",
+          error: row.error_message ?? FACET_ERA_AGENT_TOOL_RUN_ERROR
+        });
+        continue;
+      }
       let inspection: AgentToolRunInspection | null = null;
       try {
         const child = await this._agentToolChild(row.agent_type, runId);
@@ -4683,13 +4705,22 @@ export class Agent<
       try {
         if (row.child_name === null) {
           // From when the child was a facet: delete the facet with the run.
-          await this.deleteSubAgent(
-            { name: row.agent_type } as unknown as SubAgentClass,
-            row.run_id
-          );
+          // A run refused at dispatch (concurrency limit) has none.
+          if (this.hasSubAgent(row.agent_type, row.run_id)) {
+            await this.deleteSubAgent(
+              { name: row.agent_type } as unknown as SubAgentClass,
+              row.run_id
+            );
+          }
         } else {
           const child = await this._agentToolChild(row.agent_type, row.run_id);
-          if (row.status === "starting" || row.status === "running") {
+          // `interrupted`: the parent stopped following, the child may not
+          // have stopped working.
+          if (
+            row.status === "starting" ||
+            row.status === "running" ||
+            row.status === "interrupted"
+          ) {
             const adapter = this._asAgentToolChildAdapter(child);
             await adapter.cancelAgentToolRun(
               row.run_id,
@@ -4707,6 +4738,9 @@ export class Agent<
                 AND run_id != ${row.run_id}
             `[0]?.n ?? 0;
           if (row.child_name_minted === 1 && othersOnChild === 0) {
+            // The child's own runs go first: a destroyed child no longer
+            // reaches the children it started.
+            await child.clearAgentToolRuns().catch(() => {});
             // Wipes the child's storage on its next wake.
             await child._cf_scheduleDestroy();
           }
@@ -6307,7 +6341,11 @@ export class Agent<
       return this._agentToolRunRecoveryPromise;
     }
 
-    if (options?.runIds && options.runIds.length === 0) {
+    if (
+      options?.runIds &&
+      options.runIds.length === 0 &&
+      !this._hasFacetEraAgentToolRuns()
+    ) {
       return Promise.resolve();
     }
 

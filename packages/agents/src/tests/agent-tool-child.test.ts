@@ -117,4 +117,66 @@ describe("agent-tool run child", () => {
     const named = await getAgentByName(env.TestAgentToolStubChild, namedChild);
     expect(await named.destroyPendingForTest()).toBeNull();
   });
+
+  it("hands a WebSocket upgrade to the child, which owns the socket", async () => {
+    const parent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `child-ws-${crypto.randomUUID()}`
+    );
+    await parent.runDeterministicAgentToolForTest({
+      runId: "ws-run",
+      chunkBodies: []
+    });
+    const first = JSON.parse(
+      await parent.connectRunChildForTest(
+        "agents/test-agent-tool-replay-agent/x/agent-tool-runs/ws-run"
+      )
+    ) as { type: string; agent?: string };
+    // The child's identity frame: the socket is the child's, not the parent's.
+    expect(first).toMatchObject({
+      type: "cf_agent_identity",
+      agent: "test-agent-tool-stub-child"
+    });
+  });
+
+  it("drills in under a parent whose own name is the route segment", async () => {
+    const parent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      "agent-tool-runs"
+    );
+    const runId = `named-parent-${crypto.randomUUID()}`;
+    await parent.runDeterministicAgentToolForTest({ runId, chunkBodies: [] });
+    const routed = await parent.fetchPathForTest(
+      `agents/test-agent-tool-replay-agent/agent-tool-runs/agent-tool-runs/${runId}/hello`
+    );
+    expect(routed.status).toBe(200);
+    expect(routed.body.split(" ")[2]).toBe("/hello");
+  });
+
+  it("ends a facet-era run that is only interrupted at startup", async () => {
+    const parent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `facet-era-interrupted-${crypto.randomUUID()}`
+    );
+    expect(
+      await parent.recoverOnlyInterruptedFacetEraRunForTest("old-interrupted")
+    ).toBe("error");
+  });
+
+  it("delivers a facet-era run's onFinish again after it failed", async () => {
+    const parent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `facet-era-redeliver-${crypto.randomUUID()}`
+    );
+    await parent.redeliverFacetEraFinishForTest("old-redeliver");
+    const log = await parent.getDetachedDeliveryLog();
+    expect(
+      log.filter(
+        (entry) =>
+          entry.runId === "old-redeliver" && entry.hook === "onDetachedDone"
+      )
+    ).toEqual([
+      { hook: "onDetachedDone", runId: "old-redeliver", status: "error" }
+    ]);
+  });
 });

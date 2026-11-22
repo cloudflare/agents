@@ -393,11 +393,21 @@ function latestUserText(messages: UIMessage[]): string {
   return "";
 }
 
+// Agent-tool children are reached only through their parent's
+// `agent-tool-runs/{runId}` route, never by their own name.
+const CHILD_CLASSES = new Set<string>(["ClaudeCodeAgent"]);
+const refuseChildren = (_request: Request, route: { className: string }) =>
+  CHILD_CLASSES.has(route.className)
+    ? new Response("Not found", { status: 404 })
+    : undefined;
+
 export default {
   async fetch(request: Request, env: Env) {
     return (
-      (await routeAgentRequest(request, env)) ||
-      new Response("Not found", { status: 404 })
+      (await routeAgentRequest(request, env, {
+        onBeforeConnect: refuseChildren,
+        onBeforeRequest: refuseChildren
+      })) || new Response("Not found", { status: 404 })
     );
   }
 } satisfies ExportedHandler<Env>;
