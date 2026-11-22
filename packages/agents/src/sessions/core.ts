@@ -416,6 +416,7 @@ export class SessionsCore {
         )
         .map((row) => row.id)
     );
+    const copies = new Set<string>();
     let lastLifted = -1;
     if (present.size > 0) {
       this.#forEachLegacyRow(
@@ -424,17 +425,31 @@ export class SessionsCore {
         (row, body) => {
           const message = body === undefined ? undefined : parse(body, row.id);
           if (message && this.#holdsMessage("", message)) {
+            copies.add(row.id);
             lastLifted = Math.max(lastLifted, row.index);
           }
         }
       );
     }
+    // The chat moved on after an earlier, partial lift when the session's
+    // newest message is not the last lifted row. A row imported now would
+    // become the newest and hide that history, so none is: the rest stay
+    // in the table, recoverable.
+    const leafId = this.#tail("").leafId;
+    const movedOn =
+      leafId !== null && (lastLifted < 0 || order[lastLifted].id !== leafId);
 
     let parentId: string | null = null;
     let imported = 0;
     let skipped = 0;
     this.#forEachLegacyRow(table, order, (row, body) => {
-      if (!present.has(row.id) && row.index < lastLifted) {
+      if (copies.has(row.id)) {
+        // Verified above: count it without decoding it again.
+        parentId = row.id;
+        imported++;
+        return;
+      }
+      if (!present.has(row.id) && (movedOn || row.index < lastLifted)) {
         skipped++;
         return;
       }

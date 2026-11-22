@@ -391,12 +391,15 @@ describe("Sessions lift of a legacy flat message table", () => {
     });
   });
 
-  it("lifts a row before an id held by a different message", async () => {
+  it("leaves the table alone once the chat moved on past a partial lift", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
       await instance.sessions
         .session()
         .appendMessage(message("x", "squatter", "user"));
+      await instance.sessions
+        .session()
+        .appendMessage(message("y", "reply", "assistant"));
       instance.seedLegacy(
         flatTable([
           { id: "a", body: JSON.stringify(message("a", "one", "user")), at: 1 },
@@ -411,12 +414,16 @@ describe("Sessions lift of a legacy flat message table", () => {
     await evictDurableObject(stub);
 
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
-      // `x` is not a copy, so it does not mark how far an earlier lift got.
+      // Importing `a` now would make it the newest message and hide `x` and
+      // `y`. It stays in the table instead.
       const ids = (await instance.sessions.session().getHistory()).map(
         (m) => m.id
       );
-      expect(ids).toContain("a");
+      expect(ids).toEqual(["x", "y"]);
       expect(instance.tableNames()).toContain("legacy_flat_messages");
+      expect(
+        instance.eventsOfType("session:migration:incomplete")[0]?.payload
+      ).toMatchObject({ table: "legacy_flat_messages", source: 2, copied: 0 });
     });
   });
 
