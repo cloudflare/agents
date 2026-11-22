@@ -29,7 +29,8 @@ import type { Think } from "./think";
  */
 export interface ActionToolHost {
   readonly agent: Think;
-  readonly env: Cloudflare.Env;
+  /** The agent's bindings, read each time an action runs. */
+  env(): Cloudflare.Env;
   /** Request id of the admitted turn, or `""`. */
   requestId(): string;
   /** Whether a human already approved this call (its transcript part). */
@@ -289,7 +290,7 @@ async function authorizeActionCall(
     grantedPermissions: host.grantedPermissions(),
     messages: options.ctx.messages,
     agent: host.agent,
-    env: host.env
+    env: host.env()
   });
   return {
     ...normalizeActionAuthorization(decision),
@@ -374,7 +375,7 @@ function actionToTool(
           ) => {
             const ctx: ActionContext = {
               agent: host.agent,
-              env: host.env,
+              env: host.env(),
               requestId: host.requestId(),
               toolCallId: options.toolCallId,
               messages: options.messages,
@@ -431,7 +432,7 @@ function actionToTool(
       const requestId = host.requestId();
       const actionContext: ActionContext = {
         agent: host.agent,
-        env: host.env,
+        env: host.env(),
         requestId,
         toolCallId: options.toolCallId ?? "",
         messages: options.messages ?? [],

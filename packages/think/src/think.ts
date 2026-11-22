@@ -4215,7 +4215,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   /** What the turn's compiled action tools call on this agent. */
   readonly #actionToolHost: ActionToolHost = {
     agent: this,
-    env: this.env as Cloudflare.Env,
+    env: () => this.env as Cloudflare.Env,
     requestId: () => admittedTurnContext.getStore()?.requestId ?? "",
     isApproved: (toolCallId) =>
       this._activeTurnApprovedActionInputs.has(toolCallId),

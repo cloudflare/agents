@@ -14,7 +14,7 @@ import type { Think } from "../think";
 function host(overrides: Partial<ActionToolHost> = {}): ActionToolHost {
   return {
     agent: {} as Think,
-    env: {} as Cloudflare.Env,
+    env: () => ({}) as Cloudflare.Env,
     requestId: () => "req",
     isApproved: () => false,
     grantedPermissions: () => undefined,
@@ -150,5 +150,25 @@ describe("action helpers", () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(signal.aborted).toBe(true);
     cleanup();
+  });
+});
+
+describe("action context bindings", () => {
+  it("reads the agent's env when the action runs, not when it compiles", async () => {
+    let env = { STAGE: "first" } as unknown as Cloudflare.Env;
+    const tools = compileActionTools(
+      {
+        stage: action({
+          description: "stage",
+          inputSchema: {} as never,
+          execute: (_input: unknown, ctx) =>
+            (ctx.env as unknown as { STAGE: string }).STAGE
+        })
+      },
+      host({ env: () => env }),
+      new Map()
+    );
+    env = { STAGE: "second" } as unknown as Cloudflare.Env;
+    expect(await run(tools.stage, {})).toBe("second");
   });
 });
