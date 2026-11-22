@@ -7667,6 +7667,7 @@ export class ThinkToolsTestAgent extends Think {
             : mode === "ledger-key" ||
                 mode === "ledger-throw" ||
                 mode === "ledger-large-output" ||
+                mode === "ledger-oversize-output" ||
                 mode === "ledger-slow" ||
                 mode === "ledger-symbol-output" ||
                 mode === "ledger-approval" ||
@@ -7728,6 +7729,10 @@ export class ThinkToolsTestAgent extends Think {
           if (mode === "ledger-large-output") {
             return `echo: ${message} ${"x".repeat(25_000)}`;
           }
+          if (mode === "ledger-oversize-output") {
+            // Past SQLite's 2 MB row limit before the model-output cap.
+            return `echo: ${message} ${"x".repeat(3 * 1024 * 1024)}`;
+          }
           if (mode === "non-json-output") {
             const output: { count: bigint; self?: unknown } = { count: 12n };
             output.self = output;
@@ -7777,6 +7782,7 @@ export class ThinkToolsTestAgent extends Think {
     | "ledger-key"
     | "ledger-throw"
     | "ledger-large-output"
+    | "ledger-oversize-output"
     | "ledger-slow"
     | "ledger-symbol-output"
     | "ledger-approval"
@@ -7849,6 +7855,8 @@ export class ThinkToolsTestAgent extends Think {
       | "ledger-key"
       | "ledger-throw"
       | "ledger-large-output"
+      | "ledger-oversize-output"
+      | "ledger-oversize-output"
       | "ledger-slow"
       | "ledger-symbol-output"
       | "ledger-approval"
