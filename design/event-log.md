@@ -30,9 +30,9 @@ A live event is a one-element `events` frame with no `id`, for every follower. A
 
 The log stores nothing of its own. It is one stream, `log:<name>`, of the host's `Streams` capability (`options.streams`). Event seq n is chunk n - 1 of that stream, and the stream's metadata holds the log's epoch, a random id written once. A client cursor from before a storage wipe or a `reset()` never matches a new log that happens to reach the same seq. An event can be at most `maxEventBytes` (1 MiB by default, 1.9 MB at most).
 
-A buffered write goes into a new block: one INSERT per flush, no read, and no rewrite of an earlier block (an UPDATE that grew a 256 KB block cost 160-480 ms of CPU per 2,000 publishes on a deployment). The open block of a buffered stream is kept in memory after the first read. An event is serialized once: the live frame and the stored chunk are the same text.
+A buffered write goes into a new block: one INSERT per flush, no read, and no rewrite of an earlier block (an UPDATE that grew a 256 KB block cost 160-480 ms of CPU per 2,000 publishes on a deployment). A flush that would pass the 1.9 MB row limit is split into several blocks, written in one transaction. The sync aperture is one object per `Streams`, built on first use. The open block of a buffered stream is kept in memory after the first read. An event is serialized once: the live frame and the stored chunk are the same text.
 
-Retention (`Streams.trim`) deletes the oldest blocks while the log holds more than `maxEvents` events or `maxBytes` stored bytes (UTF-8, as SQLite counts them), and never the newest block. A block is one flush, so a log can hold up to one flush more than its limits, and the head is never reused. Totals are read once per isolate and kept in memory.
+Retention (`Streams.trim`) deletes the oldest blocks while the log holds more than `maxEvents` events or `maxBytes` stored bytes (UTF-8, as SQLite counts them), and never the newest block. A block is one flush (or part of a split one), so a log can hold up to one flush more than its limits, and a trim may delete the older blocks of a split flush, and the head is never reused. Totals are read once per isolate and kept in memory.
 
 ### Batches and the crash rule
 

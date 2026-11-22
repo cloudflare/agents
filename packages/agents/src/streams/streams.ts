@@ -782,6 +782,7 @@ export class Streams extends LifecycleCapability {
     // One block per flush, split only where the flush would pass the row
     // limit: each chunk is at most FLUSH_ROW_MAX_BYTES (callers check), so
     // every block fits a row.
+    const rows: (string | number)[][] = [];
     let start = 0;
     while (start < jsons.length) {
       let end = start + 1;
@@ -799,7 +800,7 @@ export class Streams extends LifecycleCapability {
             ? jsons[0]
             : jsons.join(",")
           : jsons.slice(start, end).join(",");
-      this.#sqlWrite(INSERT_BLOCK, [
+      rows.push([
         streamId,
         block,
         firstSeq + start,
@@ -810,6 +811,13 @@ export class Streams extends LifecycleCapability {
       ]);
       block += 1;
       start = end;
+    }
+    if (rows.length === 1) this.#sqlWrite(INSERT_BLOCK, rows[0]);
+    else {
+      // All blocks or none: a retry after a failure writes the same seqs.
+      this.lifecycle.storage.transactionSync(() => {
+        for (const row of rows) this.#sqlWrite(INSERT_BLOCK, row);
+      });
     }
     // Dropped only once written: a failed write leaves the chunks buffered.
     this.#buffers.delete(streamId);

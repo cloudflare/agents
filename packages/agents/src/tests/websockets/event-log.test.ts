@@ -350,6 +350,23 @@ describe("event log", () => {
     client.close();
   });
 
+  it("writes a split flush as all its blocks or none", async () => {
+    const name = crypto.randomUUID();
+    await stub(name).head("big");
+    await stub(name).openBatch("big");
+    expect(await stub(name).appendSized(200_000)).toBe(1);
+    // The second block of the coming split flush is taken, so its write fails.
+    await stub(name).plantBlock("big", 1);
+    await expect(
+      stub(name).publishText("big", "y".repeat(1_800_000))
+    ).rejects.toThrow();
+    // The first block was rolled back with it: no stored seq is left behind
+    // for a retry to write again.
+    expect(await stub(name).rows("big")).toEqual([
+      { seq_from: 1_000_000, seq_to: 1_000_001 }
+    ]);
+  });
+
   it("keeps a connection's subscriptions across hibernation", async () => {
     const name = crypto.randomUUID();
     const client = await connect(name);
