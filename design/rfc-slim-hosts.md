@@ -38,7 +38,7 @@ The experimental `ThinkHarness` (`agents/src/harness/think`) shows the other way
 
 A host class is a composition root. It installs capabilities in its constructor, exposes its public API as one-line delegates, and keeps its hooks and options. The only one-line delegates on a host are public or protected API that existed before this work. A private method whose whole body forwards to another object is not kept: when code moves, its call sites and the tests that reached into it move in the same PR to call the new owner. It owns no SQLite table, no queue, no waiter map, no timer and no wire frame. Anything with durable rows, a job or an alarm moves into a capability that owns its rows and states what it keeps durably and what it keeps in memory. Anything else moves into a plain internal module.
 
-Six rules hold across every capability and module below:
+Seven rules hold across every capability and module below:
 
 1. **One scheduler.** A capability that waits for a time pushes a job onto the Lifecycle job queue. No capability arms the alarm, keeps a heartbeat or runs its own backoff timer that must survive a reset.
 2. **Ids and idempotency everywhere.** Every record that starts work (a task run, an effect, a chat request) has an id the caller may choose. The same id with the same payload is a no-op. A different payload under the same id is an error. The Outbox is the one exception by design: its key names a slot whose undelivered value a later send replaces, and each value gets its own idempotency key that stays the same across that value's retries, so a sink dedupes on it.
@@ -46,6 +46,7 @@ Six rules hold across every capability and module below:
 4. **Root only.** Agents are never facets after this change, so no capability supports a routed Lifecycle, and the route envelopes in Lifecycle, Tasks, Scheduler and Queue go. Facets stay for dynamic code execution (codemode, Worker Loader), which does not install a Lifecycle.
 5. **Shape.** Anything that needs its own storage (tables, keys) or an alarm or scheduled work (it pushes Lifecycle jobs or must be woken) is a capability: a `LifecycleCapability` installed with `Lifecycle.use()`, owning its rows and its migrations. Anything else is a plain internal module: functions or a small class that takes what it needs. Hosts and modules own no tables and never touch alarms or the job queue directly.
 6. **Exposure.** Nothing new is public. See [Exposure](#exposure).
+7. **Exactly what is necessary.** No row, column, index, key or job that no reader needs, and no fact stored twice. On a hot path (a chat turn, a queued request, a task run, a fiber, a stream chunk, a socket connect or resume, startup) the rows written and read, the KV operations, the alarm writes and the `storage.sync()` calls do not rise against the tree before this work without a reason stated in the PR, and the folds onto Tasks and Streams should lower them. Nothing in memory is unbounded: every map keyed by request, run or connection has a bound and a removal path, stated in the design doc. Nothing is built before its call site, and what a change replaces is deleted in the same PR or the next one in its stack.
 
 ### What each class holds when done
 
@@ -274,7 +275,7 @@ Each step is a set of small PRs, each green alone. A step only starts when the s
 
 ## Open questions
 
-- **Frames that are neither a chunk nor a terminal.** Transcript updates and other broadcasts have no stream to live on. The starting point is that they are not logged: a tab that missed one gets it from the snapshot on resync. If a probe shows a tab can miss one without a resync, they need a home, and that is decided then with the measurement.
+- **Frames that are neither a chunk nor a terminal.** Transcript updates and other broadcasts have no stream to live on. The starting point is that they are not logged: a tab that missed one gets it from the snapshot on resync. The case to probe: a tab that reconnects in the middle of a turn misses a `MESSAGE_UPDATED`, because neither host sends the transcript on connect while a stream is active, and it stays stale until the turn's closing `CHAT_MESSAGES`. If the probe confirms it, either the reconnect sends the transcript or these frames get a home, decided then with the measurement.
 - **Merge.** `AIChatAgent` merges the bodies of overlapping messages under `merge`; `Think` supersedes like `latest`. One rule is decided when chat admissions move onto the Tasks lane, recorded in `chat-turn-core.md`.
 - **Server tools as durable steps.** With a turn as a durable run, a server tool call could be a recorded step (`ThinkHarness` does this). It is not part of this RFC.
 
