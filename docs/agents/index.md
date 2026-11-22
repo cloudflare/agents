@@ -66,6 +66,7 @@ Install each capability with `lifecycle.use()`. Capabilities marked experimental
 | `State`            | `agents/state`      | Stable       | [Lifecycle](./lifecycle.md#websockets-are-an-opt-in-capability) |
 | `WebSockets`       | `agents/websockets` | Stable       | [Lifecycle](./lifecycle.md#websockets-are-an-opt-in-capability) |
 | `Queue`            | `agents/queue`      | Experimental | [Queue](./queue.md)                                             |
+| `Inbox`            | `agents/inbox`      | Experimental | [Inbox](./inbox.md)                                             |
 | `RoutedAgents`     | `agents/routing`    | Experimental | [Routing](./routing.md)                                         |
 | `Browser`          | `agents/browser`    | Experimental | [Browse the Web](./browse-the-web.md)                           |
 | `Sessions`         | `agents/sessions`   | Experimental | [Sessions](./sessions.md)                                       |
@@ -93,6 +94,7 @@ Building your own harness? Sessions stores the conversation, Streams holds durab
 ### Background processing
 
 - [Queue](./queue.md) - Durable background task execution
+- [Inbox](./inbox.md) - Durable requests with ids, idempotency keys, ordered lanes and stored results
 - [Scheduling](./scheduling.md) - Delayed, scheduled, and cron-based tasks
 - [Retries](./retries.md) - Automatic retries with exponential backoff and jitter
 - [Durable Execution](./durable-execution.md) - `runFiber()`, `startFiber()`, `stash()`, and crash recovery for long tasks
