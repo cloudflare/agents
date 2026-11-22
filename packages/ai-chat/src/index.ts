@@ -1499,10 +1499,6 @@ export class AIChatAgent<
     // continuation it runs go into the normal STREAM_RESUMING path now that
     // a stream exists.
     this._turns.streamStarted(requestId, (c) => this._notifyStreamResuming(c));
-    // Arm on START as well as finish so cleanup still has a belt-and-suspenders
-    // wake if fiber recovery cannot finalize a stream. The last-activity sweep
-    // threshold keeps an actively streaming run from being reclaimed before it
-    // goes quiet (#1706).
     return streamId;
   }
 

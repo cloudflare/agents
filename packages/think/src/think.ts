@@ -13723,18 +13723,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /**
-   * Start a resumable stream and arm buffer cleanup. Wrapper around
-   * `ResumableStream.start`: arming on START as well as finish guarantees a
-   * stream whose DO is evicted mid-flight and never reaches a finish still gets
-   * a future sweep instead of leaking its buffer.
-   *
-   * When a turn runs inside `runFiber` (durable recovery), the DO already
-   * self-heals: `runFiber` holds `keepAlive`, which leaves a durable alarm in
-   * storage that survives eviction, fires within ~keepAliveIntervalMs, and runs
-   * the fiber-recovery scan — finalizing the stream (which arms cleanup) without
-   * any client reconnect. Arming here is the safety net for any non-fiber stream
-   * path, where no such alarm exists. The last-activity sweep threshold prevents
-   * an actively streaming run from being reclaimed before it goes quiet (#1706).
+   * Start a resumable stream (`ResumableStream.start`), recording the
+   * request's origin message ids on it. No cleanup is armed: a stream's rows
+   * go at the cutover that stores its message, and the next stream start
+   * reclaims what a crash left behind. The last-activity threshold keeps an
+   * actively streaming run from being reclaimed before it goes quiet (#1706).
    */
   protected _startResumableStream(
     requestId: string,

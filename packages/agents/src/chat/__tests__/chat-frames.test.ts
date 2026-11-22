@@ -77,9 +77,13 @@ describe("ChatFrames", () => {
   });
 
   it("records a terminal frame after sending it", () => {
-    const { frames, kv } = setup();
+    const recordedAtSend: unknown[] = [];
+    const { frames, kv } = setup({
+      broadcast: () => recordedAtSend.push(recentChatTerminal(kv, ["r1"]))
+    });
     frames.requestOrigins.set("r1", ["u1"]);
     frames.broadcast({ type: RESPONSE, id: "r1", body: "", done: true });
+    expect(recordedAtSend).toEqual([null]);
     expect(recentChatTerminal(kv, ["r1"])).toMatchObject({
       requestId: "r1",
       messageIds: ["u1"]
