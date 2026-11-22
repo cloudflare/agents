@@ -1535,7 +1535,7 @@ export class Think<
   }
 
   /** Cached messages, kept in sync with session storage. */
-  private readonly _transcript = new ThinkTranscriptCache({
+  private readonly _cfTranscript = new ThinkTranscriptCache({
     budget: () => this.hydrationByteBudget,
     readAll: () => this._readMessagesFromStorage(),
     readRecent: async (budget) => {
@@ -1543,15 +1543,15 @@ export class Think<
       return { ...recent, messages: recent.messages as UIMessage[] };
     },
     emitWindowed: (payload) => this._emit("chat:hydration:windowed", payload),
-    refreshed: () => this._mediaEviction.request()
+    refreshed: () => this._cfMediaEviction.request()
   });
 
   private get _cachedMessages(): UIMessage[] {
-    return this._transcript.messages;
+    return this._cfTranscript.messages;
   }
 
   private set _cachedMessages(messages: UIMessage[]) {
-    this._transcript.messages = messages;
+    this._cfTranscript.messages = messages;
   }
   private _unsubscribeSessionChanges: (() => void) | undefined;
 
@@ -1672,8 +1672,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     super(ctx, env);
 
     this.lifecycle.use(this.sessions);
-    this.lifecycle.use(this._config);
-    this.lifecycle.use(this._mediaEviction);
+    this.lifecycle.use(this._cfConfig);
+    this.lifecycle.use(this._cfMediaEviction);
     this.lifecycle.use(this.streams);
     this.lifecycle.use(this._approvals);
     this._registerChatTurnTaskDefinition();
@@ -1725,9 +1725,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           this._unsubscribeSessionChanges = this.sessions
             .session(this.session.sessionId)
             .mirror<UIMessage>({
-              get: () => this._transcript.messages,
+              get: () => this._cfTranscript.messages,
               set: (messages) => {
-                this._transcript.replace(messages);
+                this._cfTranscript.replace(messages);
               },
               transform: (message) => message as UIMessage,
               intercept: async (event) => {
@@ -1738,23 +1738,23 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
                     if (event.inserted && event.parentId === undefined) {
                       return false;
                     }
-                    await this._transcript.sync();
+                    await this._cfTranscript.sync();
                     return true;
                   case "import":
                     // A row the cache never saw. Re-derive at the next safe
                     // boundary instead of mirroring a migration row by row.
-                    this._transcript.coversActivePath = false;
+                    this._cfTranscript.coversActivePath = false;
                     return true;
                   case "clear":
-                    this._transcript.replace([]);
-                    this._transcript.coversActivePath = true;
+                    this._cfTranscript.replace([]);
+                    this._cfTranscript.coversActivePath = true;
                     return true;
                   case "compaction":
                   case "delete":
-                    await this._transcript.sync();
+                    await this._cfTranscript.sync();
                     return true;
                   case "compact":
-                    await this._transcript.sync();
+                    await this._cfTranscript.sync();
                     await this.#contextBlocks?.refreshSystemPrompt();
                     return true;
                   default:
@@ -1770,8 +1770,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
                 // where an eviction pass becomes worth scheduling; the gate
                 // decides from memory. It also grows the cache past what the
                 // last refresh measured.
-                this._transcript.noteGrowth(cachedMessageBytes(message));
-                this._mediaEviction.noteAppend();
+                this._cfTranscript.noteGrowth(cachedMessageBytes(message));
+                this._cfMediaEviction.noteAppend();
               }
             });
 
@@ -1784,7 +1784,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       // recent window on oversized transcripts), but even the budgeted read
       // can fail — and that failure must not escape onStart, or the DO is
       // bricked (#1710). Degrade to an empty in-memory view; persisted
-      // history is untouched and the next safe-boundary `_transcript.sync()`
+      // history is untouched and the next safe-boundary `_cfTranscript.sync()`
       // retries.
       this._onStartDegradations = [];
       await this._withAgentSpan(
@@ -1794,7 +1794,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         async () => {
           const hydrated = await this._runBestEffortOnStartStep(
             "transcript-hydration",
-            () => this._transcript.sync(),
+            () => this._cfTranscript.sync(),
             "The agent is starting with an empty in-memory message view; " +
               "persisted history is untouched. If the error is SQLITE_NOMEM, " +
               "the stored transcript is too large to hydrate (often inline " +
@@ -1802,7 +1802,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               "to recover."
           );
           if (!hydrated) {
-            this._transcript.replace([]);
+            this._cfTranscript.replace([]);
           }
         }
       );
@@ -1917,7 +1917,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    *
    * Storage remains the durable source of truth, but runtime logic should read
    * through this cache so in-flight turns, tool updates, and recovery state all
-   * observe the same message list. Use `_transcript.sync()` only at safe
+   * observe the same message list. Use `_cfTranscript.sync()` only at safe
    * boundaries where a full storage reread cannot drop in-flight state.
    *
    * When the stored transcript exceeds `hydrationByteBudget`, this view is a
@@ -1925,13 +1925,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * full history remains readable via `session.getHistory()`.
    */
   get messages(): UIMessage[] {
-    return this._transcript.messages;
+    return this._cfTranscript.messages;
   }
 
   /**
    * Read the durable message path from session storage.
    *
-   * Intentionally UNBUDGETED — unlike the cache refresh in `_transcript.sync()`,
+   * Intentionally UNBUDGETED — unlike the cache refresh in `_cfTranscript.sync()`,
    * which routes through `session.getRecentHistory(hydrationByteBudget)`, this
    * returns the full active path. Its caller, message reconciliation, must see
    * every message: it diffs incoming client messages against the complete
@@ -2016,7 +2016,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       // The broadcast carries the whole list, so every tab drops it.
       remove: async (ids) => {
         await this.session.deleteMessages(ids);
-        await this._transcript.sync();
+        await this._cfTranscript.sync();
         this._broadcastMessages();
       },
       emitRepaired: (event) => this._emit("chat:transcript:repaired", event)
@@ -2073,13 +2073,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /** Aged-media eviction passes (see `mediaEviction`). */
-  private readonly _mediaEviction = new MediaEvictionPasses({
+  private readonly _cfMediaEviction = new MediaEvictionPasses({
     config: () => resolveMediaEvictionConfig(this.mediaEviction),
     truncationStep: () => this.truncationStep,
-    cachedMessages: () => this._transcript.messages,
+    cachedMessages: () => this._cfTranscript.messages,
     agedRowsHiddenFromCache: () =>
       this._lastHydration?.truncated === true ||
-      this._transcript.messages.some((message) =>
+      this._cfTranscript.messages.some((message) =>
         isCompactionMessage(message as SessionMessage)
       ),
     storedBytes: () => this._lastHydration?.totalContentBytes ?? null,
@@ -2112,7 +2112,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
   /** Run one bounded eviction pass now. @internal Exposed for tests. */
   protected _evictAgedMediaBestEffort(): Promise<MediaEvictionPassResult | null> {
-    return this._mediaEviction.run();
+    return this._cfMediaEviction.run();
   }
 
   /**
@@ -2121,26 +2121,26 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * a larger stored transcript.
    */
   protected get _lastHydration(): HydrationResult | null {
-    return this._transcript.lastHydration;
+    return this._cfTranscript.lastHydration;
   }
 
   /** Whether `this.messages` holds every message on the active path. */
   private get _cacheCoversActivePath(): boolean {
-    return this._transcript.coversActivePath;
+    return this._cfTranscript.coversActivePath;
   }
 
   private set _cacheCoversActivePath(covers: boolean) {
-    this._transcript.coversActivePath = covers;
+    this._cfTranscript.coversActivePath = covers;
   }
 
   /** Patch a message that is already present in the live cache. */
   private _patchCachedMessage(message: UIMessage): void {
-    const index = this._transcript.messages.findIndex(
+    const index = this._cfTranscript.messages.findIndex(
       (m) => m.id === message.id
     );
     if (index === -1) return;
-    const previous = this._transcript.messages[index];
-    this._transcript.messages[index] = message;
+    const previous = this._cfTranscript.messages[index];
+    this._cfTranscript.messages[index] = message;
     this._noteCachedReplacement(previous, message);
   }
 
@@ -2153,8 +2153,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   private _noteCachedReplacement(previous: UIMessage, next: UIMessage): void {
     const grew = cachedMessageBytes(next) - cachedMessageBytes(previous);
     if (grew > 0) {
-      this._transcript.noteGrowth(grew);
-      this._mediaEviction.invalidate();
+      this._cfTranscript.noteGrowth(grew);
+      this._cfMediaEviction.invalidate();
     }
   }
 
@@ -2228,7 +2228,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
   /** Refresh Think's live message cache from the durable session path. */
   protected async syncMessagesFromStorage(): Promise<UIMessage[]> {
-    return (await this._transcript.sync()).slice();
+    return (await this._cfTranscript.sync()).slice();
   }
 
   /**
@@ -2410,9 +2410,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * `think_config`, skipping a value equal to what is stored.
    */
   private readonly _requestContext = new ChatRequestContext({
-    get: (key) => this._config.get(key),
-    set: (key, json) => this._config.set(key, json),
-    delete: (key) => this._config.delete(key)
+    get: (key) => this._cfConfig.get(key),
+    set: (key, json) => this._cfConfig.set(key, json),
+    delete: (key) => this._cfConfig.delete(key)
   });
   private get _lastClientTools(): ClientToolSchema[] | undefined {
     return this._requestContext.clientTools;
@@ -2563,7 +2563,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    */
   configure<T = Record<string, unknown>>(config: T): void {
     const json = JSON.stringify(config);
-    this._config.set("_think_config", json);
+    this._cfConfig.set("_think_config", json);
     this.#configCache = config;
   }
 
@@ -2577,7 +2577,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    */
   getConfig<T = Record<string, unknown>>(): T | null {
     if (this.#configCache !== null) return this.#configCache as T;
-    const raw = this._config.get("_think_config");
+    const raw = this._cfConfig.get("_think_config");
     if (raw !== undefined) {
       this.#configCache = JSON.parse(raw);
       return this.#configCache as T;
@@ -2591,7 +2591,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   readonly #messengerReplies: MessengerReplies;
 
   /** Think's private keyed config rows. */
-  private readonly _config = new ThinkConfigStore();
+  private readonly _cfConfig = new ThinkConfigStore();
 
   /**
    * Run the legacy `assistant_config` lift again. The config capability runs
@@ -2599,7 +2599,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * @internal
    */
   protected _migrateLegacyConfigToThinkTable(): void {
-    this._config.migrateLegacy();
+    this._cfConfig.migrateLegacy();
   }
 
   // ── Configuration overrides ─────────────────────────────────────
@@ -8019,8 +8019,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               await this._persistIncomingMessage(message, undefined, "web");
             }
             if (!isCurrent()) return false;
-            if (!this._transcript.coversActivePath)
-              await this._transcript.sync();
+            if (!this._cfTranscript.coversActivePath)
+              await this._cfTranscript.sync();
             return true;
           }
         );
@@ -8200,7 +8200,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * carries the new count and runs.
    */
   private _stopEveryChat(): void {
-    this._config.set(
+    this._cfConfig.set(
       CONNECTIONLESS_STOPS_KEY,
       String(this._connectionlessStops() + 1)
     );
@@ -8213,7 +8213,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * before an eviction is still known to come before a later stop.
    */
   private _connectionlessStops(): number {
-    const stops = Number(this._config.get(CONNECTIONLESS_STOPS_KEY) ?? 0);
+    const stops = Number(this._cfConfig.get(CONNECTIONLESS_STOPS_KEY) ?? 0);
     return Number.isFinite(stops) ? stops : 0;
   }
 
@@ -10117,8 +10117,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         // append lands in place; a branch append already forced a full
         // refresh), so a cache that covers the path is current. Only a
         // windowed or unhydrated cache needs storage to re-derive its view.
-        if (!this._transcript.coversActivePath) {
-          await this._transcript.sync();
+        if (!this._cfTranscript.coversActivePath) {
+          await this._cfTranscript.sync();
         }
         return true;
       }
@@ -10137,8 +10137,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * change feed while the caller is still iterating.
    */
   private async _serverTranscriptForReconcile(): Promise<UIMessage[]> {
-    if (this._transcript.coversActivePath)
-      return [...this._transcript.messages];
+    if (this._cfTranscript.coversActivePath)
+      return [...this._cfTranscript.messages];
     return this._readMessagesFromStorage();
   }
 
@@ -11016,7 +11016,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const names = unexecutedToolNames(tools);
     this._unexecutedTools = names;
     // `_configSet` skips the write when the value has not changed.
-    this._config.set("unexecutedTools", JSON.stringify(names));
+    this._cfConfig.set("unexecutedTools", JSON.stringify(names));
   }
 
   /** Read once per isolate: `hasPendingInteraction()` is polled. */
@@ -11029,7 +11029,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    */
   private _unexecutedToolNames(): string[] {
     if (this._unexecutedTools) return this._unexecutedTools;
-    const stored = this._config.get("unexecutedTools");
+    const stored = this._cfConfig.get("unexecutedTools");
     if (stored !== undefined) {
       try {
         const parsed: unknown = JSON.parse(stored);

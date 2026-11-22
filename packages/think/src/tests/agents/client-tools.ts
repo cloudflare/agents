@@ -1725,7 +1725,7 @@ export class ThinkClientToolsAgent extends Think {
     const ownerId = await this._seedMeasuredTranscript(transcript);
     const internal = this as unknown as {
       _applyToolUpdateToMessages(update: ToolPartUpdate): Promise<unknown>;
-      _transcript: { coversActivePath: boolean };
+      _cfTranscript: { coversActivePath: boolean };
     };
     this.#billed.start();
     await internal._applyToolUpdateToMessages(
@@ -1740,7 +1740,7 @@ export class ThinkClientToolsAgent extends Think {
     return {
       ...billed,
       state: part?.state,
-      cacheCoversPath: internal._transcript.coversActivePath
+      cacheCoversPath: internal._cfTranscript.coversActivePath
     };
   }
 

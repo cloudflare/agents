@@ -137,10 +137,10 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
       this._recoveryMode() === "later"
     ) {
       const internal = this as unknown as {
-        _transcript: { messages: UIMessage[] };
+        _cfTranscript: { messages: UIMessage[] };
       };
-      internal._transcript.messages = [
-        ...internal._transcript.messages,
+      internal._cfTranscript.messages = [
+        ...internal._cfTranscript.messages,
         {
           id: crypto.randomUUID(),
           role: "assistant",

@@ -1,5 +1,4 @@
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
-import { deliverReplyAttachments } from "../../attachments";
 import { hasToolCall, Output, tool } from "ai";
 import { action, skills, Think, type ThinkSession } from "../../think";
 import { Agent } from "agents";
@@ -2028,12 +2027,13 @@ export class ThinkTestAgent extends Think {
   async renderAttachmentsForTest(
     attachments: import("../../think").ReplyAttachment[]
   ): Promise<UIMessage[]> {
-    // The post-turn step that delivers attachments to the active channel.
-    await deliverReplyAttachments(
-      attachments,
-      (attachment) => this.renderAttachment(attachment),
-      (rendered) => this.deliverNotice(rendered, { kind: "interim" })
-    );
+    await (
+      this as unknown as {
+        _renderChannelAttachments(
+          a: import("../../think").ReplyAttachment[]
+        ): Promise<void>;
+      }
+    )._renderChannelAttachments(attachments);
     return this.getMessages();
   }
 
@@ -7384,10 +7384,10 @@ export class ThinkToolsTestAgent extends Think {
   /** Keep only the newest `count` messages in memory, as a windowed hydration. */
   async windowCachedMessagesForTest(count: number): Promise<void> {
     const self = this as unknown as {
-      _transcript: { messages: UIMessage[]; coversActivePath: boolean };
+      _cfTranscript: { messages: UIMessage[]; coversActivePath: boolean };
     };
-    self._transcript.messages = self._transcript.messages.slice(-count);
-    self._transcript.coversActivePath = false;
+    self._cfTranscript.messages = self._cfTranscript.messages.slice(-count);
+    self._cfTranscript.coversActivePath = false;
   }
 
   /** Reconcile and persist a client transcript, as a chat request does. */
@@ -11148,9 +11148,11 @@ export class ThinkRecoveryTestAgent extends Think {
    * reset in `_beginChatRecoveryIncident`.
    */
   async addAssistantMessageForTest(id: string): Promise<void> {
-    const self = this as unknown as { _transcript: { messages: UIMessage[] } };
-    self._transcript.messages = [
-      ...self._transcript.messages,
+    const self = this as unknown as {
+      _cfTranscript: { messages: UIMessage[] };
+    };
+    self._cfTranscript.messages = [
+      ...self._cfTranscript.messages,
       {
         id,
         role: "assistant",
@@ -11178,8 +11180,10 @@ export class ThinkRecoveryTestAgent extends Think {
    *  messages from the live cache. Used to prove the recovery progress signal
    *  is compaction-immune (#1628). */
   async dropAssistantMessagesForTest(): Promise<void> {
-    const self = this as unknown as { _transcript: { messages: UIMessage[] } };
-    self._transcript.messages = self._transcript.messages.filter(
+    const self = this as unknown as {
+      _cfTranscript: { messages: UIMessage[] };
+    };
+    self._cfTranscript.messages = self._cfTranscript.messages.filter(
       (m) => m.role !== "assistant"
     );
   }
@@ -11636,9 +11640,11 @@ export class ThinkRecoveryTestAgent extends Think {
     // A user message must be the latest leaf so `latestUserMessageId` resolves
     // to the same identity the route computes.
     const userId = `user-${crypto.randomUUID()}`;
-    const self = this as unknown as { _transcript: { messages: UIMessage[] } };
-    self._transcript.messages = [
-      ...self._transcript.messages,
+    const self = this as unknown as {
+      _cfTranscript: { messages: UIMessage[] };
+    };
+    self._cfTranscript.messages = [
+      ...self._cfTranscript.messages,
       { id: userId, role: "user", parts: [{ type: "text", text: "hi" }] }
     ];
     const requestId = `stall-exhaust-${crypto.randomUUID()}`;
@@ -13404,7 +13410,7 @@ export class ThinkWindowedHydrationAgent extends Think {
   }> {
     const internal = this as unknown as {
       _applyToolUpdateToMessages(update: ToolPartUpdate): Promise<unknown>;
-      _transcript: { coversActivePath: boolean };
+      _cfTranscript: { coversActivePath: boolean };
     };
     await this.session.appendMessage({
       id: "grow-user",
@@ -13425,14 +13431,14 @@ export class ThinkWindowedHydrationAgent extends Think {
       ]
     } as unknown as UIMessage);
     await this.syncMessagesFromStorage();
-    const coversAfterSync = internal._transcript.coversActivePath;
+    const coversAfterSync = internal._cfTranscript.coversActivePath;
 
     // A 70 KB result on a message the cache already holds: an update, not an
     // append, and alone larger than the budget.
     await internal._applyToolUpdateToMessages(
       toolResultUpdate("tc-grow", "y".repeat(70_000))
     );
-    const coversAfterUpdate = internal._transcript.coversActivePath;
+    const coversAfterUpdate = internal._cfTranscript.coversActivePath;
 
     // Reset by refreshing (the update re-windows), then grow by an append
     // of 40 000 two-byte characters: 40 KB of string length, 80 KB stored.
@@ -13443,7 +13449,7 @@ export class ThinkWindowedHydrationAgent extends Think {
       role: "user",
       parts: [{ type: "text", text: "é".repeat(40_000) }]
     });
-    const coversAfterMultibyteAppend = internal._transcript.coversActivePath;
+    const coversAfterMultibyteAppend = internal._cfTranscript.coversActivePath;
 
     return { coversAfterSync, coversAfterUpdate, coversAfterMultibyteAppend };
   }
@@ -13484,7 +13490,7 @@ export class ThinkWindowedHydrationAgent extends Think {
     const inCache = this.messages.some((m) => m.id === "old-owner");
     const internal = this as unknown as {
       _applyToolUpdateToMessages(update: ToolPartUpdate): Promise<unknown>;
-      _transcript: { coversActivePath: boolean };
+      _cfTranscript: { coversActivePath: boolean };
     };
     await internal._applyToolUpdateToMessages(
       toolResultUpdate("tc-old", "late result")
@@ -13496,7 +13502,7 @@ export class ThinkWindowedHydrationAgent extends Think {
     ) as { state?: string } | undefined;
     return {
       inCache,
-      cacheCoversPath: internal._transcript.coversActivePath,
+      cacheCoversPath: internal._cfTranscript.coversActivePath,
       storedState: part?.state
     };
   }
@@ -13832,11 +13838,11 @@ export class ThinkMediaEvictionAutoAgent extends ThinkMediaEvictionAgent {
       return rows;
     };
     const internal = this as unknown as {
-      _mediaEviction: { running: boolean };
+      _cfMediaEviction: { running: boolean };
     };
     const pass = this._evictAgedMediaBestEffort();
     await new Promise((resolve) => setTimeout(resolve, 0));
-    const runningAtAppend = internal._mediaEviction.running;
+    const runningAtAppend = internal._cfMediaEviction.running;
     for (let i = 0; i < 4; i++) {
       await this.appendMessageToHistory({
         id: `fpost-${i}`,
