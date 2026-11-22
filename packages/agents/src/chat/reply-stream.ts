@@ -17,11 +17,16 @@ import { chunkMustBeStoredNow } from "./recovery-codec";
 import type { ResumableStream } from "./resumable-stream";
 import type { ChatTurnOutcome } from "./wire-types";
 
-/** What a host records for a request when its stream settles. */
+/**
+ * What a host records for a request when its stream settles.
+ *
+ * @internal
+ */
 export type ReplyStreamResult =
   | { status: "completed"; output?: unknown }
   | { status: "aborted" | "retry" | "error" };
 
+/** @internal */
 export interface ReplyStreamsHost {
   /** The host's stream store. Read on every call: hosts assign it late. */
   resumable(): ResumableStream;
@@ -41,7 +46,11 @@ export interface ReplyStreamsHost {
   record?(requestId: string, result: ReplyStreamResult): void;
 }
 
-/** The metadata a reply's stream carries for orphan recovery and replay. */
+/**
+ * The metadata a reply's stream carries for orphan recovery and replay.
+ *
+ * @internal
+ */
 export interface ReplyStreamStart {
   /** The id the reply is stored under. */
   messageId?: string;
@@ -52,13 +61,21 @@ export interface ReplyStreamStart {
   continuation?: boolean;
 }
 
-/** Per-stream flush bookkeeping for {@link ReplyStreams.store}. */
+/**
+ * Per-stream flush bookkeeping for {@link ReplyStreams.store}.
+ *
+ * @internal
+ */
 export interface ReplyFlushState {
   chunksSinceFlush: number;
   hasFlushedContent: boolean;
 }
 
-/** What the reply pump does to a reply's stream. {@link ReplyStreams} is the one implementation. */
+/**
+ * What the reply pump does to a reply's stream. {@link ReplyStreams} is the one implementation.
+ *
+ * @internal
+ */
 export interface ReplyStreamLog {
   start(requestId: string, options?: ReplyStreamStart): string;
   store(
@@ -78,6 +95,7 @@ export interface ReplyStreamLog {
 /** Text and reasoning are flushed with the first delta and every tenth after it. */
 const DELTA_FLUSH_INTERVAL = 10;
 
+/** @internal */
 export class ReplyStreams implements ReplyStreamLog {
   constructor(private readonly host: ReplyStreamsHost) {}
 

@@ -51,7 +51,11 @@ import {
 import { isTurnStopped } from "./turn-stop";
 import { MessageType, type ChatTurnOutcome } from "./wire-types";
 
-/** The frame the pump sends to sockets for a reply. */
+/**
+ * The frame the pump sends to sockets for a reply.
+ *
+ * @internal
+ */
 export type ReplyFrame = {
   type: MessageType.CF_AGENT_USE_CHAT_RESPONSE;
   /** The request id. */
@@ -71,6 +75,8 @@ export type ReplyFrame = {
 /**
  * A second consumer of the reply besides sockets: `Think.chat()` over RPC
  * gets every chunk and how the reply ended.
+ *
+ * @internal
  */
 export interface ReplySink {
   chunk(body: string): Promise<void>;
@@ -83,10 +89,18 @@ export interface ReplySink {
   interrupted(): Promise<void>;
 }
 
-/** How the host reads an error. */
+/**
+ * How the host reads an error.
+ *
+ * @internal
+ */
 export type ReplyErrorVerdict = "terminal" | "transient" | "overflow";
 
-/** A stall or a transient error, handed to recovery. */
+/**
+ * A stall or a transient error, handed to recovery.
+ *
+ * @internal
+ */
 export interface ReplyInterruption {
   requestId: string;
   streamId: string;
@@ -112,10 +126,16 @@ export interface ReplyInterruption {
  * What recovery did with an interruption: it scheduled the rest of the
  * reply, the turn was stopped meanwhile, recovery gave up (and delivered its
  * terminal message), or the reply ends as its error (`declined`, `failed`).
+ *
+ * @internal
  */
 export type ReplyRouteOutcome = StreamInterruptionOutcome;
 
-/** Why the pump asks the host to store the reply. */
+/**
+ * Why the pump asks the host to store the reply.
+ *
+ * @internal
+ */
 export interface ReplyStoreContext {
   /**
    * `final`: the reply ended, with the cutover when its stream awaits one.
@@ -134,6 +154,8 @@ export interface ReplyStoreContext {
  * The reply while it streams and while it is stored. A tool result that
  * arrives meanwhile is applied to the accumulator, and sets `dirty` when
  * the reply is being stored so it is stored again.
+ *
+ * @internal
  */
 export class LiveReply {
   storing = false;
@@ -155,7 +177,11 @@ export class LiveReply {
   }
 }
 
-/** One stream event for the host's observability. */
+/**
+ * One stream event for the host's observability.
+ *
+ * @internal
+ */
 export type ReplyEvent =
   | { type: "message:error"; error: string }
   | {
@@ -167,7 +193,11 @@ export type ReplyEvent =
     }
   | { type: "chat:stream:stalled"; requestId: string; timeoutMs: number };
 
-/** The part of the turn core (`ChatTurns`) the pump uses. */
+/**
+ * The part of the turn core (`ChatTurns`) the pump uses.
+ *
+ * @internal
+ */
 export interface ReplyTurns {
   /** The reply tool results land on. The pump sets and clears it. */
   liveReply: LiveReply | null;
@@ -179,6 +209,7 @@ export interface ReplyTurns {
   replyFinalized(): void;
 }
 
+/** @internal */
 export interface ReplyPumpHost {
   readonly streams: ReplyStreamLog;
   readonly turns: ReplyTurns;
@@ -231,6 +262,7 @@ export interface ReplyPumpHost {
   reading?(active: boolean): void;
 }
 
+/** @internal */
 export interface ReplyPumpInput {
   requestId: string;
   source: ReplySource;
@@ -266,6 +298,7 @@ export interface ReplyPumpInput {
   started?: () => void;
 }
 
+/** @internal */
 export type ReplyResult =
   | { status: "completed"; messageId?: string; output?: unknown }
   | { status: "aborted"; reason?: "interrupted" }
@@ -282,7 +315,11 @@ export type ReplyResult =
       partial: UIMessage;
     };
 
-/** An in-band error the host called transient, carried to recovery. */
+/**
+ * An in-band error the host called transient, carried to recovery.
+ *
+ * @internal
+ */
 export class TransientChatStreamError extends Error {
   constructor(
     message: string,
@@ -340,7 +377,11 @@ function alignStart(
   return chunk.messageId == null ? { ...chunk, messageId } : chunk;
 }
 
-/** Pump one reply. See the module comment. */
+/**
+ * Pump one reply. See the module comment.
+ *
+ * @internal
+ */
 export async function pumpReply(
   input: ReplyPumpInput,
   host: ReplyPumpHost

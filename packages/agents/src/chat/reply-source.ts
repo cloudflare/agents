@@ -12,6 +12,7 @@
 
 import type { StreamChunkData } from "./message-builder";
 
+/** @internal */
 export interface ReplySource {
   readonly chunks: AsyncIterable<StreamChunkData>;
   /** The provider error behind the last in-band `error` chunk, if known. */
@@ -25,14 +26,22 @@ export interface ReplySource {
   release?(): void;
 }
 
-/** The part of an AI SDK `streamText` result the pump reads. */
+/**
+ * The part of an AI SDK `streamText` result the pump reads.
+ *
+ * @internal
+ */
 export interface UIMessageStreamResult {
   toUIMessageStream(options?: {
     onError?: (error: unknown) => string;
   }): AsyncIterable<unknown>;
 }
 
-/** The text an in-band error chunk carries for `error`. */
+/**
+ * The text an in-band error chunk carries for `error`.
+ *
+ * @internal
+ */
 export function streamErrorText(error: unknown): string {
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;
@@ -49,6 +58,8 @@ export function streamErrorText(error: unknown): string {
  * the error and not its text.
  *
  * @param release - Runs when the pump stopped before the stream's end.
+ *
+ * @internal
  */
 export function uiMessageStreamSource(
   result: UIMessageStreamResult,
@@ -69,6 +80,8 @@ export function uiMessageStreamSource(
  * UI message stream: each `data:` line is one chunk, a line that is not JSON
  * is skipped. Any other body is plain text, sent as one text part under the
  * request id.
+ *
+ * @internal
  */
 export function responseSource(
   response: Response,
