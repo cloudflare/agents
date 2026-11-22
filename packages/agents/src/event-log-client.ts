@@ -156,7 +156,17 @@ export function followEventLog<T = unknown, S = unknown>(
             return;
           }
           cursor = { epoch: cursor.epoch, seq: entry.seq };
-          handlers.onEvent(entry.data as T, entry.seq);
+          // A throwing handler must not cost the rest of the frame: during
+          // a replay nothing checks for gaps, so a skipped event would
+          // never come again.
+          try {
+            handlers.onEvent(entry.data as T, entry.seq);
+          } catch (error) {
+            console.error(
+              `[followEventLog] onEvent for "${log}" threw at seq ${entry.seq}:`,
+              error
+            );
+          }
         }
         return;
       }
