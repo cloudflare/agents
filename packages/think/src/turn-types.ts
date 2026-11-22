@@ -963,18 +963,6 @@ export interface ExtensionConfig {
 }
 
 /**
- * @internal The subset of the AI SDK's `ToolExecuteOptions` that Think's
- * tool wrapper reads when resolving a `beforeToolCall` decision.
- */
-export type ToolDecisionOptions = {
-  toolCallId: string;
-  messages: ModelMessage[];
-  abortSignal?: AbortSignal;
-  context?: unknown;
-  experimental_context?: unknown; // v6 alias kept for local wrappers if present
-};
-
-/**
  * Keys of the global `AiModels` interface (from `@cloudflare/workers-types`)
  * whose model type extends `T`. Mirrors the derivation `workers-ai-provider`
  * uses, so the set stays in sync with the installed workers-types version.

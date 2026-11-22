@@ -93,15 +93,20 @@ import type {
   LanguageModel,
   ModelMessage,
   ToolSet,
-  TypedToolCall,
   UIMessage
 } from "ai";
-import { convertToModelMessages, tool } from "ai";
+import { tool } from "ai";
 import {
   toDeclaredSchedules,
   type ThinkScheduledTasks
 } from "./scheduled-tasks";
 import { ThinkConfigStore } from "./config-store";
+import { wrapToolsWithDecision } from "./tool-decision";
+import {
+  ThinkContextOverflow,
+  TransientChatStreamError,
+  isTransientClassification
+} from "./context-overflow";
 import {
   EXECUTION_OUTCOME_MESSAGE_PREFIX,
   MODEL_RECENT_WINDOW,
@@ -389,22 +394,6 @@ type PendingResponseHook = {
   status: ChatResponseResult["status"];
   error?: string;
 };
-
-/**
- * Carries an in-stream error that `classifyChatError` marked transient out of
- * the drain loop, so it reaches the same recovery routing as a thrown error.
- * `original` is the provider error the stream reported, when it had one.
- */
-class TransientChatStreamError extends Error {
-  constructor(
-    message: string,
-    readonly classification: ChatErrorClassification,
-    readonly original: unknown
-  ) {
-    super(message);
-    this.name = "TransientChatStreamError";
-  }
-}
 
 /** A live stream interruption (stall or transient error) to route to recovery. */
 type StreamInterruptionRoute = {
@@ -1064,7 +1053,6 @@ import type {
   ToolCallContext,
   ToolCallDecision,
   ToolCallResultContext,
-  ToolDecisionOptions,
   TurnConfig,
   TurnContext,
   TurnInput,
@@ -1335,12 +1323,6 @@ const recoveredTurnAcceptanceContext = new AsyncLocalStorage<{
 // A `runTurn` continuation dispatched through an overridden `continueLastTurn`:
 // the base method, when the override delegates to it, records the full result
 // (with structured output) for that `runTurn` call alone.
-function isTransientClassification(
-  classification: ChatErrorClassification | undefined
-): classification is "transient" | "rate_limit" {
-  return classification === "transient" || classification === "rate_limit";
-}
-
 const continuationOutputContext = new AsyncLocalStorage<{
   agent: unknown;
   taken: boolean;
@@ -4354,35 +4336,31 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    */
   contextOverflow?: ContextOverflowConfig;
 
-  /** Whether the reactive compact-and-retry backstop is enabled. */
+  /** Error classification and context-overflow recovery for each turn. */
+  readonly #overflow = new ThinkContextOverflow({
+    config: () => this.contextOverflow,
+    classifierOverridden: () => isMethodOverridden(this, "classifyChatError"),
+    classify: (error, ctx) => this.classifyChatError(error, ctx),
+    compact: () => this.session.compact(this._turnHistoryLeafId),
+    emit: (type, payload) => this._emit(type, payload),
+    onChatError: (error, ctx) => this.onChatError(error, ctx),
+    rebuildMessages: async () =>
+      // The compaction refreshed the stored prompt, but this request keeps
+      // the system prompt it started with, so it still needs the reminder.
+      withContextReminder(
+        await this._assembleModelMessages(this._activeTurnTools),
+        this._turnContextReminder
+      )
+  });
+
   private get _overflowReactiveEnabled(): boolean {
-    return this.contextOverflow?.reactive === true;
+    return this.#overflow.reactiveEnabled;
   }
 
-  /** Reactive compact-and-retry budget. */
   private get _overflowMaxRetries(): number {
-    return this.contextOverflow?.maxRetries ?? 1;
+    return this.#overflow.maxRetries;
   }
 
-  /** Proactive guard config, when enabled. */
-  private get _overflowGuard():
-    | { maxInputTokens: number; headroom?: number; maxCompactions?: number }
-    | undefined {
-    return this.contextOverflow?.proactive;
-  }
-
-  /** Per-run cap on proactive compactions (independent of the reactive budget). */
-  private get _overflowProactiveMaxCompactions(): number {
-    return Math.max(1, this.contextOverflow?.proactive?.maxCompactions ?? 1);
-  }
-
-  /**
-   * Count of model messages assembled from history at the start of the current
-   * turn (captured in `_runInferenceLoop`). The proactive guard uses it to
-   * splice this turn's in-flight steps onto a freshly recompacted head. Turns
-   * are serialized, so a single value is safe.
-   */
-  private _turnModelMessageBaseline = 0;
   /** The context reminder the current turn was assembled with. */
   private _turnContextReminder: string | null = null;
 
@@ -4419,19 +4397,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    */
   private _activeTurnReplyAttachments: ReplyAttachment[] = [];
   private _activeTurnReplyAttachmentsRequestId: string | undefined;
-
-  /**
-   * Number of times the proactive guard has compacted within the current
-   * `_runInferenceLoop` (reset at the top of each run). Capped at
-   * `contextOverflow.proactive.maxCompactions` (default `1`) so a guard that
-   * keeps reading over-budget usage can't compact on every step — once the head
-   * is summarized, further compaction no-ops anyway, and a genuine remaining
-   * overflow falls through to the reactive backstop.
-   */
-  private _proactiveCompactionsThisRun = 0;
-
-  /** One-time guard for the "recovery enabled but no classifier" DX warning. */
-  private _warnedMissingClassifier = false;
 
   /**
    * Configure conversation storage. Called once during `onStart`. Override to
@@ -4807,71 +4772,24 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     _ctx?: ChatErrorContext
   ): ChatErrorClassification | void {}
 
-  /**
-   * The app's `classifyChatError` verdict for a stream error (thrown or
-   * surfaced as an in-stream error string). Call once per error: the hook may
-   * be stateful or have side effects.
-   */
   private _classifyStreamError(
     error: unknown,
     requestId: string
   ): ChatErrorClassification | undefined {
-    if (!isMethodOverridden(this, "classifyChatError")) return undefined;
-    try {
-      return (
-        this.classifyChatError(error, { stage: "stream", requestId }) ??
-        undefined
-      );
-    } catch (err) {
-      console.warn(
-        `[Think] classifyChatError threw; treating as unclassified: ${err instanceof Error ? err.message : String(err)}`
-      );
-      return undefined;
-    }
+    return this.#overflow.classifyStreamError(error, requestId);
   }
 
-  /**
-   * Whether a classified stream error should trigger the opt-in
-   * compact-and-retry backstop. Centralized so both stream consumers
-   * (WebSocket + RPC) decide identically.
-   */
   private _isRecoverableContextOverflow(
     classification: ChatErrorClassification | undefined
   ): boolean {
-    if (!this._overflowReactiveEnabled) return false;
-    // DX guard: enabling recovery without teaching Think which errors are
-    // overflows silently does nothing. Warn once instead of failing quietly.
-    if (!isMethodOverridden(this, "classifyChatError")) {
-      if (!this._warnedMissingClassifier) {
-        this._warnedMissingClassifier = true;
-        console.warn(
-          '[Think] contextOverflow.reactive is enabled but classifyChatError() is not overridden, so no error will ever be treated as a context overflow and recovery will never run. Override classifyChatError() (or assign the exported defaultContextOverflowClassifier) to return "context_overflow" for your provider\'s context-window error (e.g. Anthropic "prompt is too long", OpenAI context_length_exceeded).'
-        );
-      }
-      return false;
-    }
-    return classification === "context_overflow";
+    return this.#overflow.isRecoverable(classification);
   }
 
-  /**
-   * The `"transient"` or `"rate_limit"` class the app assigned a stream
-   * error, else `undefined`. Such errors route into bounded chat recovery like
-   * a stream stall instead of terminalizing the turn (#2085). Without a
-   * `classifyChatError` override nothing is transient, so today's terminal
-   * behavior is unchanged. A Durable Object reset is never transient here: the
-   * restart's own recovery owns the turn.
-   */
   private _transientStreamClassification(
     error: unknown,
     requestId: string
   ): ChatErrorClassification | undefined {
-    if (error instanceof TransientChatStreamError) return error.classification;
-    if (error instanceof ChatStreamStalledError) return undefined;
-    if (isDurableObjectResetError(error)) return undefined;
-    const classification = this._classifyStreamError(error, requestId);
-    return isTransientClassification(classification)
-      ? classification
-      : undefined;
+    return this.#overflow.transientClassification(error, requestId);
   }
 
   /**
@@ -4885,64 +4803,18 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       : undefined;
   }
 
-  /**
-   * Compact the session in response to a context overflow (reactive backstop or
-   * proactive guard). Returns whether history was actually shortened — a no-op
-   * compaction (returns `null`) means a retry would just overflow again, so the
-   * caller should fall through to the terminal error rather than loop.
-   *
-   * This is the single emit point for `chat:context:compacted`, so callers must
-   * NOT emit it again.
-   */
-  private async _compactForContextOverflow(
+  private _compactForContextOverflow(
     reason: "reactive" | "proactive",
     extra?: { requestId?: string; attempt?: number }
   ): Promise<boolean> {
-    try {
-      const result = await this.session.compact(this._turnHistoryLeafId);
-      const shortened = Boolean(result);
-      this._emit("chat:context:compacted", {
-        reason,
-        shortened,
-        ...extra
-      });
-      return shortened;
-    } catch (err) {
-      console.warn(
-        `[Think] context-overflow compaction failed: ${err instanceof Error ? err.message : String(err)}`
-      );
-      return false;
-    }
+    return this.#overflow.compact(reason, extra);
   }
 
-  /**
-   * Finalize a context overflow that recovery could not fix (compaction was a
-   * no-op, or the retry budget is spent). Routes the error through
-   * `onChatError` with `classification: "context_overflow"` and emits
-   * `chat:request:failed`, so every overflow terminal — whichever path it took
-   * — is reported identically. Returns the (possibly app-reshaped) message for
-   * the caller to deliver via its own transport (RPC callback / WS broadcast).
-   */
   private _finalizeContextOverflowError(
     requestId: string,
     rawError: string | undefined
   ): string {
-    const raw = rawError ?? "Context window exceeded.";
-    const wrapped = this.onChatError(raw, {
-      requestId,
-      stage: "stream",
-      messagesPersisted: true,
-      classification: "context_overflow"
-    });
-    const message =
-      wrapped instanceof Error ? wrapped.message : String(wrapped);
-    this._emit("chat:request:failed", {
-      requestId,
-      stage: "stream",
-      messagesPersisted: true,
-      error: message
-    });
-    return message;
+    return this.#overflow.finalize(requestId, rawError);
   }
 
   // ── Extension initialization ───────────────────────────────────
@@ -5014,83 +4886,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     });
   }
 
-  /**
-   * Proactive context guard (Layer 1). Runs before each step from the
-   * `prepareStep` wrapper. If `contextOverflow.proactive` is set and the *previous*
-   * step's model-reported input tokens cross the budget, compact the session in
-   * place and return recompacted messages for the upcoming step — heading off a
-   * provider context-overflow 400 before it happens.
-   *
-   * Keys off `usage.inputTokens` (provider-agnostic; every provider reports it)
-   * rather than any provider error string, and reuses `_assembleModelMessages`
-   * so the recompacted head goes through the same repair/convert pipeline. The
-   * current turn's in-flight steps (everything after `_turnModelMessageBaseline`)
-   * are spliced back on so no completed work is lost.
-   *
-   * Best-effort: any failure (no-op compaction, reconciliation that would leave
-   * an incomplete tool pair) returns `undefined` so the step proceeds unchanged
-   * and the reactive backstop (`contextOverflow.reactive`) can still
-   * catch a genuine overflow.
-   */
-  private async _maybeProactiveContextCompact(
-    event: PrepareStepContext
-  ): Promise<Awaited<ReturnType<typeof convertToModelMessages>> | undefined> {
-    const guard = this._overflowGuard;
-    if (!guard || guard.maxInputTokens <= 0) return undefined;
-    // Proactive cap is independent of the reactive budget — it has its own
-    // `proactive.maxCompactions` (default 1). This lets an app use the proactive
-    // guard without the reactive backstop (and vice versa) and tune each freely.
-    if (
-      this._proactiveCompactionsThisRun >= this._overflowProactiveMaxCompactions
-    )
-      return undefined;
-
-    const prev = event.steps?.at(-1);
-    const used = prev?.usage?.inputTokens ?? prev?.usage?.totalTokens;
-    if (used == null || !Number.isFinite(used)) return undefined;
-
-    const headroom = guard.headroom ?? 0.9;
-    if (used < guard.maxInputTokens * headroom) return undefined;
-
-    try {
-      // Count the ATTEMPT (not just successful shortenings) before compacting.
-      // This bounds the guard to `proactiveCap` tries per run regardless of
-      // outcome: a no-op compaction (e.g. nothing left to summarize) would be a
-      // no-op again on every subsequent step, so consuming the slot here is
-      // what stops it from compacting — and emitting `chat:context:compacted` —
-      // on every step. A genuine remaining overflow falls through to the
-      // reactive backstop. (Locked by the "no-op" proactive test.)
-      this._proactiveCompactionsThisRun++;
-      const shortened = await this._compactForContextOverflow("proactive");
-      if (!shortened) return undefined;
-
-      // Rebuild the compacted head, then splice this turn's in-flight steps
-      // (which are not yet persisted to the session) back onto the tail.
-      // The compaction refreshed the stored prompt, but this request keeps
-      // the system prompt it started with, so it still needs the reminder.
-      const head = withContextReminder(
-        await this._assembleModelMessages(this._activeTurnTools),
-        this._turnContextReminder
-      );
-      const tail = event.messages.slice(this._turnModelMessageBaseline);
-      const merged = [...head, ...tail];
-      // Re-baseline so a second guard fire this turn keeps the new tail. This
-      // is correct only if the AI SDK carries our returned `messages` override
-      // forward into the next step's `event.messages` (so the next slice sees
-      // [recompacted head, ...in-flight steps], not the original uncompacted
-      // array). Verified by the "fires twice in one turn" test in
-      // assistant-agent-loop.test.ts — a clean multi-fire completion proves the
-      // override propagates and the splice does not drop/duplicate tool pairs.
-      this._turnModelMessageBaseline = head.length;
-      return merged;
-    } catch (err) {
-      console.warn(
-        `[Think] proactive context compaction failed; proceeding without it: ${err instanceof Error ? err.message : String(err)}`
-      );
-      return undefined;
-    }
-  }
-
   /** Drain an abandoned inference stream so its trace span ends. */
   private _drainInferenceStream(result: object): void {
     drainInferenceStream(result, (promise) => this.ctx.waitUntil(promise));
@@ -5160,8 +4955,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     this._activeTurnAuthorization = { allowed: true };
     this._activeTurnApprovedActionInputs =
       this._approvedActionInputsFromTranscript();
-    // Reset the proactive-compaction cap for this streamText run.
-    this._proactiveCompactionsThisRun = 0;
     this._turnIsContinuation = input.continuation;
     if (this.waitForMcpConnections) {
       const timeout =
@@ -5306,7 +5099,17 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // `ToolCallDecision` — `block` short-circuits with `reason`,
     // `substitute` returns `output` directly, `allow` runs the original
     // (optionally with modified `input`).
-    const finalTools: ToolSet = this._wrapToolsWithDecision(mergedTools);
+    const finalTools: ToolSet = wrapToolsWithDecision(mergedTools, {
+      beforeToolCall: (ctx) => this.beforeToolCall(ctx),
+      observeStart: (event) => this.#extensionHooks.toolCallStart(event),
+      requestId: () => this.activeTurn?.requestId,
+      rejectChangedApprovedInput: (toolCallId, input) => {
+        const approved = this._activeTurnApprovedActionInputs.get(toolCallId);
+        return approved !== undefined && !stableJsonEqual(input, approved)
+          ? actionApprovalInputErrorEnvelope()
+          : undefined;
+      }
+    });
 
     // Baseline for the proactive context guard: everything the AI SDK appends
     // to the model-message list after the assembled turn messages belongs to
@@ -5314,7 +5117,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // re-summarize the (now-compacted) head. Captured from the FINAL messages
     // and tools — after `beforeTurn` may have overridden them — so the tail
     // splice stays correct even when the override changes the message count.
-    this._turnModelMessageBaseline = finalMessages.length;
+    this.#overflow.beginRun(finalMessages.length);
     this._activeTurnTools = mergedTools;
     this._recordUnexecutedTools(mergedTools);
 
@@ -5344,7 +5147,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       storeMessages: this.storeMessages,
       storeTools: this.storeTools,
       hooks: {
-        compactBeforeStep: (event) => this._maybeProactiveContextCompact(event),
+        compactBeforeStep: (event) => this.#overflow.compactBeforeStep(event),
         beforeStep: (event) => this.beforeStep(event),
         onChunk: async (event) => {
           await this.onChunk(event);
@@ -5897,238 +5700,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     manager: () => this.extensionManager,
     timeoutMs: () => this.hookTimeout
   });
-
-  /**
-   * Wrap each tool's `execute` function so the agent's `beforeToolCall`
-   * hook is consulted before the tool runs. The hook can return a
-   * `ToolCallDecision` to:
-   *
-   * - `allow` (default if `void` is returned) — run the original
-   *   `execute`, optionally with a substituted `input`.
-   * - `block` — skip `execute` and return `reason` (or a default string)
-   *   as the tool result. The model sees this as the tool's output.
-   * - `substitute` — skip `execute` and return `output` directly. The
-   *   model sees this as the tool's output.
-   *
-   * The wrapped `execute` also dispatches the `beforeToolCall`
-   * observation snapshot to subscribed extensions. `afterToolCall` is
-   * still wired through the AI SDK's `experimental_onToolCallFinish`
-   * callback so we get accurate `durationMs` and proper success/error
-   * discrimination — `block` and `substitute` outcomes show up as
-   * `success: true` with the substituted output; uncaught throws from
-   * the original `execute` show up as `success: false` with the error.
-   *
-   * Tools without an `execute` (output-schema-only tools, client tools
-   * routed via `needsApproval`) are left untouched.
-   *
-   * **Streaming tools (AsyncIterable):** the AI SDK supports tools whose
-   * `execute` returns `AsyncIterable<output>` to emit preliminary
-   * results before a final value. The canonical form is an async
-   * generator (`async function* execute(...)`), where calling `execute`
-   * synchronously returns a direct `AsyncIterable`. For that form Think
-   * preserves preliminary streaming: the wrapper is itself an async
-   * generator that `await`s `beforeToolCall` and then yields every
-   * chunk through unchanged. Non-streaming tools keep a scalar wrapper
-   * so they never emit a synthetic `preliminary` tool-result chunk.
-   *
-   * The non-canonical `async function execute(...) { return makeIter(); }`
-   * form returns a `Promise<AsyncIterable>`, which does not stream even
-   * in the raw AI SDK (it would surface the iterator object as the final
-   * output). Think collapses it to the last yielded value instead. If
-   * you need preliminary streaming, use an `async function*` `execute`.
-   */
-  private _wrapToolsWithDecision(tools: ToolSet): ToolSet {
-    const wrapped: ToolSet = {};
-    // Capture `this` lexically so the streaming wrapper (which must be an
-    // async generator function expression, not an arrow) can reach the
-    // shared decision helper without a per-tool `.bind`.
-    const self = this;
-    for (const [toolName, originalTool] of Object.entries(tools)) {
-      const t = originalTool as Record<string, unknown>;
-      const originalExecute = t.execute as
-        | ((input: unknown, options: unknown) => unknown | Promise<unknown>)
-        | undefined;
-      if (typeof originalExecute !== "function") {
-        wrapped[toolName] = originalTool;
-        continue;
-      }
-
-      const isDynamic = t.type === "dynamic";
-      const metadata = t.metadata as Record<string, unknown> | undefined;
-      const isApprovalConfiguredAction =
-        metadata?.cfThinkAction === true &&
-        metadata.cfThinkActionApprovalConfigured === true;
-
-      // Canonical AI SDK streaming tools use an async generator `execute`
-      // (`async function* execute(...)`). Detect that form so we can keep
-      // preliminary streaming flowing through `beforeToolCall`. Everything
-      // else routes through the scalar wrapper so non-streaming tools never
-      // emit a synthetic `preliminary` tool-result.
-      const isStreamingExecute =
-        (originalExecute as { constructor?: { name?: string } }).constructor
-          ?.name === "AsyncGeneratorFunction";
-
-      const wrappedExecute = isStreamingExecute
-        ? (input: unknown, options: ToolDecisionOptions) =>
-            // Returning the generator synchronously (via the sync arrow)
-            // keeps it a *direct* AsyncIterable so the AI SDK streams the
-            // preliminary parts instead of awaiting a Promise<AsyncIterable>.
-            (async function* () {
-              const resolved = await self._resolveToolCallDecision(
-                toolName,
-                input,
-                options,
-                isDynamic,
-                isApprovalConfiguredAction
-              );
-              if (!resolved.execute) {
-                // Block/substitute is a scalar outcome, but this wrapper had
-                // to commit to an AsyncIterable shape synchronously (before the
-                // async decision was known) so the execute path can stream.
-                // The AI SDK's `executeTool` turns every yielded value into a
-                // `preliminary` tool-result plus a `final`, so this single
-                // yield surfaces one synthetic `preliminary` chunk to observers
-                // (e.g. onChunk) that the scalar wrapper never emits. The
-                // model-visible final output is identical and correct, and this
-                // matches how any streaming tool that emits a single value
-                // already behaves — so we accept it rather than regress
-                // streaming preservation for the (rare) block/substitute case.
-                yield resolved.output;
-                return;
-              }
-              const result = await originalExecute(
-                resolved.finalInput,
-                options
-              );
-              if (
-                result != null &&
-                typeof result === "object" &&
-                Symbol.asyncIterator in (result as object)
-              ) {
-                // Stream the original tool's preliminary outputs through
-                // unchanged — the AI SDK emits each as a `preliminary`
-                // tool-result and the last as the final value.
-                yield* result as AsyncIterable<unknown>;
-              } else {
-                yield result;
-              }
-            })()
-        : async (
-            input: unknown,
-            options: ToolDecisionOptions
-          ): Promise<unknown> => {
-            const resolved = await self._resolveToolCallDecision(
-              toolName,
-              input,
-              options,
-              isDynamic,
-              isApprovalConfiguredAction
-            );
-            if (!resolved.execute) return resolved.output;
-            // Await before inspecting so we detect a direct AsyncIterable
-            // return even from a non-async-generator `execute` (e.g. a
-            // plain function that returns a generator). Such non-canonical
-            // streaming shapes are collapsed to their last yielded value.
-            const result = await originalExecute(resolved.finalInput, options);
-            if (
-              result != null &&
-              typeof result === "object" &&
-              Symbol.asyncIterator in (result as object)
-            ) {
-              let last: unknown;
-              for await (const part of result as AsyncIterable<unknown>) {
-                last = part;
-              }
-              return last;
-            }
-            return result;
-          };
-
-      wrapped[toolName] = {
-        ...(originalTool as object),
-        execute: wrappedExecute
-      } as ToolSet[string];
-    }
-    return wrapped;
-  }
-
-  /**
-   * Shared `beforeToolCall` resolution for both the scalar and streaming
-   * tool wrappers (see {@link _wrapToolsWithDecision}). Builds the
-   * `ToolCallContext`, consults the subclass `beforeToolCall` hook,
-   * dispatches the extension observation snapshot, and resolves the
-   * returned `ToolCallDecision` into either "run `execute` with this
-   * input" or "short-circuit with this output".
-   */
-  private async _resolveToolCallDecision(
-    toolName: string,
-    input: unknown,
-    options: ToolDecisionOptions,
-    isDynamic: boolean,
-    isApprovalConfiguredAction: boolean
-  ): Promise<
-    { execute: true; finalInput: unknown } | { execute: false; output: unknown }
-  > {
-    // Build the discriminated `TypedToolCall`-shaped context.
-    const toolCallBase = {
-      type: "tool-call" as const,
-      toolCallId: options.toolCallId,
-      toolName,
-      input,
-      ...(isDynamic ? { dynamic: true as const } : {})
-    };
-
-    const requestId = this.activeTurn?.requestId;
-    const ctx = {
-      ...toolCallBase,
-      stepNumber: undefined,
-      messages: options.messages,
-      abortSignal: options.abortSignal,
-      ...(requestId !== undefined && { requestId })
-    } as ToolCallContext;
-
-    // Subclass decision first.
-    const decision = await this.beforeToolCall(ctx);
-
-    // Extension observation dispatch — runs after the subclass so
-    // extensions see whatever effect the subclass had on the decision
-    // shape (input substitution shows up in the snapshot).
-    const dispatchInput =
-      decision && decision.action === "allow" && decision.input
-        ? decision.input
-        : input;
-    await this.#extensionHooks.toolCallStart({
-      toolCall: {
-        ...toolCallBase,
-        input: dispatchInput
-      } as TypedToolCall<ToolSet>,
-      stepNumber: undefined
-    });
-
-    // Resolve the decision.
-    if (!decision || decision.action === "allow") {
-      const finalInput = decision?.input ?? input;
-      const approvedInput = isApprovalConfiguredAction
-        ? this._activeTurnApprovedActionInputs.get(options.toolCallId)
-        : undefined;
-      if (
-        approvedInput !== undefined &&
-        !stableJsonEqual(finalInput, approvedInput)
-      ) {
-        return { execute: false, output: actionApprovalInputErrorEnvelope() };
-      }
-      return { execute: true, finalInput };
-    }
-    if (decision.action === "block") {
-      return {
-        execute: false,
-        output:
-          decision.reason ?? `Tool "${toolName}" was blocked by beforeToolCall.`
-      };
-    }
-    // substitute
-    return { execute: false, output: decision.output };
-  }
 
   /**
    * Hand out an RPC stub to this agent's Workspace. `getWorkspace(stub)`
