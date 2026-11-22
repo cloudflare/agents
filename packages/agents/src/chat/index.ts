@@ -317,6 +317,17 @@ export {
 } from "./tool-state";
 
 export { parseProtocolMessage, type ChatProtocolEvent } from "./parse-protocol";
+export {
+  dispatchChatProtocol,
+  parseChatRequest,
+  rejectionMessage,
+  releaseChatConnection,
+  type ChatProtocolHost,
+  type ParsedChatRequest,
+  type RejectedChatRequest,
+  type ToolApprovalEvent,
+  type ToolResultEvent
+} from "./protocol-dispatch";
 
 export {
   reconcileMessages,

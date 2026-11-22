@@ -54,7 +54,10 @@ import {
   aiSdkRecoveryCodec,
   ResumeHandshake,
   isReplayChunk,
-  parseProtocolMessage,
+  dispatchChatProtocol,
+  rejectionMessage,
+  releaseChatConnection,
+  type ChatProtocolHost,
   sendIfOpen,
   ChatTurns,
   AgentToolRuns,
@@ -1175,7 +1178,6 @@ export class AIChatAgent<
       return _onConnect(connection, ctx);
     };
 
-    // Wrap onClose to clean up pending resume connections
     const _onClose = this.onClose.bind(this);
     this.onClose = async (
       connection: Connection,
@@ -1183,253 +1185,132 @@ export class AIChatAgent<
       reason: string,
       wasClean: boolean
     ) => {
-      // Clean up pending resume state for this connection
-      this._pendingResumeConnections.delete(connection.id);
-      this._continuation.releaseConnection(connection.id);
-      this._preStream.release(connection.id);
-      // Call consumer's onClose
+      releaseChatConnection(
+        this._turns,
+        this._pendingResumeConnections,
+        connection.id
+      );
       return _onClose(connection, code, reason, wasClean);
     };
 
-    // Wrap onMessage
     const _onMessage = this.onMessage.bind(this);
-    const handleMessage = async (
-      connection: Connection,
-      message: WSMessage
-    ) => {
-      if (this._cf_connectionTargetsSubAgent(connection)) {
-        return _onMessage(connection, message);
-      }
-
-      // Handle AIChatAgent's internal messages first. Classification is shared
-      // with `@cloudflare/think` via `parseProtocolMessage`; the handler bodies
-      // below stay AIChatAgent-specific (e.g. the `messages` event persists the
-      // client snapshot, where Think no-ops it).
-      if (typeof message === "string") {
-        const event = parseProtocolMessage(message);
-        if (!event) {
-          // Not JSON, or not a recognized chat protocol message — forward to
-          // the consumer's onMessage.
-          return _onMessage(connection, message);
-        }
-
-        // Handle chat request
-        if (event.type === "chat-request" && event.init.method === "POST") {
-          const { body } = event.init;
-          if (!body) {
-            console.warn(
-              "[AIChatAgent] Received chat request with empty body, ignoring"
-            );
-            return;
-          }
-
-          let parsed: Record<string, unknown>;
-          try {
-            parsed = JSON.parse(body as string);
-          } catch (_parseError) {
-            console.warn(
-              "[AIChatAgent] Received chat request with invalid JSON body, ignoring"
-            );
-            return;
-          }
-
-          const {
-            messages,
-            clientTools,
-            trigger: _trigger,
-            ...customBody
-          } = parsed as {
-            messages: UIMessage[];
-            clientTools?: ClientToolSchema[];
-            trigger?: string;
-            [key: string]: unknown;
-          };
-          const chatMessageId = event.id;
-          const transformedMessages = autoTransformMessages(messages);
-          const requestTrigger: ChatRequestTrigger =
-            _trigger === "regenerate-message"
-              ? "regenerate-message"
-              : "submit-message";
-          const requestOriginIds = originMessageIds(messages);
-          if (requestOriginIds) {
-            this._frames.requestOrigins.set(chatMessageId, requestOriginIds);
-          }
-          try {
-            await this._turns.runClientRequest(
-              this._clientChatRequest({
-                requestId: chatMessageId,
-                trigger: requestTrigger,
-                messages: transformedMessages,
-                clientTools,
-                body: customBody,
-                connection,
-                // What was stored when a regenerate arrived: its turn may
-                // delete these, but never a question another tab sent after
-                // it.
-                regenerate:
-                  requestTrigger === "regenerate-message"
-                    ? this._regenerateAdmission(transformedMessages)
-                    : null,
-                originMessageIds: requestOriginIds
-              })
-            );
-          } finally {
-            this._frames.requestOrigins.delete(chatMessageId);
-          }
-          return;
-        }
-
-        // Handle clear chat
-        if (event.type === "clear") {
-          this.resetTurnState();
-          await this.#session.clearMessages();
-          // Drop any pending terminal record (#1645) so a stale exhaustion
-          // can't replay onto a freshly-cleared (empty) conversation when a
-          // client reconnects and runs the resume probe.
-          await this._clearChatTerminal();
-          clearRecentChatTerminals(this.ctx.storage.kv);
-          this._resumableStream.clearAll();
-          this._pendingResumeConnections.clear();
-          this._preStream.releaseAwaiting();
-          this._preStream.reset();
-          this._requestContext.clear();
-          // `clearMessages()` above emptied `this.messages` through the
-          // change feed.
-          this._broadcastChatMessage(
-            { type: MessageType.CF_AGENT_CHAT_CLEAR },
-            [connection.id]
-          );
-          this._emit("message:clear");
-          return;
-        }
-
-        // Handle message replacement
-        if (event.type === "messages") {
-          // A message a waiting request holds is stored when its turn
-          // starts, not because a tab sent it back.
-          const queued = this._turns.queuedMessageIds();
-          const transformedMessages = autoTransformMessages(
-            event.messages
-          ).filter((message) => !queued.has(message.id));
-          await this.persistMessages(transformedMessages, [connection.id]);
-          return;
-        }
-
-        // Handle request cancellation
-        if (event.type === "cancel") {
-          // Aborts the request's turn, queued or running, and a recovery
-          // attempt running for it.
-          await this._turns.cancel(event.id);
-          this._emit("message:cancel", { requestId: event.id });
-          return;
-        }
-
-        // A stop from a tab that waits for a tool continuation to start. It
-        // has no request id for it yet, so it names itself.
-        if (event.type === "cancel-continuation") {
-          this._turns.cancelWaitingContinuation(connection.id);
-          return;
-        }
-
-        // Handle client-initiated stream resume request.
-        // The client sends this after its message handler is registered,
-        // avoiding the race condition where CF_AGENT_STREAM_RESUMING sent
-        // in onConnect arrives before the client's handler is ready.
-        if (event.type === "stream-resume-request") {
-          await this._resumeHandshake().handleResumeRequest(
-            connection,
-            event.probeId,
-            event.requestIds
-          );
-          return;
-        }
-
-        // Handle stream resume acknowledgment
-        if (event.type === "stream-resume-ack") {
-          await this._resumeHandshake().handleResumeAck(connection, event.id);
-          return;
-        }
-
-        // Handle client-side tool result
-        if (event.type === "tool-result") {
-          const {
-            toolCallId,
-            toolName,
-            output,
-            state,
-            errorText,
-            autoContinue,
-            clientTools
-          } = event;
-
-          const overrideState =
-            state === "output-error" ? "output-error" : undefined;
-
-          this._emit("tool:result", { toolCallId, toolName });
-
-          // Only a result that settled its call continues, targeted at that
-          // call's message. Without autoContinue it re-arms a batch a sibling
-          // opted in for (#1650).
-          this._turns.applyInteraction(
-            // A result that settled its call and lists client tools replaces
-            // the stored ones, so its continuation runs with the latest
-            // schemas. A duplicate or a result for a call that is gone
-            // changes nothing.
-            this._requestContext.applyingToolResult(clientTools, () =>
-              this._applyToolPartUpdate(
-                toolResultUpdate(toolCallId, output, overrideState, errorText)
-              )
-            ),
-            autoContinue === true,
-            () => ({
-              connection,
-              errorPrefix: "[AIChatAgent] Tool continuation failed:"
-            }),
-            (run) => this._enqueueInteractionApply(run),
-            connection.id
-          );
-          return;
-        }
-
-        // Handle client-side tool approval response
-        if (event.type === "tool-approval") {
-          const { toolCallId, approved, autoContinue } = event;
-          this._emit("tool:approval", { toolCallId, approved });
-          this._turns.applyInteraction(
-            () =>
-              this._applyToolPartUpdate(
-                toolApprovalUpdate(toolCallId, approved)
-              ),
-            autoContinue === true,
-            () => ({
-              connection,
-              errorPrefix: "[AIChatAgent] Tool approval continuation failed:"
-            }),
-            (run) => this._enqueueInteractionApply(run),
-            connection.id
-          );
-          return;
-        }
-      }
-
-      // Forward unhandled messages to consumer's onMessage
-      return _onMessage(connection, message);
-    };
-    this.onMessage = (connection: Connection, message: WSMessage) => {
-      const event =
-        typeof message === "string" ? parseProtocolMessage(message) : null;
-      if (event?.type === "chat-request") {
-        return this._withAgentSpan(
+    const protocol: ChatProtocolHost<Connection> = {
+      turns: this._turns,
+      requestContext: this._requestContext,
+      resumeHandshake: () => this._resumeHandshake(),
+      emit: (type, payload) => this._emit(type, payload),
+      chatRequest: (connection, request) =>
+        this._withAgentSpan(
           "chat_interaction",
           "interaction",
           {
             "cloudflare.agents.component": "ai_chat",
-            "cloudflare.agents.turn.request_id": event.id
+            "cloudflare.agents.turn.request_id": request.requestId
           },
-          () => handleMessage(connection, message)
+          async () => {
+            const { requestId, trigger } = request;
+            const messages = autoTransformMessages(request.messages);
+            const requestOriginIds = originMessageIds(request.messages);
+            if (requestOriginIds) {
+              this._frames.requestOrigins.set(requestId, requestOriginIds);
+            }
+            try {
+              await this._turns.runClientRequest(
+                this._clientChatRequest({
+                  requestId,
+                  trigger,
+                  messages,
+                  clientTools: request.clientTools,
+                  body: request.body,
+                  connection,
+                  // What was stored when a regenerate arrived: its turn may
+                  // delete these, but never a question another tab sent
+                  // after it.
+                  regenerate:
+                    trigger === "regenerate-message"
+                      ? this._regenerateAdmission(messages)
+                      : null,
+                  originMessageIds: requestOriginIds
+                })
+              );
+            } finally {
+              this._frames.requestOrigins.delete(requestId);
+            }
+          }
+        ),
+      frames: this._frames,
+      rejectedChatRequest: (_connection, rejection) => {
+        const error = rejectionMessage(rejection);
+        console.warn(
+          `[AIChatAgent] Ignoring chat request ${rejection.requestId}: ${error}`
         );
+        this._emit("chat:request:failed", {
+          requestId: rejection.requestId,
+          stage: "parse",
+          messagesPersisted: false,
+          error
+        });
+        return error;
+      },
+      clear: async (connection) => {
+        this.resetTurnState();
+        await this.#session.clearMessages();
+        // Drop any pending terminal record (#1645) so a stale exhaustion
+        // can't replay onto a freshly-cleared (empty) conversation when a
+        // client reconnects and runs the resume probe.
+        await this._clearChatTerminal();
+        clearRecentChatTerminals(this.ctx.storage.kv);
+        this._resumableStream.clearAll();
+        this._pendingResumeConnections.clear();
+        this._preStream.releaseAwaiting();
+        this._preStream.reset();
+        this._requestContext.clear();
+        // `clearMessages()` above emptied `this.messages` through the
+        // change feed.
+        this._broadcastChatMessage({ type: MessageType.CF_AGENT_CHAT_CLEAR }, [
+          connection.id
+        ]);
+        this._emit("message:clear");
+      },
+      messages: async (connection, messages) => {
+        // A message a waiting request holds is stored when its turn
+        // starts, not because a tab sent it back.
+        const queued = this._turns.queuedMessageIds();
+        const transformedMessages = autoTransformMessages(messages).filter(
+          (message) => !queued.has(message.id)
+        );
+        await this.persistMessages(transformedMessages, [connection.id]);
+      },
+      applyToolResult: (event) =>
+        this._applyToolPartUpdate(
+          toolResultUpdate(
+            event.toolCallId,
+            event.output,
+            event.state === "output-error" ? "output-error" : undefined,
+            event.errorText
+          )
+        ),
+      applyToolApproval: (event) =>
+        this._applyToolPartUpdate(
+          toolApprovalUpdate(event.toolCallId, event.approved)
+        ),
+      continuation: (connection, answer) => ({
+        connection,
+        errorPrefix:
+          answer === "tool-approval"
+            ? "[AIChatAgent] Tool approval continuation failed:"
+            : "[AIChatAgent] Tool continuation failed:"
+      }),
+      enqueueInteraction: (run) => this._enqueueInteractionApply(run)
+    };
+    this.onMessage = async (connection: Connection, message: WSMessage) => {
+      if (
+        !this._cf_connectionTargetsSubAgent(connection) &&
+        (await dispatchChatProtocol(connection, message, protocol))
+      ) {
+        return;
       }
-      return handleMessage(connection, message);
+      return _onMessage(connection, message);
     };
 
     const _onRequest = this.onRequest.bind(this);

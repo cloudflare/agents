@@ -54,10 +54,12 @@ import {
   CHAT_MESSAGE_TYPES,
   CHAT_RECOVERY_TASK_NAME,
   chatRecoveryTaskRunOptions,
+  dispatchChatProtocol,
   sanitizeMessage,
   enforceRowSizeLimit,
   StreamAccumulator,
-  toolResultUpdate
+  toolResultUpdate,
+  type ChatProtocolHost
 } from "agents/chat";
 import type {
   ChatTurns,
@@ -73,6 +75,27 @@ import type { ContextConfig } from "agents/context";
 import { stableHash, type Approvals } from "agents/approvals";
 import { z } from "zod";
 import { WorkspaceFiles } from "../../workspace-files";
+
+/**
+ * Send one chat wire message through the real protocol dispatch, as a socket
+ * would. `connection` only needs what the handler for that message reads.
+ */
+async function dispatchChatMessageForTest(
+  agent: Think,
+  connection: { id: string; send(message: string): void; readyState?: number },
+  message: Record<string, unknown>
+): Promise<void> {
+  // SAFETY: tests reach the private protocol host; a fake connection carries
+  // the id and send the handlers read.
+  const host = (
+    agent as unknown as { _chatProtocol: ChatProtocolHost<Connection> }
+  )._chatProtocol;
+  await dispatchChatProtocol(
+    connection as unknown as Connection,
+    JSON.stringify(message),
+    host
+  );
+}
 
 // ── Test result type ────────────────────────────────────────────
 
@@ -3219,14 +3242,11 @@ export class ThinkTestAgent extends Think {
         this.abortAllRequests();
       } else {
         // What the `cancel` WebSocket message does.
-        await (
-          this as unknown as {
-            _handleProtocolEvent(
-              connection: unknown,
-              event: { type: "cancel"; id: string }
-            ): Promise<void>;
-          }
-        )._handleProtocolEvent(undefined, { type: "cancel", id: requestId });
+        await dispatchChatMessageForTest(
+          this,
+          { id: "cancel-probe", send() {} },
+          { type: CHAT_MESSAGE_TYPES.CHAT_REQUEST_CANCEL, id: requestId }
+        );
       }
       // The stop's bookkeeping, then whatever recovery is still queued.
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -4970,6 +4990,17 @@ export class ThinkTestAgent extends Think {
           this._lastModelCallSettings = settings;
         }
       }
+    );
+  }
+
+  /** Send one chat wire message through the protocol dispatch, as a tab would. */
+  async sendChatProtocolMessageForTest(
+    message: Record<string, unknown>
+  ): Promise<void> {
+    await dispatchChatMessageForTest(
+      this,
+      { id: "protocol-probe", send() {} },
+      message
     );
   }
 
@@ -10379,12 +10410,9 @@ export class ThinkProgrammaticTestAgent extends Think {
         resumeFrames.push(JSON.parse(message));
       }
     };
-    // SAFETY: the real resume driver only needs this open connection's id and
-    // send method on its idle path; the private host method has this signature.
-    const host = this as unknown as {
-      _handleStreamResumeRequest(target: typeof connection): Promise<void>;
-    };
-    await host._handleStreamResumeRequest(connection);
+    await dispatchChatMessageForTest(this, connection, {
+      type: CHAT_MESSAGE_TYPES.STREAM_RESUME_REQUEST
+    });
     return {
       streamStatus:
         this._resumableStream.latestStreamInfoForRequest(requestId)?.status ??
@@ -11378,7 +11406,7 @@ export class ThinkRecoveryTestAgent extends Think {
   }
 
   /**
-   * Drive a real chat request through `_handleChatRequest` that fails before
+   * Drive a real chat request through the protocol dispatch that fails before
    * the stream starts (a `beforeTurn` throw stands in for a message
    * reconciliation or persistence failure). The recovery fiber must propagate
    * the error to the outer request handler.
@@ -11390,8 +11418,8 @@ export class ThinkRecoveryTestAgent extends Think {
   }): Promise<void> {
     this._throwBeforeTurnMessage = input.error;
     const connection = { id: "c-prestream", send() {} };
-    const event = {
-      type: "chat-request" as const,
+    await dispatchChatMessageForTest(this, connection, {
+      type: CHAT_MESSAGE_TYPES.USE_CHAT_REQUEST,
       id: input.requestId,
       init: {
         method: "POST",
@@ -11405,11 +11433,7 @@ export class ThinkRecoveryTestAgent extends Think {
           ]
         })
       }
-    };
-    const self = this as unknown as {
-      _handleChatRequest(c: unknown, e: unknown): Promise<void>;
-    };
-    await self._handleChatRequest(connection, event);
+    });
   }
 
   /** What `onConnect` replays to a reconnecting client (no active stream). */
