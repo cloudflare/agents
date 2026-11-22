@@ -121,15 +121,10 @@ type ToolCallFinishCallback = NonNullable<
 import { wrapAISDK } from "agents/observability/ai";
 import { ThinkConfigStore } from "./config-store";
 import { ThinkModelResolver } from "./model";
+import { ThinkSkills } from "./skills-runtime";
 import { systemPromptForTurn } from "./system-prompt";
 import * as skills from "./skills";
-import { formatSkillDiagnostic, loadSkillCatalog } from "agents/skills";
-import { createSkillTools } from "agents/skills/tools/ai-sdk";
-import type {
-  SkillCatalog,
-  SkillScriptRunner,
-  SkillSource
-} from "agents/skills";
+import type { SkillScriptRunner, SkillSource } from "agents/skills";
 
 // Re-export AI SDK types that appear on Think's public lifecycle hooks
 // so users can import them from a single place.
@@ -629,7 +624,6 @@ function isLocalWorkspace(
 }
 
 /** Context block label for the skills catalog. */
-const SKILLS_CONTEXT_LABEL = "think_skills";
 
 const ACTION_PENDING_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 const ACTION_PENDING_LAST_SWEPT_KEY =
@@ -638,11 +632,7 @@ const ACTION_PENDING_LAST_SWEPT_KEY =
 const ACTION_PAUSE_ID_PREFIX = "actpause_";
 import { Workspace, type WorkspaceStub } from "@cloudflare/computer";
 import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
-import {
-  WorkspaceFiles,
-  resolveWorkspacePath,
-  type ThinkWorkspace
-} from "./workspace-files";
+import { WorkspaceFiles, type ThinkWorkspace } from "./workspace-files";
 import {
   evictMediaFromMessage,
   evictedFilePath,
@@ -653,7 +643,17 @@ import {
 import { createFetchTools } from "./tools/fetch";
 import type { CreateFetchToolsOptions, FetchToolEvent } from "./tools/fetch";
 import { truncatePausedExecutionOutput } from "./tools/execute";
-import { ExtensionManager, sanitizeName } from "./extensions/manager";
+import {
+  callThinkHostApi,
+  createThinkHostApi,
+  type ThinkHostApi,
+  type ThinkHostOperation
+} from "./extensions/host-api";
+import {
+  ThinkExtensionHooks,
+  createThinkExtensionManager,
+  loadThinkExtensions
+} from "./extensions/pipeline";
 import { ThinkMessengerRuntime } from "./messengers/chat-sdk";
 import {
   DEFAULT_MESSENGER_CONCURRENCY,
@@ -2620,9 +2620,8 @@ export class Think<
   /** Store tool input/output on `execute_tool` spans. */
   storeTools = false;
 
-  private _skillSources: readonly SkillSource[] = [];
-  private _skillCatalog: SkillCatalog | null = null;
-  private _loggedSkillWarnings = new Set<string>();
+  /** Skills loaded from `getSkills()`. */
+  readonly #skills = new ThinkSkills();
   private _loggedProtocolWarnings = new Set<string>();
 
   /**
@@ -2986,7 +2985,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               }
             });
 
-          await this._initializeSkills();
+          await this.#skills.initialize(() => this.getSkills(), this.context);
         }
       );
 
@@ -5234,61 +5233,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     return [];
   }
 
-  private async _initializeSkills(): Promise<void> {
-    // A misconfigured or failing skill source must never prevent the agent
-    // from starting. Any error here is logged and skills stay disabled.
-    try {
-      const sources = await this.getSkills();
-      if (sources.length === 0) return;
-
-      this._skillSources = sources;
-      await this._loadSkillCatalog();
-
-      // `whenChanged: "remind"` keeps the frozen system prompt (and the
-      // provider's prefix cache) stable when skills change mid-conversation.
-      // The new catalog goes out as a reminder after the cached prefix, and
-      // is folded into the system prompt at the next rebuild (compaction or
-      // clearing history).
-      await this.context.addBlock({
-        label: SKILLS_CONTEXT_LABEL,
-        description: "Think skills: available skill catalog",
-        whenChanged: "remind",
-        provider: {
-          get: async () =>
-            this._skillCatalog?.prompt() ?? "No skills are available."
-        }
-      });
-    } catch (error) {
-      console.warn(
-        `[think] Failed to initialize skills; continuing without them: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-  }
-
-  /** Load the catalog from every source and log new diagnostics. */
-  private async _loadSkillCatalog(): Promise<SkillCatalog> {
-    // `previous` keeps a source's last skills when it fails to list, so a
-    // transient outage (an R2 blip) does not drop them for a turn.
-    const catalog = await loadSkillCatalog(this._skillSources, {
-      previous: this._skillCatalog ?? undefined
-    });
-    for (const diagnostic of catalog.diagnostics) {
-      this._warnSkillsOnce(formatSkillDiagnostic(diagnostic));
-    }
-    this._skillCatalog = catalog;
-    return catalog;
-  }
-
-  /**
-   * Log a skills warning once per object lifetime, so a new problem after a
-   * deploy still surfaces while the same warning is not repeated every turn.
-   */
-  private _warnSkillsOnce(warning: string): void {
-    if (this._loggedSkillWarnings.has(warning)) return;
-    this._loggedSkillWarnings.add(warning);
-    console.warn(`[think] ${warning}`);
-  }
-
   /**
    * Return an optional runner that enables the `run_skill_script` tool.
    *
@@ -5300,22 +5244,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    */
   getSkillScriptRunner(): SkillScriptRunner | null {
     return null;
-  }
-
-  private async _refreshSkillsIfChanged(): Promise<void> {
-    if (!this._skillCatalog) return;
-
-    // Sources are live (a Workspace, R2); a transient failure must not break
-    // the turn. Keep the last good catalog on error. The skills block is a
-    // reminder block, so a changed catalog reaches the model without
-    // rebuilding the frozen system prompt.
-    try {
-      await this._loadSkillCatalog();
-    } catch (error) {
-      console.warn(
-        `[think] Failed to refresh skills; using last known catalog: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
   }
 
   /**
@@ -5753,77 +5681,19 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   // ── Extension initialization ───────────────────────────────────
 
   private async _initializeExtensions(): Promise<void> {
-    // 3. Create ExtensionManager with host binding if HostBridgeLoopback
-    // is re-exported from the worker entry point.
-    const agentClassName = this.constructor.name;
-    const agentId = this.ctx.id.toString();
-    const ctxExports = (this.ctx as unknown as Record<string, unknown>)
-      .exports as Record<string, unknown> | undefined;
-    const hasBridge =
-      ctxExports && typeof ctxExports.HostBridgeLoopback === "function";
-
-    this.extensionManager = new ExtensionManager({
+    this.extensionManager = createThinkExtensionManager({
       loader: this.extensionLoader!,
       storage: this.ctx.storage,
-      ...(hasBridge
-        ? {
-            workerIdScope: `${agentClassName}:${agentId}`,
-            createHostBinding: (
-              permissions: import("./extensions/types").ExtensionPermissions,
-              ownContextLabels: string[]
-            ) =>
-              (
-                ctxExports.HostBridgeLoopback as (opts: {
-                  props: Record<string, unknown>;
-                }) => Fetcher
-              )({
-                props: {
-                  agentClassName,
-                  agentId,
-                  permissions,
-                  ownContextLabels
-                }
-              })
-          }
-        : {})
+      agentClassName: this.constructor.name,
+      agentId: this.ctx.id.toString(),
+      exports: (this.ctx as unknown as { exports?: Record<string, unknown> })
+        .exports
     });
-
-    // 4. Load static extensions from getExtensions()
-    const configs = this.getExtensions();
-    for (const config of configs) {
-      await this.extensionManager.load(config.manifest, config.source);
-    }
-
-    // 5. Restore dynamic extensions from DO storage
-    await this.extensionManager.restore();
-
-    // 6. Register extension context blocks in Session (mutation phase).
-    // Context blocks use SQLite-backed AgentContextProvider (no bridge
-    // delegation to the extension Worker). Extensions write to their
-    // blocks via host.setContext() (Phase 3). Bridge providers that
-    // delegate to extension Worker RPC methods are Phase 4.
-    for (const ext of this.extensionManager.list()) {
-      const manifest = this.extensionManager.getManifest(ext.name);
-      if (!manifest?.context) continue;
-
-      const prefix = sanitizeName(ext.name);
-      for (const ctxDef of manifest.context) {
-        const namespacedLabel = `${prefix}_${ctxDef.label}`;
-        await this.context.addBlock({
-          label: namespacedLabel,
-          description: ctxDef.description,
-          maxTokens: ctxDef.maxTokens
-        });
-      }
-    }
-
-    // Wire unload callback to clean up context blocks
-    this.extensionManager.onUnload(async (_name, contextLabels) => {
-      for (const label of contextLabels) {
-        this.context.removeBlock(label);
-      }
-      await this.context.refreshSystemPrompt();
-    });
+    await loadThinkExtensions(
+      this.extensionManager,
+      this.getExtensions(),
+      this.context
+    );
   }
 
   // ── Inference loop (Think owns this) ──────────────────────────
@@ -6220,13 +6090,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const baseTools = this.getTools();
     const actionTools = await this._compileActionTools();
     const extensionTools = this.extensionManager?.getTools() ?? {};
-    await this._refreshSkillsIfChanged();
+    await this.#skills.refresh();
     const contextTools = await this.context.tools();
-    const skillTools = this._skillCatalog
-      ? createSkillTools(this._skillCatalog, {
-          scriptRunner: this.getSkillScriptRunner()
-        })
-      : {};
+    const skillTools = this.#skills.tools(() => this.getSkillScriptRunner());
     const clientToolSet = createToolsFromClientSchemas(
       input.clientTools,
       input.clientToolExecutor
@@ -6304,7 +6170,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     };
 
     const subclassConfig = (await this.beforeTurn(ctx)) ?? {};
-    const config = await this._pipelineExtensionBeforeTurn(ctx, subclassConfig);
+    const config = await this.#extensionHooks.beforeTurn(ctx, subclassConfig);
     const workflowPrompt = input.workflowPrompt;
     // Workflow `step.prompt` turns produce their structured result by calling
     // the synthetic `final_answer` tool (see THINK_FINAL_ANSWER_TOOL_NAME) —
@@ -6545,7 +6411,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         // access to the discriminated `TextStreamPart` chunk with all
         // provider metadata.
         await this.onChunk(event);
-        await this._pipelineExtensionChunk(event);
+        await this.#extensionHooks.chunk(event);
       },
       // `onStepFinish` is the step callback name in both AI SDK v6 and v7 (v7
       // also accepts the renamed `onStepEnd`, but v6 does not). Use the shared
@@ -6556,7 +6422,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         // request/response, warnings, and the full LanguageModelUsage
         // that the AI SDK provides.
         await this.onStepEnd(event);
-        await this._pipelineExtensionStepFinish(event);
+        await this.#extensionHooks.stepFinish(event);
       },
       // `beforeToolCall` is dispatched from the wrapped `execute` (see
       // `_wrapToolsWithDecision` above) so the returned `ToolCallDecision`
@@ -6600,7 +6466,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               error
             }) as unknown as ToolCallResultContext;
         await this.afterToolCall(ctx);
-        await this._pipelineExtensionToolCallFinish({
+        await this.#extensionHooks.toolCallFinish({
           toolCall: e.toolCall,
           stepNumber: e.stepNumber,
           durationMs: e.toolExecutionMs,
@@ -7234,166 +7100,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   /** Default hook timeout in milliseconds. */
   hookTimeout = 5000;
 
-  /**
-   * Pipeline beforeTurn through sandboxed extensions in load order.
-   * Each extension sees the accumulated state from prior extensions
-   * (snapshot is rebuilt after each extension's modifications).
-   * Results are merged with last-write-wins for scalar fields.
-   * Extensions that don't subscribe to beforeTurn are skipped.
-   */
-  private async _pipelineExtensionBeforeTurn(
-    ctx: TurnContext,
-    subclassConfig: TurnConfig
-  ): Promise<TurnConfig> {
-    if (!this.extensionManager) return subclassConfig;
-
-    const subscribers = this.extensionManager.getHookSubscribers("beforeTurn");
-    if (subscribers.length === 0) return subclassConfig;
-
-    const { createTurnContextSnapshot, parseHookResult } =
-      await import("./extensions/hook-proxy");
-
-    let snapshot = createTurnContextSnapshot(
-      ctx,
-      subclassConfig.model ?? undefined
-    );
-    let accumulated = { ...subclassConfig };
-
-    // Apply subclass config to the initial snapshot so extensions
-    // see the subclass overrides
-    if (accumulated.system !== undefined) snapshot.system = accumulated.system;
-    if (accumulated.maxSteps !== undefined)
-      snapshot.messageCount = ctx.messages.length;
-
-    for (const sub of subscribers) {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        const resultJson = await Promise.race([
-          sub.entrypoint.hook("beforeTurn", snapshot),
-          new Promise<string>((_, reject) => {
-            timer = setTimeout(
-              () => reject(new Error(`Hook timeout: ${sub.name}`)),
-              this.hookTimeout
-            );
-          })
-        ]);
-
-        const parsed = parseHookResult(resultJson);
-        if ("config" in parsed) {
-          // Merge serializable scalars only. model and tools are skipped —
-          // sandboxed extensions can't return LanguageModel or AI SDK Tool
-          // objects (not serializable across RPC). Use activeTools to
-          // control which tools the model can call.
-          if (parsed.config.system !== undefined)
-            accumulated.system = parsed.config.system;
-          if (parsed.config.messages !== undefined)
-            accumulated.messages = parsed.config.messages;
-          if (parsed.config.activeTools !== undefined)
-            accumulated.activeTools = parsed.config.activeTools;
-          if (parsed.config.toolChoice !== undefined)
-            accumulated.toolChoice = parsed.config.toolChoice;
-          if (parsed.config.maxSteps !== undefined)
-            accumulated.maxSteps = parsed.config.maxSteps;
-          if (parsed.config.sendReasoning !== undefined)
-            accumulated.sendReasoning = parsed.config.sendReasoning;
-          if (parsed.config.maxOutputTokens !== undefined)
-            accumulated.maxOutputTokens = parsed.config.maxOutputTokens;
-          if (parsed.config.temperature !== undefined)
-            accumulated.temperature = parsed.config.temperature;
-          if (parsed.config.topP !== undefined)
-            accumulated.topP = parsed.config.topP;
-          if (parsed.config.topK !== undefined)
-            accumulated.topK = parsed.config.topK;
-          if (parsed.config.presencePenalty !== undefined)
-            accumulated.presencePenalty = parsed.config.presencePenalty;
-          if (parsed.config.frequencyPenalty !== undefined)
-            accumulated.frequencyPenalty = parsed.config.frequencyPenalty;
-          if (parsed.config.stopSequences !== undefined)
-            accumulated.stopSequences = parsed.config.stopSequences;
-          if (parsed.config.seed !== undefined)
-            accumulated.seed = parsed.config.seed;
-          if (parsed.config.maxRetries !== undefined)
-            accumulated.maxRetries = parsed.config.maxRetries;
-          if (parsed.config.timeout !== undefined)
-            accumulated.timeout = parsed.config.timeout;
-          if (parsed.config.headers !== undefined) {
-            accumulated.headers = {
-              ...(accumulated.headers ?? {}),
-              ...parsed.config.headers
-            };
-          }
-          if (parsed.config.providerOptions !== undefined) {
-            accumulated.providerOptions = {
-              ...(accumulated.providerOptions ?? {}),
-              ...parsed.config.providerOptions
-            };
-          }
-          // Update snapshot so next extension sees this extension's changes
-          if (accumulated.system !== undefined)
-            snapshot = { ...snapshot, system: accumulated.system };
-          if (accumulated.activeTools !== undefined)
-            snapshot = { ...snapshot, toolNames: accumulated.activeTools };
-        } else if ("error" in parsed) {
-          console.warn(
-            `[Think] Extension "${sub.name}" beforeTurn error:`,
-            parsed.error
-          );
-        }
-      } catch (err) {
-        console.warn(
-          `[Think] Extension "${sub.name}" beforeTurn failed:`,
-          err instanceof Error ? err.message : err
-        );
-      } finally {
-        if (timer !== undefined) clearTimeout(timer);
-      }
-    }
-
-    return accumulated;
-  }
-
-  /**
-   * Dispatch an observation hook to all extensions that subscribe to it.
-   *
-   * Used by `_pipelineExtensionToolCallStart`, `_pipelineExtensionToolCallFinish`,
-   * `_pipelineExtensionStepFinish`, and `_pipelineExtensionChunk`. Unlike
-   * `beforeTurn`, these hooks are observation-only — extensions can't
-   * influence the turn — so we ignore return values, log errors, and
-   * apply a per-extension timeout.
-   *
-   * `onChunk` is high-frequency (per token) — extensions that subscribe
-   * to it pay an RPC cost per chunk and should be used sparingly.
-   */
-  private async _dispatchExtensionObservation(
-    hookName: "beforeToolCall" | "afterToolCall" | "onStepFinish" | "onChunk",
-    snapshot: unknown
-  ): Promise<void> {
-    if (!this.extensionManager) return;
-    const subscribers = this.extensionManager.getHookSubscribers(hookName);
-    if (subscribers.length === 0) return;
-
-    for (const sub of subscribers) {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        await Promise.race([
-          sub.entrypoint.hook(hookName, snapshot),
-          new Promise<string>((_, reject) => {
-            timer = setTimeout(
-              () => reject(new Error(`Hook timeout: ${sub.name}`)),
-              this.hookTimeout
-            );
-          })
-        ]);
-      } catch (err) {
-        console.warn(
-          `[Think] Extension "${sub.name}" ${hookName} failed:`,
-          err instanceof Error ? err.message : err
-        );
-      } finally {
-        if (timer !== undefined) clearTimeout(timer);
-      }
-    }
-  }
+  /** Runs the extension hooks of each turn. */
+  readonly #extensionHooks = new ThinkExtensionHooks({
+    manager: () => this.extensionManager,
+    timeoutMs: () => this.hookTimeout
+  });
 
   /**
    * Wrap each tool's `execute` function so the agent's `beforeToolCall`
@@ -7594,7 +7305,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       decision && decision.action === "allow" && decision.input
         ? decision.input
         : input;
-    await this._pipelineExtensionToolCallStart({
+    await this.#extensionHooks.toolCallStart({
       toolCall: {
         ...toolCallBase,
         input: dispatchInput
@@ -7627,65 +7338,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     return { execute: false, output: decision.output };
   }
 
-  private async _pipelineExtensionToolCallStart(event: {
-    toolCall: TypedToolCall<ToolSet>;
-    stepNumber: number | undefined;
-  }): Promise<void> {
-    if (!this.extensionManager) return;
-    if (this.extensionManager.getHookSubscribers("beforeToolCall").length === 0)
-      return;
-    const { createToolCallStartSnapshot } =
-      await import("./extensions/hook-proxy");
-    await this._dispatchExtensionObservation(
-      "beforeToolCall",
-      createToolCallStartSnapshot(event)
-    );
-  }
-
-  private async _pipelineExtensionToolCallFinish(event: {
-    toolCall: TypedToolCall<ToolSet>;
-    stepNumber: number | undefined;
-    durationMs: number;
-    success: boolean;
-    output?: unknown;
-    error?: unknown;
-  }): Promise<void> {
-    if (!this.extensionManager) return;
-    if (this.extensionManager.getHookSubscribers("afterToolCall").length === 0)
-      return;
-    const { createToolCallFinishSnapshot } =
-      await import("./extensions/hook-proxy");
-    await this._dispatchExtensionObservation(
-      "afterToolCall",
-      createToolCallFinishSnapshot(event)
-    );
-  }
-
-  private async _pipelineExtensionStepFinish(
-    event: StepContext
-  ): Promise<void> {
-    if (!this.extensionManager) return;
-    if (this.extensionManager.getHookSubscribers("onStepFinish").length === 0)
-      return;
-    const { createStepFinishSnapshot } =
-      await import("./extensions/hook-proxy");
-    await this._dispatchExtensionObservation(
-      "onStepFinish",
-      createStepFinishSnapshot(event)
-    );
-  }
-
-  private async _pipelineExtensionChunk(event: ChunkContext): Promise<void> {
-    if (!this.extensionManager) return;
-    if (this.extensionManager.getHookSubscribers("onChunk").length === 0)
-      return;
-    const { createChunkSnapshot } = await import("./extensions/hook-proxy");
-    await this._dispatchExtensionObservation(
-      "onChunk",
-      createChunkSnapshot(event as { chunk: { type: string } })
-    );
-  }
-
   /**
    * Hand out an RPC stub to this agent's Workspace. `getWorkspace(stub)`
    * from `@cloudflare/computer` calls it to reach the Workspace from
@@ -7710,104 +7362,28 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
   // ── Host bridge methods (called by HostBridgeLoopback via DO RPC) ──
 
-  async _hostReadFile(path: string): Promise<string | null> {
-    await this.__unsafe_ensureInitialized();
-    return new WorkspaceFiles(this.workspace).readText(
-      resolveWorkspacePath(path)
-    );
-  }
+  /** What a sandboxed extension can reach on this agent. */
+  readonly #hostApi = createThinkHostApi({
+    workspace: () => this.workspace,
+    context: () => this.context,
+    messages: () => this.messages,
+    // Not saveMessages: that queues a turn, and a tool calling this during a
+    // turn would wait on its own turn.
+    appendMessage: (message) => this._appendMessageToHistory(message)
+  });
 
-  async _hostWriteFile(path: string, content: string): Promise<void> {
+  /**
+   * Run one host operation for a sandboxed extension. `HostBridgeLoopback`
+   * calls this after it checks the extension's permissions.
+   *
+   * @internal
+   */
+  async _cfHostBridge<K extends ThinkHostOperation>(
+    operation: K,
+    args: Parameters<ThinkHostApi[K]>
+  ): Promise<Awaited<ReturnType<ThinkHostApi[K]>>> {
     await this.__unsafe_ensureInitialized();
-    await new WorkspaceFiles(this.workspace).write(
-      resolveWorkspacePath(path),
-      content
-    );
-  }
-
-  async _hostDeleteFile(path: string): Promise<boolean> {
-    await this.__unsafe_ensureInitialized();
-    try {
-      await new WorkspaceFiles(this.workspace).remove(
-        resolveWorkspacePath(path)
-      );
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  async _hostListFiles(
-    dir: string
-  ): Promise<
-    Array<{ name: string; type: string; size: number; path: string }>
-  > {
-    await this.__unsafe_ensureInitialized();
-    const entries = await new WorkspaceFiles(this.workspace).list(
-      resolveWorkspacePath(dir)
-    );
-    return entries.map((e) => ({
-      name: e.name,
-      type: e.type,
-      size: e.size,
-      path: e.path
-    }));
-  }
-
-  async _hostGetContext(label: string): Promise<string | null> {
-    await this.__unsafe_ensureInitialized();
-    const block = this.context.getBlock(label);
-    return block?.content ?? null;
-  }
-
-  async _hostSetContext(label: string, content: string): Promise<void> {
-    await this.__unsafe_ensureInitialized();
-    await this.context.setBlock(label, content);
-  }
-
-  async _hostGetMessages(
-    limit?: number
-  ): Promise<Array<{ id: string; role: string; content: string }>> {
-    await this.__unsafe_ensureInitialized();
-    const history = this.messages;
-    const sliced =
-      limit !== undefined && limit !== null
-        ? limit <= 0
-          ? []
-          : history.slice(-limit)
-        : history;
-    return sliced.map((m) => ({
-      id: m.id,
-      role: m.role,
-      content: m.parts
-        .filter((p): p is { type: "text"; text: string } => p.type === "text")
-        .map((p) => p.text)
-        .join("")
-    }));
-  }
-
-  async _hostSendMessage(content: string): Promise<void> {
-    await this.__unsafe_ensureInitialized();
-    const msg = {
-      id: crypto.randomUUID(),
-      role: "user" as const,
-      parts: [{ type: "text" as const, text: content }]
-    };
-    // Append directly to session — do NOT route through saveMessages,
-    // which enqueues a full turn via TurnQueue and would deadlock if
-    // called during an active turn (tool execution → host.sendMessage
-    // → saveMessages → TurnQueue.enqueue → awaits current turn → deadlock).
-    // The injected message is visible in the next turn's history.
-    await this._appendMessageToHistory(msg);
-  }
-
-  async _hostGetSessionInfo(): Promise<{
-    messageCount: number;
-  }> {
-    await this.__unsafe_ensureInitialized();
-    return {
-      messageCount: this.messages.length
-    };
+    return await callThinkHostApi(this.#hostApi, operation, args);
   }
 
   private async _admitTurn<T>(

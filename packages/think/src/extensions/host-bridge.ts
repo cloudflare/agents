@@ -4,7 +4,7 @@
  *
  * This is a loopback: the extension worker's `env.host` binding points here,
  * and each method call resolves the parent agent via `ctx.exports`, then
- * delegates to the agent's workspace proxy methods (`_hostReadFile`, etc.).
+ * calls the agent's `_cfHostBridge` with the operation name.
  *
  * Props carry serializable identifiers (agent class name, agent ID, and
  * permissions) so the binding survives across requests and hibernation.
@@ -19,7 +19,21 @@
  */
 
 import { WorkerEntrypoint } from "cloudflare:workers";
+import type {
+  ThinkHostApi,
+  ThinkHostFileEntry,
+  ThinkHostMessage,
+  ThinkHostOperation
+} from "./host-api";
 import type { ExtensionPermissions } from "./types";
+
+/** The agent side of the loopback: the Think agent's host entry point. */
+type ThinkHostBridgeAgent = {
+  _cfHostBridge<K extends ThinkHostOperation>(
+    operation: K,
+    args: Parameters<ThinkHostApi[K]>
+  ): Promise<Awaited<ReturnType<ThinkHostApi[K]>>>;
+};
 
 export type HostBridgeLoopbackProps = {
   agentClassName: string;
@@ -109,104 +123,66 @@ export class HostBridgeLoopback extends WorkerEntrypoint<
     }
   }
 
-  // ── Workspace (existing) ───────────────────────────────────────
+  #call<K extends ThinkHostOperation>(
+    operation: K,
+    ...args: Parameters<ThinkHostApi[K]>
+  ): Promise<Awaited<ReturnType<ThinkHostApi[K]>>> {
+    return (this._getAgent() as unknown as ThinkHostBridgeAgent)._cfHostBridge(
+      operation,
+      args
+    );
+  }
+
+  // ── Workspace ──────────────────────────────────────────────────
 
   async readFile(path: string): Promise<string | null> {
     this.#requireWorkspace("read");
-    return (
-      this._getAgent() as unknown as {
-        _hostReadFile(path: string): Promise<string | null>;
-      }
-    )._hostReadFile(path);
+    return this.#call("readFile", path);
   }
 
   async writeFile(path: string, content: string): Promise<void> {
     this.#requireWorkspace("read-write");
-    return (
-      this._getAgent() as unknown as {
-        _hostWriteFile(path: string, content: string): Promise<void>;
-      }
-    )._hostWriteFile(path, content);
+    return this.#call("writeFile", path, content);
   }
 
   async deleteFile(path: string): Promise<boolean> {
     this.#requireWorkspace("read-write");
-    return (
-      this._getAgent() as unknown as {
-        _hostDeleteFile(path: string): Promise<boolean>;
-      }
-    )._hostDeleteFile(path);
+    return this.#call("deleteFile", path);
   }
 
-  async listFiles(
-    dir: string
-  ): Promise<
-    Array<{ name: string; type: string; size: number; path: string }>
-  > {
+  async listFiles(dir: string): Promise<ThinkHostFileEntry[]> {
     this.#requireWorkspace("read");
-    return (
-      this._getAgent() as unknown as {
-        _hostListFiles(
-          dir: string
-        ): Promise<
-          Array<{ name: string; type: string; size: number; path: string }>
-        >;
-      }
-    )._hostListFiles(dir);
+    return this.#call("listFiles", dir);
   }
 
-  // ── Context blocks (new) ───────────────────────────────────────
+  // ── Context blocks ─────────────────────────────────────────────
 
   async getContext(label: string): Promise<string | null> {
     this.#requireContextRead(label);
-    return (
-      this._getAgent() as unknown as {
-        _hostGetContext(label: string): Promise<string | null>;
-      }
-    )._hostGetContext(label);
+    return this.#call("getContext", label);
   }
 
   async setContext(label: string, content: string): Promise<void> {
     this.#requireContextWrite(label);
-    return (
-      this._getAgent() as unknown as {
-        _hostSetContext(label: string, content: string): Promise<void>;
-      }
-    )._hostSetContext(label, content);
+    return this.#call("setContext", label, content);
   }
 
-  // ── Messages (new) ────────────────────────────────────────────
+  // ── Messages ───────────────────────────────────────────────────
 
-  async getMessages(
-    limit?: number
-  ): Promise<Array<{ id: string; role: string; content: string }>> {
+  async getMessages(limit?: number): Promise<ThinkHostMessage[]> {
     this.#requireMessages();
-    return (
-      this._getAgent() as unknown as {
-        _hostGetMessages(
-          limit?: number
-        ): Promise<Array<{ id: string; role: string; content: string }>>;
-      }
-    )._hostGetMessages(limit);
+    return this.#call("getMessages", limit);
   }
 
   async sendMessage(content: string): Promise<void> {
     this.#requireSendMessage();
-    return (
-      this._getAgent() as unknown as {
-        _hostSendMessage(content: string): Promise<void>;
-      }
-    )._hostSendMessage(content);
+    return this.#call("sendMessage", content);
   }
 
-  // ── Session metadata (new) ────────────────────────────────────
+  // ── Session metadata ───────────────────────────────────────────
 
   async getSessionInfo(): Promise<{ messageCount: number }> {
     this.#requireSessionMetadata();
-    return (
-      this._getAgent() as unknown as {
-        _hostGetSessionInfo(): Promise<{ messageCount: number }>;
-      }
-    )._hostGetSessionInfo();
+    return this.#call("getSessionInfo");
   }
 }
