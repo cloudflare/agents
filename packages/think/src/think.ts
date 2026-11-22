@@ -722,50 +722,6 @@ export type {
   FetchRedirectPolicy
 } from "./tools/fetch";
 
-type AgentSpanAttributes = Readonly<
-  Record<string, string | number | boolean | undefined>
->;
-
-type UpdateAgentSpan = (attributes: AgentSpanAttributes) => void;
-
-type AgentSpanHost = {
-  _withAgentSpan<T>(
-    operation: string,
-    storagePhase: string,
-    attributes: AgentSpanAttributes,
-    run: (update: UpdateAgentSpan) => T | Promise<T>
-  ): T | Promise<T>;
-};
-
-function withAgentSpan<T>(
-  host: object,
-  operation: string,
-  storagePhase: string,
-  attributes: AgentSpanAttributes,
-  run: (update: UpdateAgentSpan) => Promise<T>
-): Promise<T>;
-function withAgentSpan<T>(
-  host: object,
-  operation: string,
-  storagePhase: string,
-  attributes: AgentSpanAttributes,
-  run: (update: UpdateAgentSpan) => T
-): T;
-function withAgentSpan<T>(
-  host: object,
-  operation: string,
-  storagePhase: string,
-  attributes: AgentSpanAttributes,
-  run: (update: UpdateAgentSpan) => T | Promise<T>
-): T | Promise<T> {
-  return (host as AgentSpanHost)._withAgentSpan(
-    operation,
-    storagePhase,
-    attributes,
-    run
-  );
-}
-
 // ── Wire protocol constants ────────────────────────────────────────
 const MSG_CHAT_MESSAGES = CHAT_MESSAGE_TYPES.CHAT_MESSAGES;
 const MSG_CHAT_RESPONSE = CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE;
@@ -3869,10 +3825,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const _onStart = this.onStart.bind(this);
     const startThink = async (
       props: Props | undefined,
-      update: UpdateAgentSpan
+      update: (
+        attributes: Record<string, string | number | boolean | undefined>
+      ) => void
     ) => {
-      await withAgentSpan(
-        this,
+      await this._withAgentSpan(
         "initialize_think_session",
         "startup",
         { "cloudflare.agents.component": "think" },
@@ -3974,8 +3931,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       // history is untouched and the next safe-boundary `_syncMessages()`
       // retries.
       this._onStartDegradations = [];
-      await withAgentSpan(
-        this,
+      await this._withAgentSpan(
         "hydrate_think_session",
         "startup",
         { "cloudflare.agents.component": "think" },
@@ -3997,8 +3953,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
       // 3-6. Extension initialization (if extensionLoader is set)
       if (this.extensionLoader) {
-        await withAgentSpan(
-          this,
+        await this._withAgentSpan(
           "initialize_think_extensions",
           "startup",
           { "cloudflare.agents.component": "think" },
@@ -4007,8 +3962,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       }
 
       // 7. Protocol handlers
-      await withAgentSpan(
-        this,
+      await this._withAgentSpan(
         "initialize_think_chat",
         "startup",
         { "cloudflare.agents.component": "think" },
@@ -4041,8 +3995,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       // Best-effort: reconcile runs after the agent is otherwise functional,
       // and a failure (user getScheduledTasks() throwing, storage pressure)
       // must not brick the DO (#1710).
-      await withAgentSpan(
-        this,
+      await this._withAgentSpan(
         "reconcile_think_schedules",
         "startup",
         { "cloudflare.agents.component": "think" },
@@ -4058,8 +4011,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       // 10. Durable submissions may run user-defined model/hooks, so start them
       // after subclass initialization has completed. Best-effort for the same
       // reason as step 9.
-      await withAgentSpan(
-        this,
+      await this._withAgentSpan(
         "recover_think_durable_work",
         "startup",
         { "cloudflare.agents.component": "think" },
@@ -4095,8 +4047,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       });
     };
     this.onStart = (props?: Props) =>
-      withAgentSpan(
-        this,
+      this._withAgentSpan(
         "think_start",
         "startup",
         { "cloudflare.agents.component": "think" },
@@ -7328,8 +7279,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   ): Promise<StreamableResult> {
     const turn = admittedTurnContext.getStore();
     const active = this._activeAdmittedTurn();
-    const invoke = await withAgentSpan(
-      this,
+    const invoke = await this._withAgentSpan(
       "prepare_agent",
       "turn",
       {
@@ -9003,8 +8953,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       // The non-queue (submit/execute-submission) path runs `execute()` here
       // directly — it does NOT pass through `_runInsideAdmittedTurnBody`, so the
       // channel context must be set here too.
-      return withAgentSpan(
-        this,
+      return this._withAgentSpan(
         "chat_submission",
         "submission",
         {
@@ -9014,8 +8963,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           "cloudflare.agents.turn.channel": spec.channel
         },
         () =>
-          withAgentSpan(
-            this,
+          this._withAgentSpan(
             spec.admission === "submit"
               ? "accept_chat_submission"
               : "execute_chat_submission",
@@ -9068,8 +9016,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // in a turn that is still running, or hand it a context already dead.
     return withInvocationScope(
       () =>
-        withAgentSpan(
-          this,
+        this._withAgentSpan(
           "chat_turn",
           "turn",
           {
@@ -12636,8 +12583,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             }
           : undefined;
 
-        const streamResult = await withAgentSpan(
-          this,
+        const streamResult = await this._withAgentSpan(
           "persist_chat_result",
           "turn",
           spanAttributes,
@@ -12679,8 +12625,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         if (!overflowRequested) return streamResult;
 
         if (attempt < this._overflowMaxRetries && !abortSignal?.aborted) {
-          const shortened = await withAgentSpan(
-            this,
+          const shortened = await this._withAgentSpan(
             "compact_chat_history",
             "turn",
             spanAttributes,
@@ -12987,8 +12932,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         const event = parseProtocolMessage(message);
         if (event) {
           if (event.type === "chat-request") {
-            await withAgentSpan(
-              this,
+            await this._withAgentSpan(
               "chat_interaction",
               "interaction",
               {
@@ -13273,8 +13217,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       // client that reconnects between this submit being accepted and the
       // new turn streaming.
       onAccepted: () =>
-        withAgentSpan(
-          this,
+        this._withAgentSpan(
           "clear_previous_chat_state",
           "interaction",
           {
@@ -13318,8 +13261,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       join: async ({ messages, isCurrent }) => {
         // Stored already, by a join before a reset.
         if (messages.length === 0) return isCurrent();
-        const joined = await withAgentSpan(
-          this,
+        const joined = await this._withAgentSpan(
           "persist_incoming_messages",
           "turn",
           {
@@ -13379,8 +13321,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         // clears the stored ones: the tools a turn offers the model are
         // the ones the client that sent the request can run.
         const { clientTools: clientToolsForTurn, body: bodyForTurn } =
-          withAgentSpan(
-            this,
+          this._withAgentSpan(
             "persist_chat_request_context",
             "turn",
             {
@@ -15412,8 +15353,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       "cloudflare.agents.turn.request_id": options.requestId,
       "cloudflare.agents.turn.trigger": "ws-chat"
     };
-    const serverMessages = await withAgentSpan(
-      this,
+    const serverMessages = await this._withAgentSpan(
       "load_chat_history",
       "interaction",
       spanAttributes,
@@ -15437,8 +15377,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       branchParentId = reconciled[reconciled.length - 1].id;
     }
 
-    const persisted = await withAgentSpan(
-      this,
+    const persisted = await this._withAgentSpan(
       "persist_incoming_messages",
       "interaction",
       spanAttributes,
