@@ -160,6 +160,10 @@ import {
   type MCPServersState
 } from "./mcp/client/agent-servers";
 import { Scheduler, setSchedulerCallbackResolver } from "./schedules/scheduler";
+import {
+  DEFAULT_KEEP_ALIVE_INTERVAL_MS,
+  KeepAlive
+} from "./lifecycle/keep-alive";
 import { Queue, setQueueCallbackResolver } from "./queue/queue";
 import { Workflows } from "./workflow-tracking/workflows";
 import { Fibers, stashCurrentFiber, withFiberStash } from "./fibers/fibers";
@@ -436,7 +440,6 @@ export type {
   MCPServersState
 } from "./mcp/client/agent-servers";
 
-const DEFAULT_KEEP_ALIVE_INTERVAL_MS = 30_000;
 const DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS = 2_000;
 const DEFAULT_AGENT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS = 5_000;
 // Durable marker that this agent is condemned: written before teardown begins
@@ -1030,14 +1033,8 @@ export class Agent<
   /** Warn-once guard: `chatRecovery` reassigned during onStart() (too late for wake recovery). */
   private _warnedChatRecoveryInOnStart = false;
 
-  /**
-   * Number of active keepAlive() callers. When > 0, `_syncHostJobs()`
-   * caps the next alarm at `keepAliveIntervalMs` so the DO stays alive.
-   * Purely in-memory — lost on eviction, which is correct because the
-   * in-memory work keepAlive was protecting is also lost.
-   * @internal
-   */
-  _keepAliveRefs = 0;
+  /** @internal Holds behind keepAlive(); see {@link KeepAlive}. */
+  readonly _keepAlive: KeepAlive;
 
   /** @internal The extracted dynamic-agent (facet) machinery. */
   private _dynamicAgentsInstance: DynamicAgentsInternal | undefined;
@@ -1605,6 +1602,10 @@ export class Agent<
         ).call(this, payload, schedule);
     });
 
+    this._keepAlive = new KeepAlive({
+      intervalMs: this._resolvedOptions.keepAliveIntervalMs
+    });
+
     this._queue = new Queue({
       retry: this._resolvedOptions.retry,
       onError: (error: unknown) =>
@@ -1727,6 +1728,7 @@ export class Agent<
     // through `this.*` so they always hit the framework-wrapped hooks.
     this.lifecycle
       .use(this.scheduler)
+      .use(this._keepAlive)
       .use(this._queue)
       .use(this.mcp)
       .use(this._state)
@@ -2893,29 +2895,6 @@ export class Agent<
   }
 
   /**
-   * Acquire a root-owned keepAlive ref on behalf of a descendant facet.
-   * Facets run in separate colocated isolates but cannot set their own
-   * physical alarm, so this lets facet work use the root alarm heartbeat.
-   * @internal
-   */
-  async _cf_acquireFacetKeepAlive(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): Promise<string> {
-    await this.__unsafe_ensureInitialized();
-    return this._dynamicAgents.acquireKeepAlive(ownerPath);
-  }
-
-  /**
-   * Release a root-owned keepAlive ref previously acquired for a facet.
-   * Idempotent so disposer calls can safely race or run twice.
-   * @internal
-   */
-  async _cf_releaseFacetKeepAlive(token: string): Promise<void> {
-    await this.__unsafe_ensureInitialized();
-    await this._dynamicAgents.releaseKeepAlive(token);
-  }
-
-  /**
    * Schedule a task to be executed in the future
    *
    * Cron schedules are **idempotent by default** — calling `schedule("0 * * * *", "tick")`
@@ -3084,48 +3063,8 @@ export class Agent<
    * }
    * ```
    */
-  async keepAlive(): Promise<() => void> {
-    if (this._isFacet) {
-      const root = await this._rootAlarmOwner();
-      const token = await root._cf_acquireFacetKeepAlive(this.selfPath);
-      let disposed = false;
-      return () => {
-        if (disposed) return;
-        disposed = true;
-        const release = root._cf_releaseFacetKeepAlive(token).catch((e) => {
-          console.error("[Agent] Failed to release facet keepAlive:", e);
-        });
-        this.ctx.waitUntil(release);
-      };
-    }
-
-    this._keepAliveRefs++;
-
-    if (this._keepAliveRefs === 1) {
-      await this._syncHostJobs();
-    }
-
-    let disposed = false;
-    return () => {
-      if (disposed) return;
-      disposed = true;
-      this._keepAliveRefs = Math.max(0, this._keepAliveRefs - 1);
-      // When the last lease is released, recompute the alarm from persistent
-      // state so a short-lived keepAlive does not leave a stale
-      // `now + keepAliveIntervalMs` heartbeat armed. The dispose contract is
-      // synchronous, so fire-and-forget the async reschedule via waitUntil
-      // (mirrors `_cf_releaseFacetKeepAlive`).
-      if (this._keepAliveRefs === 0) {
-        this.ctx.waitUntil(
-          this._syncHostJobs().catch((e) => {
-            console.error(
-              "[Agent] Failed to reschedule alarm after keepAlive dispose:",
-              e
-            );
-          })
-        );
-      }
-    };
+  keepAlive(): Promise<() => void> {
+    return this._keepAlive.acquire();
   }
 
   /**
@@ -3144,13 +3083,8 @@ export class Agent<
    * });
    * ```
    */
-  async keepAliveWhile<T>(fn: () => Promise<T>): Promise<T> {
-    const dispose = await this.keepAlive();
-    try {
-      return await fn();
-    } finally {
-      dispose();
-    }
+  keepAliveWhile<T>(fn: () => Promise<T>): Promise<T> {
+    return this._keepAlive.run(fn);
   }
 
   // ── Fibers (the `Fibers` capability, ./fibers) ─────────────────────
@@ -3376,16 +3310,6 @@ export class Agent<
         await work.cancel(HOST_JOB_DESTROY_ID);
       }
 
-      if (this._keepAliveRefs > 0) {
-        await work.push({
-          id: HOST_JOB_KEEP_ALIVE_ID,
-          fn: "keepAlive",
-          time: nowMs + this._resolvedOptions.keepAliveIntervalMs
-        });
-      } else if (work.get(HOST_JOB_KEEP_ALIVE_ID)) {
-        await work.cancel(HOST_JOB_KEEP_ALIVE_ID);
-      }
-
       if (work.get(HOST_JOB_HOUSEKEEPING_ID)) {
         await work.cancel(HOST_JOB_HOUSEKEEPING_ID);
       }
@@ -3416,13 +3340,8 @@ export class Agent<
   ): LifecycleJobOutcome | void | Promise<LifecycleJobOutcome | void> {
     switch (fn) {
       case "keepAlive":
-        // This job's only purpose is guaranteeing wakes while refs are held.
-        return this._keepAliveRefs > 0
-          ? {
-              rescheduleAt:
-                Date.now() + this._resolvedOptions.keepAliveIntervalMs
-            }
-          : undefined;
+        // A heartbeat from before the KeepAlive capability; let it go.
+        return undefined;
       case "housekeeping":
         // Left by an older release; fiber recovery has its own wake now.
         return undefined;

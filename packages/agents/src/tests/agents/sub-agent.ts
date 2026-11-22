@@ -2151,7 +2151,7 @@ export class TestSubAgentParent extends Agent {
   }
 
   getRootKeepAliveRefCount(): number {
-    return this._keepAliveRefs;
+    return this._keepAlive.holds;
   }
 
   async subAgentHoldFiber(

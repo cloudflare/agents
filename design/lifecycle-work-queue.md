@@ -220,8 +220,11 @@ Agent's pull contributions became pushed jobs, synchronized with durable
 state by `_syncHostJobs()` (called on startup, on state changes that used to
 trigger an alarm recalculation, and after each alarm):
 
-- `cf:keep-alive` — held while keep-alive refs exist; reschedules every
-  `keepAliveIntervalMs`; cancelled at zero refs.
+- `cf:keep-alive` — gone. Keep-alive is the `KeepAlive` capability
+  (`lifecycle/keep-alive.ts`): one `keep-alive:heartbeat` job held while holds
+  are open, re-timed every `keepAliveIntervalMs`, cancelled at zero holds. A
+  routed Lifecycle takes its hold on the root's KeepAlive through
+  `routes.toRoot`. A leftover `cf:keep-alive` job completes when it fires.
 - `cf:housekeeping` — no longer pushed. Fiber recovery moved to the
   `Fibers` capability's own `fibers:recover` job ([fibers.md](./fibers.md));
   a leftover `cf:housekeeping` job is cancelled or completes as a no-op.

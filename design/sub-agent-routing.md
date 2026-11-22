@@ -152,9 +152,9 @@ RPC if you need parent-side side effects.
   top-level parent.
 - `getSchedule()` / `getSchedules()` are deprecated synchronous storage reads
   and throw on facets.
-- `keepAlive()` and `keepAliveWhile()` work on facets by delegating their
-  heartbeat ref to the top-level parent. Facets still do not get an independent
-  physical alarm slot.
+- `keepAlive()` and `keepAliveWhile()` work on facets: the facet's `KeepAlive`
+  capability takes its hold on the root's through `routes.toRoot`. Facets still
+  do not get an independent physical alarm slot.
 - `runFiber()` works on facets. Fiber rows and snapshots live in the child
   SQLite database. The child's `Fibers` capability mirrors its recovery wake
   on the root through Lifecycle routing, and the root routes each due wake

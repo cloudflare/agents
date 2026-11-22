@@ -4,7 +4,6 @@ import {
   getConnectionRawState,
   setConnectionProtocolEnabled
 } from "../websockets/connection-flags";
-import { nanoid } from "nanoid";
 import type {
   Connection,
   LifecycleRouteEnvelope,
@@ -138,13 +137,6 @@ export class DynamicAgentsInternal extends LifecycleCapability {
 
   /** The parent-side registry of spawned dynamic agents. */
   readonly registry: DynamicAgentRegistry;
-
-  /**
-   * Root-owned keepAlive tokens held on behalf of descendant facets.
-   * Facets cannot arm a physical alarm, so their keepAlive refs ride
-   * on the root's heartbeat.
-   */
-  #facetKeepAliveTokens = new Set<string>();
 
   /** Per-frame bridge context while a forwarded WS event runs in a facet. */
   #bridgeContext = new AsyncLocalStorage<DynamicAgentBridgeInvocationContext>();
@@ -315,32 +307,6 @@ export class DynamicAgentsInternal extends LifecycleCapability {
         prefix
       );
     }
-    await this.#host._syncHostJobs();
-  }
-
-  /**
-   * Acquire a root-owned keepAlive ref on behalf of a descendant facet.
-   */
-  async acquireKeepAlive(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): Promise<string> {
-    const ownerPathKey = agentPathKey(ownerPath);
-    const token = `${ownerPathKey ?? "unknown"}:${nanoid(9)}`;
-    this.#facetKeepAliveTokens.add(token);
-    this.#host._keepAliveRefs++;
-    if (this.#host._keepAliveRefs === 1) {
-      await this.#host._syncHostJobs();
-    }
-    return token;
-  }
-
-  /**
-   * Release a root-owned keepAlive ref previously acquired for a facet.
-   * Idempotent so disposer calls can safely race or run twice.
-   */
-  async releaseKeepAlive(token: string): Promise<void> {
-    if (!this.#facetKeepAliveTokens.delete(token)) return;
-    this.#host._keepAliveRefs = Math.max(0, this.#host._keepAliveRefs - 1);
     await this.#host._syncHostJobs();
   }
 

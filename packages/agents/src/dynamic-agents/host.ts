@@ -36,7 +36,6 @@ export interface DynamicAgentHostPort {
   readonly name: string;
   readonly _ParentClass: { readonly name: string };
   readonly selfPath: AgentPathStep[];
-  _keepAliveRefs: number;
   _isSameAgentPathPrefix(
     prefix: ReadonlyArray<AgentPathStep>,
     path: ReadonlyArray<AgentPathStep>
