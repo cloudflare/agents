@@ -476,3 +476,35 @@ describe("job driver hold limit", () => {
     });
   });
 });
+
+describe("job driver hold limit without onJobError", () => {
+  it("keeps holding a job past the limit when its owner has no onJobError", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const ran: string[] = [];
+      const first = new Jobs("isolation-hookless", ran);
+      const { lifecycle } = install(first);
+      await lifecycle.start();
+      await first.push({
+        id: "poison",
+        fn: "poison",
+        time: Date.now() - 1,
+        retry: QUICK
+      });
+      await expect(lifecycle.alarm()).rejects.toThrow("restarting");
+      storage.sql.exec(
+        "UPDATE cf_agents_jobs SET held_since = ? WHERE id = 'poison'",
+        Date.now() - 16 * 60_000
+      );
+
+      // A fresh isolate, past the limit: the job is kept (it may be its
+      // owner's only wake) and still has a wake.
+      const fresh = install(new Jobs("isolation-hookless", ran)).lifecycle;
+      await fresh.start();
+      await expect(fresh.alarm()).rejects.toThrow("restarting");
+      expect(
+        [...storage.sql.exec("SELECT id FROM cf_agents_jobs")].map((r) => r.id)
+      ).toEqual(["poison"]);
+      expect(await storage.getAlarm()).not.toBeNull();
+    });
+  });
+});
