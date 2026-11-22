@@ -15,12 +15,16 @@ import type { ChatRecoveryOptions } from "./lifecycle";
 import type { ChatFiberSnapshot } from "./recovery";
 import type { ChatRecoveryKind } from "./recovery-incident";
 
-/** The latest stored message, as recovery reads it. *
+/**
+ * The latest stored message, as recovery reads it.
+ *
  * @internal
  */
 export type RecoveryLeaf = { id: string; role: string } | null | undefined;
 
-/** What the turn's record and storage say about it. *
+/**
+ * What the turn's record and storage say about it.
+ *
  * @internal
  */
 export type InterruptedTurnEvidence = {
@@ -33,7 +37,9 @@ export type InterruptedTurnEvidence = {
   streamStatus?: "streaming" | "completed" | "error";
 };
 
-/** What a recovered turn does next. *
+/**
+ * What a recovered turn does next.
+ *
  * @internal
  */
 export type InterruptedTurnPlan =
