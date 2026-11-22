@@ -232,6 +232,12 @@ attachments, and reconstructs `Connection` objects after hibernation.
 
 There is no in-memory WebSocket mode.
 
+What the platform does to these sockets, measured on deployed Workers (22 Nov 2026):
+
+- A code deploy keeps them connected, and the new version serves them with the attachments the old one wrote. `ctx.abort()`, a crash or the memory-limit breaker closes all of them (the client sees 1006).
+- Idle sockets are not closed for idleness (30 minutes measured).
+- A message over 32 MiB is dropped silently: `send()` returns normally and the peer gets nothing, not even a close. `rpc` responses go through `serializeRpcResponse` (`websockets/frame-limit.ts`), which answers an over-limit result or stream chunk with an error response for the same call, so the caller is not left waiting. That error ends the call: a `StreamingResponse` reports closed and a `ReadableStream` result is cancelled, with no further frame for the call. Other senders must keep their frames under the limit themselves.
+
 ## Identity
 
 For supported named objects, `ctx.id.name` is authoritative. Lifecycle exposes

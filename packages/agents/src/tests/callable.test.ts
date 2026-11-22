@@ -114,6 +114,34 @@ async function callRPC(
   });
 }
 
+describe("callable results over the WebSocket frame limit", () => {
+  // A message over 32 MiB is dropped silently by the runtime: answer with
+  // an error instead of leaving the caller waiting.
+  it("answers with an error response", async () => {
+    const { ws } = await connectWS(
+      `/agents/test-callable-agent/${crypto.randomUUID()}`
+    );
+    await skipInitialMessages(ws);
+    const response = await callRPC(ws, "huge", [33], 15_000);
+    expect(expectError(response).error).toContain("message limit");
+    ws.close();
+  }, 20_000);
+
+  it("closes a stream whose chunk is over the limit", async () => {
+    const name = crypto.randomUUID();
+    const { ws } = await connectWS(`/agents/test-callable-agent/${name}`);
+    await skipInitialMessages(ws);
+    const response = await callRPC(ws, "hugeStream", [], 15_000);
+    expect(expectError(response).error).toContain("message limit");
+    const agent = await getAgentByName(env.TestCallableAgent, name);
+    expect(await agent.getHugeStreamResult()).toEqual({
+      sent: false,
+      closed: true
+    });
+    ws.close();
+  }, 20_000);
+});
+
 // Helper to collect streaming responses
 async function callStreamingRPC(
   ws: WebSocket,

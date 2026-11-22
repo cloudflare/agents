@@ -24,6 +24,7 @@ import {
   setConnectionReadonly
 } from "./connection-flags";
 import { exposableMethods, type CallableInvoker } from "./callables-target";
+import { serializeRpcResponse } from "./frame-limit";
 import { EventLog, type EventLogOptions } from "./event-log";
 import {
   EVENT_LOG_ERROR,
@@ -783,6 +784,8 @@ export class WebSockets extends LifecycleCapability {
       return true;
     }
 
+    /** The call's terminal frame went out; nothing more may follow. */
+    let ended = false;
     try {
       const result = await this.#dispatchCallable(
         method,
@@ -798,14 +801,22 @@ export class WebSockets extends LifecycleCapability {
       }
       if (result instanceof ReadableStream) {
         for await (const chunk of result) {
-          this.#reply(connection, {
+          const sent = this.#reply(connection, {
             type: "rpc",
             id,
             success: true,
             done: false,
             result: chunk
           });
+          // The chunk was answered with the call's terminal error: leaving
+          // the loop cancels the stream, and no final frame follows, even
+          // if the cancel itself fails.
+          if (!sent) {
+            ended = true;
+            break;
+          }
         }
+        if (ended) return true;
         this.#reply(connection, {
           type: "rpc",
           id,
@@ -823,6 +834,7 @@ export class WebSockets extends LifecycleCapability {
         });
       }
     } catch (error) {
+      if (ended) return true;
       this.#reply(connection, {
         type: "rpc",
         id,
@@ -833,10 +845,12 @@ export class WebSockets extends LifecycleCapability {
     return true;
   }
 
-  #reply(connection: Connection, response: RpcResponse): void {
+  /** Returns false when the frame was replaced by the call's terminal error. */
+  #reply(connection: Connection, response: RpcResponse): boolean {
     let text: string;
+    let replaced = false;
     try {
-      text = JSON.stringify(response);
+      ({ text, replaced } = serializeRpcResponse(response));
     } catch (error) {
       // A result that JSON cannot carry (a BigInt, a cycle) must still
       // settle the caller: answer with an error instead of silence.
@@ -848,8 +862,10 @@ export class WebSockets extends LifecycleCapability {
           error instanceof Error ? error.message : String(error)
         }`
       } satisfies RpcResponse);
+      replaced = true;
     }
     this.#send(connection, text);
+    return !replaced;
   }
 
   async #dispatchCallable(

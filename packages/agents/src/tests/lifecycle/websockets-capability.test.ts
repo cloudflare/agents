@@ -50,6 +50,97 @@ async function upgrade(url: URL): Promise<WebSocket> {
 }
 
 describe("plain host Agent protocol on the hibernating wire", () => {
+  // A message over 32 MiB is dropped silently by the runtime, so the caller
+  // must get an error instead of waiting for a frame that never comes.
+  it("answers an rpc result over the frame limit with an error", async () => {
+    const name = crypto.randomUUID();
+    const socket = await upgrade(
+      new URL(`/agents/plain-lifecycle-object/${name}`, "https://example.com")
+    );
+    const next = frameReader(socket);
+    try {
+      await next(); // identity
+      socket.send(
+        JSON.stringify({ type: "rpc", id: "big", method: "huge", args: [33] })
+      );
+      const frame = (await next()) as Record<string, unknown>;
+      expect(frame).toMatchObject({ type: "rpc", id: "big", success: false });
+      expect(String(frame.error)).toContain("message limit");
+
+      socket.send(
+        JSON.stringify({ type: "rpc", id: "ok", method: "huge", args: [1] })
+      );
+      expect(await next()).toMatchObject({ id: "ok", success: true });
+    } finally {
+      socket.close();
+    }
+  }, 20_000);
+
+  it("sends one error when cancelling the stream fails", async () => {
+    const name = crypto.randomUUID();
+    const socket = await upgrade(
+      new URL(`/agents/plain-lifecycle-object/${name}`, "https://example.com")
+    );
+    const next = frameReader(socket);
+    try {
+      await next(); // identity
+      socket.send(
+        JSON.stringify({
+          type: "rpc",
+          id: "c",
+          method: "hugeStreamBadCancel",
+          args: []
+        })
+      );
+      const error = (await next()) as Record<string, unknown>;
+      expect(error).toMatchObject({ id: "c", success: false });
+      expect(String(error.error)).toContain("message limit");
+      await expect
+        .poll(() => env.PlainLifecycleObject.getByName(name).hugeStreamState())
+        .toEqual({ pulled: 1, cancelled: true });
+      socket.send(
+        JSON.stringify({
+          type: "rpc",
+          id: "after",
+          method: "add",
+          args: [1, 1]
+        })
+      );
+      // The next frame answers the next call: no second error for "c".
+      expect(await next()).toMatchObject({ id: "after", success: true });
+    } finally {
+      socket.close();
+    }
+  }, 20_000);
+
+  it("ends a stream at a chunk over the frame limit", async () => {
+    const name = crypto.randomUUID();
+    const socket = await upgrade(
+      new URL(`/agents/plain-lifecycle-object/${name}`, "https://example.com")
+    );
+    const next = frameReader(socket);
+    try {
+      await next(); // identity
+      socket.send(
+        JSON.stringify({ type: "rpc", id: "s", method: "hugeStream", args: [] })
+      );
+      expect(await next()).toMatchObject({
+        id: "s",
+        done: false,
+        result: "small"
+      });
+      const frame = (await next()) as Record<string, unknown>;
+      expect(frame).toMatchObject({ id: "s", success: false });
+      expect(String(frame.error)).toContain("message limit");
+      const host = env.PlainLifecycleObject.getByName(name);
+      await expect
+        .poll(() => host.hugeStreamState())
+        .toEqual({ pulled: 2, cancelled: true });
+    } finally {
+      socket.close();
+    }
+  }, 20_000);
+
   it("identifies the host, then answers rpc frames against callables", async () => {
     const name = crypto.randomUUID();
     const socket = await upgrade(

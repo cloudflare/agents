@@ -50,6 +50,12 @@ export class TestCallableAgent extends Agent<
     return a * b;
   }
 
+  // A result of `mib` MiB, for the frame-limit test.
+  @callable()
+  huge(mib: number): string {
+    return "x".repeat(mib * 1024 * 1024);
+  }
+
   // For client call-timeout tests over the Cap'n Web endpoint.
   @callable()
   slowConfig(): Promise<string> {
@@ -133,6 +139,22 @@ export class TestCallableAgent extends Agent<
       stream.send(i);
     }
     stream.end(count);
+  }
+
+  /** What `hugeStream` saw: whether the over-limit chunk was sent. */
+  hugeStreamResult: { sent: boolean; closed: boolean } | undefined;
+
+  @callable({ streaming: true })
+  hugeStream(stream: StreamingResponse) {
+    stream.send("small");
+    const sent = stream.send("x".repeat(33 * 1024 * 1024));
+    this.hugeStreamResult = { sent, closed: stream.isClosed };
+    stream.end("done");
+  }
+
+  /** Durable Object RPC: what `hugeStream` saw. */
+  getHugeStreamResult() {
+    return this.hugeStreamResult;
   }
 
   // Streaming method - async with delays

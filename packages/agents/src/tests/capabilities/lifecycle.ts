@@ -240,6 +240,11 @@ class PlainHostCallables extends RpcTarget {
     return a + b;
   }
 
+  /** A result of `mib` MiB, for the frame-limit test. */
+  huge(mib: number): string {
+    return "x".repeat(mib * 1024 * 1024);
+  }
+
   fail(message: string): never {
     throw new Error(message);
   }
@@ -260,6 +265,49 @@ class PlainHostCallables extends RpcTarget {
   /** A value JSON cannot carry; the JSON wire must still settle the call. */
   bigint(): { value: bigint } {
     return { value: 1n };
+  }
+
+  /** Chunks pulled from the last `hugeStream`, and whether it was cancelled. */
+  hugeStreamState = { pulled: 0, cancelled: false };
+
+  /** A small chunk, a 33 MiB chunk, then more small ones. */
+  hugeStream(): ReadableStream<string> {
+    const state = { pulled: 0, cancelled: false };
+    this.hugeStreamState = state;
+    return new ReadableStream<string>(
+      {
+        pull(controller) {
+          state.pulled += 1;
+          if (state.pulled === 2)
+            controller.enqueue("x".repeat(33 * 1024 * 1024));
+          else if (state.pulled > 5) controller.close();
+          else controller.enqueue("small");
+        },
+        cancel() {
+          state.cancelled = true;
+        }
+      },
+      { highWaterMark: 0 }
+    );
+  }
+
+  /** A 33 MiB chunk from a stream whose cancel fails. */
+  hugeStreamBadCancel(): ReadableStream<string> {
+    const state = { pulled: 0, cancelled: false };
+    this.hugeStreamState = state;
+    return new ReadableStream<string>(
+      {
+        pull(controller) {
+          state.pulled += 1;
+          controller.enqueue("x".repeat(33 * 1024 * 1024));
+        },
+        cancel() {
+          state.cancelled = true;
+          throw new Error("cancel failed");
+        }
+      },
+      { highWaterMark: 0 }
+    );
   }
 
   streamNumbers(): ReadableStream<number> {
@@ -369,6 +417,11 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
   /** Open connections on either wire, for transport tests. */
   connectionCount(): number {
     return [...this.#webSockets.getConnections()].length;
+  }
+
+  /** Chunks the last `hugeStream` callable produced, and whether it was cancelled. */
+  hugeStreamState(): { pulled: number; cancelled: boolean } {
+    return { ...this.#callables.hugeStreamState };
   }
 
   /** How many times the `bump` callable ran, for closed-connection tests. */
