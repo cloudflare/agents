@@ -154,8 +154,8 @@ Once a Durable Object is reset (`ctx.abort()`, a crash, the memory-limit breaker
 So code that retries a call, or keeps a stub for a long time, must open a new stub after a failure:
 
 - `getAgentByName` opens a new stub for every attempt of its startup call, so `routingRetry` can get past a reset. `routeAgentRequest` already did this.
-- `AgentWorkflow` keeps its `agent` stub for the whole run. `this.agent` renews itself after a failed call (`stub-renewal.ts`): the failed call still rejects, and the step's own retry reaches the restarted Agent.
-- The MCP RPC client transport (`mcp/rpc.ts`) drops its stub after a failed send; the next send opens a new one through `getAgentByName`, which also passes the props again, because a reset loses the props a server was started with.
+- `AgentWorkflow` keeps its `agent` stub for the whole run. `this.agent` renews itself after a failed call (`stub-renewal.ts`): the failed call still rejects, and the step's own retry reaches the restarted Agent. A renewed stub starts the Agent (`__unsafe_ensureInitialized`) before its first call, because native RPC reaches a synchronous method without running startup. Property reads (`await this.agent.someGetter`) go to the current stub's own RPC property, so they behave as on a plain stub.
+- The MCP RPC client transport (`mcp/rpc.ts`) drops its stub after a failed send; the next send opens a new one through `getAgentByName` with the same props. `McpAgent` stores the client's initialize request on the RPC path, as the HTTP transports already did, so a server restarted after a reset or an eviction replays the handshake and keeps what the client negotiated.
 
 ## Schema migration
 

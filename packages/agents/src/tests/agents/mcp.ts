@@ -92,6 +92,21 @@ export class TestMcpAgent extends McpAgent<Cloudflare.Env, unknown, Props> {
   );
 
   async init() {
+    // Reports the client the server negotiated with, to show the
+    // handshake survives a reset of this object.
+    this.server.registerTool(
+      "clientName",
+      { description: "Name of the initialized client" },
+      async () => ({
+        content: [
+          {
+            text: this.server.server.getClientVersion()?.name ?? "none",
+            type: "text" as const
+          }
+        ]
+      })
+    );
+
     this.server.registerTool(
       "greet",
       {

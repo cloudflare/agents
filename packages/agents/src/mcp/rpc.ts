@@ -110,7 +110,13 @@ export class RPCClientTransport implements V2Transport {
       throw new Error("Transport not started");
     }
 
-    const stub = this._stub ?? (this._stub = await this._open());
+    let stub = this._stub;
+    if (!stub) {
+      stub = await this._open();
+      // `close()` ran while the new stub was opening.
+      if (!this._started) throw new Error("Transport closed");
+      this._stub = stub;
+    }
     try {
       const pending = stub.handleMcpMessage(message) as Promise<
         V2JSONRPCMessage | V2JSONRPCMessage[] | undefined

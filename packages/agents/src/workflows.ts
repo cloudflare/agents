@@ -67,6 +67,17 @@ type AgentPathInvoker = {
  * WeakSet to track which prototypes have been wrapped.
  * This prevents re-wrapping on subsequent instantiations of the same class.
  */
+/**
+ * Start a renewed Agent stub's object before its first call: native RPC
+ * reaches a synchronous method without running the Agent's startup.
+ */
+function ensureStarted(stub: object): Promise<void> {
+  // SAFETY: every Agent exposes this internal initializer for native RPC.
+  return (
+    stub as { __unsafe_ensureInitialized(): Promise<void> }
+  ).__unsafe_ensureInitialized();
+}
+
 const wrappedPrototypes = new WeakSet<object>();
 
 /**
@@ -258,8 +269,10 @@ export class AgentWorkflow<
       namespace,
       resolvedAgentName
     );
-    this._agent = renewingStub(agent, () =>
-      namespace.get(namespace.idFromName(resolvedAgentName))
+    this._agent = renewingStub(
+      agent,
+      () => namespace.get(namespace.idFromName(resolvedAgentName)),
+      ensureStarted
     );
   }
 
@@ -289,7 +302,8 @@ export class AgentWorkflow<
       () =>
         namespace.get(
           namespace.idFromName(root.name)
-        ) as unknown as AgentPathInvoker
+        ) as unknown as AgentPathInvoker,
+      ensureStarted
     );
 
     return new Proxy(

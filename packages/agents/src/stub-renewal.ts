@@ -4,9 +4,9 @@
  * Once a Durable Object is reset (`ctx.abort()`, a crash, the memory-limit
  * breaker, a code update), every later call through a stub obtained before
  * the reset rejects with the same error, while a new stub from the namespace
- * works at once (measured, see design/retries.md). Code that
- * keeps one stub for a long time, such as a workflow run, must open a new
- * one after a failure or it stays broken for the rest of its life.
+ * works at once (measured, see design/retries.md). Code that keeps one stub
+ * for a long time, such as a workflow run, must open a new one after a
+ * failure or it stays broken for the rest of its life.
  *
  * The failed call still rejects and is not retried here: the caller's own
  * retry (a workflow step's retries, say) runs on the new stub. An error the
@@ -14,13 +14,53 @@
  * not reliable, so any rejection renews it; a new stub to the same object
  * costs nothing.
  *
+ * Every property read is forwarded to the current stub's own RPC property,
+ * so awaiting a remote getter and reading nested properties work as on the
+ * stub; only calling and awaiting are observed. `prepare` runs on a renewed
+ * stub before its first call (an Agent starts itself through it), so that
+ * one call returns a plain promise instead of an RPC promise.
+ *
  * @internal
  */
-export function renewingStub<T extends object>(first: T, open: () => T): T {
+export function renewingStub<T extends object>(
+  first: T,
+  open: () => T,
+  prepare?: (stub: T) => Promise<unknown>
+): T {
   let current = first;
+  let preparing: Promise<unknown> | undefined;
   const renew = (failed: T) => {
-    if (current === failed) current = open();
+    if (current !== failed) return;
+    current = open();
+    if (prepare) {
+      const stub = current;
+      const ready = prepare(stub).then(
+        () => {
+          if (preparing === ready) preparing = undefined;
+        },
+        (error: unknown) => {
+          renew(stub);
+          throw error;
+        }
+      );
+      // Observed by the next call; never an unhandled rejection.
+      ready.catch(() => {});
+      preparing = ready;
+    }
   };
+  const observe = (stub: T, result: unknown) => {
+    if (isThenable(result)) {
+      // Observe without replacing the caller's promise, so RPC pipelining
+      // on the result keeps working. `JsRpcPromise.then` requires both
+      // callbacks to be functions.
+      result.then(
+        () => {},
+        () => renew(stub)
+      );
+    }
+    return result;
+  };
+
   // SAFETY: every property read is forwarded to the current stub, so the
   // empty target is never read.
   return new Proxy({} as T, {
@@ -28,31 +68,40 @@ export function renewingStub<T extends object>(first: T, open: () => T): T {
       const stub = current;
       const value: unknown = Reflect.get(stub, prop);
       if (typeof value !== "function") return value;
-      return (...args: unknown[]) => {
-        let result: unknown;
-        try {
-          // Reflect.apply, not `value.apply`: on an RPC stub every property,
-          // `apply` included, is a remote method.
-          result = Reflect.apply(
-            value as (...a: unknown[]) => unknown,
-            stub,
-            args
-          );
-        } catch (error) {
-          renew(stub);
-          throw error;
+      const property = value as (...args: unknown[]) => unknown;
+      return new Proxy(property, {
+        apply(target, _this, args: unknown[]) {
+          const call = () =>
+            // Reflect.apply, not `target.apply`: on an RPC stub every
+            // property, `apply` included, is a remote method.
+            Reflect.apply(target, stub, args);
+          const pending = stub === current ? preparing : undefined;
+          if (pending) return observe(stub, pending.then(call));
+          try {
+            return observe(stub, call());
+          } catch (error) {
+            renew(stub);
+            throw error;
+          }
+        },
+        get(target, key) {
+          const member: unknown = Reflect.get(target, key);
+          if (key !== "then" || typeof member !== "function") return member;
+          // Awaiting a remote property: observe its failure as well.
+          return (
+            onFulfilled?: (value: unknown) => unknown,
+            onRejected?: (error: unknown) => unknown
+          ) =>
+            Reflect.apply(member, target, [
+              onFulfilled ?? ((result: unknown) => result),
+              (error: unknown) => {
+                renew(stub);
+                if (onRejected) return onRejected(error);
+                throw error;
+              }
+            ]);
         }
-        if (isThenable(result)) {
-          // Observe without replacing the caller's promise, so RPC
-          // pipelining on the result keeps working. `JsRpcPromise.then`
-          // requires both callbacks to be functions.
-          result.then(
-            () => {},
-            () => renew(stub)
-          );
-        }
-        return result;
-      };
+      });
     }
   });
 }

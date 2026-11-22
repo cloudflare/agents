@@ -758,6 +758,15 @@ export class TestWorkflowAgent extends Agent {
     return value;
   }
 
+  /** Synchronous, so native RPC alone does not start the Agent. */
+  startedForTest(): boolean {
+    return this.lifecycle.isStarted();
+  }
+
+  get settingsForTest(): { enabled: boolean } {
+    return { enabled: true };
+  }
+
   async runAgentResetWorkflowTest(workflowId: string): Promise<string> {
     return this.runWorkflow("AGENT_RESET_WORKFLOW", {}, { id: workflowId });
   }

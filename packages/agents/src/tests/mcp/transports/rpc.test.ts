@@ -138,12 +138,47 @@ describe("RPC Transport", () => {
         transport.send(TEST_MESSAGES.propsTestTool)
       ).rejects.toThrow();
 
+      // No new initialize: the restarted server keeps the handshake and
+      // the props.
       received.length = 0;
-      await transport.send(TEST_MESSAGES.initialize);
       await transport.send(TEST_MESSAGES.propsTestTool);
       expect(received.at(-1)).toMatchObject({
         result: { content: [{ text: "from-rpc-client" }] }
       });
+      await transport.send({
+        id: "client-name-1",
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { name: "clientName", arguments: {} }
+      } as JSONRPCMessage);
+      expect(received.at(-1)).toMatchObject({
+        result: { content: [{ text: "test-client" }] }
+      });
+    });
+
+    it("does not send after close while it reopens a stub", async () => {
+      const name = `test-reset-close-${crypto.randomUUID()}`;
+      const transport = new RPCClientTransport({
+        namespace: env.MCP_OBJECT,
+        name
+      });
+      await transport.start();
+      transport.onerror = () => {};
+      await transport.send(TEST_MESSAGES.initialize);
+      const server = env.MCP_OBJECT.get(
+        env.MCP_OBJECT.idFromName(`rpc:${name}`)
+      ) as unknown as { crashForTest(): Promise<void> };
+      await server.crashForTest().catch(() => {});
+      await expect(transport.send(TEST_MESSAGES.toolsList)).rejects.toThrow();
+
+      const received: JSONRPCMessage[] = [];
+      transport.onmessage = (msg) => {
+        received.push(msg);
+      };
+      const sending = transport.send(TEST_MESSAGES.toolsList);
+      await transport.close();
+      await expect(sending).rejects.toThrow("Transport closed");
+      expect(received).toEqual([]);
     });
 
     it("should call onclose when closing", async () => {

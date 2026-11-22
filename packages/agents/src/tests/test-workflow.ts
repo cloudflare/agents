@@ -262,7 +262,16 @@ export class AgentResetWorkflow extends AgentWorkflow<
       { retries: { limit: 0, delay: 0 } },
       async () => {
         await this.agent.crashForTest().catch(() => {});
-        return await this.agent.echoForTest("after reset");
+        const echo = await this.agent.echoForTest("after reset");
+        // Synchronous: only renewal's startup call starts the Agent.
+        const started = await this.agent.startedForTest();
+        // A remote getter reads through the renewed stub too.
+        const settings = await (
+          this.agent as unknown as {
+            settingsForTest: Promise<{ enabled: boolean }>;
+          }
+        ).settingsForTest;
+        return { echo, started, settings };
       }
     );
   }

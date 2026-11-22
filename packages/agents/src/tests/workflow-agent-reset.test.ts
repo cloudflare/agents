@@ -24,7 +24,11 @@ describe("AgentWorkflow across an Agent reset", () => {
 
     await expect(
       instance.waitForStepResult({ name: "call-across-reset" })
-    ).resolves.toBe("after reset");
+    ).resolves.toEqual({
+      echo: "after reset",
+      started: true,
+      settings: { enabled: true }
+    });
     await expect(instance.waitForStatus("complete")).resolves.not.toThrow();
   });
 });
