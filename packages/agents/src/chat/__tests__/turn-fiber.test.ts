@@ -12,30 +12,18 @@ const snapshot = (requestId: string) =>
 
 describe("ChatTurnFibers", () => {
   let log: string[];
-  let facet: boolean;
   let turnSignal: AbortSignal | undefined;
   let fibers: ChatTurnFibers;
   let host: ChatTurnFiberHost;
 
   beforeEach(() => {
     log = [];
-    facet = false;
     turnSignal = undefined;
     host = {
       fiberName: "chat",
       snapshotKey: "__snapshot",
       generateId: () => "nonce-1",
       turnSignal: () => turnSignal,
-      isFacet: () => facet,
-      runLegacyFiber: async (name, fn, options) => {
-        log.push(`legacy:${name}:${JSON.stringify(options.initialSnapshot)}`);
-        try {
-          return await fn();
-        } catch (error) {
-          log.push("engine:failed");
-          throw error;
-        }
-      },
       // The Task runs the registered closure and settles the caller.
       runTask: async ({ requestId, continuation, nonce }) => {
         log.push(`task:${requestId}:${continuation}:${nonce}`);
@@ -172,23 +160,6 @@ describe("ChatTurnFibers", () => {
     );
   });
 
-  it("runs a facet's turn on the legacy fiber engine", async () => {
-    facet = true;
-    const value = await fibers.run(
-      {
-        requestId: "r1",
-        continuation: false,
-        snapshot: snapshot("r1"),
-        onAccepted: () => void log.push("accepted")
-      },
-      async () => "reply"
-    );
-    expect(value).toBe("reply");
-    expect(log[0]).toContain("legacy:chat:r1:");
-    expect(log).toContain("accepted");
-    expect(log.some((entry) => entry.startsWith("task:"))).toBe(false);
-  });
-
   it("keeps a running turn's entry when an earlier turn with the same request id ends", async () => {
     // A turn run inside a queue slot the host already holds reuses the
     // slot's request id.
@@ -240,38 +211,34 @@ describe("ChatTurnFibers", () => {
     expect(unhandled).toEqual([]);
   });
 
-  for (const engine of ["Task", "legacy fiber"]) {
-    it(`gives the caller what a stopped turn threw, and does not fail the ${engine} with it`, async () => {
-      facet = engine === "legacy fiber";
-      const controller = new AbortController();
-      turnSignal = controller.signal;
-      await expect(
-        fibers.run(
-          { requestId: "r1", continuation: false, snapshot: snapshot("r1") },
-          async () => {
-            // The stop, then what the model call throws because of it.
-            controller.abort("stop reason");
-            throw controller.signal.reason;
-          }
-        )
-      ).rejects.toBe("stop reason");
-      expect(log).not.toContain("engine:failed");
-    });
+  it("gives the caller what a stopped turn threw, and does not fail the Task with it", async () => {
+    const controller = new AbortController();
+    turnSignal = controller.signal;
+    await expect(
+      fibers.run(
+        { requestId: "r1", continuation: false, snapshot: snapshot("r1") },
+        async () => {
+          // The stop, then what the model call throws because of it.
+          controller.abort("stop reason");
+          throw controller.signal.reason;
+        }
+      )
+    ).rejects.toBe("stop reason");
+    expect(log).not.toContain("engine:failed");
+  });
 
-    it(`fails the ${engine} with the error of a turn nothing stopped`, async () => {
-      facet = engine === "legacy fiber";
-      turnSignal = new AbortController().signal;
-      await expect(
-        fibers.run(
-          { requestId: "r1", continuation: false, snapshot: snapshot("r1") },
-          async () => {
-            throw new Error("boom");
-          }
-        )
-      ).rejects.toThrow("boom");
-      expect(log).toContain("engine:failed");
-    });
-  }
+  it("fails the Task with the error of a turn nothing stopped", async () => {
+    turnSignal = new AbortController().signal;
+    await expect(
+      fibers.run(
+        { requestId: "r1", continuation: false, snapshot: snapshot("r1") },
+        async () => {
+          throw new Error("boom");
+        }
+      )
+    ).rejects.toThrow("boom");
+    expect(log).toContain("engine:failed");
+  });
 
   it("gives a recovery attempt's turn its error, and does not fail the Task with it", async () => {
     host.inRecoveryAttempt = () => true;

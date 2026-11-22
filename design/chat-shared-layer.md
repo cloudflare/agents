@@ -252,7 +252,7 @@ Pure functions for aligning client messages with server state during persistence
 
 `runRecoveredTurn` (`recovery-attempt.ts`) is the body of a recovery attempt in both hosts, and `routeStreamInterruption` (`recovery-route.ts`) routes a live stall or transient error into recovery, reading `Retry-After` from the error. The engine section below describes the orchestration around them.
 
-**`ChatRecoveryEngine`** owns the **shared durable chat-recovery orchestration** — the sequence both `AIChatAgent` and `Think` run when a Durable Object wakes and finds an interrupted chat turn (a Task run for a root agent, or `runFiber` for a routed facet, that died mid-stream from hibernation, process death, or deploy churn). This state machine was previously duplicated across both packages, and the duplication was already drifting (better fixes landing in one but not the other).
+**`ChatRecoveryEngine`** owns the **shared durable chat-recovery orchestration** — the sequence both `AIChatAgent` and `Think` run when a Durable Object wakes and finds an interrupted chat turn (a chat-turn Task run, on a root agent or a routed facet, that died mid-stream from hibernation, process death, or deploy churn). This state machine was previously duplicated across both packages, and the duplication was already drifting (better fixes landing in one but not the other).
 
 Durable chat recovery is an invariant in both hosts: every chat entry path runs inside a recovery fiber. `ChatRecoveryConfig` accepts `true` or a tuning object, not `false`; previously compiled JavaScript that still supplies `false` is resolved to the default configuration. This guarantees that agent-tool child inspection can use durable recovery state after a restart instead of relying on instance-local abort controllers or stream managers.
 
@@ -298,10 +298,10 @@ so the next attempt counts entries left by another isolate in
 counted on the failure path. See
 [rfc-chat-recovery-interrupted-attempts.md](./rfc-chat-recovery-interrupted-attempts.md).
 
-Facets do not yet have routed Task wakes. Dynamic-agent recovery therefore
-keeps the root-owned routed Scheduler transport as a compatibility path until
-Tasks can mirror a child run's wake to its alarm owner. Legacy recovery schedule
-rows use the same callback entry points and drain without migration.
+A facet's turns and recovery attempts run on Tasks too: the run and its step
+journal live on the facet, and Tasks mirrors its wake to the root's alarm.
+Legacy recovery schedule rows and legacy chat fiber rows use the same entry
+points and drain without migration.
 
 Full design + point-in-time decision record: [rfc-chat-recovery-foundation.md](./rfc-chat-recovery-foundation.md).
 

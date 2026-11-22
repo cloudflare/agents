@@ -868,9 +868,6 @@ export class AIChatAgent<
     snapshotKey: "__cfAIChatFiberSnapshot",
     generateId: () => nanoid(),
     turnSignal: (requestId) => this._abortRegistry.getExistingSignal(requestId),
-    isFacet: () => this.parentPath.length > 0,
-    runLegacyFiber: (name, fn, options) =>
-      this._runFiberWithStashWrapper(name, fn, options),
     runTask: ({ requestId, continuation, nonce }) =>
       this.tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
         (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME,

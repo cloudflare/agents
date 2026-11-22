@@ -4744,9 +4744,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     snapshotKey: "__cfThinkChatFiberSnapshot",
     generateId: () => crypto.randomUUID(),
     turnSignal: (requestId) => this._turns.aborts.getExistingSignal(requestId),
-    isFacet: () => this.parentPath.length > 0,
-    runLegacyFiber: (name, fn, options) =>
-      this._runFiberWithStashWrapper(name, fn, options),
     runTask: ({ requestId, continuation, nonce }) =>
       this.tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
         (this.constructor as typeof Think).CHAT_FIBER_NAME,

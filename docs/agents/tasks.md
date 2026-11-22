@@ -238,8 +238,8 @@ external effect already accepted cannot be undone.
 ## Current limits
 
 The first release is deliberately narrow: no `waitForCompletion` mode on
-`run()`, and no runs on routed sub-agents (facet-hosted work stays on the
-legacy fiber engine until owner-path routed dispatch lands). The legacy
+`run()`. A run accepted on a routed sub-agent lives on the sub-agent, and
+the root agent's alarm wakes it. The legacy
 `runFiber()`/`startFiber()` APIs are released public API and remain
 unchanged, still recovered by their own scan. The design and its evolution
 are recorded in
