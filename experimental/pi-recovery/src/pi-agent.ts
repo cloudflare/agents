@@ -500,7 +500,13 @@ export class PiAgent extends Agent<Env> {
         this._faux.setNextTurnText(full);
       }
 
-      await this._runPiTurn(crypto.randomUUID(), true);
+      await this._runPiTurn(
+        crypto.randomUUID(),
+        // Only a continue of the partial is a continuation. A full
+        // regenerate answers the question again, so a reset during it
+        // retries the question rather than continuing nothing.
+        this._continuationTargetId !== null
+      );
       await this._engine().updateIncident(incidentId, "completed");
     } catch (error) {
       this._continuationTargetId = null;

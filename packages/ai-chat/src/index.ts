@@ -3573,7 +3573,13 @@ export class AIChatAgent<
       createdAt: turn.createdAt
     };
     await this._chatRecoveryEngine().recoverInterruptedTurn(recovered, {
-      latestMessage: () => this._recoveryLeaf(),
+      // Read from storage, not `this.messages`: a chat fiber row an older
+      // version left is recovered at startup, before `onStart` hydrates the
+      // messages.
+      latestMessage: async () => {
+        const leaf = await this.#session.getLatestLeaf();
+        return leaf ? { id: leaf.id, role: leaf.role } : null;
+      },
       partialHoldsContent: (partial) =>
         partial.text !== "" || partial.parts.length > 0,
       invokeOnChatRecovery: (input) =>
@@ -3646,7 +3652,6 @@ export class AIChatAgent<
     return { streamId, streamStillActive };
   }
 
-  /**
   /**
    * Called when an interrupted chat stream is detected after restart.
    * Return options to control recovery:

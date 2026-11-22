@@ -193,3 +193,47 @@ describe("AIChatAgent recovery after forced Durable Object eviction", () => {
     }
   });
 });
+
+describe("AIChatAgent chat recovery at startup", () => {
+  it("continues a reply whose legacy fiber row is recovered before the messages are loaded", async () => {
+    const room = crypto.randomUUID();
+    const stub = (await getAgentByName(
+      env.ChatRecoveryTestAgent,
+      room
+    )) as unknown as {
+      persistMessages(messages: ChatMessage[]): Promise<void>;
+      insertLegacyChatFiberForTest(requestId: string): Promise<void>;
+      getOnChatMessageCallCount(): Promise<number>;
+      getChatRecoveryIncidentsForTest(): Promise<
+        Array<{ status: string; reason?: string }>
+      >;
+    };
+    await stub.persistMessages([
+      { id: "boot-user", role: "user", parts: [{ type: "text", text: "Hi" }] },
+      {
+        id: "boot-assistant",
+        role: "assistant",
+        parts: [{ type: "text", text: "Partial" }]
+      }
+    ]);
+    // A chat turn's fiber row an older version left: the startup fiber scan
+    // recovers it, before the agent has read its messages into memory.
+    await stub.insertLegacyChatFiberForTest("req-boot");
+
+    await evictDurableObject(stub as unknown as DurableObjectStub);
+    const fresh = (await getAgentByName(
+      env.ChatRecoveryTestAgent,
+      room
+    )) as unknown as typeof stub;
+
+    // The stored reply is the latest message, so recovery continues it.
+    await waitFor(
+      async () => (await fresh.getOnChatMessageCallCount()) >= 1,
+      8000
+    );
+    const incidents = await fresh.getChatRecoveryIncidentsForTest();
+    expect(
+      incidents.some((incident) => incident.reason === "conversation_changed")
+    ).toBe(false);
+  });
+});
