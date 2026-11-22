@@ -5817,18 +5817,18 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     };
   }
 
-  /** Chat-turn recoveries this facet ran, by fiber name. */
+  /** Chat-turn recoveries this facet ran, by request id. */
   private _turnRecoveriesForTest: string[] = [];
 
   /** Leave a chat-turn Task run whose isolate died (no live closure). */
   async seedOrphanChatTurnRunForTest(requestId: string): Promise<string> {
     const self = this as unknown as {
-      _handleInternalFiberRecovery(ctx: { name: string }): Promise<boolean>;
+      _recoverChatTurn(turn: { requestId: string }): Promise<void>;
     };
-    const original = self._handleInternalFiberRecovery.bind(this);
-    self._handleInternalFiberRecovery = async (ctx) => {
-      this._turnRecoveriesForTest.push(ctx.name);
-      return original(ctx);
+    const original = self._recoverChatTurn.bind(this);
+    self._recoverChatTurn = async (turn) => {
+      this._turnRecoveriesForTest.push(turn.requestId);
+      return original(turn);
     };
     const receipt = await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
       AIChatAgent.CHAT_FIBER_NAME,
