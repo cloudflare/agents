@@ -55,9 +55,10 @@ A re-arm reads the current alarm first and writes only when the time changes,
 and deletes only an alarm that is set. Each `setAlarm()` is billed as a row
 written, and most queue mutations (a push later than the earliest job, a cancel
 of a later job) leave the earliest wake where it was. Inside `alarm()` the
-platform has already cleared the firing alarm, so `getAlarm()` reads whatever
-the driver armed since (the startup fallback or the deadman), and the
-end-of-alarm re-arm writes only when that differs from the next wake.
+platform has already cleared the firing alarm, so `getAlarm()` reads the
+latest alarm set since (the driver's startup fallback or deadman, or one a
+queue mutation during the alarm set), and the end-of-alarm re-arm writes only
+when that differs from the next wake.
 
 ## When the alarm fires
 
