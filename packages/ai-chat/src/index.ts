@@ -166,50 +166,6 @@ export type {
   SkippedTurnReason
 } from "agents/chat";
 
-type AgentSpanAttributes = Readonly<
-  Record<string, string | number | boolean | undefined>
->;
-
-type UpdateAgentSpan = (attributes: AgentSpanAttributes) => void;
-
-type AgentSpanHost = {
-  _withAgentSpan<T>(
-    operation: string,
-    storagePhase: string,
-    attributes: AgentSpanAttributes,
-    run: (update: UpdateAgentSpan) => T | Promise<T>
-  ): T | Promise<T>;
-};
-
-function withAgentSpan<T>(
-  host: object,
-  operation: string,
-  storagePhase: string,
-  attributes: AgentSpanAttributes,
-  run: (update: UpdateAgentSpan) => Promise<T>
-): Promise<T>;
-function withAgentSpan<T>(
-  host: object,
-  operation: string,
-  storagePhase: string,
-  attributes: AgentSpanAttributes,
-  run: (update: UpdateAgentSpan) => T
-): T;
-function withAgentSpan<T>(
-  host: object,
-  operation: string,
-  storagePhase: string,
-  attributes: AgentSpanAttributes,
-  run: (update: UpdateAgentSpan) => T | Promise<T>
-): T | Promise<T> {
-  return (host as AgentSpanHost)._withAgentSpan(
-    operation,
-    storagePhase,
-    attributes,
-    run
-  );
-}
-
 type ChatRecoveryRetryData = {
   targetUserId?: string;
   originalRequestId?: string;
@@ -1057,14 +1013,12 @@ export class AIChatAgent<
     this.lifecycle.use(this.streams);
     this._registerChatTurnTaskDefinition();
     this._registerChatRecoveryTaskDefinition();
-    withAgentSpan(
-      this,
+    this._withAgentSpan(
       "chat_initialization",
       "initialization",
       { "cloudflare.agents.component": "ai_chat" },
       (update) => {
-        withAgentSpan(
-          this,
+        this._withAgentSpan(
           "initialize_chat_storage",
           "initialization",
           { "cloudflare.agents.component": "ai_chat" },
@@ -1087,8 +1041,7 @@ export class AIChatAgent<
         );
 
         // Restore request context from SQLite (survives hibernation)
-        withAgentSpan(
-          this,
+        this._withAgentSpan(
           "restore_chat_request_context",
           "initialization",
           { "cloudflare.agents.component": "ai_chat" },
@@ -1098,8 +1051,7 @@ export class AIChatAgent<
         );
 
         // Initialize resumable stream manager (creates its own tables + restores state)
-        withAgentSpan(
-          this,
+        this._withAgentSpan(
           "initialize_resumable_stream",
           "initialization",
           { "cloudflare.agents.component": "ai_chat" },
@@ -1134,8 +1086,7 @@ export class AIChatAgent<
 
     const _onStart = this.onStart.bind(this);
     this.onStart = async (props?: Props) => {
-      await withAgentSpan(
-        this,
+      await this._withAgentSpan(
         "load_chat_messages",
         "startup",
         { "cloudflare.agents.component": "ai_chat" },
@@ -1450,8 +1401,7 @@ export class AIChatAgent<
       const event =
         typeof message === "string" ? parseProtocolMessage(message) : null;
       if (event?.type === "chat-request") {
-        return withAgentSpan(
-          this,
+        return this._withAgentSpan(
           "chat_interaction",
           "interaction",
           {
@@ -2352,8 +2302,7 @@ export class AIChatAgent<
       // (#1645) so a stale exhaustion can't replay on a later
       // reconnect once the user has moved on.
       onAccepted: () =>
-        withAgentSpan(
-          this,
+        this._withAgentSpan(
           "clear_previous_chat_state",
           "interaction",
           {
@@ -2371,8 +2320,7 @@ export class AIChatAgent<
         epoch = generation;
         // A replay after a reset: its messages are on its record.
         if (!transformedMessages) return true;
-        await withAgentSpan(
-          this,
+        await this._withAgentSpan(
           "persist_incoming_messages",
           "interaction",
           {
@@ -2424,8 +2372,7 @@ export class AIChatAgent<
         this._noteMergeStart(concurrencyDecision);
         // Stored already, by a join before a reset.
         if (messages.length === 0) return isCurrent();
-        await withAgentSpan(
-          this,
+        await this._withAgentSpan(
           "persist_incoming_messages",
           "turn",
           {
@@ -2463,8 +2410,7 @@ export class AIChatAgent<
         // Re-merge inside the lock: more overlapping submits may have
         // persisted additional user messages while this turn was queued.
         if (concurrencyDecision.strategy === "merge") {
-          await withAgentSpan(
-            this,
+          await this._withAgentSpan(
             "merge_queued_messages",
             "turn",
             {
@@ -2493,8 +2439,7 @@ export class AIChatAgent<
           }
         }
 
-        await withAgentSpan(
-          this,
+        await this._withAgentSpan(
           "prepare_chat_context",
           "turn",
           {
@@ -2597,8 +2542,7 @@ export class AIChatAgent<
               const chatTurnBody = async () => {
                 let replying = false;
                 try {
-                  await withAgentSpan(
-                    this,
+                  await this._withAgentSpan(
                     "repair_interrupted_tools",
                     "turn",
                     {
@@ -2628,8 +2572,7 @@ export class AIChatAgent<
                   );
 
                   if (response) {
-                    await withAgentSpan(
-                      this,
+                    await this._withAgentSpan(
                       "persist_chat_result",
                       "turn",
                       {
@@ -2937,8 +2880,7 @@ export class AIChatAgent<
           // boundary would close every span in a turn that is still running.
           withInvocationScope(
             () =>
-              withAgentSpan(
-                this,
+              this._withAgentSpan(
                 "chat_turn",
                 "turn",
                 {

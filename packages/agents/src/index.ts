@@ -1543,20 +1543,23 @@ export class Agent<
     } as ObservabilityEvent);
   }
 
-  /** Run SDK work under a stable parent for platform child spans. */
-  private _withAgentSpan<T>(
+  /**
+   * Run SDK work under a stable parent for platform child spans.
+   * @internal For the chat hosts built on `Agent`.
+   */
+  protected _withAgentSpan<T>(
     operation: string,
     storagePhase: string,
     attributes: TraceAttributes,
     run: (update: (attributes: TraceAttributes) => void) => Promise<T>
   ): Promise<T>;
-  private _withAgentSpan<T>(
+  protected _withAgentSpan<T>(
     operation: string,
     storagePhase: string,
     attributes: TraceAttributes,
     run: (update: (attributes: TraceAttributes) => void) => T
   ): T;
-  private _withAgentSpan<T>(
+  protected _withAgentSpan<T>(
     operation: string,
     storagePhase: string,
     attributes: TraceAttributes,
