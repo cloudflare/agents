@@ -9,6 +9,9 @@ import type {
 
 export class TestRunFiberAgent extends Agent {
   static options = { keepAliveIntervalMs: 2_000 };
+  // Stands in for a chat host's turn-fiber name, whose recovery owns its
+  // own budget.
+  static readonly CHAT_FIBER_NAME = "__cf_internal_probe";
 
   executionLog: string[] = [];
   recoveredFibers: FiberRecoveryContext[] = [];

@@ -438,6 +438,24 @@ describe("runFiber", () => {
       ).resolves.toBe("ran");
     });
 
+    it("counts a __cf_internal fiber no chat host owns, and drops it after three crashes", async () => {
+      const agent = await getAgentByName(
+        env.TestRunFiberAgent,
+        "recovery-crash-unowned-internal"
+      );
+
+      await agent.insertCrashedRecoveryFiber(
+        "unowned-crashed",
+        "__cf_internal_other:turn",
+        3
+      );
+      await agent.triggerRecoveryCheck();
+
+      expect(await agent.internalRecoveredFibers()).toEqual([]);
+      expect((await agent.getRecoveredFibers()) as unknown as []).toEqual([]);
+      expect((await agent.getRunningFiberCount()) as unknown as number).toBe(0);
+    });
+
     it("leaves framework fibers to their own recovery budget after crashes", async () => {
       const agent = await getAgentByName(
         env.TestRunFiberAgent,

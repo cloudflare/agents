@@ -80,6 +80,12 @@ export type FibersOptions = {
    * fiber, so the user hook is skipped. Bounded by `recoveryHookTimeoutMs`.
    */
   handleInternalRecovery: (ctx: FiberRecoveryContext) => Promise<boolean>;
+  /**
+   * Whether the host's internal recovery owns the crash budget of a fiber
+   * with this name (its engine keeps its own durable budget and ends the
+   * work with a terminal outcome). Every other plain fiber is counted.
+   */
+  ownsRecoveryBudget: (name: string) => boolean;
   /** The user's recovery hook; a result settles a managed ledger row. */
   onRecovered: (
     ctx: FiberRecoveryContext
@@ -100,12 +106,6 @@ const CURRENT_SCHEMA_VERSION = 2;
 // Recovery attempts on one unmanaged row that killed the isolate before
 // returning. After this many the row is dropped without running the hook.
 const MAX_RECOVERY_CRASHES = 3;
-// Framework fibers (legacy chat turns) are recovered by engines that keep
-// their own durable interruption budget and end the turn with a terminal
-// outcome; dropping their row early would skip that. They are not counted.
-// The prefix cannot be reserved on the public API: released
-// `@cloudflare/ai-chat` versions call `runFiber()` with it.
-const FRAMEWORK_FIBER_PREFIX = "__cf_internal";
 
 const WAKE_JOB_ID = "fibers:recover";
 const WAKE_JOB_FN = "recover";
@@ -707,7 +707,7 @@ export class Fibers extends LifecycleCapability {
         // the isolate is given up on after MAX_RECOVERY_CRASHES.
         const crashes = row.recovery_crashes ?? 0;
         const counted =
-          !managedRow && !row.name.startsWith(FRAMEWORK_FIBER_PREFIX);
+          !managedRow && !this.#options.ownsRecoveryBudget(row.name);
         if (counted) {
           if (crashes >= MAX_RECOVERY_CRASHES) {
             this.#emit("fiber:recovery:skipped", {

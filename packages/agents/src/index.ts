@@ -1264,6 +1264,16 @@ export class Agent<
 
     this._fibers = new Fibers({
       handleInternalRecovery: (ctx) => this._handleInternalFiberRecovery(ctx),
+      // A chat host (AIChatAgent, Think, released versions included) names
+      // its legacy turn fibers `${CHAT_FIBER_NAME}:<id>` and recovers them
+      // with its own durable budget. Nothing else is exempt.
+      ownsRecoveryBudget: (name) => {
+        const chatFiber = (this.constructor as { CHAT_FIBER_NAME?: unknown })
+          .CHAT_FIBER_NAME;
+        return (
+          typeof chatFiber === "string" && name.startsWith(`${chatFiber}:`)
+        );
+      },
       onRecovered: (ctx) => this.onFiberRecovered(ctx),
       heartbeatMs: this._resolvedOptions.keepAliveIntervalMs,
       recoveryHookTimeoutMs: this._resolvedOptions.fiberRecoveryHookTimeoutMs,
