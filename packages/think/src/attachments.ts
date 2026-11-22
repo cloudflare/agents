@@ -12,6 +12,8 @@ type RenderedAttachment = string | { markdown: string } | undefined;
 /**
  * The default text for a reply attachment, or `undefined` to skip it:
  * unknown types, and types a channel handles out of band (`voice_note`).
+ *
+ * @internal
  */
 export function defaultAttachmentText(
   attachment: ReplyAttachment
@@ -39,7 +41,11 @@ export function defaultAttachmentText(
   }
 }
 
-/** Render each attachment and post it. Failures are logged and skipped. */
+/**
+ * Render each attachment and post it. Failures are logged and skipped.
+ *
+ * @internal
+ */
 export async function deliverReplyAttachments(
   attachments: ReplyAttachment[] | undefined,
   render: (attachment: ReplyAttachment) => RenderedAttachment,

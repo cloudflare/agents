@@ -6,6 +6,7 @@
  * `super()` runs, and later checks read the snapshot.
  */
 
+/** @internal */
 export interface DeclaredOverrides {
   /** Record the members each prototype below the base declares. Call before `super()`. */
   snapshot(prototype: object): void;
@@ -13,7 +14,11 @@ export interface DeclaredOverrides {
   isOverridden(instance: object, methodName: string): boolean;
 }
 
-/** Track overrides of the methods of `base()` (read lazily). */
+/**
+ * Track overrides of the methods of `base()` (read lazily).
+ *
+ * @internal
+ */
 export function declaredOverrides(base: () => object): DeclaredOverrides {
   const declared = new WeakMap<object, ReadonlySet<PropertyKey>>();
   return {

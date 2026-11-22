@@ -19,7 +19,11 @@ type ToolDecisionOptions = {
   experimental_context?: unknown; // v6 alias kept for local wrappers if present
 };
 
-/** What the wrapped tools call on their agent. */
+/**
+ * What the wrapped tools call on their agent.
+ *
+ * @internal
+ */
 export interface ToolDecisionHooks {
   beforeToolCall(
     ctx: ToolCallContext
@@ -80,6 +84,8 @@ type ResolvedToolCallDecision =
  * in the raw AI SDK (it would surface the iterator object as the final
  * output). Think collapses it to the last yielded value instead. If
  * you need preliminary streaming, use an `async function*` `execute`.
+ *
+ * @internal
  */
 export function wrapToolsWithDecision(
   tools: ToolSet,

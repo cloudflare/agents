@@ -28,6 +28,8 @@ import type {
  * Carries an in-stream error that `classifyChatError` marked transient out of
  * the drain loop, so it reaches the same recovery routing as a thrown error.
  * `original` is the provider error the stream reported, when it had one.
+ *
+ * @internal
  */
 export class TransientChatStreamError extends Error {
   constructor(
@@ -40,14 +42,22 @@ export class TransientChatStreamError extends Error {
   }
 }
 
-/** Whether a classification routes the turn into bounded recovery. */
+/**
+ * Whether a classification routes the turn into bounded recovery.
+ *
+ * @internal
+ */
 export function isTransientClassification(
   classification: ChatErrorClassification | undefined
 ): classification is "transient" | "rate_limit" {
   return classification === "transient" || classification === "rate_limit";
 }
 
-/** What {@link ThinkContextOverflow} reads from its agent. */
+/**
+ * What {@link ThinkContextOverflow} reads from its agent.
+ *
+ * @internal
+ */
 export interface ThinkContextOverflowOptions {
   readonly config: () => ContextOverflowConfig | undefined;
   /** Whether the agent overrides `classifyChatError`. */
@@ -70,6 +80,7 @@ export interface ThinkContextOverflowOptions {
   readonly rebuildMessages: () => Promise<ModelMessage[]>;
 }
 
+/** @internal */
 export class ThinkContextOverflow {
   readonly #options: ThinkContextOverflowOptions;
   /**

@@ -49,7 +49,11 @@ const EXTENSION_SCALAR_CONFIG_KEYS = [
   "timeout"
 ] as const satisfies ReadonlyArray<keyof TurnConfig>;
 
-/** What {@link createThinkExtensionManager} needs from the agent. */
+/**
+ * What {@link createThinkExtensionManager} needs from the agent.
+ *
+ * @internal
+ */
 export interface ThinkExtensionManagerOptions {
   readonly loader: WorkerLoader;
   readonly storage: DurableObjectStorage;
@@ -62,6 +66,8 @@ export interface ThinkExtensionManagerOptions {
 /**
  * Create the extension manager. Extensions get a host binding only when the
  * Worker entry re-exports `HostBridgeLoopback`.
+ *
+ * @internal
  */
 export function createThinkExtensionManager(
   options: ThinkExtensionManagerOptions
@@ -100,6 +106,8 @@ export function createThinkExtensionManager(
  * Load the static extensions, restore the dynamic ones from storage, and
  * register each extension's context blocks under a name-prefixed label.
  * Unloading an extension removes its blocks.
+ *
+ * @internal
  */
 export async function loadThinkExtensions(
   manager: ExtensionManager,
@@ -136,7 +144,11 @@ export async function loadThinkExtensions(
   });
 }
 
-/** Runs the extension hooks of one agent. */
+/**
+ * Runs the extension hooks of one agent.
+ *
+ * @internal
+ */
 export class ThinkExtensionHooks {
   readonly #manager: () => ExtensionManager | undefined;
   readonly #timeoutMs: () => number;

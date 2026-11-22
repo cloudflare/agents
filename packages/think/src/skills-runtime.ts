@@ -17,9 +17,14 @@ import type {
 } from "agents/skills";
 import { createSkillTools } from "agents/skills/tools/ai-sdk";
 
-/** Label of the context block that carries the skill catalog. */
+/**
+ * Label of the context block that carries the skill catalog.
+ *
+ * @internal
+ */
 export const SKILLS_CONTEXT_LABEL = "think_skills";
 
+/** @internal */
 export class ThinkSkills {
   #sources: readonly SkillSource[] = [];
   #catalog: SkillCatalog | null = null;

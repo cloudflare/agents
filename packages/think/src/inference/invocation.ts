@@ -62,7 +62,11 @@ const agentsAISDKInvocationBounded = Symbol.for(
 );
 const usesAISDKV7Telemetry = "registerTelemetry" in aiSdk;
 
-/** The text a stream error reaches the client as. */
+/**
+ * The text a stream error reaches the client as.
+ *
+ * @internal
+ */
 export function streamErrorToString(error: unknown): string {
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;
@@ -169,6 +173,8 @@ const inferenceStreamFinalizers = new WeakMap<
  * abandoned tee branch so the operation span closes even on early exits.
  * Idempotent (the finalizer is removed before it runs); the drain is handed
  * to `waitUntil` so it survives turn completion without blocking it.
+ *
+ * @internal
  */
 export function drainInferenceStream(
   result: object,
@@ -192,7 +198,11 @@ export function drainInferenceStream(
   }
 }
 
-/** The agent hooks an invocation calls while the model runs. */
+/**
+ * The agent hooks an invocation calls while the model runs.
+ *
+ * @internal
+ */
 export interface InferenceHooks {
   /**
    * Proactive context guard, run before `beforeStep`. Returns recompacted
@@ -228,7 +238,11 @@ export interface InferenceHooks {
   transformResult(result: StreamableResult): StreamableResult;
 }
 
-/** Everything a turn decided before calling the model. */
+/**
+ * Everything a turn decided before calling the model.
+ *
+ * @internal
+ */
 export interface InferenceInvocationInput {
   /** The merged config from `beforeTurn` and extensions. */
   readonly config: TurnConfig;
@@ -254,6 +268,8 @@ export interface InferenceInvocationInput {
 /**
  * Build the turn's `streamText` call. The returned function starts the
  * model stream; call it once.
+ *
+ * @internal
  */
 export function createInferenceInvocation(
   input: InferenceInvocationInput

@@ -18,12 +18,18 @@ const encoder = new TextEncoder();
 /**
  * A cached message's size in the unit the hydration budget is measured in:
  * UTF-8 bytes of its serialized form, not UTF-16 code units.
+ *
+ * @internal
  */
 export function cachedMessageBytes(message: UIMessage): number {
   return encoder.encode(JSON.stringify(message)).byteLength;
 }
 
-/** What the last budgeted refresh measured. */
+/**
+ * What the last budgeted refresh measured.
+ *
+ * @internal
+ */
 export interface HydrationResult {
   /** `true` when the cache is a recent window of a larger transcript. */
   truncated: boolean;
@@ -31,7 +37,11 @@ export interface HydrationResult {
   hydratedMessages: number;
 }
 
-/** What a {@link ThinkTranscriptCache} reads from its agent. */
+/**
+ * What a {@link ThinkTranscriptCache} reads from its agent.
+ *
+ * @internal
+ */
 export interface TranscriptCacheHost {
   /** The agent's `hydrationByteBudget`. Non-finite or non-positive: no budget. */
   budget(): number;
@@ -52,6 +62,7 @@ export interface TranscriptCacheHost {
   refreshed(): void;
 }
 
+/** @internal */
 export class ThinkTranscriptCache {
   readonly #host: TranscriptCacheHost;
 

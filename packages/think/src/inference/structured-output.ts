@@ -22,6 +22,8 @@ import type { UIMessage } from "ai";
  *
  * The name is namespaced to avoid clashing with user tools; if a user tool
  * already uses it, the turn picks a suffixed variant (see `_handleTurn`).
+ *
+ * @internal
  */
 export const THINK_FINAL_ANSWER_TOOL_NAME = "think_final_answer";
 
@@ -29,6 +31,8 @@ export const THINK_FINAL_ANSWER_TOOL_NAME = "think_final_answer";
  * Whether `name` is (or is a collision-suffixed variant of) the reserved
  * structured-output final-answer tool. Used to strip the internal tool's parts
  * from persisted assistant messages regardless of which per-turn name was used.
+ *
+ * @internal
  */
 export function isThinkFinalAnswerToolName(name: string): boolean {
   return (
@@ -40,6 +44,8 @@ export function isThinkFinalAnswerToolName(name: string): boolean {
 /**
  * Build the system-prompt instruction that tells the model to terminate a
  * structured workflow turn by calling the given final-answer tool.
+ *
+ * @internal
  */
 export function thinkFinalAnswerInstruction(toolName: string): string {
   return (
@@ -53,6 +59,8 @@ export function thinkFinalAnswerInstruction(toolName: string): string {
 /**
  * `message` without the parts of the internal final-answer tool, which a
  * structured workflow turn uses as plumbing and never stores.
+ *
+ * @internal
  */
 export function withoutFinalAnswerParts(message: UIMessage): UIMessage {
   const parts = message.parts.filter((part) => {

@@ -11,14 +11,22 @@ import type { ThinkModel } from "./turn-types";
 
 const WORKERS_AI_MODEL_PREFIXES = ["@cf/", "@hf/"];
 
-/** Whether `model` is a Workers AI id (`@cf/...` or `@hf/...`). */
+/**
+ * Whether `model` is a Workers AI id (`@cf/...` or `@hf/...`).
+ *
+ * @internal
+ */
 export function isWorkersAIModelId(model: string): boolean {
   return WORKERS_AI_MODEL_PREFIXES.some(
     (prefix) => model.startsWith(prefix) && model.length > prefix.length
   );
 }
 
-/** What a {@link ThinkModelResolver} reads from its agent. */
+/**
+ * What a {@link ThinkModelResolver} reads from its agent.
+ *
+ * @internal
+ */
 export interface ThinkModelResolverOptions {
   /** The Workers AI binding. Read once, when the first string model resolves. */
   readonly binding: () => Ai;
@@ -32,6 +40,8 @@ export interface ThinkModelResolverOptions {
  * Builds models through one default provider per agent. The provider is
  * created on first use and cached, which assumes the binding is stable for
  * the lifetime of the agent.
+ *
+ * @internal
  */
 export class ThinkModelResolver {
   readonly #options: ThinkModelResolverOptions;

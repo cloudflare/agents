@@ -12,13 +12,19 @@ import type { UIMessage } from "ai";
  * {@link stampTurnContext}) and trusted by hooks and recovery. They are
  * stripped from client-supplied messages at intake so a client can never
  * forge them.
+ *
+ * @internal
  */
 export const RESERVED_MESSAGE_METADATA_KEYS = [
   "channel",
   "turnMetadata"
 ] as const;
 
-/** The reserved keys `message` carries, or `undefined` when it has none. */
+/**
+ * The reserved keys `message` carries, or `undefined` when it has none.
+ *
+ * @internal
+ */
 export function reservedMetadataOf(
   message: UIMessage
 ): Record<string, unknown> | undefined {
@@ -44,6 +50,8 @@ export function reservedMetadataOf(
  * reserved keys on every client write, so a compare against a stored row has
  * to drop them too. Mirrors `SessionCore.stripReservedMetadata` for the keys
  * Think registers.
+ *
+ * @internal
  */
 export function stripReservedMetadata(message: UIMessage): UIMessage {
   const metadata = message.metadata;
@@ -73,6 +81,8 @@ export function stripReservedMetadata(message: UIMessage): UIMessage {
 /**
  * Stamp the channel id, and the caller's turn metadata when supplied, onto
  * the user messages.
+ *
+ * @internal
  */
 export function stampTurnContext(
   messages: UIMessage[],
@@ -109,13 +119,21 @@ function latestUserMessageMetadata(
   return undefined;
 }
 
-/** The channel stamped on the latest user message in the given list, if any. */
+/**
+ * The channel stamped on the latest user message in the given list, if any.
+ *
+ * @internal
+ */
 export function channelFromMessages(messages: UIMessage[]): string | undefined {
   const channel = latestUserMessageMetadata(messages)?.channel;
   return typeof channel === "string" ? channel : undefined;
 }
 
-/** The turn metadata stamped on the latest user message, if any. */
+/**
+ * The turn metadata stamped on the latest user message, if any.
+ *
+ * @internal
+ */
 export function turnMetadataFromMessages(
   messages: UIMessage[]
 ): Record<string, unknown> | undefined {
@@ -137,6 +155,8 @@ export function turnMetadataFromMessages(
  * row keeps its own, and a new user message gets `channel` when the caller
  * supplies one. A message with no reserved metadata to keep is written as
  * the client sent it.
+ *
+ * @internal
  */
 export function incomingMessageWrite(
   sanitized: UIMessage,
