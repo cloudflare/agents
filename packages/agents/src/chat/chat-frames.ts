@@ -20,7 +20,7 @@ import {
 } from "./recent-terminals";
 
 /** A frame sent to tabs. */
-export type ChatFrame = { type: string };
+export type ChatFrame = Readonly<Record<string, unknown>>;
 
 /** A socket a frame can be sent to directly. */
 export interface ChatFrameConnection {
@@ -111,7 +111,8 @@ export class ChatFrames {
   }
 
   #prepare(frame: ChatFrame): ChatFrame {
-    const fields = frame as ChatFrame & {
+    const fields = frame as {
+      type?: unknown;
       id?: unknown;
       done?: unknown;
       error?: unknown;

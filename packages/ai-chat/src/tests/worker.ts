@@ -4694,7 +4694,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       _chatRecoveryOriginIdsScope: {
         run<R>(store: string[], fn: () => R): R;
       };
-      _originMessageIdsFor(requestId: string): string[] | undefined;
+      _frames: { originIds(requestId: string): string[] | undefined };
     };
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
@@ -4702,9 +4702,9 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     });
     const scoped = self._chatRecoveryOriginIdsScope.run(ids, async () => {
       await gate;
-      return self._originMessageIdsFor("successor");
+      return self._frames.originIds("successor");
     });
-    const unrelated = self._originMessageIdsFor("unrelated");
+    const unrelated = self._frames.originIds("unrelated");
     release();
     return { successor: await scoped, unrelated };
   }

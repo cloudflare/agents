@@ -31,6 +31,13 @@ export { TurnQueue, type TurnResult, type EnqueueOptions } from "./turn-queue";
 export { originMessageIds, withOriginMessageIds } from "./origin-message-ids";
 
 export {
+  ChatFrames,
+  type ChatFrame,
+  type ChatFrameConnection,
+  type ChatFramesOptions
+} from "./chat-frames";
+
+export {
   mergeQueuedUserMessages,
   mergeUserMessages
 } from "./merge-user-messages";

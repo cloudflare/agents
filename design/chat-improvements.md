@@ -36,7 +36,7 @@ All of these live in `packages/agents/src/chat/`.
 | Tool state machine              | Shipped                 | `applyToolUpdate` and the update builders (`tool-state.ts`). Think uses them; `AIChatAgent` keeps its own tool-part update path because of its shared `_streamingMessage` reference (see [chat-shared-layer.md](./chat-shared-layer.md)) |
 | Request context persistence     | Not shipped as proposed | No shared `RequestContextStore`. Think keeps `lastClientTools` and `lastBody` in its `think_config` table; `AIChatAgent` uses `cf_ai_chat_request_context`                                                                               |
 | Stream resume handshake         | Shipped                 | `ResumeHandshake` (`resume-handshake.ts`), used by both hosts                                                                                                                                                                            |
-| Broadcast with resume exclusion | Not extracted           | Each host still excludes connections with a pending resume when it broadcasts (Think does this in `_broadcastChat`)                                                                                                                      |
+| Broadcast with resume exclusion | Extracted               | `ChatFrames` (`chat-frames.ts`) sends every response frame for both hosts: origin ids on terminals, the queued view on message lists, no live frames to a tab waiting on its resume ack, and the recent-terminal record                  |
 
 ## Deprecations
 

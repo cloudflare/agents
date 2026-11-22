@@ -203,6 +203,7 @@ import {
   enforceRowSizeLimit,
   StreamAccumulator,
   CHAT_MESSAGE_TYPES,
+  ChatFrames,
   ResumableStream,
   createChatStreams,
   addContinuationTarget,
@@ -253,7 +254,6 @@ import {
   enqueueChatRecoveryTask,
   clearRecentChatTerminals,
   recentChatTerminal,
-  recordRecentChatTerminal,
   type StreamInterruptionOutcome,
   createChatFiberSnapshot,
   unwrapChatFiberSnapshot,
@@ -272,7 +272,6 @@ import {
   clearChatTerminal,
   pendingChatTerminal,
   originMessageIds,
-  withOriginMessageIds,
   buildChatRecoveringFrame,
   setChatRecovering,
   AgentToolStreamProgressThrottle,
@@ -2484,9 +2483,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           };
     const requestId = record.requestId;
     if (stored.originMessageIds) {
-      this._requestOriginMessageIds.set(requestId, stored.originMessageIds);
+      this._frames.requestOrigins.set(requestId, stored.originMessageIds);
     }
-    const forget = () => this._requestOriginMessageIds.delete(requestId);
+    const forget = () => this._frames.requestOrigins.delete(requestId);
     const request = this._clientChatRequest({
       requestId,
       isRegeneration: stored.trigger === "regenerate-message",
@@ -2544,6 +2543,16 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
   protected _resumableStream!: ResumableStream;
   private _pendingResumeConnections: Set<string> = new Set();
+  /** Where every chat frame to tabs goes out (the shared `ChatFrames`). */
+  private readonly _frames = new ChatFrames({
+    broadcast: (message, without) => this.broadcast(message, without),
+    kv: this.ctx.storage.kv,
+    resuming: this._pendingResumeConnections,
+    storedOriginIds: (requestId) =>
+      this._resumableStream.getOriginMessageIds(requestId),
+    recoveryOriginIds: () => this._activeChatRecoveryOriginIds,
+    clientView: (messages) => this._turns.clientView(messages)
+  });
   /** Lazily-built shared resume-handshake driver (Tier-2). */
   private _resumeHandshakeInstance: ResumeHandshake | null = null;
   /**
@@ -2653,7 +2662,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     generateRequestId: () => crypto.randomUUID(),
     activeRequestId: () => admittedTurnContext.getStore()?.requestId,
     broadcastChunk: (requestId, body) =>
-      this._broadcastChat({
+      this._frames.broadcast({
         type: MSG_CHAT_RESPONSE,
         id: requestId,
         body,
@@ -3322,7 +3331,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         messages: this.messages,
         lastBody: context ? context.body : this._lastBody,
         lastClientTools: context ? context.clientTools : this._lastClientTools,
-        originMessageIds: this._originMessageIdsFor(requestId)
+        originMessageIds: this._frames.originIds(requestId)
       }),
       ...(branchParentId !== undefined && { branchParentId })
     };
@@ -7773,7 +7782,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     };
 
     const terminal = (frame: Record<string, unknown>) =>
-      this._broadcastChat({
+      this._frames.broadcast({
         type: MSG_CHAT_RESPONSE,
         id: requestId,
         done: true,
@@ -8402,7 +8411,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const requestId = event.id;
     const requestOriginIds = originMessageIds(incomingMessages);
     if (requestOriginIds) {
-      this._requestOriginMessageIds.set(requestId, requestOriginIds);
+      this._frames.requestOrigins.set(requestId, requestOriginIds);
     }
 
     // The turn core runs the request: decide, accept (pre-stream mark and
@@ -8425,7 +8434,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         })
       );
     } finally {
-      this._requestOriginMessageIds.delete(requestId);
+      this._frames.requestOrigins.delete(requestId);
     }
   }
 
@@ -8591,7 +8600,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       // a skipped request it never streamed, so only the tab that sent it
       // was ever shown it.
       onCancelledBeforeStart: () =>
-        this._endUnstartedRequest(connection, requestId, "aborted"),
+        this._frames.endUnstarted(connection, requestId, "aborted"),
       run: async ({ branchParentId }, abortSignal) => {
         // The request's tools and body become the stored request context
         // now that its turn runs. Storing them when the request was
@@ -9184,7 +9193,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
                 chunkBody,
                 flushState
               );
-              this._broadcastChat({
+              this._frames.broadcast({
                 type: MSG_CHAT_RESPONSE,
                 id: requestId,
                 body: chunkBody,
@@ -9236,7 +9245,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               messagesPersisted: true,
               error: streamError
             });
-            this._broadcastChat({
+            this._frames.broadcast({
               type: MSG_CHAT_RESPONSE,
               id: requestId,
               body: action.error,
@@ -9255,7 +9264,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             chunkBody,
             flushState
           );
-          this._broadcastChat({
+          this._frames.broadcast({
             type: MSG_CHAT_RESPONSE,
             id: requestId,
             body: chunkBody,
@@ -9360,7 +9369,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       }
       // After the transcript broadcast: `done` flips `useAgentChat` to ready,
       // and a later snapshot would drop a message sent in between (#2119).
-      this._broadcastChat({
+      this._frames.broadcast({
         type: MSG_CHAT_RESPONSE,
         id: requestId,
         body: "",
@@ -9446,7 +9455,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             streamFinalized = true;
           }
           if (!doneSent) {
-            this._broadcastChat({
+            this._frames.broadcast({
               type: MSG_CHAT_RESPONSE,
               id: requestId,
               body: "",
@@ -9476,7 +9485,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             streamFinalized = true;
           }
           if (!doneSent) {
-            this._broadcastChat({
+            this._frames.broadcast({
               type: MSG_CHAT_RESPONSE,
               id: requestId,
               body: "",
@@ -9542,7 +9551,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         if (!doneSent) {
           const streamError =
             error instanceof Error ? error.message : "Stream error";
-          this._broadcastChat({
+          this._frames.broadcast({
             type: MSG_CHAT_RESPONSE,
             id: requestId,
             body: streamError,
@@ -9844,7 +9853,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
                 chunkBody,
                 flushState
               );
-              this._broadcastChat({
+              this._frames.broadcast({
                 type: MSG_CHAT_RESPONSE,
                 id: requestId,
                 body: chunkBody,
@@ -9922,7 +9931,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               messagesPersisted: true,
               error: streamError
             });
-            this._broadcastChat({
+            this._frames.broadcast({
               type: MSG_CHAT_RESPONSE,
               id: requestId,
               body: action.error,
@@ -9947,7 +9956,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             chunkBody,
             flushState
           );
-          this._broadcastChat({
+          this._frames.broadcast({
             type: MSG_CHAT_RESPONSE,
             id: requestId,
             body: chunkBody,
@@ -10080,7 +10089,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           this._completeResumableStream(streamId, "recovering");
           this._pendingResumeConnections.clear();
           if (!doneSent) {
-            this._broadcastChat({
+            this._frames.broadcast({
               type: MSG_CHAT_RESPONSE,
               id: requestId,
               body: "",
@@ -10106,7 +10115,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           this._completeStoppedStream(streamId, requestId);
           this._pendingResumeConnections.clear();
           if (!doneSent) {
-            this._broadcastChat({
+            this._frames.broadcast({
               type: MSG_CHAT_RESPONSE,
               id: requestId,
               body: "",
@@ -10167,7 +10176,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
     const sendTerminalFrame = () => {
       if (!terminalFrame) return;
-      this._broadcastChat(terminalFrame);
+      this._frames.broadcast(terminalFrame);
       terminalFrame = undefined;
     };
 
@@ -11669,7 +11678,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         recordTerminalError: (requestId, errorText) =>
           this._recordTerminalChatStatus("error", requestId, errorText),
         endSkippedRequest: (requestId) =>
-          this._endUnstartedRequest(null, requestId, "skipped"),
+          this._frames.endUnstarted(null, requestId, "skipped"),
         reconcileAgentToolChildRuns: () => this._agentToolRuns.reconcileOwn(),
         trackAlarmWork: (turn) => this.lifecycle.trackAlarmWork(turn),
         attemptScope: new AsyncLocalStorage<ChatRecoveryAttemptScope>(),
@@ -11836,8 +11845,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           // reason; only the set of durable writes below differs (Think also
           // writes a submission row).
           const messageIds =
-            this._originMessageIdsFor(ctx.requestId) ?? originMessageIds;
-          this._broadcastChat({
+            this._frames.originIds(ctx.requestId) ?? originMessageIds;
+          this._frames.broadcast({
             type: MSG_CHAT_RESPONSE,
             id: ctx.requestId,
             body: ctx.terminalMessage,
@@ -11908,7 +11917,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       retryAfterSeconds: input.retryAfterSeconds,
       latestUserMessageId:
         [...this.messages].reverse().find((m) => m.role === "user")?.id ?? null,
-      originMessageIds: this._originMessageIdsFor(input.requestId),
+      originMessageIds: this._frames.originIds(input.requestId),
       // A stall before the first chunk leaves the user's message as the
       // leaf (#1941). A regeneration retries the message it branches from.
       retryTargetUserId: async () =>
@@ -12201,7 +12210,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     } = input;
     const { retryTargetUserId } = input.detail;
     const originIds =
-      this._originMessageIdsFor(requestId) ?? snapshot?.originMessageIds;
+      this._frames.originIds(requestId) ?? snapshot?.originMessageIds;
     const streamIsTerminal =
       streamStatus === "completed" || streamStatus === "error";
 
@@ -12297,7 +12306,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       requestId,
       declinedMessage
     );
-    this._broadcastChat({
+    this._frames.broadcast({
       type: MSG_CHAT_RESPONSE,
       id: requestId,
       body: declinedMessage,
@@ -12871,45 +12880,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
   // ── Concurrency strategies ──────────────────────────────────────
 
-  /**
-   * Send the terminal frame of a request that ended before its turn started
-   * (skipped or cancelled in the queue) to the connection that sent it. No
-   * other connection was shown the request.
-   */
-  private _endUnstartedRequest(
-    connection: Connection | null,
-    requestId: string,
-    outcome: "skipped" | "aborted"
-  ): void {
-    const frame = {
-      type: MSG_CHAT_RESPONSE,
-      id: requestId,
-      body: "",
-      done: true,
-      outcome
-    };
-    // A request replayed after a reset has no connection: the tab that sent
-    // it may be any of them now.
-    if (!connection) {
-      this._broadcastChat(frame);
-      return;
-    }
-    const sent = this._withOriginMessageIds(frame);
-    try {
-      connection.send(JSON.stringify(sent));
-    } catch {
-      // The connection closed before the server could answer.
-    }
-    // Recorded like every terminal, so the tab that sent it gets it when it
-    // resumes by request id, if it was away when it was sent.
-    recordRecentChatTerminal(this.ctx.storage.kv, sent);
-  }
-
   private _completeSkippedRequest(
     connection: Connection | null,
     requestId: string
   ): void {
-    this._endUnstartedRequest(connection, requestId, "skipped");
+    this._frames.endUnstarted(connection, requestId, "skipped");
     // A skipped turn settles out of the pre-stream set, but must NOT release
     // parked connections (#1784): a skip happens because a NEWER turn was
     // admitted (latest/merge supersede) or the queue generation advanced. The
@@ -13037,7 +13012,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       },
       recordTerminal: (requestId, errorMessage) =>
         this._recordTerminalChatStatus("error", requestId, errorMessage),
-      broadcast: (frame) => this._broadcastChat({ ...frame }),
+      broadcast: (frame) => this._frames.broadcast({ ...frame }),
       // Called once the turn has left the queue. A continuation that was
       // activated while another turn settled was fired inside that turn's
       // admission context, and code after its own turn still runs in it, so
@@ -13636,7 +13611,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   private async _recordChatTerminal(
     requestId: string,
     body: string,
-    messageIds = this._originMessageIdsFor(requestId)
+    messageIds = this._frames.originIds(requestId)
   ): Promise<void> {
     await recordChatTerminal(this.ctx.storage, requestId, body, messageIds);
   }
@@ -13669,7 +13644,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     await setChatRecovering(active, requestId, {
       storage: this.ctx.storage,
       messageType: MSG_CHAT_RECOVERING,
-      broadcast: (frame) => this._broadcastChat(frame),
+      broadcast: (frame) => this._frames.broadcast(frame),
       now: Date.now()
     });
   }
@@ -13771,7 +13746,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     }
   ): string {
     const originIds =
-      this._requestOriginMessageIds.get(requestId) ??
+      this._frames.requestOrigins.get(requestId) ??
       this._activeChatRecoveryOriginIds;
     const streamId = this._resumableStream.start(requestId, {
       ...options,
@@ -13944,49 +13919,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       this._recordSubmissionMessage(requestId, persistedId);
     }
     this._broadcastMessages();
-  }
-
-  private _broadcastChat(message: Record<string, unknown>, exclude?: string[]) {
-    const allExclusions = [
-      ...(exclude || []),
-      ...this._pendingResumeConnections
-    ];
-    const frame = this._withOriginMessageIds(message);
-    this.broadcast(JSON.stringify(frame), allExclusions);
-    // A tab that is away when the request ends gets this frame when it
-    // resumes (`recent-terminals.ts`). After the broadcast: the record can
-    // fail, and the frame must still go out.
-    if (message.type === MSG_CHAT_RESPONSE) {
-      recordRecentChatTerminal(this.ctx.storage.kv, frame);
-    }
-  }
-
-  /**
-   * User message ids a WebSocket chat request originated from (#2280), keyed
-   * by request id while the request is handled. After that (or after a
-   * restart) the request's stream metadata is the fallback.
-   */
-  private _requestOriginMessageIds = new Map<string, string[]>();
-
-  private _originMessageIdsFor(requestId: string): string[] | undefined {
-    return (
-      this._requestOriginMessageIds.get(requestId) ??
-      this._resumableStream.getOriginMessageIds(requestId) ??
-      this._activeChatRecoveryOriginIds
-    );
-  }
-
-  private _withOriginMessageIds(
-    message: Record<string, unknown>
-  ): Record<string, unknown> {
-    if (
-      message.type !== MSG_CHAT_RESPONSE ||
-      typeof message.id !== "string" ||
-      !(message.done || message.error)
-    ) {
-      return message;
-    }
-    return withOriginMessageIds(message, this._originMessageIdsFor(message.id));
   }
 
   private _broadcast(message: Record<string, unknown>, exclude?: string[]) {
