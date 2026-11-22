@@ -24,6 +24,13 @@ import {
   setConnectionReadonly
 } from "./connection-flags";
 import { exposableMethods, type CallableInvoker } from "./callables-target";
+import { EventLog, type EventLogOptions } from "./event-log";
+import {
+  EVENT_LOG_ERROR,
+  EVENT_LOG_SUBSCRIBE,
+  parseEventLogClientFrame,
+  type EventLogClientFrame
+} from "./event-log-protocol";
 import type {
   SyncedState,
   WebSocketHandlers,
@@ -164,6 +171,10 @@ export class WebSockets extends LifecycleCapability {
   readonly #connecting = new Set<Connection>();
   readonly #callables: ReadonlyMap<string, CallableInvoker>;
   readonly #sessions = new Map<string, CapnWebSession>();
+  readonly #logs = new Map<
+    string,
+    Pick<EventLog, "subscribe" | "unsubscribe" | "dispose">
+  >();
   #manager: ConnectionManager | undefined;
 
   constructor(options: WebSocketsOptions = {}) {
@@ -238,6 +249,7 @@ export class WebSockets extends LifecycleCapability {
    * them down.
    */
   dispose(): void {
+    for (const log of this.#logs.values()) log.dispose();
     for (const connection of this.getConnections()) {
       try {
         connection.close(1001, "Durable Object destroyed");
@@ -254,6 +266,57 @@ export class WebSockets extends LifecycleCapability {
    */
   use(handlers: WebSocketHandlers): void {
     this.#added.push(handlers);
+  }
+
+  // ── Event logs ─────────────────────────────────────────────────────────
+
+  /**
+   * Declare a replayable event log. Every event it publishes gets the
+   * log's next seq, is stored, and goes to the connections following it.
+   * A client follows with `followEventLog()` (`agents/client`) or
+   * `useEventLog()` (`agents/react`), and on reconnect gets the events it
+   * missed, or a resync from `options.snapshot` when they are gone.
+   *
+   * Declare logs where you construct the capability: a client's subscribe
+   * frame can arrive in a fresh isolate, and a log declared later does not
+   * exist yet then. Declaring a name twice throws.
+   *
+   * @experimental The API surface may change before stabilizing.
+   */
+  log<T = unknown, S = unknown>(
+    name: string,
+    options: EventLogOptions<S> = {}
+  ): EventLog<T, S> {
+    if (this.#logs.has(name)) {
+      throw new Error(`Event log "${name}" is already declared`);
+    }
+    const log = new EventLog<T, S>(name, options, {
+      sql: () => this.lifecycle.storage.sql,
+      connections: () => this.getConnections(),
+      emit: (type, payload) => this.lifecycle.events.emit(type, payload)
+    });
+    this.#logs.set(name, log);
+    return log;
+  }
+
+  /** Answer a subscribe or unsubscribe frame from a client. */
+  #logFrame(connection: Connection, frame: EventLogClientFrame): void {
+    const log = this.#logs.get(frame.log);
+    if (!log) {
+      if (frame.type === EVENT_LOG_SUBSCRIBE) {
+        this.#sendFrame(connection, {
+          type: EVENT_LOG_ERROR,
+          log: frame.log,
+          error: `No event log named "${frame.log}"`
+        });
+      }
+      return;
+    }
+    if (frame.type === EVENT_LOG_SUBSCRIBE) {
+      log.subscribe(connection, frame.cursor);
+    } else {
+      log.unsubscribe(connection);
+    }
   }
 
   // ── Connections ────────────────────────────────────────────────────────
@@ -319,6 +382,18 @@ export class WebSockets extends LifecycleCapability {
     connection: Connection,
     message: WebSocketMessage
   ): Promise<void> {
+    if (this.#logs.size > 0 && typeof message === "string") {
+      const frame = parseEventLogClientFrame(parseJson(message));
+      if (frame) {
+        // Host context, so `snapshot` and `canSubscribe` see the
+        // connection. The answer itself runs synchronously inside.
+        await this.lifecycle.runInHostContext(
+          () => this.#logFrame(connection, frame),
+          { connection }
+        );
+        return;
+      }
+    }
     if (
       this.#state &&
       this.#protocol !== false &&

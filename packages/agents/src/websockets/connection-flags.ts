@@ -21,7 +21,14 @@ export const CF_READONLY_KEY = "_cf_readonly";
  */
 export const CF_NO_PROTOCOL_KEY = "_cf_no_protocol";
 
-const internalKeys = new Set<string>([CF_READONLY_KEY, CF_NO_PROTOCOL_KEY]);
+/** The event logs a connection follows (see `EventLog`). */
+export const CF_EVENT_LOGS_KEY = "_cf_logs";
+
+const internalKeys = new Set<string>([
+  CF_READONLY_KEY,
+  CF_NO_PROTOCOL_KEY,
+  CF_EVENT_LOGS_KEY
+]);
 
 /**
  * Register additional `_cf_`-prefixed keys a host or mixin stores in

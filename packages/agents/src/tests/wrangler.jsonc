@@ -25,6 +25,10 @@
         "name": "StatefulPlainObject"
       },
       {
+        "class_name": "EventLogObject",
+        "name": "EventLogObject"
+      },
+      {
         "class_name": "RetryableStartObject",
         "name": "RetryableStartObject"
       },
@@ -477,6 +481,7 @@
         "CapabilityHarnessObject",
         "PlainLifecycleObject",
         "StatefulPlainObject",
+        "EventLogObject",
         "RetryableStartObject",
         "AlarmStartFailureObject",
         "ConcurrentStartObject",
