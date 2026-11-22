@@ -1166,8 +1166,7 @@ export class Lifecycle<
 
   /** The next wake: every job at its own time, held owners' after the hold. */
   #wakeTime(deferral?: JobDeferral): number | null {
-    const next = this.#jobQueue.nextAlarmTime(Date.now(), deferral?.owners);
-    return deferral ? Math.min(next ?? deferral.until, deferral.until) : next;
+    return this.#jobQueue.nextAlarmTime(Date.now(), deferral);
   }
 
   /** The deferral the driver ended a drive from the root with. */

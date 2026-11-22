@@ -235,3 +235,49 @@ describe("job driver hold within one scan", () => {
     });
   });
 });
+
+describe("job driver hold and the alarm", () => {
+  async function heldFailingOwner(
+    install: Parameters<
+      Parameters<typeof withCapabilityHarness>[0]
+    >[0]["install"]
+  ) {
+    const ran: string[] = [];
+    const failing = new Jobs("isolation-failing", ran);
+    const other = new Jobs("isolation-other", ran);
+    const { lifecycle } = install(failing);
+    lifecycle.use(other);
+    await lifecycle.start();
+    await failing.push({
+      id: "poison",
+      fn: "poison",
+      time: Date.now() - 1_000,
+      retry: QUICK
+    });
+    await lifecycle.alarm().catch(() => {});
+    return { failing, other, lifecycle };
+  }
+
+  it("lets an exclusive job keep its own wake during a hold", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const { other } = await heldFailingOwner(install);
+      const teardown = Date.now() + 60_000;
+      await other.push({
+        id: "teardown",
+        fn: "ok",
+        time: teardown,
+        exclusive: true
+      });
+      expect(await storage.getAlarm()).toBe(teardown);
+    });
+  });
+
+  it("drops the hold's wake once the held owner has no jobs", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const { lifecycle } = await heldFailingOwner(install);
+      storage.sql.exec("DELETE FROM cf_agents_jobs WHERE id = 'poison'");
+      await lifecycle.rearmAlarm();
+      expect(await storage.getAlarm()).toBeNull();
+    });
+  });
+});
