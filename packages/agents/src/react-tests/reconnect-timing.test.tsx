@@ -13,7 +13,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render } from "vitest-browser-react";
 import { Suspense } from "react";
-import { AgentClient, isLocalClose } from "../client";
+import { AgentClient } from "../client";
 import { useAgent } from "../react";
 import { getTestWorkerHost } from "./test-config";
 
@@ -208,38 +208,41 @@ describe("reconnect after a drop with an async query", () => {
     ).toBeLessThan(2500);
   }, 25_000);
 
-  it("tells PartySocket's own close events apart", async () => {
+  // PartySocket reports a failed upgrade with the same synthetic close as
+  // `reconnect()`; only a real `reconnect()` call may skip the delay.
+  it("waits between failed upgrades", async () => {
     const { host, protocol } = getTestWorkerHost();
-    const closeOf = (client: AgentClient) =>
-      new Promise<CloseEvent>((resolve) =>
-        client.addEventListener("close", (event) => resolve(event), {
-          once: true
-        })
-      );
-
-    // `reconnect()`: a local close.
-    const local = connect(`close-${crypto.randomUUID()}`);
-    await local.ready;
-    const reconnected = closeOf(local);
-    local.reconnect();
-    expect(isLocalClose(await reconnected)).toBe(true);
-
-    // A handshake that outlives `connectionTimeout`: a drop.
-    const slow = new AgentClient({
-      agent: "TestSlowConnectAgent",
-      name: `close-${crypto.randomUUID()}`,
-      host,
-      protocol,
-      connectionTimeout: 200
-    });
-    clients.push(slow);
-    expect(isLocalClose(await closeOf(slow))).toBe(false);
-
-    // A native close with another code: a drop.
-    expect(
-      isLocalClose(new CloseEvent("close", { code: 1006, reason: "" }))
-    ).toBe(false);
-  }, 20_000);
+    let token = 0;
+    const query = async () => ({ token: String(++token) });
+    let attempts = 0;
+    const onClose = () => {
+      attempts += 1;
+    };
+    const name = `missing-${crypto.randomUUID()}`;
+    function Probe() {
+      useAgent({
+        agent: "NoSuchAgentForTest",
+        name,
+        host,
+        protocol,
+        query,
+        onClose,
+        minReconnectionDelay: 2000
+      });
+      return null;
+    }
+    await render(
+      <Suspense fallback={null}>
+        <Probe />
+      </Suspense>
+    );
+    // @ts-expect-error - globalThis is not typed
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false;
+    await new Promise((resolve) => setTimeout(resolve, 4500));
+    // First dial, then at most one retry per 2 s.
+    expect(attempts).toBeGreaterThanOrEqual(1);
+    expect(attempts).toBeLessThanOrEqual(3);
+  }, 15_000);
 
   it("reopens at once after a local reconnect()", async () => {
     const { host, protocol } = getTestWorkerHost();

@@ -108,6 +108,13 @@ function createReadyEntry(): ReadyEntry {
   return entry;
 }
 
+/**
+ * Sockets that opened since their last close. PartySocket reports a failed
+ * upgrade with the same synthetic close as `reconnect()`; a failed upgrade
+ * never opened, so only a socket that did can have closed on purpose.
+ */
+const openedSockets = new WeakSet<PartySocket>();
+
 /** The host `usePartySocket` connects to when none is given. */
 function defaultSocketHost(): string {
   return typeof window !== "undefined"
@@ -910,6 +917,8 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     ...socketOptions,
     enabled: socketEnabled,
     onOpen: (event: Event) => {
+      const opened = event.target as PartySocket | null;
+      if (opened) openedSockets.add(opened);
       connectionErrorAddressKeyRef.current = null;
       setConnectionError(null);
       // The socket is open: transmit any RPC requests that were issued
@@ -1027,6 +1036,8 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
       const finalClose = closeClassifier.takeFinalClose();
       if (closedSocket) connectProgressRef.current.delete(closedSocket);
       const reconnecting = !!closedSocket?.shouldReconnect && !finalClose;
+      const wasOpen =
+        closedSocket !== null && openedSockets.delete(closedSocket);
 
       // Calls transmitted on the closed socket can never receive their
       // response — reject them. Calls still queued (never transmitted)
@@ -1052,14 +1063,15 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
         if (reconnecting) {
           // Pause reconnection for async queries until fresh query params are ready.
           if (isAsyncQuery) {
-            reopenAtRef.current = isLocalClose(event)
-              ? 0
-              : Date.now() +
-                firstRetryDelay(
-                  reconnectTimingFor(restOptions, reconnectTiming)
-                    .minReconnectionDelay,
-                  restOptions.maxReconnectionDelay
-                );
+            reopenAtRef.current =
+              wasOpen && isLocalClose(event)
+                ? 0
+                : Date.now() +
+                  firstRetryDelay(
+                    reconnectTimingFor(restOptions, reconnectTiming)
+                      .minReconnectionDelay,
+                    restOptions.maxReconnectionDelay
+                  );
             setAwaitingQueryRefresh(true);
           }
 
