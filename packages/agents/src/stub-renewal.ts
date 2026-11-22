@@ -99,19 +99,24 @@ export function renewingStub<T extends object>(
         get(target, key) {
           const member: unknown = Reflect.get(target, key);
           if (key !== "then" || typeof member !== "function") return member;
-          // Awaiting a remote property: observe its failure as well.
+          // Awaiting a remote property: prepare a renewed stub first, as
+          // for a call, and observe the read's failure as well.
           return (
             onFulfilled?: (value: unknown) => unknown,
             onRejected?: (error: unknown) => unknown
-          ) =>
-            Reflect.apply(member, target, [
-              onFulfilled ?? ((result: unknown) => result),
-              (error: unknown) => {
-                renew(stub);
-                if (onRejected) return onRejected(error);
-                throw error;
-              }
-            ]);
+          ) => {
+            const read = () =>
+              Reflect.apply(member, target, [
+                onFulfilled ?? ((result: unknown) => result),
+                (error: unknown) => {
+                  renew(stub);
+                  if (onRejected) return onRejected(error);
+                  throw error;
+                }
+              ]);
+            const pending = ready(stub);
+            return pending ? pending.then(read, onRejected) : read();
+          };
         }
       });
     }

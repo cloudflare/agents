@@ -763,6 +763,10 @@ export class TestWorkflowAgent extends Agent {
     return this.lifecycle.isStarted();
   }
 
+  get startedGetterForTest(): boolean {
+    return this.lifecycle.isStarted();
+  }
+
   get settingsForTest(): { enabled: boolean } {
     return { enabled: true };
   }

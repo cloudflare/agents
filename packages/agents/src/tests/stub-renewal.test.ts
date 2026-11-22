@@ -56,4 +56,23 @@ describe("renewingStub", () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(prepares).toBe(1);
   });
+
+  it("starts a renewed Agent before a property read that comes first", async () => {
+    const name = `renew-getter-${crypto.randomUUID()}`;
+    const namespace = env.TestWorkflowAgent;
+    const stub = await getAgentByName(namespace, name);
+    const renewing = renewingStub(
+      stub,
+      () => namespace.get(namespace.idFromName(name)),
+      (next) =>
+        (
+          next as unknown as { __unsafe_ensureInitialized(): Promise<void> }
+        ).__unsafe_ensureInitialized()
+    ) as unknown as {
+      crashForTest(): Promise<void>;
+      startedGetterForTest: Promise<boolean>;
+    };
+    await renewing.crashForTest().catch(() => {});
+    await expect(renewing.startedGetterForTest).resolves.toBe(true);
+  });
 });
