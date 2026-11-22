@@ -51,6 +51,8 @@ A client that saw a lost event has a cursor in `[seq_to + 1, open_until)` and ge
 
 The client also re-subscribes if a live event skips a seq, letting the server choose between replay and resync. Until that subscribe is answered the client ignores live frames: they left the server before it read the subscribe, so the replay sends them again in order. This guard matters when an isolate records a gap and is reset before it resyncs the survivors; the next isolate sees no open mark, and the skip is the only sign.
 
+An `onEvent` that throws is reported with `reportError` where the runtime has it (browsers and workerd: error listeners see it), and logged elsewhere (Node has none, and a rethrow would end the process); the client goes on with the next event, with the cursor past the one that threw. Stopping instead would lose events: the replay path does not check for gaps, so an event left behind in a replay frame would never come again. Re-delivering the event that threw would loop on a handler that always throws.
+
 ## Guarantees
 
 - **Durable:** every `publish` before its frame leaves; batched events at their write; the epoch; trimming; which logs each connection follows.

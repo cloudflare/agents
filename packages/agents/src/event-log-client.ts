@@ -60,6 +60,19 @@ export type EventLogSubscription = {
 const OPEN = 1;
 
 /**
+ * `reportError` where the runtime has it (browsers, workerd), so error
+ * listeners see the throw; elsewhere (Node) a log, never a throw that
+ * would end the process.
+ */
+function reportHandlerError(error: unknown): void {
+  if (typeof globalThis.reportError === "function") {
+    globalThis.reportError(error);
+  } else {
+    console.error("[followEventLog] onEvent threw:", error);
+  }
+}
+
+/**
  * Open subscriptions per socket and log. Several followers of one log on
  * one socket share the server's subscription, so only the last to close
  * sends the unsubscribe.
@@ -156,7 +169,16 @@ export function followEventLog<T = unknown, S = unknown>(
             return;
           }
           cursor = { epoch: cursor.epoch, seq: entry.seq };
-          handlers.onEvent(entry.data as T, entry.seq);
+          // A throwing handler must not cost the rest of the frame: during
+          // a replay nothing checks for gaps, so a skipped event would
+          // never come again.
+          try {
+            handlers.onEvent(entry.data as T, entry.seq);
+          } catch (error) {
+            // Report it as an uncaught error would be (browser error
+            // listeners see it), without stopping this frame.
+            reportHandlerError(error);
+          }
         }
         return;
       }
