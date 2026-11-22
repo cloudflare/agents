@@ -72,6 +72,10 @@ describe("owed response hooks", () => {
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
 
+      // The older hook reached the app, and left the newer status alone.
+      expect(
+        (await agent.getResponseLog()).map((response) => response.requestId)
+      ).toContain("older-request");
       expect(await agent.getPendingChatTerminalForTest()).toMatchObject({
         requestId: "newer-request"
       });
