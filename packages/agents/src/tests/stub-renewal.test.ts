@@ -72,7 +72,9 @@ describe("renewingStub", () => {
       crashForTest(): Promise<void>;
       startedGetterForTest: Promise<boolean>;
     };
-    await renewing.crashForTest().catch(() => {});
+    // The reset must happen (the call rejects), or the getter would read
+    // the original, started Agent.
+    await expect(renewing.crashForTest()).rejects.toThrow();
     await expect(renewing.startedGetterForTest).resolves.toBe(true);
   });
 });
