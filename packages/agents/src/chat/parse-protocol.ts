@@ -45,6 +45,7 @@ export type ChatProtocolEvent =
       type: "tool-approval";
       toolCallId: string;
       approved: boolean;
+      approvalId?: string;
       autoContinue?: boolean;
     }
   | {
@@ -126,6 +127,9 @@ export function parseProtocolMessage(raw: string): ChatProtocolEvent | null {
         type: "tool-approval",
         toolCallId: data.toolCallId as string,
         approved: data.approved as boolean,
+        ...(typeof data.approvalId === "string" && {
+          approvalId: data.approvalId
+        }),
         autoContinue: data.autoContinue as boolean | undefined
       };
 

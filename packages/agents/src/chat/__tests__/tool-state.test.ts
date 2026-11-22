@@ -213,13 +213,20 @@ describe("applyToolPartUpdate", () => {
     expect(env.broadcasts[0].parts).toHaveLength(2);
   });
 
-  it("changes a part of the reply in flight in place", async () => {
-    const part = makePart("tc1", "input-available");
-    const env = setup({
-      inFlight: { id: "a1", role: "assistant", parts: [part] }
+  it("writes a stored copy that shares its part objects with the reply in flight", async () => {
+    // A reply stored early (an approval request) can keep the same part
+    // objects as the reply still streaming. Changing the live part in place
+    // would change the stored copy's view too, and its update would be lost.
+    const part = makePart("tc1", "approval-requested", {
+      approval: { id: "ap1" }
     });
-    await applyToolPartUpdate(toolResultUpdate("tc1", "ok"), env.target);
-    expect(part).toMatchObject({ state: "output-available", output: "ok" });
+    const env = setup({
+      inFlight: { id: "a1", role: "assistant", parts: [part] },
+      stored: [{ id: "a1", role: "assistant", parts: [part] }]
+    });
+    await applyToolPartUpdate(toolApprovalUpdate("tc1", false), env.target);
+    expect(env.writes).toHaveLength(1);
+    expect(env.writes[0].parts[0]).toMatchObject({ state: "output-denied" });
   });
 
   it("answers unchanged for a repeat, with no write and no broadcast", async () => {
@@ -554,6 +561,19 @@ describe("applyToolUpdate", () => {
         approval: { id: "a1", approved: true }
       })
     );
+  });
+
+  it("matches only the approval an approval id names", () => {
+    const parts = [
+      makePart("tc1", "approval-requested", { approval: { id: "a" } }),
+      makePart("tc1", "approval-requested", { approval: { id: "b" } })
+    ];
+    const result = applyToolUpdate(parts, toolApprovalUpdate("tc1", true, "b"));
+    expect(result!.parts[0]).toBe(parts[0]);
+    expect(result!.parts[1]).toMatchObject({ state: "approval-responded" });
+    expect(
+      applyToolUpdate(parts, toolApprovalUpdate("tc1", true, "c"))
+    ).toBeNull();
   });
 
   it("updates every copy of a call a legacy message holds twice", () => {

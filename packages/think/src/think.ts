@@ -235,6 +235,7 @@ import {
   createAgentToolRunStore,
   createToolsFromClientSchemas,
   applyToolPartUpdate,
+  applyToolUpdate,
   unexecutedToolNames,
   toolResultUpdate,
   crossMessageToolResultUpdate,
@@ -7838,7 +7839,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         ),
       applyToolApproval: (event) =>
         this._applyToolUpdateToMessages(
-          toolApprovalUpdate(event.toolCallId, event.approved)
+          toolApprovalUpdate(event.toolCallId, event.approved, event.approvalId)
         ),
       continuation: (connection) => this._continuationSpec(connection),
       enqueueInteraction: (run) => this._enqueueInteractionOutcome(run)
@@ -10895,7 +10896,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           }
         : null,
       storedOwner: (toolCallId, inFlightId) =>
-        this._resolveToolCallOwner(toolCallId, inFlightId),
+        this._resolveToolCallOwner(toolCallId, inFlightId, update),
       write: async (message) => {
         const safe = await this._updateMessageInHistory(message);
         this._patchCachedMessage(safe);
@@ -10935,17 +10936,33 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    */
   private async _resolveToolCallOwner(
     toolCallId: string,
-    liveMessageId: string | undefined
+    liveMessageId: string | undefined,
+    update?: ToolPartUpdate
   ): Promise<UIMessage | null> {
     const owns = (message: UIMessage): boolean =>
       message.parts.some(
         (part) => (part as { toolCallId?: unknown }).toolCallId === toolCallId
       );
+    // A provider can reuse a tool-call id across replies: with an update,
+    // the newest message whose part it matches (by state, and by approval
+    // id when the client sent one) is the owner, as in `@cloudflare/ai-chat`.
+    const matches = (message: UIMessage): boolean =>
+      owns(message) &&
+      (update === undefined ||
+        applyToolUpdate(
+          message.parts as unknown as Array<Record<string, unknown>>,
+          update
+        ) !== null);
     const stored = async (id: string): Promise<UIMessage | null> => {
       const row = (await this.session.getMessage(id)) as UIMessage | null;
       return row && owns(row) ? row : null;
     };
     const cachedOwnerId = (): string | null => {
+      for (let i = this._cachedMessages.length - 1; i >= 0; i--) {
+        if (matches(this._cachedMessages[i])) {
+          return this._cachedMessages[i].id;
+        }
+      }
       for (let i = this._cachedMessages.length - 1; i >= 0; i--) {
         if (owns(this._cachedMessages[i])) return this._cachedMessages[i].id;
       }
@@ -10961,10 +10978,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const cachedId = cachedOwnerId();
     if (cachedId !== null) return stored(cachedId);
     if (this._cacheCoversActivePath) return null;
+    let newestHolder: UIMessage | null = null;
     for await (const message of this.session.history({ newestFirst: true })) {
-      if (owns(message as UIMessage)) return message as UIMessage;
+      if (matches(message as UIMessage)) return message as UIMessage;
+      if (!newestHolder && owns(message as UIMessage)) {
+        newestHolder = message as UIMessage;
+      }
     }
-    return null;
+    return newestHolder;
   }
 
   // ── Stability + pending interactions ─────────────────────────────

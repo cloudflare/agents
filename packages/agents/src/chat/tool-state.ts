@@ -6,12 +6,20 @@
  * in their own way; this module provides the state matching and update logic.
  */
 
+import { transferToolPartMarks, type MessagePart } from "./message-builder";
+
 /**
  * Describes an update to apply to a tool part.
  */
 export type ToolPartUpdate = {
   toolCallId: string;
   matchStates: string[];
+  /**
+   * When set, only a part whose `approval.id` is this matches: a provider
+   * can reuse a tool-call id across replies, and the approval id tells their
+   * requests apart.
+   */
+  approvalId?: string;
   apply: (part: Record<string, unknown>) => Record<string, unknown>;
 };
 
@@ -37,7 +45,10 @@ export function applyToolUpdate(
       "toolCallId" in part &&
       part.toolCallId === update.toolCallId &&
       "state" in part &&
-      update.matchStates.includes(part.state as string)
+      update.matchStates.includes(part.state as string) &&
+      (update.approvalId === undefined ||
+        (part.approval as { id?: unknown } | undefined)?.id ===
+          update.approvalId)
     ) {
       matched = true;
       const applied = update.apply(part);
@@ -108,7 +119,7 @@ function isTerminalToolState(state: unknown): boolean {
  */
 export type InFlightToolReply<TMessage> = {
   readonly id: string;
-  /** The reply's live parts array. A changed part is updated in place. */
+  /** The reply's live parts array. A changed part is replaced in it. */
   readonly parts: Array<Record<string, unknown>>;
   /** The reply as a message, for the broadcast. */
   readonly snapshot: () => TMessage;
@@ -132,7 +143,8 @@ export type ToolPartTarget<TMessage extends { id: string; parts: unknown[] }> =
      */
     readonly storedOwner: (
       toolCallId: string,
-      inFlightId: string | undefined
+      inFlightId: string | undefined,
+      update: ToolPartUpdate
     ) => Promise<TMessage | null>;
     /** Store a changed message. Returns the form to broadcast. */
     readonly write: (message: TMessage) => Promise<TMessage>;
@@ -182,10 +194,13 @@ export async function applyToolPartUpdate<
       if (result.changed) {
         result.parts.forEach((part, index) => {
           const live = inFlight.parts[index];
-          // Changed in place: the stream parser tracks a live part by
-          // identity (input rebuilt from deltas waits for the final input),
-          // so the part must stay the same object.
-          if (part !== live) Object.assign(live, part);
+          if (part === live) return;
+          // Replaced, not changed in place: a stored copy can share this
+          // part object, and must see its own update. The stream parser's
+          // marks on the old object (input rebuilt from deltas, waiting for
+          // the final input) move to the new one.
+          transferToolPartMarks(live as MessagePart, part as MessagePart);
+          inFlight.parts[index] = part;
         });
         inFlight.changed();
         const snapshot = inFlight.snapshot();
@@ -197,7 +212,8 @@ export async function applyToolPartUpdate<
 
   const owner = await target.storedOwner(
     update.toolCallId,
-    inFlightOwnsCall && inFlight ? inFlight.id : undefined
+    inFlightOwnsCall && inFlight ? inFlight.id : undefined,
+    update
   );
   if (owner) {
     const ownerParts = owner.parts as Array<Record<string, unknown>>;
@@ -339,11 +355,13 @@ export function pausedExecutionUpdate(
  */
 export function toolApprovalUpdate(
   toolCallId: string,
-  approved: boolean
+  approved: boolean,
+  approvalId?: string
 ): ToolPartUpdate {
   return {
     toolCallId,
     matchStates: ["input-available", "approval-requested"],
+    ...(approvalId !== undefined && { approvalId }),
     apply: (part) => {
       const approval =
         typeof part.approval === "object" &&

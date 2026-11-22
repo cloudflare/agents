@@ -72,6 +72,7 @@ import {
   type ToolInteractionOutcome,
   type ToolPartUpdate,
   applyToolPartUpdate,
+  applyToolUpdate,
   toolApprovalUpdate,
   toolResultUpdate,
   type TurnResult,
@@ -1259,7 +1260,7 @@ export class AIChatAgent<
         ),
       applyToolApproval: (event) =>
         this._applyToolPartUpdate(
-          toolApprovalUpdate(event.toolCallId, event.approved)
+          toolApprovalUpdate(event.toolCallId, event.approved, event.approvalId)
         ),
       continuation: (connection, answer) => ({
         connection,
@@ -4522,21 +4523,33 @@ export class AIChatAgent<
   ): Promise<ToolInteractionOutcome> {
     const live = this._liveReply;
     // The stored copy of the reply in flight first, then the newest reply
-    // holding the call: a provider can reuse a tool-call id across replies.
+    // with a part the update matches: a provider can reuse a tool-call id
+    // across replies, and only the call the update is for matches (by
+    // state, and by approval id when the client sent one).
     const ownerOf = (
       toolCallId: string,
-      inFlightId: string | undefined
+      inFlightId: string | undefined,
+      wanted: ToolPartUpdate
     ): UIMessage | null => {
       const holds = (message: UIMessage) =>
         message.role === "assistant" &&
         message.parts.some(
           (part) => "toolCallId" in part && part.toolCallId === toolCallId
         );
+      const matches = (message: UIMessage) =>
+        holds(message) &&
+        applyToolUpdate(
+          message.parts as unknown as Array<Record<string, unknown>>,
+          wanted
+        ) !== null;
       if (inFlightId !== undefined) {
         const own = this.messages.find(
           (message) => message.id === inFlightId && holds(message)
         );
         if (own) return own;
+      }
+      for (let i = this.messages.length - 1; i >= 0; i--) {
+        if (matches(this.messages[i])) return this.messages[i];
       }
       for (let i = this.messages.length - 1; i >= 0; i--) {
         if (holds(this.messages[i])) return this.messages[i];
@@ -4557,8 +4570,8 @@ export class AIChatAgent<
             changed: () => live.changed()
           }
         : null,
-      storedOwner: async (toolCallId, inFlightId) =>
-        ownerOf(toolCallId, inFlightId),
+      storedOwner: async (toolCallId, inFlightId, wanted) =>
+        ownerOf(toolCallId, inFlightId, wanted),
       write: async (message) => {
         const sanitized = this._sanitizeMessageForPersistence(message);
         // The change feed patches `this.messages`. A `null` result means the
