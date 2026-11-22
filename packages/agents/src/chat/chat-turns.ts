@@ -102,7 +102,7 @@ import {
   type TurnFailure,
   type TurnFailureHost
 } from "./turn-failure";
-import { TurnQueue } from "./turn-queue";
+import { ChatLane } from "./chat-lane";
 import { ChatStreamStalledError } from "./stall-watchdog";
 import { ChatRecoverySupersededError, isTurnStopped } from "./turn-stop";
 
@@ -314,8 +314,12 @@ export interface RecoveryAttemptHandle {
 export class ChatTurns<
   TConnection extends ContinuationConnection = ContinuationConnection
 > {
-  /** Serializes turns; its generation is the chat's reset epoch. */
-  readonly queue = new TurnQueue();
+  /**
+   * Serializes turns on the chat core's inbox lane; its generation is the
+   * chat's reset epoch. The host installs `queue.inbox` with
+   * `Lifecycle.use()`.
+   */
+  readonly queue = new ChatLane();
   /** One abort controller per request id. */
   readonly aborts = new AbortRegistry();
   /** Overlapping-submit policy (`messageConcurrency`). */

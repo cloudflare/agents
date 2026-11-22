@@ -1676,6 +1676,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     this.lifecycle.use(this.#mediaEviction);
     this.lifecycle.use(this.streams);
     this.lifecycle.use(this._approvals);
+    // The chat turn queue keeps its records in its own inbox lane.
+    this.lifecycle.use(this._turns.queue.inbox);
     this._registerChatTurnTaskDefinition();
     this._registerChatRecoveryTaskDefinition();
     this.#messengerReplies = new MessengerReplies(

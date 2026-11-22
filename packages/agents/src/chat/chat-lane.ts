@@ -8,6 +8,10 @@
  * async context of the call that enqueued it. After a reset a record has no
  * closure, and the turn ends `skipped`, as `TurnQueue`'s did.
  *
+ * `reset()` invalidates queued turns; it does not stop a turn whose closure
+ * is running. That turn ends with its closure, as with the in-memory queue
+ * before; stopping it is the abort registry's job.
+ *
  * The surface is the one the hosts already use (`generation`,
  * `activeRequestId`, `enqueue(requestId, fn, { generation })`, `reset`,
  * `waitForIdle`, `queuedCount`), so a host's admission wrapper does not

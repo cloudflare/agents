@@ -353,7 +353,7 @@ export class Inbox<
       now
     });
     if (options.local !== undefined) this.#locals.set(token, options.local);
-    const start = options.start ?? "alarm";
+    const start = this.#routed() ? "now" : (options.start ?? "alarm");
     // The wake is durable with the row: a reset during the pending report
     // below still runs the request.
     if (!dropped) {
@@ -715,7 +715,22 @@ export class Inbox<
     return `${this.capabilityId}/${LANE_JOB_PREFIX}${lane}`;
   }
 
+  /**
+   * Whether this inbox runs on a routed Lifecycle (a facet). A facet has no
+   * alarm of its own: its lanes start in the calling invocation, and after a
+   * reset the next call to the inbox starts them again (its start wakes the
+   * lanes in memory). Nothing is pushed to the job queue.
+   */
+  #routed(): boolean {
+    return this.#services.routes.source !== undefined;
+  }
+
   #pushWake(lane: string, time: number): Promise<unknown> {
+    if (this.#routed()) {
+      // Out of the current call (it may be startup) before the lane runs.
+      if (time <= Date.now()) setTimeout(() => this.#kick(lane, "now"), 0);
+      return Promise.resolve();
+    }
     return this.#services.jobs
       .push({
         id: this.#laneJob(lane),
@@ -730,6 +745,16 @@ export class Inbox<
 
   /** @param delayMs - After a failed report, wait before the replay. */
   #pushReportJob(delayMs = 0): Promise<unknown> {
+    if (this.#routed()) {
+      if (delayMs === 0) {
+        setTimeout(() => {
+          this.#replaying ??= this.#replayReports().finally(() => {
+            this.#replaying = null;
+          });
+        }, 0);
+      }
+      return Promise.resolve();
+    }
     return this.#services.jobs
       .push({
         id: `${this.capabilityId}/${REPORT_JOB}`,
@@ -766,7 +791,7 @@ export class Inbox<
       }
       if (!reported) break;
     }
-    if (this.#rows.unreported(1).length === 0) {
+    if (!this.#routed() && this.#rows.unreported(1).length === 0) {
       void this.#services.jobs
         .cancel(`${this.capabilityId}/${REPORT_JOB}`)
         .catch(() => {});
@@ -832,7 +857,11 @@ export class Inbox<
           // Same synchronous block as the read: a submit cannot land in
           // between and lose its wake.
           if (this.#lanes.get(lane) === state) this.#lanes.delete(lane);
-          void this.#services.jobs.cancel(this.#laneJob(lane)).catch(() => {});
+          if (!this.#routed()) {
+            void this.#services.jobs
+              .cancel(this.#laneJob(lane))
+              .catch(() => {});
+          }
           return;
         }
         await this.#step(state, next);
