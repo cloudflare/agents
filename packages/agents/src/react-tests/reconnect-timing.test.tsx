@@ -214,9 +214,9 @@ describe("reconnect after a drop with an async query", () => {
     const { host, protocol } = getTestWorkerHost();
     let token = 0;
     const query = async () => ({ token: String(++token) });
-    let attempts = 0;
+    const closes: number[] = [];
     const onClose = () => {
-      attempts += 1;
+      closes.push(Date.now());
     };
     const name = `missing-${crypto.randomUUID()}`;
     function Probe() {
@@ -238,10 +238,12 @@ describe("reconnect after a drop with an async query", () => {
     );
     // @ts-expect-error - globalThis is not typed
     globalThis.IS_REACT_ACT_ENVIRONMENT = false;
-    await new Promise((resolve) => setTimeout(resolve, 4500));
-    // First dial, then at most one retry per 2 s.
-    expect(attempts).toBeGreaterThanOrEqual(1);
-    expect(attempts).toBeLessThanOrEqual(3);
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+    // It does retry, and never sooner than the delay after a failure.
+    expect(closes.length).toBeGreaterThanOrEqual(2);
+    for (let i = 1; i < closes.length; i++) {
+      expect(closes[i] - closes[i - 1]).toBeGreaterThanOrEqual(1500);
+    }
   }, 15_000);
 
   it("reopens at once after a local reconnect()", async () => {

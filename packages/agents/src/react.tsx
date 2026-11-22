@@ -111,7 +111,10 @@ function createReadyEntry(): ReadyEntry {
 /**
  * Sockets that opened since their last close. PartySocket reports a failed
  * upgrade with the same synthetic close as `reconnect()`; a failed upgrade
- * never opened, so only a socket that did can have closed on purpose.
+ * never opened, so only a socket that did can have closed on purpose. A
+ * `reconnect()` during a handshake is therefore treated as a failure and
+ * waits the reconnect delay; the hook's own internal reconnects make the
+ * call itself no signal.
  */
 const openedSockets = new WeakSet<PartySocket>();
 
