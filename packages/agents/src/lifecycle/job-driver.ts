@@ -72,6 +72,9 @@ const MIN_UNREPORTED_ATTEMPTS = 3;
  */
 const MAX_HOLD_MS = 15 * 60_000;
 
+/** First wait before a job whose owner is not installed is looked at again. */
+const OWNERLESS_RETRY_MS = 60_000;
+
 /** Longest wait between attempts of a job whose attempts ran out. */
 const MAX_EXHAUSTED_BACKOFF_MS = 60 * 60_000;
 
@@ -196,6 +199,8 @@ export class JobDriver {
    * them too, and an eviction just lets them run again.
    */
   readonly #heldOwners = new Map<string, number>();
+  /** Owners already reported missing in this isolate. */
+  readonly #reportedOwnerless = new Set<string>();
   /**
    * Work handed off by alarm-driven jobs that has not settled yet. While it
    * is non-empty the alarm domain is not quiescent, so a clean alarm must not
@@ -502,17 +507,44 @@ export class JobDriver {
     const job = jobFromRow(row);
     const dispatch = await resolveDispatch(row.capability);
     if (!dispatch) {
-      console.error(
-        `No installed capability or host handler for job ${row.id} ` +
-          `(owner ${JSON.stringify(row.capability)}); dropping it`
+      // Keep it: the owner may be installed again (a rollback, a library
+      // constructed conditionally), and its job may be its only record of the
+      // work. Look again later, further out the older the job, and say so once
+      // per owner per isolate.
+      const ageMs = Date.now() - row.created_at * 1000;
+      const retryInMs = Math.min(
+        MAX_EXHAUSTED_BACKOFF_MS,
+        Math.max(OWNERLESS_RETRY_MS, Math.floor(ageMs / 2))
       );
-      queue.delete(row.id);
+      if (!this.#reportedOwnerless.has(row.capability)) {
+        this.#reportedOwnerless.add(row.capability);
+        console.error(
+          `No installed capability or host handler for job ${row.id} ` +
+            `(owner ${JSON.stringify(row.capability)}); keeping it and ` +
+            `looking again in ${Math.round(retryInMs / 1000)}s`
+        );
+        this.#emitSafely("job:owner_missing", {
+          capability: row.capability,
+          fn: row.fn,
+          id: row.id
+        });
+      }
+      if (owned())
+        queue.reschedule(row.capability, row.id, Date.now() + retryInMs);
       return undefined;
     }
 
     const maxAttempts = job.retry?.maxAttempts ?? DEFAULT_JOB_RETRY.maxAttempts;
     const prior = row.attempts ?? 0;
     const unreportedLimit = Math.max(maxAttempts, MIN_UNREPORTED_ATTEMPTS);
+    if (prior >= unreportedLimit) {
+      this.#emitSafely("job:exhausted", {
+        capability: row.capability,
+        fn: row.fn,
+        id: row.id,
+        attempts: prior
+      });
+    }
     if (prior >= unreportedLimit && dispatch.onJobError) {
       // Every attempt so far ended with its isolate; running it again would
       // most likely end the same way. The owner decides what happens.
@@ -675,6 +707,12 @@ export class JobDriver {
       // that has held its owner for MAX_HOLD_MS: the owner observes it and
       // decides advancement; default is completion.
       if (holdSpent) {
+        this.#emitSafely("job:hold_limit", {
+          capability: row.capability,
+          fn: row.fn,
+          id: row.id,
+          heldForMs: MAX_HOLD_MS
+        });
         console.error(
           `Job ${row.id} (${row.capability}/${row.fn}) kept failing with ` +
             `platform errors for ${MAX_HOLD_MS / 60_000} minutes; ` +
@@ -694,6 +732,15 @@ export class JobDriver {
     if (outcome === SUPERSEDED) return undefined;
     queue.applyOutcome(claim, outcome ?? undefined);
     return undefined;
+  }
+
+  /** Best-effort telemetry: never blocks or fails a dispatch. */
+  #emitSafely(type: string, payload: unknown): void {
+    try {
+      this.#options.emit(type, payload);
+    } catch {
+      // telemetry never blocks the dispatch
+    }
   }
 
   #warnBacklog(due: ReadonlyArray<JobStorageRow>): void {
