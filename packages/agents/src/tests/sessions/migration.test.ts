@@ -454,4 +454,40 @@ describe("Sessions lift of a legacy flat message table", () => {
       expect(instance.tableNames()).not.toContain("legacy_flat_messages");
     });
   });
+
+  it("does not lift a repaired row once the chat moved on after a partial lift", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, (instance: SessionHarnessObject) => {
+      instance.seedLegacy(
+        flatTable([
+          { id: "a", body: JSON.stringify(message("a", "one", "user")), at: 1 },
+          { id: "b", body: JSON.stringify({ id: "b" }), at: 2 }
+        ])
+      );
+    });
+    await evictDurableObject(stub);
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      // The partial lift landed `a`; the chat then goes on.
+      await instance.sessions
+        .session()
+        .appendMessage(message("n", "after", "assistant"));
+      instance.seedLegacy([
+        `UPDATE legacy_flat_messages
+         SET message = ${sqlLiteral(JSON.stringify(message("b", "two", "user")))}
+         WHERE id = 'b'`
+      ]);
+    });
+    await evictDurableObject(stub);
+
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const ids = (await instance.sessions.session().getHistory()).map(
+        (m) => m.id
+      );
+      expect(ids).toEqual(["a", "n"]);
+      expect(instance.tableNames()).toContain("legacy_flat_messages");
+      expect(
+        instance.eventsOfType("session:migration:incomplete")[0]?.payload
+      ).toMatchObject({ table: "legacy_flat_messages", source: 2, copied: 1 });
+    });
+  });
 });
