@@ -2,6 +2,8 @@
  * The Agent side of email: routing an inbound message to an Agent, the
  * RPC bridge its handler talks back through, and replies. `Agent` keeps
  * thin delegates (`_onEmail`, `replyToEmail`).
+ *
+ * @internal
  */
 
 import { EmailMessage } from "cloudflare:email";
@@ -22,7 +24,7 @@ export type EmailRoutingOptions<Env> = AgentOptions<Env> & {
   onNoRoute?: (email: ForwardableEmailMessage) => void | Promise<void>;
 };
 
-/** What `routeAgentEmail()` sends `Agent._onEmail()`: plain data plus the bridge. */
+/** What `routeAgentEmail()` sends `Agent._onEmail()`: plain data plus the bridge. @internal */
 export type AgentEmailPayload = {
   from: string;
   to: string;
@@ -32,6 +34,7 @@ export type AgentEmailPayload = {
   _bridge: EmailBridge;
 };
 
+/** @internal */
 export type ReplyToEmailOptions = {
   fromName: string;
   subject?: string | undefined;
@@ -47,6 +50,7 @@ export type ReplyToEmailOptions = {
 // tear down the bidirectional RPC session when _onEmail returns,
 // rather than keeping the DO pinned for the caller's entire context
 // lifetime (~100-120s for CF Email Routing handlers).
+/** @internal */
 export class EmailBridge extends RpcTarget {
   #email: ForwardableEmailMessage;
 
@@ -105,6 +109,8 @@ export class EmailBridge extends RpcTarget {
  * The `AgentEmail` an `onEmail` handler sees, rebuilt from the payload.
  * The payload is plain data because of
  * https://github.com/cloudflare/workerd/issues/4499.
+ *
+ * @internal
  */
 export function agentEmailFromPayload(payload: AgentEmailPayload): AgentEmail {
   return {
@@ -125,6 +131,8 @@ export function agentEmailFromPayload(payload: AgentEmailPayload): AgentEmail {
 /**
  * Reply to `email` as the agent, with its routing headers, signed when a
  * secret is given. Returns the subject the reply went out with.
+ *
+ * @internal
  */
 export async function replyToAgentEmail(
   email: AgentEmail,
