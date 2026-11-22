@@ -1,11 +1,12 @@
 /**
- * How `AIChatAgent` reads its transcript out of Sessions: the one-time lift
- * of the legacy flat table, hydration under a byte budget, and the
- * `get-messages` body.
+ * How `AIChatAgent` keeps its flat transcript in Sessions: the one-time
+ * lift of the legacy table, hydration under a byte budget, the in-memory
+ * mirror, what a persist writes, retention, and the `get-messages` body.
  */
 
 import type { UIMessage } from "ai";
-import type { Session } from "agents/sessions";
+import { keepStoredReplies, reconcileMessages } from "agents/chat";
+import type { Session, SessionMessage } from "agents/sessions";
 import { autoTransformMessages } from "./ai-chat-v5-migration";
 
 /** The table ai-chat stored messages in before Sessions. */
@@ -201,4 +202,102 @@ export function transcriptJson(session: Session): ReadableStream<Uint8Array> {
       await batches.return?.(undefined);
     }
   });
+}
+
+/**
+ * Keep `messages` in step with the Sessions change feed. Every durable
+ * write dispatches here synchronously, so write sites never patch the
+ * array by hand. A stored row is exactly what the write returned, so
+ * turning it into its in-memory form never costs a re-read.
+ */
+export function mirrorTranscript(
+  session: Session,
+  get: () => UIMessage[],
+  set: (messages: UIMessage[]) => void
+): void {
+  session.mirror<UIMessage>({
+    get,
+    set,
+    transform: (message: SessionMessage) => {
+      const stored = message as UIMessage;
+      return autoTransformMessages([stored])[0] ?? stored;
+    }
+  });
+}
+
+/** What a turn's persist knows about the messages it was given. */
+export interface PersistScope {
+  /** The messages are a client's copy (`keepStoredReplies`). */
+  clientCopy: boolean;
+  /** Messages a waiting request holds: never stored or broadcast. */
+  hold?: ReadonlySet<string>;
+}
+
+/**
+ * What `persistMessages` stores, given the messages it was called with and
+ * the transcript before the write.
+ *
+ * `merged` is the transcript after the write: the incoming messages
+ * reconciled against the stored ones (server tool results and ids win),
+ * a client's copy never shortening a stored reply, held messages left
+ * out. `toWrite` is the part of it that differs from what is stored,
+ * sanitized. A message serializing to what is stored already is skipped
+ * here with a string compare; letting Sessions find out would cost a row
+ * read and, for media, a decode and hash of every payload on every turn.
+ */
+export function planPersist(
+  messages: UIMessage[],
+  prior: readonly UIMessage[],
+  sanitize: (message: UIMessage) => UIMessage,
+  scope?: PersistScope
+): { merged: UIMessage[]; toWrite: UIMessage[] } {
+  const priorList = [...prior];
+  const priorById = new Map(priorList.map((m) => [m.id, m]));
+  const reconciled = reconcileMessages(messages, priorList, sanitize);
+  const kept = scope?.clientCopy
+    ? keepStoredReplies(reconciled, priorList)
+    : reconciled;
+  const hold = scope?.hold;
+  const merged =
+    hold && hold.size > 0 ? kept.filter((m) => !hold.has(m.id)) : kept;
+
+  const toWrite: UIMessage[] = [];
+  for (const message of merged) {
+    const resolved = sanitize(message);
+    const stored = priorById.get(resolved.id);
+    if (stored && JSON.stringify(stored) === JSON.stringify(resolved)) continue;
+    toWrite.push(resolved);
+  }
+  return { merged, toWrite };
+}
+
+/**
+ * The ids to delete after a regenerate. A regenerate can submit a strict
+ * subset of the stored transcript; when every merged message was stored
+ * before, the stored messages it left out go. Sessions splices their
+ * descendants to the grandparent, so the active path stays whole.
+ */
+export function staleMessageIds(
+  merged: readonly UIMessage[],
+  prior: readonly UIMessage[],
+  current: readonly UIMessage[]
+): string[] {
+  const priorIds = new Set(prior.map((message) => message.id));
+  if (!merged.every((message) => priorIds.has(message.id))) return [];
+  const keep = new Set(merged.map((message) => message.id));
+  return current.map((message) => message.id).filter((id) => !keep.has(id));
+}
+
+/**
+ * The oldest stored rows past `max`. Counts stored rows, not the hydrated
+ * window: a transcript larger than the hydration budget holds rows the
+ * in-memory list never saw.
+ */
+export async function rowsPastRetention(
+  session: Session,
+  max: number
+): Promise<string[]> {
+  const stored = await session.getHistoryRowStats();
+  const excess = stored.length - max;
+  return excess > 0 ? stored.slice(0, excess).map((row) => row.id) : [];
 }

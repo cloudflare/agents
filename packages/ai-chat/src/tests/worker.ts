@@ -1020,11 +1020,13 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   setTestBody(body: Record<string, unknown>): void {
-    (this as unknown as { _lastBody: Record<string, unknown> })._lastBody =
-      body;
-    (
-      this as unknown as { _persistRequestContext(): void }
-    )._persistRequestContext();
+    const context = (
+      this as unknown as {
+        _requestContext: { body: typeof body; persist(): void };
+      }
+    )._requestContext;
+    context.body = body;
+    context.persist();
   }
 
   resetTurnStateForTest(): void {
@@ -4148,13 +4150,12 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     body: Record<string, unknown> | undefined;
   }> {
     const self = this as unknown as {
-      _setRequestContext(
-        clientTools: undefined,
-        body: Record<string, unknown> | undefined
-      ): void;
+      _requestContext: {
+        set(context: { body: Record<string, unknown> | undefined }): void;
+      };
       _lastBody: Record<string, unknown> | undefined;
     };
-    self._setRequestContext(undefined, { theme: "dark" });
+    self._requestContext.set({ body: { theme: "dark" } });
     const runId = crypto.randomUUID();
     if (recovered) {
       this._failingTurn = {
