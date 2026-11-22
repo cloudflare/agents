@@ -2386,3 +2386,51 @@ describe("Think — beforeTurn config overrides", () => {
     expect(types).toContain("text-delta");
   });
 });
+
+describe("a tool-call id reused across replies", () => {
+  it("applies an approval to the request its approval id names", async () => {
+    const agent = await freshAgent(`reused-approval-${crypto.randomUUID()}`);
+    const request = (approvalId: string, a: number) =>
+      ({
+        type: "tool-calculate",
+        toolCallId: "call_1",
+        state: "approval-requested",
+        input: { a },
+        approval: { id: approvalId }
+      }) as unknown as UIMessage["parts"][number];
+    const text = (t: string) =>
+      [{ type: "text", text: t }] as UIMessage["parts"];
+    await agent.persistTestMessage({
+      id: "u1",
+      role: "user",
+      parts: text("one")
+    });
+    await agent.persistTestMessage({
+      id: "a1",
+      role: "assistant",
+      parts: [request("approval_a", 1)]
+    });
+    await agent.persistTestMessage({
+      id: "u2",
+      role: "user",
+      parts: text("two")
+    });
+    await agent.persistTestMessage({
+      id: "a2",
+      role: "assistant",
+      parts: [request("approval_b", 2)]
+    });
+
+    await agent.applyToolApprovalForTest("call_1", false, "approval_a");
+
+    const stored = (await agent.getStoredMessages()) as UIMessage[];
+    const state = (id: string) =>
+      (
+        stored.find((m) => m.id === id)?.parts[0] as
+          | { state?: string }
+          | undefined
+      )?.state;
+    expect(state("a1")).toBe("output-denied");
+    expect(state("a2")).toBe("approval-requested");
+  });
+});
