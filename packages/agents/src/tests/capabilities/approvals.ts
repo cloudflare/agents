@@ -117,6 +117,10 @@ export class ApprovalsHarnessObject extends DurableObject<Cloudflare.Env> {
     this.ctx.abort("restarted by test");
   }
 
+  error(id: string): string | undefined {
+    return this.approvals.get(id)?.error;
+  }
+
   status(id: string): string | undefined {
     return this.approvals.get(id)?.status;
   }

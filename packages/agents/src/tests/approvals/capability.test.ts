@@ -701,6 +701,7 @@ describe("Approvals decisions", () => {
     stub = env.ApprovalsHarnessObject.getByName(name);
     expect(await stub.attempts(parkedId)).toBe(3);
     expect(await stub.status(parkedId)).toBe("settled");
+    expect(await stub.error(parkedId)).toMatch(/did not finish in 3 attempts/);
   });
 
   it("finishes a continuation a real reset cut off", async () => {
