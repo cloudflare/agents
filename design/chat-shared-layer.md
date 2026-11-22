@@ -113,7 +113,7 @@ Row-size enforcement for chat tables that are **not** session storage. Message p
 
 **`enforceRowSizeLimit(message, { warn? }) → UIMessage`** — compacts messages exceeding 1.8MB (`ROW_MAX_BYTES`, below SQLite's 2MB row limit). Two-pass: first compact tool outputs over 1KB (annotating `metadata.compactedToolOutputs`), then truncate text parts oldest-first (annotating `metadata.compactedTextParts`). The host passes `warn` to log with its own prefix.
 
-Think calls `enforceRowSizeLimit` only when serializing its submission queue (`cf_think_submissions`). `AIChatAgent` does not call it: its `_sanitizeMessageForPersistence` runs `_truncateProviderExecutedToolPayloads` (large strings in Anthropic-style server-executed tool payloads) and then the protected `sanitizeMessageForPersistence()` hook, and Sessions handles size.
+Think calls `enforceRowSizeLimit` only when sanitizing the messages of a programmatic submission. `AIChatAgent` does not call it: its `_sanitizeMessageForPersistence` runs `_truncateProviderExecutedToolPayloads` (large strings in Anthropic-style server-executed tool payloads) and then the protected `sanitizeMessageForPersistence()` hook, and Sessions handles size.
 
 ### stream-accumulator.ts
 

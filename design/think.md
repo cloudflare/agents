@@ -181,7 +181,7 @@ Actions can record advisory delivery metadata for the current reply with `ctx.at
 | `cf_agents_streams` / `cf_agents_stream_blocks`           | Streams           | Resumable in-flight output                                  |
 | `cf_agents_task_runs` / `cf_agents_task_steps`            | Tasks (inherited) | Chat-turn, recovery, and messenger-reply runs               |
 | `think_config`                                            | Think             | `configure()` blob, client tools, request body, skill state |
-| `cf_think_submissions`                                    | Think             | Durable submissions                                         |
+| `cf_agents_inbox` (kind `submission`)                     | Inbox capability  | Durable submissions                                         |
 | `cf_agents_effects`                                       | Approvals         | Action idempotency (run once per key)                       |
 | `cf_think_action_pending_approvals`                       | Think             | Durable-pause approvals                                     |
 | `cf_agent_tool_child_runs` / `cf_agent_tool_milestones`   | Think             | Agent-tool runs                                             |

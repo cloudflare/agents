@@ -92,106 +92,91 @@ terminal outcome.
 
 Allowed transitions:
 
-| From      | To                            | Trigger                                                |
-| --------- | ----------------------------- | ------------------------------------------------------ |
-| none      | `pending`                     | `submitMessages()` accepts new work                    |
-| any       | unchanged                     | idempotent retry returns existing row                  |
-| `pending` | `running`                     | drain claims the oldest pending row                    |
-| `pending` | `aborted`                     | `cancelSubmission()` before execution                  |
-| `pending` | `skipped`                     | `resetTurnState()` before execution                    |
-| `running` | `pending`                     | startup recovery sees no messages were applied         |
-| `running` | `completed`                   | Think turn completes successfully                      |
-| `running` | `aborted`                     | durable cancellation aborts the active turn            |
-| `running` | `skipped`                     | turn queue generation changed before/while running     |
-| `running` | `error`                       | execution failed, replay is unsafe, or recovery failed |
-| terminal  | terminal, no further mutation | late completion and recovery updates are ignored       |
+| From      | To                            | Trigger                                                       |
+| --------- | ----------------------------- | ------------------------------------------------------------- |
+| none      | `pending`                     | `submitMessages()` accepts new work                           |
+| any       | unchanged                     | idempotent retry returns existing row                         |
+| `pending` | `running`                     | the inbox lane reaches the submission                         |
+| `pending` | `aborted`                     | `cancelSubmission()` before execution                         |
+| `pending` | `skipped`                     | `resetTurnState()` before execution                           |
+| `running` | `running`                     | the next attempt after a reset, when no messages were applied |
+| `running` | `completed`                   | Think turn completes successfully                             |
+| `running` | `aborted`                     | durable cancellation aborts the active turn                   |
+| `running` | `skipped`                     | `resetTurnState()` while it runs                              |
+| `running` | `error`                       | execution failed, replay is unsafe, or recovery failed        |
+| terminal  | terminal, no further mutation | late completion and recovery updates are ignored              |
 
 ## Durable State
 
-Submissions are stored in `cf_think_submissions`:
+A submission is a request on the [Inbox](./inbox.md) capability: kind
+`submission`, one lane, in `cf_agents_inbox`. The inbox owns the record, the
+order, idempotent lookups, cancel, reset, `wait()` and the replay after a
+reset. Its payload is the sanitized messages. What the turn learns about
+itself lives in the request's progress:
 
-```sql
-CREATE TABLE IF NOT EXISTS cf_think_submissions (
-  submission_id TEXT PRIMARY KEY,
-  idempotency_key TEXT UNIQUE,
-  request_id TEXT,
-  stream_id TEXT,
-  status TEXT NOT NULL,
-  messages_json TEXT NOT NULL,
-  metadata_json TEXT,
-  error_message TEXT,
-  created_at INTEGER NOT NULL,
-  messages_applied_at INTEGER,
-  started_at INTEGER,
-  completed_at INTEGER
-)
-```
+| Progress field      | Meaning                                                       |
+| ------------------- | ------------------------------------------------------------- |
+| `requestId`         | The request id of the turn answering it; recovery moves it    |
+| `streamId`          | The stream that answered it                                   |
+| `messagesAppliedAt` | Set once its messages were appended to Session                |
+| `resultStatus`      | The cutover outcome, written in the stream settle transaction |
+| `output`            | The structured output stamped with a `completed` cutover      |
+| `messageId`         | The assistant message its turn persisted                      |
 
-Indexes keep the table usable as both a FIFO queue and an inspection ledger:
+A completed submission's inbox result is its structured output, which the
+workflow notification carries. Objects written by an older release keep their
+rows in `cf_think_submissions`; the first start moves them into the inbox in
+creation order and drops the table.
 
-```sql
-CREATE INDEX IF NOT EXISTS cf_think_submissions_status_created_idx
-  ON cf_think_submissions (status, created_at, submission_id);
-
-CREATE INDEX IF NOT EXISTS cf_think_submissions_request_status_idx
-  ON cf_think_submissions (request_id, status);
-
-CREATE INDEX IF NOT EXISTS cf_think_submissions_status_completed_idx
-  ON cf_think_submissions (status, completed_at, created_at);
-```
-
-The row is the durable source of truth. In-memory state may accelerate the
-current isolate, but the implementation must be able to reconstruct progress
-from SQLite after hibernation.
-
-`messages_applied_at` is the important internal safety marker. It is set only
+`messagesAppliedAt` is the important internal safety marker. It is set only
 after submitted messages have been appended to Session. Recovery uses it to
 avoid unsafe replay:
 
-- If a `running` submission has no applied messages, it can be moved back to
-  `pending`.
+- If a `running` submission has no applied messages, it runs again.
 - If any submitted messages are already present in Session but
-  `messages_applied_at` is missing, replay is unsafe and the submission becomes
+  `messagesAppliedAt` is missing, replay is unsafe and the submission becomes
   `error`.
-- If `messages_applied_at` is present, the turn has crossed the boundary where
+- If `messagesAppliedAt` is present, the turn has crossed the boundary where
   chat recovery must either continue it or mark it `error`.
 
 ## Execution Flow
 
-1. `submitMessages()` serializes and sanitizes the messages, inserts a
-   `pending` row, emits `submission:create`, emits the initial `pending` status,
-   and schedules an idempotent `_drainThinkSubmissions` alarm. It does not start
-   model work inside the short acceptance invocation.
-2. The awaited `_drainThinkSubmissions` alarm owns `_drainSubmissions()`, which
-   claims the oldest `pending` row by conditionally updating it to `running`.
-   Keeping execution inside that alarm invocation also gives tracing spans the
-   correct lifecycle owner; no `invoke_agent` span crosses an invocation
-   boundary.
+1. `submitMessages()` sanitizes the messages and submits an inbox request.
+   The inbox writes the row, reports `pending` (Think emits
+   `submission:create` and `submission:status`), and pushes its lane's wake
+   due now. No model work starts inside the accepting invocation.
+2. The lane's alarm runs the submission. Keeping execution inside that alarm
+   invocation also gives tracing spans the correct lifecycle owner; no
+   `invoke_agent` span crosses an invocation boundary.
 3. `_runSubmission()` calls the same programmatic turn path used by
    `saveMessages()`, with the submission id as the request id.
 4. `_runProgrammaticMessagesTurn()` appends submitted messages to Session,
-   marks `messages_applied_at`, broadcasts messages, and runs the normal Think
+   records `messagesAppliedAt`, broadcasts messages, and runs the normal Think
    inference and streaming path.
-5. The submission row is updated to `completed`, `aborted`, `skipped`, or
-   `error` only while it is still `running`, so late completions cannot
-   overwrite cancellation or reset outcomes.
-
-The scheduled drain is deliberately idempotent. It is not a separate queue
-system; it is a wakeup mechanism for the SQLite-backed submission table.
+5. The handler returns the outcome, and the inbox ends the request only while
+   it is still `running`, so late completions cannot overwrite cancellation or
+   reset outcomes.
+6. The terminal report queues the workflow notification, then runs
+   `onSubmissionStatus`. The inbox repeats a terminal report a reset cut
+   short, and the notification's stable queue id makes the repeat a replace.
 
 ## Recovery Rules
 
-On startup, `_recoverSubmissionsOnStart()` reconciles `running` rows:
+A submission whose turn chat recovery took over ends its run `detached`: it
+stays `running`, frees the lane, and recovery settles it. On startup, and on
+the next attempt of a run a reset interrupted, Think decides from the stored
+evidence:
 
-- `messages_applied_at IS NULL` and no submitted messages are in Session:
-  restore the row to `pending` so it can be drained again.
-- `messages_applied_at IS NULL` and some or all submitted messages are already
-  in Session: mark `error`, because replay could duplicate or reorder messages.
-- `messages_applied_at IS NOT NULL` with fresh recoverable chat evidence:
-  leave the row `running`; chat recovery owns the terminal outcome.
-- `messages_applied_at IS NOT NULL` with a scheduled recovered continuation:
-  leave the row `running`; the scheduled callback owns the terminal outcome.
-- Otherwise: mark `error`, because the turn was interrupted after messages were
+- A `completed` or `aborted` cutover stamp ends it that way.
+- `messagesAppliedAt` missing and no submitted messages in Session: it runs
+  again, after any chat recovery the reset left.
+- `messagesAppliedAt` missing and some or all submitted messages in Session:
+  `error`, because replay could duplicate or reorder messages.
+- `messagesAppliedAt` present with fresh recoverable chat evidence, or with a
+  scheduled recovered continuation: it stays `running` (`detached`); chat
+  recovery owns the terminal outcome.
+- A terminal stream for its request: `completed` or `error`.
+- Otherwise: `error`, because the turn was interrupted after messages were
   applied and there is no safe recovery path.
 
 Fresh recovery evidence comes from `runFiber` rows or active stream metadata.
@@ -205,8 +190,8 @@ Failure boundaries:
 | Failure point                                  | Recovery behavior                                           |
 | ---------------------------------------------- | ----------------------------------------------------------- |
 | Before row insert                              | Caller does not receive `accepted: true`; retry may insert  |
-| After row insert, before drain scheduling      | Idempotent retry or startup drain scheduling re-wakes row   |
-| After claim, before Session append             | `running` row returns to `pending`                          |
+| After row insert, before the lane wake         | The inbox wakes open lanes on start; a retry re-wakes it    |
+| After claim, before Session append             | The next attempt runs it again                              |
 | During Session append                          | Any detected applied message makes replay unsafe → `error`  |
 | After Session append, before stream completion | Chat recovery continues, or row becomes `error` if unsafe   |
 | During recovered continuation                  | Submission remains `running` until continuation is terminal |
@@ -214,18 +199,18 @@ Failure boundaries:
 
 ## Reset and Cancellation
 
-`resetTurnState()` invalidates queued and active turns. For durable submissions,
-it must synchronously mark all still-`pending` submissions as `skipped` before
-returning; otherwise a pending submission could be claimed by a drain after the
-reset. Status hook emission can remain async, but the SQLite state transition is
-part of reset itself.
+`resetTurnState()` invalidates queued and active turns. For durable submissions
+it clears the inbox lane: every open submission ends `skipped` before reset
+returns, so none can start after it. Status hook emission stays async, but the
+SQLite state transition is part of reset itself.
 
 `cancelSubmission()` marks `pending` or `running` submissions as `aborted`. If
 the submission is currently executing, its request controller is aborted. If the
 submission is in recovered continuation, the continuation gets its own linked
 controller so durable cancellation still reaches the resumed turn.
 
-All completion paths use conditional updates against `status = 'running'`.
+All completion paths end the request through the inbox, which writes only
+while it is `running`.
 That invariant is what prevents late stream completion, recovery completion, or
 error handling from overwriting `aborted` or `skipped`.
 
@@ -320,7 +305,7 @@ Think's existing turn queue, Session integration, and chat recovery machinery.
   `accepted: true`.
 - Submitted messages are appended to Session only when the row has been claimed
   as `running`.
-- `messages_applied_at` is set only after Session append succeeds.
+- `messagesAppliedAt` is set only after Session append succeeds.
 - Recovery must never replay messages if any submitted message is already in
   Session.
 - Pending submissions skipped by reset must transition synchronously before

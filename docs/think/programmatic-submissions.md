@@ -56,14 +56,14 @@ The array must contain at least one message.
 
 ## Statuses
 
-| Status      | Meaning                                        |
-| ----------- | ---------------------------------------------- |
-| `pending`   | Accepted and waiting for its turn              |
-| `running`   | Claimed by the agent and executing             |
-| `completed` | The Think turn completed successfully          |
-| `aborted`   | The submission was cancelled                   |
-| `skipped`   | Turn state was reset before the submission ran |
-| `error`     | Execution failed or recovery was unsafe        |
+| Status      | Meaning                                 |
+| ----------- | --------------------------------------- |
+| `pending`   | Accepted and waiting for its turn       |
+| `running`   | Claimed by the agent and executing      |
+| `completed` | The Think turn completed successfully   |
+| `aborted`   | The submission was cancelled            |
+| `skipped`   | Turn state was reset before it finished |
+| `error`     | Execution failed or recovery was unsafe |
 
 ## Idempotent retries
 
@@ -168,13 +168,18 @@ If you cancel a submission before its messages have been applied, including one
 that has been claimed but is still waiting for its turn, those messages are not
 persisted to the conversation.
 
-If the chat is cleared or turn state is reset before a pending submission runs,
-that submission is marked `skipped`.
+If the chat is cleared or turn state is reset, every submission that has not
+finished is marked `skipped`.
 
 If the isolate resets while one submission runs and others are pending, the
 running one's turn is recovered first. The pending submissions run after that
-recovery settles, in order, each with its own reply. A submission accepted
-after the reset runs as usual.
+recovery settles, in order, each with its own reply, and a submission accepted
+after the reset runs after them.
+
+Submissions are stored with the [Inbox](https://github.com/cloudflare/agents/blob/main/docs/agents/inbox.md)
+capability. A restart that cuts off `onSubmissionStatus` for a finished
+submission runs it again for that status, so write the hook so that a repeat
+is harmless.
 
 Client requests sent over a WebSocket get the same treatment: a waiting
 request's messages join the Session when its turn starts. See

@@ -136,6 +136,21 @@ type ThinkSubmissionTestStub = {
     limit?: number;
   }): Promise<number>;
   drainSubmissionsForTest(): Promise<void>;
+  seedLegacySubmissionTableForTest(
+    rows: Array<{
+      submissionId: string;
+      status: ThinkSubmissionStatus;
+      idempotencyKey?: string;
+      text?: string;
+      messagesJson?: string;
+      createdAt: number;
+      startedAt?: number | null;
+      completedAt?: number | null;
+      errorMessage?: string | null;
+      messageId?: string | null;
+    }>
+  ): Promise<void>;
+  hasLegacySubmissionTableForTest(): Promise<boolean>;
   recoverSubmissionsForTest(): Promise<void>;
   abortSubmissionRequestForTest(requestId: string): Promise<void>;
   recoverSubmissionSettlementForTest(requestId: string): Promise<void>;
@@ -2007,7 +2022,92 @@ describe("Think durable submissions", () => {
     ).resolves.toMatchObject({ status: "running" });
   });
 
-  it("requeues stale running submissions when messages were not applied", async () => {
+  it("moves submissions from the retired table into the inbox, and runs the open ones", async () => {
+    const agent = await freshAgent();
+    const now = Date.now();
+    await agent.seedLegacySubmissionTableForTest([
+      {
+        submissionId: "legacy-done",
+        status: "completed",
+        idempotencyKey: "legacy-key",
+        createdAt: now - 3_000,
+        startedAt: now - 3_000,
+        completedAt: now - 2_500,
+        messageId: "legacy-assistant"
+      },
+      {
+        submissionId: "legacy-interrupted",
+        status: "running",
+        text: "interrupted before its messages were applied",
+        createdAt: now - 2_000,
+        startedAt: now - 2_000
+      },
+      {
+        submissionId: "legacy-pending",
+        status: "pending",
+        text: "waiting",
+        createdAt: now - 1_000
+      },
+      {
+        submissionId: "legacy-broken",
+        status: "pending",
+        messagesJson: "{",
+        createdAt: now - 500
+      }
+    ]);
+
+    await agent.recoverSubmissionsForTest();
+    expect(await agent.hasLegacySubmissionTableForTest()).toBe(false);
+    await expect(
+      agent.inspectSubmissionForTest("legacy-done")
+    ).resolves.toMatchObject({
+      status: "completed",
+      idempotencyKey: "legacy-key",
+      metadata: { from: "legacy" },
+      createdAt: now - 3_000,
+      completedAt: now - 2_500,
+      messageId: "legacy-assistant"
+    });
+    // An idempotent retry of a migrated submission finds it.
+    await expect(
+      agent.testSubmitMessages("again", { idempotencyKey: "legacy-key" })
+    ).resolves.toMatchObject({ accepted: false, submissionId: "legacy-done" });
+
+    await agent.drainSubmissionsForTest();
+    await expect(
+      agent.inspectSubmissionForTest("legacy-interrupted")
+    ).resolves.toMatchObject({ status: "completed" });
+    await expect(
+      agent.inspectSubmissionForTest("legacy-pending")
+    ).resolves.toMatchObject({ status: "completed" });
+    await expect(
+      agent.inspectSubmissionForTest("legacy-broken")
+    ).resolves.toMatchObject({
+      status: "error",
+      error: "Stored submission messages are invalid"
+    });
+    const users = (await agent.getStoredMessages()).filter(
+      (message) => message.role === "user"
+    );
+    expect(users.map((message) => message.id)).toEqual([
+      "legacy-interrupted-message",
+      "legacy-pending-message"
+    ]);
+    // A second start finds nothing to move.
+    await agent.recoverSubmissionsForTest();
+    expect(
+      (await agent.listSubmissionsForTest({ limit: 100 })).map(
+        (submission) => submission.submissionId
+      )
+    ).toEqual([
+      "legacy-broken",
+      "legacy-pending",
+      "legacy-interrupted",
+      "legacy-done"
+    ]);
+  });
+
+  it("runs an interrupted submission again when its messages were not applied", async () => {
     const agent = await freshAgent();
     await agent.insertSubmissionForTest({
       submissionId: "sub-requeue",
@@ -2016,12 +2116,19 @@ describe("Think durable submissions", () => {
     });
 
     await agent.recoverSubmissionsForTest();
-
+    // Nothing decides it from the evidence: it waits for its next run.
     await expect(
       agent.inspectSubmissionForTest("sub-requeue")
-    ).resolves.toMatchObject({
-      status: "pending"
-    });
+    ).resolves.toMatchObject({ status: "running" });
+
+    await agent.drainSubmissionsForTest();
+    await expect(
+      agent.inspectSubmissionForTest("sub-requeue")
+    ).resolves.toMatchObject({ status: "completed" });
+    const messages = await agent.getStoredMessages();
+    expect(messages.filter((message) => message.role === "user")).toHaveLength(
+      1
+    );
   });
 
   it("drains pending submissions after a previous turn reset", async () => {
@@ -2799,15 +2906,15 @@ describe("Think durable submissions", () => {
       completedAt: now
     });
     await agent.insertSubmissionForTest({
-      submissionId: "sub-multi-new-pending",
-      status: "pending",
-      createdAt: now + 3_000
-    });
-    await agent.insertSubmissionForTest({
       submissionId: "sub-multi-mid-completed",
       status: "completed",
       createdAt: now + 2_000,
       completedAt: now + 2_000
+    });
+    await agent.insertSubmissionForTest({
+      submissionId: "sub-multi-new-pending",
+      status: "pending",
+      createdAt: now + 3_000
     });
 
     const submissions = await agent.listSubmissionsForTest({
