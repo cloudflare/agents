@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import type { ThinkSubmissionStatus } from "@cloudflare/think";
 import { getAgentByName } from "agents";
+import type { Inbox } from "agents/inbox";
 import { describe, expect, it } from "vitest";
 import { AgentThink, type ThinkAgent } from "../src/index";
 
@@ -17,22 +18,30 @@ async function createSubmission(
   }
 ): Promise<void> {
   await runInDurableObject(agent, async (instance, state) => {
-    await instance.listSubmissions();
+    // Seed the record the way the inbox stores it, without waking its lane,
+    // so a pending or running seed stays as written.
+    const { _submissions } = instance as unknown as { _submissions: Inbox };
+    await _submissions.import({
+      id: input.submissionId,
+      kind: "submission",
+      status: input.status,
+      attempt: input.startedAt === undefined ? 0 : 1,
+      idempotencyKey: `key-${input.submissionId}`,
+      payload: { messages: [] },
+      metadata: { instruction: "private workflow instruction" },
+      progress: {
+        requestId: `request-${input.submissionId}`,
+        streamId: `stream-${input.submissionId}`
+      },
+      ...(input.error !== undefined && { error: input.error }),
+      createdAt: input.createdAt,
+      ...(input.startedAt !== undefined && { startedAt: input.startedAt }),
+      ...(input.completedAt !== undefined && {
+        settledAt: input.completedAt
+      })
+    });
     state.storage.sql.exec(
-      `INSERT INTO cf_think_submissions
-        (submission_id, idempotency_key, request_id, stream_id, status,
-         messages_json, metadata_json, error_message, created_at, started_at, completed_at)
-       VALUES (?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?)`,
-      input.submissionId,
-      `key-${input.submissionId}`,
-      `request-${input.submissionId}`,
-      `stream-${input.submissionId}`,
-      input.status,
-      JSON.stringify({ instruction: "private workflow instruction" }),
-      input.error ?? null,
-      input.createdAt,
-      input.startedAt ?? null,
-      input.completedAt ?? null
+      "DELETE FROM cf_agents_jobs WHERE capability = 'inbox' AND fn = 'drain'"
     );
   });
 }
