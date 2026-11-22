@@ -79,6 +79,15 @@ describe("codemode approval after a reset", () => {
     await runDurableObjectAlarm(agent);
     await delay(1000);
 
+    // The job ran the decision: it settled without running the runtime.
+    await runInDurableObject(agent, (_instance, state) => {
+      const rows = [
+        ...state.storage.sql.exec(
+          "SELECT status FROM cf_agents_decisions WHERE kind = 'codemode'"
+        )
+      ];
+      expect(rows).toEqual([{ status: "settled" }]);
+    });
     // Nobody approved prod.
     expect(await agent.gatedCallCount()).toBe(1);
     ws.close();
