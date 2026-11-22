@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import type { ThinkSubmissionStatus } from "@cloudflare/think";
 import { getAgentByName } from "agents";
-import type { Inbox } from "agents/inbox";
+import type { Inbox } from "agents/internal";
 import { describe, expect, it } from "vitest";
 import { AgentThink, type ThinkAgent } from "../src/index";
 

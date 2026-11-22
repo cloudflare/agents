@@ -176,8 +176,7 @@ running one's turn is recovered first. The pending submissions run after that
 recovery settles, in order, each with its own reply, and a submission accepted
 after the reset runs after them.
 
-Submissions are stored with the [Inbox](https://github.com/cloudflare/agents/blob/main/docs/agents/inbox.md)
-capability. A restart that cuts off `onSubmissionStatus` for a finished
+A restart that cuts off `onSubmissionStatus` for a finished
 submission runs it again for that status, so write the hook so that a repeat
 is harmless. The workflow
 event of a workflow submission is sent once either way.
