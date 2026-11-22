@@ -220,6 +220,58 @@ describe("Tool result idempotency (issue #1404)", () => {
     ws.close(1000);
   });
 
+  it("a tool-call id reused by a later reply settles the later call", async () => {
+    const room = crypto.randomUUID();
+    await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+    const toolCallId = "call_reused";
+    await agentStub.persistMessages([
+      { id: "u1", role: "user", parts: [{ type: "text", text: "one" }] },
+      {
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-changeBackgroundColor",
+            toolCallId,
+            state: "output-available",
+            input: { color: "red" },
+            output: { success: true, color: "red" }
+          }
+        ] as ChatMessage["parts"]
+      },
+      { id: "u2", role: "user", parts: [{ type: "text", text: "two" }] },
+      {
+        id: "a2",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-changeBackgroundColor",
+            toolCallId,
+            state: "input-available",
+            input: { color: "blue" }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
+
+    expect(
+      await agentStub.testApplyToolResult(toolCallId, "changeBackgroundColor", {
+        success: true,
+        color: "blue"
+      })
+    ).toBe(true);
+
+    const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const part = (id: string) =>
+      persisted.find((m) => m.id === id)?.parts[0] as Record<string, unknown>;
+    expect(part("a1").output).toEqual({ success: true, color: "red" });
+    expect(part("a2")).toMatchObject({
+      state: "output-available",
+      output: { success: true, color: "blue" }
+    });
+  });
+
   it("legacy duplicate tool parts: real change to one part is still persisted even if another duplicate is already terminal", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);

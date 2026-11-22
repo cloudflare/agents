@@ -108,7 +108,7 @@ function isTerminalToolState(state: unknown): boolean {
  */
 export type InFlightToolReply<TMessage> = {
   readonly id: string;
-  /** The reply's live parts array. A changed part is replaced in it. */
+  /** The reply's live parts array. A changed part is updated in place. */
   readonly parts: Array<Record<string, unknown>>;
   /** The reply as a message, for the broadcast. */
   readonly snapshot: () => TMessage;
@@ -165,7 +165,10 @@ export async function applyToolPartUpdate<
   | { status: "unchanged" }
   | { status: "missing" }
 > {
-  let broadcastMessage: TMessage | undefined;
+  // One broadcast per message. When the reply in flight and its stored
+  // copy both changed, the reply in flight is the newer: it may hold text
+  // the stored copy does not have yet.
+  const broadcasts = new Map<string, TMessage>();
   // `undefined`: no part found; `null`: found, already settled.
   let changedMessageId: string | null | undefined;
 
@@ -178,10 +181,15 @@ export async function applyToolPartUpdate<
       changedMessageId = null;
       if (result.changed) {
         result.parts.forEach((part, index) => {
-          inFlight.parts[index] = part;
+          const live = inFlight.parts[index];
+          // Changed in place: the stream parser tracks a live part by
+          // identity (input rebuilt from deltas waits for the final input),
+          // so the part must stay the same object.
+          if (part !== live) Object.assign(live, part);
         });
         inFlight.changed();
-        broadcastMessage = inFlight.snapshot();
+        const snapshot = inFlight.snapshot();
+        broadcasts.set(snapshot.id, snapshot);
         changedMessageId = inFlight.id;
       }
     }
@@ -200,14 +208,14 @@ export async function applyToolPartUpdate<
         ...owner,
         parts: result.parts as TMessage["parts"]
       });
-      broadcastMessage = stored;
+      if (!broadcasts.has(stored.id)) broadcasts.set(stored.id, stored);
       // The reply in flight, when it also holds the call, is the one a
       // continuation answers: keep it as the changed message.
       if (typeof changedMessageId !== "string") changedMessageId = owner.id;
     }
   }
 
-  if (broadcastMessage) target.broadcast(broadcastMessage);
+  for (const message of broadcasts.values()) target.broadcast(message);
   if (typeof changedMessageId === "string") {
     return { status: "changed", messageId: changedMessageId };
   }

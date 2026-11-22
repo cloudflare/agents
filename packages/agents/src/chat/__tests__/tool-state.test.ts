@@ -189,6 +189,39 @@ describe("applyToolPartUpdate", () => {
     });
   });
 
+  it("broadcasts the reply in flight, not its older stored copy, when both change", async () => {
+    const reply = {
+      id: "a1",
+      role: "assistant",
+      parts: [
+        makePart("tc1", "input-available"),
+        { type: "text", text: "streamed after the stored copy" }
+      ]
+    };
+    const env = setup({
+      inFlight: reply,
+      stored: [
+        {
+          id: "a1",
+          role: "assistant",
+          parts: [makePart("tc1", "input-available")]
+        }
+      ]
+    });
+    await applyToolPartUpdate(toolResultUpdate("tc1", "ok"), env.target);
+    expect(env.broadcasts).toHaveLength(1);
+    expect(env.broadcasts[0].parts).toHaveLength(2);
+  });
+
+  it("changes a part of the reply in flight in place", async () => {
+    const part = makePart("tc1", "input-available");
+    const env = setup({
+      inFlight: { id: "a1", role: "assistant", parts: [part] }
+    });
+    await applyToolPartUpdate(toolResultUpdate("tc1", "ok"), env.target);
+    expect(part).toMatchObject({ state: "output-available", output: "ok" });
+  });
+
   it("answers unchanged for a repeat, with no write and no broadcast", async () => {
     const env = setup({
       stored: [
