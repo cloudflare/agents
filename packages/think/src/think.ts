@@ -4037,14 +4037,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     this.tasks.register(
       chatFiberName,
       createChatTurnTaskDefinition({
-        definitionName: chatFiberName,
         storage: this.ctx.storage,
         getRunCreatedAt: async (runId) =>
           (await this.tasks.get(runId))?.createdAt ?? null,
         getLiveClosure: (nonce) => this._liveChatTurnClosures.get(nonce),
         keepAliveWhile: (fn) => this.keepAliveWhile(fn),
         withStash: (context, fn) => this._withFiberStash(context, fn),
-        handleRecovery: (ctx) => this._handleInternalFiberRecovery(ctx)
+        recover: (turn) => this._recoverChatTurn(turn)
       })
     );
   }
@@ -13212,14 +13211,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           this._requestContext.restore("lastClientTools");
         }
       },
-      // Messenger/workflow reply fibers (`think:messenger-reply`) are NOT chat
-      // turns; the messenger runtime owns their recovery. The engine dispatches
-      // this before the chat-fiber gate so such a fiber is never misread as an
-      // orphaned chat turn. `Promise.resolve(false)` when no messenger runtime
-      // is initialized (e.g. a child facet).
-      tryHandleNonChatFiberRecovery: (ctx) =>
-        this._messengerRuntime?.handleFiberRecovery(ctx) ??
-        Promise.resolve(false),
       readProgress: () => this._chatRecoveryProgressMarker(),
       // A turn parked on a pending CLIENT interaction is waiting on the human,
       // not stuck, so the engine keeps it budget-free. SERVER-tool orphans are
@@ -13504,28 +13495,60 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     return leaf?.role === "user" ? leaf.id : null;
   }
 
+  /**
+   * A fiber left by a dead isolate. Messenger/workflow reply fibers
+   * (`think:messenger-reply`) are not chat turns: the messenger runtime owns
+   * their recovery, and it is asked first so such a fiber is never misread as
+   * an orphaned chat turn. A chat turn's fiber row an older version left in
+   * the fiber ledger is recovered like a replayed chat-turn Task run. Every
+   * other fiber is the app's.
+   */
   protected override async _handleInternalFiberRecovery(
     ctx: FiberRecoveryContext
   ): Promise<boolean> {
-    // The wake-recovery lifecycle (non-chat dispatch → chat gate → unwrap →
-    // stream/partial → classify → begin-incident → exhausted-branch →
-    // onChatRecovery → persist → complete → dispatch → catch→failed) lives in the
-    // shared ChatRecoveryEngine; this binds the divergent organs as wake hooks,
-    // symmetric with `AIChatAgent`. `Think` tracks terminal stream status and a
-    // durable submission layer + session leaf, so its dispatch owns the
-    // terminal-skip / submission-completion / interrupted-broadcast branches the
-    // engine frame stays out of. See design/rfc-chat-recovery-foundation.md.
-    const chatFiberPrefix =
-      (this.constructor as typeof Think).CHAT_FIBER_NAME + ":";
-    if (
-      ctx.name.startsWith(chatFiberPrefix) &&
-      (await this._settlePersistedChatTurn(
-        ctx.name.slice(chatFiberPrefix.length)
-      ))
-    ) {
-      return true;
-    }
-    return this._recoverChatFiber(ctx);
+    if (await this._messengerRuntime?.handleFiberRecovery(ctx)) return true;
+    const prefix = (this.constructor as typeof Think).CHAT_FIBER_NAME + ":";
+    if (!ctx.name.startsWith(prefix)) return false;
+    await this._recoverChatTurn({
+      requestId: ctx.name.slice(prefix.length),
+      persisted: ctx.snapshot,
+      createdAt: ctx.createdAt
+    });
+    return true;
+  }
+
+  /**
+   * Recover a chat turn whose isolate died before it finished. The lifecycle
+   * (stream/partial → classify → begin-incident → exhausted-branch →
+   * onChatRecovery → persist → complete → dispatch → catch→failed) lives in the
+   * shared ChatRecoveryEngine; this binds the divergent organs as wake hooks,
+   * symmetric with `AIChatAgent`. `Think` tracks terminal stream status and a
+   * durable submission layer + session leaf, so its dispatch owns the
+   * terminal-skip / submission-completion / interrupted-broadcast branches the
+   * engine frame stays out of. See design/rfc-chat-recovery-foundation.md.
+   *
+   * @param turn - `persisted` is the snapshot envelope the turn stored.
+   */
+  private async _recoverChatTurn(turn: {
+    requestId: string;
+    persisted: unknown;
+    createdAt: number;
+  }): Promise<void> {
+    if (await this._settlePersistedChatTurn(turn.requestId)) return;
+    const { snapshot, user } = unwrapChatFiberSnapshot<"think-chat-turn">(
+      "__cfThinkChatFiberSnapshot",
+      turn.persisted,
+      "think-chat-turn"
+    );
+    await this._chatRecoveryEngine().recoverInterruptedTurn(
+      {
+        requestId: turn.requestId,
+        snapshot,
+        recoveryData: user,
+        createdAt: turn.createdAt
+      },
+      this._chatRecoveryWakeHooks()
+    );
   }
 
   /**
@@ -13550,18 +13573,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     return true;
   }
 
-  private _recoverChatFiber(ctx: FiberRecoveryContext): Promise<boolean> {
-    return this._chatRecoveryEngine().handleChatFiberRecovery(ctx, {
-      chatFiberPrefix: () =>
-        (this.constructor as typeof Think).CHAT_FIBER_NAME + ":",
-      unwrapRecoverySnapshot: (fiber) => {
-        const { snapshot, user } = unwrapChatFiberSnapshot<"think-chat-turn">(
-          "__cfThinkChatFiberSnapshot",
-          fiber.snapshot,
-          "think-chat-turn"
-        );
-        return { snapshot, recoveryData: user };
-      },
+  private _chatRecoveryWakeHooks(): ChatFiberWakeHooks<ThinkRecoveryClassification> {
+    return {
       classifyRecoveredTurn: (input) => this._classifyRecoveredThinkTurn(input),
       invokeOnChatRecovery: (input) =>
         this.onChatRecovery({
@@ -13596,7 +13609,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       completeRecoveredStream: (streamId) =>
         this._completeResumableStream(streamId),
       dispatchRecoveredTurn: (input) => this._dispatchRecoveredThinkTurn(input)
-    } satisfies ChatFiberWakeHooks<ThinkRecoveryClassification>);
+    };
   }
 
   /**

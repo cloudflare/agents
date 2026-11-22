@@ -901,14 +901,13 @@ export class AIChatAgent<
     this.tasks.register(
       chatFiberName,
       createChatTurnTaskDefinition({
-        definitionName: chatFiberName,
         storage: this.ctx.storage,
         getRunCreatedAt: async (runId) =>
           (await this.tasks.get(runId))?.createdAt ?? null,
         getLiveClosure: (nonce) => this._liveChatTurnClosures.get(nonce),
         keepAliveWhile: (fn) => this.keepAliveWhile(fn),
         withStash: (context, fn) => this._withFiberStash(context, fn),
-        handleRecovery: (ctx) => this._handleInternalFiberRecovery(ctx)
+        recover: (turn) => this._recoverChatTurn(turn)
       })
     );
   }
@@ -4196,28 +4195,53 @@ export class AIChatAgent<
     });
   }
 
+  /**
+   * A chat turn's fiber row an older version left in the fiber ledger: recover
+   * it like a replayed chat-turn Task run. Every other fiber is the app's.
+   */
   protected override async _handleInternalFiberRecovery(
     ctx: FiberRecoveryContext
   ): Promise<boolean> {
-    // The wake-recovery lifecycle (non-chat dispatch → chat gate → unwrap →
-    // stream/partial → classify → begin-incident → exhausted-branch →
-    // onChatRecovery → persist → complete → dispatch → catch→failed) lives in the
-    // shared ChatRecoveryEngine; this binds the divergent organs as wake hooks,
-    // symmetric with `Think`. `AIChatAgent` tracks no terminal stream status
-    // (`streamStatus: undefined`, so every terminal-stream branch is dead) and
-    // has no submission layer, so its dispatch is a leaf-only retry/continue/skip.
-    // See design/rfc-chat-recovery-foundation.md.
-    return this._chatRecoveryEngine().handleChatFiberRecovery(ctx, {
-      chatFiberPrefix: () =>
-        (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME + ":",
-      unwrapRecoverySnapshot: (fiber) => {
-        const { snapshot, user } = unwrapChatFiberSnapshot<"ai-chat-turn">(
-          "__cfAIChatFiberSnapshot",
-          fiber.snapshot,
-          "ai-chat-turn"
-        );
-        return { snapshot, recoveryData: user };
-      },
+    const prefix =
+      (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME + ":";
+    if (!ctx.name.startsWith(prefix)) return false;
+    await this._recoverChatTurn({
+      requestId: ctx.name.slice(prefix.length),
+      persisted: ctx.snapshot,
+      createdAt: ctx.createdAt
+    });
+    return true;
+  }
+
+  /**
+   * Recover a chat turn whose isolate died before it finished. The lifecycle
+   * (stream/partial → classify → begin-incident → exhausted-branch →
+   * onChatRecovery → persist → complete → dispatch → catch→failed) lives in the
+   * shared ChatRecoveryEngine; this binds the divergent organs as wake hooks,
+   * symmetric with `Think`. `AIChatAgent` tracks no terminal stream status
+   * (`streamStatus: undefined`, so every terminal-stream branch is dead) and
+   * has no submission layer, so its dispatch is a leaf-only retry/continue/skip.
+   * See design/rfc-chat-recovery-foundation.md.
+   *
+   * @param turn - `persisted` is the snapshot envelope the turn stored.
+   */
+  private async _recoverChatTurn(turn: {
+    requestId: string;
+    persisted: unknown;
+    createdAt: number;
+  }): Promise<void> {
+    const { snapshot, user } = unwrapChatFiberSnapshot<"ai-chat-turn">(
+      "__cfAIChatFiberSnapshot",
+      turn.persisted,
+      "ai-chat-turn"
+    );
+    const recovered = {
+      requestId: turn.requestId,
+      snapshot,
+      recoveryData: user,
+      createdAt: turn.createdAt
+    };
+    await this._chatRecoveryEngine().recoverInterruptedTurn(recovered, {
       classifyRecoveredTurn: (input) => this._classifyRecoveredChatTurn(input),
       invokeOnChatRecovery: (input) =>
         this.onChatRecovery({

@@ -550,23 +550,26 @@ export class PiAgent extends Agent<Env> {
   protected override async _handleInternalFiberRecovery(
     ctx: FiberRecoveryContext
   ): Promise<boolean> {
-    return this._engine().handleChatFiberRecovery<PiClassify>(
-      ctx,
+    if (!ctx.name.startsWith(PiAgent.FIBER_PREFIX)) return false;
+    const { snapshot, user } = unwrapChatFiberSnapshot(
+      PiAgent.SNAPSHOT_KEY,
+      ctx.snapshot,
+      "pi-turn"
+    );
+    await this._engine().recoverInterruptedTurn<PiClassify>(
+      {
+        requestId: ctx.name.slice(PiAgent.FIBER_PREFIX.length),
+        snapshot,
+        recoveryData: user,
+        createdAt: ctx.createdAt
+      },
       this._wakeHooks()
     );
+    return true;
   }
 
   private _wakeHooks(): ChatFiberWakeHooks<PiClassify> {
     return {
-      chatFiberPrefix: () => PiAgent.FIBER_PREFIX,
-      unwrapRecoverySnapshot: (ctx) => {
-        const { snapshot, user } = unwrapChatFiberSnapshot(
-          PiAgent.SNAPSHOT_KEY,
-          ctx.snapshot,
-          "pi-turn"
-        );
-        return { snapshot, recoveryData: user };
-      },
       classifyRecoveredTurn: (input: ClassifyRecoveredTurnInput) => {
         // A surviving partial drives a `continue` (regenerate only the suffix
         // and merge); an empty partial (crash before the first delta flushed)
