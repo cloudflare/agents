@@ -306,4 +306,53 @@ describe("deferred destroy (#1625)", () => {
 
     await expectTeardownCompleted(namespace, name);
   });
+
+  it("a request for an unknown MCP session ID does not leave its DO behind", async () => {
+    const handler = TestMcpJurisdiction.serve("/mcp", {
+      binding: "TEST_MCP_JURISDICTION",
+      transport: "streamable-http"
+    });
+    const namespace =
+      env.TEST_MCP_JURISDICTION as unknown as DurableObjectNamespace<
+        Agent<Cloudflare.Env>
+      >;
+
+    // Each of these creates the Durable Object named after the session ID
+    // the client made up. Nothing else will ever address it, so it has to
+    // remove itself.
+    const requests = [
+      new Request("http://example.com/mcp", {
+        method: "POST",
+        headers: {
+          "mcp-session-id": `unknown-${crypto.randomUUID()}`,
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: "2", method: "tools/list" })
+      }),
+      new Request("http://example.com/mcp", {
+        method: "GET",
+        headers: {
+          "mcp-session-id": `unknown-${crypto.randomUUID()}`,
+          Accept: "text/event-stream"
+        }
+      }),
+      new Request("http://example.com/mcp", {
+        method: "DELETE",
+        headers: { "mcp-session-id": `unknown-${crypto.randomUUID()}` }
+      })
+    ];
+    for (const request of requests) {
+      const response = await handler.fetch(
+        request,
+        env,
+        createExecutionContext()
+      );
+      expect(response.status, request.method).toBe(404);
+      await expectTeardownCompleted(
+        namespace,
+        `streamable-http:${request.headers.get("mcp-session-id")}`
+      );
+    }
+  });
 });

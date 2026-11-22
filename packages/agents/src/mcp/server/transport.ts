@@ -80,9 +80,8 @@ export interface StreamableHTTPServerTransportOptions {
    * reconnect and resume messages.
    *
    * If the store also implements {@link ClearableEventStore.clearStream}
-   * the transport will call it after the final response of a POST
-   * stream is written, so storage stays bounded without any background
-   * sweep. {@link DurableObjectEventStore} is the canonical example.
+   * the transport calls it once a finished POST stream's retention has
+   * run out, so storage stays bounded without any background sweep. {@link DurableObjectEventStore} is the canonical example.
    */
   eventStore?: EventStore | ClearableEventStore;
 }
@@ -219,7 +218,8 @@ export class StreamableHTTPServerTransport implements Transport {
     //   - standalone listen stream: tag with _standaloneSse so
     //     server-initiated notifications continue to land here.
     //   - completed POST / unknown: this connection is a one-shot
-    //     replay channel. No future messages will be routed to it.
+    //     replay channel. No future messages will be routed to it, so
+    //     it is closed once the replay is written.
     //
     // In every resumable case we supersede any prior connection bound
     // to the same streamId by closing it, so there is at most one live
@@ -233,6 +233,7 @@ export class StreamableHTTPServerTransport implements Transport {
         const resumeState: TransportConnState = {
           streamId: resumedStreamId
         };
+        let expectsMore = true;
         if (resumedStreamId === STANDALONE_STREAM_ID) {
           resumeState._standaloneSse = true;
         } else {
@@ -240,6 +241,8 @@ export class StreamableHTTPServerTransport implements Transport {
             await agent.getStreamRequestIds(resumedStreamId);
           if (persistedReqs && persistedReqs.length > 0) {
             resumeState.requestIds = persistedReqs;
+          } else {
+            expectsMore = false;
           }
         }
         this.supersedePriorStreamConnections(
@@ -249,6 +252,7 @@ export class StreamableHTTPServerTransport implements Transport {
         );
         connection.setState(resumeState);
         await this.replayEvents(lastEventId);
+        if (!expectsMore) connection.close(1000, "Stream complete");
         return;
       }
     }
@@ -483,11 +487,18 @@ export class StreamableHTTPServerTransport implements Transport {
     }
 
     if (shouldClose) {
-      // A concurrent GET resume between these awaits would replay
-      // events about to be deleted — benign.
       await agent.deleteStreamRequestIds(streamId);
+      // The stream's events stay for a while: the write above only queues
+      // the response, and with no live connection it wrote nothing. A
+      // client that did not receive the response resumes with
+      // Last-Event-ID and gets it replayed. What is cleared here is the
+      // streams that finished long enough ago.
       if (this._eventStore && isClearableEventStore(this._eventStore)) {
-        await this._eventStore.clearStream(streamId);
+        const expired = await agent.finishStream(streamId);
+        for (const expiredStreamId of expired) {
+          await this._eventStore.clearStream(expiredStreamId);
+        }
+        await agent.forgetFinishedStreams(expired);
       }
     }
   }

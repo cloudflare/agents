@@ -59,6 +59,8 @@ export interface TransportState {
   sessionId?: string;
   initialized: boolean;
   initializeParams?: InitializeRequestParams;
+  /** True once the client ended the session with `DELETE`. */
+  closed?: boolean;
 }
 
 const DEFAULT_CORS_OPTIONS: Required<
@@ -166,9 +168,16 @@ export class WorkerTransport extends WebStandardStreamableHTTPServerTransport {
 
     const response = await super.handleRequest(request, options);
 
-    // State is persisted by the `onsessioninitialized` bridge, which the SDK
-    // fires (and awaits) during `super.handleRequest` on the initialize path —
-    // the only point session state actually changes. We deliberately do *not*
+    // A deleted session has to stay deleted after a restart, so the end of
+    // the session is stored too. Without it the next cold start would
+    // restore the session from storage and answer for it again.
+    if (request.method === "DELETE" && this.isClosed()) {
+      await this.saveState();
+    }
+
+    // Otherwise state is persisted by the `onsessioninitialized` bridge, which
+    // the SDK fires (and awaits) during `super.handleRequest` on the initialize
+    // path. We deliberately do *not*
     // snapshot again here: that would write to storage on every request
     // (notifications, tool calls, GET, DELETE) where nothing changed, matching
     // neither the pre-refactor behaviour (one write at init) nor the intent of
@@ -239,6 +248,10 @@ export class WorkerTransport extends WebStandardStreamableHTTPServerTransport {
       return;
     }
     await super.send(message, options);
+  }
+
+  private isClosed(): boolean {
+    return (this as unknown as { _closed: boolean })._closed === true;
   }
 
   // ── CORS ───────────────────────────────────────────────────────────────
@@ -340,10 +353,17 @@ export class WorkerTransport extends WebStandardStreamableHTTPServerTransport {
     const sdk = this as unknown as {
       sessionId?: string;
       _initialized: boolean;
+      _closed: boolean;
     };
     sdk.sessionId = state.sessionId;
     sdk._initialized = state.initialized;
     this._capturedInitializeParams = state.initializeParams;
+    // The SDK answers 404 "Session not found" to every request on a closed
+    // transport, which is what a deleted session owes its client.
+    if (state.closed) {
+      sdk._closed = true;
+      return;
+    }
 
     if (state.initializeParams && this.onmessage) {
       // Replay through the Server so `_clientCapabilities` etc. are
@@ -366,7 +386,8 @@ export class WorkerTransport extends WebStandardStreamableHTTPServerTransport {
     const state: TransportState = {
       sessionId: sdk.sessionId,
       initialized: sdk._initialized,
-      initializeParams: this._capturedInitializeParams
+      initializeParams: this._capturedInitializeParams,
+      ...(this.isClosed() && { closed: true })
     };
     await Promise.resolve(this._storage.set(state));
   }

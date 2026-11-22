@@ -4,8 +4,7 @@ import {
   type MessageExtraInfo,
   InitializeRequestSchema,
   SUPPORTED_PROTOCOL_VERSIONS,
-  isJSONRPCResultResponse,
-  isJSONRPCNotification
+  isJSONRPCRequest
 } from "@modelcontextprotocol/sdk/types.js";
 import type { McpAgent } from "..";
 import { getAgentByName } from "../..";
@@ -53,6 +52,18 @@ function unsupportedProtocolVersionResponse(
       jsonrpc: "2.0"
     },
     { status: 400 }
+  );
+}
+
+/** The answer to a request for a session that does not exist or has ended. */
+function sessionNotFoundResponse(headers?: HeadersInit): Response {
+  return Response.json(
+    {
+      jsonrpc: "2.0",
+      error: { code: -32001, message: "Session not found" },
+      id: null
+    },
+    { status: 404, headers }
   );
 }
 
@@ -239,23 +250,11 @@ export const createStreamingHttpHandler = (
           }
         );
 
-        // An initialize POST has a session ID generated just above, so there
-        // is no stored initialize request to read. Only other POSTs check.
-        if (maybeInitializeRequest) {
-          await agent.setInitializeRequest(maybeInitializeRequest);
-        } else if (!(await agent.getInitializeRequest())) {
-          // if we have gotten here, then a session id that was never initialized
-          // was provided
-          const body = JSON.stringify({
-            error: {
-              code: -32001,
-              message: "Session not found"
-            },
-            id: null,
-            jsonrpc: "2.0"
-          });
-          return new Response(body, { status: 404 });
-        }
+        // The session's object decides whether the session exists when it
+        // accepts the upgrade below: it stores an initialize request, and
+        // answers 404 to any other message for a session it does not have.
+        // Checking here first would leave a gap in which a DELETE could end
+        // the session before the message reaches it.
 
         // We've evaluated all the error conditions! Now it's time to establish
         // all the streams
@@ -282,6 +281,7 @@ export const createStreamingHttpHandler = (
           }
         });
         const response = await agent.fetch(req);
+        if (response.status === 404) return sessionNotFoundResponse();
 
         // Get the WebSocket
         const ws = response.webSocket;
@@ -305,11 +305,11 @@ export const createStreamingHttpHandler = (
 
         // If there are no requests, we send the messages to the agent and
         // acknowledge the request with a 202 since we don't expect any
-        // responses back through this connection. Decide this *before*
+        // responses back through this connection. That covers notifications
+        // and both kinds of response, result and error. Decide this *before*
         // arming a keepalive on the SSE writer so we don't leak a timer.
-        const hasOnlyNotificationsOrResponses = messages.every(
-          (msg) => isJSONRPCNotification(msg) || isJSONRPCResultResponse(msg)
-        );
+        const hasOnlyNotificationsOrResponses =
+          !messages.some(isJSONRPCRequest);
         if (hasOnlyNotificationsOrResponses) {
           // closing the websocket will also close the SSE connection
           ws.close();
@@ -436,18 +436,6 @@ export const createStreamingHttpHandler = (
             jurisdiction: options.jurisdiction
           }
         );
-        const isInitialized = await agent.getInitializeRequest();
-        if (!isInitialized) {
-          return new Response(
-            JSON.stringify({
-              jsonrpc: "2.0",
-              error: { code: -32001, message: "Session not found" },
-              id: null
-            }),
-            { status: 404 }
-          );
-        }
-
         const existingHeaders: Record<string, string> = {};
         request.headers.forEach((v, k) => {
           existingHeaders[k] = v;
@@ -462,6 +450,8 @@ export const createStreamingHttpHandler = (
             }
           })
         );
+
+        if (response.status === 404) return sessionNotFoundResponse();
 
         const ws = response.webSocket;
         if (!ws) {
@@ -487,6 +477,13 @@ export const createStreamingHttpHandler = (
                 return;
               }
               await writer.write(encoder.encode(message.event));
+
+              // A resumed POST stream ends with its response, like the POST
+              // stream it replaces.
+              if (message.close) {
+                ws?.close();
+                await writer.close().catch(() => {});
+              }
             }
             onMessage(event).catch(console.error);
           } catch (e) {
@@ -534,17 +531,6 @@ export const createStreamingHttpHandler = (
           `streamable-http:${sessionId}`,
           { jurisdiction: options.jurisdiction }
         );
-        const isInitialized = await agent.getInitializeRequest();
-        if (!isInitialized) {
-          return new Response(
-            JSON.stringify({
-              jsonrpc: "2.0",
-              error: { code: -32001, message: "Session not found" },
-              id: null
-            }),
-            { status: 404, headers: corsHeaders(request, options.corsOptions) }
-          );
-        }
         // Defer the actual teardown to the agent's own alarm invocation
         // (#1625). Running `destroy()` on this request's `waitUntil` was
         // unreliable: the client is usually already gone by the time the
@@ -555,7 +541,11 @@ export const createStreamingHttpHandler = (
         // then runs the real teardown with a fresh execution budget and a
         // durable marker that survives any further interruption. The
         // session itself ends now: later requests with its ID get 404.
-        await agent._cf_terminateSession();
+        if (!(await agent._cf_terminateSession())) {
+          return sessionNotFoundResponse(
+            corsHeaders(request, options.corsOptions)
+          );
+        }
         return new Response(null, {
           status: 204,
           headers: corsHeaders(request, options.corsOptions)

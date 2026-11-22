@@ -20,21 +20,17 @@ import type {
  *
  * ## Lifecycle
  *
- * Each POST tool-call stream's events live only until the final
- * response is delivered. The transport calls {@link clearStream}
- * immediately after writing the close frame, so storage growth is
- * bounded by the in-flight POST streams plus the standalone GET
- * stream. There is no background sweep — quiescent agents do no work,
- * and the DO itself dies with the session.
+ * Each POST tool-call stream's events live until a few minutes after
+ * its response was sent (`McpAgent.FINISHED_STREAM_RETENTION_MS`), so a
+ * client that lost its connection before the response reached it can
+ * resume with `Last-Event-ID`. The transport calls {@link clearStream}
+ * for expired streams when a later stream finishes. There is no
+ * background sweep — quiescent agents do no work, and the DO itself
+ * dies with the session.
  *
  * Standalone GET stream events (`_GET_stream`) are *not* cleared
  * automatically; they accumulate for the lifetime of the DO. Bounded
  * by session length in practice.
- *
- * Trade-off: if the client TCP connection dies *after* the close
- * frame has been enqueued on the WS but before the bytes reach the
- * client, the final message is unreplayable. Every earlier event in
- * the stream is still replayable while the in-flight stream is open.
  *
  * ## Stream id constraints
  *
@@ -130,9 +126,8 @@ export class DurableObjectEventStore implements EventStore {
 
   /**
    * Drop the event log for a single stream. Called by the transport
-   * immediately after a POST's final response has been written to the
-   * wire — no future `Last-Event-ID` for this stream is expected to
-   * resolve.
+   * once a finished POST stream's retention has run out — no future
+   * `Last-Event-ID` for this stream is expected to resolve.
    *
    * Lists and deletes in chunks of {@link DELETE_CHUNK} (128, the DO
    * storage cap) so we never load the entire event log into memory.

@@ -11,6 +11,7 @@ import type {
   RequestId
 } from "@modelcontextprotocol/sdk/types.js";
 import {
+  InitializeRequestSchema,
   JSONRPCMessageSchema,
   isJSONRPCErrorResponse,
   isJSONRPCResultResponse,
@@ -87,11 +88,67 @@ export abstract class McpAgent<
    * is scheduled first, so a failure part-way leaves a session the client can
    * `DELETE` again rather than one that is never cleaned up.
    *
+   * Returns false when there was no session to end. The object a request for
+   * an unknown session ID created is still torn down, so it does not stay
+   * behind holding storage.
+   *
    * @internal
    */
-  async _cf_terminateSession(): Promise<void> {
+  async _cf_terminateSession(): Promise<boolean> {
+    const existed = (await this.getInitializeRequest()) !== undefined;
     await this._cf_scheduleDestroy();
     await this.ctx.storage.delete("initializeRequest");
+    return existed;
+  }
+
+  /**
+   * Decide whether a streamable HTTP bridge upgrade belongs to a session.
+   * An initialize request starts the session and is stored. Any other
+   * message, or a GET, needs a session that already exists; without one the
+   * object schedules its own teardown, because the request that created it
+   * is the only thing that will ever address it.
+   */
+  private async _admitStreamableHttp(
+    messageHeader: string | null
+  ): Promise<boolean> {
+    if (await this.getInitializeRequest()) return true;
+
+    if (messageHeader) {
+      const parsed: unknown = JSON.parse(
+        Buffer.from(messageHeader, "base64").toString("utf-8")
+      );
+      const initializeRequest = (
+        Array.isArray(parsed) ? parsed : [parsed]
+      ).find((message) => InitializeRequestSchema.safeParse(message).success);
+      if (initializeRequest) {
+        await this.setInitializeRequest(
+          JSONRPCMessageSchema.parse(initializeRequest)
+        );
+        return true;
+      }
+    }
+
+    await this._cf_scheduleDestroy();
+    return false;
+  }
+
+  /**
+   * The Worker handler bridges each streamable HTTP request to this object as
+   * a WebSocket upgrade. The session check runs here, in the same call that
+   * accepts the upgrade, so a session cannot end between the two.
+   */
+  override async fetch(request: Request): Promise<Response> {
+    const method = request.headers.get(MCP_HTTP_METHOD_HEADER);
+    if (
+      (method === "POST" || method === "GET") &&
+      this.ctx.id.name?.startsWith("streamable-http:")
+    ) {
+      const admitted = await this._admitStreamableHttp(
+        method === "POST" ? request.headers.get(MCP_MESSAGE_HEADER) : null
+      );
+      if (!admitted) return new Response(null, { status: 404 });
+    }
+    return super.fetch(request);
   }
 
   /**
@@ -126,6 +183,48 @@ export abstract class McpAgent<
   async deleteStreamRequestIds(streamId: string): Promise<void> {
     await this.ctx.storage.delete(
       `${McpAgent.STREAM_REQS_KEY_PREFIX}${streamId}`
+    );
+  }
+
+  /**
+   * How long a POST stream's events stay replayable after its response was
+   * sent. A client that lost its connection around the time the tool finished
+   * reconnects with `Last-Event-ID` within seconds; five minutes also covers
+   * the edge closing an idle stream.
+   *
+   * @internal
+   */
+  static readonly FINISHED_STREAM_RETENTION_MS = 5 * 60_000;
+
+  private static readonly STREAM_DONE_KEY_PREFIX = "__mcp_stream_done__:";
+
+  /**
+   * Record that a POST stream has sent its response, and return the streams
+   * whose retention has run out. The caller clears their events and then
+   * calls {@link forgetFinishedStreams}. Nothing runs in the background:
+   * expired streams are collected when a later stream finishes, and the
+   * session's teardown removes whatever is left.
+   *
+   * @internal
+   */
+  async finishStream(streamId: string, now = Date.now()): Promise<string[]> {
+    const prefix = McpAgent.STREAM_DONE_KEY_PREFIX;
+    await this.ctx.storage.put<number>(`${prefix}${streamId}`, now);
+    const rows = await this.ctx.storage.list<number>({ prefix, limit: 128 });
+    const expired: string[] = [];
+    for (const [key, finishedAt] of rows) {
+      if (now - finishedAt >= McpAgent.FINISHED_STREAM_RETENTION_MS) {
+        expired.push(key.slice(prefix.length));
+      }
+    }
+    return expired;
+  }
+
+  /** Drop the finish records of streams whose events were cleared. @internal */
+  async forgetFinishedStreams(streamIds: string[]): Promise<void> {
+    if (streamIds.length === 0) return;
+    await this.ctx.storage.delete(
+      streamIds.map((id) => `${McpAgent.STREAM_DONE_KEY_PREFIX}${id}`)
     );
   }
 
@@ -240,10 +339,10 @@ export abstract class McpAgent<
    * edge closes an idle SSE stream (~5 minute watchdog) instead of
    * relying on a server-side keepalive that would block hibernation.
    *
-   * Per-stream events are cleared by the transport immediately after
-   * the final response is written to the wire, so there's no
-   * background cleanup — storage cost is bounded by the in-flight
-   * streams alone.
+   * A stream's events are kept for
+   * {@link McpAgent.FINISHED_STREAM_RETENTION_MS} after its response, so
+   * a client that missed the response can still resume, and are cleared
+   * when a later stream finishes. There is no background cleanup.
    *
    * Override to disable (`return undefined`) or swap implementations.
    */

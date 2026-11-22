@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { createExecutionContext } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
+import { getAgentByName } from "../..";
 import worker from "../worker";
 import {
   initializeStreamableHTTPServer,
@@ -386,5 +387,122 @@ describe("McpAgent SSE resumability (#1583)", () => {
     // `replayEventsAfter` must skip it — the client already saw it on
     // the original POST stream and re-delivering it would be a bug.
     expect(resumeBuf).not.toContain("notifications/progress");
+  });
+
+  /**
+   * Start `deferredGreet`, read its progress notification, then drop the
+   * POST stream while the tool is still running.
+   */
+  const dropPostMidCall = async (delayMs: number) => {
+    const ctx = createExecutionContext();
+    const sessionId = await initializeStreamableHTTPServer(ctx, baseUrl);
+    const callResponse = await worker.fetch(
+      new Request(baseUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+          "mcp-session-id": sessionId
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 78,
+          method: "tools/call",
+          params: {
+            name: "deferredGreet",
+            arguments: { name: "late", delayMs }
+          }
+        })
+      }),
+      env,
+      ctx
+    );
+    const reader = responseReader(callResponse);
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (!buffer.includes("notifications/progress")) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+    }
+    const eventId = extractEventId(buffer);
+    if (!eventId) throw new Error("Expected a progress event id");
+    await reader.cancel();
+    return { ctx, sessionId, eventId };
+  };
+
+  /** Read a resumed stream to its end, failing if it stays open. */
+  const readToEnd = async (response: Response) => {
+    const reader = responseReader(response);
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const deadline = Date.now() + 5000;
+    for (;;) {
+      const frame = await Promise.race([
+        reader.read(),
+        new Promise<"timeout">((resolve) =>
+          setTimeout(() => resolve("timeout"), deadline - Date.now())
+        )
+      ]);
+      if (frame === "timeout") {
+        await reader.cancel();
+        throw new Error(`stream stayed open, got:\n${buffer}`);
+      }
+      if (frame.done) return buffer;
+      buffer += decoder.decode(frame.value, { stream: true });
+    }
+  };
+
+  const resume = (ctx: ExecutionContext, sessionId: string, eventId: string) =>
+    worker.fetch(
+      new Request(baseUrl, {
+        method: "GET",
+        headers: {
+          Accept: "text/event-stream",
+          "mcp-session-id": sessionId,
+          "Last-Event-ID": eventId
+        }
+      }),
+      env,
+      ctx
+    );
+
+  it("a resumed stream ends once it has delivered the tool result", async () => {
+    const { ctx, sessionId, eventId } = await dropPostMidCall(600);
+    const resumed = await resume(ctx, sessionId, eventId);
+    expect(resumed.status).toBe(200);
+    expect(await readToEnd(resumed)).toContain("Hello, late!");
+  });
+
+  it("a client that reconnects after the tool finished still gets the result", async () => {
+    const { ctx, sessionId, eventId } = await dropPostMidCall(200);
+    // The tool returns while no stream is connected.
+    await new Promise((resolve) => setTimeout(resolve, 800));
+
+    const resumed = await resume(ctx, sessionId, eventId);
+    expect(resumed.status).toBe(200);
+    const body = await readToEnd(resumed);
+    expect(body).toContain("Hello, late!");
+    expect(body).not.toContain("notifications/progress");
+  });
+
+  it("clears a finished stream's events once its retention has run out", async () => {
+    const ctx = createExecutionContext();
+    const sessionId = await initializeStreamableHTTPServer(ctx, baseUrl);
+    const stub = await getAgentByName(
+      env.MCP_OBJECT,
+      `streamable-http:${sessionId}`
+    );
+    const retention = 5 * 60_000;
+
+    expect(await stub.finishStream("first", 1_000)).toEqual([]);
+    expect(await stub.finishStream("second", 1_000 + retention - 1)).toEqual(
+      []
+    );
+    expect(await stub.finishStream("third", 1_000 + retention)).toEqual([
+      "first"
+    ]);
+    await stub.forgetFinishedStreams(["first"]);
+    expect(await stub.finishStream("fourth", 1_000 + retention)).toEqual([]);
   });
 });

@@ -294,6 +294,26 @@ describe("Streamable HTTP Transport", () => {
       );
     });
 
+    it("should answer 202 to a JSON-RPC error response", async () => {
+      const ctx = createExecutionContext();
+      const sessionId = await initializeStreamableHTTPServer(ctx);
+
+      // What a client sends when it declines a server request, such as an
+      // elicitation it cannot show. Nothing will be sent back for it.
+      const response = await sendPostRequest(
+        ctx,
+        baseUrl,
+        {
+          jsonrpc: "2.0",
+          id: "server-request-1",
+          error: { code: -32601, message: "Method not found" }
+        },
+        sessionId
+      );
+
+      expect(response.status).toBe(202);
+    });
+
     it("should handle batch notification messages with 202 response", async () => {
       const ctx = createExecutionContext();
       const sessionId = await initializeStreamableHTTPServer(ctx);

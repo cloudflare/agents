@@ -8,18 +8,16 @@ function countingNamespace(calls: string[]) {
   const wrapStub = (stub: object) =>
     new Proxy(stub, {
       get(target, prop) {
-        if (prop === "getInitializeRequest") {
-          return () => {
-            calls.push(prop);
-            return (
-              target as unknown as {
-                getInitializeRequest(): Promise<unknown>;
-              }
-            ).getInitializeRequest();
-          };
-        }
         const value = Reflect.get(target, prop);
-        return prop === "fetch" ? (value as Function).bind(target) : value;
+        if (typeof prop !== "string" || typeof value !== "function") {
+          return value;
+        }
+        return (...args: unknown[]) => {
+          calls.push(prop);
+          return (
+            target as unknown as Record<string, (...a: unknown[]) => unknown>
+          )[prop](...args);
+        };
       }
     });
   const ns = env.MCP_OBJECT;
@@ -41,7 +39,7 @@ function countingNamespace(calls: string[]) {
 }
 
 describe("streamable HTTP initialize", () => {
-  it("does not read the stored initialize request", async () => {
+  it("starts a session with two calls to its Durable Object", async () => {
     const calls: string[] = [];
     const handler = createStreamingHttpHandler(
       "/mcp",
@@ -60,6 +58,8 @@ describe("streamable HTTP initialize", () => {
     );
     expect(response.status).toBe(200);
     expect(response.headers.get("mcp-session-id")).toBeTruthy();
-    expect(calls).toEqual([]);
+    // The upgrade stores the initialize request, so the handler neither
+    // reads nor writes it in calls of its own.
+    expect(calls).toEqual(["__unsafe_ensureInitialized", "fetch"]);
   });
 });
