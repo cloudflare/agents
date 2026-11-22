@@ -1,4 +1,4 @@
-import { MAX_OUTBOX_PAYLOAD_BYTES, type OutboxSink } from "agents/chat";
+import { MAX_OUTBOX_PAYLOAD_BYTES, type OutboxSink } from "agents/internal";
 
 const encoder = new TextEncoder();
 
