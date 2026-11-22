@@ -652,6 +652,23 @@ describe("Think — actions compile into guarded tools", () => {
     expect((await agent.getActionProbe()).count).toBe(1);
   });
 
+  it("records an action output past the row limit, capped, and replays it", async () => {
+    const agent = await freshToolAgent(
+      `action-ledger-oversize-${crypto.randomUUID()}`
+    );
+    await agent.useEchoActionForTest("ledger-oversize-output");
+    await agent.setActionIdempotencyKey("oversize-key");
+
+    const first = (await agent.executeEchoActionToolForTest()) as string;
+    expect(first.length).toBeLessThan(25_000);
+    expect(first).toContain("[truncated");
+    expect(await agent.listActionLedgerRowsForTest()).toMatchObject([
+      { key: "action:echo:oversize-key", status: "settled" }
+    ]);
+    await expect(agent.executeEchoActionToolForTest()).resolves.toBe(first);
+    expect((await agent.getActionProbe()).count).toBe(1);
+  });
+
   it("returns a programming error for action ledger key/input conflicts", async () => {
     const agent = await freshToolAgent(
       `action-ledger-conflict-${crypto.randomUUID()}`
@@ -916,6 +933,27 @@ describe("Think — actions compile into guarded tools", () => {
         status: "settled"
       }
     ]);
+  });
+
+  it("moves ledger rows an earlier version wrote, so a settled action still replays", async () => {
+    const agent = await freshToolAgent(
+      `action-ledger-migrate-${crypto.randomUUID()}`
+    );
+    await agent.useEchoActionForTest("ledger-key");
+    await agent.setActionIdempotencyKey("legacy-key");
+    await agent.insertLegacyActionLedgerRowForTest({
+      key: "action:echo:legacy-key",
+      output: "from before the upgrade"
+    });
+    expect(await agent.migrateLegacyActionLedgerForTest()).toBe(false);
+    expect(await agent.listActionLedgerRowsForTest()).toMatchObject([
+      { key: "action:echo:legacy-key", status: "settled" }
+    ]);
+
+    await expect(agent.executeEchoActionToolForTest()).resolves.toBe(
+      "from before the upgrade"
+    );
+    expect((await agent.getActionProbe()).count).toBe(0);
   });
 
   it("emits an approval request with a stable action descriptor", async () => {
