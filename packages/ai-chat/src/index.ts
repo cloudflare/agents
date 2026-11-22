@@ -93,6 +93,7 @@ import {
   pumpReply,
   ReplyStreams,
   responseSource,
+  streamErrorText,
   type ReplyInterruption,
   type ReplyPumpHost
 } from "agents/chat";
@@ -4724,8 +4725,7 @@ export class AIChatAgent<
         !inBand && isRecoverableStreamReadError(error)
           ? "transient"
           : "terminal",
-      describeError: (error) =>
-        error instanceof Error ? error.message : String(error),
+      describeError: (error) => streamErrorText(error),
       // Clients built on AI SDK v4 read the finish reason from the
       // message metadata (#677).
       frameChunk: (chunk) => {
