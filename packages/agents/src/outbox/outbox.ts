@@ -37,7 +37,10 @@ import type {
   OutboxSinks
 } from "./types";
 
-/** Largest JSON value one delivery holds. SQLite rows stop at 2 MB. */
+/**
+ * Largest JSON value one delivery holds. SQLite rows stop at 2 MB.
+ * @internal
+ */
 export const MAX_OUTBOX_PAYLOAD_BYTES = 1_000_000;
 
 const JOB_PREFIX = "outbox:";
@@ -48,7 +51,10 @@ const JOB_RETRY = { maxAttempts: 1 } as const;
 const DISPATCH_BUDGET_MS = 5_000;
 /** Longest `last_error` kept on a row; the rest is cut. */
 const MAX_ERROR_CHARS = 4_000;
-/** Largest JSON checkpoint one delivery holds, beside its payload. */
+/**
+ * Largest JSON checkpoint one delivery holds, beside its payload.
+ * @internal
+ */
 export const MAX_OUTBOX_CHECKPOINT_BYTES = 256_000;
 /** Failed deliveries older than this are purged at startup. */
 const FAILED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -152,7 +158,8 @@ function decodePolicy(json: string): OutboxRetryPolicy {
  * sinks must be idempotent, and pass `idempotencyKey` on to a receiver that
  * can drop repeats.
  *
- * @experimental The API surface may change before stabilizing.
+ * @internal Framework support, not a public API. Hosts use the Outbox
+ * `Agent` installs (`_outbox`).
  */
 export class Outbox<
   Sinks extends OutboxSinks = OutboxSinks

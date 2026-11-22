@@ -1,4 +1,7 @@
-/** Where a delivery stands. Acknowledged deliveries are deleted. */
+/**
+ * Where a delivery stands. Acknowledged deliveries are deleted.
+ * @internal
+ */
 export type OutboxDeliveryStatus = "pending" | "held" | "failed";
 
 /**
@@ -8,6 +11,7 @@ export type OutboxDeliveryStatus = "pending" | "held" | "failed";
  * 2^(n-1))` before the next one. Delivery gives up after `maxAttempts`
  * attempts, or when the next attempt would start more than `giveUpAfterMs`
  * after the first.
+ * @internal
  */
 export type OutboxRetryPolicy = {
   /**
@@ -26,7 +30,10 @@ export type OutboxRetryPolicy = {
   readonly giveUpAfterMs?: number;
 };
 
-/** One delivery as stored. */
+/**
+ * One delivery as stored.
+ * @internal
+ */
 export type OutboxDelivery<T = unknown> = {
   /** Stable id of the delivery; kept when its value is replaced. */
   readonly id: string;
@@ -62,7 +69,10 @@ export type OutboxDelivery<T = unknown> = {
   readonly updatedAt: number;
 };
 
-/** What a sink gets with each attempt. */
+/**
+ * What a sink gets with each attempt.
+ * @internal
+ */
 export type OutboxDeliveryContext = {
   readonly id: string;
   readonly sink: string;
@@ -89,6 +99,7 @@ export type OutboxDeliveryContext = {
 /**
  * Where deliveries go. `deliver` returning acknowledges the value; throwing
  * fails the attempt.
+ * @internal
  */
 export type OutboxSink<T = unknown> = {
   readonly deliver: (
@@ -108,14 +119,21 @@ export type OutboxSink<T = unknown> = {
 /**
  * Constraint for a sink map. The payload is `never` so a concretely typed
  * sink satisfies the map; {@link OutboxPayload} recovers it.
+ * @internal
  */
 export type OutboxSinks = Record<string, OutboxSink<never>>;
 
-/** The payload type a sink accepts. */
+/**
+ * The payload type a sink accepts.
+ * @internal
+ */
 export type OutboxPayload<Sink> =
   Sink extends OutboxSink<infer Payload> ? Payload : never;
 
-/** Options for one `send()`. */
+/**
+ * Options for one `send()`.
+ * @internal
+ */
 export type OutboxSendOptions = {
   /** The key. Default: a new unique key, so every send is its own delivery. */
   readonly key?: string;
@@ -125,20 +143,29 @@ export type OutboxSendOptions = {
   readonly retry?: OutboxRetryPolicy;
 };
 
-/** Filters for `list()`. */
+/**
+ * Filters for `list()`.
+ * @internal
+ */
 export type OutboxListOptions = {
   readonly sink?: string;
   readonly status?: OutboxDeliveryStatus | OutboxDeliveryStatus[];
 };
 
-/** Events the Outbox emits. */
+/**
+ * Events the Outbox emits.
+ * @internal
+ */
 export type OutboxEventType =
   | "outbox:send"
   | "outbox:deliver"
   | "outbox:retry"
   | "outbox:give_up";
 
-/** Options for an Outbox capability. */
+/**
+ * Options for an Outbox capability.
+ * @internal
+ */
 export type OutboxOptions<Sinks extends OutboxSinks = OutboxSinks> = {
   /** Named sinks. Registered on every wake, so pending deliveries resolve. */
   readonly sinks?: Sinks;

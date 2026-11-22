@@ -1,6 +1,8 @@
 # Outbox
 
-The `Outbox` capability (`agents/outbox`) delivers a value to a named sink and keeps retrying until the sink acknowledges it. It exists because Think, `Agent` and `AIChatAgent` each built this by hand: workflow notifications had their own backoff over the queue and the scheduler, recovered messenger replies had storage keys, a cursor and a scheduled retry, and detached agent-tool results had a claim, a lease and a delivered-at column. Each copy had its own idea of when to give up and none could be listed.
+Status: internal and experimental. Not exported from any package entry point and not documented for users; `Agent` installs one as `_outbox` and the chat hosts register their sinks on it. It stays internal until it has shipped inside Think and AIChatAgent for a release.
+
+The `Outbox` capability (`packages/agents/src/outbox`) delivers a value to a named sink and keeps retrying until the sink acknowledges it. It exists because Think, `Agent` and `AIChatAgent` each built this by hand: workflow notifications had their own backoff over the queue and the scheduler, recovered messenger replies had storage keys, a cursor and a scheduled retry, and detached agent-tool results had a claim, a lease and a delivered-at column. Each copy had its own idea of when to give up and none could be listed.
 
 ## How it works
 
@@ -20,6 +22,37 @@ An attempt that outlives its timeout counts as failed and backs off like a throw
 Giving up sets the row to `failed`, emits `outbox:give_up` and calls the sink's `onGiveUp`. Failed rows stay readable and can be started over with `retry()`. Startup purges failed rows older than seven days.
 
 On a facet (a routed Lifecycle) the rows stay on the facet. Its wake is mirrored into the root's job queue, and the root routes the dispatch back, the same shape as Tasks.
+
+## API
+
+```ts
+new Outbox({ sinks?: Record<string, OutboxSink>, retry?: OutboxRetryPolicy })
+outbox.register("__cf_…", sink)            // framework sinks, from a host constructor
+outbox.send(sink, payload, { key?, hold?, retry? }) // store and deliver; same key replaces
+outbox.release(sink, key, update?)          // deliver a held value; read and write in one step
+outbox.get(sink, key) / list({ sink?, status? })
+outbox.cancel(sink, key)                    // drop a pending, held or failed delivery
+outbox.retry(sink, key)                     // start a failed delivery over
+outbox.purge({ before? })                   // delete failed deliveries
+```
+
+A sink is `{ deliver(payload, delivery), retry?, onGiveUp? }`. `deliver` returning acknowledges the value; throwing fails the attempt. The delivery context carries `id`, `sink`, `key`, `idempotencyKey` (new per send, stable across retries of that value), `version` (counts sends under the key), `attempt`, `checkpoint` and `saveCheckpoint(value)`.
+
+Retry policy, most specific wins (send, then sink, then Outbox):
+
+| Option             | Default    |
+| ------------------ | ---------- |
+| `attemptTimeoutMs` | 60 seconds |
+| `baseDelayMs`      | 2 seconds  |
+| `maxDelayMs`       | 10 minutes |
+| `maxAttempts`      | unlimited  |
+| `giveUpAfterMs`    | 12 hours   |
+
+A failed attempt `n` waits `min(maxDelayMs, baseDelayMs * 2^(n - 1))`. Delivery gives up after `maxAttempts`, or when the next attempt would start more than `giveUpAfterMs` after the first.
+
+Once the Lifecycle has started, `send()` writes its row before it returns its promise, so a send in the same synchronous block as the caller's own SQL writes commits with them.
+
+Events go to the `agents:outbox` diagnostics channel: `outbox:send`, `outbox:deliver`, `outbox:retry` and `outbox:give_up`.
 
 ## Key decisions
 

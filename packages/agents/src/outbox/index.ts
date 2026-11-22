@@ -1,8 +1,8 @@
 /**
  * Deliver until acknowledged, for Lifecycle Objects.
  *
- * @experimental The whole `agents/outbox` surface may change before
- * stabilizing.
+ * @internal Not a package entry point. Framework hosts use the Outbox
+ * `Agent` installs; sibling packages import its types from `agents/chat`.
  */
 export {
   Outbox,
