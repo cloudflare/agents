@@ -9829,9 +9829,18 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   private _recordUnexecutedTools(tools: ToolSet): void {
     const names = unexecutedToolNames(tools);
     this._unexecutedTools = names;
-    // `_configSet` skips the write when the value has not changed.
+    // An empty list with no row stored says nothing a reader does not
+    // already assume, so it costs no write. The config store skips a write
+    // whose value has not changed.
+    this._unexecutedToolsStored ??=
+      this._cfConfig.get("unexecutedTools") !== undefined;
+    if (names.length === 0 && !this._unexecutedToolsStored) return;
     this._cfConfig.set("unexecutedTools", JSON.stringify(names));
+    this._unexecutedToolsStored = true;
   }
+
+  /** Whether a `think_config` row holds the list; read once per isolate. */
+  private _unexecutedToolsStored: boolean | undefined;
 
   /** Read once per isolate: `hasPendingInteraction()` is polled. */
   private _unexecutedTools: string[] | undefined;

@@ -1,5 +1,7 @@
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
+import { getAgentByName, getSubAgentByName } from "agents";
+import { ThinkTestAgent } from "./agents/think-session";
 import type { LanguageModel, ToolSet } from "ai";
 import { describe, expect, it } from "vitest";
 import { ThinkModelResolver, isWorkersAIModelId } from "../model";
@@ -196,5 +198,26 @@ describe("systemPromptForTurn", () => {
   it("leaves a prompt that already has the block alone", () => {
     const base = `Base.\n\n${capabilityBlock({})}`;
     expect(systemPromptForTurn(base, { read: noop })).toBe(base);
+  });
+});
+
+describe("unexecuted tool record", () => {
+  it("stores no row for a turn whose tools all run on the server", async () => {
+    const stub = await getAgentByName(
+      env.ThinkTestAgent as unknown as DurableObjectNamespace<ThinkTestAgent>,
+      `periphery-unexecuted-${crypto.randomUUID()}`
+    );
+    expect((await stub.testChat("hello")).done).toBe(true);
+    expect(await stub.thinkConfigRowForTest("unexecutedTools")).toBe(null);
+  });
+
+  it("stores no row inside a facet either", async () => {
+    const parent = await getAgentByName(
+      env.ThinkTestAgent as unknown as DurableObjectNamespace<ThinkTestAgent>,
+      `periphery-unexecuted-parent-${crypto.randomUUID()}`
+    );
+    const child = await getSubAgentByName(parent, ThinkTestAgent, "child");
+    expect((await child.testChat("hello")).done).toBe(true);
+    expect(await child.thinkConfigRowForTest("unexecutedTools")).toBe(null);
   });
 });

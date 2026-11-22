@@ -2598,6 +2598,14 @@ export class ThinkTestAgent extends Think {
     return this._resumableStream.getAllStreamMetadata()[0]?.status ?? null;
   }
 
+  /** A raw `think_config` value, or null when no row holds the key. */
+  async thinkConfigRowForTest(key: string): Promise<string | null> {
+    const rows = this.sql<{ value: string }>`
+      SELECT value FROM think_config WHERE key = ${key}
+    `;
+    return rows[0]?.value ?? null;
+  }
+
   async testChat(message: string): Promise<TestChatResult> {
     const cb = new TestCollectingCallback();
     await this.chat(message, cb);
