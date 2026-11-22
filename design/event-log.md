@@ -47,7 +47,7 @@ Connections that still follow the log (hibernated sockets survive an eviction) g
 
 A client that saw a lost event has a cursor in `[seq_to + 1, open_until)` and gets `resync`. A client whose cursor is before the gap replays across it: it never saw the lost events, and neither did storage.
 
-The client also re-subscribes if a live event skips a seq, letting the server choose between replay and resync. With the server-side gap resync this should not happen; it is a cheap guard.
+The client also re-subscribes if a live event skips a seq, letting the server choose between replay and resync. Until that subscribe is answered the client ignores live frames: they left the server before it read the subscribe, so the replay sends them again in order. This guard matters when an isolate records a gap and is reset before it resyncs the survivors; the next isolate sees no open mark, and the skip is the only sign.
 
 ## Guarantees
 
@@ -70,6 +70,8 @@ The client also re-subscribes if a live event skips a seq, letting the server ch
 - Every live event reads each connection's attachment to check its subscriptions. Cheap for a handful of connections per object; a cache would help an object with hundreds.
 - A crashed batch costs clients that saw its tail a full resync, even when nothing was in fact lost.
 - Retention deletes whole rows, so a log can hold up to one row more than its limits.
+- Retention runs only for declared logs. Rows of a log a deploy stopped declaring stay in the tables until something deletes them.
+- The followed log names live in the connection's hibernation attachment beside user state, which the runtime caps at 2 KB. Keep log names short; a connection following many long-named logs can overflow it.
 
 ## Inspiration
 

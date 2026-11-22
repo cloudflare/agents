@@ -383,7 +383,13 @@ export class WebSockets extends LifecycleCapability {
     connection: Connection,
     message: WebSocketMessage
   ): Promise<void> {
-    if (this.#logs.size > 0 && typeof message === "string") {
+    if (
+      this.#logs.size > 0 &&
+      typeof message === "string" &&
+      // Skip the second JSON parse for every other frame (chat messages
+      // can be megabytes).
+      message.includes("cf_agent_log_")
+    ) {
       const frame = parseEventLogClientFrame(parseJson(message));
       if (frame) {
         // Host context, so `snapshot` and `canSubscribe` see the

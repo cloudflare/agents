@@ -127,6 +127,11 @@ export function followEventLog<T = unknown, S = unknown>(
       case EVENT_LOG_EVENTS: {
         // Before the first resync there is nothing to apply events to.
         if (!cursor) return;
+        // While a subscribe is unanswered, only its own replay counts. A
+        // live frame here left the server before it read the subscribe, so
+        // the replay sends it again in order; applying it now could move
+        // the cursor past seqs the replay would then drop.
+        if (replaying && frame.id !== id) return;
         for (const entry of frame.events) {
           if (entry.seq <= cursor.seq) continue;
           if (!replaying && entry.seq !== cursor.seq + 1) {

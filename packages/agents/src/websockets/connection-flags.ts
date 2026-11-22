@@ -26,8 +26,8 @@ export const CF_EVENT_LOGS_KEY = "_cf_logs";
 
 /**
  * Holds user state that is not a plain object (an array, a string, a
- * number) while internal flags are stored beside it, so it round-trips in
- * its own shape.
+ * `Map`, a `Date`) while internal flags are stored beside it, so it
+ * round-trips in its own shape.
  */
 const CF_VALUE_KEY = "_cf_value";
 
@@ -38,8 +38,11 @@ const internalKeys = new Set<string>([
   CF_VALUE_KEY
 ]);
 
+/** A plain object: flags can sit beside its own keys. */
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  if (typeof value !== "object" || value === null) return false;
+  const proto: unknown = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
 }
 
 /** The user-visible part of a raw state: internal keys hidden. */

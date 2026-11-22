@@ -30,7 +30,8 @@ export type EventLogSubscribeFrame = {
   /**
    * Client-chosen id, echoed on the frames that answer this subscribe, so
    * several followers of one log on one socket each know their own
-   * replay and resync.
+   * replay and resync. At most 64 characters; a longer id is ignored and
+   * the answer is untagged.
    */
   readonly id?: string;
 };

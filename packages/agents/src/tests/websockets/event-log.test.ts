@@ -300,6 +300,54 @@ describe("event log", () => {
     survivor.close();
   });
 
+  it("resyncs a hibernated follower of a log without a snapshot just before the first publish after the wake, then sends it", async () => {
+    const name = crypto.randomUUID();
+    const survivor = await connect(name);
+    await follow(survivor, "bare");
+    await stub(name).openBatch("bare");
+    await stub(name).append("stored");
+    await survivor.until(isType("events"));
+    await evictDurableObject(stub(name));
+
+    // Default batches hold 10 events: the gap is seqs 2..11.
+    expect(await stub(name).publish("bare", "after")).toBe(12);
+    const frames = await survivor.until(isType("events"));
+    expect(frames.map((frame) => frame.type)).toEqual([
+      "cf_agent_log_resync",
+      "cf_agent_log_events"
+    ]);
+    expect(frames[0]).toMatchObject({ seq: 11 });
+    expect(frames[0]).not.toHaveProperty("snapshot");
+    expect(events(frames)).toEqual([{ seq: 12, data: "after" }]);
+    survivor.close();
+  });
+
+  it("resyncs the existing followers on a socket whose new subscribe finds the crash gap", async () => {
+    const name = crypto.randomUUID();
+    const survivor = await connect(name);
+    await follow(survivor);
+    await stub(name).openBatch();
+    await stub(name).append("stored");
+    await survivor.until(isType("events"));
+    await evictDurableObject(stub(name));
+
+    survivor.socket.send(
+      JSON.stringify({
+        type: "cf_agent_log_subscribe",
+        log: "feed",
+        id: "late"
+      })
+    );
+    const frames = await survivor.until(
+      (frame) => isType("resync")(frame) && frame.id === "late"
+    );
+    expect(frames.map((frame) => [frame.type, frame.id])).toEqual([
+      ["cf_agent_log_resync", undefined],
+      ["cf_agent_log_resync", "late"]
+    ]);
+    survivor.close();
+  });
+
   it("keeps a connection's subscriptions across hibernation", async () => {
     const name = crypto.randomUUID();
     const client = await connect(name);
@@ -340,6 +388,16 @@ describe("event log", () => {
     );
     await follow(client, "bare");
     expect(await stub(name).connectionState("listed")).toEqual(["a", "b"]);
+    client.close();
+  });
+
+  it("keeps a Map connection state a Map while following", async () => {
+    const name = crypto.randomUUID();
+    const client = await connect(name, "?_pk=mapped&mapState");
+    await follow(client);
+    const state = await stub(name).connectionState("mapped");
+    expect(state).toBeInstanceOf(Map);
+    expect([...(state as Map<string, string>)]).toEqual([["k", "v"]]);
     client.close();
   });
 

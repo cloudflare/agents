@@ -43,9 +43,9 @@ export class EventLogObject extends DurableObject<Cloudflare.Env> {
     handlers: {
       // `?listState` gives the connection state that is not an object.
       onConnect: (connection, { request }) => {
-        if (new URL(request.url).searchParams.has("listState")) {
-          connection.setState(["a", "b"]);
-        }
+        const params = new URL(request.url).searchParams;
+        if (params.has("listState")) connection.setState(["a", "b"]);
+        if (params.has("mapState")) connection.setState(new Map([["k", "v"]]));
       }
     }
   });
@@ -99,9 +99,9 @@ export class EventLogObject extends DurableObject<Cloudflare.Env> {
     }
   }
 
-  async openBatch(): Promise<void> {
+  async openBatch(log = "feed"): Promise<void> {
     await this.lifecycle.start();
-    this.#batch = this.#feed.batch();
+    this.#batch = this.#log(log).batch();
   }
 
   async append(data: unknown): Promise<number> {

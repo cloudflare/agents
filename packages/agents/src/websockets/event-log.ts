@@ -339,12 +339,18 @@ export class EventLog<T = unknown, S = unknown> {
     cursor: EventLogCursor | undefined,
     id?: string
   ): void {
+    // A refusal (or a failed snapshot below) leaves an earlier
+    // subscription on this connection as it was: both are decided per
+    // connection, so a socket already following was allowed before.
     if (this.#canSubscribe && !this.#canSubscribe(connection)) {
       this.#sendError(connection, "Subscription refused", id);
       return;
     }
+    // A socket that already follows the log may carry other followers:
+    // they need the crash resync too, not only this subscribe's answer.
+    const following = followedLogs(connection).includes(this.name);
     const loaded = this.#load();
-    this.#resyncFollowers(connection);
+    this.#resyncFollowers(following ? undefined : connection);
     if (cursor && this.#canReplay(loaded, cursor.epoch, cursor.seq)) {
       this.#replay(connection, cursor.seq, id);
       trySend(
@@ -431,7 +437,12 @@ export class EventLog<T = unknown, S = unknown> {
   }
 
   /** Send a resync with the host's snapshot. Returns false when it failed. */
-  #sendResync(connection: Connection, loaded: Loaded, id?: string): boolean {
+  #sendResync(
+    connection: Connection,
+    loaded: Loaded,
+    id?: string,
+    seq = loaded.head
+  ): boolean {
     let snapshot: S | undefined;
     try {
       snapshot = this.#snapshot?.(connection);
@@ -446,7 +457,7 @@ export class EventLog<T = unknown, S = unknown> {
         type: EVENT_LOG_RESYNC,
         log: this.name,
         epoch: loaded.epoch,
-        seq: loaded.head,
+        seq,
         ...(snapshot !== undefined && { snapshot }),
         ...(id !== undefined && { id })
       });
@@ -475,12 +486,21 @@ export class EventLog<T = unknown, S = unknown> {
   }
 
   /**
-   * Send a new event to the followers, or, when a crash resync is
-   * pending, resync them at this event's seq instead: their snapshot is
-   * taken after the producer's state change, so it already holds it.
+   * Send a new event to the followers. When a crash resync is pending, a
+   * log with a snapshot resyncs them at this event's seq instead: the
+   * snapshot is taken after the producer's state change, so it holds it.
+   * A log without one resyncs them just before the event and then sends
+   * it, since a resync without a snapshot carries no state.
    */
   #deliver(entry: Entry): void {
-    if (!this.#resyncFollowers()) this.#broadcast([entry]);
+    if (!this.#resyncPending) {
+      this.#broadcast([entry]);
+    } else if (this.#snapshot) {
+      this.#resyncFollowers();
+    } else {
+      this.#resyncFollowers(undefined, entry.seq - 1);
+      this.#broadcast([entry]);
+    }
   }
 
   #broadcast(entries: readonly Entry[]): void {
@@ -614,16 +634,16 @@ export class EventLog<T = unknown, S = unknown> {
   }
 
   /**
-   * Send the pending crash resync to every follower but `except`, at the
-   * current head. Returns whether one was pending.
+   * Send the pending crash resync to every follower but `except`, at
+   * `seq` (the head by default). Returns whether one was pending.
    */
-  #resyncFollowers(except?: Connection): boolean {
+  #resyncFollowers(except?: Connection, seq?: number): boolean {
     if (!this.#resyncPending || !this.#loaded) return false;
     this.#resyncPending = false;
     for (const connection of this.#host.connections()) {
       if (connection === except) continue;
       if (!followedLogs(connection).includes(this.name)) continue;
-      if (!this.#sendResync(connection, this.#loaded)) {
+      if (!this.#sendResync(connection, this.#loaded, undefined, seq)) {
         this.unsubscribe(connection);
       }
     }
