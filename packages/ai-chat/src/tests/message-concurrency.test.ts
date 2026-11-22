@@ -316,7 +316,7 @@ describe("AIChatAgent messageConcurrency", () => {
       );
 
     expect(userTexts).toEqual(["Hello"]);
-    expect(terminalFor("req-drop-1")).not.toHaveProperty("outcome");
+    expect(terminalFor("req-drop-1")).toHaveProperty("outcome", "completed");
 
     ws.close(1000);
   });

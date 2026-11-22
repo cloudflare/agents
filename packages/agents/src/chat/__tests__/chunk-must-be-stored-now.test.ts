@@ -2,9 +2,10 @@ import { describe, expect, it } from "vitest";
 import { chunkMustBeStoredNow } from "../recovery-codec";
 
 describe("chunkMustBeStoredNow", () => {
-  it("is true for a tool call and for a settled tool result", () => {
+  it("is true for a tool call, an approval request and a settled tool result", () => {
     for (const type of [
       "tool-input-available",
+      "tool-approval-request",
       "tool-output-available",
       "tool-output-error",
       "tool-output-denied"

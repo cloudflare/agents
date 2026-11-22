@@ -1542,16 +1542,18 @@ export class TestChatAgent extends AIChatAgent<Env> {
     { id: string; message_id: string | null }
   >();
 
-  protected override _startStream(
-    requestId: string,
-    options: { messageId?: string; continuation?: boolean } = {}
-  ): string {
-    const streamId = super._startStream(requestId, options);
-    this._startedStreams.set(requestId, {
-      id: streamId,
-      message_id: this._resumableStream.getStreamMessageId(streamId)
-    });
-    return streamId;
+  /** Record every stream started from now on, for {@link getStartedStreamMetadata}. */
+  captureStreamStarts(): void {
+    const stream = this._resumableStream;
+    const start = stream.start.bind(stream);
+    stream.start = (requestId, options) => {
+      const streamId = start(requestId, options);
+      this._startedStreams.set(requestId, {
+        id: streamId,
+        message_id: stream.getStreamMessageId(streamId)
+      });
+      return streamId;
+    };
   }
 
   getStartedStreamMetadata(

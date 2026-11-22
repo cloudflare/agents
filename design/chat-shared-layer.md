@@ -101,11 +101,7 @@ The directory has a few more small helpers (throttling, chunk sizing, replay bat
 
 This is the single most shared piece of code in the chat system. Used by:
 
-- `AIChatAgent._streamSSEReply` — server-side SSE parsing
-- `StreamAccumulator.applyChunk` — the higher-level wrapper (which is how
-  `AIChatAgent._persistOrphanedStream` and Think now rebuild orphaned partials —
-  the orphan path no longer calls `applyChunkToParts` directly)
-- Think's `StreamAccumulator` usage in `_streamResult` (WebSocket and programmatic turns) and `_streamResultToRpcCallback` (`chat()` RPC path)
+- `StreamAccumulator.applyChunk` — the higher-level wrapper, which the reply pump (`pumpReply`) and both hosts' orphan recovery (`_persistOrphanedStream`) build messages with
 
 **Key type: `StreamChunkData`** — deliberately loose (index signature, many optionals) to match the wire format without encoding chunk-type-specific constraints. The `messageMetadata` field is typed as `unknown` (not `Record<string, unknown>`) to match `UIMessageChunk` from the AI SDK.
 
@@ -137,22 +133,33 @@ class StreamAccumulator {
 
 **`ChunkResult`** carries an optional **`ChunkAction`** — a discriminated union that signals domain-specific concerns without the accumulator knowing about them:
 
-| Action type                 | When                                                                                  | Caller handles                                                          |
-| --------------------------- | ------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| `start`                     | `start` chunk with optional `messageId` / `messageMetadata`                           | ai-chat: may overwrite `message.id`                                     |
-| `finish`                    | `finish` chunk with optional `finishReason`                                           | ai-chat: normalize `finishReason` to `messageMetadata` before broadcast |
-| `message-metadata`          | `message-metadata` chunk                                                              | Metadata already merged by accumulator                                  |
-| `tool-approval-request`     | `tool-approval-request` chunk                                                         | ai-chat: early persist to SQLite for page-refresh survival              |
-| `cross-message-tool-update` | `tool-output-available` / `tool-output-error` for a `toolCallId` not in current parts | ai-chat: search `this.messages` and update persisted message            |
-| `error`                     | `error` chunk                                                                         | Think: broadcast error frame, `continue`; ai-chat: broadcast error      |
+| Action type                 | When                                                                                  | Caller handles                                                     |
+| --------------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `start`                     | `start` chunk with optional `messageId` / `messageMetadata`                           | Metadata already merged by accumulator                             |
+| `finish`                    | `finish` chunk with optional `finishReason`                                           | Metadata already merged by accumulator                             |
+| `message-metadata`          | `message-metadata` chunk                                                              | Metadata already merged by accumulator                             |
+| `tool-approval-request`     | `tool-approval-request` chunk                                                         | Nothing: the reply is stored when it ends                          |
+| `cross-message-tool-update` | `tool-output-available` / `tool-output-error` for a `toolCallId` not in current parts | `pumpReply`: the host updates the stored message                   |
+| `error`                     | `error` chunk                                                                         | `pumpReply`: the host classifies it; a terminal one ends the reply |
 
 **`mergeInto(messages)`** — produces a new message array by finding an existing message (by `messageId`, or walking backward for last assistant in continuation mode), then replacing or appending. This replaced the `flushActiveStreamToMessages` function on the client and the `activeStreamRef` + metadata merge pattern.
 
 **Where the accumulator is used vs. not:**
 
 - **Client** (`agents/chat/react.tsx`, shared by both packages' React exports): Uses `StreamAccumulator` for broadcast/resume streams. The transport-owned path (local tab requests) still goes through `useChat`'s built-in pipeline.
-- **Think server**: Uses `StreamAccumulator` in both `_streamResult` (WebSocket path) and `chat()` (RPC sub-agent path), and to rebuild orphaned partials in `_persistOrphanedStream`.
-- **ai-chat server**: `_persistOrphanedStream` rebuilds orphaned partials through `StreamAccumulator` (the orphan-persist (a) step — see [recovery-engine.ts](#recovery-enginets)). The live streaming path (`_streamSSEReply`) **still** uses `applyChunkToParts` directly: its streaming message (`_streamingMessage`) is shared by reference with `hasPendingInteraction`, `_messagesForClientSync`, and `_findAndUpdateToolPart`, making it impractical to route through the accumulator without a deeper refactoring of the shared mutable state (see "Server-side StreamAccumulator (deferred)").
+- **Both servers**: every live reply is built in the reply pump's accumulator ([reply-pump.ts](#reply-pumpts-reply-sourcets-and-reply-streamts)), and orphaned partials are rebuilt through `StreamAccumulator` in `_persistOrphanedStream`.
+
+### reply-pump.ts, reply-source.ts and reply-stream.ts
+
+**`pumpReply(input, host)`** runs one reply: start its stream, build the message, store and send each chunk, stop on a stop, a stall or an error, route a stall or a transient error to recovery, store the reply, send the terminal frame after the transcript, run the response hook. Both hosts call it for every reply. [chat-turn-core.md](./chat-turn-core.md) has the order of work and the decisions (D118 to D139).
+
+A host passes a `ReplyPumpHost`: `send` (a frame to sockets), `store` (the reply, with the cutover), `route` (recovery), `classify` and `describeError`, `settled` (the response hook), and the chunk steps only one host has. A caller that wants the chunks too (`Think.chat()`) passes a `ReplySink`.
+
+**`LiveReply`** is the reply while it streams and while it is stored. A tool result that arrives then is applied to its accumulator, and `changed()` makes the pump store the reply again. `ended` says the stream closed and the terminal frame waits, which the resume handshake reads (`holdsTerminalFrames`).
+
+**`ReplySource`** is what the pump reads. `uiMessageStreamSource(result)` reads an AI SDK result and keeps the provider error behind an in-band `error` chunk. `responseSource(response, body, requestId)` reads an `onChatMessage` `Response`: SSE lines (a line may span two reads) or plain text as one text part.
+
+**`ReplyStreams`** writes a reply's chunks to `ResumableStream`. It releases the tabs parked on a request when its stream starts and the tabs offered it when it ends, flushes a tool call or result at once and text deltas with the first and every tenth, and lets a host record the request's result in the transaction that settles the stream (`Think`'s submissions).
 
 ### chat-turns.ts
 
@@ -317,17 +324,7 @@ Both `ai-chat` and `think` already depend on `agents`. Adding a new package woul
 
 ### Why the accumulator signals actions instead of handling them
 
-The accumulator doesn't know about SQLite, WebSockets, or broadcasting. It signals via `ChunkAction` and the caller decides what to do. This keeps the accumulator testable as a pure data structure and reusable across contexts that handle actions differently (server persists to SQLite on approval, client ignores it; server broadcasts errors on the wire, client logs them).
-
-### Why `_streamSSEReply` was not refactored to use the accumulator
-
-`_streamSSEReply` in ai-chat's server mutates a `message` object that is shared by reference as `this._streamingMessage`. Other methods read this reference to check for pending tool interactions, build client sync payloads, and apply tool results during streaming. Routing through a `StreamAccumulator` would require either:
-
-1. Sharing the same parts array between the accumulator and the message object (breaking the accumulator's encapsulation)
-2. Syncing the accumulator's state back to the message after each chunk (adding complexity, not removing it)
-3. Refactoring all consumers of `_streamingMessage` to read from the accumulator (a much larger change)
-
-None of these reduce complexity. The metadata handling on the server is ~30 lines of straightforward switch/case that matches the accumulator's behavior exactly. The cost of duplication is low; the risk of the refactoring is high.
+The accumulator doesn't know about SQLite, WebSockets, or broadcasting. It signals via `ChunkAction` and the caller decides what to do. This keeps the accumulator testable as a pure data structure and reusable across contexts that handle actions differently (the server stores a result for an earlier message, the client ignores it; the server sends errors on the wire, the client logs them).
 
 ### Why reconciliation is shared
 
@@ -385,29 +382,9 @@ class TurnQueue {
 
 ---
 
-### Server-side StreamAccumulator (deferred)
+### Server-side StreamAccumulator (done)
 
-Making `_streamSSEReply` use the `StreamAccumulator` requires resolving the `_streamingMessage` shared reference problem.
-
-**Consumers of `_streamingMessage`:**
-
-| Method                   | What it reads                                                       | Mutation?                                            |
-| ------------------------ | ------------------------------------------------------------------- | ---------------------------------------------------- |
-| `_messagesForClientSync` | `parts.length`, `id`, full object (spliced into messages array)     | Read only                                            |
-| `hasPendingInteraction`  | Full object → `_messageHasPendingInteraction`                       | Read only                                            |
-| `_findAndUpdateToolPart` | Iterates `parts`, uses `message === _streamingMessage` for identity | **Mutates parts in place** when `isStreamingMessage` |
-| `_streamSSEReply`        | Truthiness, shallow copy for early persist snapshot                 | Read only                                            |
-| `_reply`                 | Sets to the live message object; clears to `null` in `finally`      | Write                                                |
-
-**The core problem:** `_findAndUpdateToolPart` uses **reference identity** (`message === this._streamingMessage`) to decide whether to mutate parts in place vs. spread-copy. If `_streamingMessage` were a `StreamAccumulator`, you'd need to replace this identity check with something else (e.g., a boolean `isStreamingBuffer`, or comparing against the accumulator instance).
-
-**Possible approaches:**
-
-1. **Shared parts array.** Make `StreamAccumulator` accept an external `parts` array in its constructor (by reference, not copy). The accumulator and the `ChatMessage` share the same array. `applyChunk` mutates the shared array. `_streamingMessage` continues to point to the `ChatMessage`. The accumulator is only used for metadata handling. **Downside:** Breaks the accumulator's current encapsulation (constructor copies parts).
-
-2. **Accumulator as `_streamingMessage`.** Replace `_streamingMessage: ChatMessage | null` with `_streamingAccumulator: StreamAccumulator | null`. Refactor all consumers to use `_streamingAccumulator.parts` / `_streamingAccumulator.messageId` / `_streamingAccumulator.toMessage()`. The biggest change is `_findAndUpdateToolPart`'s identity check — replace with `message === _streamingAccumulator?.toMessage()` won't work (toMessage creates new objects). Use a flag instead. **Downside:** Touches 5+ methods.
-
-3. **Leave as-is.** The metadata handling in `_streamSSEReply` is ~30 lines of switch/case that exactly matches the accumulator's behavior. The cost of duplication is low. **This is the current state.**
+`AIChatAgent`'s live loop no longer mutates a shared `_streamingMessage`. Both hosts build every reply in the reply pump's accumulator, and the reply tool results land on is the pump's `LiveReply`. `_findAndUpdateToolPart` writes into the accumulator's parts in place and calls `LiveReply.changed()`.
 
 ---
 
@@ -448,7 +425,7 @@ The machine handles accumulator creation (including continuation context walking
 
 **What still uses independent variables**: `localRequestIdsRef` (path A vs B switch), `resumingToolContinuationRef` (tool continuation re-entrancy guard), `useChatHelpers.status` (AI SDK lifecycle), and the transport's resolver state. These cross-cut the broadcast/transport boundary and aren't part of the accumulator lifecycle.
 
-**Server frame order**: a `done: true` or `error: true` frame ends the client's stream, and a later `cf_agent_chat_messages` snapshot replaces the client's message list. So when a turn persists an assistant message, the server sends that transcript broadcast before the turn's terminal frames. Otherwise a message the user sends right after the turn ends is lost from the UI until the next turn. `AIChatAgent` holds terminal frames (including an in-band SSE `error` frame and the `done` that follows it) in `_broadcastChatMessage` while `_reply` owns the request, releases them in order after the persist, and turns them into errors when persistence fails.
+**Server frame order**: a `done: true` or `error: true` frame ends the client's stream, and a later `cf_agent_chat_messages` snapshot replaces the client's message list. So when a turn persists an assistant message, the server sends that transcript broadcast before the turn's terminal frames. Otherwise a message the user sends right after the turn ends is lost from the UI until the next turn. The reply pump holds the terminal frames (an in-band `error` frame included) until the reply is stored and the transcript sent, for both hosts, and sends an error frame instead when the store fails.
 
 ## History
 

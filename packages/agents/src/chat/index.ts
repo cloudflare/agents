@@ -532,6 +532,41 @@ export {
 
 export { ChatRecoverySupersededError, isTurnStopped } from "./turn-stop";
 
+/**
+ * @internal The reply pump both chat hosts run every reply through, with
+ * its sources and its stream. Sibling-package support, not a public API.
+ */
+export {
+  LiveReply,
+  pumpReply,
+  TransientChatStreamError,
+  type ReplyErrorVerdict,
+  type ReplyEvent,
+  type ReplyFrame,
+  type ReplyInterruption,
+  type ReplyPumpHost,
+  type ReplyPumpInput,
+  type ReplyResult,
+  type ReplyRouteOutcome,
+  type ReplySink,
+  type ReplyStoreContext
+} from "./reply-pump";
+export {
+  responseSource,
+  streamErrorText,
+  uiMessageStreamSource,
+  type ReplySource,
+  type UIMessageStreamResult
+} from "./reply-source";
+export {
+  ReplyStreams,
+  type ReplyFlushState,
+  type ReplyStreamLog,
+  type ReplyStreamResult,
+  type ReplyStreamStart,
+  type ReplyStreamsHost
+} from "./reply-stream";
+
 export type {
   ChatResponseResult,
   ReplyAttachment,

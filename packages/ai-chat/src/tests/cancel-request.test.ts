@@ -285,7 +285,7 @@ describe("Cancel request", () => {
     const chatResponses = messages.filter(isUseChatResponseMessage);
     const doneMsg = chatResponses.find((m) => m.done === true);
     expect(doneMsg).toBeDefined();
-    expect(doneMsg?.outcome).toBeUndefined();
+    expect(doneMsg?.outcome).toBe("completed");
 
     // Should have all 3 text-delta events
     const textDeltas = chatResponses.filter((m) => {

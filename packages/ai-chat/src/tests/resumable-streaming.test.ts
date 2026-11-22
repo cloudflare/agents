@@ -80,6 +80,7 @@ describe("Resumable Streaming", () => {
       // column would be null and recovery would fall back to the (buggy)
       // last-assistant heuristic.
       const agentStub = await getAgentByName(env.TestChatAgent, room);
+      await agentStub.captureStreamStarts();
       const done = new Promise<void>((resolve) => {
         ws.addEventListener("message", (e: MessageEvent) => {
           const data = JSON.parse(e.data as string);
