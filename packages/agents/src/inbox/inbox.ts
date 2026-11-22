@@ -26,6 +26,7 @@ import type {
   LifecycleJobContext,
   LifecycleJobOutcome
 } from "../lifecycle/job-queue";
+import { stableStringify } from "../approvals/hash";
 import { isPlatformFailure } from "../retries";
 import { arrival, normalizePolicy } from "./policy";
 import { INBOX_METADATA_LIMIT, InboxStore, type InboxRow } from "./store";
@@ -179,6 +180,8 @@ export class Inbox<
    * returned, nor after a cancelled request's report began.
    */
   readonly #barriers = new Map<string, Set<Promise<unknown>>>();
+  /** The replay of unreported terminal reports, while one runs. */
+  #replaying: Promise<void> | null = null;
 
   constructor(options: InboxOptions<Handlers>) {
     if (options.name !== undefined && !/^[a-z][a-z0-9]*$/.test(options.name)) {
@@ -234,11 +237,14 @@ export class Inbox<
   async onJob(context: LifecycleJobContext): Promise<LifecycleJobOutcome> {
     const { job } = context;
     if (job.fn === REPORT_FN) {
-      // The reports run user code, so they leave the job loop. A reset
-      // before they finish leaves them unreported, and start queues them
-      // again.
-      this.#services.trackAlarmWork(this.#replayReports());
-      return undefined;
+      // The reports run user code, so they leave the job loop. The job
+      // stays, 30 seconds out, until the replay found nothing left: a reset
+      // during it still wakes the object to finish.
+      this.#replaying ??= this.#replayReports().finally(() => {
+        this.#replaying = null;
+      });
+      this.#services.trackAlarmWork(this.#replaying);
+      return { rescheduleAt: Date.now() + HEARTBEAT_MS };
     }
     const lane = laneOfJob(job.payload);
     if (job.fn !== DRAIN_FN || lane === undefined) return undefined;
@@ -301,7 +307,7 @@ export class Inbox<
     if (existing) {
       if (
         existing.request.kind !== kind ||
-        rows.payloadJson(existing.request.id) !== payloadJson
+        !samePayload(rows.payloadJson(existing.request.id), payloadJson)
       ) {
         throw new Error(
           `Inbox request ${JSON.stringify(existing.request.id)} exists with a different ${
@@ -507,8 +513,25 @@ export class Inbox<
       this.#abortLive(id, token, reason);
     }
     const reports = (async () => {
-      for (const { request, token } of ended) {
-        await this.#afterTerminal(request, token, true);
+      let next = 0;
+      try {
+        for (; next < ended.length; next++) {
+          const { request, token } = ended[next];
+          await this.#afterTerminal(request, token, true);
+        }
+      } finally {
+        // A report that failed stops the rest. Theirs never started: release
+        // them, and the replay reports them.
+        for (let rest = next + 1; rest < ended.length; rest++) {
+          const { request, token } = ended[rest];
+          const count = (this.#reporting.get(token) ?? 1) - 1;
+          if (count > 0) {
+            this.#reporting.set(token, count);
+          } else {
+            this.#reporting.delete(token);
+            this.#unreported(request, token);
+          }
+        }
       }
     })();
     this.#lanes.get(lane)?.wake?.();
@@ -531,16 +554,28 @@ export class Inbox<
     if (this.#notStarted()) await this.#services.ready();
     const row = this.#rows.exists() ? this.#rows.get(id) : undefined;
     if (!row) return false;
-    const settled = this.#rows.settle(
-      row.token,
-      outcome.status,
-      {
-        result: resultJson(outcome),
-        error: errorText(outcome.reason),
-        now: Date.now()
-      },
-      { from: "running" }
-    );
+    const write = (settlement: InboxSettlement) =>
+      this.#rows.settle(
+        row.token,
+        settlement.status as InboxTerminalStatus,
+        {
+          result: resultJson(settlement),
+          error: errorText(settlement.reason),
+          now: Date.now()
+        },
+        { from: "running" }
+      );
+    let settled: boolean;
+    try {
+      settled = write(outcome);
+    } catch (error) {
+      if (isPlatformFailure(error)) throw error;
+      settled = write(
+        Inbox.failed(`The outcome could not be stored: ${reasonOf(error)}`)
+      );
+    } finally {
+      resultJsons.delete(outcome);
+    }
     if (!settled) return false;
     await this.#outsideRunner(
       row.request.lane,
@@ -621,7 +656,7 @@ export class Inbox<
     this.#rows.restore(
       record,
       crypto.randomUUID(),
-      metadataJson(record.metadata)
+      record.metadata === undefined ? null : JSON.stringify(record.metadata)
     );
     if (OPEN.has(record.status)) {
       void this.#pushWake(record.lane ?? record.kind, Date.now());
@@ -685,12 +720,13 @@ export class Inbox<
       });
   }
 
-  #pushReportJob(): Promise<unknown> {
+  /** @param delayMs - After a failed report, wait before the replay. */
+  #pushReportJob(delayMs = 0): Promise<unknown> {
     return this.#services.jobs
       .push({
         id: `${this.capabilityId}/${REPORT_JOB}`,
         fn: REPORT_FN,
-        time: Date.now()
+        time: Date.now() + delayMs
       })
       .catch((error: unknown) => {
         console.error("[inbox] failed to queue status reports", error);
@@ -700,17 +736,32 @@ export class Inbox<
   /** Replay the terminal reports a reset cut short, a batch at a time. */
   async #replayReports(): Promise<void> {
     for (;;) {
-      const batch = this.#rows.unreported(REPORT_BATCH).filter((request) => {
-        const row = this.#rows.get(request.id);
-        return row !== undefined && !this.#reporting.has(row.token);
-      });
-      if (batch.length === 0) return;
-      for (const request of batch) {
-        const row = this.#rows.get(request.id);
-        if (row && !this.#reporting.has(row.token)) {
-          await this.#afterTerminal(row.request, row.token);
+      const batch = this.#rows
+        .unreported(REPORT_BATCH)
+        .filter(({ token }) => !this.#reporting.has(token));
+      if (batch.length === 0) break;
+      let reported = false;
+      for (const { id, token } of batch) {
+        // Read again: a report before this one may have deleted the record
+        // or reused its id. Only the same record, still unreported, goes.
+        const row = this.#rows.get(id);
+        if (
+          row?.token !== token ||
+          OPEN.has(row.request.status) ||
+          row.reported ||
+          this.#reporting.has(token)
+        ) {
+          continue;
         }
+        await this.#afterTerminal(row.request, token);
+        reported = true;
       }
+      if (!reported) break;
+    }
+    if (this.#rows.unreported(1).length === 0) {
+      void this.#services.jobs
+        .cancel(`${this.capabilityId}/${REPORT_JOB}`)
+        .catch(() => {});
     }
   }
 
@@ -808,6 +859,23 @@ export class Inbox<
 
   async #step(state: Lane, row: InboxRow): Promise<void> {
     const { request, token } = row;
+    if (request.status === "pending" && request.attempt >= this.#maxAttempts) {
+      // A record another store reset to pending, its attempts spent.
+      if (
+        this.#rows.settle(
+          token,
+          "error",
+          {
+            error: `Interrupted ${request.attempt} time${request.attempt === 1 ? "" : "s"}`,
+            now: Date.now()
+          },
+          { from: "pending" }
+        )
+      ) {
+        await this.#afterTerminal(this.#read(request.id), token);
+      }
+      return;
+    }
     if (request.status === "running") {
       // Only this runner starts runs in this lane, so a running row it
       // reads was interrupted: its isolate died.
@@ -835,7 +903,10 @@ export class Inbox<
       const by = this.#rows.supersededBy(request.lane, request.seq);
       if (by !== undefined) {
         // The survivor keeps the list, so it outlives the skipped record.
-        this.#rows.addMerged(by, [...row.merged, request.id]);
+        this.#rows.addMerged(by, [
+          ...row.mergedEntries,
+          { id: request.id, seq: request.seq }
+        ]);
         if (
           this.#rows.settle(
             token,
@@ -895,8 +966,14 @@ export class Inbox<
     const controller = new AbortController();
     this.#live.set(request.id, { controller, token });
     void this.#pushWake(request.lane, now + HEARTBEAT_MS);
+    // The attempt must be durable before user code runs: a reset before the
+    // next I/O rolls back unconfirmed writes, and a handler that kills its
+    // isolate would then never use up its attempts.
     let outcome: InboxSettlement;
     try {
+      await this.#services.storage.sync();
+      // A cancel or clear while the attempt was written ended it already.
+      if (!this.#rows.holds(token, attempt)) return;
       const started = this.#read(request.id);
       await this.#notify(started);
       // A cancel or clear during the report ended it already.
@@ -920,6 +997,7 @@ export class Inbox<
           value instanceof InboxSettlement ? value : Inbox.completed(value);
         // A result that cannot be stored is the handler's failure, decided
         // here, not a settle that throws and leaves the request running.
+        // Serialized once: the stored JSON is this one.
         resultJson(outcome);
       } catch (error) {
         // The isolate is going: leave the request running for the next
@@ -966,6 +1044,9 @@ export class Inbox<
       settled = write(
         Inbox.failed(`The outcome could not be stored: ${reasonOf(error)}`)
       );
+    } finally {
+      // The JSON is this run's; a settlement reused later serializes again.
+      resultJsons.delete(outcome);
     }
     if (settled) await this.#afterTerminal(this.#read(id), token);
   }
@@ -992,13 +1073,18 @@ export class Inbox<
     held = false
   ): Promise<void> {
     if (!held) this.#holdReport(token);
+    let reported = false;
     try {
       await this.#notify(request);
       this.#rows.reported(token, request.status);
+      reported = true;
     } finally {
       const count = (this.#reporting.get(token) ?? 1) - 1;
       if (count > 0) {
         this.#reporting.set(token, count);
+      } else if (!reported) {
+        this.#reporting.delete(token);
+        this.#unreported(request, token);
       } else {
         this.#reporting.delete(token);
         this.#locals.delete(token);
@@ -1011,6 +1097,20 @@ export class Inbox<
         if (!this.#retain && same) this.#rows.delete(request.id);
       }
     }
+  }
+
+  /**
+   * A report that failed (a platform failure), or never started. The record
+   * stays unreported for the replay, and its waiters keep waiting; a record
+   * deleted meanwhile has no replay, so its waiters get what it ended with.
+   */
+  #unreported(request: InboxRequest, token: string): void {
+    if (this.#rows.get(request.id)?.token === token) {
+      void this.#pushReportJob(HEARTBEAT_MS);
+      return;
+    }
+    this.#locals.delete(token);
+    this.#wake(token, request);
   }
 
   /** Resolve the waiters of the record `token` names with `answer`. */
@@ -1065,6 +1165,21 @@ export class Inbox<
   }
 }
 
+/** Whether two payloads' JSON is the same value, whatever its key order. */
+function samePayload(stored: string | null, submitted: string | null): boolean {
+  if (stored === submitted) return true;
+  if (stored === null || submitted === null) return false;
+  try {
+    return (
+      stableStringify(JSON.parse(stored)) ===
+      stableStringify(JSON.parse(submitted))
+    );
+  } catch {
+    // Nested too deep to compare key by key: only the exact text matches.
+    return false;
+  }
+}
+
 function laneOfJob(payload: unknown): string | undefined {
   if (typeof payload !== "object" || payload === null) return undefined;
   const lane = (payload as { lane?: unknown }).lane;
@@ -1100,8 +1215,15 @@ function errorText(reason: string | undefined): string | null {
     : reason;
 }
 
+/** Each settlement's result JSON, serialized once. */
+const resultJsons = new WeakMap<InboxSettlement, string | null>();
+
 function resultJson(outcome: InboxSettlement): string | null {
-  return outcome.status === "completed" && outcome.result !== undefined
-    ? JSON.stringify(outcome.result)
-    : null;
+  if (resultJsons.has(outcome)) return resultJsons.get(outcome) ?? null;
+  const json =
+    outcome.status === "completed" && outcome.result !== undefined
+      ? JSON.stringify(outcome.result)
+      : null;
+  resultJsons.set(outcome, json);
+  return json;
 }
