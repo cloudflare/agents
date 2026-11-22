@@ -1450,12 +1450,9 @@ export class TestChatAgent extends AIChatAgent<Env> {
     };
     (
       this as unknown as {
-        _broadcastChatMessage: (
-          msg: OutgoingMessage,
-          exclude?: string[]
-        ) => void;
+        _frames: { broadcast(msg: OutgoingMessage, exclude?: string[]): void };
       }
-    )._broadcastChatMessage(message);
+    )._frames.broadcast(message);
   }
 
   testFlushChunkBuffer(): void {
@@ -2014,17 +2011,17 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     });
     let errorFrames = 0;
     const self = this as unknown as {
-      _broadcastChatMessage(...args: unknown[]): void;
+      _frames: { broadcast(...args: unknown[]): void };
       abortRequest(requestId: string, reason?: unknown): void;
       continueLastTurn(
         body?: Record<string, unknown>,
         options?: { signal?: AbortSignal }
       ): Promise<SaveMessagesResult>;
     };
-    const broadcast = self._broadcastChatMessage;
-    self._broadcastChatMessage = (...args) => {
+    const broadcast = self._frames.broadcast;
+    self._frames.broadcast = (...args) => {
       if ((args[0] as { error?: boolean }).error === true) errorFrames++;
-      return broadcast.apply(this, args);
+      return broadcast.apply(self._frames, args);
     };
     const caller = new AbortController();
     const reason =
@@ -2070,7 +2067,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
         errorFrames
       };
     } finally {
-      self._broadcastChatMessage = broadcast;
+      self._frames.broadcast = broadcast;
       this._stopWithReasonStarted = undefined;
       this.setTestBody({});
     }
@@ -3470,14 +3467,16 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
     let terminalBroadcast: string | undefined;
     const self = this as unknown as {
-      _broadcastChatMessage(
-        msg: { body?: string; error?: boolean; done?: boolean },
-        exclude?: string[]
-      ): void;
+      _frames: {
+        broadcast(
+          msg: { body?: string; error?: boolean; done?: boolean },
+          exclude?: string[]
+        ): void;
+      };
       _recordChatTerminal(requestId: string, body: string): Promise<void>;
     };
-    const realBroadcast = self._broadcastChatMessage.bind(this);
-    self._broadcastChatMessage = (m, exclude) => {
+    const realBroadcast = self._frames.broadcast.bind(self._frames);
+    self._frames.broadcast = (m, exclude) => {
       if (m.error && m.done) terminalBroadcast = m.body;
       realBroadcast(m, exclude);
     };
@@ -3518,7 +3517,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     } catch {
       secondThrew = true;
     } finally {
-      self._broadcastChatMessage = realBroadcast;
+      self._frames.broadcast = realBroadcast;
       self._recordChatTerminal = realRecordTerminal;
     }
     const incidentStatusAfterSecond = await readIncidentStatus();
@@ -3567,13 +3566,15 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
     let terminalBroadcast: string | undefined;
     const self = this as unknown as {
-      _broadcastChatMessage(
-        msg: { body?: string; error?: boolean; done?: boolean },
-        exclude?: string[]
-      ): void;
+      _frames: {
+        broadcast(
+          msg: { body?: string; error?: boolean; done?: boolean },
+          exclude?: string[]
+        ): void;
+      };
     };
-    const realBroadcast = self._broadcastChatMessage.bind(this);
-    self._broadcastChatMessage = (m, exclude) => {
+    const realBroadcast = self._frames.broadcast.bind(self._frames);
+    self._frames.broadcast = (m, exclude) => {
       if (m.error && m.done) terminalBroadcast = m.body;
       realBroadcast(m, exclude);
     };
@@ -3620,7 +3621,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     } catch {
       threw = true;
     } finally {
-      self._broadcastChatMessage = realBroadcast;
+      self._frames.broadcast = realBroadcast;
       storage.get = realGet;
     }
 
@@ -3669,13 +3670,15 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
     let terminalBroadcast: string | undefined;
     const self = this as unknown as {
-      _broadcastChatMessage(
-        msg: { body?: string; error?: boolean; done?: boolean },
-        exclude?: string[]
-      ): void;
+      _frames: {
+        broadcast(
+          msg: { body?: string; error?: boolean; done?: boolean },
+          exclude?: string[]
+        ): void;
+      };
     };
-    const realBroadcast = self._broadcastChatMessage.bind(this);
-    self._broadcastChatMessage = (m, exclude) => {
+    const realBroadcast = self._frames.broadcast.bind(self._frames);
+    self._frames.broadcast = (m, exclude) => {
       if (m.error && m.done) terminalBroadcast = m.body;
       realBroadcast(m, exclude);
     };
@@ -3710,7 +3713,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     } catch {
       threw = true;
     } finally {
-      self._broadcastChatMessage = realBroadcast;
+      self._frames.broadcast = realBroadcast;
       storage.put = realPut;
     }
 
@@ -6278,7 +6281,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       const live = await this._waitForLiveTurnForTest(runId);
       if (live) {
         await this["_storeStreamChunk"](live.streamId, race.body);
-        this["_broadcastChatMessage"]({
+        this["_frames"].broadcast({
           body: race.body,
           done: false,
           id: live.requestId,
@@ -6298,13 +6301,13 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       // dedupe would silently drop them — the regression this guards against.
       const live = await this._waitForLiveTurnForTest(runId);
       if (live) {
-        this["_broadcastChatMessage"]({
+        this["_frames"].broadcast({
           body: progress.progressBody,
           done: false,
           id: live.requestId,
           type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
         });
-        this["_broadcastChatMessage"]({
+        this["_frames"].broadcast({
           body: progress.milestoneBody,
           done: false,
           id: live.requestId,
@@ -6407,7 +6410,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       toolCallId: "post-restart",
       output: "ok"
     });
-    this["_broadcastChatMessage"]({
+    this["_frames"].broadcast({
       body: postBody,
       done: false,
       id: requestId,
@@ -6439,7 +6442,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     this["_agentToolRuns"].runsByRequestId.set(requestId, runId);
     this["_agentToolRuns"].liveSequences.set(runId, 0);
     const broadcast = (body: string) =>
-      this["_broadcastChatMessage"]({
+      this["_frames"].broadcast({
         body,
         done: false,
         id: requestId,
@@ -6515,7 +6518,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     this["_agentToolRuns"].runsByRequestId.set(requestId, runId);
     this["_agentToolRuns"].liveSequences.set(runId, 0);
     const broadcast = (body: string) =>
-      this["_broadcastChatMessage"]({
+      this["_frames"].broadcast({
         body,
         done: false,
         id: requestId,
@@ -6665,7 +6668,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
         delta: "post-restart"
       });
       await this["_storeStreamChunk"](streamId, postBody);
-      this["_broadcastChatMessage"]({
+      this["_frames"].broadcast({
         body: postBody,
         done: false,
         id: requestId,
@@ -6855,7 +6858,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       toolCallId: "sibling",
       output: "ok"
     });
-    this["_broadcastChatMessage"]({
+    this["_frames"].broadcast({
       body,
       done: false,
       id: requestId,
