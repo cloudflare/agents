@@ -5,6 +5,8 @@
  * only one. A tab that does not follow the log gets frames the old way.
  */
 
+import { env } from "cloudflare:workers";
+import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
 import { MessageType } from "../types";
 import { connectChatWS } from "./test-utils";
@@ -204,5 +206,111 @@ describe("AIChatAgent chat event log", () => {
     await waitFor(() => senderFrames.some((frame) => isTerminal(frame, id)));
     sender.close(1000);
     late.close(1000);
+  });
+
+  it("ends an orphaned stream a follower acks with one aborted terminal in the log, and stores its partial", async () => {
+    const room = crypto.randomUUID();
+    const path = `/agents/test-chat-agent/${room}`;
+    const agent = await getAgentByName(env.TestChatAgent, room);
+    const streamId = await agent.testStartStream("req-orphan-log");
+    await agent.testStoreStreamChunk(
+      streamId,
+      '{"type":"text-start","id":"t1"}'
+    );
+    await agent.testStoreStreamChunk(
+      streamId,
+      '{"type":"text-delta","id":"t1","delta":"partial"}'
+    );
+    await agent.testFlushChunkBuffer();
+    await agent.testSimulateHibernationWake();
+
+    const { ws } = await connectChatWS(path);
+    const frames = record(ws);
+    ws.send(JSON.stringify({ type: "cf_agent_log_subscribe", log: "cf_chat" }));
+    await waitFor(() =>
+      frames.some((frame) => frame.type === "cf_agent_log_resync")
+    );
+    const resync = frames.find(
+      (frame) => frame.type === "cf_agent_log_resync"
+    )!;
+    expect(
+      (resync.snapshot as { active?: { requestId: string } }).active?.requestId
+    ).toBe("req-orphan-log");
+
+    ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+        id: "req-orphan-log"
+      })
+    );
+    await waitFor(() =>
+      logFrames(frames).some((frame) => isTerminal(frame, "req-orphan-log"))
+    );
+    const terminal = logFrames(frames).find((frame) =>
+      isTerminal(frame, "req-orphan-log")
+    )!;
+    expect(terminal.outcome).toBe("aborted");
+    // No raw replay: the follower replays from the log itself.
+    expect(
+      frames.some(
+        (frame) =>
+          frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          frame.replay === true
+      )
+    ).toBe(false);
+    expect(await agent.getActiveStreamId()).toBeNull();
+    const persisted = (await agent.getPersistedMessages()) as unknown as Array<{
+      role: string;
+      parts: Array<{ type: string; text?: string }>;
+    }>;
+    expect(
+      persisted.some(
+        (message) =>
+          message.role === "assistant" &&
+          message.parts.some((part) => part.text?.includes("partial"))
+      )
+    ).toBe(true);
+    ws.close(1000);
+  });
+
+  it("answers a follower's resume request after its turn ended with idle, not a raw terminal replay", async () => {
+    const room = crypto.randomUUID();
+    const path = `/agents/response-agent/${room}`;
+    const { ws } = await connectChatWS(path);
+    const frames = record(ws);
+    ws.send(JSON.stringify({ type: "cf_agent_log_subscribe", log: "cf_chat" }));
+    await waitFor(() =>
+      frames.some((frame) => frame.type === "cf_agent_log_resync")
+    );
+    const id = sendChat(ws);
+    await waitFor(() =>
+      logFrames(frames).some((frame) => isTerminal(frame, id))
+    );
+    ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST,
+        probeId: "p1",
+        requestIds: [id]
+      })
+    );
+    await waitFor(() =>
+      frames.some(
+        (frame) => frame.type === MessageType.CF_AGENT_STREAM_RESUME_NONE
+      )
+    );
+    expect(
+      frames.find(
+        (frame) => frame.type === MessageType.CF_AGENT_STREAM_RESUME_NONE
+      )
+    ).toMatchObject({ reason: "idle", probeId: "p1" });
+    expect(
+      frames.some(
+        (frame) =>
+          frame.type === MessageType.CF_AGENT_STREAM_RESUMING ||
+          (frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+            frame.id === id)
+      )
+    ).toBe(false);
+    ws.close(1000);
   });
 });

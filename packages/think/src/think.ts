@@ -13251,6 +13251,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         this._persistOrphanedStream(streamId),
       isConnectionPresent: (connectionId) =>
         this.getConnection(connectionId) !== undefined,
+      followsLog: (connection) =>
+        this._chatLog.followerIds().includes(connection.id),
+      broadcastFrame: (frame) => this._frames.broadcast(frame),
       recentTerminal: (requestIds) =>
         recentChatTerminal(this.ctx.storage.kv, requestIds)
     }));

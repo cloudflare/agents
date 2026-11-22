@@ -1332,6 +1332,9 @@ export class AIChatAgent<
         this._persistOrphanedStream(streamId),
       isConnectionPresent: (connectionId) =>
         this._isConnectionPresent(connectionId),
+      followsLog: (connection) =>
+        this._chatLog.followerIds().includes(connection.id),
+      broadcastFrame: (frame) => this._frames.broadcast(frame),
       holdsTerminalFrames: (requestId) =>
         this._liveReply?.requestId === requestId && this._liveReply.ended,
       recentTerminal: (requestIds) =>

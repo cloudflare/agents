@@ -87,6 +87,18 @@ export interface ResumeHandshakeHost {
    * away when its request ended learns nothing on resume.
    */
   recentTerminal?(requestIds: readonly string[]): ChatRecentTerminal | null;
+  /**
+   * Whether the connection follows the chat event log. Such a tab gets its
+   * replay and every terminal frame from the log (it answers its own ack),
+   * so it is told only whether to resume, wait, or not.
+   */
+  followsLog?(connection: Connection): boolean;
+  /**
+   * Broadcast a frame to every tab (through `ChatFrames`, so it goes into
+   * the chat event log). Used to end an orphaned stream a log follower
+   * acked. Required with `followsLog`.
+   */
+  broadcastFrame?(frame: Record<string, unknown>): void;
 }
 
 /**
@@ -123,7 +135,7 @@ export class ResumeHandshake {
         ...(probeId ? { probeId } : {})
       })
     );
-    if (sent) {
+    if (sent && !this.host.followsLog?.(connection)) {
       // Add to pending set — excluded from live broadcasts until they ACK to
       // receive the full stream replay.
       pendingResumeConnections.add(connection.id);
@@ -142,6 +154,7 @@ export class ResumeHandshake {
     requestIds: readonly string[] = []
   ): Promise<void> {
     const { resumableStream, continuation, preStream } = this.host;
+    const followsLog = this.host.followsLog?.(connection) === true;
     if (resumableStream.hasActiveStream()) {
       if (
         continuation.activeRequestId === resumableStream.activeRequestId &&
@@ -172,12 +185,16 @@ export class ResumeHandshake {
         continuation.pending.requestId,
         probeId
       );
-    } else if (await this._replayTerminalOnResume(connection, probeId)) {
+    } else if (
+      !followsLog &&
+      (await this._replayTerminalOnResume(connection, probeId))
+    ) {
       // A turn terminalized while no client was connected (#1645): drive the
       // resume handshake so the terminal error frame can be delivered on the
       // resumed stream (the only path that surfaces as an error on the client)
       // once this connection ACKs — see `_replayTerminalOnAck`.
     } else if (
+      !followsLog &&
       this._replayRecentTerminalOnResume(connection, requestIds, probeId)
     ) {
       // A request this tab waits on ended while it was away (a request
@@ -200,6 +217,35 @@ export class ResumeHandshake {
         probeId
       );
     }
+  }
+
+  /**
+   * End the active stream `requestId` when no producer is left to finish
+   * it: store its partial reply and broadcast the aborted terminal frame,
+   * which every log follower gets from the log.
+   */
+  private async _endOrphanForLog(requestId: string): Promise<void> {
+    const { resumableStream } = this.host;
+    if (
+      !resumableStream.hasActiveStream() ||
+      resumableStream.activeRequestId !== requestId ||
+      resumableStream.isLive
+    ) {
+      return;
+    }
+    const streamId = resumableStream.activeStreamId;
+    if (!streamId) return;
+    const continuation = resumableStream.activeSnapshot()?.continuation;
+    resumableStream.complete(streamId, "aborted");
+    await this.host.persistOrphanedStream(streamId);
+    this.host.broadcastFrame?.({
+      type: this.host.responseMessageType,
+      id: requestId,
+      body: "",
+      done: true,
+      outcome: "aborted",
+      ...(continuation && { continuation: true })
+    });
   }
 
   private _sendResumeNone(
@@ -247,6 +293,12 @@ export class ResumeHandshake {
   ): Promise<void> {
     const { resumableStream, pendingResumeConnections, responseMessageType } =
       this.host;
+    if (this.host.followsLog?.(connection)) {
+      // The tab replays from the log itself. The ack still ends a stream
+      // whose producer is gone (restored after a restart with no reader).
+      await this._endOrphanForLog(requestId);
+      return;
+    }
     // An ACK for a stream other than the active one (a notice from before
     // that stream finished) leaves the connection waiting for the active
     // stream's ACK: it was told to resume that stream and gets its chunks

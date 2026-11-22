@@ -64,11 +64,8 @@ describe("ChatLogSocket", () => {
     expect(seen).toEqual([{ type: "cf_agent_stream_resuming", id: "r1" }]);
   });
 
-  it("rebuilds from the snapshot and answers the resume handshake from the log", async () => {
+  it("rebuilds from the snapshot, leaves the resume decision to the server and answers the ack from the log", async () => {
     const { agent, socket, seen } = setup();
-    socket.send(
-      JSON.stringify({ type: "cf_agent_stream_resume_request", probeId: "p" })
-    );
     agent.deliver({
       type: "cf_agent_log_resync",
       log: "cf_chat",
@@ -85,23 +82,37 @@ describe("ChatLogSocket", () => {
         }
       }
     });
-    await flush();
     expect(seen).toEqual([
       {
         type: "cf_agent_chat_messages",
         messages: [{ id: "u1" }],
         connect: true
-      },
-      { type: "cf_agent_stream_resuming", id: "r1", probeId: "p" }
+      }
     ]);
-    // The ack is answered with the stream so far, never sent to the server.
+    // The request goes to the server, which decides; its answer comes through.
+    socket.send(
+      JSON.stringify({ type: "cf_agent_stream_resume_request", probeId: "p" })
+    );
+    expect(agent.sent.at(-1)).toEqual({
+      type: "cf_agent_stream_resume_request",
+      probeId: "p"
+    });
+    agent.deliver({ type: "cf_agent_stream_resuming", id: "r1", probeId: "p" });
+    expect(seen.at(-1)).toEqual({
+      type: "cf_agent_stream_resuming",
+      id: "r1",
+      probeId: "p"
+    });
+    // The ack is answered with the stream so far from the log; the server
+    // gets it too, to end the stream if its producer is gone.
     socket.send(
       JSON.stringify({ type: "cf_agent_stream_resume_ack", id: "r1" })
     );
+    expect(agent.sent.at(-1)).toEqual({
+      type: "cf_agent_stream_resume_ack",
+      id: "r1"
+    });
     await flush();
-    expect(
-      agent.sent.some((f) => f.type === "cf_agent_stream_resume_ack")
-    ).toBe(false);
     expect(seen.slice(2)).toEqual([
       {
         type: RESPONSE,
@@ -150,7 +161,7 @@ describe("ChatLogSocket", () => {
     });
   });
 
-  it("answers idle once the in-flight stream ended", async () => {
+  it("answers an ack for a stream with no chunks yet with an empty replay", async () => {
     const { agent, socket, seen } = setup();
     agent.deliver({
       type: "cf_agent_log_resync",
@@ -160,26 +171,70 @@ describe("ChatLogSocket", () => {
       id: agent.subscribeId(),
       snapshot: { messages: [] }
     });
+    socket.send(
+      JSON.stringify({ type: "cf_agent_stream_resume_ack", id: "c1" })
+    );
+    await flush();
+    expect(seen.at(-1)).toEqual({
+      type: RESPONSE,
+      id: "c1",
+      body: "",
+      done: false,
+      replay: true,
+      replayComplete: true
+    });
+  });
+
+  it("holds an ack sent while reconnecting until the log caught up", async () => {
+    const { agent, socket, seen } = setup();
+    agent.deliver({
+      type: "cf_agent_log_resync",
+      log: "cf_chat",
+      epoch: "e",
+      seq: 0,
+      id: agent.subscribeId(),
+      snapshot: { messages: [] }
+    });
+    agent.dispatchEvent(new Event("close"));
+    socket.send(
+      JSON.stringify({ type: "cf_agent_stream_resume_ack", id: "r3" })
+    );
+    await flush();
+    expect(seen.map((f) => f.type)).toEqual(["cf_agent_chat_messages"]);
+    agent.dispatchEvent(new Event("open"));
+    const resubscribe = agent.sent
+      .filter((f) => f.type === "cf_agent_log_subscribe")
+      .at(-1)!;
     agent.deliver({
       type: "cf_agent_log_events",
       log: "cf_chat",
+      id: resubscribe.id,
       events: [
         {
           seq: 1,
-          data: { frame: { type: RESPONSE, id: "r2", body: "a", done: false } }
-        },
-        {
-          seq: 2,
-          data: { frame: { type: RESPONSE, id: "r2", body: "", done: true } }
+          data: { frame: { type: RESPONSE, id: "r3", body: "a", done: false } }
         }
       ]
     });
-    socket.send(JSON.stringify({ type: "cf_agent_stream_resume_request" }));
-    await flush();
-    expect(seen.at(-1)).toEqual({
-      type: "cf_agent_stream_resume_none",
-      reason: "idle"
+    agent.deliver({
+      type: "cf_agent_log_synced",
+      log: "cf_chat",
+      epoch: "e",
+      seq: 1,
+      id: resubscribe.id
     });
+    await flush();
+    expect(seen.slice(-2)).toEqual([
+      { type: RESPONSE, id: "r3", body: "a", done: false, replay: true },
+      {
+        type: RESPONSE,
+        id: "r3",
+        body: "",
+        done: false,
+        replay: true,
+        replayComplete: true
+      }
+    ]);
   });
 
   it("skips events that name this connection, and broadcasts the log will carry", () => {
@@ -197,7 +252,6 @@ describe("ChatLogSocket", () => {
       messages: [],
       inLog: true
     });
-    agent.deliver({ type: "cf_agent_stream_resuming", id: "r9" });
     agent.deliver({
       type: "cf_agent_log_events",
       log: "cf_chat",

@@ -9,10 +9,10 @@
  * - A drop and reconnect is not shown to the chat code (no `close`/`open`),
  *   because nothing needs resuming: the replay continues every stream where
  *   it stopped. Only a final close (no reconnect coming) is passed on.
- * - The resume handshake the chat code still speaks is answered here, from
- *   the log: `cf_agent_stream_resume_request` gets `cf_agent_stream_resuming`
- *   for the stream in flight (or `cf_agent_stream_resume_none`), and its ack
- *   gets that stream's chunks so far as replay frames.
+ * - The resume handshake the chat code still speaks keeps its server side
+ *   for the decision (a stream to resume, a turn not streaming yet, or
+ *   nothing), but the ack is answered here: with that stream's chunks so
+ *   far, from the log, as replay frames. The server no longer replays.
  * - A new tab, or one whose cursor cannot be replayed, gets the snapshot as
  *   a `cf_agent_chat_messages` frame plus the in-flight stream.
  *
@@ -26,7 +26,7 @@
 import { followEventLog } from "../event-log-client";
 import { CHAT_EVENT_LOG, type ChatLogEvent } from "./chat-frames";
 import type { ChatLogActiveStream, ChatLogSnapshot } from "./chat-log";
-import { CHAT_MESSAGE_TYPES, STREAM_RESUME_NONE_REASONS } from "./protocol";
+import { CHAT_MESSAGE_TYPES } from "./protocol";
 
 /** The agent socket a {@link ChatLogSocket} wraps. @internal */
 export interface ChatLogSocketAgent {
@@ -44,13 +44,6 @@ type ActiveStream = {
 };
 
 type Mode = "pending" | "log" | "legacy";
-
-/** Frames of the server-driven resume handshake, answered here instead. */
-const SERVER_HANDSHAKE = new Set<string>([
-  CHAT_MESSAGE_TYPES.STREAM_RESUMING,
-  CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE,
-  CHAT_MESSAGE_TYPES.STREAM_PENDING
-]);
 
 const wrapped = new WeakMap<ChatLogSocketAgent, ChatLogSocket>();
 
@@ -71,8 +64,8 @@ export class ChatLogSocket extends EventTarget {
   /** Whether the log answered since the socket last opened. */
   #synced = false;
   #resynced = false;
-  /** Resume requests waiting for the log's first answer. */
-  #waiting: Array<Record<string, unknown>> = [];
+  /** Resume acks waiting for the log to catch up after a (re)connect. */
+  #waitingAcks: unknown[] = [];
   #active: ActiveStream | null = null;
 
   constructor(agent: ChatLogSocketAgent) {
@@ -141,25 +134,13 @@ export class ChatLogSocket extends EventTarget {
   }
 
   send(data: string): boolean | void {
-    if (this.#mode === "pending") {
-      // Until the server answers the subscribe, it may have no log: the
-      // request goes to it as well. A server with the log ignores resume
-      // frames from a connection that follows the log, and the subscribe
-      // went out first.
+    if (this.#mode === "log") {
       const frame = parseFrame(data);
-      if (frame?.type === CHAT_MESSAGE_TYPES.STREAM_RESUME_REQUEST) {
-        this.#waiting.push(frame);
-      }
-    } else if (this.#mode === "log") {
-      const frame = parseFrame(data);
-      if (frame?.type === CHAT_MESSAGE_TYPES.STREAM_RESUME_REQUEST) {
-        if (this.#synced) this.#answerRequest(frame);
-        else this.#waiting.push(frame);
-        return true;
-      }
       if (frame?.type === CHAT_MESSAGE_TYPES.STREAM_RESUME_ACK) {
-        this.#answerAck(frame.id);
-        return true;
+        if (this.#synced) this.#answerAck(frame.id);
+        else this.#waitingAcks.push(frame.id);
+        // The server sends nothing back to a follower's ack; it only ends a
+        // stream whose producer is gone.
       }
     }
     return this.#agent.send(data);
@@ -173,14 +154,6 @@ export class ChatLogSocket extends EventTarget {
       // A broadcast this socket got before the server read its subscribe:
       // the log replays it, or the snapshot holds it.
       if (data.includes('"inLog":true') && parseFrame(data)?.inLog === true) {
-        return;
-      }
-      if (
-        this.#mode === "log" &&
-        typeof type === "string" &&
-        SERVER_HANDSHAKE.has(type)
-      ) {
-        // The server's own resume handshake: the log replaces it.
         return;
       }
     }
@@ -227,16 +200,14 @@ export class ChatLogSocket extends EventTarget {
   #ready(): void {
     this.#mode = "log";
     this.#synced = true;
-    const waiting = this.#waiting;
-    this.#waiting = [];
-    for (const frame of waiting) this.#answerRequest(frame);
+    const acks = this.#waitingAcks;
+    this.#waitingAcks = [];
+    for (const id of acks) this.#answerAck(id);
   }
 
   /** The server has no chat log: pass everything through from now on. */
   #legacy(): void {
     this.#mode = "legacy";
-    // Its resume requests already went to the server.
-    this.#waiting = [];
   }
 
   /** Follow the stream in flight, so a resume can be answered from here. */
@@ -269,28 +240,14 @@ export class ChatLogSocket extends EventTarget {
     }
   }
 
-  #answerRequest(frame: Record<string, unknown>): void {
-    const probe = frame.probeId !== undefined ? { probeId: frame.probeId } : {};
-    const active = this.#active;
-    this.#later(
-      active
-        ? {
-            type: CHAT_MESSAGE_TYPES.STREAM_RESUMING,
-            id: active.requestId,
-            ...probe
-          }
-        : {
-            type: CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE,
-            reason: STREAM_RESUME_NONE_REASONS.IDLE,
-            ...probe
-          }
-    );
-  }
-
   /** Replay the acked stream's chunks so far; the log carries the rest. */
   #answerAck(requestId: unknown): void {
-    const active = this.#active;
-    if (!active || active.requestId !== requestId) return;
+    if (typeof requestId !== "string") return;
+    // The stream may not have sent a chunk yet: then the replay is empty.
+    const active: ActiveStream =
+      this.#active?.requestId === requestId
+        ? this.#active
+        : { requestId, continuation: false, chunks: [] };
     const flags = {
       ...(active.continuation && { continuation: true }),
       ...(active.continuation &&
@@ -319,11 +276,6 @@ export class ChatLogSocket extends EventTarget {
     queueMicrotask(() => {
       for (const frame of frames) this.#dispatchFrame(frame);
     });
-  }
-
-  /** Answer after the caller's own synchronous work, like a server would. */
-  #later(frame: Record<string, unknown>): void {
-    queueMicrotask(() => this.#dispatchFrame(frame));
   }
 
   #dispatchFrame(frame: Record<string, unknown>): void {
