@@ -851,8 +851,9 @@ export class Lifecycle<
    * Recompute the physical Durable Object alarm from job-queue state.
    *
    * Concurrent requests are serialized so a later durable-state change cannot
-   * be overwritten by an earlier alarm calculation. Queue mutations call this
-   * automatically; it stays public for composition roots and tests.
+   * be overwritten by an earlier alarm calculation. The alarm is written only
+   * when its time changes. Queue mutations call this automatically; it stays
+   * public for composition roots and tests.
    */
   async rearmAlarm(): Promise<void> {
     if (this.#alarmsDisabled) return;
@@ -864,9 +865,12 @@ export class Lifecycle<
     await this.#serializeAlarmWrite(async () => {
       if (this.#alarmsDisabled) return;
       const alarm = this.#jobQueue.nextAlarmTime(Date.now());
+      // Each setAlarm() and deleteAlarm() is billed as a row written, and
+      // most queue mutations leave the earliest wake where it was.
+      const current = await this.#ctx.storage.getAlarm();
       if (alarm === null) {
-        await this.#ctx.storage.deleteAlarm();
-      } else {
+        if (current !== null) await this.#ctx.storage.deleteAlarm();
+      } else if (current !== alarm) {
         await this.#ctx.storage.setAlarm(alarm);
       }
     });

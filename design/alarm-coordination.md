@@ -51,6 +51,11 @@ alarm can be lost: the platform retries a throwing `alarm()` six times (at
 about 2, 5, 9, 18, 36 and 78 seconds) and then drops it, and user code can
 call `deleteAlarm()`. Measured on a deployed Worker, 22 Nov 2026.
 
+A re-arm reads the current alarm first and writes only when the time changes,
+and deletes only an alarm that is set. Each `setAlarm()` and `deleteAlarm()`
+is billed as a row written, and most queue mutations (a push later than the
+earliest job, a cancel of a later job) leave the earliest wake where it was.
+
 ## When the alarm fires
 
 `Lifecycle.alarm()` runs the event loop: arm the deadman, drive due jobs in
