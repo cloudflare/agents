@@ -94,7 +94,7 @@ due jobs are driven. Host `getNextAlarm()` is removed.
 
 ## The dispatch contract
 
-Four named rules define what a job owner can and cannot rely on:
+Five named rules define what a job owner can and cannot rely on:
 
 1. **Job ids are scoped to their owner.** Every queue verb — push
    included — sees only the owner's own jobs. A same-id push replaces the
@@ -127,12 +127,30 @@ Four named rules define what a job owner can and cannot rely on:
    pushed mid-drive. Owners that both push and return outcomes for the
    same job (Tasks) should derive both from the same durable state so
    they always agree.
-4. **Platform failures abort the drive loop.** A platform-class failure
-   (superseded isolate, memory-limit reset, platform transient) preserves
-   the failing job and re-throws, deferring the _remaining_ due jobs to
-   the platform's alarm retry. This is deliberate: platform failures are
-   properties of the isolate, not the job, so later jobs would fail the
-   same way, and the retry runs on a fresh invocation.
+4. **A reset stops the drive loop; a transient failure stops only its
+   job.** A superseded isolate, a storage reset or a memory-limit reset
+   condemns the isolate: the driver preserves the failing job and
+   re-throws, and the remaining due jobs wait for a fresh invocation (or
+   the breaker engages). Any other platform-class failure (a `retryable`
+   error, "Network connection lost.") belongs to something the job called,
+   such as a downstream stub. The driver keeps that job, moves it 30 s out
+   and drives the rest; the alarm re-arms and then still fails, so the
+   failure is visible. Before this rule, one such job kept its old due
+   time, headed the due list on every alarm and stopped every job behind
+   it for as long as the downstream kept failing.
+5. **Attempts are counted durably, before `onJob` runs.** The row's
+   `attempts` column is written and synced before each dispatch attempt,
+   and `context.attempt` reads it. An attempt that takes its isolate down
+   (CPU limit, the 15-minute alarm wall-time limit, a reset) is still
+   counted, so the next alarm continues the count. When a job starts with
+   its count at `maxAttempts`, an owner with `onJobError` gets a
+   `JobAttemptsExhaustedError` and decides the outcome; an owner without
+   one keeps its job (it may be the owner's only wake), and each further
+   attempt first moves the job out by 30 s, doubling to an hour. An
+   attempt that ends in a platform failure is uncounted. A push or a
+   non-final outcome (`rescheduleAt`, `"yield"`) starts the count at zero.
+   Without this, a job that exceeded the CPU limit ran again every 30 s
+   forever with `attempt: 1` (measured on a deployed Worker, 22 Nov 2026).
 
 Everything else about drive order — in particular the interleaving of
 different owners' jobs within one alarm cycle — is unspecified. Owners may
@@ -164,11 +182,15 @@ and `Lifecycle` wires them to the host and capabilities through the narrow
    - stop if alarms were disabled mid-phase (host teardown);
    - a single-flight job whose previous run is in flight is skipped until it
      crosses its hung timeout, then forcibly re-run;
+   - a job whose durable attempt count already reached `maxAttempts` goes
+     to `onJobError` (or, with no `onJobError`, is backed off and run once);
    - dispatch `onJob` inside `tryN` using the job's retry options (defaults
-     3 attempts / 100 ms base / 3000 ms cap);
-   - platform-class failures (superseded isolate, platform transient on
-     exhaustion, memory-limit reset) preserve the job and re-throw so the
-     platform retries a fresh invocation or the breaker engages;
+     3 attempts / 100 ms base / 3000 ms cap), counting and syncing each
+     attempt in the row first;
+   - a reset or memory-limit failure preserves the job and re-throws so a
+     fresh invocation runs the rest or the breaker engages; any other
+     platform-class failure (on exhaustion) moves the job 30 s out and the
+     loop goes on, and the alarm re-throws it after re-arming;
    - terminal application failures reach `onJobError`, whose drive result
      decides advancement (recurring schedules reschedule; one-shots
      complete);

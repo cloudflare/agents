@@ -100,7 +100,16 @@ export type LifecycleJobOutcome =
 export type LifecycleJobContext = {
   /** The due job being executed. */
   readonly job: LifecycleJob;
-  /** 1-indexed dispatch attempt within the current alarm invocation. */
+  /**
+   * 1-indexed dispatch attempt, counted durably before `onJob` runs. It
+   * carries across alarm invocations: an attempt that never reported back
+   * (the isolate was reset, or exceeded its CPU or wall-time limit) stays
+   * counted, so the next invocation runs attempt 2. A push or a non-final
+   * outcome (`rescheduleAt`, `"yield"`) starts the count again. An attempt
+   * that ended in a platform failure (a deploy, a dropped connection, a
+   * memory-limit reset) is not counted. A number can repeat when its write
+   * was lost with the isolate; it is not a deduplication key.
+   */
   readonly attempt: number;
 };
 
@@ -142,6 +151,8 @@ export type JobStorageRow = {
   recovery_loop: number;
   running: number;
   execution_started_at: number | null;
+  /** Dispatch attempts counted since the job was pushed or last progressed. */
+  attempts: number;
   created_at: number;
 };
 
@@ -233,8 +244,21 @@ export class JobQueue {
         recovery_loop INTEGER NOT NULL DEFAULT 0,
         running INTEGER NOT NULL DEFAULT 0,
         execution_started_at INTEGER,
+        attempts INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL DEFAULT (unixepoch())
       ) WITHOUT ROWID`);
+    // Tables created before attempts were counted get the column; their
+    // pending jobs start at zero.
+    const columns = [
+      ...this.#storage.sql.exec<{ name: string }>(
+        "SELECT name FROM pragma_table_info('cf_agents_jobs')"
+      )
+    ];
+    if (!columns.some((column) => column.name === "attempts")) {
+      this.#storage.sql.exec(
+        "ALTER TABLE cf_agents_jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0"
+      );
+    }
     this.#tableEnsured = true;
   }
 
@@ -330,7 +354,8 @@ export class JobQueue {
          exclusive = excluded.exclusive,
          recovery_loop = excluded.recovery_loop,
          running = 0,
-         execution_started_at = NULL
+         execution_started_at = NULL,
+         attempts = 0
        WHERE cf_agents_jobs.capability = excluded.capability`,
       id,
       capability,
@@ -450,6 +475,45 @@ export class JobQueue {
     );
   }
 
+  /**
+   * Record that one dispatch attempt is starting. Written before `onJob`
+   * runs, so an attempt that kills its isolate is still counted.
+   */
+  setAttempts(id: string, attempts: number): void {
+    this.#sql(
+      "UPDATE cf_agents_jobs SET attempts = ? WHERE id = ?",
+      attempts,
+      id
+    );
+  }
+
+  /**
+   * Move the due time of a job this dispatch holds, without touching its
+   * running marker or revision: the dispatch's own outcome still applies.
+   */
+  setTime(id: string, time: number): void {
+    this.#sql(
+      "UPDATE cf_agents_jobs SET time = ? WHERE id = ?",
+      Math.floor(time),
+      id
+    );
+  }
+
+  /**
+   * Keep a job whose dispatch hit a transient platform failure, and move it
+   * to `time` so the jobs behind it run first and it does not head the next
+   * alarm's due list straight away.
+   */
+  defer(id: string, time: number): void {
+    this.#sql(
+      `UPDATE cf_agents_jobs
+       SET time = ?, running = 0, execution_started_at = NULL
+       WHERE id = ?`,
+      Math.floor(time),
+      id
+    );
+  }
+
   delete(id: string): void {
     this.#revise(id);
     this.#sql("DELETE FROM cf_agents_jobs WHERE id = ?", id);
@@ -533,7 +597,12 @@ export class JobQueue {
       return;
     }
     if (outcome === "yield") {
-      this.clearRunning(id);
+      this.#sql(
+        `UPDATE cf_agents_jobs
+         SET running = 0, execution_started_at = NULL, attempts = 0
+         WHERE id = ?`,
+        id
+      );
       return;
     }
     if (
@@ -543,7 +612,7 @@ export class JobQueue {
     ) {
       this.#sql(
         `UPDATE cf_agents_jobs
-         SET time = ?, running = 0, execution_started_at = NULL
+         SET time = ?, running = 0, execution_started_at = NULL, attempts = 0
          WHERE id = ?`,
         Math.floor(outcome.rescheduleAt),
         id
