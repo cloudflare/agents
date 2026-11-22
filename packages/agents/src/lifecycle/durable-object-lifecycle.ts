@@ -9,7 +9,7 @@ import {
   type LifecycleEventSink
 } from "./capability-runner";
 import { abortWithoutAlarmRetry } from "./abort";
-import { JobDriver, type JobDispatch } from "./job-driver";
+import { JobDriver, type JobDeferral, type JobDispatch } from "./job-driver";
 import {
   HOST_JOB_CAPABILITY,
   JobQueue,
@@ -255,7 +255,7 @@ export class Lifecycle<
       },
       emit: (type, payload) =>
         this.#emitCapabilityEvent({ source: "lifecycle", type, payload }),
-      rearm: () => this.rearmAlarm(),
+      rearm: (deferral) => this.#rearm(deferral),
       // Deferred a tick so the current invocation settles (its RPC/alarm
       // completes and its writes confirm) before the instance resets —
       // `abort()` throws an uncatchable error, mirroring Agent.destroy().
@@ -856,6 +856,14 @@ export class Lifecycle<
    * public for composition roots and tests.
    */
   async rearmAlarm(): Promise<void> {
+    return this.#rearm();
+  }
+
+  /**
+   * Re-arm, optionally around a deferral: the held owners' jobs wake no
+   * sooner than its end, every other job at its own time.
+   */
+  async #rearm(deferral?: JobDeferral): Promise<void> {
     if (this.#alarmsDisabled) return;
     if (this.#status === "starting") {
       this.#rearmRequestedDuringStart = true;
@@ -864,7 +872,10 @@ export class Lifecycle<
 
     await this.#serializeAlarmWrite(async () => {
       if (this.#alarmsDisabled) return;
-      const alarm = this.#jobQueue.nextAlarmTime(Date.now());
+      const next = this.#jobQueue.nextAlarmTime(Date.now(), deferral?.owners);
+      const alarm = deferral
+        ? Math.min(next ?? deferral.until, deferral.until)
+        : next;
       // Each setAlarm() is billed as a row written, and most queue
       // mutations leave the earliest wake where it was.
       const current = await this.#ctx.storage.getAlarm();

@@ -90,6 +90,16 @@ function attemptsExhaustedError(row: JobStorageRow): Error {
   return error;
 }
 
+/**
+ * Owners whose jobs a transient platform failure held back in this alarm.
+ * Their due jobs keep their times (so a Queue keeps its order) and wait
+ * until `until`; everything else re-arms as usual.
+ */
+export type JobDeferral = {
+  readonly owners: readonly string[];
+  readonly until: number;
+};
+
 /** The dispatch hooks one job owner exposes to the driver. */
 export type JobDispatch = {
   readonly onJob: (
@@ -116,7 +126,7 @@ export type JobDriverOptions = {
   /** Best-effort lifecycle telemetry. */
   readonly emit: (type: string, payload: unknown) => void;
   /** Recompute the physical alarm from queue state. */
-  readonly rearm: () => Promise<void>;
+  readonly rearm: (deferral?: JobDeferral) => Promise<void>;
   /**
    * Schedule an isolate reset after a memory-limit strike is fully
    * recorded, suppressing any retry of the current alarm. Returns
@@ -144,6 +154,12 @@ class AttributedPlatformFailure {
   ) {}
 }
 
+/** What a drive held back after a transient platform failure. */
+type DeferredDrive = {
+  readonly failure: AttributedPlatformFailure;
+  readonly owners: Set<string>;
+};
+
 /** One recorded memory-limit strike, shared by every flow that observed it. */
 type MemoryLimitStrike = {
   readonly strikes: number;
@@ -166,6 +182,12 @@ export class JobDriver {
    */
   readonly #alarmScope = new AsyncLocalStorage<AlarmScope>();
   #alarmsInFlight = 0;
+  /**
+   * Owners held back after a transient platform failure, with the time the
+   * hold ends. In memory: an alarm for another owner inside the hold skips
+   * them too, and an eviction just lets them run again.
+   */
+  readonly #heldOwners = new Map<string, number>();
   /**
    * Work handed off by alarm-driven jobs that has not settled yet. While it
    * is non-empty the alarm domain is not quiescent, so a clean alarm must not
@@ -219,7 +241,7 @@ export class JobDriver {
     // quiescence and undo what it just set. Reaching quiescence again is a
     // job for some LATER, genuinely clean invocation or handoff settlement.
     let clean = false;
-    let deferred: AttributedPlatformFailure | undefined;
+    let deferred: DeferredDrive | undefined;
     try {
       try {
         await this.armStartupFallback();
@@ -253,12 +275,12 @@ export class JobDriver {
       this.#alarmsInFlight--;
       if (clean) await this.#clearMemoryLimitStrikesWhenQuiescent();
     }
-    await this.#options.rearm();
+    await this.#options.rearm(this.#currentDeferral());
     // A job deferred on a transient platform failure still fails the alarm,
     // so the failure is visible to the platform. The alarm re-armed above
     // wins over the platform's own retry, so this never spends its
     // six-retry budget (RUNTIME-FACTS, 22 Nov).
-    if (deferred) throw deferred.cause;
+    if (deferred) throw deferred.failure.cause;
   }
 
   /**
@@ -351,16 +373,31 @@ export class JobDriver {
     );
   }
 
+  /** The owners still held back, re-armed no sooner than the earliest end. */
+  #currentDeferral(): JobDeferral | undefined {
+    const now = Date.now();
+    for (const [owner, until] of this.#heldOwners) {
+      if (until <= now) this.#heldOwners.delete(owner);
+    }
+    if (this.#heldOwners.size === 0) return undefined;
+    return {
+      owners: [...this.#heldOwners.keys()],
+      until: Math.min(...this.#heldOwners.values())
+    };
+  }
+
   /**
-   * Drive every due job once, in due-time order. A job deferred on a
-   * transient platform failure does not stop the others; the first such
-   * failure is returned so the alarm can report it after re-arming.
+   * Drive every due job once, in due-time order. A transient platform
+   * failure holds back its owner's remaining due jobs (an owner such as
+   * Queue relies on their order) but not other owners'; the first failure
+   * and the held owners are returned so the alarm can re-arm around them and
+   * report the failure.
    */
-  async #driveDueJobs(): Promise<AttributedPlatformFailure | undefined> {
+  async #driveDueJobs(): Promise<DeferredDrive | undefined> {
     const nowMs = Date.now();
     const due = this.#options.queue.due(nowMs);
     if (due.length === 0) return undefined;
-    let deferred: AttributedPlatformFailure | undefined;
+    let deferred: DeferredDrive | undefined;
     this.#warnBacklog(due);
 
     // Deadman pre-arm: before driving any job, arm a fallback alarm so a
@@ -382,6 +419,7 @@ export class JobDriver {
       // row that changed but is still due dispatches with its fresh data.
       const row = this.#options.queue.dueRow(stale.id, nowMs);
       if (!row) continue;
+      if ((this.#heldOwners.get(row.capability) ?? 0) > Date.now()) continue;
 
       let takeover = false;
       if (row.singleflight === 1 && row.running === 1) {
@@ -405,7 +443,14 @@ export class JobDriver {
       const claim = this.#options.queue.claim(row.id, nowMs, takeover);
       try {
         const failure = await this.#driveJob(row, claim);
-        deferred ??= failure;
+        if (failure) {
+          deferred ??= { failure, owners: new Set() };
+          deferred.owners.add(row.capability);
+          this.#heldOwners.set(
+            row.capability,
+            Date.now() + DEADMAN_ALARM_DELAY_MS
+          );
+        }
       } finally {
         this.#options.queue.release(claim);
       }
@@ -509,7 +554,9 @@ export class JobDriver {
     try {
       outcome = await this.#alarmScope.run({ executing: row }, () =>
         tryN(
-          maxAttempts,
+          // An exhausted job kept for an owner without onJobError gets one
+          // attempt per wake; its backoff, not tryN, spaces them.
+          prior >= unreportedLimit ? 1 : maxAttempts,
           async (local) => {
             // A retry waits in tryN's backoff, and requests run meanwhile.
             // A cancel or same-id push made then is newer intent: do not
@@ -584,19 +631,19 @@ export class JobDriver {
           throw failure;
         }
         // A transient failure of something this job called (a stub that
-        // lost its connection, a retryable error). Keep the job, move it
-        // back by the deadman delay so the jobs behind it run now and it
-        // does not head every later alarm, and go on with the rest.
+        // lost its connection, a retryable error). Keep the job where it is
+        // in its owner's order; the alarm holds this owner back for the
+        // deadman delay and goes on with the other owners' jobs.
         try {
-          if (owned()) {
-            queue.defer(row.id, Date.now() + DEADMAN_ALARM_DELAY_MS);
-          }
+          if (owned()) queue.clearRunning(row.id);
         } catch {
           // the hung timeout eventually recovers the flag
         }
         console.warn(
-          `Deferring job ${row.id} by ${DEADMAN_ALARM_DELAY_MS / 1000}s ` +
-            `after a platform failure; the job is preserved.`
+          `Deferring job ${row.id} and the rest of ` +
+            `${JSON.stringify(row.capability)}'s due jobs by ` +
+            `${DEADMAN_ALARM_DELAY_MS / 1000}s after a platform failure; ` +
+            `the jobs are preserved.`
         );
         return failure;
       }
