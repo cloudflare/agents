@@ -58,6 +58,10 @@ export class InboxHarnessObject extends DurableObject<Cloudflare.Env> {
         await this.#park(run);
         return run.progress ?? null;
       },
+      bigint: async (_payload: null, run: InboxRun) => {
+        this.#record("bigint", null, run);
+        return { n: BigInt(1) };
+      },
       big: async (payload: string, run: InboxRun) => {
         this.#record("big", payload.length, run);
         return payload;

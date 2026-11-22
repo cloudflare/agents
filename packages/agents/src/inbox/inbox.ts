@@ -466,7 +466,7 @@ export class Inbox<
     const settled = this.#rows.settle(
       row.token,
       "aborted",
-      { error: reasonOf(reason) ?? null, now: Date.now() },
+      { error: errorText(reasonOf(reason)), now: Date.now() },
       { from: "open" }
     );
     const ended = this.#read(id);
@@ -491,7 +491,7 @@ export class Inbox<
   async clear(lane: string, reason?: unknown): Promise<InboxRequest[]> {
     if (this.#notStarted()) await this.#services.ready();
     const now = Date.now();
-    const error = reasonOf(reason) ?? "cleared";
+    const error = errorText(reasonOf(reason)) ?? "cleared";
     const ended: Array<{ request: InboxRequest; token: string }> = [];
     for (const { id, token } of this.#rows.openTokens(lane, {
       includeDetached: true
@@ -536,7 +536,7 @@ export class Inbox<
       outcome.status,
       {
         result: resultJson(outcome),
-        error: outcome.reason ?? null,
+        error: errorText(outcome.reason),
         now: Date.now()
       },
       { from: "running" }
@@ -864,13 +864,20 @@ export class Inbox<
         return;
       }
     }
-    await this.#execute(row, 1);
+    // A pending record can carry earlier attempts (an imported one).
+    await this.#execute(row, request.attempt + 1);
   }
 
   async #execute(row: InboxRow, attempt: number): Promise<void> {
     const { request, token } = row;
     const now = Date.now();
-    if (!this.#rows.start(token, attempt, now)) return;
+    if (!this.#rows.start(token, attempt, now)) {
+      // Another write changed the record since the runner read it. Yield
+      // to the event loop before the runner reads the lane again, so a
+      // record that cannot start never spins the isolate.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      return;
+    }
     const handler = this.#handlers[request.kind] as
       | ((payload: unknown, run: InboxRun) => unknown)
       | undefined;
@@ -911,6 +918,9 @@ export class Inbox<
         );
         outcome =
           value instanceof InboxSettlement ? value : Inbox.completed(value);
+        // A result that cannot be stored is the handler's failure, decided
+        // here, not a settle that throws and leaves the request running.
+        resultJson(outcome);
       } catch (error) {
         // The isolate is going: leave the request running for the next
         // attempt.
@@ -936,21 +946,28 @@ export class Inbox<
     attempt: number
   ): Promise<void> {
     if (outcome.status === "detached") return;
-    if (
-      !this.#rows.settle(
+    const write = (settlement: InboxSettlement) =>
+      this.#rows.settle(
         token,
-        outcome.status,
+        settlement.status as InboxTerminalStatus,
         {
-          result: resultJson(outcome),
-          error: outcome.reason ?? null,
+          result: resultJson(settlement),
+          error: errorText(settlement.reason),
           now: Date.now()
         },
         { from: "running", attempt }
-      )
-    ) {
-      return;
+      );
+    let settled: boolean;
+    try {
+      settled = write(outcome);
+    } catch (error) {
+      if (isPlatformFailure(error)) throw error;
+      // The outcome could not be stored: end it `error`, never run again.
+      settled = write(
+        Inbox.failed(`The outcome could not be stored: ${reasonOf(error)}`)
+      );
     }
-    await this.#afterTerminal(this.#read(id), token);
+    if (settled) await this.#afterTerminal(this.#read(id), token);
   }
 
   // ── Status ───────────────────────────────────────────────────────────
@@ -1071,6 +1088,16 @@ function reasonOf(reason: unknown): string | undefined {
   if (reason === undefined) return undefined;
   if (reason instanceof Error) return reason.message;
   return typeof reason === "string" ? reason : String(reason);
+}
+
+/** The longest error text a record keeps. */
+const ERROR_LIMIT = 10_000;
+
+function errorText(reason: string | undefined): string | null {
+  if (reason === undefined) return null;
+  return reason.length > ERROR_LIMIT
+    ? `${reason.slice(0, ERROR_LIMIT)}…`
+    : reason;
 }
 
 function resultJson(outcome: InboxSettlement): string | null {
