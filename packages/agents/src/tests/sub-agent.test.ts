@@ -78,16 +78,19 @@ async function expectRootKeepAliveRefCount(
 }
 
 /**
- * Run the root's alarm until no fiber wake it mirrors is due. A wake armed
- * due now can already be firing on the real alarm, which makes a concurrent
- * `runDurableObjectAlarm` return early, so retry until the due wakes drain.
+ * Wait until no fiber wake the root mirrors is due. A wake armed due now
+ * fires on the real alarm, so wait for that first; run the alarm by hand
+ * only if it has not. Running it by hand while the real one runs would let
+ * both drive the same due jobs.
  */
 async function drainDueFiberWakes(agent: {
   dueFiberWakeCount(): Promise<number>;
 }) {
-  for (let attempt = 0; attempt < 50; attempt++) {
-    await runDurableObjectAlarm(agent as unknown as DurableObjectStub);
+  for (let attempt = 0; attempt < 100; attempt++) {
     if ((await agent.dueFiberWakeCount()) === 0) return;
+    if (attempt >= 50) {
+      await runDurableObjectAlarm(agent as unknown as DurableObjectStub);
+    }
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   expect(await agent.dueFiberWakeCount()).toBe(0);
@@ -1304,8 +1307,13 @@ describe("SubAgent", () => {
       []
     );
 
-    await drainDueFiberWakes(agent);
-
+    // The continuation is a schedule due now, on the root's real alarm.
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if ((await agent.subAgentScheduleLog("chat-recovery-child")).length > 0) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
     expect(await agent.subAgentScheduleLog("chat-recovery-child")).toEqual([
       expect.objectContaining({
         value: "recovered:chat-fiber-1",
