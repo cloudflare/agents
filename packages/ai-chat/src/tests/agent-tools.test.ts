@@ -329,6 +329,10 @@ type ParentStub = DurableObjectStub & {
     childName: string;
     incidentId: string;
   }): Promise<string>;
+  runChildTurnStoresForTest(): Promise<{
+    status: string;
+    stores: Array<{ taskRuns: number; fibers: number }>;
+  }>;
   driveFacetChatRecoveryDetectionForTest(childName: string): Promise<{
     taskRunOnChild: number;
     routedWakeOnRoot: number;
@@ -585,6 +589,17 @@ describe("AIChatAgent as an agent-tool child", () => {
 
     expect(await parent.rootHasRoutedTaskWakeForTest(runId)).toBe(true);
   }, 10_000);
+
+  it("runs a facet's chat turn as a Task run on the facet, not a legacy fiber", async () => {
+    const parent = await getParent();
+
+    const { status, stores } = await parent.runChildTurnStoresForTest();
+
+    expect(status).toBe("completed");
+    // Read while the child's turn ran: its durable record is the chat-turn
+    // Task run, so an interrupted turn replays like a root agent's.
+    expect(stores).toEqual([{ taskRuns: 1, fibers: 0 }]);
+  });
 
   it("routes a facet's real recovery detection through Tasks, mirrored to the root alarm", async () => {
     const parent = await getParent();

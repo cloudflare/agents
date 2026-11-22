@@ -5691,6 +5691,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
         .join("") ?? "";
 
     this._chatCallsForTest.push(prompt);
+    this._turnStoresForTest.push(this._turnStoreCountsForTest());
     const bodyText = `AIChat child handled: ${prompt}`;
     await delayWithAbort(Number(input?.delayMs ?? 0), options?.abortSignal);
     if (input?.streamError) {
@@ -5729,6 +5730,28 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
 
   /** The prompt of every `onChatMessage` call, in order. */
   private _chatCallsForTest: string[] = [];
+
+  /** Where each running turn was stored, read inside `onChatMessage`. */
+  private _turnStoresForTest: Array<{ taskRuns: number; fibers: number }> = [];
+
+  private _turnStoreCountsForTest(): { taskRuns: number; fibers: number } {
+    const taskRuns = this.sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM cf_agents_task_runs
+      WHERE definition = ${AIChatAgent.CHAT_FIBER_NAME}
+        AND state IN ('pending', 'running', 'waiting')
+    `;
+    const fibers = this.sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM cf_agents_runs
+    `;
+    return {
+      taskRuns: taskRuns[0]?.count ?? 0,
+      fibers: fibers[0]?.count ?? 0
+    };
+  }
+
+  getTurnStoresForTest(): Array<{ taskRuns: number; fibers: number }> {
+    return this._turnStoresForTest;
+  }
 
   private async _waitForRunTerminalForTest(
     runId: string
@@ -7151,6 +7174,20 @@ export class AIChatAgentToolParent extends Agent<Env> {
     if (this.finishRunIdsToThrow.has(run.runId)) {
       throw new Error(`finish failed for ${run.runId}`);
     }
+  }
+
+  /** Run a child, and say where the child stored its running turn. */
+  async runChildTurnStoresForTest(): Promise<{
+    status: string;
+    stores: Array<{ taskRuns: number; fibers: number }>;
+  }> {
+    const runId = crypto.randomUUID();
+    const result = await this.runChild({ prompt: "where" }, runId);
+    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    return {
+      status: result.status,
+      stores: await child.getTurnStoresForTest()
+    };
   }
 
   async runChild(

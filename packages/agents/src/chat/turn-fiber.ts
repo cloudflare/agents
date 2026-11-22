@@ -17,9 +17,10 @@
  * - a recovery attempt's turn that throws does not fail its fiber: the
  *   attempt owns the turn, and a failed fiber would be recovered again as
  *   an interrupted turn;
- * - on a facet, run on the legacy fiber engine; otherwise register the live
- *   closure, start the chat-turn Task ({@link createChatTurnTaskDefinition}
- *   runs the closure) and wait for its outcome.
+ * - register the live closure, start the chat-turn Task
+ *   ({@link createChatTurnTaskDefinition} runs the closure) and wait for its
+ *   outcome. A facet's turn runs on Tasks too: its run lives on the facet
+ *   and the root's alarm wakes it.
  *
  * The host supplies its fiber and Task plumbing and the snapshot.
  *
@@ -42,18 +43,6 @@ export interface ChatTurnFiberHost {
   generateId(): string;
   /** The abort signal of the turn running under `requestId`, if it has one. */
   turnSignal(requestId: string): AbortSignal | undefined;
-  /**
-   * `true` on a facet (a routed sub-agent). The Tasks capability does not
-   * accept runs there yet, and facet recovery goes through the root's
-   * facet-run index, so its turns stay on the legacy fiber engine.
-   */
-  isFacet(): boolean;
-  /** Run `fn` on the legacy fiber engine. */
-  runLegacyFiber<T>(
-    name: string,
-    fn: () => Promise<T>,
-    options: { initialSnapshot: unknown; wrapStash: (data: unknown) => unknown }
-  ): Promise<T>;
   /** Start the chat-turn Task for a registered live closure. */
   runTask(input: {
     requestId: string;
@@ -205,21 +194,6 @@ export class ChatTurnFibers {
 
     this.liveTurns.set(requestId, liveTurn);
     try {
-      if (this.host.isFacet()) {
-        return settled(
-          await this.host.runLegacyFiber(
-            `${this.host.fiberName}:${requestId}`,
-            () => {
-              // The legacy engine stored the fiber and its snapshot before it
-              // entered this closure.
-              this.host.turnAccepted?.(requestId);
-              turn.onAccepted?.(requestId);
-              return body();
-            },
-            { initialSnapshot: wrap(null), wrapStash: wrap }
-          )
-        );
-      }
       return settled(await this.#runAsTask(turn, wrap, body));
     } finally {
       if (this.liveTurns.get(requestId) === liveTurn) {
