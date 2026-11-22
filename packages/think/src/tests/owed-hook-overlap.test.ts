@@ -40,10 +40,18 @@ describe("owed response hooks", () => {
         },
         { key: "owed-request" }
       );
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      // Start the live turn while the owed hook is still running.
+      const deadline = Date.now() + 5_000;
+      while (
+        Date.now() < deadline &&
+        (await agent.getHookConcurrencyForTest()).running === 0
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
       await agent.testChat("second");
       await new Promise((resolve) => setTimeout(resolve, 1_500));
       const log = await agent.getResponseLog();
+      expect((await agent.getHookConcurrencyForTest()).most).toBe(2);
       expect(log).toHaveLength(3);
       expect(log.map((response) => response.requestId)).toContain(
         "owed-request"

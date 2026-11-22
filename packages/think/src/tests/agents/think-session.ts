@@ -10806,9 +10806,26 @@ export class ThinkAsyncHookTestAgent extends Think {
     return createMockModel("Async hook response");
   }
 
+  private _hooksRunning = 0;
+  private _mostHooksAtOnce = 0;
+
   override async onChatResponse(result: ChatResponseResult): Promise<void> {
-    await new Promise((resolve) => setTimeout(resolve, this._hookDelayMs));
-    this._responseLog.push(result);
+    this._hooksRunning += 1;
+    this._mostHooksAtOnce = Math.max(this._mostHooksAtOnce, this._hooksRunning);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, this._hookDelayMs));
+      this._responseLog.push(result);
+    } finally {
+      this._hooksRunning -= 1;
+    }
+  }
+
+  /** How many `onChatResponse` calls run now, and the most at once. */
+  async getHookConcurrencyForTest(): Promise<{
+    running: number;
+    most: number;
+  }> {
+    return { running: this._hooksRunning, most: this._mostHooksAtOnce };
   }
 
   async testChat(message: string): Promise<TestChatResult> {
