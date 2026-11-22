@@ -81,6 +81,10 @@
         "name": "InboxHarnessObject"
       },
       {
+        "class_name": "OutboxHarnessObject",
+        "name": "OutboxHarnessObject"
+      },
+      {
         "class_name": "BrowserHarnessObject",
         "name": "BrowserHarnessObject"
       },
@@ -507,6 +511,7 @@
         "ApprovalsHarnessObject",
         "ApprovalsReviewObject",
         "InboxHarnessObject",
+        "OutboxHarnessObject",
         "BrowserHarnessObject",
         "InternalHostsPlainObject",
         "InternalHostsNoMethodObject",

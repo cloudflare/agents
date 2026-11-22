@@ -22,6 +22,7 @@ export const channels = {
   stream: channel("agents:stream"),
   agentTool: channel("agents:agent_tool"),
   schedule: channel("agents:schedule"),
+  outbox: channel("agents:outbox"),
   lifecycle: channel("agents:lifecycle"),
   workflow: channel("agents:workflow"),
   mcp: channel("agents:mcp"),
@@ -39,6 +40,7 @@ function getChannel(type: string): Channel {
     return channels.transcript;
   if (type.startsWith("chat:")) return channels.chat;
   if (type.startsWith("agent_tool:")) return channels.agentTool;
+  if (type.startsWith("outbox:")) return channels.outbox;
   if (type.startsWith("schedule:") || type.startsWith("queue:"))
     return channels.schedule;
   if (

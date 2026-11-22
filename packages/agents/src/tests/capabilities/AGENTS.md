@@ -30,6 +30,9 @@ per capability, all registered in the shared workers project
   capability; its continuation runs a side effect through `once()` and
   counts real runs) and `backdateDecisionJob()`, which makes a decision's
   recovery job due so a test drives it with a real alarm.
+- `outbox.ts` — `OutboxHarnessObject` (Outbox as the only capability) with
+  sinks that record attempts, fail on demand, give up, and deliver in
+  checkpointed steps; `waitFor()` polls a condition.
 - `streams.ts` — `StreamHarnessObject` (Streams as the only capability) and
   `TaskStreamComposeObject` (the checkpointed-cursor contract with Tasks,
   including recovery from stream evidence).
