@@ -167,7 +167,10 @@ function fakeLog(followers: string[] = [], limit = Infinity) {
           }
         };
       },
-      followerIds: () => followers
+      followerIds: () => followers,
+      reset() {
+        published.push({ kind: "reset", event: undefined });
+      }
     }
   };
 }
@@ -194,11 +197,42 @@ describe("ChatFrames with the chat event log", () => {
     expect(sent.every((entry) => entry.without.includes("tab"))).toBe(true);
   });
 
-  it("sends a frame the log refuses to following tabs the old way", () => {
+  it("sends a frame the log refuses to following tabs the old way, and leaves a resync marker", () => {
     const fake = fakeLog(["tab"], 200);
     const { frames, sent } = setup({ log: fake.log });
     frames.broadcast({ type: MESSAGES, messages: ["x".repeat(500)] });
-    expect(fake.published).toEqual([]);
+    expect(fake.published).toEqual([
+      { kind: "publish", event: { resync: true } }
+    ]);
     expect(sent[0].without).not.toContain("tab");
+  });
+
+  it("puts a reply to a following tab in the log for that tab only", () => {
+    const fake = fakeLog(["tab"]);
+    const { frames } = setup({ log: fake.log });
+    const direct: string[] = [];
+    frames.endUnstarted(
+      { id: "tab", send: (message) => direct.push(message) },
+      "r9",
+      "skipped"
+    );
+    expect(direct).toEqual([]);
+    expect(fake.published[0].event).toMatchObject({
+      frame: { id: "r9", done: true, outcome: "skipped" },
+      only: ["tab"]
+    });
+  });
+
+  it("forgets the log's history when the chat is cleared", () => {
+    const fake = fakeLog(["tab"]);
+    const { frames } = setup({ log: fake.log });
+    frames.broadcast({ type: RESPONSE, id: "r1", body: "a", done: false });
+    frames.broadcast({ type: "cf_agent_chat_clear" }, ["sender"]);
+    expect(fake.published.map((entry) => entry.kind)).toEqual([
+      "append",
+      "reset",
+      "publish"
+    ]);
+    expect(fake.open).toBe(0);
   });
 });

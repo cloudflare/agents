@@ -37,16 +37,23 @@ export interface ChatFrameConnection {
 }
 
 /**
- * One chat frame in the chat event log. `without` names the connections
- * the frame skips (a sender that already holds what it says); a following
- * tab drops an event that names its own connection id.
+ * One event in the chat event log: a chat frame, or a marker that the log
+ * missed a frame. A frame's `without` names the connections it skips (a
+ * sender that already holds what it says); `only` names the one tab a
+ * frame is for (a reply to that tab's own request). A following tab drops
+ * a frame that names it in `without`, or names only others in `only`.
+ * `resync` marks a frame the log could not hold (over the size cap): a tab
+ * that meets it rebuilds from the snapshot.
  *
  * @internal
  */
-export type ChatLogEvent = {
-  readonly frame: ChatFrame;
-  readonly without?: readonly string[];
-};
+export type ChatLogEvent =
+  | {
+      readonly frame: ChatFrame;
+      readonly without?: readonly string[];
+      readonly only?: readonly string[];
+    }
+  | { readonly resync: true };
 
 /**
  * The event log the host declared for chat frames (`cf_chat`). The parts
@@ -58,6 +65,8 @@ export interface ChatFrameLog {
   publish(event: ChatLogEvent): number;
   batch(): { append(event: ChatLogEvent): number; close(): void };
   followerIds(): string[];
+  /** Delete the history and resync every follower (see `EventLog.reset`). */
+  reset(): void;
 }
 
 /** The name of the chat event log. @internal */
@@ -116,8 +125,16 @@ export class ChatFrames {
     { append(event: ChatLogEvent): number; close(): void }
   >();
 
-  /** Send `frame` to every tab except `exclude` and resuming tabs. */
-  broadcast(frame: ChatFrame, exclude: readonly string[] = []): void {
+  /**
+   * Send `frame` to every tab except `exclude` and resuming tabs. With
+   * `toResuming`, tabs waiting on their resume ack get it too (`Think`
+   * withholds only response frames from them).
+   */
+  broadcast(
+    frame: ChatFrame,
+    exclude: readonly string[] = [],
+    options: { toResuming?: boolean } = {}
+  ): void {
     const ready = this.#prepare(frame);
     const log = this.options.log;
     const logged = log ? this.#publish(log, ready, exclude) : false;
@@ -127,7 +144,7 @@ export class ChatFrames {
     const raw = logged ? { ...ready, inLog: true } : ready;
     this.options.broadcast(JSON.stringify(raw), [
       ...exclude,
-      ...this.options.resuming,
+      ...(options.toResuming ? [] : this.options.resuming),
       ...(log && logged ? log.followerIds() : [])
     ]);
     this.#record(ready);
@@ -144,13 +161,11 @@ export class ChatFrames {
     frame: ChatFrame,
     exclude: readonly string[]
   ): boolean {
-    try {
-      this.#append(log, frame, exclude);
-      return true;
-    } catch (error) {
-      console.error("[ChatFrames] chat event log refused a frame:", error);
-      return false;
-    }
+    if (this.#tryLog(() => this.#append(log, frame, exclude))) return true;
+    // Tabs that are away would miss this frame on replay: leave a marker
+    // that sends them to the snapshot instead.
+    this.#tryLog(() => log.publish({ resync: true }));
+    return false;
   }
 
   #append(log: ChatFrameLog, frame: ChatFrame, exclude: readonly string[]) {
@@ -162,6 +177,16 @@ export class ChatFrames {
       done?: unknown;
       error?: unknown;
     };
+    if (fields.type === CHAT_MESSAGE_TYPES.CHAT_CLEAR) {
+      // The transcript was deleted: so is the log's copy of it. Every tab
+      // resyncs (to the now empty transcript) and gets the clear frame as
+      // the first event after.
+      for (const open of this.#batches.values()) open.close();
+      this.#batches.clear();
+      log.reset();
+      log.publish(event);
+      return;
+    }
     if (
       fields.type !== CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE ||
       typeof fields.id !== "string"
@@ -188,12 +213,35 @@ export class ChatFrames {
   /** Send `frame` to one tab. A closed socket is ignored. */
   send(connection: ChatFrameConnection, frame: ChatFrame): void {
     const ready = this.#prepare(frame);
+    const log = this.options.log;
+    // A reply to a following tab goes into the log for that tab only, so
+    // it still arrives if the socket drops before it does.
+    if (
+      log &&
+      ready.type === CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE &&
+      log.followerIds().includes(connection.id) &&
+      this.#tryLog(() => log.publish({ frame: ready, only: [connection.id] }))
+    ) {
+      this.#record(ready);
+      return;
+    }
     try {
       connection.send(JSON.stringify(ready));
     } catch {
       // The connection closed before the server could answer.
     }
     this.#record(ready);
+  }
+
+  /** Run a log write; false when the log refused it. */
+  #tryLog(write: () => unknown): boolean {
+    try {
+      write();
+      return true;
+    } catch (error) {
+      console.error("[ChatFrames] chat event log refused a frame:", error);
+      return false;
+    }
   }
 
   /**

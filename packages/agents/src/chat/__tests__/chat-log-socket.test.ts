@@ -25,6 +25,7 @@ class FakeAgent extends EventTarget {
 function setup() {
   const agent = new FakeAgent();
   const socket = new ChatLogSocket(agent);
+  socket.retain();
   const seen: Array<Record<string, unknown>> = [];
   const events: string[] = [];
   socket.addEventListener("message", (event: Event) =>
@@ -161,7 +162,7 @@ describe("ChatLogSocket", () => {
     });
   });
 
-  it("answers an ack for a stream with no chunks yet with an empty replay", async () => {
+  it("leaves an ack for anything but the stream in flight to the server", async () => {
     const { agent, socket, seen } = setup();
     agent.deliver({
       type: "cf_agent_log_resync",
@@ -175,14 +176,11 @@ describe("ChatLogSocket", () => {
       JSON.stringify({ type: "cf_agent_stream_resume_ack", id: "c1" })
     );
     await flush();
-    expect(seen.at(-1)).toEqual({
-      type: RESPONSE,
-      id: "c1",
-      body: "",
-      done: false,
-      replay: true,
-      replayComplete: true
+    expect(agent.sent.at(-1)).toEqual({
+      type: "cf_agent_stream_resume_ack",
+      id: "c1"
     });
+    expect(seen.map((f) => f.type)).toEqual(["cf_agent_chat_messages"]);
   });
 
   it("holds an ack sent while reconnecting until the log caught up", async () => {
@@ -293,5 +291,147 @@ describe("ChatLogSocket", () => {
     agent.shouldReconnect = false;
     agent.dispatchEvent(new Event("close"));
     expect(events).toEqual(["close"]);
+  });
+
+  it("passes broadcasts through until the server answers the subscribe", () => {
+    const { agent, seen } = setup();
+    agent.deliver({
+      type: RESPONSE,
+      id: "r1",
+      body: "a",
+      done: false,
+      inLog: true
+    });
+    expect(seen.map((f) => f.id)).toEqual(["r1"]);
+  });
+
+  it("applies a reply meant for this tab only, and drops one for another tab", () => {
+    const { agent, seen } = setup();
+    agent.deliver({
+      type: "cf_agent_log_resync",
+      log: "cf_chat",
+      epoch: "e",
+      seq: 0,
+      id: agent.subscribeId(),
+      snapshot: { messages: [] }
+    });
+    agent.deliver({
+      type: "cf_agent_log_events",
+      log: "cf_chat",
+      events: [
+        {
+          seq: 1,
+          data: {
+            frame: { type: RESPONSE, id: "x", body: "", done: true },
+            only: ["other"]
+          }
+        },
+        {
+          seq: 2,
+          data: {
+            frame: { type: RESPONSE, id: "y", body: "", done: true },
+            only: ["me"]
+          }
+        }
+      ]
+    });
+    expect(seen.slice(1).map((f) => f.id)).toEqual(["y"]);
+  });
+
+  it("marks terminal frames caught up from the cursor as replayed", () => {
+    const { agent, seen } = setup();
+    agent.deliver({
+      type: "cf_agent_log_resync",
+      log: "cf_chat",
+      epoch: "e",
+      seq: 0,
+      id: agent.subscribeId(),
+      snapshot: { messages: [] }
+    });
+    agent.dispatchEvent(new Event("close"));
+    agent.dispatchEvent(new Event("open"));
+    const id = agent.sent
+      .filter((f) => f.type === "cf_agent_log_subscribe")
+      .at(-1)!.id;
+    agent.deliver({
+      type: "cf_agent_log_events",
+      log: "cf_chat",
+      id,
+      events: [
+        {
+          seq: 1,
+          data: { frame: { type: RESPONSE, id: "r", body: "a", done: false } }
+        },
+        {
+          seq: 2,
+          data: { frame: { type: RESPONSE, id: "r", body: "", done: true } }
+        }
+      ]
+    });
+    expect(seen.slice(1)).toEqual([
+      { type: RESPONSE, id: "r", body: "a", done: false },
+      { type: RESPONSE, id: "r", body: "", done: true, replay: true }
+    ]);
+  });
+
+  it("asks for the snapshot when a replay meets a frame the log could not hold", () => {
+    const { agent } = setup();
+    agent.deliver({
+      type: "cf_agent_log_resync",
+      log: "cf_chat",
+      epoch: "e",
+      seq: 0,
+      id: agent.subscribeId(),
+      snapshot: { messages: [] }
+    });
+    agent.dispatchEvent(new Event("close"));
+    agent.dispatchEvent(new Event("open"));
+    const id = agent.sent
+      .filter((f) => f.type === "cf_agent_log_subscribe")
+      .at(-1)!.id;
+    agent.deliver({
+      type: "cf_agent_log_events",
+      log: "cf_chat",
+      id,
+      events: [{ seq: 1, data: { resync: true } }]
+    });
+    const last = agent.sent.at(-1)!;
+    expect(last.type).toBe("cf_agent_log_subscribe");
+    expect(last).not.toHaveProperty("cursor");
+  });
+
+  it("shows the chat code a reconnect when a later resync replaces its state", () => {
+    const { agent, seen, events } = setup();
+    const resync = (seq: number, id: unknown) =>
+      agent.deliver({
+        type: "cf_agent_log_resync",
+        log: "cf_chat",
+        epoch: "e2",
+        seq,
+        id,
+        snapshot: { messages: [] }
+      });
+    resync(0, agent.subscribeId());
+    expect(events).toEqual([]);
+    agent.dispatchEvent(new Event("close"));
+    agent.dispatchEvent(new Event("open"));
+    resync(
+      5,
+      agent.sent.filter((f) => f.type === "cf_agent_log_subscribe").at(-1)!.id
+    );
+    expect(events).toEqual(["close", "open"]);
+    expect(seen.at(-1)).toMatchObject({
+      type: "cf_agent_chat_recovering",
+      recovering: false
+    });
+  });
+
+  it("stops following when the last hook releases it", () => {
+    const { agent, socket } = setup();
+    socket.release();
+    expect(agent.sent.at(-1)).toEqual({
+      type: "cf_agent_log_unsubscribe",
+      log: "cf_chat"
+    });
   });
 });

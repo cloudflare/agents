@@ -42,6 +42,7 @@ export {
 export { TestOAuthAgent, TestCustomOAuthAgent } from "./oauth";
 export { McpIntegrationAgent } from "./mcp-integration";
 export { TestReadonlyAgent } from "./readonly";
+export { TestEventLogParent } from "./event-log";
 export { TestProtocolMessagesAgent } from "./protocol-messages";
 export { TestCallableAgent, TestParentAgent, TestChildAgent } from "./callable";
 export { TestQueueAgent } from "./queue";

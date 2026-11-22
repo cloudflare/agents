@@ -406,6 +406,46 @@ export class EventLog<T = unknown, S = unknown> {
     }
   }
 
+  /**
+   * Forget the log's history: delete every stored event, start a new epoch
+   * at seq 0, and resync every follower (from the snapshot, which should
+   * reflect what replaced the history). A client holding a cursor from
+   * before can no longer replay anything, and the deleted events are gone
+   * from storage. Buffered batch events are dropped; open batches stay
+   * open and keep appending to the new epoch.
+   */
+  reset(): void {
+    this.#load();
+    if (this.#timer !== undefined) clearTimeout(this.#timer);
+    this.#timer = undefined;
+    this.#buffer = [];
+    this.#bufferBytes = 0;
+    const epoch = crypto.randomUUID();
+    const sql = this.#host.sql();
+    sql.exec(`DELETE FROM cf_agents_event_log_rows WHERE log = ?`, this.name);
+    sql.exec(
+      `UPDATE cf_agents_event_logs SET epoch = ? WHERE log = ?`,
+      epoch,
+      this.name
+    );
+    this.#loaded = {
+      epoch,
+      head: 0,
+      oldest: null,
+      rows: 0,
+      events: 0,
+      bytes: 0,
+      newestOpen: false
+    };
+    this.#resyncPending = false;
+    for (const connection of this.#host.connections()) {
+      if (!followedLogs(connection).includes(this.name)) continue;
+      if (!this.#sendResync(connection, this.#loaded)) {
+        this.unsubscribe(connection);
+      }
+    }
+  }
+
   /** @internal Stop the flush timer; called when the host is destroyed. */
   dispose(): void {
     if (this.#timer !== undefined) clearTimeout(this.#timer);

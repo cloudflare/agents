@@ -13462,7 +13462,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   private _broadcast(message: Record<string, unknown>, exclude?: string[]) {
-    this.broadcast(JSON.stringify(message), exclude);
+    // Through `ChatFrames`, so the frame is in the chat event log too.
+    // Tabs waiting on their resume ack still get it, as before.
+    this._frames.broadcast(message, exclude, { toResuming: true });
   }
 
   /**

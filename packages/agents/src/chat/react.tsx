@@ -972,7 +972,11 @@ export function useAgentChat<
   // to send through a stale/closed socket (issue #929).
   // Chat frames come from the chat event log through this wrapper of the
   // agent's socket (see `chat-log-socket.ts`); sends go through it too.
-  const chatSocket = chatLogSocketFor(agent as unknown as ChatLogSocketAgent);
+  // With `resume: false` a tab does not get missed frames back after a
+  // reconnect, so it talks to the agent's socket directly.
+  const chatSocket = resume
+    ? chatLogSocketFor(agent as unknown as ChatLogSocketAgent)
+    : agent;
   const agentRef = useRef(chatSocket);
   agentRef.current = chatSocket;
 
@@ -2085,7 +2089,11 @@ export function useAgentChat<
   const [isRecovering, setIsRecovering] = useState(false);
 
   useEffect(() => {
-    const chatAgent = chatLogSocketFor(agent as unknown as ChatLogSocketAgent);
+    const chatLog = resume
+      ? chatLogSocketFor(agent as unknown as ChatLogSocketAgent)
+      : null;
+    chatLog?.retain();
+    const chatAgent = chatLog ?? agent;
     const localResponseIds = localResponseMessageIdsRef.current;
     const turnErrors = turnErrorsRef.current;
     const endedTurnIds = endedTurnIdsRef.current;
@@ -2840,6 +2848,7 @@ export function useAgentChat<
       chatAgent.removeEventListener("message", onAgentMessage);
       chatAgent.removeEventListener("close", onAgentClose);
       chatAgent.removeEventListener("open", onAgentOpen);
+      chatLog?.release();
       fallbackAckedResumeRequestIds.clear();
       streamStateRef.current = { status: "idle" };
       setIsServerStreaming(false);

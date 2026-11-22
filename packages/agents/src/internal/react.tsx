@@ -37,7 +37,8 @@ export function useEventLog<T = unknown, S = unknown>(
   useEffect(() => {
     if (!agent) return;
     const subscription = followEventLog<T, S>(agent, log, {
-      onEvent: (data, seq) => handlersRef.current.onEvent(data, seq),
+      onEvent: (data, seq, info) =>
+        handlersRef.current.onEvent(data, seq, info),
       onResync: (snapshot, seq) => handlersRef.current.onResync(snapshot, seq),
       onSynced: (seq) => handlersRef.current.onSynced?.(seq),
       onError: (error) => handlersRef.current.onError?.(error)

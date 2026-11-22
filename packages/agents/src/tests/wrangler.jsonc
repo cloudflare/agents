@@ -198,6 +198,10 @@
         "name": "TestReadonlyAgent"
       },
       {
+        "class_name": "TestEventLogParent",
+        "name": "TestEventLogParent"
+      },
+      {
         "class_name": "TestProtocolMessagesAgent",
         "name": "TestProtocolMessagesAgent"
       },
@@ -537,6 +541,7 @@
         "TestAlarmInitAgent",
         "TestDestroyScheduleAgent",
         "TestReadonlyAgent",
+        "TestEventLogParent",
         "TestProtocolMessagesAgent",
         "TestScheduleAgent",
         "TestTaskAgent",

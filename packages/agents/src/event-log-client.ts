@@ -31,7 +31,7 @@ export type EventLogSocket = Pick<
  */
 export type EventLogHandlers<T = unknown, S = unknown> = {
   /** One event, in seq order. Called for replayed and live events alike. */
-  onEvent(data: T, seq: number): void;
+  onEvent(data: T, seq: number, info: { replay: boolean }): void;
   /**
    * Drop what was built from earlier events and start again from
    * `snapshot` (undefined when the log has no snapshot: fetch your own).
@@ -53,6 +53,11 @@ export type EventLogHandlers<T = unknown, S = unknown> = {
 export type EventLogSubscription = {
   /** The last event applied, or null before the first resync. */
   readonly cursor: EventLogCursor | null;
+  /**
+   * Drop the cursor and ask for a resync: the server answers with the
+   * snapshot. For a client that learned its state is no longer complete.
+   */
+  resync(): void;
   /** Stop following: unsubscribe and remove the listeners. */
   close(): void;
 };
@@ -156,7 +161,7 @@ export function followEventLog<T = unknown, S = unknown>(
             return;
           }
           cursor = { epoch: cursor.epoch, seq: entry.seq };
-          handlers.onEvent(entry.data as T, entry.seq);
+          handlers.onEvent(entry.data as T, entry.seq, { replay: replaying });
         }
         return;
       }
@@ -188,6 +193,11 @@ export function followEventLog<T = unknown, S = unknown>(
   return {
     get cursor() {
       return cursor;
+    },
+    resync() {
+      if (closed) return;
+      cursor = null;
+      if (socket.readyState === OPEN) subscribe();
     },
     close() {
       if (closed) return;

@@ -347,6 +347,25 @@ describe("event log", () => {
     survivor.close();
   });
 
+  it("forgets its history on reset: new epoch, no rows, every follower resynced", async () => {
+    const name = crypto.randomUUID();
+    await stub(name).publishMany("feed", 2);
+    const { epoch } = await stub(name).head();
+    const client = await connect(name);
+    await follow(client);
+    await stub(name).reset();
+    const [resync] = (await client.until(isType("resync"))).slice(-1);
+    expect(resync.epoch).not.toBe(epoch);
+    expect(resync).toMatchObject({ seq: 0, snapshot: { at: 0 } });
+    expect(await stub(name).rows()).toEqual([]);
+    const late = await connect(name);
+    late.subscribe("feed", { epoch, seq: 2 });
+    await late.until(isType("resync"));
+    expect(await stub(name).publish("feed", "next")).toBe(1);
+    client.close();
+    late.close();
+  });
+
   it("keeps a connection's subscriptions across hibernation", async () => {
     const name = crypto.randomUUID();
     const client = await connect(name);

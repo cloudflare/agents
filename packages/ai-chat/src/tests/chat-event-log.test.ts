@@ -273,7 +273,7 @@ describe("AIChatAgent chat event log", () => {
     ws.close(1000);
   });
 
-  it("answers a follower's resume request after its turn ended with idle, not a raw terminal replay", async () => {
+  it("answers a follower's resume request after its turn ended with idle", async () => {
     const room = crypto.randomUUID();
     const path = `/agents/response-agent/${room}`;
     const { ws } = await connectChatWS(path);
@@ -289,8 +289,7 @@ describe("AIChatAgent chat event log", () => {
     ws.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST,
-        probeId: "p1",
-        requestIds: [id]
+        probeId: "p1"
       })
     );
     await waitFor(() =>
@@ -312,5 +311,61 @@ describe("AIChatAgent chat event log", () => {
       )
     ).toBe(false);
     ws.close(1000);
+  });
+
+  it("clears the log with the chat: a follower resyncs to the empty transcript, and an old cursor replays nothing", async () => {
+    const room = crypto.randomUUID();
+    const path = `/agents/response-agent/${room}`;
+    const { ws } = await connectChatWS(path);
+    const frames = record(ws);
+    ws.send(JSON.stringify({ type: "cf_agent_log_subscribe", log: "cf_chat" }));
+    await waitFor(() =>
+      frames.some((frame) => frame.type === "cf_agent_log_resync")
+    );
+    const first = frames.find((frame) => frame.type === "cf_agent_log_resync")!;
+    const id = sendChat(ws);
+    await waitFor(() =>
+      logFrames(frames).some((frame) => isTerminal(frame, id))
+    );
+
+    const { ws: clearer } = await connectChatWS(path);
+    clearer.send(JSON.stringify({ type: MessageType.CF_AGENT_CHAT_CLEAR }));
+    await waitFor(
+      () =>
+        frames.filter((frame) => frame.type === "cf_agent_log_resync")
+          .length === 2
+    );
+    const second = frames.filter(
+      (frame) => frame.type === "cf_agent_log_resync"
+    )[1];
+    expect(second.epoch).not.toBe(first.epoch);
+    expect((second.snapshot as { messages: unknown[] }).messages).toEqual([]);
+    await waitFor(() =>
+      logFrames(frames).some(
+        (frame) => frame.type === MessageType.CF_AGENT_CHAT_CLEAR
+      )
+    );
+
+    // A tab back with a cursor from before the clear gets no deleted frame.
+    const { ws: back } = await connectChatWS(path);
+    const backFrames = record(back);
+    back.send(
+      JSON.stringify({
+        type: "cf_agent_log_subscribe",
+        log: "cf_chat",
+        cursor: { epoch: first.epoch, seq: first.seq }
+      })
+    );
+    await waitFor(() =>
+      backFrames.some((frame) => frame.type === "cf_agent_log_resync")
+    );
+    expect(
+      logFrames(backFrames).some(
+        (frame) => frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE
+      )
+    ).toBe(false);
+    ws.close(1000);
+    clearer.close(1000);
+    back.close(1000);
   });
 });

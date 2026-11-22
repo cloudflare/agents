@@ -87,6 +87,7 @@ import {
 } from "./lifecycle/current-agent";
 import { getAgentByName, type AgentOptions } from "./agent-routing";
 import { WebSockets } from "./websockets";
+import { declareEventLog } from "./websockets/websockets";
 import type { EventLog, EventLogOptions } from "./websockets/event-log";
 import {
   ensureConnectionWrapped,
@@ -866,7 +867,30 @@ export class Agent<
     name: string,
     options: EventLogOptions<S>
   ): EventLog<T, S> {
-    return this._webSockets.log<T, S>(name, options);
+    return declareEventLog<T, S>(this._webSockets, name, {
+      ...options,
+      // A connection routed to a sub-agent belongs to the child: it must
+      // not follow (and read) this Agent's log.
+      canSubscribe: (connection) =>
+        !this._routesToSubAgent(connection) &&
+        (options.canSubscribe?.(connection) ?? true)
+    });
+  }
+
+  /** Whether a connection's messages go to a sub-agent (`/sub/...`). */
+  private _routesToSubAgent(connection: Connection): boolean {
+    const outer = this._unsafe_getConnectionFlag(
+      connection,
+      CF_SUB_AGENT_OUTER_URL_KEY
+    );
+    const uri = typeof outer === "string" ? outer : connection.uri;
+    if (!uri) return false;
+    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
+    return (
+      _parseSubAgentPath(uri, {
+        knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
+      }) !== null
+    );
   }
 
   /**

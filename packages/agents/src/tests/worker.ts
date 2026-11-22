@@ -138,6 +138,7 @@ export {
   TestCustomOAuthAgent,
   McpIntegrationAgent,
   TestReadonlyAgent,
+  TestEventLogParent,
   TestProtocolMessagesAgent,
   TestCallableAgent,
   TestParentAgent,
@@ -216,6 +217,7 @@ import type {
   TestOnStartScheduleNoWarnAgent,
   TestOnStartScheduleExplicitFalseAgent,
   TestReadonlyAgent,
+  TestEventLogParent,
   TestProtocolMessagesAgent,
   TestScheduleAgent,
   TestTaskAgent,
@@ -306,6 +308,7 @@ export type Env = {
   TestOnStartScheduleNoWarnAgent: DurableObjectNamespace<TestOnStartScheduleNoWarnAgent>;
   TestOnStartScheduleExplicitFalseAgent: DurableObjectNamespace<TestOnStartScheduleExplicitFalseAgent>;
   TestReadonlyAgent: DurableObjectNamespace<TestReadonlyAgent>;
+  TestEventLogParent: DurableObjectNamespace<TestEventLogParent>;
   TestProtocolMessagesAgent: DurableObjectNamespace<TestProtocolMessagesAgent>;
   TestScheduleAgent: DurableObjectNamespace<TestScheduleAgent>;
   TestTaskAgent: DurableObjectNamespace<TestTaskAgent>;

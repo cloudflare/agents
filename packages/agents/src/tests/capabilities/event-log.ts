@@ -133,6 +133,11 @@ export class EventLogObject extends DurableObject<Cloudflare.Env> {
     return this.#webSockets.getConnection(id)?.state;
   }
 
+  async reset(log = "feed"): Promise<void> {
+    await this.lifecycle.start();
+    this.#log(log).reset();
+  }
+
   async head(log = "feed"): Promise<{ epoch: string; seq: number }> {
     await this.lifecycle.start();
     return this.#log(log).head;

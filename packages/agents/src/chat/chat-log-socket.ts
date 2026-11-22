@@ -23,7 +23,7 @@
  * @internal Sibling-package support, not a public API.
  */
 
-import { followEventLog } from "../event-log-client";
+import { followEventLog, type EventLogSubscription } from "../event-log-client";
 import { CHAT_EVENT_LOG, type ChatLogEvent } from "./chat-frames";
 import type { ChatLogActiveStream, ChatLogSnapshot } from "./chat-log";
 import { CHAT_MESSAGE_TYPES } from "./protocol";
@@ -67,6 +67,9 @@ export class ChatLogSocket extends EventTarget {
   /** Resume acks waiting for the log to catch up after a (re)connect. */
   #waitingAcks: unknown[] = [];
   #active: ActiveStream | null = null;
+  /** Hooks using this socket; the log is followed while there is one. */
+  #users = 0;
+  #subscription: EventLogSubscription | undefined;
 
   constructor(agent: ChatLogSocketAgent) {
     super();
@@ -85,12 +88,38 @@ export class ChatLogSocket extends EventTarget {
         this.dispatchEvent(new CloseEvent("close", event as CloseEventInit));
       }
     });
-    followEventLog<ChatLogEvent, ChatLogSnapshot>(agent, CHAT_EVENT_LOG, {
-      onResync: (snapshot) => this.#onResync(snapshot ?? { messages: [] }),
-      onEvent: (event) => this.#onEvent(event),
-      onSynced: () => this.#ready(),
-      onError: () => this.#legacy()
-    });
+  }
+
+  /**
+   * A hook starts using this socket: follow the log if nothing did. Called
+   * from an effect, so a render that never commits leaves no subscription.
+   */
+  retain(): void {
+    this.#users += 1;
+    if (this.#subscription) return;
+    this.#subscription = followEventLog<ChatLogEvent, ChatLogSnapshot>(
+      this.#agent,
+      CHAT_EVENT_LOG,
+      {
+        onResync: (snapshot) => this.#onResync(snapshot ?? { messages: [] }),
+        onEvent: (event, _seq, info) => this.#onEvent(event, info.replay),
+        onSynced: () => this.#ready(),
+        onError: () => this.#legacy()
+      }
+    );
+  }
+
+  /** A hook stopped using this socket: the last one stops following. */
+  release(): void {
+    this.#users = Math.max(0, this.#users - 1);
+    if (this.#users > 0 || !this.#subscription) return;
+    this.#subscription.close();
+    this.#subscription = undefined;
+    this.#mode = "pending";
+    this.#synced = false;
+    this.#resynced = false;
+    this.#active = null;
+    this.#waitingAcks = [];
   }
 
   /** Listeners typed for the `MessageEvent`s this socket dispatches. */
@@ -153,21 +182,48 @@ export class ChatLogSocket extends EventTarget {
       if (typeof type === "string" && type.startsWith("cf_agent_log_")) return;
       // A broadcast this socket got before the server read its subscribe:
       // the log replays it, or the snapshot holds it.
-      if (data.includes('"inLog":true') && parseFrame(data)?.inLog === true) {
+      if (
+        this.#mode === "log" &&
+        data.includes('"inLog":true') &&
+        parseFrame(data)?.inLog === true
+      ) {
         return;
       }
     }
     this.#dispatch(data);
   }
 
-  #onEvent(event: ChatLogEvent): void {
-    this.#track(event.frame);
+  #onEvent(event: ChatLogEvent, replay: boolean): void {
+    if (!("frame" in event)) {
+      // The log could not hold a frame: what this tab built may miss it.
+      if (replay) this.#subscription?.resync();
+      return;
+    }
     const own = this._pk;
+    if (event.only && (own === undefined || !event.only.includes(own))) {
+      return;
+    }
+    this.#track(event.frame);
     if (own !== undefined && event.without?.includes(own)) return;
-    this.#dispatch(JSON.stringify(event.frame));
+    // A terminal frame caught up from the cursor reads as replayed, as it
+    // did from the old resume replay (`onTurnEnd`'s `replay`).
+    const frame =
+      replay &&
+      event.frame.type === CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE &&
+      (event.frame.done === true || event.frame.error === true)
+        ? { ...event.frame, replay: true }
+        : event.frame;
+    this.#dispatch(JSON.stringify(frame));
   }
 
   #onResync(snapshot: ChatLogSnapshot): void {
+    if (this.#resynced) {
+      // A resync after the first means the tab missed frames it cannot
+      // replay. Show the chat code a reconnect, so it settles what it
+      // waits on the way it did before the log (its resume probe).
+      this.dispatchEvent(new CloseEvent("close", { code: 1006 }));
+      this.dispatchEvent(new Event("open"));
+    }
     this.#mode = "log";
     this.#active = snapshot.active ? fromSnapshot(snapshot.active) : null;
     this.#dispatchFrame({
@@ -242,12 +298,10 @@ export class ChatLogSocket extends EventTarget {
 
   /** Replay the acked stream's chunks so far; the log carries the rest. */
   #answerAck(requestId: unknown): void {
-    if (typeof requestId !== "string") return;
-    // The stream may not have sent a chunk yet: then the replay is empty.
-    const active: ActiveStream =
-      this.#active?.requestId === requestId
-        ? this.#active
-        : { requestId, continuation: false, chunks: [] };
+    // Only the stream in flight is replayed from here. Anything else (a
+    // request that ended, a recorded error) the server answers.
+    const active = this.#active;
+    if (!active || active.requestId !== requestId) return;
     const flags = {
       ...(active.continuation && { continuation: true }),
       ...(active.continuation &&
