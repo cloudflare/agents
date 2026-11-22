@@ -6,12 +6,20 @@
  * in their own way; this module provides the state matching and update logic.
  */
 
+import { transferToolPartMarks, type MessagePart } from "./message-builder";
+
 /**
  * Describes an update to apply to a tool part.
  */
 export type ToolPartUpdate = {
   toolCallId: string;
   matchStates: string[];
+  /**
+   * When set, only a part whose `approval.id` is this matches: a provider
+   * can reuse a tool-call id across replies, and the approval id tells their
+   * requests apart.
+   */
+  approvalId?: string;
   apply: (part: Record<string, unknown>) => Record<string, unknown>;
 };
 
@@ -37,7 +45,10 @@ export function applyToolUpdate(
       "toolCallId" in part &&
       part.toolCallId === update.toolCallId &&
       "state" in part &&
-      update.matchStates.includes(part.state as string)
+      update.matchStates.includes(part.state as string) &&
+      (update.approvalId === undefined ||
+        (part.approval as { id?: unknown } | undefined)?.id ===
+          update.approvalId)
     ) {
       matched = true;
       const applied = update.apply(part);
@@ -132,7 +143,8 @@ export type ToolPartTarget<TMessage extends { id: string; parts: unknown[] }> =
      */
     readonly storedOwner: (
       toolCallId: string,
-      inFlightId: string | undefined
+      inFlightId: string | undefined,
+      update: ToolPartUpdate
     ) => Promise<TMessage | null>;
     /** Store a changed message. Returns the form to broadcast. */
     readonly write: (message: TMessage) => Promise<TMessage>;
@@ -165,7 +177,10 @@ export async function applyToolPartUpdate<
   | { status: "unchanged" }
   | { status: "missing" }
 > {
-  let broadcastMessage: TMessage | undefined;
+  // One broadcast per message. When the reply in flight and its stored
+  // copy both changed, the reply in flight is the newer: it may hold text
+  // the stored copy does not have yet.
+  const broadcasts = new Map<string, TMessage>();
   // `undefined`: no part found; `null`: found, already settled.
   let changedMessageId: string | null | undefined;
 
@@ -178,10 +193,18 @@ export async function applyToolPartUpdate<
       changedMessageId = null;
       if (result.changed) {
         result.parts.forEach((part, index) => {
+          const live = inFlight.parts[index];
+          if (part === live) return;
+          // Replaced, not changed in place: a stored copy can share this
+          // part object, and must see its own update. The stream parser's
+          // marks on the old object (input rebuilt from deltas, waiting for
+          // the final input) move to the new one.
+          transferToolPartMarks(live as MessagePart, part as MessagePart);
           inFlight.parts[index] = part;
         });
         inFlight.changed();
-        broadcastMessage = inFlight.snapshot();
+        const snapshot = inFlight.snapshot();
+        broadcasts.set(snapshot.id, snapshot);
         changedMessageId = inFlight.id;
       }
     }
@@ -189,7 +212,8 @@ export async function applyToolPartUpdate<
 
   const owner = await target.storedOwner(
     update.toolCallId,
-    inFlightOwnsCall && inFlight ? inFlight.id : undefined
+    inFlightOwnsCall && inFlight ? inFlight.id : undefined,
+    update
   );
   if (owner) {
     const ownerParts = owner.parts as Array<Record<string, unknown>>;
@@ -200,14 +224,14 @@ export async function applyToolPartUpdate<
         ...owner,
         parts: result.parts as TMessage["parts"]
       });
-      broadcastMessage = stored;
+      if (!broadcasts.has(stored.id)) broadcasts.set(stored.id, stored);
       // The reply in flight, when it also holds the call, is the one a
       // continuation answers: keep it as the changed message.
       if (typeof changedMessageId !== "string") changedMessageId = owner.id;
     }
   }
 
-  if (broadcastMessage) target.broadcast(broadcastMessage);
+  for (const message of broadcasts.values()) target.broadcast(message);
   if (typeof changedMessageId === "string") {
     return { status: "changed", messageId: changedMessageId };
   }
@@ -331,11 +355,13 @@ export function pausedExecutionUpdate(
  */
 export function toolApprovalUpdate(
   toolCallId: string,
-  approved: boolean
+  approved: boolean,
+  approvalId?: string
 ): ToolPartUpdate {
   return {
     toolCallId,
     matchStates: ["input-available", "approval-requested"],
+    ...(approvalId !== undefined && { approvalId }),
     apply: (part) => {
       const approval =
         typeof part.approval === "object" &&

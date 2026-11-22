@@ -133,6 +133,28 @@ export function isLateToolInputChunk(
 }
 
 /**
+ * Move what the parser tracks about a tool part (input text from deltas,
+ * input rebuilt from them) to the object that replaces it, so a later
+ * chunk still treats the new object the same way.
+ *
+ * @internal
+ */
+export function transferToolPartMarks(
+  from: MessagePart,
+  to: MessagePart
+): void {
+  const raw = rawToolInputText.get(from);
+  if (raw !== undefined) {
+    rawToolInputText.set(to, raw);
+    rawToolInputText.delete(from);
+  }
+  if (provisionalInput.has(from)) {
+    provisionalInput.add(to);
+    provisionalInput.delete(from);
+  }
+}
+
+/**
  * Fill an approval part's input from a `tool-input-available` that arrived
  * after its `tool-approval-request`, without changing the approval state.
  * Only replaces input that is missing or was reconstructed from deltas, so

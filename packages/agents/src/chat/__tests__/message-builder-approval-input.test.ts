@@ -8,6 +8,7 @@ import {
   type MessagePart,
   type StreamChunkData
 } from "../message-builder";
+import { applyToolPartUpdate, toolApprovalUpdate } from "../tool-state";
 
 const INPUT = { id: "res-1", data: { approval_flow: "two-step" } };
 const INPUT_JSON = JSON.stringify(INPUT);
@@ -201,5 +202,28 @@ describe("tool input around approval requests (#1872)", () => {
     const parts = applyStream([start, approvalRequest]);
     (parts[0] as Record<string, unknown>).state = "approval-responded";
     expect(lateToolInputForwardChunks(parts, inputAvailable)).toEqual([]);
+  });
+});
+
+describe("an approval applied while the input is still provisional", () => {
+  it("keeps the final input that arrives after the approval", async () => {
+    const parts = applyStream([start, deltas[0], approvalRequest]);
+    const message = { id: "a1", role: "assistant", parts };
+    await applyToolPartUpdate(toolApprovalUpdate("tc1", true), {
+      inFlight: {
+        id: "a1",
+        parts: parts as Array<Record<string, unknown>>,
+        snapshot: () => message,
+        changed: () => {}
+      },
+      storedOwner: async () => null,
+      write: async (m) => m,
+      broadcast: () => {}
+    });
+    expect(toolPart(parts).state).toBe("approval-responded");
+
+    expect(applyLateToolInput(parts, inputAvailable)).toBe(true);
+    expect(toolPart(parts).input).toEqual(INPUT);
+    expect(toolPart(parts).approval).toMatchObject({ approved: true });
   });
 });

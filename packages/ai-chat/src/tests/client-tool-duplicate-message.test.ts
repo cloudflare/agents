@@ -1150,6 +1150,107 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
     ws.close(1000);
   });
 
+  it("a rejection carrying its approval id lands on that request when a tool-call id is reused", async () => {
+    const room = crypto.randomUUID();
+    const res = await exports.default.fetch(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const toolCallId = "call_1";
+    const request = (approvalId: string, a: number) => ({
+      type: "tool-calculate",
+      toolCallId,
+      state: "approval-requested",
+      input: { a, b: 1 },
+      approval: { id: approvalId }
+    });
+    await agentStub.persistMessages([
+      { id: "u1", role: "user", parts: [{ type: "text", text: "one" }] },
+      {
+        id: "a1",
+        role: "assistant",
+        parts: [request("approval_a", 1)] as ChatMessage["parts"]
+      },
+      { id: "u2", role: "user", parts: [{ type: "text", text: "two" }] },
+      {
+        id: "a2",
+        role: "assistant",
+        parts: [request("approval_b", 2)] as ChatMessage["parts"]
+      }
+    ]);
+
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_approval",
+        toolCallId,
+        approved: false,
+        approvalId: "approval_a"
+      })
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await agentStub.waitForIdleForTest();
+
+    const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const part = (id: string) =>
+      persisted.find((m) => m.id === id)?.parts[0] as Record<string, unknown>;
+    expect(part("a1").state).toBe("output-denied");
+    expect(part("a2").state).toBe("approval-requested");
+    ws.close(1000);
+  });
+
+  it("a repeated decision without an approval id does not land on an older request", async () => {
+    const room = crypto.randomUUID();
+    const res = await exports.default.fetch(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const toolCallId = "call_1";
+    const request = (approvalId: string, a: number) => ({
+      type: "tool-calculate",
+      toolCallId,
+      state: "approval-requested",
+      input: { a, b: 1 },
+      approval: { id: approvalId }
+    });
+    await agentStub.persistMessages([
+      { id: "u1", role: "user", parts: [{ type: "text", text: "one" }] },
+      {
+        id: "a1",
+        role: "assistant",
+        parts: [request("approval_a", 1)] as ChatMessage["parts"]
+      },
+      { id: "u2", role: "user", parts: [{ type: "text", text: "two" }] },
+      {
+        id: "a2",
+        role: "assistant",
+        parts: [request("approval_b", 2)] as ChatMessage["parts"]
+      }
+    ]);
+    const reject = JSON.stringify({
+      type: "cf_agent_tool_approval",
+      toolCallId,
+      approved: false
+    });
+    for (let i = 0; i < 2; i++) {
+      ws.send(reject);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await agentStub.waitForIdleForTest();
+    }
+
+    const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const part = (id: string) =>
+      persisted.find((m) => m.id === id)?.parts[0] as Record<string, unknown>;
+    expect(part("a2").state).toBe("output-denied");
+    expect(part("a1").state).toBe("approval-requested");
+    ws.close(1000);
+  });
+
   it("CF_AGENT_TOOL_APPROVAL handles rejection (approved: false)", async () => {
     const room = crypto.randomUUID();
     const res = await exports.default.fetch(

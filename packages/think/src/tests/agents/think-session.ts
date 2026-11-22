@@ -59,6 +59,7 @@ import {
   enforceRowSizeLimit,
   LiveReply,
   StreamAccumulator,
+  toolApprovalUpdate,
   toolResultUpdate,
   type ChatProtocolHost
 } from "agents/chat";
@@ -3617,6 +3618,21 @@ export class ThinkTestAgent extends Think {
 
   async persistTestMessage(msg: UIMessage): Promise<void> {
     await this.session.appendMessage(msg);
+  }
+
+  /** Apply a tool approval the way the `tool-approval` frame does. */
+  async applyToolApprovalForTest(
+    toolCallId: string,
+    approved: boolean,
+    approvalId?: string
+  ): Promise<unknown> {
+    return (
+      this as unknown as {
+        _applyToolUpdateToMessages(update: ToolPartUpdate): Promise<unknown>;
+      }
+    )._applyToolUpdateToMessages(
+      toolApprovalUpdate(toolCallId, approved, approvalId)
+    );
   }
 
   async seedWorkspaceBytes(

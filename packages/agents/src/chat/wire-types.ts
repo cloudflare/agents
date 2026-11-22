@@ -281,6 +281,12 @@ export type IncomingMessage<ChatMessage extends UIMessage = UIMessage> =
       toolCallId: string;
       /** Whether the tool execution was approved */
       approved: boolean;
+      /**
+       * The approval this answers (`part.approval.id`). A provider can reuse
+       * a tool-call id across replies; the id picks the right request.
+       * Optional for older clients.
+       */
+      approvalId?: string;
       /** Whether server should auto-continue the conversation after applying approval */
       autoContinue?: boolean;
     };

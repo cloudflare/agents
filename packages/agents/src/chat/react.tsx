@@ -1919,12 +1919,13 @@ export function useAgentChat<
 
   // Helper function to send tool approval to server
   const sendToolApprovalToServer = useCallback(
-    (toolCallId: string, approved: boolean) => {
+    (toolCallId: string, approved: boolean, approvalId?: string) => {
       agentRef.current.send(
         JSON.stringify({
           type: MessageType.CF_AGENT_TOOL_APPROVAL,
           toolCallId,
           approved,
+          ...(approvalId !== undefined && { approvalId }),
           autoContinue: autoContinueAfterToolResult
         })
       );
@@ -2968,7 +2969,7 @@ export function useAgentChat<
 
       if (toolCallId) {
         // Send approval to server first (server updates message in place)
-        sendToolApprovalToServer(toolCallId, approved);
+        sendToolApprovalToServer(toolCallId, approved, approvalId);
       } else {
         console.warn(
           `[useAgentChat] addToolApprovalResponse: Could not find toolCallId for approval ID "${approvalId}". ` +

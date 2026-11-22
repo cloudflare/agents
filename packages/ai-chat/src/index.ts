@@ -72,6 +72,7 @@ import {
   type ToolInteractionOutcome,
   type ToolPartUpdate,
   applyToolPartUpdate,
+  applyToolUpdate,
   toolApprovalUpdate,
   toolResultUpdate,
   type TurnResult,
@@ -1259,7 +1260,7 @@ export class AIChatAgent<
         ),
       applyToolApproval: (event) =>
         this._applyToolPartUpdate(
-          toolApprovalUpdate(event.toolCallId, event.approved)
+          toolApprovalUpdate(event.toolCallId, event.approved, event.approvalId)
         ),
       continuation: (connection, answer) => ({
         connection,
@@ -4521,14 +4522,46 @@ export class AIChatAgent<
     update: ToolPartUpdate
   ): Promise<ToolInteractionOutcome> {
     const live = this._liveReply;
-    const ownerOf = (toolCallId: string): UIMessage | null =>
-      this.messages.find(
-        (message) =>
-          message.role === "assistant" &&
-          message.parts.some(
-            (part) => "toolCallId" in part && part.toolCallId === toolCallId
-          )
-      ) ?? null;
+    // The stored copy of the reply in flight first, then, for an update
+    // that names its approval, the newest reply whose part it matches (a
+    // provider can reuse a tool-call id across replies), then the newest
+    // reply holding the call.
+    const ownerOf = (
+      toolCallId: string,
+      inFlightId: string | undefined,
+      wanted: ToolPartUpdate
+    ): UIMessage | null => {
+      const holds = (message: UIMessage) =>
+        message.role === "assistant" &&
+        message.parts.some(
+          (part) => "toolCallId" in part && part.toolCallId === toolCallId
+        );
+      const matches = (message: UIMessage) =>
+        holds(message) &&
+        applyToolUpdate(
+          message.parts as unknown as Array<Record<string, unknown>>,
+          wanted
+        ) !== null;
+      if (inFlightId !== undefined) {
+        const own = this.messages.find(
+          (message) => message.id === inFlightId && holds(message)
+        );
+        if (own) return own;
+      }
+      // Search by match only when the update names its approval: a
+      // decision without an approval id (an older client) repeated after it
+      // was stored must not skip the answered request and land on an older
+      // one with the same tool-call id.
+      if (wanted.approvalId !== undefined) {
+        for (let i = this.messages.length - 1; i >= 0; i--) {
+          if (matches(this.messages[i])) return this.messages[i];
+        }
+      }
+      for (let i = this.messages.length - 1; i >= 0; i--) {
+        if (holds(this.messages[i])) return this.messages[i];
+      }
+      return null;
+    };
     return applyToolPartUpdate<UIMessage>(update, {
       inFlight: live
         ? {
@@ -4543,7 +4576,8 @@ export class AIChatAgent<
             changed: () => live.changed()
           }
         : null,
-      storedOwner: async (toolCallId) => ownerOf(toolCallId),
+      storedOwner: async (toolCallId, inFlightId, wanted) =>
+        ownerOf(toolCallId, inFlightId, wanted),
       write: async (message) => {
         const sanitized = this._sanitizeMessageForPersistence(message);
         // The change feed patches `this.messages`. A `null` result means the
