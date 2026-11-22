@@ -7288,7 +7288,7 @@ export class AIChatAgentToolParent extends Agent<Env> {
     childName: string,
     runId: string
   ): Promise<{
-    state: string;
+    status: string;
     generation: string | null;
     next_at: number | null;
   } | null> {

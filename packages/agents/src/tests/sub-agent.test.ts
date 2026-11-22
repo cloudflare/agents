@@ -1279,6 +1279,17 @@ describe("SubAgent", () => {
     expect(await agent.fiberWakeOwners()).toHaveLength(1);
   });
 
+  it("runs a Task in a facet with its local and checkpoint, and clears the checkpoint on settle", async () => {
+    const agent = await getAgentByName(env.TestSubAgentParent, uniqueName());
+    await expect(
+      agent.subAgentRunRememberTask("remember-child")
+    ).resolves.toEqual({
+      status: "completed",
+      seen: [{ local: { from: "caller" }, rows: 1 }],
+      rowsAfter: 0
+    });
+  });
+
   it("drops host jobs an earlier release left in a sub-agent's queue (#2299)", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
