@@ -7,7 +7,7 @@
  * are plain JSON-safe data objects that survive Workers RPC serialization.
  */
 
-import type { ThinkModel, TurnContext, TurnConfig } from "../think";
+import type { ThinkModel, TurnContext, TurnConfig } from "../turn-types";
 
 /**
  * Best-effort JSON-safe normalization. Strips functions, AbortSignals,

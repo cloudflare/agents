@@ -10,9 +10,10 @@ type ColdRpcStub = {
     messages: UIMessage[];
     onStartCount: number;
   }>;
-  _hostGetMessages(): Promise<
-    Array<{ id: string; role: string; content: string }>
-  >;
+  _cfHostBridge(
+    operation: "getMessages",
+    args: []
+  ): Promise<Array<{ id: string; role: string; content: string }>>;
 };
 
 function uniqueName(): string {
@@ -71,7 +72,7 @@ describe("native RPC initialization", () => {
     const hostStub = namespace.get(
       namespace.idFromString(durableStub.id.toString())
     ) as unknown as ColdRpcStub;
-    expect(await hostStub._hostGetMessages()).toEqual([
+    expect(await hostStub._cfHostBridge("getMessages", [])).toEqual([
       {
         id: message.id,
         role: message.role,

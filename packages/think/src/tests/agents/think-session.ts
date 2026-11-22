@@ -5051,25 +5051,25 @@ export class ThinkTestAgent extends Think {
   }
 
   async hostWriteFile(path: string, content: string): Promise<void> {
-    await this._hostWriteFile(path, content);
+    await this._cfHostBridge("writeFile", [path, content]);
   }
 
   async hostReadFile(path: string): Promise<string | null> {
-    return this._hostReadFile(path);
+    return this._cfHostBridge("readFile", [path]);
   }
 
   async hostGetContext(label: string): Promise<string | null> {
-    return this._hostGetContext(label);
+    return this._cfHostBridge("getContext", [label]);
   }
 
   async hostGetMessages(
     limit?: number
   ): Promise<Array<{ id: string; role: string; content: string }>> {
-    return this._hostGetMessages(limit);
+    return this._cfHostBridge("getMessages", [limit]);
   }
 
   async hostGetSessionInfo(): Promise<{ messageCount: number }> {
-    return this._hostGetSessionInfo();
+    return this._cfHostBridge("getSessionInfo", []);
   }
 
   async isInsideInferenceLoop(): Promise<boolean> {
@@ -5078,7 +5078,7 @@ export class ThinkTestAgent extends Think {
   }
 
   async hostDeleteFile(path: string): Promise<boolean> {
-    return this._hostDeleteFile(path);
+    return this._cfHostBridge("deleteFile", [path]);
   }
 
   async hostListFiles(
@@ -5086,11 +5086,11 @@ export class ThinkTestAgent extends Think {
   ): Promise<
     Array<{ name: string; type: string; size: number; path: string }>
   > {
-    return this._hostListFiles(dir);
+    return this._cfHostBridge("listFiles", [dir]);
   }
 
   async hostSendMessage(content: string): Promise<void> {
-    return this._hostSendMessage(content);
+    return this._cfHostBridge("sendMessage", [content]);
   }
 
   async getLastBeforeTurnSystem(): Promise<string | null> {
@@ -6476,11 +6476,11 @@ export class ThinkSessionTestAgent extends Think {
   }
 
   async hostSetContext(label: string, content: string): Promise<void> {
-    await this._hostSetContext(label, content);
+    await this._cfHostBridge("setContext", [label, content]);
   }
 
   async hostGetContext(label: string): Promise<string | null> {
-    return this._hostGetContext(label);
+    return this._cfHostBridge("getContext", [label]);
   }
 }
 
