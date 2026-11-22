@@ -1,4 +1,4 @@
-import type { OutboxSink } from "agents/outbox";
+import type { OutboxSink } from "agents/chat";
 
 /**
  * The workflow event a terminal submission owes, delivered through the

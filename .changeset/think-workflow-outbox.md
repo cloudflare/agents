@@ -3,4 +3,4 @@
 "agents": patch
 ---
 
-`Think` delivers workflow notifications through the `Outbox` capability. Pending notifications from earlier releases move into it when they fire. See [Outbox](https://github.com/cloudflare/agents/blob/main/docs/agents/outbox.md).
+`Think` retries a workflow notification with backoff for up to twelve hours after its first attempt, then reports it to `onError`. Notifications pending from earlier releases are delivered the same way.
