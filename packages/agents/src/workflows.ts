@@ -448,6 +448,10 @@ export class AgentWorkflow<
    * Get the Agent stub for RPC calls.
    * Provides typed access to the Agent's methods.
    *
+   * After a call fails (the Agent was reset, say), the stub is replaced
+   * for the next call, which first starts the Agent; that one call returns
+   * a plain promise and cannot be pipelined.
+   *
    * @example
    * ```typescript
    * // Call any public method on the Agent

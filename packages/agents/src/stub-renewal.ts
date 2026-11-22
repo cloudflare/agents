@@ -17,8 +17,10 @@
  * Every property read is forwarded to the current stub's own RPC property,
  * so awaiting a remote getter and reading nested properties work as on the
  * stub; only calling and awaiting are observed. `prepare` runs on a renewed
- * stub before its first call (an Agent starts itself through it), so that
- * one call returns a plain promise instead of an RPC promise.
+ * stub when its first call comes (an Agent starts itself through it), so
+ * that one call returns a plain promise instead of an RPC promise, and
+ * cannot be pipelined. A `prepare` that fails rejects that call and renews
+ * the stub again; nothing retries on its own.
  *
  * @internal
  */
@@ -28,25 +30,35 @@ export function renewingStub<T extends object>(
   prepare?: (stub: T) => Promise<unknown>
 ): T {
   let current = first;
+  /** The current stub still needs `prepare` before its first call. */
+  let unprepared = false;
   let preparing: Promise<unknown> | undefined;
   const renew = (failed: T) => {
     if (current !== failed) return;
     current = open();
-    if (prepare) {
-      const stub = current;
-      const ready = prepare(stub).then(
+    unprepared = prepare !== undefined;
+    preparing = undefined;
+  };
+  /**
+   * Run `prepare` once for the current stub, shared by the calls that need
+   * it. Runs only when a call comes, so a startup that keeps failing costs
+   * one attempt per call, never a loop.
+   */
+  const ready = (stub: T): Promise<unknown> | undefined => {
+    if (!prepare || stub !== current || !unprepared) return undefined;
+    if (!preparing) {
+      const attempt = prepare(stub).then(
         () => {
-          if (preparing === ready) preparing = undefined;
+          if (current === stub) unprepared = false;
         },
         (error: unknown) => {
           renew(stub);
           throw error;
         }
       );
-      // Observed by the next call; never an unhandled rejection.
-      ready.catch(() => {});
-      preparing = ready;
+      preparing = attempt;
     }
+    return preparing;
   };
   const observe = (stub: T, result: unknown) => {
     if (isThenable(result)) {
@@ -75,7 +87,7 @@ export function renewingStub<T extends object>(
             // Reflect.apply, not `target.apply`: on an RPC stub every
             // property, `apply` included, is a remote method.
             Reflect.apply(target, stub, args);
-          const pending = stub === current ? preparing : undefined;
+          const pending = ready(stub);
           if (pending) return observe(stub, pending.then(call));
           try {
             return observe(stub, call());

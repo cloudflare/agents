@@ -33,4 +33,27 @@ describe("renewingStub", () => {
       await settle(() => native.settingsForTest.enabled)
     );
   });
+
+  it("prepares a renewed stub only when a call comes, once per call", async () => {
+    let prepares = 0;
+    const broken = {
+      ping: () => Promise.reject(new Error("reset"))
+    };
+    const renewing = renewingStub<{ ping(): Promise<string> }>(
+      broken,
+      () => ({ ping: () => Promise.resolve("pong") }),
+      () => {
+        prepares += 1;
+        return Promise.reject(new Error("onStart failed"));
+      }
+    );
+
+    await expect(renewing.ping()).rejects.toThrow("reset");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(prepares).toBe(0);
+
+    await expect(renewing.ping()).rejects.toThrow("onStart failed");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(prepares).toBe(1);
+  });
 });
