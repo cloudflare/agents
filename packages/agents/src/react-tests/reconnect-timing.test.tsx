@@ -13,7 +13,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render } from "vitest-browser-react";
 import { Suspense } from "react";
-import { AgentClient } from "../client";
+import { AgentClient, isLocalClose } from "../client";
 import { useAgent } from "../react";
 import { getTestWorkerHost } from "./test-config";
 
@@ -133,9 +133,15 @@ describe("reconnect spread", () => {
 });
 
 describe("reconnect after a drop with an async query", () => {
-  // Fresh query parameters make PartySocket open a new socket, whose first
-  // dial has no delay; the hook waits its reconnect delay first.
-  it("waits the reconnect delay before the new socket", async () => {
+  /**
+   * Render a hook on `TestResetAgent`, reset the Agent (its sockets drop
+   * with 1006) and return how long the hook took to be identified again.
+   */
+  async function reconnectAfterReset(options: {
+    minReconnectionDelay?: number;
+    maxReconnectionDelay?: number;
+    cacheTtl?: number;
+  }): Promise<number> {
     const { host, protocol } = getTestWorkerHost();
     const name = `reset-${crypto.randomUUID()}`;
     let token = 0;
@@ -148,7 +154,7 @@ describe("reconnect after a drop with an async query", () => {
         host,
         protocol,
         query,
-        minReconnectionDelay: 2000
+        ...options
       });
       agentRef = agent;
       return (
@@ -170,8 +176,43 @@ describe("reconnect after a drop with an async query", () => {
 
     await agentRef!.call("resetForTest").catch(() => {});
     await expect.poll(status, { timeout: 5_000 }).toBe("connecting");
+    // Measured from when the drop is seen, a few hundred ms after it.
     const droppedAt = Date.now();
     await expect.poll(status, { timeout: 10_000 }).toBe("connected");
-    expect(Date.now() - droppedAt).toBeGreaterThanOrEqual(1800);
+    return Date.now() - droppedAt;
+  }
+
+  // Fresh query parameters make PartySocket open a new socket, whose first
+  // dial has no delay; the hook waits its reconnect delay first.
+  it("waits the reconnect delay before the new socket", async () => {
+    expect(
+      await reconnectAfterReset({ minReconnectionDelay: 2000 })
+    ).toBeGreaterThanOrEqual(1500);
   }, 25_000);
+
+  it("reopens on time while query refreshes keep arriving", async () => {
+    const elapsed = await reconnectAfterReset({
+      minReconnectionDelay: 2000,
+      cacheTtl: 300
+    });
+    expect(elapsed).toBeGreaterThanOrEqual(1500);
+    expect(elapsed).toBeLessThan(6000);
+  }, 25_000);
+
+  it("caps the delay at maxReconnectionDelay", async () => {
+    expect(
+      await reconnectAfterReset({
+        minReconnectionDelay: 5000,
+        maxReconnectionDelay: 300
+      })
+    ).toBeLessThan(2500);
+  }, 25_000);
+
+  it("counts a handshake timeout as a drop, not a local close", () => {
+    const close = (code: number, reason: string) =>
+      new CloseEvent("close", { code, reason });
+    expect(isLocalClose(close(1000, ""))).toBe(true);
+    expect(isLocalClose(close(1000, "timeout"))).toBe(false);
+    expect(isLocalClose(close(1006, ""))).toBe(false);
+  });
 });

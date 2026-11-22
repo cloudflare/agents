@@ -22,6 +22,8 @@ import {
   NativeCallQueue,
   reconnectDefaults,
   reconnectTimingFor,
+  firstRetryDelay,
+  isLocalClose,
   splitCallOptions
 } from "./client";
 import {
@@ -664,20 +666,19 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
 
   // Re-enable socket after async query resolves. Fresh parameters make
   // PartySocket open a new socket, whose first dial has no delay; after a
-  // drop (not a clean local close) wait this hook's reconnect delay first,
-  // so the clients of an Agent that restarted do not all come back at once.
-  const refreshDelayRef = useRef(0);
+  // drop (not a clean local close) wait until this hook's reconnect time
+  // first, so the clients of an Agent that restarted do not all come back
+  // at once. The time is fixed at the drop, so query refreshes arriving
+  // meanwhile do not push it back.
+  const reopenAtRef = useRef(0);
   useEffect(() => {
     if (!awaitingQueryRefresh || resolvedQuery === undefined) return;
-    const delay = refreshDelayRef.current;
+    const delay = reopenAtRef.current - Date.now();
     if (delay <= 0) {
       setAwaitingQueryRefresh(false);
       return;
     }
-    const timer = setTimeout(() => {
-      refreshDelayRef.current = 0;
-      setAwaitingQueryRefresh(false);
-    }, delay);
+    const timer = setTimeout(() => setAwaitingQueryRefresh(false), delay);
     return () => clearTimeout(timer);
   }, [awaitingQueryRefresh, resolvedQuery]);
 
@@ -1051,11 +1052,14 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
         if (reconnecting) {
           // Pause reconnection for async queries until fresh query params are ready.
           if (isAsyncQuery) {
-            refreshDelayRef.current =
-              event.code === 1000
-                ? 0
-                : reconnectTimingFor(restOptions, reconnectTiming)
-                    .minReconnectionDelay;
+            reopenAtRef.current = isLocalClose(event)
+              ? 0
+              : Date.now() +
+                firstRetryDelay(
+                  reconnectTimingFor(restOptions, reconnectTiming)
+                    .minReconnectionDelay,
+                  restOptions.maxReconnectionDelay
+                );
             setAwaitingQueryRefresh(true);
           }
 

@@ -81,6 +81,28 @@ export function reconnectTimingFor(
   };
 }
 
+/**
+ * PartySocket's first retry delay: the minimum, capped by the maximum
+ * (10 s when not set).
+ * @internal
+ */
+export function firstRetryDelay(
+  minReconnectionDelay: number,
+  maxReconnectionDelay: number | undefined
+): number {
+  return Math.min(minReconnectionDelay, maxReconnectionDelay ?? 10_000);
+}
+
+/**
+ * Whether a close came from this side on purpose (`close()`, `reconnect()`),
+ * as opposed to a drop. PartySocket reports a handshake timeout as a close
+ * with code 1000 and reason `"timeout"`, which is a drop.
+ * @internal
+ */
+export function isLocalClose(event: CloseEvent): boolean {
+  return event.code === 1000 && event.reason !== "timeout";
+}
+
 type ReconnectingSocket = { shouldReconnect: boolean; retryCount: number };
 
 /**
