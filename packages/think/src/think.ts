@@ -1203,6 +1203,10 @@ type ActionPauseEvent =
   | {
       type: "action:pause:rejected";
       payload: { action: string; executionId: string };
+    }
+  | {
+      type: "action:pause:swept";
+      payload: { swept: number };
     };
 
 type ActionReplyEvent = {
@@ -5798,8 +5802,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /**
-   * Delete expired ledger rows (at most once an hour unless `force`) and
-   * report them as `action:ledger:swept`.
+   * Delete expired ledger rows and abandoned durable-pause approvals (at
+   * most once an hour unless `force`) and report them as
+   * `action:ledger:swept` and `action:pause:swept`.
    */
   private async _sweepApprovals(options?: {
     force?: boolean;
@@ -5813,6 +5818,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       this._emitActionLedgerEvent({
         type: "action:ledger:swept",
         payload: result
+      });
+    }
+    if (swept.pendingDecisions > 0) {
+      this._emitActionPauseEvent({
+        type: "action:pause:swept",
+        payload: { swept: swept.pendingDecisions }
       });
     }
     return result;

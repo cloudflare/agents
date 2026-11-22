@@ -83,6 +83,7 @@ export type AgentObservabilityEvent =
     >
   | BaseEvent<"action:pause:approved", { action: string; executionId: string }>
   | BaseEvent<"action:pause:rejected", { action: string; executionId: string }>
+  | BaseEvent<"action:pause:swept", { swept: number }>
   | BaseEvent<
       "action:reply-attached",
       { action?: string; attachmentType: string }
