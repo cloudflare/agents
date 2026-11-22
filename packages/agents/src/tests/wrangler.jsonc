@@ -77,6 +77,10 @@
         "name": "ApprovalsReviewObject"
       },
       {
+        "class_name": "InboxHarnessObject",
+        "name": "InboxHarnessObject"
+      },
+      {
         "class_name": "BrowserHarnessObject",
         "name": "BrowserHarnessObject"
       },
@@ -502,6 +506,7 @@
         "QueueHarnessObject",
         "ApprovalsHarnessObject",
         "ApprovalsReviewObject",
+        "InboxHarnessObject",
         "BrowserHarnessObject",
         "InternalHostsPlainObject",
         "InternalHostsNoMethodObject",

@@ -36,6 +36,7 @@ const entries = [
   "src/models/pi-ai/index.ts",
   "src/observability/ai/index.ts",
   "src/queue/index.ts",
+  "src/inbox/index.ts",
   "src/schedules/index.ts",
   "src/schedules/parser.ts",
   "src/tasks/index.ts",

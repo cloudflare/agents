@@ -328,6 +328,11 @@
       "import": "./dist/queue/index.js",
       "require": "./dist/queue/index.js"
     },
+    "./inbox": {
+      "types": "./dist/inbox/index.d.ts",
+      "import": "./dist/inbox/index.js",
+      "require": "./dist/inbox/index.js"
+    },
     "./schedules": {
       "types": "./dist/schedules/index.d.ts",
       "import": "./dist/schedules/index.js",
