@@ -70,6 +70,7 @@ import type { Schedule } from "agents";
 import type { DeclaredScheduleInfo } from "agents/schedules";
 import type { Session } from "../../think";
 import type { ContextConfig } from "agents/context";
+import { stableHash, type Approvals } from "agents/approvals";
 import { z } from "zod";
 import { WorkspaceFiles } from "../../workspace-files";
 
@@ -7981,9 +7982,7 @@ export class ThinkToolsTestAgent extends Think {
       updated_at: number;
     }>
   > {
-    (
-      this as unknown as { _ensureActionLedgerTable: () => void }
-    )._ensureActionLedgerTable();
+    this._approvalsForTest().importRecords({});
     return this.sql<{
       key: string;
       action_name: string;
@@ -7992,8 +7991,9 @@ export class ThinkToolsTestAgent extends Think {
       result_json: string | null;
       updated_at: number;
     }>`
-      SELECT key, action_name, input_hash, status, result_json, updated_at
-      FROM cf_think_action_ledger
+      SELECT key, name AS action_name, input_hash, status, result_json,
+             updated_at
+      FROM cf_agents_effects
       ORDER BY key ASC
     `;
   }
@@ -8006,43 +8006,83 @@ export class ThinkToolsTestAgent extends Think {
     output?: unknown;
     updatedAt?: number;
   }): Promise<void> {
-    (
-      this as unknown as { _ensureActionLedgerTable: () => void }
-    )._ensureActionLedgerTable();
-    const inputHash = (
-      this as unknown as { _actionInputHash: (input: unknown) => string }
-    )._actionInputHash(options.input ?? { message: "hello" });
-    const output =
-      options.status === "settled"
-        ? JSON.stringify({
-            valuePresent: options.output !== undefined,
-            value: options.output
-          })
-        : null;
     const now = options.updatedAt ?? Date.now();
+    this._approvalsForTest().importRecords({
+      effects: [
+        {
+          key: options.key,
+          name: options.actionName ?? "echo",
+          inputHash: stableHash(options.input ?? { message: "hello" }),
+          status: options.status ?? "pending",
+          resultJson:
+            options.status === "settled"
+              ? JSON.stringify({
+                  valuePresent: options.output !== undefined,
+                  value: options.output
+                })
+              : null,
+          context: { toolCallId: "tc-seeded" },
+          createdAt: now,
+          updatedAt: now
+        }
+      ]
+    });
+  }
+
+  async sweepActionLedgerForTest(): Promise<{
+    effects: number;
+    decisions: number;
+  }> {
+    return this._approvalsForTest().sweep({ force: true });
+  }
+
+  /** Seed a row in the table an earlier version used, for the migration. */
+  async insertLegacyActionLedgerRowForTest(options: {
+    key: string;
+    output: unknown;
+  }): Promise<void> {
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_think_action_ledger (
+        key TEXT PRIMARY KEY,
+        action_name TEXT NOT NULL,
+        request_id TEXT,
+        tool_call_id TEXT,
+        input_hash TEXT NOT NULL,
+        status TEXT NOT NULL,
+        result_json TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )
+    `;
+    const now = Date.now();
     this.sql`
       INSERT INTO cf_think_action_ledger (
         key, action_name, request_id, tool_call_id, input_hash, status,
         result_json, created_at, updated_at
       )
       VALUES (
-        ${options.key}, ${options.actionName ?? "echo"}, ${null}, ${"tc-seeded"},
-        ${inputHash}, ${options.status ?? "pending"}, ${output}, ${now}, ${now}
+        ${options.key}, ${"echo"}, ${null}, ${"tc-legacy"},
+        ${stableHash({ message: "hello" })}, ${"settled"},
+        ${JSON.stringify({ valuePresent: true, value: options.output })},
+        ${now}, ${now}
       )
     `;
   }
 
-  async sweepActionLedgerForTest(): Promise<{
-    settled: number;
-    pending: number;
-  }> {
+  async migrateLegacyActionLedgerForTest(): Promise<boolean> {
+    await (
+      this as unknown as { _migrateLegacyActionLedger: () => Promise<void> }
+    )._migrateLegacyActionLedger();
     return (
-      this as unknown as {
-        _sweepActionLedger: (options: {
-          force?: boolean;
-        }) => Promise<{ settled: number; pending: number }>;
-      }
-    )._sweepActionLedger({ force: true });
+      this.sql<{ name: string }>`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name = 'cf_think_action_ledger'
+      `.length > 0
+    );
+  }
+
+  private _approvalsForTest(): Approvals {
+    return (this as unknown as { _approvals: Approvals })._approvals;
   }
 
   // ── Durable-pause action test helpers ───────────────────────────

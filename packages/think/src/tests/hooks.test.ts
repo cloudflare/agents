@@ -906,8 +906,8 @@ describe("Think — actions compile into guarded tools", () => {
     });
 
     await expect(agent.sweepActionLedgerForTest()).resolves.toEqual({
-      settled: 1,
-      pending: 1
+      effects: 2,
+      decisions: 0
     });
 
     expect(await agent.listActionLedgerRowsForTest()).toMatchObject([
@@ -916,6 +916,27 @@ describe("Think — actions compile into guarded tools", () => {
         status: "settled"
       }
     ]);
+  });
+
+  it("moves ledger rows an earlier version wrote, so a settled action still replays", async () => {
+    const agent = await freshToolAgent(
+      `action-ledger-migrate-${crypto.randomUUID()}`
+    );
+    await agent.useEchoActionForTest("ledger-key");
+    await agent.setActionIdempotencyKey("legacy-key");
+    await agent.insertLegacyActionLedgerRowForTest({
+      key: "action:echo:legacy-key",
+      output: "from before the upgrade"
+    });
+    expect(await agent.migrateLegacyActionLedgerForTest()).toBe(false);
+    expect(await agent.listActionLedgerRowsForTest()).toMatchObject([
+      { key: "action:echo:legacy-key", status: "settled" }
+    ]);
+
+    await expect(agent.executeEchoActionToolForTest()).resolves.toBe(
+      "from before the upgrade"
+    );
+    expect((await agent.getActionProbe()).count).toBe(0);
   });
 
   it("emits an approval request with a stable action descriptor", async () => {
