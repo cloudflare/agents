@@ -100,11 +100,13 @@ describe("Agent recovery after forced Durable Object eviction", () => {
     );
     const agent = stub as unknown as TestRunFiberAgent;
 
+    await agent.runSimple("warm");
+    expect(await agent.getExecutionLog()).toContain("executed:warm");
+    // Written after the warm fiber settled: an orphan a dead isolate left,
+    // which no live wake in this isolate has seen.
     await agent.insertInterruptedFiber("evicted-fiber", "research", {
       step: 7
     });
-    await agent.runSimple("warm");
-    expect(await agent.getExecutionLog()).toContain("executed:warm");
 
     await evictDurableObject(stub);
 

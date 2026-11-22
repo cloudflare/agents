@@ -29,13 +29,8 @@ import { getAgentByName } from "..";
  *   3. Update this snapshot to match the new DDL
  */
 const EXPECTED_SCHEMA_DDL = [
-  `CREATE TABLE cf_agents_facet_runs (
-          owner_path TEXT NOT NULL,
-          owner_path_key TEXT NOT NULL,
-          run_id TEXT NOT NULL,
-          created_at INTEGER NOT NULL,
-          PRIMARY KEY (owner_path_key, run_id)
-        )`,
+  // The Fibers capability creates its two tables on first use; startup's
+  // recovery scan is that first use.
   `CREATE TABLE cf_agents_fibers (
           fiber_id TEXT PRIMARY KEY,
           idempotency_key TEXT UNIQUE,
@@ -188,7 +183,8 @@ describe("schema version gating", () => {
     expect(await agent.tableExists("cf_agents_mcp_servers")).toBe(true);
     expect(await agent.tableExists("cf_agents_runs")).toBe(true);
     expect(await agent.tableExists("cf_agents_fibers")).toBe(true);
-    expect(await agent.tableExists("cf_agents_facet_runs")).toBe(true);
+    // The old root-side facet fiber index; fiber wakes mirror on the root now.
+    expect(await agent.tableExists("cf_agents_facet_runs")).toBe(false);
   });
 
   it("should drop every internal table during destroy cleanup", async () => {

@@ -156,9 +156,9 @@ RPC if you need parent-side side effects.
   heartbeat ref to the top-level parent. Facets still do not get an independent
   physical alarm slot.
 - `runFiber()` works on facets. Fiber rows and snapshots live in the child
-  SQLite database, while the root parent keeps a small index of active facet
-  fibers so alarm housekeeping can route recovery checks back into idle
-  children.
+  SQLite database. The child's `Fibers` capability mirrors its recovery wake
+  on the root through Lifecycle routing, and the root routes each due wake
+  back into the child ([fibers.md](./fibers.md)).
 - Think chat recovery works on facets; recovered continuations can schedule from
   the child and are routed through the top-level parent's alarm.
 - `deleteSubAgent()` is idempotent and removes pending schedules for that

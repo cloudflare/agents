@@ -57,17 +57,15 @@ export interface DynamicAgentHostPort {
   readonly _queue: {
     __DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(prefix: string): Promise<void>;
   };
-  /** Local (non-facet-index) durable fiber recovery pass. */
-  _checkRunFibers(): Promise<void>;
+  readonly _fibers: {
+    __DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(prefix: string): Promise<void>;
+  };
   /** Overridable RPC entry points — call via the host so subclass overrides intercept. */
   _cf_broadcastToSubAgent(
     ownerPath: ReadonlyArray<AgentPathStep>,
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): Promise<void>;
-  _cf_checkRunFibersForFacet(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): Promise<number>;
   /** Ensure constructor-time async initialization has completed. */
   __unsafe_ensureInitialized(): Promise<void>;
   /**

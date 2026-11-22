@@ -436,7 +436,7 @@ Dynamic agents can schedule their own callbacks and run durable fibers:
 - `this.getScheduleById()` / `this.listSchedules()` work on a child.
 - `this.runFiber()` and Think `chatRecovery` work on a child.
 
-The top-level parent still owns the physical alarm because facets do not have independent alarm slots. The Agents SDK stores the child owner path with each schedule row, wakes the parent, and routes the callback back into the child. `keepAlive()` and `keepAliveWhile()` work in dynamic agents by delegating their heartbeat ref to the top-level parent. `runFiber()` also works in dynamic agents: fiber rows and snapshots live in the child's own SQLite database, and the parent keeps a small root-side index so alarm housekeeping can route recovery checks back into idle children.
+The top-level parent still owns the physical alarm because facets do not have independent alarm slots. The Agents SDK stores the child owner path with each schedule row, wakes the parent, and routes the callback back into the child. `keepAlive()` and `keepAliveWhile()` work in dynamic agents by delegating their heartbeat ref to the top-level parent. `runFiber()` also works in dynamic agents: fiber rows and snapshots live in the child's own SQLite database, and the parent keeps a copy of the child's recovery alarm so it can route recovery back into idle children.
 
 ## Broadcasts
 

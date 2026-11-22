@@ -9,6 +9,7 @@ import type {
 } from "../../index.ts";
 import { RpcTarget } from "cloudflare:workers";
 import { MessageType } from "../../types.ts";
+import { agentPathKey } from "../../dynamic-agents/identity.ts";
 import type { Tasks } from "../../tasks/tasks.ts";
 
 const STALE_FRAME_PROBE = "stale-frame-probe";
@@ -2100,7 +2101,7 @@ export class TestSubAgentParent extends Agent {
       name,
       snapshot
     );
-    await this._cf_registerFacetRun(innerSelfPath, id);
+    await this.armFacetFiberWake(innerSelfPath);
   }
 
   async nestedRecoveredFibers(
@@ -2217,7 +2218,7 @@ export class TestSubAgentParent extends Agent {
   ): Promise<void> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     await child.insertInterruptedFiber(id, name, snapshot);
-    await this._cf_registerFacetRun(await child.getSelfPath(), id);
+    await this.armFacetFiberWake(await child.getSelfPath());
   }
 
   async insertSubAgentInterruptedManagedFiber(
@@ -2228,35 +2229,106 @@ export class TestSubAgentParent extends Agent {
   ): Promise<void> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     await child.insertInterruptedManagedFiber(id, name, snapshot);
-    await this._cf_registerFacetRun(await child.getSelfPath(), id);
+    await this.armFacetFiberWake(await child.getSelfPath());
   }
 
-  async registerSubAgentFacetRunLeaseOnly(
+  async armSubAgentFiberWakeOnly(subAgentName: string): Promise<void> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    await this.armFacetFiberWake(await child.getSelfPath());
+  }
+
+  /**
+   * Mirror a facet's fiber wake on this root, due now, the way the facet's
+   * own Fibers capability routes it while a fiber runs there.
+   */
+  async armFacetFiberWake(
+    selfPath: Array<{ className: string; name: string }>
+  ): Promise<void> {
+    await (
+      this as unknown as {
+        _fibers: {
+          onRoute(context: {
+            source: { key: string; data: string };
+            payload: unknown;
+          }): Promise<unknown>;
+        };
+      }
+    )._fibers.onRoute({
+      source: {
+        key: agentPathKey(selfPath) ?? "",
+        data: JSON.stringify(selfPath)
+      },
+      payload: { type: "syncWake", next: Date.now() }
+    });
+  }
+
+  dueFiberWakeCount(): number {
+    return (
+      this.sql<{ count: number }>`
+        SELECT COUNT(*) AS count FROM cf_agents_jobs
+        WHERE capability = 'fibers' AND time <= ${Date.now()}
+      `[0]?.count ?? 0
+    );
+  }
+
+  /** Owner keys of facet fiber wakes this root mirrors. */
+  fiberWakeOwners(): string[] {
+    return this.sql<{ payload: string }>`
+      SELECT payload FROM cf_agents_jobs
+      WHERE capability = 'fibers' AND id LIKE 'fibers:recover:%'
+      ORDER BY id
+    `.map(
+      (row) =>
+        (JSON.parse(row.payload) as { owner_path_key: string }).owner_path_key
+    );
+  }
+
+  async insertSubAgentInterruptedFiberWithLegacyIndex(
     subAgentName: string,
-    id: string
+    id: string,
+    name: string,
+    snapshot?: { value?: string }
   ): Promise<void> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
-    await this._cf_registerFacetRun(await child.getSelfPath(), id);
+    await child.insertInterruptedFiber(id, name, snapshot);
+    this.insertLegacyFacetRunIndexRow(await child.getSelfPath(), id);
   }
 
-  facetRunRows(): Array<{
-    ownerPath: string;
-    ownerPathKey: string;
-    runId: string;
-  }> {
-    return this.sql<{
-      owner_path: string;
-      owner_path_key: string;
-      run_id: string;
-    }>`
-      SELECT owner_path, owner_path_key, run_id
-      FROM cf_agents_facet_runs
-      ORDER BY owner_path_key, run_id
-    `.map((row) => ({
-      ownerPath: row.owner_path,
-      ownerPathKey: row.owner_path_key,
-      runId: row.run_id
-    }));
+  /** Run the Fibers capability's startup migration again. */
+  async restartFibers(): Promise<void> {
+    await (
+      this as unknown as { _fibers: { onStart(): Promise<void> } }
+    )._fibers.onStart();
+  }
+
+  legacyFacetRunIndexExists(): boolean {
+    return (
+      this.sql`
+        SELECT 1 FROM sqlite_master
+        WHERE type = 'table' AND name = 'cf_agents_facet_runs'
+      `.length > 0
+    );
+  }
+
+  /** Insert the root-side facet fiber index an earlier release kept. */
+  insertLegacyFacetRunIndexRow(
+    selfPath: Array<{ className: string; name: string }>,
+    runId: string
+  ): void {
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agents_facet_runs (
+        owner_path TEXT NOT NULL,
+        owner_path_key TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (owner_path_key, run_id)
+      )
+    `;
+    const key = agentPathKey(selfPath) ?? "";
+    this.sql`
+      INSERT INTO cf_agents_facet_runs (owner_path, owner_path_key, run_id, created_at)
+      VALUES (${JSON.stringify(selfPath)}, ${key}, ${runId}, ${Date.now()})
+    `;
   }
 
   async subAgentTryCancelSchedule(subAgentName: string): Promise<string> {

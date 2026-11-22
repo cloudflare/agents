@@ -1,4 +1,3 @@
-import { AsyncLocalStorage } from "node:async_hooks";
 import type {
   Prompt,
   Resource,
@@ -172,6 +171,19 @@ import { RPC_DO_PREFIX, type McpRpcAgent } from "./mcp/rpc";
 import { ensureMcpServerTable, type MCPServerRow } from "./mcp/client/storage";
 import { Scheduler, setSchedulerCallbackResolver } from "./schedules/scheduler";
 import { Queue, setQueueCallbackResolver } from "./queue/queue";
+import { Fibers, stashCurrentFiber, withFiberStash } from "./fibers/fibers";
+import type {
+  DeleteFibersOptions,
+  FiberContext,
+  FiberInspection,
+  FiberRecoveryContext,
+  FiberRecoveryResult,
+  FiberStashContext,
+  InternalFiberOptions,
+  ListFibersOptions,
+  StartFiberOptions,
+  StartFiberResult
+} from "./fibers/types";
 import type { QueueItem } from "./queue/types";
 export type { QueueItem } from "./queue/types";
 import {
@@ -391,142 +403,17 @@ type AgentToolRunStorageRow = {
 type DeferredAgentToolFinish = () => Promise<void>;
 type DetachedReconcilePayload = { cadenceIndex?: number };
 
-/**
- * Context passed to the `runFiber` callback. Provides checkpoint
- * and identity for durable execution.
- */
-export type FiberContext = {
-  /** Unique identifier for this fiber execution. */
-  id: string;
-  /** Cooperative cancellation signal for managed fiber callers. */
-  signal: AbortSignal;
-  /** Checkpoint data during execution. Synchronous SQLite write. */
-  stash(data: unknown): void;
-  /** Currently null during execution; recovered snapshots are passed to onFiberRecovered(). */
-  snapshot: unknown | null;
-};
-
-export type FiberStatus =
-  | "pending"
-  | "running"
-  | "completed"
-  | "aborted"
-  | "interrupted"
-  | "error";
-
-export type StartFiberOptions = {
-  fiberId?: string;
-  idempotencyKey?: string;
-  metadata?: Record<string, unknown>;
-  waitForCompletion?: boolean;
-};
-
-export type FiberInspection = {
-  fiberId: string;
-  name: string;
-  idempotencyKey?: string;
-  status: FiberStatus;
-  snapshot?: unknown;
-  error?: string;
-  metadata?: Record<string, unknown>;
-  createdAt: number;
-  startedAt?: number;
-  settledAt?: number;
-};
-
-export type StartFiberResult = FiberInspection & {
-  accepted: boolean;
-};
-
-export type FiberRecoveryResult =
-  | {
-      status: "completed";
-      snapshot?: unknown;
-      metadata?: Record<string, unknown>;
-    }
-  | {
-      status: "error";
-      error?: unknown;
-      snapshot?: unknown;
-    }
-  | {
-      status: "aborted";
-      reason?: string;
-      snapshot?: unknown;
-    }
-  | {
-      status: "interrupted";
-      reason?: string;
-      snapshot?: unknown;
-    };
-
-export type ListFibersOptions = {
-  status?: FiberStatus | FiberStatus[];
-  name?: string;
-  limit?: number;
-};
-
-export type DeleteFibersOptions = {
-  status?: FiberStatus | FiberStatus[];
-  settledBefore?: Date;
-  limit?: number;
-};
-
-type FiberLedgerRow = {
-  fiber_id: string;
-  idempotency_key: string | null;
-  name: string;
-  status: FiberStatus;
-  snapshot: string | null;
-  metadata_json: string | null;
-  error_message: string | null;
-  created_at: number;
-  started_at: number | null;
-  completed_at: number | null;
-};
-
-/**
- * Context passed to the `onFiberRecovered` hook when an interrupted
- * fiber is detected after DO restart.
- */
-export type FiberRecoveryContext = {
-  /** Fiber ID. */
-  id: string;
-  /** Name passed to `runFiber`. */
-  name: string;
-  /** Status for managed fibers recovered through the retained ledger. */
-  status?: FiberStatus;
-  /** Idempotency key for managed fibers, if one was supplied. */
-  idempotencyKey?: string;
-  /** Metadata for managed fibers, if one was supplied. */
-  metadata?: Record<string, unknown> | null;
-  /** Last checkpoint data from `stash()`, or null if never stashed. */
-  snapshot: unknown | null;
-  /**
-   * Epoch milliseconds when the fiber row was inserted (when `runFiber`
-   * started). Use `Date.now() - createdAt` to gate stale recoveries.
-   */
-  createdAt: number;
-  /** Why this recovery hook is running. */
-  recoveryReason: "interrupted";
-  [key: string]: unknown;
-};
-
-const _fiberALS = new AsyncLocalStorage<{
-  id: string;
-  signal: AbortSignal;
-  stash: (data: unknown) => void;
-}>();
-
-type InternalFiberOptions = {
-  signal?: AbortSignal;
-  managed?: boolean;
-  initialSnapshot?: unknown;
-  wrapStash?: (data: unknown) => unknown;
-  beforeRunCleanup?: (
-    outcome: { ok: true } | { ok: false; error: unknown }
-  ) => void;
-};
+export type {
+  DeleteFibersOptions,
+  FiberContext,
+  FiberInspection,
+  FiberRecoveryContext,
+  FiberRecoveryResult,
+  FiberStatus,
+  ListFibersOptions,
+  StartFiberOptions,
+  StartFiberResult
+} from "./fibers/types";
 
 export type { TransportType } from "./mcp/types";
 export type { RetryOptions } from "./retries";
@@ -680,6 +567,7 @@ const DESTROY_PENDING_KEY = "cf_agents_destroy_pending";
 
 // Stable ids for Agent-owned host jobs in the Lifecycle job queue.
 const HOST_JOB_KEEP_ALIVE_ID = "cf:keep-alive";
+// Fiber recovery's wake before the Fibers capability owned it.
 const HOST_JOB_HOUSEKEEPING_ID = "cf:housekeeping";
 const HOST_JOB_DESTROY_ID = "cf:destroy";
 // Delay before the deferred-teardown alarm fires (#1625). `_cf_scheduleDestroy`
@@ -692,18 +580,6 @@ const HOST_JOB_DESTROY_ID = "cf:destroy";
 // small delay lets the response flush before the abort. Teardown latency of a
 // second is irrelevant for an already-abandoned session.
 const DESTROY_ALARM_DELAY_MS = 1_000;
-// Ceiling for the exponential backoff applied to the runFiber-recovery
-// follow-up alarm. A scan that makes NO forward progress (every pending orphan
-// row's recovery hook threw) but still has work pending backs off so a poison
-// fiber — or a `fiberRecoveryMaxAgeMs: 0` "retain forever" row whose hook keeps
-// throwing — does not wake the DO every `keepAliveIntervalMs` indefinitely (the
-// perpetual-heartbeat hazard #1707 guards against). A scan that DID make
-// progress (recovered ≥1 row, including a scan-deadline yield that drained
-// some) resets the backoff so legitimate multi-pass draining stays prompt.
-const FIBER_RECOVERY_MAX_BACKOFF_MS = 5 * 60_000;
-// Cap the doubling exponent so `base * 2 ** n` never overflows before the
-// `FIBER_RECOVERY_MAX_BACKOFF_MS` clamp applies.
-const FIBER_RECOVERY_BACKOFF_MAX_EXP = 20;
 // Re-attaching to a still-running child agent-tool run (parent recovery /
 // duplicate-runId re-issue) tails it to its REAL terminal result instead of
 // abandoning it as `interrupted` and re-running already-completed child work
@@ -1337,23 +1213,6 @@ export class Agent<
     return this._dynamicAgentsApi;
   }
 
-  /** @internal In-memory set of fiber IDs running in this process. */
-  private _runFiberActiveFibers = new Set<string>();
-  /** @internal In-memory abort controllers for managed running fibers. */
-  private _managedFiberAbortControllers = new Map<string, AbortController>();
-  /** @internal In-memory executions for callers that want to await accepted work. */
-  private _managedFiberExecutions = new Map<string, Promise<void>>();
-  /** @internal In-memory waiters for managed fibers reaching terminal ledger state. */
-  private _managedFiberTerminalWaiters = new Map<string, Set<() => void>>();
-  /** @internal Prevents re-entrant recovery from overlapping alarm ticks. */
-  private _runFiberRecoveryInProgress = false;
-  /**
-   * @internal Consecutive runFiber-recovery scans that made NO forward progress
-   * while work was still pending. Drives the exponential backoff of the
-   * recovery follow-up alarm so a repeatedly-throwing recovery hook does not
-   * busy-loop the DO. Reset to 0 whenever a scan recovers anything.
-   */
-  private _recoveryNoProgressScans = 0;
   /** @internal Single-flight background recovery for parent agent-tool rows. */
   private _agentToolRunRecoveryPromise: Promise<void> | undefined;
   /** @internal Serializes detached-backbone arming against concurrent dispatch. */
@@ -1407,6 +1266,9 @@ export class Agent<
   declare readonly taskDefinitions?: TaskHandlers;
 
   readonly mcp: MCPClientManager;
+
+  /** Durable fibers; `runFiber()`, `startFiber()` and friends delegate to it. */
+  private readonly _fibers: Fibers;
 
   /**
    * Initial state for the Agent
@@ -1689,70 +1551,6 @@ export class Agent<
         CREATE INDEX IF NOT EXISTS idx_workflows_name ON cf_agents_workflows(workflow_name)
       `;
 
-      // v3: durable fibers table for runFiber
-      this.sql`
-        CREATE TABLE IF NOT EXISTS cf_agents_runs (
-          id TEXT PRIMARY KEY NOT NULL,
-          name TEXT NOT NULL,
-          snapshot TEXT,
-          created_at INTEGER NOT NULL,
-          completed_at INTEGER,
-          outcome TEXT,
-          error_message TEXT
-        )
-      `;
-
-      // v5: root-side index of descendant facet fibers. The fiber's
-      // authoritative row stays in the facet's own cf_agents_runs table;
-      // this table only lets the root alarm owner know which facets need
-      // recovery checks while they are idle.
-      this.sql`
-        CREATE TABLE IF NOT EXISTS cf_agents_facet_runs (
-          owner_path TEXT NOT NULL,
-          owner_path_key TEXT NOT NULL,
-          run_id TEXT NOT NULL,
-          created_at INTEGER NOT NULL,
-          PRIMARY KEY (owner_path_key, run_id)
-        )
-      `;
-
-      this.sql`
-        CREATE INDEX IF NOT EXISTS idx_facet_runs_owner_path_key
-        ON cf_agents_facet_runs(owner_path_key)
-      `;
-
-      // v8: managed fiber job ledger for idempotent acceptance,
-      // inspection, cancellation, and terminal cleanup.
-      this.sql`
-        CREATE TABLE IF NOT EXISTS cf_agents_fibers (
-          fiber_id TEXT PRIMARY KEY,
-          idempotency_key TEXT UNIQUE,
-          name TEXT NOT NULL,
-          status TEXT NOT NULL,
-          snapshot TEXT,
-          metadata_json TEXT,
-          error_message TEXT,
-          created_at INTEGER NOT NULL,
-          started_at INTEGER,
-          completed_at INTEGER
-        )
-      `;
-
-      this.sql`
-        CREATE INDEX IF NOT EXISTS idx_fibers_status_created
-        ON cf_agents_fibers(status, created_at, fiber_id)
-      `;
-
-      this.sql`
-        CREATE INDEX IF NOT EXISTS idx_fibers_name_status_created
-        ON cf_agents_fibers(name, status, created_at, fiber_id)
-      `;
-
-      this.sql`
-        CREATE INDEX IF NOT EXISTS idx_fibers_status_completed
-        ON cf_agents_fibers(status, completed_at, created_at)
-      `;
-
       this.sql`
         CREATE TABLE IF NOT EXISTS cf_agent_tool_runs (
           run_id TEXT PRIMARY KEY,
@@ -1845,19 +1643,6 @@ export class Agent<
       // reconcile can deliver them after eviction, not only the warm tail.
       addColumnIfNotExists(
         "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached_on_milestones TEXT"
-      );
-      // A legacy fiber body that settled whose row delete then failed. Recovery
-      // deletes it without calling `onFiberRecovered()` (#2305).
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agents_runs ADD COLUMN completed_at INTEGER"
-      );
-      // How that settled body ended, so recovery settles a managed ledger
-      // whose own settle write failed with the body's real outcome.
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agents_runs ADD COLUMN outcome TEXT"
-      );
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agents_runs ADD COLUMN error_message TEXT"
       );
       // `runAgentTool({ eventDelivery: "terminal" })`: NULL means "full".
       addColumnIfNotExists(
@@ -2038,6 +1823,15 @@ export class Agent<
         this.taskDefinitions?.[name] as TaskCallbacks[string] | undefined
     );
 
+    this._fibers = new Fibers({
+      handleInternalRecovery: (ctx) => this._handleInternalFiberRecovery(ctx),
+      onRecovered: (ctx) => this.onFiberRecovered(ctx),
+      heartbeatMs: this._resolvedOptions.keepAliveIntervalMs,
+      recoveryHookTimeoutMs: this._resolvedOptions.fiberRecoveryHookTimeoutMs,
+      scanDeadlineMs: this._resolvedOptions.fiberRecoveryScanDeadlineMs,
+      maxAgeMs: this._resolvedOptions.fiberRecoveryMaxAgeMs
+    });
+
     this.mcp = this._withAgentSpan(
       "agent_initialization",
       "initialization",
@@ -2087,6 +1881,7 @@ export class Agent<
       .use(this._state)
       .use(this._webSockets)
       .use(this.tasks)
+      .use(this._fibers)
       // Registered for capability identity/services; its hot paths are
       // wired directly (see the DynamicAgentsInternal class doc).
       .use(this._dynamicAgents);
@@ -2153,10 +1948,6 @@ export class Agent<
     this.onAlarm = async () => {
       if (this._destroyed) return;
       await _onAlarm();
-      if (this._destroyed) return;
-      await this._onAlarmHousekeeping();
-      // Housekeeping scans change fiber/facet/keep-alive state; refresh the
-      // host jobs that guarantee their wakes before Lifecycle re-arms.
       if (this._destroyed) return;
       await this._syncHostJobs();
     };
@@ -2525,9 +2316,8 @@ export class Agent<
               runIds: startupAgentToolRunIds
             });
 
-            // Push-based host jobs replace the pull-based alarm contribution:
-            // re-sync them on every wake so orphaned fiber/facet recovery
-            // state left by a dead process re-arms its housekeeping wake.
+            // Re-sync the host jobs on every wake so keep-alive and destroy
+            // state left by a dead process re-arms its wake.
             await this._syncHostJobs();
             return result;
           });
@@ -3325,32 +3115,6 @@ export class Agent<
   }
 
   /**
-   * Register a facet's durable run row in the root-side index so root
-   * alarm housekeeping can dispatch recovery checks into idle facets.
-   * The facet remains authoritative for snapshots and recovery hooks.
-   * @internal
-   */
-  async _cf_registerFacetRun(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    runId: string
-  ): Promise<void> {
-    await this.__unsafe_ensureInitialized();
-    await this._dynamicAgents.registerRun(ownerPath, runId);
-  }
-
-  /**
-   * Remove a completed facet fiber from the root-side index.
-   * @internal
-   */
-  async _cf_unregisterFacetRun(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    runId: string
-  ): Promise<void> {
-    await this.__unsafe_ensureInitialized();
-    await this._dynamicAgents.unregisterRun(ownerPath, runId);
-  }
-
-  /**
    * Schedule a task to be executed in the future
    *
    * Cron schedules are **idempotent by default** — calling `schedule("0 * * * *", "tick")`
@@ -3588,934 +3352,96 @@ export class Agent<
     }
   }
 
-  // ── Managed fibers: idempotent durable jobs ────────────────────────
+  // ── Fibers (the `Fibers` capability, ./fibers) ─────────────────────
 
-  private _isTerminalFiberStatus(status: FiberStatus): boolean {
-    return (
-      status === "completed" ||
-      status === "aborted" ||
-      status === "interrupted" ||
-      status === "error"
-    );
+  /**
+   * Run a function as a durable fiber and return its result. The fiber is
+   * recorded before it runs, checkpoints with `ctx.stash()` or
+   * `this.stash()`, and after an eviction its last checkpoint goes to
+   * `onFiberRecovered`. The function itself never runs again.
+   */
+  runFiber<T>(name: string, fn: (ctx: FiberContext) => Promise<T>): Promise<T> {
+    return this._fibers.run(name, fn);
   }
 
-  private _notifyManagedFiberTerminal(fiberId: string): void {
-    const row = this._readFiber(fiberId);
-    if (row && !this._isTerminalFiberStatus(row.status)) {
-      return;
-    }
-
-    const waiters = this._managedFiberTerminalWaiters.get(fiberId);
-    if (!waiters) {
-      return;
-    }
-
-    this._managedFiberTerminalWaiters.delete(fiberId);
-    for (const resolve of waiters) {
-      resolve();
-    }
-  }
-
-  private _waitForManagedFiberTerminal(fiberId: string): Promise<void> {
-    const row = this._readFiber(fiberId);
-    if (!row || this._isTerminalFiberStatus(row.status)) {
-      return Promise.resolve();
-    }
-
-    return new Promise<void>((resolve) => {
-      let waiters = this._managedFiberTerminalWaiters.get(fiberId);
-      if (!waiters) {
-        waiters = new Set();
-        this._managedFiberTerminalWaiters.set(fiberId, waiters);
-      }
-      waiters.add(resolve);
-    });
-  }
-
-  private _normalizeFiberStatusFilter(
-    status?: FiberStatus | FiberStatus[]
-  ): Set<FiberStatus> | null {
-    if (!status) return null;
-    return new Set(Array.isArray(status) ? status : [status]);
-  }
-
-  private _parseFiberJsonObject(
-    value: string | null
-  ): Record<string, unknown> | null {
-    if (value === null) return null;
-    try {
-      const parsed = JSON.parse(value) as unknown;
-      if (
-        parsed !== null &&
-        typeof parsed === "object" &&
-        !Array.isArray(parsed)
-      ) {
-        return parsed as Record<string, unknown>;
-      }
-    } catch {
-      // Invalid metadata should not prevent inspection.
-    }
-    return null;
-  }
-
-  private _parseFiberSnapshot(value: string | null): unknown | undefined {
-    if (value === null) return undefined;
-    try {
-      return JSON.parse(value) as unknown;
-    } catch {
-      return undefined;
-    }
-  }
-
-  private _fiberErrorMessage(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
-  }
-
-  private _stringifyFiberSnapshot(snapshot: unknown): string | null {
-    return snapshot === undefined ? null : JSON.stringify(snapshot);
-  }
-
-  private _fiberRecoveryErrorMessage(
-    result: FiberRecoveryResult
-  ): string | null {
-    if (result.status === "error") {
-      return result.error === undefined
-        ? null
-        : this._fiberErrorMessage(result.error);
-    }
-    if (result.status === "aborted" || result.status === "interrupted") {
-      return result.reason ?? null;
-    }
-    return null;
-  }
-
-  private _applyManagedFiberRecoveryResult(
-    fiberId: string,
-    result: FiberRecoveryResult
-  ): void {
-    const completedAt = Date.now();
-    const snapshot = this._stringifyFiberSnapshot(result.snapshot);
-    const errorMessage = this._fiberRecoveryErrorMessage(result);
-    const metadata =
-      result.status === "completed" && result.metadata !== undefined
-        ? JSON.stringify(result.metadata)
-        : undefined;
-
-    if (metadata !== undefined) {
-      this.sql`
-        UPDATE cf_agents_fibers
-        SET status = ${result.status},
-            snapshot = COALESCE(${snapshot}, snapshot),
-            metadata_json = ${metadata},
-            error_message = ${errorMessage},
-            completed_at = ${completedAt}
-        WHERE fiber_id = ${fiberId}
-          AND status = 'interrupted'
-      `;
-      this._notifyManagedFiberTerminal(fiberId);
-      return;
-    }
-
-    this.sql`
-      UPDATE cf_agents_fibers
-      SET status = ${result.status},
-          snapshot = COALESCE(${snapshot}, snapshot),
-          error_message = ${errorMessage},
-          completed_at = ${completedAt}
-      WHERE fiber_id = ${fiberId}
-        AND status = 'interrupted'
-    `;
-    this._notifyManagedFiberTerminal(fiberId);
-  }
-
-  private _settleManagedFiberExecution(
-    fiberId: string,
-    outcome: { ok: true } | { ok: false; error: unknown },
-    signal: AbortSignal
-  ): void {
-    const completedAt = Date.now();
-    if (outcome.ok) {
-      this.sql`
-        UPDATE cf_agents_fibers
-        SET status = 'completed', completed_at = ${completedAt}
-        WHERE fiber_id = ${fiberId} AND status = 'running'
-      `;
-      this._notifyManagedFiberTerminal(fiberId);
-      return;
-    }
-
-    const message = this._fiberErrorMessage(outcome.error);
-    const status: FiberStatus = signal.aborted ? "aborted" : "error";
-    this.sql`
-      UPDATE cf_agents_fibers
-      SET status = ${status},
-          error_message = ${message},
-          completed_at = ${completedAt}
-      WHERE fiber_id = ${fiberId} AND status = 'running'
-    `;
-    this._notifyManagedFiberTerminal(fiberId);
-  }
-
-  private _parseFiberRecoverySnapshot(
-    fiberId: string,
-    snapshotText: string | null
-  ): unknown | null {
-    if (!snapshotText) return null;
-    try {
-      return JSON.parse(snapshotText) as unknown;
-    } catch {
-      console.warn(
-        `[Agent] Corrupted snapshot for fiber ${fiberId}, treating as null`
-      );
-      return null;
-    }
-  }
-
-  private _fiberRecoveryPayload(
-    ctx: FiberRecoveryContext,
-    managedRow: FiberLedgerRow | null,
-    startedAt?: number
-  ): Record<string, unknown> {
-    return {
-      fiberId: ctx.id,
-      fiberName: ctx.name,
-      managed: managedRow !== null,
-      recoveryReason: ctx.recoveryReason,
-      elapsedMs: startedAt === undefined ? undefined : Date.now() - startedAt
-    };
-  }
-
-  private async _withFiberRecoveryTimeout<T>(
-    ctx: FiberRecoveryContext,
-    operation: () => Promise<T>
+  /**
+   * Run a fiber whose framework recovery data wraps the user's checkpoints.
+   * @internal
+   */
+  protected _runFiberWithStashWrapper<T>(
+    name: string,
+    fn: (ctx: FiberContext) => Promise<T>,
+    options: Pick<InternalFiberOptions, "initialSnapshot" | "wrapStash">
   ): Promise<T> {
-    const timeoutMs = this._resolvedOptions.fiberRecoveryHookTimeoutMs;
-    if (timeoutMs <= 0) return operation();
-
-    // Note: this bounds how long we WAIT for the operation, but does not
-    // cancel it — `operation` keeps running after the timeout rejects. It is
-    // applied to internal framework recovery only, which is idempotent and
-    // safe to abandon mid-flight.
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      return await Promise.race([
-        operation(),
-        new Promise<T>((_, reject) => {
-          timer = setTimeout(() => {
-            reject(
-              new Error(
-                `Fiber recovery hook timed out after ${timeoutMs}ms for "${ctx.name}" (${ctx.id})`
-              )
-            );
-          }, timeoutMs);
-        })
-      ]);
-    } finally {
-      if (timer !== undefined) clearTimeout(timer);
-    }
+    return this._fibers.run(name, fn, options);
   }
 
-  private _recordFiberRecoveryFailure(
-    ctx: FiberRecoveryContext,
-    managedRow: FiberLedgerRow | null,
-    error: unknown,
-    startedAt: number,
-    reason = "handler_error"
-  ): void {
-    const errorMessage = this._fiberErrorMessage(error);
-    const completedAt = Date.now();
-    if (managedRow) {
-      this.sql`
-        UPDATE cf_agents_fibers
-        SET status = 'error',
-            error_message = ${errorMessage},
-            completed_at = ${completedAt}
-        WHERE fiber_id = ${ctx.id}
-          AND status = 'interrupted'
-      `;
-      this._notifyManagedFiberTerminal(ctx.id);
-    }
-    this._emit("fiber:recovery:failed", {
-      ...this._fiberRecoveryPayload(ctx, managedRow, startedAt),
-      error: errorMessage,
-      reason
-    });
-  }
-
-  private async _runFiberRecoveryHook(
-    ctx: FiberRecoveryContext,
-    managedRow: FiberLedgerRow | null
-  ): Promise<boolean> {
-    const startedAt = Date.now();
-    this._emit(
-      "fiber:recovery:attempt",
-      this._fiberRecoveryPayload(ctx, managedRow)
-    );
-    try {
-      const handled = await this._withFiberRecoveryTimeout(ctx, () =>
-        this._handleInternalFiberRecovery(ctx)
-      );
-      if (!handled) {
-        const recoveryResult = await this.onFiberRecovered(ctx);
-        if (managedRow && recoveryResult) {
-          this._applyManagedFiberRecoveryResult(ctx.id, recoveryResult);
-        }
-      }
-      this._emit("fiber:recovery:handled", {
-        ...this._fiberRecoveryPayload(ctx, managedRow, startedAt),
-        status: handled ? "internal" : managedRow ? "managed" : "user"
-      });
-      return true;
-    } catch (e) {
-      this._recordFiberRecoveryFailure(ctx, managedRow, e, startedAt);
-      console.error(
-        `[Agent] Fiber recovery failed for "${ctx.name}" (${ctx.id}):`,
-        e
-      );
-      return false;
-    }
-  }
-
-  private _fiberInspectionFromRow(row: FiberLedgerRow): FiberInspection {
-    const snapshot = this._parseFiberSnapshot(row.snapshot);
-    const inspection: FiberInspection = {
-      fiberId: row.fiber_id,
-      name: row.name,
-      status: row.status,
-      createdAt: row.created_at
-    };
-
-    if (row.idempotency_key !== null) {
-      inspection.idempotencyKey = row.idempotency_key;
-    }
-    if (snapshot !== undefined) {
-      inspection.snapshot = snapshot;
-    }
-    if (row.error_message !== null) {
-      inspection.error = row.error_message;
-    }
-    const metadata = this._parseFiberJsonObject(row.metadata_json);
-    if (metadata !== null) {
-      inspection.metadata = metadata;
-    }
-    if (row.started_at !== null) {
-      inspection.startedAt = row.started_at;
-    }
-    if (row.completed_at !== null) {
-      inspection.settledAt = row.completed_at;
-    }
-
-    return inspection;
-  }
-
-  private async _waitForManagedFiber(
-    fiberId: string
-  ): Promise<FiberInspection | null> {
-    const row = this._readFiber(fiberId);
-    if (!row || this._isTerminalFiberStatus(row.status)) {
-      return row ? this._fiberInspectionFromRow(row) : null;
-    }
-
-    if (this._managedFiberExecutions.has(fiberId)) {
-      await this._waitForManagedFiberTerminal(fiberId);
-      return this.inspectFiber(fiberId);
-    }
-
-    await this._checkRunFibers();
-    await this._waitForManagedFiberTerminal(fiberId);
-    return this.inspectFiber(fiberId);
-  }
-
-  private _readFiber(fiberId: string): FiberLedgerRow | null {
-    const rows = this.sql<FiberLedgerRow>`
-      SELECT fiber_id, idempotency_key, name, status, snapshot, metadata_json,
-             error_message, created_at, started_at, completed_at
-      FROM cf_agents_fibers
-      WHERE fiber_id = ${fiberId}
-      LIMIT 1
-    `;
-    return rows[0] ?? null;
-  }
-
-  private _readFiberByKey(idempotencyKey: string): FiberLedgerRow | null {
-    const rows = this.sql<FiberLedgerRow>`
-      SELECT fiber_id, idempotency_key, name, status, snapshot, metadata_json,
-             error_message, created_at, started_at, completed_at
-      FROM cf_agents_fibers
-      WHERE idempotency_key = ${idempotencyKey}
-      LIMIT 1
-    `;
-    return rows[0] ?? null;
-  }
-
-  private _listFiberRows(options?: ListFibersOptions): FiberLedgerRow[] {
-    const limit = Math.min(Math.max(options?.limit ?? 50, 1), 100);
-    const statuses = this._normalizeFiberStatusFilter(options?.status);
-    if (statuses) {
-      return [...statuses]
-        .flatMap((status) =>
-          this._listFiberRowsByStatus(status, limit, options?.name)
-        )
-        .sort((a, b) =>
-          b.created_at === a.created_at
-            ? b.fiber_id.localeCompare(a.fiber_id)
-            : b.created_at - a.created_at
-        )
-        .slice(0, limit);
-    }
-
-    if (options?.name) {
-      return this.sql<FiberLedgerRow>`
-        SELECT fiber_id, idempotency_key, name, status, snapshot, metadata_json,
-               error_message, created_at, started_at, completed_at
-        FROM cf_agents_fibers
-        WHERE name = ${options.name}
-        ORDER BY created_at DESC, fiber_id DESC
-        LIMIT ${limit}
-      `;
-    }
-
-    return this.sql<FiberLedgerRow>`
-      SELECT fiber_id, idempotency_key, name, status, snapshot, metadata_json,
-             error_message, created_at, started_at, completed_at
-      FROM cf_agents_fibers
-      ORDER BY created_at DESC, fiber_id DESC
-      LIMIT ${limit}
-    `;
-  }
-
-  private _listFiberRowsByStatus(
-    status: FiberStatus,
-    limit: number,
-    name?: string
-  ): FiberLedgerRow[] {
-    if (name) {
-      return this.sql<FiberLedgerRow>`
-        SELECT fiber_id, idempotency_key, name, status, snapshot, metadata_json,
-               error_message, created_at, started_at, completed_at
-        FROM cf_agents_fibers
-        WHERE status = ${status} AND name = ${name}
-        ORDER BY created_at DESC, fiber_id DESC
-        LIMIT ${limit}
-      `;
-    }
-
-    return this.sql<FiberLedgerRow>`
-      SELECT fiber_id, idempotency_key, name, status, snapshot, metadata_json,
-             error_message, created_at, started_at, completed_at
-      FROM cf_agents_fibers
-      WHERE status = ${status}
-      ORDER BY created_at DESC, fiber_id DESC
-      LIMIT ${limit}
-    `;
+  /**
+   * Accept a managed fiber: deduplicated by `fiberId` or `idempotencyKey`,
+   * kept in a ledger you inspect, cancel, resolve and delete.
+   */
+  startFiber(
+    name: string,
+    fn: (ctx: FiberContext) => Promise<void>,
+    options?: StartFiberOptions
+  ): Promise<StartFiberResult> {
+    return this._fibers.start(name, fn, options);
   }
 
   async inspectFiber(fiberId: string): Promise<FiberInspection | null> {
-    const row = this._readFiber(fiberId);
-    return row ? this._fiberInspectionFromRow(row) : null;
+    return this._fibers.inspect(fiberId);
   }
 
   async inspectFiberByKey(
     idempotencyKey: string
   ): Promise<FiberInspection | null> {
-    const row = this._readFiberByKey(idempotencyKey);
-    return row ? this._fiberInspectionFromRow(row) : null;
+    return this._fibers.inspectByKey(idempotencyKey);
   }
 
   async listFibers(options?: ListFibersOptions): Promise<FiberInspection[]> {
-    return this._listFiberRows(options).map((row) =>
-      this._fiberInspectionFromRow(row)
-    );
+    return this._fibers.list(options);
   }
 
   async cancelFiber(fiberId: string, reason?: string): Promise<boolean> {
-    const row = this._readFiber(fiberId);
-    if (!row || this._isTerminalFiberStatus(row.status)) {
-      return false;
-    }
-
-    const now = Date.now();
-    this.sql`
-      UPDATE cf_agents_fibers
-      SET status = 'aborted',
-          error_message = ${reason ?? null},
-          completed_at = ${now}
-      WHERE fiber_id = ${fiberId}
-        AND status IN ('pending', 'running')
-    `;
-    this._managedFiberAbortControllers.get(fiberId)?.abort(reason);
-    this._notifyManagedFiberTerminal(fiberId);
-    return true;
+    return this._fibers.cancel(fiberId, reason);
   }
 
   async cancelFiberByKey(
     idempotencyKey: string,
     reason?: string
   ): Promise<boolean> {
-    const row = this._readFiberByKey(idempotencyKey);
-    return row ? this.cancelFiber(row.fiber_id, reason) : false;
+    return this._fibers.cancelByKey(idempotencyKey, reason);
   }
 
   async resolveFiber(
     fiberId: string,
     result: FiberRecoveryResult
   ): Promise<boolean> {
-    const row = this._readFiber(fiberId);
-    if (!row || row.status !== "interrupted") {
-      return false;
-    }
-
-    this._applyManagedFiberRecoveryResult(fiberId, result);
-    return true;
+    return this._fibers.resolve(fiberId, result);
   }
 
   async deleteFibers(options?: DeleteFibersOptions): Promise<number> {
-    const statuses =
-      this._normalizeFiberStatusFilter(options?.status) ??
-      new Set<FiberStatus>(["completed", "aborted", "error"]);
-    const terminalStatuses = [...statuses].filter((status) =>
-      this._isTerminalFiberStatus(status)
-    );
-    if (terminalStatuses.length === 0) {
-      return 0;
-    }
-
-    const limit = Math.min(Math.max(options?.limit ?? 100, 1), 500);
-    const settledBefore = options?.settledBefore?.getTime();
-    const rows = terminalStatuses
-      .flatMap((status) =>
-        this._listTerminalFiberRowsForDelete(status, limit, settledBefore)
-      )
-      .sort((a, b) =>
-        a.completed_at === b.completed_at
-          ? a.created_at - b.created_at
-          : (a.completed_at ?? 0) - (b.completed_at ?? 0)
-      )
-      .slice(0, limit);
-
-    for (const row of rows) {
-      this.sql`
-        DELETE FROM cf_agents_fibers
-        WHERE fiber_id = ${row.fiber_id}
-          AND status IN ('completed', 'aborted', 'interrupted', 'error')
-      `;
-    }
-
-    return rows.length;
-  }
-
-  private _listTerminalFiberRowsForDelete(
-    status: FiberStatus,
-    limit: number,
-    settledBefore?: number
-  ): FiberLedgerRow[] {
-    if (settledBefore !== undefined) {
-      return this.sql<FiberLedgerRow>`
-        SELECT fiber_id, idempotency_key, name, status, snapshot, metadata_json,
-               error_message, created_at, started_at, completed_at
-        FROM cf_agents_fibers
-        WHERE status = ${status}
-          AND completed_at IS NOT NULL
-          AND completed_at < ${settledBefore}
-        ORDER BY completed_at ASC, created_at ASC
-        LIMIT ${limit}
-      `;
-    }
-
-    return this.sql<FiberLedgerRow>`
-      SELECT fiber_id, idempotency_key, name, status, snapshot, metadata_json,
-             error_message, created_at, started_at, completed_at
-      FROM cf_agents_fibers
-      WHERE status = ${status}
-      ORDER BY completed_at ASC, created_at ASC
-      LIMIT ${limit}
-    `;
-  }
-
-  // ── Legacy fibers: durable execution (see agents/tasks for the new engine) ──
-
-  /**
-   * Run a function as a durable fiber. The fiber is registered in SQLite
-   * before execution, checkpointable during execution via `ctx.stash()`,
-   * and recoverable after eviction via `onFiberRecovered`.
-   *
-   * - Row created in `cf_agents_runs` at start, deleted on completion
-   * - `keepAlive()` held for the duration — prevents idle eviction
-   * - Inline (await result) or fire-and-forget (`void this.runFiber(...)`)
-   *
-   * @param name Informational name for debugging and recovery filtering
-   * @param fn Async function to execute. Receives a FiberContext with stash/snapshot.
-   * @returns The return value of fn
-   */
-  async runFiber<T>(
-    name: string,
-    fn: (ctx: FiberContext) => Promise<T>
-  ): Promise<T> {
-    return this._runFiberInternal(nanoid(), name, fn);
+    return this._fibers.delete(options);
   }
 
   /**
-   * Internal framework entry point for fibers that need to compose their own
-   * recovery metadata with user checkpoint data while preserving the public
-   * `this.stash()` behavior.
-   *
-   * This deliberately stays protected/internal rather than becoming a public
-   * `runFiber()` option until the durable execution API needs this generality.
-   * @internal
-   */
-  protected async _runFiberWithStashWrapper<T>(
-    name: string,
-    fn: (ctx: FiberContext) => Promise<T>,
-    options: Pick<InternalFiberOptions, "initialSnapshot" | "wrapStash">
-  ): Promise<T> {
-    return this._runFiberInternal(nanoid(), name, fn, options);
-  }
-
-  async startFiber(
-    name: string,
-    fn: (ctx: FiberContext) => Promise<void>,
-    options?: StartFiberOptions
-  ): Promise<StartFiberResult> {
-    const fiberId = options?.fiberId ?? nanoid();
-    const idempotencyKey = options?.idempotencyKey;
-    if (options?.fiberId !== undefined && options.fiberId.trim() === "") {
-      throw new Error("fiberId must not be blank");
-    }
-    if (
-      options?.idempotencyKey !== undefined &&
-      options.idempotencyKey.trim() === ""
-    ) {
-      throw new Error("idempotencyKey must not be blank");
-    }
-    const existingById = this._readFiber(fiberId);
-    const existingByKey = idempotencyKey
-      ? this._readFiberByKey(idempotencyKey)
-      : null;
-
-    if (
-      existingById &&
-      existingByKey &&
-      existingById.fiber_id !== existingByKey.fiber_id
-    ) {
-      throw new Error("fiberId and idempotencyKey refer to different fibers");
-    }
-    if (
-      existingByKey &&
-      options?.fiberId &&
-      existingByKey.fiber_id !== fiberId
-    ) {
-      throw new Error("fiberId and idempotencyKey refer to different fibers");
-    }
-
-    const existing = existingById ?? existingByKey;
-    if (existing) {
-      if (
-        options?.waitForCompletion &&
-        !this._isTerminalFiberStatus(existing.status)
-      ) {
-        const waited = await this._waitForManagedFiber(existing.fiber_id);
-        if (waited) {
-          return {
-            ...waited,
-            accepted: false
-          };
-        }
-        throw new Error(`Fiber ${existing.fiber_id} no longer exists`);
-      }
-      return {
-        ...this._fiberInspectionFromRow(existing),
-        accepted: false
-      };
-    }
-
-    const now = Date.now();
-    this.sql`
-      INSERT INTO cf_agents_fibers
-        (fiber_id, idempotency_key, name, status, snapshot, metadata_json,
-         error_message, created_at, started_at, completed_at)
-      VALUES
-        (${fiberId}, ${idempotencyKey ?? null}, ${name}, 'pending', NULL,
-         ${options?.metadata ? JSON.stringify(options.metadata) : null}, NULL,
-         ${now}, NULL, NULL)
-    `;
-
-    const row = this._readFiber(fiberId);
-    if (!row) {
-      throw new Error(`Failed to create fiber ${fiberId}`);
-    }
-
-    const execution = this._executeManagedFiber(fiberId, name, fn)
-      .catch((error) => {
-        console.error(
-          `[Agent] Managed fiber "${name}" (${fiberId}) failed:`,
-          error
-        );
-      })
-      .finally(() => {
-        if (this._managedFiberExecutions.get(fiberId) === execution) {
-          this._managedFiberExecutions.delete(fiberId);
-        }
-      });
-    this._managedFiberExecutions.set(fiberId, execution);
-
-    if (options?.waitForCompletion) {
-      const completed = await this._waitForManagedFiber(fiberId);
-      if (!completed) {
-        throw new Error(`Fiber ${fiberId} no longer exists`);
-      }
-      return {
-        ...completed,
-        accepted: true
-      };
-    }
-
-    return {
-      ...this._fiberInspectionFromRow(row),
-      accepted: true
-    };
-  }
-
-  private async _executeManagedFiber(
-    fiberId: string,
-    name: string,
-    fn: (ctx: FiberContext) => Promise<void>
-  ): Promise<void> {
-    const row = this._readFiber(fiberId);
-    if (!row || row.status !== "pending") {
-      return;
-    }
-
-    const controller = new AbortController();
-    this._managedFiberAbortControllers.set(fiberId, controller);
-    const now = Date.now();
-    this.sql`
-      UPDATE cf_agents_fibers
-      SET status = 'running', started_at = ${now}
-      WHERE fiber_id = ${fiberId} AND status = 'pending'
-    `;
-
-    const updated = this._readFiber(fiberId);
-    if (!updated || updated.status !== "running") {
-      this._managedFiberAbortControllers.delete(fiberId);
-      return;
-    }
-
-    let settled = false;
-    try {
-      await this._runFiberInternal(fiberId, name, fn, {
-        signal: controller.signal,
-        managed: true,
-        beforeRunCleanup: (outcome) => {
-          settled = true;
-          this._settleManagedFiberExecution(
-            fiberId,
-            outcome,
-            controller.signal
-          );
-        }
-      });
-    } catch (error) {
-      if (!settled) {
-        this._settleManagedFiberExecution(
-          fiberId,
-          { ok: false, error },
-          controller.signal
-        );
-      }
-    } finally {
-      this._managedFiberAbortControllers.delete(fiberId);
-    }
-  }
-
-  private async _runFiberInternal<T>(
-    id: string,
-    name: string,
-    fn: (ctx: FiberContext) => Promise<T>,
-    options?: InternalFiberOptions
-  ): Promise<T> {
-    const signal = options?.signal ?? new AbortController().signal;
-    this._withAgentSpan(
-      "initialize_fiber",
-      "fiber",
-      {
-        "cloudflare.agents.fiber.id": id,
-        "cloudflare.agents.fiber.name": name
-      },
-      () => {
-        this.sql`
-          INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
-          VALUES (${id}, ${name}, NULL, ${Date.now()})
-        `;
-      }
-    );
-    const startedAt = Date.now();
-    this._emit("fiber:run:started", {
-      fiberId: id,
-      fiberName: name,
-      managed: options?.managed === true
-    });
-    this._runFiberActiveFibers.add(id);
-
-    const writeSnapshot = (data: unknown) => {
-      const snapshot = JSON.stringify(data);
-      this._withAgentSpan(
-        "persist_fiber_snapshot",
-        "fiber",
-        {
-          "cloudflare.agents.fiber.id": id,
-          "cloudflare.agents.fiber.name": name
-        },
-        () => {
-          this.sql`
-            UPDATE cf_agents_runs SET snapshot = ${snapshot}
-            WHERE id = ${id}
-          `;
-          if (options?.managed) {
-            this.sql`
-              UPDATE cf_agents_fibers SET snapshot = ${snapshot}
-              WHERE fiber_id = ${id}
-            `;
-          }
-        }
-      );
-    };
-
-    let root: RootFacetRpcSurface | undefined;
-    let registeredFacetRun = false;
-    let bodyOutcome:
-      | { status: "completed" | "error" | "aborted"; error: string | null }
-      | undefined;
-    let dispose: () => void = () => {};
-    try {
-      if ("initialSnapshot" in (options ?? {})) {
-        writeSnapshot(options?.initialSnapshot);
-      }
-
-      if (this._isFacet) {
-        root = await this._rootAlarmOwner();
-        await root._cf_registerFacetRun(this.selfPath, id);
-        registeredFacetRun = true;
-      }
-
-      dispose = await this.keepAlive();
-      const stash = (data: unknown) => {
-        writeSnapshot(options?.wrapStash ? options.wrapStash(data) : data);
-      };
-
-      try {
-        let result: T;
-        try {
-          result = await _fiberALS.run({ id, signal, stash }, () =>
-            fn({ id, signal, stash, snapshot: null })
-          );
-        } catch (error) {
-          bodyOutcome = {
-            status: signal.aborted ? "aborted" : "error",
-            error: this._fiberErrorMessage(error)
-          };
-          throw error;
-        }
-        bodyOutcome = { status: "completed", error: null };
-        options?.beforeRunCleanup?.({ ok: true });
-        this._emit("fiber:run:completed", {
-          fiberId: id,
-          fiberName: name,
-          managed: options?.managed === true,
-          elapsedMs: Date.now() - startedAt
-        });
-        return result;
-      } catch (error) {
-        options?.beforeRunCleanup?.({ ok: false, error });
-        this._emit("fiber:run:failed", {
-          fiberId: id,
-          fiberName: name,
-          managed: options?.managed === true,
-          error: this._fiberErrorMessage(error),
-          elapsedMs: Date.now() - startedAt
-        });
-        throw error;
-      }
-    } finally {
-      this._runFiberActiveFibers.delete(id);
-      let rowDeleted = false;
-      try {
-        this._withAgentSpan(
-          "finalize_fiber",
-          "fiber",
-          {
-            "cloudflare.agents.fiber.id": id,
-            "cloudflare.agents.fiber.name": name
-          },
-          () => {
-            if (bodyOutcome) {
-              try {
-                this.sql`
-                  UPDATE cf_agents_runs
-                  SET completed_at = ${Date.now()},
-                      outcome = ${bodyOutcome.status},
-                      error_message = ${bodyOutcome.error}
-                  WHERE id = ${id}
-                `;
-              } catch {
-                // The delete below is still worth attempting.
-              }
-            }
-            this.sql`DELETE FROM cf_agents_runs WHERE id = ${id}`;
-          }
-        );
-        rowDeleted = true;
-      } catch (error) {
-        console.error(
-          `[Agent] Failed to finalize fiber "${name}" (${id}); leaving run row for recovery:`,
-          error
-        );
-      }
-      dispose();
-      // The root's registration is what brings recovery back to an idle facet,
-      // so it stays until the leftover row is gone.
-      if (root && registeredFacetRun && rowDeleted) {
-        try {
-          await root._cf_unregisterFacetRun(this.selfPath, id);
-        } catch (e) {
-          // Leave the root-side lease behind if cleanup fails; root
-          // housekeeping will re-enter the facet and prune stale rows
-          // once it observes that this fiber row no longer exists.
-          console.error("[Agent] Failed to unregister facet fiber:", e);
-        }
-      }
-    }
-  }
-
-  /**
-   * Checkpoint data for the currently executing fiber.
-   * Uses AsyncLocalStorage to identify the correct fiber,
-   * so it works correctly even with concurrent fibers.
-   *
-   * Throws if called outside a `runFiber` callback.
+   * Checkpoint data for the fiber running in the current async context.
+   * Throws if called outside a fiber.
    */
   stash(data: unknown): void {
-    const ctx = _fiberALS.getStore();
-    if (!ctx) {
-      throw new Error("stash() called outside a fiber");
-    }
-    ctx.stash(data);
+    stashCurrentFiber(data);
   }
 
   /**
-   * Run `fn` inside the fiber stash context so `this.stash()` keeps working
-   * for turns executing on the `tasks` capability exactly as it does inside
-   * legacy `runFiber()` closures.
+   * Run `fn` as the current fiber so `this.stash()` works for turns
+   * running on the `tasks` capability.
    * @internal
    */
   protected _withFiberStash<T>(
-    context: {
-      id: string;
-      signal: AbortSignal;
-      stash: (data: unknown) => void;
-    },
+    context: FiberStashContext,
     fn: () => Promise<T>
   ): Promise<T> {
-    return _fiberALS.run(context, fn);
+    return withFiberStash(context, fn);
   }
 
   /**
@@ -4549,221 +3475,9 @@ export class Agent<
     return false;
   }
 
-  /** @internal Detect fibers left by a dead process (runFiber system). */
-  private async _checkRunFibers(): Promise<void> {
-    if (this._runFiberRecoveryInProgress) return;
-    this._runFiberRecoveryInProgress = true;
-    const scanStartedAt = Date.now();
-    const scanDeadlineMs = this._resolvedOptions.fiberRecoveryScanDeadlineMs;
-    const fiberRecoveryMaxAgeMs = this._resolvedOptions.fiberRecoveryMaxAgeMs;
-    // Forward progress this scan = at least one fiber was resolved (orphan row
-    // deleted via recovery/age-out/managed-terminal, or a ledger-only managed
-    // fiber finalized). Drives the recovery-alarm backoff in `_syncHostJobs`.
-    let madeProgress = false;
-
-    try {
-      const rows = this.sql<{
-        id: string;
-        name: string;
-        snapshot: string | null;
-        created_at: number;
-        completed_at: number | null;
-        outcome: "completed" | "error" | "aborted" | null;
-        error_message: string | null;
-      }>`
-        SELECT id, name, snapshot, created_at, completed_at, outcome,
-               error_message
-        FROM cf_agents_runs
-      `;
-
-      for (const row of rows) {
-        if (scanDeadlineMs > 0 && Date.now() - scanStartedAt > scanDeadlineMs) {
-          this._emit("fiber:recovery:skipped", {
-            fiberId: row.id,
-            fiberName: row.name,
-            reason: "scan_deadline_exceeded",
-            elapsedMs: Date.now() - scanStartedAt
-          });
-          break;
-        }
-        if (this._runFiberActiveFibers.has(row.id)) continue;
-
-        const managedRow = this._readFiber(row.id);
-        // A managed row needs the recorded outcome; without it the ledger
-        // can't be settled truthfully, so it falls through to recovery.
-        if (
-          row.completed_at !== null &&
-          (!managedRow || row.outcome !== null)
-        ) {
-          // The body settled and only its cleanup failed: nothing to recover.
-          // A managed ledger still non-terminal here means its settle write
-          // failed too, so record the body's own outcome.
-          if (managedRow) {
-            this.sql`
-              UPDATE cf_agents_fibers
-              SET status = ${row.outcome},
-                  error_message = ${row.error_message},
-                  completed_at = ${row.completed_at}
-              WHERE fiber_id = ${row.id}
-                AND status IN ('pending', 'running')
-            `;
-          }
-          this.sql`DELETE FROM cf_agents_runs WHERE id = ${row.id}`;
-          madeProgress = true;
-          if (managedRow) this._notifyManagedFiberTerminal(row.id);
-          continue;
-        }
-        if (managedRow && this._isTerminalFiberStatus(managedRow.status)) {
-          this.sql`DELETE FROM cf_agents_runs WHERE id = ${row.id}`;
-          madeProgress = true;
-          this._notifyManagedFiberTerminal(row.id);
-          continue;
-        }
-
-        const snapshot = this._parseFiberRecoverySnapshot(row.id, row.snapshot);
-        const ctx: FiberRecoveryContext = {
-          id: row.id,
-          name: row.name,
-          snapshot,
-          createdAt: row.created_at,
-          recoveryReason: "interrupted"
-        };
-
-        this._emit("fiber:recovery:detected", {
-          ...this._fiberRecoveryPayload(ctx, managedRow),
-          elapsedMs: Date.now() - row.created_at
-        });
-        this._emit("fiber:run:interrupted", {
-          fiberId: row.id,
-          fiberName: row.name,
-          managed: managedRow !== null,
-          recoveryReason: "interrupted",
-          elapsedMs: Date.now() - row.created_at
-        });
-        if (managedRow) {
-          const completedAt = Date.now();
-          this.sql`
-            UPDATE cf_agents_fibers
-            SET status = 'interrupted',
-                snapshot = ${row.snapshot},
-                completed_at = ${completedAt}
-            WHERE fiber_id = ${row.id}
-              AND status IN ('pending', 'running')
-          `;
-          ctx.idempotencyKey = managedRow.idempotency_key ?? undefined;
-          ctx.metadata = this._parseFiberJsonObject(managedRow.metadata_json);
-          ctx.status = "interrupted";
-        }
-
-        const recovered = await this._runFiberRecoveryHook(ctx, managedRow);
-        // Managed rows are always cleaned up (their ledger row records the
-        // terminal status). Unmanaged rows are retained when recovery fails so
-        // a later scan can retry — but only until they exceed the max age, at
-        // which point a repeatedly-throwing hook would otherwise loop forever.
-        const tooOld =
-          fiberRecoveryMaxAgeMs > 0 &&
-          Date.now() - row.created_at > fiberRecoveryMaxAgeMs;
-        if (recovered || managedRow || tooOld) {
-          if (!recovered && !managedRow && tooOld) {
-            this._emit("fiber:recovery:skipped", {
-              fiberId: row.id,
-              fiberName: row.name,
-              reason: "max_age_exceeded",
-              elapsedMs: Date.now() - row.created_at
-            });
-          }
-          this.sql`DELETE FROM cf_agents_runs WHERE id = ${row.id}`;
-          madeProgress = true;
-        }
-        if (managedRow) {
-          this._notifyManagedFiberTerminal(row.id);
-        }
-      }
-
-      const ledgerOnlyRows = this.sql<FiberLedgerRow>`
-        SELECT f.fiber_id, f.idempotency_key, f.name, f.status, f.snapshot,
-               f.metadata_json, f.error_message, f.created_at, f.started_at,
-               f.completed_at
-        FROM cf_agents_fibers f
-        LEFT JOIN cf_agents_runs r ON r.id = f.fiber_id
-        WHERE f.status IN ('pending', 'running')
-          AND r.id IS NULL
-      `;
-
-      for (const row of ledgerOnlyRows) {
-        if (scanDeadlineMs > 0 && Date.now() - scanStartedAt > scanDeadlineMs) {
-          this._emit("fiber:recovery:skipped", {
-            fiberId: row.fiber_id,
-            fiberName: row.name,
-            reason: "scan_deadline_exceeded",
-            elapsedMs: Date.now() - scanStartedAt,
-            managed: true
-          });
-          break;
-        }
-        if (this._runFiberActiveFibers.has(row.fiber_id)) continue;
-
-        const snapshot = this._parseFiberRecoverySnapshot(
-          row.fiber_id,
-          row.snapshot
-        );
-        const completedAt = Date.now();
-        this.sql`
-          UPDATE cf_agents_fibers
-          SET status = 'interrupted',
-              completed_at = ${completedAt}
-          WHERE fiber_id = ${row.fiber_id}
-            AND status IN ('pending', 'running')
-        `;
-
-        const ctx: FiberRecoveryContext = {
-          id: row.fiber_id,
-          name: row.name,
-          snapshot,
-          createdAt: row.created_at,
-          idempotencyKey: row.idempotency_key ?? undefined,
-          metadata: this._parseFiberJsonObject(row.metadata_json),
-          status: "interrupted",
-          recoveryReason: "interrupted"
-        };
-        this._emit("fiber:recovery:detected", {
-          ...this._fiberRecoveryPayload(ctx, row),
-          elapsedMs: Date.now() - row.created_at
-        });
-        this._emit("fiber:run:interrupted", {
-          fiberId: row.fiber_id,
-          fiberName: row.name,
-          managed: true,
-          recoveryReason: "interrupted",
-          elapsedMs: Date.now() - row.created_at
-        });
-
-        await this._runFiberRecoveryHook(ctx, row);
-        // A ledger-only fiber is finalized this pass regardless of hook outcome
-        // (its ledger row is marked terminal and waiters are notified), so it
-        // will not be pending next scan — that is forward progress.
-        madeProgress = true;
-        this._notifyManagedFiberTerminal(row.fiber_id);
-      }
-    } finally {
-      this._runFiberRecoveryInProgress = false;
-      // Update the recovery-alarm backoff streak: reset on any forward progress,
-      // otherwise grow it only while work is still pending (a repeatedly-failing
-      // poison hook). `_syncHostJobs` reads this to space out retries.
-      if (madeProgress) {
-        this._recoveryNoProgressScans = 0;
-      } else {
-        this._recoveryNoProgressScans = this._hasPendingFiberRecovery()
-          ? this._recoveryNoProgressScans + 1
-          : 0;
-      }
-    }
-  }
-
-  /** @internal */
-  async _onAlarmHousekeeping(): Promise<void> {
-    await this._checkRunFibers();
-    await this._checkFacetRunFibers();
+  /** @internal Recover fibers left by a dead process. */
+  private _checkRunFibers(): Promise<void> {
+    return this._fibers.recover();
   }
 
   private _isSameAgentPathPrefix(
@@ -4776,28 +3490,6 @@ export class Agent<
         step.className === path[index].className &&
         step.name === path[index].name
     );
-  }
-
-  /**
-   * Root-side scan for durable fibers owned by descendant facets.
-   * `cf_agents_facet_runs` is only an index; actual snapshots and
-   * recovery hooks live in each facet's own `cf_agents_runs` table.
-   * @internal
-   */
-  private _checkFacetRunFibers(): Promise<void> {
-    return this._dynamicAgents.checkRunFibers();
-  }
-
-  /**
-   * Dispatch a runFiber recovery check into the facet identified by
-   * `ownerPath`. Returns the number of remaining local `cf_agents_runs`
-   * rows on the target facet after recovery.
-   * @internal
-   */
-  _cf_checkRunFibersForFacet(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): Promise<number> {
-    return this._dynamicAgents.checkRunFibersAtPath(ownerPath);
   }
 
   /**
@@ -4835,49 +3527,19 @@ export class Agent<
   }
 
   /**
-   * Whether any runFiber recovery work is still outstanding: orphaned
-   * `cf_agents_runs` rows left by a dead process (excluding fibers currently
-   * executing in memory, which already hold a keepAlive ref) or managed
-   * ledger fibers stuck in a non-terminal state with no live run row.
-   *
-   * Used by `_syncHostJobs` to arm a follow-up alarm so multi-pass
-   * recovery (e.g. after a scan-deadline yield, or while retrying a throwing
-   * recovery hook) resumes instead of starving.
-   * @internal
-   */
-  private _hasPendingFiberRecovery(): boolean {
-    const runRows = this.sql<{ id: string }>`
-      SELECT id FROM cf_agents_runs
-    `;
-    for (const row of runRows) {
-      if (!this._runFiberActiveFibers.has(row.id)) return true;
-    }
-
-    const ledgerOnly = this.sql<{ count: number }>`
-      SELECT COUNT(*) AS count
-      FROM cf_agents_fibers f
-      LEFT JOIN cf_agents_runs r ON r.id = f.fiber_id
-      WHERE f.status IN ('pending', 'running')
-        AND r.id IS NULL
-    `;
-    return (ledgerOnly[0]?.count ?? 0) > 0;
-  }
-
-  /**
    * Synchronize Agent-owned host jobs with current durable state.
    *
-   * Replaces the old pull-based `getNextAlarm()` contribution: keep-alive
-   * refs hold a `cf:keep-alive` job, and fiber-recovery / facet-run state
-   * holds a `cf:housekeeping` job. Every state change that used to trigger
-   * an alarm recalculation now re-pushes or cancels these jobs; queue
-   * mutations re-arm the physical alarm automatically.
+   * Keep-alive refs hold a `cf:keep-alive` job and a pending destroy holds
+   * `cf:destroy`. Fiber recovery owns its own wake (the `Fibers`
+   * capability); a `cf:housekeeping` job left by an older release is
+   * cancelled. Queue mutations re-arm the physical alarm automatically.
    * @internal
    */
   private async _syncHostJobs(): Promise<void> {
     if (this._destroyed) return;
     if (this._isFacet) {
       // A facet has no alarm slot (`setAlarm()` throws): the root holds its
-      // keepAlive refs and facet-run leases, and facets never write the
+      // keepAlive refs and mirrors fiber wakes, and facets never write the
       // destroy marker. Earlier releases could persist a host job here
       // before the re-arm threw; drop it so it cannot re-arm again.
       const work = this.lifecycle.jobs;
@@ -4923,54 +3585,13 @@ export class Agent<
         await work.cancel(HOST_JOB_KEEP_ALIVE_ID);
       }
 
-      const housekeepingAt = this._nextHousekeepingWakeMs(nowMs);
-      if (housekeepingAt !== null) {
-        await work.push({
-          id: HOST_JOB_HOUSEKEEPING_ID,
-          fn: "housekeeping",
-          time: housekeepingAt
-        });
-      } else if (work.get(HOST_JOB_HOUSEKEEPING_ID)) {
+      if (work.get(HOST_JOB_HOUSEKEEPING_ID)) {
         await work.cancel(HOST_JOB_HOUSEKEEPING_ID);
       }
     });
   }
 
-  /**
-   * The next wake fiber-recovery or facet-run housekeeping needs, or `null`
-   * when neither has pending durable state.
-   */
-  private _nextHousekeepingWakeMs(nowMs: number): number | null {
-    let nextTimeMs: number | null = null;
-
-    if (this._hasPendingFiberRecovery()) {
-      const base = this._resolvedOptions.keepAliveIntervalMs;
-      const exp = Math.min(
-        this._recoveryNoProgressScans,
-        FIBER_RECOVERY_BACKOFF_MAX_EXP
-      );
-      const recoveryDelayMs = Math.min(
-        FIBER_RECOVERY_MAX_BACKOFF_MS,
-        base * 2 ** exp
-      );
-      nextTimeMs = nowMs + recoveryDelayMs;
-    }
-
-    const facetRuns = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_facet_runs
-    `;
-    if ((facetRuns[0]?.count ?? 0) > 0) {
-      const facetRecoveryMs = nowMs + this._resolvedOptions.keepAliveIntervalMs;
-      nextTimeMs =
-        nextTimeMs === null
-          ? facetRecoveryMs
-          : Math.min(nextTimeMs, facetRecoveryMs);
-    }
-
-    return nextTimeMs;
-  }
-
-  /** Lifecycle alarm callback; Agent housekeeping runs after user alarm work. */
+  /** Lifecycle alarm callback; Agent re-syncs its host jobs after it. */
   onAlarm(): void {}
 
   /**
@@ -4994,19 +3615,16 @@ export class Agent<
   ): LifecycleJobOutcome | void | Promise<LifecycleJobOutcome | void> {
     switch (fn) {
       case "keepAlive":
-        // This job's only purpose is guaranteeing wakes while refs are
-        // held; housekeeping itself runs on every alarm via the onAlarm
-        // wrapper.
+        // This job's only purpose is guaranteeing wakes while refs are held.
         return this._keepAliveRefs > 0
           ? {
               rescheduleAt:
                 Date.now() + this._resolvedOptions.keepAliveIntervalMs
             }
           : undefined;
-      case "housekeeping": {
-        const next = this._nextHousekeepingWakeMs(Date.now());
-        return next === null ? undefined : { rescheduleAt: next };
-      }
+      case "housekeeping":
+        // Left by an older release; fiber recovery has its own wake now.
+        return undefined;
       case "destroy":
         // The alarm preamble consumes pending destroys before the event
         // loop runs; a surviving job is stale.

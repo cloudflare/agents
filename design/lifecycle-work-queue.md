@@ -218,12 +218,13 @@ deduplicates still calls `jobs.rearm()` so a lost alarm recovers.
 
 Agent's pull contributions became pushed jobs, synchronized with durable
 state by `_syncHostJobs()` (called on startup, on state changes that used to
-trigger an alarm recalculation, and after each alarm's housekeeping):
+trigger an alarm recalculation, and after each alarm):
 
 - `cf:keep-alive` — held while keep-alive refs exist; reschedules every
   `keepAliveIntervalMs`; cancelled at zero refs.
-- `cf:housekeeping` — held while fiber-recovery or facet-run state exists;
-  reschedules with the existing backoff math; completes when idle.
+- `cf:housekeeping` — no longer pushed. Fiber recovery moved to the
+  `Fibers` capability's own `fibers:recover` job ([fibers.md](./fibers.md));
+  a leftover `cf:housekeeping` job is cancelled or completes as a no-op.
 - `cf:destroy` — exclusive; re-derived from the durable `DESTROY_PENDING_KEY`
   marker on every sync (covering markers written by pre-queue releases), so
   a keepAlive-holding agent cannot delay its own condemnation. The marker
@@ -232,5 +233,4 @@ trigger an alarm recalculation, and after each alarm's housekeeping):
 - `think:workflow-notifications` — Think's wake for its notification drain,
   replacing the removed `_getExtensionAlarm()`.
 
-Agent housekeeping continues to run on every alarm via its `onAlarm`
-wrapper; the host jobs exist to guarantee the wakes.
+Agent's `onAlarm` wrapper re-syncs the host jobs after every alarm.
