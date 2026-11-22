@@ -11,6 +11,7 @@ import type {
   AgentToolLifecycleResult,
   AgentToolRunInfo,
   AgentToolRunInspection,
+  AgentToolRunStatus,
   AgentToolStoredChunk,
   AgentToolTerminalStatus,
   RunAgentToolResult
@@ -68,7 +69,9 @@ type AgentToolInternals = {
     completedAt?: number
   ): Promise<void>;
   _armDetachedBackbone(options?: { resetCadence?: boolean }): Promise<void>;
-  _scheduleAgentToolRunRecovery(): Promise<void>;
+  _scheduleAgentToolRunRecovery(options?: {
+    runIds?: readonly string[];
+  }): Promise<void>;
 };
 
 type DetachedDeliveryLogEntry = {
@@ -513,6 +516,110 @@ export class TestAgentToolReplayAgent extends Agent {
       .some((column) => column.name === "child_name");
   }
 
+  /** Startup recovery with only an `interrupted` run from facet days. */
+  async recoverOnlyInterruptedFacetEraRunForTest(
+    runId: string
+  ): Promise<string | null> {
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, parent_tool_call_id, agent_type, status, display_order,
+        started_at, detached, detached_on_finish
+      ) VALUES (
+        ${runId}, ${null}, 'TestAgentToolStubChild', 'interrupted', 0,
+        ${Date.now()}, 1, 'onDetachedDone'
+      )
+    `;
+    await this._agentTool._scheduleAgentToolRunRecovery({ runIds: [] });
+    return this.readRunStatusForTest(runId);
+  }
+
+  /**
+   * A facet-era detached run whose `onFinish` fails the first time: the
+   * backbone delivers it again once the claim's lease has passed.
+   */
+  async redeliverFacetEraFinishForTest(runId: string): Promise<void> {
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, parent_tool_call_id, agent_type, status, display_order,
+        started_at, detached, detached_on_finish
+      ) VALUES (
+        ${runId}, ${null}, 'TestAgentToolStubChild', 'running', 0,
+        ${Date.now()}, 1, 'onDetachedFailsOnce'
+      )
+    `;
+    await this._agentTool._scheduleAgentToolRunRecovery({ runIds: [] });
+    this.expireDetachedFinishClaimForTest(runId);
+    await this._cfDetachedReconcileTick();
+  }
+
+  /** Clear a run whose own child has run tools: did it ask the child to clear? */
+  async clearAsksChildToClearForTest(runId: string): Promise<unknown> {
+    await this.runDeterministicAgentToolForTest({ runId, chunkBodies: [] });
+    const routed = await this.fetchRunChildForTest(`agent-tool-runs/${runId}/`);
+    const childName = routed.body.split(" ")[1];
+    await this.clearAgentToolRuns();
+    const child = await getAgentByName(
+      this.env.TestAgentToolStubChild,
+      childName
+    );
+    return child.clearedRunsForTest();
+  }
+
+  /** Clear an `interrupted` run whose child is still working: is it cancelled? */
+  async clearCancelsInterruptedRunForTest(
+    runId: string
+  ): Promise<string | undefined> {
+    const child = await this._stubChildForTest(runId);
+    await child.startAgentToolRun(
+      { chunkBodies: [], pendingChunkBodies: ["x"] },
+      { runId }
+    );
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        child_name, child_name_minted, run_id, parent_tool_call_id,
+        agent_type, status, display_order, started_at, detached
+      ) VALUES (
+        ${childNameForTest(runId)}, 0, ${runId}, ${null},
+        'TestAgentToolStubChild', 'interrupted', 0, ${Date.now()}, 0
+      )
+    `;
+    await this.clearAgentToolRuns();
+    const inspection = (await child.inspectAgentToolRun(runId)) as {
+      status: string;
+    } | null;
+    return inspection?.status;
+  }
+
+  /** Open a WebSocket to a run's child through this agent's route. */
+  async connectRunChildForTest(path: string): Promise<string> {
+    const response = await this.fetch(
+      new Request(`https://agent.test/${path}`, {
+        headers: { Upgrade: "websocket" }
+      })
+    );
+    const socket = response.webSocket;
+    if (!socket) return `no socket (${response.status})`;
+    socket.accept();
+    const first = await new Promise<string>((resolve) => {
+      socket.addEventListener("message", (event) =>
+        resolve(String(event.data))
+      );
+    });
+    socket.close();
+    return first;
+  }
+
+  /** Fetch a path under this agent, as the Worker would forward it. */
+  async fetchPathForTest(path: string): Promise<{
+    status: number;
+    body: string;
+  }> {
+    const response = await this.fetch(
+      new Request(`https://agent.test/${path}`)
+    );
+    return { status: response.status, body: await response.text() };
+  }
+
   /** Re-issue a run id an earlier version left open, with no child name. */
   async reissueFacetEraRunForTest(runId: string): Promise<RunAgentToolResult> {
     this.sql`
@@ -780,6 +887,18 @@ export class TestAgentToolReplayAgent extends Agent {
  * wakes a hibernated DO can still replay them via `getAgentToolChunks`.
  */
 export class TestAgentToolStubChild extends Agent {
+  override async clearAgentToolRuns(options?: {
+    olderThan?: number;
+    status?: AgentToolRunStatus[];
+  }): Promise<void> {
+    await this.ctx.storage.put("cleared-runs", true);
+    await super.clearAgentToolRuns(options);
+  }
+
+  async clearedRunsForTest(): Promise<unknown> {
+    return (await this.ctx.storage.get("cleared-runs")) ?? null;
+  }
+
   async destroyPendingForTest(): Promise<unknown> {
     return (await this.ctx.storage.get("cf_agents_destroy_pending")) ?? null;
   }

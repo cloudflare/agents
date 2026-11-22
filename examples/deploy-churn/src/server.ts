@@ -960,21 +960,9 @@ export class DeployChurnAgent extends Think<Env> {
     this.sql`DELETE FROM harness_ledger`;
     this._ensureHarnessConfigTable();
     this.sql`DELETE FROM harness_config`;
-    // Sub-agent harness: reset the child and clear the parent's launched-run
-    // records so a fresh subagent run starts from zero.
-    try {
-      const child = await this.getAgentToolChild<DeployChurnSubAgentChild>(
-        SUB_AGENT_CHILD_RUN_ID
-      );
-      await child?.resetChild();
-    } catch {
-      // Child may not exist yet.
-    }
-    try {
-      this.sql`DELETE FROM cf_agent_tool_runs`;
-    } catch {
-      // Table not created until the first agent-tool run.
-    }
+    // Sub-agent harness: clearing the launched runs destroys their children,
+    // so a fresh subagent run starts from zero.
+    await this.clearAgentToolRuns();
     this.log("harness:reset", { clearedIncidents: incidents.length });
     return { ok: true };
   }

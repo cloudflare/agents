@@ -600,8 +600,22 @@ class is a declared Durable Object, so `routeAgentRequest()` also routes
 `/agents/<child-class>/<name>` to it directly. A client that drills in learns
 the child's name (the child sends its identity on connect). Authorize both
 paths in your Worker, for example in the `onBeforeConnect` and
-`onBeforeRequest` options of `routeAgentRequest()`, the same way you
-authorize the parent.
+`onBeforeRequest` options of `routeAgentRequest()`: authorize the parent the
+way you already do, and refuse the child classes so clients reach a child only
+through its parent:
+
+```ts
+const children = new Set(["Researcher"]);
+const refuseChildren = (_request: Request, route: { className: string }) =>
+  children.has(route.className)
+    ? new Response("Not found", { status: 404 })
+    : undefined;
+
+routeAgentRequest(request, env, {
+  onBeforeConnect: refuseChildren,
+  onBeforeRequest: refuseChildren
+});
+```
 
 ## Clear retained runs
 
@@ -617,9 +631,10 @@ await this.clearAgentToolRuns({
 await this.clearAgentToolRuns({ olderThan: Date.now() - 7 * 24 * 60 * 60_000 });
 ```
 
-If a retained run is still `starting` or `running`, cleanup cancels the child
-first. Each cleared run's child is then destroyed: its storage is wiped on its
-next wake.
+If a retained run is still `starting`, `running` or `interrupted`, cleanup
+cancels it on the child first. A child is destroyed with the last cleared run
+that uses it: it clears its own runs, then its storage is wiped on its next
+wake.
 
 ## Runs started before child Durable Objects
 

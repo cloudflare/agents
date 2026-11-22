@@ -70,14 +70,16 @@ export function agentToolChildStub(
 }
 
 /**
- * @internal The run id a request addresses through the parent, and the path the
- * child sees, or `null` when the request is not for a run.
+ * @internal Every reading of a request as `/agent-tool-runs/{runId}/...`: the
+ * run id and the path the child sees. The segment can also be part of the
+ * agent's own name, so each occurrence is a candidate.
  */
 export function matchAgentToolRunRequest(
   request: Request
-): { runId: string; url: URL } | null {
+): Array<{ runId: string; url: URL }> {
   const url = new URL(request.url);
   const segments = url.pathname.split("/");
+  const matches: Array<{ runId: string; url: URL }> = [];
   for (let i = 1; i < segments.length - 1; i++) {
     if (segments[i] !== AGENT_TOOL_RUN_ROUTE || segments[i + 1] === "") {
       continue;
@@ -88,10 +90,11 @@ export function matchAgentToolRunRequest(
     } catch {
       // Keep the raw segment.
     }
-    url.pathname = `/${segments.slice(i + 2).join("/")}`;
-    return { runId, url };
+    const target = new URL(url);
+    target.pathname = `/${segments.slice(i + 2).join("/")}`;
+    matches.push({ runId, url: target });
   }
-  return null;
+  return matches;
 }
 
 /**
@@ -106,14 +109,17 @@ export async function forwardAgentToolRunRequest(
   request: Request,
   child: (runId: string) => { className: string; childName: string } | null
 ): Promise<Response | undefined> {
-  const match = matchAgentToolRunRequest(request);
-  if (!match) return undefined;
-  const target = child(match.runId);
-  if (!target) return new Response("Agent tool run not found", { status: 404 });
-  const stub = await agentToolChildStub(
-    ctx,
-    target.className,
-    target.childName
-  );
-  return stub.fetch(new Request(match.url, request));
+  const matches = matchAgentToolRunRequest(request);
+  if (matches.length === 0) return undefined;
+  for (const match of matches) {
+    const target = child(match.runId);
+    if (!target) continue;
+    const stub = await agentToolChildStub(
+      ctx,
+      target.className,
+      target.childName
+    );
+    return stub.fetch(new Request(match.url, request));
+  }
+  return new Response("Agent tool run not found", { status: 404 });
 }
