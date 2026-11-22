@@ -171,6 +171,22 @@ describe("agent-tool run child", () => {
     });
   });
 
+  it("refuses a drill-in to a facet-era run instead of opening the parent", async () => {
+    const parent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `facet-era-drill-${crypto.randomUUID()}`
+    );
+    await parent.seedFinishedFacetEraRunForTest("old-finished");
+    const socket = await parent.connectRunChildForTest(
+      "agents/test-agent-tool-replay-agent/x/agent-tool-runs/old-finished"
+    );
+    expect(socket).toBe("no socket (404)");
+    const http = await parent.fetchPathForTest(
+      "agents/test-agent-tool-replay-agent/x/agent-tool-runs/old-finished/hello"
+    );
+    expect(http.status).toBe(404);
+  });
+
   it("ends a facet-era run that is only interrupted at startup", async () => {
     const parent = await getAgentByName(
       env.TestAgentToolReplayAgent,

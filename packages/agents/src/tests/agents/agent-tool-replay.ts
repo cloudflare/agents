@@ -624,6 +624,19 @@ export class TestAgentToolReplayAgent extends Agent {
     return { status: response.status, body: await response.text() };
   }
 
+  /** A finished run from when children were facets: it has no child name. */
+  seedFinishedFacetEraRunForTest(runId: string): void {
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, parent_tool_call_id, agent_type, status, display_order,
+        started_at, completed_at, detached
+      ) VALUES (
+        ${runId}, ${`call-${runId}`}, 'TestAgentToolStubChild', 'completed',
+        0, ${Date.now()}, ${Date.now()}, 0
+      )
+    `;
+  }
+
   /** Re-issue a run id an earlier version left open, with no child name. */
   async reissueFacetEraRunForTest(runId: string): Promise<RunAgentToolResult> {
     this.sql`
