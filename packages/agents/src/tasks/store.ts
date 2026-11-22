@@ -11,30 +11,30 @@ import type { TaskJson, TaskRunRow, TaskRunSnapshot, TaskValue } from "./types";
 
 /** Columns of `cf_agents_task_runs`. */
 const RUNS_COLUMNS = `
-  run_id TEXT PRIMARY KEY,
-  definition TEXT NOT NULL,
-  input TEXT,
-  status TEXT NOT NULL CHECK (status IN (
-    'pending', 'running', 'completed', 'error', 'aborted'
-  )),
-  result TEXT,
-  error_name TEXT,
-  error_message TEXT,
-  status_message TEXT,
-  metadata TEXT,
-  idempotency_key TEXT UNIQUE,
-  retain INTEGER NOT NULL DEFAULT 1,
-  attempt INTEGER NOT NULL DEFAULT 0,
-  generation TEXT,
-  next_at INTEGER,
-  wait_reason TEXT,
-  cancel_requested INTEGER NOT NULL DEFAULT 0,
-  cancel_reason TEXT,
-  created_at INTEGER NOT NULL,
-  started_at INTEGER,
-  updated_at INTEGER NOT NULL,
-  settled_at INTEGER
-`;
+        run_id TEXT PRIMARY KEY,
+        definition TEXT NOT NULL,
+        input TEXT,
+        status TEXT NOT NULL CHECK (status IN (
+          'pending', 'running', 'completed', 'error', 'aborted'
+        )),
+        result TEXT,
+        error_name TEXT,
+        error_message TEXT,
+        status_message TEXT,
+        metadata TEXT,
+        idempotency_key TEXT UNIQUE,
+        retain INTEGER NOT NULL DEFAULT 1,
+        attempt INTEGER NOT NULL DEFAULT 0,
+        generation TEXT,
+        next_at INTEGER,
+        wait_reason TEXT,
+        cancel_requested INTEGER NOT NULL DEFAULT 0,
+        cancel_reason TEXT,
+        created_at INTEGER NOT NULL,
+        started_at INTEGER,
+        updated_at INTEGER NOT NULL,
+        settled_at INTEGER
+      `;
 
 /** @internal SQL-backed store for one Tasks capability instance. */
 export class TaskStore {

@@ -6801,7 +6801,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const rows = this.sql<{ created_at: number }>`
       SELECT created_at FROM cf_agents_task_runs
       WHERE definition = ${(this.constructor as typeof Think).CHAT_FIBER_NAME}
-        AND state IN ('pending', 'running', 'waiting', 'recovering')
+        AND status IN ('pending', 'running')
         AND metadata = ${JSON.stringify({ requestId })}
       LIMIT 1
     `;

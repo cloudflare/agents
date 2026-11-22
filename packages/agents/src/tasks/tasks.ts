@@ -1380,7 +1380,7 @@ export class Tasks<
   #interruptedStep(runId: string): { name: string; attempt: number } | null {
     const rows = this.#store.sql<{ step_name: string; attempt: number }>`
       SELECT step_name, attempt FROM cf_agents_task_steps
-      WHERE run_id = ${runId} AND status = 'running'
+      WHERE run_id = ${runId} AND state = 'running'
       ORDER BY started_at DESC
       LIMIT 1
     `;

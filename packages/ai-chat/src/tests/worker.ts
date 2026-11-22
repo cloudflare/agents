@@ -91,7 +91,7 @@ async function insertInterruptedTurnForTest(
   const now = Date.now();
   agent.sql`
     INSERT INTO cf_agents_task_runs
-      (run_id, definition, input, state, metadata, idempotency_key, retain,
+      (run_id, definition, input, status, metadata, idempotency_key, retain,
        attempt, next_at, cancel_requested, created_at, updated_at)
     VALUES
       (${runId}, ${AIChatAgent.CHAT_FIBER_NAME},
@@ -110,7 +110,7 @@ async function recoverInterruptedTurnsForTest(
 ): Promise<void> {
   const runs = agent.sql<{ run_id: string; input: string; metadata: string }>`
     SELECT run_id, input, metadata FROM cf_agents_task_runs
-    WHERE definition = ${AIChatAgent.CHAT_FIBER_NAME} AND state = 'pending'
+    WHERE definition = ${AIChatAgent.CHAT_FIBER_NAME} AND status = 'pending'
     ORDER BY created_at
   `;
   for (const run of runs) {
@@ -3999,7 +3999,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       this.sql<{ count: number }>`
         SELECT COUNT(*) AS count FROM cf_agents_task_runs
         WHERE definition = '__cf_internal_chat_turn'
-          AND state IN ('pending', 'running', 'waiting')
+          AND status IN ('pending', 'running')
       `[0]?.count ?? 0
     );
   }
@@ -4010,7 +4010,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     this.sql`
       UPDATE cf_agents_task_runs SET next_at = ${past}
       WHERE definition = '__cf_internal_chat_turn'
-        AND state IN ('pending', 'running', 'waiting')
+        AND status IN ('pending', 'running')
     `;
     this.sql`
       UPDATE cf_agents_task_steps SET next_at = ${past}
@@ -4745,7 +4745,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     const rows = this.sql<{ run_id: string }>`
       SELECT run_id FROM cf_agents_task_runs
       WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
-        AND state IN ('pending', 'running', 'waiting')
+        AND status IN ('pending', 'running')
         AND json_extract(metadata, '$.callback') = ${callback}
       ORDER BY created_at ASC
       LIMIT 1
@@ -4964,7 +4964,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     const tasks = this.sql<{ count: number }>`
       SELECT COUNT(*) AS count FROM cf_agents_task_runs
       WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
-        AND state IN ('pending', 'running', 'waiting')
+        AND status IN ('pending', 'running')
         AND json_extract(metadata, '$.callback') = ${callback}
     `;
     return {
@@ -5037,7 +5037,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     const tasks = this.sql<{ count: number }>`
       SELECT COUNT(*) AS count FROM cf_agents_task_runs
       WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
-        AND state IN ('pending', 'running', 'waiting')
+        AND status IN ('pending', 'running')
         AND json_extract(metadata, '$.callback') = ${callback}
     `;
     return (scheduled[0]?.count ?? 0) + (tasks[0]?.count ?? 0);
@@ -5744,16 +5744,16 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
 
   /** This facet's own run row state, to check a routed strike reached it. */
   getFacetRecoveryOomRunStateForTest(runId: string): {
-    state: string;
+    status: string;
     generation: string | null;
     next_at: number | null;
   } | null {
     const rows = this.sql<{
-      state: string;
+      status: string;
       generation: string | null;
       next_at: number | null;
     }>`
-      SELECT state, generation, next_at FROM cf_agents_task_runs
+      SELECT status, generation, next_at FROM cf_agents_task_runs
       WHERE run_id = ${runId}
     `;
     return rows[0] ?? null;
@@ -5787,7 +5787,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     const rows = this.sql<{ count: number }>`
       SELECT COUNT(*) AS count FROM cf_agents_task_runs
       WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
-        AND state IN ('pending', 'running', 'waiting')
+        AND status IN ('pending', 'running')
         AND json_extract(metadata, '$.callback') = ${callback}
     `;
     return rows[0]?.count ?? 0;
@@ -5900,7 +5900,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     const taskRuns = this.sql<{ count: number }>`
       SELECT COUNT(*) AS count FROM cf_agents_task_runs
       WHERE definition = ${AIChatAgent.CHAT_FIBER_NAME}
-        AND state IN ('pending', 'running', 'waiting')
+        AND status IN ('pending', 'running')
     `;
     const fibers = this.sql<{ count: number }>`
       SELECT COUNT(*) AS count FROM cf_agents_runs
@@ -5952,9 +5952,9 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
 
   getTaskRunStateForTest(runId: string): string | null {
     return (
-      this.sql<{ state: string }>`
-        SELECT state FROM cf_agents_task_runs WHERE run_id = ${runId}
-      `[0]?.state ?? null
+      this.sql<{ status: string }>`
+        SELECT status FROM cf_agents_task_runs WHERE run_id = ${runId}
+      `[0]?.status ?? null
     );
   }
 
@@ -7453,7 +7453,7 @@ export class AIChatAgentToolParent extends Agent<Env> {
     await this.alarm();
     for (let i = 0; i < 100; i++) {
       const state = await child.getTaskStatusForTest(runId);
-      if (state === "completed" || state === "failed") break;
+      if (state === "completed" || state === "error") break;
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     return {

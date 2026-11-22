@@ -202,7 +202,7 @@ before re-entering irreversible work:
 ```
 
 A step callback that throws is not an interruption; the retry policy owns
-it, with the run parked `waiting` between attempts. Interruptions also emit
+it, with the run `pending` (`waitReason: "retry"`) between attempts. Interruptions also emit
 a `task:attempt:interrupted` event carrying the same step name.
 
 ## Inspection and control
@@ -215,16 +215,15 @@ await this.tasks.cancel(receipt.runId, "superseded");
 await this.tasks.delete({ settledBefore: new Date(Date.now() - 86_400_000) });
 ```
 
-A snapshot is discriminated by `state`:
+A snapshot is discriminated by `status`:
 
-| State       | Meaning                                                            |
-| ----------- | ------------------------------------------------------------------ |
-| `pending`   | Accepted, first attempt not yet claimed.                           |
-| `running`   | An attempt is executing (`attempt`, `startedAt`, `statusMessage`). |
-| `waiting`   | Parked on a durable deadline (`reason`: `sleep` or `retry`).       |
-| `completed` | Settled with `result`.                                             |
-| `failed`    | Settled with a safe `error` projection.                            |
-| `cancelled` | Settled by cancellation, with its optional `reason`.               |
+| Status      | Meaning                                                                                                                     |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `pending`   | Not running. Accepted and not yet claimed, or parked on a durable deadline: `waitReason` (`sleep` or `retry`) and `wakeAt`. |
+| `running`   | An attempt is executing (`attempt`, `startedAt`, `statusMessage`).                                                          |
+| `completed` | Settled with `result`.                                                                                                      |
+| `error`     | Settled with a safe `error` projection.                                                                                     |
+| `aborted`   | Settled by cancellation, with its optional `reason`.                                                                        |
 
 Cancellation is cooperative: a parked run settles immediately, a live attempt
 is aborted through its signal and settles at its next step boundary. An

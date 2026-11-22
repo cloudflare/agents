@@ -452,7 +452,7 @@ export function interruptedTurnRequestIds(
     for (const row of sql
       .exec(
         `select input from cf_agents_task_runs
-         where definition = ? and state in ('pending', 'running', 'waiting')`,
+         where definition = ? and status in ('pending', 'running')`,
         turnName
       )
       .toArray()) {

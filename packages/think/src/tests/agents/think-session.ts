@@ -158,7 +158,7 @@ async function insertInterruptedTurnForTest(
   const now = Date.now();
   agent.sql`
     INSERT INTO cf_agents_task_runs
-      (run_id, definition, input, state, metadata, idempotency_key, retain,
+      (run_id, definition, input, status, metadata, idempotency_key, retain,
        attempt, next_at, cancel_requested, created_at, updated_at)
     VALUES
       (${runId}, ${Think.CHAT_FIBER_NAME},
@@ -175,7 +175,7 @@ async function insertInterruptedTurnForTest(
 async function recoverInterruptedTurnsForTest(agent: Think): Promise<void> {
   const runs = agent.sql<{ run_id: string; input: string; metadata: string }>`
     SELECT run_id, input, metadata FROM cf_agents_task_runs
-    WHERE definition = ${Think.CHAT_FIBER_NAME} AND state = 'pending'
+    WHERE definition = ${Think.CHAT_FIBER_NAME} AND status = 'pending'
     ORDER BY created_at
   `;
   for (const run of runs) {
@@ -204,7 +204,7 @@ function recoveryTransportCountsForTest(
   const tasks = agent.sql<{ count: number }>`
     SELECT COUNT(*) AS count FROM cf_agents_task_runs
     WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
-      AND state IN ('pending', 'running', 'waiting')
+      AND status IN ('pending', 'running')
       AND json_extract(metadata, '$.callback') = ${callback}
   `;
   return {
@@ -225,7 +225,7 @@ async function runQueuedRecoveryTaskForTest(
   const rows = agent.sql<{ run_id: string }>`
     SELECT run_id FROM cf_agents_task_runs
     WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
-      AND state IN ('pending', 'running', 'waiting')
+      AND status IN ('pending', 'running')
       AND json_extract(metadata, '$.callback') = ${callback}
     ORDER BY created_at ASC
     LIMIT 1
@@ -4080,7 +4080,7 @@ export class ThinkTestAgent extends Think {
         SELECT json_extract(input, '$.delaySeconds') AS delay, idempotency_key
         FROM cf_agents_task_runs
         WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
-          AND state IN ('pending', 'waiting')
+          AND status = 'pending'
         ORDER BY created_at DESC
         LIMIT 1
       `[0];
@@ -9956,7 +9956,7 @@ export class ThinkProgrammaticTestAgent extends Think {
   ): Promise<void> {
     this.sql`
       UPDATE cf_agents_task_runs
-      SET state = 'completed', next_at = NULL
+      SET status = 'completed', next_at = NULL
       WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
         AND json_extract(metadata, '$.recoveredRequestId') = ${requestId}
     `;
@@ -11091,7 +11091,7 @@ export class ThinkRecoveryTestAgent extends Think {
     const rows = this.sql<{ count: number }>`
       SELECT COUNT(*) AS count FROM cf_agents_task_runs
       WHERE definition = ${Think.CHAT_FIBER_NAME}
-        AND state IN ('pending', 'running', 'waiting')
+        AND status IN ('pending', 'running')
     `;
     return rows[0]?.count ?? 0;
   }
@@ -12872,7 +12872,7 @@ export class ThinkRecoveryTestAgent extends Think {
       const chatTasks = this.sql<{ count: number }>`
         SELECT COUNT(*) AS count FROM cf_agents_task_runs
         WHERE definition = ${ThinkRecoveryTestAgent.CHAT_FIBER_NAME}
-          AND state IN ('pending', 'running', 'waiting', 'recovering')
+          AND status IN ('pending', 'running')
       `;
       const row = this.sql<{ request_id: string }>`
         SELECT request_id FROM cf_think_submissions
@@ -12994,7 +12994,7 @@ export class ThinkRecoveryTestAgent extends Think {
           this.sql<{ run_id: string }>`
               SELECT run_id FROM cf_agents_task_runs
               WHERE definition = ${ThinkRecoveryTestAgent.CHAT_FIBER_NAME}
-                AND state = 'running'
+                AND status = 'running'
                 AND metadata = ${JSON.stringify({ requestId })}
             `.length === 1;
       },
@@ -13213,7 +13213,7 @@ export class ThinkRecoveryTestAgent extends Think {
       SELECT json_extract(input, '$.data') AS payload
       FROM cf_agents_task_runs
       WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
-        AND state IN ('pending', 'running', 'waiting')
+        AND status IN ('pending', 'running')
         AND json_extract(metadata, '$.callback') = ${callback}
       ORDER BY created_at ASC
       LIMIT 1
