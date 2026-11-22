@@ -57,6 +57,7 @@ const EXPECTED_SCHEMA_DDL = [
         running INTEGER NOT NULL DEFAULT 0,
         execution_started_at INTEGER,
         attempts INTEGER NOT NULL DEFAULT 0,
+        held_since INTEGER,
         created_at INTEGER NOT NULL DEFAULT (unixepoch())
       ) WITHOUT ROWID`,
   `CREATE TABLE cf_agents_mcp_servers (
