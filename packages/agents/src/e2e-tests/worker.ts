@@ -1178,7 +1178,7 @@ export class AbortingRecoveryHookAgent extends Agent<Record<string, unknown>> {
   static options = { keepAliveIntervalMs: 2_000 };
 
   override async onFiberRecovered(ctx: RunFiberRecoveryContext): Promise<void> {
-    if (ctx.name !== "aborting-hook") return;
+    if (ctx.name !== "aborting-hook" && ctx.name !== "aborting-plain") return;
     // No storage writes here: the scan's own commit is what is under test.
     // The log line is how the test counts runs; it survives the reset.
     console.log("[aborting-hook] ran");
@@ -1192,6 +1192,24 @@ export class AbortingRecoveryHookAgent extends Agent<Record<string, unknown>> {
       this.ctx.abort("fiber body aborts");
     });
     return result.fiberId;
+  }
+
+  @callable()
+  startAbortingPlainFiber(): string {
+    void this.runFiber("aborting-plain", async () => {
+      await fiberSleep(300);
+      this.ctx.abort("fiber body aborts");
+    }).catch(() => {});
+    return "started";
+  }
+
+  @callable()
+  runRowCount(): number {
+    return (
+      this.sql<{
+        count: number;
+      }>`SELECT COUNT(*) AS count FROM cf_agents_runs`[0]?.count ?? 0
+    );
   }
 
   @callable()

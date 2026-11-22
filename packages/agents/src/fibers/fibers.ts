@@ -95,7 +95,11 @@ export type FibersOptions = {
 };
 
 const SCHEMA_VERSION_KEY = "cf_agents:fibers_schema_version";
-const CURRENT_SCHEMA_VERSION = 1;
+// 2: `cf_agents_runs.recovery_crashes`.
+const CURRENT_SCHEMA_VERSION = 2;
+// Recovery attempts on one unmanaged row that killed the isolate before
+// returning. After this many the row is dropped without running the hook.
+const MAX_RECOVERY_CRASHES = 3;
 
 const WAKE_JOB_ID = "fibers:recover";
 const WAKE_JOB_FN = "recover";
@@ -618,7 +622,7 @@ export class Fibers extends LifecycleCapability {
     try {
       const rows = this.#sql<FiberRunRow>`
         SELECT id, name, snapshot, created_at, completed_at, outcome,
-               error_message
+               error_message, recovery_crashes
         FROM cf_agents_runs
       `;
 
@@ -688,14 +692,40 @@ export class Fibers extends LifecycleCapability {
           ctx.status = "interrupted";
         }
 
-        if (managedRow) {
-          // Commit the `interrupted` mark before the hook runs. A hook that
-          // kills the isolate before its first I/O would otherwise roll the
-          // mark back, and every wake would run it again (RUNTIME-FACTS:
-          // "A reset before the first I/O rolls back...").
-          await this.lifecycle.storage.sync();
+        // A hook that kills the isolate before its first I/O rolls back every
+        // write since the last commit (RUNTIME-FACTS: "A reset before the
+        // first I/O rolls back..."), so whatever must survive it is committed
+        // before the hook runs. A managed row's `interrupted` mark makes the
+        // next scan skip it. An unmanaged row counts an attempt that is only
+        // taken back if the hook returns, so a hook that keeps killing the
+        // isolate is given up on after MAX_RECOVERY_CRASHES.
+        const crashes = row.recovery_crashes ?? 0;
+        if (!managedRow) {
+          if (crashes >= MAX_RECOVERY_CRASHES) {
+            this.#emit("fiber:recovery:skipped", {
+              fiberId: row.id,
+              fiberName: row.name,
+              reason: "recovery_crashed",
+              elapsedMs: Date.now() - row.created_at
+            });
+            this.#sql`DELETE FROM cf_agents_runs WHERE id = ${row.id}`;
+            madeProgress = true;
+            continue;
+          }
+          this.#sql`
+            UPDATE cf_agents_runs SET recovery_crashes = ${crashes + 1}
+            WHERE id = ${row.id}
+          `;
         }
+        await this.lifecycle.storage.sync();
         const recovered = await this.#runRecoveryHook(ctx, managedRow);
+        if (!managedRow) {
+          // The hook returned (or threw): this attempt did not crash.
+          this.#sql`
+            UPDATE cf_agents_runs SET recovery_crashes = ${crashes}
+            WHERE id = ${row.id}
+          `;
+        }
         // Managed rows are always cleaned up (the ledger keeps the terminal
         // status). Unmanaged rows stay when recovery fails so a later scan
         // retries, until they exceed the max age.
@@ -1216,14 +1246,16 @@ export class Fibers extends LifecycleCapability {
           created_at INTEGER NOT NULL,
           completed_at INTEGER,
           outcome TEXT,
-          error_message TEXT
+          error_message TEXT,
+          recovery_crashes INTEGER NOT NULL DEFAULT 0
         )
       `);
       // Tables from before these columns existed.
       for (const column of [
         "completed_at INTEGER",
         "outcome TEXT",
-        "error_message TEXT"
+        "error_message TEXT",
+        "recovery_crashes INTEGER NOT NULL DEFAULT 0"
       ]) {
         try {
           storage.sql.exec(`ALTER TABLE cf_agents_runs ADD COLUMN ${column}`);

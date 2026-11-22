@@ -74,7 +74,8 @@ const EXPECTED_SCHEMA_DDL = [
           created_at INTEGER NOT NULL,
           completed_at INTEGER,
           outcome TEXT,
-          error_message TEXT
+          error_message TEXT,
+          recovery_crashes INTEGER NOT NULL DEFAULT 0
         )`,
   `CREATE TABLE cf_agents_state (
         id TEXT PRIMARY KEY NOT NULL,

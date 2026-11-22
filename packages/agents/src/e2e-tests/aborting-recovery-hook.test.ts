@@ -30,6 +30,8 @@ const harness: Harness = {
   persistDir: PERSIST_DIR
 };
 const AGENT_PATH = "/agents/aborting-recovery-hook-agent/aborting-hook-e2e";
+const PLAIN_AGENT_PATH =
+  "/agents/aborting-recovery-hook-agent/aborting-plain-e2e";
 
 describe("aborting recovery hook e2e", () => {
   let wrangler: ChildProcess | null = null;
@@ -90,6 +92,48 @@ describe("aborting recovery hook e2e", () => {
     expect(
       await callAgentByPath(harness, AGENT_PATH, "fiberStatus", [fiberId])
     ).toBe("interrupted");
+    expect(hookRuns()).toBe(runs);
+  });
+
+  it("gives up on a plain fiber whose recovery hook keeps killing the isolate", async () => {
+    wrangler = startWrangler(harness);
+    let output = "";
+    wrangler.stdout?.on("data", (data: Buffer) => {
+      output += data.toString();
+    });
+    const hookRuns = () => output.split("[aborting-hook] ran").length - 1;
+    await waitForReady(harness);
+
+    await callAgentByPath(harness, PLAIN_AGENT_PATH, "startAbortingPlainFiber");
+
+    // Each wake runs the hook, which kills the isolate. After the crash
+    // budget the row is dropped and requests are served again.
+    let rows: number | null = null;
+    for (let attempt = 0; attempt < 60; attempt++) {
+      await sleep(1000);
+      try {
+        rows = (await callAgentByPath(
+          harness,
+          PLAIN_AGENT_PATH,
+          "runRowCount"
+        )) as number;
+      } catch {
+        rows = null;
+      }
+      if (rows === 0 && hookRuns() > 0) break;
+    }
+    expect(rows).toBe(0);
+    for (let attempt = 0; attempt < 20 && hookRuns() === 0; attempt++) {
+      await sleep(250);
+    }
+    expect(hookRuns()).toBeGreaterThanOrEqual(1);
+    expect(hookRuns()).toBeLessThanOrEqual(4);
+
+    const runs = hookRuns();
+    await sleep(5000);
+    expect(
+      await callAgentByPath(harness, PLAIN_AGENT_PATH, "runRowCount")
+    ).toBe(0);
     expect(hookRuns()).toBe(runs);
   });
 });
