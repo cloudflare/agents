@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
+import { runInDurableObject } from "cloudflare:test";
 import { Agent, routeAgentEmail, getAgentByName } from "../index";
 import type { SendEmailOptions } from "../index";
 import {
@@ -783,5 +784,73 @@ describe("sendEmail", () => {
       to: "user@example.com",
       subject: "Object from"
     });
+  });
+});
+
+describe("replyToEmail", () => {
+  it("sends a signed MIME reply with the agent's routing headers", async () => {
+    const stub = await getAgentByName(env.EmailAgent, "reply-probe");
+    const sent = await runInDurableObject(stub, async (agent) => {
+      const replies: { from: string; to: string; raw: string }[] = [];
+      await agent.replyToEmail(
+        {
+          from: "user@example.com",
+          to: "agent@example.com",
+          headers: new Headers({
+            subject: "Hello",
+            "Message-ID": "<original@example.com>"
+          }),
+          rawSize: 0,
+          getRaw: async () => new Uint8Array(),
+          setReject: () => {},
+          forward: async () => ({ messageId: "forward" }),
+          reply: async (message) => {
+            replies.push(message);
+            return { messageId: "reply" };
+          }
+        },
+        { fromName: "Probe", body: "pong", secret: "s3cret" }
+      );
+      return replies;
+    });
+
+    expect(sent).toHaveLength(1);
+    const [reply] = sent;
+    expect(reply.from).toBe("agent@example.com");
+    expect(reply.to).toBe("user@example.com");
+    // mimetext encodes the subject as RFC 2047 base64.
+    expect(reply.raw).toContain(`Subject: =?utf-8?B?${btoa("Re: Hello")}?=`);
+    expect(reply.raw).toContain("In-Reply-To: <original@example.com>");
+    expect(reply.raw).toContain("X-Agent-Name: test-email-agent");
+    expect(reply.raw).toContain("X-Agent-ID: reply-probe");
+    expect(reply.raw).toMatch(/X-Agent-Sig: \S+/);
+    expect(reply.raw).toMatch(/X-Agent-Sig-Ts: \d+/);
+    expect(reply.raw).toContain("pong");
+  });
+
+  it("refuses an unsigned reply to a securely routed email", async () => {
+    const stub = await getAgentByName(env.EmailAgent, "reply-secure-probe");
+    const error = await runInDurableObject(stub, async (agent) => {
+      try {
+        await agent.replyToEmail(
+          {
+            from: "user@example.com",
+            to: "agent@example.com",
+            headers: new Headers({ subject: "Hello" }),
+            rawSize: 0,
+            _secureRouted: true,
+            getRaw: async () => new Uint8Array(),
+            setReject: () => {},
+            forward: async () => ({ messageId: "forward" }),
+            reply: async () => ({ messageId: "reply" })
+          },
+          { fromName: "Probe", body: "pong" }
+        );
+        return null;
+      } catch (e) {
+        return e instanceof Error ? e.message : String(e);
+      }
+    });
+    expect(error).toMatch(/You must pass a secret to replyToEmail/);
   });
 });
