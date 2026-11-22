@@ -239,7 +239,10 @@ describe("reconnect after a drop with an async query", () => {
     // @ts-expect-error - globalThis is not typed
     globalThis.IS_REACT_ACT_ENVIRONMENT = false;
     await new Promise((resolve) => setTimeout(resolve, 5000));
-    // It does retry, and never sooner than the delay after a failure.
+    // It does retry, and never sooner than the delay after a failure. The
+    // gap is measured close to close: a refused upgrade from the local
+    // worker fails within milliseconds, so each gap is the wait before the
+    // next dial plus that, and the old code's gaps were about 300 ms.
     expect(closes.length).toBeGreaterThanOrEqual(2);
     for (let i = 1; i < closes.length; i++) {
       expect(closes[i] - closes[i - 1]).toBeGreaterThanOrEqual(1500);
