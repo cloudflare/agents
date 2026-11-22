@@ -238,11 +238,12 @@ export const createStreamingHttpHandler = (
             jurisdiction: options.jurisdiction
           }
         );
-        const isInitialized = await agent.getInitializeRequest();
 
+        // An initialize POST has a session ID generated just above, so there
+        // is no stored initialize request to read. Only other POSTs check.
         if (maybeInitializeRequest) {
           await agent.setInitializeRequest(maybeInitializeRequest);
-        } else if (!isInitialized) {
+        } else if (!(await agent.getInitializeRequest())) {
           // if we have gotten here, then a session id that was never initialized
           // was provided
           const body = JSON.stringify({
