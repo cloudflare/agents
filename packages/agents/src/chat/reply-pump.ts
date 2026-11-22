@@ -167,21 +167,28 @@ export type ReplyEvent =
     }
   | { type: "chat:stream:stalled"; requestId: string; timeoutMs: number };
 
+/** The part of the turn core (`ChatTurns`) the pump uses. */
+export interface ReplyTurns {
+  /** The reply tool results land on. The pump sets and clears it. */
+  liveReply: LiveReply | null;
+  /** Whether the chat was reset since this call (`ChatTurns.turnResetGuard`). */
+  turnResetGuard(): () => boolean;
+  /** Abort the turn as the runtime after a stall (`ChatTurns.stallAbort`). */
+  stallAbort(requestId: string): void;
+  /** Re-check what waits on a reply that is no longer live. */
+  replyFinalized(): void;
+}
+
 export interface ReplyPumpHost {
   readonly streams: ReplyStreamLog;
+  readonly turns: ReplyTurns;
   /** Send a frame to sockets. */
   send(frame: ReplyFrame): void;
   /** Send every tab the transcript. */
   broadcastTranscript(): void;
   emit(event: ReplyEvent): void;
-  /** The reply tool results land on, or `null` once it is stored. */
-  setLive(reply: LiveReply | null): void;
   /** No chunk for this long fails the stream as stalled. `0` disables. */
   readonly stallTimeoutMs: number;
-  /** The watchdog fired: abort the turn as the runtime, not as a stop. */
-  onStall(requestId: string): void;
-  /** Whether the chat was reset since the turn started. */
-  isReset(): boolean;
   /** Call once per error: an app's classifier may count calls. */
   classify(error: unknown, inBand: boolean): ReplyErrorVerdict;
   /** The text a failed reply reports, from the host's error hook. */
@@ -215,10 +222,11 @@ export interface ReplyPumpHost {
    */
   settled(response: ChatResponseResult): Promise<void>;
   /**
-   * The reply is no longer live. `rearm` is false when recovery took it:
-   * its retry runs the turn again and re-checks what waits on this one.
+   * The reply is no longer live, before the turn core re-checks what waits
+   * on it. `rearm` is false when recovery took the reply: its retry runs the
+   * turn again and re-checks then. Optional: for a host's own finalize work.
    */
-  finalized(rearm: boolean): void;
+  finalized?(rearm: boolean): void;
   /** The pump is reading the model's stream (`true`) or stopped (`false`). */
   reading?(active: boolean): void;
 }
@@ -362,8 +370,18 @@ export async function pumpReply(
     existingParts: extend?.parts.map(settleInterruptedPart),
     existingMetadata: extendMetadata
   });
+  const { turns } = host;
+  const isReset = turns.turnResetGuard();
   const live = new LiveReply(requestId, accumulator);
-  host.setLive(live);
+  turns.liveReply = live;
+  // Only this reply's own slot: a reset may have started another reply.
+  const release = () => {
+    if (turns.liveReply === live) turns.liveReply = null;
+  };
+  const finalized = (rearm: boolean) => {
+    host.finalized?.(rearm);
+    if (rearm) turns.replyFinalized();
+  };
   input.started?.();
 
   const frame = (fields: Omit<ReplyFrame, "type" | "id">): ReplyFrame => ({
@@ -429,7 +447,7 @@ export async function pumpReply(
         streamId,
         response: { ...response, message }
       });
-      while (id !== undefined && live.dirty && !host.isReset()) {
+      while (id !== undefined && live.dirty && !isReset()) {
         live.dirty = false;
         message = buildReply(cut);
         await host.store(message, {
@@ -465,8 +483,8 @@ export async function pumpReply(
     }
     if (!host.route) {
       streams.complete(streamId, "recovering");
-      host.setLive(null);
-      host.finalized(false);
+      release();
+      finalized(false);
       return {
         status: "interrupted",
         error,
@@ -484,7 +502,7 @@ export async function pumpReply(
       continuation,
       ...(input.parentId !== undefined && { parentId: input.parentId }),
       keepPartial: async () => {
-        if (host.isReset() || accumulator.parts.length === 0) return undefined;
+        if (isReset() || accumulator.parts.length === 0) return undefined;
         const { id } = await storeLive(
           { kind: "partial", result: { status: "aborted" } },
           true
@@ -500,28 +518,28 @@ export async function pumpReply(
         // The retry owns the reply's end. Close this stream cleanly.
         streams.complete(streamId, "recovering");
         host.send(frame({ body: "", done: true, outcome: "recovering" }));
-        host.setLive(null);
-        host.finalized(false);
+        release();
+        finalized(false);
         await sink?.interrupted();
         return { status: "aborted", reason: "interrupted" };
       case "stopped":
         // Stopped while routed: the partial is stored, so no cutover follows.
         streams.completeStopped(streamId, requestId);
         host.send(frame({ body: "", done: true, outcome: "aborted" }));
-        host.setLive(null);
-        if (!host.isReset()) {
+        release();
+        if (!isReset()) {
           await host.settled({
             ...responseFor(buildReply(true)),
             status: "aborted"
           });
         }
-        host.finalized(true);
+        finalized(true);
         return { status: "aborted" };
       case "exhausted":
         // Recovery delivered the terminal message itself.
         streams.error(streamId, requestId);
-        host.setLive(null);
-        host.finalized(false);
+        release();
+        finalized(false);
         await sink?.interrupted();
         return { status: "aborted", reason: "interrupted" };
       default:
@@ -547,7 +565,7 @@ export async function pumpReply(
             requestId,
             timeoutMs: host.stallTimeoutMs
           });
-          host.onStall(requestId);
+          turns.stallAbort(requestId);
         }
       );
       for await (const raw of chunks) {
@@ -632,8 +650,8 @@ export async function pumpReply(
       // owns the end: no terminal frame, nothing stored (a stored partial
       // would sit beside the retry's answer).
       streams.completeForRetry(streamId, requestId);
-      host.setLive(null);
-      host.finalized(false);
+      release();
+      finalized(false);
       return {
         status: "overflow_retry",
         error: streamError,
@@ -696,7 +714,7 @@ export async function pumpReply(
     ? { status: "aborted" }
     : { status: "completed", output };
   let storedId: string | undefined;
-  let reset = host.isReset();
+  let reset = isReset();
   let response = responseFor(buildReply());
   try {
     if (!reset) {
@@ -705,7 +723,7 @@ export async function pumpReply(
         storedId = stored.id;
         response = { ...response, message: stored.message };
       }
-      reset = host.isReset() && storedId === undefined;
+      reset = isReset() && storedId === undefined;
     }
     held.push(terminal());
   } catch (error) {
@@ -721,7 +739,7 @@ export async function pumpReply(
   } finally {
     // Every write of the reply is done: the terminal frame goes out.
     streams.settlePending(requestId, result);
-    host.setLive(null);
+    release();
     sendHeld();
   }
   // The reply held nothing and was not stored, but tabs drew what streamed.
@@ -735,21 +753,24 @@ export async function pumpReply(
   ) {
     host.broadcastTranscript();
   }
+  // A reply the chat was cleared under before it was stored did not
+  // complete. One stored first did, whatever came after.
+  const completed = streamError === undefined && !aborted && !reset;
   try {
+    // An RPC caller learns the reply is done before the response hook runs,
+    // and of a failure after it.
+    if (completed) await sink?.done();
     // A clear kept the reply out: no hook.
     if (!reset) await host.settled(response);
   } finally {
-    host.finalized(true);
+    finalized(true);
   }
 
   if (streamError !== undefined) {
     await sink?.error(streamError);
     return { status: "error", error: streamError };
   }
-  // A reply the chat was cleared under before it was stored did not
-  // complete. One stored first did, whatever came after.
-  if (aborted || reset) return { status: "aborted" };
-  await sink?.done();
+  if (!completed) return { status: "aborted" };
   return {
     status: "completed",
     ...(storedId !== undefined && { messageId: storedId }),

@@ -74,6 +74,7 @@ import {
 } from "./continuation-turn";
 import type { MessageConcurrency } from "./lifecycle";
 import { PreStreamTurns } from "./pre-stream-turns";
+import type { LiveReply } from "./reply-pump";
 import {
   runServerTurn,
   type ServerChatTurn,
@@ -102,6 +103,7 @@ import {
   type TurnFailureHost
 } from "./turn-failure";
 import { TurnQueue } from "./turn-queue";
+import { ChatStreamStalledError } from "./stall-watchdog";
 import { ChatRecoverySupersededError, isTurnStopped } from "./turn-stop";
 
 /** The transcript shape the core reads: ids for targets, parts for batches. */
@@ -352,6 +354,13 @@ export class ChatTurns<
    * stop for it is a stop of the reply a waiting continuation continues.
    */
   #lastReply: string | null = null;
+
+  /**
+   * The reply `pumpReply` builds, while it streams and while it is stored.
+   * A tool result or approval that arrives then is applied to it in place,
+   * and the resume handshake reads whether its terminal frame waits.
+   */
+  liveReply: LiveReply | null = null;
   /** Depth of {@link runtimeAbort} calls in progress. */
   #runtimeAborts = 0;
   /** The signals of the turns a stop landed on. */
@@ -1054,6 +1063,25 @@ export class ChatTurns<
     replyFinalized(this.#continuationParts);
   }
 
+  /**
+   * The stall watchdog fired on `requestId`'s reply: abort its turn as the
+   * runtime, not as a stop. Recovery continues the turn, so nothing waiting
+   * on it is dropped. The isolate is held until the stop's bookkeeping ends.
+   */
+  stallAbort(requestId: string): void {
+    this.runtimeAbort(() => {
+      // Cancelled now, inside the runtime's abort: a cancel the hold ran
+      // later would read as a user's stop.
+      const settled = this.cancel(
+        requestId,
+        new ChatStreamStalledError(
+          "chat stream stalled: inactivity watchdog fired"
+        )
+      );
+      void this.host.keepAliveWhile(() => settled);
+    });
+  }
+
   // ── Before a turn ──────────────────────────────────────────────────
 
   /**
@@ -1431,6 +1459,8 @@ export class ChatTurns<
    * host's to clear.
    */
   reset(): void {
+    // A late tool result must not land on the reply of a cleared chat.
+    this.liveReply = null;
     this.admissions?.clear();
     this.#restoredDecisions.clear();
     this.queue.reset();

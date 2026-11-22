@@ -173,12 +173,16 @@ export class AISDKRecoveryCodec implements ChatRecoveryCodec {
  *   an eviction the transcript would hold no trace that a call was made and
  *   may have had side effects. Stored, recovery settles it as an error that
  *   says so.
+ * - `tool-approval-request` waits for a user. The reply is stored when its
+ *   stream ends, so until then this chunk is the only record that the
+ *   approval was asked for.
  *
  * Both chat hosts ask this for every chunk they store.
  */
 export function chunkMustBeStoredNow(type: string | undefined): boolean {
   return (
     type === "tool-input-available" ||
+    type === "tool-approval-request" ||
     type === "tool-output-available" ||
     type === "tool-output-error" ||
     type === "tool-output-denied"

@@ -10,7 +10,8 @@ import {
   type ReplyPumpHost,
   type ReplyPumpInput,
   type ReplyRouteOutcome,
-  type ReplyStoreContext
+  type ReplyStoreContext,
+  type ReplyTurns
 } from "../reply-pump";
 import { responseSource, type ReplySource } from "../reply-source";
 import type {
@@ -70,12 +71,17 @@ function fakeHost(overrides: Partial<ReplyPumpHost> = {}) {
   const stored: Array<{ message: UIMessage; context: ReplyStoreContext }> = [];
   const settled: ChatResponseResult[] = [];
   const streams = new FakeStreamLog();
-  const state: { live: LiveReply | null; reset: boolean } = {
-    live: null,
-    reset: false
+  const state: { reset: boolean } = { reset: false };
+  const rearms: boolean[] = [];
+  const turns: ReplyTurns = {
+    liveReply: null,
+    turnResetGuard: () => () => state.reset,
+    stallAbort: () => void log.push("onStall"),
+    replyFinalized: () => void rearms.push(true)
   };
   const host: ReplyPumpHost = {
     streams,
+    turns,
     send: (frame) => {
       frames.push(frame);
       if (frame.done) log.push(`terminal:${frame.outcome}`);
@@ -83,12 +89,7 @@ function fakeHost(overrides: Partial<ReplyPumpHost> = {}) {
     },
     broadcastTranscript: () => void log.push("transcript"),
     emit: (event) => void events.push(event),
-    setLive: (reply) => {
-      state.live = reply;
-    },
     stallTimeoutMs: 0,
-    onStall: () => void log.push("onStall"),
-    isReset: () => state.reset,
     classify: () => "terminal",
     describeError: (error) =>
       error instanceof Error ? error.message : String(error),
@@ -111,7 +112,18 @@ function fakeHost(overrides: Partial<ReplyPumpHost> = {}) {
     finalized: (rearm) => void log.push(`finalized:${rearm}`),
     ...overrides
   };
-  return { host, log, frames, events, stored, settled, streams, state };
+  return {
+    host,
+    log,
+    frames,
+    events,
+    stored,
+    settled,
+    streams,
+    state,
+    turns,
+    rearms
+  };
 }
 
 function source(chunks: StreamChunkData[]): ReplySource {
@@ -615,14 +627,11 @@ describe("pumpReply", () => {
   });
 
   it("stores the reply again when a tool result lands during the write", async () => {
-    let live: LiveReply | null = null;
     let writes = 0;
-    const { host, stored } = fakeHost({
-      setLive: (reply) => {
-        live = reply;
-      },
+    const { host, stored, turns } = fakeHost({
       store: async (message, context) => {
         stored.push({ message, context });
+        const live = turns.liveReply;
         if (writes++ === 0) {
           const part = live!.accumulator.parts[0] as Record<string, unknown>;
           part.state = "output-available";
@@ -671,21 +680,70 @@ describe("pumpReply", () => {
     ]);
   });
 
-  it("marks the live reply ended while it is stored", async () => {
+  it("marks the live reply ended while it is stored, and clears it after", async () => {
     let seen: boolean | undefined;
-    let live: LiveReply | null = null;
-    const { host } = fakeHost({
-      setLive: (reply) => {
-        live = reply;
-      },
+    const { host, turns, rearms } = fakeHost({
       store: async (message) => {
-        seen = live?.ended;
+        seen = turns.liveReply?.ended;
         return message.id;
       }
     });
     await pumpReply(input({ source: source(textReply) }), host);
     expect(seen).toBe(true);
-    expect(live).toBeNull();
+    expect(turns.liveReply).toBeNull();
+    expect(rearms).toEqual([true]);
+  });
+
+  it("leaves a newer reply in the live slot alone", async () => {
+    const other = { requestId: "other" } as LiveReply;
+    const { host, turns } = fakeHost({
+      store: async (message) => {
+        // A reset started another reply while this one was stored.
+        turns.liveReply = other;
+        return message.id;
+      }
+    });
+    await pumpReply(input({ source: source(textReply) }), host);
+    expect(turns.liveReply).toBe(other);
+  });
+
+  it("does not re-check waiting continuations when recovery took the reply", async () => {
+    const { host, rearms } = fakeHost({
+      stallTimeoutMs: 10,
+      route: async () => "exhausted"
+    });
+    await pumpReply(
+      input({
+        source: {
+          chunks: (async function* () {
+            yield { type: "text-start", id: "t" } as StreamChunkData;
+            await new Promise(() => {});
+          })()
+        }
+      }),
+      host
+    );
+    expect(rearms).toEqual([]);
+  });
+
+  it("tells an RPC caller the reply is done before the response hook runs", async () => {
+    const order: string[] = [];
+    const { host } = fakeHost({
+      settled: async () => void order.push("settled")
+    });
+    await pumpReply(
+      input({
+        source: source(textReply),
+        sink: {
+          chunk: async () => {},
+          done: async () => void order.push("done"),
+          error: async () => {},
+          interrupted: async () => {}
+        }
+      }),
+      host
+    );
+    expect(order).toEqual(["done", "settled"]);
   });
 });
 

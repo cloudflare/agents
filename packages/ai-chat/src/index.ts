@@ -123,7 +123,6 @@ import {
   resolveChatRecoveryConfig,
   ChatRecoveryEngine,
   runChatRecoveryExhaustion,
-  ChatStreamStalledError,
   isTurnStopped,
   CHAT_RECOVERY_PROGRESS_KEY,
   recordChatTerminal,
@@ -521,11 +520,10 @@ export class AIChatAgent<
    */
   protected _resumableStream!: ResumableStream;
 
-  /**
-   * The reply `pumpReply` builds, while it streams and while it is stored.
-   * A tool result or approval that arrives then is applied to it in place.
-   */
-  private _liveReply: LiveReply | null = null;
+  /** The reply `pumpReply` builds (`ChatTurns.liveReply`). */
+  private get _liveReply(): LiveReply | null {
+    return this._turns.liveReply;
+  }
 
   /** The reply that is not in the stored transcript yet, or not in its final form. */
   private _replyInFlight(): UIMessage | null {
@@ -4717,20 +4715,8 @@ export class AIChatAgent<
         type === "message:error"
           ? this._emit(type, event as { error: string })
           : this._emit(type, event as never),
-      setLive: (reply) => {
-        this._liveReply = reply;
-      },
+      turns: this._turns,
       stallTimeoutMs: this.chatStreamStallTimeoutMs,
-      onStall: (id) =>
-        this._turns.runtimeAbort(() =>
-          this.abortRequest(
-            id,
-            new ChatStreamStalledError(
-              "chat stream stalled: inactivity watchdog fired"
-            )
-          )
-        ),
-      isReset: resetSinceTurnStarted,
       // An in-band error is the provider's answer. A dropped connection
       // (#1964) is worth a retry.
       classify: (error, inBand) =>
@@ -4789,9 +4775,6 @@ export class AIChatAgent<
           this._emit("message:response");
         }
         this._pendingChatResponseResults.push(result);
-      },
-      finalized: (rearm) => {
-        if (rearm) this._turns.replyFinalized();
       }
     };
   }
