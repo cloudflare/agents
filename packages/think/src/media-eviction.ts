@@ -367,7 +367,11 @@ export interface MediaEvictionPassHost {
   storedBytes(): number | null;
   rowStats(): Promise<ReadonlyArray<{ id: string; bytes: number }>>;
   readMessage(id: string): Promise<UIMessage | null>;
-  writeFile(path: string, bytes: Uint8Array): Promise<void>;
+  /**
+   * A file writer for one pass, opened once at the start of the pass so every
+   * payload of the pass lands in the same Workspace.
+   */
+  openFiles(): { write(path: string, bytes: Uint8Array): Promise<void> };
   updateMessage(message: UIMessage): Promise<unknown>;
   emitEvicted(totals: Omit<MediaEvictionPassResult, "backlogRemains">): void;
   /** Queue one pass on the agent's job queue, coalesced by a stable id. */
@@ -526,6 +530,7 @@ export class MediaEvictionPasses {
       backlogRemains: false
     };
     try {
+      const files = this.#host.openFiles();
       const stats = await this.#host.rowStats();
       const aged = stats.slice(
         0,
@@ -555,7 +560,7 @@ export class MediaEvictionPasses {
           minPartBytes: config.minPartBytes,
           write: async (index, bytes, mediaType) => {
             const path = evictedFilePath(message.id, index, mediaType);
-            await this.#host.writeFile(path, bytes);
+            await files.write(path, bytes);
             return path;
           }
         });

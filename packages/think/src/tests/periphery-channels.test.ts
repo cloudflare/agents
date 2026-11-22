@@ -254,7 +254,7 @@ describe("MediaEvictionPasses", () => {
       storedBytes: () => null,
       rowStats: async () => [],
       readMessage: async () => null,
-      writeFile: async () => {},
+      openFiles: () => ({ write: async () => {} }),
       updateMessage: async () => {},
       emitEvicted: () => {},
       queuePass
@@ -282,5 +282,43 @@ describe("MediaEvictionPasses", () => {
 
   it("does nothing when eviction is off", async () => {
     expect(await passes([], false).runner.run()).toBeNull();
+  });
+
+  it("writes every payload of a pass to the workspace it opened with", async () => {
+    const written: string[] = [];
+    let workspace = "first";
+    const rows = Array.from({ length: 8 }, (_, i) => ({
+      id: `m${i}`,
+      bytes: i < 2 ? 10_000 : 10
+    }));
+    const passes = new MediaEvictionPasses({
+      config: () => ({
+        keepRecentMessages: 2,
+        minPartBytes: 100,
+        maxRowsPerPass: 10
+      }),
+      truncationStep: () => 1,
+      cachedMessages: () => [],
+      agedRowsHiddenFromCache: () => false,
+      storedBytes: () => null,
+      rowStats: async () => rows,
+      readMessage: async (id) => media(id),
+      openFiles: () => {
+        const opened = workspace;
+        return {
+          write: async (path) => void written.push(`${opened}:${path}`)
+        };
+      },
+      updateMessage: async () => {
+        // An agent may swap its workspace reference mid-pass.
+        workspace = "second";
+      },
+      emitEvicted: () => {},
+      queuePass: async () => {}
+    });
+    const result = await passes.run();
+    expect(result?.messages).toBe(2);
+    expect(written).toHaveLength(2);
+    expect(written.every((entry) => entry.startsWith("first:"))).toBe(true);
   });
 });

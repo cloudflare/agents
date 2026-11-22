@@ -2352,8 +2352,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     rowStats: () => this.session.getHistoryRowStats(),
     readMessage: async (id) =>
       (await this.session.getMessage(id)) as UIMessage | null,
-    writeFile: (path, bytes) =>
-      new WorkspaceFiles(this.workspace).write(path, bytes),
+    openFiles: () => new WorkspaceFiles(this.workspace),
     updateMessage: (message) => this._updateMessageInHistory(message),
     emitEvicted: (totals) =>
       this._emit("chat:media:evicted", {
