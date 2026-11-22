@@ -268,6 +268,84 @@ describe("Outbox capability", () => {
     });
   });
 
+  it("keeps an unlimited per-send attempt bound over the sink's", async () => {
+    const { stub } = stubFor();
+    await runInDurableObject(stub, async (instance: OutboxHarnessObject) => {
+      await instance.outbox.send("fragile", "x", {
+        key: "unlimited",
+        retry: { maxAttempts: Number.POSITIVE_INFINITY, baseDelayMs: 1 }
+      });
+      await waitFor(() => instance.attempts.length >= 3);
+      expect(instance.gaveUp).toEqual([]);
+      expect(await instance.outbox.cancel("fragile", "unlimited")).toBe(true);
+    });
+  });
+
+  it("recovers when a transaction rolls back the first send", async () => {
+    const { stub } = stubFor();
+    await runInDurableObject(
+      stub,
+      async (instance: OutboxHarnessObject, state) => {
+        // Start the Lifecycle so the send writes in this synchronous block.
+        await instance.outbox.list();
+        expect(() =>
+          state.storage.transactionSync(() => {
+            void instance.outbox.send(
+              "record",
+              { value: "lost" },
+              { hold: true }
+            );
+            throw new Error("roll back");
+          })
+        ).toThrow("roll back");
+        expect(await instance.outbox.list()).toEqual([]);
+        await instance.outbox.send("record", { value: "kept" }, { hold: true });
+        expect(
+          (await instance.outbox.list()).map((delivery) => delivery.payload)
+        ).toEqual([{ value: "kept" }]);
+      }
+    );
+  });
+
+  it("gives up on a delivery whose wake a sealed memory breaker deleted", async () => {
+    const { stub } = stubFor();
+    await runInDurableObject(stub, async (instance: OutboxHarnessObject) => {
+      const delivery = await instance.outbox.send(
+        "record",
+        { value: "a" },
+        {
+          key: "sealed",
+          hold: true
+        }
+      );
+      instance.sql(
+        `UPDATE cf_agents_outbox SET status = 'pending', attempts = 1,
+           next_at = ? WHERE id = ?`,
+        Date.now() + 60_000,
+        delivery.id
+      );
+      await instance.outbox.onMemoryLimit({
+        sealed: true,
+        executing: {
+          id: `outbox:${delivery.id}`,
+          capability: "outbox",
+          fn: "deliver",
+          time: Date.now(),
+          payload: { id: delivery.id },
+          retry: { maxAttempts: 1 },
+          singleflight: false,
+          exclusive: false,
+          recoveryLoop: false,
+          createdAt: Date.now()
+        }
+      });
+      expect(await instance.outbox.get("record", "sealed")).toMatchObject({
+        status: "failed"
+      });
+      expect(instance.gaveUp).toHaveLength(1);
+    });
+  });
+
   it("cancels, lists by sink and status, and validates sends", async () => {
     const { stub } = stubFor();
     await runInDurableObject(stub, async (instance: OutboxHarnessObject) => {

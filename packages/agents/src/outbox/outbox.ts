@@ -12,6 +12,7 @@ import {
   type LifecycleRouteAddress,
   type LifecycleRouteContext
 } from "../lifecycle/capability";
+import type { MemoryLimitContext } from "../lifecycle/capability-runner";
 import type {
   LifecycleJobContext,
   LifecycleJobOutcome
@@ -88,7 +89,8 @@ type OutboxJobPayload = {
 
 type OutboxRouteMessage =
   | { readonly type: "wake"; readonly id: string; readonly time: number | null }
-  | { readonly type: "dispatch"; readonly id: string };
+  | { readonly type: "dispatch"; readonly id: string }
+  | { readonly type: "sealed"; readonly id: string };
 
 function isOutboxJobPayload(value: unknown): value is OutboxJobPayload {
   return (
@@ -119,6 +121,19 @@ function validatePolicy(policy: OutboxRetryPolicy | undefined): void {
   }
 }
 
+/** JSON has no Infinity: an unlimited bound is stored as `"unlimited"`. */
+function encodePolicy(policy: OutboxRetryPolicy): string {
+  return JSON.stringify(policy, (_key, value: unknown) =>
+    value === Number.POSITIVE_INFINITY ? "unlimited" : value
+  );
+}
+
+function decodePolicy(json: string): OutboxRetryPolicy {
+  return JSON.parse(json, (_key, value: unknown) =>
+    value === "unlimited" ? Number.POSITIVE_INFINITY : value
+  ) as OutboxRetryPolicy;
+}
+
 /**
  * Durable delivery until acknowledged, for a Lifecycle Object.
  *
@@ -140,7 +155,8 @@ export class Outbox<
   readonly #retryDefaults: Required<OutboxRetryPolicy>;
   /** Attempts running in this isolate, by delivery id. */
   readonly #active = new Map<string, Promise<void>>();
-  #tableEnsured = false;
+  /** Whether the table was seen; cleared when a rollback dropped it. */
+  #tableSeen = false;
 
   constructor(options: OutboxOptions<Sinks> = {}) {
     super("outbox");
@@ -210,6 +226,50 @@ export class Outbox<
     return this.#dispatch(payload.id, true);
   }
 
+  /**
+   * The alarm memory-limit breaker (#1825) struck during a delivery. A
+   * strike that does not seal backs the wake off, and the attempt it cost
+   * is already counted. A strike that seals deletes the wake, so the
+   * delivery gives up now instead of waiting for a start to re-arm it; on
+   * a root's mirror of a facet's wake, the facet's row gives up.
+   */
+  async onMemoryLimit(context: MemoryLimitContext): Promise<void> {
+    const job = context.executing;
+    if (!context.sealed || job?.capability !== this.capabilityId) return;
+    if (!isOutboxJobPayload(job.payload)) return;
+    if (!job.payload.owner_path) {
+      await this.#sealed(job.payload.id);
+      return;
+    }
+    try {
+      await this.lifecycle.routes.to(
+        {
+          key: job.payload.owner_path_key ?? job.payload.owner_path,
+          data: job.payload.owner_path
+        },
+        { type: "sealed", id: job.payload.id } satisfies OutboxRouteMessage
+      );
+    } catch (error) {
+      console.error(
+        `[Outbox] could not report a sealed breaker for delivery ${job.payload.id}`,
+        error
+      );
+    }
+  }
+
+  async #sealed(id: string): Promise<void> {
+    const row = this.#row(id);
+    if (row?.status !== "pending") return;
+    await this.#giveUp(
+      row,
+      new Error(
+        "Sealed by the alarm memory-limit circuit breaker (#1825) after " +
+          "consecutive Durable Object memory-limit resets."
+      )
+    );
+    await this.#syncWake(id);
+  }
+
   /** Handle the wake mirror between a facet and its root. */
   async onRoute(context: LifecycleRouteContext): Promise<unknown> {
     const message = context.payload as OutboxRouteMessage;
@@ -222,6 +282,9 @@ export class Outbox<
       }
       case "dispatch":
         return this.#dispatch(message.id, false);
+      case "sealed":
+        await this.#sealed(message.id);
+        return true;
       default:
         throw new Error("Unknown routed Outbox message");
     }
@@ -290,7 +353,7 @@ export class Outbox<
       json,
       nanoid(),
       status,
-      options.retry ? JSON.stringify(options.retry) : null,
+      options.retry ? encodePolicy(options.retry) : null,
       options.hold ? null : now,
       now,
       now
@@ -357,15 +420,22 @@ export class Outbox<
         : Array.isArray(options.status)
           ? options.status
           : [options.status];
+    const where: string[] = [];
+    const params: string[] = [];
+    if (options.sink !== undefined) {
+      where.push("sink = ?");
+      params.push(options.sink);
+    }
+    if (statuses !== undefined) {
+      where.push(`status IN (${statuses.map(() => "?").join(", ")})`);
+      params.push(...statuses);
+    }
     return this.#sql<OutboxRow>(
-      `SELECT * FROM cf_agents_outbox ORDER BY created_at ASC, id ASC`
-    )
-      .filter(
-        (row) =>
-          (options.sink === undefined || row.sink === options.sink) &&
-          (statuses === undefined || statuses.includes(row.status))
-      )
-      .map((row) => this.#delivery<T>(row));
+      `SELECT * FROM cf_agents_outbox
+       ${where.length > 0 ? `WHERE ${where.join(" AND ")}` : ""}
+       ORDER BY created_at ASC, rowid ASC`,
+      ...params
+    ).map((row) => this.#delivery<T>(row));
   }
 
   /** Drop one delivery, whatever its status. Returns false when none matched. */
@@ -402,10 +472,11 @@ export class Outbox<
   /** Delete failed deliveries, optionally only those last changed before a time. */
   async purge(options: { before?: Date } = {}): Promise<number> {
     await this.lifecycle.ready();
-    return this.#write(
-      `DELETE FROM cf_agents_outbox WHERE status = 'failed' AND updated_at < ?`,
+    return this.#sql(
+      `DELETE FROM cf_agents_outbox WHERE status = 'failed' AND updated_at < ?
+       RETURNING id`,
       options.before?.getTime() ?? Number.MAX_SAFE_INTEGER
-    );
+    ).length;
   }
 
   // ── Delivery ─────────────────────────────────────────────────────────────
@@ -761,9 +832,7 @@ export class Outbox<
 
   #policy(row: OutboxRow): Required<OutboxRetryPolicy> {
     const own =
-      row.retry_options === null
-        ? undefined
-        : (JSON.parse(row.retry_options) as OutboxRetryPolicy);
+      row.retry_options === null ? undefined : decodePolicy(row.retry_options);
     return {
       ...this.#retryDefaults,
       ...this.#resolveSink(row.sink)?.retry,
@@ -803,8 +872,11 @@ export class Outbox<
     )[0];
   }
 
+  /**
+   * Create the table. Runs on every send rather than once: a send inside a
+   * transaction that rolls back takes the table with it.
+   */
   #ensureTable(): void {
-    if (this.#tableEnsured) return;
     this.lifecycle.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS cf_agents_outbox (
         id TEXT PRIMARY KEY NOT NULL,
@@ -823,38 +895,48 @@ export class Outbox<
         updated_at INTEGER NOT NULL,
         UNIQUE (sink, key)
       )`);
-    this.#tableEnsured = true;
+    this.#tableSeen = true;
   }
 
   #hasTable(): boolean {
-    if (this.#tableEnsured) return true;
-    this.#tableEnsured =
+    this.#tableSeen ||=
       this.lifecycle.storage.sql
         .exec(
-          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'cf_agents_outbox'"
+          "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cf_agents_outbox'"
         )
         .toArray().length > 0;
-    return this.#tableEnsured;
+    return this.#tableSeen;
   }
 
-  /** Reads see no rows until the first send creates the table. */
-  #sql<T>(query: string, ...params: (string | number | null)[]): T[] {
-    if (!this.#hasTable()) return [];
+  /**
+   * Run one statement. Before the first send there is no table and nothing
+   * to read; a rolled-back first send can drop the table after it was seen.
+   */
+  #exec<T>(
+    query: string,
+    params: (string | number | null)[],
+    read: (cursor: SqlStorageCursor<Record<string, SqlStorageValue>>) => T,
+    empty: T
+  ): T {
+    if (!this.#hasTable()) return empty;
     try {
-      // SAFETY: T names the columns the query selects from this table.
-      return [...this.lifecycle.storage.sql.exec(query, ...params)] as T[];
+      return read(this.lifecycle.storage.sql.exec(query, ...params));
     } catch (cause) {
+      if (/no such table: cf_agents_outbox/.test(String(cause))) {
+        this.#tableSeen = false;
+        return empty;
+      }
       throw new SqlError(query, cause);
     }
+  }
+
+  #sql<T>(query: string, ...params: (string | number | null)[]): T[] {
+    // SAFETY: T names the columns the query selects from this table.
+    return this.#exec(query, params, (cursor) => [...cursor] as T[], []);
   }
 
   #write(query: string, ...params: (string | number | null)[]): number {
-    if (!this.#hasTable()) return 0;
-    try {
-      return this.lifecycle.storage.sql.exec(query, ...params).rowsWritten;
-    } catch (cause) {
-      throw new SqlError(query, cause);
-    }
+    return this.#exec(query, params, (cursor) => cursor.rowsWritten, 0);
   }
 
   #emit(type: OutboxEventType, payload: Record<string, unknown>): void {

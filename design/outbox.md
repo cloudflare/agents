@@ -52,3 +52,7 @@ Values are capped at 1 MB of JSON because SQLite rows stop at 2 MB.
 - One job per pending delivery. A burst of thousands of deliveries is thousands of job rows. Every current user sends a handful.
 - The lease is fixed at five minutes. A sink that crashes its isolate waits that long before its next attempt.
 - Failed rows are kept for seven days, then deleted without notice. `onGiveUp` and `outbox:give_up` are the reporting path.
+
+## History
+
+- [rfc-slim-hosts.md](./rfc-slim-hosts.md) (#2934) placed the Outbox among the capabilities the hosts compose and settled one keyed rule instead of separate fanout and latest-value modes.
