@@ -87,43 +87,37 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import * as aiSdk from "ai";
 import type {
   FlexibleSchema,
   InferSchema,
   LanguageModel,
   ModelMessage,
-  PrepareStepFunction,
-  PrepareStepResult,
-  TextStreamPart,
   ToolSet,
   TypedToolCall,
   UIMessage
 } from "ai";
-import {
-  convertToModelMessages,
-  hasToolCall,
-  jsonSchema,
-  // `stepCountIs` exists in both AI SDK v6 and v7 (v7 keeps it as an alias of
-  // `isStepCount`). Using it keeps Think compatible with both majors.
-  stepCountIs,
-  streamText,
-  tool
-} from "ai";
-/**
- * Callback type for the AI SDK tool-execution-finished hook, derived from
- * `streamText`'s options so it resolves under both AI SDK v6 and v7 (the
- * exported `OnToolExecutionEndCallback` type is v7-only).
- */
-type ToolCallFinishCallback = NonNullable<
-  Parameters<typeof streamText>[0]["experimental_onToolCallFinish"]
->;
-import { wrapAISDK } from "agents/observability/ai";
+import { convertToModelMessages, tool } from "ai";
 import {
   toDeclaredSchedules,
   type ThinkScheduledTasks
 } from "./scheduled-tasks";
 import { ThinkConfigStore } from "./config-store";
+import {
+  EXECUTION_OUTCOME_MESSAGE_PREFIX,
+  MODEL_RECENT_WINDOW,
+  MODEL_TRUNCATION_STEP,
+  ensureValidContinueCheckpoint,
+  mediaEvictionCutoff,
+  modelMessagesFromHistory,
+  withContextReminder
+} from "./inference/model-messages";
+import { isThinkFinalAnswerToolName } from "./inference/structured-output";
+import type { TelemetryIdentity } from "./inference/telemetry";
+import {
+  createInferenceInvocation,
+  drainInferenceStream,
+  streamErrorToString
+} from "./inference/invocation";
 import { ThinkModelResolver } from "./model";
 import { ThinkSkills } from "./skills-runtime";
 import { systemPromptForTurn } from "./system-prompt";
@@ -159,10 +153,6 @@ import {
   __DO_NOT_USE_WILL_BREAK__withInvocationScope as withInvocationScope
 } from "agents";
 
-const agentsAISDKInvocationBounded = Symbol.for(
-  "cloudflare.agents.ai-sdk.invocation-bounded"
-);
-const usesAISDKV7Telemetry = "registerTelemetry" in aiSdk;
 import type {
   AgentToolLifecycleResult,
   AgentToolMilestone,
@@ -292,7 +282,6 @@ import type {
   ChatTurnOutcome,
   OrphanPersistStore
 } from "agents/chat";
-import { truncateOlderMessages, truncateOlderToolResults } from "agents/chat";
 import {
   Sessions,
   isCompactionMessage,
@@ -305,31 +294,6 @@ import {
   type ContextConfig,
   type WritableContextProvider
 } from "agents/context";
-
-/**
- * The shortest recent-message span the model sees at FULL fidelity each turn
- * (see `_assembleModelMessages` and {@link MODEL_TRUNCATION_STEP}).
- *
- * Both memory bounds are anchored to this window (#1710):
- * - budgeted hydration (`hydrationByteBudget`) is a hard byte ceiling, so a
- *   window of unusually large messages can be shorter than this; the model
- *   then sees what fits rather than exhausting isolate memory;
- * - media eviction never rewrites messages above the stepped truncation
- *   cutoff (see {@link mediaEvictionCutoff}), so the rows the model replays
- *   at full fidelity are never stripped.
- */
-const MODEL_RECENT_WINDOW = 4;
-
-/**
- * Default `truncationStep`. Read-time truncation cuts the history at a
- * multiple of this many messages,
- * so the full-fidelity span grows from `MODEL_RECENT_WINDOW` to
- * `MODEL_RECENT_WINDOW + MODEL_TRUNCATION_STEP - 1` messages between cuts.
- * Providers cache on a byte-identical prompt prefix, and a cutoff that moved
- * every turn rewrote a message near the end of that prefix on every turn
- * (#2200). Stepping it rewrites the prefix once per step instead.
- */
-const MODEL_TRUNCATION_STEP = 8;
 
 /**
  * Drop the keys of a `start` chunk's metadata that the extended assistant
@@ -364,48 +328,6 @@ function turnContextWithoutModel(ctx: TurnContext): Omit<TurnContext, "model"> {
   return Object.defineProperties({}, descriptors) as Omit<TurnContext, "model">;
 }
 
-/** `Infinity` never moves the cutoff; any other invalid step cuts every turn. */
-function truncationStepSize(step: number): number {
-  if (step === Number.POSITIVE_INFINITY) return step;
-  return Number.isFinite(step) ? Math.max(1, Math.floor(step)) : 1;
-}
-
-function truncationKeepRecent(messageCount: number, step: number): number {
-  const safeStep = truncationStepSize(step);
-  if (messageCount <= MODEL_RECENT_WINDOW) return MODEL_RECENT_WINDOW;
-  if (safeStep === Number.POSITIVE_INFINITY) return messageCount;
-  return (
-    MODEL_RECENT_WINDOW + ((messageCount - MODEL_RECENT_WINDOW) % safeStep)
-  );
-}
-
-/**
- * Index below which media eviction may rewrite messages: the stepped
- * truncation cutoff, moved back whole steps until at least
- * `keepRecentMessages` messages stay above it. It only moves when the
- * truncation cutoff does, so eviction rewrites the cached prompt prefix at
- * most once per step and never inside the full-fidelity window (#2356).
- * With stepping disabled (`truncationStep = Infinity`) there is no cutoff to
- * align with, and eviction keeps exactly `keepRecentMessages`.
- */
-function mediaEvictionCutoff(
-  messageCount: number,
-  keepRecentMessages: number,
-  step: number
-): number {
-  const keep = Math.max(keepRecentMessages, MODEL_RECENT_WINDOW);
-  const safeStep = truncationStepSize(step);
-  if (safeStep === Number.POSITIVE_INFINITY) {
-    return Math.max(0, messageCount - keep);
-  }
-  const stepsBack = Math.ceil((keep - MODEL_RECENT_WINDOW) / safeStep);
-  return Math.max(
-    0,
-    messageCount -
-      truncationKeepRecent(messageCount, safeStep) -
-      stepsBack * safeStep
-  );
-}
 const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
 
 const ACTION_OUTPUT_MAX_CHARS = 20_000;
@@ -788,93 +710,6 @@ function actionErrorEnvelope(error: unknown): {
   };
 }
 
-function streamErrorToString(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (typeof error === "string") return error;
-  try {
-    return JSON.stringify(error);
-  } catch {
-    return String(error);
-  }
-}
-
-/**
- * Normalizes the AI SDK tool-execution-finished event across major versions.
- *
- * Think registers a single `experimental_onToolCallFinish` callback, which is
- * the native option in AI SDK v6 and a supported alias for `onToolExecutionEnd`
- * in AI SDK v7 (resolved internally — see `ai`'s `streamText`). The two majors
- * hand the callback different event shapes:
- *
- * - v6: `{ toolCall, messages, success, output, error, durationMs, stepNumber }`
- * - v7: `{ toolCall, messages, toolExecutionMs, toolOutput: { type, output|error } }`
- *   (no `stepNumber`)
- *
- * This collapses both into one shape so the rest of Think stays version-agnostic.
- */
-function normalizeToolFinishEvent(event: unknown): {
-  toolCall: TypedToolCall<ToolSet>;
-  messages: ModelMessage[];
-  toolExecutionMs: number;
-  stepNumber: number | undefined;
-  success: boolean;
-  output: unknown;
-  error: unknown;
-} {
-  const e = event as {
-    toolCall: TypedToolCall<ToolSet>;
-    messages: ModelMessage[];
-    // v7
-    toolExecutionMs?: number;
-    toolOutput?: { type: string; output?: unknown; error?: unknown };
-    // v6
-    durationMs?: number;
-    success?: boolean;
-    output?: unknown;
-    error?: unknown;
-    stepNumber?: number;
-  };
-  const toolExecutionMs = e.toolExecutionMs ?? e.durationMs ?? 0;
-  if (e.toolOutput) {
-    const success = e.toolOutput.type === "tool-result";
-    return {
-      toolCall: e.toolCall,
-      messages: e.messages,
-      toolExecutionMs,
-      // v7 does not provide a step number on this event.
-      stepNumber: undefined,
-      success,
-      output: success ? e.toolOutput.output : undefined,
-      error: success ? undefined : e.toolOutput.error
-    };
-  }
-  const success = e.success ?? false;
-  return {
-    toolCall: e.toolCall,
-    messages: e.messages,
-    toolExecutionMs,
-    stepNumber: e.stepNumber,
-    success,
-    output: success ? e.output : undefined,
-    error: success ? undefined : e.error
-  };
-}
-
-async function* readableStreamToAsyncIterable<T>(
-  stream: ReadableStream<T>
-): AsyncIterable<T> {
-  const reader = stream.getReader();
-  try {
-    while (true) {
-      const next = await reader.read();
-      if (next.done) return;
-      yield next.value;
-    }
-  } finally {
-    reader.releaseLock();
-  }
-}
-
 function actionAuthorizationErrorEnvelope(
   reason: string | undefined,
   permissions: string[]
@@ -1158,59 +993,6 @@ type ThinkRecoveryClassification = { retryTargetUserId: string | null };
 // `setChatRecovering` / `buildChatRecoveringFrame` helpers, and buffer cleanup via
 // The N9 throttle lives
 // there too as `AgentToolStreamProgressThrottle`.)
-
-// Ephemeral user message appended when a model request would otherwise end in
-// an assistant message (see `ensureValidContinueCheckpoint`).
-const CONTINUE_CHECKPOINT_PROMPT =
-  "Continue your previous response from exactly where it left off. Do not repeat any of it.";
-
-/**
- * Ensure a model request does not end in an assistant message.
- *
- * Continuing a partial assistant turn (e.g. after a deploy interrupts a stream)
- * replays a transcript whose final message is that partial assistant message —
- * an "assistant prefill". Modern chat models reject this: Anthropic Claude 4.6+
- * returns a 400 ("This model does not support assistant message prefill. The
- * conversation must end with a user message."). To reach a valid continue
- * checkpoint across providers we append an ephemeral user message. This shapes
- * only the model request; it is never persisted to the transcript.
- */
-function ensureValidContinueCheckpoint(
-  messages: ModelMessage[]
-): ModelMessage[] {
-  if (messages.length === 0) return messages;
-  if (messages[messages.length - 1]?.role !== "assistant") return messages;
-  return [...messages, { role: "user", content: CONTINUE_CHECKPOINT_PROMPT }];
-}
-
-/**
- * Carry a context reminder (`ContextBlocks.reminder()`) after the cached
- * prefix without persisting it. It joins the final user message when there is
- * one, since not every provider accepts two user messages in a row. A request
- * ending in a partial assistant message gets the continue checkpoint here,
- * carrying the reminder, so `ensureValidContinueCheckpoint` adds nothing.
- */
-function withContextReminder(
-  messages: ModelMessage[],
-  reminder: string | null
-): ModelMessage[] {
-  if (!reminder || messages.length === 0) return messages;
-  const part = { type: "text" as const, text: reminder };
-  const lastIndex = messages.length - 1;
-  const last = messages[lastIndex];
-  if (last.role === "user") {
-    const content =
-      typeof last.content === "string"
-        ? [{ type: "text" as const, text: last.content }, part]
-        : [...last.content, part];
-    return [...messages.slice(0, lastIndex), { ...last, content }];
-  }
-  const content =
-    last.role === "assistant"
-      ? [{ type: "text" as const, text: CONTINUE_CHECKPOINT_PROMPT }, part]
-      : [part];
-  return [...messages, { role: "user", content }];
-}
 
 // (The terminal-record key and the recovering-flag key now live in agents/chat;
 // the durable terminal/recovering records are driven via the shared
@@ -1583,20 +1365,6 @@ const submissionStatusHookContext = new AsyncLocalStorage<{
   ended: boolean;
 }>();
 
-// Drains the underlying model stream when a drain loop exits early (in-stream
-// error break, stall abort, user abort). The AI SDK tees its base stream, so
-// an abandoned tee branch would otherwise leave the tracing wrapper's
-// operation span open forever. One registration is associated with both the
-// stable pre-transform result and any wrapper returned by the test seam.
-type InferenceStreamFinalizer = {
-  started: boolean;
-  run: () => Promise<void>;
-};
-const inferenceStreamFinalizers = new WeakMap<
-  object,
-  InferenceStreamFinalizer
->();
-
 type ActionLedgerStatus = "pending" | "settled";
 
 type ActionLedgerRow = {
@@ -1884,68 +1652,6 @@ function stripReservedMetadata(message: UIMessage): UIMessage {
   }
   const { metadata: _dropped, ...withoutMetadata } = message;
   return withoutMetadata as UIMessage;
-}
-
-/** Stable id prefix for fallback notes that preserve orphaned execution outcomes. */
-const EXECUTION_OUTCOME_MESSAGE_PREFIX = "exec-outcome-";
-
-/**
- * Present framework-authored execution outcome notes to providers as user
- * context. Think persists these notes as system messages so clients and
- * recovery do not mistake them for human input, but AI SDK v7 and strict
- * providers reject system messages in arbitrary transcript
- * positions. The provider-only projection leaves current and legacy session
- * history unchanged.
- */
-function toProviderSafeExecutionOutcomeMessage(message: UIMessage): UIMessage {
-  return message.role === "system" &&
-    message.id.startsWith(EXECUTION_OUTCOME_MESSAGE_PREFIX)
-    ? { ...message, role: "user" }
-    : message;
-}
-
-/**
- * Reserved name for the synthetic tool a workflow `step.prompt` turn uses to
- * deliver its structured final answer. The agent runs a full multi-step,
- * tool-using turn and ends it by calling this tool with arguments matching the
- * requested schema — exactly the way a sub-agent returns a result.
- *
- * Why a tool instead of the AI SDK `output`/`response_format` path: streaming a
- * JSON Schema `response_format` is rejected by some providers (Workers AI
- * returns `AiError 5023: JSON Schema mode is not supported with stream mode`),
- * whereas plain tool-calling streams on every provider. Capturing the tool
- * call's INPUT as the result keeps Think's single streaming engine intact
- * (persistence, recovery, resumable streams) and works uniformly across
- * Workers AI, OpenAI, and Anthropic.
- *
- * The name is namespaced to avoid clashing with user tools; if a user tool
- * already uses it, the turn picks a suffixed variant (see `_handleTurn`).
- */
-const THINK_FINAL_ANSWER_TOOL_NAME = "think_final_answer";
-
-/**
- * Whether `name` is (or is a collision-suffixed variant of) the reserved
- * structured-output final-answer tool. Used to strip the internal tool's parts
- * from persisted assistant messages regardless of which per-turn name was used.
- */
-function isThinkFinalAnswerToolName(name: string): boolean {
-  return (
-    name === THINK_FINAL_ANSWER_TOOL_NAME ||
-    name.startsWith(`${THINK_FINAL_ANSWER_TOOL_NAME}_`)
-  );
-}
-
-/**
- * Build the system-prompt instruction that tells the model to terminate a
- * structured workflow turn by calling the given final-answer tool.
- */
-function thinkFinalAnswerInstruction(toolName: string): string {
-  return (
-    "When you have everything you need to answer, you MUST call the " +
-    `\`${toolName}\` tool exactly once with arguments that match the required ` +
-    "schema. Do not write the final answer as plain text — the " +
-    `\`${toolName}\` tool call IS the answer and ends the task.`
-  );
 }
 
 export type ThinkSubmissionInspection = {
@@ -5294,56 +5000,19 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    */
   private async _assembleModelMessages(
     tools: ToolSet
-  ): Promise<Awaited<ReturnType<typeof convertToModelMessages>>> {
-    const repair = await this._turnHistory();
-    // The rule holds where the request is built: a continuation turn whose
-    // repair kept a call a client still has to answer has nothing to
-    // continue. The continuation entry points end such a turn before it
-    // gets here (`ChatTurns.continuationWaitsOnClient`). One that did not
-    // must not reach the model: the request would hold a call with no
-    // result, and with it dropped the model calls the same tool again.
-    if (repair.keptToolCallIds.length > 0) {
-      throw new Error(
-        `[Think] A continuation turn cannot call the model while its reply waits on a client for tool call(s) ${repair.keptToolCallIds.join(", ")}.`
-      );
-    }
-    const history = repair.messages;
-    const providerSafeHistory = history.map(
-      toProviderSafeExecutionOutcomeMessage
-    );
-    const keepRecent = truncationKeepRecent(
-      providerSafeHistory.length,
-      this.truncationStep
-    );
-    const truncated = truncateOlderMessages(providerSafeHistory, {
-      keepRecent,
-      toolOutputs: false
-    }) as UIMessage[];
-    // The before-turn repair above already heals orphan tool calls
-    // (flipping them to errored results, preserving the record). This is the
-    // last-line backstop: if any incomplete tool call still slips through
-    // (compaction edge, addToolOutput race, an unrecognized part shape), drop it
-    // here rather than letting the provider 400 with AI_MissingToolResultsError.
-    //
-    // The backstop drops silently. Repair should have left nothing incomplete,
-    // so a non-empty set here means repair missed a shape — surface it (rather
-    // than masking a repair bug) without breaking the turn.
-    const incompleteAfterRepair = this._incompleteToolCallIds(truncated);
-    if (incompleteAfterRepair.length > 0) {
-      console.warn(
-        `[Think] ${incompleteAfterRepair.length} incomplete tool call(s) survived transcript repair and will be dropped by ignoreIncompleteToolCalls: ${incompleteAfterRepair.join(", ")}. This indicates a gap in the before-turn repair.`
-      );
-      this._emit("chat:transcript:repaired", {
-        removedToolCalls: incompleteAfterRepair.length,
-        normalizedInputs: 0,
-        toolCallIds: incompleteAfterRepair
-      });
-    }
-    const modelMessages = await convertToModelMessages(truncated, {
+  ): Promise<ModelMessage[]> {
+    return modelMessagesFromHistory(await this._turnHistory(), {
       tools,
-      ignoreIncompleteToolCalls: true
+      truncationStep: this.truncationStep,
+      incompleteToolCallIds: (messages) =>
+        this._incompleteToolCallIds(messages),
+      onIncompleteToolCalls: (toolCallIds) =>
+        this._emit("chat:transcript:repaired", {
+          removedToolCalls: toolCallIds.length,
+          normalizedInputs: 0,
+          toolCallIds
+        })
     });
-    return truncateOlderToolResults(modelMessages, truncated, { keepRecent });
   }
 
   /**
@@ -5423,148 +5092,20 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     }
   }
 
-  /**
-   * Finalizes the traced inference stream after a drain loop exits: drains the
-   * abandoned tee branch so the operation span closes even on early exits.
-   * Idempotent (the finalizer is removed before it runs); the drain rides
-   * `ctx.waitUntil` so it survives turn completion without blocking it.
-   */
+  /** Drain an abandoned inference stream so its trace span ends. */
   private _drainInferenceStream(result: object): void {
-    const finalizer = inferenceStreamFinalizers.get(result);
-    inferenceStreamFinalizers.delete(result);
-    if (!finalizer || finalizer.started) {
-      return;
-    }
-
-    finalizer.started = true;
-    // Invoke exactly once: start the drain, then try to extend its lifetime.
-    // A missing/throwing waitUntil must not start a second tee consumer.
-    const completion = finalizer.run();
-    try {
-      this.ctx.waitUntil(completion);
-    } catch {
-      // waitUntil unavailable (tests, exotic contexts): the drain is already
-      // running; nothing further to attach it to.
-    }
+    drainInferenceStream(result, (promise) => this.ctx.waitUntil(promise));
   }
 
-  /**
-   * Adds default identity and current-turn metadata to the AI SDK telemetry
-   * options. The class identifies the logical agent implementation, the named
-   * instance identifies the agent resource, and the opaque Durable Object id
-   * identifies its one persisted conversation. Caller values override defaults.
-   */
-  private _turnTelemetry(
-    base: Parameters<typeof streamText>[0]["experimental_telemetry"]
-  ): Parameters<typeof streamText>[0]["experimental_telemetry"] {
-    const settings = (base ?? {}) as unknown as Record<string, unknown>;
-    const metadata =
-      typeof settings.metadata === "object" && settings.metadata !== null
-        ? (settings.metadata as Record<string, unknown>)
-        : {};
+  /** Who a turn's AI SDK telemetry names: this agent and its admitted turn. */
+  private _telemetryIdentity(): TelemetryIdentity {
     const turn = admittedTurnContext.getStore();
     return {
-      ...settings,
-      // AI SDK maps functionId to gen_ai.agent.name. Use the class name by
-      // default while preserving an explicit caller label.
-      functionId:
-        typeof settings.functionId === "string"
-          ? settings.functionId
-          : this.constructor.name,
-      metadata: {
-        agentId: this.name,
-        conversationId: this.ctx.id.toString(),
-        ...(turn?.agent === this
-          ? {
-              "cloudflare.agents.turn.request_id": turn.requestId,
-              "cloudflare.agents.turn.trigger": turn.trigger,
-              "cloudflare.agents.turn.admission": turn.admission,
-              ...(turn.channel !== undefined && {
-                "cloudflare.agents.turn.channel": turn.channel
-              }),
-              ...(turn.continuation !== undefined && {
-                "cloudflare.agents.turn.continuation": turn.continuation
-              }),
-              ...(turn.generation !== undefined && {
-                "cloudflare.agents.turn.generation": turn.generation
-              })
-            }
-          : {}),
-        // beforeTurn remains authoritative. metadata.agentName, when supplied,
-        // also takes precedence over functionId in the tracing adapter.
-        ...metadata
-      }
-    } as unknown as Parameters<typeof streamText>[0]["experimental_telemetry"];
-  }
-
-  /** Builds the native AI SDK v7 telemetry settings and identity context. */
-  private _turnTelemetryV7(
-    base: Parameters<typeof streamText>[0]["experimental_telemetry"]
-  ): {
-    options: Record<string, unknown>;
-    runtimeContext: Record<string, unknown>;
-  } {
-    const settings = (base ?? {}) as unknown as Record<string, unknown>;
-    const metadata =
-      typeof settings.metadata === "object" && settings.metadata !== null
-        ? (settings.metadata as Record<string, unknown>)
-        : {};
-    const turn = admittedTurnContext.getStore();
-    const runtimeContext: Record<string, unknown> = {
+      className: this.constructor.name,
       agentId: this.name,
       conversationId: this.ctx.id.toString(),
-      ...(turn?.agent === this
-        ? {
-            "cloudflare.agents.turn.request_id": turn.requestId,
-            "cloudflare.agents.turn.trigger": turn.trigger,
-            "cloudflare.agents.turn.admission": turn.admission,
-            ...(turn.channel !== undefined && {
-              "cloudflare.agents.turn.channel": turn.channel
-            }),
-            ...(turn.continuation !== undefined && {
-              "cloudflare.agents.turn.continuation": turn.continuation
-            }),
-            ...(turn.generation !== undefined && {
-              "cloudflare.agents.turn.generation": turn.generation
-            })
-          }
-        : {}),
-      ...metadata
+      ...(turn?.agent === this && { turn })
     };
-    const includedContext =
-      typeof settings.includeRuntimeContext === "object" &&
-      settings.includeRuntimeContext !== null
-        ? (settings.includeRuntimeContext as Record<string, boolean>)
-        : {};
-    const localIntegrations = settings.integrations;
-    const globalIntegrations = (
-      globalThis as typeof globalThis & {
-        AI_SDK_TELEMETRY_INTEGRATIONS?: unknown[];
-      }
-    ).AI_SDK_TELEMETRY_INTEGRATIONS;
-    const integrations = [
-      ...(localIntegrations !== undefined
-        ? Array.isArray(localIntegrations)
-          ? localIntegrations
-          : [localIntegrations]
-        : (globalIntegrations ?? []))
-    ];
-    const options: Record<string, unknown> = {
-      ...settings,
-      functionId:
-        typeof settings.functionId === "string"
-          ? settings.functionId
-          : this.constructor.name,
-      includeRuntimeContext: {
-        ...Object.fromEntries(
-          Object.keys(runtimeContext).map((key) => [key, true])
-        ),
-        ...includedContext
-      },
-      integrations
-    };
-    delete options.metadata;
-    return { options, runtimeContext };
   }
 
   /**
@@ -5733,15 +5274,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
     const subclassConfig = (await this.beforeTurn(ctx)) ?? {};
     const config = await this.#extensionHooks.beforeTurn(ctx, subclassConfig);
-    const workflowPrompt = input.workflowPrompt;
-    // Workflow `step.prompt` turns produce their structured result by calling
-    // the synthetic `final_answer` tool (see THINK_FINAL_ANSWER_TOOL_NAME) —
-    // NOT via the AI SDK `output`/`response_format` path, which some providers
-    // reject when streaming. We pre-build the JSON Schema once here.
-    const structuredOutputSchema = workflowPrompt?.output
-      ? jsonSchema(workflowPrompt.output.schema as never)
-      : undefined;
-    const wantsStructuredOutput = structuredOutputSchema !== undefined;
 
     const finalModel =
       config.model != null
@@ -5776,25 +5308,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // `substitute` returns `output` directly, `allow` runs the original
     // (optionally with modified `input`).
     const finalTools: ToolSet = this._wrapToolsWithDecision(mergedTools);
-    // For a structured workflow turn, expose a final-answer tool alongside the
-    // agent's real tools. The agent loops with its tools and terminates by
-    // calling this one; its arguments are captured as the structured result.
-    // Guard against a clash with a user tool of the same name by suffixing.
-    let finalAnswerToolName = THINK_FINAL_ANSWER_TOOL_NAME;
-    if (structuredOutputSchema) {
-      let suffix = 1;
-      while (finalAnswerToolName in finalTools) {
-        finalAnswerToolName = `${THINK_FINAL_ANSWER_TOOL_NAME}_${suffix++}`;
-      }
-      finalTools[finalAnswerToolName] = tool({
-        description:
-          "Provide your final answer. The arguments MUST match the required " +
-          "schema. Calling this tool ends the task — call it exactly once when " +
-          "you have everything you need.",
-        inputSchema: structuredOutputSchema,
-        execute: async () => "Final answer recorded."
-      });
-    }
 
     // Baseline for the proactive context guard: everything the AI SDK appends
     // to the model-message list after the assembled turn messages belongs to
@@ -5806,333 +5319,51 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     this._activeTurnTools = mergedTools;
     this._recordUnexecutedTools(mergedTools);
 
-    // `maxTurns` is an overridable per-channel default: a user `beforeTurn`
-    // returning `maxSteps` still wins, then the channel cap, then the instance
-    // default.
-    const finalMaxSteps =
-      config.maxSteps ?? channelDefinition?.maxTurns ?? this.maxSteps;
-    const finalSendReasoning = config.sendReasoning ?? this.sendReasoning;
-    const metadataWriter = config.messageMetadata ?? this.messageMetadata;
-    const continuation = input.continuation ?? false;
-    const finalMessageMetadata =
-      metadataWriter &&
-      ((options: { part: TextStreamPart<ToolSet> }) =>
-        metadataWriter({ ...options, continuation }));
     // Resolve the per-turn stall-watchdog override (explicit `0` = off for this
     // turn). Read by `_streamResult` / `_streamResultToRpcCallback` when arming
     // the watchdog. `??` so a `0` override is honored, not treated as "unset".
     this._activeStallTimeoutMs =
       config.chatStreamStallTimeoutMs ?? this.chatStreamStallTimeoutMs;
-    // `output` (AI SDK structured-output / `response_format`) is reserved for
-    // the opt-in chat `TurnConfig.output` API. Workflow prompts use the
-    // `final_answer` tool instead (see `wantsStructuredOutput`).
-    const finalOutput = config.output;
-    // On a structured workflow turn, append the instruction telling the model to
-    // finish by calling `final_answer`. `filter(Boolean)` drops an absent system
-    // prompt so we never stringify `undefined` into the prompt.
-    const turnSystem = wantsStructuredOutput
-      ? [finalSystem, thinkFinalAnswerInstruction(finalAnswerToolName)]
-          .filter(Boolean)
-          .join("\n\n")
-      : finalSystem;
-    // Structured turns must not end with a plain-text answer that skips
-    // `final_answer` (some models, e.g. Workers AI llama, otherwise just reply
-    // in text and stop). Force tool use: when the agent has real tools, require
-    // *a* tool each step so it can do work and then call `final_answer`; with no
-    // real tools, pin the choice directly to `final_answer`. A caller-provided
-    // `toolChoice` still wins.
-    const structuredHasRealTools =
-      wantsStructuredOutput &&
-      Object.keys(finalTools).some((name) => name !== finalAnswerToolName);
-    const finalToolChoice = wantsStructuredOutput
-      ? (config.toolChoice ??
-        (structuredHasRealTools
-          ? "required"
-          : { type: "tool" as const, toolName: finalAnswerToolName }))
-      : config.toolChoice;
-    const finalStopWhen = [
-      stepCountIs(finalMaxSteps),
-      // Stop as soon as the model calls `final_answer` so the structured turn
-      // terminates at the answer instead of continuing to stream more steps.
-      ...(wantsStructuredOutput ? [hasToolCall(finalAnswerToolName)] : []),
-      ...(Array.isArray(config.stopWhen)
-        ? config.stopWhen
-        : config.stopWhen
-          ? [config.stopWhen]
-          : [])
-    ];
 
-    const turnTelemetry = config.telemetry ?? config.experimental_telemetry;
-    const streamTextOptions = {
+    return createInferenceInvocation({
+      config,
       model: finalModel,
-      // `system` is accepted by both AI SDK v6 and v7 (v7 also accepts the
-      // renamed `instructions`, but v6 does not). Use `system` for cross-major
-      // compatibility.
-      system: turnSystem,
+      system: finalSystem,
       messages: finalMessages,
       tools: finalTools,
-      // Keep the synthetic final-answer tool callable even when a caller
-      // restricts `activeTools` — otherwise a structured turn could never call
-      // it and would fail to produce output.
-      activeTools:
-        wantsStructuredOutput && config.activeTools
-          ? [...config.activeTools, finalAnswerToolName]
-          : config.activeTools,
-      toolChoice: finalToolChoice,
-      maxOutputTokens: config.maxOutputTokens,
-      temperature: config.temperature,
-      topP: config.topP,
-      topK: config.topK,
-      presencePenalty: config.presencePenalty,
-      frequencyPenalty: config.frequencyPenalty,
-      stopSequences: config.stopSequences,
-      seed: config.seed,
-      maxRetries: config.maxRetries,
-      timeout: config.timeout,
-      headers: config.headers,
-      stopWhen: finalStopWhen,
-      providerOptions: config.providerOptions as
-        | Parameters<typeof streamText>[0]["providerOptions"]
-        | undefined,
-      experimental_telemetry: usesAISDKV7Telemetry
-        ? undefined
-        : this._turnTelemetry(turnTelemetry),
-      // Forward the per-turn stream transform(s) from TurnConfig so callers
-      // can inspect/rewrite the stream (e.g. emit `source` parts derived from
-      // tool results) without owning the stream pipeline themselves.
-      experimental_transform: config.experimental_transform,
-      // `experimental_repairToolCall` is the common option name across AI SDK
-      // v6 and v7. TurnConfig exposes the stable v7 name while this boundary
-      // keeps both supported majors working.
-      experimental_repairToolCall: config.repairToolCall,
-      // Forward the per-turn structured-output spec from TurnConfig so
-      // callers can use AI SDK `Output.object({ schema })` / `Output.text()`
-      // on the terminal turn without dropping tools at model construction.
-      output: finalOutput,
-      abortSignal: input.signal,
-      // Forward the AI SDK's `prepareStep` callback unchanged so subclasses
-      // can make per-step decisions from the previous steps, current
-      // messages, model, and experimental context.
-      //
-      // Subclass-only by design: extension dispatch is intentionally not
-      // wired here. The prepareStep event includes a live `LanguageModel`
-      // instance which is not JSON-serializable, and a returned override
-      // can include the same — there's no useful "snapshot, override"
-      // contract we could give to sandboxed extensions. If we expose
-      // observation-only later it should go through a separate,
-      // serialized event surface.
-      //
-      // `beforeStep` returning `void`/`undefined`/`null` is normalized to
-      // `{}` so the AI SDK falls back to top-level settings (it accepts
-      // `undefined` per docs but the typed return is non-null).
-      prepareStep: (async (event) => {
-        // Proactive context guard (Layer 1) runs first so `beforeStep` sees the
-        // recompacted messages and can still override them if it wants to.
-        const guarded = await this._maybeProactiveContextCompact(event);
-        const result = await this.beforeStep(
-          guarded ? { ...event, messages: guarded } : event
-        );
-        const base = result == null ? {} : result;
-        // Only apply the guard's recompacted messages when the subclass didn't
-        // set its own `messages` override for this step.
-        const baseMessages = (base as { messages?: unknown }).messages;
-        const withMessages =
-          guarded && baseMessages === undefined
-            ? { ...base, messages: guarded }
-            : base;
-        // Safety net for structured workflow turns: on the final permitted step,
-        // force the model to call `final_answer` so the turn always terminates
-        // with a schema-shaped result instead of running out of steps. Respect a
-        // `toolChoice` the subclass already set for this step.
-        const stepResult =
-          wantsStructuredOutput &&
-          event.stepNumber >= finalMaxSteps - 1 &&
-          (withMessages as { toolChoice?: unknown }).toolChoice === undefined
-            ? {
-                ...withMessages,
-                toolChoice: {
-                  type: "tool" as const,
-                  toolName: finalAnswerToolName
-                },
-                activeTools: [finalAnswerToolName]
-              }
-            : withMessages;
-        // `beforeStep` may return a string `model` (StepConfig widens it to
-        // ThinkModel); the AI SDK needs a concrete LanguageModel, so resolve it.
-        const stepModel = (stepResult as { model?: ThinkModel }).model;
-        if (typeof stepModel === "string") {
-          return {
-            ...stepResult,
-            model: this.resolveModel(stepModel)
-          } as PrepareStepResult<ToolSet>;
-        }
-        return stepResult as PrepareStepResult<ToolSet>;
-      }) satisfies PrepareStepFunction<ToolSet>,
-      onChunk: async (event) => {
-        // Pass the AI SDK's chunk event through unchanged — gives users
-        // access to the discriminated `TextStreamPart` chunk with all
-        // provider metadata.
-        await this.onChunk(event);
-        await this.#extensionHooks.chunk(event);
-      },
-      // `onStepFinish` is the step callback name in both AI SDK v6 and v7 (v7
-      // also accepts the renamed `onStepEnd`, but v6 does not). Use the shared
-      // name; it still dispatches to Think's `onStepEnd` hook.
-      onStepFinish: async (event) => {
-        // Pass the full StepResult through — gives users access to
-        // reasoning, sources, files, providerMetadata (cache tokens),
-        // request/response, warnings, and the full LanguageModelUsage
-        // that the AI SDK provides.
-        await this.onStepEnd(event);
-        await this.#extensionHooks.stepFinish(event);
-      },
-      // `beforeToolCall` is dispatched from the wrapped `execute` (see
-      // `_wrapToolsWithDecision` above) so the returned `ToolCallDecision`
-      // can actually intercept the call. `afterToolCall` is wired through
-      // the AI SDK's `experimental_onToolCallFinish` callback so we get
-      // accurate execution time and the discriminated `success`/`error`
-      // outcome — including failures that propagate out of `execute`.
-      //
-      // We register `experimental_onToolCallFinish` (rather than the v7-only
-      // `onToolExecutionEnd`) because it is the native option in AI SDK v6 and
-      // a supported alias in v7 — `ai` resolves it to `onToolExecutionEnd`
-      // internally and fires it exactly once. `normalizeToolFinishEvent`
-      // reconciles the differing event shapes between the two majors.
-      experimental_onToolCallFinish: (async (event) => {
-        // The synthetic final-answer tool is internal plumbing for structured
-        // workflow turns — do not surface it to user `afterToolCall` hooks or
-        // extensions.
-        const e = normalizeToolFinishEvent(event);
-        if (e.toolCall.toolName === finalAnswerToolName) return;
-        const { success, output, error } = e;
-        const requestId = this.activeTurn?.requestId;
-        const base = {
-          ...e.toolCall,
-          stepNumber: e.stepNumber,
-          messages: e.messages,
-          toolExecutionMs: e.toolExecutionMs,
-          durationMs: e.toolExecutionMs,
-          ...(requestId !== undefined && { requestId })
-        };
-        const ctx = (success
-          ? {
-              ...base,
-              toolOutput: { type: "tool-result" as const, output },
-              success: true as const,
-              output
-            }
-          : {
-              ...base,
-              toolOutput: { type: "tool-error" as const, error },
-              success: false as const,
-              error
-            }) as unknown as ToolCallResultContext;
-        await this.afterToolCall(ctx);
-        await this.#extensionHooks.toolCallFinish({
-          toolCall: e.toolCall,
-          stepNumber: e.stepNumber,
-          durationMs: e.toolExecutionMs,
-          success,
-          output,
-          error
-        });
-      }) as ToolCallFinishCallback
-    } satisfies Parameters<typeof streamText>[0];
-
-    const crossMajorOptions = streamTextOptions as unknown as Record<
-      PropertyKey,
-      unknown
-    >;
-    if (usesAISDKV7Telemetry) {
-      const { options, runtimeContext } = this._turnTelemetryV7(turnTelemetry);
-      delete crossMajorOptions.experimental_telemetry;
-      crossMajorOptions.telemetry = options;
-      crossMajorOptions.runtimeContext = runtimeContext;
-    }
-    if (admittedTurnContext.getStore()?.trigger === "ws-chat") {
-      crossMajorOptions[agentsAISDKInvocationBounded] = true;
-    }
-
-    const inferenceStreamText = wrapAISDK(aiSdk, {
+      // `maxTurns` is an overridable per-channel default: a user `beforeTurn`
+      // returning `maxSteps` still wins, then the channel cap, then the
+      // instance default.
+      maxSteps: config.maxSteps ?? channelDefinition?.maxTurns ?? this.maxSteps,
+      sendReasoning: config.sendReasoning ?? this.sendReasoning,
+      continuation: input.continuation ?? false,
+      messageMetadata: config.messageMetadata ?? this.messageMetadata,
+      workflowPrompt: input.workflowPrompt,
+      signal: input.signal,
+      telemetry: this._telemetryIdentity(),
+      invocationBounded: admittedTurnContext.getStore()?.trigger === "ws-chat",
       storeMessages: this.storeMessages,
-      storeTools: this.storeTools
-    }).streamText;
-
-    return () => {
-      const result = inferenceStreamText(streamTextOptions);
-
-      const outputPromise = wantsStructuredOutput
-        ? // Structured workflow result = the `final_answer` tool call's INPUT
-          // (its arguments), captured after the stream finishes. Take the last
-          // call in case the model emitted more than one. `result.toolCalls` is a
-          // `PromiseLike`, so wrap it to get a real `Promise` (for `.catch` below).
-          Promise.resolve(result.toolCalls).then((calls) => {
-            const finalCalls = calls.filter(
-              (call) => call.toolName === finalAnswerToolName
-            );
-            const last = finalCalls[finalCalls.length - 1];
-            if (!last) {
-              throw new Error(
-                `Model ended the turn without calling the ${finalAnswerToolName} tool`
-              );
-            }
-            return last.input;
-          })
-        : finalOutput
-          ? // `result.output` is a getter that builds a new promise per read.
-            Promise.resolve(result.output)
-          : undefined;
-      if (outputPromise) {
-        // Attach a rejection observer immediately. `_streamResult()` will still
-        // await this promise when captureOutput is enabled, but aborted streams can
-        // reject before the stream consumer reaches that point.
-        void outputPromise.catch(() => {});
-      }
-
-      const streamResult = {
-        toUIMessageStream: (options) => {
-          const sendReasoning = options?.sendReasoning ?? finalSendReasoning;
-          const onError = options?.onError ?? streamErrorToString;
-          // Use the result's own `toUIMessageStream()` method rather than the
-          // standalone `toUIMessageStream({ stream })` helper: the method exists
-          // in both AI SDK v6 and v7 (deprecated in v7 but functional), whereas
-          // the standalone helper and the `result.stream` property it needs are
-          // v7-only.
-          const uiStream = (
-            result as {
-              toUIMessageStream: (o: {
-                sendReasoning?: boolean;
-                onError?: (error: unknown) => string;
-                messageMetadata?: (options: {
-                  part: TextStreamPart<ToolSet>;
-                }) => Record<string, unknown> | undefined;
-              }) => ReadableStream;
-            }
-          ).toUIMessageStream({
-            sendReasoning,
-            onError,
-            messageMetadata: finalMessageMetadata
-          });
-          return readableStreamToAsyncIterable(uiStream);
+      storeTools: this.storeTools,
+      hooks: {
+        compactBeforeStep: (event) => this._maybeProactiveContextCompact(event),
+        beforeStep: (event) => this.beforeStep(event),
+        onChunk: async (event) => {
+          await this.onChunk(event);
+          await this.#extensionHooks.chunk(event);
         },
-        output: outputPromise
-      } satisfies StreamableResult;
-
-      const finalizer: InferenceStreamFinalizer = {
-        started: false,
-        run: () =>
-          // consumeStream never rejects (onError swallows) and is a no-op when
-          // the stream already ran to completion.
-          Promise.resolve(result.consumeStream({ onError: () => {} }))
-      };
-      inferenceStreamFinalizers.set(streamResult, finalizer);
-
-      const finalized = this._transformInferenceResult(streamResult);
-      if (finalized !== streamResult) {
-        inferenceStreamFinalizers.set(finalized, finalizer);
+        onStepEnd: async (event) => {
+          await this.onStepEnd(event);
+          await this.#extensionHooks.stepFinish(event);
+        },
+        afterToolCall: async (ctx, event) => {
+          await this.afterToolCall(ctx);
+          await this.#extensionHooks.toolCallFinish(event);
+        },
+        requestId: () => this.activeTurn?.requestId,
+        resolveModel: (model) => this.resolveModel(model),
+        transformResult: (result) => this._transformInferenceResult(result)
       }
-      return finalized;
-    };
+    });
   }
 
   /** @internal Test seam — override in test agents to wrap the stream (e.g. error injection). */
