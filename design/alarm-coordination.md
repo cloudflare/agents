@@ -44,6 +44,13 @@ Re-arm requests are serialized so a later durable-state change cannot be
 overwritten by an earlier calculation, and requests made during startup are
 coalesced and applied after startup completes.
 
+Startup also runs a wake check: when the queue holds jobs and no alarm is set,
+Lifecycle re-arms from the queue. An existing alarm is left alone. Without it,
+a lost alarm strands every pending job until the next queue mutation, and an
+alarm can be lost: the platform retries a throwing `alarm()` six times (at
+about 2, 5, 9, 18, 36 and 78 seconds) and then drops it, and user code can
+call `deleteAlarm()`. Measured on a deployed Worker, 22 Nov 2026.
+
 ## When the alarm fires
 
 `Lifecycle.alarm()` runs the event loop: arm the deadman, drive due jobs in

@@ -772,6 +772,26 @@ export class Lifecycle<
     if (this.#rearmRequestedDuringStart) {
       this.#rearmRequestedDuringStart = false;
       await this.rearmAlarm();
+      return;
+    }
+    await this.#restoreLostAlarm();
+  }
+
+  /**
+   * Wake check: re-arm when the queue holds jobs but no alarm is set. The
+   * platform drops an alarm whose handler failed six times in a row, and
+   * user code can delete it; either way pending jobs would wait for the next
+   * queue mutation. An existing alarm is left alone. Best-effort: a failure
+   * here must not fail the startup that woke the object.
+   */
+  async #restoreLostAlarm(): Promise<void> {
+    if (this.#alarmsDisabled) return;
+    try {
+      if (!this.#jobQueue.hasJobs()) return;
+      if ((await this.#ctx.storage.getAlarm()) !== null) return;
+      await this.rearmAlarm();
+    } catch (error) {
+      console.error(this.#errorLogPrefix("wake check"), error);
     }
   }
 
