@@ -461,7 +461,10 @@ export class JobDriver {
       // the owner's only wake. Run one attempt at a time, each starting
       // further out, so a job that keeps taking its isolate down costs one
       // attempt per backoff instead of one every deadman delay.
-      queue.setTime(row.id, Date.now() + exhaustedBackoffMs(prior - maxAttempts));
+      queue.setTime(
+        row.id,
+        Date.now() + exhaustedBackoffMs(prior - maxAttempts)
+      );
     }
     let attempt = prior;
 
