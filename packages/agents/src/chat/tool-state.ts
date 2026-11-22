@@ -16,16 +16,21 @@ export type ToolPartUpdate = {
 };
 
 /**
- * Apply a tool part update to a parts array.
- * Finds the first part matching `update.toolCallId` in one of `update.matchStates`,
- * applies the update immutably, and returns the new parts array with the index.
+ * Apply a tool part update to a parts array: to every part for
+ * `update.toolCallId` in one of `update.matchStates`. A legacy message can
+ * hold the same call twice; leaving one copy unanswered would leave the call
+ * pending for ever.
  *
- * Returns `null` if no matching part was found.
+ * Immutable: `parts` is not changed. Returns the new array (the same array
+ * when no matched part changed) and whether one changed, or `null` when no
+ * part matched.
  */
 export function applyToolUpdate(
   parts: Array<Record<string, unknown>>,
   update: ToolPartUpdate
-): { parts: Array<Record<string, unknown>>; index: number } | null {
+): { parts: Array<Record<string, unknown>>; changed: boolean } | null {
+  let next: Array<Record<string, unknown>> | undefined;
+  let matched = false;
   for (let i = 0; i < parts.length; i++) {
     const part = parts[i];
     if (
@@ -34,19 +39,27 @@ export function applyToolUpdate(
       "state" in part &&
       update.matchStates.includes(part.state as string)
     ) {
-      const updatedParts = [...parts];
-      updatedParts[i] = update.apply(part);
-      return { parts: updatedParts, index: i };
+      matched = true;
+      const applied = update.apply(part);
+      if (applied !== part) {
+        next ??= [...parts];
+        next[i] = applied;
+      }
     }
   }
-  return null;
+  if (!matched) return null;
+  return next ? { parts: next, changed: true } : { parts, changed: false };
 }
 
 /**
  * Build an update descriptor for applying a tool result.
  *
- * Matches parts in `input-available`, `approval-requested`, or `approval-responded` state.
- * Sets state to `output-available` (with output) or `output-error` (with errorText).
+ * Matches the pre-terminal states (`input-available`, `approval-requested`,
+ * `approval-responded`) and sets `output-available` (with output) or
+ * `output-error` (with errorText). First write wins: a part that already
+ * holds a terminal result is matched and returned as the same reference, so
+ * a duplicate frame, a second tab or a provider replay is an idempotent
+ * no-op (`unchanged`), not a miss, and never overwrites the first result.
  */
 export function toolResultUpdate(
   toolCallId: string,
@@ -59,18 +72,140 @@ export function toolResultUpdate(
     matchStates: [
       "input-available",
       "approval-requested",
-      "approval-responded"
+      "approval-responded",
+      "output-available",
+      "output-error",
+      "output-denied"
     ],
-    apply: (part) => ({
-      ...part,
-      ...(overrideState === "output-error"
-        ? {
-            state: "output-error",
-            errorText: errorText ?? "Tool execution denied by user"
-          }
-        : { state: "output-available", output, preliminary: false })
-    })
+    apply: (part) => {
+      if (isTerminalToolState(part.state)) return part;
+      return {
+        ...part,
+        ...(overrideState === "output-error"
+          ? {
+              state: "output-error",
+              errorText: errorText ?? "Tool execution denied by user"
+            }
+          : { state: "output-available", output, preliminary: false })
+      };
+    }
   };
+}
+
+function isTerminalToolState(state: unknown): boolean {
+  return (
+    state === "output-available" ||
+    state === "output-error" ||
+    state === "output-denied"
+  );
+}
+
+/**
+ * The reply a host is streaming or storing now, whose parts an update may
+ * change in place.
+ */
+export type InFlightToolReply<TMessage> = {
+  readonly id: string;
+  /** The reply's live parts array. A changed part is replaced in it. */
+  readonly parts: Array<Record<string, unknown>>;
+  /** The reply as a message, for the broadcast. */
+  readonly snapshot: () => TMessage;
+  /** A part changed in place: a store of the reply already under way must run again. */
+  readonly changed: () => void;
+};
+
+/** Where {@link applyToolPartUpdate} finds, writes and announces the part. */
+export type ToolPartTarget<TMessage extends { id: string; parts: unknown[] }> =
+  {
+    /** The reply in flight, or `null`. */
+    readonly inFlight: InFlightToolReply<TMessage> | null;
+    /**
+     * The stored message holding the call, or `null`. `inFlightId` is set when
+     * the reply in flight holds it: a row under that id exists only when part
+     * of the reply was stored before it finished.
+     */
+    readonly storedOwner: (
+      toolCallId: string,
+      inFlightId: string | undefined
+    ) => Promise<TMessage | null>;
+    /** Store a changed message. Returns the form to broadcast. */
+    readonly write: (message: TMessage) => Promise<TMessage>;
+    /** Tell clients the message changed. */
+    readonly broadcast: (message: TMessage) => void;
+  };
+
+/**
+ * Apply a tool result, approval or outcome to its part, wherever the part
+ * is: in the reply in flight, in the stored transcript, or both. Both, because
+ * a reply can be partly stored while it streams (stall recovery, #1649) and a
+ * result written only to one copy would be lost when the other is stored.
+ *
+ * An update that leaves the matched part as the same reference changed
+ * nothing: no write and no broadcast.
+ *
+ * @returns `changed` with the message a continuation answers (the reply in
+ *   flight when it holds the call), `unchanged` when the part was found and
+ *   already settled, or `missing`.
+ */
+export async function applyToolPartUpdate<
+  TMessage extends { id: string; parts: unknown[] }
+>(
+  update: ToolPartUpdate,
+  target: ToolPartTarget<TMessage>
+): Promise<
+  | { status: "changed"; messageId: string }
+  | { status: "unchanged" }
+  | { status: "missing" }
+> {
+  let broadcastMessage: TMessage | undefined;
+  // `undefined`: no part found; `null`: found, already settled.
+  let changedMessageId: string | null | undefined;
+
+  const inFlight = target.inFlight;
+  let inFlightOwnsCall = false;
+  if (inFlight) {
+    const result = applyToolUpdate(inFlight.parts, update);
+    if (result) {
+      inFlightOwnsCall = true;
+      changedMessageId = null;
+      if (result.changed) {
+        result.parts.forEach((part, index) => {
+          inFlight.parts[index] = part;
+        });
+        inFlight.changed();
+        broadcastMessage = inFlight.snapshot();
+        changedMessageId = inFlight.id;
+      }
+    }
+  }
+
+  const owner = await target.storedOwner(
+    update.toolCallId,
+    inFlightOwnsCall && inFlight ? inFlight.id : undefined
+  );
+  if (owner) {
+    const ownerParts = owner.parts as Array<Record<string, unknown>>;
+    const result = applyToolUpdate(ownerParts, update);
+    if (result) changedMessageId ??= null;
+    if (result?.changed) {
+      const stored = await target.write({
+        ...owner,
+        parts: result.parts as TMessage["parts"]
+      });
+      broadcastMessage = stored;
+      // The reply in flight, when it also holds the call, is the one a
+      // continuation answers: keep it as the changed message.
+      if (typeof changedMessageId !== "string") changedMessageId = owner.id;
+    }
+  }
+
+  if (broadcastMessage) target.broadcast(broadcastMessage);
+  if (typeof changedMessageId === "string") {
+    return { status: "changed", messageId: changedMessageId };
+  }
+  return changedMessageId === null
+    ? { status: "unchanged" }
+    : { status: "missing" };
 }
 
 /**
@@ -118,13 +253,7 @@ export function crossMessageToolResultUpdate(
       "output-denied"
     ],
     apply: (part) => {
-      if (
-        part.state === "output-available" ||
-        part.state === "output-error" ||
-        part.state === "output-denied"
-      ) {
-        return part;
-      }
+      if (isTerminalToolState(part.state)) return part;
       if (updateType === "output-error") {
         return {
           ...part,

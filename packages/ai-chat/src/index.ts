@@ -64,7 +64,11 @@ import {
   toSaveMessagesResult,
   type TurnFailureHost,
   type ToolInteractionOutcome,
+  type ToolPartUpdate,
+  applyToolPartUpdate,
+  crossMessageToolResultUpdate,
   toolApprovalUpdate,
+  toolResultUpdate,
   type TurnResult,
   type MessagePart,
   type StreamChunkData,
@@ -1436,12 +1440,8 @@ export class AIChatAgent<
             // schemas. A duplicate or a result for a call that is gone
             // changes nothing.
             this._requestContext.applyingToolResult(clientTools, () =>
-              this._settleToolResult(
-                toolCallId,
-                toolName,
-                output,
-                overrideState,
-                errorText
+              this._applyToolPartUpdate(
+                toolResultUpdate(toolCallId, output, overrideState, errorText)
               )
             ),
             autoContinue === true,
@@ -1460,7 +1460,10 @@ export class AIChatAgent<
           const { toolCallId, approved, autoContinue } = event;
           this._emit("tool:approval", { toolCallId, approved });
           this._turns.applyInteraction(
-            () => this._settleToolApproval(toolCallId, approved),
+            () =>
+              this._applyToolPartUpdate(
+                toolApprovalUpdate(toolCallId, approved)
+              ),
             autoContinue === true,
             () => ({
               connection,
@@ -5232,27 +5235,6 @@ export class AIChatAgent<
     );
   }
 
-  /**
-   * Finds an existing assistant message that contains a tool part with the given toolCallId.
-   * Used to detect when a tool result should update an existing message rather than
-   * creating a new one.
-   *
-   * @param toolCallId - The tool call ID to search for
-   * @returns The existing message if found, undefined otherwise
-   */
-  private _findMessageByToolCallId(toolCallId: string): UIMessage | undefined {
-    for (const msg of this.messages) {
-      if (msg.role !== "assistant") continue;
-
-      for (const part of msg.parts) {
-        if ("toolCallId" in part && part.toolCallId === toolCallId) {
-          return msg;
-        }
-      }
-    }
-    return undefined;
-  }
-
   private _findLastAssistantMessage(): UIMessage | undefined {
     for (let i = this.messages.length - 1; i >= 0; i--) {
       if (this.messages[i].role === "assistant") {
@@ -5422,250 +5404,67 @@ export class AIChatAgent<
   }
 
   /**
-   * Shared helper for finding a tool part by toolCallId and applying an update.
-   * Handles both streaming (in-memory) and persisted (SQLite) messages.
-   *
-   * Checks _streamingMessage first (tool results/approvals can arrive while
-   * the AI is still streaming), then retries persisted messages with backoff
-   * in case streaming completes between attempts.
-   *
-   * `applyUpdate` may return its argument by reference (or `{ ...part }`
-   * with no semantic changes) to signal an idempotent no-op — this is
-   * detected via `_isToolPartUnchanged` and short-circuits the SQLite
-   * write and `MESSAGE_UPDATED` broadcast.
-   *
-   * @param toolCallId - The tool call ID to find
-   * @param callerName - Name for log messages (e.g. "_settleToolResult")
-   * @param matchStates - Which tool part states to match
-   * @param applyUpdate - Mutation to apply to the matched part (streaming: in-place, persisted: spread)
-   * @returns true if the update was applied (or matched as an idempotent
-   *   no-op), false if no matching part was found
+   * Apply a tool result, approval or replayed server result to its part with
+   * the shared `applyToolPartUpdate`: in the reply in flight (a result can
+   * arrive while the model streams, or while the finished reply is being
+   * stored) and in the stored transcript. A repeat leaves the part as it was
+   * and is neither written nor broadcast.
    */
-  private async _findAndUpdateToolPart(
-    toolCallId: string,
-    callerName: string,
-    matchStates: string[],
-    applyUpdate: (part: Record<string, unknown>) => Record<string, unknown>
-  ): Promise<boolean> {
-    return (
-      (
-        await this._updateToolPart(
-          toolCallId,
-          callerName,
-          matchStates,
-          applyUpdate
-        )
-      ).status !== "missing"
-    );
-  }
-
-  /**
-   * {@link _findAndUpdateToolPart}, reporting whether the update changed the
-   * part, was an idempotent no-op, or found no part to update.
-   */
-  private async _updateToolPart(
-    toolCallId: string,
-    callerName: string,
-    matchStates: string[],
-    applyUpdate: (part: Record<string, unknown>) => Record<string, unknown>
+  private _applyToolPartUpdate(
+    update: ToolPartUpdate
   ): Promise<ToolInteractionOutcome> {
-    // Find the message containing this tool call: the reply in flight first
-    // (streaming, or finished and being stored), then the stored transcript.
-    // One look, no retry: applies run one at a time, so waiting here for a
-    // call that does not exist would stall every result queued behind it.
-    // The reply in flight covers every moment a reply exists and is not yet
-    // stored, so there is nothing to wait for.
-    let message: UIMessage | undefined;
-
     const inFlight = this._replyInFlight();
-    if (inFlight) {
-      for (const part of inFlight.parts) {
-        if ("toolCallId" in part && part.toolCallId === toolCallId) {
-          message = inFlight;
-          break;
-        }
-      }
-    }
-
-    message ??= this._findMessageByToolCallId(toolCallId);
-
-    if (!message) {
-      console.warn(
-        `[AIChatAgent] ${callerName}: Could not find message with toolCallId ${toolCallId}`
-      );
-      return { status: "missing" };
-    }
-
-    const isStreamingMessage = message === inFlight;
-    // `wasFound` tracks whether any matching part was processed (real
-    // change OR idempotent no-op). `hasRealChange` tracks whether any
-    // apply actually mutated state. Tracking both separately matters
-    // when a (legacy) message somehow contains duplicate tool parts for
-    // the same toolCallId — we must still persist if any of them
-    // produced a real change, even if another was an idempotent no-op.
-    let wasFound = false;
-    let hasRealChange = false;
-
-    if (isStreamingMessage) {
-      // Update in place -- the message will be persisted when streaming completes
-      for (const part of message.parts) {
-        if (
-          "toolCallId" in part &&
-          part.toolCallId === toolCallId &&
-          "state" in part &&
-          matchStates.includes(part.state as string)
-        ) {
-          wasFound = true;
-          const applied = applyUpdate(part as Record<string, unknown>);
-          if (
-            !AIChatAgent._isToolPartUnchanged(
-              part as Record<string, unknown>,
-              applied
-            )
-          ) {
-            Object.assign(part, applied);
-            hasRealChange = true;
-            // A reply that is being stored may already have been written
-            // without this change: `_reply` stores it again.
-            if (this._replyBeingStored?.message === message) {
-              this._replyBeingStored.dirty = true;
+    const ownerOf = (toolCallId: string): UIMessage | null =>
+      this.messages.find(
+        (message) =>
+          message.role === "assistant" &&
+          message.parts.some(
+            (part) => "toolCallId" in part && part.toolCallId === toolCallId
+          )
+      ) ?? null;
+    return applyToolPartUpdate<UIMessage>(update, {
+      inFlight: inFlight
+        ? {
+            id: inFlight.id,
+            parts: inFlight.parts as unknown as Array<Record<string, unknown>>,
+            snapshot: () => inFlight,
+            changed: () => {
+              // A reply that is being stored may already have been written
+              // without this change: `_reply` stores it again.
+              if (this._replyBeingStored?.message === inFlight) {
+                this._replyBeingStored.dirty = true;
+              }
             }
           }
-          break;
-        }
-      }
-    } else {
-      // For persisted messages, create updated parts immutably
-      const updatedParts = message.parts.map((part) => {
-        if (
-          "toolCallId" in part &&
-          part.toolCallId === toolCallId &&
-          "state" in part &&
-          matchStates.includes(part.state as string)
-        ) {
-          wasFound = true;
-          const applied = applyUpdate(part as Record<string, unknown>);
-          if (
-            AIChatAgent._isToolPartUnchanged(
-              part as Record<string, unknown>,
-              applied
-            )
-          ) {
-            return part;
-          }
-          hasRealChange = true;
-          return applied;
-        }
-        return part;
-      }) as UIMessage["parts"];
-
-      if (hasRealChange) {
-        const updatedMessage: UIMessage = this._sanitizeMessageForPersistence({
-          ...message,
-          parts: updatedParts
-        });
+        : null,
+      storedOwner: async (toolCallId) => ownerOf(toolCallId),
+      write: async (message) => {
+        const sanitized = this._sanitizeMessageForPersistence(message);
         // The change feed patches `this.messages`. A `null` result means the
         // row is not in storage (nothing to mirror), so patch the live view
         // directly to keep the in-memory transcript consistent.
-        const stored = await this.#session.updateMessage(updatedMessage);
-        if (!stored) {
-          const index = this.messages.findIndex(
-            (candidate) => candidate.id === updatedMessage.id
-          );
-          if (index !== -1) {
-            this.messages[index] = autoTransformMessages([updatedMessage])[0];
-          }
+        const stored = await this.#session.updateMessage(sanitized);
+        const index = this.messages.findIndex(
+          (candidate) => candidate.id === sanitized.id
+        );
+        if (!stored && index !== -1) {
+          this.messages[index] = autoTransformMessages([sanitized])[0];
         }
-      }
-    }
-
-    if (!wasFound) {
-      console.warn(
-        `[AIChatAgent] ${callerName}: Tool part with toolCallId ${toolCallId} not in expected state (expected: ${matchStates.join("|")})`
-      );
-      return { status: "missing" };
-    }
-
-    // Idempotent no-op: caller asked us to apply something we'd already
-    // applied (e.g. a duplicate cf_agent_tool_result, or a cross-tab
-    // re-delivery). Skip the broadcast — clients are already in the
-    // correct state and a redundant MESSAGE_UPDATED would just churn UI.
-    if (!hasRealChange) {
-      return { status: "unchanged" };
-    }
-
-    // Broadcast the update to all clients.
-    // For persisted messages, re-fetch the latest state from this.messages.
-    // For streaming messages, broadcast the in-memory snapshot so clients
-    // get immediate confirmation that the tool result/approval was applied.
-    if (isStreamingMessage) {
-      this._broadcastChatMessage({
-        type: MessageType.CF_AGENT_MESSAGE_UPDATED,
-        message
-      });
-    } else {
-      const broadcastMessage = this._findMessageByToolCallId(toolCallId);
-      if (broadcastMessage) {
+        return index !== -1 ? this.messages[index] : sanitized;
+      },
+      broadcast: (message) =>
         this._broadcastChatMessage({
           type: MessageType.CF_AGENT_MESSAGE_UPDATED,
-          message: broadcastMessage
-        });
-      }
-    }
-
-    return { status: "changed", messageId: message.id };
-  }
-
-  /**
-   * Returns true if `applied` is the same reference as `original`, or if
-   * the two have identical state-relevant fields. Used by
-   * `_findAndUpdateToolPart` to detect idempotent re-applies and skip
-   * SQLite writes plus `MESSAGE_UPDATED` broadcasts.
-   */
-  private static _isToolPartUnchanged(
-    original: Record<string, unknown>,
-    applied: Record<string, unknown>
-  ): boolean {
-    if (applied === original) return true;
-    if (applied.state !== original.state) return false;
-    // For terminal output states, the only fields the apply functions
-    // touch are output / errorText / preliminary. Compare via JSON so
-    // structurally equal outputs (the common idempotent case) compare
-    // equal regardless of reference identity.
-    if (
-      applied.state === "output-available" ||
-      applied.state === "output-error"
-    ) {
-      return (
-        JSON.stringify(applied.output) === JSON.stringify(original.output) &&
-        applied.errorText === original.errorText &&
-        applied.preliminary === original.preliminary
-      );
-    }
-    if (applied.state === "output-denied") {
-      return true;
-    }
-    if (
-      applied.state === "approval-responded" ||
-      applied.state === "approval-requested"
-    ) {
-      return (
-        JSON.stringify(applied.approval) === JSON.stringify(original.approval)
-      );
-    }
-    return false;
+          message
+        })
+    });
   }
 
   /**
    * Serialize a client-tool result/approval apply behind any in-flight apply
    * (#1649, defensive). Each apply is a read-modify-write of the message and
-   * parallel tool results arrive as independent WebSocket messages. Today
-   * `_findAndUpdateToolPart` performs that read-modify-write synchronously (no
-   * await between reading `this.messages` and the SQLite write), so concurrent
-   * applies can't actually interleave — unlike Think, ai-chat does not exhibit
-   * the #1649 clobber. This queue is a guard so the invariant survives if the
-   * apply ever gains an await between read and write (e.g. async storage): each
-   * apply commits atomically in arrival order.
+   * parallel tool results arrive as independent WebSocket messages. The
+   * queue makes each read-modify-write commit atomically, in arrival order.
    *
    * `_pendingInteractionPromise` is set to the newest link so the barrier's
    * single-slot wake-up observes the latest apply; because the chain is serial,
@@ -5677,78 +5476,6 @@ export class AIChatAgent<
     apply: () => Promise<boolean>
   ): Promise<boolean> {
     return this._turns.enqueueInteraction(apply);
-  }
-
-  /**
-   * Applies a tool result to an existing assistant message.
-   * This is used when the client sends CF_AGENT_TOOL_RESULT for client-side tools.
-   * The server is the source of truth, so we update the message here and broadcast
-   * the update to all clients.
-   *
-   * `output-available` and `output-error` are accepted as valid starting
-   * states for *idempotent* re-application — duplicate WS frames, second
-   * tabs re-running the same tool, and provider-replay round-trips all
-   * become silent no-ops rather than a warn + skipped update. The first
-   * applied terminal result wins; subsequent results carrying *different*
-   * data are also dropped (preserving the existing "first write wins"
-   * contract — see `client-tool-duplicate-message.test.ts`). See issue
-   * #1404.
-   *
-   * @param toolCallId - The tool call ID this result is for
-   * @param _toolName - The name of the tool (unused, kept for API compat)
-   * @param output - The output from the tool execution
-   * @param overrideState - Optional state override ("output-error" to signal denial/failure)
-   * @param errorText - Error message when overrideState is "output-error"
-   * @returns What the apply did to the part: changed it, left it as it was
-   *   (an idempotent re-apply), or found no part.
-   */
-  private async _settleToolResult(
-    toolCallId: string,
-    _toolName: string,
-    output: unknown,
-    overrideState?: "output-error",
-    errorText?: string
-  ): Promise<ToolInteractionOutcome> {
-    return this._updateToolPart(
-      toolCallId,
-      "_settleToolResult",
-      [
-        "input-available",
-        "approval-requested",
-        "approval-responded",
-        // Idempotent re-apply: if the part is already terminal, the apply
-        // function below returns the part by reference. _findAndUpdateToolPart
-        // detects that and skips the persist + broadcast (and the warn).
-        "output-available",
-        "output-error",
-        "output-denied"
-      ],
-      (part) => {
-        // Once a tool part has reached a terminal state, the first applied
-        // result wins. Don't overwrite with conflicting data, and don't
-        // emit a redundant MESSAGE_UPDATED for a matching re-apply.
-        if (
-          part.state === "output-available" ||
-          part.state === "output-error" ||
-          part.state === "output-denied"
-        ) {
-          return part;
-        }
-        if (overrideState === "output-error") {
-          return {
-            ...part,
-            state: "output-error",
-            errorText: errorText ?? "Tool execution denied by user"
-          };
-        }
-        return {
-          ...part,
-          state: "output-available",
-          output,
-          preliminary: false
-        };
-      }
-    );
   }
 
   private async _streamSSEReply(
@@ -5952,97 +5679,39 @@ export class AIChatAgent<
               this._approvalPersistedMessageId = stored.message.id;
             }
 
-            // Cross-message tool output fallback:
-            // When a tool with needsApproval is approved, the continuation
-            // stream emits tool-output-available/tool-output-error for a
-            // tool call that lives in a *previous* assistant message.
-            // applyChunkToParts only searches the current message's parts,
-            // so the update is silently skipped. Fall back to searching
-            // this.messages and update the persisted message directly.
-            // Note: checked independently of `handled` — applyChunkToParts
-            // returns true for recognized chunk types even when it cannot
-            // find the target part, so `handled` is not a reliable signal.
-            //
-            // `output-available` and `output-error` are accepted as
-            // starting states for idempotent re-application. Some
-            // providers (notably the OpenAI Responses API) replay the
-            // entire prior tool round-trip during continuations — the
-            // replay's tool-output-available carries the same output the
-            // part already has, so the apply functions below short-circuit
-            // to a no-op via reference equality (issue #1404).
+            // Cross-message tool output fallback: when a tool with
+            // needsApproval is approved, the continuation stream emits
+            // tool-output-available/tool-output-error for a call that lives
+            // in a *previous* assistant message, which applyChunkToParts
+            // cannot reach. Checked independently of `handled`:
+            // applyChunkToParts returns true for recognized chunk types even
+            // when it cannot find the target part. The update is first write
+            // wins, so a provider that replays the prior round trip (the
+            // OpenAI Responses API, #1404) changes nothing.
             if (
               (data.type === "tool-output-available" ||
                 data.type === "tool-output-error") &&
-              data.toolCallId
-            ) {
-              const foundInCurrentMessage = message.parts.some(
+              data.toolCallId &&
+              !message.parts.some(
                 (p) => "toolCallId" in p && p.toolCallId === data.toolCallId
+              )
+            ) {
+              void this._applyToolPartUpdate(
+                data.type === "tool-output-available"
+                  ? crossMessageToolResultUpdate(
+                      data.toolCallId,
+                      "output-available",
+                      data.output,
+                      undefined,
+                      data.preliminary
+                    )
+                  : crossMessageToolResultUpdate(
+                      data.toolCallId,
+                      "output-error",
+                      undefined,
+                      data.errorText
+                    )
               );
-              if (!foundInCurrentMessage) {
-                if (data.type === "tool-output-available") {
-                  this._findAndUpdateToolPart(
-                    data.toolCallId,
-                    "_streamSSEReply",
-                    [
-                      "input-available",
-                      "input-streaming",
-                      "approval-responded",
-                      "approval-requested",
-                      "output-available",
-                      "output-error",
-                      "output-denied"
-                    ],
-                    (part) => {
-                      // First-write-wins: a chunk arriving for a tool
-                      // that's already terminal is a provider replay.
-                      // Never overwrite a resolved tool's output.
-                      if (
-                        part.state === "output-available" ||
-                        part.state === "output-error" ||
-                        part.state === "output-denied"
-                      ) {
-                        return part;
-                      }
-                      return {
-                        ...part,
-                        state: "output-available",
-                        output: data.output,
-                        ...(data.preliminary !== undefined && {
-                          preliminary: data.preliminary
-                        })
-                      };
-                    }
-                  );
-                } else {
-                  this._findAndUpdateToolPart(
-                    data.toolCallId,
-                    "_streamSSEReply",
-                    [
-                      "input-available",
-                      "input-streaming",
-                      "approval-responded",
-                      "approval-requested",
-                      "output-available",
-                      "output-error",
-                      "output-denied"
-                    ],
-                    (part) => {
-                      if (
-                        part.state === "output-available" ||
-                        part.state === "output-error" ||
-                        part.state === "output-denied"
-                      ) {
-                        return part;
-                      }
-                      return {
-                        ...part,
-                        state: "output-error",
-                        errorText: data.errorText
-                      };
-                    }
-                  );
-                }
-              }
             }
 
             // Handle server-specific chunk types not covered by the shared parser
@@ -6290,36 +5959,6 @@ export class AIChatAgent<
     }
 
     return { status: "completed" };
-  }
-
-  /**
-   * Applies a tool approval response from the client, updating the persisted message.
-   * This is called when the client sends CF_AGENT_TOOL_APPROVAL for tools with needsApproval.
-   *
-   * - approved=true transitions to approval-responded
-   * - approved=false transitions to output-denied so convertToModelMessages
-   *   emits a tool_result for providers (e.g. Anthropic) that require it.
-   *
-   * @param toolCallId - The tool call ID this approval is for
-   * @param approved - Whether the tool execution was approved
-   * @returns What the apply did to the part.
-   */
-  private async _settleToolApproval(
-    toolCallId: string,
-    approved: boolean
-  ): Promise<ToolInteractionOutcome> {
-    // Use the shared `agents/chat` builder so the approval merge — including
-    // the fallback that synthesizes `approval.id` from `toolCallId` when an
-    // older / hand-seeded transcript lacks one — stays identical to Think.
-    // convertToModelMessages needs `approval.id` to produce a valid
-    // tool-approval-request content part with `approvalId`.
-    const update = toolApprovalUpdate(toolCallId, approved);
-    return this._updateToolPart(
-      toolCallId,
-      "_settleToolApproval",
-      update.matchStates,
-      update.apply
-    );
   }
 
   private async _reply(

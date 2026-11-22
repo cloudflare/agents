@@ -18,7 +18,13 @@ import type {
   TurnConfig,
   TurnContext
 } from "../../think";
-import { StreamAccumulator, type ClientToolSchema } from "agents/chat";
+import {
+  StreamAccumulator,
+  toolApprovalUpdate,
+  toolResultUpdate,
+  type ClientToolSchema,
+  type ToolPartUpdate
+} from "agents/chat";
 
 function createClientToolMockModel(): LanguageModel {
   let callCount = 0;
@@ -1423,7 +1429,7 @@ export class ThinkClientToolsAgent extends Think {
   }): Promise<{ state: string; output: string }> {
     const internal = this as unknown as {
       _streamingAssistant: StreamAccumulator | null;
-      _applyToolResult(toolCallId: string, output: unknown): Promise<void>;
+      _applyToolUpdateToMessages(update: ToolPartUpdate): Promise<unknown>;
       _persistAssistantMessage(msg: UIMessage): Promise<void>;
     };
 
@@ -1444,7 +1450,9 @@ export class ThinkClientToolsAgent extends Think {
     // would not find it (mirrors a turn mid-stream, before persist).
     internal._streamingAssistant = accumulator;
     // A client tool result arrives over the WebSocket while the stream is open.
-    await internal._applyToolResult(opts.toolCallId, opts.output);
+    await internal._applyToolUpdateToMessages(
+      toolResultUpdate(opts.toolCallId, opts.output)
+    );
     // The stream ends and persists the accumulated message.
     await internal._persistAssistantMessage(accumulator.toMessage());
     internal._streamingAssistant = null;
@@ -1471,7 +1479,7 @@ export class ThinkClientToolsAgent extends Think {
   }): Promise<{ state: string }> {
     const internal = this as unknown as {
       _streamingAssistant: StreamAccumulator | null;
-      _applyToolApproval(toolCallId: string, approved: boolean): Promise<void>;
+      _applyToolUpdateToMessages(update: ToolPartUpdate): Promise<unknown>;
       _persistAssistantMessage(msg: UIMessage): Promise<void>;
     };
 
@@ -1489,7 +1497,9 @@ export class ThinkClientToolsAgent extends Think {
     });
 
     internal._streamingAssistant = accumulator;
-    await internal._applyToolApproval(opts.toolCallId, opts.approved);
+    await internal._applyToolUpdateToMessages(
+      toolApprovalUpdate(opts.toolCallId, opts.approved)
+    );
     await internal._persistAssistantMessage(accumulator.toMessage());
     internal._streamingAssistant = null;
 
@@ -1714,11 +1724,13 @@ export class ThinkClientToolsAgent extends Think {
   > {
     const ownerId = await this._seedMeasuredTranscript(transcript);
     const internal = this as unknown as {
-      _applyToolResult(toolCallId: string, output: unknown): Promise<void>;
+      _applyToolUpdateToMessages(update: ToolPartUpdate): Promise<unknown>;
       _cacheCoversActivePath: boolean;
     };
     this.#billed.start();
-    await internal._applyToolResult("tc-measure", "measured");
+    await internal._applyToolUpdateToMessages(
+      toolResultUpdate("tc-measure", "measured")
+    );
     const billed = this.#billed.stop();
     const stored = await this.session.getMessage(ownerId);
     const part = stored?.parts.find(

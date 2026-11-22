@@ -281,6 +281,7 @@ export {
 
 export {
   applyToolUpdate,
+  applyToolPartUpdate,
   toolResultUpdate,
   crossMessageToolResultUpdate,
   toolApprovalUpdate,
@@ -289,6 +290,8 @@ export {
   hasPendingToolInteraction,
   partAwaitsClientInteraction,
   clientResolvableToolNames,
+  type InFlightToolReply,
+  type ToolPartTarget,
   type ToolPartUpdate
 } from "./tool-state";
 

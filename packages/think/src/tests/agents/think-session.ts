@@ -56,12 +56,14 @@ import {
   chatRecoveryTaskRunOptions,
   sanitizeMessage,
   enforceRowSizeLimit,
-  StreamAccumulator
+  StreamAccumulator,
+  toolResultUpdate
 } from "agents/chat";
 import type {
   ChatTurns,
   ClientToolSchema,
   ResumableStream,
+  ToolPartUpdate,
   TurnQueue
 } from "agents/chat";
 import type { Schedule } from "agents";
@@ -13394,7 +13396,7 @@ export class ThinkWindowedHydrationAgent extends Think {
     coversAfterMultibyteAppend: boolean;
   }> {
     const internal = this as unknown as {
-      _applyToolResult(toolCallId: string, output: unknown): Promise<void>;
+      _applyToolUpdateToMessages(update: ToolPartUpdate): Promise<unknown>;
       _cacheCoversActivePath: boolean;
     };
     await this.session.appendMessage({
@@ -13420,7 +13422,9 @@ export class ThinkWindowedHydrationAgent extends Think {
 
     // A 70 KB result on a message the cache already holds: an update, not an
     // append, and alone larger than the budget.
-    await internal._applyToolResult("tc-grow", "y".repeat(70_000));
+    await internal._applyToolUpdateToMessages(
+      toolResultUpdate("tc-grow", "y".repeat(70_000))
+    );
     const coversAfterUpdate = internal._cacheCoversActivePath;
 
     // Reset by refreshing (the update re-windows), then grow by an append
@@ -13472,10 +13476,12 @@ export class ThinkWindowedHydrationAgent extends Think {
     await this.syncMessagesFromStorage();
     const inCache = this.messages.some((m) => m.id === "old-owner");
     const internal = this as unknown as {
-      _applyToolResult(toolCallId: string, output: unknown): Promise<void>;
+      _applyToolUpdateToMessages(update: ToolPartUpdate): Promise<unknown>;
       _cacheCoversActivePath: boolean;
     };
-    await internal._applyToolResult("tc-old", "late result");
+    await internal._applyToolUpdateToMessages(
+      toolResultUpdate("tc-old", "late result")
+    );
     const stored = await this.session.getMessage("old-owner");
     const part = stored?.parts.find(
       (candidate) =>

@@ -36,7 +36,9 @@ import {
   CHAT_RECOVERY_TASK_NAME,
   ResumableStream,
   chatRecoveryTaskRunOptions,
-  type ChatTurns
+  toolResultUpdate,
+  type ChatTurns,
+  type ToolPartUpdate
 } from "agents/chat";
 
 // Type helper for tool call parts - extracts from ChatMessage parts
@@ -847,12 +849,8 @@ export class TestChatAgent extends AIChatAgent<Env> {
     errorText?: string
   ): Promise<boolean> {
     const self = this as unknown as {
-      _settleToolResult(
-        toolCallId: string,
-        toolName: string,
-        output: unknown,
-        overrideState?: "output-error",
-        errorText?: string
+      _applyToolPartUpdate(
+        update: ToolPartUpdate
       ): Promise<{ status: "changed" | "unchanged" | "missing" }>;
       _turns: {
         applyInteraction(
@@ -863,14 +861,11 @@ export class TestChatAgent extends AIChatAgent<Env> {
         ): Promise<boolean>;
       };
     };
+    void toolName;
     return self._turns.applyInteraction(
       () =>
-        self._settleToolResult(
-          toolCallId,
-          toolName,
-          output,
-          overrideState,
-          errorText
+        self._applyToolPartUpdate(
+          toolResultUpdate(toolCallId, output, overrideState, errorText)
         ),
       false,
       () => {
