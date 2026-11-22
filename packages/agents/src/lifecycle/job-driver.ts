@@ -14,6 +14,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import {
   isDurableObjectCodeUpdateReset,
   isDurableObjectMemoryLimitReset,
+  isDurableObjectResetError,
   isPlatformFailure,
   tryN
 } from "../retries";
@@ -54,6 +55,32 @@ const DEADMAN_ALARM_DELAY_MS = 30_000;
 
 /** A retry found its job cancelled or replaced, so it did not run. */
 const SUPERSEDED = Symbol("superseded");
+
+/** Longest wait between attempts of a job whose attempts ran out. */
+const MAX_EXHAUSTED_BACKOFF_MS = 60 * 60_000;
+
+/** Wait before the next attempt of a job `over` attempts past its budget. */
+function exhaustedBackoffMs(over: number): number {
+  return Math.min(
+    MAX_EXHAUSTED_BACKOFF_MS,
+    DEADMAN_ALARM_DELAY_MS * 2 ** Math.min(over, 10)
+  );
+}
+
+/**
+ * The error a job's owner sees in `onJobError` when its attempts ran out
+ * without one reporting back: each ended with the isolate (a reset, the CPU
+ * or wall-time limit), so no error reached the driver.
+ */
+function attemptsExhaustedError(row: JobStorageRow): Error {
+  const error = new Error(
+    `Job ${row.id} (${row.capability}/${row.fn}) used its ${row.attempts} ` +
+      `attempts without finishing; each ended with its isolate (a reset, or ` +
+      `the CPU or wall-time limit)`
+  );
+  error.name = "JobAttemptsExhaustedError";
+  return error;
+}
 
 /** The dispatch hooks one job owner exposes to the driver. */
 export type JobDispatch = {
@@ -184,11 +211,12 @@ export class JobDriver {
     // quiescence and undo what it just set. Reaching quiescence again is a
     // job for some LATER, genuinely clean invocation or handoff settlement.
     let clean = false;
+    let deferred: AttributedPlatformFailure | undefined;
     try {
       try {
         await this.armStartupFallback();
         await initialize();
-        await this.#driveDueJobs();
+        deferred = await this.#driveDueJobs();
         await this.#alarmScope.run({ executing: undefined }, runHostAlarm);
         clean = true;
       } catch (error) {
@@ -218,6 +246,11 @@ export class JobDriver {
       if (clean) await this.#clearMemoryLimitStrikesWhenQuiescent();
     }
     await this.#options.rearm();
+    // A job deferred on a transient platform failure still fails the alarm,
+    // so the failure is visible to the platform. The alarm re-armed above
+    // wins over the platform's own retry, so this never spends its
+    // six-retry budget (RUNTIME-FACTS, 22 Nov).
+    if (deferred) throw deferred.cause;
   }
 
   /**
@@ -310,11 +343,16 @@ export class JobDriver {
     );
   }
 
-  /** Drive every due job once, in due-time order. */
-  async #driveDueJobs(): Promise<void> {
+  /**
+   * Drive every due job once, in due-time order. A job deferred on a
+   * transient platform failure does not stop the others; the first such
+   * failure is returned so the alarm can report it after re-arming.
+   */
+  async #driveDueJobs(): Promise<AttributedPlatformFailure | undefined> {
     const nowMs = Date.now();
     const due = this.#options.queue.due(nowMs);
-    if (due.length === 0) return;
+    if (due.length === 0) return undefined;
+    let deferred: AttributedPlatformFailure | undefined;
     this.#warnBacklog(due);
 
     // Deadman pre-arm: before driving any job, arm a fallback alarm so a
@@ -327,7 +365,7 @@ export class JobDriver {
 
     for (const stale of due) {
       // Host teardown mid-phase: its storage is gone, stop touching it.
-      if (this.#options.disabled()) return;
+      if (this.#options.disabled()) return deferred;
 
       // Refetch before claiming: an earlier dispatch in this loop may have
       // pushed, rescheduled, or cancelled this job since the due snapshot
@@ -358,16 +396,34 @@ export class JobDriver {
       // sets feeds single-flight skipping and hung recovery.
       const claim = this.#options.queue.claim(row.id, nowMs, takeover);
       try {
-        await this.#driveJob(row, claim);
+        const failure = await this.#driveJob(row, claim);
+        deferred ??= failure;
       } finally {
         this.#options.queue.release(claim);
       }
     }
+    return deferred;
   }
 
-  /** Dispatch one due row to its owner with retry and failure policy. */
-  async #driveJob(row: JobStorageRow, claim: JobClaim): Promise<void> {
-    const { queue, resolveDispatch, disabled } = this.#options;
+  /**
+   * Dispatch one due row to its owner with retry and failure policy.
+   *
+   * Each attempt is counted in the row and synced before `onJob` runs, so
+   * an attempt that takes its isolate down (CPU or wall-time limit, reset)
+   * still counts; once the count reaches `maxAttempts` the job goes to
+   * `onJobError` instead of running again. Without that, such a job re-ran
+   * on every fallback alarm forever (RUNTIME-FACTS, 22 Nov).
+   *
+   * @returns A transient platform failure this job was deferred on, for
+   * the alarm to report once every other due job had its turn. A reset or
+   * memory-limit failure throws instead: the isolate is condemned, so the
+   * remaining jobs would fail too.
+   */
+  async #driveJob(
+    row: JobStorageRow,
+    claim: JobClaim
+  ): Promise<AttributedPlatformFailure | undefined> {
+    const { queue, resolveDispatch, disabled, storage } = this.#options;
     // Whether the job is still the one this dispatch claimed: no cancel,
     // push, reschedule or hung takeover changed it since.
     const owned = () => queue.isCurrent(claim);
@@ -379,10 +435,35 @@ export class JobDriver {
           `(owner ${JSON.stringify(row.capability)}); dropping it`
       );
       queue.delete(row.id);
-      return;
+      return undefined;
     }
 
     const maxAttempts = job.retry?.maxAttempts ?? DEFAULT_JOB_RETRY.maxAttempts;
+    const prior = row.attempts ?? 0;
+    if (prior >= maxAttempts && dispatch.onJobError) {
+      // Every attempt so far ended with its isolate; running it again would
+      // most likely end the same way. The owner decides what happens.
+      let outcome: LifecycleJobOutcome | void = undefined;
+      try {
+        outcome = await dispatch.onJobError?.(
+          { job, attempt: prior },
+          attemptsExhaustedError(row)
+        );
+      } catch (hookError) {
+        console.error(`Job failure hook threw for ${row.id}`, hookError);
+      }
+      if (disabled()) return undefined;
+      queue.applyOutcome(claim, outcome ?? undefined);
+      return undefined;
+    }
+    if (prior >= maxAttempts) {
+      // An owner without onJobError keeps its job: deleting it would lose
+      // the owner's only wake. Run one attempt at a time, each starting
+      // further out, so a job that keeps taking its isolate down costs one
+      // attempt per backoff instead of one every deadman delay.
+      queue.setTime(row.id, Date.now() + exhaustedBackoffMs(prior - maxAttempts));
+    }
+    let attempt = prior;
 
     // Dispatch must be bounded: the drive loop awaits each job inline, so
     // one long dispatch delays every other job on this object. The queue
@@ -412,13 +493,29 @@ export class JobDriver {
     try {
       outcome = await this.#alarmScope.run({ executing: row }, () =>
         tryN(
-          maxAttempts,
-          async (attempt) => {
+          Math.max(1, maxAttempts - prior),
+          async (local) => {
             // A retry waits in tryN's backoff, and requests run meanwhile.
             // A cancel or same-id push made then is newer intent: do not
             // run the job this dispatch captured again.
-            if (attempt > 1 && !owned()) return SUPERSEDED;
-            return dispatch.onJob({ job, attempt });
+            if (local > 1 && !owned()) return SUPERSEDED;
+            attempt += 1;
+            queue.setAttempts(row.id, attempt);
+            await storage.sync();
+            try {
+              return await dispatch.onJob({ job, attempt });
+            } catch (error) {
+              // A platform failure is not the job's: uncount it.
+              if (isPlatformFailure(error)) {
+                attempt -= 1;
+                try {
+                  if (owned()) queue.setAttempts(row.id, attempt);
+                } catch {
+                  // a condemned isolate's storage; the count stays
+                }
+              }
+              throw error;
+            }
           },
           {
             baseDelayMs:
@@ -436,35 +533,55 @@ export class JobDriver {
         )
       );
     } catch (error) {
-      if (disabled()) return;
+      if (disabled()) return undefined;
       if (isPlatformFailure(error)) {
-        // Platform-class failure: preserve the job and re-throw so the
-        // platform retries a fresh invocation (or the memory-limit breaker
-        // engages at the alarm boundary). Best-effort dispatch-marker reset
-        // so the preserved job is not mistaken for one still in flight (and
-        // a single-flight job does not wait out its hung timeout first).
-        try {
-          if (owned()) queue.clearRunning(row.id);
-        } catch {
-          // the hung timeout eventually recovers the flag
-        }
-        console.warn(
-          `Deferring job ${row.id} to a fresh invocation after a ` +
-            `platform failure; the job is preserved.`
-        );
         // Carry the row out with the error rather than through a shared
         // field: an overlapping alarm's own #driveJob may already be
         // dispatching a different row by the time this unwinds to
         // runAlarm's catch.
-        throw new AttributedPlatformFailure(row, error);
+        const failure = new AttributedPlatformFailure(row, error);
+        if (
+          isDurableObjectMemoryLimitReset(error) ||
+          isDurableObjectResetError(error)
+        ) {
+          // The isolate is condemned: preserve the job and stop here, so
+          // the memory-limit breaker engages at the alarm boundary or a
+          // fresh isolate picks the queue up. Best-effort dispatch-marker
+          // reset so the preserved job is not mistaken for one still in
+          // flight (and a single-flight job does not wait out its hung
+          // timeout first).
+          try {
+            if (owned()) queue.clearRunning(row.id);
+          } catch {
+            // the hung timeout eventually recovers the flag
+          }
+          console.warn(
+            `Deferring job ${row.id} to a fresh invocation after a ` +
+              `platform failure; the job is preserved.`
+          );
+          throw failure;
+        }
+        // A transient failure of something this job called (a stub that
+        // lost its connection, a retryable error). Keep the job, move it
+        // back by the deadman delay so the jobs behind it run now and it
+        // does not head every later alarm, and go on with the rest.
+        try {
+          if (owned()) {
+            queue.defer(row.id, Date.now() + DEADMAN_ALARM_DELAY_MS);
+          }
+        } catch {
+          // the hung timeout eventually recovers the flag
+        }
+        console.warn(
+          `Deferring job ${row.id} by ${DEADMAN_ALARM_DELAY_MS / 1000}s ` +
+            `after a platform failure; the job is preserved.`
+        );
+        return failure;
       }
       // Application failure after retry exhaustion: the owner observes it
       // and decides advancement; default is completion.
       try {
-        outcome = await dispatch.onJobError?.(
-          { job, attempt: maxAttempts },
-          error
-        );
+        outcome = await dispatch.onJobError?.({ job, attempt }, error);
       } catch (hookError) {
         console.error(`Job failure hook threw for ${row.id}`, hookError);
       }
@@ -472,9 +589,10 @@ export class JobDriver {
       clearTimeout(slowWatchdog);
     }
 
-    if (disabled()) return;
-    if (outcome === SUPERSEDED) return;
+    if (disabled()) return undefined;
+    if (outcome === SUPERSEDED) return undefined;
     queue.applyOutcome(claim, outcome ?? undefined);
+    return undefined;
   }
 
   #warnBacklog(due: ReadonlyArray<JobStorageRow>): void {
