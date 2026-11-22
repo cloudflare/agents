@@ -298,22 +298,27 @@ export class Queue<
     return undefined;
   }
 
-  /** Observe one item's terminal application failure; the item is dropped. */
+  /**
+   * Observe one item's terminal failure; the item is dropped. That includes
+   * an item whose attempts all ended with their isolate
+   * (`JobAttemptsExhaustedError`), whatever reset the isolate: dropping it
+   * is what stops an item that keeps killing the isolate from running
+   * forever, and the Lifecycle allows at least three such attempts first.
+   */
   async onJobError(
     context: LifecycleJobContext,
     error: unknown
   ): Promise<LifecycleJobOutcome | void> {
-    const { job } = context;
-    const { maxAttempts } = resolveRetryConfig(job.retry, this.#retryDefaults);
+    const { job, attempt } = context;
     console.error(
-      `queue callback "${job.fn}" failed after ${maxAttempts} attempts`,
+      `queue callback "${job.fn}" failed after ${attempt} attempts`,
       error
     );
     this.#emit("queue:error", {
       callback: job.fn,
       id: job.id,
       error: error instanceof Error ? error.message : String(error),
-      attempts: maxAttempts
+      attempts: attempt
     });
     try {
       await this.#onError?.(error);
