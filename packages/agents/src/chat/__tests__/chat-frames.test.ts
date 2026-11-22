@@ -151,6 +151,10 @@ describe("ChatFrames", () => {
     sent.resuming.add("waiting");
     sent.frames.broadcastMessages([{ id: "m" }], ["self"]);
     expect(sent.sent[0].without).toEqual(["self"]);
+    sent.frames.broadcastMessages([{ id: "m" }]);
+    expect(sent.sent[1].without).toEqual([]);
+    withheld.frames.broadcastMessages([{ id: "m" }]);
+    expect(withheld.sent[1].without).toEqual(["waiting"]);
     expect(
       sent.frames.messagesFrame([{ id: "m" }], { connect: true })
     ).toMatchObject({
