@@ -40,6 +40,7 @@ import type {
   WorkflowStepEvent
 } from "cloudflare:workers";
 import { getAgentByName, type Agent } from "./index";
+import { renewingStub } from "./stub-renewal";
 import type {
   AgentWorkflowParams,
   AgentWorkflowStep,
@@ -66,6 +67,17 @@ type AgentPathInvoker = {
  * WeakSet to track which prototypes have been wrapped.
  * This prevents re-wrapping on subsequent instantiations of the same class.
  */
+/**
+ * Start a renewed Agent stub's object before its first call: native RPC
+ * reaches a synchronous method without running the Agent's startup.
+ */
+function ensureStarted(stub: object): Promise<void> {
+  // SAFETY: every Agent exposes this internal initializer for native RPC.
+  return (
+    stub as { __unsafe_ensureInitialized(): Promise<void> }
+  ).__unsafe_ensureInitialized();
+}
+
 const wrappedPrototypes = new WeakSet<object>();
 
 /**
@@ -251,10 +263,16 @@ export class AgentWorkflow<
       );
     }
 
-    // Get the Agent stub by name
-    this._agent = await getAgentByName<Cloudflare.Env, AgentType>(
+    // Get the Agent stub by name. A run keeps it across steps, so it is
+    // renewed after a failed call: a reset of the Agent breaks the stub.
+    const agent = await getAgentByName<Cloudflare.Env, AgentType>(
       namespace,
       resolvedAgentName
+    );
+    this._agent = renewingStub(
+      agent,
+      () => namespace.get(namespace.idFromName(resolvedAgentName)),
+      ensureStarted
     );
   }
 
@@ -276,10 +294,17 @@ export class AgentWorkflow<
       );
     }
 
-    const rootAgent = (await getAgentByName<Cloudflare.Env, Agent>(
-      namespace,
-      root.name
-    )) as unknown as AgentPathInvoker;
+    const rootAgent = renewingStub(
+      (await getAgentByName<Cloudflare.Env, Agent>(
+        namespace,
+        root.name
+      )) as unknown as AgentPathInvoker,
+      () =>
+        namespace.get(
+          namespace.idFromName(root.name)
+        ) as unknown as AgentPathInvoker,
+      ensureStarted
+    );
 
     return new Proxy(
       {},
@@ -422,6 +447,10 @@ export class AgentWorkflow<
   /**
    * Get the Agent stub for RPC calls.
    * Provides typed access to the Agent's methods.
+   *
+   * After a call fails (the Agent was reset, say), the stub is replaced
+   * for the next call, which first starts the Agent; that one call returns
+   * a plain promise and cannot be pipelined.
    *
    * @example
    * ```typescript

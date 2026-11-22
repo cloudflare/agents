@@ -188,6 +188,7 @@ export {
   TestProcessingWorkflow,
   SimpleTestWorkflow,
   ThrowInRunWorkflow,
+  AgentResetWorkflow,
   ReportErrorThenThrowWorkflow,
   ReportErrorOnlyWorkflow,
   ThrowNonErrorWorkflow,
@@ -353,6 +354,7 @@ export type Env = {
   FACET_APPROVAL_WORKFLOW: Workflow;
   FACET_EVENT_STATE_WORKFLOW: Workflow;
   THROW_IN_RUN_WORKFLOW: Workflow;
+  AGENT_RESET_WORKFLOW: Workflow;
   REPORT_ERROR_THEN_THROW_WORKFLOW: Workflow;
   REPORT_ERROR_ONLY_WORKFLOW: Workflow;
   THROW_NON_ERROR_WORKFLOW: Workflow;

@@ -74,6 +74,11 @@ export class TestMcpAgent extends McpAgent<Cloudflare.Env, unknown, Props> {
   private tempToolHandle?: { remove: () => void };
   private collisionBarrierResolvers: Array<() => void> = [];
 
+  /** Reset this object, as a crash or a code update would. */
+  crashForTest(): void {
+    this.ctx.abort("crashed by test");
+  }
+
   server = new McpServer(
     { name: "test-server", version: "1.0.0" },
     {
@@ -87,6 +92,21 @@ export class TestMcpAgent extends McpAgent<Cloudflare.Env, unknown, Props> {
   );
 
   async init() {
+    // Reports the client the server negotiated with, to show the
+    // handshake survives a reset of this object.
+    this.server.registerTool(
+      "clientName",
+      { description: "Name of the initialized client" },
+      async () => ({
+        content: [
+          {
+            text: this.server.server.getClientVersion()?.name ?? "none",
+            type: "text" as const
+          }
+        ]
+      })
+    );
+
     this.server.registerTool(
       "greet",
       {

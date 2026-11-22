@@ -147,6 +147,16 @@ The actors library has a `tryWhile(condition, fn)` that retries as long as a con
 2. `tryWhile` with a bug in the condition function retries forever
 3. Internal-only usage does not need the flexibility
 
+### A retry after a reset needs a new stub
+
+Once a Durable Object is reset (`ctx.abort()`, a crash, the memory-limit breaker, a code update), every call through a stub obtained before the reset rejects with the same error, on that request and on later ones. A new stub from the namespace works at once. An error the callee throws itself does not break a stub. (Measured on a deployed Worker, 22 Nov 2026.)
+
+So code that retries a call, or keeps a stub for a long time, must open a new stub after a failure:
+
+- `getAgentByName` opens a new stub for every attempt of its startup call, so `routingRetry` can get past a reset. `routeAgentRequest` already did this.
+- `AgentWorkflow` keeps its `agent` stub for the whole run. `this.agent` renews itself after a failed call (`stub-renewal.ts`): the failed call still rejects, and the step's own retry reaches the restarted Agent. A renewed stub starts the Agent (`__unsafe_ensureInitialized`) before its first call, because native RPC reaches a synchronous method without running startup. Property reads (`await this.agent.someGetter`) go to the current stub's own RPC property, so they behave as on a plain stub.
+- The MCP RPC client transport (`mcp/rpc.ts`) drops its stub after a failed send; the next send opens a new one through `getAgentByName` with the same props. `McpAgent` stores the client's initialize request on the RPC path, as the HTTP transports already did, so a server restarted after a reset or an eviction replays the handshake and keeps what the client negotiated.
+
 ## Schema migration
 
 Two columns added via `ALTER TABLE ... ADD COLUMN`:

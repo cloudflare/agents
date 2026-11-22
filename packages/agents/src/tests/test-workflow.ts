@@ -246,6 +246,38 @@ export class FacetEventStateWorkflow extends AgentWorkflow<
 }
 
 /**
+ * Calls the Agent through `this.agent` after the Agent was reset, in one
+ * step with no retries: the call must reach the restarted Agent.
+ */
+export class AgentResetWorkflow extends AgentWorkflow<
+  TestWorkflowAgent,
+  Record<string, never>
+> {
+  async run(
+    _event: AgentWorkflowEvent<Record<string, never>>,
+    step: AgentWorkflowStep
+  ) {
+    return await step.do(
+      "call-across-reset",
+      { retries: { limit: 0, delay: 0 } },
+      async () => {
+        await this.agent.crashForTest().catch(() => {});
+        const echo = await this.agent.echoForTest("after reset");
+        // Synchronous: only renewal's startup call starts the Agent.
+        const started = await this.agent.startedForTest();
+        // A remote getter reads through the renewed stub too.
+        const settings = await (
+          this.agent as unknown as {
+            settingsForTest: Promise<{ enabled: boolean }>;
+          }
+        ).settingsForTest;
+        return { echo, started, settings };
+      }
+    );
+  }
+}
+
+/**
  * Test workflow that throws directly in run() (outside any step.do).
  * Used to verify that unhandled errors trigger onWorkflowError on the Agent.
  */

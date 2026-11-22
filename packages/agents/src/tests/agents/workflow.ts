@@ -749,6 +749,32 @@ export class TestWorkflowAgent extends Agent {
   }
 
   // Start a throw-in-run workflow
+  /** Reset this object, as a crash or the memory-limit breaker would. */
+  crashForTest(): void {
+    this.ctx.abort("crashed by test");
+  }
+
+  echoForTest(value: string): string {
+    return value;
+  }
+
+  /** Synchronous, so native RPC alone does not start the Agent. */
+  startedForTest(): boolean {
+    return this.lifecycle.isStarted();
+  }
+
+  get startedGetterForTest(): boolean {
+    return this.lifecycle.isStarted();
+  }
+
+  get settingsForTest(): { enabled: boolean } {
+    return { enabled: true };
+  }
+
+  async runAgentResetWorkflowTest(workflowId: string): Promise<string> {
+    return this.runWorkflow("AGENT_RESET_WORKFLOW", {}, { id: workflowId });
+  }
+
   async runThrowInRunWorkflowTest(
     workflowId: string,
     params: { message: string }

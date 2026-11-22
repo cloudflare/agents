@@ -466,6 +466,11 @@
       "class_name": "FacetEventStateWorkflow"
     },
     {
+      "name": "agent-reset-workflow",
+      "binding": "AGENT_RESET_WORKFLOW",
+      "class_name": "AgentResetWorkflow"
+    },
+    {
       "name": "throw-in-run-workflow",
       "binding": "THROW_IN_RUN_WORKFLOW",
       "class_name": "ThrowInRunWorkflow"
