@@ -792,7 +792,8 @@ export class ThinkMessengerRuntime {
     if (!definition || !threadId) {
       return undefined;
     }
-    const chat = this.chat ?? this.createChat();
+    const chat = (this.chat ??= this.createChat());
+    await chat.initialize();
     return chat.thread(threadId) satisfies MessengerDeliverySurface;
   }
 

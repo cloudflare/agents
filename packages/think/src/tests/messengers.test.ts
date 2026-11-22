@@ -1119,6 +1119,29 @@ describe("think messengers core", () => {
     expect(resolved).toEqual([{ status: "completed" }]);
   });
 
+  it("delivers an out-of-turn notice on a cold runtime", async () => {
+    const posted: string[] = [];
+    const runtime = new ThinkMessengerRuntime(
+      {
+        fake: chatSdkMessenger({
+          adapter: fakeAdapter({
+            postMessage(threadId, message) {
+              posted.push(String(message));
+              return Promise.resolve({ id: "posted", raw: {}, threadId });
+            }
+          }),
+          provider: "fake",
+          userName: "fake_bot",
+          verifyWebhook: false
+        })
+      },
+      fakeHost([])
+    );
+    const surface = await runtime.resolveDeliverySurface("fake", "fake:thread");
+    await surface!.post("hello");
+    expect(posted).toEqual(["hello"]);
+  });
+
   describe("streamed replies on adapters without native streaming", () => {
     function recordingRuntime(
       overrides: Partial<Adapter> = {},
