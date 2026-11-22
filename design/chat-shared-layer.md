@@ -283,8 +283,10 @@ Task calls the existing bounded `_chatRecoveryContinue` / `_chatRecoveryRetry`
 entry point; both hosts run it through the shared
 `dispatchChatRecoveryToHandoff`, which returns at model handoff so a long turn
 never blocks the Lifecycle job loop and registers the turn as tracked alarm
-work (on the root; on a facet `trackAlarmWork` declines, and the detached turn
-stays outside the breaker until Tasks supports routed child wakes). A platform
+work (on the root; on a facet `trackAlarmWork` declines, because the facet runs
+its routed dispatch outside an alarm scope and the root tracks only the routed
+call, which returns at handoff, so the detached turn stays outside the
+breaker). A platform
 failure before handoff propagates through the
 current Task or compatibility schedule; after handoff that execution has
 settled, so the detached continuation enqueues exactly one replacement attempt.

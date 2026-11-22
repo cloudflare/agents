@@ -187,9 +187,9 @@ by using the API rather than reasoning about it:
 
 - `waitForCompletion` on `run()` — callers poll snapshots or settle
   through their own channel.
-- Runs on routed sub-agents (facets) — landed with owner-path routed
-  dispatch: the run and its step journal live on the facet and the root's
-  alarm wakes it. Chat turns on a facet run on Tasks like a root agent's.
+- Runs on routed sub-agents (facets) — needs owner-path routed dispatch,
+  the pattern the Scheduler uses for facet schedules; facet chat turns
+  stay on the legacy fiber engine until then.
 - `runFiber()`/`startFiber()` deprecation — released public API; untouched
   until the facet migration lands and in-flight rows can drain.
 
