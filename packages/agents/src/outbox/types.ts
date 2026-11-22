@@ -10,6 +10,12 @@ export type OutboxDeliveryStatus = "pending" | "held" | "failed";
  * after the first.
  */
 export type OutboxRetryPolicy = {
+  /**
+   * How long one attempt may run before it counts as failed. The sink keeps
+   * running; if it returns later the value is still acknowledged. Default:
+   * 60 seconds.
+   */
+  readonly attemptTimeoutMs?: number;
   /** Wait after the first failed attempt. Default: 2 seconds. */
   readonly baseDelayMs?: number;
   /** Longest wait between two attempts. Default: 10 minutes. */
@@ -42,8 +48,14 @@ export type OutboxDelivery<T = unknown> = {
   readonly firstAttemptAt: number | null;
   /** Epoch ms of the next attempt, or null when held or failed. */
   readonly nextAt: number | null;
-  /** Message of the last failed attempt. */
+  /** Message of the last failed attempt, cut at 4,000 characters. */
   readonly lastError: string | null;
+  /**
+   * Counts the values sent under this key, starting at 1. A receiver that
+   * can see two attempts of one key (an attempt that timed out and returned
+   * late) keeps the higher version.
+   */
+  readonly version: number;
   /** Epoch ms the key was first sent. */
   readonly createdAt: number;
   /** Epoch ms of the last change. */
@@ -56,6 +68,8 @@ export type OutboxDeliveryContext = {
   readonly sink: string;
   readonly key: string;
   readonly idempotencyKey: string;
+  /** The value's version under its key; see {@link OutboxDelivery.version}. */
+  readonly version: number;
   /** 1-based attempt for this value. */
   readonly attempt: number;
   /** What the sink last saved for this value, or undefined. */
@@ -63,7 +77,8 @@ export type OutboxDeliveryContext = {
   /**
    * Durably record progress inside this value (for a value delivered in
    * several steps). The next attempt reads it back as `checkpoint`. A new
-   * value clears it.
+   * value clears it. At most 256 KB of JSON; past that it throws, which
+   * fails the attempt.
    */
   readonly saveCheckpoint: (value: unknown) => Promise<void>;
 };

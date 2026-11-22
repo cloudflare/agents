@@ -46,15 +46,15 @@ const JOB_FN = "deliver";
 const JOB_RETRY = { maxAttempts: 1 } as const;
 /** How long one dispatch holds the alarm loop before running on detached. */
 const DISPATCH_BUDGET_MS = 5_000;
-/**
- * The wake re-armed behind an attempt that is still running. If the isolate
- * dies mid-attempt, this is when the delivery runs again.
- */
-const ATTEMPT_LEASE_MS = 5 * 60 * 1000;
+/** Longest `last_error` kept on a row; the rest is cut. */
+const MAX_ERROR_CHARS = 4_000;
+/** Largest JSON checkpoint one delivery holds, beside its payload. */
+export const MAX_OUTBOX_CHECKPOINT_BYTES = 256_000;
 /** Failed deliveries older than this are purged at startup. */
 const FAILED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 const DEFAULT_RETRY: Required<OutboxRetryPolicy> = {
+  attemptTimeoutMs: 60_000,
   baseDelayMs: 2_000,
   maxDelayMs: 10 * 60 * 1000,
   maxAttempts: Number.POSITIVE_INFINITY,
@@ -76,6 +76,7 @@ type OutboxRow = {
   next_at: number | null;
   last_error: string | null;
   checkpoint: string | null;
+  version: number;
   created_at: number;
   updated_at: number;
 };
@@ -105,7 +106,10 @@ function parseJson(text: string | null): unknown {
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  const message = error instanceof Error ? error.message : String(error);
+  return message.length > MAX_ERROR_CHARS
+    ? `${message.slice(0, MAX_ERROR_CHARS)}… (${message.length - MAX_ERROR_CHARS} more characters)`
+    : message;
 }
 
 function validatePolicy(policy: OutboxRetryPolicy | undefined): void {
@@ -115,6 +119,9 @@ function validatePolicy(policy: OutboxRetryPolicy | undefined): void {
     if (typeof value !== "number" || Number.isNaN(value) || value < 0) {
       throw new Error(`Outbox retry.${name} must be a non-negative number`);
     }
+  }
+  if (policy.attemptTimeoutMs !== undefined && policy.attemptTimeoutMs < 1) {
+    throw new Error("Outbox retry.attemptTimeoutMs must be at least 1");
   }
   if (policy.maxAttempts !== undefined && policy.maxAttempts < 1) {
     throw new Error("Outbox retry.maxAttempts must be at least 1");
@@ -346,6 +353,7 @@ export class Outbox<
          next_at = excluded.next_at,
          last_error = NULL,
          checkpoint = NULL,
+         version = cf_agents_outbox.version + 1,
          updated_at = excluded.updated_at`,
       nanoid(),
       sink,
@@ -489,8 +497,29 @@ export class Outbox<
   async #dispatch(id: string, bounded: boolean): Promise<LifecycleJobOutcome> {
     const active = this.#active.get(id);
     if (active) {
+      // An attempt still runs in this isolate. Its own timeout fails it;
+      // past the give-up deadline it gives up now, whatever it is waiting on.
+      const running = this.#row(id);
+      if (running?.status === "pending" && running.first_attempt_at !== null) {
+        const policy = this.#policy(running);
+        if (Date.now() - running.first_attempt_at >= policy.giveUpAfterMs) {
+          this.#active.delete(id);
+          await this.#giveUp(
+            running,
+            new Error("The delivery attempt did not finish before giving up")
+          );
+          await this.#syncWake(id);
+          return this.#wakeOutcome(id);
+        }
+        this.lifecycle.trackAlarmWork(active);
+        return { rescheduleAt: Date.now() + policy.attemptTimeoutMs };
+      }
+      // A newer value waits for the old attempt, which re-arms it when it
+      // ends; look again in a second rather than spinning the alarm loop.
       this.lifecycle.trackAlarmWork(active);
-      return { rescheduleAt: Date.now() + ATTEMPT_LEASE_MS };
+      return running?.status === "pending"
+        ? { rescheduleAt: Date.now() + 1_000 }
+        : undefined;
     }
     const row = this.#row(id);
     if (!row || row.status !== "pending" || row.next_at === null) {
@@ -523,7 +552,7 @@ export class Outbox<
        WHERE id = ? AND idempotency_key = ?`,
       attempt,
       now,
-      now + ATTEMPT_LEASE_MS,
+      now + policy.attemptTimeoutMs,
       now,
       id,
       row.idempotency_key
@@ -553,7 +582,7 @@ export class Outbox<
       ]);
       if (winner === "budget") {
         this.lifecycle.trackAlarmWork(run);
-        return { rescheduleAt: Date.now() + ATTEMPT_LEASE_MS };
+        return { rescheduleAt: Date.now() + policy.attemptTimeoutMs };
       }
     } finally {
       clearTimeout(timer);
@@ -561,6 +590,13 @@ export class Outbox<
     return this.#wakeOutcome(id);
   }
 
+  /**
+   * Run one attempt. It fails when the sink throws or outlives the
+   * attempt timeout. A sink that returns after its attempt timed out still
+   * acknowledges the value; a late throw changes nothing. Writes for this
+   * attempt are guarded on its value and attempt number, so a late attempt
+   * never re-times or overwrites a newer one.
+   */
   async #attempt(row: OutboxRow): Promise<void> {
     const sink = this.#resolveSink(row.sink);
     const context: OutboxDeliveryContext = {
@@ -568,27 +604,56 @@ export class Outbox<
       sink: row.sink,
       key: row.key,
       idempotencyKey: row.idempotency_key,
+      version: row.version,
       attempt: row.attempts,
       checkpoint: parseJson(row.checkpoint),
       saveCheckpoint: async (value) => {
+        const json = value === undefined ? null : JSON.stringify(value);
+        if (
+          json !== null &&
+          encoder.encode(json).byteLength > MAX_OUTBOX_CHECKPOINT_BYTES
+        ) {
+          throw new Error(
+            `Outbox checkpoint for "${row.sink}" is over ${MAX_OUTBOX_CHECKPOINT_BYTES} bytes`
+          );
+        }
         this.#write(
           `UPDATE cf_agents_outbox SET checkpoint = ?, updated_at = ?
-           WHERE id = ? AND idempotency_key = ?`,
-          value === undefined ? null : JSON.stringify(value),
+           WHERE id = ? AND idempotency_key = ? AND attempts = ?`,
+          json,
           Date.now(),
           row.id,
-          row.idempotency_key
+          row.idempotency_key,
+          row.attempts
         );
       }
     };
+    const timeoutMs = this.#policy(row).attemptTimeoutMs;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       if (!sink) throw new Error(`No Outbox sink "${row.sink}" is registered`);
       const payload = parseJson(row.payload) as never;
-      await this.lifecycle.runInHostContext(() =>
+      const delivered = this.lifecycle.runInHostContext(() =>
         sink.deliver(payload, context)
       );
+      const timedOut = new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), timeoutMs);
+      });
+      const winner = await Promise.race([
+        delivered.then(() => "done" as const),
+        timedOut
+      ]);
+      if (winner === "timeout") {
+        delivered.then(
+          () => this.#acknowledge(row),
+          () => {}
+        );
+        throw new Error(
+          `The delivery attempt did not finish within ${timeoutMs} ms`
+        );
+      }
     } catch (error) {
-      // The isolate is going away; the lease wake runs this again.
+      // The isolate is going away; the attempt's wake runs this again.
       if (
         isDurableObjectMemoryLimitReset(error) ||
         isDurableObjectResetError(error)
@@ -597,8 +662,14 @@ export class Outbox<
       }
       await this.#fail(row, error);
       return;
+    } finally {
+      clearTimeout(timer);
     }
-    // Acknowledged. A value sent during the attempt stays for its own.
+    await this.#acknowledge(row);
+  }
+
+  /** Delete the value this attempt delivered; a newer value stays. */
+  async #acknowledge(row: OutboxRow): Promise<void> {
     const acknowledged = this.#write(
       `DELETE FROM cf_agents_outbox WHERE id = ? AND idempotency_key = ?`,
       row.id,
@@ -635,12 +706,14 @@ export class Outbox<
     const changed = this.#write(
       `UPDATE cf_agents_outbox
        SET next_at = ?, last_error = ?, updated_at = ?
-       WHERE id = ? AND idempotency_key = ? AND status = 'pending'`,
+       WHERE id = ? AND idempotency_key = ? AND attempts = ?
+         AND status = 'pending'`,
       nextAt,
       errorMessage(error),
       now,
       row.id,
-      row.idempotency_key
+      row.idempotency_key,
+      row.attempts
     );
     if (changed > 0) {
       console.warn(
@@ -665,11 +738,13 @@ export class Outbox<
     const changed = this.#write(
       `UPDATE cf_agents_outbox
        SET status = 'failed', next_at = NULL, last_error = ?, updated_at = ?
-       WHERE id = ? AND idempotency_key = ? AND status = 'pending'`,
+       WHERE id = ? AND idempotency_key = ? AND attempts = ?
+         AND status = 'pending'`,
       errorMessage(error),
       now,
       row.id,
-      row.idempotency_key
+      row.idempotency_key,
+      row.attempts
     );
     if (changed === 0) return;
     console.error(
@@ -781,7 +856,9 @@ export class Outbox<
       if (winner === "budget") {
         this.lifecycle.trackAlarmWork(call);
         // The facet re-mirrors its wake when the attempt ends.
-        return { rescheduleAt: Date.now() + ATTEMPT_LEASE_MS };
+        return {
+          rescheduleAt: Date.now() + this.#retryDefaults.attemptTimeoutMs
+        };
       }
       // `false`: the facet is gone.
       if (winner.outcome === false) return undefined;
@@ -852,6 +929,7 @@ export class Outbox<
       firstAttemptAt: row.first_attempt_at,
       nextAt: row.status === "pending" ? row.next_at : null,
       lastError: row.last_error,
+      version: row.version,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };
@@ -891,6 +969,7 @@ export class Outbox<
         next_at INTEGER,
         last_error TEXT,
         checkpoint TEXT,
+        version INTEGER NOT NULL DEFAULT 1,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         UNIQUE (sink, key)

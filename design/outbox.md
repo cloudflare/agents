@@ -8,12 +8,14 @@ A delivery is a row in `cf_agents_outbox`, unique on `(sink, key)`. `send(sink, 
 
 When the job fires, the Outbox:
 
-1. Counts the attempt in the row and sets the next wake one lease (5 minutes) out, before the sink runs.
+1. Counts the attempt in the row and sets the next wake one attempt timeout (default 60 seconds) out, before the sink runs.
 2. Runs the sink inside host context.
 3. On return, deletes the row if it still holds the value this attempt read (compared by idempotency key).
 4. On a throw, sets the next attempt `min(maxDelayMs, baseDelayMs * 2^(attempt-1))` out, or gives up.
 
-A sink still running after five seconds is handed to the alarm's memory-limit breaker with `trackAlarmWork`, and the alarm loop moves on. The lease wake covers an isolate that dies mid-attempt. Tasks uses the same pattern.
+A sink still running after five seconds is handed to the alarm's memory-limit breaker with `trackAlarmWork`, and the alarm loop moves on. The wake set in step 1 covers an isolate that dies mid-attempt. Tasks uses the same pattern.
+
+An attempt that outlives its timeout counts as failed and backs off like a throw. The sink is not cancelled, so it may still return: a late return acknowledges the value (it was delivered), and a late throw changes nothing. Every write an attempt makes is guarded on the value's idempotency key and the attempt number, so an old attempt cannot re-time, fail or overwrite the checkpoint of a newer one. A sink that never settles still gives up at `giveUpAfterMs`. Each value also carries a `version` that counts the sends under its key, so a receiver that sees two attempts overlap can keep the newer value.
 
 Giving up sets the row to `failed`, emits `outbox:give_up` and calls the sink's `onGiveUp`. Failed rows stay readable and can be started over with `retry()`. Startup purges failed rows older than seven days.
 
@@ -37,11 +39,11 @@ On a facet (a routed Lifecycle) the rows stay on the facet. Its wake is mirrored
 
 ## Guarantees
 
-| What                                                                         | Where                        |
-| ---------------------------------------------------------------------------- | ---------------------------- |
-| Value, key, status, attempts, first attempt, next attempt, error, checkpoint | SQLite                       |
-| The wake for each pending delivery                                           | SQLite (Lifecycle job queue) |
-| Which attempts are running in this isolate                                   | Memory                       |
+| What                                                                                  | Where                        |
+| ------------------------------------------------------------------------------------- | ---------------------------- |
+| Value, key, version, status, attempts, first attempt, next attempt, error, checkpoint | SQLite                       |
+| The wake for each pending delivery                                                    | SQLite (Lifecycle job queue) |
+| Which attempts are running in this isolate                                            | Memory                       |
 
 Delivery is at least once. A sink can run again for a value it already handled, after a reset between its side effect and the row delete. Sinks must be idempotent, and `idempotencyKey` is stable across the retries of one value so a receiver can drop repeats.
 
@@ -50,7 +52,9 @@ Values are capped at 1 MB of JSON because SQLite rows stop at 2 MB.
 ## Tradeoffs
 
 - One job per pending delivery. A burst of thousands of deliveries is thousands of job rows. Every current user sends a handful.
-- The lease is fixed at five minutes. A sink that crashes its isolate waits that long before its next attempt.
+- An attempt that crashes its isolate waits one attempt timeout before the next attempt.
+- The attempt timeout does not cancel the sink. Two attempts of one value can overlap, which at-least-once already allows.
+- `last_error` is cut at 4,000 characters and checkpoints stop at 256 KB, so a row stays under SQLite's 2 MB limit beside a 1 MB value.
 - Failed rows are kept for seven days, then deleted without notice. `onGiveUp` and `outbox:give_up` are the reporting path.
 
 ## History

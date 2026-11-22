@@ -56,22 +56,27 @@ Deliveries under different keys are independent. A failing key does not hold up 
 
 ## Retries and giving up
 
-A failed attempt `n` waits `min(maxDelayMs, baseDelayMs * 2^(n - 1))` before the next one. Delivery gives up after `maxAttempts` attempts, or when the next attempt would start more than `giveUpAfterMs` after the first one.
+An attempt fails when the sink throws or runs past `attemptTimeoutMs`. A failed attempt `n` waits `min(maxDelayMs, baseDelayMs * 2^(n - 1))` before the next one. Delivery gives up after `maxAttempts` attempts, or when the next attempt would start more than `giveUpAfterMs` after the first one.
 
-| Option          | Default    |
-| --------------- | ---------- |
-| `baseDelayMs`   | 2 seconds  |
-| `maxDelayMs`    | 10 minutes |
-| `maxAttempts`   | unlimited  |
-| `giveUpAfterMs` | 12 hours   |
+| Option             | Default    |
+| ------------------ | ---------- |
+| `attemptTimeoutMs` | 60 seconds |
+| `baseDelayMs`      | 2 seconds  |
+| `maxDelayMs`       | 10 minutes |
+| `maxAttempts`      | unlimited  |
+| `giveUpAfterMs`    | 12 hours   |
 
 Set a policy on the `Outbox` (`retry`), on a sink (`retry`), or on one send (`options.retry`). The most specific wins.
+
+The timeout does not stop the sink. If it returns after its attempt timed out, the value counts as delivered; if it throws, nothing changes. Raise `attemptTimeoutMs` for a sink that is slow on purpose.
 
 When a delivery gives up, its status becomes `failed`, the sink's `onGiveUp(payload, delivery, error)` runs once, and an `outbox:give_up` event is emitted. Failed deliveries stay readable for seven days. `retry(sink, key)` starts one over, and `purge()` deletes them.
 
 ## At least once
 
 The Outbox counts an attempt before the sink runs. If the object resets after the sink did its work but before the Outbox recorded the acknowledgement, the sink runs again for the same value. Make sinks idempotent. `delivery.idempotencyKey` is new for every `send()` and the same for every retry of that value. Pass it to a receiver that can drop repeats.
+
+Two attempts of one value can overlap when the first one timed out. `delivery.version` counts the values sent under a key, starting at 1, so a receiver can keep the newest.
 
 An attempt that brings the object down still counts, so a value that fails that way gives up like any other failing value.
 
@@ -101,7 +106,7 @@ const posts: OutboxSink<string[]> = {
 };
 ```
 
-Sending a new value clears the checkpoint.
+Sending a new value clears the checkpoint. A checkpoint is at most 256 KB of JSON; `saveCheckpoint` throws past that.
 
 ## API
 
@@ -117,7 +122,7 @@ Sending a new value clears the checkpoint.
 
 Once the Lifecycle has started, `send()` writes its row before it returns its promise, so a send made in the same synchronous block as your own SQL writes commits with them.
 
-Values are JSON and at most 1 MB each.
+Values are JSON and at most 1 MB each. The last error kept on a delivery is cut at 4,000 characters.
 
 ## What is stored
 

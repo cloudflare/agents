@@ -346,6 +346,125 @@ describe("Outbox capability", () => {
     });
   });
 
+  it("gives up on a sink that never returns once the give-up deadline passes", async () => {
+    const { stub } = stubFor();
+    await runInDurableObject(stub, async (instance: OutboxHarnessObject) => {
+      let entered = false;
+      instance.outbox.register("__cf_hang", {
+        deliver: () => {
+          entered = true;
+          return new Promise<void>(() => {});
+        }
+      });
+      const delivery = await instance.outbox.send("__cf_hang", "x", {
+        key: "k",
+        retry: { maxAttempts: 1, giveUpAfterMs: 10 }
+      });
+      await waitFor(() => entered);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      // What the attempt's wake does when it fires.
+      await instance.outbox.onJob({
+        job: {
+          id: `outbox:${delivery.id}`,
+          capability: "outbox",
+          fn: "deliver",
+          time: Date.now(),
+          payload: { id: delivery.id },
+          retry: { maxAttempts: 1 },
+          singleflight: false,
+          exclusive: false,
+          recoveryLoop: false,
+          createdAt: Date.now()
+        },
+        attempt: 1
+      });
+      expect(await instance.outbox.get("__cf_hang", "k")).toMatchObject({
+        status: "failed",
+        lastError: "The delivery attempt did not finish before giving up"
+      });
+    });
+  });
+
+  it("fails an attempt past its timeout, retries, and lets a late return acknowledge", async () => {
+    const { stub } = stubFor();
+    await runInDurableObject(stub, async (instance: OutboxHarnessObject) => {
+      const releases: Array<() => void> = [];
+      let calls = 0;
+      instance.outbox.register("__cf_slow", {
+        deliver: () => {
+          calls += 1;
+          return new Promise<void>((resolve) => releases.push(resolve));
+        },
+        retry: { attemptTimeoutMs: 20, baseDelayMs: 5, maxDelayMs: 5 }
+      });
+      await instance.outbox.send("__cf_slow", "x", { key: "k" });
+      await waitFor(() => calls >= 2);
+      expect(await instance.outbox.get("__cf_slow", "k")).toMatchObject({
+        status: "pending",
+        lastError: "The delivery attempt did not finish within 20 ms"
+      });
+      // The first attempt returns late: the value was delivered.
+      releases[0]();
+      await waitFor(
+        async () => (await instance.outbox.get("__cf_slow", "k")) === undefined
+      );
+      for (const release of releases) release();
+    });
+  });
+
+  it("does not let a late failure of an old attempt re-time a newer one", async () => {
+    const { stub } = stubFor();
+    await runInDurableObject(stub, async (instance: OutboxHarnessObject) => {
+      const rejects: Array<(error: Error) => void> = [];
+      instance.outbox.register("__cf_late_fail", {
+        deliver: () =>
+          new Promise<void>((_resolve, reject) => rejects.push(reject)),
+        retry: { attemptTimeoutMs: 20, baseDelayMs: 5, maxDelayMs: 5 }
+      });
+      await instance.outbox.send("__cf_late_fail", "x", { key: "k" });
+      await waitFor(() => rejects.length >= 2);
+      const before = await instance.outbox.get("__cf_late_fail", "k");
+      rejects[0](new Error("late"));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const after = await instance.outbox.get("__cf_late_fail", "k");
+      expect(after?.lastError).not.toBe("late");
+      expect(after?.attempts).toBeGreaterThanOrEqual(before?.attempts ?? 0);
+      await instance.outbox.cancel("__cf_late_fail", "k");
+    });
+  });
+
+  it("cuts long errors, caps checkpoints, and versions each value of a key", async () => {
+    const { stub } = stubFor();
+    await runInDurableObject(stub, async (instance: OutboxHarnessObject) => {
+      const checkpointErrors: string[] = [];
+      instance.outbox.register("__cf_big", {
+        deliver: async (_payload: string, delivery) => {
+          try {
+            await delivery.saveCheckpoint("c".repeat(300_000));
+          } catch (error) {
+            checkpointErrors.push(String(error));
+          }
+          throw new Error("e".repeat(1_200_000));
+        },
+        retry: { maxAttempts: 1 }
+      });
+      const first = await instance.outbox.send("__cf_big", "a", {
+        key: "k",
+        hold: true
+      });
+      expect(first.version).toBe(1);
+      const second = await instance.outbox.send("__cf_big", "b", { key: "k" });
+      expect(second.version).toBe(2);
+      await waitFor(
+        async () =>
+          (await instance.outbox.get("__cf_big", "k"))?.status === "failed"
+      );
+      const failed = await instance.outbox.get("__cf_big", "k");
+      expect(failed?.lastError?.length).toBeLessThan(4_100);
+      expect(checkpointErrors[0]).toContain("checkpoint");
+    });
+  });
+
   it("cancels, lists by sink and status, and validates sends", async () => {
     const { stub } = stubFor();
     await runInDurableObject(stub, async (instance: OutboxHarnessObject) => {
