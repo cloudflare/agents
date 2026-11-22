@@ -119,9 +119,9 @@ type ToolCallFinishCallback = NonNullable<
   Parameters<typeof streamText>[0]["experimental_onToolCallFinish"]
 >;
 import { wrapAISDK } from "agents/observability/ai";
-import { createWorkersAI } from "workers-ai-provider";
-import { anthropic } from "workers-ai-provider/anthropic";
-import { openai } from "workers-ai-provider/openai";
+import { ThinkConfigStore } from "./config-store";
+import { ThinkModelResolver } from "./model";
+import { systemPromptForTurn } from "./system-prompt";
 import * as skills from "./skills";
 import { formatSkillDiagnostic, loadSkillCatalog } from "agents/skills";
 import { createSkillTools } from "agents/skills/tools/ai-sdk";
@@ -435,14 +435,6 @@ type MessengerRecoveryDelivery = {
 
 const MESSENGER_RECOVERY_RETRY_CALLBACK = "_cfRetryMessengerRecoveryDelivery";
 const MESSENGER_RECOVERY_MAX_RETRIES = 8;
-
-const WORKERS_AI_MODEL_PREFIXES = ["@cf/", "@hf/"];
-
-function isWorkersAIModelId(model: string): boolean {
-  return WORKERS_AI_MODEL_PREFIXES.some(
-    (prefix) => model.startsWith(prefix) && model.length > prefix.length
-  );
-}
 
 function messageText(message: UIMessage | undefined): string {
   return (message?.parts ?? [])
@@ -2643,12 +2635,6 @@ export class Think<
     return this._chatRecoveryOriginIdsScope.getStore();
   }
 
-  private static readonly CONFIG_KEYS = [
-    "_think_config",
-    "lastClientTools",
-    "lastBody",
-    "skillsFingerprint"
-  ] as const;
   /**
    * Whether Think automatically converts connected MCP tools to AI SDK tools
    * and merges them into each model turn.
@@ -4174,102 +4160,23 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
   // ── Config storage helpers (think_config table) ─────────────────
 
-  #configTableReady = false;
+  /** Think's private keyed config rows. */
+  readonly #config = new ThinkConfigStore(this.ctx.storage.sql);
 
   protected _migrateLegacyConfigToThinkTable(): void {
-    const legacy = this.ctx.storage.sql
-      .exec(
-        `SELECT name FROM sqlite_master
-         WHERE type = 'table'
-           AND name IN ('assistant_config', 'assistant_config__lifted_v1')`
-      )
-      .toArray()
-      .map((row) => String(row.name));
-    // Sessions leaves `assistant_config` alone; these keys are Think's, so
-    // Think lifts them into its own table and drops the source.
-    const source = legacy.includes("assistant_config")
-      ? "assistant_config"
-      : legacy.includes("assistant_config__lifted_v1")
-        ? "assistant_config__lifted_v1"
-        : null;
-    if (!source) return;
-
-    for (const key of Think.CONFIG_KEYS) {
-      const rows =
-        source === "assistant_config"
-          ? this.sql<{ value: string }>`
-              SELECT value FROM assistant_config
-              WHERE session_id = '' AND key = ${key}
-            `
-          : this.sql<{ value: string }>`
-              SELECT value FROM assistant_config__lifted_v1
-              WHERE session_id = '' AND key = ${key}
-            `;
-      const value = rows[0]?.value;
-      if (value !== undefined) {
-        this.sql`
-          INSERT OR IGNORE INTO think_config (key, value)
-          VALUES (${key}, ${value})
-        `;
-      }
-    }
-    // Config is a handful of small rows and every key Think reads now lives in
-    // think_config, so the source has nothing left to give.
-    this.ctx.storage.sql.exec(`DROP TABLE ${source}`);
+    this.#config.migrateLegacy();
   }
-
-  private _ensureConfigTable(): void {
-    if (this.#configTableReady) return;
-    this.sql`
-      CREATE TABLE IF NOT EXISTS think_config (
-        key TEXT NOT NULL,
-        value TEXT NOT NULL,
-        PRIMARY KEY (key)
-      )
-    `;
-    this._migrateLegacyConfigToThinkTable();
-    this.#configTableReady = true;
-  }
-
-  /**
-   * Last value each `think_config` key was seen to hold in this isolate.
-   * Only this object writes the table, so a write whose value matches is a
-   * no-op and skips the row — the request body and client-tool schemas are
-   * re-persisted on every chat request and rarely change.
-   */
-  readonly #configMemo = new Map<string, string | undefined>();
 
   private _configSet(key: string, value: string): void {
-    this._ensureConfigTable();
-    if (this.#configMemo.get(key) === value) return;
-    this.sql`
-      INSERT OR REPLACE INTO think_config (key, value)
-      VALUES (${key}, ${value})
-    `;
-    this.#configMemo.set(key, value);
+    this.#config.set(key, value);
   }
 
   private _configGet(key: string): string | undefined {
-    this._ensureConfigTable();
-    const rows = this.sql<{ value: string }>`
-      SELECT value FROM think_config
-      WHERE key = ${key}
-    `;
-    const value = rows[0]?.value;
-    this.#configMemo.set(key, value);
-    return value;
+    return this.#config.get(key);
   }
 
   private _configDelete(key: string): void {
-    this._ensureConfigTable();
-    if (this.#configMemo.has(key) && this.#configMemo.get(key) === undefined) {
-      return;
-    }
-    this.sql`
-      DELETE FROM think_config
-      WHERE key = ${key}
-    `;
-    this.#configMemo.set(key, undefined);
+    this.#config.delete(key);
   }
 
   // ── Configuration overrides ─────────────────────────────────────
@@ -4336,16 +4243,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     return binding;
   }
 
-  /**
-   * Lazily-constructed, instance-cached default provider. Bundles the `openai`
-   * and `anthropic` wire-format plugins so a `"<provider>/<model>"` slug routes
-   * through AI Gateway out of the box (covers OpenAI, Anthropic, Google,
-   * xAI/Grok, Groq, and the OpenAI-compatible long tail).
-   *
-   * Cached per instance, which assumes {@link getAIBinding} is stable for the
-   * lifetime of the agent (the default `this.env.AI` always is).
-   */
-  private _defaultProvider?: ReturnType<typeof createWorkersAI>;
+  /** Builds string models through one cached default provider. */
+  readonly #models = new ThinkModelResolver({
+    binding: () => this.getAIBinding(),
+    gateway: (model) => this.getGateway(model),
+    sessionAffinity: () => this.sessionAffinity
+  });
 
   /**
    * Return AI Gateway options for a string model resolved by the default
@@ -4376,47 +4279,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * since `getModel()` may return a bare string.
    */
   resolveModel(model: ThinkModel = this.getModel()): LanguageModel {
-    if (typeof model !== "string") return model;
-    // The provider sends every `@...` id straight to `env.AI.run(model)`, so a
-    // malformed one would only fail at inference time.
-    const isWorkersAI = isWorkersAIModelId(model);
-    const slash = model.indexOf("/");
-    if (
-      !isWorkersAI &&
-      (model.startsWith("@") || slash <= 0 || slash === model.length - 1)
-    ) {
-      throw new Error(
-        `Invalid model id ${JSON.stringify(model)}. Use a Workers AI id ` +
-          '(e.g. "@cf/deepseek-ai/deepseek-v4.1-flash-1017") or a "<provider>/<model>" ' +
-          'AI Gateway slug (e.g. "openai/gpt-5.5"), or return a LanguageModel.'
-      );
-    }
-    const gateway = this.getGateway(model);
-    if (
-      gateway !== null &&
-      typeof gateway === "object" &&
-      typeof (gateway as { then?: unknown }).then === "function"
-    ) {
-      throw new Error(
-        `getGateway() returned a Promise for model "${model}". It must return ` +
-          "GatewayOptions (or undefined) synchronously; resolve any async " +
-          "lookup in beforeTurn and return the model from there instead."
-      );
-    }
-    this._defaultProvider ??= createWorkersAI({
-      binding: this.getAIBinding(),
-      providers: [openai, anthropic]
-    });
-    // Workers AI ids take Workers AI chat settings (sessionAffinity improves
-    // prefix-cache hits). Any other slug is a catalog model routed through AI
-    // Gateway; we pass no other per-call settings, which avoids forcing
-    // options a given provider/transport would reject.
-    return isWorkersAI
-      ? this._defaultProvider(model, {
-          sessionAffinity: this.sessionAffinity,
-          ...(gateway && { gateway })
-        })
-      : this._defaultProvider(model, gateway && { gateway });
+    return this.#models.resolve(model);
   }
 
   /**
@@ -5147,79 +5010,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       },
       fn
     );
-  }
-
-  private _systemPromptForTurn(baseSystem: string, tools: ToolSet): string {
-    if (baseSystem.includes("You are running inside a Think agent.")) {
-      return baseSystem;
-    }
-
-    return `${baseSystem.trimEnd()}\n\n${this._buildThinkCapabilityBlock(tools)}`;
-  }
-
-  private _buildThinkCapabilityBlock(tools: ToolSet): string {
-    const toolNames = new Set(Object.keys(tools));
-    const hasTools = toolNames.size > 0;
-    const hasWorkspaceTools = [
-      "read",
-      "write",
-      "edit",
-      "ls",
-      "find",
-      "grep",
-      "delete"
-    ].some((toolName) => toolNames.has(toolName));
-    const hasExtensionTools =
-      toolNames.has("load_extension") || toolNames.has("list_extensions");
-    const hasExecuteTool = toolNames.has("execute");
-    const hasFetchTools = [...toolNames].some((name) =>
-      name.startsWith("fetch_")
-    );
-
-    const lines = [
-      "You are running inside a Think agent.",
-      "",
-      "Capabilities available in this turn:"
-    ];
-
-    if (hasWorkspaceTools) {
-      lines.push(
-        "- You can inspect and edit the agent workspace using the available file tools."
-      );
-    }
-
-    if (hasTools) {
-      lines.push(
-        "- Use the tools exposed in this turn when they materially improve accuracy or let you act on the user's request. Treat tool descriptions and schemas as the source of truth."
-      );
-      lines.push(
-        "- Some tools may call server code, browser/client code, MCP servers, extensions, or delegated agents. Use them according to their descriptions."
-      );
-    }
-
-    if (hasExtensionTools) {
-      lines.push(
-        "- If extension tools are available, use them only when loading or inspecting extensions directly helps with the task."
-      );
-    }
-
-    if (hasExecuteTool) {
-      lines.push(
-        "- If sandboxed execution is available, prefer it for safe, bounded checks or coordinated multi-step operations."
-      );
-    }
-
-    if (hasFetchTools) {
-      lines.push(
-        "- If fetch tools are available, use them to read allowlisted HTTP resources (documentation, APIs). They are read-only and bounded; respect their allowlist and do not assume access to other URLs."
-      );
-    }
-
-    lines.push(
-      "- Do not claim access to capabilities that are not exposed as tools in this turn."
-    );
-
-    return lines.join("\n");
   }
 
   /** Maximum number of tool-call steps per turn. Override via property or per-turn via TurnConfig. */
@@ -6530,7 +6320,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const baseSystem = channelInstructions
       ? `${channelInstructions}\n\n${rawBaseSystem}`
       : rawBaseSystem;
-    const system = this._systemPromptForTurn(baseSystem, tools);
+    const system = systemPromptForTurn(baseSystem, tools);
 
     this._turnContextReminder = await this.context.reminder();
     const messages = withContextReminder(
@@ -6585,7 +6375,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const finalSystem =
       config.instructions ??
       config.system ??
-      this._systemPromptForTurn(
+      systemPromptForTurn(
         baseSystem,
         config.tools ? { ...tools, ...config.tools } : tools
       );
