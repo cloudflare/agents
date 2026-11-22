@@ -21,8 +21,6 @@
         "name": "ThinkRecoveryHelperParent",
         "class_name": "ThinkRecoveryHelperParent"
       },
-      // Test-harness-only binding: production only needs to export this
-      // facet class, but vitest-pool-workers needs it here for ctx.exports.
       {
         "name": "ThinkRecoveryHelperAgent",
         "class_name": "ThinkRecoveryHelperAgent"
@@ -157,6 +155,10 @@
     {
       "tag": "v14",
       "new_sqlite_classes": ["ThinkActionLedgerRecoveryE2EAgent"]
+    },
+    {
+      "tag": "v15",
+      "new_sqlite_classes": ["ThinkRecoveryHelperAgent"]
     }
   ],
   "r2_buckets": [

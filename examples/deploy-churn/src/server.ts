@@ -960,21 +960,20 @@ export class DeployChurnAgent extends Think<Env> {
     this.sql`DELETE FROM harness_ledger`;
     this._ensureHarnessConfigTable();
     this.sql`DELETE FROM harness_config`;
-    // Sub-agent harness: clear the parent's launched-run records + reset the
-    // child facet so a fresh subagent run starts from zero.
+    // Sub-agent harness: reset the child and clear the parent's launched-run
+    // records so a fresh subagent run starts from zero.
+    try {
+      const child = await this.getAgentToolChild<DeployChurnSubAgentChild>(
+        SUB_AGENT_CHILD_RUN_ID
+      );
+      await child?.resetChild();
+    } catch {
+      // Child may not exist yet.
+    }
     try {
       this.sql`DELETE FROM cf_agent_tool_runs`;
     } catch {
       // Table not created until the first agent-tool run.
-    }
-    try {
-      const child = await this.subAgent(
-        DeployChurnSubAgentChild,
-        SUB_AGENT_CHILD_RUN_ID
-      );
-      await child.resetChild();
-    } catch {
-      // Child facet may not exist yet.
     }
     this.log("harness:reset", { clearedIncidents: incidents.length });
     return { ok: true };
@@ -1033,11 +1032,10 @@ export class DeployChurnAgent extends Think<Env> {
       hasFiberRows: boolean;
     } | null = null;
     try {
-      const stub = await this.subAgent(
-        DeployChurnSubAgentChild,
+      const stub = await this.getAgentToolChild<DeployChurnSubAgentChild>(
         SUB_AGENT_CHILD_RUN_ID
       );
-      child = await stub.getLedgerStatus();
+      child = stub ? await stub.getLedgerStatus() : null;
     } catch {
       child = null;
     }

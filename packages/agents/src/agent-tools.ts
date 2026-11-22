@@ -216,6 +216,7 @@ export function agentTool<Input = unknown, Output = unknown>(
 }
 
 export type { AgentToolFactoryOptions };
+export type { AgentToolChildStub } from "./agent-runs/child";
 export type {
   AgentToolChildAdapter,
   AgentToolDisplayMetadata,

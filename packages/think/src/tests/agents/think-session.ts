@@ -1,7 +1,7 @@
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { hasToolCall, Output, tool } from "ai";
 import { action, skills, Think, type ThinkSession } from "../../think";
-import { Agent } from "agents";
+import { Agent, getAgentByName } from "agents";
 import type {
   Connection,
   AgentToolEventMessage,
@@ -5219,14 +5219,29 @@ type AgentToolFinishForTest = {
   result: AgentToolLifecycleResult;
 };
 
+/** The child name the test parents give each run, so a test can reach it first. */
+export function agentToolChildNameForTest(runId: string): string {
+  return `child-${runId}`;
+}
+
+/**
+ * The child of a run a test parent started. The stub is typed as the class:
+ * every method a test calls on it is async.
+ */
+async function agentToolChildForTest<T extends Agent>(
+  namespace: DurableObjectNamespace<T>,
+  runId: string
+): Promise<T> {
+  return (await getAgentByName(
+    namespace,
+    agentToolChildNameForTest(runId)
+  )) as unknown as T;
+}
+
 export class StuckThinkAgentToolChild extends Agent {
-  override async _cf_initAsFacet(
-    _name: string,
-    _parentPath: ReadonlyArray<{ className: string; name: string }> = [],
-    _identityName = _name
-  ): Promise<void> {
+  override async __unsafe_ensureInitialized(): Promise<void> {
     await new Promise<void>(() => {
-      // Intentionally never resolves: simulates a child facet wedged in startup.
+      // Intentionally never resolves: simulates a child wedged in startup.
     });
   }
 
@@ -5260,6 +5275,7 @@ export class ThinkNestedMiddleAgent extends ThinkTestAgent {
   ): Promise<AgentToolRunInspection> {
     await this.runAgentTool(ThinkTestAgent, {
       runId: `${options.runId}-grandchild`,
+      childName: agentToolChildNameForTest(`${options.runId}-grandchild`),
       parentToolCallId: "nested-grandchild-call",
       input: "grandchild work",
       inputPreview: "grandchild work"
@@ -5296,6 +5312,7 @@ export class ThinkNestedMiddleAgent extends ThinkTestAgent {
       runIds.map((runId) =>
         this.runAgentTool(ThinkTestAgent, {
           runId,
+          childName: agentToolChildNameForTest(runId),
           parentToolCallId: `gc-${runId}`,
           input: "grandchild work",
           inputPreview: "grandchild work"
@@ -5398,6 +5415,7 @@ export class ThinkAgentToolParent extends Agent {
     this.finishes = [];
     return this.runAgentTool(ThinkTestAgent, {
       runId,
+      childName: agentToolChildNameForTest(runId),
       parentToolCallId: "think-tool-call",
       input,
       inputPreview: input
@@ -5425,6 +5443,7 @@ export class ThinkAgentToolParent extends Agent {
     this.finishes = [];
     const result = await this.runAgentTool(ThinkNestedMiddleAgent, {
       runId,
+      childName: agentToolChildNameForTest(runId),
       parentToolCallId: "nested-middle-call",
       input: "middle work",
       inputPreview: "middle work"
@@ -5432,7 +5451,10 @@ export class ThinkAgentToolParent extends Agent {
     const parentEventRunIds = Array.from(
       new Set(this.events.map((e) => e.event.runId))
     );
-    const middle = await this.subAgent(ThinkNestedMiddleAgent, runId);
+    const middle = await agentToolChildForTest<ThinkNestedMiddleAgent>(
+      this.env.ThinkNestedMiddleAgent,
+      runId
+    );
     const grandchildRuns = await middle.getAgentToolRunStatusesForTest();
     return {
       middleStatus: result.status,
@@ -5462,6 +5484,7 @@ export class ThinkAgentToolParent extends Agent {
       runIds.map((runId) =>
         this.runAgentTool(ThinkTestAgent, {
           runId,
+          childName: agentToolChildNameForTest(runId),
           parentToolCallId: `concurrency-${runId}`,
           input: "concurrent child",
           inputPreview: "concurrent child"
@@ -5492,11 +5515,11 @@ export class ThinkAgentToolParent extends Agent {
       status === "starting" || status === "running" ? null : now;
     this.sql`
       INSERT INTO cf_agent_tool_runs (
-        run_id, parent_tool_call_id, agent_type, input_preview,
+        child_name, run_id, parent_tool_call_id, agent_type, input_preview,
         input_redacted, status, display_metadata, display_order,
         started_at, completed_at
       ) VALUES (
-        ${runId}, 'seed-tool-call', 'ThinkTestAgent', ${JSON.stringify("seed")},
+        ${agentToolChildNameForTest(runId)}, ${runId}, 'seed-tool-call', 'ThinkTestAgent', ${JSON.stringify("seed")},
         1, ${status}, ${JSON.stringify({ name: "seed" })}, 0, ${now}, ${completedAt}
       )
     `;
@@ -5511,6 +5534,7 @@ export class ThinkAgentToolParent extends Agent {
     this.finishes = [];
     const r = await this.runAgentTool(ThinkTestAgent, {
       runId: `single-${crypto.randomUUID()}`,
+      childName: agentToolChildNameForTest(`single-${crypto.randomUUID()}`),
       parentToolCallId: "single-call",
       input: "single child",
       inputPreview: "single child"
@@ -5531,13 +5555,17 @@ export class ThinkAgentToolParent extends Agent {
   ): Promise<RunAgentToolResult> {
     this.events = [];
     this.finishes = [];
-    const child = await this.subAgent(ThinkTestAgent, runId);
+    const child = await agentToolChildForTest<ThinkTestAgent>(
+      this.env.ThinkTestAgent,
+      runId
+    );
     const timer = setTimeout(() => {
       void child.broadcastUnrelatedErrorForTest(`unrelated-turn-${runId}`);
     }, injectAfterMs);
     try {
       return await this.runAgentTool(ThinkTestAgent, {
         runId,
+        childName: agentToolChildNameForTest(runId),
         parentToolCallId: "think-tool-call",
         input,
         inputPreview: input
@@ -5560,11 +5588,15 @@ export class ThinkAgentToolParent extends Agent {
   ): Promise<{ result: RunAgentToolResult; events: AgentToolEventMessage[] }> {
     this.events = [];
     this.finishes = [];
-    const child = await this.subAgent(ThinkTestAgent, runId);
+    const child = await agentToolChildForTest<ThinkTestAgent>(
+      this.env.ThinkTestAgent,
+      runId
+    );
     await child.setStreamChunkDelayForTest(chunkDelayMs);
     await child.armAttachRaceInjectionForTest(runId, raceBody);
     const result = await this.runAgentTool(ThinkTestAgent, {
       runId,
+      childName: agentToolChildNameForTest(runId),
       parentToolCallId: "think-tool-call",
       input,
       inputPreview: input
@@ -5589,11 +5621,15 @@ export class ThinkAgentToolParent extends Agent {
   ): Promise<{ result: RunAgentToolResult; events: AgentToolEventMessage[] }> {
     this.events = [];
     this.finishes = [];
-    const child = await this.subAgent(ThinkTestAgent, runId);
+    const child = await agentToolChildForTest<ThinkTestAgent>(
+      this.env.ThinkTestAgent,
+      runId
+    );
     await child.setStreamChunkDelayForTest(chunkDelayMs);
     await child.armProgressInjectionForTest(runId, progressBody, milestoneBody);
     const result = await this.runAgentTool(ThinkTestAgent, {
       runId,
+      childName: agentToolChildNameForTest(runId),
       parentToolCallId: "think-tool-call",
       input,
       inputPreview: input,
@@ -5607,12 +5643,18 @@ export class ThinkAgentToolParent extends Agent {
     name: string,
     data: unknown
   ): Promise<number> {
-    const child = await this.subAgent(ThinkTestAgent, runId);
+    const child = await agentToolChildForTest<ThinkTestAgent>(
+      this.env.ThinkTestAgent,
+      runId
+    );
     return child.persistAgentToolMilestoneForTest(runId, name, data);
   }
 
   async failNextChildChunkReadForTest(runId: string): Promise<void> {
-    const child = await this.subAgent(ThinkTestAgent, runId);
+    const child = await agentToolChildForTest<ThinkTestAgent>(
+      this.env.ThinkTestAgent,
+      runId
+    );
     await child.failNextAgentToolChunkReadForTest();
   }
 
@@ -5658,10 +5700,14 @@ export class ThinkAgentToolParent extends Agent {
   ): Promise<RunAgentToolResult> {
     this.events = [];
     this.finishes = [];
-    const child = await this.subAgent(ThinkTestAgent, runId);
+    const child = await agentToolChildForTest<ThinkTestAgent>(
+      this.env.ThinkTestAgent,
+      runId
+    );
     await child.setInBandErrorResponse(errorText);
     return this.runAgentTool(ThinkTestAgent, {
       runId,
+      childName: agentToolChildNameForTest(runId),
       parentToolCallId: "think-tool-call",
       input,
       inputPreview: input
@@ -5679,10 +5725,14 @@ export class ThinkAgentToolParent extends Agent {
     child: { status: string; error?: string } | null;
   }> {
     const runId = crypto.randomUUID();
-    const child = await this.subAgent(ThinkTestAgent, runId);
+    const child = await agentToolChildForTest<ThinkTestAgent>(
+      this.env.ThinkTestAgent,
+      runId
+    );
     await child.useSlowModelForTest(["one ", "two ", "three ", "four "], 100);
     const running = this.runAgentTool(ThinkTestAgent, {
       runId,
+      childName: agentToolChildNameForTest(runId),
       parentToolCallId: "think-tool-call",
       input: "work through a reset",
       inputPreview: "work through a reset"
@@ -5701,7 +5751,10 @@ export class ThinkAgentToolParent extends Agent {
     const deadline = Date.now() + 10_000;
     let inspection: { status: string; error?: string } | null = null;
     while (Date.now() < deadline) {
-      const fresh = await this.subAgent(ThinkTestAgent, runId);
+      const fresh = await agentToolChildForTest<ThinkTestAgent>(
+        this.env.ThinkTestAgent,
+        runId
+      );
       inspection = await fresh.inspectAgentToolRun(runId);
       if (
         inspection &&
@@ -5738,7 +5791,10 @@ export class ThinkAgentToolParent extends Agent {
     errorText: string,
     runId = crypto.randomUUID()
   ): Promise<AgentToolRunInspection> {
-    const child = await this.subAgent(ThinkTestAgent, runId);
+    const child = await agentToolChildForTest<ThinkTestAgent>(
+      this.env.ThinkTestAgent,
+      runId
+    );
     await child.setInBandErrorResponse(errorText);
     await child.startAgentToolRun(input, { runId });
     return this.waitForTerminalInspectionForTest(child, runId);
@@ -5756,7 +5812,10 @@ export class ThinkAgentToolParent extends Agent {
     input: string,
     runId = crypto.randomUUID()
   ): Promise<{ status: string | null; reissueStatus: string }> {
-    const child = await this.subAgent(ThinkTestAgent, runId);
+    const child = await agentToolChildForTest<ThinkTestAgent>(
+      this.env.ThinkTestAgent,
+      runId
+    );
     const started = await child.startAgentToolRun(input, { runId });
     await this.waitForTerminalInspectionForTest(child, runId);
 
@@ -5764,11 +5823,11 @@ export class ThinkAgentToolParent extends Agent {
     // re-attach budget would have.
     this.sql`
       INSERT INTO cf_agent_tool_runs (
-        run_id, parent_tool_call_id, agent_type, input_preview,
+        child_name, run_id, parent_tool_call_id, agent_type, input_preview,
         input_redacted, status, display_metadata, display_order,
         started_at, completed_at
       ) VALUES (
-        ${runId}, 'think-tool-call', 'ThinkTestAgent',
+        ${agentToolChildNameForTest(runId)}, ${runId}, 'think-tool-call', 'ThinkTestAgent',
         ${JSON.stringify(input)}, 1, 'interrupted',
         ${JSON.stringify({ name: "think child" })}, 0,
         ${started.startedAt}, ${Date.now()}
@@ -5779,6 +5838,7 @@ export class ThinkAgentToolParent extends Agent {
     this.finishes = [];
     const result = await this.runAgentTool(ThinkTestAgent, {
       runId,
+      childName: agentToolChildNameForTest(runId),
       parentToolCallId: "think-tool-call",
       input,
       inputPreview: input
@@ -5798,10 +5858,10 @@ export class ThinkAgentToolParent extends Agent {
   ): void {
     this.sql`
       INSERT INTO cf_agent_tool_runs (
-        run_id, parent_tool_call_id, agent_type, input_preview,
+        child_name, run_id, parent_tool_call_id, agent_type, input_preview,
         input_redacted, status, display_metadata, display_order, started_at
       ) VALUES (
-        ${runId}, 'think-tool-call', ${agentType},
+        ${agentToolChildNameForTest(runId)}, ${runId}, 'think-tool-call', ${agentType},
         ${JSON.stringify(inputPreview)}, 1, ${status},
         ${JSON.stringify({ name: "think child" })}, 0, ${startedAt}
       )
@@ -5872,7 +5932,10 @@ export class ThinkAgentToolParent extends Agent {
     inspection: AgentToolRunInspection;
     status: string | null;
   }> {
-    const child = await this.subAgent(ThinkTestAgent, runId);
+    const child = await agentToolChildForTest<ThinkTestAgent>(
+      this.env.ThinkTestAgent,
+      runId
+    );
     const started = await child.startAgentToolRun(input, { runId });
     this.insertRecoverableParentRunForTest(
       runId,
@@ -5905,7 +5968,10 @@ export class ThinkAgentToolParent extends Agent {
     input: string,
     runId = crypto.randomUUID()
   ): Promise<{ status: string; chunks: number }> {
-    const child = await this.subAgent(ThinkTestAgent, runId);
+    const child = await agentToolChildForTest<ThinkTestAgent>(
+      this.env.ThinkTestAgent,
+      runId
+    );
     await child.startAgentToolRun(input, { runId });
     const inspection = await this.waitForTerminalInspectionForTest(
       child,
@@ -5930,7 +5996,10 @@ export class ThinkAgentToolParent extends Agent {
     finishes: AgentToolFinishForTest[];
     status: string | null;
   }> {
-    const child = await this.subAgent(ThinkTestAgent, runId);
+    const child = await agentToolChildForTest<ThinkTestAgent>(
+      this.env.ThinkTestAgent,
+      runId
+    );
     // Short delay: the child is genuinely still running when reconciliation
     // starts, then reaches terminal a moment later — within the re-attach
     // budget — so the parent tails it to `completed`.
@@ -5968,7 +6037,10 @@ export class ThinkAgentToolParent extends Agent {
     elapsedMs: number;
     status: string | null;
   }> {
-    const child = await this.subAgent(ThinkTestAgent, runId);
+    const child = await agentToolChildForTest<ThinkTestAgent>(
+      this.env.ThinkTestAgent,
+      runId
+    );
     // Long delay → the child stays `running` for the whole (small) re-attach
     // budget, so the parent times out and interrupts.
     await child.setBeforeStepAsyncDelay(60_000);
@@ -6014,7 +6086,10 @@ export class ThinkAgentToolParent extends Agent {
     status: string | null;
     childStatus: string | null;
   }> {
-    const child = await this.subAgent(ThinkTestAgent, runId);
+    const child = await agentToolChildForTest<ThinkTestAgent>(
+      this.env.ThinkTestAgent,
+      runId
+    );
     // Long delay → the child stays `running` (no chunks, never terminal) for the
     // whole window, so only the ceiling can end the wait.
     await child.setBeforeStepAsyncDelay(60_000);
@@ -6062,7 +6137,10 @@ export class ThinkAgentToolParent extends Agent {
     const stuckRunId = crypto.randomUUID();
     const fastRunId = crypto.randomUUID();
 
-    const stuckChild = await this.subAgent(ThinkTestAgent, stuckRunId);
+    const stuckChild = await agentToolChildForTest<ThinkTestAgent>(
+      this.env.ThinkTestAgent,
+      stuckRunId
+    );
     await stuckChild.setBeforeStepAsyncDelay(60_000);
     const stuckStart = await stuckChild.startAgentToolRun("stuck child", {
       runId: stuckRunId
@@ -6076,7 +6154,10 @@ export class ThinkAgentToolParent extends Agent {
       stuckStart.startedAt
     );
 
-    const fastChild = await this.subAgent(ThinkTestAgent, fastRunId);
+    const fastChild = await agentToolChildForTest<ThinkTestAgent>(
+      this.env.ThinkTestAgent,
+      fastRunId
+    );
     await fastChild.setBeforeStepAsyncDelay(200);
     const fastStart = await fastChild.startAgentToolRun("fast child", {
       runId: fastRunId

@@ -3,15 +3,15 @@
  *
  * The user chats with a `CodingOrchestrator` (a Think agent). It does not edit
  * code itself — instead it delegates concrete tasks to `ClaudeCodeAgent`
- * sub-agents. Each sub-agent runs as a facet whose `this.name` is the agent-tool
- * run id, so each delegated task gets its OWN sandbox container with the repo
+ * sub-agents. Each agent-tool run gets its own `ClaudeCodeAgent` Durable
+ * Object, so each delegated task gets its OWN sandbox container with the repo
  * checked out. The sub-agent's stream + progress forward to the orchestrator's
  * UI, and it returns the diff it produced.
  *
  *   CodingOrchestrator (Think)  ── delegate_coding_task / delegate_parallel ──▶
- *     ClaudeCodeAgent (AIChatAgent facet, name = runId)
- *       └─ sandboxFor(env, orchestrator, this.name)  ──▶  one per task,
- *          destroyed by the orchestrator when the run finishes
+ *     ClaudeCodeAgent (AIChatAgent, one Durable Object per run)
+ *       └─ sandboxFor(env, this.name)  ──▶  one per task,
+ *          released by the orchestrator when the run finishes
  */
 
 import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
@@ -124,9 +124,8 @@ Sandbox.outboundByHost = { "api.anthropic.com": anthropicViaGateway };
  * A coding sub-agent. Thin `AIChatAgent` that delegates one task to the Claude
  * Code CLI running inside its own container, then reports back the diff.
  *
- * It never gets a top-level binding — the orchestrator spawns it as a facet via
- * `agentTool` / `runAgentTool`, so `this.name` is the run id and each task is
- * isolated in its own container.
+ * The orchestrator starts one per run via `agentTool` / `runAgentTool`, under a
+ * name it mints, so each task is isolated in its own container.
  */
 export class ClaudeCodeAgent extends AIChatAgent<Env> {
   // Claude owns its native session; persist its id so each turn can --resume it.
@@ -140,10 +139,14 @@ export class ClaudeCodeAgent extends AIChatAgent<Env> {
   }
 
   private sandbox(): Sandbox {
-    // One container per sub-agent. The orchestrator destroys it when the run
+    // One container per sub-agent. The orchestrator releases it when the run
     // reaches a terminal state; `sleepAfter` only bounds an idle drill-in.
-    const orchestrator = this.parentPath[this.parentPath.length - 1];
-    return sandboxFor(this.env, orchestrator?.name ?? "", this.name);
+    return sandboxFor(this.env, this.name);
+  }
+
+  /** Destroy this agent's container. Called by the orchestrator. */
+  async releaseSandbox(): Promise<void> {
+    await this.sandbox().destroy();
   }
 
   private setLastResult(result: TurnResult): void {
@@ -340,24 +343,6 @@ export class CodingOrchestrator extends Think<Env> {
     };
   }
 
-  /** Gate HTTP/WS drill-in into a sub-agent facet to runs this orchestrator owns. */
-  override async onBeforeSubAgent(
-    _request: Request,
-    child: { className: string; name: string }
-  ): Promise<Response | void> {
-    if (child.className !== "ClaudeCodeAgent") {
-      return new Response(`Unknown agent tool class: ${child.className}`, {
-        status: 404
-      });
-    }
-    if (!this.hasAgentToolRun(child.className, child.name)) {
-      return new Response(
-        `Agent tool ${child.className}/${child.name} not found`,
-        { status: 404 }
-      );
-    }
-  }
-
   // Containers are billed while awake and count against `max_instances`, so
   // track every run's sandbox and tear it down as soon as the run is over.
   override async onAgentToolStart(run: AgentToolRunInfo): Promise<void> {
@@ -386,7 +371,8 @@ export class CodingOrchestrator extends Think<Env> {
   private async isChildLive(runId: string): Promise<boolean> {
     if (!this.hasAgentToolRun(ClaudeCodeAgent, runId)) return false;
     try {
-      const child = await this.dynamicAgents.get(ClaudeCodeAgent, runId);
+      const child = await this.getAgentToolChild<ClaudeCodeAgent>(runId);
+      if (!child) return false;
       const inspection = await child.inspectAgentToolRun(runId);
       return (
         inspection?.status === "running" || inspection?.status === "starting"
@@ -414,18 +400,21 @@ export class CodingOrchestrator extends Think<Env> {
 
   @callable()
   async clearDelegatedRuns(): Promise<void> {
-    await this.clearAgentToolRuns();
+    // Release the containers first: the children are reached through the
+    // run rows, which `clearAgentToolRuns` deletes.
     const tracked = await this.ctx.storage.list({ prefix: SANDBOX_RUN_PREFIX });
     await Promise.all(
       [...tracked.keys()].map((key) =>
         this.destroySandbox(key.slice(SANDBOX_RUN_PREFIX.length))
       )
     );
+    await this.clearAgentToolRuns();
   }
 
   private async destroySandbox(runId: string): Promise<void> {
     try {
-      await sandboxFor(this.env, this.name, runId).destroy();
+      const child = await this.getAgentToolChild<ClaudeCodeAgent>(runId);
+      await child?.releaseSandbox();
     } catch (error) {
       console.warn(`Failed to destroy sandbox for run ${runId}:`, error);
       return;
@@ -440,17 +429,13 @@ const SANDBOX_RUN_PREFIX = "sandbox-run:";
 type TurnResult = WorkspaceDiff & { error?: string };
 
 /**
- * The sandbox for one delegated run. Its id is derived from the orchestrator
- * name AND the run id, so two orchestrators never share a container.
+ * The sandbox for one delegated run, keyed by its agent's name. The
+ * orchestrator mints a fresh name per run, so two runs never share a container.
  */
-function sandboxFor(env: Env, orchestratorName: string, runId: string) {
-  return getSandbox(
-    env.Sandbox,
-    sandboxIdFor(`${orchestratorName}\0${runId}`),
-    {
-      sleepAfter: "15m"
-    }
-  );
+function sandboxFor(env: Env, agentName: string) {
+  return getSandbox(env.Sandbox, sandboxIdFor(agentName), {
+    sleepAfter: "15m"
+  });
 }
 
 /**

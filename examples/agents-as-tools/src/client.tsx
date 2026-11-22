@@ -25,11 +25,11 @@
  *
  * Per-helper drill-in is wired here via `<DrillInPanel>`: clicking
  * the ↗ button on any helper panel opens a side panel that runs a
- * full `useAgentChat` against the helper's own sub-agent connection
- * (`useAgent({ agent: "Assistant", name: USER, sub: [{ agent:
- * helperType, name: runId }] })`). Because the helper IS a
- * Think, drill-in is real chat, not a custom event view — the
- * routing primitive does all the work.
+ * full `useAgentChat` against the helper's own connection
+ * (`useAgent({ agent: "Assistant", name: USER, path:
+ * `agent-tool-runs/${runId}` })`). The parent forwards that path to
+ * the run's child, which is a Think, so drill-in is real chat, not a
+ * custom event view.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -800,10 +800,10 @@ function MessageParts({
 // ── Drill-in side panel ────────────────────────────────────────────
 //
 // A click on a helper panel's ↗ button opens a side panel that runs
-// a full `useAgentChat` against the helper's own sub-agent connection.
-// Because the helper IS a Think, this is real chat — not a custom
-// event view. The routing primitive (`sub: [{agent, name}]`) does all
-// the work; this component is mostly the presentation layer.
+// a full `useAgentChat` against the helper's own connection. Because
+// the helper IS a Think, this is real chat — not a custom event view.
+// The parent forwards `agent-tool-runs/{runId}` to the run's child;
+// this component is mostly the presentation layer.
 //
 // Mounting the panel triggers a fresh `useAgent` connection to the
 // helper. Unmounting (close, switch helpers) cleans up the WebSocket.
@@ -841,34 +841,14 @@ function DrillInPanel({
   // shipped on 2026-04-28 from a different root cause.
   const isKnownHelperType = KNOWN_HELPER_TYPES.has(helperType);
 
-  // Direct WS to the helper sub-agent. URL shape:
-  // `/agents/assistant/{USER}/sub/{kebab(helperType)}/{helperId}`.
-  // The framework routes this through Assistant (which has no
-  // `onBeforeSubAgent` gate, so any known helperId works) and into
-  // the matching helper facet. The helper's `onConnect` (Think's
-  // default protocol setup) sends MSG_CHAT_MESSAGES; useAgentChat
-  // picks it up.
-  //
-  // `agent: helperType` (rather than the class name string verbatim)
-  // is what makes drill-in work for both `Researcher` and `Planner`
-  // panels. Hardcoding `agent: "Researcher"` would route a Planner
-  // drill-in into a fresh empty Researcher facet (because
-  // `onBeforeSubAgent` is open) and the UI would hang on
-  // "Connecting to helper…" with no error to surface.
-  //
-  // We pass a safe fallback type when `helperType` isn't recognized
-  // — the connection won't be used (we render the error state
-  // below) but the hook needs SOMETHING to compute its URL with so
-  // we don't violate the rules-of-hooks by conditionally calling.
+  // The parent forwards `/agents/assistant/{USER}/agent-tool-runs/{runId}`
+  // to the run's child, and only for runs it started. After the upgrade
+  // the child owns the socket. The child's `onConnect` (Think's default
+  // protocol setup) sends MSG_CHAT_MESSAGES; useAgentChat picks it up.
   const helperAgent = useAgent<{ readonly state: unknown }, unknown>({
     agent: "Assistant",
     name: USER,
-    sub: [
-      {
-        agent: isKnownHelperType ? helperType : "Researcher",
-        name: helperId
-      }
-    ]
+    path: `agent-tool-runs/${encodeURIComponent(helperId)}`
   });
   const { messages, sendMessage, status } = useAgentChat({
     agent: helperAgent,
@@ -1079,7 +1059,7 @@ export default function App() {
   // Drill-in side panel target. We store just the helper id; the
   // panel's metadata (helperType, query) is looked up from the
   // existing helper state. The panel itself opens its own
-  // `useAgent({ sub: [...] })` connection to the helper; we don't
+  // `useAgent({ path })` connection to the helper; we don't
   // need to pre-resolve anything here.
   const [drillInHelperId, setDrillInHelperId] = useState<string | null>(null);
   const openDrillIn = useCallback(
@@ -1113,7 +1093,7 @@ export default function App() {
 
   const clear = useCallback(() => {
     void (async () => {
-      // Delete retained helper facets before broadcasting the chat
+      // Delete retained helper agents before broadcasting the chat
       // clear. Otherwise another tab could reconnect in the small
       // window between clearHistory() and helper-run cleanup and see
       // a replay of helper panels the user just cleared.

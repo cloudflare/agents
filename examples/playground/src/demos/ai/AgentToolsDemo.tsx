@@ -75,11 +75,11 @@ return childRuns.map((run) => (
   {
     title: "Drill into the real child agent",
     description:
-      "The child is not just a rendered transcript. It is a retained sub-agent facet that the UI can connect to directly for replay or follow-up.",
+      "The child is not just a rendered transcript. It is a retained Durable Object of its own that the UI can connect to through the parent for replay or follow-up.",
     code: `const helper = useAgent({
   agent: "Assistant",
   name: userId,
-  sub: [{ agent: "Researcher", name: run.info.runId }]
+  path: \`agent-tool-runs/\${run.info.runId}\`
 });
 
 const helperChat = useAgentChat({ agent: helper });`
@@ -125,7 +125,7 @@ export function AgentToolsDemo() {
             </div>
             <p className="text-sm text-kumo-subtle mb-4">
               A parent chat agent can expose specialist Think agents as tools.
-              The model chooses the helper, the framework starts a child facet,
+              The model chooses the helper, the framework starts a child agent,
               and the UI receives live child events under the original tool
               call.
             </p>

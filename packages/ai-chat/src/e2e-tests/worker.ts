@@ -554,8 +554,7 @@ export class ChatRecoveryHelperParent extends Agent<Env> {
     runId: string,
     prompt: string
   ): Promise<string> {
-    // The child facet is named by `runId` (runAgentTool resolves it via
-    // subAgent(cls, runId)) and self-heals on recovery by default
+    // The child self-heals on recovery by default
     // (ChatRecoveryTestAgent.onChatRecovery returns {} = continue), so a
     // re-attached parent collects the child's REAL terminal after a restart
     // instead of abandoning it as interrupted.

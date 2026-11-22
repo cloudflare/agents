@@ -1,11 +1,10 @@
 # Agent Tools
 
-Agent tools let one chat agent dispatch another chat-capable sub-agent as part
-of its work — per-run, parent-supervised delegation is the flagship use case
-for facet-backed dynamic agents. The child is a real sub-agent with its own Durable Object storage,
-messages, tools, resumable stream, and drill-in URL. The parent keeps a small
-run registry so clients can render the child timeline, replay it after refresh,
-and clean it up later.
+Agent tools let one chat agent dispatch another chat-capable agent as part of
+its work. The child is an ordinary Durable Object of its own class, with its
+own storage, messages, tools, resumable stream, and drill-in URL. The parent
+keeps a small run registry so clients can render the child timeline, replay it
+after refresh, and clean it up later.
 
 Agent tools support `@cloudflare/think` agents and `AIChatAgent` subclasses.
 `AIChatAgent` children run headlessly through `saveMessages()`, so they should
@@ -15,9 +14,36 @@ separate parent-mediated workflow.
 
 For Think children, prefer agent tools when the parent model or workflow
 delegates work and you want retained child runs, event replay, abort bridging,
-and UI drill-in. Use raw `subAgent(...).chat()` only for lower-level streaming
-RPC where your code owns forwarding, cancellation, and replay policy. For the
+and UI drill-in. Call the child's `chat()` over RPC yourself only for
+lower-level streaming where your code owns forwarding, cancellation, and replay
+policy. For the
 full comparison, see [Choosing a turn API](https://github.com/cloudflare/agents/blob/main/docs/think/index.md#choosing-a-turn-api).
+
+## Configure the child class
+
+The child of a run is a Durable Object of the child class, so the class must
+be exported from your Worker and declared as a SQLite-backed Durable Object:
+
+```jsonc
+// wrangler.jsonc
+{
+  "durable_objects": {
+    "bindings": [
+      { "class_name": "Assistant", "name": "Assistant" },
+      { "class_name": "Researcher", "name": "Researcher" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Assistant", "Researcher"] }
+  ]
+}
+```
+
+The parent finds the namespace through `ctx.exports`, so you do not pass the
+binding yourself. Each run gets a child under a random name the parent records
+with the run, so two runs never share a child and a client cannot reach a
+child the parent did not start. Pass `childName` to `runAgentTool()` to send
+several runs to the same child, which then keeps its messages between them.
 
 ## Use an Agent as an AI SDK tool
 
@@ -554,33 +580,32 @@ for (const message of messages) {
 Imperative runs without a parent tool call are available as
 `agentTools.unboundRuns`.
 
-## Drill in and gate access
+## Drill in
 
-Agent tools are normal sub-agents. Connect to a retained child through the
-parent route:
+Connect to a retained child through the parent. The parent forwards
+`agent-tool-runs/{runId}` under its own URL to the run's child, and answers
+`404` for a run id it does not have:
 
 ```ts
 useAgent({
   agent: "Assistant",
   name: userId,
-  sub: [{ agent: "Researcher", name: runId }]
+  path: `agent-tool-runs/${runId}`
 });
 ```
 
-Gate external access with the parent registry so guessed run ids cannot spawn
-fresh child facets:
+After the WebSocket upgrade the child owns the socket, so its frames do not
+wake the parent. Server code reaches the child with `getAgentToolChild(runId)`,
+which returns a stub, or `null` for an unknown run:
 
 ```ts
-override async onBeforeSubAgent(_request, child) {
-  if (!this.hasAgentToolRun(child.className, child.name)) {
-    return new Response("Not found", { status: 404 });
-  }
-}
+const child = await this.getAgentToolChild<Researcher>(runId);
+const inspection = await child?.inspectAgentToolRun(runId);
 ```
 
 ## Clear retained runs
 
-Runs and child facets are retained by default for refresh, drill-in, and later
+Runs and their children are retained by default for refresh, drill-in, and later
 inspection. Delete them explicitly when clearing chat history or applying your
 own retention policy:
 
@@ -593,14 +618,25 @@ await this.clearAgentToolRuns({ olderThan: Date.now() - 7 * 24 * 60 * 60_000 });
 ```
 
 If a retained run is still `starting` or `running`, cleanup cancels the child
-before deleting its facet.
+first. Each cleared run's child is then destroyed: its storage is wiped on its
+next wake.
+
+## Runs started before child Durable Objects
+
+Earlier versions ran each child as a facet of the parent. A run such a version
+left `starting`, `running` or `interrupted` cannot be followed after the
+upgrade. On its first start the parent ends each one `error`, broadcasts the
+terminal event, and calls `onAgentToolFinish` and, for a detached run, its
+`onFinish` or chat notification. Running the same `runId` again returns that
+error. Finished runs keep their stored result. The old facet storage is left in
+place and is no longer read.
 
 ## Interrupted runs and recovery
 
 Agent-tool runs are retained in the parent. If the parent restarts (deploy,
 eviction) while a child run is still `starting` or `running`, the parent does
 not immediately abandon it. Startup recovery re-attaches to the live child and
-tails its stream to the child's real terminal result: the child is a sub-agent
+tails its stream to the child's real terminal result: the child is an agent
 with its own `chatRecovery`, so it self-heals its interrupted turn while the
 parent forwards its output and collects the final outcome. A completed child is
 finalized in the parent without re-running already-finished work.
