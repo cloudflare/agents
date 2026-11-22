@@ -29,13 +29,27 @@ export class RefundDesk extends DurableObject<Env> {
       return { refunded: false, reason: decision.verdict?.reason };
     }
     const refund = decision.subject as Refund;
-    const result = await this.approvals.once({
+    const effect = await this.approvals.once({
       key: `refund:${refund.orderId}`,
       name: "refund",
       input: refund,
       run: () => this.env.PAYMENTS.refund(refund)
     });
-    return { refunded: true, result };
+    switch (effect.status) {
+      case "ran":
+      case "replayed":
+      case "reclaimed":
+      case "unrecorded":
+        return { refunded: true, result: effect.value };
+      case "in-doubt":
+        // An earlier attempt may have refunded: check with the provider.
+        return { refunded: "unknown" };
+      case "conflict":
+        return {
+          refunded: false,
+          reason: "order already refunded another way"
+        };
+    }
   }
 }
 ```
@@ -53,16 +67,17 @@ const outcome = await this.approvals.once({
 
 `outcome.status` is one of:
 
-| Status       | Meaning                                                                                                 |
-| ------------ | ------------------------------------------------------------------------------------------------------- |
-| `ran`        | This call ran `run` and recorded its value.                                                             |
-| `replayed`   | The value was recorded earlier. `run` did not run.                                                      |
-| `in-doubt`   | An earlier attempt claimed the key and its isolate ended before it finished. `run` did not run.         |
-| `reclaimed`  | As `in-doubt`, but the claim was older than `reclaimAfterMs`, so this call took it over and ran `run`.  |
-| `conflict`   | The key was used before with another `name` or `input`. Nothing ran.                                    |
-| `unrecorded` | `run` returned a value that is not JSON. It is returned once and not recorded; a later call runs again. |
+| Status       | Meaning                                                                                                                                 |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `ran`        | This call ran `run` and recorded its value.                                                                                             |
+| `replayed`   | The value was recorded earlier. `run` did not run.                                                                                      |
+| `in-doubt`   | An earlier attempt claimed the key and its isolate ended before it finished. `run` did not run.                                         |
+| `reclaimed`  | As `in-doubt`, but the claim was older than `reclaimAfterMs`, so this call took it over and ran `run`.                                  |
+| `conflict`   | The key was used before with another `name` or `input`. Nothing ran.                                                                    |
+| `unrecorded` | `run` ran, but its value is not JSON or its claim was deleted meanwhile. It is returned once and not recorded; a later call runs again. |
 
-`ran`, `replayed`, `reclaimed` and `unrecorded` carry `value`. The recorded
+`ran`, `replayed`, `reclaimed` and `unrecorded` carry `value`. The input
+should be JSON; dates are compared by their time. The recorded
 value is the JSON form of what `run` returned, and the first call gets that
 form too.
 
@@ -103,8 +118,12 @@ Other methods:
 - `wait(id, { timeoutMs, signal })` resolves once the decision is settled.
 - `unacknowledged()` lists settled decisions whose outcome was not
   acknowledged; `acknowledge(id)` marks one done.
+- `record({ kind, subject, verdict, outcome })` stores a decision made
+  elsewhere (for example by a code runtime that holds its own pending calls)
+  and hands its outcome to `onSettled` until it is acknowledged.
+  `onDecided` does not run.
 - `sweep({ force })` deletes expired rows. It also runs on start, at most
-  once an hour.
+  once an hour. A `wait()` on a decision it deletes rejects.
 
 ## What is durable
 
@@ -122,7 +141,8 @@ Other methods:
   until you call `acknowledge()`.
 - If `onDecided` throws, the error reaches the caller of `decide()` and the
   recovery job retries it. After three failures the decision settles with
-  `decision.error`.
+  `decision.error`. An outcome too large to store (SQLite's 2 MB row limit)
+  settles the decision with `decision.error` at once.
 - A sub-agent running as a facet has no alarm of its own, so there an
   unfinished decision is not resumed after a reset.
 

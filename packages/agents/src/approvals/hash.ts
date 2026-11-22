@@ -1,9 +1,13 @@
 /**
  * A stable string form of a value: object keys sorted, so two objects with
- * the same entries in another order give the same string.
+ * the same entries in another order give the same string. Meant for JSON
+ * values; a `Date` is written as its ISO time so two dates tell apart.
  */
 export function stableStringify(value: unknown): string {
   if (value === undefined) return "undefined";
+  if (value instanceof Date) {
+    return `Date(${Number.isNaN(value.getTime()) ? "Invalid" : value.toISOString()})`;
+  }
   if (typeof value === "function" || typeof value === "symbol") {
     return String(value);
   }

@@ -142,8 +142,10 @@ export type ApprovalsOptions = {
   /**
    * Take a recorded outcome up. Called after the outcome is written, and
    * again after a reset until {@link Approvals.acknowledge} is called
-   * (`redelivered` is then `true`). Runs in host context. Without it, an
-   * outcome is acknowledged as soon as it is recorded.
+   * (`redelivered` is then `true`). Runs in host context. If it throws, the
+   * decision still counts as settled and the recovery job hands the outcome
+   * off again. Without it, an outcome is acknowledged as soon as it is
+   * recorded.
    */
   readonly onSettled?: (
     decision: Decision,
@@ -156,7 +158,10 @@ export type ApprovalsOptions = {
   readonly retention?: () => ApprovalsRetention;
   /**
    * How long a decided continuation may run before its recovery job treats
-   * the isolate that ran it as gone. Default: 60 seconds.
+   * the isolate that ran it as gone. Default: 60 seconds. A continuation
+   * still running in this isolate when the job fires is left to run and
+   * checked again after the same interval, with no limit: give it its own
+   * timeout.
    */
   readonly resumeAfterMs?: number;
 };

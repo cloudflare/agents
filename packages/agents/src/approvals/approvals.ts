@@ -18,7 +18,7 @@ import type {
   LifecycleJobOutcome
 } from "../lifecycle/job-queue";
 import { SqlError } from "../sql-error";
-import { stableHash } from "./hash";
+import { stableHash, stableStringify } from "./hash";
 import type {
   ApprovalsEventType,
   ApprovalsOptions,
@@ -184,9 +184,19 @@ function resumeJobId(id: string): string {
 export class Approvals extends LifecycleCapability {
   readonly #options: ApprovalsOptions;
   #tablesEnsured = false;
-  readonly #runningEffects = new Map<string, Promise<EffectOutcome<unknown>>>();
+  readonly #runningEffects = new Map<
+    string,
+    {
+      name: string;
+      inputHash: string;
+      promise: Promise<EffectOutcome<unknown>>;
+    }
+  >();
   readonly #runningDecisions = new Map<string, Promise<Decision>>();
-  readonly #waiters = new Map<string, Set<(decision: Decision) => void>>();
+  readonly #waiters = new Map<
+    string,
+    Set<{ done: (decision: Decision) => void; fail: (error: Error) => void }>
+  >();
 
   constructor(options: ApprovalsOptions = {}) {
     super("approvals");
@@ -252,7 +262,12 @@ export class Approvals extends LifecycleCapability {
       return { rescheduleAt: Date.now() + this.#resumeAfterMs() };
     }
     if (row.acknowledged === 0) {
-      await this.#settle(this.#toDecision(row), { redelivered: true });
+      try {
+        await this.#settle(this.#toDecision(row), { redelivered: true });
+      } catch (error) {
+        console.error(`[Approvals] Hand-off of "${id}" failed:`, error);
+        return { rescheduleAt: Date.now() + this.#resumeAfterMs() };
+      }
     }
     return undefined;
   }
@@ -278,10 +293,16 @@ export class Approvals extends LifecycleCapability {
       throw new TypeError("Approvals.once: key must be non-empty");
     }
     this.#ensureTables();
-    const running = this.#runningEffects.get(key);
-    if (running) return (await running) as EffectOutcome<T>;
-
     const inputHash = stableHash(input);
+    const running = this.#runningEffects.get(key);
+    if (running) {
+      if (running.name !== name || running.inputHash !== inputHash) {
+        this.#emit("approvals:effect:conflict", { key, name });
+        return { status: "conflict" };
+      }
+      return (await running.promise) as EffectOutcome<T>;
+    }
+
     const contextJson = toJson(options.context, "context");
     const now = Date.now();
     const existing = this.#readEffect(key);
@@ -335,12 +356,25 @@ export class Approvals extends LifecycleCapability {
         this.#emit("approvals:effect:unrecorded", { key, name });
         return { status: "unrecorded", value };
       }
-      this.#write(
-        `UPDATE cf_agents_effects
-         SET status = 'settled', result_json = ?, updated_at = ?
-         WHERE key = ?`,
-        [encoded.json, Date.now(), key]
-      );
+      let settled: number;
+      try {
+        settled = this.#write(
+          `UPDATE cf_agents_effects
+           SET status = 'settled', result_json = ?, updated_at = ?
+           WHERE key = ? AND status = 'pending'`,
+          [encoded.json, Date.now(), key]
+        );
+      } catch {
+        // SQLite will not store the value (past its 2 MB row limit). The
+        // effect ran; nothing is recorded, as for a value that is not JSON.
+        this.#releaseEffect(key);
+        settled = 0;
+      }
+      if (settled === 0) {
+        // The claim is gone (deleted while the effect ran): nothing recorded.
+        this.#emit("approvals:effect:unrecorded", { key, name });
+        return { status: "unrecorded", value };
+      }
       const recorded = encoded.value as T;
       if (reclaimedAge !== undefined) {
         this.#emit("approvals:effect:reclaimed", {
@@ -353,7 +387,7 @@ export class Approvals extends LifecycleCapability {
       this.#emit("approvals:effect:ran", { key, name });
       return { status: "ran", value: recorded };
     })();
-    this.#runningEffects.set(key, execution);
+    this.#runningEffects.set(key, { name, inputHash, promise: execution });
     try {
       return await execution;
     } finally {
@@ -397,7 +431,8 @@ export class Approvals extends LifecycleCapability {
     if (existing) {
       if (
         existing.kind !== options.kind ||
-        existing.subject_json !== subjectJson
+        stableStringify(parseJson(existing.subject_json)) !==
+          stableStringify(options.subject)
       ) {
         throw new Error(
           `Approvals.park: decision "${id}" exists with another kind or subject`
@@ -479,6 +514,62 @@ export class Approvals extends LifecycleCapability {
   }
 
   /**
+   * Record a decision made elsewhere, with its outcome, and hand the outcome
+   * off ({@link ApprovalsOptions.onSettled}) until it is acknowledged. For
+   * work whose own system holds what is pending and runs the decision (a
+   * code runtime that pauses on a gated call), so only the hand-off needs a
+   * durable record here. `onDecided` does not run.
+   */
+  async record(
+    options: ParkOptions & {
+      readonly verdict: Verdict;
+      readonly outcome: unknown;
+    }
+  ): Promise<Decision> {
+    this.#ensureTables();
+    const id = options.id ?? `decision_${crypto.randomUUID()}`;
+    const now = Date.now();
+    let outcomeJson: string | null = null;
+    let error: string | null = null;
+    try {
+      outcomeJson = toJson(options.outcome, "outcome");
+    } catch (cause) {
+      error = errorMessage(cause);
+    }
+    const insert = (outcome: string | null, failure: string | null) =>
+      this.#write(
+        `INSERT INTO cf_agents_decisions
+           (id, kind, subject_json, descriptor_json, status, verdict_json,
+            outcome_json, error, attempts, acknowledged, created_at,
+            decided_at, settled_at)
+         VALUES (?, ?, ?, ?, 'settled', ?, ?, ?, 0, 0, ?, ?, ?)`,
+        [
+          id,
+          options.kind,
+          toJson(options.subject, "subject") ?? "null",
+          toJson(options.descriptor, "descriptor"),
+          toJson(options.verdict, "verdict"),
+          outcome,
+          failure,
+          now,
+          now,
+          now
+        ]
+      );
+    try {
+      insert(outcomeJson, error);
+    } catch (cause) {
+      insert(null, `The outcome could not be stored: ${errorMessage(cause)}`);
+    }
+    this.#emit("approvals:decision:decided", {
+      id,
+      kind: options.kind,
+      approved: options.verdict.approved
+    });
+    return this.#afterSettle(id, options.kind, { redelivered: false });
+  }
+
+  /**
    * Resolve once the decision under `id` is settled. In memory: the record
    * is the truth, so a decision that settled earlier resolves at once.
    * Rejects on timeout, on abort, or when there is no such decision.
@@ -496,21 +587,27 @@ export class Approvals extends LifecycleCapability {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const waiters = this.#waiters.get(id) ?? new Set();
       this.#waiters.set(id, waiters);
+      const entry = {
+        done: (decision: Decision) => {
+          cleanup();
+          resolve(decision);
+        },
+        fail: (error: Error) => {
+          cleanup();
+          reject(error);
+        }
+      };
       const cleanup = () => {
-        waiters.delete(done);
+        waiters.delete(entry);
         if (waiters.size === 0) this.#waiters.delete(id);
         if (timer !== undefined) clearTimeout(timer);
         options.signal?.removeEventListener("abort", onAbort);
-      };
-      const done = (decision: Decision) => {
-        cleanup();
-        resolve(decision);
       };
       const onAbort = () => {
         cleanup();
         reject(options.signal?.reason ?? new Error("Aborted"));
       };
-      waiters.add(done);
+      waiters.add(entry);
       if (options.timeoutMs !== undefined) {
         timer = setTimeout(() => {
           cleanup();
@@ -698,12 +795,27 @@ export class Approvals extends LifecycleCapability {
         );
         return this.#afterSettle(id, row.kind, delivery);
       }
-      this.#write(
-        `UPDATE cf_agents_decisions
-         SET status = 'settled', outcome_json = ?, settled_at = ?
-         WHERE id = ? AND status = 'decided'`,
-        [outcomeJson, Date.now(), id]
-      );
+      try {
+        this.#write(
+          `UPDATE cf_agents_decisions
+           SET status = 'settled', outcome_json = ?, settled_at = ?
+           WHERE id = ? AND status = 'decided'`,
+          [outcomeJson, Date.now(), id]
+        );
+      } catch (error) {
+        // An outcome SQLite will not store (past its 2 MB row limit) fails
+        // the same way on every run: settle with the error instead.
+        this.#write(
+          `UPDATE cf_agents_decisions
+           SET status = 'settled', error = ?, settled_at = ?
+           WHERE id = ? AND status = 'decided'`,
+          [
+            `The outcome could not be stored: ${errorMessage(error)}`,
+            Date.now(),
+            id
+          ]
+        );
+      }
       return this.#afterSettle(id, row.kind, delivery);
     })();
     this.#runningDecisions.set(id, work);
@@ -721,17 +833,30 @@ export class Approvals extends LifecycleCapability {
     kind: string,
     delivery: { redelivered: boolean }
   ): Promise<Decision> {
-    if (this.#canWake()) await this.lifecycle.jobs.cancel(resumeJobId(id));
     const row = this.#readDecision(id);
     if (!row) throw new Error(`Approvals: no decision "${id}"`);
     const decision = this.#toDecision(row);
+    // Keep a wake while the outcome is handed off: a reset during it hands
+    // it off again. Cancelled once the hand-off returns, so an outcome the
+    // host chose to take up later is not handed off again and again.
+    await this.#pushResume(id, Date.now() + this.#resumeAfterMs());
     this.#emit("approvals:decision:settled", {
       id,
       kind,
       ...(decision.error !== undefined && { error: decision.error })
     });
-    for (const waiter of [...(this.#waiters.get(id) ?? [])]) waiter(decision);
-    await this.#settle(decision, delivery);
+    for (const waiter of [...(this.#waiters.get(id) ?? [])]) {
+      waiter.done(decision);
+    }
+    try {
+      await this.#settle(decision, delivery);
+    } catch (error) {
+      // The outcome is recorded; only the hand-off failed. The job stays due
+      // and hands it off again.
+      console.error(`[Approvals] Hand-off of "${id}" failed:`, error);
+      return this.get(id) ?? decision;
+    }
+    if (this.#canWake()) await this.lifecycle.jobs.cancel(resumeJobId(id));
     return this.get(id) ?? decision;
   }
 
@@ -802,10 +927,21 @@ export class Approvals extends LifecycleCapability {
     } catch (cause) {
       throw new SqlError(query, cause);
     }
+    let deleted = 0;
     for (const key of keys) {
+      // A claim this isolate is still running is live, however old.
+      if (table === "cf_agents_effects" && this.#runningEffects.has(key)) {
+        continue;
+      }
       this.#write(`DELETE FROM ${table} WHERE ${keyColumn} = ?`, [key]);
+      deleted += 1;
+      if (table === "cf_agents_decisions") {
+        for (const waiter of [...(this.#waiters.get(key) ?? [])]) {
+          waiter.fail(new Error(`Approvals: decision "${key}" expired`));
+        }
+      }
     }
-    return keys.length;
+    return deleted;
   }
 
   #readEffect(key: string): EffectRow | undefined {

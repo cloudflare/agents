@@ -2,8 +2,8 @@
 
 `Approvals` (`agents/approvals`) is a Lifecycle capability for two kinds of
 work that must not happen twice: a side effect claimed by key, and work
-parked until someone approves or rejects it. Think's actions and
-`approveExecution` / `rejectExecution` are built on it.
+parked until someone approves or rejects it. It is built for Think's action
+ledger and its durable-pause and codemode approvals.
 
 ## How it works
 
@@ -20,7 +20,8 @@ timestamps.
   and does not run (`replayed`).
 - The same key with another name or input runs nothing (`conflict`). The
   caller reused a key, which is a programming error.
-- A call while this isolate runs the key awaits that run.
+- A call while this isolate runs the key awaits that run, if its name and
+  input match; otherwise it is a `conflict`.
 - A `pending` row nothing in this isolate is running was left by an attempt
   whose isolate ended. The effect may or may not have happened. The call
   answers `in-doubt` and runs nothing, unless the caller passed
@@ -28,7 +29,7 @@ timestamps.
   over and runs again (`reclaimed`).
 - If `run` throws, the row is deleted and the error rethrown, so a later call
   runs again. A value that is not JSON is returned once and not recorded
-  (`unrecorded`).
+  (`unrecorded`), and so is one whose claim was deleted while it ran.
 
 The value is recorded as its JSON round trip and that form is returned on
 the first run too, so the first caller and a replay see the same value.
@@ -64,14 +65,27 @@ wake. A continuation that throws stays `decided` and the job retries it; the
 third failure settles the decision with the error.
 
 `wait(id)` resolves when the decision is settled. It waits in memory; a
-decision that settled earlier resolves at once.
+decision that settled earlier resolves at once, and a sweep that deletes the
+decision rejects it.
+
+`record({ kind, subject, verdict, outcome })` stores a decision made
+elsewhere as settled and hands its outcome off the same way. It is for work
+whose own system holds what is pending and runs the decision, such as the
+codemode runtime: only the hand-off needs a record here.
+
+The recovery job stays while the outcome is handed off and is cancelled
+when `onSettled` returns, so a reset during the hand-off hands it off again
+but an outcome the host chose to take up later is not handed off in a loop.
+An outcome SQLite will not store (its 2 MB row limit) settles the decision
+with an error instead of failing the same way on every retry.
 
 ### Retention
 
 `sweep()` runs from `onStart` at most once an hour. It deletes, per
 retention window (each can be `false`): recorded effects (30 days), unfinished
 effect claims (90 days), decisions nobody made (30 days), and acknowledged
-decisions (30 days). A `decided` row is never swept. Deleting an effect ends
+decisions (30 days). A `decided` row is never swept, and neither is an
+effect claim this isolate is running. Deleting an effect ends
 the run-once guarantee for its key.
 
 ## Guarantees
@@ -90,7 +104,14 @@ the run-once guarantee for its key.
 - A decided continuation runs at least once. It can run twice if a reset
   lands after it ran and before the outcome was written, so a continuation
   with a side effect runs it through `once()`.
-- `onSettled` runs at least once per outcome, until acknowledged.
+- `onSettled` runs at least once per outcome, until acknowledged. If it
+  throws, `decide()` still returns `settled` and the recovery job hands the
+  outcome off again.
+- A continuation that is still running in this isolate when its job fires
+  is checked again after `resumeAfterMs`, with no limit. It needs its own
+  timeout (Think's actions have one).
+- An effect value SQLite will not store is `unrecorded` and its claim is
+  released, as for a value that is not JSON.
 
 ## Key decisions
 

@@ -38,6 +38,11 @@ export class ApprovalsHarnessObject extends DurableObject<Cloudflare.Env> {
         this.failuresBeforeSuccess -= 1;
         throw new Error("continuation failed");
       }
+      if (this.nextOutcome !== undefined) {
+        const outcome = this.nextOutcome;
+        this.nextOutcome = undefined;
+        return outcome;
+      }
       if (!decision.verdict?.approved) {
         return { status: "rejected", reason: decision.verdict?.reason };
       }
@@ -65,6 +70,33 @@ export class ApprovalsHarnessObject extends DurableObject<Cloudflare.Env> {
   });
 
   readonly lifecycle = Lifecycle.install(this).use(this.approvals);
+
+  /** What the next continuation returns instead of its normal outcome. */
+  nextOutcome: unknown = undefined;
+
+  /**
+   * Park and decide a decision whose continuation is held, then return its
+   * id while the continuation waits. {@link restart} then ends the isolate
+   * in the middle of it.
+   */
+  async decideHeld(): Promise<string> {
+    this.hold();
+    const { id } = this.approvals.park({ kind: "action", subject: { n: 1 } });
+    void this.approvals.decide(id, { approved: true }).catch(() => {});
+    while (!this.continued.includes(id)) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    return id;
+  }
+
+  /** End the isolate the way the runtime does: memory goes, storage stays. */
+  restart(): void {
+    this.ctx.abort("restarted by test");
+  }
+
+  status(id: string): string | undefined {
+    return this.approvals.get(id)?.status;
+  }
 
   /** Hold every continuation until {@link release}. */
   hold(): void {
