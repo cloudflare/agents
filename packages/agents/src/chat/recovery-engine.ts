@@ -16,6 +16,11 @@ import type {
   ResolvedChatRecoveryConfig
 } from "./lifecycle";
 import type { ChatFiberSnapshot } from "./recovery";
+import {
+  interruptedTurnKind,
+  planInterruptedTurn,
+  type RecoveryLeaf
+} from "./interrupted-turn";
 import type { RecoveryAttemptHandle } from "./chat-turns";
 import {
   handleRecoveryAttemptError,
@@ -396,16 +401,6 @@ export interface ResolvedRecoveryStream {
   streamStatus?: ChatStreamStatus;
 }
 
-/** Input to {@link ChatFiberWakeHooks.classifyRecoveredTurn}. */
-export interface ClassifyRecoveredTurnInput {
-  snapshot: ChatFiberSnapshot | null;
-  requestId: string;
-  streamId: string;
-  partial: RecoveryPartial;
-  streamStillActive: boolean;
-  streamStatus?: ChatStreamStatus;
-}
-
 /** Input to {@link ChatFiberWakeHooks.invokeOnChatRecovery}. */
 export interface InvokeOnChatRecoveryInput {
   incident: ChatRecoveryIncident;
@@ -425,21 +420,6 @@ export interface PersistOrphanedPartialInput {
   streamStillActive: boolean;
   streamStatus?: ChatStreamStatus;
   snapshot: ChatFiberSnapshot | null;
-}
-
-/** Input to {@link ChatFiberWakeHooks.dispatchRecoveredTurn}. */
-export interface DispatchRecoveredTurnInput<TClassify> {
-  incident: ChatRecoveryIncident;
-  config: ResolvedChatRecoveryConfig;
-  recoveryKind: ChatRecoveryKind;
-  options: ChatRecoveryOptions;
-  snapshot: ChatFiberSnapshot | null;
-  requestId: string;
-  recoveryRootRequestId: string;
-  streamId: string;
-  streamStatus?: ChatStreamStatus;
-  /** The package-specific classification detail produced by `classifyRecoveredTurn`. */
-  detail: TClassify;
 }
 
 /**
@@ -462,26 +442,24 @@ export interface InterruptedChatTurn {
  * The host operations the engine drives when it recovers an interrupted chat
  * turn. Kept SEPARATE from {@link ChatRecoveryAdapter} (and passed per call to
  * {@link ChatRecoveryEngine.recoverInterruptedTurn}) so the incident/give-up
- * adapter stays focused, and generic over `TClassify` so the
- * `classifyRecoveredTurn` → `dispatchRecoveredTurn` handoff is type-safe without a
- * class-level generic.
+ * adapter stays focused.
  *
- * The engine owns the LIFECYCLE (stream → partial → classify → begin-incident →
- * exhausted-branch → onChatRecovery → persist → complete → dispatch →
- * catch→failed) and the shared persist clause; these hooks own the
- * package-specific I/O and the retry/continue/skip decision.
+ * The engine owns the LIFECYCLE (stream → partial → kind → begin-incident →
+ * exhausted-branch → onChatRecovery → persist → complete → plan → schedule or
+ * skip → catch→failed), the shared persist clause and the plan
+ * (`planInterruptedTurn`); these hooks own the package-specific I/O.
  */
-export interface ChatFiberWakeHooks<TClassify> {
+export interface ChatFiberWakeHooks {
   /**
-   * Classify the recovered turn as a `retry` or `continue` and return any
-   * package-specific detail the dispatch decision needs (e.g. the pre-stream
-   * retry target id). Runs before the incident is opened.
+   * The latest stored message. Read before the incident opens, for the kind
+   * it is opened with, and again after the partial was stored, for the plan.
    */
-  classifyRecoveredTurn(
-    input: ClassifyRecoveredTurnInput
-  ):
-    | { recoveryKind: ChatRecoveryKind; detail: TClassify }
-    | Promise<{ recoveryKind: ChatRecoveryKind; detail: TClassify }>;
+  latestMessage(): RecoveryLeaf | Promise<RecoveryLeaf>;
+  /**
+   * Whether what the turn streamed holds anything that would be stored, by
+   * the host's rules for what a stored reply drops.
+   */
+  partialHoldsContent(partial: RecoveryPartial): boolean;
   /**
    * Build the package's `ChatRecoveryContext` and invoke the user `onChatRecovery`
    * hook, returning its (defaulted) options. The engine wraps this in the
@@ -505,15 +483,28 @@ export interface ChatFiberWakeHooks<TClassify> {
   persistOrphanedStream(streamId: string): Promise<void>;
   /** Mark the (still-active) recovered stream complete and schedule cleanup. */
   completeRecoveredStream(streamId: string): void | Promise<void>;
+  /** The message ids the interrupted request came from, when the host still knows them. */
+  originMessageIds?(requestId: string): string[] | undefined;
+  /** Host fields for the recovery payload, such as `Think`'s submission id. */
+  scheduleData?(input: {
+    recoveryRootRequestId: string;
+  }): Record<string, unknown> | Promise<Record<string, unknown>>;
+  /** The turn's stream ended before the reset: there is nothing to recover. */
+  onStreamEnded?(input: {
+    requestId: string;
+    recoveryRootRequestId: string;
+    streamStatus: "completed" | "error";
+  }): Promise<void>;
   /**
-   * The retry/continue/skip DECISION — the package-owned core. Runs after persist
-   * + complete; owns the leaf/submission computation, the schedule calls (via
-   * {@link ChatRecoveryEngine.scheduleRecovery}), the skip transitions, and any
-   * package-specific terminal/broadcast writes.
+   * Nothing will recover the turn: the app declined to continue it
+   * (`continue_disabled`), or the conversation moved on
+   * (`conversation_changed`). Runs after the incident records the skip.
    */
-  dispatchRecoveredTurn(
-    input: DispatchRecoveredTurnInput<TClassify>
-  ): Promise<void>;
+  onSkipped?(input: {
+    requestId: string;
+    recoveryRootRequestId: string;
+    reason: "continue_disabled" | "conversation_changed";
+  }): Promise<void>;
 }
 
 /**
@@ -710,21 +701,21 @@ export class ChatRecoveryEngine {
    * organs are the {@link ChatFiberWakeHooks}. In order:
    *
    * 1. resolve the orphaned stream + reconstruct its partial;
-   * 2. classify the turn (retry/continue + package detail) and open the incident;
+   * 2. read the kind the incident opens with (`interruptedTurnKind`) and open it;
    * 3. if the budget is already exhausted, persist the settled partial (so
    *    non-idempotent tool results are not discarded — #1631) and terminalize
    *    BEFORE consulting `onChatRecovery`;
    * 4. otherwise, inside a `failed`-on-throw guard: invoke `onChatRecovery`,
    *    apply the shared persist gate (base eligibility AND `persist !== false ||
-   *    settled tool results`), complete the live stream, then hand the
-   *    retry/continue/skip DECISION to {@link ChatFiberWakeHooks.dispatchRecoveredTurn}.
+   *    settled tool results`), complete the live stream, then plan what the
+   *    turn does next (`planInterruptedTurn`) and schedule it or skip.
    *
    * Any throw after the incident opens flips it to `failed` so it is never
    * left leaking in `attempting`.
    */
-  async recoverInterruptedTurn<TClassify>(
+  async recoverInterruptedTurn(
     turn: InterruptedChatTurn,
-    wake: ChatFiberWakeHooks<TClassify>
+    wake: ChatFiberWakeHooks
   ): Promise<void> {
     const { adapter } = this;
     const { requestId, snapshot, recoveryData, createdAt } = turn;
@@ -739,14 +730,11 @@ export class ChatRecoveryEngine {
       ? adapter.getPartialStreamText(streamId)
       : { text: "", parts: [], hasSettledToolResults: false };
 
-    const { recoveryKind, detail } = await wake.classifyRecoveredTurn({
-      snapshot,
-      requestId,
-      streamId,
-      partial,
-      streamStillActive,
-      streamStatus
-    });
+    const recoveryKind = interruptedTurnKind(
+      { snapshot, streamStatus },
+      wake.partialHoldsContent(partial),
+      await wake.latestMessage()
+    );
     const recoveryRootRequestId = snapshot?.recoveryRootRequestId ?? requestId;
 
     // An interrupted turn is a run whose isolate died before it finished. The
@@ -790,7 +778,6 @@ export class ChatRecoveryEngine {
         config,
         exhausted,
         recoveryKind,
-        detail,
         requestId,
         recoveryRootRequestId,
         snapshot,
@@ -807,15 +794,14 @@ export class ChatRecoveryEngine {
   }
 
   /** The part of {@link recoverInterruptedTurn} that runs after the incident opened. */
-  async #replayRecoveredTurn<TClassify>(
-    wake: ChatFiberWakeHooks<TClassify>,
+  async #replayRecoveredTurn(
+    wake: ChatFiberWakeHooks,
     input: {
       createdAt: number;
       incident: ChatRecoveryIncident;
       config: ResolvedChatRecoveryConfig;
       exhausted: boolean;
       recoveryKind: ChatRecoveryKind;
-      detail: TClassify;
       requestId: string;
       recoveryRootRequestId: string;
       snapshot: ChatFiberSnapshot | null;
@@ -833,7 +819,6 @@ export class ChatRecoveryEngine {
       config,
       exhausted,
       recoveryKind,
-      detail,
       requestId,
       recoveryRootRequestId,
       snapshot,
@@ -909,17 +894,46 @@ export class ChatRecoveryEngine {
         await wake.completeRecoveredStream(streamId);
       }
 
-      await wake.dispatchRecoveredTurn({
-        incident,
-        config,
-        recoveryKind,
+      const plan = planInterruptedTurn(
+        { snapshot, streamStatus },
         options,
-        snapshot,
-        requestId,
+        await wake.latestMessage()
+      );
+      if (plan.action === "skip") {
+        if (streamStatus === "completed" || streamStatus === "error") {
+          await wake.onStreamEnded?.({
+            requestId,
+            recoveryRootRequestId,
+            streamStatus
+          });
+        }
+        await this.updateIncident(incident.incidentId, "skipped", plan.reason);
+        if (plan.reason !== "stream_terminal") {
+          await wake.onSkipped?.({
+            requestId,
+            recoveryRootRequestId,
+            reason: plan.reason
+          });
+        }
+        return;
+      }
+      await this.scheduleRecoveredTurn({
+        incident,
+        recoveryKind: plan.action,
         recoveryRootRequestId,
-        streamId,
-        streamStatus,
-        detail
+        retryUserId: plan.action === "retry" ? plan.questionId : null,
+        targetAssistantId:
+          plan.action === "continue" ? plan.replyId : undefined,
+        requestContext: snapshot,
+        originMessageIds:
+          wake.originMessageIds?.(requestId) ?? snapshot?.originMessageIds,
+        extra: {
+          ...(plan.action === "retry" &&
+            plan.regeneratedLeafId !== undefined && {
+              regeneratedLeafId: plan.regeneratedLeafId
+            }),
+          ...(await wake.scheduleData?.({ recoveryRootRequestId }))
+        }
       });
     } catch (error) {
       await this.updateIncident(
@@ -941,8 +955,8 @@ export class ChatRecoveryEngine {
    * (#1631), and the codec (not the engine) decides whether a partial carries
    * settled tool work, so the engine stays wire-vocabulary-agnostic.
    */
-  private async _shouldPersistOrphanedPartial<TClassify>(
-    wake: ChatFiberWakeHooks<TClassify>,
+  private async _shouldPersistOrphanedPartial(
+    wake: ChatFiberWakeHooks,
     input: PersistOrphanedPartialInput & {
       options: ChatRecoveryOptions | undefined;
       partial: RecoveryPartial;

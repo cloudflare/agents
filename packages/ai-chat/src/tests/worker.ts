@@ -7245,6 +7245,15 @@ export class AIChatAgentToolParent extends Agent<Env> {
     schedules: number;
   }> {
     const child = await this.subAgent(AIChatAgentToolChild, childName);
+    // A reply to continue: recovery continues the latest assistant message.
+    await child.persistMessages([
+      { id: "u-facet", role: "user", parts: [{ type: "text", text: "Hi" }] },
+      {
+        id: "a-facet",
+        role: "assistant",
+        parts: [{ type: "text", text: "Partial" }]
+      }
+    ]);
     await child.insertInterruptedFiber("__cf_internal_chat_turn:req-facet");
     await child.triggerFiberRecovery();
     const taskRunOnChild = await child.getChatRecoveryTaskRunCountForTest(

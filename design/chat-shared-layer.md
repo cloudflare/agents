@@ -69,6 +69,7 @@ packages/agents/src/chat/          ← shared foundation
   recovery.ts                      chat-fiber snapshot codec
   recovery-incident.ts             incident budget math + storage helpers
   recovery-engine.ts               ChatRecoveryEngine + adapter / wake-hook seams
+  interrupted-turn.ts              planInterruptedTurn: what a turn found interrupted does next
   recovery-attempt.ts              runRecoveredTurn: the body of one recovery attempt
   recovery-route.ts                routeStreamInterruption: a live stall or transient error into recovery
   recovery-task.ts                 reserved chained Task definition for continuations
@@ -266,9 +267,9 @@ Durable chat recovery is an invariant in both hosts: every chat entry path runs 
 **Two host-supplied seams:**
 
 - **`ChatRecoveryAdapter`** — the incident/budget I/O the engine drives (read/write/sweep incidents, read progress, emit lifecycle events, resolve the recovery stream, give-up/exhaust). Stable across a session.
-- **`ChatFiberWakeHooks<TClassify>`** — the per-wake "divergent organs": classify the turn (`retry`/`continue`), the base persist gate, `persistOrphanedStream`, `completeRecoveredStream`, and the retry/continue/skip dispatch. Passed per `recoverInterruptedTurn` call so the adapter stays focused.
+- **`ChatFiberWakeHooks`** — the per-wake "divergent organs": the latest stored message, whether a partial holds anything the host would store, the base persist gate, `persistOrphanedStream`, `completeRecoveredStream`, and `Think`'s submission steps (`scheduleData`, `onStreamEnded`, `onSkipped`). Passed per `recoverInterruptedTurn` call so the adapter stays focused. The retry/continue/skip decision is `planInterruptedTurn` (`interrupted-turn.ts`), the same for every host.
 
-**The engine owns the lifecycle and its ordering invariants**: resolve stream / reconstruct partial → classify → open incident → **if the budget is exhausted**, persist the settled partial _before_ sealing (so non-idempotent tool results aren't discarded, #1631) and terminalize → **else** (inside a `failed`-on-throw guard) invoke `onChatRecovery`, apply the shared persist gate (`persist !== false || hasSettledToolResults`), complete the live stream, then hand the decision to `dispatchRecoveredTurn`. The budget math is the pure `evaluateChatRecoveryIncident`. `experimental/pi-recovery` is a third adapter implementation driving a **non-AI-SDK codec** — the forcing function that keeps the engine host-agnostic.
+**The engine owns the lifecycle and its ordering invariants**: resolve stream / reconstruct partial → kind (`interruptedTurnKind`) → open incident → **if the budget is exhausted**, persist the settled partial _before_ sealing (so non-idempotent tool results aren't discarded, #1631) and terminalize → **else** (inside a `failed`-on-throw guard) invoke `onChatRecovery`, apply the shared persist gate (`persist !== false || hasSettledToolResults`), complete the live stream, then plan the turn (`planInterruptedTurn`) and schedule it or skip. The budget math is the pure `evaluateChatRecoveryIncident`. `experimental/pi-recovery` is a third adapter implementation driving a **non-AI-SDK codec** — the forcing function that keeps the engine host-agnostic.
 
 `recoverInterruptedTurn` takes the turn as its record left it: the request id, the unwrapped snapshot, the stash data and the run's creation time (`InterruptedChatTurn`). A chat-turn Task run replayed with no live closure reaches it through the host's `_recoverChatTurn`, which `ChatTurnTaskHooks.recover` calls. A chat fiber row an older version left reaches the same method through the host's `_handleInternalFiberRecovery` override, which also asks `Think`'s messenger runtime first about its reply fibers. Hosts unwrap the snapshot themselves, so the engine never reads a fiber.
 

@@ -3871,6 +3871,49 @@ describe("Think — onChatRecovery", () => {
     ]);
   });
 
+  it("answers the question again when onChatRecovery drops a new turn's partial", async () => {
+    const agent = await freshRecoveryAgent(crypto.randomUUID());
+
+    await agent.setRecoveryOverride({ persist: false });
+    await agent.persistTestMessage({
+      id: "u-drop",
+      role: "user",
+      parts: [{ type: "text", text: "question" }]
+    });
+    await agent.insertInterruptedStream("stream-drop", "req-drop", [
+      {
+        body: JSON.stringify({ type: "start", messageId: "assistant-drop" }),
+        index: 0
+      },
+      { body: JSON.stringify({ type: "text-start" }), index: 1 },
+      {
+        body: JSON.stringify({ type: "text-delta", delta: "Dropped" }),
+        index: 2
+      }
+    ]);
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-drop", {
+      __cfThinkChatFiberSnapshot: {
+        kind: "think-chat-turn",
+        version: 1,
+        requestId: "req-drop",
+        continuation: false,
+        latestMessageId: "u-drop",
+        latestMessageRole: "user",
+        latestUserMessageId: "u-drop",
+        startedAt: Date.now()
+      },
+      user: null
+    });
+
+    // Nothing of the reply was stored, so the question is the latest message
+    // again: recovery answers it, it does not continue a reply that is not
+    // there.
+    await expect(agent.triggerFiberRecovery()).resolves.toEqual({
+      scheduledContinueCount: 0,
+      scheduledRetryCount: 1
+    });
+  });
+
   it("exhausts chat recovery after the configured max attempts", async () => {
     const agent = await freshRecoveryAgent("recovery-exhaustion");
 

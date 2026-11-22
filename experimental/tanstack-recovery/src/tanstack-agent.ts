@@ -70,8 +70,6 @@ import {
   type ChatRecoveryOptions,
   type ChatRecoveryScheduleCallback,
   type ChatRecoveryScheduleReason,
-  type ClassifyRecoveredTurnInput,
-  type DispatchRecoveredTurnInput,
   type RecoveryPartial,
   type ResolvedRecoveryStream,
   type ResumeHandshakeHost,
@@ -105,9 +103,6 @@ interface RecoverySummary {
   /** Chars of the survived partial prefix (0 on a regenerate). */
   prefixChars: number;
 }
-
-/** No classification detail needed — `recoveryKind` captures continue vs retry. */
-type TanStackClassify = undefined;
 
 const RECOVERING_MESSAGE_TYPE = CHAT_MESSAGE_TYPES.CHAT_RECOVERING;
 const RECOVERY_SUMMARY_KEY = "tanstack:recovery:summary";
@@ -741,7 +736,7 @@ export class TanStackAgent extends Agent<Env> {
       ctx.snapshot,
       "tanstack-turn"
     );
-    await this._engine().recoverInterruptedTurn<TanStackClassify>(
+    await this._engine().recoverInterruptedTurn(
       {
         requestId: ctx.name.slice(TanStackAgent.FIBER_PREFIX.length),
         snapshot,
@@ -753,17 +748,16 @@ export class TanStackAgent extends Agent<Env> {
     return true;
   }
 
-  private _wakeHooks(): ChatFiberWakeHooks<TanStackClassify> {
+  private _wakeHooks(): ChatFiberWakeHooks {
     return {
-      classifyRecoveredTurn: (input: ClassifyRecoveredTurnInput) => {
-        // A surviving partial drives a `continue`; an empty partial (crash
-        // before the first delta flushed) falls back to a `retry`.
-        const recoveryKind =
-          input.partial.text.length > 0
-            ? ("continue" as const)
-            : ("retry" as const);
-        return { recoveryKind, detail: undefined };
+      // The engine plans the turn from the latest stored message: a persisted
+      // partial is the leaf and is continued (regenerate only the suffix and
+      // merge); with no partial the question is the leaf and is answered again.
+      latestMessage: () => {
+        const entry = this._transcript.at(-1);
+        return entry && { id: entry.id, role: entry.role };
       },
+      partialHoldsContent: (partial) => partial.text.length > 0,
       invokeOnChatRecovery: async (): Promise<ChatRecoveryOptions> => {
         // The user-configurable `onChatRecovery` policy. A `{ persist: false }`
         // return would normally DROP the orphaned partial — but the engine's
@@ -780,22 +774,6 @@ export class TanStackAgent extends Agent<Env> {
       },
       completeRecoveredStream: (streamId) => {
         this._resumableStream.complete(streamId);
-      },
-      dispatchRecoveredTurn: async (
-        input: DispatchRecoveredTurnInput<TanStackClassify>
-      ) => {
-        const continueFromPartial = input.recoveryKind === "continue";
-        await this._engine().scheduleRecovery({
-          incident: input.incident,
-          recoveryKind: input.recoveryKind,
-          callback: continueFromPartial
-            ? "_chatRecoveryContinue"
-            : "_chatRecoveryRetry",
-          data: {
-            originalRequestId: input.recoveryRootRequestId,
-            incidentId: input.incident.incidentId
-          }
-        });
       }
     };
   }

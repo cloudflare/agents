@@ -10,7 +10,6 @@ import {
   type ChatFiberWakeHooks,
   type ChatRecoveryScheduleCallback,
   type ChatRecoveryScheduleReason,
-  type DispatchRecoveredTurnInput,
   type InterruptedChatTurn,
   type RecoveryPartial,
   type ResolvedRecoveryStream
@@ -1635,26 +1634,25 @@ describe("partialHasSettledToolResults", () => {
 
 /**
  * Layer-2 seam test for the wake-recovery lifecycle (slice 4d-2). The engine owns
- * the FRAME (stream/partial → classify →
+ * the FRAME (stream/partial → kind →
  * begin-incident → exhausted-branch → onChatRecovery → persist → complete →
- * dispatch → catch→failed) and the shared persist clause; the {@link
+ * plan → schedule or skip → catch→failed) and the shared persist clause; the {@link
  * ChatFiberWakeHooks} own the divergent organs. These tests pin the ordering, the
  * shared `base && (persist !== false || settled)` gate, the exhausted
  * short-circuit, and the failed-on-throw guard — the exact contract `AIChatAgent`
  * and `Think` now delegate.
  */
 describe("ChatRecoveryEngine.recoverInterruptedTurn (fake adapter + wake hooks)", () => {
-  type TestDetail = { tag: string };
-
   type HarnessOptions = {
     snapshot?: ChatFiberSnapshot | null;
     stream?: ResolvedRecoveryStream;
     partial?: RecoveryPartial;
     recoveryKind?: "retry" | "continue";
-    detail?: TestDetail;
+    /** The latest stored message. Defaults to an assistant reply. */
+    leaf?: { id: string; role: string };
     onChatRecovery?: ChatRecoveryOptions | void;
     basePersist?: boolean;
-    dispatchThrows?: boolean;
+    scheduleThrows?: boolean;
     seedExhausted?: boolean;
     /**
      * Drop the engine-defaulted optional hooks (`isAwaitingClientInteraction`,
@@ -1671,7 +1669,10 @@ describe("ChatRecoveryEngine.recoverInterruptedTurn (fake adapter + wake hooks)"
     const calls: string[] = [];
     const storage = new Map<string, ChatRecoveryIncident>();
     const events: ChatRecoveryIncidentEvent[] = [];
-    const dispatched: DispatchRecoveredTurnInput<TestDetail>[] = [];
+    const scheduled: Array<{
+      callback: ChatRecoveryScheduleCallback;
+      data: Record<string, unknown>;
+    }> = [];
     const persisted: string[] = [];
     const completed: string[] = [];
     const exhausted: Array<{ streamId: string; createdAt: number }> = [];
@@ -1711,7 +1712,14 @@ describe("ChatRecoveryEngine.recoverInterruptedTurn (fake adapter + wake hooks)"
         return Promise.resolve();
       },
       emitRecoveryEvent: (event) => events.push(event),
-      scheduleRecovery: () => Promise.resolve(),
+      scheduleRecovery: (callback, data) => {
+        calls.push("schedule");
+        scheduled.push({ callback, data });
+        if (options.scheduleThrows) {
+          return Promise.reject(new Error("schedule boom"));
+        }
+        return Promise.resolve();
+      },
       setRecovering: () => Promise.resolve(),
       onShouldKeepRecoveringError: () => {},
       exhaustChatRecovery: (
@@ -1737,14 +1745,12 @@ describe("ChatRecoveryEngine.recoverInterruptedTurn (fake adapter + wake hooks)"
       onGiveUpBookkeepingError: () => {}
     };
 
-    const wake: ChatFiberWakeHooks<TestDetail> = {
-      classifyRecoveredTurn: () => {
-        calls.push("classify");
-        return {
-          recoveryKind: options.recoveryKind ?? "continue",
-          detail: options.detail ?? { tag: "d" }
-        };
+    const wake: ChatFiberWakeHooks = {
+      latestMessage: () => {
+        calls.push("leaf");
+        return options.leaf ?? { id: "a1", role: "assistant" };
       },
+      partialHoldsContent: (p) => p.text !== "" || p.parts.length > 0,
       invokeOnChatRecovery: () => {
         calls.push("invokeOnChatRecovery");
         return Promise.resolve(options.onChatRecovery);
@@ -1761,14 +1767,6 @@ describe("ChatRecoveryEngine.recoverInterruptedTurn (fake adapter + wake hooks)"
       completeRecoveredStream: (streamId) => {
         calls.push("complete");
         completed.push(streamId);
-      },
-      dispatchRecoveredTurn: (dispatchInput) => {
-        calls.push("dispatch");
-        dispatched.push(dispatchInput);
-        if (options.dispatchThrows) {
-          return Promise.reject(new Error("dispatch boom"));
-        }
-        return Promise.resolve();
       }
     };
 
@@ -1819,7 +1817,7 @@ describe("ChatRecoveryEngine.recoverInterruptedTurn (fake adapter + wake hooks)"
       wake,
       calls,
       events,
-      dispatched,
+      scheduled,
       persisted,
       completed,
       exhausted,
@@ -1841,7 +1839,7 @@ describe("ChatRecoveryEngine.recoverInterruptedTurn (fake adapter + wake hooks)"
     await h.engine.recoverInterruptedTurn(h.turn, h.wake);
 
     expect(h.calls).not.toContain("exhaust");
-    expect(h.calls).not.toContain("dispatch");
+    expect(h.calls).not.toContain("schedule");
     expect(h.calls).not.toContain("invokeOnChatRecovery");
     expect(h.events.slice(eventsBefore)).toEqual([]);
     // What the cut-off turn stored is kept, and its stream is closed.
@@ -1849,27 +1847,69 @@ describe("ChatRecoveryEngine.recoverInterruptedTurn (fake adapter + wake hooks)"
     expect(h.completed).toEqual(["s1"]);
   });
 
-  it("drives the wake lifecycle in order and threads the classification detail", async () => {
-    const detail: TestDetail = { tag: "carry-me" };
-    const h = makeHarness({ recoveryKind: "retry", detail });
+  it("drives the wake lifecycle in order and schedules what the plan says", async () => {
+    // A new turn whose question is still the latest message: nothing of its
+    // reply was stored, so it answers the question again.
+    const h = makeHarness({
+      snapshot: {
+        kind: "test",
+        version: 1,
+        requestId: "req-1",
+        continuation: false,
+        latestUserMessageId: "u1",
+        startedAt: 0
+      },
+      leaf: { id: "u1", role: "user" }
+    });
 
     await h.engine.recoverInterruptedTurn(h.turn, h.wake);
 
     const order = (label: string) => h.calls.indexOf(label);
-    // resolveStream → getPartial → classify → begin(put) →
-    // onChatRecovery → shouldPersist → complete → dispatch.
-    expect(order("resolveStream")).toBeLessThan(order("classify"));
-    expect(order("classify")).toBeLessThan(order("put"));
+    // resolveStream → getPartial → leaf → begin(put) → onChatRecovery →
+    // shouldPersist → complete → leaf again → schedule.
+    expect(order("resolveStream")).toBeLessThan(order("leaf"));
+    expect(order("leaf")).toBeLessThan(order("put"));
     expect(order("put")).toBeLessThan(order("invokeOnChatRecovery"));
     expect(order("invokeOnChatRecovery")).toBeLessThan(order("shouldPersist"));
     expect(order("shouldPersist")).toBeLessThan(order("complete"));
-    expect(order("complete")).toBeLessThan(order("dispatch"));
+    expect(h.calls.lastIndexOf("leaf")).toBeGreaterThan(order("complete"));
+    expect(order("complete")).toBeLessThan(order("schedule"));
 
-    // Dispatch receives the classify detail + the reported kind verbatim.
-    expect(h.dispatched).toHaveLength(1);
-    expect(h.dispatched[0].detail).toBe(detail);
-    expect(h.dispatched[0].recoveryKind).toBe("retry");
-    expect(h.dispatched[0].requestId).toBe("req-1");
+    expect(h.scheduled).toEqual([
+      {
+        callback: "_chatRecoveryRetry",
+        data: expect.objectContaining({
+          targetUserId: "u1",
+          originalRequestId: "req-1"
+        })
+      }
+    ]);
+    expect(h.events.find((e) => e.type === "chat:recovery:scheduled")).toEqual(
+      expect.objectContaining({ recoveryKind: "retry" })
+    );
+  });
+
+  it("continues the reply that is the latest message", async () => {
+    const h = makeHarness({ leaf: { id: "a7", role: "assistant" } });
+    await h.engine.recoverInterruptedTurn(h.turn, h.wake);
+    expect(h.scheduled).toEqual([
+      {
+        callback: "_chatRecoveryContinue",
+        data: expect.objectContaining({ targetAssistantId: "a7" })
+      }
+    ]);
+  });
+
+  it("skips a turn whose conversation moved on, and schedules nothing", async () => {
+    const h = makeHarness({ leaf: { id: "u9", role: "user" } });
+    await h.engine.recoverInterruptedTurn(h.turn, h.wake);
+    expect(h.scheduled).toEqual([]);
+    expect(h.events.at(-1)).toEqual(
+      expect.objectContaining({
+        type: "chat:recovery:skipped",
+        reason: "conversation_changed"
+      })
+    );
   });
 
   it("persists with the default clause (persist undefined) when the base gate is open", async () => {
@@ -1928,52 +1968,50 @@ describe("ChatRecoveryEngine.recoverInterruptedTurn (fake adapter + wake hooks)"
     });
     await h.engine.recoverInterruptedTurn(h.turn, h.wake);
     expect(h.completed).toEqual([]);
-    // Dispatch still runs (the decision owns the not-active case).
-    expect(h.calls).toContain("dispatch");
+    // The plan still runs (it owns the not-active case).
+    expect(h.calls).toContain("schedule");
   });
 
-  it("terminalizes the exhausted budget BEFORE onChatRecovery and skips dispatch", async () => {
+  it("terminalizes the exhausted budget BEFORE onChatRecovery and schedules nothing", async () => {
     const h = makeHarness({ seedExhausted: true });
 
     await h.engine.recoverInterruptedTurn(h.turn, h.wake);
 
     // Exhausted path: persist gate (no options) + exhaustChatRecovery, with the
-    // turn's createdAt; never consults onChatRecovery or dispatch.
+    // turn's createdAt; never consults onChatRecovery or schedules.
     expect(h.calls).toContain("exhaust");
     expect(h.exhausted[0]?.createdAt).toBe(4242);
     expect(h.calls).not.toContain("invokeOnChatRecovery");
-    expect(h.calls).not.toContain("dispatch");
+    expect(h.calls).not.toContain("schedule");
   });
 
-  it("flips the incident to failed and rethrows when dispatch throws", async () => {
-    const h = makeHarness({ dispatchThrows: true });
+  it("flips the incident to failed and rethrows when scheduling throws", async () => {
+    const h = makeHarness({ scheduleThrows: true });
 
     await expect(
       h.engine.recoverInterruptedTurn(h.turn, h.wake)
-    ).rejects.toThrow("dispatch boom");
+    ).rejects.toThrow("schedule boom");
 
     // The incident was sealed `failed` (not left leaking in `attempting`).
     const sealed = [...h.events]
       .reverse()
       .find((e) => e.type === "chat:recovery:failed");
-    expect(sealed?.reason).toBe("dispatch boom");
+    expect(sealed?.reason).toBe("schedule boom");
   });
 
   it("drives a MINIMAL adapter (omitted optional hooks) via engine defaults", async () => {
     // A host with no client-interaction / shouldKeepRecovering-diagnostic /
     // user-onChatRecovery surface (e.g. the pi fixture) omits these hooks. The
     // engine must default them rather than throw on the missing functions
-    // (T2-3b). The run completing + dispatching is the proof.
+    // (T2-3b). The run completing + scheduling is the proof.
     const h = makeHarness({ omitOptionalHooks: true });
 
     await h.engine.recoverInterruptedTurn(h.turn, h.wake);
 
     // `invokeOnChatRecovery` was omitted, so it is never called and the engine
-    // proceeds with empty options (`{}`) — which still flow through to dispatch.
+    // proceeds with empty options (`{}`), which continue the reply.
     expect(h.calls).not.toContain("invokeOnChatRecovery");
-    expect(h.calls).toContain("dispatch");
-    expect(h.dispatched).toHaveLength(1);
-    expect(h.dispatched[0].options).toEqual({});
+    expect(h.scheduled).toHaveLength(1);
   });
 
   it("minimal adapter still terminalizes an exhausted budget without onChatRecovery", async () => {
@@ -1984,7 +2022,7 @@ describe("ChatRecoveryEngine.recoverInterruptedTurn (fake adapter + wake hooks)"
 
     await h.engine.recoverInterruptedTurn(h.turn, h.wake);
     expect(h.calls).toContain("exhaust");
-    expect(h.calls).not.toContain("dispatch");
+    expect(h.calls).not.toContain("schedule");
   });
 });
 
