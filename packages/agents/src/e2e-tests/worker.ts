@@ -1179,16 +1179,10 @@ export class AbortingRecoveryHookAgent extends Agent<Record<string, unknown>> {
 
   override async onFiberRecovered(ctx: RunFiberRecoveryContext): Promise<void> {
     if (ctx.name !== "aborting-hook") return;
-    // Count the run durably, then kill the isolate before any other I/O.
-    const runs = this.ctx.storage.kv.get<number>("hookRuns") ?? 0;
-    this.ctx.storage.kv.put("hookRuns", runs + 1);
-    await this.ctx.storage.sync();
+    // No storage writes here: the scan's own commit is what is under test.
+    // The log line is how the test counts runs; it survives the reset.
+    console.log("[aborting-hook] ran");
     this.ctx.abort("recovery hook aborts");
-  }
-
-  @callable()
-  hookRuns(): number {
-    return this.ctx.storage.kv.get<number>("hookRuns") ?? 0;
   }
 
   @callable()
