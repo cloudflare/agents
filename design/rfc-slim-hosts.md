@@ -36,7 +36,7 @@ The experimental `ThinkHarness` (`agents/src/harness/think`) shows the other way
 
 ### The rule for a host
 
-A host class is a composition root. It installs capabilities in its constructor, exposes its public API as one-line delegates, and keeps its hooks and options. It owns no SQLite table, no queue, no waiter map, no timer and no wire frame. Anything with durable rows, a job or an alarm moves into a capability that owns its rows and states what it keeps durably and what it keeps in memory. Anything else moves into a plain internal module.
+A host class is a composition root. It installs capabilities in its constructor, exposes its public API as one-line delegates, and keeps its hooks and options. The only one-line delegates on a host are public or protected API that existed before this work. A private method whose whole body forwards to another object is not kept: when code moves, its call sites and the tests that reached into it move in the same PR to call the new owner. It owns no SQLite table, no queue, no waiter map, no timer and no wire frame. Anything with durable rows, a job or an alarm moves into a capability that owns its rows and states what it keeps durably and what it keeps in memory. Anything else moves into a plain internal module.
 
 Six rules hold across every capability and module below:
 
