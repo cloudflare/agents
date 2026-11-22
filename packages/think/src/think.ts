@@ -543,6 +543,7 @@ import {
 } from "./media-eviction";
 import {
   migrateLegacyRecoveredReplies,
+  fitRecoveredReply,
   RECOVERED_REPLY_SINK,
   recoveredReplySink,
   settleRecoveredReply,
@@ -12747,11 +12748,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     if (!context) return;
     await this._outbox.send(
       RECOVERED_REPLY_SINK,
-      {
+      fitRecoveredReply({
         messengerId: context.messengerId,
         threadId: context.thread.id,
         partialText
-      } satisfies RecoveredMessengerReply,
+      } satisfies RecoveredMessengerReply),
       { key: incidentId, hold: true }
     );
     this._messengerRecoveryClaims.add(requestId);

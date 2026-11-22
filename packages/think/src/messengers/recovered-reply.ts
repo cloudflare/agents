@@ -34,21 +34,58 @@ export const RECOVERED_REPLY_SINK = "__cf_think_messenger_recovery";
 /** Storage prefix of replies written by earlier releases. */
 const LEGACY_PREFIX = "cf_think_messenger_recovery:";
 
+/**
+ * Most bytes of reply text kept for delivery, so the reply fits one Outbox
+ * value (1 MB of JSON) with room for its other fields. No messenger posts
+ * a reply anywhere near this long.
+ */
+const MAX_REPLY_TEXT_BYTES = 900_000;
+
+const encoder = new TextEncoder();
+
+function capText(text: string | undefined): string | undefined {
+  if (
+    text === undefined ||
+    encoder.encode(text).byteLength <= MAX_REPLY_TEXT_BYTES
+  )
+    return text;
+  let end = Math.min(text.length, MAX_REPLY_TEXT_BYTES);
+  while (
+    end > 0 &&
+    encoder.encode(text.slice(0, end)).byteLength > MAX_REPLY_TEXT_BYTES - 3
+  )
+    end = Math.floor(end * 0.9);
+  return `${text.slice(0, end)}…`;
+}
+
+/** The reply cut to fit one Outbox value. */
+export function fitRecoveredReply(
+  reply: RecoveredMessengerReply
+): RecoveredMessengerReply {
+  const text = capText(reply.text);
+  const partialText = capText(reply.partialText) ?? "";
+  return {
+    ...reply,
+    partialText,
+    ...(text !== undefined && { text })
+  };
+}
+
 /** The reply with its outcome; a recovered text drops the part already posted. */
 export function settleRecoveredReply(
   reply: RecoveredMessengerReply,
   outcome: "completed" | "interrupted",
   text?: string
 ): RecoveredMessengerReply {
-  if (outcome !== "completed") return { ...reply, outcome };
+  if (outcome !== "completed") return fitRecoveredReply({ ...reply, outcome });
   const recovered = text ?? "";
-  return {
+  return fitRecoveredReply({
     ...reply,
     outcome,
     text: recovered.startsWith(reply.partialText)
       ? recovered.slice(reply.partialText.length)
       : recovered
-  };
+  });
 }
 
 /**
@@ -64,6 +101,10 @@ export function recoveredReplySink(
   >
 ): OutboxSink<RecoveredMessengerReply> {
   return {
+    // A post that hangs past the attempt timeout keeps running while the
+    // retry moves to the next post, so the timeout is long: a reply's posts
+    // arrive out of order only if one post hangs for five minutes.
+    retry: { attemptTimeoutMs: 5 * 60 * 1000 },
     deliver: async (reply, delivery) => {
       const post = await connect();
       const outcome = reply.outcome ?? "interrupted";
@@ -105,7 +146,16 @@ export async function migrateLegacyRecoveredReplies(
     prefix: LEGACY_PREFIX
   });
   for (const [key, reply] of legacy) {
-    await send(reply, key.slice(LEGACY_PREFIX.length), !reply.outcome);
-    await storage.delete(key);
+    try {
+      await send(
+        fitRecoveredReply(reply),
+        key.slice(LEGACY_PREFIX.length),
+        !reply.outcome
+      );
+      await storage.delete(key);
+    } catch (error) {
+      // One bad record does not hold back the rest, or the start, on every wake.
+      console.error(`[Think] could not migrate recovered reply ${key}`, error);
+    }
   }
 }
