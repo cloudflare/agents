@@ -55,12 +55,17 @@ export function settleRecoveredReply(
  * The sink. Each post goes out at most once: the checkpoint advances
  * before it, because a rejected post may still have landed (a timeout after
  * the platform accepted it), so a retry resumes with the next post.
+ * `connect` resolves the messenger host first; failing to reach it fails
+ * the attempt without spending a post.
  */
 export function recoveredReplySink(
-  post: (input: RecoveredReplyPost) => Promise<{ chunks: number }>
+  connect: () => Promise<
+    (input: RecoveredReplyPost) => Promise<{ chunks: number }>
+  >
 ): OutboxSink<RecoveredMessengerReply> {
   return {
     deliver: async (reply, delivery) => {
+      const post = await connect();
       const outcome = reply.outcome ?? "interrupted";
       let next =
         typeof delivery.checkpoint === "number"

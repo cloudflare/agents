@@ -1627,7 +1627,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     this.lifecycle.use(this.#messengerReplies);
     this._outbox.register(
       RECOVERED_REPLY_SINK,
-      recoveredReplySink(async (input) => {
+      recoveredReplySink(async () => {
         const parent = this.parentPath.at(-1);
         // `parentAgent` resolves the parent by class name only.
         const host = parent
@@ -1635,7 +1635,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               name: parent.className
             } as unknown as SubAgentClass<Think>)
           : this;
-        return host._cf_deliverRecoveredMessengerReply(input);
+        return (input) => host._cf_deliverRecoveredMessengerReply(input);
       })
     );
     this._outbox.register(
