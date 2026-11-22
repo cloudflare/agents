@@ -53,7 +53,7 @@ No schedule rows are created in `cf_agents_schedules`. The heartbeat is invisibl
 
 ### Alarm persistence
 
-`ctx.storage.setAlarm()` persists to disk. If the DO is evicted or the process dies, recovery runs eagerly in `onStart()` on the first request after wake. The persisted alarm serves as a fallback — `_onAlarmHousekeeping()` also calls `_checkRunFibers()`, with a re-entrancy guard preventing double recovery.
+`ctx.storage.setAlarm()` persists to disk. If the DO is evicted or the process dies, recovery runs during startup, before the user's `onStart()`, whatever wakes the object: a request, a connection or the persisted alarm. The persisted alarm is what wakes an agent with no clients. Once nothing is left to recover, the Fibers capability cancels its `fibers:recover` wake instead of running an empty scan.
 
 ### Configurable interval
 
@@ -175,11 +175,11 @@ runFiber("work", fn)
 ```
 [DO evicted — all in-memory state lost]
   │
-  ├─ First request/connection → onStart() → _checkRunFibers()  [primary]
+  ├─ Any wake (request, connection, alarm) → startup → fiber recovery scan → onStart()
   │  OR
-  ├─ Heartbeat alarm fires → _onAlarmHousekeeping() → _checkRunFibers()  [fallback]
+  ├─ No clients: the persisted alarm is that wake
   │
-  ├─ _checkRunFibers() (runs once — re-entrancy guard prevents double recovery)
+  ├─ recovery scan (runs once — a concurrent caller joins it)
   │    │
   │    ├─ SELECT * FROM cf_agents_runs
   │    ├─ For each row NOT in _runFiberActiveFibers (in-memory set):
@@ -241,7 +241,7 @@ ctx.stash({
 
 Multiple fibers can run concurrently. Each calls `keepAlive()` independently — ref-counted, so the DO stays alive until all fibers complete. Each fiber has its own row in `cf_agents_runs` with its own snapshot. `ctx.stash()` writes to the correct row via closure capture.
 
-On recovery, `_checkRunFibers()` iterates all orphaned rows and calls the recovery hook for each. The developer controls ordering and parallelism in their `onFiberRecovered` implementation.
+On recovery, the fiber recovery scan iterates all orphaned rows and calls the recovery hook for each. The developer controls ordering and parallelism in their `onFiberRecovered` implementation.
 
 ### DX example
 
@@ -427,7 +427,7 @@ Key behaviors during hibernation:
 
 - **`cf_agents_runs` rows persist** — SQLite survives hibernation
 - **`_runFiberActiveFibers` (in-memory Set) is empty** — reconstructed from scratch
-- **`_checkRunFibers()` runs eagerly in `onStart()` on first wake** — any row NOT in the (empty) in-memory set is treated as interrupted. The alarm path also calls it as a fallback, with a re-entrancy guard preventing double recovery
+- **the fiber recovery scan runs at startup, before `onStart()`, on first wake** — any row NOT in the (empty) in-memory set is treated as interrupted. An alarm wake goes through the same startup
 - **`_lastBody` and `_lastClientTools` are restored from SQLite** — `cf_ai_chat_request_context` table, restored in the constructor
 
 The `cf_agents_runs` table is created with `CREATE TABLE IF NOT EXISTS` in the Agent constructor — cheap DDL that runs every wake. No `_fibersTableCreated` flag needed (that would reset on hibernation and miss recovery).
@@ -436,8 +436,8 @@ The `cf_agents_runs` table is created with `CREATE TABLE IF NOT EXISTS` in the A
 
 1. `runFiber()` calls `keepAlive()`, which increments `_keepAliveRefs` and calls `_scheduleNextAlarm()`
 2. `_scheduleNextAlarm()` sets `ctx.storage.setAlarm(now + keepAliveIntervalMs)` — persists to disk
-3. On wake, `onStart()` calls `_checkRunFibers()` eagerly — recovery fires immediately on the first request
-4. The alarm also calls `_onAlarmHousekeeping()` → `_checkRunFibers()` as a fallback (re-entrancy guard prevents double recovery)
+3. On wake, startup runs the fiber recovery scan before `onStart()` — recovery fires immediately on the first request
+4. With no requests, the persisted alarm wakes the object and the same startup scan runs
 5. `_scheduleNextAlarm()` sets the next alarm if refs are still held
 
 The alarm handler itself runs for milliseconds (a few SQL queries + setting the next alarm). The actual fiber work runs in the method execution context, not the alarm handler. The 15-minute alarm timeout is a non-issue.
@@ -448,8 +448,8 @@ Workerd persists both SQLite and alarm state to disk. Local development and prod
 
 1. Fiber is running, `keepAlive()` sets an alarm
 2. Process is killed (SIGKILL, code update, `Ctrl-C`)
-3. Process restarts — first request triggers `onStart()` → `_checkRunFibers()` → recovery
-4. Persisted alarm also fires as fallback → `_onAlarmHousekeeping()` → `_checkRunFibers()` (no-op, already recovered)
+3. Process restarts — the first request triggers startup → the fiber recovery scan → recovery → `onStart()`
+4. Nothing is left to recover, so the `fibers:recover` wake is cancelled rather than run as an empty scan. If a hook failed and its row was kept, the wake stays armed instead and the next scan retries it
 
 The E2E test in `packages/agents/src/e2e-tests/` validates this: it starts wrangler, spawns a fiber, kills the process with SIGKILL, restarts with the same persist directory, and verifies the fiber recovers automatically.
 

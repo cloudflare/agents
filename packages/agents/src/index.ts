@@ -1288,7 +1288,9 @@ export class Agent<
       (update) => {
         if (!wrappedClasses.has(this.constructor)) {
           // Auto-wrap custom methods with agent context
-          this._autoWrapCustomMethods();
+          wrapCustomMethods(this, Agent.prototype, (name) =>
+            this._isCallable(name)
+          );
           wrappedClasses.add(this.constructor);
         }
 
@@ -1594,7 +1596,7 @@ export class Agent<
               "startup",
               {},
               async () => {
-                await this._checkRunFibers();
+                await this._fibers.recover();
                 // Interrupted Task runs (including chat turns) recover via
                 // the Lifecycle job queue: their mirror jobs are overdue and
                 // re-fire on the post-startup alarm derivation.
@@ -1607,7 +1609,7 @@ export class Agent<
                 startupAgentToolRunIds.length
             });
 
-            // Chat recovery (above, in `_checkRunFibers`) evaluates its budgets
+            // Chat recovery (above, in fiber recovery) evaluates its budgets
             // — and may seal an interrupted turn, firing `onExhausted` — BEFORE
             // the user's onStart runs. So a `chatRecovery` config produced
             // inside onStart is applied too late for the recovery that matters.
@@ -2017,14 +2019,6 @@ export class Agent<
       await this.onError(e);
       throw e;
     }
-  }
-
-  /**
-   * Wrap public subclass methods that may be entered outside Lifecycle, such as
-   * native Durable Object RPC. Lifecycle hooks already have Agent context.
-   */
-  private _autoWrapCustomMethods() {
-    wrapCustomMethods(this, Agent.prototype, (name) => this._isCallable(name));
   }
 
   onError(connection: Connection, error: unknown): void | Promise<void>;
@@ -2558,11 +2552,6 @@ export class Agent<
     _ctx: FiberRecoveryContext
   ): Promise<boolean> {
     return false;
-  }
-
-  /** @internal Recover fibers left by a dead process. */
-  private _checkRunFibers(): Promise<void> {
-    return this._fibers.recover();
   }
 
   private _isSameAgentPathPrefix(

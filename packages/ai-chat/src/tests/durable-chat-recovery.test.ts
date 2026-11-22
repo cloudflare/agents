@@ -2002,7 +2002,7 @@ describe("onChatRecovery", () => {
     ]);
   });
 
-  it("should not double-recover when _checkRunFibers runs from both onStart and alarm", async () => {
+  it("should not double-recover when fiber recovery runs from both onStart and alarm", async () => {
     const room = crypto.randomUUID();
     const agentStub = await getTestAgent(room);
     await agentStub.setRecoveryOverride({ continue: false });
