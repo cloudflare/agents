@@ -16,7 +16,8 @@ import type { LifecycleJobContext, LifecycleJobOutcome } from "./job-queue";
 /** Default heartbeat interval: well inside the platform's idle eviction. */
 export const DEFAULT_KEEP_ALIVE_INTERVAL_MS = 30_000;
 
-const HEARTBEAT_JOB_ID = "heartbeat";
+/** Job ids are one namespace across owners, so this one names its owner. */
+const HEARTBEAT_JOB_ID = "keep-alive:heartbeat";
 
 type KeepAliveRouteMessage =
   | { readonly type: "acquire" }
@@ -92,8 +93,8 @@ export class KeepAlive extends LifecycleCapability {
     const message = context.payload as KeepAliveRouteMessage;
     if (message.type === "acquire") {
       const token = nanoid(12);
-      this.#routedHolds.add(token);
       await this.#open();
+      this.#routedHolds.add(token);
       return token;
     }
     if (message.type === "release" && this.#routedHolds.delete(message.token)) {
@@ -102,14 +103,19 @@ export class KeepAlive extends LifecycleCapability {
     return undefined;
   }
 
+  /** Count a hold; a hold whose heartbeat could not be armed is not counted. */
   async #open(): Promise<void> {
     this.#holds += 1;
-    if (this.#holds === 1) {
+    if (this.#holds > 1) return;
+    try {
       await this.lifecycle.jobs.push({
         id: HEARTBEAT_JOB_ID,
-        fn: HEARTBEAT_JOB_ID,
+        fn: "heartbeat",
         time: Date.now() + this.#intervalMs
       });
+    } catch (error) {
+      this.#holds -= 1;
+      throw error;
     }
   }
 

@@ -3295,7 +3295,6 @@ export class Agent<
     }
     await this._withAgentSpan("schedule_agent_alarm", "alarm", {}, async () => {
       const work = this.lifecycle.jobs;
-      const nowMs = Date.now();
 
       // A pending destroy (#1625) must keep its wake armed and exclusive
       // through any re-sync — including markers written by a pre-job-queue
