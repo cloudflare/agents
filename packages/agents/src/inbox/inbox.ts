@@ -522,12 +522,15 @@ export class Inbox<
         // A report that failed stops the rest. Theirs never started: release
         // them, and the replay reports them.
         for (let rest = next + 1; rest < ended.length; rest++) {
-          const { token } = ended[rest];
+          const { request, token } = ended[rest];
           const count = (this.#reporting.get(token) ?? 1) - 1;
-          if (count > 0) this.#reporting.set(token, count);
-          else this.#reporting.delete(token);
+          if (count > 0) {
+            this.#reporting.set(token, count);
+          } else {
+            this.#reporting.delete(token);
+            this.#unreported(request, token);
+          }
         }
-        if (next < ended.length - 1) void this.#pushReportJob();
       }
     })();
     this.#lanes.get(lane)?.wake?.();
@@ -569,6 +572,8 @@ export class Inbox<
       settled = write(
         Inbox.failed(`The outcome could not be stored: ${reasonOf(error)}`)
       );
+    } finally {
+      resultJsons.delete(outcome);
     }
     if (!settled) return false;
     await this.#outsideRunner(
@@ -714,12 +719,13 @@ export class Inbox<
       });
   }
 
-  #pushReportJob(): Promise<unknown> {
+  /** @param delayMs - After a failed report, wait before the replay. */
+  #pushReportJob(delayMs = 0): Promise<unknown> {
     return this.#services.jobs
       .push({
         id: `${this.capabilityId}/${REPORT_JOB}`,
         fn: REPORT_FN,
-        time: Date.now()
+        time: Date.now() + delayMs
       })
       .catch((error: unknown) => {
         console.error("[inbox] failed to queue status reports", error);
@@ -959,6 +965,10 @@ export class Inbox<
     const controller = new AbortController();
     this.#live.set(request.id, { controller, token });
     void this.#pushWake(request.lane, now + HEARTBEAT_MS);
+    // The attempt must be durable before user code runs: a reset before the
+    // next I/O rolls back unconfirmed writes, and a handler that kills its
+    // isolate would then never use up its attempts.
+    await this.#services.storage.sync();
     let outcome: InboxSettlement;
     try {
       const started = this.#read(request.id);
@@ -1031,6 +1041,9 @@ export class Inbox<
       settled = write(
         Inbox.failed(`The outcome could not be stored: ${reasonOf(error)}`)
       );
+    } finally {
+      // The JSON is this run's; a settlement reused later serializes again.
+      resultJsons.delete(outcome);
     }
     if (settled) await this.#afterTerminal(this.#read(id), token);
   }
@@ -1067,10 +1080,8 @@ export class Inbox<
       if (count > 0) {
         this.#reporting.set(token, count);
       } else if (!reported) {
-        // The report failed (a platform failure): the record stays
-        // unreported for the replay, and its waiters keep waiting.
         this.#reporting.delete(token);
-        void this.#pushReportJob();
+        this.#unreported(request, token);
       } else {
         this.#reporting.delete(token);
         this.#locals.delete(token);
@@ -1083,6 +1094,20 @@ export class Inbox<
         if (!this.#retain && same) this.#rows.delete(request.id);
       }
     }
+  }
+
+  /**
+   * A report that failed (a platform failure), or never started. The record
+   * stays unreported for the replay, and its waiters keep waiting; a record
+   * deleted meanwhile has no replay, so its waiters get what it ended with.
+   */
+  #unreported(request: InboxRequest, token: string): void {
+    if (this.#rows.get(request.id)?.token === token) {
+      void this.#pushReportJob(HEARTBEAT_MS);
+      return;
+    }
+    this.#locals.delete(token);
+    this.#wake(token, request);
   }
 
   /** Resolve the waiters of the record `token` names with `answer`. */

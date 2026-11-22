@@ -42,6 +42,10 @@ describe("Inbox terminal reports and records", () => {
           return r;
         });
         instance.release();
+        await eventually(() => failed);
+        // The replay waits out a backoff after a failure; start it now.
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        await instance.inbox.onStart();
         expect(await waiting).toMatchObject({ status: "completed" });
         // Not after the failed report: after the replay that returned.
         expect(resolvedAfter).toBe(2);
@@ -105,6 +109,112 @@ describe("Inbox terminal reports and records", () => {
     );
   });
 
+  it("waits out a backoff before replaying a report that failed", async () => {
+    await runInDurableObject(
+      harness(),
+      async (instance: InboxHarnessObject, state) => {
+        let failed = false;
+        instance.reportHook = (r: InboxRequest) => {
+          if (r.status === "completed" && !failed) {
+            failed = true;
+            throw retryable();
+          }
+        };
+        const { request } = await instance.inbox.submit("echo", { value: "a" });
+        await eventually(() => failed);
+        const reportJob = () =>
+          state.storage.sql
+            .exec(
+              "SELECT time FROM cf_agents_jobs WHERE capability = 'inbox' AND fn = 'report'"
+            )
+            .toArray();
+        await eventually(() => reportJob().length === 1);
+        expect(reportJob()[0].time as number).toBeGreaterThan(
+          Date.now() + 20_000
+        );
+        expect(instance.inbox.isSettled(request.id)).toBe(false);
+      }
+    );
+  });
+
+  it("answers the waiters of a record deleted while its report failed", async () => {
+    await runInDurableObject(
+      harness(),
+      async (instance: InboxHarnessObject) => {
+        instance.hold();
+        const { request } = await instance.inbox.submit("echo", { value: "a" });
+        instance.reportHook = (r: InboxRequest) => {
+          if (r.id === request.id && r.status === "completed") {
+            instance.inbox.delete(request.id);
+            throw retryable();
+          }
+        };
+        const waiting = instance.inbox.wait(request.id, { timeoutMs: 3_000 });
+        instance.release();
+        expect(await waiting).toMatchObject({
+          status: "completed",
+          result: { echoed: "a" }
+        });
+      }
+    );
+  });
+
+  it("serializes a reused settlement for each request it ends", async () => {
+    await runInDurableObject(
+      harness(),
+      async (instance: InboxHarnessObject) => {
+        const one = await instance.inbox.submit(
+          "settle",
+          { as: "detached" },
+          {
+            lane: "one"
+          }
+        );
+        const two = await instance.inbox.submit(
+          "settle",
+          { as: "detached" },
+          {
+            lane: "two"
+          }
+        );
+        await eventually(
+          () =>
+            instance.inbox.get(one.request.id)?.detached === true &&
+            instance.inbox.get(two.request.id)?.detached === true
+        );
+        const result = { n: 1 };
+        const outcome = Inbox.completed(result);
+        await instance.inbox.settle(one.request.id, outcome);
+        result.n = 2;
+        await instance.inbox.settle(two.request.id, outcome);
+        expect(instance.inbox.get(one.request.id)?.result).toEqual({ n: 1 });
+        expect(instance.inbox.get(two.request.id)?.result).toEqual({ n: 2 });
+      }
+    );
+  });
+
+  it("reads a survivor's merged ids written before they carried their order", async () => {
+    await runInDurableObject(
+      harness(),
+      async (instance: InboxHarnessObject, state) => {
+        instance.hold();
+        const a = await instance.inbox.submit("echo", { value: "a" });
+        await eventually(() => instance.running.has(a.request.id));
+        const s = await instance.inbox.submit("echo", { value: "s" });
+        state.storage.sql.exec(
+          "UPDATE cf_agents_inbox SET merged = ? WHERE id = ?",
+          JSON.stringify(["x", "y"]),
+          s.request.id
+        );
+        instance.release();
+        await instance.inbox.wait(s.request.id);
+        expect(
+          instance.calls.find((call) => call.id === s.request.id)?.merged
+        ).toEqual(["x", "y"]);
+      }
+    );
+  });
+
   it("reports the rest of a clear when one of its reports fails", async () => {
     await runInDurableObject(
       harness(),
@@ -122,6 +232,8 @@ describe("Inbox terminal reports and records", () => {
         };
         await expect(instance.inbox.clear("echo")).rejects.toThrow(/retryable/);
         instance.release();
+        // The replay waits out a backoff after a failure; start it now.
+        await instance.inbox.onStart();
         expect(
           await instance.inbox.wait(b.request.id, { timeoutMs: 3_000 })
         ).toMatchObject({ status: "skipped" });

@@ -637,14 +637,21 @@ export class InboxStore {
         : row.progress;
     const metadata = parseJson(row.metadata);
     const merged = parseJson(row.merged);
+    // Rows written before entries carried their seq hold bare ids, oldest
+    // first; they sort ahead of every entry that has one.
     const mergedEntries: MergedEntry[] = Array.isArray(merged)
-      ? merged.filter(
-          (entry): entry is MergedEntry =>
+      ? merged.flatMap((entry): MergedEntry[] => {
+          if (typeof entry === "string") return [{ id: entry, seq: 0 }];
+          if (
             typeof entry === "object" &&
             entry !== null &&
             typeof (entry as MergedEntry).id === "string" &&
             typeof (entry as MergedEntry).seq === "number"
-        )
+          ) {
+            return [entry as MergedEntry];
+          }
+          return [];
+        })
       : [];
     const request: InboxRequest = {
       id: row.id,
