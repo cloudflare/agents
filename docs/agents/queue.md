@@ -146,7 +146,13 @@ class MyAgent extends Agent {
    `onError` option) observes the error.
 6. **Recovery**: an isolate that dies mid-callback wakes again on the
    Lifecycle deadman alarm and resumes the queue, so callbacks should be
-   idempotent.
+   idempotent. Each such death counts as an attempt whatever caused it (the
+   callback exceeding the CPU or wall-time limit, a deploy or another reset
+   landing mid-callback). After `maxAttempts` of them, and never fewer than
+   3, the item is dropped as a terminal failure with an error named
+   `JobAttemptsExhaustedError`, so an item that keeps taking the isolate
+   down cannot run forever. The floor of 3 is there so a single deploy does
+   not drop an item with `maxAttempts: 1`.
 
 ## Use cases
 

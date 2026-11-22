@@ -4,6 +4,7 @@ import {
   type LifecycleJobContext,
   type LifecycleJobPushOptions
 } from "../../lifecycle";
+import { Queue } from "../../queue";
 import { withCapabilityHarness } from "../shared/capability-harness";
 
 /** Records every dispatch and every terminal failure it is told about. */
@@ -309,6 +310,31 @@ describe("durable job attempts", () => {
 
       expect(jobs.attempts).toEqual([1]);
       expect(jobs.get("old")).toBeUndefined();
+    });
+  });
+});
+
+describe("Queue items whose attempts ended with their isolate", () => {
+  it("drops the item as a terminal failure and says why", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const calls: unknown[] = [];
+      const errors: unknown[] = [];
+      const queue = new Queue({
+        callbacks: { work: (payload: unknown) => void calls.push(payload) },
+        onError: (error) => void errors.push(error)
+      });
+      const { lifecycle } = install(queue);
+      await lifecycle.start();
+      const item = await queue.push("work", "payload");
+      // Three attempts that each took the isolate down: a CPU-limit callback
+      // or three resets landing mid-callback look the same from here.
+      interrupted(storage, item.id, 3);
+
+      await lifecycle.alarm();
+
+      expect(calls).toEqual([]);
+      expect(errors).toMatchObject([{ name: "JobAttemptsExhaustedError" }]);
+      expect(await queue.list()).toEqual([]);
     });
   });
 });
