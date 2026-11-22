@@ -491,6 +491,14 @@ describe("job driver hold limit without onJobError", () => {
         retry: QUICK
       });
       await expect(lifecycle.alarm()).rejects.toThrow("restarting");
+      // No hold clock is kept for an owner the limit does not apply to.
+      expect(
+        [
+          ...storage.sql.exec(
+            "SELECT held_since FROM cf_agents_jobs WHERE id = 'poison'"
+          )
+        ][0]?.held_since
+      ).toBeNull();
       storage.sql.exec(
         "UPDATE cf_agents_jobs SET held_since = ? WHERE id = 'poison'",
         Date.now() - 16 * 60_000
