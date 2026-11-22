@@ -96,6 +96,15 @@ describe("jobs whose owner is not installed", () => {
         );
       }
       await lifecycle.alarm();
+      // All hundred are kept, untouched.
+      expect(
+        [
+          ...storage.sql.exec(
+            "SELECT COUNT(*) AS n FROM cf_agents_jobs WHERE id LIKE 'gone-%' AND time = ?",
+            now - 1
+          )
+        ][0]?.n
+      ).toBe(100);
 
       // All hundred are held; an installed owner can still push and its
       // earlier deadline becomes the wake.
