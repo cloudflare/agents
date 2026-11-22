@@ -8806,6 +8806,15 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   override onStart(): void {
     this._coldRpcOnStartCount++;
+    this._legacySubmissionAtStart =
+      submissionInbox(this).get("legacy-at-start")?.status ?? null;
+  }
+
+  /** What the app's onStart saw of the submission `legacy-at-start`. */
+  private _legacySubmissionAtStart: string | null = null;
+
+  async getLegacySubmissionAtStartForTest(): Promise<string | null> {
+    return this._legacySubmissionAtStart;
   }
 
   /**
@@ -9806,6 +9815,7 @@ export class ThinkProgrammaticTestAgent extends Think {
       completedAt?: number | null;
       errorMessage?: string | null;
       messageId?: string | null;
+      metadataJson?: string;
     }>
   ): Promise<void> {
     this.ctx.storage.sql.exec(`
@@ -9845,7 +9855,7 @@ export class ThinkProgrammaticTestAgent extends Think {
               parts: [{ type: "text", text: row.text ?? row.submissionId }]
             }
           ]),
-        JSON.stringify({ from: "legacy" }),
+        row.metadataJson ?? JSON.stringify({ from: "legacy" }),
         row.errorMessage ?? null,
         row.createdAt,
         row.startedAt ?? null,
