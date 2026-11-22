@@ -2433,4 +2433,51 @@ describe("a tool-call id reused across replies", () => {
     expect(state("a1")).toBe("output-denied");
     expect(state("a2")).toBe("approval-requested");
   });
+
+  it("does not move a repeated id-less decision onto an older request", async () => {
+    const agent = await freshAgent(`reused-idless-${crypto.randomUUID()}`);
+    const request = (approvalId: string) =>
+      ({
+        type: "tool-calculate",
+        toolCallId: "call_1",
+        state: "approval-requested",
+        input: {},
+        approval: { id: approvalId }
+      }) as unknown as UIMessage["parts"][number];
+    const text = (t: string) =>
+      [{ type: "text", text: t }] as UIMessage["parts"];
+    await agent.persistTestMessage({
+      id: "u1",
+      role: "user",
+      parts: text("one")
+    });
+    await agent.persistTestMessage({
+      id: "a1",
+      role: "assistant",
+      parts: [request("approval_a")]
+    });
+    await agent.persistTestMessage({
+      id: "u2",
+      role: "user",
+      parts: text("two")
+    });
+    await agent.persistTestMessage({
+      id: "a2",
+      role: "assistant",
+      parts: [request("approval_b")]
+    });
+
+    await agent.applyToolApprovalForTest("call_1", false);
+    await agent.applyToolApprovalForTest("call_1", false);
+
+    const stored = (await agent.getStoredMessages()) as UIMessage[];
+    const state = (id: string) =>
+      (
+        stored.find((m) => m.id === id)?.parts[0] as
+          | { state?: string }
+          | undefined
+      )?.state;
+    expect(state("a2")).toBe("output-denied");
+    expect(state("a1")).toBe("approval-requested");
+  });
 });

@@ -10943,12 +10943,15 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       message.parts.some(
         (part) => (part as { toolCallId?: unknown }).toolCallId === toolCallId
       );
-    // A provider can reuse a tool-call id across replies: with an update,
-    // the newest message whose part it matches (by state, and by approval
-    // id when the client sent one) is the owner, as in `@cloudflare/ai-chat`.
+    // A provider can reuse a tool-call id across replies: for an update that
+    // names its approval, the newest message whose part it matches is the
+    // owner, as in `@cloudflare/ai-chat`; otherwise the newest holder.
+    // Only an update that names its approval: an id-less decision repeated
+    // after it was stored must not land on an older request.
+    const byMatch = update?.approvalId !== undefined;
     const matches = (message: UIMessage): boolean =>
       owns(message) &&
-      (update === undefined ||
+      (!byMatch ||
         applyToolUpdate(
           message.parts as unknown as Array<Record<string, unknown>>,
           update
@@ -10958,7 +10961,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       return row && owns(row) ? row : null;
     };
     const cachedOwnerId = (): string | null => {
-      for (let i = this._cachedMessages.length - 1; i >= 0; i--) {
+      for (let i = this._cachedMessages.length - 1; byMatch && i >= 0; i--) {
         if (matches(this._cachedMessages[i])) {
           return this._cachedMessages[i].id;
         }

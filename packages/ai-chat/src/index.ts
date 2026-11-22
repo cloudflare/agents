@@ -4522,10 +4522,10 @@ export class AIChatAgent<
     update: ToolPartUpdate
   ): Promise<ToolInteractionOutcome> {
     const live = this._liveReply;
-    // The stored copy of the reply in flight first, then the newest reply
-    // with a part the update matches: a provider can reuse a tool-call id
-    // across replies, and only the call the update is for matches (by
-    // state, and by approval id when the client sent one).
+    // The stored copy of the reply in flight first, then, for an update
+    // that names its approval, the newest reply whose part it matches (a
+    // provider can reuse a tool-call id across replies), then the newest
+    // reply holding the call.
     const ownerOf = (
       toolCallId: string,
       inFlightId: string | undefined,
@@ -4548,8 +4548,14 @@ export class AIChatAgent<
         );
         if (own) return own;
       }
-      for (let i = this.messages.length - 1; i >= 0; i--) {
-        if (matches(this.messages[i])) return this.messages[i];
+      // Search by match only when the update names its approval: a
+      // decision without an approval id (an older client) repeated after it
+      // was stored must not skip the answered request and land on an older
+      // one with the same tool-call id.
+      if (wanted.approvalId !== undefined) {
+        for (let i = this.messages.length - 1; i >= 0; i--) {
+          if (matches(this.messages[i])) return this.messages[i];
+        }
       }
       for (let i = this.messages.length - 1; i >= 0; i--) {
         if (holds(this.messages[i])) return this.messages[i];
