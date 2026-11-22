@@ -168,13 +168,16 @@ Six named rules define what a job owner can and cannot rely on:
    forever with `attempt: 1` (measured on a deployed Worker, 22 Nov 2026).
 6. **A job whose owner is not installed is kept.** The owner may come back
    (a rollback, a capability installed conditionally), and the job may be
-   its only record of the work. The driver moves it out by half its age,
+   its only record of the work. The driver does not claim it and writes
+   nothing to it, so its time, attempts and hold survive and its owner's
+   order holds. It holds the owner back in memory for half the job's age,
    at least a minute and at most an hour, emits `job:owner_missing` once
-   per owner per isolate, and runs it once the owner is installed again.
-   pi-durable keeps a task whose definition is missing the same way, and
-   durability keeps rows of a channel nothing attached. A capability that
-   is removed for good deletes its own jobs in the migration that removes
-   it. Exhaustion and the hold limit emit `job:exhausted` and
+   per owner per isolate, and runs the jobs once the owner is installed
+   again. pi-durable keeps a task whose definition is missing the same way,
+   and durability keeps rows of a channel nothing attached. A capability
+   that is removed for good deletes its own jobs in the migration that
+   removes it; until it does, each leftover wakes the object once per
+   hold. Exhaustion and the hold limit emit `job:exhausted` and
    `job:hold_limit`, so a host can count crash loops.
 
 Everything else about drive order — in particular the interleaving of

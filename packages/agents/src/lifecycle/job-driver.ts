@@ -440,6 +440,18 @@ export class JobDriver {
       if (!row) continue;
       if (skip.has(row.capability)) continue;
 
+      const dispatch = await this.#options.resolveDispatch(row.capability);
+      if (!dispatch) {
+        // Keep it, and do not claim it: the owner may be installed again (a
+        // rollback, a library constructed conditionally), and its job may be
+        // its only record of the work. Its row is left as it is (time,
+        // attempts, hold), so its owner's order and history survive; the
+        // owner is held back in memory, longer the older the job.
+        this.#holdOwnerless(row);
+        skip.add(row.capability);
+        continue;
+      }
+
       let takeover = false;
       if (row.singleflight === 1 && row.running === 1) {
         if (!isHungRow(row, nowMs)) {
@@ -461,7 +473,7 @@ export class JobDriver {
       // sets feeds single-flight skipping and hung recovery.
       const claim = this.#options.queue.claim(row.id, nowMs, takeover);
       try {
-        const failure = await this.#driveJob(row, claim);
+        const failure = await this.#driveJob(row, claim, dispatch);
         if (failure) {
           deferred ??= { failure, owners: new Set() };
           deferred.owners.add(row.capability);
@@ -498,42 +510,14 @@ export class JobDriver {
    */
   async #driveJob(
     row: JobStorageRow,
-    claim: JobClaim
+    claim: JobClaim,
+    dispatch: JobDispatch
   ): Promise<AttributedPlatformFailure | undefined> {
-    const { queue, resolveDispatch, disabled } = this.#options;
+    const { queue, disabled } = this.#options;
     // Whether the job is still the one this dispatch claimed: no cancel,
     // push, reschedule or hung takeover changed it since.
     const owned = () => queue.isCurrent(claim);
     const job = jobFromRow(row);
-    const dispatch = await resolveDispatch(row.capability);
-    if (!dispatch) {
-      // Keep it: the owner may be installed again (a rollback, a library
-      // constructed conditionally), and its job may be its only record of the
-      // work. Look again later, further out the older the job, and say so once
-      // per owner per isolate.
-      const ageMs = Date.now() - row.created_at * 1000;
-      const retryInMs = Math.min(
-        MAX_EXHAUSTED_BACKOFF_MS,
-        Math.max(OWNERLESS_RETRY_MS, Math.floor(ageMs / 2))
-      );
-      if (!this.#reportedOwnerless.has(row.capability)) {
-        this.#reportedOwnerless.add(row.capability);
-        console.error(
-          `No installed capability or host handler for job ${row.id} ` +
-            `(owner ${JSON.stringify(row.capability)}); keeping it and ` +
-            `looking again in ${Math.round(retryInMs / 1000)}s`
-        );
-        this.#emitSafely("job:owner_missing", {
-          capability: row.capability,
-          fn: row.fn,
-          id: row.id
-        });
-      }
-      if (owned())
-        queue.reschedule(row.capability, row.id, Date.now() + retryInMs);
-      return undefined;
-    }
-
     const maxAttempts = job.retry?.maxAttempts ?? DEFAULT_JOB_RETRY.maxAttempts;
     const prior = row.attempts ?? 0;
     const unreportedLimit = Math.max(maxAttempts, MIN_UNREPORTED_ATTEMPTS);
@@ -732,6 +716,32 @@ export class JobDriver {
     if (outcome === SUPERSEDED) return undefined;
     queue.applyOutcome(claim, outcome ?? undefined);
     return undefined;
+  }
+
+  /**
+   * Hold back an owner that is not installed, without writing to its jobs.
+   * The wait grows with the job's age, from a minute to an hour; an
+   * eviction forgets it and the next alarm looks again.
+   */
+  #holdOwnerless(row: JobStorageRow): void {
+    const ageMs = Date.now() - row.created_at * 1000;
+    const retryInMs = Math.min(
+      MAX_EXHAUSTED_BACKOFF_MS,
+      Math.max(OWNERLESS_RETRY_MS, Math.floor(ageMs / 2))
+    );
+    this.#heldOwners.set(row.capability, Date.now() + retryInMs);
+    if (this.#reportedOwnerless.has(row.capability)) return;
+    this.#reportedOwnerless.add(row.capability);
+    console.error(
+      `No installed capability or host handler for job ${row.id} ` +
+        `(owner ${JSON.stringify(row.capability)}); keeping it and ` +
+        `looking again in ${Math.round(retryInMs / 1000)}s`
+    );
+    this.#emitSafely("job:owner_missing", {
+      capability: row.capability,
+      fn: row.fn,
+      id: row.id
+    });
   }
 
   /** Best-effort telemetry: never blocks or fails a dispatch. */
