@@ -333,6 +333,11 @@ type ParentStub = DurableObjectStub & {
     status: string;
     stores: Array<{ taskRuns: number; fibers: number }>;
   }>;
+  facetOrphanTurnReplayForTest(childName: string): Promise<{
+    mirrored: number;
+    recoveries: string[];
+    state: string | null;
+  }>;
   driveFacetChatRecoveryDetectionForTest(childName: string): Promise<{
     taskRunOnChild: number;
     routedWakeOnRoot: number;
@@ -599,6 +604,18 @@ describe("AIChatAgent as an agent-tool child", () => {
     // Read while the child's turn ran: its durable record is the chat-turn
     // Task run, so an interrupted turn replays like a root agent's.
     expect(stores).toEqual([{ taskRuns: 1, fibers: 0 }]);
+  });
+
+  it("replays a facet's interrupted chat-turn Task run from the root alarm into chat recovery", async () => {
+    const parent = await getParent();
+    const result = await parent.facetOrphanTurnReplayForTest(
+      crypto.randomUUID()
+    );
+    expect(result).toEqual({
+      mirrored: 1,
+      recoveries: ["__cf_internal_chat_turn:req-orphan"],
+      state: "completed"
+    });
   });
 
   it("routes a facet's real recovery detection through Tasks, mirrored to the root alarm", async () => {

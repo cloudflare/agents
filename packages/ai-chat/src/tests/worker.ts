@@ -5749,6 +5749,39 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     };
   }
 
+  /** Chat-turn recoveries this facet ran, by fiber name. */
+  private _turnRecoveriesForTest: string[] = [];
+
+  /** Leave a chat-turn Task run whose isolate died (no live closure). */
+  async seedOrphanChatTurnRunForTest(requestId: string): Promise<string> {
+    const self = this as unknown as {
+      _handleInternalFiberRecovery(ctx: { name: string }): Promise<boolean>;
+    };
+    const original = self._handleInternalFiberRecovery.bind(this);
+    self._handleInternalFiberRecovery = async (ctx) => {
+      this._turnRecoveriesForTest.push(ctx.name);
+      return original(ctx);
+    };
+    const receipt = await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+      AIChatAgent.CHAT_FIBER_NAME,
+      { requestId, continuation: false, nonce: `gone-${requestId}` },
+      { metadata: { requestId } }
+    );
+    return receipt.runId;
+  }
+
+  getTurnRecoveriesForTest(): string[] {
+    return this._turnRecoveriesForTest;
+  }
+
+  getTaskRunStateForTest(runId: string): string | null {
+    return (
+      this.sql<{ state: string }>`
+        SELECT state FROM cf_agents_task_runs WHERE run_id = ${runId}
+      `[0]?.state ?? null
+    );
+  }
+
   getTurnStoresForTest(): Array<{ taskRuns: number; fibers: number }> {
     return this._turnStoresForTest;
   }
@@ -7174,6 +7207,38 @@ export class AIChatAgentToolParent extends Agent<Env> {
     if (this.finishRunIdsToThrow.has(run.runId)) {
       throw new Error(`finish failed for ${run.runId}`);
     }
+  }
+
+  /** Replay an interrupted facet chat turn from the root's alarm. */
+  async facetOrphanTurnReplayForTest(childName: string): Promise<{
+    mirrored: number;
+    recoveries: string[];
+    state: string | null;
+  }> {
+    const child = await this.subAgent(AIChatAgentToolChild, childName);
+    const runId = await child.seedOrphanChatTurnRunForTest("req-orphan");
+    const mirrored =
+      this.sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM cf_agents_jobs
+      WHERE capability = 'tasks'
+        AND json_extract(payload, '$.runId') = ${runId}
+        AND json_extract(payload, '$.owner_path') IS NOT NULL
+    `[0]?.count ?? 0;
+    this.sql`
+      UPDATE cf_agents_jobs SET time = ${Date.now() - 1_000}
+      WHERE capability = 'tasks' AND json_extract(payload, '$.runId') = ${runId}
+    `;
+    await this.alarm();
+    for (let i = 0; i < 100; i++) {
+      const state = await child.getTaskRunStateForTest(runId);
+      if (state === "completed" || state === "failed") break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return {
+      mirrored,
+      recoveries: await child.getTurnRecoveriesForTest(),
+      state: await child.getTaskRunStateForTest(runId)
+    };
   }
 
   /** Run a child, and say where the child stored its running turn. */

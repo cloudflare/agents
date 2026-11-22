@@ -12873,13 +12873,12 @@ export class ThinkRecoveryTestAgent extends Think {
     }
   }
 
-  /** Exercise a facet's turn acceptance without requiring facet routing. */
-  async facetRecoveryAcceptanceForTest(): Promise<{
+  /** A recovered turn's acceptance: after its durable run exists, before it completes. */
+  async recoveryAcceptanceForTest(): Promise<{
     acceptedBeforeCompletion: boolean;
     durableAtAcceptance: boolean;
   }> {
-    // SAFETY: these private methods are the real acceptance and fiber seams;
-    // overriding only the path makes this inert fixture a facet.
+    // SAFETY: these private methods are the real acceptance and fiber seams.
     const internals = this as unknown as {
       _runRecoveredTurnAfterAcceptance<T>(
         row: null,
@@ -12892,36 +12891,27 @@ export class ThinkRecoveryTestAgent extends Think {
         run: () => Promise<T>
       ): Promise<T>;
     };
-    Object.defineProperty(this, "parentPath", {
-      configurable: true,
-      value: [{ className: "ThinkRecoveryTestAgent", name: "parent" }]
-    });
     let accepted = false;
     let durableAtAcceptance = false;
     const requestId = crypto.randomUUID();
-    try {
-      return await internals._runRecoveredTurnAfterAcceptance(
-        null,
-        () => {
-          accepted = true;
-          // A facet's turn is a chat-turn Task run, like a root agent's.
-          durableAtAcceptance =
-            this.sql<{ run_id: string }>`
+    return internals._runRecoveredTurnAfterAcceptance(
+      null,
+      () => {
+        accepted = true;
+        durableAtAcceptance =
+          this.sql<{ run_id: string }>`
               SELECT run_id FROM cf_agents_task_runs
               WHERE definition = ${ThinkRecoveryTestAgent.CHAT_FIBER_NAME}
                 AND state = 'running'
                 AND metadata = ${JSON.stringify({ requestId })}
             `.length === 1;
-        },
-        () =>
-          internals._runChatRecoveryFiber(requestId, false, async () => ({
-            acceptedBeforeCompletion: accepted,
-            durableAtAcceptance
-          }))
-      );
-    } finally {
-      Reflect.deleteProperty(this, "parentPath");
-    }
+      },
+      () =>
+        internals._runChatRecoveryFiber(requestId, false, async () => ({
+          acceptedBeforeCompletion: accepted,
+          durableAtAcceptance
+        }))
+    );
   }
 
   /** A subclass can settle recovery without accepting a successor Task. */
