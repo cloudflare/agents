@@ -117,7 +117,7 @@ Values are JSON and at most 1 MB each.
 
 ## What is stored
 
-Each delivery is a row in `cf_agents_outbox`, a table the first `send()` creates: the value, its key, its status (`pending`, `held` or `failed`), the attempt count, the time of the first attempt and the next one, the last error, and the checkpoint. Each pending delivery has one job in the Lifecycle job queue. Which attempts are running right now is kept in memory only.
+The first `send()` creates the `cf_agents_outbox` table. Each delivery is a row in it: the value, its key, its status (`pending`, `held` or `failed`), the attempt count, the time of the first attempt and the next one, the last error, and the checkpoint. Each pending delivery has one job in the Lifecycle job queue. Which attempts are running right now is kept in memory only.
 
 ## Events
 
