@@ -1169,10 +1169,15 @@ export class Inbox<
 function samePayload(stored: string | null, submitted: string | null): boolean {
   if (stored === submitted) return true;
   if (stored === null || submitted === null) return false;
-  return (
-    stableStringify(JSON.parse(stored)) ===
-    stableStringify(JSON.parse(submitted))
-  );
+  try {
+    return (
+      stableStringify(JSON.parse(stored)) ===
+      stableStringify(JSON.parse(submitted))
+    );
+  } catch {
+    // Nested too deep to compare key by key: only the exact text matches.
+    return false;
+  }
 }
 
 function laneOfJob(payload: unknown): string | undefined {
