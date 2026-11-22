@@ -66,6 +66,17 @@ describe("Resumable Streaming", () => {
       ws.close(1000);
     });
 
+    it("rebuilds a cut-off continuation onto its message once, however often it is rebuilt", async () => {
+      const agentStub = await getAgentByName(
+        env.TestChatAgent,
+        crypto.randomUUID()
+      );
+      expect(await agentStub.rebuildContinuedReplyTwiceForTest()).toEqual([
+        "Before",
+        "After"
+      ]);
+    });
+
     it("records the allocated assistant message id in stream metadata for a real turn (#1691 wiring)", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
@@ -342,11 +353,18 @@ describe("Resumable Streaming", () => {
 
       await new Promise((r) => setTimeout(r, 100));
 
-      // Broadcast a live chunk while ws2 is pending resume (no ACK yet)
+      // Broadcast live chunks while ws2 is pending resume (no ACK yet). The
+      // first delta is stored at once, the second waits in the buffer: the
+      // replay must flush it.
       await agentStub.testBroadcastLiveChunk(
         "req-live",
         streamId,
         '{"type":"text-delta","id":"0","delta":"A"}'
+      );
+      await agentStub.testBroadcastLiveChunk(
+        "req-live",
+        streamId,
+        '{"type":"text-delta","id":"0","delta":"A2"}'
       );
 
       await new Promise((r) => setTimeout(r, 100));
@@ -355,12 +373,12 @@ describe("Resumable Streaming", () => {
       const preAckChunks = messages2.filter(isUseChatResponseMessage);
       expect(preAckChunks.length).toBe(0);
 
-      // ws1 should receive the live chunk
+      // ws1 should receive the live chunks
       const ws1Chunks = messages1.filter(isUseChatResponseMessage);
-      expect(ws1Chunks.length).toBe(1);
-      expect(ws1Chunks[0].body).toBe(
-        '{"type":"text-delta","id":"0","delta":"A"}'
-      );
+      expect(ws1Chunks.map((m) => m.body)).toEqual([
+        '{"type":"text-delta","id":"0","delta":"A"}',
+        '{"type":"text-delta","id":"0","delta":"A2"}'
+      ]);
 
       // Send ACK to resume
       ws2.send(
@@ -373,15 +391,16 @@ describe("Resumable Streaming", () => {
       // Wait for the full round-trip: ACK delivery → server flushes chunk
       // buffer to SQLite → reads chunks → sends replay back to ws2.
       await waitFor(
-        () => messages2.filter(isUseChatResponseMessage).length >= 1
+        () => messages2.filter(isUseChatResponseMessage).length >= 2
       );
 
-      // After ACK, ws2 should receive the replayed chunk
+      // After ACK, ws2 should receive both replayed chunks, the buffered one
+      // included
       const postAckChunks = messages2.filter(isUseChatResponseMessage);
-      expect(postAckChunks.length).toBeGreaterThanOrEqual(1);
-      expect(postAckChunks[0].body).toBe(
-        '{"type":"text-delta","id":"0","delta":"A"}'
-      );
+      expect(postAckChunks.slice(0, 2).map((m) => m.body)).toEqual([
+        '{"type":"text-delta","id":"0","delta":"A"}',
+        '{"type":"text-delta","id":"0","delta":"A2"}'
+      ]);
 
       // Live chunks after ACK should be delivered
       await agentStub.testBroadcastLiveChunk(

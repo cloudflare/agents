@@ -560,6 +560,7 @@ export {
 } from "./reply-source";
 export {
   ReplyStreams,
+  type OrphanReplyOptions,
   type ReplyFlushState,
   type ReplyStreamLog,
   type ReplyStreamResult,

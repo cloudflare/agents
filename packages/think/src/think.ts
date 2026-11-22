@@ -248,8 +248,6 @@ import {
   normalizeToolInput,
   interruptedToolPartAsError,
   unsettledToolCallIds,
-  streamChunksFinished,
-  persistReconstructedOrphan,
   keepStoredReplies,
   reconcileMessages,
   CHAT_RECOVERY_TASK_NAME,
@@ -304,11 +302,7 @@ import type {
   ReplyRemoval,
   TurnFailureHost
 } from "agents/chat";
-import {
-  replyIsEmpty,
-  settleInterruptedPart,
-  stripTrailingReasoning
-} from "agents/chat";
+import { replyIsEmpty, stripTrailingReasoning } from "agents/chat";
 import type {
   BeforeTurnRepairResult,
   RepairedTranscriptSink,
@@ -11951,102 +11945,20 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /**
-   * The message an orphaned stream's assistant message branches from, so the
-   * reconstructed message lands where the live turn would have persisted it:
-   * a regeneration beside the response it replaces, not under it. Undefined
-   * for a turn that appends to the latest leaf, and on an `agents` release
-   * that does not record the parent.
+   * Rebuild the reply an orphaned stream holds and store it
+   * (`ReplyStreams.persistOrphan`), stripped as a live reply is. A durable
+   * submission the stream belongs to links the message.
    */
-  private _orphanParentId(streamId: string): string | undefined {
-    const stream = this._resumableStream as ResumableStream & {
-      getStreamParentMessageId?: (streamId: string) => string | null;
-    };
-    return stream.getStreamParentMessageId?.(streamId) ?? undefined;
-  }
-
-  /**
-   * The assistant message a leaf-extending stream continues, and how many parts
-   * it held when the stream started; undefined for a stream that produces a
-   * message of its own. `_streamResult` records both when it starts the stream.
-   *
-   * Recovery keeps that many leading parts of the stored message, so it relies
-   * on them staying put until the stream is recovered. That holds today: the
-   * stream itself only adds parts after them, and once a stream is recovered
-   * it is marked completed and reclaimed when the next stream starts, so a
-   * later stream that extends the message again cannot be overwritten by a
-   * replay.
-   * (`_dropGenerationAfterResolvedPause` can trim an orphaned leaf; it only
-   * drops text and reasoning written against a paused tool result.)
-   */
-  private _orphanContinuedMessage(
-    streamId: string
-  ): { messageId: string; basePartCount: number } | undefined {
-    const messageId = this._resumableStream.getStreamMessageId(streamId);
-    const basePartCount =
-      this._resumableStream.getStreamBasePartCount(streamId);
-    return messageId !== null && basePartCount !== null
-      ? { messageId, basePartCount }
-      : undefined;
-  }
-
   private async _persistOrphanedStream(streamId: string): Promise<void> {
-    this._resumableStream.flushBuffer();
-    const chunks = this._resumableStream.getStreamChunks(streamId);
-    if (chunks.length === 0) return;
-
-    // The accumulate loop and the `getMessage → update(merge) XOR append` upsert
-    // are the shared `persistReconstructedOrphan` core. Think supplies:
-    //   - continues: for a stream that extended the assistant leaf (a recovery
-    //     continuation), replay its chunks onto the leaf's parts from when the
-    //     stream started, as the live accumulator did. Recovery then rewrites
-    //     the leaf instead of appending a copy each time (#2780).
-    //   - fallbackId: the id `_streamResult` recorded for a continuation, whose
-    //     `start` chunk carries none (`_alignStreamStartId` skips them).
-    //   - prepare: `_strippedForPersist` (same as `_persistAssistantMessage`) —
-    //     drop the internal final-answer parts and skip (`null`) an empty
-    //     structural-only assistant message.
-    //   - merge: Think replaces the whole message (no partial merge).
-    // NOTE: progress is bumped at production/flush time in `_storeChunkDurably`
-    // (#1637), NOT here — persisting on recovery or a client reconnect must not
-    // be miscounted as new forward progress.
-    let persistedId: string | undefined;
-    const store = this._orphanStore();
-    const parentId = this._orphanParentId(streamId);
-    const continued = this._orphanContinuedMessage(streamId);
-    const wrote = await persistReconstructedOrphan(chunks, {
-      store:
-        parentId === undefined
-          ? store
-          : {
-              ...store,
-              appendMessage: (message) => store.appendMessage(message, parentId)
-            },
-      ...(continued && {
-        continues: { ...continued, settleBasePart: settleInterruptedPart }
-      }),
-      fallbackId:
-        this._resumableStream.getStreamMessageId(streamId) ??
-        crypto.randomUUID(),
-      prepare: (message) => {
-        // A stream with no `finish` chunk was cut off: settle the calls it
-        // left unanswered. One that finished and only missed its persist
-        // keeps them: those wait for a client.
-        const prepared = this._strippedForPersist(
-          streamChunksFinished(chunks)
-            ? message
-            : this._settleInterruptedReply(message)
-        );
-        persistedId = prepared?.id;
-        return prepared;
-      },
-      merge: (_existing, incoming) => incoming
+    const persistedId = await this._replyStreams.persistOrphan(streamId, {
+      store: this._orphanStore(),
+      settle: (message) => this._settleInterruptedReply(message),
+      prepare: (message) => this._strippedForPersist(message)
     });
-    if (!wrote) return;
+    if (persistedId === undefined) return;
     const requestId =
       this._resumableStream.getStreamMetadata(streamId)?.request_id;
-    if (requestId && persistedId) {
-      this._recordSubmissionMessage(requestId, persistedId);
-    }
+    if (requestId) this._recordSubmissionMessage(requestId, persistedId);
     this._broadcastMessages();
   }
 

@@ -265,8 +265,9 @@ describe("continueLastTurn", () => {
     const { beforeCall, afterCall } =
       await agentStub.probeToolCallDurabilityForTest();
 
-    // The reasoning is still in the buffer. The call brings both to storage.
-    expect(beforeCall).toBe(0);
+    // The first reasoning delta is stored at once, the second waits in the
+    // buffer (D121). The call brings it to storage.
+    expect(beforeCall).toBe(1);
     expect(afterCall).toBeGreaterThan(beforeCall);
   });
 

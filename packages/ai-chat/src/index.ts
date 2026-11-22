@@ -41,8 +41,6 @@ import {
   ChatRequestContext,
   interruptedToolPartAsError,
   type RepairedTranscriptSink,
-  streamChunksFinished,
-  persistReconstructedOrphan,
   createChatFiberSnapshot,
   unwrapChatFiberSnapshot,
   type OrphanPersistStore
@@ -79,8 +77,7 @@ import {
   type MessagePart,
   type ServerChatTurn,
   type SubmitConcurrencyDecision,
-  type ChatFiberSnapshot,
-  type ChatTurnOutcome
+  type ChatFiberSnapshot
 } from "agents/chat";
 import {
   ChatFrames,
@@ -90,7 +87,6 @@ import {
   truncateProviderToolPayloads
 } from "agents/chat";
 import {
-  LiveReply,
   pumpReply,
   ReplyStreams,
   responseSource,
@@ -113,7 +109,6 @@ import {
   type StreamInterruptionOutcome
 } from "agents/chat";
 import {
-  chunkMustBeStoredNow,
   replyIsEmpty,
   settleInterruptedPart,
   type ClientToolSchema,
@@ -423,11 +418,12 @@ export class AIChatAgent<
    * set and tool-result apply chain, with the rules that tie them together.
    * The fields below that alias its parts are the same objects.
    */
-  private readonly _turns = new ChatTurns<Connection>(
+  private readonly _turns: ChatTurns<Connection> = new ChatTurns<Connection>(
     {
       messages: () => this.messages,
-      isReplyStreaming: () => this._liveReply !== null,
-      streamingReply: () => this._replyInFlight(),
+      isReplyStreaming: () => this._turns.liveReply !== null,
+      streamingReply: () =>
+        this._turns.liveReply?.accumulator.toMessage() ?? null,
       clientToolNames: () => this._requestContext.clientToolNames(),
       hasActiveStream: () => this._resumableStream.hasActiveStream(),
       generateRequestId: () => nanoid(),
@@ -523,16 +519,6 @@ export class AIChatAgent<
    */
   protected _resumableStream!: ResumableStream;
 
-  /** The reply `pumpReply` builds (`ChatTurns.liveReply`). */
-  private get _liveReply(): LiveReply | null {
-    return this._turns.liveReply;
-  }
-
-  /** The reply that is not in the stored transcript yet, or not in its final form. */
-  private _replyInFlight(): UIMessage | null {
-    return this._liveReply?.accumulator.toMessage() ?? null;
-  }
-
   /** The stream every reply writes (`pumpReply`). */
   private readonly _replyStreams = new ReplyStreams({
     resumable: () => this._resumableStream,
@@ -540,7 +526,12 @@ export class AIChatAgent<
       this._turns.streamStarted(requestId, (c) =>
         this._notifyStreamResuming(c)
       ),
-    streamEnded: (requestId) => this._afterStreamFinished(requestId),
+    // A connection offered the stream that never ACKed must still get the
+    // terminal frame and every later broadcast.
+    streamEnded: (requestId) => {
+      this._pendingResumeConnections.clear();
+      this._turns.streamEnded(requestId);
+    },
     originMessageIds: (requestId) =>
       this._frames.requestOrigins.get(requestId) ??
       this._activeChatRecoveryOriginIds,
@@ -1313,7 +1304,8 @@ export class AIChatAgent<
       isConnectionPresent: (connectionId) =>
         this._isConnectionPresent(connectionId),
       holdsTerminalFrames: (requestId) =>
-        this._liveReply?.requestId === requestId && this._liveReply.ended,
+        this._turns.liveReply?.requestId === requestId &&
+        this._turns.liveReply.ended,
       recentTerminal: (requestIds) =>
         recentChatTerminal(this.ctx.storage.kv, requestIds)
     }));
@@ -1332,131 +1324,20 @@ export class AIChatAgent<
 
   // ── Resumable stream ───────────────────────────────────────────────
 
-  /** @internal Delegate to _resumableStream */
-  protected _startStream(
-    requestId: string,
-    options: { messageId?: string; continuation?: boolean } = {}
-  ): string {
-    return this._replyStreams.start(requestId, options);
-  }
-
-  /** @internal Delegate to _resumableStream */
-  protected _completeStream(streamId: string, outcome?: ChatTurnOutcome) {
-    this._replyStreams.complete(streamId, outcome);
-  }
-
-  /** @internal The producer finished; the cutover settles the stream. */
-  protected _finishStream(streamId: string, outcome?: ChatTurnOutcome) {
-    this._replyStreams.finish(streamId, outcome);
-  }
-
-  private _afterStreamFinished(requestId: string | null) {
-    this._pendingResumeConnections.clear();
-    this._turns.streamEnded(requestId);
-  }
-
   /**
-   * @internal Delegate to _resumableStream.
-   *
-   * A settled tool result (`tool-output-available` / `-error` / `-denied`)
-   * is flushed to SQLite immediately rather than waiting for the packed
-   * segment to fill: it captures a completed, often non-idempotent side
-   * effect (or a user's denial), and an isolate eviction before the next
-   * batch flush would lose it — recovery would re-anchor without it and
-   * re-run the tool. The flush is also what the recovery progress marker is
-   * derived from (`_chatRecoveryProgressMarker`), so a settled result counts
-   * as forward progress the moment it lands, as it did under the old
-   * per-chunk counter. Streaming deltas keep the buffer's own packing.
-   *
-   * A tool call (`tool-input-available`) is flushed too, before the tool
-   * runs: see the shared `chunkMustBeStoredNow`.
-   */
-  protected async _storeStreamChunk(
-    streamId: string,
-    body: string
-  ): Promise<number | undefined> {
-    const seq = this._resumableStream.storeChunk(streamId, body);
-    let type: string | undefined;
-    try {
-      type = (JSON.parse(body) as { type?: string }).type;
-    } catch {
-      // non-JSON chunk body — packed with the rest
-    }
-    if (chunkMustBeStoredNow(type)) {
-      this._resumableStream.flushBuffer();
-    }
-    return seq;
-  }
-
-  /** @internal Delegate to _resumableStream */
-  protected _markStreamError(streamId: string) {
-    this._replyStreams.error(streamId);
-  }
-
-  /**
-   * Reconstruct and persist a partial assistant message from an orphaned
-   * stream's stored chunks. Called when the DO wakes from hibernation and
-   * discovers an active stream with no live LLM reader.
-   *
-   * Built from the three orphan-persist seams the chat-recovery RFC factored
-   * out — all three are ai-chat's substrate-specific realizations of a shape
-   * `Think` shares:
-   *   - (a) reconstruct via the shared `StreamAccumulator` (the same primitive
-   *     `Think` and the client reducer use), replacing a hand-rolled chunk
-   *     switch; it owns the `start` / `finish` / `message-metadata` handling;
-   *   - (b) {@link _resolveOrphanTargetId} — the id to persist under (#1691);
-   *   - (c)+(d) upsert-by-id through the shared `OrphanPersistStore` shape
-   *     (`getMessage` → `updateMessage` / `appendMessage`).
-   *     When a row already owns the id, the shared `reconcileOrphanPartial`
-   *     merge preserves an in-place tool result rather than letting a replayed
-   *     chunk re-advance it (ai-chat has an early tool-approval persist; hosts
-   *     without one append straight through).
+   * Rebuild the reply an orphaned stream holds and store it
+   * (`ReplyStreams.persistOrphan`). Each write goes through
+   * `persistMessages`, which broadcasts it.
    * @internal
    */
   protected async _persistOrphanedStream(streamId: string): Promise<void> {
-    const chunks = this._resumableStream.getStreamChunks(streamId);
-    if (!chunks.length) return;
-
-    // The accumulate loop and the `getMessage → update(merge) XOR append` upsert
-    // are the shared `persistReconstructedOrphan` core. ai-chat supplies the two
-    // host-specific hooks:
-    //   - prepare: resolve the persist-target id (#1691) — the one per-package
-    //     step (a flat array can't express the tree a Session uses). A provider
-    //     `start.messageId` is adopted by the accumulator (the live path adopts
-    //     it for new turns too); continuations have it stripped before storage
-    //     (#1229), so the unconditional adopt matches the live path.
-    //   - merge: a row may already own this id (an early persist during tool
-    //     approval, or a continuation resuming the last assistant message) —
-    //     reconcile onto it via the shared `reconcileOrphanPartial` so an
-    //     in-place tool result isn't re-advanced by a replayed chunk.
-    // The store routes each write through `persistMessages` (exactly one write →
-    // one `persistMessages` → one broadcast), so no explicit broadcast here.
-    // NOTE: progress is bumped at production/flush time in `_storeStreamChunk`
-    // (#1637), NOT here — persisting on recovery or a client reconnect must not
-    // be miscounted as new forward progress.
-    // A stream with no `finish` chunk was cut off: settle the tool calls it
-    // left unanswered, so the stored reply never shows a server tool as
-    // running after its `execute()` died. A stream that finished and only
-    // missed its persist keeps its unanswered calls: those wait for a client.
-    const settle = streamChunksFinished(chunks)
-      ? (message: UIMessage) => message
-      : (message: UIMessage) => this._settleInterruptedReply(message);
-    const fallbackId = `assistant_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
-    await persistReconstructedOrphan(chunks, {
+    await this._replyStreams.persistOrphan(streamId, {
       store: this._orphanStore(),
-      fallbackId,
-      prepare: (message) => {
-        message.id = this._resolveOrphanTargetId(
-          streamId,
-          message.id,
-          fallbackId
-        );
-        const settled = settle(message);
-        // Nothing left to store (cut off while the model was reasoning).
-        return replyIsEmpty(settled) ? null : settled;
-      },
-      merge: (existing, incoming) =>
-        settle(reconcileOrphanPartial(existing, incoming))
+      settle: (message) => this._settleInterruptedReply(message),
+      // A stream from before #1691 recorded no id: it continued the last
+      // assistant message, and holds only its own parts.
+      legacyMessageId: () => this._findLastAssistantMessage()?.id,
+      mergeLegacy: reconcileOrphanPartial
     });
   }
 
@@ -1531,40 +1412,6 @@ export class AIChatAgent<
       this._repairedTranscriptSink(),
       removal
     );
-  }
-
-  /**
-   * Resolve the id an orphaned partial should persist under — orphan-persist
-   * step **(b)**, and the one legitimately per-package piece of the path: a
-   * flat `UIMessage[]` can't express the parent/child a Session tree uses to
-   * resolve this structurally, so ai-chat reads it from stream metadata.
-   *
-   * When the reconstructed message already adopted a provider `start.messageId`
-   * (kept as-is — the live path adopts it for new turns too) `reconstructedId`
-   * differs from `fallbackId` and is returned unchanged. Otherwise resolve to:
-   *   - the id allocated when the stream started, recorded in stream metadata
-   *     (#1691) — the SAME id the live path persists under (it only adopts a
-   *     provider id, never invents one). A new turn stored its own fresh id, so
-   *     it becomes its own message; a continuation stored the cloned
-   *     last-assistant id, so it merges. This is what stops a new turn after a
-   *     later user message from being folded into the previous assistant
-   *     message (the #1691 corruption); or
-   *   - (legacy rows written before the metadata column existed) the last
-   *     assistant message, matching pre-#1691 behavior.
-   * @internal
-   */
-  protected _resolveOrphanTargetId(
-    streamId: string,
-    reconstructedId: string,
-    fallbackId: string
-  ): string {
-    if (reconstructedId !== fallbackId) return reconstructedId;
-    const storedId = this._resumableStream.getStreamMessageId(streamId);
-    if (storedId != null) return storedId;
-    for (let i = this.messages.length - 1; i >= 0; i--) {
-      if (this.messages[i].role === "assistant") return this.messages[i].id;
-    }
-    return reconstructedId;
   }
 
   /**
@@ -1755,7 +1602,7 @@ export class AIChatAgent<
   }
 
   private _messagesForClientSync(): readonly UIMessage[] {
-    const inFlight = this._replyInFlight();
+    const inFlight = this._turns.liveReply?.accumulator.toMessage() ?? null;
     if (!inFlight || inFlight.parts.length === 0) {
       return this.messages;
     }
@@ -4521,7 +4368,7 @@ export class AIChatAgent<
   private _applyToolPartUpdate(
     update: ToolPartUpdate
   ): Promise<ToolInteractionOutcome> {
-    const live = this._liveReply;
+    const live = this._turns.liveReply;
     // The stored copy of the reply in flight first, then, for an update
     // that names its approval, the newest reply whose part it matches (a
     // provider can reuse a tool-call id across replies), then the newest
