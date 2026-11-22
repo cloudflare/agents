@@ -5598,16 +5598,20 @@ export class Agent<
    * The child of a run: an ordinary Durable Object of the run's class,
    * under the name minted when the run was recorded.
    */
-  /** The class and name of a run's child, or `null` for no such run. */
+  /**
+   * The class and name of a run's child, `"unreachable"` for a run from
+   * when children were facets, or `null` for no such run.
+   */
   private _agentToolChildAddress(
     runId: string
-  ): { className: string; childName: string } | null {
+  ): { className: string; childName: string } | "unreachable" | null {
     const [row] = this.sql<{ agent_type: string; child_name: string | null }>`
       SELECT agent_type, child_name FROM cf_agent_tool_runs WHERE run_id = ${runId}
     `;
-    return row?.child_name
+    if (!row) return null;
+    return row.child_name
       ? { className: row.agent_type, childName: row.child_name }
-      : null;
+      : "unreachable";
   }
 
   private async _agentToolChild(

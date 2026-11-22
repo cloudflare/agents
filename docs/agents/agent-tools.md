@@ -644,7 +644,7 @@ left `starting`, `running` or `interrupted` cannot be followed after the
 upgrade. On its first start the parent ends each one `error`, broadcasts the
 terminal event, and calls `onAgentToolFinish` and, for a detached run, its
 `onFinish` or chat notification. Running the same `runId` again returns that
-error. Finished runs keep their stored result. The old facet storage is left in
+error. Finished runs keep their stored result; a drill-in to one answers `404`, since its child cannot be opened. The old facet storage is left in
 place and is no longer read.
 
 ## Interrupted runs and recovery

@@ -101,21 +101,32 @@ export function matchAgentToolRunRequest(
  * @internal Forward a request (HTTP or WebSocket upgrade) to a run's child. After an
  * upgrade the child owns the socket, so its frames never wake the parent.
  *
- * @param child - The child's class and name for a run id, or `null` when
- *   the parent has no such run (or it predates child names).
- * @returns The child's response, or `undefined` when no candidate in the
- *   path is a run of this parent, so the agent handles the request itself.
+ * @param child - For a run id: the child's class and name, `"unreachable"`
+ *   for a run of this parent that has no child to reach (it is from when
+ *   children were facets), or `null` when the parent has no such run.
+ * @returns The child's response; `404` for a run whose child cannot be
+ *   reached, so the request never lands on the parent's own chat; or
+ *   `undefined` when no candidate in the path is a run of this parent, so
+ *   the agent handles the request itself.
  */
 export async function forwardAgentToolRunRequest(
   ctx: DurableObjectState,
   request: Request,
-  child: (runId: string) => { className: string; childName: string } | null
+  child: (
+    runId: string
+  ) => { className: string; childName: string } | "unreachable" | null
 ): Promise<Response | undefined> {
   const matches = matchAgentToolRunRequest(request);
   if (matches.length === 0) return undefined;
   for (const match of matches) {
     const target = child(match.runId);
     if (!target) continue;
+    if (target === "unreachable") {
+      return new Response(
+        "This agent tool run's child was kept by an earlier version and cannot be opened",
+        { status: 404 }
+      );
+    }
     const stub = await agentToolChildStub(
       ctx,
       target.className,
