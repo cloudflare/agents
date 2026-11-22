@@ -11,18 +11,14 @@
  *   CodingOrchestrator (Think)  ── delegate_coding_task / delegate_parallel ──▶
  *     ClaudeCodeAgent (AIChatAgent, one Durable Object per run)
  *       └─ sandboxFor(env, this.name)  ──▶  one per task,
- *          released by the orchestrator when the run finishes
+ *          released when the agent's turn ends
  */
 
 import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
 import { getSandbox, Sandbox as BaseSandbox } from "@cloudflare/sandbox";
 import { Think, type TurnConfig } from "@cloudflare/think";
 import { callable, routeAgentRequest } from "agents";
-import {
-  agentTool,
-  type AgentToolLifecycleResult,
-  type AgentToolRunInfo
-} from "agents/agent-tools";
+import { agentTool } from "agents/agent-tools";
 import { tool, type ToolSet, type UIMessage } from "ai";
 import { z } from "zod";
 import { MAX_OUTPUT_TOKENS, runClaudeCode } from "./claude-code";
@@ -139,14 +135,20 @@ export class ClaudeCodeAgent extends AIChatAgent<Env> {
   }
 
   private sandbox(): Sandbox {
-    // One container per sub-agent. The orchestrator releases it when the run
-    // reaches a terminal state; `sleepAfter` only bounds an idle drill-in.
+    // One container per sub-agent, released when each turn ends;
+    // `sleepAfter` only bounds a container whose release failed.
     return sandboxFor(this.env, this.name);
   }
 
-  /** Destroy this agent's container. Called by the orchestrator. */
-  async releaseSandbox(): Promise<void> {
-    await this.sandbox().destroy();
+  // Containers are billed while awake and count against `max_instances`, so
+  // each one goes as soon as the turn that used it is over. A drill-in
+  // follow-up turn starts a fresh container and re-clones the repo.
+  protected override async onChatResponse(): Promise<void> {
+    try {
+      await this.sandbox().destroy();
+    } catch (error) {
+      console.warn(`Failed to release sandbox for ${this.name}:`, error);
+    }
   }
 
   private setLastResult(result: TurnResult): void {
@@ -343,87 +345,11 @@ export class CodingOrchestrator extends Think<Env> {
     };
   }
 
-  // Containers are billed while awake and count against `max_instances`, so
-  // track every run's sandbox and tear it down as soon as the run is over.
-  override async onAgentToolStart(run: AgentToolRunInfo): Promise<void> {
-    await this.ctx.storage.put(`${SANDBOX_RUN_PREFIX}${run.runId}`, true);
-  }
-
-  override async onAgentToolFinish(
-    run: AgentToolRunInfo,
-    result: AgentToolLifecycleResult
-  ): Promise<void> {
-    // `interrupted` means the orchestrator stopped waiting, not that the child
-    // stopped working (`childStillRunning` is unset when that is unknown). Keep
-    // its container; `releaseIdleSandboxes` frees it once the child settles.
-    if (result.status === "interrupted" && result.childStillRunning !== false) {
-      return;
-    }
-    // An `error` can also be the parent losing the child's stream while the
-    // child keeps editing; keep a live child's container for the sweep too.
-    if (result.status === "error" && (await this.isChildLive(run.runId))) {
-      return;
-    }
-    await this.destroySandbox(run.runId);
-  }
-
-  /** Whether the child still reports its run as in flight (or can't be asked). */
-  private async isChildLive(runId: string): Promise<boolean> {
-    if (!this.hasAgentToolRun(ClaudeCodeAgent, runId)) return false;
-    try {
-      const child = await this.getAgentToolChild<ClaudeCodeAgent>(runId);
-      if (!child) return false;
-      const inspection = await child.inspectAgentToolRun(runId);
-      return (
-        inspection?.status === "running" || inspection?.status === "starting"
-      );
-    } catch (error) {
-      console.warn(`Could not inspect run ${runId}; keeping it:`, error);
-      return true;
-    }
-  }
-
-  // Some runs never deliver a usable finish: a child that failed to start, or
-  // one kept alive above. Sweep them on every wake.
-  override async onStart(): Promise<void> {
-    this.ctx.waitUntil(this.releaseIdleSandboxes());
-  }
-
-  private async releaseIdleSandboxes(): Promise<void> {
-    const tracked = await this.ctx.storage.list({ prefix: SANDBOX_RUN_PREFIX });
-    for (const key of tracked.keys()) {
-      const runId = key.slice(SANDBOX_RUN_PREFIX.length);
-      if (await this.isChildLive(runId)) continue;
-      await this.destroySandbox(runId);
-    }
-  }
-
   @callable()
   async clearDelegatedRuns(): Promise<void> {
-    // Release the containers first: the children are reached through the
-    // run rows, which `clearAgentToolRuns` deletes.
-    const tracked = await this.ctx.storage.list({ prefix: SANDBOX_RUN_PREFIX });
-    await Promise.all(
-      [...tracked.keys()].map((key) =>
-        this.destroySandbox(key.slice(SANDBOX_RUN_PREFIX.length))
-      )
-    );
     await this.clearAgentToolRuns();
   }
-
-  private async destroySandbox(runId: string): Promise<void> {
-    try {
-      const child = await this.getAgentToolChild<ClaudeCodeAgent>(runId);
-      await child?.releaseSandbox();
-    } catch (error) {
-      console.warn(`Failed to destroy sandbox for run ${runId}:`, error);
-      return;
-    }
-    await this.ctx.storage.delete(`${SANDBOX_RUN_PREFIX}${runId}`);
-  }
 }
-
-const SANDBOX_RUN_PREFIX = "sandbox-run:";
 
 /** What one Claude Code turn produced; `error` is set when the turn failed. */
 type TurnResult = WorkspaceDiff & { error?: string };

@@ -12,7 +12,7 @@ import { getAgentByName } from "../agent-routing";
 import type { Agent } from "../index";
 
 /**
- * A typed stub for the child of a run: the child class's own methods
+ * @internal A typed stub for the child of a run: the child class's own methods
  * (not `Agent`'s), each returning a Promise. Return values cross a Durable
  * Object RPC call, so they must be serializable.
  */
@@ -28,7 +28,7 @@ export type AgentToolChildStub<T extends Agent> = {
     : never;
 };
 
-/** The URL segment a parent forwards to a run's child: `/agent-tool-runs/{runId}`. */
+/** @internal The URL segment a parent forwards to a run's child: `/agent-tool-runs/{runId}`. */
 export const AGENT_TOOL_RUN_ROUTE = "agent-tool-runs";
 
 /** The `ctx.exports` entry for a class: a namespace when the class is a Durable Object. */
@@ -39,7 +39,7 @@ type ExportsCtx = {
   >;
 };
 
-/** The namespace of an exported Durable Object class, or an error saying what is missing. */
+/** @internal The namespace of an exported Durable Object class, or an error saying what is missing. */
 export function agentToolChildNamespace(
   ctx: DurableObjectState,
   className: string
@@ -57,7 +57,7 @@ export function agentToolChildNamespace(
   return entry as unknown as DurableObjectNamespace<Agent>;
 }
 
-/** The started child of a run, as a stub. */
+/** @internal The started child of a run, as a stub. */
 export function agentToolChildStub(
   ctx: DurableObjectState,
   className: string,
@@ -70,7 +70,7 @@ export function agentToolChildStub(
 }
 
 /**
- * The run id a request addresses through the parent, and the path the
+ * @internal The run id a request addresses through the parent, and the path the
  * child sees, or `null` when the request is not for a run.
  */
 export function matchAgentToolRunRequest(
@@ -95,7 +95,7 @@ export function matchAgentToolRunRequest(
 }
 
 /**
- * Forward a request (HTTP or WebSocket upgrade) to a run's child. After an
+ * @internal Forward a request (HTTP or WebSocket upgrade) to a run's child. After an
  * upgrade the child owns the socket, so its frames never wake the parent.
  *
  * @param child - The child's class and name for a run id, or `null` when

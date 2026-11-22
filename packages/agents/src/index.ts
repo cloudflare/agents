@@ -57,7 +57,6 @@ export type {
 import { signAgentHeaders, type SendEmailOptions } from "./email";
 import { sendAgentEmail } from "./email-send";
 export type { EmailSendBinding, SendEmailOptions } from "./email";
-export type { AgentToolChildStub } from "./agent-runs/child";
 import { nanoid } from "nanoid";
 import { EmailMessage } from "cloudflare:email";
 import {
@@ -89,9 +88,9 @@ import {
 import { getAgentByName, type AgentOptions } from "./agent-routing";
 import {
   agentToolChildStub,
+  forwardAgentToolRunRequest,
   type AgentToolChildStub
 } from "./agent-runs/child";
-import { AgentToolRunRoute } from "./agent-runs/route";
 import { WebSockets } from "./websockets";
 import {
   ensureConnectionWrapped,
@@ -1337,8 +1336,6 @@ export class Agent<
       .use(this._queue)
       .use(this.mcp)
       .use(this._state)
-      // Before WebSockets, which claims every upgrade.
-      .use(new AgentToolRunRoute(this.ctx))
       .use(this._webSockets)
       .use(this.tasks)
       .use(this._fibers)
@@ -2874,7 +2871,13 @@ export class Agent<
     });
 
     if (!match) {
-      return this.lifecycle.fetch(request);
+      // `/agent-tool-runs/{runId}` drills in to a run's child.
+      const forwarded = await forwardAgentToolRunRequest(
+        this.ctx,
+        request,
+        (runId) => this._agentToolChildAddress(runId)
+      );
+      return forwarded ?? this.lifecycle.fetch(request);
     }
 
     // Hook runs in the parent's isolate before any facet work.
@@ -5561,6 +5564,18 @@ export class Agent<
    * The child of a run: an ordinary Durable Object of the run's class,
    * under the name minted when the run was recorded.
    */
+  /** The class and name of a run's child, or `null` for no such run. */
+  private _agentToolChildAddress(
+    runId: string
+  ): { className: string; childName: string } | null {
+    const [row] = this.sql<{ agent_type: string; child_name: string | null }>`
+      SELECT agent_type, child_name FROM cf_agent_tool_runs WHERE run_id = ${runId}
+    `;
+    return row?.child_name
+      ? { className: row.agent_type, childName: row.child_name }
+      : null;
+  }
+
   private async _agentToolChild(
     agentType: string,
     runId: string
@@ -5573,8 +5588,8 @@ export class Agent<
   }
 
   /**
-   * The child of a run this agent started, as a stub for RPC (for example
-   * to read its messages), or `null` when there is no such run.
+   * @internal The child of a run this agent started, as a stub for RPC, or
+   * `null` when there is no such run.
    */
   async getAgentToolChild<T extends Agent = Agent>(
     runId: string

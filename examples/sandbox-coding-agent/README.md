@@ -7,7 +7,7 @@ This is the Cloudflare-native take on the ["agent harness"](https://ai-sdk.dev/d
 ## What it demonstrates
 
 - **Agents as tools / sub-agents.** The orchestrator exposes `agentTool(ClaudeCodeAgent, …)` so its planning loop can delegate work. When it does, the framework starts the sub-agent as its own Durable Object, forwards its chat chunks to the parent as `agent-tool-event` frames, and surfaces its `reportProgress` on a live bar — all on the same WebSocket.
-- **One container per task.** Each agent-tool run gets its own `ClaudeCodeAgent` Durable Object under a name the orchestrator mints; we hash that name into a DNS-safe sandbox id so `getSandbox(env.Sandbox, …)` gives every delegated task its _own_ isolated container with the repo checked out. The orchestrator asks the child to release the container as soon as the run finishes (`onAgentToolFinish`) and when you clear runs.
+- **One container per task.** Each agent-tool run gets its own `ClaudeCodeAgent` Durable Object under a name the orchestrator mints; we hash that name into a DNS-safe sandbox id so `getSandbox(env.Sandbox, …)` gives every delegated task its _own_ isolated container with the repo checked out. The sub-agent releases its container as soon as each of its turns ends (`onChatResponse`).
 - **Parallel fan-out.** `delegate_parallel` dispatches several tasks at once (or competing attempts at one task) via `runAgentTool`, each in its own container, then compares the diffs.
 - **Think owns the planning loop; Claude Code owns the coding loop.** The orchestrator's loop runs on Workers AI; each sub-agent drives the Claude Code CLI headless inside its container and maps its `stream-json` output into AI SDK `UIMessage` chunks.
 - **No credentials in the container.** The Sandbox intercepts Claude Code's egress to `api.anthropic.com` and forwards it through the `env.AI.gateway()` binding, which authenticates via your Cloudflare account. The only config is a plaintext gateway id. This does **not** make the container harmless: anything running in it can spend through your gateway (see [Security](#security)).
@@ -135,24 +135,17 @@ export class ClaudeCodeAgent extends AIChatAgent<Env> {
 }
 ```
 
-The orchestrator tears each container down once its run is over:
+Each sub-agent releases its own container when its turn ends:
 
 ```ts
-export class CodingOrchestrator extends Think<Env> {
-  override async onAgentToolFinish(
-    run: AgentToolRunInfo,
-    result: AgentToolLifecycleResult
-  ) {
-    // The orchestrator stopped waiting, but the child may still be working.
-    if (result.status === "interrupted" && result.childStillRunning !== false) {
-      return;
-    }
-    await sandboxFor(this.env, this.name, run.runId).destroy();
+export class ClaudeCodeAgent extends AIChatAgent<Env> {
+  protected override async onChatResponse() {
+    await sandboxFor(this.env, this.name).destroy();
   }
 }
 ```
 
-An `interrupted` run (the orchestrator gave up waiting, e.g. after a restart) keeps its container while the child may still be working, and a run whose child failed to start never delivers a finish at all. So on every wake the orchestrator also sweeps its tracked containers (`releaseIdleSandboxes`) and destroys any whose child run is no longer `running`.
+A drill-in follow-up turn gets a fresh container and clones the repo again.
 
 A turn only counts as successful if the `claude` process exits with code 0 and every `git` command succeeds. A failed clone, a non-zero exit, or a log stream that ends with no exit event (what a container dying mid-turn looks like) is reported in the delegate's panel and marks the run as an error, so the orchestrator sees a failure rather than "no file changes".
 

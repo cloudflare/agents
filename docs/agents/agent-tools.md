@@ -43,13 +43,6 @@ The parent finds the namespace through `ctx.exports`, so you do not pass the
 binding yourself. Each run gets a child under a random name the parent records
 with the run, so two runs never share a child.
 
-Pass `childName` to `runAgentTool()` to send several runs to the same child,
-which then keeps its messages between them. The name is global to the child
-class: every parent that passes the same name reaches the same object, so
-scope it to the parent, for example `` `${this.name}:researcher` ``.
-`clearAgentToolRuns()` cancels a named child's runs but never destroys it,
-because other runs, or your own code, may still use it.
-
 ## Use an Agent as an AI SDK tool
 
 Use `agentTool()` when the parent model should decide when to call the helper.
@@ -608,13 +601,7 @@ class is a declared Durable Object, so `routeAgentRequest()` also routes
 the child's name (the child sends its identity on connect). Authorize both
 paths in your Worker, for example in the `onBeforeConnect` and
 `onBeforeRequest` options of `routeAgentRequest()`, the same way you
-authorize the parent. Server code reaches the child with `getAgentToolChild(runId)`,
-which returns a stub, or `null` for an unknown run:
-
-```ts
-const child = await this.getAgentToolChild<Researcher>(runId);
-const inspection = await child?.inspectAgentToolRun(runId);
-```
+authorize the parent.
 
 ## Clear retained runs
 
