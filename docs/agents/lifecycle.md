@@ -490,6 +490,9 @@ Durable Object is reachable from `useAgent` and `AgentClient` exactly like an
   never leaves the host. Without the option, state is never sent or
   accepted over connections.
 
+- `log(name, options)` declares an [event log](./event-logs.md): numbered,
+  stored events that clients replay by cursor after a reconnect.
+
 - Any other frame goes to `handlers.onMessage`.
 
 An `Agent` adds no new surface for this: its `@callable()`-decorated methods

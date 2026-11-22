@@ -46,6 +46,7 @@ The Lifecycle runs startup, routes requests to capabilities, and owns the object
 
 - [Durable Object Lifecycle](./lifecycle.md) - Install a Lifecycle on a Durable Object, write capabilities, and use the job queue
 - [getCurrentAgent()](./get-current-agent.md) - Accessing the current object, request, and connection across async calls
+- [Event logs (Experimental)](./event-logs.md) - Numbered WebSocket events that clients replay by cursor after a reconnect
 
 ## Harnesses
 

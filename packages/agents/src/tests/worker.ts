@@ -27,6 +27,8 @@ import type {
   RetryableStartObject,
   StatefulPlainObject
 } from "./capabilities/lifecycle.ts";
+export { EventLogObject } from "./capabilities/event-log.ts";
+import type { EventLogObject } from "./capabilities/event-log.ts";
 export {
   ScheduledLifecycleObject,
   SchedulerHarnessObject,
@@ -257,6 +259,7 @@ export type Env = {
   EvictableStartObject: DurableObjectNamespace<EvictableStartObject>;
   FetchErrorObject: DurableObjectNamespace<FetchErrorObject>;
   StatefulPlainObject: DurableObjectNamespace<StatefulPlainObject>;
+  EventLogObject: DurableObjectNamespace<EventLogObject>;
   ScheduledLifecycleObject: DurableObjectNamespace<ScheduledLifecycleObject>;
   SchedulerHarnessObject: DurableObjectNamespace<SchedulerHarnessObject>;
   SchedulerStartupWarnObject: DurableObjectNamespace<SchedulerStartupWarnObject>;

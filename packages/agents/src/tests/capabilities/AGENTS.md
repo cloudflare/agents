@@ -29,6 +29,9 @@ per capability, all registered in the shared workers project
 - `streams.ts` — `StreamHarnessObject` (Streams as the only capability) and
   `TaskStreamComposeObject` (the checkpointed-cursor contract with Tasks,
   including recovery from stream evidence).
+- `event-log.ts` — `EventLogObject` (WebSockets with three event logs:
+  small retention and batches, no snapshot, and a `canSubscribe` guard),
+  with RPC methods to publish, batch, crash, and read the stored rows.
 - `mcp-client.ts` — `PlainMcpClientObject` (manager as an installed
   capability); its driver `withMcpHarness()` (in `../shared/mcp-harness.ts`)
   creates per-test managers over shared real storage, simulating hibernation
