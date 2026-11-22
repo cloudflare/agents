@@ -3333,6 +3333,16 @@ describe("Think — body persistence", () => {
   });
 });
 
+describe("Think — chat() over RPC", () => {
+  it("tells the caller the reply is done before onChatResponse runs", async () => {
+    const agent = await getAgentByName(env.ThinkTestAgent, crypto.randomUUID());
+    expect(await agent.rpcDoneOrderForTest()).toEqual([
+      "onDone",
+      "onChatResponse:completed"
+    ]);
+  });
+});
+
 // ── chatRecovery ────────────────────────────────────────
 
 describe("Think — chatRecovery", () => {

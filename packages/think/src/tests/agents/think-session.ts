@@ -57,6 +57,7 @@ import {
   dispatchChatProtocol,
   sanitizeMessage,
   enforceRowSizeLimit,
+  LiveReply,
   StreamAccumulator,
   toolResultUpdate,
   type ChatProtocolHost
@@ -2484,12 +2485,12 @@ export class ThinkTestAgent extends Think {
     };
     internals._resumeHandshake().notifyStreamResuming(connection);
     if (close === "finish") {
-      this._finishResumableStream(streamId);
+      this["_replyStreams"].finish(streamId);
       this._resumableStream.finalizePending();
     } else if (close === "complete") {
-      this._completeResumableStream(streamId);
+      this["_replyStreams"].complete(streamId);
     } else {
-      this._errorResumableStream(streamId);
+      this["_replyStreams"].error(streamId);
     }
     internals._frames.broadcast({
       type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
@@ -4237,13 +4238,11 @@ export class ThinkTestAgent extends Think {
     restore(): void;
   } {
     const self = this as unknown as {
-      _streamResultToRpcCallback(
-        ...args: unknown[]
-      ): Promise<{ status: string }>;
+      _pumpReply(...args: unknown[]): Promise<{ status: string }>;
     };
-    const original = self._streamResultToRpcCallback;
+    const original = self._pumpReply;
     let status: string | undefined;
-    self._streamResultToRpcCallback = async (...args) => {
+    self._pumpReply = async (...args) => {
       const result = await original.apply(this, args);
       status = result.status;
       return result;
@@ -4251,7 +4250,7 @@ export class ThinkTestAgent extends Think {
     return {
       read: () => status,
       restore: () => {
-        self._streamResultToRpcCallback = original;
+        self._pumpReply = original;
       }
     };
   }
@@ -4646,7 +4645,7 @@ export class ThinkTestAgent extends Think {
         _timer: ReturnType<typeof setTimeout> | null;
         cancelTimer(): void;
       };
-      _streamingAssistant: unknown;
+      _turns: { liveReply: unknown };
     };
     // Seed a pending auto-continuation with `pastCoalesce: false` so the buggy
     // re-arm path (`_rearmPendingAutoContinuationForBatch`) would reset the
@@ -4670,7 +4669,7 @@ export class ThinkTestAgent extends Think {
       // ran, so an erroneously armed 50ms timer cannot have fired yet.
       const coalesceTimerArmedAfterStall =
         internal._autoContinuation._timer !== null;
-      const streamingAssistantCleared = internal._streamingAssistant === null;
+      const streamingAssistantCleared = internal._turns.liveReply === null;
       const scheduledContinues = recoveryWorkCountForTest(
         this,
         "_chatRecoveryContinue"
@@ -4745,26 +4744,23 @@ export class ThinkTestAgent extends Think {
   async runInBandStreamErrorForTest(errorText: string): Promise<void> {
     await (
       this as unknown as {
-        _streamResult: (
+        _pumpReply: (
           requestId: string,
           result: StreamableResult
-        ) => Promise<void>;
+        ) => Promise<unknown>;
       }
-    )._streamResult(
-      crypto.randomUUID(),
-      createInBandErrorStreamResult(errorText)
-    );
+    )._pumpReply(crypto.randomUUID(), createInBandErrorStreamResult(errorText));
   }
 
   async runPartialInBandStreamErrorForTest(errorText: string): Promise<void> {
     await (
       this as unknown as {
-        _streamResult: (
+        _pumpReply: (
           requestId: string,
           result: StreamableResult
-        ) => Promise<void>;
+        ) => Promise<unknown>;
       }
-    )._streamResult(
+    )._pumpReply(
       crypto.randomUUID(),
       createInBandErrorStreamResult(errorText, ["partial response"])
     );
@@ -4773,12 +4769,12 @@ export class ThinkTestAgent extends Think {
   async runInBandStreamErrorThenTextForTest(errorText: string): Promise<void> {
     await (
       this as unknown as {
-        _streamResult: (
+        _pumpReply: (
           requestId: string,
           result: StreamableResult
-        ) => Promise<void>;
+        ) => Promise<unknown>;
       }
-    )._streamResult(
+    )._pumpReply(
       crypto.randomUUID(),
       createInBandErrorStreamResult(errorText, [], ["ignored response"])
     );
@@ -4787,12 +4783,12 @@ export class ThinkTestAgent extends Think {
   async runEmptyStreamForTest(): Promise<void> {
     await (
       this as unknown as {
-        _streamResult: (
+        _pumpReply: (
           requestId: string,
           result: StreamableResult
-        ) => Promise<void>;
+        ) => Promise<unknown>;
       }
-    )._streamResult(crypto.randomUUID(), createEmptyStreamResult());
+    )._pumpReply(crypto.randomUUID(), createEmptyStreamResult());
   }
 
   /**
@@ -4809,12 +4805,12 @@ export class ThinkTestAgent extends Think {
     const requestId = crypto.randomUUID();
     await (
       this as unknown as {
-        _streamResult: (
+        _pumpReply: (
           requestId: string,
           result: StreamableResult
-        ) => Promise<void>;
+        ) => Promise<unknown>;
       }
-    )._streamResult(
+    )._pumpReply(
       requestId,
       createInBandErrorStreamResult(errorText, ["partial response"])
     );
@@ -4844,20 +4840,46 @@ export class ThinkTestAgent extends Think {
     return { returned, frames };
   }
 
+  /** The order a `chat()` caller hears `onDone` and the app `onChatResponse`. */
+  async rpcDoneOrderForTest(): Promise<string[]> {
+    const order: string[] = [];
+    const self = this as unknown as {
+      onChatResponse(result: ChatResponseResult): unknown;
+    };
+    const original = self.onChatResponse;
+    self.onChatResponse = async (result) => {
+      order.push(`onChatResponse:${result.status}`);
+    };
+    try {
+      await this.chat("hi", {
+        onStart() {},
+        onEvent() {},
+        onDone() {
+          order.push("onDone");
+        },
+        onError(error: string) {
+          order.push(`onError:${error}`);
+        }
+      });
+    } finally {
+      self.onChatResponse = original;
+    }
+    return order;
+  }
+
   async runEmptyRpcStreamForTest(): Promise<{ doneCalled: boolean }> {
     let doneCalled = false;
     await (
       this as unknown as {
-        _streamResultToRpcCallback: (
+        _pumpReply: (
           requestId: string,
           result: StreamableResult,
-          callback: StreamCallback
-        ) => Promise<void>;
+          signal: AbortSignal | undefined,
+          options: { sink: StreamCallback }
+        ) => Promise<unknown>;
       }
-    )._streamResultToRpcCallback(
-      crypto.randomUUID(),
-      createEmptyStreamResult(),
-      {
+    )._pumpReply(crypto.randomUUID(), createEmptyStreamResult(), undefined, {
+      sink: {
         onStart() {},
         onEvent() {},
         onDone() {
@@ -4867,7 +4889,7 @@ export class ThinkTestAgent extends Think {
           throw new Error(error);
         }
       }
-    );
+    });
     return { doneCalled };
   }
 
@@ -9147,12 +9169,12 @@ export class ThinkProgrammaticTestAgent extends Think {
     };
     await (
       this as unknown as {
-        _streamResult: (
+        _pumpReply: (
           requestId: string,
           result: StreamableResult
-        ) => Promise<void>;
+        ) => Promise<unknown>;
       }
-    )._streamResult(requestId, result);
+    )._pumpReply(requestId, result);
   }
 
   async setSubmissionStatusDelayForTest(delayMs: number): Promise<void> {
@@ -9700,9 +9722,10 @@ export class ThinkProgrammaticTestAgent extends Think {
     requestId: string,
     status: "completed" | "error" | "retry"
   ): Promise<void> {
-    const streamId = this._startResumableStream(requestId);
-    if (status === "error") this._errorResumableStream(streamId, requestId);
-    else this._completeResumableStream(streamId);
+    const streams = this["_replyStreams"];
+    const streamId = streams.start(requestId);
+    if (status === "error") streams.error(streamId, requestId);
+    else streams.complete(streamId);
     if (status === "retry") {
       this
         .sql`UPDATE cf_think_submissions SET result_status = 'retry' WHERE request_id = ${requestId}`;
@@ -10142,12 +10165,15 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   private _streamStartContinuations: boolean[] = [];
 
-  protected override _startResumableStream(
-    requestId: string,
-    options?: { messageId?: string; continuation?: boolean }
-  ): string {
-    this._streamStartContinuations.push(options?.continuation ?? false);
-    return super._startResumableStream(requestId, options);
+  constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
+    super(ctx, env);
+    // Every reply's stream starts here (`pumpReply`).
+    const streams = this["_replyStreams"];
+    const start = streams.start.bind(streams);
+    streams.start = (requestId, options) => {
+      this._streamStartContinuations.push(options?.continuation ?? false);
+      return start(requestId, options);
+    };
   }
 
   async getStreamStartContinuationsForTest(): Promise<boolean[]> {
@@ -11200,17 +11226,23 @@ export class ThinkRecoveryTestAgent extends Think {
   }> {
     const self = this as unknown as {
       _resumableStream: { start(id: string): string };
-      _storeChunkDurably(
-        streamId: string,
-        chunk: unknown,
-        chunkBody: string,
-        state: { chunksSinceFlush: number; hasFlushedContent: boolean }
-      ): Promise<void>;
+      _replyStreams: {
+        store(
+          streamId: string,
+          chunk: { type: string; [key: string]: unknown },
+          chunkBody: string,
+          state: { chunksSinceFlush: number; hasFlushedContent: boolean }
+        ): number | undefined;
+      };
     };
     const streamId = self._resumableStream.start("req-tool-durability");
     const state = { chunksSinceFlush: 0, hasFlushedContent: false };
-    const store = (chunk: Record<string, unknown>): Promise<void> =>
-      self._storeChunkDurably(streamId, chunk, JSON.stringify(chunk), state);
+    const store = async (chunk: {
+      type: string;
+      [key: string]: unknown;
+    }): Promise<void> => {
+      self._replyStreams.store(streamId, chunk, JSON.stringify(chunk), state);
+    };
     const rawCount = (): number => {
       const rows = this.sql<{ count: number }>`
         SELECT COALESCE(MAX(seq_to), 0) as count FROM cf_agents_stream_blocks
@@ -11241,17 +11273,23 @@ export class ThinkRecoveryTestAgent extends Think {
   }> {
     const self = this as unknown as {
       _resumableStream: { start(id: string): string };
-      _storeChunkDurably(
-        streamId: string,
-        chunk: unknown,
-        chunkBody: string,
-        state: { chunksSinceFlush: number; hasFlushedContent: boolean }
-      ): Promise<void>;
+      _replyStreams: {
+        store(
+          streamId: string,
+          chunk: { type: string; [key: string]: unknown },
+          chunkBody: string,
+          state: { chunksSinceFlush: number; hasFlushedContent: boolean }
+        ): number | undefined;
+      };
     };
     const streamId = self._resumableStream.start("req-tool-call-durability");
     const state = { chunksSinceFlush: 0, hasFlushedContent: false };
-    const store = (chunk: Record<string, unknown>): Promise<void> =>
-      self._storeChunkDurably(streamId, chunk, JSON.stringify(chunk), state);
+    const store = async (chunk: {
+      type: string;
+      [key: string]: unknown;
+    }): Promise<void> => {
+      self._replyStreams.store(streamId, chunk, JSON.stringify(chunk), state);
+    };
     const rawCount = (): number =>
       this.sql<{ count: number }>`
         SELECT COALESCE(MAX(seq_to), 0) as count FROM cf_agents_stream_blocks
@@ -11281,12 +11319,14 @@ export class ThinkRecoveryTestAgent extends Think {
   }> {
     const self = this as unknown as {
       _resumableStream: { start(id: string): string };
-      _storeChunkDurably(
-        streamId: string,
-        chunk: unknown,
-        chunkBody: string,
-        state: { chunksSinceFlush: number; hasFlushedContent: boolean }
-      ): Promise<void>;
+      _replyStreams: {
+        store(
+          streamId: string,
+          chunk: { type: string; [key: string]: unknown },
+          chunkBody: string,
+          state: { chunksSinceFlush: number; hasFlushedContent: boolean }
+        ): number | undefined;
+      };
       _persistOrphanedStream(streamId: string): Promise<void>;
     };
     const read = async (): Promise<number> =>
@@ -11295,8 +11335,12 @@ export class ThinkRecoveryTestAgent extends Think {
     const start = await read();
     const streamId = self._resumableStream.start("req-progress-immunity");
     const state = { chunksSinceFlush: 0, hasFlushedContent: false };
-    const store = (chunk: Record<string, unknown>): Promise<void> =>
-      self._storeChunkDurably(streamId, chunk, JSON.stringify(chunk), state);
+    const store = async (chunk: {
+      type: string;
+      [key: string]: unknown;
+    }): Promise<void> => {
+      self._replyStreams.store(streamId, chunk, JSON.stringify(chunk), state);
+    };
 
     await store({ type: "text-delta", id: "t", delta: "hello" });
     await store({
@@ -12260,13 +12304,9 @@ export class ThinkRecoveryTestAgent extends Think {
     )._resumableStream.insertChunkAt(streamId, '{"type":"text"}', ageMs);
   }
 
-  /** Start a stream via the cleanup-arming wrapper (without ever finishing it). */
+  /** Start a reply's stream (without ever finishing it). */
   async startStreamForTest(requestId: string): Promise<string> {
-    return (
-      this as unknown as {
-        _startResumableStream(requestId: string): string;
-      }
-    )._startResumableStream(requestId);
+    return this["_replyStreams"].start(requestId);
   }
 
   /** Reclaim leftover streams now, as the next stream start does. */
@@ -12274,11 +12314,9 @@ export class ThinkRecoveryTestAgent extends Think {
     return this._resumableStream.reclaim(nowMs);
   }
 
-  /** Finish a stream via the cleanup-arming wrapper (mirrors a real turn end). */
+  /** Complete a reply's stream (mirrors a real turn end). */
   async completeStreamForTest(streamId: string): Promise<void> {
-    (
-      this as unknown as { _completeResumableStream(id: string): void }
-    )._completeResumableStream(streamId);
+    this["_replyStreams"].complete(streamId);
   }
 
   /**
@@ -12500,7 +12538,7 @@ export class ThinkRecoveryTestAgent extends Think {
   }
 
   /**
-   * Seed the in-flight `_streamingAssistant` accumulator with `parts` (or clear
+   * Seed the in-flight reply (`ChatTurns.liveReply`) with `parts` (or clear
    * it with `null`), simulating a mid-stream turn whose partial hasn't been
    * persisted to `this.messages` yet — e.g. a parallel tool batch where a
    * client-tool `input-available` part has streamed but the end-of-stream
@@ -12510,15 +12548,16 @@ export class ThinkRecoveryTestAgent extends Think {
   async setStreamingAssistantForTest(
     parts: UIMessage["parts"] | null
   ): Promise<void> {
-    (
-      this as unknown as { _streamingAssistant: StreamAccumulator | null }
-    )._streamingAssistant =
+    this["_turns"].liveReply =
       parts === null
         ? null
-        : new StreamAccumulator({
-            messageId: "streaming-assistant",
-            existingParts: parts
-          });
+        : new LiveReply(
+            "streaming-request",
+            new StreamAccumulator({
+              messageId: "streaming-assistant",
+              existingParts: parts
+            })
+          );
   }
 
   async waitUntilStableForTest(timeout?: number): Promise<boolean> {

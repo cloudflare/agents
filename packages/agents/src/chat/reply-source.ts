@@ -50,7 +50,12 @@ export function streamErrorText(error: unknown): string {
     try {
       text = JSON.stringify(error);
     } catch {
-      text = String(error);
+      try {
+        text = String(error);
+      } catch {
+        // An error that cannot be written as text still failed the reply.
+        text = undefined;
+      }
     }
   }
   // A stream that errors with no reason still failed: the text is what

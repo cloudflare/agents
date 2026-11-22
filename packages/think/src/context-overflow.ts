@@ -16,31 +16,17 @@
  */
 
 import type { ModelMessage } from "ai";
-import { ChatStreamStalledError, isDurableObjectResetError } from "agents/chat";
+import {
+  ChatStreamStalledError,
+  TransientChatStreamError,
+  isDurableObjectResetError
+} from "agents/chat";
 import type {
   ChatErrorClassification,
   ChatErrorContext,
   ContextOverflowConfig,
   PrepareStepContext
 } from "./turn-types";
-
-/**
- * Carries an in-stream error that `classifyChatError` marked transient out of
- * the drain loop, so it reaches the same recovery routing as a thrown error.
- * `original` is the provider error the stream reported, when it had one.
- *
- * @internal
- */
-export class TransientChatStreamError extends Error {
-  constructor(
-    message: string,
-    readonly classification: ChatErrorClassification,
-    readonly original: unknown
-  ) {
-    super(message);
-    this.name = "TransientChatStreamError";
-  }
-}
 
 /**
  * Whether a classification routes the turn into bounded recovery.
@@ -178,7 +164,7 @@ export class ThinkContextOverflow {
     error: unknown,
     requestId: string
   ): ChatErrorClassification | undefined {
-    if (error instanceof TransientChatStreamError) return error.classification;
+    if (error instanceof TransientChatStreamError) return "transient";
     if (error instanceof ChatStreamStalledError) return undefined;
     if (isDurableObjectResetError(error)) return undefined;
     const classification = this.classifyStreamError(error, requestId);

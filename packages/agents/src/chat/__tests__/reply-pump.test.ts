@@ -843,6 +843,33 @@ describe("pumpReply, review findings", () => {
     expect(frames.find((f) => f.error)?.body).toBe("wrapped: provider failed");
   });
 
+  it("sends the terminal frame when the error hook throws", async () => {
+    const errors: string[] = [];
+    const { host, frames } = fakeHost({
+      describeError: () => {
+        throw new Error("hook failed");
+      }
+    });
+    const result = await pumpReply(
+      input({
+        source: source([
+          { type: "text-start", id: "t" },
+          { type: "error", errorText: "provider failed" }
+        ]),
+        sink: {
+          chunk: async () => {},
+          done: async () => {},
+          error: async (message) => void errors.push(message),
+          interrupted: async () => {}
+        }
+      }),
+      host
+    );
+    expect(result).toEqual({ status: "error", error: "provider failed" });
+    expect(frames.at(-1)).toMatchObject({ done: true, outcome: "error" });
+    expect(errors).toEqual(["provider failed"]);
+  });
+
   it("describes a structured output failure through the host", async () => {
     const { host } = fakeHost({
       describeError: (error) =>
@@ -1030,6 +1057,18 @@ describe("responseSource", () => {
     src.cancel?.();
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(body.locked).toBe(false);
+  });
+
+  it("gives a text for an error that cannot be written as text", () => {
+    const error = {
+      toJSON() {
+        throw new Error("no");
+      },
+      toString() {
+        throw new Error("no");
+      }
+    };
+    expect(streamErrorText(error)).toBe("Stream error");
   });
 
   it("reads an empty plain-text body as no reply", async () => {

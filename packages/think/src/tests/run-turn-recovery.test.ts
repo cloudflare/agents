@@ -199,7 +199,10 @@ describe("recovery × failed final persist (#1997)", () => {
     const result = await agent.testRunTurnWait("hello");
 
     expect(result.status).toBe("error");
-    expect(await agent.getChatResponsesForTest()).toEqual([]);
+    // The turn ended, so its hook runs, with the error.
+    expect(await agent.getChatResponsesForTest()).toEqual([
+      expect.objectContaining({ status: "error" })
+    ]);
   });
 
   it("does not mark a recovery incident completed when the continuation cannot persist", async () => {
@@ -260,7 +263,9 @@ describe("recovery × failed final persist (#1997)", () => {
     }>;
     expect(incidents).toHaveLength(1);
     expect(incidents[0].status).not.toBe("completed");
-    expect(await agent.getChatResponsesForTest()).toEqual([]);
+    expect(await agent.getChatResponsesForTest()).toEqual([
+      expect.objectContaining({ status: "error" })
+    ]);
   });
 });
 
