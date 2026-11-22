@@ -106,7 +106,8 @@ export type LifecycleJobContext = {
    * its CPU or wall-time limit). Those are counted durably before `onJob`
    * runs, so after such an attempt the next invocation runs attempt 2. A
    * push or a non-final outcome (`rescheduleAt`, `"yield"`) starts the count
-   * again. A number can repeat when its write was lost with the isolate; it
+   * again, as does a `reschedule()`. A number can repeat when its write was
+   * lost with the isolate; it
    * is not a deduplication key.
    */
   readonly attempt: number;

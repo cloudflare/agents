@@ -9,13 +9,15 @@ import { withCapabilityHarness } from "../shared/capability-harness";
 
 class Jobs extends LifecycleCapability {
   readonly ran: string[] = [];
+  readonly attempts: number[] = [];
 
   constructor(id: string) {
     super(id);
   }
 
-  onJob({ job }: LifecycleJobContext): void {
+  onJob({ job, attempt }: LifecycleJobContext): void {
     this.ran.push(job.id);
+    this.attempts.push(attempt);
   }
 
   push(options: LifecycleJobPushOptions) {
@@ -61,6 +63,16 @@ describe("jobs whose owner is not installed", () => {
         capture.stop();
       }
 
+      // Looking at an ownerless job is no attempt of it: it can be looked
+      // at many times and still runs once its owner returns.
+      for (let i = 0; i < 4; i++) {
+        storage.sql.exec(
+          "UPDATE cf_agents_jobs SET time = ? WHERE id = 'work'",
+          Date.now() - 1
+        );
+        await without.lifecycle.alarm();
+      }
+
       // The owner comes back and the job runs.
       storage.sql.exec(
         "UPDATE cf_agents_jobs SET time = ? WHERE id = 'work'",
@@ -70,6 +82,7 @@ describe("jobs whose owner is not installed", () => {
       await after.lifecycle.start();
       await after.lifecycle.alarm();
       expect(after.capability.ran).toEqual(["work"]);
+      expect(after.capability.attempts).toEqual([1]);
     });
   });
 
