@@ -21,8 +21,10 @@ afterEach(() => {
   cleanup();
 });
 
-// oxlint-disable-next-line @typescript-eslint/no-explicit-any -- tests don't need strict agent typing
-type Agent = ReturnType<typeof useAgent<any>>;
+/** The part of the agent the test drives: untyped calls to `publish`. */
+type Agent = {
+  call<T = unknown>(method: string, args?: unknown[]): Promise<T>;
+};
 
 function Feed({
   name,
@@ -34,8 +36,7 @@ function Feed({
   onResync: () => void;
 }) {
   const { host, protocol } = getTestWorkerHost();
-  // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- untyped calls
-  const agent = useAgent<any>({
+  const agent = useAgent({
     agent: "EventLogObject",
     name,
     host,

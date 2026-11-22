@@ -229,6 +229,8 @@ export class EventLog<T = unknown, S = unknown> {
   #bufferBytes = 0;
   #openBatches = 0;
   #timer: ReturnType<typeof setTimeout> | undefined;
+  /** A crash gap was recorded and surviving followers are not told yet. */
+  #resyncPending = false;
 
   /** @internal Use `WebSockets.log()`. */
   constructor(name: string, options: EventLogOptions<S>, host: EventLogHost) {
@@ -282,7 +284,7 @@ export class EventLog<T = unknown, S = unknown> {
     this.#buffer.push(entry);
     this.#bufferBytes += entry.bytes;
     this.#flush();
-    this.#broadcast([entry]);
+    this.#deliver(entry);
     return entry.seq;
   }
 
@@ -302,7 +304,7 @@ export class EventLog<T = unknown, S = unknown> {
         const entry = this.#entry(data);
         this.#buffer.push(entry);
         this.#bufferBytes += entry.bytes;
-        this.#broadcast([entry]);
+        this.#deliver(entry);
         if (
           first ||
           this.#buffer.length >= this.#batchEvents ||
@@ -332,24 +334,30 @@ export class EventLog<T = unknown, S = unknown> {
    * resync. Runs synchronously from reading the head to marking the
    * connection subscribed, so no event falls between replay and live.
    */
-  subscribe(connection: Connection, cursor: EventLogCursor | undefined): void {
+  subscribe(
+    connection: Connection,
+    cursor: EventLogCursor | undefined,
+    id?: string
+  ): void {
     if (this.#canSubscribe && !this.#canSubscribe(connection)) {
-      this.#sendError(connection, "Subscription refused");
+      this.#sendError(connection, "Subscription refused", id);
       return;
     }
-    const loaded = this.#load(connection);
+    const loaded = this.#load();
+    this.#resyncFollowers(connection);
     if (cursor && this.#canReplay(loaded, cursor.epoch, cursor.seq)) {
-      this.#replay(connection, cursor.seq);
+      this.#replay(connection, cursor.seq, id);
       trySend(
         connection,
         JSON.stringify({
           type: EVENT_LOG_SYNCED,
           log: this.name,
           epoch: loaded.epoch,
-          seq: loaded.head
+          seq: loaded.head,
+          ...(id !== undefined && { id })
         })
       );
-    } else if (!this.#sendResync(connection, loaded)) {
+    } else if (!this.#sendResync(connection, loaded, id)) {
       return;
     }
     const logs = followedLogs(connection);
@@ -380,18 +388,22 @@ export class EventLog<T = unknown, S = unknown> {
     const oldest = loaded.oldest ?? this.#buffer[0]?.seq ?? loaded.head + 1;
     if (seq < oldest - 1) return false;
     if (seq === 0 || seq < oldest) return true;
-    // A cursor inside a gap saw events a crash lost.
+    // A cursor inside a gap saw events a crash lost. The gap's last seq
+    // is never a lost event's (see #load): a cursor equal to it was
+    // handed out as the head, so it is safe to replay from.
     const row = this.#sql<{ kind: string; seq_to: number }>(
       `SELECT kind, seq_to FROM cf_agents_event_log_rows
        WHERE log = ? AND seq_from <= ? ORDER BY seq_from DESC LIMIT 1`,
       this.name,
       seq
     )[0];
-    return !(row && row.kind === "gap" && row.seq_to >= seq);
+    return !(row && row.kind === "gap" && seq < row.seq_to);
   }
 
-  #replay(connection: Connection, after: number): void {
-    const prefix = `{"type":"${EVENT_LOG_EVENTS}","log":${JSON.stringify(this.name)},"events":`;
+  #replay(connection: Connection, after: number, id?: string): void {
+    const prefix = `{"type":"${EVENT_LOG_EVENTS}","log":${JSON.stringify(
+      this.name
+    )},${id === undefined ? "" : `"id":${JSON.stringify(id)},`}"events":`;
     const rows = this.#host.sql().exec<Row>(
       `SELECT seq_from, seq_to, kind, body, bytes FROM cf_agents_event_log_rows
          WHERE log = ? AND seq_to > ? ORDER BY seq_from ASC`,
@@ -419,13 +431,13 @@ export class EventLog<T = unknown, S = unknown> {
   }
 
   /** Send a resync with the host's snapshot. Returns false when it failed. */
-  #sendResync(connection: Connection, loaded: Loaded): boolean {
+  #sendResync(connection: Connection, loaded: Loaded, id?: string): boolean {
     let snapshot: S | undefined;
     try {
       snapshot = this.#snapshot?.(connection);
     } catch (error) {
       console.error(`[EventLog] snapshot for "${this.name}" threw:`, error);
-      this.#sendError(connection, "Snapshot failed");
+      this.#sendError(connection, "Snapshot failed", id);
       return false;
     }
     let text: string;
@@ -435,25 +447,40 @@ export class EventLog<T = unknown, S = unknown> {
         log: this.name,
         epoch: loaded.epoch,
         seq: loaded.head,
-        ...(snapshot !== undefined && { snapshot })
+        ...(snapshot !== undefined && { snapshot }),
+        ...(id !== undefined && { id })
       });
     } catch (error) {
       console.error(
         `[EventLog] snapshot for "${this.name}" is not JSON:`,
         error
       );
-      this.#sendError(connection, "Snapshot failed");
+      this.#sendError(connection, "Snapshot failed", id);
       return false;
     }
     trySend(connection, text);
     return true;
   }
 
-  #sendError(connection: Connection, error: string): void {
+  #sendError(connection: Connection, error: string, id?: string): void {
     trySend(
       connection,
-      JSON.stringify({ type: EVENT_LOG_ERROR, log: this.name, error })
+      JSON.stringify({
+        type: EVENT_LOG_ERROR,
+        log: this.name,
+        error,
+        ...(id !== undefined && { id })
+      })
     );
+  }
+
+  /**
+   * Send a new event to the followers, or, when a crash resync is
+   * pending, resync them at this event's seq instead: their snapshot is
+   * taken after the producer's state change, so it already holds it.
+   */
+  #deliver(entry: Entry): void {
+    if (!this.#resyncFollowers()) this.#broadcast([entry]);
   }
 
   #broadcast(entries: readonly Entry[]): void {
@@ -504,7 +531,7 @@ export class EventLog<T = unknown, S = unknown> {
    * record those seqs as a gap and resync the connections still
    * following (hibernated sockets survive an eviction).
    */
-  #load(except?: Connection): Loaded {
+  #load(): Loaded {
     if (this.#loaded) return this.#loaded;
     const sql = this.#host.sql();
     ensureTables(sql);
@@ -574,13 +601,33 @@ export class EventLog<T = unknown, S = unknown> {
       loaded.rows += 1;
       this.#host.emit("eventlog:gap", { log: this.name, from, to });
       this.#trim(loaded);
-      for (const connection of this.#host.connections()) {
-        if (connection === except) continue;
-        if (!followedLogs(connection).includes(this.name)) continue;
-        if (!this.#sendResync(connection, loaded)) this.unsubscribe(connection);
-      }
+      // Followers that survived (hibernated sockets outlive an eviction)
+      // are resynced, but not from here: this may be the first `publish`
+      // after the wake, whose state change the snapshot already holds.
+      // That publish resyncs them at its own seq instead of sending the
+      // event; otherwise a microtask resyncs them at the head once the
+      // current synchronous block is done.
+      this.#resyncPending = true;
+      queueMicrotask(() => this.#resyncFollowers());
     }
     return loaded;
+  }
+
+  /**
+   * Send the pending crash resync to every follower but `except`, at the
+   * current head. Returns whether one was pending.
+   */
+  #resyncFollowers(except?: Connection): boolean {
+    if (!this.#resyncPending || !this.#loaded) return false;
+    this.#resyncPending = false;
+    for (const connection of this.#host.connections()) {
+      if (connection === except) continue;
+      if (!followedLogs(connection).includes(this.name)) continue;
+      if (!this.#sendResync(connection, this.#loaded)) {
+        this.unsubscribe(connection);
+      }
+    }
+    return true;
   }
 
   /**

@@ -66,6 +66,8 @@ export default {
 
 `publish(data)` stores the event, then sends it to every connection following the log, and returns its `seq`. Data must be JSON.
 
+Change the state your snapshot reads and publish the event in the same synchronous block, as `addItem` does. A snapshot taken at `seq` n then holds every event up to n and none after it. With an `await` between the write and the `publish`, a client that subscribes in between gets the write in its snapshot and again as an event.
+
 ## Follow a log from a client
 
 In React, use `useEventLog` with the agent from `useAgent`:
@@ -115,12 +117,12 @@ subscription.close();
 
 The handlers:
 
-- `onResync(snapshot, seq)` runs on the first subscription, and whenever the server cannot replay what the client missed. Replace your local state with the snapshot. The snapshot is `undefined` when the log has no `snapshot` option; fetch your own state then.
+- `onResync(snapshot, seq)` runs on the first subscription, and whenever the server cannot replay what the client missed. Replace your local state with the snapshot. The snapshot is `undefined` when the log has no `snapshot` option; fetch your own state then. Events keep arriving while that fetch is in flight, so hold them until it returns, then apply them, and make applying an event the fetched state already holds a no-op.
 - `onEvent(data, seq)` runs for every event after that, replayed or live, in `seq` order.
 - `onSynced(seq)` runs when a reconnect finished replaying.
 - `onError(error)` runs when the server refuses the subscription.
 
-The client keeps its cursor in memory. A page reload starts with `onResync`.
+The client keeps its cursor in memory. A page reload starts with `onResync`. Several followers of one log can share a socket: each gets its own replay or resync, and the server stops sending the log's events only when the last one closes.
 
 ## When a client gets a resync
 
@@ -151,10 +153,13 @@ Storing every event as its own row is too many writes for a stream of model toke
 
 ```ts
 const batch = this.tokens.batch();
-for await (const chunk of stream) {
-  batch.append(chunk);
+try {
+  for await (const chunk of stream) {
+    batch.append(chunk);
+  }
+} finally {
+  batch.close();
 }
-batch.close();
 ```
 
 `append` gives the event its `seq` and sends it at once, then stores it with the next write of the buffer. The buffer is written when it holds 10 events or 256 KiB, after 250 ms, when something is published to the same log, and on `close()`. Tune it per log with `batching: { maxEvents, maxBytes, maxDelayMs }`.

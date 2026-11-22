@@ -50,6 +50,27 @@ export type EventLogSubscription = {
 const OPEN = 1;
 
 /**
+ * Open subscriptions per socket and log. Several followers of one log on
+ * one socket share the server's subscription, so only the last to close
+ * sends the unsubscribe.
+ */
+const openFollowers = new WeakMap<EventLogSocket, Map<string, number>>();
+
+let followerCount = 0;
+
+function countFollowers(socket: EventLogSocket, log: string, by: number) {
+  let logs = openFollowers.get(socket);
+  if (!logs) {
+    logs = new Map();
+    openFollowers.set(socket, logs);
+  }
+  const count = (logs.get(log) ?? 0) + by;
+  if (count > 0) logs.set(log, count);
+  else logs.delete(log);
+  return count;
+}
+
+/**
  * Follow a server event log (`WebSockets.log()`) over a socket. The cursor
  * lives in memory: on every (re)connect the subscription asks for the
  * events after it, so a dropped connection loses nothing the server still
@@ -70,6 +91,8 @@ export function followEventLog<T = unknown, S = unknown>(
   log: string,
   handlers: EventLogHandlers<T, S>
 ): EventLogSubscription {
+  /** Echoed on the frames that answer this follower's subscribes. */
+  const id = `${++followerCount}.${Math.random().toString(36).slice(2, 10)}`;
   let cursor: EventLogCursor | null = null;
   /** Between a subscribe and its `synced`/`resync`: seqs may jump gaps. */
   let replaying = false;
@@ -81,6 +104,7 @@ export function followEventLog<T = unknown, S = unknown>(
       JSON.stringify({
         type: EVENT_LOG_SUBSCRIBE,
         log,
+        id,
         ...(cursor && { cursor })
       })
     );
@@ -97,6 +121,8 @@ export function followEventLog<T = unknown, S = unknown>(
     }
     const frame = parseEventLogServerFrame(parsed);
     if (!frame || frame.log !== log) return;
+    // An answer to another follower's subscribe on this socket.
+    if (frame.id !== undefined && frame.id !== id) return;
     switch (frame.type) {
       case EVENT_LOG_EVENTS: {
         // Before the first resync there is nothing to apply events to.
@@ -134,6 +160,7 @@ export function followEventLog<T = unknown, S = unknown>(
     }
   };
 
+  countFollowers(socket, log, 1);
   socket.addEventListener("message", onMessage);
   socket.addEventListener("open", subscribe);
   if (socket.readyState === OPEN) subscribe();
@@ -147,7 +174,7 @@ export function followEventLog<T = unknown, S = unknown>(
       closed = true;
       socket.removeEventListener("message", onMessage);
       socket.removeEventListener("open", subscribe);
-      if (socket.readyState === OPEN) {
+      if (countFollowers(socket, log, -1) === 0 && socket.readyState === OPEN) {
         socket.send(JSON.stringify({ type: EVENT_LOG_UNSUBSCRIBE, log }));
       }
     }

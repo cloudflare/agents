@@ -272,6 +272,34 @@ describe("event log", () => {
     survivor.close();
   });
 
+  it("resyncs a hibernated follower at the seq of the first publish after the wake, without also sending that event", async () => {
+    const name = crypto.randomUUID();
+    const survivor = await connect(name);
+    await follow(survivor);
+    const { epoch } = await stub(name).head();
+
+    await stub(name).openBatch();
+    await stub(name).append("stored");
+    await survivor.until(isType("events"));
+    await evictDurableObject(stub(name));
+
+    // The first touch is a publish. Its snapshot is taken after the
+    // producer's state change, so the follower resyncs at seq 5 and must
+    // not get event 5 on top.
+    expect(await stub(name).publish("feed", "after")).toBe(5);
+    expect(await stub(name).publish("feed", "next")).toBe(6);
+    const frames = await survivor.until(
+      (frame) => isType("events")(frame) && events([frame])[0]?.seq === 6
+    );
+    expect(frames.map((frame) => frame.type)).toEqual([
+      "cf_agent_log_resync",
+      "cf_agent_log_events"
+    ]);
+    expect(frames[0]).toMatchObject({ epoch, seq: 5, snapshot: { at: 5 } });
+    expect(events(frames)).toEqual([{ seq: 6, data: "next" }]);
+    survivor.close();
+  });
+
   it("keeps a connection's subscriptions across hibernation", async () => {
     const name = crypto.randomUUID();
     const client = await connect(name);
@@ -298,6 +326,66 @@ describe("event log", () => {
     await stub(name).publish("feed", "seen");
     const frames = await client.until(isType("events"));
     expect(frames.every((frame) => frame.log === "feed")).toBe(true);
+    client.close();
+  });
+
+  it("keeps connection state that is not an object in its shape while following", async () => {
+    const name = crypto.randomUUID();
+    const client = await connect(name, "?_pk=listed&listState");
+    expect(await stub(name).connectionState("listed")).toEqual(["a", "b"]);
+    await follow(client);
+    expect(await stub(name).connectionState("listed")).toEqual(["a", "b"]);
+    client.socket.send(
+      JSON.stringify({ type: "cf_agent_log_unsubscribe", log: "feed" })
+    );
+    await follow(client, "bare");
+    expect(await stub(name).connectionState("listed")).toEqual(["a", "b"]);
+    client.close();
+  });
+
+  it("answers each follower's subscribe on a shared socket with its own id", async () => {
+    const name = crypto.randomUUID();
+    await stub(name).publish("feed", "a");
+    const { epoch } = await stub(name).head();
+    const client = await connect(name);
+    client.socket.send(
+      JSON.stringify({ type: "cf_agent_log_subscribe", log: "feed", id: "one" })
+    );
+    client.socket.send(
+      JSON.stringify({
+        type: "cf_agent_log_subscribe",
+        log: "feed",
+        id: "two",
+        cursor: { epoch, seq: 0 }
+      })
+    );
+    const frames = await client.until(isType("synced"));
+    expect(frames.map((frame) => [frame.type, frame.id])).toEqual([
+      ["cf_agent_log_resync", "one"],
+      ["cf_agent_log_events", "two"],
+      ["cf_agent_log_synced", "two"]
+    ]);
+    await stub(name).publish("feed", "live");
+    const [live] = await client.until(isType("events"));
+    expect(live).not.toHaveProperty("id");
+    client.close();
+  });
+
+  it("replays from the head a resync handed out after a crash gap", async () => {
+    const name = crypto.randomUUID();
+    const { epoch } = await stub(name).head();
+    await stub(name).openBatch();
+    await stub(name).append("stored");
+    await stub(name)
+      .crash()
+      .catch(() => {});
+    expect((await stub(name).head()).seq).toBe(4);
+
+    const client = await connect(name);
+    client.subscribe("feed", { epoch, seq: 4 });
+    expect((await client.until(isType("synced"))).at(-1)).toMatchObject({
+      seq: 4
+    });
     client.close();
   });
 
@@ -442,6 +530,36 @@ describe("followEventLog", () => {
     // Nothing more arrives once closed.
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(log).toHaveLength(5);
+    socket.drop();
+  });
+
+  it("keeps a second follower on the same socket going when the first closes", async () => {
+    const name = crypto.randomUUID();
+    await stub(name).publish("feed", "before");
+    const socket = new ReconnectingSocket();
+    socket.attach(await rawSocket(name));
+    const first: string[] = [];
+    const second: string[] = [];
+    const a = followEventLog<string>(socket, "feed", {
+      onResync: (_snapshot, seq) => first.push(`resync ${seq}`),
+      onEvent: (data) => first.push(data)
+    });
+    await waitFor(() => first.length === 1);
+    await stub(name).publish("feed", "one");
+    await waitFor(() => first.length === 2);
+
+    // The second follower's resync must not reset the first.
+    followEventLog<string>(socket, "feed", {
+      onResync: (_snapshot, seq) => second.push(`resync ${seq}`),
+      onEvent: (data) => second.push(data)
+    });
+    await waitFor(() => second.length === 1);
+    a.close();
+    await stub(name).publish("feed", "two");
+    await waitFor(() => second.length === 2);
+
+    expect(first).toEqual(["resync 1", "one"]);
+    expect(second).toEqual(["resync 2", "two"]);
     socket.drop();
   });
 

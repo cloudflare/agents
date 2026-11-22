@@ -307,13 +307,14 @@ export class WebSockets extends LifecycleCapability {
         this.#sendFrame(connection, {
           type: EVENT_LOG_ERROR,
           log: frame.log,
-          error: `No event log named "${frame.log}"`
+          error: `No event log named "${frame.log}"`,
+          ...(frame.id !== undefined && { id: frame.id })
         });
       }
       return;
     }
     if (frame.type === EVENT_LOG_SUBSCRIBE) {
-      log.subscribe(connection, frame.cursor);
+      log.subscribe(connection, frame.cursor, frame.id);
     } else {
       log.unsubscribe(connection);
     }

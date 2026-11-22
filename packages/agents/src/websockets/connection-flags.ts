@@ -24,11 +24,41 @@ export const CF_NO_PROTOCOL_KEY = "_cf_no_protocol";
 /** The event logs a connection follows (see `EventLog`). */
 export const CF_EVENT_LOGS_KEY = "_cf_logs";
 
+/**
+ * Holds user state that is not a plain object (an array, a string, a
+ * number) while internal flags are stored beside it, so it round-trips in
+ * its own shape.
+ */
+const CF_VALUE_KEY = "_cf_value";
+
 const internalKeys = new Set<string>([
   CF_READONLY_KEY,
   CF_NO_PROTOCOL_KEY,
-  CF_EVENT_LOGS_KEY
+  CF_EVENT_LOGS_KEY,
+  CF_VALUE_KEY
 ]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** The user-visible part of a raw state: internal keys hidden. */
+function userState(raw: unknown): unknown {
+  if (!isRecord(raw) || !rawHasInternalKeys(raw)) return raw;
+  if (CF_VALUE_KEY in raw) return raw[CF_VALUE_KEY];
+  return stripInternalKeys(raw);
+}
+
+/** Combine user state with internal flags into one raw state. */
+function withFlags(
+  user: unknown,
+  flags: Record<string, unknown>
+): Record<string, unknown> | unknown {
+  if (Object.keys(flags).length === 0) return user;
+  if (user == null) return flags;
+  if (isRecord(user)) return { ...user, ...flags };
+  return { [CF_VALUE_KEY]: user, ...flags };
+}
 
 /**
  * Register additional `_cf_`-prefixed keys a host or mixin stores in
@@ -61,13 +91,13 @@ function stripInternalKeys(
   return hasUserKeys ? result : null;
 }
 
-/** A copy containing only the internal keys present in `raw`. */
+/** A copy of the internal flags in `raw` (not the wrapped user value). */
 function extractInternalFlags(
   raw: Record<string, unknown>
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   for (const key of Object.keys(raw)) {
-    if (internalKeys.has(key)) result[key] = raw[key];
+    if (internalKeys.has(key) && key !== CF_VALUE_KEY) result[key] = raw[key];
   }
   return result;
 }
@@ -122,11 +152,7 @@ export function ensureConnectionWrapped(connection: Connection): void {
     configurable: true,
     enumerable: true,
     get() {
-      const raw = getRaw();
-      if (raw != null && typeof raw === "object" && rawHasInternalKeys(raw)) {
-        return stripInternalKeys(raw);
-      }
-      return raw;
+      return userState(getRaw());
     }
   });
 
@@ -135,34 +161,14 @@ export function ensureConnectionWrapped(connection: Connection): void {
     writable: true,
     value(stateOrFn: unknown | ((prev: unknown) => unknown)) {
       const raw = getRaw();
-      const flags =
-        raw != null && typeof raw === "object"
-          ? extractInternalFlags(raw as Record<string, unknown>)
-          : {};
-      const hasFlags = Object.keys(flags).length > 0;
-
-      let newUserState: unknown;
-      if (typeof stateOrFn === "function") {
-        // The callback sees only user-visible state.
-        const userVisible = hasFlags
-          ? stripInternalKeys(raw as Record<string, unknown>)
-          : raw;
-        newUserState = (stateOrFn as (prev: unknown) => unknown)(userVisible);
-      } else {
-        newUserState = stateOrFn;
-      }
-
-      if (hasFlags) {
-        if (newUserState != null && typeof newUserState === "object") {
-          return setRaw({
-            ...(newUserState as Record<string, unknown>),
-            ...flags
-          });
-        }
-        // User set null: keep just the flags.
-        return setRaw(flags);
-      }
-      return setRaw(newUserState);
+      const flags = isRecord(raw) ? extractInternalFlags(raw) : {};
+      // The callback sees only user-visible state.
+      const newUserState =
+        typeof stateOrFn === "function"
+          ? (stateOrFn as (prev: unknown) => unknown)(userState(raw))
+          : stateOrFn;
+      setRaw(withFlags(newUserState, flags));
+      return newUserState;
     }
   });
 }
@@ -181,13 +187,15 @@ export function getConnectionFlag(
   key: string
 ): unknown {
   ensureConnectionWrapped(connection);
-  return rawStateAccessors.get(connection)!.getRaw()?.[key];
+  const raw: unknown = rawStateAccessors.get(connection)!.getRaw();
+  return isRecord(raw) ? raw[key] : undefined;
 }
 
 /**
  * Write an internal flag to the raw connection state. `undefined` removes
  * the key rather than storing a dead value; the last key removed leaves
- * `null`.
+ * the user state as it was, or `null`. User state of any shape keeps its
+ * shape.
  */
 export function setConnectionFlag(
   connection: Connection,
@@ -196,13 +204,11 @@ export function setConnectionFlag(
 ): void {
   ensureConnectionWrapped(connection);
   const accessors = rawStateAccessors.get(connection)!;
-  const raw = accessors.getRaw() ?? {};
-  if (value === undefined) {
-    const { [key]: _, ...rest } = raw;
-    accessors.setRaw(Object.keys(rest).length > 0 ? rest : null);
-  } else {
-    accessors.setRaw({ ...raw, [key]: value });
-  }
+  const raw: unknown = accessors.getRaw();
+  const flags = isRecord(raw) ? extractInternalFlags(raw) : {};
+  if (value === undefined) delete flags[key];
+  else flags[key] = value;
+  accessors.setRaw(withFlags(userState(raw), flags) ?? null);
 }
 
 export function isConnectionReadonly(connection: Connection): boolean {

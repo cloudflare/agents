@@ -27,6 +27,12 @@ export type EventLogSubscribeFrame = {
   readonly type: typeof EVENT_LOG_SUBSCRIBE;
   readonly log: string;
   readonly cursor?: EventLogCursor;
+  /**
+   * Client-chosen id, echoed on the frames that answer this subscribe, so
+   * several followers of one log on one socket each know their own
+   * replay and resync.
+   */
+  readonly id?: string;
 };
 
 /** Client to server: stop following a log. */
@@ -35,11 +41,15 @@ export type EventLogUnsubscribeFrame = {
   readonly log: string;
 };
 
-/** Server to client: events in seq order, replayed or live. */
+/**
+ * Server to client: events in seq order. A replay frame carries the
+ * subscribe's `id`; a live frame carries none and is for every follower.
+ */
 export type EventLogEventsFrame<T = unknown> = {
   readonly type: typeof EVENT_LOG_EVENTS;
   readonly log: string;
   readonly events: readonly EventLogEntry<T>[];
+  readonly id?: string;
 };
 
 /** Server to client: replay is done; events from here on are live. */
@@ -48,6 +58,7 @@ export type EventLogSyncedFrame = {
   readonly log: string;
   readonly epoch: string;
   readonly seq: number;
+  readonly id?: string;
 };
 
 /**
@@ -61,6 +72,8 @@ export type EventLogResyncFrame<S = unknown> = {
   readonly epoch: string;
   readonly seq: number;
   readonly snapshot?: S;
+  /** The subscribe this answers; absent on a crash resync for everyone. */
+  readonly id?: string;
 };
 
 /** Server to client: the subscription was refused. */
@@ -68,6 +81,7 @@ export type EventLogErrorFrame = {
   readonly type: typeof EVENT_LOG_ERROR;
   readonly log: string;
   readonly error: string;
+  readonly id?: string;
 };
 
 export type EventLogClientFrame =
@@ -106,7 +120,9 @@ export function parseEventLogClientFrame(
     type: EVENT_LOG_SUBSCRIBE,
     log: value.log,
     // A malformed cursor is treated as none: the client gets a resync.
-    ...(isCursor(value.cursor) && { cursor: value.cursor })
+    ...(isCursor(value.cursor) && { cursor: value.cursor }),
+    ...(typeof value.id === "string" &&
+      value.id.length <= 64 && { id: value.id })
   };
 }
 

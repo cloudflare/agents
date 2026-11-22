@@ -9,20 +9,20 @@ How the WebSockets capability numbers, stores, and replays outbound events. User
 - it replays every retained event after the cursor, then sends `synced`, or
 - it sends `resync` with the host's snapshot and the head `seq`, when the cursor is absent, from another epoch, ahead of the head, before the oldest retained event, or inside a gap.
 
-Then it records the subscription in the connection's hibernation attachment (`_cf_logs`), so a hibernated socket still gets events after a wake. The client re-subscribes with its cursor on every reconnect.
+Then it records the subscription in the connection's hibernation attachment (`_cf_logs`), so a hibernated socket still gets events after a wake. Connection state that is not a plain object (an array, a string) is kept under `_cf_value` beside the flags and keeps its shape. The client re-subscribes with its cursor on every reconnect.
 
 ### Frames
 
 | Direction | `type`                     | Fields                             |
 | --------- | -------------------------- | ---------------------------------- |
-| client    | `cf_agent_log_subscribe`   | `log`, `cursor?`                   |
+| client    | `cf_agent_log_subscribe`   | `log`, `cursor?`, `id?`            |
 | client    | `cf_agent_log_unsubscribe` | `log`                              |
 | server    | `cf_agent_log_events`      | `log`, `events: [{seq, data}]`     |
 | server    | `cf_agent_log_synced`      | `log`, `epoch`, `seq`              |
 | server    | `cf_agent_log_resync`      | `log`, `epoch`, `seq`, `snapshot?` |
 | server    | `cf_agent_log_error`       | `log`, `error`                     |
 
-A live event is a one-element `events` frame. A replay sends one frame per stored row.
+A live event is a one-element `events` frame with no `id`, for every follower. A replay sends one frame per stored row. The frames that answer a subscribe (replay `events`, `synced`, `resync`, `error`) echo its `id`, so several followers of one log on one socket each apply only their own answer; the client counts them and unsubscribes only when the last one closes.
 
 ### Storage
 
@@ -41,9 +41,11 @@ Retention deletes the oldest rows while the log holds more than `maxEvents` even
 
 A batch's first `append` is written at once. While any batch is open, every written row carries `open_until = seq_to + maxEvents`; the write on the last `close()` clears it (an UPDATE of the newest row when nothing was buffered). A batch holds at most `maxEvents - 1` unwritten events, so the seqs a crash can lose all lie in `[seq_to + 1, open_until)`.
 
-When a log is first touched in an isolate and its newest row has `open_until`, the previous isolate ended with a batch open. The log writes a gap row `[seq_to + 1, open_until]` and moves the head to `open_until`. The gap ends one past the last seq that can have been lost, so no client cursor can equal its last seq; once retention trims the gap, a cursor just before the oldest kept event is still one that saw nothing lost. The log then sends `resync` to every connection that still follows it (hibernated sockets survive an eviction).
+When a log is first touched in an isolate and its newest row has `open_until`, the previous isolate ended with a batch open. The log writes a gap row `[seq_to + 1, open_until]` and moves the head to `open_until`. The gap ends one past the last seq that can have been lost, so no event ever had the gap's last seq. A cursor equal to it was handed out as the head and replays normally, and once retention trims the gap, a cursor just before the oldest kept event is still one that saw nothing lost.
 
-A client that saw a lost event has a cursor inside the gap and gets `resync`. A client whose cursor is before the gap replays across it: it never saw the lost events, and neither did storage.
+Connections that still follow the log (hibernated sockets survive an eviction) get a `resync`, but not at the moment of the load: the load may be the first `publish` after the wake, and the producer has already written the state that publish announces. That publish resyncs the followers at its own seq instead of sending them the event. When the load came from anywhere else, a microtask resyncs them at the head once the current synchronous block is done.
+
+A client that saw a lost event has a cursor in `[seq_to + 1, open_until)` and gets `resync`. A client whose cursor is before the gap replays across it: it never saw the lost events, and neither did storage.
 
 The client also re-subscribes if a live event skips a seq, letting the server choose between replay and resync. With the server-side gap resync this should not happen; it is a cheap guard.
 
@@ -53,7 +55,7 @@ The client also re-subscribes if a live event skips a seq, letting the server ch
 - **In memory, lost in a crash:** a batch's unwritten events (at most `maxEvents - 1`, at most `maxDelayMs` old); the cached counts (rebuilt with one query).
 - **Client memory:** the cursor and the state built on it. A page reload starts with a resync.
 - **Delivery:** in `seq` order, at least once across reconnects. No per-client cursor or acknowledgement on the server. The client drops events at or before its cursor.
-- **Snapshot:** `snapshot(connection)` runs in the same synchronous block that reads the head, so the snapshot and the resync's `seq` agree.
+- **Snapshot:** `snapshot(connection)` runs in the same synchronous block that reads the head, so the snapshot and the resync's `seq` agree, provided the producer changes the state and publishes in one synchronous block.
 
 ## Key decisions
 

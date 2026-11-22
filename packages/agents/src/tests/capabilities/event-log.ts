@@ -39,7 +39,15 @@ class EventLogCallables extends RpcTarget {
  */
 export class EventLogObject extends DurableObject<Cloudflare.Env> {
   readonly #webSockets = new WebSockets({
-    callables: new EventLogCallables((data) => this.#feed.publish(data))
+    callables: new EventLogCallables((data) => this.#feed.publish(data)),
+    handlers: {
+      // `?listState` gives the connection state that is not an object.
+      onConnect: (connection, { request }) => {
+        if (new URL(request.url).searchParams.has("listState")) {
+          connection.setState(["a", "b"]);
+        }
+      }
+    }
   });
 
   readonly #feed: EventLog<unknown, { at: number }> = this.#webSockets.log<
@@ -117,6 +125,11 @@ export class EventLogObject extends DurableObject<Cloudflare.Env> {
   /** Reset the object the way a crash does: in-memory state is gone. */
   crash(): void {
     this.ctx.abort("simulated crash");
+  }
+
+  async connectionState(id: string): Promise<unknown> {
+    await this.lifecycle.start();
+    return this.#webSockets.getConnection(id)?.state;
   }
 
   async head(log = "feed"): Promise<{ epoch: string; seq: number }> {
