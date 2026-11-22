@@ -26,6 +26,7 @@ import {
 } from "./tokens";
 import type {
   HistoryReadOptions,
+  LegacyFlatMessages,
   RecentHistoryResult,
   SearchResult,
   SessionChangeEvent,
@@ -58,6 +59,10 @@ const NEWEST_FIRST_WINDOW_ROWS = 8;
  * recent rows only, and `getRecentHistory` reports that as truncated.
  */
 const MAX_PATH_DEPTH = 10_000;
+
+/** Bounds for one window of a legacy flat-table lift: rows and summed bytes. */
+const LEGACY_LIFT_WINDOW_ROWS = 25;
+const LEGACY_LIFT_WINDOW_BYTES = 4 * 1024 * 1024;
 
 /**
  * Hidden overlay rows: a stored `compaction_<id>` row whose `<id>` names one
@@ -137,7 +142,10 @@ export class SessionsCore {
     this.io = io;
     this.#attachments = new AttachmentStore(io);
     this.#reservedMetadataKeys = options.reservedMetadataKeys ?? [];
+    this.#legacyFlatMessages = options.legacyFlatMessages;
   }
+
+  readonly #legacyFlatMessages: LegacyFlatMessages | undefined;
 
   // ── Schema ───────────────────────────────────────────────────────────────
 
@@ -355,6 +363,105 @@ export class SessionsCore {
     drop("assistant_sessions");
     drop("assistant_fts");
     return complete;
+  }
+
+  /**
+   * Lift the configured flat legacy table into the default session.
+   *
+   * Order is read first as ids and sizes alone, then bodies are fetched in
+   * windows bounded by row count and bytes, so a large transcript never sits
+   * in the isolate at once. The table is dropped only when every row landed:
+   * a row that cannot be parsed or imported keeps it, and the next start
+   * tries again (`importMessage` ignores ids it already has).
+   *
+   * @returns `false` when rows were left behind.
+   */
+  liftLegacyFlatMessages(): boolean {
+    const source = this.#legacyFlatMessages;
+    if (!source || !this.#tableExists(source.table)) return true;
+    const { table } = source;
+    const order = this.io.sql<{
+      id: string;
+      bytes: number;
+      created_at: string | number | null;
+    }>(
+      `SELECT id, LENGTH(CAST(message AS BLOB)) AS bytes, created_at
+       FROM ${table}
+       ORDER BY created_at ASC, rowid ASC`,
+      []
+    );
+
+    let parentId: string | null = null;
+    let imported = 0;
+    let skipped = 0;
+    let index = 0;
+    while (index < order.length) {
+      const window: typeof order = [];
+      let bytes = 0;
+      while (
+        index < order.length &&
+        window.length < LEGACY_LIFT_WINDOW_ROWS &&
+        (window.length === 0 ||
+          bytes + order[index].bytes <= LEGACY_LIFT_WINDOW_BYTES)
+      ) {
+        bytes += order[index].bytes;
+        window.push(order[index]);
+        index++;
+      }
+      const bodies = new Map(
+        this.io
+          .sql<{ id: string; message: string }>(
+            `SELECT id, message FROM ${table}
+             WHERE id IN (SELECT value FROM json_each(?))`,
+            [JSON.stringify(window.map((row) => row.id))]
+          )
+          .map((row) => [row.id, row.message] as const)
+      );
+
+      for (const row of window) {
+        const body = bodies.get(row.id);
+        if (body === undefined) {
+          skipped++;
+          continue;
+        }
+        try {
+          const message = source.parse(JSON.parse(body), row.id);
+          if (!message) {
+            skipped++;
+            continue;
+          }
+          const parsedTime =
+            typeof row.created_at === "number"
+              ? row.created_at
+              : Date.parse(String(row.created_at ?? ""));
+          this.importMessage("", message, {
+            parentId,
+            createdAt: Number.isFinite(parsedTime) ? parsedTime : imported
+          });
+          parentId = message.id;
+          imported++;
+        } catch (error) {
+          console.error(`[Sessions] Failed to lift message ${row.id}:`, error);
+          skipped++;
+        }
+      }
+    }
+
+    if (skipped === 0 && imported === order.length) {
+      this.io.sqlWrite(`DROP TABLE ${table}`, []);
+      return true;
+    }
+    console.error(
+      `[Sessions] Legacy lift imported ${imported} of ${order.length} rows ` +
+        `(${skipped} skipped); leaving ${table} in place so they remain ` +
+        "recoverable."
+    );
+    this.io.emit("session:migration:incomplete", {
+      table,
+      source: order.length,
+      copied: imported
+    });
+    return false;
   }
 
   // ── Change feed ──────────────────────────────────────────────────────────

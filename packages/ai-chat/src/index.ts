@@ -28,9 +28,10 @@ import {
 import { MessageType, type OutgoingMessage } from "./types";
 import { autoTransformMessages } from "./ai-chat-v5-migration";
 import {
+  LEGACY_MESSAGES_TABLE,
   hydrateMessages,
-  liftLegacyMessages,
   mirrorTranscript,
+  parseLegacyMessage,
   planPersist,
   rowsPastRetention,
   staleMessageIds,
@@ -498,8 +499,16 @@ export class AIChatAgent<
    */
   private readonly _abortRegistry = this._turns.aborts;
 
-  /** Durable chat history for this Agent. */
-  readonly sessions = new Sessions();
+  /**
+   * Durable chat history for this Agent. On start it lifts the table
+   * ai-chat stored messages in before Sessions.
+   */
+  readonly sessions = new Sessions({
+    legacyFlatMessages: {
+      table: LEGACY_MESSAGES_TABLE,
+      parse: parseLegacyMessage
+    }
+  });
 
   /**
    * Byte budget for wake-time transcript hydration into {@link messages}.
@@ -1113,7 +1122,6 @@ export class AIChatAgent<
         "startup",
         { "cloudflare.agents.component": "ai_chat" },
         async (update) => {
-          await liftLegacyMessages(this.ctx.storage.sql, this.#session);
           this.messages = await hydrateMessages(
             this.#session,
             this.hydrationByteBudget
