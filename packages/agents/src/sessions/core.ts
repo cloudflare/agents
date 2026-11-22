@@ -391,6 +391,24 @@ export class SessionsCore {
       []
     );
 
+    // Rows an earlier start already lifted. A row that lands now must not
+    // go before one of them: importing it would fork the chain, and the
+    // rows after it would leave the active path. Such a row stays in the
+    // table, recoverable, and keeps the table.
+    const lifted = new Set(
+      this.io
+        .sql<{ id: string }>(
+          `SELECT id FROM cf_agents_session_messages
+           WHERE session_id = '' AND id IN (SELECT value FROM json_each(?))`,
+          [JSON.stringify(order.map((row) => row.id))]
+        )
+        .map((row) => row.id)
+    );
+    let lastLifted = -1;
+    order.forEach((row, i) => {
+      if (lifted.has(row.id)) lastLifted = i;
+    });
+
     let parentId: string | null = null;
     let imported = 0;
     let skipped = 0;
@@ -418,7 +436,12 @@ export class SessionsCore {
           .map((row) => [row.id, row.message] as const)
       );
 
-      for (const row of window) {
+      const windowStart = index - window.length;
+      for (const [offset, row] of window.entries()) {
+        if (!lifted.has(row.id) && windowStart + offset < lastLifted) {
+          skipped++;
+          continue;
+        }
         const body = bodies.get(row.id);
         if (body === undefined) {
           skipped++;
@@ -434,11 +457,18 @@ export class SessionsCore {
             typeof row.created_at === "number"
               ? row.created_at
               : Date.parse(String(row.created_at ?? ""));
-          this.importMessage("", message, {
+          const inserted = this.importMessage("", message, {
             parentId,
             createdAt: Number.isFinite(parsedTime) ? parsedTime : imported
           });
           parentId = message.id;
+          // An id already taken counts as copied only when it holds this
+          // payload: dropping the table must not lose a row whose id some
+          // other message occupies.
+          if (!inserted && !this.#holdsMessage("", message)) {
+            skipped++;
+            continue;
+          }
           imported++;
         } catch (error) {
           console.error(`[Sessions] Failed to lift message ${row.id}:`, error);
@@ -462,6 +492,19 @@ export class SessionsCore {
       copied: imported
     });
     return false;
+  }
+
+  /** Whether the stored row with `message.id` holds exactly `message`. */
+  #holdsMessage(sessionId: string, message: SessionMessage): boolean {
+    const json = JSON.stringify(extractAttachments(message).message);
+    const [row] = this.io.sql<{ content_hash: string | null }>(
+      "SELECT content_hash FROM cf_agents_session_messages WHERE session_id = ? AND id = ?",
+      [sessionId, message.id]
+    );
+    if (!row) return false;
+    if (row.content_hash != null)
+      return row.content_hash === contentDigest(json);
+    return this.#content(sessionId, message.id) === json;
   }
 
   // ── Change feed ──────────────────────────────────────────────────────────
