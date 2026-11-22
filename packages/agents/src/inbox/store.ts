@@ -76,9 +76,14 @@ export type InboxRow = {
   readonly debounceUntil: number | null;
   /** The ids of the requests this one superseded, oldest first. */
   readonly merged: readonly string[];
+  /** {@link merged} with each request's arrival `seq`. */
+  readonly mergedEntries: readonly MergedEntry[];
   /** A terminal record whose terminal `onStatus` returned. */
   readonly reported: boolean;
 };
+
+/** A request a survivor superseded, with its arrival order. */
+export type MergedEntry = { readonly id: string; readonly seq: number };
 
 /** A new row, as {@link InboxStore.insert} takes it. */
 export type InboxInsert = {
@@ -163,6 +168,10 @@ export class InboxStore {
     this.#storage.sql.exec(
       `CREATE INDEX IF NOT EXISTS ${this.#table}_lane_idx
        ON ${this.#table} (lane, status, seq)`
+    );
+    this.#storage.sql.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS ${this.#table}_token_idx
+       ON ${this.#table} (token)`
     );
     this.#storage.sql.exec(
       `CREATE INDEX IF NOT EXISTS ${this.#table}_settled_idx
@@ -331,14 +340,14 @@ export class InboxStore {
   }
 
   /** Terminal requests whose terminal `onStatus` has not returned. */
-  unreported(limit: number): InboxRequest[] {
+  unreported(limit: number): Array<{ id: string; token: string }> {
     if (!this.exists()) return [];
-    return this.#sql<Row>(
-      `SELECT * FROM ${this.#table}
+    return this.#sql<{ id: string; token: string }>(
+      `SELECT id, token FROM ${this.#table}
        WHERE status IN ${TERMINAL} AND (notified IS NULL OR notified != status)
        ORDER BY seq ASC LIMIT ?`,
       limit
-    ).map((row) => this.#fromRow(row).request);
+    );
   }
 
   /** Ids of terminal requests settled before `time`, earliest first. */
@@ -486,13 +495,12 @@ export class InboxStore {
   }
 
   /** Add to the requests a survivor superseded, keeping their order. */
-  addMerged(id: string, ids: readonly string[]): void {
+  addMerged(id: string, entries: readonly MergedEntry[]): void {
     const current = this.get(id);
     if (!current) return;
-    const merged = [
-      ...current.merged,
-      ...ids.filter((m) => !current.merged.includes(m))
-    ];
+    const byId = new Map(current.mergedEntries.map((e) => [e.id, e]));
+    for (const entry of entries) byId.set(entry.id, entry);
+    const merged = [...byId.values()].sort((a, b) => a.seq - b.seq);
     this.#write(
       `UPDATE ${this.#table} SET merged = ? WHERE id = ?`,
       JSON.stringify(merged),
@@ -629,6 +637,15 @@ export class InboxStore {
         : row.progress;
     const metadata = parseJson(row.metadata);
     const merged = parseJson(row.merged);
+    const mergedEntries: MergedEntry[] = Array.isArray(merged)
+      ? merged.filter(
+          (entry): entry is MergedEntry =>
+            typeof entry === "object" &&
+            entry !== null &&
+            typeof (entry as MergedEntry).id === "string" &&
+            typeof (entry as MergedEntry).seq === "number"
+        )
+      : [];
     const request: InboxRequest = {
       id: row.id,
       kind: row.kind,
@@ -654,9 +671,8 @@ export class InboxStore {
       token: row.token,
       overlap: row.overlap === 1,
       debounceUntil: row.debounce_until,
-      merged: Array.isArray(merged)
-        ? merged.filter((m): m is string => typeof m === "string")
-        : [],
+      merged: mergedEntries.map((entry) => entry.id),
+      mergedEntries,
       reported: !OPEN_SET.has(row.status) && row.notified === row.status
     };
   }
