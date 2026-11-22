@@ -33,7 +33,7 @@ import {
 } from "./message-builder";
 import { takeAtFirstContent } from "./recovery-codec";
 import type { StreamInterruptionOutcome } from "./recovery-route";
-import type { ReplySource } from "./reply-source";
+import { streamErrorText, type ReplySource } from "./reply-source";
 import type {
   ReplyFlushState,
   ReplyStreamLog,
@@ -408,7 +408,11 @@ export async function pumpReply(
   const accumulator = new StreamAccumulator({
     messageId: extend?.id ?? input.messageId,
     continuation: extend !== undefined,
-    existingParts: extend?.parts.map(settleInterruptedPart),
+    // A copy: chunks mutate the parts they apply to, and the extended
+    // message's parts are the host's stored transcript.
+    existingParts: extend
+      ? structuredClone(extend.parts).map(settleInterruptedPart)
+      : undefined,
     existingMetadata: extendMetadata
   });
   const { turns } = host;
@@ -462,6 +466,10 @@ export async function pumpReply(
   let streamError: string | undefined;
   let overflow = false;
   let dropped = false;
+  // Why the reply failed, until the host describes it (`describeFailure`).
+  let failure: { cause: unknown; inBand: boolean } | undefined;
+  let errorFrame: ReplyFrame | undefined;
+  let partialStored: { id: string; message: UIMessage } | undefined;
   const approvalRequests = new Map<string, StreamChunkData>();
   // A stream that was stopped or failed is cut off: settle the calls it
   // left unanswered before the reply is stored.
@@ -544,10 +552,11 @@ export async function pumpReply(
       ...(input.parentId !== undefined && { parentId: input.parentId }),
       keepPartial: async () => {
         if (isReset() || accumulator.parts.length === 0) return undefined;
-        const { id } = await storeLive(
+        const { id, message } = await storeLive(
           { kind: "partial", result: { status: "aborted" } },
           true
         );
+        if (id !== undefined) partialStored = { id, message };
         return id;
       },
       dropPartial: () => {
@@ -609,7 +618,13 @@ export async function pumpReply(
           turns.stallAbort(requestId);
         }
       );
-      for await (const raw of chunks) {
+      // Stopped before the first read: a source that ignores the signal
+      // would otherwise hold the turn until it sends a chunk.
+      if (signal?.aborted) {
+        aborted = true;
+        source.cancel?.();
+      }
+      for await (const raw of aborted ? [] : chunks) {
         if (signal?.aborted) {
           aborted = true;
           break;
@@ -666,8 +681,10 @@ export async function pumpReply(
           if (verdict === "transient") {
             throw new TransientChatStreamError(action.error, cause);
           }
-          streamError = host.describeError(cause, true);
-          held.push(frame({ body: streamError, done: false, error: true }));
+          streamError = action.error;
+          failure = { cause, inBand: true };
+          errorFrame = frame({ body: streamError, done: false, error: true });
+          held.push(errorFrame);
           break;
         }
 
@@ -706,25 +723,14 @@ export async function pumpReply(
   } catch (error) {
     const result = await routed(error);
     if (result) return result;
-    streamError = host.describeError(
+    const cause =
       error instanceof TransientChatStreamError
         ? (error.original ?? error)
-        : error,
-      false
-    );
+        : error;
+    streamError = streamErrorText(cause);
+    failure = { cause, inBand: false };
     streams.error(streamId, requestId);
     live.ended = true;
-  }
-
-  if (streamError !== undefined) {
-    host.emit({ type: "message:error", error: streamError });
-    host.emit({
-      type: "chat:request:failed",
-      requestId,
-      stage: "stream",
-      messagesPersisted: true,
-      error: streamError
-    });
   }
 
   let output: unknown;
@@ -734,9 +740,27 @@ export async function pumpReply(
     } catch (error) {
       streamError =
         error instanceof Error ? error.message : "Structured output error";
+      failure = { cause: error, inBand: false };
       streams.error(streamId, requestId);
     }
   }
+
+  // The app's error hook runs once the partial reply is stored, so it reads
+  // the transcript with the reply in it. The frames wait for it.
+  const describeFailure = () => {
+    if (!failure) return;
+    streamError = host.describeError(failure.cause, failure.inBand);
+    failure = undefined;
+    if (errorFrame) errorFrame.body = streamError;
+    host.emit({ type: "message:error", error: streamError });
+    host.emit({
+      type: "chat:request:failed",
+      requestId,
+      stage: "stream",
+      messagesPersisted: true,
+      error: streamError
+    });
+  };
 
   // One error frame per failed reply: an in-band error already sent its
   // own, and the terminal frame after it only says how the request ended.
@@ -759,20 +783,34 @@ export async function pumpReply(
   let response = responseFor(buildReply());
   try {
     if (!reset) {
-      if (accumulator.parts.length > 0 && !dropped) {
+      const message = buildReply();
+      if (
+        partialStored !== undefined &&
+        JSON.stringify(partialStored.message) === JSON.stringify(message)
+      ) {
+        // Recovery kept the partial and declined to continue: it is stored
+        // as it is.
+        storedId = partialStored.id;
+        response = { ...response, message };
+      } else if (accumulator.parts.length > 0 && !dropped) {
         const stored = await storeLive({ kind: "final", result, response });
         storedId = stored.id;
         response = { ...response, message: stored.message };
       }
       reset = isReset() && storedId === undefined;
     }
+    describeFailure();
+    response = responseFor(response.message);
     held.push(terminal());
   } catch (error) {
     console.error("Failed to persist assistant message:", error);
     streams.error(streamId, requestId);
     // A reply that already failed keeps its error and its error frame.
-    if (streamError === undefined) {
-      streamError = host.describeError(error, false);
+    if (failure) {
+      describeFailure();
+    } else if (streamError === undefined) {
+      failure = { cause: error, inBand: false };
+      describeFailure();
       held.splice(0);
     }
     held.push(terminal());
@@ -800,9 +838,12 @@ export async function pumpReply(
   try {
     // An RPC caller learns the reply is done before the response hook runs,
     // and of a failure after it.
-    if (completed) await sink?.done();
-    // A clear kept the reply out: no hook.
-    if (!reset) await host.settled(response);
+    try {
+      if (completed) await sink?.done();
+    } finally {
+      // A clear kept the reply out: no hook.
+      if (!reset) await host.settled(response);
+    }
   } finally {
     finalized(true);
   }

@@ -747,6 +747,160 @@ describe("pumpReply", () => {
   });
 });
 
+describe("pumpReply, review findings", () => {
+  it("does not change the stored message a continuation extends", async () => {
+    const { host, stored } = fakeHost();
+    const extend: UIMessage = {
+      id: "earlier",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-t",
+          toolCallId: "c1",
+          state: "approval-responded",
+          input: {},
+          approval: { id: "a1", approved: true }
+        } as unknown as UIMessage["parts"][number]
+      ]
+    };
+    await pumpReply(
+      input({
+        continuation: true,
+        extend,
+        source: source([
+          { type: "tool-output-available", toolCallId: "c1", output: 1 }
+        ])
+      }),
+      host
+    );
+    // The host compares the reply with its stored copy to decide whether
+    // to write it: the stored copy must be what was stored before.
+    expect(extend.parts[0]).toMatchObject({ state: "approval-responded" });
+    expect(stored[0].message.parts[0]).toMatchObject({
+      state: "output-available"
+    });
+  });
+
+  it("ends a reply stopped before its first chunk without waiting on the source", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    let cancelled = false;
+    const { host } = fakeHost();
+    const result = await pumpReply(
+      input({
+        signal: controller.signal,
+        source: {
+          chunks: (async function* () {
+            await new Promise(() => {});
+            yield { type: "text-start", id: "t" } as StreamChunkData;
+          })(),
+          cancel: () => {
+            cancelled = true;
+          }
+        }
+      }),
+      host
+    );
+    expect(result).toEqual({ status: "aborted" });
+    expect(cancelled).toBe(true);
+  });
+
+  it("runs the error hook after the partial reply is stored", async () => {
+    const log: string[] = [];
+    const { host, frames } = fakeHost({
+      store: async (message) => {
+        log.push("store");
+        return message.id;
+      },
+      describeError: (error) => {
+        log.push("describe");
+        return `wrapped: ${String(error)}`;
+      }
+    });
+    const result = await pumpReply(
+      input({
+        source: source([
+          { type: "text-start", id: "t" },
+          { type: "text-delta", id: "t", delta: "Part" },
+          { type: "error", errorText: "provider failed" }
+        ])
+      }),
+      host
+    );
+    expect(log).toEqual(["store", "describe"]);
+    expect(result).toEqual({
+      status: "error",
+      error: "wrapped: provider failed"
+    });
+    expect(frames.find((f) => f.error)?.body).toBe("wrapped: provider failed");
+  });
+
+  it("describes a structured output failure through the host", async () => {
+    const { host } = fakeHost({
+      describeError: (error) =>
+        `wrapped: ${error instanceof Error ? error.message : String(error)}`
+    });
+    const result = await pumpReply(
+      input({
+        source: source(textReply),
+        output: async () => {
+          throw new Error("bad output");
+        }
+      }),
+      host
+    );
+    expect(result).toEqual({ status: "error", error: "wrapped: bad output" });
+  });
+
+  it("stores a kept partial once when recovery declines to continue", async () => {
+    const { host, stored } = fakeHost({
+      classify: () => "transient",
+      route: async (interruption) => {
+        await interruption.keepPartial();
+        return "declined";
+      }
+    });
+    await pumpReply(
+      input({
+        source: {
+          chunks: (async function* () {
+            yield { type: "text-start", id: "t" } as StreamChunkData;
+            yield {
+              type: "text-delta",
+              id: "t",
+              delta: "Part"
+            } as StreamChunkData;
+            throw new Error("connection reset");
+          })()
+        }
+      }),
+      host
+    );
+    expect(stored.map((s) => s.context.kind)).toEqual(["partial"]);
+  });
+
+  it("runs the response hook when an RPC caller's onDone rejects", async () => {
+    const { host, settled } = fakeHost();
+    await expect(
+      pumpReply(
+        input({
+          source: source(textReply),
+          sink: {
+            chunk: async () => {},
+            done: async () => {
+              throw new Error("caller gone");
+            },
+            error: async () => {},
+            interrupted: async () => {}
+          }
+        }),
+        host
+      )
+    ).rejects.toThrow("caller gone");
+    expect(settled.map((r) => r.status)).toEqual(["completed"]);
+  });
+});
+
 describe("responseSource", () => {
   function response(parts: string[], contentType: string) {
     const encoder = new TextEncoder();
@@ -802,6 +956,30 @@ describe("responseSource", () => {
       { type: "text-delta", id: "req", delta: "lo" },
       { type: "text-end", id: "req" }
     ]);
+  });
+
+  it("cancels a body the pump stopped reading before its end", async () => {
+    let cancelled = false;
+    const encoder = new TextEncoder();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode('data: {"type":"error","errorText":"x"}\n\n')
+        );
+      },
+      cancel() {
+        cancelled = true;
+      }
+    });
+    const r = new Response(null, {
+      headers: { "content-type": "text/event-stream" }
+    });
+    const src = responseSource(r, body, "req");
+    for await (const chunk of src.chunks) {
+      if (chunk.type === "error") break;
+    }
+    src.release?.();
+    expect(cancelled).toBe(true);
   });
 
   it("reads an empty plain-text body as no reply", async () => {

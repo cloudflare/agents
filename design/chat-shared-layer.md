@@ -151,7 +151,7 @@ class StreamAccumulator {
 
 ### reply-pump.ts, reply-source.ts and reply-stream.ts
 
-**`pumpReply(input, host)`** runs one reply: start its stream, build the message, store and send each chunk, stop on a stop, a stall or an error, route a stall or a transient error to recovery, store the reply, send the terminal frame after the transcript, run the response hook. Both hosts call it for every reply. [chat-turn-core.md](./chat-turn-core.md) has the order of work and the decisions (D118 to D137).
+**`pumpReply(input, host)`** runs one reply: start its stream, build the message, store and send each chunk, stop on a stop, a stall or an error, route a stall or a transient error to recovery, store the reply, send the terminal frame after the transcript, run the response hook. Both hosts call it for every reply. [chat-turn-core.md](./chat-turn-core.md) has the order of work and the decisions (D118 to D139).
 
 A host passes a `ReplyPumpHost`: `send` (a frame to sockets), `store` (the reply, with the cutover), `route` (recovery), `classify` and `describeError`, `settled` (the response hook), and the chunk steps only one host has. A caller that wants the chunks too (`Think.chat()`) passes a `ReplySink`.
 

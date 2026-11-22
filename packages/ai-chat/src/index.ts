@@ -430,6 +430,7 @@ export class AIChatAgent<
       hasActiveStream: () => this._resumableStream.hasActiveStream(),
       generateRequestId: () => nanoid(),
       keepAliveWhile: (fn) => this.keepAliveWhile(fn),
+      abortRequest: (requestId, reason) => this.abortRequest(requestId, reason),
       // Fired from a timer that may have been armed inside a recovered turn.
       // The continuation is its own turn, not the recovery attempt's.
       fireContinuation: () =>

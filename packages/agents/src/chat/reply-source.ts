@@ -110,6 +110,7 @@ async function* readText(
   reader: ReadableStreamDefaultReader<Uint8Array>
 ): AsyncGenerator<string> {
   const decoder = new TextDecoder();
+  let ended = false;
   try {
     while (true) {
       const { done, value } = await reader.read();
@@ -117,9 +118,13 @@ async function* readText(
       const text = decoder.decode(value, { stream: true });
       if (text.length > 0) yield text;
     }
+    ended = true;
     const rest = decoder.decode();
     if (rest.length > 0) yield rest;
   } finally {
+    // Closed before the body ended (an error chunk, a stop): cancel the
+    // body while this reader still holds it, so its producer stops too.
+    if (!ended) reader.cancel().catch(() => {});
     reader.releaseLock();
   }
 }

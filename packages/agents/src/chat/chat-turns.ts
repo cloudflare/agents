@@ -143,6 +143,12 @@ export interface ChatTurnsHost {
   /** Hold the isolate alive for the duration of `fn`. */
   keepAliveWhile<T>(fn: () => Promise<T>): Promise<T>;
   /**
+   * Stop a request the host's way (its protected `abortRequest`), so a
+   * subclass that observes aborts sees the stall watchdog's too. Optional:
+   * without it {@link ChatTurns.stallAbort} cancels through the core.
+   */
+  abortRequest?(requestId: string, reason: unknown): void;
+  /**
    * Run the continuation turn for the pending continuation: the host's own
    * inference and reply pipeline, started through its turn admission.
    */
@@ -1072,12 +1078,14 @@ export class ChatTurns<
     this.runtimeAbort(() => {
       // Cancelled now, inside the runtime's abort: a cancel the hold ran
       // later would read as a user's stop.
-      const settled = this.cancel(
-        requestId,
-        new ChatStreamStalledError(
-          "chat stream stalled: inactivity watchdog fired"
-        )
+      const reason = new ChatStreamStalledError(
+        "chat stream stalled: inactivity watchdog fired"
       );
+      if (this.host.abortRequest) {
+        this.host.abortRequest(requestId, reason);
+        return;
+      }
+      const settled = this.cancel(requestId, reason);
       void this.host.keepAliveWhile(() => settled);
     });
   }
