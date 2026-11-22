@@ -470,6 +470,69 @@ describe("Think — error handling", () => {
     expect(errorLog[0]).toContain("Custom error for hook");
   });
 
+  it("reports a chat request whose body cannot be parsed (D140)", async () => {
+    const agent = await freshAgent(`parse-failed-${crypto.randomUUID()}`);
+    const events: Array<{ payload: { requestId?: string; stage?: string } }> =
+      [];
+    const unsubscribe = subscribe("chat", (event) => {
+      if (event.type === "chat:request:failed") events.push(event);
+    });
+    try {
+      for (const [id, body] of [
+        ["no-body", undefined],
+        ["bad-json", "{nope"],
+        ["no-messages", JSON.stringify({ text: "hi" })]
+      ] as const) {
+        await agent.sendChatProtocolMessageForTest({
+          type: "cf_agent_use_chat_request",
+          id,
+          init: { method: "POST", ...(body !== undefined && { body }) }
+        });
+      }
+    } finally {
+      unsubscribe();
+    }
+    expect(
+      events.map((event) => [event.payload.requestId, event.payload.stage])
+    ).toEqual([
+      ["no-body", "parse"],
+      ["bad-json", "parse"],
+      ["no-messages", "parse"]
+    ]);
+    expect(await agent.getChatErrorLog()).toHaveLength(3);
+    expect(await agent.getMessages()).toEqual([]);
+  });
+
+  it("emits tool:result and message:cancel for protocol messages (D142)", async () => {
+    const agent = await freshAgent(`protocol-events-${crypto.randomUUID()}`);
+    const types: string[] = [];
+    const unsubscribe = subscribe("message", (event) => {
+      types.push(event.type);
+    });
+    try {
+      await agent.sendChatProtocolMessageForTest({
+        type: "cf_agent_tool_result",
+        toolCallId: "call-missing",
+        toolName: "pick",
+        output: 1
+      });
+      await agent.sendChatProtocolMessageForTest({
+        type: "cf_agent_tool_approval",
+        toolCallId: "call-missing",
+        approved: true
+      });
+      await agent.sendChatProtocolMessageForTest({
+        type: "cf_agent_chat_request_cancel",
+        id: "nothing-running"
+      });
+    } finally {
+      unsubscribe();
+    }
+    expect(types).toEqual(
+      expect.arrayContaining(["tool:result", "tool:approval", "message:cancel"])
+    );
+  });
+
   it("emits chat:request:failed when a chat stream fails", async () => {
     const agent = await freshAgent(`err-event-${crypto.randomUUID()}`);
     const events: Array<{

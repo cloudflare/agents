@@ -234,7 +234,11 @@ import {
   toolApprovalUpdate,
   pausedExecutionUpdate,
   ChatRequestContext,
-  parseProtocolMessage,
+  dispatchChatProtocol,
+  rejectionMessage,
+  releaseChatConnection,
+  type ChatProtocolHost,
+  type ParsedChatRequest,
   aiSdkRecoveryCodec,
   ResumeHandshake,
   normalizeToolInput,
@@ -8200,38 +8204,21 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       reason: string,
       wasClean: boolean
     ) => {
-      this._pendingResumeConnections.delete(connection.id);
-      this._continuation.releaseConnection(connection.id);
-      this._preStream.release(connection.id);
+      releaseChatConnection(
+        this._turns,
+        this._pendingResumeConnections,
+        connection.id
+      );
       return _onClose(connection, code, reason, wasClean);
     };
 
     const _onMessage = this.onMessage.bind(this);
     this.onMessage = async (connection: Connection, message: WSMessage) => {
-      const connectionTargetsSubAgent =
-        this._cf_connectionTargetsSubAgent(connection);
-      if (connectionTargetsSubAgent) {
-        return _onMessage(connection, message);
-      }
-
-      if (typeof message === "string") {
-        const event = parseProtocolMessage(message);
-        if (event) {
-          if (event.type === "chat-request") {
-            await this._withAgentSpan(
-              "chat_interaction",
-              "interaction",
-              {
-                "cloudflare.agents.component": "think",
-                "cloudflare.agents.turn.request_id": event.id
-              },
-              () => this._handleProtocolEvent(connection, event)
-            );
-          } else {
-            await this._handleProtocolEvent(connection, event);
-          }
-          return;
-        }
+      if (
+        !this._cf_connectionTargetsSubAgent(connection) &&
+        (await dispatchChatProtocol(connection, message, this._chatProtocol))
+      ) {
+        return;
       }
       return _onMessage(connection, message);
     };
@@ -8256,85 +8243,46 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     };
   }
 
-  private async _handleProtocolEvent(
-    connection: Connection,
-    event: NonNullable<ReturnType<typeof parseProtocolMessage>>
-  ): Promise<void> {
-    switch (event.type) {
-      case "stream-resume-request":
-        await this._handleStreamResumeRequest(
-          connection,
-          event.probeId,
-          event.requestIds
+  /** What the shared chat protocol dispatch calls on this agent. */
+  private _chatProtocolInstance: ChatProtocolHost<Connection> | undefined;
+  private get _chatProtocol(): ChatProtocolHost<Connection> {
+    this._chatProtocolInstance ??= {
+      turns: this._turns,
+      requestContext: this._requestContext,
+      resumeHandshake: () => this._resumeHandshake(),
+      emit: (type, payload) => this._emit(type, payload),
+      chatRequest: (connection, request) =>
+        this._withAgentSpan(
+          "chat_interaction",
+          "interaction",
+          {
+            "cloudflare.agents.component": "think",
+            "cloudflare.agents.turn.request_id": request.requestId
+          },
+          () => this._handleChatRequest(connection, request)
+        ),
+      frames: this._frames,
+      rejectedChatRequest: (_connection, rejection) => {
+        const wrapped = this.onChatError(
+          rejection.error ?? new Error(rejectionMessage(rejection)),
+          {
+            requestId: rejection.requestId,
+            stage: "parse",
+            messagesPersisted: false
+          }
         );
-        break;
-
-      case "stream-resume-ack":
-        await this._handleStreamResumeAck(connection, event.id);
-        break;
-
-      case "chat-request":
-        if (event.init?.method === "POST") {
-          await this._handleChatRequest(connection, event);
-        }
-        break;
-
-      case "tool-result": {
-        // Only a result that settled its call continues, targeted at that
-        // call's message; without autoContinue it re-arms a batch (#1650).
-        // Such a result also replaces the stored client tools with the ones
-        // it lists, so its continuation runs with the latest schemas. A
-        // duplicate or a result for a call that is gone changes nothing.
-        this._turns.applyInteraction(
-          this._requestContext.applyingToolResult(event.clientTools, () =>
-            this._applyToolUpdateToMessages(
-              toolResultUpdate(
-                event.toolCallId,
-                event.output,
-                event.state as "output-error" | undefined,
-                event.errorText
-              )
-            )
-          ),
-          event.autoContinue === true,
-          () => this._continuationSpec(connection),
-          (run) => this._enqueueInteractionOutcome(run),
-          connection.id
-        );
-        break;
-      }
-
-      case "tool-approval": {
-        this._turns.applyInteraction(
-          () =>
-            this._applyToolUpdateToMessages(
-              toolApprovalUpdate(event.toolCallId, event.approved)
-            ),
-          event.autoContinue === true,
-          () => this._continuationSpec(connection),
-          (run) => this._enqueueInteractionOutcome(run),
-          connection.id
-        );
-        break;
-      }
-
-      case "clear":
-        await this._handleClear(connection);
-        break;
-
-      case "cancel":
-        // A user's stop: it also drops the continuations waiting on the
-        // turn it stops.
-        await this._turns.cancel(event.id);
-        break;
-
-      case "cancel-continuation":
-        // A stop from a tab that waits for a tool continuation to start. It
-        // has no request id for it yet, so it names itself.
-        this._turns.cancelWaitingContinuation(connection.id);
-        break;
-
-      case "messages":
+        const error =
+          wrapped instanceof Error ? wrapped.message : String(wrapped);
+        this._emit("chat:request:failed", {
+          requestId: rejection.requestId,
+          stage: "parse",
+          messagesPersisted: false,
+          error
+        });
+        return error;
+      },
+      clear: (connection) => this._handleClear(connection),
+      messages: async () => {
         if (!this._loggedProtocolWarnings.has("client-pushed-messages")) {
           this._loggedProtocolWarnings.add("client-pushed-messages");
           console.warn(
@@ -8344,71 +8292,37 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               "local-only, and use clearHistory() for persisted clears."
           );
         }
-        break;
-    }
-  }
-
-  private async _handleStreamResumeRequest(
-    connection: Connection,
-    probeId?: string,
-    requestIds?: string[]
-  ): Promise<void> {
-    await this._resumeHandshake().handleResumeRequest(
-      connection,
-      probeId,
-      requestIds
-    );
-  }
-
-  private async _handleStreamResumeAck(
-    connection: Connection,
-    requestId: string
-  ): Promise<void> {
-    await this._resumeHandshake().handleResumeAck(connection, requestId);
+      },
+      applyToolResult: (event) =>
+        this._applyToolUpdateToMessages(
+          toolResultUpdate(
+            event.toolCallId,
+            event.output,
+            event.state as "output-error" | undefined,
+            event.errorText
+          )
+        ),
+      applyToolApproval: (event) =>
+        this._applyToolUpdateToMessages(
+          toolApprovalUpdate(event.toolCallId, event.approved)
+        ),
+      continuation: (connection) => this._continuationSpec(connection),
+      enqueueInteraction: (run) => this._enqueueInteractionOutcome(run)
+    };
+    return this._chatProtocolInstance;
   }
 
   private async _handleChatRequest(
     connection: Connection,
-    event: Extract<
-      NonNullable<ReturnType<typeof parseProtocolMessage>>,
-      { type: "chat-request" }
-    >
+    request: ParsedChatRequest
   ) {
-    if (!event.init?.body) return;
-
-    let rawParsed: Record<string, unknown>;
-    try {
-      rawParsed = JSON.parse(event.init.body) as Record<string, unknown>;
-    } catch (error) {
-      const wrapped = this.onChatError(error, {
-        requestId: event.id,
-        stage: "parse",
-        messagesPersisted: false
-      });
-      this._emit("chat:request:failed", {
-        requestId: event.id,
-        stage: "parse",
-        messagesPersisted: false,
-        error: wrapped instanceof Error ? wrapped.message : String(wrapped)
-      });
-      return;
-    }
-
     const {
       messages: incomingMessages,
       clientTools: rawClientTools,
-      trigger: rawTrigger,
-      ...customBody
-    } = rawParsed as {
-      messages?: UIMessage[];
-      clientTools?: ClientToolSchema[];
-      trigger?: string;
-      [key: string]: unknown;
-    };
-    if (!Array.isArray(incomingMessages)) return;
-
-    const isRegeneration = rawTrigger === "regenerate-message";
-    const requestId = event.id;
+      body: customBody
+    } = request;
+    const isRegeneration = request.trigger === "regenerate-message";
+    const requestId = request.requestId;
     const requestOriginIds = originMessageIds(incomingMessages);
     if (requestOriginIds) {
       this._frames.requestOrigins.set(requestId, requestOriginIds);

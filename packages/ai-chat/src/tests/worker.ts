@@ -18,6 +18,7 @@ import {
 import { MessageType, type OutgoingMessage } from "../types";
 import type {
   Connection,
+  WSMessage,
   AgentToolEventMessage,
   AgentToolLifecycleResult,
   AgentToolRunInfo,
@@ -309,6 +310,17 @@ export class TestChatAgent extends AIChatAgent<Env> {
       })
     );
   }
+  /** Messages the chat protocol left to the app's `onMessage`. */
+  private _forwardedMessages: string[] = [];
+
+  override onMessage(_connection: Connection, message: WSMessage): void {
+    if (typeof message === "string") this._forwardedMessages.push(message);
+  }
+
+  forwardedMessagesForTest(): string[] {
+    return this._forwardedMessages;
+  }
+
   // Store captured context for testing
   private _capturedContext: {
     hasAgent: boolean;
