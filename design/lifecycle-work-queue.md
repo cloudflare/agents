@@ -94,7 +94,7 @@ due jobs are driven. Host `getNextAlarm()` is removed.
 
 ## The dispatch contract
 
-Five named rules define what a job owner can and cannot rely on:
+Six named rules define what a job owner can and cannot rely on:
 
 1. **Job ids are scoped to their owner.** Every queue verb — push
    included — sees only the owner's own jobs. A same-id push replaces the
@@ -166,6 +166,16 @@ Five named rules define what a job owner can and cannot rely on:
    zero. Retries within one invocation stay bounded by `maxAttempts`.
    Without this, a job that exceeded the CPU limit ran again every 30 s
    forever with `attempt: 1` (measured on a deployed Worker, 22 Nov 2026).
+6. **A job whose owner is not installed is kept.** The owner may come back
+   (a rollback, a capability installed conditionally), and the job may be
+   its only record of the work. The driver moves it out by half its age,
+   at least a minute and at most an hour, emits `job:owner_missing` once
+   per owner per isolate, and runs it once the owner is installed again.
+   pi-durable keeps a task whose definition is missing the same way, and
+   durability keeps rows of a channel nothing attached. A capability that
+   is removed for good deletes its own jobs in the migration that removes
+   it. Exhaustion and the hold limit emit `job:exhausted` and
+   `job:hold_limit`, so a host can count crash loops.
 
 Everything else about drive order — in particular the interleaving of
 different owners' jobs within one alarm cycle — is unspecified. Owners may
