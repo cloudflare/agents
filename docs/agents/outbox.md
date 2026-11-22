@@ -77,7 +77,10 @@ An attempt that brings the object down still counts, so a value that fails that 
 
 ## Holding a value
 
-`send(sink, value, { key, hold: true })` stores a value without delivering it. A later `send()` to the same key without `hold` releases it, with whatever value that send carries. Use it when you know where a message goes before you know what it says.
+`send(sink, value, { key, hold: true })` stores a value without delivering it. Use it when you know where a message goes before you know what it says. Two calls release it:
+
+- `release(sink, key, update?)` delivers the held value, or the value `update(held)` returns. The read and the write happen together, so when two callers race to release the same key, one wins and the other gets `false`.
+- A `send()` to the same key without `hold` replaces the value and delivers it.
 
 ## Values delivered in steps
 

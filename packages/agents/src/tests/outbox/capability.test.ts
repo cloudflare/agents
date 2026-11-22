@@ -156,6 +156,30 @@ describe("Outbox capability", () => {
     });
   });
 
+  it("releases a held value once, with the value the update returns", async () => {
+    const { stub } = stubFor();
+    await runInDurableObject(stub, async (instance: OutboxHarnessObject) => {
+      await instance.outbox.send(
+        "record",
+        { value: "draft" },
+        { key: "k", hold: true }
+      );
+      const update = (held: { value: string }) => ({
+        value: `${held.value}+final`
+      });
+      const releases = await Promise.all([
+        instance.outbox.release("record", "k", update),
+        instance.outbox.release("record", "k", update)
+      ]);
+      expect(releases.sort()).toEqual([false, true]);
+      await waitFor(() => drained(instance));
+      expect(instance.attempts.map((attempt) => attempt.payload)).toEqual([
+        { value: "draft+final" }
+      ]);
+      expect(await instance.outbox.release("record", "k")).toBe(false);
+    });
+  });
+
   it("delivers a value replaced during an attempt after that attempt", async () => {
     const { stub } = stubFor();
     await runInDurableObject(stub, async (instance: OutboxHarnessObject) => {

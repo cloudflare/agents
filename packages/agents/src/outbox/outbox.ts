@@ -262,15 +262,7 @@ export class Outbox<
       throw new Error("Outbox keys must be non-empty");
     }
     validatePolicy(options.retry);
-    const json = payload === undefined ? null : JSON.stringify(payload);
-    if (
-      json !== null &&
-      encoder.encode(json).byteLength > MAX_OUTBOX_PAYLOAD_BYTES
-    ) {
-      throw new Error(
-        `Outbox payload for "${sink}" is over ${MAX_OUTBOX_PAYLOAD_BYTES} bytes`
-      );
-    }
+    const json = this.#encode(sink, payload);
     const key = options.key ?? nanoid();
     const now = Date.now();
     this.#ensureTable();
@@ -310,6 +302,38 @@ export class Outbox<
     this.#emit("outbox:send", { sink, key, id: row.id, held: !!options.hold });
     await wake;
     return this.#delivery(row);
+  }
+
+  /**
+   * Release a held delivery: it becomes pending and is delivered.
+   * `update` maps the held value to the one to deliver. The read and the
+   * write happen together, so of two concurrent releases one wins and the
+   * other returns false. Returns false when no held delivery matched.
+   */
+  async release<T = unknown>(
+    sink: string,
+    key: string,
+    update?: (held: T) => T
+  ): Promise<boolean> {
+    await this.lifecycle.ready();
+    const row = this.#rowByKey(sink, key);
+    if (!row || row.status !== "held") return false;
+    const payload = update
+      ? update(parseJson(row.payload) as T)
+      : (parseJson(row.payload) as T);
+    const json = this.#encode(sink, payload);
+    const now = Date.now();
+    this.#write(
+      `UPDATE cf_agents_outbox
+       SET status = 'pending', payload = ?, next_at = ?, updated_at = ?
+       WHERE id = ? AND status = 'held'`,
+      json,
+      now,
+      now,
+      row.id
+    );
+    await this.#syncWake(row.id);
+    return true;
   }
 
   /** Read one delivery. Acknowledged deliveries are gone. */
@@ -717,6 +741,19 @@ export class Outbox<
   }
 
   // ── Storage ──────────────────────────────────────────────────────────────
+
+  #encode(sink: string, payload: unknown): string | null {
+    const json = payload === undefined ? null : JSON.stringify(payload);
+    if (
+      json !== null &&
+      encoder.encode(json).byteLength > MAX_OUTBOX_PAYLOAD_BYTES
+    ) {
+      throw new Error(
+        `Outbox payload for "${sink}" is over ${MAX_OUTBOX_PAYLOAD_BYTES} bytes`
+      );
+    }
+    return json;
+  }
 
   #resolveSink(name: string): OutboxSink<never> | undefined {
     return this.#sinks[name] ?? this.#registered.get(name);

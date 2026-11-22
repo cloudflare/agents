@@ -29,7 +29,7 @@ On a facet (a routed Lifecycle) the rows stay on the facet. Its wake is mirrored
 
 **Replacing a value starts it over.** The attempt count, the give-up window and the checkpoint reset, and the value gets a new idempotency key. A new value is new intent. An attempt already running finishes with the old value, and its acknowledgement cannot delete the new one.
 
-**Hold.** `send(..., { hold: true })` stores a value without delivering it, and a later send of the key releases it. Think's messenger recovery needs this. The reply's destination is known before recovery knows what the reply is.
+**Hold.** `send(..., { hold: true })` stores a value without delivering it, and `release()` delivers it. `release` reads and writes in one step, so two racing releases deliver once. Think's messenger recovery needs this. The reply's destination is known before recovery knows what the reply is.
 
 **Checkpoints.** `saveCheckpoint` records progress inside one value. A recovered messenger reply is several posts, and a retry must start after the last post that went out.
 
