@@ -2481,7 +2481,7 @@ export class ThinkWorkflowRecoveryE2EAgent extends Think<Env> {
 // resume with NO live client connection. This agent drives the full path
 // against the wrangler-dev runtime:
 //   1. a chat turn calls a `kind: "durable-pause"` action, which parks a row in
-//      `cf_think_action_pending_approvals` and ends the turn
+//      the Approvals decisions table and ends the turn
 //   2. a real SIGKILL + restart proves the pending row + its descriptor survive
 //      the deploy (rebuilt from the durable store on cold start)
 //   3. `approveExecution` with no open socket runs the action exactly once and

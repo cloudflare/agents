@@ -7348,7 +7348,10 @@ export class ThinkToolsTestAgent extends Think {
   /** Skip the next resolved-pause drop, as a restart right before it would. */
   async skipNextResolvedPauseDropForTest(): Promise<void> {
     const self = this as unknown as {
-      _dropGenerationAfterResolvedPause(toolCallId: string): Promise<void>;
+      _dropGenerationAfterResolvedPause(
+        toolCallId: string,
+        decisionId: string
+      ): Promise<void>;
     };
     const original = self._dropGenerationAfterResolvedPause;
     self._dropGenerationAfterResolvedPause = async () => {
@@ -7418,22 +7421,18 @@ export class ThinkToolsTestAgent extends Think {
     };
   }
 
-  /** Drop in-memory deferred-pause state, as an eviction would. */
+  /** Drop in-memory resolved-pause state, as an eviction would. */
   async forgetDeferredResolvedPausesForTest(): Promise<void> {
-    const state = this as unknown as {
-      _deferredResolvedPauses: Map<string, unknown>;
-      _deferredResolvedPausesLoad: Promise<void> | undefined;
-    };
-    state._deferredResolvedPauses.clear();
-    state._deferredResolvedPausesLoad = undefined;
+    (
+      this as unknown as { _pauseOutcomesBeingApplied: Set<string> }
+    )._pauseOutcomesBeingApplied.clear();
   }
 
   private _listActionPendingRowsForTest(): Array<{ execution_id: string }> {
-    return (
-      this as unknown as {
-        _listActionPendingRows: () => Array<{ execution_id: string }>;
-      }
-    )._listActionPendingRows();
+    return this._approvalsForTest()
+      .pending()
+      .filter((decision) => decision.kind === "action")
+      .map((decision) => ({ execution_id: decision.id }));
   }
 
   async getBeforeStepLog(): Promise<
@@ -8128,6 +8127,64 @@ export class ThinkToolsTestAgent extends Think {
     );
   }
 
+  /**
+   * Leave a parked action as a reset during its approval leaves it: the
+   * verdict is stored, the continuation never finished.
+   */
+  async interruptApprovalForTest(executionId: string): Promise<void> {
+    this.sql`
+      UPDATE cf_agents_decisions
+      SET status = 'decided',
+          verdict_json = ${JSON.stringify({ approved: true })},
+          decided_at = ${Date.now()}
+      WHERE id = ${executionId}
+    `;
+  }
+
+  /** Start Approvals again, as the next wake does. */
+  async restartApprovalsForTest(): Promise<void> {
+    await this._approvalsForTest().onStart();
+  }
+
+  async decisionStatusForTest(executionId: string): Promise<string | null> {
+    return this._approvalsForTest().get(executionId)?.status ?? null;
+  }
+
+  /** Seed a parked action in the table an earlier version used. */
+  async insertLegacyActionPendingRowForTest(
+    executionId: string
+  ): Promise<void> {
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_think_action_pending_approvals (
+        execution_id TEXT PRIMARY KEY,
+        action_name TEXT NOT NULL,
+        tool_call_id TEXT NOT NULL,
+        request_id TEXT,
+        input_json TEXT NOT NULL,
+        descriptor_json TEXT,
+        created_at INTEGER NOT NULL
+      )
+    `;
+    this.sql`
+      INSERT INTO cf_think_action_pending_approvals (
+        execution_id, action_name, tool_call_id, request_id, input_json,
+        descriptor_json, created_at
+      )
+      VALUES (
+        ${executionId}, ${"pauseAction"}, ${"tc-legacy"}, ${null},
+        ${JSON.stringify({ message: "from before" })},
+        ${JSON.stringify({ action: "pauseAction", kind: "durable-pause" })},
+        ${Date.now()}
+      )
+    `;
+  }
+
+  async migrateLegacyPauseRecordsForTest(): Promise<void> {
+    await (
+      this as unknown as { _migrateLegacyPauseRecords: () => Promise<void> }
+    )._migrateLegacyPauseRecords();
+  }
+
   private _approvalsForTest(): Approvals {
     return (this as unknown as { _approvals: Approvals })._approvals;
   }
@@ -8221,17 +8278,26 @@ export class ThinkToolsTestAgent extends Think {
       descriptor_json: string | null;
     }>
   > {
-    return (
-      this as unknown as {
-        _listActionPendingRows: () => Array<{
-          execution_id: string;
-          action_name: string;
-          tool_call_id: string;
-          input_json: string;
-          descriptor_json: string | null;
-        }>;
-      }
-    )._listActionPendingRows();
+    return this._approvalsForTest()
+      .pending()
+      .filter((decision) => decision.kind === "action")
+      .map((decision) => {
+        const subject = decision.subject as {
+          action: string;
+          toolCallId: string;
+          input: unknown;
+        };
+        return {
+          execution_id: decision.id,
+          action_name: subject.action,
+          tool_call_id: subject.toolCallId,
+          input_json: JSON.stringify(subject.input),
+          descriptor_json:
+            decision.descriptor === undefined
+              ? null
+              : JSON.stringify(decision.descriptor)
+        };
+      });
   }
 
   async approveExecutionForTest(executionId: string): Promise<unknown> {
@@ -8259,13 +8325,10 @@ export class ThinkToolsTestAgent extends Think {
   }
 
   async sweepActionPendingApprovalsForTest(): Promise<{ swept: number }> {
-    return (
-      this as unknown as {
-        _sweepActionPendingApprovals: (options: {
-          force?: boolean;
-        }) => Promise<{ swept: number }>;
-      }
-    )._sweepActionPendingApprovals({ force: true });
+    const { decisions } = await this._approvalsForTest().sweep({
+      force: true
+    });
+    return { swept: decisions };
   }
 
   async setActionPendingApprovalTtlForTest(ttl: number | false): Promise<void> {
@@ -8279,9 +8342,9 @@ export class ThinkToolsTestAgent extends Think {
     createdAt: number
   ): Promise<void> {
     this.sql`
-      UPDATE cf_think_action_pending_approvals
+      UPDATE cf_agents_decisions
       SET created_at = ${createdAt}
-      WHERE execution_id = ${executionId}
+      WHERE id = ${executionId}
     `;
   }
 

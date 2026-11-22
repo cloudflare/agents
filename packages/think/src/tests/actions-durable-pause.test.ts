@@ -1037,18 +1037,51 @@ describe("resolving a durable pause drops pending-state generation (#2054)", () 
     expect(generatedAfter(resolved, "dp1")).toEqual([]);
   });
 
-  it("retries loading deferred cleanup after a failed storage read", async () => {
-    const agent = await approvedMidStreamWithoutContinuation("dp-stale-load");
-    await agent.forgetDeferredResolvedPausesForTest();
-    await agent.failNextStorageGetForTest("cf_think_deferred_resolved_pauses");
+  it("finishes an approval a reset interrupted: runs the action once and writes its outcome", async () => {
+    const { agent, executionId } = await parkInTurn("dp-approve-reset");
+    await agent.holdConnectionlessContinuationForTest();
+    await agent.interruptApprovalForTest(executionId);
+    expect(await agent.getDurablePauseExecCount()).toBe(0);
 
-    const failed = await agent.testChat("first try");
-    expect(failed.error).toContain("simulated storage read failure");
-    await agent.testChat("what is the status?");
+    // The next wake finds the decided approval and its recovery job runs it.
+    await agent.restartApprovalsForTest();
+    await vi.waitFor(
+      async () => {
+        expect(await agent.decisionStatusForTest(executionId)).toBe("settled");
+        const resolved = ownerOf(
+          (await agent.getStoredMessages()) as UIMessage[],
+          "dp1"
+        );
+        expect(toolOutput(resolved, "dp1")).toBe("paused-exec: hello");
+      },
+      { timeout: 5000, interval: 50 }
+    );
+    expect(await agent.getDurablePauseExecCount()).toBe(1);
+    expect(await agent.listActionPendingForTest()).toHaveLength(0);
 
-    const prompts = await agent.getDurablePausePromptsForTest();
-    expect(prompts.at(-1)).toContain("paused-exec: hello");
-    expect(prompts.at(-1)).not.toContain("Once approved");
+    // A late approve from another tab does not run it again.
+    const late = (await agent.approveExecutionForTest(executionId)) as {
+      status?: string;
+    };
+    expect(late.status).toBe("error");
+    expect(await agent.getDurablePauseExecCount()).toBe(1);
+  });
+
+  it("moves parked rows an earlier version wrote, so they stay approvable", async () => {
+    const agent = await freshPauseAgent(`dp-migrate-${crypto.randomUUID()}`);
+    await agent.useDurablePauseActionForTest();
+    await agent.insertLegacyActionPendingRowForTest("actpause_legacy");
+    await agent.migrateLegacyPauseRecordsForTest();
+
+    const [pending] = await agent.listActionPendingForTest();
+    expect(pending.execution_id).toBe("actpause_legacy");
+    expect(JSON.parse(pending.descriptor_json ?? "null")).toMatchObject({
+      action: "pauseAction"
+    });
+    await expect(
+      agent.approveExecutionForTest("actpause_legacy")
+    ).resolves.toBe("paused-exec: from before");
+    expect(await agent.getDurablePauseExecCount()).toBe(1);
   });
 
   it("keeps the outcome when a stale client resubmits the paused message", async () => {
