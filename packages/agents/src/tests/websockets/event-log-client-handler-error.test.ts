@@ -26,7 +26,9 @@ class FakeSocket extends EventTarget {
 
 describe("followEventLog handler errors", () => {
   it("applies every replayed event when onEvent throws for one", () => {
-    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const error = vi
+      .spyOn(globalThis, "reportError")
+      .mockImplementation(() => {});
     const socket = new FakeSocket();
     const seen: number[] = [];
     const sub = followEventLog(socket, "feed", {
@@ -73,7 +75,9 @@ describe("followEventLog handler errors", () => {
   });
 
   it("applies the rest of a live frame when onEvent throws for one", () => {
-    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const error = vi
+      .spyOn(globalThis, "reportError")
+      .mockImplementation(() => {});
     const socket = new FakeSocket();
     const seen: number[] = [];
     followEventLog(socket, "feed", {

@@ -59,6 +59,17 @@ export type EventLogSubscription = {
 
 const OPEN = 1;
 
+/** `reportError` where the runtime has it, else an uncaught throw later. */
+function reportHandlerError(error: unknown): void {
+  if (typeof globalThis.reportError === "function") {
+    globalThis.reportError(error);
+  } else {
+    queueMicrotask(() => {
+      throw error;
+    });
+  }
+}
+
 /**
  * Open subscriptions per socket and log. Several followers of one log on
  * one socket share the server's subscription, so only the last to close
@@ -162,10 +173,9 @@ export function followEventLog<T = unknown, S = unknown>(
           try {
             handlers.onEvent(entry.data as T, entry.seq);
           } catch (error) {
-            console.error(
-              `[followEventLog] onEvent for "${log}" threw at seq ${entry.seq}:`,
-              error
-            );
+            // Report it as an uncaught error would be (browser error
+            // listeners see it), without stopping this frame.
+            reportHandlerError(error);
           }
         }
         return;
