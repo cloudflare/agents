@@ -123,6 +123,8 @@ Other methods:
 - If `onDecided` throws, the error reaches the caller of `decide()` and the
   recovery job retries it. After three failures the decision settles with
   `decision.error`.
+- A sub-agent running as a facet has no alarm of its own, so there an
+  unfinished decision is not resumed after a reset.
 
 ## Retention
 

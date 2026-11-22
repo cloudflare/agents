@@ -721,7 +721,7 @@ export class Approvals extends LifecycleCapability {
     kind: string,
     delivery: { redelivered: boolean }
   ): Promise<Decision> {
-    await this.lifecycle.jobs.cancel(resumeJobId(id));
+    if (this.#canWake()) await this.lifecycle.jobs.cancel(resumeJobId(id));
     const row = this.#readDecision(id);
     if (!row) throw new Error(`Approvals: no decision "${id}"`);
     const decision = this.#toDecision(row);
@@ -750,7 +750,17 @@ export class Approvals extends LifecycleCapability {
     );
   }
 
+  /**
+   * Whether this object can wake itself. A routed sub-agent (a facet) has
+   * no alarm of its own, so it keeps no recovery jobs, and an unfinished
+   * decision there is not resumed after a reset.
+   */
+  #canWake(): boolean {
+    return this.lifecycle.routes.source === undefined;
+  }
+
   async #pushResume(id: string, time: number): Promise<void> {
+    if (!this.#canWake()) return;
     await this.lifecycle.jobs.push({
       id: resumeJobId(id),
       fn: RESUME_FN,

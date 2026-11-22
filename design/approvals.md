@@ -115,8 +115,9 @@ the run-once guarantee for its key.
 
 ## Tradeoffs
 
-- On a facet there is no alarm, so a recovery job never fires there. The
-  next `onStart` repairs it instead.
+- A facet has no alarm, so the capability keeps no recovery job there, and
+  an unfinished decision on a facet is not resumed after a reset. Effects
+  and the once-only verdict work the same on a facet.
 - `in-doubt` is conservative. A caller that knows its effect is safe to
   repeat opts into `reclaimAfterMs`; nobody else gets a second run they did
   not ask for.
