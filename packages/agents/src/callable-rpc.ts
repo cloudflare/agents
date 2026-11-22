@@ -2,6 +2,8 @@
  * Callable RPC over a WebSocket: the request and response frames, the
  * dispatch of one request to a `@callable()` method, and
  * `StreamingResponse` for streaming methods.
+ *
+ * @internal
  */
 
 import { getCallableMetadata, isCallableMethod } from "./callable-decorator";
@@ -49,6 +51,7 @@ export type RPCResponse = {
     }
 );
 
+/** @internal */
 export function sendRpcResponseIfOpen(
   connection: Connection,
   response: RPCResponse
@@ -64,6 +67,8 @@ export function sendRpcResponseIfOpen(
 
 /**
  * Type guard for RPC request messages
+ *
+ * @internal
  */
 export function isRPCRequest(msg: unknown): msg is RPCRequest {
   return (
@@ -85,6 +90,8 @@ export function isRPCRequest(msg: unknown): msg is RPCRequest {
  * response (or, for a streaming method, let the method stream through a
  * `StreamingResponse`). `replyBridge` is set when the request arrived over
  * a facet bridge; replies then go back through it.
+ *
+ * @internal
  */
 export async function dispatchCallableRpc(
   target: object,
