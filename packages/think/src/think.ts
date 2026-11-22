@@ -100,6 +100,12 @@ import {
   toDeclaredSchedules,
   type ThinkScheduledTasks
 } from "./scheduled-tasks";
+import {
+  deliverChannelNotice,
+  resolveChannelContext,
+  type ChannelEvent
+} from "./channels/runtime";
+import { defaultAttachmentText, deliverReplyAttachments } from "./attachments";
 import { ThinkConfigStore } from "./config-store";
 import { wrapToolsWithDecision } from "./tool-decision";
 import {
@@ -109,10 +115,8 @@ import {
 } from "./context-overflow";
 import {
   EXECUTION_OUTCOME_MESSAGE_PREFIX,
-  MODEL_RECENT_WINDOW,
   MODEL_TRUNCATION_STEP,
   ensureValidContinueCheckpoint,
-  mediaEvictionCutoff,
   modelMessagesFromHistory,
   withContextReminder
 } from "./inference/model-messages";
@@ -123,7 +127,20 @@ import {
   drainInferenceStream,
   streamErrorToString
 } from "./inference/invocation";
+import {
+  registerMessengerReplyTask,
+  runMessengerReplyTask
+} from "./messengers/reply-task";
 import { ThinkModelResolver } from "./model";
+import { declaredOverrides } from "./overrides";
+import {
+  RESERVED_MESSAGE_METADATA_KEYS,
+  channelFromMessages,
+  reservedMetadataOf,
+  stampTurnContext,
+  stripReservedMetadata,
+  turnMetadataFromMessages
+} from "./turn-metadata";
 import { ThinkSkills } from "./skills-runtime";
 import { systemPromptForTurn } from "./system-prompt";
 import * as skills from "./skills";
@@ -151,9 +168,6 @@ import {
   Agent,
   callable,
   getCurrentAgent,
-  isDurableObjectCodeUpdateReset,
-  isDurableObjectMemoryLimitReset,
-  isPlatformTransientError,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext,
   __DO_NOT_USE_WILL_BREAK__withInvocationScope as withInvocationScope
 } from "agents";
@@ -528,23 +542,6 @@ function keepResolvedPauses(
     return { ...message, parts };
   });
 }
-/**
- * Whether a workspace is a Computer `Workspace` this agent owns, as opposed
- * to a client for one another Durable Object owns. Checked by shape so a
- * second copy of `@cloudflare/computer` in the bundle still matches.
- */
-function isLocalWorkspace(
-  workspace: ThinkWorkspace
-): workspace is ThinkWorkspace & Pick<Workspace, "ready" | "stub"> {
-  return (
-    "ready" in workspace &&
-    typeof workspace.ready === "function" &&
-    "stub" in workspace &&
-    typeof workspace.stub === "function"
-  );
-}
-
-/** Context block label for the skills catalog. */
 
 const ACTION_PENDING_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 const ACTION_PENDING_LAST_SWEPT_KEY =
@@ -553,13 +550,16 @@ const ACTION_PENDING_LAST_SWEPT_KEY =
 const ACTION_PAUSE_ID_PREFIX = "actpause_";
 import { Workspace, type WorkspaceStub } from "@cloudflare/computer";
 import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
-import { WorkspaceFiles, type ThinkWorkspace } from "./workspace-files";
 import {
-  evictMediaFromMessage,
-  evictedFilePath,
+  WorkspaceFiles,
+  isLocalWorkspace,
+  type ThinkWorkspace
+} from "./workspace-files";
+import {
+  MediaEvictionPasses,
   resolveMediaEvictionConfig,
   type MediaEvictionConfig,
-  hasEvictableMedia
+  type MediaEvictionPassResult
 } from "./media-eviction";
 import { createFetchTools } from "./tools/fetch";
 import type { CreateFetchToolsOptions, FetchToolEvent } from "./tools/fetch";
@@ -576,12 +576,8 @@ import {
   loadThinkExtensions
 } from "./extensions/pipeline";
 import { ThinkMessengerRuntime } from "./messengers/chat-sdk";
-import {
-  DEFAULT_MESSENGER_CONCURRENCY,
-  MESSENGER_REPLY_FIBER_NAME
-} from "./messengers";
+import { DEFAULT_MESSENGER_CONCURRENCY } from "./messengers";
 import type {
-  DeliveryKind,
   MessengerConcurrency,
   MessengerContext,
   MessengerDeliverySurface,
@@ -1316,24 +1312,6 @@ type ActionLedgerEvent =
       payload: { settled: number; pending: number };
     };
 
-type ChannelEvent =
-  | {
-      type: "channel:resolved";
-      payload: { channel: string; kind: string; requestId?: string };
-    }
-  | {
-      type: "channel:delivered";
-      payload: { channel: string; kind: DeliveryKind; turnEnded: boolean };
-    }
-  | {
-      type: "notice:delivered";
-      payload: { channel: string; kind: DeliveryKind; informModel: boolean };
-    }
-  | {
-      type: "notice:failed";
-      payload: { channel: string; error: string };
-    };
-
 /**
  * A durably-parked `kind: "durable-pause"` action awaiting human approval. The
  * row is the compaction-safe record of everything needed to run `execute` on
@@ -1439,13 +1417,6 @@ function submissionRunItemId(submissionId: string): string {
   return `submission:${submissionId}`;
 }
 
-/**
- * Message-metadata keys that are server-written turn context (stamped by
- * `_stampChannel`) and trusted by hooks and recovery. They are stripped from
- * client-supplied messages at intake so a client can never forge them.
- */
-const RESERVED_MESSAGE_METADATA_KEYS = ["channel", "turnMetadata"] as const;
-
 const cachedMessageEncoder = new TextEncoder();
 
 /**
@@ -1454,26 +1425,6 @@ const cachedMessageEncoder = new TextEncoder();
  */
 function cachedMessageBytes(message: UIMessage): number {
   return cachedMessageEncoder.encode(JSON.stringify(message)).byteLength;
-}
-
-function reservedMetadataOf(
-  message: UIMessage
-): Record<string, unknown> | undefined {
-  const metadata = message.metadata;
-  if (
-    typeof metadata !== "object" ||
-    metadata === null ||
-    Array.isArray(metadata)
-  ) {
-    return undefined;
-  }
-  const reserved: Record<string, unknown> = {};
-  for (const key of RESERVED_MESSAGE_METADATA_KEYS) {
-    if (key in metadata) {
-      reserved[key] = (metadata as Record<string, unknown>)[key];
-    }
-  }
-  return Object.keys(reserved).length > 0 ? reserved : undefined;
 }
 
 /**
@@ -1505,37 +1456,6 @@ function dropGenerationAfterToolCall(
       (part.type !== "text" && part.type !== "reasoning")
   );
   return kept.length === parts.length ? parts : kept;
-}
-
-/**
- * The stored form of a client-sourced message's metadata: Sessions drops the
- * reserved keys on every client write, so a compare against a stored row has
- * to drop them too. Mirrors `SessionCore.stripReservedMetadata` for the keys
- * Think registers.
- */
-function stripReservedMetadata(message: UIMessage): UIMessage {
-  const metadata = message.metadata;
-  if (
-    typeof metadata !== "object" ||
-    metadata === null ||
-    Array.isArray(metadata)
-  ) {
-    return message;
-  }
-  const remaining: Record<string, unknown> = { ...metadata };
-  let changed = false;
-  for (const key of RESERVED_MESSAGE_METADATA_KEYS) {
-    if (key in remaining) {
-      delete remaining[key];
-      changed = true;
-    }
-  }
-  if (!changed) return message;
-  if (Object.keys(remaining).length > 0) {
-    return { ...message, metadata: remaining };
-  }
-  const { metadata: _dropped, ...withoutMetadata } = message;
-  return withoutMetadata as UIMessage;
 }
 
 export type ThinkSubmissionInspection = {
@@ -1668,48 +1588,8 @@ import type {
   SaveMessagesResult
 } from "agents/chat";
 
-/**
- * Definition name for messenger reply runs on the Tasks capability. The
- * reserved prefix keeps it outside the public `fibers.run()` surface; the
- * recovery context still carries the historical `MESSENGER_REPLY_FIBER_NAME`
- * so the messenger runtime's recovery gate is unchanged.
- */
-const MESSENGER_REPLY_TASK_DEFINITION = "__cf_internal_messenger_reply";
-
-// Agent wraps subclass methods during super(), copying inherited methods onto
-// the concrete prototype. Snapshot the chain first so later checks see user
-// declarations rather than framework-installed wrappers.
-const declaredPrototypeMembers = new WeakMap<
-  object,
-  ReadonlySet<PropertyKey>
->();
-
-function snapshotDeclaredMembers(prototype: object): void {
-  for (
-    let current: object | null = prototype;
-    current && current !== Think.prototype;
-    current = Object.getPrototypeOf(current) as object | null
-  ) {
-    if (!declaredPrototypeMembers.has(current)) {
-      declaredPrototypeMembers.set(current, new Set(Reflect.ownKeys(current)));
-    }
-  }
-}
-
-function isMethodOverridden(instance: object, methodName: string): boolean {
-  // Agent's auto-wrapper writes to the concrete prototype, not the instance;
-  // an own member here is a subclass class-field override initialized later.
-  if (Object.prototype.hasOwnProperty.call(instance, methodName)) return true;
-
-  for (
-    let current: object | null = Object.getPrototypeOf(instance) as object;
-    current && current !== Think.prototype;
-    current = Object.getPrototypeOf(current) as object | null
-  ) {
-    if (declaredPrototypeMembers.get(current)?.has(methodName)) return true;
-  }
-  return false;
-}
+const { snapshot: snapshotDeclaredMembers, isOverridden: isMethodOverridden } =
+  declaredOverrides(() => Think.prototype);
 
 /**
  * What `Think` stores with a client request's admission record, to run it
@@ -2051,7 +1931,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     this.lifecycle.use(this._approvals);
     this._registerChatTurnTaskDefinition();
     this._registerChatRecoveryTaskDefinition();
-    this._registerMessengerReplyTaskDefinition();
+    registerMessengerReplyTask(this.tasks, {
+      runtime: () => this._messengerRuntime,
+      storage: this.ctx.storage
+    });
 
     const _onStart = this.onStart.bind(this);
     const startThink = async (
@@ -2140,13 +2023,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
                 // decides from memory. It also grows the cache past what the
                 // last refresh measured.
                 this._noteCachedGrowth(cachedMessageBytes(message));
-                if (this._mediaEvictionFruitless) {
-                  this._mediaEvictionFruitless.appendsSince++;
-                }
-                if (this._mediaEvictionRunning) {
-                  this._mediaEvictionAppendsDuringPass++;
-                }
-                this._scheduleMediaEvictionPass();
+                this.#mediaEviction.noteAppend();
               }
             });
 
@@ -2461,108 +2338,38 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     }
   }
 
-  private _mediaEvictionRunning = false;
-  /**
-   * A request that arrived while a pass was running. That pass read its
-   * candidates before the request's append landed, so the request is kept
-   * and re-evaluated once the pass ends rather than dropped.
-   */
-  private _mediaEvictionPending = false;
-  /**
-   * Linear appends that landed while a pass was running. The pass read its
-   * candidates before them, so a fruitless result records them as appends
-   * since — not zero — and the request they left pending can pass the gate.
-   */
-  private _mediaEvictionAppendsDuringPass = 0;
-  /**
-   * The last pass that found nothing to evict while aged rows were hidden
-   * from the cache: the stored size it saw, and how many linear appends have
-   * landed since. Until either changes enough, another pass would scan the
-   * same rows to the same answer. A refresh that measures a different size
-   * re-arms it, and so do `keepRecentMessages` appends: that is what it takes
-   * for a row the pass had to protect to age into a candidate. An update
-   * that grows a cached row clears it outright (`_patchCachedMessage`).
-   */
-  private _mediaEvictionFruitless: {
-    storedBytes: number;
-    appendsSince: number;
-  } | null = null;
-
-  /**
-   * Whether the cache can stand in for the stored path when deciding if an
-   * eviction pass is worth running. It cannot when the hydration is a window
-   * of the path, or when a compaction overlay collapses rows the pass would
-   * still read and rewrite.
-   */
-  private _agedRowsHiddenFromCache(): boolean {
-    return (
+  /** Aged-media eviction passes (see `mediaEviction`). */
+  readonly #mediaEviction = new MediaEvictionPasses({
+    config: () => resolveMediaEvictionConfig(this.mediaEviction),
+    truncationStep: () => this.truncationStep,
+    cachedMessages: () => this._cachedMessages,
+    agedRowsHiddenFromCache: () =>
       this._lastHydration?.truncated === true ||
       this._cachedMessages.some((message) =>
         isCompactionMessage(message as SessionMessage)
-      )
-    );
+      ),
+    storedBytes: () => this._lastHydration?.totalContentBytes ?? null,
+    rowStats: () => this.session.getHistoryRowStats(),
+    readMessage: async (id) =>
+      (await this.session.getMessage(id)) as UIMessage | null,
+    writeFile: (path, bytes) =>
+      new WorkspaceFiles(this.workspace).write(path, bytes),
+    updateMessage: (message) => this._updateMessageInHistory(message),
+    emitEvicted: (totals) =>
+      this._emit("chat:media:evicted", {
+        ...totals,
+        externalizedBytes: totals.bytes
+      }),
+    queuePass: () =>
+      this.queue(MEDIA_EVICTION_CALLBACK, undefined, { id: "media-eviction" })
+  });
+
+  private get _mediaEvictionRunning(): boolean {
+    return this.#mediaEviction.running;
   }
 
-  /**
-   * Queue a bounded media-eviction pass (see `mediaEviction`).
-   *
-   * The pass is one queue item with a stable id, so repeated requests
-   * coalesce and the pass runs from the alarm loop, never inside the
-   * request or the `blockConcurrencyWhile` cache refresh that asked for it.
-   * A request that lands while a pass is running is re-evaluated once the
-   * pass ends, so media aged by an append during the pass is not left until
-   * the next one. `_evictAgedMediaBestEffort` swallows its own failures, so
-   * a bad pass can never brick the object.
-   */
   private _scheduleMediaEvictionPass(): void {
-    if (this._mediaEvictionRunning) {
-      this._mediaEvictionPending = true;
-      return;
-    }
-    const config = resolveMediaEvictionConfig(this.mediaEviction);
-    if (!config) return;
-    // Decide from memory whether a pass could evict anything, so a pass is
-    // not the way to find out: its first act is a content-free scan of the
-    // whole stored path, and this runs after every cache refresh and every
-    // linear append.
-    //
-    // When the cache holds every aged row, it is the same rows the pass
-    // would read, so a pass is scheduled only when an aged cached message
-    // still carries an inline payload. When it does not — a windowed
-    // hydration, or rows hidden under a compaction overlay — a pass is
-    // scheduled once per distinct stored size, since until the bytes change
-    // it would scan the same rows to the same answer.
-    const keepRecent = Math.max(config.keepRecentMessages, MODEL_RECENT_WINDOW);
-    if (this._agedRowsHiddenFromCache()) {
-      const fruitless = this._mediaEvictionFruitless;
-      if (
-        fruitless !== null &&
-        this._lastHydration !== null &&
-        fruitless.storedBytes === this._lastHydration.totalContentBytes &&
-        fruitless.appendsSince < keepRecent
-      ) {
-        return;
-      }
-    } else {
-      const aged = this._cachedMessages.slice(
-        0,
-        mediaEvictionCutoff(
-          this._cachedMessages.length,
-          config.keepRecentMessages,
-          this.truncationStep
-        )
-      );
-      if (
-        !aged.some((message) => hasEvictableMedia(message, config.minPartBytes))
-      ) {
-        return;
-      }
-    }
-    void this.queue(MEDIA_EVICTION_CALLBACK, undefined, {
-      id: "media-eviction"
-    }).catch((error) => {
-      console.error("[Think] Failed to queue media eviction pass", error);
-    });
+    this.#mediaEviction.request();
   }
 
   /**
@@ -2573,127 +2380,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     await this._evictAgedMediaBestEffort();
   }
 
-  /**
-   * Remove aged media from the conversation, leaving a Workspace pointer the
-   * agent can read back.
-   *
-   * Memory-bounded by design: candidate sizes come from `getHistoryRowStats()`
-   * (no content loaded), only rows big enough to hold an evictable payload are
-   * read, and they are processed one at a time. Bytes are written to the
-   * Workspace BEFORE the row is rewritten, so a failed pass never loses data;
-   * once the rewritten row is stored, its Sessions attachment reference is
-   * gone and the blob is reaped, so the bytes live in exactly one place.
-   *
-   * The aged cutoff is {@link mediaEvictionCutoff}: the stepped truncation
-   * cutoff, kept at least `keepRecentMessages` back. Messages the model still
-   * replays at full fidelity are never rewritten, whatever the configuration
-   * says, and the cutoff moves only once per truncation step.
-   *
-   * Best-effort: failures are logged and the next pass retries. When a pass
-   * stops at `maxRowsPerPass` having made progress, the next one is scheduled
-   * so a backlog drains on its own; a pass that changed nothing does not
-   * reschedule, which is what guarantees termination.
-   */
-  protected async _evictAgedMediaBestEffort(): Promise<{
-    messages: number;
-    parts: number;
-    bytes: number;
-    backlogRemains: boolean;
-  } | null> {
-    if (this._mediaEvictionRunning) return null;
-    const config = resolveMediaEvictionConfig(this.mediaEviction);
-    if (!config) return null;
-    this._mediaEvictionRunning = true;
-    this._mediaEvictionAppendsDuringPass = 0;
-    const totals = {
-      messages: 0,
-      parts: 0,
-      bytes: 0,
-      backlogRemains: false
-    };
-    try {
-      const files = new WorkspaceFiles(this.workspace);
-      const stats = await this.session.getHistoryRowStats();
-      const aged = stats.slice(
-        0,
-        mediaEvictionCutoff(
-          stats.length,
-          config.keepRecentMessages,
-          this.truncationStep
-        )
-      );
-
-      let processed = 0;
-      for (const row of aged) {
-        // The stored row is not large enough to hold an evictable payload —
-        // skip without reading it. A rewritten row drops below this line and
-        // is skipped by every later pass.
-        if (row.bytes < config.minPartBytes) continue;
-        if (processed >= config.maxRowsPerPass) {
-          totals.backlogRemains = true;
-          break;
-        }
-        processed++;
-
-        const message = (await this.session.getMessage(
-          row.id
-        )) as UIMessage | null;
-        if (!message) continue;
-
-        const result = await evictMediaFromMessage(message, {
-          minPartBytes: config.minPartBytes,
-          write: async (index, bytes, mediaType) => {
-            const path = evictedFilePath(message.id, index, mediaType);
-            await files.write(path, bytes);
-            return path;
-          }
-        });
-        if (!result.changed) continue;
-
-        // The rewritten row no longer carries the payload, so the bytes now
-        // exist only as the Workspace file.
-        await this._updateMessageInHistory(result.message);
-        totals.messages++;
-        totals.parts += result.parts;
-        totals.bytes += result.bytes;
-      }
-
-      if (totals.messages > 0) {
-        this._mediaEvictionFruitless = null;
-        this._emit("chat:media:evicted", {
-          messages: totals.messages,
-          parts: totals.parts,
-          bytes: totals.bytes,
-          externalizedBytes: totals.bytes
-        });
-      } else if (this._agedRowsHiddenFromCache() && this._lastHydration) {
-        this._mediaEvictionFruitless = {
-          storedBytes: this._lastHydration.totalContentBytes,
-          appendsSince: this._mediaEvictionAppendsDuringPass
-        };
-      }
-      return totals;
-    } catch (error) {
-      console.error(
-        "[Think] media eviction pass failed; a later pass will retry.",
-        error
-      );
-      return null;
-    } finally {
-      this._mediaEvictionRunning = false;
-      // Only chain when this pass actually shrank something: a pass that
-      // changed nothing would otherwise reschedule itself forever.
-      if (totals.backlogRemains && totals.messages > 0) {
-        this._scheduleMediaEvictionPass();
-      }
-      // A request that landed mid-pass goes back through the gate now, so
-      // media aged by an append during this pass is not left until the
-      // next one. The gate, not the request, decides whether a pass runs.
-      if (this._mediaEvictionPending) {
-        this._mediaEvictionPending = false;
-        this._scheduleMediaEvictionPass();
-      }
-    }
+  /** Run one bounded eviction pass now. @internal Exposed for tests. */
+  protected _evictAgedMediaBestEffort(): Promise<MediaEvictionPassResult | null> {
+    return this.#mediaEviction.run();
   }
 
   /** Replace the live cache with a durable storage snapshot. */
@@ -2854,7 +2543,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const grew = cachedMessageBytes(next) - cachedMessageBytes(previous);
     if (grew > 0) {
       this._noteCachedGrowth(grew);
-      this._mediaEvictionFruitless = null;
+      this.#mediaEviction.invalidate();
     }
   }
 
@@ -3569,46 +3258,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * keys are stripped at intake). `undefined` when the turn carried none.
    */
   get activeTurnMetadata(): Record<string, unknown> | undefined {
-    return this._turnMetadataFromMessages(this.messages);
-  }
-
-  /** Resolve a channel id to a turn-scoped {@link ChannelContext}, if registered. */
-  private _resolveChannelContext(
-    channel: string | undefined
-  ): ChannelContext | undefined {
-    if (!channel) {
-      return undefined;
-    }
-    const definition = this._channels?.get(channel);
-    if (!definition) {
-      // A channel was requested but is not registered. Don't throw (a recovered
-      // turn may name a channel later removed from `configureChannels()`), but
-      // warn so a typo'd channel id is visible rather than silently policy-free.
-      // `_channels` is undefined for sub-agents (no channel registry), where a
-      // missing channel is expected, so only warn once the registry exists.
-      if (this._channels) {
-        console.warn(
-          `[Think] turn requested channel "${channel}" which is not registered ` +
-            `(configureChannels()/getMessengers()); no per-channel policy applied`
-        );
-      }
-      return undefined;
-    }
-    this._emitChannelEvent({
-      type: "channel:resolved",
-      payload: {
-        channel,
-        kind: definition.kind,
-        requestId: admittedTurnContext.getStore()?.requestId
-      }
-    });
-    return {
-      channelId: channel,
-      kind: definition.kind,
-      capabilities: definition.capabilities,
-      messenger:
-        definition.kind === "messenger" ? this.getMessengerContext() : undefined
-    };
+    return turnMetadataFromMessages(this.messages);
   }
 
   /**
@@ -3620,7 +3270,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     channel: string | undefined,
     fn: () => Promise<T>
   ): Promise<T> {
-    const context = this._resolveChannelContext(channel);
+    const context = resolveChannelContext(channel, {
+      registry: this._channels,
+      requestId: admittedTurnContext.getStore()?.requestId,
+      messengerContext: () => this.getMessengerContext(),
+      emit: (event) => this._emitChannelEvent(event)
+    });
     if (!context) {
       return fn();
     }
@@ -3633,68 +3288,17 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     }
   }
 
-  /**
-   * Stamp the channel id — and, when supplied, the caller's turn metadata —
-   * onto user messages so a recovered/continued turn can re-resolve both from
-   * durable history.
-   */
   private _stampChannel(
     messages: UIMessage[],
     channel: string | undefined,
     turnMetadata?: Record<string, unknown>
   ): UIMessage[] {
-    if (!channel && !turnMetadata) {
-      return messages;
-    }
-    return messages.map((message) =>
-      message.role === "user"
-        ? {
-            ...message,
-            metadata: {
-              ...(message.metadata as Record<string, unknown> | undefined),
-              ...(channel ? { channel } : {}),
-              ...(turnMetadata ? { turnMetadata } : {})
-            }
-          }
-        : message
-    );
-  }
-
-  /** Metadata of the latest user message in the given list, if any. */
-  private _latestUserMessageMetadata(
-    messages: UIMessage[]
-  ): Record<string, unknown> | undefined {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const message = messages[i];
-      if (message.role === "user") {
-        return message.metadata as Record<string, unknown> | undefined;
-      }
-    }
-    return undefined;
-  }
-
-  /** The channel stamped on the latest user message in the given list, if any. */
-  private _channelFromMessages(messages: UIMessage[]): string | undefined {
-    const channel = this._latestUserMessageMetadata(messages)?.channel;
-    return typeof channel === "string" ? channel : undefined;
-  }
-
-  /** The turn metadata stamped on the latest user message, if any. */
-  private _turnMetadataFromMessages(
-    messages: UIMessage[]
-  ): Record<string, unknown> | undefined {
-    const turnMetadata =
-      this._latestUserMessageMetadata(messages)?.turnMetadata;
-    return turnMetadata &&
-      typeof turnMetadata === "object" &&
-      !Array.isArray(turnMetadata)
-      ? (turnMetadata as Record<string, unknown>)
-      : undefined;
+    return stampTurnContext(messages, channel, turnMetadata);
   }
 
   /** Re-resolve the channel for a continuation from the latest user message. */
   private _channelFromLatestUserMessage(): string | undefined {
-    return this._channelFromMessages(this.messages);
+    return channelFromMessages(this.messages);
   }
 
   private _channelForAutoContinuation(): string | undefined {
@@ -3721,61 +3325,19 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     text: string | { markdown: string },
     options?: DeliverNoticeOptions
   ): Promise<void> {
-    const informModel = options?.informModel ?? false;
-    const kind: DeliveryKind = options?.kind ?? "notice";
-    const plain = typeof text === "string" ? text : text.markdown;
-    const annotated = `[Delivered to the user out of band] ${plain}`;
     const channelId = options?.channel ?? this._activeChannelId() ?? "web";
-
-    try {
-      if (channelId === "web") {
-        await this.addMessages([
-          this._noticeMessage(informModel ? annotated : plain, kind)
-        ]);
-      } else {
-        const surface =
-          this._activeDeliverySurface ??
-          (await this._messengerRuntime?.resolveDeliverySurface(
-            channelId,
-            options?.thread
-          ));
-        if (!surface) {
-          const kindOf = this._channels?.get(channelId)?.kind;
-          let hint: string;
-          if (kindOf === undefined) {
-            hint = `; channel "${channelId}" is not registered`;
-          } else if (kindOf === "messenger") {
-            hint = options?.thread
-              ? ` (thread "${options.thread}")`
-              : "; pass { thread } for out-of-turn messenger notices";
-          } else {
-            hint = `; channel kind "${kindOf}" has no out-of-turn delivery surface yet`;
-          }
-          throw new Error(
-            `deliverNotice: cannot resolve a delivery surface for channel "${channelId}"${hint}`
-          );
-        }
-        await surface.post(
-          typeof text === "string" ? text : { markdown: text.markdown }
-        );
-        if (informModel) {
-          await this.addMessages([this._noticeMessage(annotated, kind)]);
-        }
-      }
-      this._emitChannelEvent({
-        type: "notice:delivered",
-        payload: { channel: channelId, kind, informModel }
-      });
-    } catch (error) {
-      this._emitChannelEvent({
-        type: "notice:failed",
-        payload: {
-          channel: channelId,
-          error: error instanceof Error ? error.message : String(error)
-        }
-      });
-      throw error;
-    }
+    await deliverChannelNotice(text, options, {
+      channelId,
+      registry: this._channels,
+      surface: async () =>
+        this._activeDeliverySurface ??
+        (await this._messengerRuntime?.resolveDeliverySurface(
+          channelId,
+          options?.thread
+        )),
+      addMessages: (messages) => this.addMessages(messages),
+      emit: (event) => this._emitChannelEvent(event)
+    });
   }
 
   /**
@@ -3812,18 +3374,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       this.activeChannel?.channelId ??
       this._activeMessengerContext()?.messengerId
     );
-  }
-
-  private _noticeMessage(
-    text: string,
-    kind: DeliveryKind = "notice"
-  ): UIMessage {
-    return {
-      id: crypto.randomUUID(),
-      role: "assistant",
-      parts: [{ type: "text", text }],
-      metadata: { deliveryKind: kind }
-    };
   }
 
   private async _initializeChannels(): Promise<void> {
@@ -3981,108 +3531,17 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /**
-   * The messenger-reply Task definition. A live webhook reply executes as
-   * one journaled step through the runtime's closure registry, persisting
-   * its re-entry snapshot in host storage; a replay whose closure is gone
-   * is recovered on wake by the same
-   * `ThinkMessengerRuntime.handleFiberRecovery` the legacy scan used.
-   */
-  private _registerMessengerReplyTaskDefinition(): void {
-    this.tasks.register(
-      MESSENGER_REPLY_TASK_DEFINITION,
-      async (input, step) => {
-        const { nonce } = input as { nonce: string };
-        await step.do(
-          "deliver",
-          { retries: { limit: 1 }, timeout: "1 day" },
-          async ({ signal }) => {
-            const runtime = this._messengerRuntime;
-            if (!runtime) {
-              throw new Error("Messenger runtime is unavailable");
-            }
-            const runId = `msgr_${nonce}`;
-            const persistKey = `__cf_messenger_recovery:${runId}`;
-            if (!runtime.hasLiveReply(nonce)) {
-              // Replay after an unclean interruption: recover through the
-              // runtime seam, preferring the snapshot a prior attempt (live
-              // or recovering) persisted before being interrupted itself.
-              const persisted = await this.ctx.storage.get(persistKey);
-              const createdAt =
-                (await this.tasks.get(runId))?.createdAt ?? Date.now();
-              const ctx: FiberRecoveryContext = {
-                id: runId,
-                name: MESSENGER_REPLY_FIBER_NAME,
-                snapshot: (persisted ?? null) as unknown,
-                createdAt,
-                recoveryReason: "interrupted"
-              };
-              await runtime.handleFiberRecovery(ctx, {
-                persistRecoverySnapshot: async (snapshot) => {
-                  await this.ctx.storage.put(persistKey, snapshot);
-                },
-                // Platform failures leave the step claimed and the run is
-                // replayed; any other error fails this single-attempt step.
-                retriesAfter: (error) =>
-                  isPlatformTransientError(error) ||
-                  isDurableObjectMemoryLimitReset(error) ||
-                  isDurableObjectCodeUpdateReset(error)
-              });
-              await this.ctx.storage.delete(persistKey);
-              return undefined;
-            }
-            // The initial "accepted" snapshot must be durable before any
-            // delivery work begins: an isolate lost mid-answer recovers
-            // through this snapshot, and without it replay could neither
-            // deliver nor apologize.
-            const initial = runtime.initialReplySnapshot(nonce);
-            if (initial !== undefined) {
-              await this.ctx.storage.put(persistKey, initial);
-            }
-            // Later fire-and-forget stash writes are safe: Durable Object
-            // storage applies same-key operations in issuance order, so the
-            // delete below can never be overtaken by an earlier put. A crash
-            // loses only the unflushed tail, which recovery tolerates by
-            // design (the snapshot is a hint; stream evidence is
-            // authoritative).
-            await runtime.executeLiveReply(nonce, {
-              id: runId,
-              signal,
-              stash: (data) =>
-                void this.ctx.storage.put(persistKey, data).catch(() => {}),
-              snapshot: null
-            });
-            await this.ctx.storage.delete(persistKey);
-            return undefined;
-          }
-        );
-      }
-    );
-  }
-
-  /**
    * Host seam for {@link ThinkMessengerRuntime}: durably accept one reply
    * run on the Tasks capability and execute it inline while this isolate
    * lives.
    * @internal
    */
-  async _runMessengerReplyTask(input: {
+  _runMessengerReplyTask(input: {
     nonce: string;
     idempotencyKey: string;
     metadata: Record<string, unknown>;
   }): Promise<{ accepted: boolean }> {
-    const receipt = await this.tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
-      MESSENGER_REPLY_TASK_DEFINITION,
-      { nonce: input.nonce },
-      {
-        runId: `msgr_${input.nonce}`,
-        idempotencyKey: input.idempotencyKey,
-        metadata: input.metadata as Record<
-          string,
-          import("agents/tasks").TaskJson
-        >
-      }
-    );
-    return { accepted: receipt.accepted };
+    return runMessengerReplyTask(this.tasks, input);
   }
 
   private _runChatRecoveryFiber<T>(
@@ -8388,9 +7847,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // metadata (covers the submission drain replaying stamped messages).
     const channel =
       options?.channel ??
-      (Array.isArray(messages)
-        ? this._channelFromMessages(messages)
-        : undefined);
+      (Array.isArray(messages) ? channelFromMessages(messages) : undefined);
     return this._runServerTurn(requestId, {
       signal: options?.signal,
       spec: {
@@ -14020,60 +13477,18 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   renderAttachment(
     attachment: ReplyAttachment
   ): string | { markdown: string } | undefined {
-    switch (attachment.type) {
-      case "card":
-        return {
-          markdown: `\`\`\`json\n${JSON.stringify(
-            (attachment as { payload: unknown }).payload,
-            null,
-            2
-          )}\n\`\`\``
-        };
-      case "email_draft": {
-        const draft = attachment as { subject?: string; to?: string[] };
-        const lines = ["**Email draft**"];
-        if (draft.to?.length) lines.push(`To: ${draft.to.join(", ")}`);
-        if (draft.subject) lines.push(`Subject: ${draft.subject}`);
-        return { markdown: lines.join("\n") };
-      }
-      case "voice_note":
-        return undefined;
-      default:
-        return undefined;
-    }
+    return defaultAttachmentText(attachment);
   }
 
-  /**
-   * Deliver known reply attachments to the active channel (best-effort, never
-   * fails the turn). Unknown types are ignored.
-   */
-  private async _renderChannelAttachments(
+  /** Deliver known reply attachments to the active channel; never throws. */
+  private _renderChannelAttachments(
     attachments: ReplyAttachment[] | undefined
   ): Promise<void> {
-    if (!attachments?.length) {
-      return;
-    }
-    for (const attachment of attachments) {
-      let rendered: string | { markdown: string } | undefined;
-      try {
-        rendered = this.renderAttachment(attachment);
-      } catch (error) {
-        console.warn(
-          `[Think] renderAttachment threw: ${error instanceof Error ? error.message : String(error)}`
-        );
-        continue;
-      }
-      if (rendered === undefined) {
-        continue;
-      }
-      try {
-        await this.deliverNotice(rendered, { kind: "interim" });
-      } catch (error) {
-        console.warn(
-          `[Think] failed to deliver channel attachment: ${error instanceof Error ? error.message : String(error)}`
-        );
-      }
-    }
+    return deliverReplyAttachments(
+      attachments,
+      (attachment) => this.renderAttachment(attachment),
+      (rendered) => this.deliverNotice(rendered, { kind: "interim" })
+    );
   }
 
   private async _fireResponseHook(result: ChatResponseResult): Promise<void> {
