@@ -400,18 +400,21 @@ export async function getAgentByName<
     ? namespace.jurisdiction(options.jurisdiction)
     : namespace;
   const id = target.idFromName(name);
-  const stub = target.get(id, durableObjectGetOptions(options));
 
-  // SAFETY: Agent exposes this internal initializer specifically for native
-  // RPC calls, which bypass the lifecycle-installed fetch handler.
-  const lifecycleStub = stub as unknown as {
-    __unsafe_ensureInitialized(props?: Props): Promise<void>;
-  };
-  await retryDurableObjectOperation(
-    () => lifecycleStub.__unsafe_ensureInitialized(options?.props),
+  // A new stub per attempt: a reset of the object (the retryable case)
+  // leaves the stub that saw it broken, so retrying through it fails again.
+  return await retryDurableObjectOperation(
+    async () => {
+      const stub = target.get(id, durableObjectGetOptions(options));
+      // SAFETY: Agent exposes this internal initializer specifically for
+      // native RPC calls, which bypass the lifecycle-installed fetch handler.
+      const lifecycleStub = stub as unknown as {
+        __unsafe_ensureInitialized(props?: Props): Promise<void>;
+      };
+      await lifecycleStub.__unsafe_ensureInitialized(options?.props);
+      return stub;
+    },
     { name },
     options?.routingRetry
   );
-
-  return stub;
 }

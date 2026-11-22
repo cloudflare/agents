@@ -113,6 +113,39 @@ describe("RPC Transport", () => {
       });
     });
 
+    it("reaches the server again after the server object is reset", async () => {
+      const name = `test-reset-${crypto.randomUUID()}`;
+      const transport = new RPCClientTransport({
+        namespace: env.MCP_OBJECT,
+        name,
+        props: { testValue: "from-rpc-client" }
+      });
+      await transport.start();
+      const received: JSONRPCMessage[] = [];
+      transport.onmessage = (msg) => {
+        received.push(msg);
+      };
+      transport.onerror = () => {};
+      await transport.send(TEST_MESSAGES.initialize);
+
+      // Reset through another stub: the transport's stub now fails every
+      // call. The first send after the reset still fails.
+      const server = env.MCP_OBJECT.get(
+        env.MCP_OBJECT.idFromName(`rpc:${name}`)
+      ) as unknown as { crashForTest(): Promise<void> };
+      await server.crashForTest().catch(() => {});
+      await expect(
+        transport.send(TEST_MESSAGES.propsTestTool)
+      ).rejects.toThrow();
+
+      received.length = 0;
+      await transport.send(TEST_MESSAGES.initialize);
+      await transport.send(TEST_MESSAGES.propsTestTool);
+      expect(received.at(-1)).toMatchObject({
+        result: { content: [{ text: "from-rpc-client" }] }
+      });
+    });
+
     it("should call onclose when closing", async () => {
       const transport = new RPCClientTransport({
         namespace: env.MCP_OBJECT,

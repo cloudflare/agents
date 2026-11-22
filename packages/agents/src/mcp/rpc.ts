@@ -84,14 +84,16 @@ export class RPCClientTransport implements V2Transport {
       throw new Error("Transport already started");
     }
 
-    const doName = `${RPC_DO_PREFIX}${this._name}`;
-    this._stub = await getAgentByName<Cloudflare.Env, McpRpcAgent>(
+    this._stub = await this._open();
+    this._started = true;
+  }
+
+  private _open(): Promise<DurableObjectStub<McpRpcAgent>> {
+    return getAgentByName<Cloudflare.Env, McpRpcAgent>(
       this._namespace,
-      doName,
+      `${RPC_DO_PREFIX}${this._name}`,
       { props: this._props }
     );
-
-    this._started = true;
   }
 
   async close(): Promise<void> {
@@ -104,12 +106,13 @@ export class RPCClientTransport implements V2Transport {
     message: V2JSONRPCMessage | V2JSONRPCMessage[],
     options?: V2TransportSendOptions
   ): Promise<void> {
-    if (!this._started || !this._stub) {
+    if (!this._started) {
       throw new Error("Transport not started");
     }
 
+    const stub = this._stub ?? (this._stub = await this._open());
     try {
-      const pending = this._stub.handleMcpMessage(message) as Promise<
+      const pending = stub.handleMcpMessage(message) as Promise<
         V2JSONRPCMessage | V2JSONRPCMessage[] | undefined
       >;
       const result = await raceWithSignal(pending, options?.requestSignal);
@@ -127,6 +130,10 @@ export class RPCClientTransport implements V2Transport {
         this.onmessage?.(msg, extra);
       }
     } catch (error) {
+      // A reset of the server object leaves this stub broken for every
+      // later call; the next send opens a new one (and starts the server
+      // with the props again, which a reset dropped).
+      if (this._stub === stub) this._stub = undefined;
       this.onerror?.(error as Error);
       throw error;
     }

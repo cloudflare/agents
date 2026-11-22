@@ -749,6 +749,19 @@ export class TestWorkflowAgent extends Agent {
   }
 
   // Start a throw-in-run workflow
+  /** Reset this object, as a crash or the memory-limit breaker would. */
+  crashForTest(): void {
+    this.ctx.abort("crashed by test");
+  }
+
+  echoForTest(value: string): string {
+    return value;
+  }
+
+  async runAgentResetWorkflowTest(workflowId: string): Promise<string> {
+    return this.runWorkflow("AGENT_RESET_WORKFLOW", {}, { id: workflowId });
+  }
+
   async runThrowInRunWorkflowTest(
     workflowId: string,
     params: { message: string }

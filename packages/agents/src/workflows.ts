@@ -40,6 +40,7 @@ import type {
   WorkflowStepEvent
 } from "cloudflare:workers";
 import { getAgentByName, type Agent } from "./index";
+import { renewingStub } from "./stub-renewal";
 import type {
   AgentWorkflowParams,
   AgentWorkflowStep,
@@ -251,10 +252,14 @@ export class AgentWorkflow<
       );
     }
 
-    // Get the Agent stub by name
-    this._agent = await getAgentByName<Cloudflare.Env, AgentType>(
+    // Get the Agent stub by name. A run keeps it across steps, so it is
+    // renewed after a failed call: a reset of the Agent breaks the stub.
+    const agent = await getAgentByName<Cloudflare.Env, AgentType>(
       namespace,
       resolvedAgentName
+    );
+    this._agent = renewingStub(agent, () =>
+      namespace.get(namespace.idFromName(resolvedAgentName))
     );
   }
 
@@ -276,10 +281,16 @@ export class AgentWorkflow<
       );
     }
 
-    const rootAgent = (await getAgentByName<Cloudflare.Env, Agent>(
-      namespace,
-      root.name
-    )) as unknown as AgentPathInvoker;
+    const rootAgent = renewingStub(
+      (await getAgentByName<Cloudflare.Env, Agent>(
+        namespace,
+        root.name
+      )) as unknown as AgentPathInvoker,
+      () =>
+        namespace.get(
+          namespace.idFromName(root.name)
+        ) as unknown as AgentPathInvoker
+    );
 
     return new Proxy(
       {},
