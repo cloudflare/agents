@@ -6,11 +6,16 @@
 
 import type { streamText } from "ai";
 
+/** @internal */
 export type TurnTelemetrySettings = Parameters<
   typeof streamText
 >[0]["experimental_telemetry"];
 
-/** The admitted turn the telemetry describes. */
+/**
+ * The admitted turn the telemetry describes.
+ *
+ * @internal
+ */
 export interface TelemetryTurn {
   readonly requestId: string;
   readonly trigger: string;
@@ -20,6 +25,7 @@ export interface TelemetryTurn {
   readonly generation?: number;
 }
 
+/** @internal */
 export interface TelemetryIdentity {
   /** Default `functionId` (AI SDK maps it to `gen_ai.agent.name`). */
   readonly className: string;
@@ -66,7 +72,11 @@ function settingsOf(base: TurnTelemetrySettings): {
   };
 }
 
-/** AI SDK v6 `experimental_telemetry` for a turn. */
+/**
+ * AI SDK v6 `experimental_telemetry` for a turn.
+ *
+ * @internal
+ */
 export function turnTelemetryV6(
   base: TurnTelemetrySettings,
   identity: TelemetryIdentity
@@ -86,7 +96,11 @@ export function turnTelemetryV6(
   } as unknown as TurnTelemetrySettings;
 }
 
-/** AI SDK v7 `telemetry` options and `runtimeContext` for a turn. */
+/**
+ * AI SDK v7 `telemetry` options and `runtimeContext` for a turn.
+ *
+ * @internal
+ */
 export function turnTelemetryV7(
   base: TurnTelemetrySettings,
   identity: TelemetryIdentity

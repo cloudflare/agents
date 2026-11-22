@@ -9,6 +9,7 @@ import type { ContextBlocks } from "agents/context";
 import { WorkspaceFiles, resolveWorkspacePath } from "../workspace-files";
 import type { ThinkWorkspace } from "../workspace-files";
 
+/** @internal */
 export interface ThinkHostFileEntry {
   name: string;
   type: string;
@@ -16,13 +17,18 @@ export interface ThinkHostFileEntry {
   path: string;
 }
 
+/** @internal */
 export interface ThinkHostMessage {
   id: string;
   role: string;
   content: string;
 }
 
-/** The operations `HostBridgeLoopback` forwards to the agent. */
+/**
+ * The operations `HostBridgeLoopback` forwards to the agent.
+ *
+ * @internal
+ */
 export interface ThinkHostApi {
   readFile(path: string): Promise<string | null>;
   writeFile(path: string, content: string): Promise<void>;
@@ -38,9 +44,14 @@ export interface ThinkHostApi {
   getSessionInfo(): Promise<{ messageCount: number }>;
 }
 
+/** @internal */
 export type ThinkHostOperation = keyof ThinkHostApi;
 
-/** What {@link createThinkHostApi} reads from the agent. */
+/**
+ * What {@link createThinkHostApi} reads from the agent.
+ *
+ * @internal
+ */
 export interface ThinkHostApiOptions {
   readonly workspace: () => ThinkWorkspace;
   readonly context: () => ContextBlocks;
@@ -53,6 +64,7 @@ export interface ThinkHostApiOptions {
   readonly appendMessage: (message: UIMessage) => Promise<unknown>;
 }
 
+/** @internal */
 export function createThinkHostApi(options: ThinkHostApiOptions): ThinkHostApi {
   const files = () => new WorkspaceFiles(options.workspace());
   return {
@@ -112,7 +124,11 @@ export function createThinkHostApi(options: ThinkHostApiOptions): ThinkHostApi {
   };
 }
 
-/** Run one host operation by name. Rejects a name that is not an operation. */
+/**
+ * Run one host operation by name. Rejects a name that is not an operation.
+ *
+ * @internal
+ */
 export function callThinkHostApi<K extends ThinkHostOperation>(
   api: ThinkHostApi,
   operation: K,

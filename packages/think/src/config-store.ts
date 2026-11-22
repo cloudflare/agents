@@ -14,6 +14,7 @@ const LEGACY_CONFIG_KEYS = [
   "skillsFingerprint"
 ] as const;
 
+/** @internal */
 export class ThinkConfigStore {
   readonly #sql: SqlStorage;
   #ready = false;

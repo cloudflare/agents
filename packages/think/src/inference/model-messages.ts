@@ -24,6 +24,8 @@ import {
  * - media eviction never rewrites messages above the stepped truncation
  *   cutoff (see {@link mediaEvictionCutoff}), so the rows the model replays
  *   at full fidelity are never stripped.
+ *
+ * @internal
  */
 export const MODEL_RECENT_WINDOW = 4;
 
@@ -35,15 +37,22 @@ export const MODEL_RECENT_WINDOW = 4;
  * Providers cache on a byte-identical prompt prefix, and a cutoff that moved
  * every turn rewrote a message near the end of that prefix on every turn
  * (#2200). Stepping it rewrites the prefix once per step instead.
+ *
+ * @internal
  */
 export const MODEL_TRUNCATION_STEP = 8;
 
-/** `Infinity` never moves the cutoff; any other invalid step cuts every turn. */
+/**
+ * `Infinity` never moves the cutoff; any other invalid step cuts every turn.
+ *
+ * @internal
+ */
 export function truncationStepSize(step: number): number {
   if (step === Number.POSITIVE_INFINITY) return step;
   return Number.isFinite(step) ? Math.max(1, Math.floor(step)) : 1;
 }
 
+/** @internal */
 export function truncationKeepRecent(
   messageCount: number,
   step: number
@@ -64,6 +73,8 @@ export function truncationKeepRecent(
  * most once per step and never inside the full-fidelity window (#2356).
  * With stepping disabled (`truncationStep = Infinity`) there is no cutoff to
  * align with, and eviction keeps exactly `keepRecentMessages`.
+ *
+ * @internal
  */
 export function mediaEvictionCutoff(
   messageCount: number,
@@ -84,7 +95,11 @@ export function mediaEvictionCutoff(
   );
 }
 
-/** Stable id prefix for fallback notes that preserve orphaned execution outcomes. */
+/**
+ * Stable id prefix for fallback notes that preserve orphaned execution outcomes.
+ *
+ * @internal
+ */
 export const EXECUTION_OUTCOME_MESSAGE_PREFIX = "exec-outcome-";
 
 /**
@@ -94,6 +109,8 @@ export const EXECUTION_OUTCOME_MESSAGE_PREFIX = "exec-outcome-";
  * providers reject system messages in arbitrary transcript
  * positions. The provider-only projection leaves current and legacy session
  * history unchanged.
+ *
+ * @internal
  */
 export function toProviderSafeExecutionOutcomeMessage(
   message: UIMessage
@@ -106,6 +123,7 @@ export function toProviderSafeExecutionOutcomeMessage(
 
 // Ephemeral user message appended when a model request would otherwise end in
 // an assistant message (see `ensureValidContinueCheckpoint`).
+/** @internal */
 export const CONTINUE_CHECKPOINT_PROMPT =
   "Continue your previous response from exactly where it left off. Do not repeat any of it.";
 
@@ -119,6 +137,8 @@ export const CONTINUE_CHECKPOINT_PROMPT =
  * conversation must end with a user message."). To reach a valid continue
  * checkpoint across providers we append an ephemeral user message. This shapes
  * only the model request; it is never persisted to the transcript.
+ *
+ * @internal
  */
 export function ensureValidContinueCheckpoint(
   messages: ModelMessage[]
@@ -134,6 +154,8 @@ export function ensureValidContinueCheckpoint(
  * one, since not every provider accepts two user messages in a row. A request
  * ending in a partial assistant message gets the continue checkpoint here,
  * carrying the reminder, so `ensureValidContinueCheckpoint` adds nothing.
+ *
+ * @internal
  */
 export function withContextReminder(
   messages: ModelMessage[],
@@ -157,7 +179,11 @@ export function withContextReminder(
   return [...messages, { role: "user", content }];
 }
 
-/** What {@link modelMessagesFromHistory} needs besides the repaired history. */
+/**
+ * What {@link modelMessagesFromHistory} needs besides the repaired history.
+ *
+ * @internal
+ */
 export interface ModelMessagesOptions {
   readonly tools: ToolSet;
   /** The agent's `truncationStep`. */
@@ -176,6 +202,8 @@ export interface ModelMessagesOptions {
  * @throws When repair kept a tool call a client still has to answer. A
  * continuation turn in that state has nothing to continue, and the request
  * would hold a call with no result.
+ *
+ * @internal
  */
 export async function modelMessagesFromHistory(
   repair: BeforeTurnRepairResult,

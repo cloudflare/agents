@@ -12,13 +12,19 @@ import type { UIMessage } from "ai";
  * {@link stampTurnContext}) and trusted by hooks and recovery. They are
  * stripped from client-supplied messages at intake so a client can never
  * forge them.
+ *
+ * @internal
  */
 export const RESERVED_MESSAGE_METADATA_KEYS = [
   "channel",
   "turnMetadata"
 ] as const;
 
-/** The reserved keys `message` carries, or `undefined` when it has none. */
+/**
+ * The reserved keys `message` carries, or `undefined` when it has none.
+ *
+ * @internal
+ */
 export function reservedMetadataOf(
   message: UIMessage
 ): Record<string, unknown> | undefined {
@@ -44,6 +50,8 @@ export function reservedMetadataOf(
  * reserved keys on every client write, so a compare against a stored row has
  * to drop them too. Mirrors `SessionCore.stripReservedMetadata` for the keys
  * Think registers.
+ *
+ * @internal
  */
 export function stripReservedMetadata(message: UIMessage): UIMessage {
   const metadata = message.metadata;
@@ -73,6 +81,8 @@ export function stripReservedMetadata(message: UIMessage): UIMessage {
 /**
  * Stamp the channel id, and the caller's turn metadata when supplied, onto
  * the user messages.
+ *
+ * @internal
  */
 export function stampTurnContext(
   messages: UIMessage[],
@@ -109,13 +119,21 @@ function latestUserMessageMetadata(
   return undefined;
 }
 
-/** The channel stamped on the latest user message in the given list, if any. */
+/**
+ * The channel stamped on the latest user message in the given list, if any.
+ *
+ * @internal
+ */
 export function channelFromMessages(messages: UIMessage[]): string | undefined {
   const channel = latestUserMessageMetadata(messages)?.channel;
   return typeof channel === "string" ? channel : undefined;
 }
 
-/** The turn metadata stamped on the latest user message, if any. */
+/**
+ * The turn metadata stamped on the latest user message, if any.
+ *
+ * @internal
+ */
 export function turnMetadataFromMessages(
   messages: UIMessage[]
 ): Record<string, unknown> | undefined {
@@ -125,4 +143,50 @@ export function turnMetadataFromMessages(
     !Array.isArray(turnMetadata)
     ? (turnMetadata as Record<string, unknown>)
     : undefined;
+}
+
+/**
+ * How to store a message the client posted, or `null` to skip it because
+ * the server already holds the same stored form. The client posts its whole
+ * transcript on every request, so skipping unchanged rows is what keeps a
+ * turn's storage traffic independent of transcript length.
+ *
+ * Reserved metadata is server-owned: the client's copy is ignored, a stored
+ * row keeps its own, and a new user message gets `channel` when the caller
+ * supplies one. A message with no reserved metadata to keep is written as
+ * the client sent it.
+ *
+ * @internal
+ */
+export function incomingMessageWrite(
+  sanitized: UIMessage,
+  original: UIMessage,
+  prior: UIMessage | undefined,
+  channel: string | undefined
+): { message: UIMessage; source: "client" | "server" } | null {
+  const incoming = stripReservedMetadata(sanitized);
+  if (
+    prior &&
+    JSON.stringify(stripReservedMetadata(prior)) === JSON.stringify(incoming)
+  ) {
+    return null;
+  }
+  const reserved = prior
+    ? reservedMetadataOf(prior)
+    : incoming.role === "user" && channel
+      ? { channel }
+      : undefined;
+  if (!reserved) {
+    return { message: original, source: "client" };
+  }
+  return {
+    message: {
+      ...incoming,
+      metadata: {
+        ...(incoming.metadata as Record<string, unknown> | undefined),
+        ...reserved
+      }
+    },
+    source: "server"
+  };
 }

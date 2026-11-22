@@ -30,7 +30,11 @@ const MESSENGER_REPLY_TASK_DEFINITION = "__cf_internal_messenger_reply";
 
 const runIdFor = (nonce: string) => `msgr_${nonce}`;
 
-/** Register the messenger-reply Task definition on `tasks`. */
+/**
+ * Register the messenger-reply Task definition on `tasks`.
+ *
+ * @internal
+ */
 export function registerMessengerReplyTask(
   tasks: Tasks,
   options: {
@@ -108,6 +112,8 @@ export function registerMessengerReplyTask(
 /**
  * Durably accept one reply run and execute it inline while this isolate
  * lives. `accepted` is false when the idempotency key already has a run.
+ *
+ * @internal
  */
 export async function runMessengerReplyTask(
   tasks: Tasks,

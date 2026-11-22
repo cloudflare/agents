@@ -10,6 +10,8 @@ const CAPABILITY_BLOCK_HEADING = "You are running inside a Think agent.";
 /**
  * Append the capability block for `tools` to `baseSystem`. A prompt that
  * already carries the block (an override that includes it) is returned as-is.
+ *
+ * @internal
  */
 export function systemPromptForTurn(
   baseSystem: string,
@@ -22,7 +24,11 @@ export function systemPromptForTurn(
   return `${baseSystem.trimEnd()}\n\n${capabilityBlock(tools)}`;
 }
 
-/** The capability block for the tools a turn exposes. */
+/**
+ * The capability block for the tools a turn exposes.
+ *
+ * @internal
+ */
 export function capabilityBlock(tools: ToolSet): string {
   const toolNames = new Set(Object.keys(tools));
   const hasTools = toolNames.size > 0;

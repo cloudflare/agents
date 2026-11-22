@@ -14,7 +14,11 @@ import type {
 import type { DeliverNoticeOptions } from "../turn-types";
 import type { ChannelContext, NormalizedChannelDefinition } from "./index";
 
-/** Observability events about channels. */
+/**
+ * Observability events about channels.
+ *
+ * @internal
+ */
 export type ChannelEvent =
   | {
       type: "channel:resolved";
@@ -37,6 +41,8 @@ export type ChannelEvent =
  * Resolve a channel id to a turn-scoped {@link ChannelContext}. `registry`
  * is `undefined` on an agent that has no channel registry (a sub-agent),
  * where a missing channel is expected.
+ *
+ * @internal
  */
 export function resolveChannelContext(
   channel: string | undefined,
@@ -80,7 +86,11 @@ export function resolveChannelContext(
   };
 }
 
-/** A framework-authored assistant message that carries a notice. */
+/**
+ * A framework-authored assistant message that carries a notice.
+ *
+ * @internal
+ */
 export function noticeMessage(
   text: string,
   kind: DeliveryKind = "notice"
@@ -93,7 +103,11 @@ export function noticeMessage(
   };
 }
 
-/** What {@link deliverChannelNotice} needs from the agent. */
+/**
+ * What {@link deliverChannelNotice} needs from the agent.
+ *
+ * @internal
+ */
 export interface ChannelNoticeTarget {
   /** The channel to deliver to. */
   readonly channelId: string;
@@ -113,6 +127,8 @@ export interface ChannelNoticeTarget {
  * their delivery surface and touch the transcript only with `informModel`.
  *
  * @throws When a non-web channel has no delivery surface.
+ *
+ * @internal
  */
 export async function deliverChannelNotice(
   text: string | { markdown: string },
