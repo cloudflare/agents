@@ -573,7 +573,10 @@ export class TanStackAgent extends Agent<Env> {
             ? tail
             : undefined;
         if (partial) this._continuationTargetId = partial.id;
-        await this._runTurn(crypto.randomUUID(), true);
+        await this._runTurn(
+          crypto.randomUUID(),
+          this._continuationTargetId !== null
+        );
         await this._engine().updateIncident(incidentId, "completed");
         return;
       }
@@ -607,7 +610,13 @@ export class TanStackAgent extends Agent<Env> {
         this._faux.setNextTurnText(full);
       }
 
-      await this._runTurn(crypto.randomUUID(), true);
+      await this._runTurn(
+        crypto.randomUUID(),
+        // Only a continue of the partial is a continuation. A full
+        // regenerate answers the question again, so a reset during it
+        // retries the question rather than continuing nothing.
+        this._continuationTargetId !== null
+      );
       await this._engine().updateIncident(incidentId, "completed");
     } catch (error) {
       this._continuationTargetId = null;
