@@ -26,19 +26,28 @@ class Jobs extends LifecycleCapability {
 }
 
 describe("jobs whose owner is not installed", () => {
-  it("keeps the job, looks again later, and runs it once the owner returns", async () => {
+  it("keeps the jobs untouched, holds the wake, and runs them in order once the owner returns", async () => {
     await withCapabilityHarness(async ({ install, storage }) => {
-      // A deploy installs the owner and it pushes a job.
+      // A deploy installs the owner and it queues two jobs, the older first.
       const before = install(new Jobs("returning-owner"));
       await before.lifecycle.start();
-      await before.capability.push({
-        id: "work",
-        fn: "run",
-        time: Date.now() - 1
-      });
+      const now = Date.now();
+      await before.capability.push({ id: "older", fn: "run", time: now - 2 });
+      await before.capability.push({ id: "newer", fn: "run", time: now - 1 });
+      const rows = () => [
+        ...storage.sql.exec(
+          "SELECT id, time, attempts, held_since FROM cf_agents_jobs ORDER BY time"
+        )
+      ];
+      // History the older job carries: one unreported attempt and a hold.
+      storage.sql.exec(
+        "UPDATE cf_agents_jobs SET attempts = 1, held_since = ? WHERE id = 'older'",
+        now - 60_000
+      );
+      const stored = rows();
 
-      // The next deploy does not install it (a rollback, a conditional
-      // install). Its alarm finds the job ownerless.
+      // The next deploy does not install it. Its alarms find the jobs
+      // ownerless, several times.
       const without = install(new Jobs("someone-else"));
       await without.lifecycle.start();
       const capture = captureDiagnosticsEvents(
@@ -46,43 +55,25 @@ describe("jobs whose owner is not installed", () => {
         without.lifecycle.name
       );
       try {
-        const now = Date.now();
-        await without.lifecycle.alarm();
-
-        const [row] = [
-          ...storage.sql.exec(
-            "SELECT time FROM cf_agents_jobs WHERE id = 'work'"
-          )
-        ];
-        expect(row?.time).toBeGreaterThanOrEqual(now + 60_000);
+        for (let i = 0; i < 3; i++) await without.lifecycle.alarm();
         expect(
-          capture.events.find((event) => event.type === "job:owner_missing")
-            ?.payload
-        ).toMatchObject({ capability: "returning-owner", id: "work" });
+          capture.events.filter((event) => event.type === "job:owner_missing")
+        ).toHaveLength(1);
       } finally {
         capture.stop();
       }
 
-      // Looking at an ownerless job is no attempt of it: it can be looked
-      // at many times and still runs once its owner returns.
-      for (let i = 0; i < 4; i++) {
-        storage.sql.exec(
-          "UPDATE cf_agents_jobs SET time = ? WHERE id = 'work'",
-          Date.now() - 1
-        );
-        await without.lifecycle.alarm();
-      }
+      // Nothing about the jobs changed, and the wake waits a minute.
+      expect(rows()).toEqual(stored);
+      expect(await storage.getAlarm()).toBeGreaterThanOrEqual(now + 55_000);
 
-      // The owner comes back and the job runs.
-      storage.sql.exec(
-        "UPDATE cf_agents_jobs SET time = ? WHERE id = 'work'",
-        Date.now() - 1
-      );
+      // The owner comes back (a fresh isolate) and both run, older first,
+      // the older one continuing its attempt count.
       const after = install(new Jobs("returning-owner"));
       await after.lifecycle.start();
       await after.lifecycle.alarm();
-      expect(after.capability.ran).toEqual(["work"]);
-      expect(after.capability.attempts).toEqual([1]);
+      expect(after.capability.ran).toEqual(["older", "newer"]);
+      expect(after.capability.attempts).toEqual([2, 1]);
     });
   });
 
