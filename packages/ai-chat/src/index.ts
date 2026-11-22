@@ -738,7 +738,7 @@ export class AIChatAgent<
     resetError: "Agent tool run was skipped because the chat was cleared.",
     keepAliveWhile: (fn) => this.keepAliveWhile(fn),
     generateRequestId: () => nanoid(),
-    activeRequestId: () => this._activeRequestId,
+    activeRequestId: () => this._resumableStream?.activeRequestId ?? null,
     broadcastChunk: (requestId, body) =>
       this._broadcastChatMessage({
         type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
@@ -1513,19 +1513,7 @@ export class AIChatAgent<
     this._resumeHandshake().notifyStreamResuming(connection);
   }
 
-  // ── Delegate methods for backward compatibility with tests ─────────
-  // These protected methods delegate to _resumableStream so existing
-  // test workers that call them directly continue to work.
-
-  /** @internal Delegate to _resumableStream */
-  protected get _activeStreamId(): string | null {
-    return this._resumableStream?.activeStreamId ?? null;
-  }
-
-  /** @internal Delegate to _resumableStream */
-  protected get _activeRequestId(): string | null {
-    return this._resumableStream?.activeRequestId ?? null;
-  }
+  // ── Resumable stream ───────────────────────────────────────────────
 
   /** @internal Delegate to _resumableStream */
   protected _startStream(
@@ -1574,16 +1562,6 @@ export class AIChatAgent<
   }
 
   /**
-   * @deprecated Streams are reclaimed at cutover and on the next stream
-   * start; no alarm is armed any more. Kept so a cleanup alarm persisted
-   * by an earlier version still resolves to a callback when it fires.
-   * @internal
-   */
-  async _cleanupStreamBuffers(): Promise<void> {
-    this._resumableStream.reclaim();
-  }
-
-  /**
    * @internal Delegate to _resumableStream.
    *
    * A settled tool result (`tool-output-available` / `-error` / `-denied`)
@@ -1614,16 +1592,6 @@ export class AIChatAgent<
       this._resumableStream.flushBuffer();
     }
     return seq;
-  }
-
-  /** @internal Delegate to _resumableStream */
-  protected _flushChunkBuffer() {
-    this._resumableStream.flushBuffer();
-  }
-
-  /** @internal Delegate to _resumableStream */
-  protected _restoreActiveStream() {
-    this._resumableStream.restore();
   }
 
   /** @internal Delegate to _resumableStream */

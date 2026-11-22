@@ -1381,7 +1381,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   testFlushChunkBuffer(): void {
-    this._flushChunkBuffer();
+    this._resumableStream.flushBuffer();
   }
 
   testCompleteStream(streamId: string): void {
@@ -1393,11 +1393,11 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   getActiveStreamId(): string | null {
-    return this._activeStreamId;
+    return this._resumableStream.activeStreamId;
   }
 
   getActiveRequestId(): string | null {
-    return this._activeRequestId;
+    return this._resumableStream.activeRequestId;
   }
 
   getStreamChunks(
@@ -1521,7 +1521,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   testRestoreActiveStream(): void {
-    this._restoreActiveStream();
+    this._resumableStream.restore();
   }
 
   /** Reclaim leftover chat streams now, as the next stream start would. */
