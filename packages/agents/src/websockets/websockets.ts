@@ -173,7 +173,7 @@ let declareEventLogOn: <T, S>(
 export function declareEventLog<T = unknown, S = unknown>(
   webSockets: WebSockets,
   name: string,
-  options: EventLogOptions<S> = {}
+  options: EventLogOptions<S>
 ): EventLog<T, S> {
   return declareEventLogOn<T, S>(webSockets, name, options);
 }
@@ -307,9 +307,7 @@ export class WebSockets extends LifecycleCapability {
         throw new Error(`Event log "${name}" is already declared`);
       }
       const log = new EventLog<T, S>(name, options, {
-        sql: () => webSockets.lifecycle.storage.sql,
-        connections: () => webSockets.getConnections(),
-        emit: (type, payload) => webSockets.lifecycle.events.emit(type, payload)
+        connections: () => webSockets.getConnections()
       });
       webSockets.#logs.set(name, log);
       return log;

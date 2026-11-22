@@ -1,5 +1,6 @@
 import { DurableObject, RpcTarget } from "cloudflare:workers";
 import { Lifecycle } from "../../lifecycle";
+import { Streams } from "../../streams/streams";
 import { WebSockets } from "../../websockets";
 import {
   declareEventLog,
@@ -7,12 +8,8 @@ import {
   type EventLogBatch
 } from "../../internal";
 
-type StoredRow = {
-  seq_from: number;
-  seq_to: number;
-  kind: string;
-  open_until: number | null;
-};
+/** One stored block of a log's stream: chunk seqs `[seq_from, seq_to)`. */
+type StoredRow = { seq_from: number; seq_to: number };
 
 /** What a browser client may call: publish to `feed`. */
 class EventLogCallables extends RpcTarget {
@@ -35,10 +32,14 @@ class EventLogCallables extends RpcTarget {
  * - `feed`: small retention (5 events) and batches (3 events, a long delay
  *   so buffered events stay buffered until a test flushes or evicts), and
  *   a snapshot that reports the head it was taken at.
+ *
+ * Each log is a stream of the object's `Streams` capability.
  * - `bare`: no snapshot.
  * - `guarded`: only connections opened with `?allow` may follow it.
  */
 export class EventLogObject extends DurableObject<Cloudflare.Env> {
+  readonly #streams = new Streams();
+
   readonly #webSockets = new WebSockets({
     callables: new EventLogCallables((data) => this.#feed.publish(data)),
     handlers: {
@@ -55,20 +56,26 @@ export class EventLogObject extends DurableObject<Cloudflare.Env> {
     unknown,
     { at: number }
   >(this.#webSockets, "feed", {
+    streams: this.#streams,
     retention: { maxEvents: 5 },
     batching: { maxEvents: 3, maxDelayMs: 60_000 },
     maxEventBytes: 600_000,
     snapshot: (): { at: number } => ({ at: this.#feed.head.seq })
   });
 
-  readonly #bare = declareEventLog(this.#webSockets, "bare");
+  readonly #bare = declareEventLog(this.#webSockets, "bare", {
+    streams: this.#streams
+  });
 
   readonly #guarded = declareEventLog(this.#webSockets, "guarded", {
+    streams: this.#streams,
     canSubscribe: (connection) =>
       new URL(connection.uri ?? "https://x").searchParams.has("allow")
   });
 
-  readonly lifecycle = Lifecycle.install(this).use(this.#webSockets);
+  readonly lifecycle = Lifecycle.install(this)
+    .use(this.#streams)
+    .use(this.#webSockets);
 
   #batch: EventLogBatch | undefined;
 
@@ -142,9 +149,9 @@ export class EventLogObject extends DurableObject<Cloudflare.Env> {
     await this.lifecycle.start();
     return this.ctx.storage.sql
       .exec<StoredRow>(
-        `SELECT seq_from, seq_to, kind, open_until FROM cf_agents_event_log_rows
-         WHERE log = ? ORDER BY seq_from`,
-        log
+        `SELECT seq_from, seq_to FROM cf_agents_stream_blocks
+         WHERE stream_id = ? ORDER BY block`,
+        `log:${log}`
       )
       .toArray();
   }

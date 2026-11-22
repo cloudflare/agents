@@ -151,13 +151,16 @@ describe("event log", () => {
     client.close();
   });
 
-  it("trims to retention without reusing a seq, and resyncs a trimmed cursor", async () => {
+  it("trims whole blocks to retention without reusing a seq, and resyncs a trimmed cursor", async () => {
     const name = crypto.randomUUID();
-    const seqs = await stub(name).publishMany("feed", 8);
-    expect(seqs).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
-    const rows = await stub(name).rows();
-    // Retention is 5 events: seqs 4..8 are kept.
-    expect(rows.map((row) => row.seq_from)).toEqual([4, 5, 6, 7, 8]);
+    // 150 KB events: one per 256 KB block, so retention trims per event.
+    for (let i = 1; i <= 8; i++) {
+      expect(await stub(name).publishSized(150_000)).toBe(i);
+    }
+    // Retention is 5 events: chunks 3..7 (events 4..8) are kept.
+    expect((await stub(name).rows()).map((row) => row.seq_from)).toEqual([
+      3, 4, 5, 6, 7
+    ]);
     const { epoch } = await stub(name).head();
 
     const client = await connect(name);
@@ -172,7 +175,7 @@ describe("event log", () => {
     client.close();
   });
 
-  it("sends batched events at once, stores them in batches, and replays the buffered tail from memory", async () => {
+  it("sends batched events at once, stores them in batches, and replays the buffered tail", async () => {
     const name = crypto.randomUUID();
     const live = await connect(name);
     await follow(live);
@@ -187,36 +190,29 @@ describe("event log", () => {
     expect(events(await live.until(isType("events")))).toEqual([
       { seq: 2, data: "t2" }
     ]);
+    // Both still buffered (the batch writes at 3).
+    expect(await stub(name).rows()).toEqual([]);
 
-    // The first append is stored at once and marks the log open; the
-    // second is still buffered.
-    expect(await stub(name).rows()).toEqual([
-      { seq_from: 1, seq_to: 1, kind: "events", open_until: 4 }
-    ]);
-
+    // A tab that saw t1 gets t2: the replay writes the buffer first.
     const late = await connect(name);
-    late.subscribe("feed", { epoch, seq: 0 });
+    late.subscribe("feed", { epoch, seq: 1 });
     const frames = await late.until(isType("synced"));
-    expect(events(frames).map((event) => event.seq)).toEqual([1, 2]);
+    expect(events(frames)).toEqual([{ seq: 2, data: "t2" }]);
+    expect(await stub(name).rows()).toEqual([{ seq_from: 0, seq_to: 2 }]);
 
-    // Closing writes the buffered seqs 2..3 as one row and clears the
-    // open mark.
-    await stub(name).append("t3");
+    // Closing writes t3 into the same block, in one row write.
+    expect(await stub(name).append("t3")).toBe(3);
     await stub(name).closeBatch();
-    expect(await stub(name).rows()).toEqual([
-      { seq_from: 1, seq_to: 1, kind: "events", open_until: 4 },
-      { seq_from: 2, seq_to: 3, kind: "events", open_until: null }
-    ]);
+    expect(await stub(name).rows()).toEqual([{ seq_from: 0, seq_to: 3 }]);
     live.close();
     late.close();
   });
 
-  it("turns a crashed batch's unstored tail into a gap, resyncing a cursor inside it", async () => {
+  it("never gives a seq a crash may have lost to a new event, and resyncs a cursor that saw one", async () => {
     const name = crypto.randomUUID();
+    expect(await stub(name).publish("feed", "stored")).toBe(1);
     const { epoch } = await stub(name).head();
-
     await stub(name).openBatch();
-    expect(await stub(name).append("stored")).toBe(1);
     // Buffered, sent to any follower, never stored.
     expect(await stub(name).append("lost")).toBe(2);
 
@@ -224,15 +220,16 @@ describe("event log", () => {
       .crash()
       .catch(() => {});
 
-    // The next touch finds the open batch and records seqs 2..4 as a gap.
-    expect(await stub(name).head()).toEqual({ epoch, seq: 4 });
-    expect(await stub(name).rows()).toEqual([
-      { seq_from: 1, seq_to: 1, kind: "events", open_until: 4 },
-      { seq_from: 2, seq_to: 4, kind: "gap", open_until: null }
-    ]);
+    // The new isolate starts 3 (the batch size) past the stored seqs: seq
+    // 2 is never reused, and seqs 2..4 are a hole.
+    expect(await stub(name).head()).toEqual({ epoch, seq: 1 });
     expect(await stub(name).publish("feed", "after")).toBe(5);
+    expect(await stub(name).rows()).toEqual([
+      { seq_from: 0, seq_to: 1 },
+      { seq_from: 4, seq_to: 5 }
+    ]);
 
-    // A cursor inside the gap saw a lost event: resync.
+    // A cursor in the hole saw a lost event: resync.
     const sawLost = await connect(name);
     sawLost.subscribe("feed", { epoch, seq: 2 });
     expect((await sawLost.until(isType("resync"))).at(-1)).toMatchObject({
@@ -240,7 +237,7 @@ describe("event log", () => {
       snapshot: { at: 5 }
     });
 
-    // A cursor before the gap replays across it.
+    // A cursor before the hole replays across it.
     const before = await connect(name);
     before.subscribe("feed", { epoch, seq: 1 });
     const frames = await before.until(isType("synced"));
@@ -249,101 +246,23 @@ describe("event log", () => {
     before.close();
   });
 
-  it("resyncs a hibernated follower when the batch it was following did not close", async () => {
+  it("shows a follower that survived an eviction a seq jump, and its cursor still replays", async () => {
     const name = crypto.randomUUID();
     const survivor = await connect(name);
-    await follow(survivor);
-    const { epoch } = await stub(name).head();
-
-    await stub(name).openBatch();
-    await stub(name).append("stored");
-    await survivor.until(isType("events"));
-
-    // The batch is still open when the instance goes away.
-    await evictDurableObject(stub(name));
-
-    expect(await stub(name).head()).toEqual({ epoch, seq: 4 });
-    expect((await survivor.until(isType("resync"))).at(-1)).toMatchObject({
-      epoch,
-      seq: 4,
-      snapshot: { at: 4 }
-    });
-    survivor.close();
-  });
-
-  it("resyncs a hibernated follower at the seq of the first publish after the wake, without also sending that event", async () => {
-    const name = crypto.randomUUID();
-    const survivor = await connect(name);
-    await follow(survivor);
-    const { epoch } = await stub(name).head();
-
-    await stub(name).openBatch();
-    await stub(name).append("stored");
+    const { epoch } = await follow(survivor);
+    expect(await stub(name).publish("feed", "before")).toBe(1);
     await survivor.until(isType("events"));
     await evictDurableObject(stub(name));
 
-    // The first touch is a publish. Its snapshot is taken after the
-    // producer's state change, so the follower resyncs at seq 5 and must
-    // not get event 5 on top.
+    // The first write of the new isolate skips the batch size.
     expect(await stub(name).publish("feed", "after")).toBe(5);
-    expect(await stub(name).publish("feed", "next")).toBe(6);
-    const frames = await survivor.until(
-      (frame) => isType("events")(frame) && events([frame])[0]?.seq === 6
-    );
-    expect(frames.map((frame) => frame.type)).toEqual([
-      "cf_agent_log_resync",
-      "cf_agent_log_events"
+    expect(events(await survivor.until(isType("events")))).toEqual([
+      { seq: 5, data: "after" }
     ]);
-    expect(frames[0]).toMatchObject({ epoch, seq: 5, snapshot: { at: 5 } });
-    expect(events(frames)).toEqual([{ seq: 6, data: "next" }]);
-    survivor.close();
-  });
-
-  it("resyncs a hibernated follower of a log without a snapshot just before the first publish after the wake, then sends it", async () => {
-    const name = crypto.randomUUID();
-    const survivor = await connect(name);
-    await follow(survivor, "bare");
-    await stub(name).openBatch("bare");
-    await stub(name).append("stored");
-    await survivor.until(isType("events"));
-    await evictDurableObject(stub(name));
-
-    // Default batches hold 10 events: the gap is seqs 2..11.
-    expect(await stub(name).publish("bare", "after")).toBe(12);
-    const frames = await survivor.until(isType("events"));
-    expect(frames.map((frame) => frame.type)).toEqual([
-      "cf_agent_log_resync",
-      "cf_agent_log_events"
-    ]);
-    expect(frames[0]).toMatchObject({ seq: 11 });
-    expect(frames[0]).not.toHaveProperty("snapshot");
-    expect(events(frames)).toEqual([{ seq: 12, data: "after" }]);
-    survivor.close();
-  });
-
-  it("resyncs the existing followers on a socket whose new subscribe finds the crash gap", async () => {
-    const name = crypto.randomUUID();
-    const survivor = await connect(name);
-    await follow(survivor);
-    await stub(name).openBatch();
-    await stub(name).append("stored");
-    await survivor.until(isType("events"));
-    await evictDurableObject(stub(name));
-
-    survivor.socket.send(
-      JSON.stringify({
-        type: "cf_agent_log_subscribe",
-        log: "feed",
-        id: "late"
-      })
-    );
-    const frames = await survivor.until(
-      (frame) => isType("resync")(frame) && frame.id === "late"
-    );
-    expect(frames.map((frame) => [frame.type, frame.id])).toEqual([
-      ["cf_agent_log_resync", undefined],
-      ["cf_agent_log_resync", "late"]
-    ]);
+    // The client's skip guard asks again from its cursor: a replay.
+    survivor.subscribe("feed", { epoch, seq: 1 });
+    const frames = await survivor.until(isType("synced"));
+    expect(events(frames)).toEqual([{ seq: 5, data: "after" }]);
     survivor.close();
   });
 
@@ -353,8 +272,10 @@ describe("event log", () => {
     await follow(client);
     await evictDurableObject(stub(name));
     await stub(name).publish("feed", "woke");
+    // The new isolate's first write starts 3 (the batch size) past the
+    // stored seqs: seq 4.
     expect(events(await client.until(isType("events")))).toEqual([
-      { seq: 1, data: "woke" }
+      { seq: 4, data: "woke" }
     ]);
     client.close();
   });
@@ -428,20 +349,21 @@ describe("event log", () => {
     client.close();
   });
 
-  it("replays from the head a resync handed out after a crash gap", async () => {
+  it("replays from the head a resync handed out after a crash", async () => {
     const name = crypto.randomUUID();
+    expect(await stub(name).publish("feed", "stored")).toBe(1);
     const { epoch } = await stub(name).head();
     await stub(name).openBatch();
-    await stub(name).append("stored");
+    await stub(name).append("lost");
     await stub(name)
       .crash()
       .catch(() => {});
-    expect((await stub(name).head()).seq).toBe(4);
+    expect((await stub(name).head()).seq).toBe(1);
 
     const client = await connect(name);
-    client.subscribe("feed", { epoch, seq: 4 });
+    client.subscribe("feed", { epoch, seq: 1 });
     expect((await client.until(isType("synced"))).at(-1)).toMatchObject({
-      seq: 4
+      seq: 1
     });
     client.close();
   });
@@ -464,8 +386,10 @@ describe("event log", () => {
     // Publishing writes the buffer and this event: 600 KB, two rows.
     expect(await stub(name).publishSized(400_000)).toBe(3);
     await stub(name).closeBatch();
+    // The small event and the 200 KB one share a block; the 400 KB one
+    // does not fit beside them.
     expect((await stub(name).rows()).map((row) => row.seq_from)).toEqual([
-      1, 2, 3
+      0, 2
     ]);
     const client = await connect(name);
     client.subscribe("feed", { epoch, seq: 0 });
@@ -642,11 +566,13 @@ describe("followEventLog", () => {
 
     socket.attach(await rawSocket(name));
     await waitFor(() => log.length === 4);
+    // Both events were still buffered: the log holds nothing, so the
+    // cursor at 2 is ahead of it.
     expect(log).toEqual([
       "resync 0",
       "event stored 1",
       "event lost 2",
-      "resync 4"
+      "resync 0"
     ]);
     socket.drop();
   });

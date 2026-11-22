@@ -179,3 +179,15 @@ export type StreamChunkRow = {
   chunk: string;
   created_at: number;
 };
+
+/**
+ * Limits of a buffered append (internal sync aperture): the buffer is
+ * written once it holds `maxChunks` chunks or `maxBytes` serialized
+ * characters.
+ *
+ * @internal
+ */
+export interface StreamBatching {
+  readonly maxChunks: number;
+  readonly maxBytes: number;
+}

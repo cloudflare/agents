@@ -6,13 +6,13 @@
  * last seq it applied; the log replays what it still holds after that, or
  * tells the client to resync from a snapshot when it cannot.
  *
- * Storage is two tables owned by the WebSockets capability:
- * `cf_agents_event_logs` (one row per log: its epoch) and
- * `cf_agents_event_log_rows` (batches of whole events, plus gap rows that
- * mark seqs a crash lost). See design/event-log.md for the contract.
+ * It stores nothing of its own: a log is one stream (`log:<name>`) of the
+ * host's `Streams` capability, which batches, trims and survives restarts.
+ * Event seq n is chunk n - 1 of that stream. See design/event-log.md.
  */
 
 import type { Connection } from "../lifecycle";
+import type { Streams, StreamsSyncInternal } from "../streams/streams";
 import {
   CF_EVENT_LOGS_KEY,
   getConnectionFlag,
@@ -34,12 +34,8 @@ import {
 export const DEFAULT_MAX_EVENT_BYTES = 1_048_576;
 /** Highest `maxEventBytes` a log accepts: one event must fit one row. */
 const MAX_EVENT_BYTES_LIMIT = 1_900_000;
-/**
- * A stored row closes before its body passes this many bytes; a larger
- * event is stored alone. Well under SQLite's 2 MB row limit, and one row
- * is one replay frame.
- */
-const ROW_MAX_BYTES = 512 * 1024;
+/** Events per replay frame. */
+const REPLAY_PAGE_EVENTS = 100;
 const MAX_LOG_NAME_LENGTH = 128;
 
 const DEFAULT_RETENTION_EVENTS = 1000;
@@ -56,11 +52,13 @@ const utf8 = new TextEncoder();
  * @internal Not a public API (sibling-package support through `agents/internal`).
  */
 export interface EventLogOptions<S = unknown> {
+  /** The host's `Streams` capability: the log is one of its streams. */
+  readonly streams: Streams;
   /**
    * How much history the log keeps for replay. After every write the
-   * oldest batches are deleted while either limit is exceeded; the newest
-   * batch is always kept, so a seq is never reused. A client whose cursor
-   * falls before the oldest kept event gets a resync.
+   * stream's oldest blocks are deleted while either limit is exceeded; the
+   * newest block is always kept, so a seq is never reused. A client whose
+   * cursor falls before the oldest kept event gets a resync.
    */
   readonly retention?: {
     /** Events kept. Default 1000. */
@@ -71,7 +69,9 @@ export interface EventLogOptions<S = unknown> {
   /**
    * When a batch (see {@link EventLog.batch}) writes its buffered events.
    * A crash loses what is still buffered: at most `maxEvents - 1` events,
-   * and at most `maxDelayMs` of output.
+   * and at most `maxDelayMs` of output. The next isolate starts its seqs
+   * `maxEvents` past the stored ones, so a lost seq is never given to a new
+   * event, and a client whose cursor is one of them resyncs.
    */
   readonly batching?: {
     /** Buffered events that force a write. Default 10. */
@@ -99,30 +99,8 @@ export interface EventLogOptions<S = unknown> {
   readonly canSubscribe?: (connection: Connection) => boolean;
 }
 
-/** One event as it waits in the batch buffer: seq and serialized entry. */
-type Entry = { readonly seq: number; readonly json: string; bytes: number };
-
-/** Per-isolate view of the log's stored rows, read once on first use. */
-type Loaded = {
-  readonly epoch: string;
-  /** Last seq assigned, buffered events included. 0 when none yet. */
-  head: number;
-  /** First retained seq, or null when the log has no rows. */
-  oldest: number | null;
-  rows: number;
-  events: number;
-  bytes: number;
-  /** Whether the newest row carries `open_until`. */
-  newestOpen: boolean;
-};
-
-type Row = {
-  seq_from: number;
-  seq_to: number;
-  kind: "events" | "gap";
-  body: string;
-  bytes: number;
-};
+/** One event as it is sent: seq and serialized entry. */
+type Entry = { readonly seq: number; readonly json: string };
 
 /**
  * What the log needs from the WebSockets capability.
@@ -130,36 +108,8 @@ type Row = {
  * @internal
  */
 export type EventLogHost = {
-  readonly sql: () => SqlStorage;
   readonly connections: () => Iterable<Connection>;
-  readonly emit: (type: string, payload: Record<string, unknown>) => void;
 };
-
-/** Storage handles whose tables exist, so DDL runs once per isolate. */
-const tablesReady = new WeakSet<SqlStorage>();
-
-function ensureTables(sql: SqlStorage): void {
-  if (tablesReady.has(sql)) return;
-  sql.exec(`
-    CREATE TABLE IF NOT EXISTS cf_agents_event_logs (
-      log TEXT PRIMARY KEY,
-      epoch TEXT NOT NULL,
-      created_at INTEGER NOT NULL
-    )`);
-  sql.exec(`
-    CREATE TABLE IF NOT EXISTS cf_agents_event_log_rows (
-      log TEXT NOT NULL,
-      seq_from INTEGER NOT NULL,
-      seq_to INTEGER NOT NULL,
-      kind TEXT NOT NULL CHECK (kind IN ('events', 'gap')),
-      body TEXT NOT NULL,
-      bytes INTEGER NOT NULL,
-      open_until INTEGER,
-      created_at INTEGER NOT NULL,
-      PRIMARY KEY (log, seq_from)
-    ) WITHOUT ROWID`);
-  tablesReady.add(sql);
-}
 
 function positive(value: number | undefined, fallback: number): number {
   if (value === undefined) return fallback;
@@ -227,24 +177,20 @@ export interface EventLogBatch<T = unknown> {
 export class EventLog<T = unknown, S = unknown> {
   readonly name: string;
   readonly #host: EventLogHost;
-  readonly #retentionEvents: number;
-  readonly #retentionBytes: number;
-  readonly #batchEvents: number;
-  readonly #batchBytes: number;
+  readonly #streamsCapability: Streams;
+  readonly #streamId: string;
+  readonly #retention: { maxChunks: number; maxBytes: number };
+  readonly #batching: { maxChunks: number; maxBytes: number };
   readonly #batchDelayMs: number;
   readonly #maxEventBytes: number;
   readonly #snapshot: ((connection: Connection) => S) | undefined;
   readonly #canSubscribe: ((connection: Connection) => boolean) | undefined;
 
-  #loaded: Loaded | undefined;
-  #buffer: Entry[] = [];
-  #bufferBytes = 0;
-  #openBatches = 0;
+  /** The stream's epoch, read or written once per isolate. */
+  #epoch: string | undefined;
   #timer: ReturnType<typeof setTimeout> | undefined;
-  /** A crash gap was recorded and surviving followers are not told yet. */
-  #resyncPending = false;
 
-  /** @internal Use `WebSockets.log()`. */
+  /** @internal Use `declareEventLog()`. */
   constructor(name: string, options: EventLogOptions<S>, host: EventLogHost) {
     if (name.length === 0 || name.length > MAX_LOG_NAME_LENGTH) {
       throw new RangeError(
@@ -253,21 +199,21 @@ export class EventLog<T = unknown, S = unknown> {
     }
     this.name = name;
     this.#host = host;
-    this.#retentionEvents = positive(
-      options.retention?.maxEvents,
-      DEFAULT_RETENTION_EVENTS
-    );
-    this.#retentionBytes = positive(
-      options.retention?.maxBytes,
-      DEFAULT_RETENTION_BYTES
-    );
-    this.#batchEvents = Math.floor(
-      positive(options.batching?.maxEvents, DEFAULT_BATCH_EVENTS)
-    );
-    this.#batchBytes = positive(
-      options.batching?.maxBytes,
-      DEFAULT_BATCH_BYTES
-    );
+    this.#streamsCapability = options.streams;
+    this.#streamId = `log:${name}`;
+    this.#retention = {
+      maxChunks: positive(
+        options.retention?.maxEvents,
+        DEFAULT_RETENTION_EVENTS
+      ),
+      maxBytes: positive(options.retention?.maxBytes, DEFAULT_RETENTION_BYTES)
+    };
+    this.#batching = {
+      maxChunks: Math.floor(
+        positive(options.batching?.maxEvents, DEFAULT_BATCH_EVENTS)
+      ),
+      maxBytes: positive(options.batching?.maxBytes, DEFAULT_BATCH_BYTES)
+    };
     this.#batchDelayMs = positive(
       options.batching?.maxDelayMs,
       DEFAULT_BATCH_DELAY_MS
@@ -282,8 +228,8 @@ export class EventLog<T = unknown, S = unknown> {
 
   /** The log's epoch and the last seq assigned (0 before the first event). */
   get head(): EventLogCursor {
-    const loaded = this.#load();
-    return { epoch: loaded.epoch, seq: loaded.head };
+    const epoch = this.#open();
+    return { epoch, seq: this.#streams.bounds(this.#streamId).head };
   }
 
   /**
@@ -292,51 +238,51 @@ export class EventLog<T = unknown, S = unknown> {
    * order. Returns the event's seq.
    */
   publish(data: T): number {
-    const entry = this.#entry(data);
-    this.#buffer.push(entry);
-    this.#bufferBytes += entry.bytes;
+    const entry = this.#append(data);
     this.#flush();
-    this.#deliver(entry);
+    this.#broadcast(entry);
     return entry.seq;
   }
 
   /**
-   * Open a batch for a high-rate producer. Its first `append` is stored at
-   * once and marks the log open, so a crash before `close()` is detected
-   * on the next start: the seqs that may have been sent but not stored
-   * become a gap, and clients that saw them resync.
+   * Open a batch for a high-rate producer: each `append` gets its seq and
+   * is sent at once, and is stored with the next write of the log's
+   * buffer (`maxEvents`, `maxBytes`, or after `maxDelayMs`).
    */
   batch(): EventLogBatch<T> {
-    let first = true;
     let closed = false;
-    this.#openBatches += 1;
     return {
       append: (data: T) => {
         if (closed) throw new Error("This event log batch is closed");
-        const entry = this.#entry(data);
-        this.#buffer.push(entry);
-        this.#bufferBytes += entry.bytes;
-        this.#deliver(entry);
-        if (
-          first ||
-          this.#buffer.length >= this.#batchEvents ||
-          this.#bufferBytes >= this.#batchBytes
-        ) {
-          this.#flush();
-        } else {
-          this.#armTimer();
-        }
-        first = false;
+        const entry = this.#append(data);
+        this.#broadcast(entry);
+        this.#armTimer();
         return entry.seq;
       },
       flush: () => this.#flush(),
       close: () => {
         if (closed) return;
         closed = true;
-        this.#openBatches -= 1;
         this.#flush();
       }
     };
+  }
+
+  /**
+   * Forget the log's history: delete the stream, start a new epoch at seq
+   * 0, and resync every follower (from the snapshot, which should reflect
+   * what replaced the history). A client holding a cursor from before can
+   * no longer replay anything, and the deleted events are gone from
+   * storage. Buffered events are dropped with the stream.
+   */
+  reset(): void {
+    this.#open();
+    this.#streams.deleteUnchecked(this.#streamId);
+    this.#epoch = undefined;
+    this.#open();
+    for (const connection of this.#followers()) {
+      if (!this.#sendResync(connection)) this.unsubscribe(connection);
+    }
   }
 
   // ── Subscriptions ──────────────────────────────────────────────────────
@@ -358,24 +304,20 @@ export class EventLog<T = unknown, S = unknown> {
       this.#sendError(connection, "Subscription refused", id);
       return;
     }
-    // A socket that already follows the log may carry other followers:
-    // they need the crash resync too, not only this subscribe's answer.
-    const following = followedLogs(connection).includes(this.name);
-    const loaded = this.#load();
-    this.#resyncFollowers(following ? undefined : connection);
-    if (cursor && this.#canReplay(loaded, cursor.epoch, cursor.seq)) {
+    const epoch = this.#open();
+    if (cursor && cursor.epoch === epoch && this.#canReplay(cursor.seq)) {
       this.#replay(connection, cursor.seq, id);
       trySend(
         connection,
         JSON.stringify({
           type: EVENT_LOG_SYNCED,
           log: this.name,
-          epoch: loaded.epoch,
-          seq: loaded.head,
+          epoch,
+          seq: this.#streams.bounds(this.#streamId).head,
           ...(id !== undefined && { id })
         })
       );
-    } else if (!this.#sendResync(connection, loaded, id)) {
+    } else if (!this.#sendResync(connection, id)) {
       return;
     }
     const logs = followedLogs(connection);
@@ -394,67 +336,63 @@ export class EventLog<T = unknown, S = unknown> {
     }
   }
 
+  /**
+   * @internal Ids of the open connections following this log, so a host
+   * can send the same frames the old way to connections that do not.
+   */
+  followerIds(): string[] {
+    return this.#followers().map((connection) => connection.id);
+  }
+
   /** @internal Stop the flush timer; called when the host is destroyed. */
   dispose(): void {
     if (this.#timer !== undefined) clearTimeout(this.#timer);
     this.#timer = undefined;
   }
 
-  #canReplay(loaded: Loaded, epoch: string, seq: number): boolean {
-    if (epoch !== loaded.epoch) return false;
-    if (seq < 0 || seq > loaded.head) return false;
-    const oldest = loaded.oldest ?? this.#buffer[0]?.seq ?? loaded.head + 1;
-    if (seq < oldest - 1) return false;
-    if (seq === 0 || seq < oldest) return true;
-    // A cursor inside a gap saw events a crash lost. The gap's last seq
-    // is never a lost event's (see #load): a cursor equal to it was
-    // handed out as the head, so it is safe to replay from.
-    const row = this.#sql<{ kind: string; seq_to: number }>(
-      `SELECT kind, seq_to FROM cf_agents_event_log_rows
-       WHERE log = ? AND seq_from <= ? ORDER BY seq_from DESC LIMIT 1`,
-      this.name,
-      seq
-    )[0];
-    return !(row && row.kind === "gap" && seq < row.seq_to);
+  /**
+   * Whether events after cursor `seq` can be replayed: it is not ahead of
+   * the head, not before the oldest kept event, and is an event that was
+   * stored (a cursor in a hole saw an event a crash lost).
+   */
+  #canReplay(seq: number): boolean {
+    const { oldest, head } = this.#streams.bounds(this.#streamId);
+    if (seq < 0 || seq > head) return false;
+    // Nothing applied yet: replayable while the log still holds its first
+    // chunk (a log whose first chunks a crash lost starts past 0).
+    if (seq === 0) return oldest === 0;
+    // Chunk `seq - 1` is event `seq`; replay starts at the next one.
+    if (seq < oldest) return false;
+    if (seq === oldest) return true;
+    return this.#streams.holds(this.#streamId, seq - 1);
   }
 
   #replay(connection: Connection, after: number, id?: string): void {
+    // Buffered events are written first, so the replay reads them too.
+    this.#flush();
     const prefix = `{"type":"${EVENT_LOG_EVENTS}","log":${JSON.stringify(
       this.name
     )},${id === undefined ? "" : `"id":${JSON.stringify(id)},`}"events":`;
-    const rows = this.#host.sql().exec<Row>(
-      `SELECT seq_from, seq_to, kind, body, bytes FROM cf_agents_event_log_rows
-         WHERE log = ? AND seq_to > ? ORDER BY seq_from ASC`,
-      this.name,
-      after
-    );
-    for (const row of rows) {
-      if (row.kind !== "events") continue;
-      if (row.seq_from > after) {
-        trySend(connection, `${prefix}${row.body}}`);
-        continue;
-      }
-      const entries = (JSON.parse(row.body) as { seq: number }[]).filter(
-        (entry) => entry.seq > after
+    let from = after;
+    for (;;) {
+      const rows = this.#streams.readChunks(
+        this.#streamId,
+        from,
+        REPLAY_PAGE_EVENTS
       );
-      trySend(connection, `${prefix}${JSON.stringify(entries)}}`);
-    }
-    const buffered = this.#buffer.filter((entry) => entry.seq > after);
-    if (buffered.length > 0) {
-      trySend(
-        connection,
-        `${prefix}[${buffered.map((entry) => entry.json).join(",")}]}`
+      if (rows.length === 0) break;
+      const entries = rows.map(
+        (row) => `{"seq":${row.seq + 1},"data":${row.chunk}}`
       );
+      trySend(connection, `${prefix}[${entries.join(",")}]}`);
+      from = rows[rows.length - 1].seq + 1;
     }
   }
 
   /** Send a resync with the host's snapshot. Returns false when it failed. */
-  #sendResync(
-    connection: Connection,
-    loaded: Loaded,
-    id?: string,
-    seq = loaded.head
-  ): boolean {
+  #sendResync(connection: Connection, id?: string): boolean {
+    const epoch = this.#open();
+    const seq = this.#streams.bounds(this.#streamId).head;
     let snapshot: S | undefined;
     try {
       snapshot = this.#snapshot?.(connection);
@@ -468,7 +406,7 @@ export class EventLog<T = unknown, S = unknown> {
       text = JSON.stringify({
         type: EVENT_LOG_RESYNC,
         log: this.name,
-        epoch: loaded.epoch,
+        epoch,
         seq,
         ...(snapshot !== undefined && { snapshot }),
         ...(id !== undefined && { id })
@@ -497,50 +435,53 @@ export class EventLog<T = unknown, S = unknown> {
     );
   }
 
-  /**
-   * Send a new event to the followers. When a crash resync is pending, a
-   * log with a snapshot resyncs them at this event's seq instead: the
-   * snapshot is taken after the producer's state change, so it holds it.
-   * A log without one resyncs them just before the event and then sends
-   * it, since a resync without a snapshot carries no state.
-   */
-  #deliver(entry: Entry): void {
-    if (!this.#resyncPending) {
-      this.#broadcast([entry]);
-    } else if (this.#snapshot) {
-      this.#resyncFollowers();
-    } else {
-      this.#resyncFollowers(undefined, entry.seq - 1);
-      this.#broadcast([entry]);
-    }
-  }
-
-  #broadcast(entries: readonly Entry[]): void {
-    const text = `{"type":"${EVENT_LOG_EVENTS}","log":${JSON.stringify(
-      this.name
-    )},"events":[${entries.map((entry) => entry.json).join(",")}]}`;
+  #followers(): Connection[] {
+    const followers: Connection[] = [];
     for (const connection of this.#host.connections()) {
       if (followedLogs(connection).includes(this.name)) {
-        trySend(connection, text);
+        followers.push(connection);
       }
     }
+    return followers;
   }
 
-  // ── Storage ────────────────────────────────────────────────────────────
-
-  #sql<R extends Record<string, SqlStorageValue>>(
-    query: string,
-    ...params: SqlStorageValue[]
-  ): R[] {
-    return this.#host
-      .sql()
-      .exec<R>(query, ...params)
-      .toArray();
+  #broadcast(entry: Entry): void {
+    const text = `{"type":"${EVENT_LOG_EVENTS}","log":${JSON.stringify(
+      this.name
+    )},"events":[${entry.json}]}`;
+    for (const connection of this.#followers()) trySend(connection, text);
   }
 
-  /** Serialize and number one event; throws before assigning a seq. */
-  #entry(data: T): Entry {
-    const loaded = this.#load();
+  // ── Storage (the stream) ───────────────────────────────────────────────
+
+  get #streams(): StreamsSyncInternal {
+    return this.#streamsCapability.__DO_NOT_USE_WILL_BREAK__sync();
+  }
+
+  /** Make sure the stream exists; returns its epoch. Once per isolate. */
+  #open(): string {
+    if (this.#epoch !== undefined) return this.#epoch;
+    const streams = this.#streams;
+    streams.ensureTables();
+    const row = streams.getStream(this.#streamId);
+    const stored: unknown = row?.metadata
+      ? (JSON.parse(row.metadata) as { epoch?: unknown }).epoch
+      : undefined;
+    let epoch: string;
+    if (typeof stored === "string") {
+      epoch = stored;
+    } else {
+      epoch = crypto.randomUUID();
+      if (row) streams.setMetadata(this.#streamId, { epoch });
+      else streams.insertStream(this.#streamId, null, { epoch });
+    }
+    this.#epoch = epoch;
+    return epoch;
+  }
+
+  /** Number one event and add it to the buffer; throws before a seq. */
+  #append(data: T): Entry {
+    this.#open();
     const dataJson = JSON.stringify(data);
     if (dataJson === undefined) {
       throw new TypeError("Event log data must be a JSON value");
@@ -551,216 +492,19 @@ export class EventLog<T = unknown, S = unknown> {
         `Event of ${bytes} bytes exceeds the ${this.#maxEventBytes}-byte limit of event log "${this.name}"`
       );
     }
-    const seq = loaded.head + 1;
-    loaded.head = seq;
-    const json = `{"seq":${seq},"data":${dataJson}}`;
-    return { seq, json, bytes: bytes + json.length - dataJson.length };
+    const seq =
+      this.#streams.append(this.#streamId, data as never, this.#batching) + 1;
+    return { seq, json: `{"seq":${seq},"data":${dataJson}}` };
   }
 
-  /**
-   * Read the log once per isolate. When the newest row says a batch was
-   * open, the previous isolate may have sent events it never stored:
-   * record those seqs as a gap and resync the connections still
-   * following (hibernated sockets survive an eviction).
-   */
-  #load(): Loaded {
-    if (this.#loaded) return this.#loaded;
-    const sql = this.#host.sql();
-    ensureTables(sql);
-    let epoch = this.#sql<{ epoch: string }>(
-      `SELECT epoch FROM cf_agents_event_logs WHERE log = ?`,
-      this.name
-    )[0]?.epoch;
-    if (epoch === undefined) {
-      epoch = crypto.randomUUID();
-      sql.exec(
-        `INSERT INTO cf_agents_event_logs (log, epoch, created_at) VALUES (?, ?, ?)`,
-        this.name,
-        epoch,
-        Date.now()
-      );
-    }
-    const totals = this.#sql<{
-      rows: number;
-      oldest: number | null;
-      events: number | null;
-      bytes: number | null;
-    }>(
-      `SELECT COUNT(*) AS rows, MIN(seq_from) AS oldest,
-         SUM(CASE kind WHEN 'events' THEN seq_to - seq_from + 1 ELSE 0 END) AS events,
-         SUM(bytes) AS bytes
-       FROM cf_agents_event_log_rows WHERE log = ?`,
-      this.name
-    )[0];
-    const newest = this.#sql<{ seq_to: number; open_until: number | null }>(
-      `SELECT seq_to, open_until FROM cf_agents_event_log_rows
-       WHERE log = ? ORDER BY seq_from DESC LIMIT 1`,
-      this.name
-    )[0];
-    const loaded: Loaded = {
-      epoch,
-      head: newest?.seq_to ?? 0,
-      oldest: totals?.oldest ?? null,
-      rows: totals?.rows ?? 0,
-      events: totals?.events ?? 0,
-      bytes: totals?.bytes ?? 0,
-      newestOpen: false
-    };
-    this.#loaded = loaded;
-
-    if (
-      newest &&
-      newest.open_until !== null &&
-      newest.open_until > newest.seq_to
-    ) {
-      // A batch sends at most `maxEvents - 1` events it has not stored, so
-      // the lost seqs end before `open_until`. Ending the gap at
-      // `open_until` itself means no client cursor can equal the gap's
-      // last seq, so once the gap is trimmed, a cursor just before the
-      // oldest kept event is still one that never saw a lost event.
-      const from = newest.seq_to + 1;
-      const to = newest.open_until;
-      sql.exec(
-        `INSERT INTO cf_agents_event_log_rows
-           (log, seq_from, seq_to, kind, body, bytes, open_until, created_at)
-         VALUES (?, ?, ?, 'gap', '[]', 0, NULL, ?)`,
-        this.name,
-        from,
-        to,
-        Date.now()
-      );
-      loaded.head = to;
-      loaded.rows += 1;
-      this.#host.emit("eventlog:gap", { log: this.name, from, to });
-      this.#trim(loaded);
-      // Followers that survived (hibernated sockets outlive an eviction)
-      // are resynced, but not from here: this may be the first `publish`
-      // after the wake, whose state change the snapshot already holds.
-      // That publish resyncs them at its own seq instead of sending the
-      // event; otherwise a microtask resyncs them at the head once the
-      // current synchronous block is done.
-      this.#resyncPending = true;
-      queueMicrotask(() => this.#resyncFollowers());
-    }
-    return loaded;
-  }
-
-  /**
-   * Send the pending crash resync to every follower but `except`, at
-   * `seq` (the head by default). Returns whether one was pending.
-   */
-  #resyncFollowers(except?: Connection, seq?: number): boolean {
-    if (!this.#resyncPending || !this.#loaded) return false;
-    this.#resyncPending = false;
-    for (const connection of this.#host.connections()) {
-      if (connection === except) continue;
-      if (!followedLogs(connection).includes(this.name)) continue;
-      if (!this.#sendResync(connection, this.#loaded, undefined, seq)) {
-        this.unsubscribe(connection);
-      }
-    }
-    return true;
-  }
-
-  /**
-   * Write the buffer as rows of whole events, each under the row limit,
-   * then trim to retention. With nothing buffered, only clears the open
-   * mark once the last batch has closed.
-   */
+  /** Write the buffer, then trim to retention. */
   #flush(): void {
     if (this.#timer !== undefined) {
       clearTimeout(this.#timer);
       this.#timer = undefined;
     }
-    const loaded = this.#load();
-    const open = this.#openBatches > 0;
-    if (this.#buffer.length === 0) {
-      if (loaded.newestOpen && !open) {
-        this.#host.sql().exec(
-          `UPDATE cf_agents_event_log_rows SET open_until = NULL
-             WHERE log = ? AND seq_from = (SELECT MAX(seq_from) FROM cf_agents_event_log_rows WHERE log = ?)`,
-          this.name,
-          this.name
-        );
-        loaded.newestOpen = false;
-      }
-      return;
-    }
-    const buffer = this.#buffer;
-    this.#buffer = [];
-    this.#bufferBytes = 0;
-    const sql = this.#host.sql();
-    const now = Date.now();
-    let start = 0;
-    while (start < buffer.length) {
-      let end = start + 1;
-      let bytes = buffer[start].bytes;
-      while (
-        end < buffer.length &&
-        bytes + buffer[end].bytes + 1 <= ROW_MAX_BYTES
-      ) {
-        bytes += buffer[end].bytes + 1;
-        end += 1;
-      }
-      const rowEntries = buffer.slice(start, end);
-      const seqFrom = rowEntries[0].seq;
-      const seqTo = rowEntries[rowEntries.length - 1].seq;
-      const body = `[${rowEntries.map((entry) => entry.json).join(",")}]`;
-      sql.exec(
-        `INSERT INTO cf_agents_event_log_rows
-           (log, seq_from, seq_to, kind, body, bytes, open_until, created_at)
-         VALUES (?, ?, ?, 'events', ?, ?, ?, ?)`,
-        this.name,
-        seqFrom,
-        seqTo,
-        body,
-        bytes + 2,
-        open ? seqTo + this.#batchEvents : null,
-        now
-      );
-      loaded.rows += 1;
-      loaded.events += rowEntries.length;
-      loaded.bytes += bytes + 2;
-      loaded.oldest ??= seqFrom;
-      start = end;
-    }
-    loaded.newestOpen = open;
-    this.#trim(loaded);
-  }
-
-  /** Delete the oldest rows while over retention, never the newest one. */
-  #trim(loaded: Loaded): void {
-    while (
-      loaded.rows > 1 &&
-      (loaded.events > this.#retentionEvents ||
-        loaded.bytes > this.#retentionBytes)
-    ) {
-      const oldest = this.#sql<{
-        seq_from: number;
-        seq_to: number;
-        kind: string;
-        bytes: number;
-      }>(
-        `SELECT seq_from, seq_to, kind, bytes FROM cf_agents_event_log_rows
-         WHERE log = ? ORDER BY seq_from ASC LIMIT 1`,
-        this.name
-      )[0];
-      if (!oldest) break;
-      this.#host
-        .sql()
-        .exec(
-          `DELETE FROM cf_agents_event_log_rows WHERE log = ? AND seq_from = ?`,
-          this.name,
-          oldest.seq_from
-        );
-      loaded.rows -= 1;
-      if (oldest.kind === "events") {
-        loaded.events -= oldest.seq_to - oldest.seq_from + 1;
-      }
-      loaded.bytes -= oldest.bytes;
-      // Rows cover contiguous seq ranges, so the next row starts here.
-      loaded.oldest = oldest.seq_to + 1;
-    }
+    this.#streams.flush(this.#streamId);
+    this.#streams.trim(this.#streamId, this.#retention);
   }
 
   #armTimer(): void {
