@@ -106,7 +106,8 @@ export type LifecycleJobContext = {
    * its CPU or wall-time limit). Those are counted durably before `onJob`
    * runs, so after such an attempt the next invocation runs attempt 2. A
    * push or a non-final outcome (`rescheduleAt`, `"yield"`) starts the count
-   * again. A number can repeat when its write was lost with the isolate; it
+   * again, as does a `reschedule()`. A number can repeat when its write was
+   * lost with the isolate; it
    * is not a deduplication key.
    */
   readonly attempt: number;
@@ -422,7 +423,8 @@ export class JobQueue {
     this.#revise(id);
     this.#sql(
       `UPDATE cf_agents_jobs
-       SET time = ?, running = 0, execution_started_at = NULL
+       SET time = ?, running = 0, execution_started_at = NULL, attempts = 0,
+           held_since = NULL
        WHERE id = ? AND capability = ?`,
       Math.floor(time),
       id,
