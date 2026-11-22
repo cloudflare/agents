@@ -436,11 +436,15 @@ export class JobDriver {
       // was taken. A row that is gone or no longer due belongs to that
       // newer intent — skip it (the final re-arm owns any future wake). A
       // row that changed but is still due dispatches with its fresh data.
-      // A job's owner never changes, so a held owner is skipped before its
-      // row is read again.
+      // A held owner is skipped before its row is read again. A cancelled
+      // id can be pushed again by another owner, so the fresh row's owner
+      // is checked too.
       if (skip.has(stale.capability)) continue;
       const row = this.#options.queue.dueRow(stale.id, nowMs);
       if (!row) continue;
+      if (row.capability !== stale.capability && skip.has(row.capability)) {
+        continue;
+      }
 
       const dispatch = await this.#options.resolveDispatch(row.capability);
       if (!dispatch) {
