@@ -153,7 +153,7 @@ export class SpikeSubChild extends Agent {
       }
       if (message.startsWith("broadcast:")) {
         // Use `this.broadcast(...)` — the path
-        // `AIChatAgent._broadcastChatMessage` exercises for streaming
+        // `ChatFrames.broadcast` (AIChatAgent) exercises for streaming
         // chunks. This is the code path that was silently no-op'd on
         // facets by an over-cautious guard, breaking real-time UI
         // updates for any facet-backed chat agent.
