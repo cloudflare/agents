@@ -865,8 +865,8 @@ export class Lifecycle<
     await this.#serializeAlarmWrite(async () => {
       if (this.#alarmsDisabled) return;
       const alarm = this.#jobQueue.nextAlarmTime(Date.now());
-      // Each setAlarm() and deleteAlarm() is billed as a row written, and
-      // most queue mutations leave the earliest wake where it was.
+      // Each setAlarm() is billed as a row written, and most queue
+      // mutations leave the earliest wake where it was.
       const current = await this.#ctx.storage.getAlarm();
       if (alarm === null) {
         if (current !== null) await this.#ctx.storage.deleteAlarm();

@@ -58,6 +58,7 @@ describe("Lifecycle alarm writes", () => {
   it("writes the alarm only when its time changes", async () => {
     const stub = env.CapabilityHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance, state) => {
+      const storage = state.storage;
       const { writes, ctx } = countingAlarmWrites(state);
       const host = Object.create(instance, { ctx: { value: ctx } });
       const jobs = new Jobs();
@@ -75,15 +76,20 @@ describe("Lifecycle alarm writes", () => {
       expect(writes).toEqual([`set:${first}`]);
       expect(await state.storage.getAlarm()).toBe(first);
 
+      // An alarm that runs the first job leaves the second one's wake.
+      storage.sql.exec(
+        "UPDATE cf_agents_jobs SET time = ? WHERE id = 'a'",
+        Date.now() - 1
+      );
+      await lifecycle.alarm();
+      expect(await storage.getAlarm()).toBe(first + 1_000);
+
       // Emptying the queue deletes the alarm once.
-      await jobs.cancel("a");
+      writes.length = 0;
       await jobs.cancel("b");
       await lifecycle.rearmAlarm();
-      expect(writes).toEqual([
-        `set:${first}`,
-        `set:${first + 1_000}`,
-        "delete"
-      ]);
+      expect(writes).toEqual(["delete"]);
+      expect(await storage.getAlarm()).toBeNull();
     });
   });
 });
