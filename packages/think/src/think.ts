@@ -280,14 +280,11 @@ import {
   type ChatRecoveryAdapter,
   type ChatFiberWakeHooks,
   type ResolvedRecoveryStream,
-  type ClassifyRecoveredTurnInput,
-  type DispatchRecoveredTurnInput,
   type ChatRecoveryScheduleCallback,
   type ChatRecoveryTaskReason,
   CHAT_RECOVERY_INCIDENT_KEY_PREFIX,
   type ChatRecoveryAttemptScope,
-  type ChatRecoveryIncident,
-  type ChatRecoveryKind
+  type ChatRecoveryIncident
 } from "agents/chat";
 import type { Streams } from "agents/streams";
 import {
@@ -702,29 +699,6 @@ type ChatRecoveryContinueData = {
   lastClientTools?: ClientToolSchema[] | null;
   recoveredRequestId?: string;
 };
-
-/**
- * Think's chat fiber snapshot. `branchParentId` is set for a regeneration: the
- * user message the turn answers as a new sibling branch.
- */
-type ThinkChatFiberSnapshot = ChatFiberSnapshot<"think-chat-turn"> & {
-  branchParentId?: string;
-};
-
-function regenerationParentOf(
-  snapshot: ChatFiberSnapshot | null
-): string | undefined {
-  const parentId = (snapshot as ThinkChatFiberSnapshot | null)?.branchParentId;
-  return typeof parentId === "string" ? parentId : undefined;
-}
-
-/**
- * `Think`'s `classifyRecoveredTurn` detail (the {@link ChatFiberWakeHooks}
- * generic). `retryTargetUserId` is the pre-stream user message the turn re-runs
- * when it had no partial; the dispatch decision re-derives `streamIsTerminal` from
- * `streamStatus` rather than carrying it here.
- */
-type ThinkRecoveryClassification = { retryTargetUserId: string | null };
 
 // `ChatRecoveryIncident` / `ChatRecoveryKind` / `CHAT_RECOVERY_INCIDENT_KEY_PREFIX`
 // are the canonical shared symbols from `agents/chat` (imported above); the
@@ -3122,7 +3096,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // A recovered turn tells its attempt when its fiber is durably accepted,
     // so the attempt can move a submission it owns to this turn.
     const acceptance = recoveredTurnAcceptanceContext.getStore();
-    const snapshot: ThinkChatFiberSnapshot = {
+    const snapshot: ChatFiberSnapshot<"think-chat-turn"> = {
       ...createChatFiberSnapshot({
         kind: "think-chat-turn",
         requestId,
@@ -10332,9 +10306,21 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     return true;
   }
 
-  private _chatRecoveryWakeHooks(): ChatFiberWakeHooks<ThinkRecoveryClassification> {
+  private _chatRecoveryWakeHooks(): ChatFiberWakeHooks {
     return {
-      classifyRecoveredTurn: (input) => this._classifyRecoveredThinkTurn(input),
+      latestMessage: () => this._recoveryLeaf(),
+      // A partial that holds only the internal final-answer tool, or only the
+      // reasoning the model was cut off in, persists nothing.
+      partialHoldsContent: (partial) =>
+        partial.text !== "" ||
+        (partial.parts.length > 0 &&
+          this._strippedForPersist(
+            stripTrailingReasoning({
+              id: "",
+              role: "assistant",
+              parts: partial.parts as UIMessage["parts"]
+            })
+          ) !== null),
       invokeOnChatRecovery: (input) =>
         this.onChatRecovery({
           incidentId: input.incident.incidentId,
@@ -10367,7 +10353,50 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         this._persistOrphanedStream(streamId),
       completeRecoveredStream: (streamId) =>
         this._replyStreams.complete(streamId),
-      dispatchRecoveredTurn: (input) => this._dispatchRecoveredThinkTurn(input)
+      originMessageIds: (requestId) => this._frames.originIds(requestId),
+      // The payload keeps the stable submission identity. `request_id`
+      // follows the accepted successor, and the recovery lookup accepts
+      // either.
+      scheduleData: ({ recoveryRootRequestId }) => {
+        const submission = this._readRunningSubmissionForRecovery(
+          recoveryRootRequestId
+        );
+        return submission
+          ? { recoveredRequestId: submission.submission_id }
+          : {};
+      },
+      // A stream that ended before the reset settles its submission.
+      onStreamEnded: async ({
+        requestId,
+        recoveryRootRequestId,
+        streamStatus
+      }) => {
+        if (!this._readRunningSubmissionForRecovery(recoveryRootRequestId)) {
+          return;
+        }
+        await this._completeRecoveredSubmission(
+          recoveryRootRequestId,
+          streamStatus === "completed" ? "completed" : "error",
+          requestId,
+          streamStatus === "completed"
+            ? null
+            : "Recovered chat stream had already errored."
+        );
+      },
+      // The app declined: mark the submission interrupted and tell the tabs.
+      // The conversation moved on: the submission's turn has nothing to do.
+      onSkipped: async ({ requestId, recoveryRootRequestId, reason }) => {
+        if (reason === "continue_disabled") {
+          await this._declineRecoveredTurn(recoveryRootRequestId, requestId);
+        } else {
+          await this._completeRecoveredSubmission(
+            recoveryRootRequestId,
+            "skipped",
+            requestId,
+            null
+          );
+        }
+      }
     };
   }
 
@@ -10422,121 +10451,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * message. Mirrors `AIChatAgent`'s empty-partial new-turn rule (#1691): a
    * `continue` here would find no assistant message and skip the turn.
    */
-  private async _classifyRecoveredThinkTurn(
-    input: ClassifyRecoveredTurnInput
-  ): Promise<{
-    recoveryKind: ChatRecoveryKind;
-    detail: ThinkRecoveryClassification;
-  }> {
-    const streamIsTerminal =
-      input.streamStatus === "completed" || input.streamStatus === "error";
-    const retryTargetUserId = await this._recoverablePreStreamUserId(
-      input.snapshot,
-      input.partial
-    );
-    const shouldRetryBase = retryTargetUserId !== null && !streamIsTerminal;
-    const recoveryKind: ChatRecoveryKind = shouldRetryBase
-      ? "retry"
-      : "continue";
-    return { recoveryKind, detail: { retryTargetUserId } };
-  }
-
-  /**
-   * The retry/continue/skip decision for a recovered chat turn, run after the
-   * partial is persisted and the stream completed. Owns `Think`'s substrate
-   * behavior the engine frame stays out of: a terminal stream reconciles the
-   * durable submission (and is never retried/continued), and a `continue: false`
-   * abandonment marks the submission interrupted + records a terminal status +
-   * broadcasts so a reconnecting client is not frozen.
-   */
-  private async _dispatchRecoveredThinkTurn(
-    input: DispatchRecoveredTurnInput<ThinkRecoveryClassification>
-  ): Promise<void> {
-    const {
-      incident,
-      options,
-      snapshot,
-      requestId,
-      recoveryRootRequestId,
-      streamStatus
-    } = input;
-    const { retryTargetUserId } = input.detail;
-    const originIds =
-      this._frames.originIds(requestId) ?? snapshot?.originMessageIds;
-    const streamIsTerminal =
-      streamStatus === "completed" || streamStatus === "error";
-
-    const shouldRetry =
-      retryTargetUserId !== null &&
-      options.continue !== false &&
-      !streamIsTerminal;
-    const lastLeaf = shouldRetry ? null : await this._recoveryLeaf();
-    const targetId =
-      lastLeaf?.role === "assistant" && !streamIsTerminal
-        ? lastLeaf.id
-        : undefined;
-    const canContinue =
-      !shouldRetry && options.continue !== false && !streamIsTerminal;
-    // Keep recovery payloads linked to the stable submission/root identity;
-    // request_id now follows the accepted successor for startup evidence.
-    // The recovery lookup accepts either identity, including released payloads.
-    const recoveredSubmission = this._readRunningSubmissionForRecovery(
-      recoveryRootRequestId
-    );
-
-    if (streamIsTerminal && recoveredSubmission) {
-      await this._completeRecoveredSubmission(
-        recoveryRootRequestId,
-        streamStatus === "completed" ? "completed" : "error",
-        requestId,
-        streamStatus === "completed"
-          ? null
-          : "Recovered chat stream had already errored."
-      );
-    }
-
-    const recoveredRequestId =
-      (canContinue || shouldRetry) && recoveredSubmission
-        ? recoveredSubmission.submission_id
-        : undefined;
-
-    if (shouldRetry || canContinue) {
-      await this._chatRecoveryEngine().scheduleRecoveredTurn({
-        incident,
-        recoveryKind: input.recoveryKind,
-        recoveryRootRequestId,
-        retryUserId: shouldRetry ? retryTargetUserId : null,
-        targetAssistantId: targetId,
-        requestContext: snapshot,
-        originMessageIds: originIds,
-        extra: {
-          ...(shouldRetry &&
-            regenerationParentOf(snapshot) !== undefined &&
-            snapshot?.latestMessageId && {
-              regeneratedLeafId: snapshot.latestMessageId
-            }),
-          // The payload keeps the stable submission identity. `request_id`
-          // follows the accepted successor, and the recovery lookup accepts
-          // either.
-          ...(recoveredRequestId ? { recoveredRequestId } : {})
-        }
-      });
-    } else if (options.continue === false && !streamIsTerminal) {
-      await this._chatRecoveryEngine().updateIncident(
-        incident.incidentId,
-        "skipped",
-        "continue_disabled"
-      );
-      await this._declineRecoveredTurn(recoveryRootRequestId, requestId);
-    } else {
-      await this._chatRecoveryEngine().updateIncident(
-        incident.incidentId,
-        "skipped",
-        streamIsTerminal ? "stream_terminal" : "not_recoverable"
-      );
-    }
-  }
-
   /**
    * The app declined to continue an interrupted turn (`continue: false`).
    * Mark its submission interrupted, so it does not wait on a turn nobody
@@ -10565,45 +10479,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       done: true,
       error: true
     });
-  }
-
-  private async _recoverablePreStreamUserId(
-    snapshot: ChatFiberSnapshot | null,
-    partial: { text: string; parts: unknown[] }
-  ): Promise<string | null> {
-    // A partial that holds only the internal final-answer tool, or only the
-    // reasoning the model was cut off in, persists nothing. The user message
-    // stays the leaf and there is nothing to continue.
-    if (
-      !snapshot ||
-      snapshot.continuation ||
-      !snapshot.latestUserMessageId ||
-      partial.text ||
-      (partial.parts.length > 0 &&
-        this._strippedForPersist(
-          stripTrailingReasoning({
-            id: "",
-            role: "assistant",
-            parts: partial.parts as UIMessage["parts"]
-          })
-        ) !== null)
-    ) {
-      return null;
-    }
-
-    const lastLeaf = await this._recoveryLeaf();
-    // A regeneration branches beside the response it replaces, so that
-    // response, not the user message, is still the leaf.
-    const branchParentId = regenerationParentOf(snapshot);
-    if (branchParentId !== undefined) {
-      return lastLeaf !== null && lastLeaf.id === snapshot.latestMessageId
-        ? branchParentId
-        : null;
-    }
-    return lastLeaf?.role === "user" &&
-      lastLeaf.id === snapshot.latestUserMessageId
-      ? snapshot.latestUserMessageId
-      : null;
   }
 
   private async _hasPersistedRecoveredAssistant(

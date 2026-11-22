@@ -76,8 +76,7 @@ import {
   type TurnResult,
   type MessagePart,
   type ServerChatTurn,
-  type SubmitConcurrencyDecision,
-  type ChatFiberSnapshot
+  type SubmitConcurrencyDecision
 } from "agents/chat";
 import {
   ChatFrames,
@@ -133,12 +132,9 @@ import {
   type ChatRecoveryAdapter,
   type ChatFiberWakeHooks,
   type ResolvedRecoveryStream,
-  type ClassifyRecoveredTurnInput,
-  type DispatchRecoveredTurnInput,
   type ChatRecoveryScheduleCallback,
   type ChatRecoveryAttemptScope,
-  type ChatRecoveryIncident,
-  type ChatRecoveryKind
+  type ChatRecoveryIncident
 } from "agents/chat";
 import type {
   ChatResponseResult,
@@ -186,14 +182,6 @@ type ChatRecoveryContinueData = {
   lastBody?: Record<string, unknown> | null;
   lastClientTools?: ClientToolSchema[] | null;
 };
-
-/**
- * `AIChatAgent`'s `classifyRecoveredTurn` detail (the {@link ChatFiberWakeHooks}
- * generic). `shouldRetryPreStream` is the only classification bit the dispatch
- * decision needs that it cannot cheaply recompute post-persist; the lost-partial
- * branch is re-derived in `_dispatchRecoveredChatTurn` from the (now-updated) leaf.
- */
-type AIChatRecoveryClassification = { shouldRetryPreStream: boolean };
 
 // `ChatRecoveryIncident` / `ChatRecoveryKind` / `CHAT_RECOVERY_INCIDENT_KEY_PREFIX`
 // are the canonical shared symbols from `agents/chat` (imported above); the
@@ -3733,7 +3721,9 @@ export class AIChatAgent<
       createdAt: turn.createdAt
     };
     await this._chatRecoveryEngine().recoverInterruptedTurn(recovered, {
-      classifyRecoveredTurn: (input) => this._classifyRecoveredChatTurn(input),
+      latestMessage: () => this._recoveryLeaf(),
+      partialHoldsContent: (partial) =>
+        partial.text !== "" || partial.parts.length > 0,
       invokeOnChatRecovery: (input) =>
         this.onChatRecovery({
           incidentId: input.incident.incidentId,
@@ -3765,8 +3755,8 @@ export class AIChatAgent<
       completeRecoveredStream: (streamId) => {
         this._resumableStream.complete(streamId);
       },
-      dispatchRecoveredTurn: (input) => this._dispatchRecoveredChatTurn(input)
-    } satisfies ChatFiberWakeHooks<AIChatRecoveryClassification>);
+      originMessageIds: (requestId) => this._frames.originIds(requestId)
+    } satisfies ChatFiberWakeHooks);
   }
 
   /**
@@ -3799,89 +3789,6 @@ export class AIChatAgent<
   }
 
   /**
-   * Classify a recovered turn as `retry` or `continue`. The `shouldRetryPreStream`
-   * detail is threaded to the dispatch decision; `emptyPartialNewTurn` only
-   * influences the reported kind (an empty partial persists nothing, so a new turn
-   * is re-run fresh rather than merged into the previous assistant — #1691). The
-   * `persist: false` discard case stays "continue" here and only surfaces as
-   * "retry" on the `chat:recovery:scheduled` event, decided in dispatch.
-   */
-  private _classifyRecoveredChatTurn(input: ClassifyRecoveredTurnInput): {
-    recoveryKind: ChatRecoveryKind;
-    detail: AIChatRecoveryClassification;
-  } {
-    const shouldRetryPreStream = this._shouldRetryRecoveredPreStreamTurn(
-      input.snapshot,
-      input.streamId,
-      input.partial
-    );
-    const preStreamLeaf = this._recoveryLeaf();
-    const emptyPartialNewTurn =
-      !!input.streamId &&
-      input.snapshot?.continuation === false &&
-      !!input.snapshot.latestUserMessageId &&
-      input.partial.text === "" &&
-      input.partial.parts.length === 0 &&
-      preStreamLeaf?.role === "user" &&
-      preStreamLeaf.id === input.snapshot.latestUserMessageId;
-    const recoveryKind: ChatRecoveryKind =
-      shouldRetryPreStream || emptyPartialNewTurn ? "retry" : "continue";
-    return { recoveryKind, detail: { shouldRetryPreStream } };
-  }
-
-  /**
-   * The retry/continue/skip decision for a recovered chat turn, run after the
-   * partial is persisted and the stream completed. A NEW turn that left no
-   * persisted assistant partial (the leaf is still the user message) is re-run
-   * fresh instead of continued (which would clone + merge into the previous
-   * assistant turn — #1691); this lost-partial check is re-derived here from the
-   * now-updated leaf rather than carried from classify.
-   */
-  private async _dispatchRecoveredChatTurn(
-    input: DispatchRecoveredTurnInput<AIChatRecoveryClassification>
-  ): Promise<void> {
-    const { incident, options, snapshot, recoveryRootRequestId } = input;
-    const originIds =
-      this._frames.originIds(input.requestId) ?? snapshot?.originMessageIds;
-    const leaf = this._recoveryLeaf();
-    const lostPartialUserId =
-      snapshot?.continuation === false &&
-      snapshot.latestUserMessageId &&
-      leaf?.role === "user" &&
-      leaf.id === snapshot.latestUserMessageId
-        ? snapshot.latestUserMessageId
-        : undefined;
-
-    if (options.continue === false) {
-      await this._chatRecoveryEngine().updateIncident(
-        incident.incidentId,
-        "skipped",
-        "continue_disabled"
-      );
-      return;
-    }
-    // A turn that died before it streamed, or whose partial is gone, leaves
-    // the question as the latest message: answer it again. Continuing would
-    // merge into the previous reply (#1691).
-    const retryUserId = input.detail.shouldRetryPreStream
-      ? snapshot?.latestUserMessageId
-      : lostPartialUserId;
-    await this._chatRecoveryEngine().scheduleRecoveredTurn({
-      incident,
-      recoveryKind:
-        !input.detail.shouldRetryPreStream && lostPartialUserId !== undefined
-          ? "retry"
-          : input.recoveryKind,
-      recoveryRootRequestId,
-      retryUserId,
-      targetAssistantId: retryUserId
-        ? undefined
-        : this._findLastAssistantMessage()?.id,
-      requestContext: snapshot,
-      originMessageIds: originIds
-    });
-  }
-
   /**
    * Called when an interrupted chat stream is detected after restart.
    * Return options to control recovery:
@@ -4068,31 +3975,6 @@ export class AIChatAgent<
   protected async onAlarmMemoryLimit(context: { readonly sealed: boolean }) {
     if (!context.sealed) return;
     await this._chatRecoveryEngine().sealMemoryLimitedRecovery();
-  }
-
-  private _shouldRetryRecoveredPreStreamTurn(
-    snapshot: ChatFiberSnapshot | null,
-    streamId: string,
-    partial: { text: string; parts: unknown[] }
-  ): snapshot is ChatFiberSnapshot & {
-    latestUserMessageId: string;
-  } {
-    if (
-      !snapshot ||
-      snapshot.continuation ||
-      !snapshot.latestUserMessageId ||
-      streamId ||
-      partial.text ||
-      partial.parts.length > 0
-    ) {
-      return false;
-    }
-
-    const lastMessage = this._recoveryLeaf();
-    return (
-      lastMessage?.role === "user" &&
-      lastMessage.id === snapshot.latestUserMessageId
-    );
   }
 
   async _chatRecoveryRetry(data?: ChatRecoveryRetryData): Promise<void> {

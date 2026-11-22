@@ -379,6 +379,40 @@ describe("onChatRecovery", () => {
     expect(await agentStub.getRunFiberCountForTest()).toBe(0);
   });
 
+  it("skips an interrupted turn whose conversation moved on, and schedules nothing", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+
+    // A newer question is the latest message: there is no reply of this
+    // turn's to continue and no question of its own to answer again.
+    await agentStub.persistMessages([
+      { id: "u-old", role: "user", parts: [{ type: "text", text: "Hi" }] },
+      {
+        id: "a-old",
+        role: "assistant",
+        parts: [{ type: "text", text: "Hey" }]
+      },
+      { id: "u-new", role: "user", parts: [{ type: "text", text: "And?" }] }
+    ]);
+    await agentStub.insertInterruptedFiber("__cf_internal_chat_turn:req-moved");
+    await agentStub.triggerFiberRecovery();
+
+    expect(
+      await agentStub.getRecoveryTransportCountsForTest("_chatRecoveryContinue")
+    ).toEqual({ tasks: 0, schedules: 0 });
+    const incidents =
+      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
+        status: string;
+        reason?: string;
+      }>;
+    expect(incidents).toEqual([
+      expect.objectContaining({
+        status: "skipped",
+        reason: "conversation_changed"
+      })
+    ]);
+  });
+
   it("passes incident metadata and exhausts after maxAttempts", async () => {
     const room = crypto.randomUUID();
     const agentStub = await getTestAgent(room);
@@ -959,6 +993,15 @@ describe("onChatRecovery", () => {
     // Interrupted chat turn: recovery schedules the continuation and, because
     // recovery is "handled", deletes the orphaned fiber-ledger row. From here
     // the only thing that can resume the turn is the scheduled continuation.
+    // A reply to continue: recovery continues the latest assistant message.
+    await agentStub.persistMessages([
+      { id: "u-cont", role: "user", parts: [{ type: "text", text: "Hi" }] },
+      {
+        id: "a-cont",
+        role: "assistant",
+        parts: [{ type: "text", text: "Partial" }]
+      }
+    ]);
     await agentStub.insertInterruptedFiber("__cf_internal_chat_turn:req-stale");
     await agentStub.triggerFiberRecovery();
     expect(await agentStub.getRunFiberCountForTest()).toBe(0);
@@ -1007,6 +1050,15 @@ describe("onChatRecovery", () => {
       "Network connection lost."
     );
 
+    // A reply to continue: recovery continues the latest assistant message.
+    await agentStub.persistMessages([
+      { id: "u-cont", role: "user", parts: [{ type: "text", text: "Hi" }] },
+      {
+        id: "a-cont",
+        role: "assistant",
+        parts: [{ type: "text", text: "Partial" }]
+      }
+    ]);
     await agentStub.insertInterruptedFiber(
       "__cf_internal_chat_turn:req-transient"
     );
