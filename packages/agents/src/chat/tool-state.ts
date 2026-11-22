@@ -380,6 +380,25 @@ export function toolPartName(
 }
 
 /**
+ * Names of the tools in `tools` the server does not run: no `execute`, and
+ * not run by the provider. An app answers a call to one of them from the
+ * client, sorted so the list can be compared and stored.
+ */
+export function unexecutedToolNames(tools: Record<string, unknown>): string[] {
+  return Object.entries(tools)
+    .filter(([, definition]) => {
+      const candidate = definition as { execute?: unknown; type?: unknown };
+      return (
+        typeof candidate.execute !== "function" &&
+        candidate.type !== "provider" &&
+        candidate.type !== "provider-defined"
+      );
+    })
+    .map(([name]) => name)
+    .sort();
+}
+
+/**
  * Whether a part is still awaiting a CLIENT interaction that can genuinely
  * arrive after a restart: an `approval-requested` part (a reconnecting client
  * replays the approval) or an `input-available` part for a CLIENT tool (the SPA

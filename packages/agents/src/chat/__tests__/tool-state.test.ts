@@ -6,7 +6,8 @@ import {
   crossMessageToolResultUpdate,
   toolApprovalUpdate,
   pausedExecutionUpdate,
-  hasPendingToolInteraction
+  hasPendingToolInteraction,
+  unexecutedToolNames
 } from "../tool-state";
 
 function makePart(
@@ -649,5 +650,19 @@ describe("hasPendingToolInteraction", () => {
         clientToolNames: ["pickFile"]
       })
     ).toBe(true);
+  });
+});
+
+describe("unexecutedToolNames", () => {
+  it("names the tools the server does not run, sorted", () => {
+    expect(
+      unexecutedToolNames({
+        zebra: { description: "client answers" },
+        run: { execute: () => 1 },
+        search: { type: "provider" },
+        legacy: { type: "provider-defined" },
+        ask: {}
+      })
+    ).toEqual(["ask", "zebra"]);
   });
 });

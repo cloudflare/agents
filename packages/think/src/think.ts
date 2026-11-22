@@ -211,6 +211,7 @@ import {
   createAgentToolRunStore,
   createToolsFromClientSchemas,
   applyToolPartUpdate,
+  unexecutedToolNames,
   toolResultUpdate,
   crossMessageToolResultUpdate,
   toolApprovalUpdate,
@@ -9196,7 +9197,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // `_lastClientTools`. The executor is a live RPC ref that dies with the
     // isolate, so unlike the WebSocket path there is no SPA that could ever
     // replay a `tool-result` after an eviction. Persisting the names would put
-    // them in `_clientResolvableToolNames()`, causing recovery to misclassify a
+    // them in `_requestContext.clientToolNames()`, causing recovery to misclassify a
     // dangling `input-available` orphan as a pending human interaction and park
     // forever. Keeping them per-turn lets such an orphan recover like a server
     // tool: `continueLastTurn`'s transcript repair errors it and the model
@@ -16372,18 +16373,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /**
-   * Names of the tools whose interrupted `input-available` part can still be
-   * resolved by the CLIENT after a restart — i.e. the client tools (no server
-   * `execute`) from the last request, which the SPA answers by replaying a
-   * `tool-result` over the WebSocket. A server tool is intentionally absent:
-   * its `execute()` promise died with the evicted isolate, so nothing will
-   * ever post its result.
-   */
-  private _clientResolvableToolNames(): Set<string> {
-    return this._requestContext.clientToolNames();
-  }
-
-  /**
    * Every tool a client may answer: the tools the client sent a schema for,
    * and the tools the server declares with no `execute` (an app answers
    * those from the client, without ever sending their schema). A call for
@@ -16391,30 +16380,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * is dead: an older version stored cut-off replies as they were.
    */
   private _clientAnswerableToolNames(): Set<string> {
-    const names = this._clientResolvableToolNames();
+    // The client tools from the last request, which the SPA answers by
+    // replaying a `tool-result` after a restart.
+    const names = this._requestContext.clientToolNames();
     for (const name of this._unexecutedToolNames()) names.add(name);
     return names;
-  }
-
-  /**
-   * Names of the tools in `tools` the server does not run: no `execute`,
-   * and not run by the provider.
-   */
-  private static _unexecutedToolNamesOf(tools: ToolSet): string[] {
-    return Object.entries(tools)
-      .filter(([, definition]) => {
-        const candidate = definition as {
-          execute?: unknown;
-          type?: unknown;
-        };
-        return (
-          typeof candidate.execute !== "function" &&
-          candidate.type !== "provider" &&
-          candidate.type !== "provider-defined"
-        );
-      })
-      .map(([name]) => name)
-      .sort();
   }
 
   /**
@@ -16422,7 +16392,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * there after a restart, before any turn has assembled its tools again.
    */
   private _recordUnexecutedTools(tools: ToolSet): void {
-    const names = Think._unexecutedToolNamesOf(tools);
+    const names = unexecutedToolNames(tools);
     this._unexecutedTools = names;
     // `_configSet` skips the write when the value has not changed.
     this._configSet("unexecutedTools", JSON.stringify(names));
@@ -16453,7 +16423,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       }
     }
     try {
-      this._unexecutedTools = Think._unexecutedToolNamesOf(this.getTools());
+      this._unexecutedTools = unexecutedToolNames(this.getTools());
     } catch {
       // `getTools()` can need turn-time context. Without it, only the
       // client's own tools are known to be a client's.
@@ -16555,7 +16525,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         }
       },
       // Hibernation ordering guard. The budget decision consults
-      // `hasPendingInteraction()` -> `_clientResolvableToolNames()` ->
+      // `hasPendingInteraction()` -> `_requestContext.clientToolNames()` ->
       // `_lastClientTools` to keep a HITL turn (parked on a client-tool
       // `input-available` orphan) budget-free. On a fresh wake the base Agent
       // runs the boot-recovery path (`_handleInternalFiberRecovery`) BEFORE

@@ -5723,7 +5723,7 @@ describe("Think — client tools via chat() RPC", () => {
     expect(await agent.getLastTurnToolNames()).toContain("client_action");
     // ...but the RPC executor path must NOT persist it into `_lastClientTools`.
     // Otherwise an `input-available` orphan left by an eviction would be
-    // misclassified by `_clientResolvableToolNames()` as a pending human
+    // misclassified by the client tool names as a pending human
     // interaction (no SPA can replay it — the executor died with the isolate),
     // wedging recovery into parking forever instead of repairing the orphan.
     expect(await agent.getCapturedClientTools()).toBeUndefined();
