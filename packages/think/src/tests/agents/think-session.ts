@@ -10560,7 +10560,7 @@ export class ThinkScheduledTasksTestAgent extends ThinkProgrammaticTestAgent {
   // no pending workflow notifications, otherwise the DO fires every 30s
   // forever and never hibernates.
   async getKeepAliveRefsForTest(): Promise<number> {
-    return (this as unknown as { _keepAliveRefs: number })._keepAliveRefs;
+    return this._keepAlive.holds;
   }
 
   async runAlarmForTest(): Promise<{
@@ -10569,8 +10569,7 @@ export class ThinkScheduledTasksTestAgent extends ThinkProgrammaticTestAgent {
   }> {
     await this.alarm();
     return {
-      keepAliveRefs: (this as unknown as { _keepAliveRefs: number })
-        ._keepAliveRefs,
+      keepAliveRefs: this._keepAlive.holds,
       scheduledAlarm: await this.ctx.storage.getAlarm()
     };
   }

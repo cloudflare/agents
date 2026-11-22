@@ -28,11 +28,7 @@ async function getKeepAliveRefs(sessionId: string): Promise<number> {
   );
   const stub = env.TestCodemodeMcpAgent.get(id);
   return runInDurableObject(stub, (instance: TestCodemodeMcpAgent) => {
-    return (
-      instance as unknown as {
-        _keepAliveRefs: number;
-      }
-    )._keepAliveRefs;
+    return instance._keepAlive.holds;
   });
 }
 

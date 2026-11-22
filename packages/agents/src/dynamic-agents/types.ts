@@ -150,10 +150,6 @@ export type RootFacetRpcSurface = {
   _cf_destroyDescendantFacet(
     targetPath: ReadonlyArray<AgentPathStep>
   ): Promise<void>;
-  _cf_acquireFacetKeepAlive(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): Promise<string>;
-  _cf_releaseFacetKeepAlive(token: string): Promise<void>;
   _cf_broadcastToSubAgent(
     ownerPath: ReadonlyArray<AgentPathStep>,
     message: string | ArrayBuffer | ArrayBufferView,

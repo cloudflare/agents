@@ -483,11 +483,38 @@ This is the recommended approach since you cannot forget to dispose the heartbea
 
 ### How it works
 
-`keepAlive()` uses an in-memory reference count. Each call increments the count; the disposer decrements it. While the count is above zero, Agent contributes a wake time every 30 seconds to Lifecycle. No schedule rows are created and no observability events are emitted, so the heartbeat is invisible to `listSchedules()` and the scheduling diagnostics channel.
+`keepAlive()` opens a hold on the `KeepAlive` Lifecycle capability, and the disposer closes it. Holds live in memory. While at least one is open, KeepAlive keeps one Lifecycle job due every `keepAliveIntervalMs` (30 seconds by default), so an alarm fires and the object stays active; the last release cancels the job. No schedule rows are created and no observability events are emitted, so the heartbeat is invisible to `listSchedules()` and the scheduling diagnostics channel. An eviction drops the holds along with the work they protected.
 
 The heartbeat does not conflict with scheduled work. Lifecycle selects one physical alarm from both contributions.
 
-Inside sub-agents, `keepAlive()` delegates that heartbeat ref to the top-level parent because facets do not have independent alarm slots. `keepAliveWhile()` works the same way because it calls `keepAlive()` and automatically disposes the delegated ref when the scoped work completes.
+Inside sub-agents, `keepAlive()` takes the hold on the top-level parent's KeepAlive because facets do not have independent alarm slots. `keepAliveWhile()` works the same way because it calls `keepAlive()` and automatically disposes the delegated ref when the scoped work completes.
+
+### Without Agent
+
+`KeepAlive` is a Lifecycle capability, so a plain Durable Object can install it:
+
+```typescript
+import { DurableObject } from "cloudflare:workers";
+import { KeepAlive, Lifecycle } from "agents/lifecycle";
+
+export class ExportObject extends DurableObject<Env> {
+  readonly keepAlive = new KeepAlive({ intervalMs: 30_000 });
+  readonly lifecycle = Lifecycle.install(this).use(this.keepAlive);
+
+  async onRequest(request: Request) {
+    const rows = await request.json<unknown[]>();
+    this.ctx.waitUntil(this.keepAlive.run(() => this.uploadInBatches(rows)));
+    return new Response("accepted", { status: 202 });
+  }
+
+  async uploadInBatches(rows: unknown[]) {
+    // ...
+  }
+}
+```
+
+`acquire()` returns the release function, `run(fn)` holds for the duration of
+`fn`, and `holds` is the number open.
 
 ### Multiple concurrent callers
 

@@ -12,6 +12,7 @@ export {
   type LifecycleStatus,
   type LifecycleSockets
 } from "./capability";
+export { KeepAlive, type KeepAliveOptions } from "./keep-alive";
 export {
   getCurrentAgent,
   type CurrentAgentContext,

@@ -576,7 +576,7 @@ export class TestRunFiberAgent extends Agent {
   }
 
   async getKeepAliveRefCount(): Promise<number> {
-    return this._keepAliveRefs;
+    return this._keepAlive.holds;
   }
 
   async getRunningFiberCount(): Promise<number> {
