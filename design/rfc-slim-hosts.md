@@ -50,15 +50,17 @@ Seven rules hold across every capability and module below:
 
 ### What each class holds when done
 
-| Class         | Today  | Budget              | Why that number                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| ------------- | ------ | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `Agent`       | 10,575 | 2,000               | About 130 public members (hooks, options, `sql`, `setState`, `schedule*`, `queue*`, `runFiber`, the workflow methods, `addMcpServer`, `broadcast`, `destroy`) at 10-15 lines each with their JSDoc, plus a constructor of about 120 lines that installs State, WebSockets, Scheduler, Queue, Tasks, Workflows, MCP and Email, and creates the fiber and AgentRuns modules on Tasks.                                                                                |
-| `AIChatAgent` | 6,799  | 900                 | About 40 public members (options such as `messageConcurrency` and `chatRecovery`, hooks such as `onChatMessage`, `onChatResponse` and `sanitizeMessageForPersistence`, and `messages`, `saveMessages`, `persistMessages`, `continueLastTurn`, `abortRequest`), plus its responder: about 80 lines that call `onChatMessage` and hand the `Response` to the chat module.                                                                                            |
-| `Think`       | 19,004 | 3,000 in `think.ts` | About 120 public members, many of them hooks with long JSDoc (`getModel`, `getTools`, `beforeTurn`, `beforeToolCall`, `authorizeAction`, `configureSession` and so on), plus a constructor that creates Chat and Approvals and declares its schedules. The inference loop is Think's responder and lives in modules under `packages/think/src` (`inference/`, `tool-decision.ts`, `action-tools.ts`, `context-overflow.ts`). Public types move to `turn-types.ts`. |
+| Class         | Today  | Budget              | Why that number                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ------------- | ------ | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Agent`       | 10,575 | 2,000               | About 130 public members (hooks, options, `sql`, `setState`, `schedule*`, `queue*`, `runFiber`, the workflow methods, `addMcpServer`, `broadcast`, `destroy`) at 10-15 lines each with their JSDoc, plus a constructor of about 120 lines that installs State, WebSockets, Scheduler, Queue, Tasks, Workflows, MCP and Email, and creates the fiber and AgentRuns modules on Tasks.                                                                                                           |
+| `AIChatAgent` | 6,799  | 900                 | About 40 public members (options such as `messageConcurrency` and `chatRecovery`, hooks such as `onChatMessage`, `onChatResponse` and `sanitizeMessageForPersistence`, and `messages`, `saveMessages`, `persistMessages`, `continueLastTurn`, `abortRequest`), plus its responder: about 80 lines that call `onChatMessage` and hand the `Response` to the chat module.                                                                                                                       |
+| `Think`       | 19,004 | 3,000 in `think.ts` | About 120 public members, many of them hooks with long JSDoc (`getModel`, `getTools`, `beforeTurn`, `beforeToolCall`, `authorizeAction`, `configureSession` and so on), plus a constructor that registers the chat turn definition, creates Approvals and declares its schedules. The inference loop is Think's responder and lives in modules under `packages/think/src` (`inference/`, `tool-decision.ts`, `action-tools.ts`, `context-overflow.ts`). Public types move to `turn-types.ts`. |
 
 A budget much lower than these means removing public API, which is a decision per member and not part of this RFC.
 
 ### The capabilities
+
+Chat is not in this table. It owns no storage and schedules nothing, so it is an internal module: see [The chat module](#the-chat-module).
 
 Existing capabilities are extended. New ones are marked new.
 
@@ -81,11 +83,16 @@ Revised 22 Nov: there is one durable engine, Tasks. The Inbox, Fibers, the Outbo
 | `MCPClientManager` (exists)                             | server registrations                                                                                                                                                                                                                                                                  | connections                                                                                           | Takes `addMcpServer`'s result mapping out of `Agent`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `Approvals` (internal module on Tasks)                  | none of its own: an effect is a run of kind `__cf_effect` keyed by the effect key; a decision is a parked run of kind `__cf_decision`                                                                                                                                                 | the running effect promise shared by same-isolate callers                                             | `once(key, run)` runs a side effect at most once per key and records its value as the run's result; a reset between the effect and the record leaves it `in-doubt`. `park` records a pending decision; `decide` releases it once and its continuation runs at least once across resets. Think's public approval methods keep their shape. Replaces Think's action ledger, durable-pause approvals and codemode outcome bookkeeping; Think's released ledger rows move into runs.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `AgentRuns` (internal module on Tasks)                  | none of its own: the parent's run is a task of kind `__cf_agent_tool` (input: child address and tool input; checkpoint: last stream cursor); the child's run is a chat-lane run, idempotency key = run id                                                                             | the tail, the no-progress timer                                                                       | A child agent is an ordinary named Durable Object reached through its namespace. The parent starts a run (idempotent by run id), follows the child's output by cursor and re-attaches from the cursor after a reset, cancels it and reads its result. The child's terminal reaches the parent through an Outbox delivery. `cf_agent_tool_runs` rows from released versions move into runs.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `Chat` (internal module)                                | none of its own                                                                                                                                                                                                                                                                       | the live reply of the running request                                                                 | Composes Sessions, a Tasks lane, Streams, the event log, Outbox deliveries (owed `onResponse` calls) and Approvals. A host installs `WebSockets` and `Tasks` and creates `Chat` with a responder and hooks. See below.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 
-### The `Chat` module
+### The chat module
 
-`Chat` is internal: the engine under `AIChatAgent` and `Think`. One module can own the transcript, admission, the stream pump, recovery and the wire protocol, and a host can be reduced to one function plus hooks. `ThinkHarness` already shows the first four for one responder. The change is that the model call becomes the host's.
+There is no `Chat` capability. By the shape rule a capability owns storage or schedules work, and chat does neither once the folds land: a turn is a task run in a lane, its chunks are a stream, its frames are the event log's view of that stream, its transcript is Sessions, and its recovery budget and request facts are the run's checkpoint. So chat is plain functions in `agents/src/chat` that plug into Tasks, Streams, Sessions and WebSockets:
+
+- one task definition for the turn. Its handler builds the model call through the host's `respond(call)`, runs the pump into the stream, stores the reply and settles. An attempt after the first is the recovery decision;
+- the inbound protocol dispatch and the resume, functions the host's socket handlers call;
+- small pure helpers: the continuation rule, the transcript repair, tool-part updates, frame builders.
+
+It owns no table, no job, no alarm and no registry that outlives a turn. The one thing it holds in memory is the live reply of an attempt running in this isolate, a local of the handler, at most one per lane. What a host supplies is one function and its hooks. `ThinkHarness` already shows this shape for one responder; the change is that the model call becomes the host's.
 
 ```ts
 import type { UIMessage, UIMessageChunk } from "ai";
@@ -175,70 +182,84 @@ export interface ChatOptions {
   readonly hydrationByteBudget?: number;
 }
 
-/** A plain class: it owns no rows and pushes no jobs. The capabilities it
- *  is given own them. */
-export class Chat {
-  constructor(
-    capabilities: {
-      tasks: Tasks;
-      sessions: Sessions;
-      streams: Streams;
-      webSockets: WebSockets;
-    },
-    options: ChatOptions
-  );
-  session(id?: string): ChatSession;
+/** What a host supplies. */
+export interface ChatHost {
+  readonly respond: ChatResponder["respond"];
+  readonly hooks?: ChatHooks;
+  readonly options?: ChatOptions;
 }
 
-export interface ChatSession {
-  readonly id: string;
-  submit(
-    input: ChatInput,
-    options?: { requestId?: string; source?: "client" | "server" }
-  ): Promise<ChatReceipt>;
-  wait(
-    requestId: string,
-    options?: { timeoutMs?: number; signal?: AbortSignal }
-  ): Promise<ChatTurnResult | undefined>;
-  /** Send one request's reply to a caller as well as to sockets (an RPC callback, an SSE response). */
-  follow(requestId: string, sink: ReplySink): Promise<ChatTurnResult>;
-  cancel(requestId?: string): Promise<boolean>;
-  clear(): Promise<void>;
-  answerTool(
-    answer: ToolAnswer,
-    options?: { autoContinue?: boolean }
-  ): Promise<ChatReceipt>;
-  messages(): readonly UIMessage[];
-  persist(messages: readonly UIMessage[]): Promise<void>;
-  waitUntilStable(): Promise<void>;
-  hasPendingInteraction(): boolean;
+/** The capabilities the functions are given. They own every row and job. */
+export interface ChatDeps {
+  readonly tasks: Tasks;
+  readonly streams: Streams;
+  readonly sessions: Sessions;
+  readonly webSockets: WebSockets;
+  readonly session?: string;
 }
+
+/** The one task definition. The host registers it on its Tasks. */
+export function chatTurnDefinition(
+  deps: ChatDeps,
+  host: ChatHost
+): TaskDefinition<ChatTurnInput, ChatTurnResult>;
+
+/** Called by the host's socket handlers. */
+export function dispatchChatProtocol(
+  deps: ChatDeps,
+  host: ChatHost,
+  connection: Connection,
+  message: WSMessage
+): Promise<boolean>;
+export function resumeChat(
+  deps: ChatDeps,
+  connection: Connection,
+  cursor?: ChatCursor
+): void;
+
+/** What the hosts' public methods call: a few lines each over Tasks and Sessions. */
+export function submitTurn(
+  deps: ChatDeps,
+  input: ChatTurnInput,
+  options?: { requestId?: string; local?: unknown }
+): Promise<ChatReceipt>;
+export function cancelTurn(
+  deps: ChatDeps,
+  requestId?: string
+): Promise<boolean>;
+export function clearChat(deps: ChatDeps): Promise<void>;
+export function answerTool(
+  deps: ChatDeps,
+  host: ChatHost,
+  answer: ToolAnswer
+): Promise<void>;
 ```
 
-Inside `Chat`:
+How the functions use the capabilities:
 
 - **Admission.** A request is a task run on lane `chat:<session>`. Its payload holds the new user messages, the client tools, the body and the trigger. The messages are held on the record and joined to the transcript when the turn reaches the front of the lane, so a turn answers its own message, as `chat-turn-core.md` requires today. Server-started turns (`saveMessages`, `continueLastTurn`, a tool-result continuation) are durable requests too, so a reset has something to run again. `saveMessages(fn)` keeps its rule that the function runs when the turn reaches the front of the lane, against the transcript as it is then. The function is held in memory beside the record; once it has run, the turn's input is checkpointed on the record. A reset before it ran ends the request `skipped` with nothing stored, which is what a reset does to a queued `saveMessages` today. Stop, cancel and clear are Tasks calls.
 - **The turn.** The lane handler joins the held messages, repairs the transcript (`before-turn.ts`), builds a `ChatModelCall`, calls `respond`, and runs the pump.
 - **The pump.** One loop reads the chunk stream into a `StreamAccumulator`, appends each chunk to Streams once, where both recovery and tab replay read it, fans it out live through the event log, applies `transformChunk`, and watches for a stop, a stall and errors. At the end it stores the message in one transaction that also settles the stream. `follow()` adds a sink; there is no second pump for RPC.
 - **Recovery.** A reset makes Tasks run the `running` request again with `attempt + 1`. A stall or a transient error ends the attempt with a returned settlement (`TaskSettlement.defer`), and the next attempt runs from the lane, which the turn keeps. Each attempt reads the evidence (the request's latest stream, the stored transcript): a reply with content is continued, a question with no reply is answered again, a conversation that moved on ends the turn `skipped`, and a spent budget ends it `error`. The request id never changes across attempts, so a tab follows one id from the first chunk to the terminal frame. No fiber snapshot, no recovery Task, no closure map keyed by a nonce.
-- **The wire protocol.** `Chat` registers its handlers on `WebSockets`, parses the `cf_agent_chat_*` messages and calls the session methods. A reply's chunks are read from its stream, and how a request ended (outcome, terminal, message id) is read from its task run, so neither is stored a second time. A tab resumes by cursor (the last run it saw and its offset in that run's stream), and a resume covers every request that ran while it was away: for each later run in lane order, its retained chunks and then its terminal. Frames that are neither a chunk nor a terminal (the transcript, a `MESSAGE_UPDATED` for a tool result or an approval, the recovering status) are not logged, and a resume supplies them from what is stored:
+- **The wire protocol.** The host's socket handlers call `dispatchChatProtocol`, which parses the `cf_agent_chat_*` messages and calls the functions above, and `resumeChat` on connect. A reply's chunks are read from its stream, and how a request ended (outcome, terminal, message id) is read from its task run, so neither is stored a second time. A tab resumes by cursor (the last run it saw and its offset in that run's stream), and a resume covers every request that ran while it was away: for each later run in lane order, its retained chunks and then its terminal. Frames that are neither a chunk nor a terminal (the transcript, a `MESSAGE_UPDATED` for a tool result or an approval, the recovering status) are not logged, and a resume supplies them from what is stored:
 
   - **The transcript.** Without more, a tab that reconnects by cursor in the middle of a turn would keep a stale tool state until the turn's closing transcript frame. So the cursor also carries a transcript marker: a counter held in memory, bumped on each transcript write, sent with an id for the isolate that counted it. A resume sends one transcript frame when the counter moved, or when the id is from an earlier isolate. That costs one transcript frame on the first reconnect after an eviction and no storage.
   - **Order.** The transcript frame goes before any terminal the resume replays. A terminal unlocks the composer, and a transcript arriving after it would replace the list and drop a message the user sent in between (the rule `terminal-frame-order.test.ts` pins for live turns).
   - **Status.** A resume ends with the status of the running turn when it has one to show (waiting out a recovery backoff, waiting for its stream to start), read from its task run, whether or not the transcript changed. A tab that reconnects during a backoff sees "recovering" as it does today.
   - **Two different mismatches.** The log's epoch is stored with the stream and changes on a clear: a cursor from another log epoch gets `resync`, and the tab rebuilds from the snapshot. The isolate id on the transcript marker is not an epoch of the log: a mismatch there only adds the transcript frame, and the chunk replay by cursor still happens. The snapshot for a resync is the stored transcript, the running request's reply so far, and the status of every open request and every request settled within the log's retention, read from the task runs. A tab whose cursor was trimmed still learns that its request failed before it produced a reply.
 
-- **Tool answers.** A client tool result or an approval is a task run too, as `ThinkHarness` treats it, deduplicated by its tool call id. Arrival policies apply to turns only: a tool answer is never superseded, merged, dropped or debounced. It is applied ahead of the queued turns, as both hosts apply it at once today, and the continuation it starts follows the existing rule (D18): it takes over a reply under recovery at its first content chunk. A turn waiting out a recovery backoff keeps its lane, so the continuation cannot be a second run queued behind it. The answer makes the waiting turn due at once, and the attempt that starts is the continuation, under the same request id. If it produces content the recovery is over (`continued_by_interaction`); if the provider errors, the turn waits again on the schedule it had. The Tasks verb for "due now" lands with C, and D18's tests stay as they are. The apply chain each host keeps today goes.
+- **Tool answers.** A client tool result or an approval is not a run and no arrival policy applies to it. For a stored message it is one synchronous Sessions write, idempotent by its tool call id. For a tool call still in the live reply it is applied to that reply through the run's `local` and written to the turn's stream as a chunk, so a reset keeps it and other tabs see it. The continuation it starts is a run in the lane, submitted in the same block, and follows the existing rule (D18): it takes over a reply under recovery at its first content chunk. A turn waiting out a recovery backoff keeps its lane, so the continuation cannot queue behind it: the answer makes the waiting turn due at once, and the attempt that starts is the continuation, under the same request id. If it produces content the recovery is over (`continued_by_interaction`); if the provider errors, the turn waits again on the schedule it had. The apply chain each host keeps today goes.
+- **What chat used to store.** Every state holder in today's chat core has a destination: the lane (`TurnQueue`, `SubmitConcurrencyController`, `ContinuationState`, `PreStreamTurns`), the run and its `signal` (`AbortRegistry`, `ChatAdmissions`, the recent terminals, owed `onResponse` calls through the run's settle report), the run's checkpoint (the recovery incident, the turn snapshot, stream facts), the stream (`ResumableStream`'s packing and reclaim, progress), a pure function (the recovery decision, the continuation rule) or deletion. One thing fits none of them: the client tools and body of the last client request, which a later server-started turn or continuation reads. They outlive the run that brought them, are not transcript and must not reach tabs. Sessions gets a small keyed value per session for them, cleared with the session.
 
-When `Chat` lands, the eleven host interfaces and `ChatRecoveryAdapter` go, and so do `turn-fiber.ts`, `turn-task.ts`, `recovery-task.ts`, `recovery-route.ts`, `recovery-attempt.ts`, `resume-handshake.ts`, `recent-terminals.ts`, the three `replay-*` files, the fiber half of `recovery-engine.ts`, and in each host the recovery adapters, the admission replay, the protocol dispatch, the stream wrappers and the message cache.
+When the module is complete, the eleven host interfaces and `ChatRecoveryAdapter` go, and so do `turn-fiber.ts`, `turn-task.ts`, `recovery-task.ts`, `recovery-route.ts`, `recovery-attempt.ts`, `resume-handshake.ts`, `recent-terminals.ts`, the three `replay-*` files, the fiber half of `recovery-engine.ts`, and in each host the recovery adapters, the admission replay, the protocol dispatch, the stream wrappers and the message cache.
 
 What stays different between the hosts is their responder, their hooks and one option. `AIChatAgent`'s responder calls `onChatMessage` and returns its `Response`. `Think`'s responder is its inference loop (tools, actions, extensions, `beforeTurn`, `beforeStep`, `beforeToolCall`, telemetry) and returns the `streamText` result. `AIChatAgent` uses `transcript: "flat"` because its regenerate replaces the old reply; `Think` uses `"tree"`.
 
-`Chat` does not run server tools itself one durable call at a time, as `ThinkHarness` does. Server tools run inside the responder's `streamText` loop, as today. `ThinkHarness`'s per-tool durability can become a responder on `Chat`, and its operation records move onto Tasks.
+The chat module does not run server tools itself one durable call at a time, as `ThinkHarness` does. Server tools run inside the responder's `streamText` loop, as today. `ThinkHarness`'s per-tool durability can become a responder for the same task definition, and its operation records move onto Tasks.
 
 ### How a host composes
 
-`AIChatAgent` and `Think` install `Tasks`, `Sessions`, `Streams` and `WebSockets` and create `Chat` over them in their constructors, with their responder and their hooks wired into `ChatHooks` once. `AIChatAgent`'s responder calls `onChatMessage` and returns its `Response`; `Think`'s runs its inference loop and returns the `streamText` result. Their public methods become delegates: `messages` reads `chat.session().messages()`, `saveMessages` is `submit` with `source: "server"` followed by `wait`, `abortRequest` is `cancel`, `persistMessages` is `persist`. Apps keep using the two classes.
+`AIChatAgent` and `Think` install `Tasks`, `Sessions`, `Streams` and `WebSockets` in their constructors and register `chatTurnDefinition(deps, host)` on Tasks, with their responder and their hooks wired into `ChatHooks` once. `AIChatAgent`'s responder calls `onChatMessage` and returns its `Response`; `Think`'s runs its inference loop and returns the `streamText` result. Their public methods call the capabilities and the chat functions directly: `messages` reads the session in Sessions, `saveMessages` is `submitTurn` followed by `tasks.wait`, `abortRequest` is `cancelTurn`, `persistMessages` is a Sessions write. Apps keep using the two classes.
 
 ### Exposure
 
@@ -260,7 +281,7 @@ Each step is a set of small PRs, each green alone. A step only starts when the s
 3. T2: lanes and arrival policies move from the Inbox into Tasks; Think submissions and `ChatLane` call Tasks; the Inbox is deleted.
 4. The adopters, each in its own PR and each bringing only the Tasks verbs it needs. After T1: fibers as one-step runs (F), and the Approvals effect ledger (A); Approvals' decisions follow with the verbs they bring. After T2: the chat turn's input, stash, budget and recovery attempts inside its own lane run, so a request and its turn are one run (C), and agent-tool runs on both sides (R). The Outbox on Tasks (O) needs no lane and lands with the hold and replace verbs it brings. F, O and A share one shape for a run settled from outside.
 5. `AgentRuns` over ordinary Durable Objects: the sub-agent facet API and Lifecycle route envelopes are removed (major). A run left open by the earlier version ends `error` on the parent's first start, with the terminal event and hooks the parent expects. Facet storage is not deleted, only no longer reached: apps that kept data in sub-agent facets (`examples/multi-ai-chat` keeps conversations there) read it once through `ctx.facets.get` and write it to the new child objects, and the migration guide shows how.
-6. The `Chat` module, after C. `ChatTurns`, the pump, recovery and the protocol become one module on a Tasks lane; the host interfaces are deleted; both hosts become a responder and hooks.
+6. The chat module, after C. `ChatTurns`, the pump, recovery and the protocol become one task definition and a few functions; the host interfaces are deleted; both hosts become a responder and hooks.
 7. One log, in parallel with steps 2 to 4 where it does not need Tasks: Streams gets packing, retention, tags, reclaim and a cursor; the event log becomes a view over a stream and its tables go; a chat chunk is written once; `chat/resumable-stream.ts` and the hosts' `_resumableStream` wrappers are deleted. Moving the turn's facts (request id, message id, outcome, terminal) from the stream onto the task run waits for T1 and C.
 8. Schema. The last tables in `Agent._ensureSchema` move to the capability that owns them.
 
