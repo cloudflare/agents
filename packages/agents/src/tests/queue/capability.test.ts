@@ -304,10 +304,16 @@ describe("Queue capability", () => {
       stub,
       async (instance: QueueHarnessObject, state) => {
         instance.hold();
-        // What a rolled-back transaction that created the table leaves: the
-        // queue believes the table exists, and it does not.
-        await instance.queue.list();
-        state.storage.sql.exec("DROP TABLE IF EXISTS cf_agents_jobs");
+        // Start without touching the job table, so the first push creates
+        // it inside the transaction that then rolls back.
+        await instance.lifecycle.start();
+        expect(
+          state.storage.sql
+            .exec(
+              "SELECT name FROM sqlite_master WHERE name = 'cf_agents_jobs'"
+            )
+            .toArray()
+        ).toEqual([]);
         expect(() =>
           state.storage.transactionSync(() => {
             void instance.queue.push("record", { value: "lost" });
