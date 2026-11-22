@@ -383,6 +383,18 @@ export class EventLog<T = unknown, S = unknown> {
       setFollowed(connection, [...logs, this.name]);
   }
 
+  /**
+   * @internal Ids of the open connections following this log, so a host
+   * can send the same frames the old way to connections that do not.
+   */
+  followerIds(): string[] {
+    const ids: string[] = [];
+    for (const connection of this.#host.connections()) {
+      if (followedLogs(connection).includes(this.name)) ids.push(connection.id);
+    }
+    return ids;
+  }
+
   /** @internal Stop sending this log's events to a connection. */
   unsubscribe(connection: Connection): void {
     const logs = followedLogs(connection);

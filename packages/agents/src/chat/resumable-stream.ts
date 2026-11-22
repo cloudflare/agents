@@ -999,6 +999,33 @@ export class ResumableStream {
   }
 
   /**
+   * @internal The active stream as a tab rebuilds it on resync: its request,
+   * whether it continues the last assistant message, and every chunk body
+   * stored so far (the buffer is flushed first). Null when no stream is
+   * active. Read synchronously, so it agrees with the event log's head.
+   */
+  activeSnapshot(): {
+    requestId: string;
+    continuation: boolean;
+    messageId?: string;
+    seqBase: number;
+    chunks: string[];
+  } | null {
+    const streamId = this._activeStreamId;
+    const requestId = this._activeRequestId;
+    if (!streamId || !requestId) return null;
+    this.flushBuffer();
+    const messageId = this.getStreamMessageId(streamId);
+    return {
+      requestId,
+      continuation: this._activeIsContinuation,
+      ...(messageId !== null && { messageId }),
+      seqBase: this._seqBase(streamId),
+      chunks: [...this._storedBodies(streamId)]
+    };
+  }
+
+  /**
    * Latest CHAT-owned row carrying a request tag. The stream table is
    * shared with application producers and tags are non-unique, so the
    * newest row by tag alone could be an unrelated stream masking chat's

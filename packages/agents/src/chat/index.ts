@@ -35,8 +35,17 @@ export {
   ChatFrames,
   type ChatFrame,
   type ChatFrameConnection,
-  type ChatFramesOptions
+  type ChatFramesOptions,
+  CHAT_EVENT_LOG,
+  type ChatFrameLog,
+  type ChatLogEvent
 } from "./chat-frames";
+export {
+  chatLogOptions,
+  type ChatLogActiveStream,
+  type ChatLogSnapshot,
+  type ChatLogSource
+} from "./chat-log";
 
 /** @internal Host helpers for `AIChatAgent` and `Think`. Not a public API. */
 export {

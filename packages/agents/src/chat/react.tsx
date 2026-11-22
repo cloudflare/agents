@@ -15,6 +15,7 @@ import { dropEmptyReply } from "./reply-empty";
 import { drawQueuedLast, splitQueuedMessages } from "./queued-messages";
 import type { ChatTurnOutcome, OutgoingMessage } from "./wire-types";
 import { STREAM_RESUME_NONE_REASONS } from "./protocol";
+import { chatLogSocketFor, type ChatLogSocketAgent } from "./chat-log-socket";
 import { MessageType } from "./wire-types";
 import {
   observedDivergesFrom,
@@ -969,8 +970,11 @@ export function useAgentChat<
   // singleton whose .agent is reassigned every render — if we used
   // useEffect the assignment would lag behind, causing the transport
   // to send through a stale/closed socket (issue #929).
-  const agentRef = useRef(agent);
-  agentRef.current = agent;
+  // Chat frames come from the chat event log through this wrapper of the
+  // agent's socket (see `chat-log-socket.ts`); sends go through it too.
+  const chatSocket = chatLogSocketFor(agent as unknown as ChatLogSocketAgent);
+  const agentRef = useRef(chatSocket);
+  agentRef.current = chatSocket;
 
   async function defaultGetInitialMessagesFetch({
     url
@@ -2081,6 +2085,7 @@ export function useAgentChat<
   const [isRecovering, setIsRecovering] = useState(false);
 
   useEffect(() => {
+    const chatAgent = chatLogSocketFor(agent as unknown as ChatLogSocketAgent);
     const localResponseIds = localResponseMessageIdsRef.current;
     const turnErrors = turnErrorsRef.current;
     const endedTurnIds = endedTurnIdsRef.current;
@@ -2822,9 +2827,9 @@ export function useAgentChat<
       tryPendingReconnectProbe();
     }
 
-    agent.addEventListener("message", onAgentMessage);
-    agent.addEventListener("close", onAgentClose);
-    agent.addEventListener("open", onAgentOpen);
+    chatAgent.addEventListener("message", onAgentMessage);
+    chatAgent.addEventListener("close", onAgentClose);
+    chatAgent.addEventListener("open", onAgentOpen);
 
     return () => {
       disposed = true;
@@ -2832,9 +2837,9 @@ export function useAgentChat<
         reconnectProbeRunnerRef.current = null;
       }
       reconnectProbePendingRef.current = false;
-      agent.removeEventListener("message", onAgentMessage);
-      agent.removeEventListener("close", onAgentClose);
-      agent.removeEventListener("open", onAgentOpen);
+      chatAgent.removeEventListener("message", onAgentMessage);
+      chatAgent.removeEventListener("close", onAgentClose);
+      chatAgent.removeEventListener("open", onAgentOpen);
       fallbackAckedResumeRequestIds.clear();
       streamStateRef.current = { status: "idle" };
       setIsServerStreaming(false);

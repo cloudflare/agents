@@ -87,6 +87,7 @@ import {
 } from "./lifecycle/current-agent";
 import { getAgentByName, type AgentOptions } from "./agent-routing";
 import { WebSockets } from "./websockets";
+import type { EventLog, EventLogOptions } from "./websockets/event-log";
 import {
   ensureConnectionWrapped,
   getConnectionFlag,
@@ -853,6 +854,19 @@ export class Agent<
       payload,
       timestamp: Date.now()
     } as ObservabilityEvent);
+  }
+
+  /**
+   * Declare an event log on this Agent's WebSockets capability. Call it
+   * from a field initializer, so the log exists before a client's
+   * subscribe frame can arrive.
+   * @internal For the chat hosts built on `Agent`.
+   */
+  protected _declareEventLog<T = unknown, S = unknown>(
+    name: string,
+    options: EventLogOptions<S>
+  ): EventLog<T, S> {
+    return this._webSockets.log<T, S>(name, options);
   }
 
   /**

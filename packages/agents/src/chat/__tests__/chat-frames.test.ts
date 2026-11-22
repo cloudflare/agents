@@ -130,3 +130,75 @@ describe("ChatFrames", () => {
     ).not.toThrow();
   });
 });
+
+/** An in-memory stand-in for the chat event log: records what it is given. */
+function fakeLog(followers: string[] = [], limit = Infinity) {
+  const published: Array<{ kind: string; event: unknown }> = [];
+  let batches = 0;
+  let open = 0;
+  const check = (event: unknown) => {
+    if (JSON.stringify(event).length > limit) throw new RangeError("too big");
+  };
+  return {
+    published,
+    get batches() {
+      return batches;
+    },
+    get open() {
+      return open;
+    },
+    log: {
+      publish(event: unknown) {
+        check(event);
+        published.push({ kind: "publish", event });
+        return published.length;
+      },
+      batch() {
+        batches += 1;
+        open += 1;
+        return {
+          append(event: unknown) {
+            check(event);
+            published.push({ kind: "append", event });
+            return published.length;
+          },
+          close() {
+            open -= 1;
+          }
+        };
+      },
+      followerIds: () => followers
+    }
+  };
+}
+
+describe("ChatFrames with the chat event log", () => {
+  it("batches a request's chunks, publishes its terminal and ends the batch", () => {
+    const fake = fakeLog(["tab"]);
+    const { frames, sent } = setup({ log: fake.log });
+    frames.broadcast({ type: RESPONSE, id: "r1", body: "a", done: false });
+    frames.broadcast({ type: RESPONSE, id: "r1", body: "b", done: false });
+    frames.broadcast({ type: RESPONSE, id: "r1", body: "", done: true });
+    frames.broadcast({ type: MESSAGES, messages: [] }, ["sender"]);
+    expect(fake.published.map((entry) => entry.kind)).toEqual([
+      "append",
+      "append",
+      "publish",
+      "publish"
+    ]);
+    expect(fake.batches).toBe(1);
+    expect(fake.open).toBe(0);
+    // The sender a frame skips travels with the event.
+    expect(fake.published[3].event).toMatchObject({ without: ["sender"] });
+    // Following tabs get frames from the log only.
+    expect(sent.every((entry) => entry.without.includes("tab"))).toBe(true);
+  });
+
+  it("sends a frame the log refuses to following tabs the old way", () => {
+    const fake = fakeLog(["tab"], 200);
+    const { frames, sent } = setup({ log: fake.log });
+    frames.broadcast({ type: MESSAGES, messages: ["x".repeat(500)] });
+    expect(fake.published).toEqual([]);
+    expect(sent[0].without).not.toContain("tab");
+  });
+});

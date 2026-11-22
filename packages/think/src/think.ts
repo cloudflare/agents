@@ -211,6 +211,10 @@ import {
   StreamAccumulator,
   CHAT_MESSAGE_TYPES,
   ChatFrames,
+  CHAT_EVENT_LOG,
+  chatLogOptions,
+  type ChatLogEvent,
+  type ChatLogSnapshot,
   ResumableStream,
   createChatStreams,
   addContinuationTarget,
@@ -2436,8 +2440,25 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
   protected _resumableStream!: ResumableStream;
   private _pendingResumeConnections: Set<string> = new Set();
+  /**
+   * Every chat frame tabs get, as a replayable event log: a tab that
+   * reconnects gets what it missed by cursor, terminal frames included.
+   */
+  private readonly _chatLog = this._declareEventLog<
+    ChatLogEvent,
+    ChatLogSnapshot<UIMessage>
+  >(
+    CHAT_EVENT_LOG,
+    chatLogOptions<UIMessage>({
+      messages: () => this.messages,
+      clientView: (messages) => this._turns.clientView(messages),
+      activeStream: () => this._resumableStream.activeSnapshot(),
+      kv: this.ctx.storage.kv
+    })
+  );
   /** Where every chat frame to tabs goes out (the shared `ChatFrames`). */
   private readonly _frames = new ChatFrames({
+    log: this._chatLog,
     broadcast: (message, without) => this.broadcast(message, without),
     kv: this.ctx.storage.kv,
     resuming: this._pendingResumeConnections,

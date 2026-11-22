@@ -91,4 +91,52 @@ describe("followEventLog skip guard", () => {
     });
     expect(resyncs).toEqual([4]);
   });
+
+  it("ignores a crash resync for everyone when its own subscribe is answered by a replay", () => {
+    const socket = new FakeSocket();
+    const applied: number[] = [];
+    const resyncs: number[] = [];
+    followEventLog(socket, "feed", {
+      onEvent: (_data, seq) => applied.push(seq),
+      onResync: (_snapshot, seq) => resyncs.push(seq)
+    });
+    const id = socket.sent[0].id as string;
+    socket.deliver({
+      type: "cf_agent_log_resync",
+      log: "feed",
+      epoch: "e",
+      seq: 1,
+      id
+    });
+    // A live event skips seq 2: the follower re-subscribes from cursor 1.
+    socket.deliver({
+      type: "cf_agent_log_events",
+      log: "feed",
+      events: [{ seq: 3, data: 3 }]
+    });
+    // The re-subscribe's load found a crash gap past cursor 1, so every
+    // follower on the socket gets an untagged resync; this one's cursor is
+    // before the gap and its own answer is a replay.
+    socket.deliver({
+      type: "cf_agent_log_resync",
+      log: "feed",
+      epoch: "e",
+      seq: 9
+    });
+    socket.deliver({
+      type: "cf_agent_log_events",
+      log: "feed",
+      id,
+      events: [{ seq: 2, data: 2 }]
+    });
+    socket.deliver({
+      type: "cf_agent_log_synced",
+      log: "feed",
+      epoch: "e",
+      seq: 9,
+      id
+    });
+    expect(resyncs).toEqual([1]);
+    expect(applied).toEqual([2]);
+  });
 });
