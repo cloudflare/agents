@@ -90,4 +90,31 @@ describe("agent-tool run child", () => {
     );
     expect(await parent.migrateRunTableFromVersion14ForTest()).toBe(true);
   });
+
+  it("destroys a minted child with its last run, and never a named one", async () => {
+    const parent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `clear-children-${crypto.randomUUID()}`
+    );
+    await parent.runDeterministicAgentToolForTest({
+      runId: "minted-run",
+      chunkBodies: []
+    });
+    const routed = await parent.fetchRunChildForTest(
+      "agent-tool-runs/minted-run/"
+    );
+    const mintedName = routed.body.split(" ")[1];
+    const namedChild = `named-${crypto.randomUUID()}`;
+    await parent.runSharedChildForTest({
+      runId: "named-run",
+      childName: namedChild
+    });
+
+    await parent.clearAgentToolRunsForTest({ olderThan: Date.now() + 1 });
+
+    const minted = await getAgentByName(env.TestAgentToolStubChild, mintedName);
+    expect(await minted.destroyPendingForTest()).not.toBeNull();
+    const named = await getAgentByName(env.TestAgentToolStubChild, namedChild);
+    expect(await named.destroyPendingForTest()).toBeNull();
+  });
 });

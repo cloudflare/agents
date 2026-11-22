@@ -531,6 +531,37 @@ export class TestAgentToolReplayAgent extends Agent {
   }
 
   /** The child a run reached, through the parent's route, as HTTP. */
+  async runSharedChildForTest(o: { runId: string; childName: string }) {
+    return this.runAgentTool<StubRunInput>(TestAgentToolStubChild, {
+      runId: o.runId,
+      childName: o.childName,
+      input: {
+        chunkBodies: [JSON.stringify({ type: "text-start", id: "t" })],
+        summary: "done"
+      }
+    });
+  }
+
+  /** A retained facet-era run with its facet child, then clear: is the facet still there? */
+  async clearFacetEraRunForTest(runId: string): Promise<boolean> {
+    await this.subAgent(TestAgentToolStubChild, runId);
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, parent_tool_call_id, agent_type, status, display_order,
+        started_at, completed_at, detached
+      ) VALUES (
+        ${runId}, ${`call-${runId}`}, 'TestAgentToolStubChild', 'completed', 0,
+        ${Date.now()}, ${Date.now()}, 0
+      )
+    `;
+    await this.clearAgentToolRuns();
+    return this.hasSubAgent(TestAgentToolStubChild, runId);
+  }
+
+  async clearAgentToolRunsForTest(o: { olderThan: number }) {
+    await this.clearAgentToolRuns(o);
+  }
+
   async fetchRunChildForTest(path: string): Promise<{
     status: number;
     body: string;
@@ -749,6 +780,10 @@ export class TestAgentToolReplayAgent extends Agent {
  * wakes a hibernated DO can still replay them via `getAgentToolChunks`.
  */
 export class TestAgentToolStubChild extends Agent {
+  async destroyPendingForTest(): Promise<unknown> {
+    return (await this.ctx.storage.get("cf_agents_destroy_pending")) ?? null;
+  }
+
   override onRequest(request: Request): Response {
     return new Response(`child ${this.name} ${new URL(request.url).pathname}`);
   }

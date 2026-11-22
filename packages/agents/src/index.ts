@@ -1038,6 +1038,11 @@ export class Agent<
       addColumnIfNotExists(
         "ALTER TABLE cf_agent_tool_runs ADD COLUMN child_name TEXT"
       );
+      // 1 when the parent minted `child_name`, 0 when the caller chose it:
+      // only a minted child is destroyed with its last run.
+      addColumnIfNotExists(
+        "ALTER TABLE cf_agent_tool_runs ADD COLUMN child_name_minted INTEGER"
+      );
       addColumnIfNotExists(
         "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached_on_finish TEXT"
       );
@@ -3723,7 +3728,8 @@ export class Agent<
         input_redacted, status, display_metadata, display_order, started_at,
         detached, detached_on_finish, detached_notify_source,
         detached_max_budget_at, detached_no_progress_budget_ms,
-        detached_on_milestones, event_delivery, child_name
+        detached_on_milestones, event_delivery, child_name,
+        child_name_minted
       ) VALUES (
         ${runId}, ${options.parentToolCallId ?? null}, ${agentType},
         ${inputPreviewJson}, 1, 'starting', ${displayJson}, ${displayOrder},
@@ -3731,7 +3737,8 @@ export class Agent<
         ${detached?.notifySource ?? null}, ${detachedMaxBudgetAt},
         ${detachedNoProgressBudgetMs}, ${detachedOnMilestonesJson},
         ${eventDelivery === "terminal" ? "terminal" : null},
-        ${options.childName ?? crypto.randomUUID()}
+        ${options.childName ?? crypto.randomUUID()},
+        ${options.childName === undefined ? 1 : 0}
       )
     `;
 
@@ -4650,8 +4657,11 @@ export class Agent<
       run_id: string;
       agent_type: string;
       status: string;
+      child_name: string | null;
+      child_name_minted: number | null;
     }>`
-      SELECT run_id, agent_type, status FROM cf_agent_tool_runs
+      SELECT run_id, agent_type, status, child_name, child_name_minted
+      FROM cf_agent_tool_runs
       ORDER BY started_at ASC
     `;
     const statusFilter = options?.status
@@ -4668,16 +4678,36 @@ export class Agent<
 
     for (const row of retained) {
       try {
-        const child = await this._agentToolChild(row.agent_type, row.run_id);
-        if (row.status === "starting" || row.status === "running") {
-          const adapter = this._asAgentToolChildAdapter(child);
-          await adapter.cancelAgentToolRun(
-            row.run_id,
-            "clearing agent tool run"
+        if (row.child_name === null) {
+          // From when the child was a facet: delete the facet with the run.
+          await this.deleteSubAgent(
+            { name: row.agent_type } as unknown as SubAgentClass,
+            row.run_id
           );
+        } else {
+          const child = await this._agentToolChild(row.agent_type, row.run_id);
+          if (row.status === "starting" || row.status === "running") {
+            const adapter = this._asAgentToolChildAdapter(child);
+            await adapter.cancelAgentToolRun(
+              row.run_id,
+              "clearing agent tool run"
+            );
+          }
+          // A child the parent named is its own, and goes with its last
+          // run. A child the caller named may be shared or used directly,
+          // so only its run is cancelled.
+          const othersOnChild =
+            this.sql<{ n: number }>`
+              SELECT COUNT(*) AS n FROM cf_agent_tool_runs
+              WHERE agent_type = ${row.agent_type}
+                AND child_name = ${row.child_name}
+                AND run_id != ${row.run_id}
+            `[0]?.n ?? 0;
+          if (row.child_name_minted === 1 && othersOnChild === 0) {
+            // Wipes the child's storage on its next wake.
+            await child._cf_scheduleDestroy();
+          }
         }
-        // Wipes the child's storage on its next wake.
-        await child._cf_scheduleDestroy();
       } catch {
         // Cleanup is intentionally idempotent.
       }

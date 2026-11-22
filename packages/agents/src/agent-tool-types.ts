@@ -294,10 +294,13 @@ export type RunAgentToolOptions<
   runId?: string;
   /**
    * The name of the child Durable Object that runs this run. Defaults to a
-   * random UUID, so the child is reachable only through this parent. Pass a
-   * name to send several runs to the same child, which keeps its own
-   * messages and state between them. Ignored when `runId` names a run this
-   * parent already recorded: that run keeps its child.
+   * random UUID that only this parent knows until a client drills in. Pass a
+   * name to send several runs to the same child, which keeps its messages
+   * and state between them. The name is global to the child's namespace:
+   * every parent that passes it reaches the same object, so scope it, for
+   * example with `${this.name}:researcher`. `clearAgentToolRuns` cancels the
+   * runs of a named child but never destroys it. Ignored when `runId` names
+   * a run this parent already recorded: that run keeps its child.
    */
   childName?: string;
   parentToolCallId?: string;
