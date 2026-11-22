@@ -1181,6 +1181,27 @@ describe("SubAgent", () => {
     }
   );
 
+  it("keeps a wake for a sub-agent fiber that started while another fiber's wake write failed", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const first =
+      await agent.subAgentStartTwoFibersFirstWakeFails("wake-failure-child");
+
+    // The first fiber fails on its wake write; the held second one still
+    // has a wake mirrored on the root.
+    expect(first).toBe("simulated fiber wake route failure");
+    expect(await agent.subAgentRunningFiberCount("wake-failure-child")).toBe(1);
+    expect(await agent.fiberWakeOwners()).toHaveLength(1);
+
+    await agent.subAgentReleaseHeldFiber("wake-failure-child");
+    for (let attempt = 0; attempt < 50; attempt++) {
+      if ((await agent.fiberWakeOwners()).length === 0) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(await agent.fiberWakeOwners()).toEqual([]);
+  });
+
   it("mirrors the fiber wake on the root for managed sub-agent fibers", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);

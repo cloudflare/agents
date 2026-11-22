@@ -509,6 +509,24 @@ export class CounterSubAgent extends Agent {
     return result.fiberId;
   }
 
+  /**
+   * Start two fibers together. The first one's wake write is the one the
+   * root rejects; the second is held until released.
+   */
+  async startTwoFibersFirstWakeFails(): Promise<string> {
+    const first = this.runFiber("first", async () => {}).then(
+      () => "ran",
+      (error: unknown) =>
+        error instanceof Error ? error.message : String(error)
+    );
+    void this.runFiber("second-held", async () => {
+      await new Promise<void>((resolve) => {
+        this._releaseHeldFiber = resolve;
+      });
+    }).catch(console.error);
+    return first;
+  }
+
   async releaseHeldFiber(): Promise<void> {
     const release = this._releaseHeldFiber;
     this._releaseHeldFiber = undefined;
@@ -1222,9 +1240,33 @@ class DelayedForwardingSubAgentBridge extends RpcTarget {
 }
 
 export class TestSubAgentParent extends Agent {
+  private _fiberWakeRouteFailuresRemaining = 0;
   private _rootResolutionFailuresRemaining = 0;
   private _nextRootResolutionDelayMs = 0;
   private _subAgentBroadcastFailuresRemaining = 0;
+
+  override async _cf_routeLifecycle(
+    target: Parameters<Agent["_cf_routeLifecycle"]>[0],
+    envelope: Parameters<Agent["_cf_routeLifecycle"]>[1]
+  ): Promise<unknown> {
+    if (
+      this._fiberWakeRouteFailuresRemaining > 0 &&
+      envelope.capability === "fibers" &&
+      (envelope.payload as { type?: string }).type === "syncWake"
+    ) {
+      this._fiberWakeRouteFailuresRemaining -= 1;
+      throw new Error("simulated fiber wake route failure");
+    }
+    return super._cf_routeLifecycle(target, envelope);
+  }
+
+  async subAgentStartTwoFibersFirstWakeFails(
+    subAgentName: string
+  ): Promise<string> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    this._fiberWakeRouteFailuresRemaining = 1;
+    return child.startTwoFibersFirstWakeFails();
+  }
 
   failNextRootResolution(): void {
     this._rootResolutionFailuresRemaining += 1;

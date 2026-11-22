@@ -830,6 +830,11 @@ describe("runFiber", () => {
         true
       );
 
+      // An empty status filter matches nothing.
+      await expect(agent.listManagedFibers({ status: [] })).resolves.toEqual(
+        []
+      );
+
       await expect(agent.deleteManagedFibers()).resolves.toBeGreaterThanOrEqual(
         1
       );

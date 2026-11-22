@@ -1166,3 +1166,32 @@ export class CutoverKillAgent extends Agent<Record<string, unknown>> {
     };
   }
 }
+
+// ── AbortingRecoveryHookAgent (a recovery hook that kills the isolate) ───
+//
+// A managed fiber aborts the isolate mid-body; its recovery hook aborts it
+// again before any I/O. The scan must commit the `interrupted` mark before
+// it runs the hook, or the reset rolls the mark back and every startup runs
+// the hook again, so the agent never serves another request.
+
+export class AbortingRecoveryHookAgent extends Agent<Record<string, unknown>> {
+  static options = { keepAliveIntervalMs: 2_000 };
+
+  override async onFiberRecovered(ctx: RunFiberRecoveryContext): Promise<void> {
+    if (ctx.name === "aborting-hook") this.ctx.abort("recovery hook aborts");
+  }
+
+  @callable()
+  async startAbortingFiber(): Promise<string> {
+    const result = await this.startFiber("aborting-hook", async () => {
+      await fiberSleep(300);
+      this.ctx.abort("fiber body aborts");
+    });
+    return result.fiberId;
+  }
+
+  @callable()
+  async fiberStatus(fiberId: string): Promise<string | null> {
+    return (await this.inspectFiber(fiberId))?.status ?? null;
+  }
+}

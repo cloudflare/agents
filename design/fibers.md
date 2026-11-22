@@ -7,8 +7,9 @@ an interruption to a recovery hook. `Agent.runFiber()`, `startFiber()`,
 `stash()`, `inspectFiber()`, `listFibers()`, `cancelFiber()`,
 `resolveFiber()`, `deleteFibers()` and the `onFiberRecovered()` hook are the
 public API. Since this change they are one-line delegates to the `Fibers`
-Lifecycle capability in `packages/agents/src/fibers/`. The capability is
-internal: Agent installs it, nothing else does yet.
+Lifecycle capability in `packages/agents/src/fibers/`. It is an internal
+module (`@internal`, no package export): Agent installs it, and a plain
+Durable Object that wants durable background work should use Tasks.
 
 [Tasks](./rfc-fibers.md) is the replayable engine: a named handler re-runs
 from its step journal. Fibers are the other shape and stay separate (see
@@ -54,7 +55,10 @@ then marks managed ledger rows with no run row (accepted, never started)
 `interrupted` and recovers them the same way. One scan runs at a time; a
 caller that arrives during a scan joins it. So a user `onFiberRecovered()` that never
 returns holds every later recovery wake, as it already held startup.
-Only the internal hook has a timeout.
+Only the internal hook has a timeout. The wake is a Lifecycle job, so a slow hook also
+delays the host's `onAlarm` and other jobs in the same alarm; the old
+housekeeping scan ran after `onAlarm` in the same alarm and waited on the hook
+the same way.
 
 Agent runs a scan during startup, before the user's `onStart()`, so chat
 recovery sees its budgets before user code changes them.

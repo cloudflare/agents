@@ -1,9 +1,15 @@
 /**
- * Workflows: start Cloudflare Workflow instances on behalf of an agent,
+ * Workflows: start Cloudflare Workflows instances on behalf of an agent,
  * control them, and keep a local record of each one.
  *
+ * This is not an execution engine. The instances are Cloudflare Workflows,
+ * the separate product: they run on the Workflows service, not in this
+ * Durable Object, and this module only starts, controls and tracks them.
+ * For durable multi-step work that runs inside the Durable Object itself,
+ * use Tasks (`agents/tasks`).
+ *
  * The Workflows service is the truth for an instance's status. This
- * capability keeps a mirror in `cf_agents_workflows`: one row per instance
+ * module keeps a mirror in `cf_agents_workflows`: one row per instance
  * started through `run()`, updated by the control calls and by the
  * callbacks an `AgentWorkflow` reports back (`record()`). Nothing lives only
  * in memory.

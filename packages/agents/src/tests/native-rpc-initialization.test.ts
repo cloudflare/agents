@@ -4,7 +4,14 @@ import {
   runDurableObjectAlarm,
   runInDurableObject
 } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { http, HttpResponse } from "msw";
+import { setupServer } from "msw/node";
+
+const mcpServer = setupServer();
+beforeAll(() => mcpServer.listen({ onUnhandledRequest: "error" }));
+afterEach(() => mcpServer.resetHandlers());
+afterAll(() => mcpServer.close());
 
 function uniqueName(): string {
   return `native-rpc-${crypto.randomUUID()}`;
@@ -157,6 +164,45 @@ describe("native Durable Object RPC initialization", () => {
 
     // Assert: startup resolved the legacy identity and ran before the method.
     expect(result).toMatchObject({ name, ready: true, startCount: 1 });
+  });
+
+  it("registers an MCP server from a cold call before the legacy name is loaded", async () => {
+    const namespace = env.TestNativeRpcAgent;
+    const stub = namespace.get(namespace.newUniqueId());
+    await runInDurableObject(stub, (_instance, ctx) =>
+      ctx.storage.put("__ps_name", uniqueName())
+    );
+    await evictDurableObject(stub);
+
+    // No callback host and no id to migrate: the name is never needed, so
+    // the call reaches the server. It answers 503, so the call fails there,
+    // with the server registered for a retry.
+    let mcpRequests = 0;
+    mcpServer.use(
+      http.all("https://cold-mcp.example.test/mcp", () => {
+        mcpRequests++;
+        return new HttpResponse(null, { status: 503 });
+      })
+    );
+    const outcome = await runInDurableObject(stub, async (instance) => {
+      try {
+        await instance.addMcpServer(
+          "files",
+          "https://cold-mcp.example.test/mcp",
+          { retry: { maxAttempts: 1 } }
+        );
+        return { error: null, servers: instance.mcp.listServers().length };
+      } catch (error) {
+        return {
+          error: error instanceof Error ? error.message : String(error),
+          servers: instance.mcp.listServers().length
+        };
+      }
+    });
+
+    expect(outcome.error).toMatch(/Failed to connect to MCP server/);
+    expect(mcpRequests).toBeGreaterThan(0);
+    expect(outcome.servers).toBe(1);
   });
 
   it("rejects a truly unnamed application RPC clearly", async () => {

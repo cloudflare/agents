@@ -226,6 +226,8 @@ export class Fibers extends LifecycleCapability {
    * root's mirror, so it can skip routing a no-op.
    */
   #armedAt: number | null = null;
+  /** The wake write in flight, if any. */
+  #wakeSync: Promise<void> | undefined;
 
   constructor(options: FibersOptions) {
     super("fibers");
@@ -504,10 +506,12 @@ export class Fibers extends LifecycleCapability {
             Array.isArray(options.status) ? options.status : [options.status]
           )
         ]
-      : [];
+      : undefined;
+    // An empty status filter matches nothing.
+    if (statuses?.length === 0) return [];
     let query = `SELECT ${LEDGER_COLUMNS} FROM cf_agents_fibers WHERE 1 = 1`;
     const params: SqlValue[] = [];
-    if (statuses.length > 0) {
+    if (statuses) {
       query += ` AND status IN (${statuses.map(() => "?").join(", ")})`;
       params.push(...statuses);
     }
@@ -684,6 +688,13 @@ export class Fibers extends LifecycleCapability {
           ctx.status = "interrupted";
         }
 
+        if (managedRow) {
+          // Commit the `interrupted` mark before the hook runs. A hook that
+          // kills the isolate before its first I/O would otherwise roll the
+          // mark back, and every wake would run it again (RUNTIME-FACTS:
+          // "A reset before the first I/O rolls back...").
+          await this.lifecycle.storage.sync();
+        }
         const recovered = await this.#runRecoveryHook(ctx, managedRow);
         // Managed rows are always cleaned up (the ledger keeps the terminal
         // status). Unmanaged rows stay when recovery fails so a later scan
@@ -747,6 +758,8 @@ export class Fibers extends LifecycleCapability {
         };
         this.#emitDetected(ctx, row);
 
+        // As above: the mark must survive a hook that kills the isolate.
+        await this.lifecycle.storage.sync();
         await this.#runRecoveryHook(ctx, row);
         // Finalized this pass whatever the hook did: that is progress.
         madeProgress = true;
@@ -1029,8 +1042,26 @@ export class Fibers extends LifecycleCapability {
     return now + Math.min(MAX_BACKOFF_MS, heartbeatMs * 2 ** exp);
   }
 
-  /** Push, re-time, or cancel this object's wake (mirrored on the root for a facet). */
+  /**
+   * Push, re-time, or cancel this object's wake (mirrored on the root for a
+   * facet). One sync runs at a time, and the armed time is recorded only
+   * once the write succeeded, so a fiber starting during a sync that then
+   * fails arms the wake itself instead of trusting it.
+   */
   async #syncWake(): Promise<void> {
+    while (this.#wakeSync) {
+      await this.#wakeSync.catch(() => {});
+    }
+    const sync = this.#writeWake();
+    this.#wakeSync = sync;
+    try {
+      await sync;
+    } finally {
+      if (this.#wakeSync === sync) this.#wakeSync = undefined;
+    }
+  }
+
+  async #writeWake(): Promise<void> {
     const now = Date.now();
     const next = this.#nextWakeMs(now);
     const armed = this.lifecycle.routes.source
@@ -1047,14 +1078,15 @@ export class Fibers extends LifecycleCapability {
       return;
     }
     if (next === null && armed === null) return;
-    this.#armedAt = next;
     if (this.lifecycle.routes.source) {
       await this.lifecycle.routes.toRoot({
         type: "syncWake",
         next
       } satisfies FibersRouteMessage);
+      this.#armedAt = next;
       return;
     }
+    this.#armedAt = next;
     if (next === null) {
       await this.lifecycle.jobs.cancel(WAKE_JOB_ID);
       return;

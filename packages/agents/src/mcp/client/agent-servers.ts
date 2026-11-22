@@ -133,8 +133,11 @@ export type AddMcpServerResult =
 export type AgentMcpServerHost = {
   readonly manager: MCPClientManager;
   readonly env: object;
-  /** The Agent's instance name. */
-  readonly agentName: string;
+  /**
+   * The Agent's instance name, read only for an id migration or a default
+   * callback URL: before startup it may not be loaded yet.
+   */
+  readonly agentName: () => string;
   /** The Agent's exported class name. */
   readonly agentClassName: string;
   /** When false, a callback URL must not carry the instance name. */
@@ -246,7 +249,7 @@ export async function addMcpServer<T extends McpRpcAgent>(
       await manager.migrateServerId(
         existingServer.id,
         requestedId,
-        host.agentName
+        host.agentName()
       );
       existingServer.id = requestedId;
     }
@@ -321,7 +324,7 @@ export async function addMcpServer<T extends McpRpcAgent>(
     const normalizedHost = callbackHost.replace(/\/$/, "");
     callbackUrl = callbackPath
       ? `${normalizedHost}/${callbackPath.replace(/^\//, "")}`
-      : `${normalizedHost}/${prefix}/${camelCaseToKebabCase(host.agentClassName)}/${host.agentName}/callback`;
+      : `${normalizedHost}/${prefix}/${camelCaseToKebabCase(host.agentClassName)}/${host.agentName()}/callback`;
   }
 
   const id = requestedId ?? existingServer?.id ?? nanoid(8);

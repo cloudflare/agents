@@ -2438,6 +2438,9 @@ export class Agent<
 
   /**
    * Run a fiber whose framework recovery data wraps the user's checkpoints.
+   * Released `@cloudflare/ai-chat` and `@cloudflare/think` versions call it
+   * for sub-agent turns, and they accept newer `agents` releases, so it
+   * stays while those versions are in range.
    * @internal
    */
   protected _runFiberWithStashWrapper<T>(
@@ -6752,7 +6755,9 @@ export class Agent<
       {
         manager: this.mcp,
         env: this.env,
-        agentName: this.name,
+        // Read only where it is used: a cold native call on an agent whose
+        // stored name is not loaded yet can still register a server.
+        agentName: () => this.name,
         agentClassName: this._ParentClass.name,
         sendIdentityOnConnect: this._resolvedOptions.sendIdentityOnConnect,
         createAuthProvider: (callbackUrl) =>
