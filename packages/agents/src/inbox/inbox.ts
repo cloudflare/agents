@@ -26,6 +26,7 @@ import type {
   LifecycleJobContext,
   LifecycleJobOutcome
 } from "../lifecycle/job-queue";
+import { stableStringify } from "../approvals/hash";
 import { isPlatformFailure } from "../retries";
 import { arrival, normalizePolicy } from "./policy";
 import { INBOX_METADATA_LIMIT, InboxStore, type InboxRow } from "./store";
@@ -306,7 +307,7 @@ export class Inbox<
     if (existing) {
       if (
         existing.request.kind !== kind ||
-        rows.payloadJson(existing.request.id) !== payloadJson
+        !samePayload(rows.payloadJson(existing.request.id), payloadJson)
       ) {
         throw new Error(
           `Inbox request ${JSON.stringify(existing.request.id)} exists with a different ${
@@ -1162,6 +1163,16 @@ export class Inbox<
   #emit(type: InboxEventType, payload: Record<string, unknown>): void {
     this.#services.events.emit(type, payload);
   }
+}
+
+/** Whether two payloads' JSON is the same value, whatever its key order. */
+function samePayload(stored: string | null, submitted: string | null): boolean {
+  if (stored === submitted) return true;
+  if (stored === null || submitted === null) return false;
+  return (
+    stableStringify(JSON.parse(stored)) ===
+    stableStringify(JSON.parse(submitted))
+  );
 }
 
 function laneOfJob(payload: unknown): string | undefined {
