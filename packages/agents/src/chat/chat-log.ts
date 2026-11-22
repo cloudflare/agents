@@ -60,6 +60,16 @@ export interface ChatLogSource<TMessage extends { id: string }> {
 
 /** Events the chat log keeps for replay. */
 const CHAT_LOG_RETENTION = { maxEvents: 5000, maxBytes: 8 * 1024 * 1024 };
+/**
+ * When a reply's chunk frames are written: at the latest after a second,
+ * or 64 frames, and at once when the reply ends (its terminal frame is
+ * published, which writes the buffer first). Tabs see each frame as it is
+ * sent; only the write waits. The idea is pi-durable's deferred progress
+ * writes (`settings.progress.persistWithinMs`, 1,000 ms by default), which
+ * cut storage transactions 5.7x to 27x there. A crash loses at most that
+ * second of frames; tabs that saw them resync.
+ */
+export const CHAT_LOG_BATCHING = { maxEvents: 64, maxDelayMs: 1000 };
 /** A chunk frame can carry up to `CHUNK_MAX_BYTES` (1.8 MB) of body. */
 const CHAT_LOG_MAX_EVENT_BYTES = 1_900_000;
 
@@ -73,6 +83,7 @@ export function chatLogOptions<TMessage extends { id: string }>(
 ): EventLogOptions<ChatLogSnapshot<TMessage>> {
   return {
     retention: CHAT_LOG_RETENTION,
+    batching: CHAT_LOG_BATCHING,
     maxEventBytes: CHAT_LOG_MAX_EVENT_BYTES,
     snapshot: () => {
       const view = source.clientView(source.messages());
