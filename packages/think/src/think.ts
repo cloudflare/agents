@@ -1166,8 +1166,7 @@ type ConnectionlessContinuation = {
 };
 /** `think_config` key of the count of stops of every chat. */
 const CONNECTIONLESS_STOPS_KEY = "connectionlessStops";
-/** Queue callback that runs one media-eviction pass. */
-
+/** Queue item id of a submission's workflow event, one per event type. */
 function workflowNotificationItemId(
   submissionId: string,
   eventType: string
