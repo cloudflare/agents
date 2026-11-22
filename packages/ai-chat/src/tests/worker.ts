@@ -116,11 +116,12 @@ async function recoverInterruptedTurnsForTest(
   for (const run of runs) {
     // Accepted again under its id, so this invocation runs it.
     agent.sql`DELETE FROM cf_agents_task_runs WHERE run_id = ${run.run_id}`;
-    await agent.tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
-      AIChatAgent.CHAT_FIBER_NAME,
-      JSON.parse(run.input),
-      { runId: run.run_id, retain: false, metadata: JSON.parse(run.metadata) }
-    );
+    await agent.tasks.run(AIChatAgent.CHAT_FIBER_NAME, JSON.parse(run.input), {
+      runId: run.run_id,
+      retain: false,
+      metadata: JSON.parse(run.metadata),
+      start: "now"
+    });
   }
   await (
     agent as unknown as { _fibers: { recover(): Promise<void> } }
@@ -4048,11 +4049,10 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       data,
       delaySeconds: 60
     };
-    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-      CHAT_RECOVERY_TASK_NAME,
-      input,
-      chatRecoveryTaskRunOptions(input, "redefer")
-    );
+    await this.tasks.run(CHAT_RECOVERY_TASK_NAME, input, {
+      ...chatRecoveryTaskRunOptions(input, "redefer"),
+      start: "alarm"
+    });
   }
 
   /** Retry-path twin of {@link preScheduleRecoveryContinueForTest}. */
@@ -4064,11 +4064,10 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       data,
       delaySeconds: 60
     };
-    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-      CHAT_RECOVERY_TASK_NAME,
-      input,
-      chatRecoveryTaskRunOptions(input, "redefer")
-    );
+    await this.tasks.run(CHAT_RECOVERY_TASK_NAME, input, {
+      ...chatRecoveryTaskRunOptions(input, "redefer"),
+      start: "alarm"
+    });
   }
 
   async getChatRecoveringForTest(): Promise<{ requestId?: string } | null> {
@@ -5551,17 +5550,12 @@ export class RecoverySlowStreamAgent extends SlowStreamAgent {
 
     // Root turns now start on the tasks capability; stub its internal start
     // path the same way so the simulated failure covers the migrated engine.
-    type RunAttached = (...args: unknown[]) => Promise<unknown>;
-    const tasksInternal = this.tasks as unknown as {
-      __DO_NOT_USE_WILL_BREAK__runAttached: RunAttached;
-    };
-    const originalRunAttached =
-      tasksInternal.__DO_NOT_USE_WILL_BREAK__runAttached.bind(
-        this.tasks
-      ) as RunAttached;
-    tasksInternal.__DO_NOT_USE_WILL_BREAK__runAttached = (() => {
+    type Run = (...args: unknown[]) => Promise<unknown>;
+    const tasksInternal = this.tasks as unknown as { run: Run };
+    const originalRun = tasksInternal.run.bind(this.tasks) as Run;
+    tasksInternal.run = (() => {
       throw new Error("simulated runFiber failure");
-    }) as RunAttached;
+    }) as Run;
 
     let threw = false;
     try {
@@ -5580,7 +5574,7 @@ export class RecoverySlowStreamAgent extends SlowStreamAgent {
       threw = true;
     } finally {
       fiberMethods._runFiberWithStashWrapper = originalRunFiberWithStashWrapper;
-      tasksInternal.__DO_NOT_USE_WILL_BREAK__runAttached = originalRunAttached;
+      tasksInternal.run = originalRun;
     }
 
     return {
@@ -5719,14 +5713,14 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
         lastAttemptAt: now
       }
     );
-    const receipt = await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+    const receipt = await this.tasks.run(
       definition,
       { incidentId },
-      { retain: false }
+      { retain: false, start: "alarm" }
     );
     for (let i = 0; i < 50; i++) {
       const run = await this.tasks.get(receipt.runId);
-      if (run?.state === "waiting") break;
+      if (run?.status === "pending" && run.waitReason !== undefined) break;
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     return receipt.runId;
@@ -5930,10 +5924,10 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       this._turnRecoveriesForTest.push(turn.requestId);
       return original(turn);
     };
-    const receipt = await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+    const receipt = await this.tasks.run(
       AIChatAgent.CHAT_FIBER_NAME,
       { requestId, continuation: false, nonce: `gone-${requestId}` },
-      { metadata: { requestId } }
+      { metadata: { requestId }, start: "alarm" }
     );
     return receipt.runId;
   }
@@ -5950,7 +5944,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
   markRunInterruptedForTest(runId: string, deadline: number): void {
     this.sql`
       UPDATE cf_agents_task_runs
-      SET state = 'running', generation = 'dead-isolate', attempt = 1,
+      SET status = 'running', generation = 'dead-isolate', attempt = 1,
           next_at = ${deadline}
       WHERE run_id = ${runId}
     `;
@@ -7458,14 +7452,14 @@ export class AIChatAgentToolParent extends Agent<Env> {
     `;
     await this.alarm();
     for (let i = 0; i < 100; i++) {
-      const state = await child.getTaskRunStateForTest(runId);
+      const state = await child.getTaskStatusForTest(runId);
       if (state === "completed" || state === "failed") break;
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     return {
       mirrored,
       recoveries: await child.getTurnRecoveriesForTest(),
-      state: await child.getTaskRunStateForTest(runId)
+      state: await child.getTaskStatusForTest(runId)
     };
   }
 

@@ -56,23 +56,25 @@ async function callTaskAgent(
 
 async function waitForRunState(
   runId: string,
-  state: string,
+  status: string,
   maxAttempts = 30
-): Promise<{ state: string; result: unknown }> {
+): Promise<{ status: string; result: unknown }> {
   for (let i = 0; i < maxAttempts; i++) {
     await sleep(1000);
     try {
       const current = (await callTaskAgent("getRunState", [runId])) as {
-        state: string;
+        status: string;
         result: unknown;
       } | null;
-      console.log(`[test] Run poll ${i + 1}: ${runId} state=${current?.state}`);
-      if (current?.state === state) return current;
+      console.log(
+        `[test] Run poll ${i + 1}: ${runId} status=${current?.status}`
+      );
+      if (current?.status === status) return current;
     } catch {
       console.log(`[test] Run poll ${i + 1}: error (agent may not be ready)`);
     }
   }
-  throw new Error(`Run ${runId} did not reach state ${state}`);
+  throw new Error(`Run ${runId} did not reach status ${status}`);
 }
 
 describe("tasks capability eviction e2e", () => {

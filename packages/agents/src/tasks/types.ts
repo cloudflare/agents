@@ -200,18 +200,17 @@ export interface TaskCheckpoint {
   set(key: string, value: TaskJson | undefined): void;
 }
 
-export type TaskRunState =
+export type TaskStatus =
   | "pending"
   | "running"
-  | "waiting"
   | "completed"
-  | "failed"
-  | "cancelled";
+  | "error"
+  | "aborted";
 
-/** Why a waiting run is waiting. */
+/** Why a pending run that already ran waits (`wakeAt`). */
 export type TaskWaitReason = "sleep" | "retry";
 
-/** Safe projection of an error retained with a failed run. */
+/** Safe projection of an error retained with a run that ended `error`. */
 export interface TaskError {
   name: string;
   message: string;
@@ -234,6 +233,20 @@ export interface TaskRunOptions {
 
   /** Keep terminal state for inspection. Defaults to `true`. */
   retain?: boolean;
+
+  /**
+   * @internal Where the first attempt runs. Omitted: in this invocation,
+   * without waiting for it. `"now"`: in this invocation, and `run()`
+   * resolves when that attempt ends. `"alarm"`: from the alarm, where
+   * `trackAlarmWork` keeps it inside the memory-limit breaker.
+   */
+  start?: "now" | "alarm";
+
+  /**
+   * @internal Handed to the first attempt as `step.local` when it runs in
+   * this invocation (`start` omitted or `"now"`); never stored.
+   */
+  local?: unknown;
 }
 
 /**
@@ -247,12 +260,12 @@ export interface TaskReceipt {
   runId: string;
   definition: string;
   accepted: boolean;
-  state: TaskRunState;
+  status: TaskStatus;
   createdAt: number;
 }
 
 /**
- * Read-only snapshot of one Task run, discriminated by state.
+ * Read-only snapshot of one Task run, discriminated by status.
  *
  * @experimental The API surface may change before stabilizing.
  */
@@ -260,14 +273,18 @@ export type TaskRunSnapshot<Output extends TaskValue> =
   | {
       runId: string;
       definition: string;
-      state: "pending";
+      status: "pending";
+      /** Set when the run ran and now sleeps or backs off until `wakeAt`. */
+      waitReason?: TaskWaitReason;
+      wakeAt?: number;
       createdAt: number;
+      statusMessage?: string;
       metadata?: Record<string, TaskJson>;
     }
   | {
       runId: string;
       definition: string;
-      state: "running";
+      status: "running";
       attempt: number;
       startedAt: number;
       createdAt: number;
@@ -277,17 +294,7 @@ export type TaskRunSnapshot<Output extends TaskValue> =
   | {
       runId: string;
       definition: string;
-      state: "waiting";
-      reason: TaskWaitReason;
-      wakeAt: number;
-      createdAt: number;
-      statusMessage?: string;
-      metadata?: Record<string, TaskJson>;
-    }
-  | {
-      runId: string;
-      definition: string;
-      state: "completed";
+      status: "completed";
       result: Output;
       createdAt: number;
       settledAt: number;
@@ -296,7 +303,7 @@ export type TaskRunSnapshot<Output extends TaskValue> =
   | {
       runId: string;
       definition: string;
-      state: "failed";
+      status: "error";
       error: TaskError;
       createdAt: number;
       settledAt: number;
@@ -305,7 +312,7 @@ export type TaskRunSnapshot<Output extends TaskValue> =
   | {
       runId: string;
       definition: string;
-      state: "cancelled";
+      status: "aborted";
       reason?: string;
       createdAt: number;
       settledAt: number;
@@ -342,7 +349,7 @@ export type TaskRunRow = {
   run_id: string;
   definition: string;
   input: string | null;
-  state: TaskRunState;
+  status: TaskStatus;
   result: string | null;
   error_name: string | null;
   error_message: string | null;

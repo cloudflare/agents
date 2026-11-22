@@ -2989,13 +2989,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     generateId: () => crypto.randomUUID(),
     turnSignal: (requestId) => this._turns.aborts.getExistingSignal(requestId),
     runTask: ({ requestId, continuation, nonce }, local) =>
-      this.tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
+      this.tasks.run(
         (this.constructor as typeof Think).CHAT_FIBER_NAME,
         { requestId, continuation, nonce },
         {
           runId: `chat_${nonce}`,
           retain: false,
           metadata: { requestId },
+          start: "now",
           local
         }
       ),
@@ -6865,7 +6866,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
     const recoveryRuns = await this.tasks.list({
       definition: CHAT_RECOVERY_TASK_NAME,
-      status: ["pending", "running", "waiting"],
+      status: ["pending", "running"],
       limit: Number.MAX_SAFE_INTEGER
     });
     if (

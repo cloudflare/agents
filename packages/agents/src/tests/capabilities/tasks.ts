@@ -454,7 +454,9 @@ export function seedTaskRun(
     readonly runId: string;
     readonly definition: string;
     readonly input?: unknown;
-    readonly state: "pending" | "running" | "waiting";
+    readonly status: "pending" | "running";
+    /** A pending run that already ran waits for its `nextAt`. */
+    readonly waitReason?: "sleep" | "retry";
     readonly generation?: string;
     readonly attempt?: number;
     readonly nextAt: number;
@@ -465,13 +467,15 @@ export function seedTaskRun(
   const now = Date.now();
   storage.sql.exec(
     `INSERT INTO cf_agents_task_runs
-       (run_id, definition, input, state, generation, attempt, next_at,
-        idempotency_key, retain, cancel_requested, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+       (run_id, definition, input, status, wait_reason, generation, attempt,
+        next_at, idempotency_key, retain, cancel_requested, created_at,
+        updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
     options.runId,
     options.definition,
     options.input === undefined ? null : JSON.stringify(options.input),
-    options.state,
+    options.status,
+    options.waitReason ?? null,
     options.generation ?? null,
     options.attempt ?? 0,
     options.nextAt,

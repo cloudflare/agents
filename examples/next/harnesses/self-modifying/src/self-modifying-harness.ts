@@ -388,18 +388,10 @@ export class SelfModifyingHarness extends LifecycleCapability {
       idempotencyKey: `self-modifying-turn:${turnId}`,
       metadata: { revisionId, streamId, promptHash }
     };
-    const receipt =
-      mode === "attached"
-        ? await this.#tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
-            TURN_TASK,
-            input,
-            taskOptions
-          )
-        : await this.#tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-            TURN_TASK,
-            input,
-            taskOptions
-          );
+    const receipt = await this.#tasks.run(TURN_TASK, input, {
+      ...taskOptions,
+      start: mode === "attached" ? "now" : "alarm"
+    });
     if (!this.#store.turn(turnId)) {
       this.#store.beginTurn(input);
       await this.#streams.open(streamId, {

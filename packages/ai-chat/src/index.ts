@@ -798,13 +798,14 @@ export class AIChatAgent<
     generateId: () => nanoid(),
     turnSignal: (requestId) => this._abortRegistry.getExistingSignal(requestId),
     runTask: ({ requestId, continuation, nonce }, local) =>
-      this.tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
+      this.tasks.run(
         (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME,
         { requestId, continuation, nonce },
         {
           runId: `chat_${nonce}`,
           retain: false,
           metadata: { requestId },
+          start: "now",
           local
         }
       ),

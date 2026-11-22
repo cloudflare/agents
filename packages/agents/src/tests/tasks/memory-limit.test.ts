@@ -74,7 +74,7 @@ async function seedDoomedRun(
     seedTaskRun(state.storage, {
       runId,
       definition,
-      state: "pending",
+      status: "pending",
       nextAt: Date.now() - 1_000
     });
     await instance.lifecycle.rearmAlarm();
@@ -129,10 +129,10 @@ async function readBreakerView(name: string, runId: string) {
       await instance.lifecycle.start();
       const run = state.storage.sql
         .exec(
-          "SELECT state, next_at FROM cf_agents_task_runs WHERE run_id = ?",
+          "SELECT status, next_at FROM cf_agents_task_runs WHERE run_id = ?",
           runId
         )
-        .toArray()[0] as { state: string; next_at: number | null } | undefined;
+        .toArray()[0] as { status: string; next_at: number | null } | undefined;
       const wake = state.storage.sql
         .exec("SELECT time FROM cf_agents_jobs WHERE id = ?", `task:${runId}`)
         .toArray()[0] as { time: number } | undefined;
@@ -155,7 +155,7 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
     expect(view.budget).toBe(4);
     // The run survives the strike but is parked past the breaker's ~30s
     // backoff — including after a fresh start's reconcile + wake re-mirror.
-    expect(view.run?.state).not.toBe("failed");
+    expect(view.run?.status).not.toBe("error");
     expect(view.run?.next_at ?? 0).toBeGreaterThan(Date.now() + 20_000);
     expect(view.wake?.time ?? 0).toBeGreaterThan(Date.now() + 20_000);
   });
@@ -171,7 +171,7 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
     expect(view.budget).toBe(4);
     // The claim is stripped but the row stays `running`, so the backoff wake
     // reclaims it as an interrupted attempt with its step evidence intact.
-    expect(view.run?.state).toBe("running");
+    expect(view.run?.status).toBe("running");
     expect(view.run?.next_at ?? 0).toBeGreaterThan(Date.now() + 20_000);
     expect(view.wake?.time ?? 0).toBeGreaterThan(Date.now() + 20_000);
   });
@@ -186,11 +186,10 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
         async (instance: TaskHarnessObject, state) => {
           await state.storage.put(OOM_STRIKES_KEY, 1);
           await state.storage.put("oomLoopRemaining", 1);
-          await instance.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-            "twinLateOom",
-            undefined,
-            { runId }
-          );
+          await instance.tasks.run("twinLateOom", undefined, {
+            runId,
+            start: "alarm"
+          });
           backdateTaskWake(state.storage, runId);
           await instance.lifecycle.rearmAlarm();
           await (instance as unknown as { alarm(): Promise<void> }).alarm();
@@ -212,7 +211,7 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
     const view = await readBreakerView(name, runId);
     expect(view.strikes).toBe(2);
     expect(view.budget).toBe(0);
-    expect(view.run?.state).toBe("running");
+    expect(view.run?.status).toBe("running");
     expect(view.run?.next_at ?? 0).toBeGreaterThan(Date.now() + 20_000);
     expect(view.wake?.time ?? 0).toBeGreaterThan(Date.now() + 20_000);
   }, 15_000);
@@ -226,11 +225,10 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
         stub,
         async (instance: TaskHarnessObject, state) => {
           await state.storage.put("oomLoopRemaining", 1);
-          await instance.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-            "oomBeforeCleanSibling",
-            undefined,
-            { runId }
-          );
+          await instance.tasks.run("oomBeforeCleanSibling", undefined, {
+            runId,
+            start: "alarm"
+          });
           backdateTaskWake(state.storage, runId);
           await instance.lifecycle.rearmAlarm();
           await (instance as unknown as { alarm(): Promise<void> }).alarm();
@@ -274,11 +272,10 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
         stub,
         async (instance: TaskHarnessObject, state) => {
           await state.storage.put("oomLoopRemaining", 1);
-          await instance.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-            "lateOomStepLoop",
-            undefined,
-            { runId }
-          );
+          await instance.tasks.run("lateOomStepLoop", undefined, {
+            runId,
+            start: "alarm"
+          });
           backdateTaskWake(state.storage, runId);
           await instance.lifecycle.rearmAlarm();
           await (instance as unknown as { alarm(): Promise<void> }).alarm();
@@ -298,7 +295,7 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
     const view = await readBreakerView(name, runId);
     expect(view.strikes).toBe(1);
     expect(view.budget).toBe(0);
-    expect(view.run?.state).toBe("running");
+    expect(view.run?.status).toBe("running");
     expect(view.run?.next_at ?? 0).toBeGreaterThan(Date.now() + 20_000);
     expect(view.wake?.time ?? 0).toBeGreaterThan(Date.now() + 20_000);
   }, 10_000);
@@ -332,7 +329,7 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
     const view = await readBreakerView(name, runId);
     expect(view.strikes).toBe(1);
     expect(view.budget).toBe(0);
-    expect(view.run?.state).toBe("running");
+    expect(view.run?.status).toBe("running");
     expect(view.run?.next_at ?? 0).toBeGreaterThan(Date.now() + 20_000);
   }, 15_000);
 
@@ -344,10 +341,9 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
       stub,
       async (instance: TaskHarnessObject, state) => {
         await state.storage.put(OOM_STRIKES_KEY, 2);
-        const receipt = await instance.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-          "lateSuccess",
-          undefined
-        );
+        const receipt = await instance.tasks.run("lateSuccess", undefined, {
+          start: "alarm"
+        });
         backdateTaskWake(state.storage, receipt.runId);
         await instance.lifecycle.rearmAlarm();
         await (instance as unknown as { alarm(): Promise<void> }).alarm();
@@ -356,7 +352,7 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
         // so the stale strikes must survive until that work settles clean.
         expect(await state.storage.get(OOM_STRIKES_KEY)).toBe(2);
         await waitForStrikes(state.storage, (strikes) => strikes === undefined);
-        expect((await instance.tasks.get(receipt.runId))?.state).toBe(
+        expect((await instance.tasks.get(receipt.runId))?.status).toBe(
           "completed"
         );
       }
@@ -377,11 +373,10 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
           await instance.tasks.run("alarmSiblingSuccess", undefined, {
             runId: cleanRunId
           });
-          await instance.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-            "lateOomStepLoop",
-            undefined,
-            { runId: doomedRunId }
-          );
+          await instance.tasks.run("lateOomStepLoop", undefined, {
+            runId: doomedRunId,
+            start: "alarm"
+          });
           const past = Date.now() - 1_000;
           state.storage.sql.exec(
             `UPDATE cf_agents_jobs SET time = ? WHERE id = ?`,
@@ -409,14 +404,16 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     const doomed = await readBreakerView(name, doomedRunId);
-    expect(doomed.run?.state).toBe("failed");
+    expect(doomed.run?.status).toBe("error");
     expect(doomed.wake).toBeUndefined();
     expect(doomed.strikes).toBe(0);
     // The breaker reset the isolate; the original stub is broken with it.
     await runInDurableObject(
       env.TaskHarnessObject.getByName(name),
       async (instance: TaskHarnessObject) => {
-        expect((await instance.tasks.get(cleanRunId))?.state).toBe("completed");
+        expect((await instance.tasks.get(cleanRunId))?.status).toBe(
+          "completed"
+        );
       }
     );
   }, 15_000);
@@ -433,13 +430,13 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
         seedTaskRun(state.storage, {
           runId: "oom-executing",
           definition: "oomStepLoop",
-          state: "pending",
+          status: "pending",
           nextAt: Date.now() - 1_000
         });
         seedTaskRun(state.storage, {
           runId: "unrelated",
           definition: "checkpointing",
-          state: "pending",
+          status: "pending",
           nextAt: future
         });
         await instance.lifecycle.rearmAlarm();
@@ -453,7 +450,7 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
     expect(struck.run?.next_at ?? 0).toBeGreaterThan(Date.now() + 20_000);
 
     const unrelated = await readBreakerView(name, "unrelated");
-    expect(unrelated.run).toEqual({ state: "pending", next_at: future });
+    expect(unrelated.run).toEqual({ status: "pending", next_at: future });
     expect(unrelated.wake?.time).toBe(future);
   });
 
@@ -469,7 +466,7 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
         seedTaskRun(state.storage, {
           runId,
           definition: "oomStepLoop",
-          state: "pending",
+          status: "pending",
           nextAt: past
         });
         await instance.tasks.onMemoryLimit({
@@ -484,11 +481,11 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
         });
         const run = state.storage.sql
           .exec(
-            "SELECT state, next_at FROM cf_agents_task_runs WHERE run_id = ?",
+            "SELECT status, next_at FROM cf_agents_task_runs WHERE run_id = ?",
             runId
           )
           .toArray()[0];
-        expect(run).toEqual({ state: "pending", next_at: past });
+        expect(run).toEqual({ status: "pending", next_at: past });
         await instance.tasks.cancel(runId);
       }
     );
@@ -506,7 +503,7 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
         seedTaskRun(state.storage, {
           runId,
           definition: "oomStepLoop",
-          state: "pending",
+          status: "pending",
           nextAt: Date.now() - 1_000,
           retain: false,
           idempotencyKey: key
@@ -594,9 +591,13 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
             instance as unknown as { alarm(): Promise<void> }
           ).alarm();
           await new Promise((resolve) => setTimeout(resolve, 100));
-          await instance.tasks.__DO_NOT_USE_WILL_BREAK__enqueue("sleeper", {
-            ms: 1
-          });
+          await instance.tasks.run(
+            "sleeper",
+            {
+              ms: 1
+            },
+            { start: "alarm" }
+          );
           await (instance as unknown as { alarm(): Promise<void> }).alarm();
           await overlapping;
         }
@@ -640,7 +641,7 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
     // Sealed: the run is a persisted terminal failure, its wake is gone,
     // the strike counter reset, and the doomed handler stopped consuming
     // its budget — the loop is over, not limping on.
-    expect(view.run?.state).toBe("failed");
+    expect(view.run?.status).toBe("error");
     expect(view.wake).toBeUndefined();
     expect(view.strikes).toBe(0);
     expect(view.budget).toBe(7);
@@ -648,7 +649,7 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
     // A later clean alarm cycle must not revive it.
     await driveOomWake(name);
     const after = await readBreakerView(name, "oom-2");
-    expect(after.run?.state).toBe("failed");
+    expect(after.run?.status).toBe("error");
     expect(after.budget).toBe(7);
   });
 });

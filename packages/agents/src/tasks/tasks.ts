@@ -53,7 +53,7 @@ import type {
   TaskRunOptions,
   TaskRunRow,
   TaskRunSnapshot,
-  TaskRunState,
+  TaskStatus,
   TaskValue
 } from "./types";
 
@@ -104,7 +104,7 @@ export function setTaskRoutedMemoryLimitHandler(
 }
 
 const FIBER_SCHEMA_VERSION_KEY = "cf_agents:tasks_schema_version";
-/** 2 adds `cf_agents_task_checkpoint`. */
+/** 2 renames the run statuses and adds `cf_agents_task_checkpoint`. */
 const CURRENT_FIBER_SCHEMA_VERSION = 2;
 
 const DEFAULT_STEP_POLICY: ResolvedStepPolicy = {
@@ -150,10 +150,10 @@ const WAKE_JOB_RETRY = { maxAttempts: 1 } as const;
  */
 const DISPATCH_BUDGET_MS = 5_000;
 
-const TERMINAL_STATES: ReadonlySet<TaskRunState> = new Set([
+const TERMINAL_STATUSES: ReadonlySet<TaskStatus> = new Set([
   "completed",
-  "failed",
-  "cancelled"
+  "error",
+  "aborted"
 ]);
 
 /**
@@ -196,8 +196,8 @@ type TaskRouteMessage =
     };
 
 /**
- * Who drives an accepted run's first attempt: `warm` starts it detached in
- * the caller's invocation (the public `run()` behaviour), `queued` leaves it
+ * Who drives an accepted run's first attempt (`TaskRunOptions.start`):
+ * `warm` starts it detached in the caller's invocation, `queued` leaves it
  * to the durable wake, and `attached` lets the caller drive and await it.
  */
 type TaskStartMode = "warm" | "queued" | "attached";
@@ -212,13 +212,13 @@ type ActiveAttempt = {
 /** Filters accepted by {@link Tasks.list}. */
 export type TaskListOptions = {
   definition?: string;
-  status?: TaskRunState | TaskRunState[];
+  status?: TaskStatus | TaskStatus[];
   limit?: number;
 };
 
 /** Filters accepted by {@link Tasks.delete}. */
 export type TaskDeleteOptions = {
-  status?: Array<"completed" | "failed" | "cancelled">;
+  status?: Array<"completed" | "error" | "aborted">;
   settledBefore?: Date;
   limit?: number;
 };
@@ -366,19 +366,32 @@ export class Tasks<
   // ── Starting runs ────────────────────────────────────────────────────────
 
   /**
-   * Durably accept one run of a declared definition and return a receipt
-   * without waiting for terminal state. The same `idempotencyKey` or `runId`
-   * joins the existing run (`accepted: false`) instead of creating a second.
-   * A reused one with a different input throws an error named
-   * `TaskInputConflictError`; object key order does not count as different.
+   * Durably accept one run and return a receipt. The same `idempotencyKey`
+   * or `runId` joins the existing run (`accepted: false`) instead of
+   * creating a second. A reused one with a different input throws an error
+   * named `TaskInputConflictError`; object key order does not count as
+   * different. A framework definition (`register()`) joins whatever the
+   * input: its callers key a run by what it is for, not by its data.
    */
   async run<Name extends keyof Handlers & string>(
     definition: Name,
     input?: TaskInput<Handlers[Name]>,
     options?: TaskRunOptions
   ): Promise<TaskReceipt> {
-    this.#validateDefinitionName(definition);
-    return this.#accept(definition, input, options, "warm", true);
+    const framework = this.#registered.has(definition);
+    if (!framework) this.#validateDefinitionName(definition);
+    const start = options?.start;
+    const receipt = await this.#accept(
+      definition,
+      input,
+      options,
+      start === "alarm" ? "queued" : start === "now" ? "attached" : "warm",
+      !framework
+    );
+    if (start === "now" && receipt.accepted) {
+      await this.#executeRun(receipt.runId, options?.local);
+    }
+    return receipt;
   }
 
   /**
@@ -420,6 +433,7 @@ export class Tasks<
     const storage = this.lifecycle.storage;
     const version = (await storage.get<number>(FIBER_SCHEMA_VERSION_KEY)) ?? 0;
     if (version < CURRENT_FIBER_SCHEMA_VERSION) {
+      if (version === 1) this.#store.migrateStatuses();
       this.#store.ensureTables();
       await storage.put(FIBER_SCHEMA_VERSION_KEY, CURRENT_FIBER_SCHEMA_VERSION);
     }
@@ -522,7 +536,7 @@ export class Tasks<
     this.#store.sql`
       UPDATE cf_agents_task_runs
       SET next_at = ${Date.now() + this.#claimTimeoutMs()}, updated_at = ${Date.now()}
-      WHERE run_id = ${runId} AND state = 'running'
+      WHERE run_id = ${runId} AND status = 'running'
     `;
   }
 
@@ -671,69 +685,10 @@ export class Tasks<
            END,
            updated_at = ?
        WHERE run_id = ?
-         AND state IN ('pending', 'waiting', 'running')`,
+         AND status IN ('pending', 'running')`,
       [context.nextTime, context.nextTime, now, runId]
     );
     await this.#syncWake(runId, { struck: true });
-  }
-
-  /**
-   * @internal Framework aperture: durably accept one run — reserved
-   * (`__cf`-prefixed) definition names included, which the public `run()`
-   * refuses so users cannot start framework runs — and drive its first
-   * attempt in the caller's invocation, resolving when that attempt reaches
-   * its next durable boundary. The receipt's run may already be terminal
-   * when this resolves; callers that need the outcome read it from their own
-   * channel (the run handler settles it) or from the snapshot.
-   */
-  async __DO_NOT_USE_WILL_BREAK__runAttached(
-    definition: string,
-    input: unknown,
-    options?: TaskRunOptions & {
-      /** Handed to this first attempt as `step.local`; never stored. */
-      local?: unknown;
-    }
-  ): Promise<TaskReceipt> {
-    const receipt = await this.#acceptReserved(
-      definition,
-      input,
-      options,
-      "attached"
-    );
-    if (receipt.accepted) {
-      await this.#executeRun(receipt.runId, options?.local);
-    }
-    return receipt;
-  }
-
-  /**
-   * @internal Framework aperture: durably accept one run — reserved names
-   * included — and leave its first attempt to the durable queue wake instead
-   * of warm-starting it in the caller's invocation. Chat recovery uses this
-   * so a continuation always runs under an alarm, where `trackAlarmWork`
-   * keeps its model turn inside the memory-limit breaker domain.
-   */
-  async __DO_NOT_USE_WILL_BREAK__enqueue(
-    definition: string,
-    input: unknown,
-    options?: TaskRunOptions
-  ): Promise<TaskReceipt> {
-    return this.#acceptReserved(definition, input, options, "queued");
-  }
-
-  /** Accept a run of any resolvable definition, reserved names included. */
-  async #acceptReserved(
-    definition: string,
-    input: unknown,
-    options: TaskRunOptions | undefined,
-    startMode: TaskStartMode
-  ): Promise<TaskReceipt> {
-    if (!this.#hasDefinition(definition)) {
-      throw new Error(
-        `Unknown Task definition "${definition}": not declared on this Tasks`
-      );
-    }
-    return this.#accept(definition, input, options, startMode);
   }
 
   /**
@@ -748,7 +703,7 @@ export class Tasks<
     const rows = this.#store.sql<{ next_at: number | null }>`
       SELECT next_at FROM cf_agents_task_runs
       WHERE run_id = ${runId}
-        AND state IN ('pending', 'waiting', 'running')
+        AND status IN ('pending', 'running')
     `;
     const next = rows[0]?.next_at;
     return typeof next === "number" ? { rescheduleAt: next } : undefined;
@@ -772,7 +727,7 @@ export class Tasks<
     const rows = this.#store.sql<{ next_at: number | null }>`
       SELECT next_at FROM cf_agents_task_runs
       WHERE run_id = ${runId}
-        AND state IN ('pending', 'waiting', 'running')
+        AND status IN ('pending', 'running')
     `;
     const next = rows[0]?.next_at ?? null;
 
@@ -916,7 +871,7 @@ export class Tasks<
   async #syncAllWakes(): Promise<void> {
     const rows = this.#store.sql<{ run_id: string }>`
       SELECT run_id FROM cf_agents_task_runs
-      WHERE state IN ('pending', 'waiting', 'running')
+      WHERE status IN ('pending', 'running')
         AND next_at IS NOT NULL
     `;
     // On restart the mirror usually survived alongside the run row (same
@@ -962,7 +917,7 @@ export class Tasks<
         ? [options.status]
         : [];
     if (states.length > 0) {
-      query += ` AND state IN (${states.map(() => "?").join(", ")})`;
+      query += ` AND status IN (${states.map(() => "?").join(", ")})`;
       params.push(...states);
     }
     query += " ORDER BY created_at DESC, run_id DESC LIMIT ?";
@@ -988,7 +943,7 @@ export class Tasks<
   async cancel(runId: string, reason?: string): Promise<boolean> {
     await this.lifecycle.ready();
     const row = this.#store.getRun(runId);
-    if (!row || TERMINAL_STATES.has(row.state)) return false;
+    if (!row || TERMINAL_STATUSES.has(row.status)) return false;
 
     const active = this.#active.get(runId);
     if (active) {
@@ -1018,9 +973,9 @@ export class Tasks<
    */
   async delete(options: TaskDeleteOptions = {}): Promise<number> {
     await this.lifecycle.ready();
-    const states = options.status ?? ["completed", "failed", "cancelled"];
+    const states = options.status ?? ["completed", "error", "aborted"];
     if (states.length === 0) return 0;
-    let query = `SELECT run_id, definition FROM cf_agents_task_runs WHERE state IN (${states.map(() => "?").join(", ")})`;
+    let query = `SELECT run_id, definition FROM cf_agents_task_runs WHERE status IN (${states.map(() => "?").join(", ")})`;
     const params: (string | number)[] = [...states];
     if (options.settledBefore) {
       query += " AND settled_at < ?";
@@ -1135,7 +1090,7 @@ export class Tasks<
         runId: existing.run_id,
         definition,
         accepted: false,
-        state: existing.state,
+        status: existing.status,
         createdAt: existing.created_at
       };
     }
@@ -1144,7 +1099,7 @@ export class Tasks<
     const now = Date.now();
     this.#store.sql`
       INSERT INTO cf_agents_task_runs
-        (run_id, definition, input, state, metadata, idempotency_key, retain,
+        (run_id, definition, input, status, metadata, idempotency_key, retain,
          attempt, next_at, cancel_requested, created_at, updated_at)
       VALUES
         (${runId}, ${definition}, ${inputJson}, 'pending', ${metadataJson},
@@ -1157,14 +1112,14 @@ export class Tasks<
     // Warm path: begin the first attempt immediately when the host is past
     // startup. The durable deadline above is authoritative either way.
     if (startMode === "warm" && this.lifecycle.status() !== "starting") {
-      void this.#executeRun(runId).catch(() => {});
+      void this.#executeRun(runId, options.local).catch(() => {});
     }
 
     return {
       runId,
       definition,
       accepted: true,
-      state: "pending",
+      status: "pending",
       createdAt: now
     };
   }
@@ -1175,7 +1130,7 @@ export class Tasks<
   async #executeRun(runId: string, local?: unknown): Promise<void> {
     if (this.#active.has(runId)) return;
     const row = this.#store.getRun(runId);
-    if (!row || TERMINAL_STATES.has(row.state)) return;
+    if (!row || TERMINAL_STATUSES.has(row.status)) return;
 
     const now = Date.now();
     if (row.cancel_requested === 1) {
@@ -1198,8 +1153,8 @@ export class Tasks<
     // results, and the interrupted step rides `step.interrupted` as the
     // durable evidence the handler branches on.
     const interrupted =
-      row.state === "running" ? this.#interruptedStep(runId) : null;
-    if (row.state === "running") {
+      row.status === "running" ? this.#interruptedStep(runId) : null;
+    if (row.status === "running") {
       this.#emit("task:attempt:interrupted", {
         runId,
         definition: row.definition,
@@ -1212,12 +1167,12 @@ export class Tasks<
     const attempt = row.attempt + 1;
     this.#store.sql`
       UPDATE cf_agents_task_runs
-      SET state = 'running', attempt = ${attempt}, generation = ${generation},
+      SET status = 'running', attempt = ${attempt}, generation = ${generation},
           started_at = coalesce(started_at, ${now}),
           next_at = ${now + this.#claimTimeoutMs()}, wait_reason = NULL,
           updated_at = ${now}
       WHERE run_id = ${runId}
-        AND state IN ('pending', 'waiting', 'running')
+        AND status IN ('pending', 'running')
     `;
     // Mirror the claim deadline before the handler runs, not after: a
     // routed run's root has no other way to learn it, and a push here
@@ -1300,9 +1255,9 @@ export class Tasks<
         runId,
         generation,
         `UPDATE cf_agents_task_runs
-         SET state = 'completed', result = ?, generation = NULL, next_at = NULL,
+         SET status = 'completed', result = ?, generation = NULL, next_at = NULL,
              settled_at = ?, updated_at = ?
-         WHERE run_id = ? AND generation = ? AND state = 'running'`,
+         WHERE run_id = ? AND generation = ? AND status = 'running'`,
         [resultJson, Date.now(), Date.now()]
       );
       if (settled) {
@@ -1360,9 +1315,9 @@ export class Tasks<
         runId,
         generation,
         `UPDATE cf_agents_task_runs
-         SET state = 'waiting', wait_reason = ?, next_at = ?, generation = NULL,
+         SET status = 'pending', wait_reason = ?, next_at = ?, generation = NULL,
              updated_at = ?
-         WHERE run_id = ? AND generation = ? AND state = 'running'`,
+         WHERE run_id = ? AND generation = ? AND status = 'running'`,
         [thrown.reason, thrown.wakeAt, Date.now()]
       );
       if (suspended) {
@@ -1425,7 +1380,7 @@ export class Tasks<
   #interruptedStep(runId: string): { name: string; attempt: number } | null {
     const rows = this.#store.sql<{ step_name: string; attempt: number }>`
       SELECT step_name, attempt FROM cf_agents_task_steps
-      WHERE run_id = ${runId} AND state = 'running'
+      WHERE run_id = ${runId} AND status = 'running'
       ORDER BY started_at DESC
       LIMIT 1
     `;
@@ -1450,19 +1405,19 @@ export class Tasks<
         runId,
         generation,
         `UPDATE cf_agents_task_runs
-         SET state = 'cancelled', cancel_requested = 1, cancel_reason = ?,
+         SET status = 'aborted', cancel_requested = 1, cancel_reason = ?,
              generation = NULL, next_at = NULL, settled_at = ?, updated_at = ?
          WHERE run_id = ? AND generation = ?
-           AND state = 'running'`,
+           AND status = 'running'`,
         [reason ?? null, now, now]
       );
     } else {
       const written = this.#store.write(
         `UPDATE cf_agents_task_runs
-         SET state = 'cancelled', cancel_requested = 1, cancel_reason = ?,
+         SET status = 'aborted', cancel_requested = 1, cancel_reason = ?,
              generation = NULL, next_at = NULL, settled_at = ?, updated_at = ?
          WHERE run_id = ?
-           AND state IN ('pending', 'waiting', 'running')`,
+           AND status IN ('pending', 'running')`,
         [reason ?? null, now, now, runId]
       );
       settled = written > 0;
@@ -1494,19 +1449,19 @@ export class Tasks<
         runId,
         generation,
         `UPDATE cf_agents_task_runs
-         SET state = 'failed', error_name = ?, error_message = ?,
+         SET status = 'error', error_name = ?, error_message = ?,
              generation = NULL, next_at = NULL, settled_at = ?, updated_at = ?
          WHERE run_id = ? AND generation = ?
-           AND state = 'running'`,
+           AND status = 'running'`,
         [error.name, error.message, now, now]
       );
     } else {
       const written = this.#store.write(
         `UPDATE cf_agents_task_runs
-         SET state = 'failed', error_name = ?, error_message = ?,
+         SET status = 'error', error_name = ?, error_message = ?,
              generation = NULL, next_at = NULL, settled_at = ?, updated_at = ?
          WHERE run_id = ?
-           AND state IN ('pending', 'waiting', 'running')`,
+           AND status IN ('pending', 'running')`,
         [error.name, error.message, now, now, runId]
       );
       settled = written > 0;
@@ -1541,12 +1496,12 @@ export class Tasks<
     // interrupted attempt: make it due immediately for reclaim and replay.
     this.#store.sql`
       UPDATE cf_agents_task_runs SET next_at = ${now}, updated_at = ${now}
-      WHERE state = 'running' AND generation IS NOT NULL
+      WHERE status = 'running' AND generation IS NOT NULL
     `;
     // Non-terminal rows must always carry a deadline; repair any without one.
     this.#store.sql`
       UPDATE cf_agents_task_runs SET next_at = ${now}, updated_at = ${now}
-      WHERE state IN ('pending', 'waiting') AND next_at IS NULL
+      WHERE status = 'pending' AND next_at IS NULL
     `;
   }
 

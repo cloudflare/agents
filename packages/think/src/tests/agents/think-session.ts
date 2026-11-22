@@ -181,11 +181,12 @@ async function recoverInterruptedTurnsForTest(agent: Think): Promise<void> {
   for (const run of runs) {
     // Accepted again under its id, so this invocation runs it.
     agent.sql`DELETE FROM cf_agents_task_runs WHERE run_id = ${run.run_id}`;
-    await agent.tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
-      Think.CHAT_FIBER_NAME,
-      JSON.parse(run.input),
-      { runId: run.run_id, retain: false, metadata: JSON.parse(run.metadata) }
-    );
+    await agent.tasks.run(Think.CHAT_FIBER_NAME, JSON.parse(run.input), {
+      runId: run.run_id,
+      retain: false,
+      metadata: JSON.parse(run.metadata),
+      start: "now"
+    });
   }
   await (
     agent as unknown as { _fibers: { recover(): Promise<void> } }
@@ -9943,11 +9944,10 @@ export class ThinkProgrammaticTestAgent extends Think {
       data,
       delaySeconds: 60
     };
-    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-      CHAT_RECOVERY_TASK_NAME,
-      input,
-      chatRecoveryTaskRunOptions(input, "redefer")
-    );
+    await this.tasks.run(CHAT_RECOVERY_TASK_NAME, input, {
+      ...chatRecoveryTaskRunOptions(input, "redefer"),
+      start: "alarm"
+    });
   }
 
   /** Mark matching Task attempts terminal without removing their metadata. */
@@ -13161,11 +13161,10 @@ export class ThinkRecoveryTestAgent extends Think {
       data,
       delaySeconds: 60
     };
-    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-      CHAT_RECOVERY_TASK_NAME,
-      input,
-      chatRecoveryTaskRunOptions(input, "redefer")
-    );
+    await this.tasks.run(CHAT_RECOVERY_TASK_NAME, input, {
+      ...chatRecoveryTaskRunOptions(input, "redefer"),
+      start: "alarm"
+    });
   }
 
   async getIncidentAttemptForTest(incidentId: string): Promise<{
@@ -13196,11 +13195,10 @@ export class ThinkRecoveryTestAgent extends Think {
       data,
       delaySeconds: 60
     };
-    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-      CHAT_RECOVERY_TASK_NAME,
-      input,
-      chatRecoveryTaskRunOptions(input, "redefer")
-    );
+    await this.tasks.run(CHAT_RECOVERY_TASK_NAME, input, {
+      ...chatRecoveryTaskRunOptions(input, "redefer"),
+      start: "alarm"
+    });
   }
 
   async getScheduledChatRecoveryPayloadForTest(
