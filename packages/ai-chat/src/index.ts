@@ -30,11 +30,13 @@ import { autoTransformMessages } from "./ai-chat-v5-migration";
 import {
   hydrateMessages,
   liftLegacyMessages,
+  mirrorTranscript,
+  planPersist,
+  rowsPastRetention,
+  staleMessageIds,
   transcriptJson
 } from "./transcript";
 import {
-  keepStoredReplies,
-  reconcileMessages,
   reconcileOrphanPartial,
   ChatRequestContext,
   interruptedToolPartAsError,
@@ -89,7 +91,7 @@ import {
   truncateProviderToolPayloads
 } from "agents/chat";
 import type { Streams } from "agents/streams";
-import { Sessions, type Session, type SessionMessage } from "agents/sessions";
+import { Sessions, type Session } from "agents/sessions";
 import {
   CHAT_RECOVERY_TASK_NAME,
   chatRecoveryProgressReader,
@@ -1083,7 +1085,13 @@ export class AIChatAgent<
 
     // `this.messages` mirrors durable storage through the Sessions change
     // feed rather than being hand-patched at each write site.
-    this.#subscribeToSessionChanges();
+    mirrorTranscript(
+      this.#session,
+      () => this.messages,
+      (messages) => {
+        this.messages = messages;
+      }
+    );
 
     const _onStart = this.onStart.bind(this);
     this.onStart = async (props?: Props) => {
@@ -1843,14 +1851,6 @@ export class AIChatAgent<
   }
 
   /**
-   * Write the request context to SQLite (the shared `ChatRequestContext`).
-   * @internal
-   */
-  private _persistRequestContext() {
-    this._requestContext.persist();
-  }
-
-  /**
    * User message ids a WebSocket chat request originated from (#2280), keyed
    * by request id while the request is handled. After that (or after a
    * restart) the request's stream metadata is the fallback.
@@ -1982,30 +1982,6 @@ export class AIChatAgent<
   }
 
   /**
-   * Mirror `this.messages` from the Sessions change feed. Every durable write
-   * dispatches here synchronously, so write sites never hand-patch the
-   * cache.
-   */
-  #subscribeToSessionChanges(): void {
-    this.#session.mirror<UIMessage>({
-      get: () => this.messages,
-      set: (messages) => {
-        this.messages = messages;
-      },
-      transform: (message) => this.#messageForCache(message)
-    });
-  }
-
-  /**
-   * Turn a stored row into its in-memory form. A stored row is exactly what
-   * the write returned, so this never costs a re-read.
-   */
-  #messageForCache(message: SessionMessage): UIMessage {
-    const stored = message as UIMessage;
-    return autoTransformMessages([stored])[0] ?? stored;
-  }
-
-  /**
    * @param signal - The signal of the turn `fn` runs, if it runs one. What
    *   a stopped turn throws is not an error: `onError` is not called for it.
    */
@@ -2073,13 +2049,6 @@ export class AIChatAgent<
     await this.persistMessages(mergedMessages, [], {
       _deleteStaleRows: true
     });
-  }
-
-  private _setRequestContext(
-    clientTools?: ClientToolSchema[],
-    body?: Record<string, unknown>
-  ) {
-    this._requestContext.set({ clientTools, body });
   }
 
   private _messagesForClientSync(): readonly UIMessage[] {
@@ -3209,7 +3178,7 @@ export class AIChatAgent<
     const { continuation } = turn;
     const clientTools = pinnedOr(turn.clientTools, () => this._lastClientTools);
     const body = pinnedOr(turn.body, () => this._lastBody);
-    if (turn.storeContext) this._setRequestContext(clientTools, body);
+    if (turn.storeContext) this._requestContext.set({ clientTools, body });
     return this._runServerTurnReply(requestId, abortSignal, {
       clientTools,
       body,
@@ -4732,32 +4701,14 @@ export class AIChatAgent<
     const reset = (): boolean => turn?.isCurrent() === false;
     if (reset()) return;
     // Snapshot the pre-write transcript: `this.messages` is mirrored from the
-    // change feed and therefore mutates as the loop below writes.
+    // change feed and therefore mutates as the writes below land.
     const priorMessages = [...this.messages];
-    const priorById = new Map(priorMessages.map((m) => [m.id, m]));
-    const reconciled = reconcileMessages(messages, priorMessages, (msg) =>
-      this._sanitizeMessageForPersistence(msg)
+    const { merged: mergedMessages, toWrite } = planPersist(
+      messages,
+      priorMessages,
+      (message) => this._sanitizeMessageForPersistence(message),
+      turn
     );
-    // A client's copy of a reply can be behind the stored one (the tab that
-    // pressed stop has one chunk fewer). It never shortens the stored reply.
-    const hold = turn?.hold;
-    const kept = turn?.clientCopy
-      ? keepStoredReplies(reconciled, priorMessages)
-      : reconciled;
-    const mergedMessages =
-      hold && hold.size > 0 ? kept.filter((m) => !hold.has(m.id)) : kept;
-
-    const toWrite: UIMessage[] = [];
-    for (const message of mergedMessages) {
-      const resolved = this._sanitizeMessageForPersistence(message);
-      // The live array mirrors storage, so a message serializing to what it
-      // already holds is already stored. Comparing here is a string compare;
-      // letting Sessions discover it would cost a row read and, for media, a
-      // decode and hash of every payload on every turn.
-      const prior = priorById.get(resolved.id);
-      if (prior && JSON.stringify(prior) === JSON.stringify(resolved)) continue;
-      toWrite.push(resolved);
-    }
     // The cutover: a persist that carries the finished turn's message
     // lands every changed message in the same transaction that settles the
     // stream and drops its rows. A persist of other messages (an override
@@ -4799,35 +4750,16 @@ export class AIChatAgent<
       }
     }
 
-    // Regeneration can submit a strict subset of the server transcript. Keep
-    // the old subset guard, but delete through Sessions so descendants splice
-    // to their grandparent instead of breaking the active path.
     if (reset()) return;
     if (options?._deleteStaleRows) {
-      const serverIds = new Set(priorMessages.map((message) => message.id));
-      const isSubsetOfServer = mergedMessages.every((message) =>
-        serverIds.has(message.id)
+      await this._deleteMessagesByIds(
+        staleMessageIds(mergedMessages, priorMessages, this.messages)
       );
-      if (isSubsetOfServer) {
-        const keepIds = new Set(mergedMessages.map((message) => message.id));
-        await this._deleteMessagesByIds(
-          this.messages
-            .map((message) => message.id)
-            .filter((id) => !keepIds.has(id))
-        );
-      }
     }
-
-    // Retention counts STORED rows, not the hydrated window: a transcript
-    // larger than the hydration budget holds rows this.messages never saw.
     if (this.maxPersistedMessages != null) {
-      const stored = await this.#session.getHistoryRowStats();
-      const excess = stored.length - this.maxPersistedMessages;
-      if (excess > 0) {
-        await this._deleteMessagesByIds(
-          stored.slice(0, excess).map((row) => row.id)
-        );
-      }
+      await this._deleteMessagesByIds(
+        await rowsPastRetention(this.#session, this.maxPersistedMessages)
+      );
     }
 
     this._broadcastChatMessage(
