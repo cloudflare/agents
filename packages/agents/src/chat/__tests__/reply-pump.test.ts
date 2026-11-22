@@ -33,6 +33,10 @@ class FakeStreamLog implements ReplyStreamLog {
   readonly calls: string[] = [];
   readonly chunks: string[] = [];
   started: ReplyStreamStart | undefined;
+  origins: string[] | undefined = undefined;
+  originMessageIds(): string[] | undefined {
+    return this.origins;
+  }
   start(_requestId: string, options?: ReplyStreamStart): string {
     this.started = options;
     this.calls.push("start");
@@ -901,6 +905,20 @@ describe("pumpReply, review findings", () => {
     expect(result).toEqual({ status: "error", error: "Stream error" });
     // Stored as cut off, not as a finished reply.
     expect(stored[0].message.metadata).toEqual({ settled: true });
+  });
+
+  it("names the request's user messages on its terminal frame", async () => {
+    const { host, frames, streams } = fakeHost({
+      store: async (message) => {
+        // The cutover drops the stream that recorded them.
+        streams.origins = undefined;
+        return message.id;
+      }
+    });
+    streams.origins = ["u1"];
+    await pumpReply(input({ source: source(textReply) }), host);
+    expect(frames.at(-1)).toMatchObject({ done: true, messageIds: ["u1"] });
+    expect(frames[0].messageIds).toBeUndefined();
   });
 
   it("runs the response hook when an RPC caller's onDone rejects", async () => {

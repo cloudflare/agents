@@ -70,6 +70,8 @@ export type ReplyFrame = {
   continuation?: true;
   /** The message a continuation's chunks go into (chunk frames). */
   messageId?: string;
+  /** The user messages the request answers (terminal and error frames). */
+  messageIds?: string[];
 };
 
 /**
@@ -429,11 +431,15 @@ export async function pumpReply(
   };
   input.started?.();
 
+  // Read now: terminal frames wait for the store, and the stream that
+  // records the request's origin ids can be gone by then.
+  const messageIds = streams.originMessageIds(requestId);
   const frame = (fields: Omit<ReplyFrame, "type" | "id">): ReplyFrame => ({
     type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
     id: requestId,
     ...fields,
-    ...(continuation && { continuation: true })
+    ...(continuation && { continuation: true }),
+    ...(messageIds && (fields.done || fields.error) && { messageIds })
   });
   // A continuation's chunks name the message they go into (D70).
   const chunkMessageId = continuation ? accumulator.messageId : undefined;

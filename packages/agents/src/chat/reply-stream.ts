@@ -78,6 +78,8 @@ export interface ReplyFlushState {
  */
 export interface ReplyStreamLog {
   start(requestId: string, options?: ReplyStreamStart): string;
+  /** The user message ids the request answers (terminal frames echo them). */
+  originMessageIds(requestId: string): string[] | undefined;
   store(
     streamId: string,
     chunk: StreamChunkData,
@@ -101,6 +103,10 @@ export class ReplyStreams implements ReplyStreamLog {
 
   private get stream(): ResumableStream {
     return this.host.resumable();
+  }
+
+  originMessageIds(requestId: string): string[] | undefined {
+    return this.host.originMessageIds(requestId);
   }
 
   /** Start the stream for a reply. */
