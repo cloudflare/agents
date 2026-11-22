@@ -1192,7 +1192,7 @@ describe("SubAgent", () => {
     // has a wake mirrored on the root.
     expect(first).toBe("simulated fiber wake route failure");
     expect(await agent.subAgentRunningFiberCount("wake-failure-child")).toBe(1);
-    expect(await agent.fiberWakeOwners()).toHaveLength(1);
+    await expectFiberWakeOwners(agent, 1);
 
     await agent.subAgentReleaseHeldFiber("wake-failure-child");
     for (let attempt = 0; attempt < 50; attempt++) {
