@@ -442,7 +442,11 @@ export interface DispatchRecoveredTurnInput<TClassify> {
   detail: TClassify;
 }
 
-/** A chat turn whose isolate died before it finished, as its record left it. */
+/**
+ * A chat turn whose isolate died before it finished, as its record left it.
+ *
+ * @internal
+ */
 export interface InterruptedChatTurn {
   /** The turn's request id. */
   requestId: string;

@@ -474,7 +474,6 @@ export {
   type ChatRecoveryScheduleCallback,
   type ChatRecoveryAdapter,
   type ChatFiberWakeHooks,
-  type InterruptedChatTurn,
   type ChatStreamStatus,
   type ResolvedRecoveryStream,
   type ClassifyRecoveredTurnInput,
