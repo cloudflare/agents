@@ -1977,14 +1977,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         for (const message of changed) {
           this._patchCachedMessage(await this._updateMessageInHistory(message));
         }
-        this._broadcastMessages();
+        this._frames.broadcastMessages(this.messages);
       },
       // The Session splices a removed message's children onto its parent.
       // The broadcast carries the whole list, so every tab drops it.
       remove: async (ids) => {
         await this.session.deleteMessages(ids);
         await this._cfTranscript.sync();
-        this._broadcastMessages();
+        this._frames.broadcastMessages(this.messages);
       },
       emitRepaired: (event) => this._emit("chat:transcript:repaired", event)
     };
@@ -2226,7 +2226,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         this._emit("chat:continuation:dropped", { ...event }),
       stopped: (requestId, reason) => this._afterStop(requestId, reason),
       // A waiting message that will not join: tabs stop drawing it.
-      waitingChanged: () => this._broadcastMessages()
+      waitingChanged: () => this._frames.broadcastMessages(this.messages)
     },
     {
       defaultDebounceMs: Think.MESSAGE_DEBOUNCE_MS,
@@ -2368,7 +2368,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     storedOriginIds: (requestId) =>
       this._resumableStream.getOriginMessageIds(requestId),
     recoveryOriginIds: () => this._activeChatRecoveryOriginIds,
-    clientView: (messages) => this._turns.clientView(messages)
+    clientView: (messages) => this._turns.clientView(messages),
+    listsReachResumingTabs: true
   });
   /** Lazily-built shared resume-handshake driver (Tier-2). */
   private _resumeHandshakeInstance: ResumeHandshake | null = null;
@@ -4638,7 +4639,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           )) {
             await this._appendMessageToHistory(msg);
           }
-          this._broadcastMessages();
+          this._frames.broadcastMessages(this.messages);
         },
         // The caller's tools are this turn's only, and it has no body.
         pinned: { clientTools: clientTools ?? null, body: null },
@@ -4943,7 +4944,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   async clearMessages(): Promise<void> {
     this.resetTurnState();
     await this._clearHistory();
-    this._broadcast({ type: MSG_CHAT_CLEAR });
+    this.broadcast(JSON.stringify({ type: MSG_CHAT_CLEAR }));
   }
 
   protected formatAgentToolInput(input: unknown): UIMessage {
@@ -7068,7 +7069,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // ride along on the turn's next broadcast.
     if (this._insideInferenceLoop) return;
     if (options?.broadcast !== false) {
-      this._broadcastMessages();
+      this._frames.broadcastMessages(this.messages);
     }
   }
 
@@ -7118,7 +7119,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           await this._appendMessageToHistory(msg);
         }
         options?.onMessagesApplied?.();
-        this._broadcastMessages();
+        this._frames.broadcastMessages(this.messages);
       },
       pinned: { body: options?.body, clientTools: options?.clientTools },
       model: {
@@ -7934,7 +7935,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         if (!reconciledTurn) return null;
 
         // Other tabs see the new messages as queued.
-        this._broadcastMessages(connection ? [connection.id] : []);
+        this._frames.broadcastMessages(
+          this.messages,
+          connection ? [connection.id] : []
+        );
         queuedViewsAtAccept = this._turns.queuedViews;
         return { branchParentId: reconciledTurn.branchParentId, generation };
       },
@@ -7966,7 +7970,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         // The tab that sent them draws them already, unless it was since
         // shown them as queued.
         if (joined) {
-          this._broadcastMessages(
+          this._frames.broadcastMessages(
+            this.messages,
             connection && this._turns.queuedViews === queuedViewsAtAccept
               ? [connection.id]
               : []
@@ -8187,8 +8192,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     this._pendingResumeConnections.clear();
     this._requestContext.clear();
     await this._clearHistory();
-    this._broadcast(
-      { type: MSG_CHAT_CLEAR },
+    this.broadcast(
+      JSON.stringify({ type: MSG_CHAT_CLEAR }),
       connection ? [connection.id] : undefined
     );
   }
@@ -9592,7 +9597,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     if (owner && parts && parts !== owner.parts) {
       const safe = await this._updateMessageInHistory({ ...owner, parts });
       this._patchCachedMessage(safe);
-      this._broadcast({ type: MSG_MESSAGE_UPDATED, message: safe });
+      this.broadcast(
+        JSON.stringify({ type: MSG_MESSAGE_UPDATED, message: safe })
+      );
     }
     await this._forgetResolvedPause(toolCallId);
   }
@@ -9686,7 +9693,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         return safe;
       },
       broadcast: (message) =>
-        this._broadcast({ type: MSG_MESSAGE_UPDATED, message })
+        this.broadcast(JSON.stringify({ type: MSG_MESSAGE_UPDATED, message }))
     });
   }
 
@@ -11150,7 +11157,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   private _rollbackDroppedSubmit(connection: Connection): void {
-    connection.send(JSON.stringify(this._messagesFrame()));
+    connection.send(JSON.stringify(this._frames.messagesFrame(this.messages)));
   }
 
   // ── Auto-continuation ──────────────────────────────────────────
@@ -11884,7 +11891,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     Array<Record<string, unknown>>
   > {
     const messages: Array<Record<string, unknown>> = [
-      this._messagesFrame({ connect: true })
+      this._frames.messagesFrame(this.messages, { connect: true })
     ];
     // Replay an in-progress "recovering…" status so a client that connects
     // mid-recovery reads the turn as working rather than frozen (#1620). This
@@ -11962,24 +11969,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     this._broadcastMessages();
   }
 
-  private _broadcast(message: Record<string, unknown>, exclude?: string[]) {
-    this.broadcast(JSON.stringify(message), exclude);
-  }
-
-  /**
-   * The message list tabs are sent: the transcript, then the messages
-   * waiting requests hold, named in `queuedMessageIds`.
-   */
-  private _messagesFrame(extra?: Record<string, unknown>) {
-    return {
-      type: MSG_CHAT_MESSAGES,
-      ...this._turns.clientView(this.messages),
-      ...extra
-    };
-  }
-
+  /** Kept for the stream code pump is rewriting; use `_frames.broadcastMessages`. */
   private _broadcastMessages(exclude?: string[]) {
-    this._broadcast(this._messagesFrame(), exclude);
+    this._frames.broadcastMessages(this.messages, exclude);
   }
 }
 
