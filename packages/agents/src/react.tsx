@@ -20,12 +20,14 @@ import {
   createCloseClassifier,
   nativeCall,
   NativeCallQueue,
-  reconnectDefaults,
-  reconnectTimingFor,
-  firstRetryDelay,
-  isLocalClose,
   splitCallOptions
 } from "./client";
+import {
+  firstRetryDelay,
+  isLocalClose,
+  reconnectDefaults,
+  reconnectTimingFor
+} from "./reconnect-timing";
 import {
   boundCapnWebSocket,
   type CapnWebSocket
