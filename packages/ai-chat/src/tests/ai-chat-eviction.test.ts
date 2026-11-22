@@ -204,6 +204,7 @@ describe("AIChatAgent chat recovery at startup", () => {
       persistMessages(messages: ChatMessage[]): Promise<void>;
       insertLegacyChatFiberForTest(requestId: string): Promise<void>;
       getOnChatMessageCallCount(): Promise<number>;
+      getPersistedMessages(): Promise<ChatMessage[]>;
       getChatRecoveryIncidentsForTest(): Promise<
         Array<{ status: string; reason?: string }>
       >;
@@ -226,11 +227,22 @@ describe("AIChatAgent chat recovery at startup", () => {
       room
     )) as unknown as typeof stub;
 
-    // The stored reply is the latest message, so recovery continues it.
-    await waitFor(
-      async () => (await fresh.getOnChatMessageCallCount()) >= 1,
-      8000
-    );
+    // The stored reply is the latest message, so recovery continues it: the
+    // continuation is stored on that same reply, after its saved text.
+    const replyText = (messages: ChatMessage[]) =>
+      messages
+        .find((message) => message.id === "boot-assistant")
+        ?.parts.filter((part) => part.type === "text")
+        .map((part) => (part as { text: string }).text)
+        .join("") ?? "";
+    await waitFor(async () => {
+      const messages = await fresh.getPersistedMessages();
+      return (
+        messages.at(-1)?.id === "boot-assistant" &&
+        replyText(messages).length > "Partial".length
+      );
+    }, 8000);
+    expect(replyText(await fresh.getPersistedMessages())).toMatch(/^Partial/);
     const incidents = await fresh.getChatRecoveryIncidentsForTest();
     expect(
       incidents.some((incident) => incident.reason === "conversation_changed")
