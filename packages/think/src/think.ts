@@ -12588,7 +12588,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     );
   }
 
-  private async _fireResponseHook(result: ChatResponseResult): Promise<void> {
+  private async _fireResponseHook(
+    result: ChatResponseResult,
+    options: { recordTerminal?: boolean } = {}
+  ): Promise<void> {
     // Surface advisory reply attachments recorded during this turn.
     result.attachments = this.replyAttachments(result.requestId);
     // Record the channel-level delivery for this turn (the turn-scoped channel
@@ -12607,11 +12610,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     await this._renderChannelAttachments(result.attachments);
     // Record the terminal status durably so a client connecting after the turn
     // ended still learns its outcome (see `_buildIdleConnectMessages`).
-    await this._recordTerminalChatStatus(
-      result.status,
-      result.requestId,
-      result.error ?? "The assistant was interrupted."
-    );
+    if (options.recordTerminal !== false) {
+      await this._recordTerminalChatStatus(
+        result.status,
+        result.requestId,
+        result.error ?? "The assistant was interrupted."
+      );
+    }
     // A hook a hook started (a turn it ran) is skipped. The guard follows
     // the call chain, not the instance: an owed hook the Outbox fires beside
     // a live turn's hook runs too.
@@ -12684,14 +12689,20 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   private async _fireOwedResponseHook(hook: OwedResponseHook): Promise<void> {
     const message = await this.session.getMessage(hook.messageId);
     if (!message) return;
-    await this._fireResponseHook({
-      message: message as UIMessage,
-      requestId: hook.requestId,
-      continuation: hook.continuation,
-      status: hook.status,
-      ...(hook.error !== undefined && { error: hook.error }),
-      recovered: true
-    });
+    await this._fireResponseHook(
+      {
+        message: message as UIMessage,
+        requestId: hook.requestId,
+        continuation: hook.continuation,
+        status: hook.status,
+        ...(hook.error !== undefined && { error: hook.error }),
+        recovered: true
+      },
+      // The Outbox can fire this after later turns ended: their terminal
+      // status is the one a reconnecting client must read, so only the
+      // latest reply records its own.
+      { recordTerminal: this.messages.at(-1)?.id === hook.messageId }
+    );
   }
 
   /**
