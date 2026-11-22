@@ -219,7 +219,7 @@ describe("detached agent-tool delivery (#1752)", () => {
     agent.seedDetachedRunForTest("run-cadence");
     await agent.detachedReconcileTickForTest(0);
     expect(await agent.detachedBackboneSchedulesForTest()).toEqual([
-      { delayInSeconds: 15, payload: { cadenceIndex: 1 } }
+      { delayInSeconds: 15, cadenceIndex: 1 }
     ]);
 
     const capped = await getAgentByName(
@@ -229,7 +229,7 @@ describe("detached agent-tool delivery (#1752)", () => {
     capped.seedDetachedRunForTest("run-cadence-cap");
     await capped.detachedReconcileTickForTest(2);
     expect(await capped.detachedBackboneSchedulesForTest()).toEqual([
-      { delayInSeconds: 120, payload: { cadenceIndex: 3 } }
+      { delayInSeconds: 120, cadenceIndex: 3 }
     ]);
   });
 
@@ -311,8 +311,27 @@ describe("detached agent-tool delivery (#1752)", () => {
     agent.seedDetachedRunForTest("run-arm-race");
     const schedules = await agent.armDetachedBackboneConcurrentlyForTest(5);
 
-    expect(schedules).toEqual([
-      { delayInSeconds: 5, payload: { cadenceIndex: 0 } }
+    expect(schedules).toEqual([{ delayInSeconds: 5, cadenceIndex: 0 }]);
+  });
+
+  it("runs a backbone schedule an earlier version armed, then carries on as a job", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `detached-legacy-schedule-${crypto.randomUUID()}`
+    );
+    // Past its budget, so the backbone gives up on it when it runs.
+    agent.seedDetachedRunForTest("run-legacy", Date.now() - 1000);
+    await agent.fireLegacyBackboneScheduleForTest();
+
+    const forRun = (await agent.getDetachedDeliveryLog()).filter(
+      (e) => e.runId === "run-legacy" && e.hook === "onDetachedDone"
+    );
+    expect(forRun).toEqual([
+      expect.objectContaining({
+        status: "interrupted",
+        reason: "budget-exceeded"
+      })
     ]);
+    expect(await agent.detachedBackboneSchedulesForTest()).toHaveLength(1);
   });
 });

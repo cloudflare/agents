@@ -82,8 +82,8 @@ type DetachedDeliveryLogEntry = {
 };
 
 type DetachedBackboneSchedule = {
-  delayInSeconds?: number;
-  payload: unknown;
+  delayInSeconds: number;
+  cadenceIndex: number | undefined;
 };
 
 /** The child name a seeded run row records. */
@@ -105,7 +105,7 @@ export class TestAgentToolReplayAgent extends Agent {
   }
 
   private get _agentTool(): AgentToolInternals {
-    return this as unknown as AgentToolInternals;
+    return this._agentRuns as unknown as AgentToolInternals;
   }
 
   /**
@@ -368,22 +368,44 @@ export class TestAgentToolReplayAgent extends Agent {
   }
 
   async detachedReconcileTickForTest(cadenceIndex?: number): Promise<void> {
-    await this._cfDetachedReconcileTick(
+    await this._agentRuns.reconcileFromSchedule(
       cadenceIndex !== undefined ? { cadenceIndex } : undefined
     );
   }
 
+  /** The backbone's Lifecycle jobs: when each is due, and the cadence step. */
   async detachedBackboneSchedulesForTest(): Promise<
     DetachedBackboneSchedule[]
   > {
-    const schedules = await this.listSchedules();
-    return schedules
-      .filter((schedule) => schedule.callback === "_cfDetachedReconcileTick")
-      .map((schedule) => ({
-        delayInSeconds:
-          "delayInSeconds" in schedule ? schedule.delayInSeconds : undefined,
-        payload: schedule.payload
+    const cadenceIndex = this.ctx.storage.kv.get<number>(
+      "cf_agents:agent_runs:backbone_cadence"
+    );
+    return this.ctx.storage.sql
+      .exec<{ time: number }>(
+        "SELECT time FROM cf_agents_jobs WHERE capability = 'agent-runs' AND fn = 'reconcile'"
+      )
+      .toArray()
+      .map((job) => ({
+        delayInSeconds: Math.round((job.time - Date.now()) / 1000),
+        cadenceIndex
       }));
+  }
+
+  /**
+   * Arm the backbone the way an earlier version did, as a schedule row for
+   * `_cfDetachedReconcileTick`, and wait for it to fire.
+   */
+  async fireLegacyBackboneScheduleForTest(): Promise<void> {
+    await this.schedule(0, "_cfDetachedReconcileTick", { cadenceIndex: 0 });
+    const deadline = Date.now() + 5000;
+    while (
+      (await this.listSchedules()).some(
+        (schedule) => schedule.callback === "_cfDetachedReconcileTick"
+      ) &&
+      Date.now() < deadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
   }
 
   async deliverFinishForTest(
@@ -512,8 +534,8 @@ export class TestAgentToolReplayAgent extends Agent {
     this.ctx.storage.sql.exec(
       "ALTER TABLE cf_agent_tool_runs DROP COLUMN child_name"
     );
-    this.ctx.storage.kv.put("cf_agents:schema_version", 14);
-    (this as unknown as { _ensureSchema(): void })._ensureSchema();
+    this.ctx.storage.kv.delete("cf_agents:agent_runs:schema_version");
+    this._agentRuns.ensureTable();
     return this.ctx.storage.sql
       .exec<{ name: string }>("PRAGMA table_info(cf_agent_tool_runs)")
       .toArray()
@@ -851,10 +873,10 @@ export class TestAgentToolReplayAgent extends Agent {
       `;
     }
 
-    const self = this as unknown as {
+    const self = this._agentRuns as unknown as {
       _agentToolChild(agentType: string, runId: string): Promise<unknown>;
     };
-    const original = self._agentToolChild.bind(this);
+    const original = self._agentToolChild.bind(self);
     self._agentToolChild = async (agentType, name) => {
       if (name === options.stalledRunId) {
         await new Promise((resolve) =>

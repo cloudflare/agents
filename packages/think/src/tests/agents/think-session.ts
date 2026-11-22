@@ -5330,6 +5330,17 @@ export class ThinkNestedMiddleAgent extends ThinkTestAgent {
 }
 
 export class ThinkAgentToolParent extends Agent {
+  /**
+   * Startup as a wake runs it: the agent-run capability first (it notes the
+   * runs open now and queues their recovery), then the agent's `onStart`.
+   */
+  private async restartForTest(): Promise<void> {
+    await (
+      this._agentRuns as unknown as { onStart(): Promise<void> }
+    ).onStart();
+    await this.onStart();
+  }
+
   // Distinctive non-default re-attach budgets so a behavioral test can prove
   // the public `AgentStaticOptions` knobs are honored (resolved + used by
   // recovery), not just type-checked. These only affect a re-attach with NO
@@ -5668,7 +5679,7 @@ export class ThinkAgentToolParent extends Agent {
       }
     };
     await (
-      this as unknown as {
+      this._agentRuns as unknown as {
         _replayAgentToolRuns(connection: unknown): Promise<void>;
       }
     )._replayAgentToolRuns(connection);
@@ -5899,7 +5910,7 @@ export class ThinkAgentToolParent extends Agent {
     totalRecoveryTimeoutMs?: number;
   }): Promise<Array<() => Promise<void>>> {
     return (
-      this as unknown as {
+      this._agentRuns as unknown as {
         _reconcileAgentToolRuns(options?: {
           deferFinishHooks?: boolean;
           childInspectionTimeoutMs?: number;
@@ -5915,7 +5926,7 @@ export class ThinkAgentToolParent extends Agent {
     childInspectionTimeoutMs?: number;
   }): Promise<void> {
     await (
-      this as unknown as {
+      this._agentRuns as unknown as {
         _scheduleAgentToolRunRecovery(options?: {
           childInspectionTimeoutMs?: number;
         }): Promise<void>;
@@ -6243,7 +6254,7 @@ export class ThinkAgentToolParent extends Agent {
       // Intentionally NO `tailAgentToolRun`.
     };
     const reattach = await (
-      this as unknown as {
+      this._agentRuns as unknown as {
         _reattachAgentToolRunToTerminal(
           adapter: unknown,
           row: {
@@ -6357,7 +6368,7 @@ export class ThinkAgentToolParent extends Agent {
     };
 
     const reattach = await (
-      this as unknown as {
+      this._agentRuns as unknown as {
         _reattachAgentToolRunToTerminal(
           adapter: unknown,
           row: {
@@ -6474,7 +6485,7 @@ export class ThinkAgentToolParent extends Agent {
     this.finishes = [];
     this.startupObservedStatuses = [];
     const startedAt = Date.now();
-    await this.onStart();
+    await this.restartForTest();
     const startupElapsedMs = Date.now() - startedAt;
     const statusAfterStartup = this.getParentAgentToolStatusForTest(runId);
 
@@ -6515,7 +6526,7 @@ export class ThinkAgentToolParent extends Agent {
     this.startupObservedStatuses = [];
     this.insertRunDuringOnStartId = onStartRunId;
     try {
-      await this.onStart();
+      await this.restartForTest();
     } finally {
       this.insertRunDuringOnStartId = null;
     }
@@ -11421,7 +11432,9 @@ export class ThinkRecoveryTestAgent extends Think {
         controller.close();
       }
     });
-    await self._forwardAgentToolStream(stream, undefined, "n9-probe-run", 1);
+    await (
+      this._agentRuns as unknown as Pick<typeof self, "_forwardAgentToolStream">
+    )._forwardAgentToolStream(stream, undefined, "n9-probe-run", 1);
     const after = await read();
     return { start, after };
   }

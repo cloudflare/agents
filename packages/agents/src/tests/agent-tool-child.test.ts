@@ -87,7 +87,7 @@ describe("agent-tool run child", () => {
     });
   });
 
-  it("adds the child name column to a run table from schema version 14", async () => {
+  it("adds the child name column to a run table an earlier version created", async () => {
     const parent = await getAgentByName(
       env.TestAgentToolReplayAgent,
       `schema-14-${crypto.randomUUID()}`
