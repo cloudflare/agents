@@ -275,7 +275,7 @@ export class JobDriver {
       this.#alarmsInFlight--;
       if (clean) await this.#clearMemoryLimitStrikesWhenQuiescent();
     }
-    await this.#options.rearm(this.#currentDeferral());
+    await this.#options.rearm(this.currentDeferral());
     // A job deferred on a transient platform failure still fails the alarm,
     // so the failure is visible to the platform. The alarm re-armed above
     // wins over the platform's own retry, so this never spends its
@@ -373,8 +373,12 @@ export class JobDriver {
     );
   }
 
-  /** The owners still held back, re-armed no sooner than the earliest end. */
-  #currentDeferral(): JobDeferral | undefined {
+  /**
+   * The owners still held back, re-armed no sooner than the earliest end.
+   * Every re-arm uses it, so a push during a hold does not wake the object
+   * early for a held owner's overdue job.
+   */
+  currentDeferral(): JobDeferral | undefined {
     const now = Date.now();
     for (const [owner, until] of this.#heldOwners) {
       if (until <= now) this.#heldOwners.delete(owner);
@@ -399,6 +403,11 @@ export class JobDriver {
     if (due.length === 0) return undefined;
     let deferred: DeferredDrive | undefined;
     this.#warnBacklog(due);
+    // Owners held for this whole scan: those held when it starts, and any a
+    // failure holds during it. A hold that ends mid-scan must not let a
+    // later job of that owner run ahead of the head it skipped; the re-arm
+    // at the end starts a fresh scan from the head.
+    const skip = new Set(this.currentDeferral()?.owners);
 
     // Deadman pre-arm: before driving any job, arm a fallback alarm so a
     // death mid-drive that the platform cannot retry (or that swallows its
@@ -419,7 +428,7 @@ export class JobDriver {
       // row that changed but is still due dispatches with its fresh data.
       const row = this.#options.queue.dueRow(stale.id, nowMs);
       if (!row) continue;
-      if ((this.#heldOwners.get(row.capability) ?? 0) > Date.now()) continue;
+      if (skip.has(row.capability)) continue;
 
       let takeover = false;
       if (row.singleflight === 1 && row.running === 1) {
@@ -446,6 +455,7 @@ export class JobDriver {
         if (failure) {
           deferred ??= { failure, owners: new Set() };
           deferred.owners.add(row.capability);
+          skip.add(row.capability);
           this.#heldOwners.set(
             row.capability,
             Date.now() + DEADMAN_ALARM_DELAY_MS

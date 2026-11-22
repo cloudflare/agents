@@ -170,3 +170,68 @@ describe("job driver deferral", () => {
     });
   });
 });
+
+describe("job driver hold within one scan", () => {
+  it("keeps skipping a held owner when its hold ends during the scan", async () => {
+    await withCapabilityHarness(async ({ install }) => {
+      const ran: string[] = [];
+      const queued = new Jobs("isolation-failing", ran);
+      const slow = new Jobs("isolation-other", ran);
+      const { lifecycle } = install(queued);
+      lifecycle.use(slow);
+      await lifecycle.start();
+      const now = Date.now();
+      await queued.push({
+        id: "head",
+        fn: "poison",
+        time: now - 3_000,
+        retry: QUICK
+      });
+      await lifecycle.alarm().catch(() => {});
+      expect(ran).toEqual(["head"]);
+
+      // Inside the hold: another owner's job runs first, and its callback
+      // outlasts the hold.
+      await queued.push({ id: "behind", fn: "ok", time: now - 1_000 });
+      await slow.push({ id: "slow", fn: "ok", time: now - 2_000 });
+      const realNow = Date.now;
+      slow.onJob = ({ job }: LifecycleJobContext) => {
+        ran.push(job.id);
+        const later = realNow() + 31_000;
+        Date.now = () => later;
+      };
+      try {
+        await lifecycle.alarm();
+      } finally {
+        Date.now = realNow;
+      }
+
+      // The job behind the held head did not run ahead of it.
+      expect(ran).toEqual(["head", "slow"]);
+    });
+  });
+
+  it("does not wake early for a held owner when another job is pushed", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const ran: string[] = [];
+      const failing = new Jobs("isolation-failing", ran);
+      const other = new Jobs("isolation-other", ran);
+      const { lifecycle } = install(failing);
+      lifecycle.use(other);
+      await lifecycle.start();
+      const now = Date.now();
+      await failing.push({
+        id: "poison",
+        fn: "poison",
+        time: now - 1_000,
+        retry: QUICK
+      });
+      await lifecycle.alarm().catch(() => {});
+
+      await other.push({ id: "later", fn: "ok", time: now + 60_000 });
+
+      // The held job is overdue, but the wake waits for the hold's end.
+      expect(await storage.getAlarm()).toBeGreaterThanOrEqual(now + 25_000);
+    });
+  });
+});
