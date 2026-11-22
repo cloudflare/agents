@@ -272,6 +272,33 @@ describe("job driver hold and the alarm", () => {
     });
   });
 
+  it("keeps a held owner's exclusive job exclusive", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const { failing, other } = await heldFailingOwner(install);
+      const now = Date.now();
+      // The held owner's job becomes exclusive, due soon; another owner
+      // has an ordinary job after the hold ends and a later exclusive one.
+      await failing.push({
+        id: "poison",
+        fn: "poison",
+        time: now + 1_000,
+        exclusive: true
+      });
+      await other.push({ id: "ordinary", fn: "ok", time: now + 45_000 });
+      await other.push({
+        id: "later-exclusive",
+        fn: "ok",
+        time: now + 90_000,
+        exclusive: true
+      });
+      // The held exclusive job wakes at the hold's end, ahead of the later
+      // exclusive one, and the ordinary job does not get its own wake.
+      const alarm = await storage.getAlarm();
+      expect(alarm).toBeGreaterThanOrEqual(now + 25_000);
+      expect(alarm).toBeLessThan(now + 45_000);
+    });
+  });
+
   it("drops the hold's wake once the held owner has no jobs", async () => {
     await withCapabilityHarness(async ({ install, storage }) => {
       const { lifecycle } = await heldFailingOwner(install);

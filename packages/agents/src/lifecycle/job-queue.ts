@@ -639,9 +639,23 @@ export class JobQueue {
       `SELECT MIN(time) AS time FROM cf_agents_jobs WHERE exclusive = 1${owners}`,
       ...excludeOwners
     );
-    if (exclusive[0]?.time !== null && exclusive[0]?.time !== undefined) {
-      return exclusive[0].time;
-    }
+    // A held owner's exclusive job is still exclusive: it wakes at the later
+    // of its time and the hold's end, and still suppresses ordinary wakes.
+    const heldExclusive =
+      held !== null && hold
+        ? this.#sql<{ time: number | null }>(
+            `SELECT MIN(time) AS time FROM cf_agents_jobs
+             WHERE exclusive = 1 AND capability IN (SELECT value FROM json_each(?))`,
+            held
+          )[0]?.time
+        : null;
+    const exclusiveTimes = [
+      exclusive[0]?.time,
+      heldExclusive === null || heldExclusive === undefined || !hold
+        ? null
+        : Math.max(heldExclusive, hold.until)
+    ].filter((time): time is number => typeof time === "number");
+    if (exclusiveTimes.length > 0) return Math.min(...exclusiveTimes);
 
     const now = Math.floor(nowMs);
     let candidate: number | null = null;
