@@ -6,10 +6,12 @@ import {
 } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { getCurrentAgent } from "../../lifecycle";
-import type {
-  DeclaredScheduleContext,
-  DeclaredSchedules
-} from "../../schedules";
+import {
+  declareSchedules,
+  listDeclaredSchedules,
+  type DeclaredScheduleContext,
+  type DeclaredSchedules
+} from "../../internal";
 import {
   nextDeclaredScheduleTime,
   parseDeclaredSchedule,
@@ -63,7 +65,7 @@ describe("Scheduler declared schedules", () => {
         const run = () => {};
         const unrelated = await instance.scheduler.set(3600, "remind", "x");
 
-        await instance.scheduler.declare({
+        await declareSchedules(instance.scheduler, {
           report: { schedule: "every day at 09:00 in UTC", run },
           tick: { schedule: "every 5 minutes", run }
         });
@@ -71,9 +73,9 @@ describe("Scheduler declared schedules", () => {
         const tick = jobTime(state.storage, "tick");
         expect(report).not.toBeNull();
         expect(tick).not.toBeNull();
-        const listed = instance.scheduler
-          .listDeclared()
-          .sort((a, b) => a.name.localeCompare(b.name));
+        const listed = listDeclaredSchedules(instance.scheduler).sort((a, b) =>
+          a.name.localeCompare(b.name)
+        );
         expect(listed.map((info) => info.name)).toEqual(["report", "tick"]);
         expect(listed[0]).toMatchObject({
           schedule: "every day at 09:00",
@@ -87,7 +89,7 @@ describe("Scheduler declared schedules", () => {
         ).toEqual([unrelated.id]);
 
         // Same timing: nothing moves.
-        await instance.scheduler.declare({
+        await declareSchedules(instance.scheduler, {
           report: {
             schedule: "every day at 09:00 in UTC",
             metadata: { changed: true },
@@ -99,14 +101,14 @@ describe("Scheduler declared schedules", () => {
         expect(jobTime(state.storage, "tick")).toBe(tick);
 
         // Changed timing re-arms; a removed name is cancelled.
-        await instance.scheduler.declare({
+        await declareSchedules(instance.scheduler, {
           report: { schedule: "every day at 10:00 in UTC", run }
         });
         expect(jobTime(state.storage, "report")).not.toBe(report);
         expect(jobTime(state.storage, "tick")).toBeNull();
 
-        await instance.scheduler.declare({});
-        expect(instance.scheduler.listDeclared()).toEqual([]);
+        await declareSchedules(instance.scheduler, {});
+        expect(listDeclaredSchedules(instance.scheduler)).toEqual([]);
         expect(
           (await instance.scheduler.list()).map((schedule) => schedule.id)
         ).toEqual([unrelated.id]);
@@ -122,15 +124,15 @@ describe("Scheduler declared schedules", () => {
         const declaration = {
           reminder: { schedule: "every day at 09:00" as const, run() {} }
         };
-        await instance.scheduler.declare(declaration, {
+        await declareSchedules(instance.scheduler, declaration, {
           defaultTimezone: "UTC"
         });
         const before = jobTime(state.storage, "reminder");
-        await instance.scheduler.declare(declaration, {
+        await declareSchedules(instance.scheduler, declaration, {
           defaultTimezone: () => "America/New_York"
         });
         expect(jobTime(state.storage, "reminder")).not.toBe(before);
-        expect(instance.scheduler.listDeclared()[0].timezone).toBe(
+        expect(listDeclaredSchedules(instance.scheduler)[0].timezone).toBe(
           "America/New_York"
         );
       }
@@ -143,7 +145,7 @@ describe("Scheduler declared schedules", () => {
     await runInDurableObject(
       stub,
       async (instance: SchedulerHarnessObject, state) => {
-        await instance.scheduler.declare({
+        await declareSchedules(instance.scheduler, {
           keep: {
             schedule: "every 1 hour",
             run() {
@@ -154,18 +156,18 @@ describe("Scheduler declared schedules", () => {
         const kept = jobTime(state.storage, "keep");
 
         await expect(
-          instance.scheduler.declare({
+          declareSchedules(instance.scheduler, {
             keep: { schedule: "every 1 hour", run() {} },
             "bad name": { schedule: "every 1 hour", run() {} }
           })
         ).rejects.toThrow(/Invalid declared schedule name/);
         await expect(
-          instance.scheduler.declare({
+          declareSchedules(instance.scheduler, {
             wallClock: { schedule: "every day at 09:00", run() {} }
           })
         ).rejects.toThrow(/requires a timezone/);
         expect(jobTime(state.storage, "keep")).toBe(kept);
-        expect(instance.scheduler.listDeclared()).toHaveLength(1);
+        expect(listDeclaredSchedules(instance.scheduler)).toHaveLength(1);
         makeDue(state.storage, "keep");
       }
     );
@@ -184,7 +186,8 @@ describe("Scheduler declared schedules", () => {
       const scheduledFor = await runInDurableObject(
         stub,
         async (instance: SchedulerHarnessObject, state) => {
-          await instance.scheduler.declare(
+          await declareSchedules(
+            instance.scheduler,
             {
               digest: {
                 schedule: "every 1 hour",
@@ -226,7 +229,7 @@ describe("Scheduler declared schedules", () => {
           expect(jobTime(state.storage, "digest")).toBe(
             scheduledFor + 3_600_000
           );
-          expect(instance.scheduler.listDeclared()[0].nextRunAt).toBe(
+          expect(listDeclaredSchedules(instance.scheduler)[0].nextRunAt).toBe(
             scheduledFor + 3_600_000
           );
         }
@@ -245,7 +248,7 @@ describe("Scheduler declared schedules", () => {
     const scheduledFor = await runInDurableObject(
       stub,
       async (instance: SchedulerHarnessObject, state) => {
-        await instance.scheduler.declare({
+        await declareSchedules(instance.scheduler, {
           broken: {
             schedule: "every 1 hour",
             retry: { maxAttempts: 3, baseDelayMs: 1, maxDelayMs: 1 },
@@ -278,7 +281,7 @@ describe("Scheduler declared schedules", () => {
     await runInDurableObject(
       stub,
       async (instance: SchedulerHarnessObject, state) => {
-        await instance.scheduler.declare((): DeclaredSchedules =>
+        await declareSchedules(instance.scheduler, (): DeclaredSchedules =>
           declared
             ? {
                 gone: {
@@ -309,27 +312,30 @@ describe("Scheduler declared schedules", () => {
       stub,
       async (instance: SchedulerHarnessObject, state) => {
         const run = () => {};
-        await instance.scheduler.declare({
+        await declareSchedules(instance.scheduler, {
           app: { schedule: "every 1 hour", run }
         });
-        await instance.scheduler.declare(
+        await declareSchedules(
+          instance.scheduler,
           { lib: { schedule: "every 1 hour", run } },
           { group: "library" }
         );
         expect(
-          instance.scheduler.listDeclared().find((info) => info.name === "lib")
-            ?.group
+          listDeclaredSchedules(instance.scheduler).find(
+            (info) => info.name === "lib"
+          )?.group
         ).toBe("library");
 
-        await instance.scheduler.declare({}, { group: "library" });
+        await declareSchedules(instance.scheduler, {}, { group: "library" });
         expect(jobTime(state.storage, "app")).not.toBeNull();
         expect(jobTime(state.storage, "library:lib")).toBeNull();
 
-        await instance.scheduler.declare(
+        await declareSchedules(
+          instance.scheduler,
           { lib: { schedule: "every 1 hour", run } },
           { group: "library" }
         );
-        await instance.scheduler.declare({});
+        await declareSchedules(instance.scheduler, {});
         expect(jobTime(state.storage, "app")).toBeNull();
         expect(jobTime(state.storage, "library:lib")).not.toBeNull();
       }
@@ -342,13 +348,14 @@ describe("Scheduler declared schedules", () => {
       stub,
       async (instance: SchedulerHarnessObject, state) => {
         let finishOlder: (schedules: DeclaredSchedules) => void = () => {};
-        const older = instance.scheduler.declare(
+        const older = declareSchedules(
+          instance.scheduler,
           () =>
             new Promise<DeclaredSchedules>((resolve) => {
               finishOlder = resolve;
             })
         );
-        const newer = instance.scheduler.declare({
+        const newer = declareSchedules(instance.scheduler, {
           reminder: { schedule: "every 1 hour", run() {} }
         });
         await new Promise((resolve) => setTimeout(resolve, 10));
@@ -367,10 +374,10 @@ describe("Scheduler declared schedules", () => {
         const minutely: DeclaredSchedules = {
           cleanup: { schedule: "every 1 minute", run() {} }
         };
-        await instance.scheduler.declare({
+        await declareSchedules(instance.scheduler, {
           cleanup: {
             schedule: "every 1 hour",
-            run: () => instance.scheduler.declare(minutely)
+            run: () => declareSchedules(instance.scheduler, minutely)
           }
         });
         makeDue(state.storage, "cleanup");
@@ -380,7 +387,7 @@ describe("Scheduler declared schedules", () => {
     await runDurableObjectAlarm(stub);
 
     await runInDurableObject(stub, async (instance: SchedulerHarnessObject) => {
-      expect(instance.scheduler.listDeclared()).toEqual([
+      expect(listDeclaredSchedules(instance.scheduler)).toEqual([
         expect.objectContaining({ name: "cleanup", schedule: "every 1 minute" })
       ]);
     });
@@ -396,10 +403,11 @@ describe("Scheduler declared schedules", () => {
         const run = (context: DeclaredScheduleContext) => {
           keys.push(context.idempotencyKey);
         };
-        await instance.scheduler.declare({
+        await declareSchedules(instance.scheduler, {
           report: { schedule: "every 1 hour", run }
         });
-        await instance.scheduler.declare(
+        await declareSchedules(
+          instance.scheduler,
           { report: { schedule: "every 1 hour", run } },
           { group: "library" }
         );
@@ -440,7 +448,7 @@ describe("Scheduler declared schedules", () => {
             }
           ]
         ]);
-        await instance.scheduler.declare(schedules);
+        await declareSchedules(instance.scheduler, schedules);
         return makeDue(state.storage, "constructor");
       }
     );
@@ -534,21 +542,21 @@ describe("Scheduler declared schedules", () => {
         const declaration = {
           report: { schedule: "every 1 hour" as const, run() {} }
         };
-        await instance.scheduler.declare(declaration);
+        await declareSchedules(instance.scheduler, declaration);
         expect(jobTime(state.storage, "report")).not.toBe(legacyTime);
 
         // Think's group keeps the exact pending occurrences.
-        await instance.scheduler.declare(
+        await declareSchedules(
+          instance.scheduler,
           { ...declaration, digest: declaration.report },
           { group: "think" }
         );
         expect(jobTime(state.storage, "think:report")).toBe(legacyTime);
         expect(jobTime(state.storage, "think:digest")).toBe(legacyTime + 1);
         expect(
-          instance.scheduler
-            .listDeclared()
-            .find((info) => info.group === "think" && info.name === "report")
-            ?.nextRunAt
+          listDeclaredSchedules(instance.scheduler).find(
+            (info) => info.group === "think" && info.name === "report"
+          )?.nextRunAt
         ).toBe(legacyTime);
         expect(
           await state.storage.get("cf_agents:declared_schedules_legacy_next")

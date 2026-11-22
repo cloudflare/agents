@@ -1,4 +1,8 @@
-/** Where a request is. `pending` and `running` are open; the rest are terminal. */
+/**
+ * Where a request is. `pending` and `running` are open; the rest are terminal.
+ *
+ * @internal
+ */
 export type InboxStatus =
   | "pending"
   | "running"
@@ -7,7 +11,11 @@ export type InboxStatus =
   | "aborted"
   | "skipped";
 
-/** The terminal statuses. A record in one of them never changes status again. */
+/**
+ * The terminal statuses. A record in one of them never changes status again.
+ *
+ * @internal
+ */
 export type InboxTerminalStatus = Exclude<InboxStatus, "pending" | "running">;
 
 /**
@@ -25,6 +33,8 @@ export type InboxTerminalStatus = Exclude<InboxStatus, "pending" | "running">;
  *
  * A request that arrives at an idle lane is never overlapping: it runs as
  * `queue` would, whatever its policy.
+ *
+ * @internal
  */
 export type InboxPolicy =
   | "queue"
@@ -33,7 +43,11 @@ export type InboxPolicy =
   | "drop"
   | { readonly debounceMs: number };
 
-/** One request as stored, without its payload. JSON values throughout. */
+/**
+ * One request as stored, without its payload. JSON values throughout.
+ *
+ * @internal
+ */
 export type InboxRequest<Result = unknown> = {
   readonly id: string;
   /** The handler that runs it. */
@@ -62,7 +76,11 @@ export type InboxRequest<Result = unknown> = {
   readonly settledAt?: number;
 };
 
-/** What a handler is given besides the payload. */
+/**
+ * What a handler is given besides the payload.
+ *
+ * @internal
+ */
 export type InboxRun = {
   readonly id: string;
   readonly kind: string;
@@ -87,13 +105,19 @@ export type InboxRun = {
 /**
  * Registered handlers, by kind. Parameters are `never` so any concretely
  * typed handler fits; {@link InboxPayload} recovers a handler's payload.
+ *
+ * @internal
  */
 export type InboxHandlers = Record<
   string,
   (payload: never, run: InboxRun) => unknown
 >;
 
-/** The payload a registered handler accepts. */
+/**
+ * The payload a registered handler accepts.
+ *
+ * @internal
+ */
 export type InboxPayload<Handler> = Handler extends (
   payload: infer Payload,
   ...rest: never[]
@@ -101,7 +125,11 @@ export type InboxPayload<Handler> = Handler extends (
   ? Payload
   : never;
 
-/** Options accepted by {@link Inbox.submit}. */
+/**
+ * Options accepted by {@link Inbox.submit}.
+ *
+ * @internal
+ */
 export type InboxSubmitOptions = {
   /** Stable id. Generated when absent. */
   readonly id?: string;
@@ -129,14 +157,22 @@ export type InboxSubmitOptions = {
   readonly local?: unknown;
 };
 
-/** What {@link Inbox.submit} returns. */
+/**
+ * What {@link Inbox.submit} returns.
+ *
+ * @internal
+ */
 export type InboxSubmitResult<Result = unknown> = {
   readonly request: InboxRequest<Result>;
   /** `false` when the id or idempotency key matched an existing record. */
   readonly accepted: boolean;
 };
 
-/** Filters for {@link Inbox.list}. */
+/**
+ * Filters for {@link Inbox.list}.
+ *
+ * @internal
+ */
 export type InboxListOptions = {
   readonly lane?: string;
   readonly kind?: string;
@@ -151,7 +187,11 @@ export type InboxListOptions = {
   readonly order?: "newest" | "oldest";
 };
 
-/** Filters for {@link Inbox.purgeBefore}. */
+/**
+ * Filters for {@link Inbox.purgeBefore}.
+ *
+ * @internal
+ */
 export type InboxPurgeOptions = {
   readonly lane?: string;
   readonly kind?: string;
@@ -160,7 +200,11 @@ export type InboxPurgeOptions = {
   readonly limit?: number;
 };
 
-/** A record moved from another store, for {@link Inbox.import}. */
+/**
+ * A record moved from another store, for {@link Inbox.import}.
+ *
+ * @internal
+ */
 export type InboxImport = {
   readonly id: string;
   readonly kind: string;
@@ -180,14 +224,22 @@ export type InboxImport = {
   readonly settledAt?: number;
 };
 
-/** What {@link Inbox.cancel} did. */
+/**
+ * What {@link Inbox.cancel} did.
+ *
+ * @internal
+ */
 export type InboxCancelResult = {
   /** The status before the cancel. Terminal means nothing changed. */
   readonly previous: InboxStatus;
   readonly request: InboxRequest;
 };
 
-/** Events the Inbox emits. */
+/**
+ * Events the Inbox emits.
+ *
+ * @internal
+ */
 export type InboxEventType =
   | "inbox:submit"
   | "inbox:status"

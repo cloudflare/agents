@@ -26,7 +26,11 @@ import {
   type EventLogCursor
 } from "./event-log-protocol";
 
-/** Default ceiling for one serialized event (1 MiB). */
+/**
+ * Default ceiling for one serialized event (1 MiB).
+ *
+ * @internal
+ */
 export const DEFAULT_MAX_EVENT_BYTES = 1_048_576;
 /** Highest `maxEventBytes` a log accepts: one event must fit one row. */
 const MAX_EVENT_BYTES_LIMIT = 1_900_000;
@@ -49,7 +53,7 @@ const utf8 = new TextEncoder();
 /**
  * Options for one event log.
  *
- * @experimental The API surface may change before stabilizing.
+ * @internal Not a public API (sibling-package support through `agents/internal`).
  */
 export interface EventLogOptions<S = unknown> {
   /**
@@ -120,7 +124,11 @@ type Row = {
   bytes: number;
 };
 
-/** What the log needs from the WebSockets capability. */
+/**
+ * What the log needs from the WebSockets capability.
+ *
+ * @internal
+ */
 export type EventLogHost = {
   readonly sql: () => SqlStorage;
   readonly connections: () => Iterable<Connection>;
@@ -161,7 +169,11 @@ function positive(value: number | undefined, fallback: number): number {
   return value;
 }
 
-/** The logs a connection follows, from its hibernation attachment. */
+/**
+ * The logs a connection follows, from its hibernation attachment.
+ *
+ * @internal
+ */
 export function followedLogs(connection: Connection): readonly string[] {
   const value = getConnectionFlag(connection, CF_EVENT_LOGS_KEY);
   return Array.isArray(value) ? (value as string[]) : [];
@@ -188,7 +200,7 @@ function trySend(connection: Connection, text: string): void {
  * Each `append` gets its seq and is sent at once, and is stored with the
  * next write of the log's buffer.
  *
- * @experimental The API surface may change before stabilizing.
+ * @internal Not a public API (sibling-package support through `agents/internal`).
  */
 export interface EventLogBatch<T = unknown> {
   /** Assign the next seq, send the event now, store it at the next write. */
@@ -210,7 +222,7 @@ export interface EventLogBatch<T = unknown> {
  * Clients follow a log with `followEventLog()` from `agents/client`, or
  * `useEventLog()` from `agents/react`.
  *
- * @experimental The API surface may change before stabilizing.
+ * @internal Not a public API (sibling-package support through `agents/internal`).
  */
 export class EventLog<T = unknown, S = unknown> {
   readonly name: string;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { KeepAlive } from "../../lifecycle";
+import { KeepAlive } from "../../internal";
 import { withCapabilityHarness } from "../shared/capability-harness";
 
 /**

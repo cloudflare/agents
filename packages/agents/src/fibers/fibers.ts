@@ -47,7 +47,11 @@ import type {
 
 const fiberStash = new AsyncLocalStorage<FiberStashContext>();
 
-/** Run `fn` with `context` as the current fiber for `stashCurrentFiber()`. */
+/**
+ * Run `fn` with `context` as the current fiber for `stashCurrentFiber()`.
+ *
+ * @internal
+ */
 export function withFiberStash<T>(
   context: FiberStashContext,
   fn: () => Promise<T>
@@ -58,6 +62,8 @@ export function withFiberStash<T>(
 /**
  * Checkpoint data for the fiber running in the current async context.
  * Throws outside a fiber.
+ *
+ * @internal
  */
 export function stashCurrentFiber(data: unknown): void {
   const context = fiberStash.getStore();
@@ -67,6 +73,7 @@ export function stashCurrentFiber(data: unknown): void {
   context.stash(data);
 }
 
+/** @internal */
 export type FibersOptions = {
   /**
    * Framework recovery for its own fibers. Returns true when it handled the
@@ -200,6 +207,7 @@ function inspectionFromRow(row: FiberLedgerRow): FiberInspection {
   return inspection;
 }
 
+/** @internal */
 export class Fibers extends LifecycleCapability {
   readonly #options: FibersOptions;
   #tablesReady = false;

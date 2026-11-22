@@ -540,10 +540,8 @@ idempotency.
 Declared tasks are armed on the root agent only. A sub-agent that declares
 tasks arms none of them and logs a warning.
 
-Think hands the declaration to the Scheduler's declared schedules
-(`this.scheduler.declare()`, group `"think"`): each task is one job holding its
-next occurrence, and `this.scheduler.listDeclared()` shows them. Static declarations reconcile
-on startup. If `getScheduledTasks()` reads product-owned data that can change
+Each task is one durable job holding its next occurrence. Static declarations
+reconcile on startup. If `getScheduledTasks()` reads product-owned data that can change
 while the Durable Object is live, call `internal_reconcileScheduledTasks()`
 after updating that data. The task `retry` option retries the prompt or
 handler action before the failure goes to `onError()`. The next occurrence is

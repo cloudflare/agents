@@ -195,6 +195,7 @@ import type {
   SubAgentClass,
   WSMessage
 } from "agents";
+import { declareSchedules } from "agents/internal";
 import {
   sanitizeMessage,
   enforceRowSizeLimit,
@@ -294,7 +295,7 @@ import {
   stableHash,
   stableStringify,
   type EffectOutcome
-} from "agents/approvals";
+} from "agents/internal";
 import type {
   ContinuationTurn,
   RecoveryLeafCheck,
@@ -3191,7 +3192,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    */
   internal_reconcileScheduledTasks(): Promise<void> {
     const ownerKey = stableHash(this.selfPath);
-    return this.scheduler.declare(
+    return declareSchedules(
+      this.scheduler,
       async () =>
         toDeclaredSchedules(
           await this.getScheduledTasks(),

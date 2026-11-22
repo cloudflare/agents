@@ -15,7 +15,11 @@ import type {
   InboxTerminalStatus
 } from "./types";
 
-/** The default inbox's table. A named inbox has `cf_agents_inbox__<name>`. */
+/**
+ * The default inbox's table. A named inbox has `cf_agents_inbox__<name>`.
+ *
+ * @internal
+ */
 export const INBOX_TABLE = "cf_agents_inbox";
 
 /**
@@ -27,7 +31,11 @@ export const INBOX_TABLE = "cf_agents_inbox";
  */
 const INLINE_LIMIT = 160_000;
 
-/** The longest metadata JSON a request may carry. */
+/**
+ * The longest metadata JSON a request may carry.
+ *
+ * @internal
+ */
 export const INBOX_METADATA_LIMIT = 100_000;
 
 /** The longest piece of split JSON in one parts row. */
@@ -68,7 +76,11 @@ type Row = {
   settled_at: number | null;
 };
 
-/** The row facts the runner needs that the public record leaves out. */
+/**
+ * The row facts the runner needs that the public record leaves out.
+ *
+ * @internal
+ */
 export type InboxRow = {
   readonly request: InboxRequest;
   /** Unique to this record: a later record under the same id has another. */
@@ -83,10 +95,18 @@ export type InboxRow = {
   readonly reported: boolean;
 };
 
-/** A request a survivor superseded, with its arrival order. */
+/**
+ * A request a survivor superseded, with its arrival order.
+ *
+ * @internal
+ */
 export type MergedEntry = { readonly id: string; readonly seq: number };
 
-/** A new row, as {@link InboxStore.insert} takes it. */
+/**
+ * A new row, as {@link InboxStore.insert} takes it.
+ *
+ * @internal
+ */
 export type InboxInsert = {
   readonly id: string;
   readonly token: string;
@@ -104,6 +124,7 @@ export type InboxInsert = {
   readonly now: number;
 };
 
+/** @internal */
 export class InboxStore {
   readonly #storage: DurableObjectStorage;
   readonly #table: string;
@@ -711,6 +732,8 @@ export class InboxStore {
  * `text` in pieces of at most `size` code units, never between the two
  * halves of a surrogate pair: SQLite stores text as UTF-8, which cannot
  * hold half a pair.
+ *
+ * @internal
  */
 export function splitPieces(text: string, size: number): string[] {
   const pieces: string[] = [];

@@ -1,6 +1,8 @@
 # Approvals
 
-`Approvals` (`agents/approvals`) is a Lifecycle capability for two kinds of
+**Internal.** Not a public API. Nothing new from the slim-hosts work is exposed to apps until it has shipped inside `Think` and `AIChatAgent` for a release and is shown correct ([rfc-slim-hosts.md](./rfc-slim-hosts.md#exposure)). Sibling packages import it from `agents/internal`.
+
+`Approvals` (`packages/agents/src/approvals`) is a Lifecycle capability for two kinds of
 work that must not happen twice: a side effect claimed by key, and work
 parked until someone approves or rejects it. It is built for Think's action
 ledger and its durable-pause and codemode approvals.

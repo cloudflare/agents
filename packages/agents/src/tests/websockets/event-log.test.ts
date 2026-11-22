@@ -2,8 +2,7 @@ import { env } from "cloudflare:workers";
 import { evictDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { routeAgentRequest } from "../..";
-import { followEventLog } from "../../client";
-import type { EventLogCursor } from "../../websockets";
+import { followEventLog, type EventLogCursor } from "../../internal";
 
 /**
  * The event log contract, driven over real hibernating WebSockets on a

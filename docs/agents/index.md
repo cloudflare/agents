@@ -46,7 +46,6 @@ The Lifecycle runs startup, routes requests to capabilities, and owns the object
 
 - [Durable Object Lifecycle](./lifecycle.md) - Install a Lifecycle on a Durable Object, write capabilities, and use the job queue
 - [getCurrentAgent()](./get-current-agent.md) - Accessing the current object, request, and connection across async calls
-- [Event logs (Experimental)](./event-logs.md) - Numbered WebSocket events that clients replay by cursor after a reconnect
 
 ## Harnesses
 
@@ -66,13 +65,11 @@ Install each capability with `lifecycle.use()`. Capabilities marked experimental
 | `State`            | `agents/state`      | Stable       | [Lifecycle](./lifecycle.md#websockets-are-an-opt-in-capability) |
 | `WebSockets`       | `agents/websockets` | Stable       | [Lifecycle](./lifecycle.md#websockets-are-an-opt-in-capability) |
 | `Queue`            | `agents/queue`      | Experimental | [Queue](./queue.md)                                             |
-| `Inbox`            | `agents/inbox`      | Experimental | [Inbox](./inbox.md)                                             |
 | `RoutedAgents`     | `agents/routing`    | Experimental | [Routing](./routing.md)                                         |
 | `Browser`          | `agents/browser`    | Experimental | [Browse the Web](./browse-the-web.md)                           |
 | `Sessions`         | `agents/sessions`   | Experimental | [Sessions](./sessions.md)                                       |
 | `Streams`          | `agents/streams`    | Experimental | [Streams](./streams.md)                                         |
 | `Tasks`            | `agents/tasks`      | Experimental | [Tasks](./tasks.md)                                             |
-| `Approvals`        | `agents/approvals`  | Experimental | [Approvals](./approvals.md)                                     |
 
 Building your own harness? Sessions stores the conversation, Streams holds durable incremental output, and Tasks runs replayable background work. [Models](./models.md) and [Models for pi-ai](./models-pi-ai.md) give you one provider for Workers AI and third-party models. [Context](./context.md) and [Workspace](https://github.com/cloudflare/agents/blob/main/docs/shell/index.md) are also available.
 
@@ -94,7 +91,6 @@ Building your own harness? Sessions stores the conversation, Streams holds durab
 ### Background processing
 
 - [Queue](./queue.md) - Durable background task execution
-- [Inbox](./inbox.md) - Durable requests with ids, idempotency keys, ordered lanes and stored results
 - [Scheduling](./scheduling.md) - Delayed, scheduled, and cron-based tasks
 - [Retries](./retries.md) - Automatic retries with exponential backoff and jitter
 - [Durable Execution](./durable-execution.md) - `runFiber()`, `startFiber()`, `stash()`, and crash recovery for long tasks

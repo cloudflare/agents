@@ -171,6 +171,41 @@ function isSchedulerJobPayload(value: unknown): value is SchedulerJobPayload {
  * event loop, and Scheduler runs registered callbacks through Lifecycle's
  * host invocation boundary when its jobs come due.
  */
+let declaredScheduleSetOf: (scheduler: Scheduler) => DeclaredScheduleSet;
+
+/**
+ * Declare a named set of recurring schedules on `scheduler` and reconcile
+ * storage to it: new names are armed at their next occurrence, names whose
+ * timing or retry changed are re-armed, names no longer declared are
+ * cancelled. Each name has one pending occurrence and never runs twice at
+ * once.
+ *
+ * Call it on every start (for example in `onStart()`), and again after data
+ * a function `source` reads changes. The declaration is read again when an
+ * occurrence runs. An invalid entry rejects the call and changes nothing. On
+ * a sub-agent nothing is armed.
+ *
+ * @internal Used by `@cloudflare/think`'s scheduled tasks. Not a public API.
+ */
+export function declareSchedules(
+  scheduler: Scheduler,
+  source: DeclaredSchedulesSource,
+  options?: DeclareSchedulesOptions
+): Promise<void> {
+  return declaredScheduleSetOf(scheduler).declare(source, options);
+}
+
+/**
+ * The armed declared schedules on `scheduler`, ordered by next occurrence.
+ *
+ * @internal Used by `@cloudflare/think`'s scheduled tasks. Not a public API.
+ */
+export function listDeclaredSchedules(
+  scheduler: Scheduler
+): DeclaredScheduleInfo[] {
+  return declaredScheduleSetOf(scheduler).list();
+}
+
 export class Scheduler<
   Handlers extends SchedulerHandlers = SchedulerCallbacks
 > extends LifecycleCapability {
@@ -639,29 +674,8 @@ export class Scheduler<
     return result.ok;
   }
 
-  // ── Declared schedules ───────────────────────────────────────────────────
-
-  /**
-   * Declare a named set of recurring schedules and reconcile storage to it:
-   * new names are armed at their next occurrence, names whose timing or
-   * retry changed are re-armed, names no longer declared are cancelled.
-   * Each name has one pending occurrence and never runs twice at once.
-   *
-   * Call it on every start (for example in `onStart()`), and again after
-   * data a function `source` reads changes. The declaration is read again
-   * when an occurrence runs. An invalid entry rejects the call and changes
-   * nothing. On a sub-agent nothing is armed.
-   */
-  declare(
-    source: DeclaredSchedulesSource,
-    options?: DeclareSchedulesOptions
-  ): Promise<void> {
-    return this.#declared.declare(source, options);
-  }
-
-  /** The armed declared schedules, ordered by next occurrence. */
-  listDeclared(): DeclaredScheduleInfo[] {
-    return this.#declared.list();
+  static {
+    declaredScheduleSetOf = (scheduler) => scheduler.#declared;
   }
 
   // ── Host-owned policy apertures ──────────────────────────────────────────

@@ -13,6 +13,8 @@ import {
  * The socket a log is followed on: an `AgentClient`, or anything with the
  * same `send`, `readyState` and events (a plain browser `WebSocket` works,
  * but does not reconnect).
+ *
+ * @internal
  */
 export type EventLogSocket = Pick<
   EventTarget,
@@ -22,7 +24,11 @@ export type EventLogSocket = Pick<
   send(data: string): unknown;
 };
 
-/** Callbacks for one followed log. */
+/**
+ * Callbacks for one followed log.
+ *
+ * @internal
+ */
 export type EventLogHandlers<T = unknown, S = unknown> = {
   /** One event, in seq order. Called for replayed and live events alike. */
   onEvent(data: T, seq: number): void;
@@ -39,7 +45,11 @@ export type EventLogHandlers<T = unknown, S = unknown> = {
   onError?(error: string): void;
 };
 
-/** A followed log. */
+/**
+ * A followed log.
+ *
+ * @internal
+ */
 export type EventLogSubscription = {
   /** The last event applied, or null before the first resync. */
   readonly cursor: EventLogCursor | null;
@@ -85,6 +95,8 @@ function countFollowers(socket: EventLogSocket, log: string, by: number) {
  *   onEvent: (item) => { items.push(item); }
  * });
  * ```
+ *
+ * @internal
  */
 export function followEventLog<T = unknown, S = unknown>(
   socket: EventLogSocket,

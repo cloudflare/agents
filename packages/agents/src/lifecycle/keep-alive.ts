@@ -13,7 +13,11 @@ import { nanoid } from "nanoid";
 import { LifecycleCapability, type LifecycleRouteContext } from "./capability";
 import type { LifecycleJobContext, LifecycleJobOutcome } from "./job-queue";
 
-/** Default heartbeat interval: well inside the platform's idle eviction. */
+/**
+ * Default heartbeat interval: well inside the platform's idle eviction.
+ *
+ * @internal
+ */
 export const DEFAULT_KEEP_ALIVE_INTERVAL_MS = 30_000;
 
 /** Job ids are one namespace across owners, so this one names its owner. */
@@ -23,7 +27,11 @@ type KeepAliveRouteMessage =
   | { readonly type: "acquire" }
   | { readonly type: "release"; readonly token: string };
 
-/** Options for {@link KeepAlive}. */
+/**
+ * Options for {@link KeepAlive}.
+ *
+ * @internal
+ */
 export type KeepAliveOptions = {
   /** Milliseconds between heartbeats while a hold is open. Default: 30,000. */
   readonly intervalMs?: number;
@@ -34,6 +42,8 @@ export type KeepAliveOptions = {
  *
  * On a routed Lifecycle (a sub-agent, which has no alarm of its own) a hold
  * is taken on the root's KeepAlive instead, so install KeepAlive on both.
+ *
+ * @internal
  */
 export class KeepAlive extends LifecycleCapability {
   readonly #intervalMs: number;

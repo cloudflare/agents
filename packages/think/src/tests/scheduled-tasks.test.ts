@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { getAgentByName } from "agents";
-import type { DeclaredScheduleInfo } from "agents/schedules";
+import type { DeclaredScheduleInfo } from "agents/internal";
 import { describe, expect, it } from "vitest";
 import type { ThinkScheduledTasksTestAgent } from "./agents/think-session";
 import type { ThinkSubmissionInspection } from "../think";

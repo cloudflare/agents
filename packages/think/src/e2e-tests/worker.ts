@@ -14,7 +14,7 @@ import {
   wrapChatFiberSnapshot
 } from "agents/chat";
 import type { ResumableStream } from "agents/chat";
-import { stableHash, type Approvals } from "agents/approvals";
+import { stableHash, type Approvals } from "agents/internal";
 import { agentTool } from "agents/agent-tools";
 import type { Adapter } from "chat";
 import {

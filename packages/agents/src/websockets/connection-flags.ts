@@ -21,7 +21,11 @@ export const CF_READONLY_KEY = "_cf_readonly";
  */
 export const CF_NO_PROTOCOL_KEY = "_cf_no_protocol";
 
-/** The event logs a connection follows (see `EventLog`). */
+/**
+ * The event logs a connection follows (see `EventLog`).
+ *
+ * @internal
+ */
 export const CF_EVENT_LOGS_KEY = "_cf_logs";
 
 /**

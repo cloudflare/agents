@@ -1,5 +1,7 @@
 # Fibers
 
+**Internal.** Not a public API. Nothing new from the slim-hosts work is exposed to apps until it has shipped inside `Think` and `AIChatAgent` for a release and is shown correct ([rfc-slim-hosts.md](./rfc-slim-hosts.md#exposure)). It is not exported at all: `Agent` installs it and delegates its public methods to it.
+
 A fiber is a closure that runs once, checkpoints with `stash()`, and hands
 an interruption to a recovery hook. `Agent.runFiber()`, `startFiber()`,
 `stash()`, `inspectFiber()`, `listFibers()`, `cancelFiber()`,

@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { declareSchedules } from "../../internal";
 import type { SchedulerHarnessObject } from "../capabilities/scheduler";
 
 describe("declared schedules and startup", () => {
@@ -13,13 +14,14 @@ describe("declared schedules and startup", () => {
     await runInDurableObject(stub, async (instance: SchedulerHarnessObject) => {
       (instance as unknown as { onStart: () => Promise<void> }).onStart =
         async () => {
-          await instance.scheduler.declare(
+          await declareSchedules(
+            instance.scheduler,
             { lib: { schedule: "every 1 hour", run() {} } },
             { group: "lib" }
           );
         };
       // As a constructor would: not awaited, outside startup.
-      const early = instance.scheduler.declare({
+      const early = declareSchedules(instance.scheduler, {
         app: { schedule: "every 1 hour", run() {} }
       });
       const outcome = await Promise.race([

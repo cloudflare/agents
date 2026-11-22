@@ -48,8 +48,7 @@ export type MCPServer = {
 };
 
 /**
- * Options for adding an MCP server
- */
+ * Options for adding an MCP server */
 export type AddMcpServerOptions = {
   /**
    * Optional caller-supplied stable server id. When provided, this id is used
@@ -94,8 +93,7 @@ export type AddMcpServerOptions = {
 };
 
 /**
- * Options for adding an MCP server via RPC (Durable Object binding)
- */
+ * Options for adding an MCP server via RPC (Durable Object binding) */
 export type AddRpcMcpServerOptions = {
   /**
    * Optional caller-supplied stable server id. When provided, this id is used
@@ -110,7 +108,11 @@ export type AddRpcMcpServerOptions = {
   props?: Record<string, unknown>;
 };
 
-/** What `addMcpServer` resolves with for an HTTP or RPC server. */
+/**
+ * What `addMcpServer` resolves with for an HTTP or RPC server.
+ *
+ * @internal
+ */
 export type AddMcpServerResult =
   | {
       id: string;
@@ -123,7 +125,11 @@ export type AddMcpServerResult =
       authUrl?: undefined;
     };
 
-/** What `addMcpServer` needs from the Agent that calls it. */
+/**
+ * What `addMcpServer` needs from the Agent that calls it.
+ *
+ * @internal
+ */
 export type AgentMcpServerHost = {
   readonly manager: MCPClientManager;
   readonly env: object;
@@ -178,7 +184,11 @@ function contextFor(server: MCPServerRow): McpConnectContext {
   };
 }
 
-/** Connect to an MCP server by URL or Durable Object binding. */
+/**
+ * Connect to an MCP server by URL or Durable Object binding.
+ *
+ * @internal
+ */
 export async function addMcpServer<T extends McpRpcAgent>(
   host: AgentMcpServerHost,
   serverName: string,
@@ -395,7 +405,11 @@ async function addRpcServer(
   return { id, state: MCPConnectionState.READY };
 }
 
-/** Try a registered server again; same result as `addMcpServer()`. */
+/**
+ * Try a registered server again; same result as `addMcpServer()`.
+ *
+ * @internal
+ */
 export async function reconnectMcpServer(
   manager: MCPClientManager,
   id: string
@@ -447,7 +461,11 @@ function mcpServerResult(
   }
 }
 
-/** The MCP state the Agent sends to clients. */
+/**
+ * The MCP state the Agent sends to clients.
+ *
+ * @internal
+ */
 export function mcpServersState(manager: MCPClientManager): MCPServersState {
   const state: MCPServersState = {
     prompts: manager.listPrompts(),

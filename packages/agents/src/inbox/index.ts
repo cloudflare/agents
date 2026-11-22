@@ -2,9 +2,10 @@
  * Durable requests for Lifecycle Objects: one record for every request
  * waiting to run, run one at a time per lane.
  *
- * @experimental The Inbox surface may change before stabilizing.
+ * @internal Not a public API (sibling-package support through `agents/internal`).
  */
 export { Inbox, InboxSettlement, type InboxOptions } from "./inbox";
+/** @internal */
 export type {
   InboxCancelResult,
   InboxEventType,

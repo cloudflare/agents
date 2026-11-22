@@ -1,8 +1,10 @@
 # Inbox
 
-`Inbox` (`packages/agents/src/inbox`, exported as `agents/inbox`) keeps one durable record for every request waiting to run on a Durable Object, and runs those requests one at a time per lane. It is a Lifecycle capability built on the Lifecycle job queue.
+**Internal.** Not a public API. Nothing new from the slim-hosts work is exposed to apps until it has shipped inside `Think` and `AIChatAgent` for a release and is shown correct ([rfc-slim-hosts.md](./rfc-slim-hosts.md#exposure)). Sibling packages import it from `agents/internal`.
 
-Status: implemented. Experimental API.
+`Inbox` (`packages/agents/src/inbox`) keeps one durable record for every request waiting to run on a Durable Object, and runs those requests one at a time per lane. It is a Lifecycle capability built on the Lifecycle job queue.
+
+Status: implemented. Internal.
 
 ## Why it exists
 

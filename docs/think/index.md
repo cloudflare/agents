@@ -831,12 +831,7 @@ Declared tasks are armed on the root agent only. A sub-agent that declares
 tasks arms none of them and logs a warning. To run a schedule per user, give
 each user their own Durable Object and declare the task there.
 
-Think hands the declaration to the Scheduler's
-[declared schedules](https://github.com/cloudflare/agents/blob/main/docs/agents/scheduling.md#declared-schedules): each task is
-one job holding its next occurrence, in the Scheduler group `"think"`, and
-`this.scheduler.listDeclared()` shows them. A subclass can also call
-`this.scheduler.declare()` itself; Think's reconcile only touches its own
-group. Static declarations reconcile on startup. A changed schedule, timezone or
+Each task is one durable job holding its next occurrence. Static declarations reconcile on startup. A changed schedule, timezone or
 `retry` re-arms the task from now; a changed prompt, handler or `metadata`
 keeps the pending occurrence. If `getScheduledTasks()` reads product-owned data
 that can change while the Durable Object is live, call
