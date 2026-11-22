@@ -113,8 +113,8 @@ async function recoverInterruptedTurnsForTest(
     );
   }
   await (
-    agent as unknown as { _checkRunFibers(): Promise<void> }
-  )._checkRunFibers();
+    agent as unknown as { _fibers: { recover(): Promise<void> } }
+  )._fibers.recover();
 }
 
 /** The STORED rows, reassembled from their continuation rows. */

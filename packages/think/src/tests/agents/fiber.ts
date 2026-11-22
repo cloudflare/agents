@@ -88,8 +88,8 @@ export class ThinkFiberTestAgent extends Think {
 
   async triggerRecovery(): Promise<void> {
     await (
-      this as unknown as { _checkRunFibers(): Promise<void> }
-    )._checkRunFibers();
+      this as unknown as { _fibers: { recover(): Promise<void> } }
+    )._fibers.recover();
   }
 
   async waitFor(ms: number): Promise<void> {

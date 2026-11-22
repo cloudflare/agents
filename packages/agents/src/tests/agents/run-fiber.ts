@@ -813,8 +813,8 @@ export class TestRunFiberAgent extends Agent {
 
   async triggerRecoveryCheck(): Promise<void> {
     await (
-      this as unknown as { _checkRunFibers(): Promise<void> }
-    )._checkRunFibers();
+      this as unknown as { _fibers: { recover(): Promise<void> } }
+    )._fibers.recover();
   }
 
   /** Read the physical DO alarm (epoch ms) or null when none is armed. */
@@ -838,8 +838,8 @@ export class TestRunFiberAgent extends Agent {
    */
   async simulateAlarmCycle(): Promise<number | null> {
     await (
-      this as unknown as { _checkRunFibers(): Promise<void> }
-    )._checkRunFibers();
+      this as unknown as { _fibers: { recover(): Promise<void> } }
+    )._fibers.recover();
     return this.ctx.storage.getAlarm();
   }
 }
