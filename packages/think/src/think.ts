@@ -376,7 +376,6 @@ function turnContextWithoutModel(ctx: TurnContext): Omit<TurnContext, "model"> {
 
 const MAX_REPLY_ATTACHMENTS_PER_TURN = 32;
 const DEFERRED_RESOLVED_PAUSES_KEY = "cf_think_deferred_resolved_pauses";
-const PENDING_RESPONSE_HOOK_PREFIX = "cf_think_pending_response_hook:";
 
 function messageText(message: UIMessage | undefined): string {
   return (message?.parts ?? [])
@@ -385,13 +384,6 @@ function messageText(message: UIMessage | undefined): string {
     .join("");
 }
 
-type PendingResponseHook = {
-  requestId: string;
-  messageId: string;
-  continuation: boolean;
-  status: ChatResponseResult["status"];
-  error?: string;
-};
 
 /** A live stream interruption (stall or transient error) to route to recovery. */
 type StreamInterruptionRoute = {
@@ -541,6 +533,12 @@ import {
   type MediaEvictionConfig,
   type MediaEvictionPassResult
 } from "./media-eviction";
+import {
+  migrateLegacyResponseHooks,
+  owedResponseHook,
+  RESPONSE_HOOK_SINK,
+  type OwedResponseHook
+} from "./response-hooks";
 import {
   migrateLegacyRecoveredReplies,
   fitRecoveredReply,
@@ -1626,6 +1624,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       () => this._messengerRuntime
     );
     this.lifecycle.use(this.#messengerReplies);
+    this._outbox.register(RESPONSE_HOOK_SINK, {
+      deliver: (hook: OwedResponseHook) => this._fireOwedResponseHook(hook)
+    });
     this._outbox.register(
       RECOVERED_REPLY_SINK,
       recoveredReplySink(async () => {
@@ -1856,7 +1857,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
                     key
                   })
               );
-              await this._replayPendingResponseHooks();
+              await this._releaseOwedResponseHooks();
               await this._releaseOrphanedMessengerRecoveries();
               await this._recoverSubmissionsOnStart();
               // Requests an earlier isolate accepted and never started run
@@ -11470,13 +11471,20 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * otherwise re-run it. Fire the owed hook and settle the submission instead.
    */
   private async _settlePersistedChatTurn(requestId: string): Promise<boolean> {
-    const hook = await this.ctx.storage.get<PendingResponseHook>(
-      PENDING_RESPONSE_HOOK_PREFIX + requestId
+    const owed = await this._outbox.get<OwedResponseHook>(
+      RESPONSE_HOOK_SINK,
+      requestId
     );
+    const hook = owed?.payload;
     if (!hook || !(await this.session.getMessage(hook.messageId))) {
       return false;
     }
-    await this._replayPendingResponseHooks(requestId);
+    // A held hook is this recovery's to fire; a released one the Outbox
+    // is already delivering.
+    if (owed.status === "held") {
+      await this._fireOwedResponseHook(hook);
+      await this._outbox.cancel(RESPONSE_HOOK_SINK, requestId);
+    }
     await this._completeRecoveredSubmission(
       requestId,
       hook.status === "error" ? "error" : "completed",
@@ -12618,10 +12626,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /**
-   * Fire a live turn's response hook, then drop its pending marker. When the
+   * Fire a live turn's response hook, then drop the owed hook. When the
    * bookkeeping before `onChatResponse` throws (attachment delivery, the
-   * terminal-status write), the hook has not run: the marker is kept, with
-   * this outcome, so the next start replays it.
+   * terminal-status write), the hook has not run: it is handed to the
+   * Outbox with this outcome, which retries it.
    */
   private async _fireLiveResponseHook(
     result: ChatResponseResult
@@ -12629,104 +12637,81 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     try {
       await this._fireResponseHook(result);
     } catch (error) {
-      console.error("[Think] onChatResponse deferred to replay:", error);
-      await this._rememberPendingResponseHook(result).catch(() => {});
+      console.error("[Think] onChatResponse deferred to the Outbox:", error);
       this._responseHooksInFlight.delete(result.requestId);
+      await this._outbox
+        .send(RESPONSE_HOOK_SINK, owedResponseHook(result), {
+          key: result.requestId
+        })
+        .catch(() => {});
       return;
     }
     await this._forgetPendingResponseHook(result.requestId).catch(
       (error: unknown) => {
-        console.error("[Think] failed to clear a response hook marker:", error);
+        console.error("[Think] failed to clear an owed response hook:", error);
       }
     );
   }
 
   /** Request ids whose response hook the live turn still owes. */
   private _responseHooksInFlight = new Set<string>();
-  private _pendingResponseHookReplay: Promise<void> | undefined;
 
   /**
-   * Record, before the assistant message is persisted, that this turn owes
-   * `onChatResponse`, so a reset between the persist and the hook replays it.
+   * Hold, before the assistant message is stored, that this turn owes
+   * `onChatResponse`, so a reset between the store and the hook fires it.
    */
   private async _rememberPendingResponseHook(
     result: ChatResponseResult
   ): Promise<void> {
     this._responseHooksInFlight.add(result.requestId);
-    const pending: PendingResponseHook = {
-      requestId: result.requestId,
-      messageId: result.message.id,
-      continuation: result.continuation,
-      status: result.status,
-      ...(result.error !== undefined && { error: result.error })
-    };
-    await this.ctx.storage.put(
-      PENDING_RESPONSE_HOOK_PREFIX + result.requestId,
-      pending
-    );
+    await this._outbox.send(RESPONSE_HOOK_SINK, owedResponseHook(result), {
+      key: result.requestId,
+      hold: true
+    });
   }
 
   private async _forgetPendingResponseHook(requestId: string): Promise<void> {
-    await this.ctx.storage.delete(PENDING_RESPONSE_HOOK_PREFIX + requestId);
+    await this._outbox.cancel(RESPONSE_HOOK_SINK, requestId);
     this._responseHooksInFlight.delete(requestId);
   }
 
   /**
-   * Fire the response hooks a reset interrupted. A hook whose message never
-   * persisted is dropped: that turn is recovered, and fires, on its own.
+   * Fire an owed hook after a reset. A hook whose message never persisted
+   * is dropped: that turn is recovered, and fires, on its own.
    */
-  private _replayPendingResponseHooks(requestId?: string): Promise<void> {
-    const previous = this._pendingResponseHookReplay ?? Promise.resolve();
-    const replay = previous
-      .catch(() => {})
-      .then(() => this._replayPendingResponseHooksNow(requestId));
-    const tracked = replay.finally(() => {
-      if (this._pendingResponseHookReplay === tracked) {
-        this._pendingResponseHookReplay = undefined;
-      }
+  private async _fireOwedResponseHook(hook: OwedResponseHook): Promise<void> {
+    const message = await this.session.getMessage(hook.messageId);
+    if (!message) return;
+    await this._fireResponseHook({
+      message: message as UIMessage,
+      requestId: hook.requestId,
+      continuation: hook.continuation,
+      status: hook.status,
+      ...(hook.error !== undefined && { error: hook.error }),
+      recovered: true
     });
-    this._pendingResponseHookReplay = tracked;
-    return tracked;
   }
 
-  private async _replayPendingResponseHooksNow(
-    requestId?: string
-  ): Promise<void> {
-    const pending =
-      requestId === undefined
-        ? await this.ctx.storage.list<PendingResponseHook>({
-            prefix: PENDING_RESPONSE_HOOK_PREFIX
-          })
-        : new Map([
-            [
-              PENDING_RESPONSE_HOOK_PREFIX + requestId,
-              await this.ctx.storage.get<PendingResponseHook>(
-                PENDING_RESPONSE_HOOK_PREFIX + requestId
-              )
-            ]
-          ]);
-    for (const [key, hook] of pending) {
-      if (!hook || this._responseHooksInFlight.has(hook.requestId)) continue;
-      // Chat recovery reads this marker to settle the turn instead of
-      // re-running it, so leave it for recovery while the turn is pending.
-      if (
-        requestId === undefined &&
-        this._hasRecoverableChatTurn(hook.requestId)
-      ) {
-        continue;
-      }
-      const message = await this.session.getMessage(hook.messageId);
-      if (message) {
-        await this._fireResponseHook({
-          message: message as UIMessage,
-          requestId: hook.requestId,
-          continuation: hook.continuation,
-          status: hook.status,
-          ...(hook.error !== undefined && { error: hook.error }),
-          recovered: true
-        });
-      }
-      await this.ctx.storage.delete(key);
+  /**
+   * On start, release the hooks a reset left owed. A turn chat recovery
+   * will settle keeps its hook held: recovery reads it to settle the turn
+   * instead of re-running it (`_settlePersistedChatTurn`).
+   */
+  private async _releaseOwedResponseHooks(): Promise<void> {
+    await migrateLegacyResponseHooks(this.ctx.storage, (hook) =>
+      this._outbox.send(RESPONSE_HOOK_SINK, hook, {
+        key: hook.requestId,
+        hold: true
+      })
+    );
+    const held = await this._outbox.list<OwedResponseHook>({
+      sink: RESPONSE_HOOK_SINK,
+      status: "held"
+    });
+    for (const { key } of held) {
+      if (this._responseHooksInFlight.has(key)) continue;
+      if (this._hasRecoverableChatTurn(key)) continue;
+      await this._outbox.release(RESPONSE_HOOK_SINK, key);
     }
   }
 

@@ -4204,7 +4204,6 @@ export class ThinkTestAgent extends Think {
   }> {
     const self = this as unknown as {
       _recordTerminalChatStatus(...args: unknown[]): Promise<void>;
-      _replayPendingResponseHooks(): Promise<void>;
     };
     const original = self._recordTerminalChatStatus;
     self._recordTerminalChatStatus = async () => {
@@ -4216,7 +4215,19 @@ export class ThinkTestAgent extends Think {
     try {
       const first = await this.testChat("hook bookkeeping fails");
       const liveResponses = this._responseLog.map((r) => r.status);
-      await self._replayPendingResponseHooks();
+      // The Outbox fires the hook the live turn could not.
+      const deadline = Date.now() + 10_000;
+      while (
+        Date.now() < deadline &&
+        (
+          await this._outbox.list({
+            sink: "__cf_think_response_hook",
+            status: "pending"
+          })
+        ).length > 0
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
       return {
         first,
         status: rpcStatus.read(),
@@ -10961,11 +10972,29 @@ export class ThinkRecoveryTestAgent extends Think {
     };
   }
 
-  /** Replay owed response hooks, as the startup durable-work step does. */
+  /**
+   * Release owed response hooks, as the startup durable-work step does, and
+   * wait until the Outbox has fired them.
+   */
   async replayPendingResponseHooksForTest(): Promise<void> {
     await (
-      this as unknown as { _replayPendingResponseHooks(): Promise<void> }
-    )._replayPendingResponseHooks();
+      this as unknown as { _releaseOwedResponseHooks(): Promise<void> }
+    )._releaseOwedResponseHooks();
+    await this._drainOwedResponseHooksForTest();
+  }
+
+  /** Wait until the Outbox holds no released response hook. */
+  private async _drainOwedResponseHooksForTest(): Promise<void> {
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      const pending = await this._outbox.list({
+        sink: "__cf_think_response_hook",
+        status: "pending"
+      });
+      if (pending.length === 0) return;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error("owed response hooks did not drain in time");
   }
 
   // A single per-channel policy (voice) so recovery tests can assert that a
