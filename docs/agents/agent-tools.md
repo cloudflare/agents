@@ -581,8 +581,9 @@ Imperative runs without a parent tool call are available as
 ## Drill in
 
 Connect to a retained child through the parent. The parent forwards
-`agent-tool-runs/{runId}` under its own URL to the run's child, and answers
-`404` for a run id it does not have:
+`agent-tool-runs/{runId}` under its own URL to the run's child. A path whose
+run id the parent does not have goes to the parent's own `onRequest` (or its
+WebSocket handler), like any other path:
 
 ```ts
 useAgent({
