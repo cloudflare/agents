@@ -395,11 +395,6 @@ type PendingResponseHook = {
   error?: string;
 };
 
-/**
- * Carries an in-stream error that `classifyChatError` marked transient out of
- * the drain loop, so it reaches the same recovery routing as a thrown error.
- * `original` is the provider error the stream reported, when it had one.
- */
 /** A live stream interruption (stall or transient error) to route to recovery. */
 type StreamInterruptionRoute = {
   requestId: string;

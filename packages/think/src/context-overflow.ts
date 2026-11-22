@@ -24,7 +24,11 @@ import type {
   PrepareStepContext
 } from "./turn-types";
 
-/** A stream error the app classified as transient or a rate limit. */
+/**
+ * Carries an in-stream error that `classifyChatError` marked transient out of
+ * the drain loop, so it reaches the same recovery routing as a thrown error.
+ * `original` is the provider error the stream reported, when it had one.
+ */
 export class TransientChatStreamError extends Error {
   constructor(
     message: string,
