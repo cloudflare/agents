@@ -172,12 +172,7 @@ export {
   type AgentStaticOptions
 } from "./agent-options";
 import { Workflows } from "./workflow-tracking/workflows";
-import {
-  assertUserFiberName,
-  Fibers,
-  stashCurrentFiber,
-  withFiberStash
-} from "./fibers/fibers";
+import { Fibers, stashCurrentFiber, withFiberStash } from "./fibers/fibers";
 import type {
   DeleteFibersOptions,
   FiberContext,
@@ -2438,7 +2433,6 @@ export class Agent<
    * `onFiberRecovered`. The function itself never runs again.
    */
   runFiber<T>(name: string, fn: (ctx: FiberContext) => Promise<T>): Promise<T> {
-    assertUserFiberName(name);
     return this._fibers.run(name, fn);
   }
 
@@ -2466,7 +2460,6 @@ export class Agent<
     fn: (ctx: FiberContext) => Promise<void>,
     options?: StartFiberOptions
   ): Promise<StartFiberResult> {
-    assertUserFiberName(name);
     return this._fibers.start(name, fn, options);
   }
 

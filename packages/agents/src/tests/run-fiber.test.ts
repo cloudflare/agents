@@ -427,19 +427,6 @@ describe("runFiber", () => {
       expect((await agent.getRunningFiberCount()) as unknown as number).toBe(0);
     });
 
-    it("refuses framework-reserved fiber names from runFiber and startFiber", async () => {
-      const agent = await getAgentByName(
-        env.TestRunFiberAgent,
-        "reserved-fiber-name"
-      );
-      await expect(
-        agent.runNamedFiber("__cf_internal_chat_turn:x")
-      ).resolves.toMatch(/reserved for the framework/);
-      await expect(
-        agent.startNamedManagedFiber("__cf_internal_probe:x")
-      ).resolves.toMatch(/reserved for the framework/);
-    });
-
     it("leaves framework fibers to their own recovery budget after crashes", async () => {
       const agent = await getAgentByName(
         env.TestRunFiberAgent,

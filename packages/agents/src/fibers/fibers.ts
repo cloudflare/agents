@@ -103,22 +103,9 @@ const MAX_RECOVERY_CRASHES = 3;
 // Framework fibers (legacy chat turns) are recovered by engines that keep
 // their own durable interruption budget and end the turn with a terminal
 // outcome; dropping their row early would skip that. They are not counted.
+// The prefix cannot be reserved on the public API: released
+// `@cloudflare/ai-chat` versions call `runFiber()` with it.
 const FRAMEWORK_FIBER_PREFIX = "__cf_internal";
-
-/**
- * Reject a framework-reserved name on the public `runFiber()` and
- * `startFiber()`. Framework fibers are exempt from the crash budget, so an
- * application fiber must not be able to claim the prefix.
- *
- * @internal
- */
-export function assertUserFiberName(name: string): void {
-  if (name.startsWith(FRAMEWORK_FIBER_PREFIX)) {
-    throw new Error(
-      `Fiber names starting with "${FRAMEWORK_FIBER_PREFIX}" are reserved for the framework`
-    );
-  }
-}
 
 const WAKE_JOB_ID = "fibers:recover";
 const WAKE_JOB_FN = "recover";

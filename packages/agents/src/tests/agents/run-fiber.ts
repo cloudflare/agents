@@ -657,24 +657,6 @@ export class TestRunFiberAgent extends Agent {
     `;
   }
 
-  async runNamedFiber(name: string): Promise<string> {
-    try {
-      await this.runFiber(name, async () => {});
-      return "ran";
-    } catch (error) {
-      return error instanceof Error ? error.message : String(error);
-    }
-  }
-
-  async startNamedManagedFiber(name: string): Promise<string> {
-    try {
-      await this.startFiber(name, async () => {});
-      return "started";
-    } catch (error) {
-      return error instanceof Error ? error.message : String(error);
-    }
-  }
-
   async internalRecoveredFibers(): Promise<string[]> {
     return this.internalRecovered;
   }
