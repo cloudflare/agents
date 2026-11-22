@@ -197,6 +197,13 @@ export class ChatFrames {
     if (!fields.done && !fields.error) {
       let batch = this.#batches.get(fields.id);
       if (!batch) {
+        // Turns stream one at a time: a new request's first chunk means any
+        // other request's stream is over, even one that never sent a
+        // terminal frame. Its batch closes, so no open batch outlives it.
+        for (const [id, open] of this.#batches) {
+          open.close();
+          this.#batches.delete(id);
+        }
         batch = log.batch();
         this.#batches.set(fields.id, batch);
       }

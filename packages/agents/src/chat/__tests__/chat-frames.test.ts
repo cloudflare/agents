@@ -235,4 +235,15 @@ describe("ChatFrames with the chat event log", () => {
     ]);
     expect(fake.open).toBe(0);
   });
+
+  it("closes a request's batch when the next request streams, even without a terminal frame", () => {
+    const fake = fakeLog();
+    const { frames } = setup({ log: fake.log });
+    frames.broadcast({ type: RESPONSE, id: "r1", body: "a", done: false });
+    frames.broadcast({ type: RESPONSE, id: "r2", body: "b", done: false });
+    expect(fake.batches).toBe(2);
+    expect(fake.open).toBe(1);
+    frames.broadcast({ type: RESPONSE, id: "r2", body: "", done: true });
+    expect(fake.open).toBe(0);
+  });
 });

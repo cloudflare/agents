@@ -199,7 +199,7 @@ export class WebSockets extends LifecycleCapability {
   readonly #sessions = new Map<string, CapnWebSession>();
   readonly #logs = new Map<
     string,
-    Pick<EventLog, "subscribe" | "unsubscribe" | "dispose">
+    Pick<EventLog, "subscribe" | "unsubscribe" | "dispose" | "forget">
   >();
   #manager: ConnectionManager | undefined;
 
@@ -458,6 +458,7 @@ export class WebSockets extends LifecycleCapability {
     reason: string,
     wasClean: boolean
   ): Promise<unknown> {
+    for (const log of this.#logs.values()) log.forget(connection);
     return this.#each((handlers) =>
       this.lifecycle.runInHostContext(
         () => handlers?.onClose?.(connection, code, reason, wasClean),

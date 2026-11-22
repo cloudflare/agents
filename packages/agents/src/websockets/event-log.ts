@@ -241,6 +241,8 @@ export class EventLog<T = unknown, S = unknown> {
   #bufferBytes = 0;
   #openBatches = 0;
   #timer: ReturnType<typeof setTimeout> | undefined;
+  /** See {@link EventLog.#followerSet}; built on first use. */
+  #followerCache: Set<Connection> | undefined;
   /** A crash gap was recorded and surviving followers are not told yet. */
   #resyncPending = false;
 
@@ -381,6 +383,7 @@ export class EventLog<T = unknown, S = unknown> {
     const logs = followedLogs(connection);
     if (!logs.includes(this.name))
       setFollowed(connection, [...logs, this.name]);
+    this.#followerSet().add(connection);
   }
 
   /**
@@ -388,15 +391,47 @@ export class EventLog<T = unknown, S = unknown> {
    * can send the same frames the old way to connections that do not.
    */
   followerIds(): string[] {
-    const ids: string[] = [];
-    for (const connection of this.#host.connections()) {
-      if (followedLogs(connection).includes(this.name)) ids.push(connection.id);
+    return this.#followers().map((connection) => connection.id);
+  }
+
+  /**
+   * @internal Forget a connection that closed. Its subscription lived in
+   * its attachment, which goes with the socket.
+   */
+  forget(connection: Connection): void {
+    this.#followerCache?.delete(connection);
+  }
+
+  /**
+   * The connections following this log, read from their attachments once
+   * per isolate and kept in memory after that, so a chunk frame does not
+   * scan every connection. Closed sockets drop out as they are met.
+   */
+  #followerSet(): Set<Connection> {
+    if (!this.#followerCache) {
+      this.#followerCache = new Set();
+      for (const connection of this.#host.connections()) {
+        if (followedLogs(connection).includes(this.name)) {
+          this.#followerCache.add(connection);
+        }
+      }
     }
-    return ids;
+    return this.#followerCache;
+  }
+
+  #followers(): Connection[] {
+    const set = this.#followerSet();
+    const open: Connection[] = [];
+    for (const connection of set) {
+      if (connection.readyState === WebSocket.OPEN) open.push(connection);
+      else set.delete(connection);
+    }
+    return open;
   }
 
   /** @internal Stop sending this log's events to a connection. */
   unsubscribe(connection: Connection): void {
+    this.#followerCache?.delete(connection);
     const logs = followedLogs(connection);
     if (logs.includes(this.name)) {
       setFollowed(
@@ -438,8 +473,7 @@ export class EventLog<T = unknown, S = unknown> {
       newestOpen: false
     };
     this.#resyncPending = false;
-    for (const connection of this.#host.connections()) {
-      if (!followedLogs(connection).includes(this.name)) continue;
+    for (const connection of this.#followers()) {
       if (!this.#sendResync(connection, this.#loaded)) {
         this.unsubscribe(connection);
       }
@@ -571,11 +605,7 @@ export class EventLog<T = unknown, S = unknown> {
     const text = `{"type":"${EVENT_LOG_EVENTS}","log":${JSON.stringify(
       this.name
     )},"events":[${entries.map((entry) => entry.json).join(",")}]}`;
-    for (const connection of this.#host.connections()) {
-      if (followedLogs(connection).includes(this.name)) {
-        trySend(connection, text);
-      }
-    }
+    for (const connection of this.#followers()) trySend(connection, text);
   }
 
   // ── Storage ────────────────────────────────────────────────────────────
@@ -704,9 +734,8 @@ export class EventLog<T = unknown, S = unknown> {
   #resyncFollowers(except?: Connection, seq?: number): boolean {
     if (!this.#resyncPending || !this.#loaded) return false;
     this.#resyncPending = false;
-    for (const connection of this.#host.connections()) {
+    for (const connection of this.#followers()) {
       if (connection === except) continue;
-      if (!followedLogs(connection).includes(this.name)) continue;
       if (!this.#sendResync(connection, this.#loaded, undefined, seq)) {
         this.unsubscribe(connection);
       }

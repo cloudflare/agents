@@ -54,6 +54,9 @@ class Client {
   }
 }
 
+/** Let a client close reach the object. */
+const waitForClose = () => new Promise((resolve) => setTimeout(resolve, 100));
+
 const isType = (type: string) => (frame: Frame) =>
   frame.type === `cf_agent_log_${type}`;
 
@@ -364,6 +367,26 @@ describe("event log", () => {
     expect(await stub(name).publish("feed", "next")).toBe(1);
     client.close();
     late.close();
+  });
+
+  it("knows its followers without scanning, and forgets one that closed", async () => {
+    const name = crypto.randomUUID();
+    const a = await connect(name, "?_pk=a");
+    const b = await connect(name, "?_pk=b");
+    await follow(a);
+    await follow(b);
+    expect((await stub(name).followerIds()).sort()).toEqual(["a", "b"]);
+    a.close();
+    await waitForClose();
+    expect(await stub(name).followerIds()).toEqual(["b"]);
+    // After a wake the followers are read again from the attachments.
+    await evictDurableObject(stub(name));
+    expect(await stub(name).followerIds()).toEqual(["b"]);
+    await stub(name).publish("feed", "still");
+    expect(events(await b.until(isType("events")))).toEqual([
+      { seq: 1, data: "still" }
+    ]);
+    b.close();
   });
 
   it("keeps a connection's subscriptions across hibernation", async () => {
