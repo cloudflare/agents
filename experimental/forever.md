@@ -53,7 +53,7 @@ No schedule rows are created in `cf_agents_schedules`. The heartbeat is invisibl
 
 ### Alarm persistence
 
-`ctx.storage.setAlarm()` persists to disk. If the DO is evicted or the process dies, recovery runs eagerly in `onStart()` on the first request after wake. The persisted alarm serves as a fallback: the Fibers capability's `fibers:recover` job runs the same recovery scan, and a scan already in progress is joined, not run twice.
+`ctx.storage.setAlarm()` persists to disk. If the DO is evicted or the process dies, recovery runs during startup, before the user's `onStart()`, whatever wakes the object: a request, a connection or the persisted alarm. The persisted alarm is what wakes an agent with no clients. Once nothing is left to recover, the Fibers capability cancels its `fibers:recover` wake instead of running an empty scan.
 
 ### Configurable interval
 
@@ -175,9 +175,9 @@ runFiber("work", fn)
 ```
 [DO evicted — all in-memory state lost]
   │
-  ├─ First request/connection → onStart() → fiber recovery scan  [primary]
+  ├─ Any wake (request, connection, alarm) → startup → fiber recovery scan → onStart()
   │  OR
-  ├─ Recovery wake (`fibers:recover` job) fires → recovery scan  [fallback]
+  ├─ No clients: the persisted alarm is that wake
   │
   ├─ recovery scan (runs once — a concurrent caller joins it)
   │    │
@@ -427,7 +427,7 @@ Key behaviors during hibernation:
 
 - **`cf_agents_runs` rows persist** — SQLite survives hibernation
 - **`_runFiberActiveFibers` (in-memory Set) is empty** — reconstructed from scratch
-- **the fiber recovery scan runs eagerly in `onStart()` on first wake** — any row NOT in the (empty) in-memory set is treated as interrupted. The alarm path also calls it as a fallback, with a re-entrancy guard preventing double recovery
+- **the fiber recovery scan runs at startup, before `onStart()`, on first wake** — any row NOT in the (empty) in-memory set is treated as interrupted. An alarm wake goes through the same startup
 - **`_lastBody` and `_lastClientTools` are restored from SQLite** — `cf_ai_chat_request_context` table, restored in the constructor
 
 The `cf_agents_runs` table is created with `CREATE TABLE IF NOT EXISTS` in the Agent constructor — cheap DDL that runs every wake. No `_fibersTableCreated` flag needed (that would reset on hibernation and miss recovery).
@@ -436,8 +436,8 @@ The `cf_agents_runs` table is created with `CREATE TABLE IF NOT EXISTS` in the A
 
 1. `runFiber()` calls `keepAlive()`, which increments `_keepAliveRefs` and calls `_scheduleNextAlarm()`
 2. `_scheduleNextAlarm()` sets `ctx.storage.setAlarm(now + keepAliveIntervalMs)` — persists to disk
-3. On wake, `onStart()` calls the fiber recovery scan eagerly — recovery fires immediately on the first request
-4. The alarm also calls the `fibers:recover` job → the fiber recovery scan as a fallback (re-entrancy guard prevents double recovery)
+3. On wake, startup runs the fiber recovery scan before `onStart()` — recovery fires immediately on the first request
+4. With no requests, the persisted alarm wakes the object and the same startup scan runs
 5. `_scheduleNextAlarm()` sets the next alarm if refs are still held
 
 The alarm handler itself runs for milliseconds (a few SQL queries + setting the next alarm). The actual fiber work runs in the method execution context, not the alarm handler. The 15-minute alarm timeout is a non-issue.
@@ -448,8 +448,8 @@ Workerd persists both SQLite and alarm state to disk. Local development and prod
 
 1. Fiber is running, `keepAlive()` sets an alarm
 2. Process is killed (SIGKILL, code update, `Ctrl-C`)
-3. Process restarts — first request triggers `onStart()` → the fiber recovery scan → recovery
-4. Persisted alarm also fires as fallback → the `fibers:recover` job → the fiber recovery scan (no-op, already recovered)
+3. Process restarts — the first request triggers startup → the fiber recovery scan → recovery → `onStart()`
+4. Nothing is left to recover, so the `fibers:recover` wake is cancelled rather than run as an empty scan
 
 The E2E test in `packages/agents/src/e2e-tests/` validates this: it starts wrangler, spawns a fiber, kills the process with SIGKILL, restarts with the same persist directory, and verifies the fiber recovers automatically.
 
