@@ -97,7 +97,7 @@ class MyAgent extends Agent {
 
 `keepAlive` prevents eviction but does nothing about recovery. If the agent _is_ evicted despite the heartbeat (code update, alarm timeout, resource limit), any in-progress work is lost.
 
-`runFiber` calls `keepAlive` internally _and_ persists the work in SQLite so it can be recovered. Use `keepAlive` alone when the work is cheap to redo or does not need checkpointing. Use `runFiber` when the work is expensive and you need to resume from where you left off.
+`runFiber` keeps the agent alive the same way (its own recovery alarm fires every `keepAliveIntervalMs` while the fiber runs) _and_ persists the work in SQLite so it can be recovered. Use `keepAlive` alone when the work is cheap to redo or does not need checkpointing. Use `runFiber` when the work is expensive and you need to resume from where you left off.
 
 | Scenario                                         | Use                         |
 | ------------------------------------------------ | --------------------------- |
@@ -245,8 +245,8 @@ Returning `undefined` keeps a managed fiber `interrupted`. Throwing leaves it
 `interrupted` and records the recovery error for inspection. Terminal managed
 fibers such as `aborted` are not recovered again if a stale run row remains.
 If a non-terminal managed ledger row loses its transient `cf_agents_runs` row
-before completion, housekeeping also marks it `interrupted` and runs the same
-recovery hook.
+before completion, the recovery scan also marks it `interrupted` and runs the
+same recovery hook.
 
 If recovery is triggered by a later duplicate webhook instead of
 `onFiberRecovered()`, use `resolveFiber()` with the same result shape after your
@@ -322,13 +322,13 @@ In this pattern:
 ```
 runFiber("work", fn)
   ├─ INSERT row into cf_agents_runs
-  ├─ keepAlive() — heartbeat starts
+  ├─ Arm the recovery alarm — it fires every keepAliveIntervalMs while fibers run
   ├─ Execute fn(ctx)
   │    ├─ ctx.stash(data) → UPDATE snapshot in SQLite
   │    ├─ ctx.stash(data) → UPDATE snapshot in SQLite
   │    └─ return result
   ├─ DELETE row from cf_agents_runs
-  ├─ keepAlive dispose — heartbeat stops
+  ├─ Cancel the recovery alarm once no fiber runs and no row is left
   └─ Return result to caller
 ```
 
@@ -338,17 +338,19 @@ runFiber("work", fn)
 [DO evicted — all in-memory state lost]
 
   On next activation:
-  ├─ Request/connection → onStart() → _checkRunFibers()     [primary path]
+  ├─ Request/connection → startup → recovery scan    [primary path]
   │  OR
-  ├─ Persisted alarm fires → _onAlarmHousekeeping()          [fallback path]
+  ├─ The persisted recovery alarm fires → recovery scan   [fallback path]
 
-  _checkRunFibers():
+  Recovery scan:
   ├─ SELECT * FROM cf_agents_runs
   ├─ For each orphaned row:
   │    ├─ Body already finished (only its cleanup failed) → DELETE, no hook
   │    ├─ Parse snapshot from JSON
   │    ├─ Call onFiberRecovered(ctx)
   │    └─ DELETE the row after successful recovery
+  ├─ A row whose hook threw stays; the next scan retries it, with the wait
+  │  doubling after each scan that recovered nothing (at most 5 minutes)
   └─ If onFiberRecovered calls runFiber() again → new row, normal execution
 ```
 
@@ -358,7 +360,7 @@ Both recovery paths call the same hook. The alarm path is critical for backgroun
 
 Fibers also work inside sub-agents. The fiber row and snapshots are stored in the sub-agent's own SQLite database, and `onFiberRecovered()` runs with the sub-agent as `this`.
 
-Sub-agents do not have independent alarm slots, so the top-level parent owns the physical heartbeat. When a sub-agent starts a fiber, the parent stores a small root-side index entry for that facet and fiber ID. Root alarm housekeeping uses that index to route recovery checks back into the owning sub-agent, even if the child has no client connection or incoming RPC.
+Sub-agents do not have independent alarm slots, so the top-level parent owns the physical alarm. While a sub-agent has a fiber running or an interrupted fiber left, the parent keeps a copy of the sub-agent's recovery alarm. When it fires, the parent routes the recovery scan back into the owning sub-agent, even if the child has no client connection or incoming RPC.
 
 This keeps recovery local to the child while preserving the single physical alarm slot owned by the parent. A recovered continuation can use `schedule()` from inside the facet; the parent owns the physical alarm and routes the callback back to the child.
 
@@ -367,7 +369,6 @@ This keeps recovery local to the child while preserving the single physical alar
 ```
 fn(ctx) throws Error
   ├─ DELETE row from cf_agents_runs
-  ├─ keepAlive dispose
   └─ Error propagates to caller (or logged if fire-and-forget)
 ```
 
@@ -472,7 +473,7 @@ Key points:
 
 ## Concurrent fibers
 
-Multiple fibers can run at the same time. Each has its own row in SQLite with its own snapshot, and each calls `keepAlive()` independently (ref-counted, so the DO stays alive until all fibers complete).
+Multiple fibers can run at the same time. Each has its own row in SQLite with its own snapshot. They share one recovery alarm, which keeps the DO alive until all fibers complete.
 
 ```typescript
 // Run two fibers concurrently
@@ -484,7 +485,7 @@ void this.runFiber("process-queue", async (ctx) => {
 });
 ```
 
-On recovery, `_checkRunFibers()` iterates all orphaned rows and calls `onFiberRecovered` for each. Use `ctx.name` to distinguish between fiber types in your recovery hook.
+On recovery, the scan iterates all orphaned rows and calls `onFiberRecovered` for each. Use `ctx.name` to distinguish between fiber types in your recovery hook.
 
 ## Testing locally
 
@@ -501,7 +502,7 @@ The E2E test in `packages/agents/src/e2e-tests/` validates this: it starts wrang
 
 ### `runFiber(name, fn)`
 
-Execute a durable fiber. The fiber is registered in SQLite before `fn` runs and deleted after it completes (or throws). `keepAlive()` is held for the duration.
+Execute a durable fiber. The fiber is registered in SQLite before `fn` runs and deleted after it completes (or throws). The recovery alarm keeps the agent alive for the duration.
 
 - **`name`** — identifier for the fiber, used in `onFiberRecovered` to distinguish fiber types. Not unique — multiple fibers can share a name.
 - **`fn`** — async function receiving a `FiberContext`. Closures work naturally (`this` and local variables are captured).

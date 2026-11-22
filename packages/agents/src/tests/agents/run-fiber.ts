@@ -756,11 +756,9 @@ export class TestRunFiberAgent extends Agent {
         },
         { fiberId }
       );
-      await (
-        this as unknown as {
-          _managedFiberExecutions: Map<string, Promise<void>>;
-        }
-      )._managedFiberExecutions.get(fiberId);
+      // The execution settles in microtasks; let it finish before the
+      // triggers go.
+      await this.waitFor(20);
     } finally {
       this.sql`DROP TRIGGER fail_managed_fiber_settle`;
       this.sql`DROP TRIGGER fail_managed_fiber_cleanup`;
@@ -778,25 +776,24 @@ export class TestRunFiberAgent extends Agent {
     return this.ctx.storage.getAlarm();
   }
 
-  /** Inspect the in-memory recovery backoff streak (white-box for tests). */
-  async getRecoveryNoProgressScans(): Promise<number> {
-    return (this as unknown as { _recoveryNoProgressScans: number })
-      ._recoveryNoProgressScans;
+  /** The Fibers capability's wake (epoch ms), or null when none is armed. */
+  async getFiberWakeTime(): Promise<number | null> {
+    const rows = this.sql<{ time: number }>`
+      SELECT time FROM cf_agents_jobs
+      WHERE capability = 'fibers' AND id = 'fibers:recover'
+    `;
+    return rows[0]?.time ?? null;
   }
 
   /**
-   * Run one housekeeping+reschedule cycle in the same order as `alarm()`
-   * (`_checkRunFibers` then `_syncHostJobs`) and return the resulting
-   * armed alarm time (epoch ms) or null. Lets tests drive multi-pass recovery
-   * deterministically without spawning a real process / waiting on timers.
+   * Run one recovery pass and return the armed alarm time (epoch ms) or
+   * null. Lets tests drive multi-pass recovery deterministically without
+   * spawning a real process or waiting on timers.
    */
   async simulateAlarmCycle(): Promise<number | null> {
-    const self = this as unknown as {
-      _checkRunFibers(): Promise<void>;
-      _syncHostJobs(): Promise<void>;
-    };
-    await self._checkRunFibers();
-    await self._syncHostJobs();
+    await (
+      this as unknown as { _checkRunFibers(): Promise<void> }
+    )._checkRunFibers();
     return this.ctx.storage.getAlarm();
   }
 }

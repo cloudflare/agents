@@ -107,11 +107,11 @@ describe("native Durable Object RPC initialization", () => {
 
     await (
       stub as unknown as {
-        _cf_checkRunFibersForFacet(
+        _cf_cleanupFacetPrefix(
           ownerPath: ReadonlyArray<{ className: string; name: string }>
-        ): Promise<number>;
+        ): Promise<void>;
       }
-    )._cf_checkRunFibersForFacet([{ className: "TestNativeRpcAgent", name }]);
+    )._cf_cleanupFacetPrefix([{ className: "TestNativeRpcAgent", name }]);
 
     const startCount = await runInDurableObject(stub, (_instance, ctx) =>
       ctx.storage.get<number>("test_start_count")

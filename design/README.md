@@ -20,6 +20,7 @@ The goal is to give contributors (and future-us) a quick way to understand _why_
 | [loopback.md](./loopback.md)                                                       | Loopback pattern — cross-boundary RPC for sub-agents and dynamic isolates                                                |
 | [rfc-codex-harness-capability.md](./rfc-codex-harness-capability.md)               | RFC: static Codex Rust/Wasm engine composed as a Lifecycle capability                                                    |
 | [rfc-harness-model-provider-boundary.md](./rfc-harness-model-provider-boundary.md) | RFC: LanguageModelV4 for Codex and pi-ai providers for Pi in v1                                                          |
+| [fibers.md](./fibers.md)                                                           | Fibers — `runFiber`/`startFiber` as a Lifecycle capability, recovery scan, the wake, facets                              |
 | [chat-turn-core.md](./chat-turn-core.md)                                           | The chat turn core — what `agents/chat` owns of a turn in `AIChatAgent` and `Think`, the differences settled, known gaps |
 | [test-coverage-matrix.md](./test-coverage-matrix.md)                               | Feature × test-layer coverage rollup, CI mapping, skipped-test debt, hygiene                                             |
 | [rfc-pi-harness-example.md](./rfc-pi-harness-example.md)                           | RFC: pi-durable as an example-local Lifecycle capability                                                                 |

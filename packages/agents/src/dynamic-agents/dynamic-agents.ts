@@ -41,7 +41,6 @@ import type {
   DynamicAgentPathInvokeEndpoint,
   DynamicAgentWebSocketEndpoint,
   FacetCapableCtx,
-  FacetRunStorageRow,
   RootFacetRpcSurface,
   StoredDynamicAgentConnection
 } from "./types";
@@ -130,8 +129,7 @@ export function rejectSubAgentWebSocket(response: Response): Response {
  * load-bearing startup ordering inside the host's startup span.
  *
  * Nothing here renames any wire- or storage-visible identifier: the
- * `cf_agents_facet_runs` table, `_cf_*` RPC method names, and route
- * key formats are frozen.
+ * `_cf_*` RPC method names and route key formats are frozen.
  *
  * @internal
  */
@@ -185,33 +183,6 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       sql: host.sql.bind(host),
       execRawSql: (sql) => void host.ctx.storage.sql.exec(sql)
     });
-  }
-
-  runRowsForPrefix(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): FacetRunStorageRow[] {
-    const rows = this.#host.sql<FacetRunStorageRow>`
-      SELECT owner_path, owner_path_key, run_id, created_at
-      FROM cf_agents_facet_runs
-    `;
-    return rows.filter((row) => {
-      try {
-        const rowOwnerPath = JSON.parse(row.owner_path) as AgentPathStep[];
-        return this.#host._isSameAgentPathPrefix(ownerPath, rowOwnerPath);
-      } catch {
-        return false;
-      }
-    });
-  }
-
-  deleteRunRowsForPrefix(ownerPath: ReadonlyArray<AgentPathStep>): void {
-    for (const row of this.runRowsForPrefix(ownerPath)) {
-      this.#host.sql`
-        DELETE FROM cf_agents_facet_runs
-        WHERE owner_path_key = ${row.owner_path_key}
-          AND run_id = ${row.run_id}
-      `;
-    }
   }
 
   lifecycleRouteAddress(): LifecycleRouteAddress | undefined {
@@ -325,9 +296,8 @@ export class DynamicAgentsInternal extends LifecycleCapability {
 
   /**
    * Clean root-owned bookkeeping for a sub-tree of facets: bulk-cancel
-   * schedules, queue items, and routed Task wake mirrors under the
-   * owner-path prefix, and delete root-side facet fiber recovery leases for
-   * the same sub-tree.
+   * schedules, queue items, and routed Task and fiber wake mirrors under
+   * the owner-path prefix.
    */
   async cleanupPrefix(ownerPath: ReadonlyArray<AgentPathStep>): Promise<void> {
     const prefix = agentPathKey(ownerPath);
@@ -341,8 +311,10 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       await this.#host._queue.__DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(
         prefix
       );
+      await this.#host._fibers.__DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(
+        prefix
+      );
     }
-    this.deleteRunRowsForPrefix(ownerPath);
     await this.#host._syncHostJobs();
   }
 
@@ -370,129 +342,6 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     if (!this.#facetKeepAliveTokens.delete(token)) return;
     this.#host._keepAliveRefs = Math.max(0, this.#host._keepAliveRefs - 1);
     await this.#host._syncHostJobs();
-  }
-
-  /**
-   * Register a facet's durable run row in the root-side index so root
-   * alarm housekeeping can dispatch recovery checks into idle facets.
-   */
-  async registerRun(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    runId: string
-  ): Promise<void> {
-    const ownerPathJson = JSON.stringify(ownerPath);
-    const ownerPathKey = agentPathKey(ownerPath);
-    if (!ownerPathKey) {
-      throw new Error("_cf_registerFacetRun requires a non-empty owner path.");
-    }
-    this.#host.sql`
-      INSERT OR REPLACE INTO cf_agents_facet_runs
-        (owner_path, owner_path_key, run_id, created_at)
-      VALUES
-        (${ownerPathJson}, ${ownerPathKey}, ${runId}, ${Date.now()})
-    `;
-    await this.#host._syncHostJobs();
-  }
-
-  /**
-   * Root-side scan for durable fibers owned by descendant facets.
-   * `cf_agents_facet_runs` is only an index; actual snapshots and
-   * recovery hooks live in each facet's own `cf_agents_runs` table.
-   */
-  async checkRunFibers(): Promise<void> {
-    // Only the root owns the physical alarm and facet-run index.
-    if (this.#host._parentPath.length > 0) return;
-
-    const rows = this.#host.sql<FacetRunStorageRow>`
-      SELECT owner_path, owner_path_key, run_id, created_at
-      FROM cf_agents_facet_runs
-      ORDER BY created_at ASC
-    `;
-    const firstRowByOwner = new Map<string, FacetRunStorageRow>();
-    for (const row of rows) {
-      if (!firstRowByOwner.has(row.owner_path_key)) {
-        firstRowByOwner.set(row.owner_path_key, row);
-      }
-    }
-
-    for (const row of firstRowByOwner.values()) {
-      let ownerPath: AgentPathStep[];
-      try {
-        ownerPath = JSON.parse(row.owner_path) as AgentPathStep[];
-      } catch (e) {
-        console.warn(
-          `[Agent] Corrupted facet fiber owner path for ${row.owner_path_key}; pruning stale lease.`,
-          e
-        );
-        this.#host.sql`
-          DELETE FROM cf_agents_facet_runs
-          WHERE owner_path_key = ${row.owner_path_key}
-        `;
-        continue;
-      }
-
-      try {
-        // Dispatch through the host so subclass overrides of the
-        // `_cf_checkRunFibersForFacet` RPC entry point keep intercepting.
-        const remaining =
-          await this.#host._cf_checkRunFibersForFacet(ownerPath);
-        if (remaining === 0) {
-          this.#host.sql`
-            DELETE FROM cf_agents_facet_runs
-            WHERE owner_path_key = ${row.owner_path_key}
-          `;
-        }
-      } catch (e) {
-        // Keep the lease so a transient failure (e.g. facet init error)
-        // gets retried on the next root heartbeat.
-        console.error(
-          `[Agent] Facet fiber recovery check failed for ${row.owner_path_key}:`,
-          e
-        );
-      }
-    }
-  }
-
-  /**
-   * Dispatch a runFiber recovery check into the facet identified by
-   * `ownerPath`. Returns the number of remaining local `cf_agents_runs`
-   * rows on the target facet after recovery.
-   */
-  async checkRunFibersAtPath(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): Promise<number> {
-    await this.#host.__unsafe_ensureInitialized();
-
-    const selfPath = this.#host.selfPath;
-    if (!this.#host._isSameAgentPathPrefix(selfPath, ownerPath)) {
-      throw new Error(
-        `Facet fiber owner path does not descend from ${JSON.stringify(selfPath)}.`
-      );
-    }
-
-    if (selfPath.length === ownerPath.length) {
-      await this.#host._checkRunFibers();
-      const rows = this.#host.sql<{ count: number }>`
-        SELECT COUNT(*) as count FROM cf_agents_runs
-      `;
-      return rows[0]?.count ?? 0;
-    }
-
-    const next = ownerPath[selfPath.length];
-    if (!this.#host.hasSubAgent(next.className, next.name)) {
-      // The facet was deleted or its registry was cleared. The root
-      // should prune the root-side lease; there is no remaining child
-      // storage to recover through the public registry path.
-      return 0;
-    }
-
-    const stub = await this.resolve(next.className, next.name);
-    const handle = stub as unknown as {
-      _cf_checkRunFibersForFacet(
-        ownerPath: ReadonlyArray<AgentPathStep>
-      ): Promise<number>;
-    };
-    return handle._cf_checkRunFibersForFacet(ownerPath);
   }
 
   /**
@@ -1932,19 +1781,5 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     // virtual sub-agent connections and `broadcast()` routes to the parent
     // bridge, so neither touches the parent's own WebSocket handles (#1679).
     await this.#host.__unsafe_ensureInitialized();
-  }
-
-  /** Remove a completed facet fiber from the root-side index. */
-  async unregisterRun(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    runId: string
-  ): Promise<void> {
-    const ownerPathKey = agentPathKey(ownerPath);
-    this.#host.sql`
-      DELETE FROM cf_agents_facet_runs
-      WHERE owner_path_key IS ${ownerPathKey}
-        AND run_id = ${runId}
-    `;
-    await this.#host._syncHostJobs();
   }
 }

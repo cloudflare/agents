@@ -134,13 +134,6 @@ export type DynamicAgentStub<T extends Agent> = {
     : never;
 };
 
-export type FacetRunStorageRow = {
-  owner_path: string;
-  owner_path_key: string;
-  run_id: string;
-  created_at: number;
-};
-
 /**
  * Internal RPC surface exposed by the root agent for facets to
  * delegate alarm-owning operations (schedules + facet teardown).
@@ -161,14 +154,6 @@ export type RootFacetRpcSurface = {
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<string>;
   _cf_releaseFacetKeepAlive(token: string): Promise<void>;
-  _cf_registerFacetRun(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    runId: string
-  ): Promise<void>;
-  _cf_unregisterFacetRun(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    runId: string
-  ): Promise<void>;
   _cf_broadcastToSubAgent(
     ownerPath: ReadonlyArray<AgentPathStep>,
     message: string | ArrayBuffer | ArrayBufferView,
