@@ -21,6 +21,7 @@ import {
   nativeCall,
   NativeCallQueue,
   reconnectDefaults,
+  reconnectTimingFor,
   splitCallOptions
 } from "./client";
 import {
@@ -661,11 +662,23 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     }
   }
 
-  // Re-enable socket after async query resolves
+  // Re-enable socket after async query resolves. Fresh parameters make
+  // PartySocket open a new socket, whose first dial has no delay; after a
+  // drop (not a clean local close) wait this hook's reconnect delay first,
+  // so the clients of an Agent that restarted do not all come back at once.
+  const refreshDelayRef = useRef(0);
   useEffect(() => {
-    if (awaitingQueryRefresh && resolvedQuery !== undefined) {
+    if (!awaitingQueryRefresh || resolvedQuery === undefined) return;
+    const delay = refreshDelayRef.current;
+    if (delay <= 0) {
       setAwaitingQueryRefresh(false);
+      return;
     }
+    const timer = setTimeout(() => {
+      refreshDelayRef.current = 0;
+      setAwaitingQueryRefresh(false);
+    }, delay);
+    return () => clearTimeout(timer);
   }, [awaitingQueryRefresh, resolvedQuery]);
 
   // Track agent state for reactivity — updated on server broadcasts and client setState
@@ -754,22 +767,22 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
 
   const socketOptions = options.basePath
     ? {
-        ...reconnectTiming,
         basePath: options.basePath,
         path: combinedPath || undefined,
         query: socketQuery,
         ...restOptions,
+        ...reconnectTimingFor(restOptions, reconnectTiming),
         ...socketClass,
         shouldReconnectOnClose: classifyReconnect
       }
     : {
-        ...reconnectTiming,
         party: agentNamespace,
         prefix: "agents",
         room: options.name || "default",
         path: combinedPath || undefined,
         query: socketQuery,
         ...restOptions,
+        ...reconnectTimingFor(restOptions, reconnectTiming),
         ...socketClass,
         shouldReconnectOnClose: classifyReconnect
       };
@@ -1038,6 +1051,11 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
         if (reconnecting) {
           // Pause reconnection for async queries until fresh query params are ready.
           if (isAsyncQuery) {
+            refreshDelayRef.current =
+              event.code === 1000
+                ? 0
+                : reconnectTimingFor(restOptions, reconnectTiming)
+                    .minReconnectionDelay;
             setAwaitingQueryRefresh(true);
           }
 

@@ -260,6 +260,10 @@
         "name": "TestSlowConnectAgent"
       },
       {
+        "class_name": "TestResetAgent",
+        "name": "TestResetAgent"
+      },
+      {
         "class_name": "TestThrowingStateAgent",
         "name": "TestThrowingStateAgent"
       },
@@ -560,6 +564,7 @@
         "TestStateAgent",
         "TestStateAgentNoInitial",
         "TestSlowConnectAgent",
+        "TestResetAgent",
         "TestThrowingStateAgent",
         "TestPersistedStateAgent",
         "TestBothHooksAgent",

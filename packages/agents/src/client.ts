@@ -64,6 +64,23 @@ export function reconnectDefaults(): {
   };
 }
 
+/**
+ * The caller's timing options, with the defaults for any it left out or
+ * passed as `undefined` (PartySocket would read `undefined` as its own
+ * defaults).
+ * @internal
+ */
+export function reconnectTimingFor(
+  options: { connectionTimeout?: number; minReconnectionDelay?: number },
+  defaults: { connectionTimeout: number; minReconnectionDelay: number }
+): { connectionTimeout: number; minReconnectionDelay: number } {
+  return {
+    connectionTimeout: options.connectionTimeout ?? defaults.connectionTimeout,
+    minReconnectionDelay:
+      options.minReconnectionDelay ?? defaults.minReconnectionDelay
+  };
+}
+
 type ReconnectingSocket = { shouldReconnect: boolean; retryCount: number };
 
 /**
@@ -675,22 +692,23 @@ export class AgentClient<
     const classifyReconnect = closeClassifier.shouldReconnectOnClose;
 
     // If basePath is provided, use it directly; otherwise construct from agent/name
+    const timingDefaults = reconnectDefaults();
     const socketOptions = options.basePath
       ? {
-          ...reconnectDefaults(),
           basePath: options.basePath,
           path: options.path,
           ...options,
+          ...reconnectTimingFor(options, timingDefaults),
           ...socketClass,
           shouldReconnectOnClose: classifyReconnect
         }
       : {
-          ...reconnectDefaults(),
           party: agentNamespace,
           prefix: "agents",
           room: options.name || "default",
           path: options.path,
           ...options,
+          ...reconnectTimingFor(options, timingDefaults),
           ...socketClass,
           shouldReconnectOnClose: classifyReconnect
         };

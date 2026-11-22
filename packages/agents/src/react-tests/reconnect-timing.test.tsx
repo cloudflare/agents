@@ -90,6 +90,17 @@ describe("handshake timeout", () => {
       .toBe("connected");
   }, 25_000);
 
+  it("keeps the defaults when the caller passes undefined", () => {
+    const client = connect(`slow-${crypto.randomUUID()}`, {
+      connectionTimeout: undefined,
+      minReconnectionDelay: undefined
+    });
+    expect(socketOptions(client).connectionTimeout).toBe(15_000);
+    expect(socketOptions(client).minReconnectionDelay).toBeGreaterThanOrEqual(
+      1000
+    );
+  });
+
   it("keeps a handshake timeout the caller sets", () => {
     const client = connect(`slow-${crypto.randomUUID()}`, {
       connectionTimeout: 1234
@@ -119,4 +130,48 @@ describe("reconnect spread", () => {
     });
     expect(socketOptions(client).minReconnectionDelay).toBe(2500);
   });
+});
+
+describe("reconnect after a drop with an async query", () => {
+  // Fresh query parameters make PartySocket open a new socket, whose first
+  // dial has no delay; the hook waits its reconnect delay first.
+  it("waits the reconnect delay before the new socket", async () => {
+    const { host, protocol } = getTestWorkerHost();
+    const name = `reset-${crypto.randomUUID()}`;
+    let token = 0;
+    const query = async () => ({ token: String(++token) });
+    let agentRef: { call(method: string): Promise<unknown> } | undefined;
+    function Probe() {
+      const agent = useAgent({
+        agent: "TestResetAgent",
+        name,
+        host,
+        protocol,
+        query,
+        minReconnectionDelay: 2000
+      });
+      agentRef = agent;
+      return (
+        <div data-testid="status">
+          {agent.identified ? "connected" : "connecting"}
+        </div>
+      );
+    }
+    const { container } = await render(
+      <Suspense fallback={null}>
+        <Probe />
+      </Suspense>
+    );
+    // @ts-expect-error - globalThis is not typed
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false;
+    const status = () =>
+      container.querySelector('[data-testid="status"]')?.textContent;
+    await expect.poll(status, { timeout: 10_000 }).toBe("connected");
+
+    await agentRef!.call("resetForTest").catch(() => {});
+    await expect.poll(status, { timeout: 5_000 }).toBe("connecting");
+    const droppedAt = Date.now();
+    await expect.poll(status, { timeout: 10_000 }).toBe("connected");
+    expect(Date.now() - droppedAt).toBeGreaterThanOrEqual(1800);
+  }, 25_000);
 });

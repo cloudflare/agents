@@ -119,6 +119,7 @@ export {
   TestFetchErrorAgent,
   TestStateAgentNoInitial,
   TestSlowConnectAgent,
+  TestResetAgent,
   TestThrowingStateAgent,
   TestPersistedStateAgent,
   TestBothHooksAgent,
@@ -229,6 +230,7 @@ import type {
   TestFetchErrorAgent,
   TestStateAgentNoInitial,
   TestSlowConnectAgent,
+  TestResetAgent,
   TestThrowingStateAgent,
   TestPersistedStateAgent,
   TestBothHooksAgent,
@@ -321,6 +323,7 @@ export type Env = {
   TestFetchErrorAgent: DurableObjectNamespace<TestFetchErrorAgent>;
   TestStateAgentNoInitial: DurableObjectNamespace<TestStateAgentNoInitial>;
   TestSlowConnectAgent: DurableObjectNamespace<TestSlowConnectAgent>;
+  TestResetAgent: DurableObjectNamespace<TestResetAgent>;
   TestThrowingStateAgent: DurableObjectNamespace<TestThrowingStateAgent>;
   TestPersistedStateAgent: DurableObjectNamespace<TestPersistedStateAgent>;
   TestBothHooksAgent: DurableObjectNamespace<TestBothHooksAgent>;

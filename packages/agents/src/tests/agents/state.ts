@@ -1,4 +1,9 @@
-import { Agent, type AgentContext, type Connection } from "../../index.ts";
+import {
+  Agent,
+  callable,
+  type AgentContext,
+  type Connection
+} from "../../index.ts";
 import { MCPConnectionState } from "../../mcp/client/connection.ts";
 
 // Test Agent for state management tests
@@ -196,6 +201,14 @@ export class TestStateAgent extends Agent<Cloudflare.Env, TestState> {
 export class TestSlowConnectAgent extends Agent {
   async onConnect(): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 6000));
+  }
+}
+
+/** An Agent a client can reset, as a crash would (its sockets close with 1006). */
+export class TestResetAgent extends Agent {
+  @callable()
+  resetForTest(): void {
+    this.ctx.abort("reset by test");
   }
 }
 
