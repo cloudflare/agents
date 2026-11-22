@@ -22,6 +22,8 @@ const LEGACY_LIFT_WINDOW_BYTES = 4 * 1024 * 1024;
  * empty: the AI SDK requires parts on incoming messages, stored data is
  * read leniently). A message failing this would throw later, in
  * `convertToModelMessages` or the UI.
+ *
+ * @internal
  */
 export function isValidMessageStructure(msg: unknown): msg is UIMessage {
   if (typeof msg !== "object" || msg === null) return false;
@@ -43,6 +45,8 @@ export function isValidMessageStructure(msg: unknown): msg is UIMessage {
  * its history twice. A row that cannot be parsed or imported leaves the
  * table in place, and the next start tries again (`importMessage` ignores
  * ids it already has).
+ *
+ * @internal
  */
 export async function liftLegacyMessages(
   sql: SqlStorage,
@@ -144,6 +148,8 @@ export async function liftLegacyMessages(
  * The messages to hold in memory after a wake: the recent history within
  * `budget` bytes (the whole history when the budget is not a positive
  * number). Rows without a valid structure are skipped with a warning.
+ *
+ * @internal
  */
 export async function hydrateMessages(
   session: Session,
@@ -172,6 +178,8 @@ export async function hydrateMessages(
  * The whole transcript as a JSON array of messages, without ever holding
  * it in one string: `historyBatches()` yields bounded batches and each
  * batch is encoded straight into the body.
+ *
+ * @internal
  */
 export function transcriptJson(session: Session): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
@@ -209,6 +217,8 @@ export function transcriptJson(session: Session): ReadableStream<Uint8Array> {
  * write dispatches here synchronously, so write sites never patch the
  * array by hand. A stored row is exactly what the write returned, so
  * turning it into its in-memory form never costs a re-read.
+ *
+ * @internal
  */
 export function mirrorTranscript(
   session: Session,
@@ -225,7 +235,11 @@ export function mirrorTranscript(
   });
 }
 
-/** What a turn's persist knows about the messages it was given. */
+/**
+ * What a turn's persist knows about the messages it was given.
+ *
+ * @internal
+ */
 export interface PersistScope {
   /** The messages are a client's copy (`keepStoredReplies`). */
   clientCopy: boolean;
@@ -244,6 +258,8 @@ export interface PersistScope {
  * sanitized. A message serializing to what is stored already is skipped
  * here with a string compare; letting Sessions find out would cost a row
  * read and, for media, a decode and hash of every payload on every turn.
+ *
+ * @internal
  */
 export function planPersist(
   messages: UIMessage[],
@@ -276,6 +292,8 @@ export function planPersist(
  * subset of the stored transcript; when every merged message was stored
  * before, the stored messages it left out go. Sessions splices their
  * descendants to the grandparent, so the active path stays whole.
+ *
+ * @internal
  */
 export function staleMessageIds(
   merged: readonly UIMessage[],
@@ -292,6 +310,8 @@ export function staleMessageIds(
  * The oldest stored rows past `max`. Counts stored rows, not the hydrated
  * window: a transcript larger than the hydration budget holds rows the
  * in-memory list never saw.
+ *
+ * @internal
  */
 export async function rowsPastRetention(
   session: Session,

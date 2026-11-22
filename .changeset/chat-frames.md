@@ -4,4 +4,4 @@
 "@cloudflare/think": patch
 ---
 
-`AIChatAgent` and `Think` send chat frames through one shared `ChatFrames` (origin message ids, queued messages, resume exclusion, recent terminals), with no change in behaviour.
+Internal refactor, no API change: `AIChatAgent` and `Think` send chat frames through the same code.

@@ -19,16 +19,28 @@ import {
   type RecentTerminalsKv
 } from "./recent-terminals";
 
-/** A frame sent to tabs. */
+/**
+ * A frame sent to tabs.
+ *
+ * @internal
+ */
 export type ChatFrame = Readonly<Record<string, unknown>>;
 
-/** A socket a frame can be sent to directly. */
+/**
+ * A socket a frame can be sent to directly.
+ *
+ * @internal
+ */
 export interface ChatFrameConnection {
   readonly id: string;
   send(message: string): void;
 }
 
-/** What {@link ChatFrames} needs from its host. */
+/**
+ * What {@link ChatFrames} needs from its host.
+ *
+ * @internal
+ */
 export interface ChatFramesOptions {
   /** Send to every connection except the `without` ids. */
   broadcast(message: string, without: string[]): void;
@@ -46,6 +58,7 @@ export interface ChatFramesOptions {
   ): { messages: TMessage[]; queuedMessageIds?: string[] };
 }
 
+/** @internal */
 export class ChatFrames {
   /**
    * Origin ids of the socket requests being handled, by request id. After
