@@ -45,6 +45,8 @@ const AsyncFunction: Function = Object.getPrototypeOf(
 /** Functions produced by {@link withAgentContext}, so they are wrapped once. */
 const agentContextWrappers = new WeakSet<Function>();
 
+type Method = (this: unknown, ...args: unknown[]) => unknown;
+
 /**
  * Restore Agent context when a public method is entered outside a Lifecycle
  * hook, notably through native Durable Object RPC or cross-Agent re-entry.
@@ -54,16 +56,14 @@ const agentContextWrappers = new WeakSet<Function>();
  * entered from outside this Agent's context first starts the lifecycle when
  * the call is the one that wakes a cold instance. Synchronous methods are
  * never deferred, so they keep their synchronous return type.
+ *
+ * @internal
  */
 
-// oxlint-disable-next-line @typescript-eslint/no-explicit-any -- generic callable constraint
-export function withAgentContext<T extends (...args: any[]) => any>(
-  method: T
-): (this: InvocationHost, ...args: Parameters<T>) => ReturnType<T> {
-  const enter = function (
-    this: InvocationHost,
-    ...args: Parameters<T>
-  ): ReturnType<T> {
+export function withAgentContext(
+  method: Method
+): (this: InvocationHost, ...args: unknown[]) => unknown {
+  const enter = function (this: InvocationHost, ...args: unknown[]): unknown {
     const { agent } = getCurrentAgent();
 
     if (agent === this) {
@@ -92,7 +92,7 @@ export function withAgentContext<T extends (...args: any[]) => any>(
 
   const enterStarted = async function (
     this: InvocationHost,
-    ...args: Parameters<T>
+    ...args: unknown[]
   ): Promise<unknown> {
     if (getCurrentAgent().agent !== this && !this.lifecycle.isStarted()) {
       await this.lifecycle.start();
@@ -100,10 +100,7 @@ export function withAgentContext<T extends (...args: any[]) => any>(
     return enter.apply(this, args);
   };
   agentContextWrappers.add(enterStarted);
-  return enterStarted as unknown as (
-    this: InvocationHost,
-    ...args: Parameters<T>
-  ) => ReturnType<T>;
+  return enterStarted;
 }
 
 /**
@@ -156,11 +153,7 @@ export function wrapCustomMethods(
       }
 
       const method = descriptor.value as Function;
-      /* oxlint-disable @typescript-eslint/no-explicit-any -- dynamic method wrapping requires any */
-      const wrappedFunction = withAgentContext(
-        method as (...args: any[]) => any
-      ) as any;
-      /* oxlint-enable @typescript-eslint/no-explicit-any */
+      const wrappedFunction = withAgentContext(method as Method);
 
       // if the method is callable, copy the metadata from the original method
       if (isCallable(methodName)) {
