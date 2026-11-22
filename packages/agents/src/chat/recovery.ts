@@ -28,6 +28,11 @@ export type ChatFiberSnapshot<Kind extends string = string> = {
   lastClientTools?: ClientToolSchema[];
   /** User message ids the turn's request originated from, if any. */
   originMessageIds?: string[];
+  /**
+   * For a regeneration that branches beside the reply it replaces (`Think`):
+   * the question the new branch answers.
+   */
+  branchParentId?: string;
 };
 
 export function createChatFiberSnapshot<Kind extends string>({

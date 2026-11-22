@@ -49,8 +49,6 @@ import {
   type ChatRecoveryIncidentEvent,
   type ChatRecoveryScheduleCallback,
   type ChatRecoveryScheduleReason,
-  type ClassifyRecoveredTurnInput,
-  type DispatchRecoveredTurnInput,
   type RecoveryPartial,
   type ResolvedRecoveryStream,
   type SnapshotMessage
@@ -84,14 +82,6 @@ interface PiRecoveryData {
   originalRequestId?: string;
   incidentId?: string;
 }
-
-/**
- * pi carries no classification detail: whether the recovered turn CONTINUEs from
- * a survived partial vs regenerates from the unanswered user message is fully
- * captured by `recoveryKind` (`"continue"` vs `"retry"`), so dispatch derives it
- * rather than threading a redundant flag through `detail` (#5).
- */
-type PiClassify = undefined;
 
 /** A continuation summary the e2e polls to prove continue-vs-regenerate. */
 interface RecoverySummary {
@@ -559,7 +549,7 @@ export class PiAgent extends Agent<Env> {
       ctx.snapshot,
       "pi-turn"
     );
-    await this._engine().recoverInterruptedTurn<PiClassify>(
+    await this._engine().recoverInterruptedTurn(
       {
         requestId: ctx.name.slice(PiAgent.FIBER_PREFIX.length),
         snapshot,
@@ -571,18 +561,16 @@ export class PiAgent extends Agent<Env> {
     return true;
   }
 
-  private _wakeHooks(): ChatFiberWakeHooks<PiClassify> {
+  private _wakeHooks(): ChatFiberWakeHooks {
     return {
-      classifyRecoveredTurn: (input: ClassifyRecoveredTurnInput) => {
-        // A surviving partial drives a `continue` (regenerate only the suffix
-        // and merge); an empty partial (crash before the first delta flushed)
-        // falls back to a `retry` that regenerates the whole reply.
-        const recoveryKind =
-          input.partial.text.length > 0
-            ? ("continue" as const)
-            : ("retry" as const);
-        return { recoveryKind, detail: undefined };
+      // The engine plans the turn from the latest stored message: a persisted
+      // partial is the leaf and is continued (regenerate only the suffix and
+      // merge); with no partial the question is the leaf and is answered again.
+      latestMessage: () => {
+        const entry = this._transcript.at(-1);
+        return entry && { id: entry.id, role: entry.message.role };
       },
+      partialHoldsContent: (partial) => partial.text.length > 0,
       // `invokeOnChatRecovery` is omitted: pi exposes no user `onChatRecovery`
       // hook, so the engine's default (empty options) applies (#6).
       // Mirror the AI SDK adapter: preserve the orphaned partial whenever its
@@ -594,22 +582,6 @@ export class PiAgent extends Agent<Env> {
       },
       completeRecoveredStream: (streamId) => {
         this._resumableStream.complete(streamId);
-      },
-      dispatchRecoveredTurn: async (
-        input: DispatchRecoveredTurnInput<PiClassify>
-      ) => {
-        const continueFromPartial = input.recoveryKind === "continue";
-        await this._engine().scheduleRecovery({
-          incident: input.incident,
-          recoveryKind: input.recoveryKind,
-          callback: continueFromPartial
-            ? "_chatRecoveryContinue"
-            : "_chatRecoveryRetry",
-          data: {
-            originalRequestId: input.recoveryRootRequestId,
-            incidentId: input.incident.incidentId
-          }
-        });
       }
     };
   }
