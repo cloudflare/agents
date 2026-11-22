@@ -213,6 +213,17 @@ export class JobQueue {
     try {
       return [...this.#storage.sql.exec(query, ...params)] as T[];
     } catch (cause) {
+      // A transaction that rolled back the statement creating the table
+      // dropped it again: create it once more and retry.
+      if (/no such table: cf_agents_jobs/.test(String(cause))) {
+        this.#tableEnsured = false;
+        this.#ensureTable();
+        try {
+          return [...this.#storage.sql.exec(query, ...params)] as T[];
+        } catch (retryCause) {
+          throw new SqlError(query, retryCause);
+        }
+      }
       throw new SqlError(query, cause);
     }
   }

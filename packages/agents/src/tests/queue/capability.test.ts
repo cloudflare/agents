@@ -297,4 +297,29 @@ describe("Queue capability", () => {
       ]);
     });
   });
+
+  it("queues again after a transaction rolled back the push that created the job table", async () => {
+    const stub = env.QueueHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: QueueHarnessObject, state) => {
+        instance.hold();
+        // What a rolled-back transaction that created the table leaves: the
+        // queue believes the table exists, and it does not.
+        await instance.queue.list();
+        state.storage.sql.exec("DROP TABLE IF EXISTS cf_agents_jobs");
+        expect(() =>
+          state.storage.transactionSync(() => {
+            void instance.queue.push("record", { value: "lost" });
+            throw new Error("roll back");
+          })
+        ).toThrow("roll back");
+        const kept = await instance.queue.push("record", { value: "kept" });
+        expect((await instance.queue.list()).map((item) => item.id)).toEqual([
+          kept.id
+        ]);
+        instance.release();
+      }
+    );
+  });
 });
