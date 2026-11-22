@@ -89,7 +89,8 @@ import { getAgentByName, type AgentOptions } from "./agent-routing";
 import {
   agentToolChildStub,
   forwardAgentToolRunRequest,
-  type AgentToolChildStub
+  type AgentToolChildStub,
+  type AgentToolRunChildAddress
 } from "./agent-runs/child";
 import { WebSockets } from "./websockets";
 import {
@@ -3692,11 +3693,11 @@ export class Agent<
         INSERT INTO cf_agent_tool_runs (
           run_id, parent_tool_call_id, agent_type, input_preview,
           input_redacted, status, error_message, display_metadata,
-          display_order, started_at, completed_at
+          display_order, started_at, completed_at, child_name_minted
         ) VALUES (
           ${runId}, ${options.parentToolCallId ?? null}, ${agentType},
           ${inputPreviewJson}, 1, 'error', ${error}, ${displayJson},
-          ${displayOrder}, ${startedAt}, ${Date.now()}
+          ${displayOrder}, ${startedAt}, ${Date.now()}, 0
         )
       `;
       this._broadcastAgentToolEvent(options.parentToolCallId, 0, {
@@ -5598,20 +5599,23 @@ export class Agent<
    * The child of a run: an ordinary Durable Object of the run's class,
    * under the name minted when the run was recorded.
    */
-  /**
-   * The class and name of a run's child, `"unreachable"` for a run from
-   * when children were facets, or `null` for no such run.
-   */
-  private _agentToolChildAddress(
-    runId: string
-  ): { className: string; childName: string } | "unreachable" | null {
-    const [row] = this.sql<{ agent_type: string; child_name: string | null }>`
-      SELECT agent_type, child_name FROM cf_agent_tool_runs WHERE run_id = ${runId}
+  /** Where a run's child is, for a drill-in (see {@link AgentToolRunChildAddress}). */
+  private _agentToolChildAddress(runId: string): AgentToolRunChildAddress {
+    const [row] = this.sql<{
+      agent_type: string;
+      child_name: string | null;
+      child_name_minted: number | null;
+    }>`
+      SELECT agent_type, child_name, child_name_minted
+      FROM cf_agent_tool_runs WHERE run_id = ${runId}
     `;
     if (!row) return null;
-    return row.child_name
-      ? { className: row.agent_type, childName: row.child_name }
-      : "unreachable";
+    if (row.child_name) {
+      return { className: row.agent_type, childName: row.child_name };
+    }
+    // A run refused at dispatch records that it has no child; a row from
+    // when children were facets predates the column.
+    return row.child_name_minted === 0 ? "never-started" : "facet-era";
   }
 
   private async _agentToolChild(

@@ -187,6 +187,38 @@ describe("agent-tool run child", () => {
     expect(http.status).toBe(404);
   });
 
+  it("reaches a live run past a facet-era run of the same segment", async () => {
+    const parent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      "agent-tool-runs"
+    );
+    // A run id equal to the parent's name, from when children were facets.
+    await parent.seedFinishedFacetEraRunForTest("agent-tool-runs");
+    const runId = `live-${crypto.randomUUID()}`;
+    await parent.runDeterministicAgentToolForTest({ runId, chunkBodies: [] });
+    const routed = await parent.fetchPathForTest(
+      `agents/test-agent-tool-replay-agent/agent-tool-runs/agent-tool-runs/${runId}/hello`
+    );
+    expect(routed.status).toBe(200);
+    expect(routed.body.split(" ")[2]).toBe("/hello");
+  });
+
+  it("says a refused run never started, not that it is from an earlier version", async () => {
+    const parent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `refused-${crypto.randomUUID()}`
+    );
+    const result = await parent.runRefusedForTest("refused-run");
+    expect(result).toMatchObject({ status: "error" });
+    const routed = await parent.fetchPathForTest(
+      "agents/test-agent-tool-replay-agent/x/agent-tool-runs/refused-run/hello"
+    );
+    expect(routed).toEqual({
+      status: 404,
+      body: "This agent tool run never started, so it has no child"
+    });
+  });
+
   it("ends a facet-era run that is only interrupted at startup", async () => {
     const parent = await getAgentByName(
       env.TestAgentToolReplayAgent,
