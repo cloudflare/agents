@@ -1076,9 +1076,10 @@ describe("runFiber", () => {
       const agent = await freshManagedAgent("managed-failed-settle-failure");
 
       await agent.runManagedFailingWithFailedSettle("managed-settle-failed");
-      await expect(
-        agent.inspectManagedFiber("managed-settle-failed")
-      ).resolves.toMatchObject({ status: "running" });
+      // No check for the in-between `running` state: the leftover run row
+      // arms the fiber's recovery wake for now, so the real alarm may settle
+      // the ledger from the row's outcome before this test looks. Either
+      // path ends in the same state.
       await agent.triggerRecoveryCheck();
 
       expect(await agent.getRecoveredFibers()).toEqual([]);
