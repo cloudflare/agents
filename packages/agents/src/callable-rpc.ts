@@ -17,6 +17,7 @@ import {
 } from "./dynamic-agents/bridges";
 import type { Connection } from "./lifecycle/durable-object-lifecycle";
 import { MessageType } from "./types";
+import { serializeRpcResponse } from "./websockets/frame-limit";
 
 /**
  * RPC request message from client
@@ -57,8 +58,10 @@ export function sendRpcResponseIfOpen(
   response: RPCResponse
 ): boolean {
   try {
-    connection.send(JSON.stringify(response));
-    return true;
+    const { text, replaced } = serializeRpcResponse(response);
+    connection.send(text);
+    // A replaced frame is the call's terminal error: nothing more is sent.
+    return !replaced;
   } catch (error) {
     if (isClosedWebSocketSendError(error)) return false;
     throw error;
@@ -176,9 +179,13 @@ export class StreamingResponse {
   }
 
   private _send(response: RPCResponse): boolean {
-    const facetSent = sendFacetStreamingResponse(this, response);
-    if (facetSent !== null) return facetSent;
-    return sendRpcResponseIfOpen(this._connection, response);
+    const sent =
+      sendFacetStreamingResponse(this, response) ??
+      sendRpcResponseIfOpen(this._connection, response);
+    // An over-limit chunk was answered with the call's terminal error, or
+    // the socket is gone: either way the stream is over.
+    if (!sent) this._closed = true;
+    return sent;
   }
 
   /**

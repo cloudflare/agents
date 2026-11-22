@@ -3170,6 +3170,15 @@ export class SlowReplySubAgent extends Agent {
     return "scheduled";
   }
 
+  /** A chunk over the frame limit, then more: nothing after the error. */
+  @callable({ streaming: true })
+  hugeStream(stream: StreamingResponse): void {
+    stream.send("small");
+    stream.send("x".repeat(33 * 1024 * 1024));
+    stream.send("chunk after");
+    stream.end("done");
+  }
+
   @callable({ streaming: true })
   async slowStreamingEcho(
     stream: StreamingResponse,

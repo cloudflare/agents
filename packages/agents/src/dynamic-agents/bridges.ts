@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { serializeRpcResponse } from "../websockets/frame-limit";
 import { RpcTarget } from "cloudflare:workers";
 import type { Connection } from "../lifecycle/durable-object-lifecycle";
 import type { RPCResponse, StreamingResponse } from "../callable-rpc";
@@ -44,14 +45,16 @@ export function sendFacetRpcResponseIfOpen(
   response: RPCResponse
 ): FacetRPCResponseDelivery {
   try {
-    const completion = Promise.resolve(
-      target.send(JSON.stringify(response))
-    ).catch((error: unknown) => {
-      if (!isClosedWebSocketSendError(error)) {
-        console.error("[Agent] Facet RPC response delivery failed:", error);
+    const { text, replaced } = serializeRpcResponse(response);
+    const completion = Promise.resolve(target.send(text)).catch(
+      (error: unknown) => {
+        if (!isClosedWebSocketSendError(error)) {
+          console.error("[Agent] Facet RPC response delivery failed:", error);
+        }
       }
-    });
-    return { sent: true, completion };
+    );
+    // A replaced frame is the call's terminal error: nothing more is sent.
+    return { sent: !replaced, completion };
   } catch (error) {
     if (isClosedWebSocketSendError(error)) {
       return { sent: false, completion: Promise.resolve() };
