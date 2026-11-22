@@ -2196,6 +2196,90 @@ describe("WorkerTransport", () => {
       expect(closedSessionId).toBe("close-test-session");
     });
 
+    it("keeps a deleted session deleted after a restart", async () => {
+      let stored: TransportState | undefined;
+      const storage = {
+        get: () => stored,
+        set: (state: TransportState) => {
+          stored = state;
+        }
+      };
+      const options = { sessionIdGenerator: () => "test-session", storage };
+      const sessionHeaders = {
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+        "mcp-session-id": "test-session",
+        "MCP-Protocol-Version": "2025-03-26"
+      };
+      const listTools = () =>
+        new Request("http://example.com/", {
+          method: "POST",
+          headers: sessionHeaders,
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: "2",
+            method: "tools/list"
+          })
+        });
+
+      const transport = await setupTransport(createTestServer(), options);
+      await transport.handleRequest(
+        new Request("http://example.com/", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json, text/event-stream"
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: "1",
+            method: "initialize",
+            params: {
+              capabilities: {},
+              clientInfo: { name: "test", version: "1.0" },
+              protocolVersion: "2025-03-26"
+            }
+          })
+        })
+      );
+
+      // A restart before the DELETE restores the session.
+      const restarted = await setupTransport(createTestServer(), options);
+      expect((await restarted.handleRequest(listTools())).status).toBe(200);
+
+      const deleted = await restarted.handleRequest(
+        new Request("http://example.com/", {
+          method: "DELETE",
+          headers: sessionHeaders
+        })
+      );
+      expect(deleted.status).toBe(200);
+
+      // A restart after it does not.
+      const afterDelete = await setupTransport(createTestServer(), options);
+      const response = await afterDelete.handleRequest(listTools());
+      expect(response.status).toBe(404);
+      const body = (await response.json()) as { error: { message: string } };
+      expect(body.error.message).toContain("Session not found");
+    });
+
+    it("does not store a DELETE on a transport without sessions", async () => {
+      let stored: TransportState | undefined;
+      const storage = {
+        get: () => stored,
+        set: (state: TransportState) => {
+          stored = state;
+        }
+      };
+
+      const transport = await setupTransport(createTestServer(), { storage });
+      const deleted = await transport.handleRequest(
+        new Request("http://example.com/", { method: "DELETE" })
+      );
+      expect(deleted.status).toBe(200);
+      expect(stored).toBeUndefined();
+    });
+
     it("should reject DELETE with wrong session ID", async () => {
       const server = createTestServer();
       const transport = await setupTransport(server, {
