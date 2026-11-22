@@ -96,11 +96,20 @@ export function firstRetryDelay(
 /**
  * Whether a close came from this side on purpose (`close()`, `reconnect()`),
  * as opposed to a drop. PartySocket reports a handshake timeout as a close
- * with code 1000 and reason `"timeout"`, which is a drop.
+ * with code 1000 and reason `"timeout"`, which is a drop. In browsers its
+ * own close events reach listeners re-wrapped: `code` is `"close"` and
+ * `reason` is the original event, so that one is read instead.
  * @internal
  */
 export function isLocalClose(event: CloseEvent): boolean {
-  return event.code === 1000 && event.reason !== "timeout";
+  const reason: unknown = event.reason;
+  const original =
+    typeof event.code !== "number" &&
+    typeof reason === "object" &&
+    reason !== null
+      ? (reason as { code?: unknown; reason?: unknown })
+      : { code: event.code, reason };
+  return original.code === 1000 && original.reason !== "timeout";
 }
 
 type ReconnectingSocket = { shouldReconnect: boolean; retryCount: number };

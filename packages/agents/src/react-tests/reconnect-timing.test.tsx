@@ -208,11 +208,82 @@ describe("reconnect after a drop with an async query", () => {
     ).toBeLessThan(2500);
   }, 25_000);
 
-  it("counts a handshake timeout as a drop, not a local close", () => {
-    const close = (code: number, reason: string) =>
-      new CloseEvent("close", { code, reason });
-    expect(isLocalClose(close(1000, ""))).toBe(true);
-    expect(isLocalClose(close(1000, "timeout"))).toBe(false);
-    expect(isLocalClose(close(1006, ""))).toBe(false);
-  });
+  it("tells PartySocket's own close events apart", async () => {
+    const { host, protocol } = getTestWorkerHost();
+    const closeOf = (client: AgentClient) =>
+      new Promise<CloseEvent>((resolve) =>
+        client.addEventListener("close", (event) => resolve(event), {
+          once: true
+        })
+      );
+
+    // `reconnect()`: a local close.
+    const local = connect(`close-${crypto.randomUUID()}`);
+    await local.ready;
+    const reconnected = closeOf(local);
+    local.reconnect();
+    expect(isLocalClose(await reconnected)).toBe(true);
+
+    // A handshake that outlives `connectionTimeout`: a drop.
+    const slow = new AgentClient({
+      agent: "TestSlowConnectAgent",
+      name: `close-${crypto.randomUUID()}`,
+      host,
+      protocol,
+      connectionTimeout: 200
+    });
+    clients.push(slow);
+    expect(isLocalClose(await closeOf(slow))).toBe(false);
+
+    // A native close with another code: a drop.
+    expect(
+      isLocalClose(new CloseEvent("close", { code: 1006, reason: "" }))
+    ).toBe(false);
+  }, 20_000);
+
+  it("reopens at once after a local reconnect()", async () => {
+    const { host, protocol } = getTestWorkerHost();
+    const name = `local-${crypto.randomUUID()}`;
+    let token = 0;
+    const query = async () => ({ token: String(++token) });
+    let agentRef: { reconnect(): void } | undefined;
+    let identities = 0;
+    const onIdentity = () => {
+      identities += 1;
+    };
+    function Probe() {
+      const agent = useAgent({
+        agent: "TestStateAgent",
+        name,
+        host,
+        protocol,
+        query,
+        onIdentity,
+        minReconnectionDelay: 4000
+      });
+      agentRef = agent;
+      return (
+        <div data-testid="status">
+          {agent.identified ? "connected" : "connecting"}
+        </div>
+      );
+    }
+    const { container } = await render(
+      <Suspense fallback={null}>
+        <Probe />
+      </Suspense>
+    );
+    // @ts-expect-error - globalThis is not typed
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false;
+    const status = () =>
+      container.querySelector('[data-testid="status"]')?.textContent;
+    await expect.poll(status, { timeout: 10_000 }).toBe("connected");
+    const before = identities;
+    const at = Date.now();
+    agentRef!.reconnect();
+    await expect
+      .poll(() => identities, { timeout: 10_000 })
+      .toBeGreaterThan(before);
+    expect(Date.now() - at).toBeLessThan(3000);
+  }, 25_000);
 });
