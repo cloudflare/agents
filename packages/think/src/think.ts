@@ -455,7 +455,7 @@ type ActionPauseSubject = {
 };
 
 /** A codemode execution an approval or rejection resolves. */
-type CodemodePauseSubject = { executionId: string; seq?: number };
+type CodemodePauseSubject = { executionId: string };
 
 /** Host data carried on a verdict. */
 type PauseVerdictData = { autoContinue?: boolean; connectionId?: string };
@@ -2547,12 +2547,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // Swept by `_sweepApprovals` once rows from an earlier version are in.
     sweepOnStart: false,
     onDecided: (decision) => this._continuePause(decision),
-    onSettled: (decision, delivery) =>
-      delivery.redelivered
-        ? this._enqueueInteractionApply(() =>
-            this._flushResolvedPause(decision)
-          ).then(() => {})
-        : this._applyPauseOutcome(decision),
+    onSettled: (decision) => this._applyPauseOutcome(decision),
     retention: () => ({
       effectSettledMs: this.actionLedgerRetention.settledMs,
       effectPendingMs: this.actionLedgerRetention.pendingMs,
@@ -10794,14 +10789,16 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /**
-   * Decide a paused execution through Approvals. The verdict is stored
-   * before anything runs, so a reset while the approved call runs, or before
-   * its outcome reaches the transcript, finishes the work on the next wake.
+   * Decide a paused execution. A durable-pause action's decision was parked
+   * with the pause (its id is the `actpause_` execution id): the verdict is
+   * stored before the action runs, so a reset while it runs, or before its
+   * outcome reaches the transcript, finishes the work on the next wake.
    *
-   * A durable-pause action's decision was parked with the pause (its id is
-   * the `actpause_` execution id). A codemode execution is parked here, at
-   * decision time: the codemode runtime holds what is pending, and the
-   * decision record carries the outcome to the transcript.
+   * A codemode execution holds its own pending call and runs the decision
+   * itself, so `runtime.approve()` / `runtime.reject()` is never run again
+   * after a reset: it resumes whatever is paused now, which after a pass
+   * that paused again is a call nobody approved. Only its outcome is
+   * recorded (`Approvals.record`), so the transcript write survives a reset.
    */
   private async _decidePause(
     executionId: string,
@@ -10814,130 +10811,135 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       }),
       ...(connectionId !== undefined && { connectionId })
     };
-    let decisionId = executionId;
-    if (!executionId.startsWith(ACTION_PAUSE_ID_PREFIX)) {
-      const runtime = this._codemodeRuntime();
-      if (!runtime) {
-        return {
-          status: "error",
-          executionId,
-          error:
-            "No codemode runtime is configured — the execute tool was never " +
-            "created on this agent."
+    const stored = verdict.approved
+      ? { approved: true as const, data }
+      : {
+          approved: false as const,
+          ...(verdict.reason !== undefined && { reason: verdict.reason }),
+          data
         };
-      }
-      let seq: number | undefined;
-      if (!verdict.approved) {
-        const pending = await runtime.pending(executionId);
-        if (pending.length === 0) {
-          return {
-            status: "error",
-            executionId,
-            error: `Execution "${executionId}" is no longer pending.`
-          };
-        }
-        seq = pending[0].seq;
-      }
-      decisionId = this._approvals.park({
-        id: `codemode_${crypto.randomUUID()}`,
-        kind: "codemode",
-        subject: {
-          executionId,
-          ...(seq !== undefined && { seq })
-        } satisfies CodemodePauseSubject
-      }).id;
+    const alreadyResolved = {
+      status: "error",
+      executionId,
+      error: `Execution "${executionId}" is no longer pending — it was approved or rejected elsewhere.`
+    };
+
+    if (executionId.startsWith(ACTION_PAUSE_ID_PREFIX)) {
+      const result = await this._approvals.decide(executionId, stored);
+      if (result.status !== "settled") return alreadyResolved;
+      return (result.decision.outcome as PauseOutcome | undefined)?.output;
     }
-    const result = await this._approvals.decide(
-      decisionId,
-      verdict.approved
-        ? { approved: true, data }
-        : {
-            approved: false,
-            ...(verdict.reason !== undefined && { reason: verdict.reason }),
-            data
-          }
-    );
-    if (result.status !== "settled") {
+
+    const runtime = this._codemodeRuntime();
+    if (!runtime) {
       return {
         status: "error",
         executionId,
-        error: `Execution "${executionId}" is no longer pending — it was approved or rejected elsewhere.`
+        error:
+          "No codemode runtime is configured — the execute tool was never " +
+          "created on this agent."
       };
     }
-    const outcome = result.decision.outcome as PauseOutcome | undefined;
-    return outcome?.output;
+    const pending = await runtime.pending(executionId);
+    let output: unknown;
+    if (verdict.approved) {
+      output = truncatePausedExecutionOutput(
+        await runtime.approve({ executionId })
+      );
+    } else {
+      if (pending.length === 0) {
+        return {
+          status: "error",
+          executionId,
+          error: `Execution "${executionId}" is no longer pending.`
+        };
+      }
+      // `reject` reports whether it actually terminated the run. A `false`
+      // means the action was resolved between the `pending()` check and the
+      // reject (approve/reject interleave across facet RPC awaits — input
+      // gates only cover storage). Writing "rejected" then would clobber a
+      // paused part whose real outcome is still coming.
+      const terminated = await runtime.reject({
+        executionId,
+        seq: pending[0].seq
+      });
+      if (!terminated) return alreadyResolved;
+      output = {
+        status: "rejected",
+        executionId,
+        reason: verdict.reason ?? "Rejected by user"
+      };
+    }
+    const outcome = await this._locatePause(executionId, output);
+    if (pending.length === 0) {
+      // Nothing was pending (expired, settled, unknown): the runtime's
+      // error still reconciles a stale card, but a client calling with any
+      // id must not grow the decisions table, so nothing is stored.
+      await this._applyPauseOutcome({
+        id: `codemode_${crypto.randomUUID()}`,
+        kind: "codemode",
+        subject: { executionId },
+        descriptor: undefined,
+        status: "settled",
+        verdict: stored,
+        outcome,
+        error: undefined,
+        acknowledged: false,
+        createdAt: Date.now(),
+        decidedAt: Date.now(),
+        settledAt: Date.now()
+      });
+      return output;
+    }
+    await this._approvals.record({
+      id: `codemode_${crypto.randomUUID()}`,
+      kind: "codemode",
+      subject: { executionId } satisfies CodemodePauseSubject,
+      verdict: stored,
+      outcome
+    });
+    return output;
   }
 
   /**
-   * The continuation of a decided pause (Approvals' `onDecided`): run the
-   * approved action or codemode call, or build the rejection, and find the
-   * paused part the outcome replaces. At least once: a reset before the
-   * outcome is stored runs it again, and the approved action's side effect
-   * replays from the action ledger.
+   * Find the paused part an outcome replaces. `apply: false` when the part
+   * was resolved in place elsewhere (e.g. approved from another tab): the
+   * transcript already has an outcome.
+   */
+  private async _locatePause(
+    executionId: string,
+    output: unknown
+  ): Promise<PauseOutcome> {
+    const toolCallId = await this._findExecutionToolCallDurably(
+      executionId,
+      true
+    );
+    const apply =
+      toolCallId !== null ||
+      (await this._findExecutionToolCallDurably(executionId)) == null;
+    return { executionId, output, toolCallId, apply };
+  }
+
+  /**
+   * The continuation of a decided durable-pause action (Approvals'
+   * `onDecided`): run the approved action, or build the rejection, and find
+   * the paused part the outcome replaces. At least once: a reset before the
+   * outcome is stored runs it again, and the action's side effect replays
+   * from the action ledger.
    */
   private async _continuePause(decision: Decision): Promise<PauseOutcome> {
-    const verdict = decision.verdict;
-    let executionId: string;
-    let output: unknown;
-    let apply = true;
-    if (decision.kind === "action") {
-      executionId = decision.id;
-      output = await this._continueActionPause(decision);
-    } else {
-      const subject = decision.subject as CodemodePauseSubject;
-      executionId = subject.executionId;
-      const runtime = this._codemodeRuntime();
-      if (!runtime) {
-        output = {
-          status: "error",
-          executionId,
-          error:
-            "No codemode runtime is configured — the execute tool was never " +
-            "created on this agent."
-        };
-        apply = false;
-      } else if (verdict?.approved) {
-        output = truncatePausedExecutionOutput(
-          await runtime.approve({ executionId })
-        );
-      } else {
-        // `reject` reports whether it actually terminated the run. A `false`
-        // means the action was resolved between the `pending()` check and
-        // the reject (approve/reject interleave across facet RPC awaits —
-        // input gates only cover storage). Writing "rejected" then would
-        // clobber a paused part whose real outcome (e.g. an in-flight
-        // approval) is still coming, so surface an error instead.
-        const terminated = await runtime.reject({
-          executionId,
-          seq: subject.seq ?? 0
-        });
-        output = terminated
-          ? {
-              status: "rejected",
-              executionId,
-              reason: verdict?.reason ?? "Rejected by user"
-            }
-          : {
-              status: "error",
-              executionId,
-              error: `Execution "${executionId}" is no longer pending — it was approved or rejected elsewhere.`
-            };
-        apply = terminated;
-      }
+    if (decision.kind !== "action") {
+      // A codemode decision is recorded settled; its runtime ran it. Never
+      // run a codemode approval here: it would resume whatever is paused now.
+      return {
+        executionId: (decision.subject as CodemodePauseSubject).executionId,
+        output: undefined,
+        toolCallId: null,
+        apply: false
+      };
     }
-    const toolCallId = apply
-      ? await this._findExecutionToolCallDurably(executionId, true)
-      : null;
-    // Already resolved in place (e.g. approved from another tab)? Then the
-    // transcript has the outcome and nothing more is needed.
-    if (
-      apply &&
-      !toolCallId &&
-      (await this._findExecutionToolCallDurably(executionId)) != null
-    ) {
-      apply = false;
-    }
-    return { executionId, output, toolCallId, apply };
+    const output = await this._continueActionPause(decision);
+    return this._locatePause(decision.id, output);
   }
 
   /**
@@ -11085,7 +11087,20 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * arrives, and that outcome's continuation would have nothing to answer.
    */
   private async _applyPauseOutcome(decision: Decision): Promise<void> {
-    const outcome = decision.outcome as PauseOutcome | undefined;
+    let outcome = decision.outcome as PauseOutcome | undefined;
+    if (decision.error !== undefined) {
+      // The continuation failed for good, or its outcome was too large to
+      // store: the paused part gets the error, not a pause for ever.
+      const executionId =
+        decision.kind === "action"
+          ? decision.id
+          : (decision.subject as CodemodePauseSubject).executionId;
+      outcome = await this._locatePause(executionId, {
+        status: "error",
+        executionId,
+        error: decision.error
+      });
+    }
     if (!outcome?.apply) {
       this._approvals.acknowledge(decision.id);
       return;
@@ -11116,8 +11131,15 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       const outcomeSource = executionId.startsWith(ACTION_PAUSE_ID_PREFIX)
         ? "durable action"
         : "execute tool";
+      // One note per decision, so a hand-off again after a reset does not
+      // write a second one.
+      const noteId = `${EXECUTION_OUTCOME_MESSAGE_PREFIX}${executionId}-${decision.id}`;
+      if (await this.session.getMessage(noteId)) {
+        this._approvals.acknowledge(decision.id);
+        return { status: "unchanged" };
+      }
       const note = await this._appendMessageToHistory({
-        id: `${EXECUTION_OUTCOME_MESSAGE_PREFIX}${executionId}-${crypto.randomUUID()}`,
+        id: noteId,
         role: "system",
         parts: [
           {
@@ -11303,20 +11325,28 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // `_applyPauseOutcome` is writing it now and acknowledges when done.
     if (this._pauseOutcomesBeingApplied.has(decision.id)) return;
     const outcome = decision.outcome as PauseOutcome | undefined;
-    const toolCallId = outcome?.toolCallId;
-    if (
-      !outcome?.apply ||
-      !toolCallId ||
-      isPausedToolPart({ state: "output-available", output: outcome.output })
-    ) {
-      this._approvals.acknowledge(decision.id);
+    if (decision.error !== undefined || !outcome?.apply) {
+      // The error path and the not-applied path belong to the hand-off.
+      if (!outcome?.apply && decision.error === undefined) {
+        this._approvals.acknowledge(decision.id);
+      }
       return;
     }
+    const toolCallId = outcome.toolCallId;
+    // A part compacted away gets its note from the hand-off.
+    if (!toolCallId) return;
     const owner = await this._resolveToolCallOwner(toolCallId, undefined);
     if (owner && ownsPausedToolCall(owner, toolCallId)) {
       await this._applyToolUpdateToMessages(
         pausedExecutionUpdate(toolCallId, outcome.executionId, outcome.output)
       );
+    }
+    if (
+      isPausedToolPart({ state: "output-available", output: outcome.output })
+    ) {
+      // Paused again: the card now shows the call that waits. Nothing to drop.
+      this._approvals.acknowledge(decision.id);
+      return;
     }
     await this._dropGenerationAfterResolvedPause(toolCallId, decision.id);
   }
