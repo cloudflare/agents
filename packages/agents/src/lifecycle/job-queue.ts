@@ -498,21 +498,6 @@ export class JobQueue {
     );
   }
 
-  /**
-   * Keep a job whose dispatch hit a transient platform failure, and move it
-   * to `time` so the jobs behind it run first and it does not head the next
-   * alarm's due list straight away.
-   */
-  defer(id: string, time: number): void {
-    this.#sql(
-      `UPDATE cf_agents_jobs
-       SET time = ?, running = 0, execution_started_at = NULL
-       WHERE id = ?`,
-      Math.floor(time),
-      id
-    );
-  }
-
   delete(id: string): void {
     this.#revise(id);
     this.#sql("DELETE FROM cf_agents_jobs WHERE id = ?", id);
@@ -633,9 +618,18 @@ export class JobQueue {
    * restarts and must re-fire immediately), merged with the earliest
    * hung-timeout recheck for in-flight single-flight jobs.
    */
-  nextAlarmTime(nowMs: number): number | null {
+  nextAlarmTime(
+    nowMs: number,
+    excludeOwners: readonly string[] = []
+  ): number | null {
+    // Owners held back by a deferral are left out; the caller adds their
+    // wake back at the deferral's end.
+    const owners = excludeOwners.length
+      ? ` AND capability NOT IN (${excludeOwners.map(() => "?").join(", ")})`
+      : "";
     const exclusive = this.#sql<{ time: number | null }>(
-      "SELECT MIN(time) AS time FROM cf_agents_jobs WHERE exclusive = 1"
+      `SELECT MIN(time) AS time FROM cf_agents_jobs WHERE exclusive = 1${owners}`,
+      ...excludeOwners
     );
     if (exclusive[0]?.time !== null && exclusive[0]?.time !== undefined) {
       return exclusive[0].time;
@@ -646,11 +640,12 @@ export class JobQueue {
 
     const ready = this.#sql<{ time: number | null }>(
       `SELECT MIN(time) AS time FROM cf_agents_jobs
-       WHERE singleflight = 0
+       WHERE (singleflight = 0
           OR running = 0
-          OR coalesce(execution_started_at, 0) + coalesce(hung_timeout_seconds, ?) * 1000 <= ?`,
+          OR coalesce(execution_started_at, 0) + coalesce(hung_timeout_seconds, ?) * 1000 <= ?)${owners}`,
       DEFAULT_HUNG_TIMEOUT_SECONDS,
-      now
+      now,
+      ...excludeOwners
     );
     if (ready[0]?.time !== null && ready[0]?.time !== undefined) {
       candidate = Math.max(ready[0].time, now + 1);
@@ -661,10 +656,11 @@ export class JobQueue {
        FROM cf_agents_jobs
        WHERE singleflight = 1
          AND running = 1
-         AND coalesce(execution_started_at, 0) + coalesce(hung_timeout_seconds, ?) * 1000 > ?`,
+         AND coalesce(execution_started_at, 0) + coalesce(hung_timeout_seconds, ?) * 1000 > ?${owners}`,
       DEFAULT_HUNG_TIMEOUT_SECONDS,
       DEFAULT_HUNG_TIMEOUT_SECONDS,
-      now
+      now,
+      ...excludeOwners
     );
     const recheck = inFlight[0]?.recheck;
     if (recheck !== null && recheck !== undefined) {

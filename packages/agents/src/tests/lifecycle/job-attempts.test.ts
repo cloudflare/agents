@@ -215,6 +215,31 @@ describe("durable job attempts", () => {
     });
   });
 
+  it("gives an exhausted job without onJobError one try per wake", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const jobs = new WakeOnly();
+      const { lifecycle } = install(jobs);
+      await lifecycle.start();
+      let calls = 0;
+      jobs.onJob = () => {
+        calls += 1;
+        throw new Error("still failing");
+      };
+      await jobs.push({
+        id: "wake",
+        fn: "scan",
+        time: Date.now() + 60_000,
+        retry: QUICK
+      });
+      interrupted(storage, "wake", 3);
+
+      await lifecycle.alarm();
+
+      // No in-alarm retries: the backoff spaces its attempts.
+      expect(calls).toBe(1);
+    });
+  });
+
   it("counts an attempt in storage before onJob runs", async () => {
     await withCapabilityHarness(async ({ install, storage }) => {
       const jobs = new Jobs();

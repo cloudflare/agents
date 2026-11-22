@@ -127,17 +127,21 @@ Five named rules define what a job owner can and cannot rely on:
    pushed mid-drive. Owners that both push and return outcomes for the
    same job (Tasks) should derive both from the same durable state so
    they always agree.
-4. **A reset stops the drive loop; a transient failure stops only its
-   job.** A superseded isolate, a storage reset or a memory-limit reset
-   condemns the isolate: the driver preserves the failing job and
+4. **A reset stops the drive loop; a transient failure holds back only
+   its owner.** A superseded isolate, a storage reset or a memory-limit
+   reset condemns the isolate: the driver preserves the failing job and
    re-throws, and the remaining due jobs wait for a fresh invocation (or
-   the breaker engages). Any other platform-class failure (a `retryable`
-   error, "Network connection lost.") belongs to something the job called,
-   such as a downstream stub. The driver keeps that job, moves it 30 s out
-   and drives the rest; the alarm re-arms and then still fails, so the
-   failure is visible. Before this rule, one such job kept its old due
-   time, headed the due list on every alarm and stopped every job behind
-   it for as long as the downstream kept failing.
+   the breaker engages). A downstream stub's upgrade error matches the same
+   pattern and also stops the loop; the two cannot be told apart. Any other
+   platform-class failure (a `retryable` error, "Network connection lost.")
+   belongs to something the job called. The driver keeps that job and its
+   time, skips the rest of that owner's due jobs, and drives every other
+   owner's. The alarm re-arms with the held owner's jobs no sooner than
+   30 s out, and then still fails, so the failure is visible. Keeping the
+   times keeps an owner's order: a Queue item behind a deferred one does
+   not run first, and `list()` order does not change. Before this rule, one
+   such job stopped every job behind it, of every owner, for as long as the
+   downstream kept failing.
 5. **Unreported attempts are counted durably.** Before each dispatch
    attempt the driver adds one to the row's `attempts` column and yields
    one macrotask so the write starts; when the attempt ends in any way the
@@ -195,8 +199,9 @@ and `Lifecycle` wires them to the host and capabilities through the narrow
      row and yielding one macrotask first;
    - a reset or memory-limit failure preserves the job and re-throws so a
      fresh invocation runs the rest or the breaker engages; any other
-     platform-class failure (on exhaustion) moves the job 30 s out and the
-     loop goes on, and the alarm re-throws it after re-arming;
+     platform-class failure (on exhaustion) holds back that job's owner for
+     30 s, keeping its jobs' times, and the loop goes on with other owners;
+     the alarm re-throws it after re-arming;
    - terminal application failures reach `onJobError`, whose drive result
      decides advancement (recurring schedules reschedule; one-shots
      complete);
