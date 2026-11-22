@@ -219,6 +219,38 @@ describe("agent-tool run child", () => {
     });
   });
 
+  it("answers 404 for a run without a child, whatever its child path names", async () => {
+    const parent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `unavailable-${crypto.randomUUID()}`
+    );
+    await parent.seedFinishedFacetEraRunForTest("old-run");
+    const live = `live-${crypto.randomUUID()}`;
+    await parent.runDeterministicAgentToolForTest({
+      runId: live,
+      chunkBodies: []
+    });
+    const routed = await parent.fetchPathForTest(
+      `agents/test-agent-tool-replay-agent/x/agent-tool-runs/old-run/agent-tool-runs/${live}/hello`
+    );
+    expect(routed.status).toBe(404);
+  });
+
+  it("names a run an earlier version refused as never started", async () => {
+    const parent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `old-refused-${crypto.randomUUID()}`
+    );
+    await parent.seedOldRefusedRunForTest("old-refused");
+    const routed = await parent.fetchPathForTest(
+      "agents/test-agent-tool-replay-agent/x/agent-tool-runs/old-refused/hello"
+    );
+    expect(routed).toEqual({
+      status: 404,
+      body: "This agent tool run never started, so it has no child"
+    });
+  });
+
   it("ends a facet-era run that is only interrupted at startup", async () => {
     const parent = await getAgentByName(
       env.TestAgentToolReplayAgent,

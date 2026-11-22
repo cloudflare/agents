@@ -638,6 +638,20 @@ export class TestAgentToolReplayAgent extends Agent {
     }
   }
 
+  /** A run an earlier version refused at dispatch: no child, no marker. */
+  seedOldRefusedRunForTest(runId: string): void {
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, parent_tool_call_id, agent_type, status, error_message,
+        display_order, started_at, completed_at, detached
+      ) VALUES (
+        ${runId}, ${null}, 'TestAgentToolStubChild', 'error',
+        'maxConcurrentAgentTools (1) exceeded', 0, ${Date.now()},
+        ${Date.now()}, 0
+      )
+    `;
+  }
+
   /** A finished run from when children were facets: it has no child name. */
   seedFinishedFacetEraRunForTest(runId: string): void {
     this.sql`

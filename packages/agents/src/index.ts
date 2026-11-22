@@ -379,6 +379,8 @@ export type {
 } from "./mcp/client/agent-servers";
 
 const DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS = 2_000;
+/** How the error of a run refused by the concurrency limit starts. */
+const REFUSED_AT_DISPATCH = "maxConcurrentAgentTools";
 /** The error of an open run whose child was a facet (before child names). */
 const FACET_ERA_AGENT_TOOL_RUN_ERROR =
   "This agent tool run was started by an earlier version of the agents SDK, which ran its child as a facet. It cannot be followed after the upgrade; run it again.";
@@ -2877,7 +2879,8 @@ export class Agent<
       const forwarded = await forwardAgentToolRunRequest(
         this.ctx,
         request,
-        (runId) => this._agentToolChildAddress(runId)
+        (runId) => this._agentToolChildAddress(runId),
+        this.name
       );
       return forwarded ?? this.lifecycle.fetch(request);
     }
@@ -3688,7 +3691,7 @@ export class Agent<
     const startedAt = Date.now();
 
     if (this._activeAgentToolRunCount() >= this.maxConcurrentAgentTools) {
-      const error = `maxConcurrentAgentTools (${this.maxConcurrentAgentTools}) exceeded`;
+      const error = `${REFUSED_AT_DISPATCH} (${this.maxConcurrentAgentTools}) exceeded`;
       this.sql`
         INSERT INTO cf_agent_tool_runs (
           run_id, parent_tool_call_id, agent_type, input_preview,
@@ -5605,17 +5608,22 @@ export class Agent<
       agent_type: string;
       child_name: string | null;
       child_name_minted: number | null;
+      error_message: string | null;
     }>`
-      SELECT agent_type, child_name, child_name_minted
+      SELECT agent_type, child_name, child_name_minted, error_message
       FROM cf_agent_tool_runs WHERE run_id = ${runId}
     `;
     if (!row) return null;
     if (row.child_name) {
       return { className: row.agent_type, childName: row.child_name };
     }
-    // A run refused at dispatch records that it has no child; a row from
-    // when children were facets predates the column.
-    return row.child_name_minted === 0 ? "never-started" : "facet-era";
+    // A run refused at dispatch has no child: it says so, or (written
+    // before the column) its error does. Any other row without a child is
+    // from when children were facets.
+    return row.child_name_minted === 0 ||
+      row.error_message?.startsWith(REFUSED_AT_DISPATCH)
+      ? "never-started"
+      : "facet-era";
   }
 
   private async _agentToolChild(

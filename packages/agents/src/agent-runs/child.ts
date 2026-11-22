@@ -70,31 +70,42 @@ export function agentToolChildStub(
 }
 
 /**
- * @internal Every reading of a request as `/agent-tool-runs/{runId}/...`: the
- * run id and the path the child sees. The segment can also be part of the
- * agent's own name, so each occurrence is a candidate.
+ * @internal The run a request addresses as `/agent-tool-runs/{runId}/...`,
+ * and the path the child sees, or `null`. The route segment is the one right
+ * after the agent's own name, so a name or a child path that contains the
+ * segment is not read as a run. Without the name in the path (a custom base
+ * path), the first occurrence counts.
  */
 export function matchAgentToolRunRequest(
-  request: Request
-): Array<{ runId: string; url: URL }> {
+  request: Request,
+  agentName?: string
+): { runId: string; url: URL } | null {
   const url = new URL(request.url);
   const segments = url.pathname.split("/");
-  const matches: Array<{ runId: string; url: URL }> = [];
+  const decode = (segment: string) => {
+    try {
+      return decodeURIComponent(segment);
+    } catch {
+      return segment;
+    }
+  };
+  let first: number | undefined;
+  let anchored: number | undefined;
   for (let i = 1; i < segments.length - 1; i++) {
     if (segments[i] !== AGENT_TOOL_RUN_ROUTE || segments[i + 1] === "") {
       continue;
     }
-    let runId = segments[i + 1];
-    try {
-      runId = decodeURIComponent(runId);
-    } catch {
-      // Keep the raw segment.
+    first ??= i;
+    if (agentName !== undefined && decode(segments[i - 1]) === agentName) {
+      anchored = i;
+      break;
     }
-    const target = new URL(url);
-    target.pathname = `/${segments.slice(i + 2).join("/")}`;
-    matches.push({ runId, url: target });
   }
-  return matches;
+  const at = anchored ?? first;
+  if (at === undefined) return null;
+  const target = new URL(url);
+  target.pathname = `/${segments.slice(at + 2).join("/")}`;
+  return { runId: decode(segments[at + 1]), url: target };
 }
 
 /**
@@ -120,24 +131,25 @@ const UNREACHABLE_CHILD = {
  * upgrade the child owns the socket, so its frames never wake the parent.
  *
  * @param child - Where the child of a run id is.
- * @returns The child's response for the first candidate that names a run
- *   with a child; else `404` when a candidate names a run whose child cannot
- *   be opened, so the request never lands on the parent's own chat; else
- *   `undefined`, so the agent handles the request itself.
+ * @param agentName - The agent's own name, to find the route segment after it.
+ * @returns The child's response; `404` for a run whose child cannot be
+ *   opened, so the request never lands on the parent's own chat; or
+ *   `undefined` when the path names no run of this parent, so the agent
+ *   handles the request itself.
  */
 export async function forwardAgentToolRunRequest(
   ctx: DurableObjectState,
   request: Request,
-  child: (runId: string) => AgentToolRunChildAddress
+  child: (runId: string) => AgentToolRunChildAddress,
+  agentName?: string
 ): Promise<Response | undefined> {
-  let unreachable: "facet-era" | "never-started" | undefined;
-  for (const match of matchAgentToolRunRequest(request)) {
-    const target = child(match.runId);
-    if (!target) continue;
-    if (typeof target === "string") {
-      unreachable ??= target;
-      continue;
-    }
+  const match = matchAgentToolRunRequest(request, agentName);
+  if (!match) return undefined;
+  const target = child(match.runId);
+  if (typeof target === "string") {
+    return new Response(UNREACHABLE_CHILD[target], { status: 404 });
+  }
+  if (target) {
     const stub = await agentToolChildStub(
       ctx,
       target.className,
@@ -145,10 +157,7 @@ export async function forwardAgentToolRunRequest(
     );
     return stub.fetch(new Request(match.url, request));
   }
-  if (unreachable) {
-    return new Response(UNREACHABLE_CHILD[unreachable], { status: 404 });
-  }
-  // No candidate is a run: the segment belongs to the agent's own name or
-  // one of its own routes, so the request is the agent's.
+  // Not a run of this parent: the segment belongs to one of the agent's own
+  // routes, so the request is the agent's.
   return undefined;
 }
