@@ -149,8 +149,8 @@ describe("ChatFrames", () => {
 
     const sent = setup({ ...view, listsReachResumingTabs: true });
     sent.resuming.add("waiting");
-    sent.frames.broadcastMessages([{ id: "m" }]);
-    expect(sent.sent[0].without).toEqual([]);
+    sent.frames.broadcastMessages([{ id: "m" }], ["self"]);
+    expect(sent.sent[0].without).toEqual(["self"]);
     expect(
       sent.frames.messagesFrame([{ id: "m" }], { connect: true })
     ).toMatchObject({
