@@ -3083,8 +3083,14 @@ export class Agent<
    * });
    * ```
    */
-  keepAliveWhile<T>(fn: () => Promise<T>): Promise<T> {
-    return this._keepAlive.run(fn);
+  async keepAliveWhile<T>(fn: () => Promise<T>): Promise<T> {
+    // Through keepAlive(), so a subclass override sees every hold.
+    const release = await this.keepAlive();
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
   }
 
   // ── Fibers (the `Fibers` capability, ./fibers) ─────────────────────
