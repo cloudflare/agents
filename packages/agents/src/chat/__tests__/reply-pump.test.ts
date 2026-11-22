@@ -13,7 +13,11 @@ import {
   type ReplyStoreContext,
   type ReplyTurns
 } from "../reply-pump";
-import { responseSource, type ReplySource } from "../reply-source";
+import {
+  responseSource,
+  streamErrorText,
+  type ReplySource
+} from "../reply-source";
 import type {
   ReplyFlushState,
   ReplyStreamLog,
@@ -879,6 +883,26 @@ describe("pumpReply, review findings", () => {
     expect(stored.map((s) => s.context.kind)).toEqual(["partial"]);
   });
 
+  it("fails a reply whose source throws with no reason", async () => {
+    const { host, stored } = fakeHost({
+      describeError: (error) => streamErrorText(error)
+    });
+    const result = await pumpReply(
+      input({
+        source: {
+          chunks: (async function* () {
+            yield { type: "text-start", id: "t" } as StreamChunkData;
+            throw undefined;
+          })()
+        }
+      }),
+      host
+    );
+    expect(result).toEqual({ status: "error", error: "Stream error" });
+    // Stored as cut off, not as a finished reply.
+    expect(stored[0].message.metadata).toEqual({ settled: true });
+  });
+
   it("runs the response hook when an RPC caller's onDone rejects", async () => {
     const { host, settled } = fakeHost();
     await expect(
@@ -980,6 +1004,14 @@ describe("responseSource", () => {
     }
     src.release?.();
     expect(cancelled).toBe(true);
+  });
+
+  it("releases the body of a reply stopped before it was read", async () => {
+    const { response: r, body } = response(["Hi"], "text/plain");
+    const src = responseSource(r, body, "req");
+    src.cancel?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(body.locked).toBe(false);
   });
 
   it("reads an empty plain-text body as no reply", async () => {

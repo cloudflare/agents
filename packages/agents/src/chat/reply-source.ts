@@ -43,13 +43,19 @@ export interface UIMessageStreamResult {
  * @internal
  */
 export function streamErrorText(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (typeof error === "string") return error;
-  try {
-    return JSON.stringify(error);
-  } catch {
-    return String(error);
+  let text: string | undefined;
+  if (error instanceof Error) text = error.message;
+  else if (typeof error === "string") text = error;
+  else {
+    try {
+      text = JSON.stringify(error);
+    } catch {
+      text = String(error);
+    }
   }
+  // A stream that errors with no reason still failed: the text is what
+  // marks the reply as failed.
+  return text ? text : "Stream error";
 }
 
 /**
@@ -94,21 +100,32 @@ export function responseSource(
     "text/event-stream"
   );
   let released = false;
+  const reading = { started: false };
   const cancel = () => {
     if (released) return;
     released = true;
-    reader.cancel().catch(() => {});
+    void reader
+      .cancel()
+      .catch(() => {})
+      .then(() => {
+        // Never read: nothing else will release the lock.
+        if (!reading.started) reader.releaseLock();
+      });
   };
   return {
-    chunks: sse ? sseChunks(reader) : plainTextChunks(reader, requestId),
+    chunks: sse
+      ? sseChunks(reader, reading)
+      : plainTextChunks(reader, requestId, reading),
     cancel,
     release: cancel
   };
 }
 
 async function* readText(
-  reader: ReadableStreamDefaultReader<Uint8Array>
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  reading: { started: boolean }
 ): AsyncGenerator<string> {
+  reading.started = true;
   const decoder = new TextDecoder();
   let ended = false;
   try {
@@ -130,11 +147,12 @@ async function* readText(
 }
 
 async function* sseChunks(
-  reader: ReadableStreamDefaultReader<Uint8Array>
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  reading: { started: boolean }
 ): AsyncGenerator<StreamChunkData> {
   // A line can span two reads: keep the unfinished tail for the next one.
   let pending = "";
-  for await (const text of readText(reader)) {
+  for await (const text of readText(reader, reading)) {
     const lines = (pending + text).split("\n");
     pending = lines.pop() ?? "";
     for (const line of lines) {
@@ -160,10 +178,11 @@ function parseSseLine(line: string): StreamChunkData | undefined {
 
 async function* plainTextChunks(
   reader: ReadableStreamDefaultReader<Uint8Array>,
-  id: string
+  id: string,
+  reading: { started: boolean }
 ): AsyncGenerator<StreamChunkData> {
   let started = false;
-  for await (const delta of readText(reader)) {
+  for await (const delta of readText(reader, reading)) {
     if (!started) {
       started = true;
       yield { type: "text-start", id };
