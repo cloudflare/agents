@@ -19,6 +19,7 @@ import type {
   TurnContext
 } from "../../think";
 import {
+  LiveReply,
   StreamAccumulator,
   toolApprovalUpdate,
   toolResultUpdate,
@@ -1319,15 +1320,18 @@ export class ThinkClientToolsAgent extends Think {
 
   private _streamParents: Array<string | null> = [];
 
-  protected override _startResumableStream(
-    requestId: string,
-    options?: Parameters<Think["_startResumableStream"]>[1]
-  ): string {
-    const streamId = super._startResumableStream(requestId, options);
-    this._streamParents.push(
-      this["_resumableStream"].getStreamParentMessageId(streamId)
-    );
-    return streamId;
+  constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
+    super(ctx, env);
+    // Every reply's stream starts here (`pumpReply`).
+    const streams = this["_replyStreams"];
+    const start = streams.start.bind(streams);
+    streams.start = (requestId, options) => {
+      const streamId = start(requestId, options);
+      this._streamParents.push(
+        this["_resumableStream"].getStreamParentMessageId(streamId)
+      );
+      return streamId;
+    };
   }
 
   /** The parent message each chat stream recorded when it started. */
@@ -1403,13 +1407,9 @@ export class ThinkClientToolsAgent extends Think {
   async streamingToolCallState(
     toolCallId: string
   ): Promise<string | undefined> {
-    const acc = (
-      this as unknown as {
-        _streamingAssistant: {
-          parts: Array<Record<string, unknown>>;
-        } | null;
-      }
-    )._streamingAssistant;
+    const acc = this["_turns"].liveReply?.accumulator as
+      | { parts: Array<Record<string, unknown>> }
+      | undefined;
     if (!acc) return undefined;
     const part = acc.parts.find((p) => p.toolCallId === toolCallId);
     return part?.state as string | undefined;
@@ -1428,7 +1428,6 @@ export class ThinkClientToolsAgent extends Think {
     output: string;
   }): Promise<{ state: string; output: string }> {
     const internal = this as unknown as {
-      _streamingAssistant: StreamAccumulator | null;
       _applyToolUpdateToMessages(update: ToolPartUpdate): Promise<unknown>;
       _persistAssistantMessage(msg: UIMessage): Promise<void>;
     };
@@ -1448,14 +1447,14 @@ export class ThinkClientToolsAgent extends Think {
 
     // The assistant message exists ONLY in the accumulator — a storage read
     // would not find it (mirrors a turn mid-stream, before persist).
-    internal._streamingAssistant = accumulator;
+    this["_turns"].liveReply = new LiveReply("mid-stream", accumulator);
     // A client tool result arrives over the WebSocket while the stream is open.
     await internal._applyToolUpdateToMessages(
       toolResultUpdate(opts.toolCallId, opts.output)
     );
     // The stream ends and persists the accumulated message.
     await internal._persistAssistantMessage(accumulator.toMessage());
-    internal._streamingAssistant = null;
+    this["_turns"].liveReply = null;
 
     const messages = (await this.getMessages()) as UIMessage[];
     const part = messages
@@ -1478,7 +1477,6 @@ export class ThinkClientToolsAgent extends Think {
     approved: boolean;
   }): Promise<{ state: string }> {
     const internal = this as unknown as {
-      _streamingAssistant: StreamAccumulator | null;
       _applyToolUpdateToMessages(update: ToolPartUpdate): Promise<unknown>;
       _persistAssistantMessage(msg: UIMessage): Promise<void>;
     };
@@ -1496,12 +1494,12 @@ export class ThinkClientToolsAgent extends Think {
       ]
     });
 
-    internal._streamingAssistant = accumulator;
+    this["_turns"].liveReply = new LiveReply("mid-stream", accumulator);
     await internal._applyToolUpdateToMessages(
       toolApprovalUpdate(opts.toolCallId, opts.approved)
     );
     await internal._persistAssistantMessage(accumulator.toMessage());
-    internal._streamingAssistant = null;
+    this["_turns"].liveReply = null;
 
     const messages = (await this.getMessages()) as UIMessage[];
     const part = messages

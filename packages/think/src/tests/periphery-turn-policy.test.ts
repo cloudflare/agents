@@ -1,8 +1,8 @@
 import type { ModelMessage, ToolSet } from "ai";
 import { describe, expect, it, vi } from "vitest";
+import { TransientChatStreamError } from "agents/chat";
 import {
   ThinkContextOverflow,
-  TransientChatStreamError,
   type ThinkContextOverflowOptions
 } from "../context-overflow";
 import {
@@ -75,7 +75,7 @@ describe("ThinkContextOverflow", () => {
     const { guard } = overflow(undefined, { classify: () => "rate_limit" });
     expect(
       guard.transientClassification(
-        new TransientChatStreamError("x", "transient", null),
+        new TransientChatStreamError("x", null),
         "r"
       )
     ).toBe("transient");

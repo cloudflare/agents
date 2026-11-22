@@ -755,7 +755,13 @@ export async function pumpReply(
   // the transcript with the reply in it. The frames wait for it.
   const describeFailure = () => {
     if (!failure) return;
-    streamError = host.describeError(failure.cause, failure.inBand);
+    try {
+      streamError = host.describeError(failure.cause, failure.inBand);
+    } catch (error) {
+      // A throwing error hook must not cost the reply its terminal frame.
+      console.error("[pumpReply] The error hook threw:", error);
+      streamError = streamErrorText(failure.cause);
+    }
     failure = undefined;
     if (errorFrame) errorFrame.body = streamError;
     host.emit({ type: "message:error", error: streamError });
