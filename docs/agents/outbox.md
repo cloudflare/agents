@@ -108,6 +108,7 @@ Sending a new value clears the checkpoint.
 | Method                          | Description                                                    |
 | ------------------------------- | -------------------------------------------------------------- |
 | `send(sink, payload, options?)` | Store a value and deliver it. Options: `key`, `hold`, `retry`. |
+| `release(sink, key, update?)`   | Deliver a held value, optionally mapped by `update`.           |
 | `get(sink, key)`                | Read a delivery. Delivered values are gone.                    |
 | `list({ sink?, status? })`      | List deliveries, oldest first.                                 |
 | `cancel(sink, key)`             | Drop a delivery, whatever its status.                          |
