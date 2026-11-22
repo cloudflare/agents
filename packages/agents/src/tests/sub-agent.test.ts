@@ -1242,6 +1242,19 @@ describe("SubAgent", () => {
     expect(await agent.fiberWakeOwners()).toHaveLength(1);
   });
 
+  it("restarts a facet with an open inbox lane through a stub it already had", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    // The inbox wakes open lanes while capabilities start, before Agent's
+    // own startup reads the stored facet flag. A wake that took the facet
+    // for a root would queue a local job and arm an alarm the facet does
+    // not have, so the first call after the reset would fail.
+    await expect(
+      agent.subAgentLocalJobIdsAfterParkedRestart("parked-inbox-child")
+    ).resolves.toEqual([]);
+  });
+
   it("drops host jobs an earlier release left in a sub-agent's queue (#2299)", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);

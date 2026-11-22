@@ -11,6 +11,7 @@ import { RpcTarget } from "cloudflare:workers";
 import { MessageType } from "../../types.ts";
 import { agentPathKey } from "../../dynamic-agents/identity.ts";
 import type { Tasks } from "../../tasks/tasks.ts";
+import { Inbox } from "../../inbox/index.ts";
 
 const STALE_FRAME_PROBE = "stale-frame-probe";
 
@@ -20,6 +21,31 @@ const STALE_FRAME_PROBE = "stale-frame-probe";
 export class CounterSubAgent extends Agent {
   private _heldKeepAliveDisposers: Array<() => void> = [];
   private _constructorName = this.name;
+  /** A lane whose requests never finish, so one stays open across a reset. */
+  readonly parkedInbox = new Inbox({
+    name: "parked",
+    handlers: { park: () => new Promise<never>(() => {}) }
+  });
+
+  constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
+    super(ctx, env);
+    this.lifecycle.use(this.parkedInbox);
+  }
+
+  /** Start this agent as a call through a kept stub would, then list its jobs. */
+  async jobIdsAfterStart(): Promise<string[]> {
+    await this.__unsafe_ensureInitialized();
+    return this.getLocalJobIds();
+  }
+
+  facetIdName(): string | undefined {
+    return this.ctx.id.name;
+  }
+
+  /** Queue a request that stays open; it starts on this facet's lane. */
+  async parkRequest(): Promise<void> {
+    await this.parkedInbox.submit("park", null, { lane: "parked" });
+  }
 
   onStart() {
     this.sql`
@@ -2343,6 +2369,29 @@ export class TestSubAgentParent extends Agent {
   ): Promise<void> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     await child.insertStaleHostJob(id, fn);
+  }
+
+  /** Open an inbox request in the facet, reset it, then call it again. */
+  async subAgentLocalJobIdsAfterParkedRestart(
+    subAgentName: string
+  ): Promise<string[]> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    await child.parkRequest();
+    const idName = await child.facetIdName();
+    this.abortSubAgent(CounterSubAgent, subAgentName);
+    // The facet restarts through a stub, without the parent's init call.
+    const exports = this.ctx.exports as unknown as Record<
+      string,
+      DurableObjectClass & Pick<DurableObjectNamespace, "idFromName">
+    >;
+    const stub = this.ctx.facets.get(
+      `CounterSubAgent\0${subAgentName}`,
+      () => ({
+        class: exports.CounterSubAgent,
+        id: exports.TestSubAgentParent.idFromName(idName ?? subAgentName)
+      })
+    ) as unknown as { jobIdsAfterStart(): Promise<string[]> };
+    return stub.jobIdsAfterStart();
   }
 
   async subAgentLocalJobIdsAfterRestart(

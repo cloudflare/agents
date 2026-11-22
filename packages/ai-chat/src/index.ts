@@ -74,7 +74,7 @@ import {
   applyToolPartUpdate,
   toolApprovalUpdate,
   toolResultUpdate,
-  type TurnResult,
+  type LaneTurnResult,
   type MessagePart,
   type ServerChatTurn,
   type SubmitConcurrencyDecision,
@@ -2498,7 +2498,7 @@ export class AIChatAgent<
     options?: { epoch?: number; onStale?: () => void }
   ): Promise<T> {
     const generation = options?.epoch;
-    let result: TurnResult<T>;
+    let result: LaneTurnResult<T>;
     try {
       result = await this._turnQueue.enqueue(
         requestId,

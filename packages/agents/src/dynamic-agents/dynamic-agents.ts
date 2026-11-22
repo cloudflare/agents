@@ -178,6 +178,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
   }
 
   lifecycleRouteAddress(): LifecycleRouteAddress | undefined {
+    this.#readStoredIdentity();
     if (!this.#host._isFacet) return undefined;
     const key = agentPathKey(this.#host.selfPath);
     return key ? { key, data: JSON.stringify(this.#host.selfPath) } : undefined;
@@ -1517,24 +1518,34 @@ export class DynamicAgentsInternal extends LifecycleCapability {
    * hibernation), then best-effort hydrate the virtual connections
    * from the root's WebSocket state.
    */
-  async restoreFacetContext(): Promise<void> {
-    const isFacet =
-      await this.#host.ctx.storage.get<boolean>("cf_agents_is_facet");
-    if (isFacet) this.#host._isFacet = true;
+  #identityRead = false;
 
-    const storedFacetName = await this.#host.ctx.storage.get<string>(
-      "cf_agents_facet_name"
-    );
+  /**
+   * Restore the identity {@link init} stored, once per isolate. Routing asks
+   * for it while capabilities start, before Agent's own startup: a facet
+   * restarted through a stub its parent kept gets no init call, and its
+   * capabilities must not take it for a root (a root arms alarms).
+   */
+  #readStoredIdentity(): void {
+    if (this.#identityRead) return;
+    this.#identityRead = true;
+    const kv = this.#host.ctx.storage.kv;
+    if (kv.get<boolean>("cf_agents_is_facet") !== true) return;
+    this.#host._isFacet = true;
+    const storedFacetName = kv.get<string>("cf_agents_facet_name");
     if (typeof storedFacetName === "string") {
       this.#host._facetName = storedFacetName;
     }
-
-    const storedParentPath = await this.#host.ctx.storage.get<
-      Array<{ className: string; name: string }>
-    >("cf_agents_parent_path");
+    const storedParentPath = kv.get<Array<{ className: string; name: string }>>(
+      "cf_agents_parent_path"
+    );
     if (isValidParentPath(storedParentPath)) {
       this.#host._parentPath = storedParentPath;
     }
+  }
+
+  async restoreFacetContext(): Promise<void> {
+    this.#readStoredIdentity();
 
     try {
       await this.hydrateConnectionsFromRoot();

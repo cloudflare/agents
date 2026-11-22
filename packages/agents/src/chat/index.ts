@@ -26,11 +26,12 @@ export {
   type ChunkResult
 } from "./stream-accumulator";
 
+export { TurnQueue, type TurnResult, type EnqueueOptions } from "./turn-queue";
+
 export {
   ChatLane,
-  type ChatLaneOptions,
   type ChatLanePayload,
-  type LaneTurnResult as TurnResult
+  type LaneTurnResult
 } from "./chat-lane";
 
 export { originMessageIds, withOriginMessageIds } from "./origin-message-ids";
