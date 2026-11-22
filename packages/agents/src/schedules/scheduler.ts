@@ -25,6 +25,13 @@ import {
   validateRetryOptions
 } from "../retries";
 import type { RetryOptions } from "../retries";
+import {
+  DeclaredScheduleSet,
+  isDeclaredJob,
+  type DeclaredScheduleInfo,
+  type DeclaredSchedulesSource,
+  type DeclareSchedulesOptions
+} from "./declared";
 import type { SchedulerEventType, SchedulerOptions } from "./options";
 import {
   isRecurring,
@@ -73,8 +80,11 @@ export function setSchedulerCallbackResolver(
 }
 
 const SCHEDULE_SCHEMA_VERSION_KEY = "cf_agents:schedules_schema_version";
-/** Version 2: schedule rows live in the Lifecycle job queue. */
-const CURRENT_SCHEDULE_SCHEMA_VERSION = 2;
+/**
+ * Version 2: schedule rows live in the Lifecycle job queue.
+ * Version 3: Think's declared-task rows became declared-schedule jobs.
+ */
+const CURRENT_SCHEDULE_SCHEMA_VERSION = 3;
 
 /**
  * Legacy schedule callbacks whose rows drive chat recovery loops from before
@@ -169,6 +179,7 @@ export class Scheduler<
   readonly #hungScheduleTimeoutSeconds: number;
   readonly #onError: ((error: unknown) => void | Promise<void>) | undefined;
   readonly #warnedStartupCallbacks = new Set<string>();
+  readonly #declared: DeclaredScheduleSet;
 
   /**
    * Create a persistent Scheduler.
@@ -192,6 +203,15 @@ export class Scheduler<
     this.#retryDefaults = resolveRetryConfig(options.retry, DEFAULT_RETRY);
     this.#hungScheduleTimeoutSeconds = options.hungScheduleTimeoutSeconds ?? 30;
     this.#onError = options.onError;
+    this.#declared = new DeclaredScheduleSet({
+      lifecycle: () => this.lifecycle,
+      retryDefaults: this.#retryDefaults,
+      hungTimeoutSeconds: this.#hungScheduleTimeoutSeconds,
+      onError: async (error) => {
+        await this.#onError?.(error);
+      },
+      emit: (type, payload) => this.#emit(type, payload)
+    });
   }
 
   // ── Lifecycle capability hooks ───────────────────────────────────────────
@@ -204,7 +224,8 @@ export class Scheduler<
       (await storage.get<number>(SCHEDULE_SCHEMA_VERSION_KEY)) ?? 0;
     if (version >= CURRENT_SCHEDULE_SCHEMA_VERSION) return;
 
-    await this.#migrateLegacyScheduleTable(storage);
+    if (version < 2) await this.#migrateLegacyScheduleTable(storage);
+    await this.#declared.migrateLegacy();
     await storage.put(
       SCHEDULE_SCHEMA_VERSION_KEY,
       CURRENT_SCHEDULE_SCHEMA_VERSION
@@ -282,6 +303,7 @@ export class Scheduler<
     context: LifecycleJobContext
   ): Promise<LifecycleJobOutcome | void> {
     const { job, attempt } = context;
+    if (isDeclaredJob(job)) return this.#declared.run(context);
     const timing = job.payload;
     if (!isSchedulerJobPayload(timing)) {
       console.error(`Malformed schedule job ${job.id}; dropping it`);
@@ -363,6 +385,7 @@ export class Scheduler<
     error: unknown
   ): Promise<LifecycleJobOutcome | void> {
     const { job } = context;
+    if (isDeclaredJob(job)) return this.#declared.runFailed(context, error);
     const timing = job.payload;
     if (!isSchedulerJobPayload(timing)) return undefined;
     const { maxAttempts } = resolveRetryConfig(job.retry, this.#retryDefaults);
@@ -614,6 +637,31 @@ export class Scheduler<
       this.#emit("schedule:cancel", { callback: result.callback, id });
     }
     return result.ok;
+  }
+
+  // ── Declared schedules ───────────────────────────────────────────────────
+
+  /**
+   * Declare a named set of recurring schedules and reconcile storage to it:
+   * new names are armed at their next occurrence, names whose timing or
+   * retry changed are re-armed, names no longer declared are cancelled.
+   * Each name has one pending occurrence and never runs twice at once.
+   *
+   * Call it on every start (for example in `onStart()`), and again after
+   * data a function `source` reads changes. The declaration is read again
+   * when an occurrence runs. An invalid entry rejects the call and changes
+   * nothing. On a sub-agent nothing is armed.
+   */
+  declare(
+    source: DeclaredSchedulesSource,
+    options?: DeclareSchedulesOptions
+  ): Promise<void> {
+    return this.#declared.declare(source, options);
+  }
+
+  /** The armed declared schedules, ordered by next occurrence. */
+  listDeclared(): DeclaredScheduleInfo[] {
+    return this.#declared.list();
   }
 
   // ── Host-owned policy apertures ──────────────────────────────────────────
