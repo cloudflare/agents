@@ -4666,7 +4666,7 @@ export class AIChatAgent<
               extend: continuation
                 ? this._findLastAssistantMessage()
                 : undefined,
-              beforeContent,
+              onFirstContent: beforeContent,
               started: onStreamStart
             },
             this._replyPumpHost(
@@ -4679,6 +4679,9 @@ export class AIChatAgent<
           );
           if (result.status === "overflow_retry") {
             return { status: "error", error: result.error ?? "" };
+          }
+          if (result.status === "interrupted") {
+            return { status: "aborted", reason: "interrupted" };
           }
           return result;
         } finally {

@@ -417,6 +417,62 @@ describe("pumpReply", () => {
     ]);
   });
 
+  it("returns an interruption to a caller that passes no route", async () => {
+    const { host, log, stored, streams } = fakeHost({
+      route: undefined,
+      classify: () => "transient"
+    });
+    const result = await pumpReply(
+      input({
+        source: {
+          chunks: (async function* () {
+            yield { type: "text-start", id: "t" } as StreamChunkData;
+            yield {
+              type: "text-delta",
+              id: "t",
+              delta: "Hi"
+            } as StreamChunkData;
+            throw new Error("connection reset");
+          })()
+        }
+      }),
+      host
+    );
+    expect(result).toMatchObject({
+      status: "interrupted",
+      streamId: "stream-1",
+      partial: { parts: [{ type: "text", text: "Hi" }] }
+    });
+    expect(stored).toEqual([]);
+    expect(log).toEqual(["finalized:false"]);
+    expect(streams.calls).toContain("complete:recovering");
+  });
+
+  it("runs onFirstContent once, at the first chunk with content", async () => {
+    const seen: string[] = [];
+    const { host } = fakeHost({
+      send: (frame) => {
+        if (!frame.done)
+          seen.push((JSON.parse(frame.body) as { type: string }).type);
+      }
+    });
+    await pumpReply(
+      input({
+        source: source(textReply),
+        onFirstContent: async () => void seen.push("first-content")
+      }),
+      host
+    );
+    expect(seen).toEqual([
+      "start",
+      "first-content",
+      "text-start",
+      "text-delta",
+      "text-end",
+      "finish"
+    ]);
+  });
+
   it("ends a reply stopped while it was routed as aborted, and runs its hook", async () => {
     const route = async (
       interruption: ReplyInterruption

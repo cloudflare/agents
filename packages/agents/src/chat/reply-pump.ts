@@ -203,7 +203,11 @@ export interface ReplyPumpHost {
     message: UIMessage,
     context: ReplyStoreContext
   ): Promise<string | undefined>;
-  route(interruption: ReplyInterruption): Promise<ReplyRouteOutcome>;
+  /**
+   * Hand a stall or a transient error to recovery. Without it the pump
+   * returns `interrupted` and the caller decides.
+   */
+  route?(interruption: ReplyInterruption): Promise<ReplyRouteOutcome>;
   /**
    * The reply ended and is stored (or was cut off with nothing to store).
    * Fires the response hook. Not called when recovery took the reply, or
@@ -235,8 +239,12 @@ export interface ReplyPumpInput {
   extend?: UIMessage;
   /** The message a regeneration branches from. */
   parentId?: string;
-  /** Runs once, before the first chunk with content (`takeAtFirstContent`). */
-  beforeContent?: () => Promise<void>;
+  /**
+   * Runs once, before the first chunk with content (`takeAtFirstContent`):
+   * a turn that continues the latest reply takes it over from a scheduled
+   * recovery there.
+   */
+  onFirstContent?: () => Promise<void>;
   /** An RPC caller's sink. */
   sink?: ReplySink;
   /**
@@ -254,7 +262,17 @@ export type ReplyResult =
   | { status: "completed"; messageId?: string; output?: unknown }
   | { status: "aborted"; reason?: "interrupted" }
   | { status: "error"; error: string }
-  | { status: "overflow_retry"; error?: string; partial: UIMessage };
+  | { status: "overflow_retry"; error?: string; partial: UIMessage }
+  /**
+   * A stall or a transient error, with no `route` to hand it to. The stream
+   * is closed `recovering` and nothing is stored: the caller owns the rest.
+   */
+  | {
+      status: "interrupted";
+      error: unknown;
+      streamId: string;
+      partial: UIMessage;
+    };
 
 /** An in-band error the host called transient, carried to recovery. */
 export class TransientChatStreamError extends Error {
@@ -323,7 +341,7 @@ export async function pumpReply(
   const continuation = input.continuation ?? false;
   const extend = input.extend;
   const extendMetadata = metadataObject(extend?.metadata);
-  const contentGate = takeAtFirstContent(input.beforeContent);
+  const contentGate = takeAtFirstContent(input.onFirstContent);
   const streams = host.streams;
 
   let streamId: string;
@@ -444,6 +462,17 @@ export async function pumpReply(
       (signal?.aborted || host.classify(error, false) !== "transient")
     ) {
       return undefined;
+    }
+    if (!host.route) {
+      streams.complete(streamId, "recovering");
+      host.setLive(null);
+      host.finalized(false);
+      return {
+        status: "interrupted",
+        error,
+        streamId,
+        partial: accumulator.toMessage()
+      };
     }
     const outcome = await host.route({
       requestId,
