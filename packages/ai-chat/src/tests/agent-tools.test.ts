@@ -595,7 +595,7 @@ describe("AIChatAgent as an agent-tool child", () => {
     expect(await parent.rootHasRoutedTaskWakeForTest(runId)).toBe(true);
   }, 10_000);
 
-  it("runs a facet's chat turn as a Task run on the facet, not a legacy fiber", async () => {
+  it("runs a child's chat turn as a Task run on the child, not a legacy fiber", async () => {
     const parent = await getParent();
 
     const { status, stores } = await parent.runChildTurnStoresForTest();

@@ -7346,7 +7346,10 @@ export class AIChatAgentToolParent extends Agent<Env> {
   }> {
     const runId = crypto.randomUUID();
     const result = await this.runChild({ prompt: "where" }, runId);
-    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    const child = await agentToolChildForTest<AIChatAgentToolChild>(
+      this.env.AIChatAgentToolChild,
+      runId
+    );
     return {
       status: result.status,
       stores: await child.getTurnStoresForTest()
