@@ -179,7 +179,12 @@ after the reset runs after them.
 Submissions are stored with the [Inbox](https://github.com/cloudflare/agents/blob/main/docs/agents/inbox.md)
 capability. A restart that cuts off `onSubmissionStatus` for a finished
 submission runs it again for that status, so write the hook so that a repeat
-is harmless.
+is harmless. The workflow
+event of a workflow submission is sent once either way.
+
+A submission whose run is interrupted by a restart runs again, at most three
+times in all. After the third interrupted run it ends `error` with
+`Interrupted 3 times`.
 
 Client requests sent over a WebSocket get the same treatment: a waiting
 request's messages join the Session when its turn starts. See

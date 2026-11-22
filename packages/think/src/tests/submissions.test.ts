@@ -63,6 +63,7 @@ type ThinkSubmissionTestStub = {
   setLastBodyForTest(body: Record<string, unknown>): Promise<void>;
   setSubmissionRecoveryStaleMsForTest(ms: number): Promise<void>;
   setWorkflowEventFailuresForTest(count: number): Promise<void>;
+  repeatSubmissionReportForTest(submissionId: string): Promise<void>;
   getErrorsForTest(): Promise<string[]>;
   getWorkflowEventsForTest(): Promise<
     Array<{
@@ -932,6 +933,39 @@ describe("Think durable submissions", () => {
         }
       })
     );
+  });
+
+  it("queues a submission's workflow event once, even when its terminal report repeats", async () => {
+    const agent = await freshAgent();
+    await agent.insertSubmissionForTest({
+      submissionId: "sub-workflow-once",
+      metadata: {
+        [workflowPromptMetadataKey]: {
+          workflow: {
+            name: "TEST_WORKFLOW",
+            id: "workflow-once",
+            stepName: "draft-report",
+            eventType: "think-prompt-once"
+          }
+        }
+      }
+    });
+    await agent.cancelSubmissionForTest("sub-workflow-once", "stop");
+    await agent.drainWorkflowNotificationsForTest();
+    // The report runs again, as after a reset during onSubmissionStatus.
+    await agent.repeatSubmissionReportForTest("sub-workflow-once");
+    await agent.drainWorkflowNotificationsForTest();
+    const events = (await agent.getWorkflowEventsForTest()).filter(
+      (entry) => entry.workflowId === "workflow-once"
+    );
+    expect(events).toHaveLength(1);
+    expect(
+      (await agent.getSubmissionLog()).filter(
+        (entry) =>
+          entry.submissionId === "sub-workflow-once" &&
+          entry.status === "aborted"
+      )
+    ).toHaveLength(2);
   });
 
   it("waitForSubmission resolves when a running submission completes", async () => {

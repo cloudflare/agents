@@ -113,6 +113,8 @@ export type SubmissionProgress = {
   output?: unknown;
   /** The assistant message its turn persisted. */
   messageId?: string;
+  /** Its workflow event was queued; a repeated terminal report skips it. */
+  workflowNotified?: boolean;
 };
 
 /** One submission as the turn and recovery code reads it. */
@@ -241,7 +243,8 @@ export function legacySubmissionImport(row: LegacySubmissionRow): InboxImport {
     id: row.submission_id,
     kind: SUBMISSION_KIND,
     status: row.status,
-    attempt: row.status === "running" || row.started_at !== null ? 1 : 0,
+    // Only a running row has a run under way; a pending one starts afresh.
+    attempt: row.status === "running" ? 1 : 0,
     ...(row.idempotency_key !== null && {
       idempotencyKey: row.idempotency_key
     }),

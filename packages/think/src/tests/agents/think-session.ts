@@ -9317,6 +9317,17 @@ export class ThinkProgrammaticTestAgent extends Think {
     return this._serverErrorLog;
   }
 
+  /** Emulate a reset that cut a submission's terminal report short. */
+  async repeatSubmissionReportForTest(submissionId: string): Promise<void> {
+    this.ctx.storage.sql.exec(
+      "UPDATE cf_agents_inbox SET notified = NULL WHERE id = ?",
+      submissionId
+    );
+    const inbox = submissionInbox(this);
+    await inbox.onStart();
+    await inbox.wait(submissionId);
+  }
+
   async getWorkflowEventsForTest(): Promise<
     Array<{
       workflowName: string;

@@ -158,9 +158,16 @@ avoid unsafe replay:
    reset outcomes.
 6. The terminal report queues the workflow notification, then runs
    `onSubmissionStatus`. The inbox repeats a terminal report a reset cut
-   short, and the notification's stable queue id makes the repeat a replace.
+   short, so `onSubmissionStatus` can run twice for one terminal status.
+   The notification is queued once: the report records `workflowNotified`
+   in the request's progress and a repeat skips it.
 
 ## Recovery Rules
+
+An interrupted submission runs again at most three times in all (the inbox's
+`maxAttempts`); the next interruption ends it `error` with `Interrupted 3
+times`. Before the inbox, a submission sent back to `pending` was requeued
+without a limit.
 
 A submission whose turn chat recovery took over ends its run `detached`: it
 stays `running`, frees the lane, and recovery settles it. On startup, and on

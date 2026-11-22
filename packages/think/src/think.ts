@@ -5721,8 +5721,15 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         idempotencyKey: inspection.idempotencyKey
       });
     }
-    if (isTerminalSubmissionStatus(inspection.status)) {
-      this._insertWorkflowNotification(inspection, request.result);
+    // Queued once per submission: a repeated report (a reset cut the user
+    // hook below short) must not queue an event the workflow already got.
+    const progress = request.progress as SubmissionProgress | undefined;
+    if (
+      isTerminalSubmissionStatus(inspection.status) &&
+      !progress?.workflowNotified &&
+      this._insertWorkflowNotification(inspection, request.result)
+    ) {
+      this._updateSubmissionProgress(request.id, { workflowNotified: true });
     }
     this._emit("submission:status", {
       submissionId: inspection.submissionId,
