@@ -1901,10 +1901,10 @@ export class ThinkClientToolsAgent extends Think {
   async pendingContinuationRequestIdForTest(): Promise<string | null> {
     return (
       (
-        this as unknown as {
-          _continuation: { pending: { requestId: string } | null };
+        this["_turns"] as unknown as {
+          continuation: { pending: { requestId: string } | null };
         }
-      )._continuation.pending?.requestId ?? null
+      ).continuation.pending?.requestId ?? null
     );
   }
 
@@ -1961,13 +1961,13 @@ export class ThinkClientToolsAgent extends Think {
   async holdCoalesceTimerForTest(): Promise<void> {
     const held = { requested: false };
     this._coalesceArmHeld = held;
-    this["_autoContinuation"].armTimer = () => {
+    this["_turns"].autoContinuation.armTimer = () => {
       held.requested = true;
     };
   }
 
   async releaseCoalesceTimerForTest(): Promise<void> {
-    const controller = this["_autoContinuation"];
+    const controller = this["_turns"].autoContinuation;
     delete (controller as { armTimer?: unknown }).armTimer;
     if (this._coalesceArmHeld?.requested) controller.armTimer();
     this._coalesceArmHeld = null;
@@ -1977,7 +1977,7 @@ export class ThinkClientToolsAgent extends Think {
     pending: boolean;
     deferred: boolean;
   }> {
-    const continuation = this["_continuation"];
+    const continuation = this["_turns"].continuation;
     return {
       pending: continuation.pending !== null,
       deferred: continuation.deferred !== null
@@ -1997,43 +1997,41 @@ export class ThinkClientToolsAgent extends Think {
     barrierActive: boolean;
     timerArmed: boolean;
   }> {
-    const internal = this as unknown as {
-      _continuation: { pending: unknown };
-      _autoContinuation: {
+    const internal = this["_turns"] as unknown as {
+      continuation: { pending: unknown };
+      autoContinuation: {
         _timer: ReturnType<typeof setTimeout> | null;
         _barrierActive: boolean;
       };
     };
     return {
-      hasPending: internal._continuation.pending != null,
-      barrierActive: internal._autoContinuation._barrierActive,
-      timerArmed: internal._autoContinuation._timer != null
+      hasPending: internal.continuation.pending != null,
+      barrierActive: internal.autoContinuation._barrierActive,
+      timerArmed: internal.autoContinuation._timer != null
     };
   }
 
   /**
    * Simulate the in-memory auto-continuation state being lost to eviction
    * WITHOUT touching the persisted transcript (#1650). A real eviction drops
-   * `_continuation.pending` and the coalesce timer but leaves messages in
+   * `continuation.pending` and the coalesce timer but leaves messages in
    * storage; the next tool-result event must re-create the pending state from
    * the persisted transcript and still fire exactly once when the batch is
    * complete (self-healing). This nulls the in-memory barrier state to model
    * that, so a test can assert the continuation survives an eviction mid-batch.
    */
   async evictInMemoryContinuationState(): Promise<void> {
-    const internal = this as unknown as {
-      _continuation: { pending: unknown };
-      _autoContinuation: { reset(): void };
-      _turns: {
-        pendingInteraction: Promise<boolean> | null;
-        interactionTail: Promise<void>;
-      };
+    const internal = this["_turns"] as unknown as {
+      continuation: { pending: unknown };
+      autoContinuation: { reset(): void };
+      pendingInteraction: Promise<boolean> | null;
+      interactionTail: Promise<void>;
     };
     // reset() cancels the coalesce timer and clears the double-fire guard.
-    internal._autoContinuation.reset();
-    internal._continuation.pending = null;
-    internal._turns.pendingInteraction = null;
-    internal._turns.interactionTail = Promise.resolve();
+    internal.autoContinuation.reset();
+    internal.continuation.pending = null;
+    internal.pendingInteraction = null;
+    internal.interactionTail = Promise.resolve();
   }
 
   /**
@@ -2054,23 +2052,21 @@ export class ThinkClientToolsAgent extends Think {
     messageInteractionPending: boolean;
     stable: boolean;
   }> {
-    const internal = this as unknown as {
-      _continuation: {
+    const internal = this["_turns"] as unknown as {
+      continuation: {
         pending: Record<string, unknown> | null;
         awaitingConnections: Map<string, unknown>;
       };
-      _autoContinuation: { fireWhenStable(): void; reset(): void };
-      _turns: {
-        pendingInteraction: Promise<boolean> | null;
-        interactionTail: Promise<void>;
-        hasPendingDecision(): boolean;
-      };
+      autoContinuation: { fireWhenStable(): void; reset(): void };
+      pendingInteraction: Promise<boolean> | null;
+      interactionTail: Promise<void>;
+      hasPendingDecision(): boolean;
     };
 
     // Seed an unfired pending continuation (no message-level interaction, so the
     // waitUntilStable loop reaches the armed-continuation branch rather than the
     // HITL branch).
-    internal._continuation.pending = {
+    internal.continuation.pending = {
       connection: undefined,
       connectionId: "armed-test",
       requestId: crypto.randomUUID(),
@@ -2089,24 +2085,24 @@ export class ThinkClientToolsAgent extends Think {
     const drainGate = new Promise<void>((resolve) => {
       releaseDrain = resolve;
     });
-    internal._turns.pendingInteraction = new Promise<boolean>(() => {});
-    internal._turns.interactionTail = drainGate;
-    internal._autoContinuation.fireWhenStable();
+    internal.pendingInteraction = new Promise<boolean>(() => {});
+    internal.interactionTail = drainGate;
+    internal.autoContinuation.fireWhenStable();
 
     try {
-      const hasArmedContinuation = internal._turns.hasPendingDecision();
+      const hasArmedContinuation = internal.hasPendingDecision();
       const messageInteractionPending = this.hasPendingInteraction();
       const stable = await this.waitUntilStable({ timeout: timeoutMs });
       return { hasArmedContinuation, messageInteractionPending, stable };
     } finally {
       // Clear pending first so the drain's post-completion re-check bails
       // without firing, then release the drain and reset the barrier.
-      internal._continuation.pending = null;
-      internal._continuation.awaitingConnections.clear();
-      internal._turns.pendingInteraction = null;
+      internal.continuation.pending = null;
+      internal.continuation.awaitingConnections.clear();
+      internal.pendingInteraction = null;
       releaseDrain();
-      internal._turns.interactionTail = Promise.resolve();
-      internal._autoContinuation.reset();
+      internal.interactionTail = Promise.resolve();
+      internal.autoContinuation.reset();
     }
   }
 

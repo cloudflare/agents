@@ -4666,20 +4666,22 @@ export class ThinkTestAgent extends Think {
     streamingAssistantCleared: boolean;
   }> {
     const internal = this as unknown as {
-      _continuation: {
-        pending: Record<string, unknown> | null;
-        awaitingConnections: Map<string, unknown>;
+      _turns: {
+        liveReply: unknown;
+        continuation: {
+          pending: Record<string, unknown> | null;
+          awaitingConnections: Map<string, unknown>;
+        };
+        autoContinuation: {
+          _timer: ReturnType<typeof setTimeout> | null;
+          cancelTimer(): void;
+        };
       };
-      _autoContinuation: {
-        _timer: ReturnType<typeof setTimeout> | null;
-        cancelTimer(): void;
-      };
-      _turns: { liveReply: unknown };
     };
     // Seed a pending auto-continuation with `pastCoalesce: false` so the buggy
-    // re-arm path (`_rearmPendingAutoContinuationForBatch`) would reset the
+    // re-arm path (`autoContinuation.rearmForBatch`) would reset the
     // coalesce timer in the recovery `finally`.
-    internal._continuation.pending = {
+    internal._turns.continuation.pending = {
       connection: undefined,
       connectionId: "test-conn",
       requestId: crypto.randomUUID(),
@@ -4697,7 +4699,7 @@ export class ThinkTestAgent extends Think {
       // Read synchronously: no `await` has yielded since the recovery `finally`
       // ran, so an erroneously armed 50ms timer cannot have fired yet.
       const coalesceTimerArmedAfterStall =
-        internal._autoContinuation._timer !== null;
+        internal._turns.autoContinuation._timer !== null;
       const streamingAssistantCleared = internal._turns.liveReply === null;
       const scheduledContinues = recoveryWorkCountForTest(
         this,
@@ -4712,9 +4714,9 @@ export class ThinkTestAgent extends Think {
     } finally {
       // Tear down the seeded pending + any armed timer so nothing leaks into a
       // later turn (and the seeded undefined connection never gets used).
-      internal._autoContinuation.cancelTimer();
-      internal._continuation.pending = null;
-      internal._continuation.awaitingConnections.clear();
+      internal._turns.autoContinuation.cancelTimer();
+      internal._turns.continuation.pending = null;
+      internal._turns.continuation.awaitingConnections.clear();
       this._stallAfterChunks = null;
       this._stallAttemptsRemaining = null;
       this.chatStreamStallTimeoutMs = 0;

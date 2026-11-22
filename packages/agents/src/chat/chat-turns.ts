@@ -323,6 +323,17 @@ export class ChatTurns<
   /** Pending, deferred and active auto-continuation slots. */
   readonly continuation = new ContinuationState<TConnection>();
   /** Accepted turns whose stream has not started, and connections parked on them. */
+  /**
+   * Accepted-but-not-yet-streamed turns and the connections parked waiting for
+   * one (#1784). See `ResumeHandshake.preStream`.
+   *
+   * HIBERNATION INVARIANT: in-memory only, NOT persisted. Safe because the
+   * pre-stream window cannot overlap hibernation — a turn between `begin()` and
+   * stream start is an unresolved `onMessage` handler promise that pins the DO,
+   * so eviction only happens once a durable stream exists (resumed via
+   * `ResumableStream`) or the turn finished. Breaks if a pre-stream wait is ever
+   * moved onto a durable alarm that releases the DO; if so, persist this state.
+   */
   readonly preStream = new PreStreamTurns<TConnection>();
   /** The coalesce timer and completeness barrier in front of a continuation. */
   readonly autoContinuation: AutoContinuationController<TConnection>;
