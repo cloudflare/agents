@@ -84,6 +84,12 @@ export type OutgoingMessage<ChatMessage extends UIMessage = UIMessage> =
        * authoritative (#1983).
        */
       connect?: boolean;
+      /**
+       * The messages at the end of `messages` that waiting requests hold:
+       * not stored yet, they join the transcript when their turn starts. A
+       * tab draws them last, after a reply that is streaming.
+       */
+      queuedMessageIds?: string[];
     }
   | {
       /** Indicates this message is a response to a chat request */

@@ -23,6 +23,13 @@ export const RECENT_TERMINALS_KEY = "cf:chat-recent-terminals";
 /** How many requests the record keeps. */
 export const RECENT_TERMINALS_MAX = 16;
 
+/**
+ * The longest frame body an entry keeps, in code units. A terminal's body is
+ * empty or an error text. A longer one is cut, so the record stays far below
+ * the storage value limit however large an error a turn failed with.
+ */
+export const RECENT_TERMINAL_BODY_MAX = 8_192;
+
 /** One request's terminal frame, as it was sent. */
 export interface ChatRecentTerminal {
   requestId: string;
@@ -47,6 +54,9 @@ function read(kv: RecentTerminalsKv): ChatRecentTerminal[] {
 /**
  * Record a terminal frame (`done` or `error`) of a chat response. Frames of
  * other kinds are ignored. A request's newer terminal replaces its older one.
+ * Never throws: the record is a convenience for a tab that was away, and a
+ * failed write must not cost a tab that is here its frame. Send the frame
+ * first anyway.
  */
 export function recordRecentChatTerminal(
   kv: RecentTerminalsKv,
@@ -64,7 +74,10 @@ export function recordRecentChatTerminal(
   if (frame.done !== true && frame.error !== true) return;
   const entry: ChatRecentTerminal = {
     requestId: frame.id,
-    body: typeof frame.body === "string" ? frame.body : "",
+    body:
+      typeof frame.body === "string"
+        ? frame.body.slice(0, RECENT_TERMINAL_BODY_MAX)
+        : "",
     ...(frame.error === true && { error: true }),
     ...(typeof frame.outcome === "string" && { outcome: frame.outcome }),
     ...(frame.continuation === true && { continuation: true }),
@@ -74,9 +87,13 @@ export function recordRecentChatTerminal(
       )
     })
   };
-  const kept = read(kv).filter((stored) => stored.requestId !== frame.id);
-  kept.push(entry);
-  kv.put(RECENT_TERMINALS_KEY, kept.slice(-RECENT_TERMINALS_MAX));
+  try {
+    const kept = read(kv).filter((stored) => stored.requestId !== frame.id);
+    kept.push(entry);
+    kv.put(RECENT_TERMINALS_KEY, kept.slice(-RECENT_TERMINALS_MAX));
+  } catch (error) {
+    console.error("[chat] could not record a terminal frame:", error);
+  }
 }
 
 /**

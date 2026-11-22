@@ -279,11 +279,19 @@ export class ChatAgent extends AIChatAgent {
 - `"drop"` — the overlapping message briefly appears (optimistic), then disappears when the server sends back the rollback.
 - `"debounce"` — same as `"latest"`, but the response waits for a quiet period before starting.
 
+A message that arrives while a turn runs waits until its own turn starts before it is stored. Each turn answers its own message, and the transcript reads `U1, A1, U2, A2`, never `U1, U2, A1`:
+
+- `this.messages`, and the messages `onChatMessage` builds its request from, gain the waiting message only when its turn starts. The turn running now never sees it.
+- Every tab sees the message at once. The message list the agent sends ends with it, and names it in `queuedMessageIds`. `useAgentChat` draws it after the reply that is streaming, and draws it once when it is stored. `setMessages` can hide a queued message in one tab, but it does not withdraw it: stop its request for that.
+- Under `"latest"`, `"merge"` and `"debounce"`, a superseded message is stored when its turn would have started, just before the message that superseded it. Under `"merge"` the messages are then collapsed into one.
+- A message whose request is stopped while it waits is stored at the same point, with no reply. A clear while it waits drops it: it is never stored.
+- A tool result for the reply that streams while a message waits does not continue that reply: the waiting message was sent first, so its turn runs first and reads the result (`chat:continuation:dropped` with `moved_on`).
+
 Notes:
 
 - This setting only applies to overlapping `sendMessage()` submits (`trigger: "submit-message"`)
 - `regenerate()`, tool continuations, approvals, clears, and programmatic `saveMessages()` calls keep the existing serialized behavior
-- `"latest"` and `"debounce"` still persist the skipped user messages in `this.messages`; they only suppress extra model turns
+- `"latest"` and `"debounce"` still persist the skipped user messages in `this.messages`; they only suppress extra model turns. They are stored when their turn would have started.
 - `"drop"` rejects the overlapping submit before it is persisted
 
 ### `waitForMcpConnections`
@@ -595,19 +603,17 @@ Durable recovery is always enabled. Use `chatRecovery` only to tune its budgets 
 
 #### Requests waiting behind an interrupted turn
 
-A client request stores its user message as soon as it arrives, then waits in the turn queue while an earlier turn finishes. The queue lives in memory, so the agent also writes a small record for each accepted request: its request id, the ids of the user messages it stored, its client tools and body, and its `messageConcurrency` decision. The record is deleted when the request's turn starts (from then on the turn's fiber is what recovery uses) or when the request ends without a turn.
+A client request waits in the turn queue while an earlier turn finishes, and its new user message waits with it, off the transcript. The queue lives in memory, so the agent writes a small record for each accepted request: its request id, the user messages it holds, its client tools and body, and its `messageConcurrency` decision. The messages are stored when the request's turn starts. The record is deleted once the turn has started (from then on the turn's fiber is what recovery uses) or when the request ends without a turn.
 
-If the isolate resets while requests wait, the next isolate recovers the interrupted turn first. Once no interrupted turn is waiting for recovery, the waiting requests run again in the order they arrived, each as its own turn under its own request id. So a conversation where `U2` was sent while `A1` streamed ends `U1, U2, A1, A2`, as it would with no reset. A tab that reconnects gets the stream of that request, or its terminal frame, under the request id it sent.
+If the isolate resets while requests wait, the next isolate recovers the interrupted turn first. The recovered turn never sees the waiting messages. Once no interrupted turn is waiting for recovery, the waiting requests run again in the order they arrived, each as its own turn under its own request id, and each stores its message when its turn starts. So a conversation where `U2` was sent while `A1` streamed ends `U1, A1, U2, A2`, as it would with no reset. A tab that connects or loads the transcript while they wait is shown the waiting messages, and a tab that reconnects gets the stream of that request, or its terminal frame, under the request id it sent.
 
 The usual rules still apply after the reset:
 
 - A stop by the request id, sent before or after the reset, ends the request `aborted` without calling the model.
 - A clear deletes every record, so nothing that was waiting runs afterwards.
 - A request a later one superseded under `"latest"`, `"merge"` or `"debounce"` stays superseded.
-- A request whose user message is no longer stored ends `skipped`.
 - A new request that arrives before the waiting ones have run lets them go first, without waiting for the recovery. The recovery then finds the conversation has moved on, as it does for any new message.
-
-While it waits, a request's user message does not count as the conversation moving on, so the recovered turn still continues or retries the reply it was recovering.
+- A waiting request is replayed however long it waited. One whose conversation gained a user message no waiting request holds (a release without these records ran in between and answered something newer) does not run: its message is stored after what is there, and it ends `skipped`. Only a clear discards a waiting message.
 
 A `saveMessages()` or `continueLastTurn()` call that is waiting in the queue stores nothing until its turn starts, so a reset loses nothing of it. Its caller's promise rejects with the reset, and the caller decides whether to call again.
 

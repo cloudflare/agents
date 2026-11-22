@@ -185,6 +185,7 @@ export type Env = {
   TestChatAgent: DurableObjectNamespace<TestChatAgent>;
   CustomSanitizeAgent: DurableObjectNamespace<CustomSanitizeAgent>;
   OverridingPersistAgent: DurableObjectNamespace<OverridingPersistAgent>;
+  OverridingPersistMergeAgent: DurableObjectNamespace<OverridingPersistMergeAgent>;
   AgentWithSuperCall: DurableObjectNamespace<AgentWithSuperCall>;
   AgentWithoutSuperCall: DurableObjectNamespace<AgentWithoutSuperCall>;
   LogOnlyOnErrorAgent: DurableObjectNamespace<LogOnlyOnErrorAgent>;
@@ -1666,6 +1667,27 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
   }
 
   /** The admission records, as `ChatTurns` stores them. */
+  /** The next admission record write fails, as SQLite's row limit would. */
+  failNextAdmissionForTest(): void {
+    const { admissions } = (this as unknown as { _turns: ChatTurns })._turns;
+    const store = (
+      admissions as unknown as {
+        host: { store: { add: (...args: unknown[]) => void } };
+      }
+    ).host.store;
+    const add = store.add;
+    store.add = () => {
+      store.add = add;
+      throw new Error("SQLITE_TOOBIG: string or blob too big");
+    };
+  }
+
+  /** Make every admission record `ms` older, as a long wait would. */
+  ageAdmissionsForTest(ms: number): void {
+    this
+      .sql`UPDATE cf_agents_chat_admissions SET created_at = created_at - ${ms}`;
+  }
+
   getAdmissionsForTest(): Array<{ requestId: string; stopped: boolean }> {
     try {
       return this.sql<{ request_id: string; stopped: number }>`
@@ -1687,11 +1709,24 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     const { admissions } = (this as unknown as { _turns: ChatTurns })._turns;
     admissions?.admit({
       requestId,
-      messageIds,
+      messages: messageIds.map((id) => ({ id, role: "user", parts: [] })),
+      afterUserId: null,
       decision: { strategy: null, overlapping: false, debounceUntilMs: null },
       payload: { trigger: "submit-message", body: {}, clientTools: undefined }
     });
     admissions?.live.delete(requestId);
+  }
+
+  /** The messages waiting requests hold, not stored yet. */
+  getQueuedMessageIdsForTest(): string[] {
+    return [
+      ...(this as unknown as { _turns: ChatTurns })._turns.queuedMessageIds()
+    ];
+  }
+
+  /** The transcript each `onChatMessage` call in this isolate saw. */
+  getTranscriptsSeenForTest(): string[][] {
+    return this._transcriptsSeen;
   }
 
   /** The body later turns run with. */
@@ -1700,6 +1735,8 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
   }
 
   private _startedRequestIds: string[] = [];
+  /** The transcript each `onChatMessage` call saw, by message id. */
+  private _transcriptsSeen: string[][] = [];
   private _requestStartTimes = new Map<string, number>();
   private _chatResponseResults: ChatResponseResult[] = [];
 
@@ -1707,6 +1744,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     _onFinish: GenerateTextOnFinishCallback<ToolSet>,
     options?: OnChatMessageOptions
   ) {
+    this._transcriptsSeen.push(this.messages.map((message) => message.id));
     if (options?.requestId) {
       this._startedRequestIds.push(options.requestId);
       this._requestStartTimes.set(options.requestId, Date.now());
@@ -2630,6 +2668,21 @@ export class LatestMessageConcurrencyAgent extends SlowStreamAgent {
 
 export class MergeMessageConcurrencyAgent extends SlowStreamAgent {
   messageConcurrency = "merge" as const;
+}
+
+/**
+ * {@link MergeMessageConcurrencyAgent} with a `persistMessages` override
+ * that passes only the messages and the exclusions on, as an app may.
+ */
+export class OverridingPersistMergeAgent extends SlowStreamAgent {
+  messageConcurrency = "merge" as const;
+
+  override async persistMessages(
+    messages: ChatMessage[],
+    excludeBroadcastIds: string[] = []
+  ) {
+    await super.persistMessages(messages, excludeBroadcastIds);
+  }
 }
 
 export class DropMessageConcurrencyAgent extends SlowStreamAgent {
@@ -3986,6 +4039,44 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     return result.status;
   }
 
+  /**
+   * A stalling turn whose request is stopped while the stall is routed,
+   * before its incident is written. Returns the route's outcome and whether
+   * a resumable stream is still open (active, or waiting for a cutover).
+   */
+  async stopWhileStallRoutedForTest(): Promise<{
+    outcomes: string[];
+    streamOpen: boolean;
+    status: SaveMessagesResult["status"];
+  }> {
+    const self = this as unknown as {
+      _routeStreamInterruption(input: { requestId: string }): Promise<string>;
+    };
+    const route = self._routeStreamInterruption.bind(this);
+    const outcomes: string[] = [];
+    self._routeStreamInterruption = async (input) => {
+      this.abortRequest(input.requestId, "user stop");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const outcome = await route(input);
+      outcomes.push(outcome);
+      return outcome;
+    };
+    try {
+      const status = await this.driveStallingTurnForTest({ timeoutMs: 100 });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      // oxlint-disable-next-line typescript/no-explicit-any -- private field
+      const stream = (this as any)._resumableStream;
+      return {
+        outcomes,
+        streamOpen:
+          stream.hasActiveStream() || stream.pendingCutoverId !== null,
+        status
+      };
+    } finally {
+      self._routeStreamInterruption = route;
+    }
+  }
+
   private _failingTurn: {
     message: string;
     remaining: number;
@@ -5197,14 +5288,13 @@ export class AsyncStartAdmissionAgent extends SlowStreamAgent {
    */
   async seedQueuedRequestForTest(requestId: string): Promise<void> {
     const id = `u-${requestId}`;
-    await this.persistMessages([
-      ...this.messages,
-      { id, role: "user", parts: [{ type: "text", text: requestId }] }
-    ]);
     const { admissions } = (this as unknown as { _turns: ChatTurns })._turns;
     admissions?.admit({
       requestId,
-      messageIds: [id],
+      messages: [
+        { id, role: "user", parts: [{ type: "text", text: requestId }] }
+      ] as ChatMessage[],
+      afterUserId: null,
       decision: { strategy: null, overlapping: false, debounceUntilMs: null },
       payload: {
         trigger: "submit-message",

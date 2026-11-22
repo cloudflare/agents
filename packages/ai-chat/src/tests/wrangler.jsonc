@@ -125,6 +125,10 @@
       {
         "class_name": "OverridingPersistAgent",
         "name": "OverridingPersistAgent"
+      },
+      {
+        "class_name": "OverridingPersistMergeAgent",
+        "name": "OverridingPersistMergeAgent"
       }
       // Agent-tool children are addressed as facets of
       // `AIChatAgentToolParent`, so they do not need migration entries.
@@ -213,6 +217,10 @@
     {
       "new_sqlite_classes": ["LogOnlyOnErrorAgent"],
       "tag": "v16"
+    },
+    {
+      "new_sqlite_classes": ["OverridingPersistMergeAgent"],
+      "tag": "v17"
     }
   ]
 }

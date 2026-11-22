@@ -27,6 +27,10 @@ type AdmissionStub = {
     Array<{ requestId: string; stopped: boolean }>
   >;
   seedAdmissionForTest(requestId: string, messageIds: string[]): Promise<void>;
+  ageAdmissionsForTest(ms: number): Promise<void>;
+  getModelRequestsForTest(): Promise<
+    Array<Array<{ role: string; text: string }>>
+  >;
 };
 
 type Binding = "ThinkAdmissionTestAgent" | "ThinkLatestAdmissionTestAgent";
@@ -151,10 +155,32 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
     expect(assistants).toHaveLength(2);
     expect(textOf(assistants[0])).toContain("s");
     expect(textOf(assistants[1])).toBe(QUICK_REPLY);
+    // Each reply follows the question it answers.
+    expect(final.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "assistant"
+    ]);
+    expect(final[0].id).toBe("u1");
+    expect(final[2].id).toBe("u2");
     expect(messages.filter((m) => m.role === "user").map((m) => m.id)).toEqual([
       "u1",
       "u2"
     ]);
+    // The recovered turn never saw the queued question, and the queued
+    // turn's request ends in it.
+    const requests = await restarted.getModelRequestsForTest();
+    expect(requests.length).toBeGreaterThanOrEqual(2);
+    for (const request of requests) {
+      if (request.some((m) => m.text.includes("two"))) {
+        expect(request.at(-1)?.role).toBe("user");
+        expect(request.at(-1)?.text).toContain("two");
+      }
+    }
+    expect(
+      requests.filter((r) => r.some((m) => m.text.includes("two")))
+    ).toHaveLength(1);
     await waitFor(
       async () => doneFrame(frames, "r2"),
       (f) => f !== undefined,
@@ -163,6 +189,22 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
     expect(frames.some((f) => f.id === "r2" && f.done !== true)).toBe(true);
     expect(await restarted.getAdmissionsForTest()).toEqual([]);
     tab.close();
+  }, 40_000);
+
+  it("runs however long it waited: its question is never dropped", async () => {
+    const binding = "ThinkAdmissionTestAgent";
+    const room = crypto.randomUUID();
+    await queueBehindSlowTurn(binding, room);
+    // The turn ahead of it ran for two hours (a long agent-tool run).
+    await (await agent(binding, room)).ageAdmissionsForTest(2 * 60 * 60 * 1000);
+    await reset(binding, room);
+    const restarted = await agent(binding, room);
+    const messages = await waitFor(
+      () => restarted.getMessagesForTest(),
+      (m) => m.some((x) => textOf(x) === QUICK_REPLY)
+    );
+    expect(messages.map((m) => m.id)).toContain("u2");
+    expect(textOf(messages.at(-1)!)).toBe(QUICK_REPLY);
   }, 40_000);
 
   it("a stop by its request id while it is only a record ends it aborted", async () => {
@@ -186,6 +228,10 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
     await delay(1000);
     const messages = await restarted.getMessagesForTest();
     expect(messages.some((m) => textOf(m) === QUICK_REPLY)).toBe(false);
+    // The stopped request's question is kept, after the reply before it,
+    // with no reply of its own.
+    expect(messages.map((m) => m.role)).toEqual(["user", "assistant", "user"]);
+    expect(messages[2].id).toBe("u2");
     expect(await restarted.getAdmissionsForTest()).toEqual([]);
     tab.close();
   }, 40_000);
@@ -237,6 +283,19 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
     const messages = await restarted.getMessagesForTest();
     expect(messages.some((m) => textOf(m) === QUICK_REPLY)).toBe(false);
     expect(doneFrame(frames, "r2")?.outcome).toBe("skipped");
+    // The superseded question is kept, and answered with the latest.
+    expect(messages.filter((m) => m.role === "user").map((m) => m.id)).toEqual([
+      "u1",
+      "u2",
+      "u3"
+    ]);
+    expect(messages.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "user",
+      "assistant"
+    ]);
     tab.close();
   }, 40_000);
 

@@ -69,7 +69,6 @@ export {
  */
 export {
   CHAT_ADMISSIONS_TABLE,
-  CHAT_ADMISSION_TTL_MS,
   ChatAdmissions,
   chatRecoveryNames,
   createChatAdmissionStore,
@@ -77,6 +76,7 @@ export {
   type ChatAdmissionRecord,
   type ChatAdmissionStore,
   type ChatAdmissionsHost,
+  type HeldChatMessage,
   type StoredSubmitDecision
 } from "./admissions";
 

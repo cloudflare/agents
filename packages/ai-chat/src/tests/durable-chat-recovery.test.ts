@@ -209,6 +209,11 @@ interface ChatRecoveryTestStub {
     message: string
   ): Promise<"completed" | "error" | "aborted" | "skipped">;
   setChatStreamStallTimeoutForTest(ms: number): Promise<void>;
+  stopWhileStallRoutedForTest(): Promise<{
+    outcomes: string[];
+    streamOpen: boolean;
+    status: string;
+  }>;
   driveStallingTurnForTest(options?: {
     timeoutMs?: number;
     hangTurns?: number;
@@ -3045,6 +3050,15 @@ describe("onChatRecovery", () => {
 // chunks is aborted and routed into the SAME bounded-recovery machinery a
 // deploy/eviction interruption uses, instead of leaving the turn hung forever.
 describe("stall watchdog (chatStreamStallTimeoutMs)", () => {
+  it("a stop that lands while the stall is routed closes the stream", async () => {
+    const agentStub = await getTestAgent(`stall-stop-${crypto.randomUUID()}`);
+    const result = await agentStub.stopWhileStallRoutedForTest();
+    expect(result.outcomes).toEqual(["stopped"]);
+    expect(result.status).toBe("aborted");
+    // No tab is offered the cut-off stream later.
+    expect(result.streamOpen).toBe(false);
+  });
+
   it("routes a stalled live stream into bounded recovery (schedules a continuation)", async () => {
     const room = `stall-route-${crypto.randomUUID()}`;
     const agentStub = await getTestAgent(room);

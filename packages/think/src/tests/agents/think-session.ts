@@ -2948,6 +2948,7 @@ export class ThinkTestAgent extends Think {
 
   /** Set to stop the request the moment the stall watchdog aborts it. */
   private _stopRightAfterStall = false;
+  _routeOutcomesForTest: string[] = [];
 
   protected override abortRequest(requestId: string, reason?: unknown): void {
     super.abortRequest(requestId, reason);
@@ -2966,22 +2967,82 @@ export class ThinkTestAgent extends Think {
    * A reply stalls, and the user stops the request right after the watchdog
    * aborted it, before recovery is scheduled.
    */
-  async stopRightAfterStallForTest(): Promise<{
+  async stopRightAfterStallForTest(
+    via: "chat" | "save" | "submit" = "chat",
+    /** Stop while the stall is routed, before the incident is written. */
+    inRoute = false
+  ): Promise<{
     scheduled: number;
     stepsAfterStop: number;
     done: boolean;
     error: string | null;
     responses: string[];
     activeIncidents: number;
+    /** A resumable stream is still open once the turn ended. */
+    activeStream: boolean;
+    /** What each routed stall came to. */
+    routeOutcomes: string[];
+    /**
+     * The running submission's result stamp when the stream was closed
+     * (`submit` only): a reset right then reads this.
+     */
+    stampAtClose?: string | null;
   }> {
     this._stallAfterChunks = 2;
     this._stallAttemptsRemaining = 1;
     this.chatStreamStallTimeoutMs = 50;
-    this._stopRightAfterStall = true;
+    this._stopRightAfterStall = !inRoute;
     this._responseLog = [];
+    this._routeOutcomesForTest = [];
+    const self = this as unknown as {
+      _routeStreamInterruption(input: unknown): Promise<string>;
+    };
+    const route = self._routeStreamInterruption.bind(this);
+    self._routeStreamInterruption = async (input: unknown) => {
+      if (inRoute) {
+        this.cancelChat((input as { requestId: string }).requestId, "stop");
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      const outcome = await route(input);
+      this._routeOutcomesForTest.push(outcome);
+      return outcome;
+    };
     const callback = new TestCollectingCallback();
+    let stampAtClose: string | null | undefined;
+    const stream = this._resumableStream as unknown as {
+      complete(streamId: string, outcome?: string): void;
+    };
+    const complete = stream.complete.bind(stream);
+    stream.complete = (streamId, outcome) => {
+      complete(streamId, outcome);
+      if (via === "submit" && stampAtClose === undefined) {
+        stampAtClose =
+          this.sql<{ result_status: string | null }>`
+            SELECT result_status FROM cf_think_submissions
+            WHERE status = 'running'
+          `[0]?.result_status ?? null;
+      }
+    };
     try {
-      await this.chat("stall, then stop", callback);
+      if (via === "chat") await this.chat("stall, then stop", callback);
+      else if (via === "submit") {
+        const { submissionId } = await this.submitMessages([
+          {
+            id: crypto.randomUUID(),
+            role: "user",
+            parts: [{ type: "text", text: "stall, then stop" }]
+          }
+        ]);
+        await this.waitForSubmission(submissionId, { timeoutMs: 8000 });
+      } else {
+        await this.saveMessages([
+          {
+            id: crypto.randomUUID(),
+            role: "user",
+            parts: [{ type: "text", text: "stall, then stop" }]
+          }
+        ]);
+      }
       await new Promise((resolve) => setTimeout(resolve, 50));
       const steps = this._beforeStepLog.length;
       const scheduled = recoveryWorkCountForTest(this, "_chatRecoveryContinue");
@@ -3000,9 +3061,16 @@ export class ThinkTestAgent extends Think {
         responses: this._responseLog.map((response) => response.status),
         activeIncidents: [...incidents.values()].filter((incident) =>
           ["detected", "scheduled", "attempting"].includes(incident.status)
-        ).length
+        ).length,
+        routeOutcomes: this._routeOutcomesForTest,
+        stampAtClose,
+        activeStream:
+          this._resumableStream.hasActiveStream() ||
+          this._resumableStream.pendingCutoverId !== null
       };
     } finally {
+      stream.complete = complete;
+      self._routeStreamInterruption = route;
       this._stopRightAfterStall = false;
       this._stallAfterChunks = null;
       this._stallAttemptsRemaining = null;
@@ -13927,7 +13995,20 @@ export class ThinkAdmissionTestAgent extends Think {
     return createDelayedMultiChunkMockModel(["unused "], 1);
   }
 
+  /** What each model request in this isolate held: role and text. */
+  private _modelRequests: Array<Array<{ role: string; text: string }>> = [];
+
+  getModelRequestsForTest(): Array<Array<{ role: string; text: string }>> {
+    return this._modelRequests;
+  }
+
   override beforeTurn(ctx: TurnContext): TurnConfig {
+    this._modelRequests.push(
+      ctx.messages.map((message) => ({
+        role: message.role,
+        text: JSON.stringify(message.content)
+      }))
+    );
     let body = ctx.body as
       | { tag?: string; chunks?: number; delayMs?: number }
       | undefined;
@@ -13959,6 +14040,27 @@ export class ThinkAdmissionTestAgent extends Think {
     return this.messages;
   }
 
+  /** The next admission record write fails, as SQLite's row limit would. */
+  failNextAdmissionForTest(): void {
+    const { admissions } = (this as unknown as { _turns: ChatTurns })._turns;
+    const store = (
+      admissions as unknown as {
+        host: { store: { add: (...args: unknown[]) => void } };
+      }
+    ).host.store;
+    const add = store.add;
+    store.add = () => {
+      store.add = add;
+      throw new Error("SQLITE_TOOBIG: string or blob too big");
+    };
+  }
+
+  /** Make every admission record `ms` older, as a long wait would. */
+  ageAdmissionsForTest(ms: number): void {
+    this
+      .sql`UPDATE cf_agents_chat_admissions SET created_at = created_at - ${ms}`;
+  }
+
   getAdmissionsForTest(): Array<{ requestId: string; stopped: boolean }> {
     try {
       return this.sql<{ request_id: string; stopped: number }>`
@@ -13980,7 +14082,8 @@ export class ThinkAdmissionTestAgent extends Think {
     const { admissions } = (this as unknown as { _turns: ChatTurns })._turns;
     admissions?.admit({
       requestId,
-      messageIds,
+      messages: messageIds.map((id) => ({ id, role: "user", parts: [] })),
+      afterUserId: null,
       decision: { strategy: null, overlapping: false, debounceUntilMs: null },
       payload: {
         trigger: "submit-message",
