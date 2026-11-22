@@ -1821,15 +1821,6 @@ export class ChatRecoveryEngine {
     return incident ? incident.replyRemoved === true : "unknown";
   }
 
-  /** Whether recovery already gave up on this incident. */
-  async isRecoverySealed(incidentId: string | undefined): Promise<boolean> {
-    if (!incidentId) return false;
-    const incident = await this.adapter.getIncident(
-      chatRecoveryIncidentKey(incidentId)
-    );
-    return incident?.status === "exhausted";
-  }
-
   /** Whether the user cancelled this incident's scheduled recovery. */
   async isRecoveryCancelled(incidentId: string | undefined): Promise<boolean> {
     if (!incidentId) return false;
