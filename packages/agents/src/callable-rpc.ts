@@ -179,9 +179,9 @@ export class StreamingResponse {
   }
 
   private _send(response: RPCResponse): boolean {
-    const facetSent = sendFacetStreamingResponse(this, response);
-    if (facetSent !== null) return facetSent;
-    const sent = sendRpcResponseIfOpen(this._connection, response);
+    const sent =
+      sendFacetStreamingResponse(this, response) ??
+      sendRpcResponseIfOpen(this._connection, response);
     // An over-limit chunk was answered with the call's terminal error, or
     // the socket is gone: either way the stream is over.
     if (!sent) this._closed = true;
