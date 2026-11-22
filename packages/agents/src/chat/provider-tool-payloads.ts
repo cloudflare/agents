@@ -14,6 +14,8 @@ const OPAQUE_STRING_KEY_PREFIX = "encrypted";
 /**
  * Longest string kept in the `input` or `output` of a provider-executed
  * tool part. A longer one is cut, with a marker giving its length.
+ *
+ * @internal
  */
 export const PROVIDER_TOOL_MAX_STRING_LENGTH = 500;
 
@@ -23,6 +25,8 @@ export const PROVIDER_TOOL_MAX_STRING_LENGTH = 500;
  * (`web_search`, `web_fetch`) whose outputs are replayed on later turns.
  * Strings under an opaque key (`encrypted…`) are kept whole. Running it on
  * its own output changes nothing.
+ *
+ * @internal
  */
 export function truncateProviderToolPayloads<T extends object>(part: T): T {
   const record = part as Record<string, unknown>;

@@ -2451,7 +2451,7 @@ export class ThinkTestAgent extends Think {
     // broadcast paths with a real connection returned by this Agent instance.
     const internals = this as unknown as {
       _notifyStreamResuming(connection: Connection): void;
-      _broadcastChat(message: Record<string, unknown>): void;
+      _frames: { broadcast(message: Record<string, unknown>): void };
     };
     internals._notifyStreamResuming(connection);
     if (close === "finish") {
@@ -2462,7 +2462,7 @@ export class ThinkTestAgent extends Think {
     } else {
       this._errorResumableStream(streamId);
     }
-    internals._broadcastChat({
+    internals._frames.broadcast({
       type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
       id: requestId,
       done: true,
@@ -2739,16 +2739,18 @@ export class ThinkTestAgent extends Think {
     let errorFrames = 0;
     const terminalOutcomes: string[] = [];
     const self = this as unknown as {
-      _broadcastChat(frame: Record<string, unknown>): void;
+      _frames: {
+        broadcast(frame: Record<string, unknown>, exclude?: string[]): void;
+      };
       _emit(type: string, payload: unknown): void;
     };
-    const broadcastChat = self._broadcastChat;
-    self._broadcastChat = (frame) => {
+    const broadcastChat = self._frames.broadcast;
+    self._frames.broadcast = (frame, exclude) => {
       if (frame.error === true) errorFrames++;
       if (frame.done === true && typeof frame.outcome === "string") {
         terminalOutcomes.push(frame.outcome);
       }
-      return broadcastChat.call(this, frame);
+      return broadcastChat.call(self._frames, frame, exclude);
     };
     let run: { status: string | null; error: string | null } | null = null;
     let failedEvents = 0;
@@ -2834,7 +2836,7 @@ export class ThinkTestAgent extends Think {
         run
       };
     } finally {
-      self._broadcastChat = broadcastChat;
+      self._frames.broadcast = broadcastChat;
       self._emit = emit;
       this._turnConfigOverride = null;
       this._beforeTurnAbortWait = null;
@@ -11627,24 +11629,19 @@ export class ThinkRecoveryTestAgent extends Think {
     await this.ageIncidentForTest(begun.incidentId, 60_000);
 
     let terminalBroadcast: string | undefined;
-    const realBroadcast = (
+    const frames = (
       this as unknown as {
-        _broadcastChat(m: {
-          body?: string;
-          error?: boolean;
-          done?: boolean;
-        }): void;
+        _frames: {
+          broadcast(m: {
+            body?: string;
+            error?: boolean;
+            done?: boolean;
+          }): void;
+        };
       }
-    )._broadcastChat.bind(this);
-    (
-      this as unknown as {
-        _broadcastChat: (m: {
-          body?: string;
-          error?: boolean;
-          done?: boolean;
-        }) => void;
-      }
-    )._broadcastChat = (m) => {
+    )._frames;
+    const realBroadcast = frames.broadcast.bind(frames);
+    frames.broadcast = (m) => {
       if (m.error && m.done) terminalBroadcast = m.body;
       realBroadcast(m);
     };
@@ -11671,9 +11668,7 @@ export class ThinkRecoveryTestAgent extends Think {
         persistPartial: async () => undefined
       });
     } finally {
-      (
-        this as unknown as { _broadcastChat: (m: unknown) => void }
-      )._broadcastChat = realBroadcast as (m: unknown) => void;
+      frames.broadcast = realBroadcast;
     }
 
     const incidents = await this.ctx.storage.list<{ status: string }>({
@@ -11777,24 +11772,19 @@ export class ThinkRecoveryTestAgent extends Think {
     }
 
     let terminalBroadcast: string | undefined;
-    const realBroadcast = (
+    const frames = (
       this as unknown as {
-        _broadcastChat(m: {
-          body?: string;
-          error?: boolean;
-          done?: boolean;
-        }): void;
+        _frames: {
+          broadcast(m: {
+            body?: string;
+            error?: boolean;
+            done?: boolean;
+          }): void;
+        };
       }
-    )._broadcastChat.bind(this);
-    (
-      this as unknown as {
-        _broadcastChat: (m: {
-          body?: string;
-          error?: boolean;
-          done?: boolean;
-        }) => void;
-      }
-    )._broadcastChat = (m) => {
+    )._frames;
+    const realBroadcast = frames.broadcast.bind(frames);
+    frames.broadcast = (m) => {
       if (m.error && m.done) terminalBroadcast = m.body;
       realBroadcast(m);
     };
@@ -11824,9 +11814,7 @@ export class ThinkRecoveryTestAgent extends Think {
     } catch {
       threw = true;
     } finally {
-      (
-        this as unknown as { _broadcastChat: (m: unknown) => void }
-      )._broadcastChat = realBroadcast as (m: unknown) => void;
+      frames.broadcast = realBroadcast;
     }
 
     const incidents = await this.ctx.storage.list<{ status: string }>({
@@ -11899,19 +11887,17 @@ export class ThinkRecoveryTestAgent extends Think {
 
     let terminalBroadcast: string | undefined;
     const self = this as unknown as {
-      _broadcastChat(m: {
-        body?: string;
-        error?: boolean;
-        done?: boolean;
-      }): void;
+      _frames: {
+        broadcast(m: { body?: string; error?: boolean; done?: boolean }): void;
+      };
       _recordTerminalChatStatus(
         status: string,
         requestId: string,
         body: string
       ): Promise<void>;
     };
-    const realBroadcast = self._broadcastChat.bind(this);
-    self._broadcastChat = (m) => {
+    const realBroadcast = self._frames.broadcast.bind(self._frames);
+    self._frames.broadcast = (m) => {
       if (m.error && m.done) terminalBroadcast = m.body;
       realBroadcast(m);
     };
@@ -11951,7 +11937,7 @@ export class ThinkRecoveryTestAgent extends Think {
     } catch {
       secondThrew = true;
     } finally {
-      self._broadcastChat = realBroadcast;
+      self._frames.broadcast = realBroadcast;
       self._recordTerminalChatStatus = realRecordTerminal;
     }
     const incidentStatusAfterSecond = await readIncidentStatus();
@@ -12074,7 +12060,7 @@ export class ThinkRecoveryTestAgent extends Think {
       _chatRecoveryOriginIdsScope: {
         run<R>(store: string[], fn: () => R): R;
       };
-      _originMessageIdsFor(requestId: string): string[] | undefined;
+      _frames: { originIds(requestId: string): string[] | undefined };
     };
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
@@ -12082,9 +12068,9 @@ export class ThinkRecoveryTestAgent extends Think {
     });
     const scoped = self._chatRecoveryOriginIdsScope.run(ids, async () => {
       await gate;
-      return self._originMessageIdsFor("successor");
+      return self._frames.originIds("successor");
     });
-    const unrelated = self._originMessageIdsFor("unrelated");
+    const unrelated = self._frames.originIds("unrelated");
     release();
     return { successor: await scoped, unrelated };
   }

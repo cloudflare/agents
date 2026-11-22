@@ -85,6 +85,7 @@ import {
   type ChatTurnOutcome
 } from "agents/chat";
 import {
+  ChatFrames,
   ResumableStream,
   createChatStreams,
   mergeQueuedUserMessages,
@@ -101,7 +102,6 @@ import {
   enqueueChatRecoveryTask,
   clearRecentChatTerminals,
   recentChatTerminal,
-  recordRecentChatTerminal,
   type ChatRecoveryTaskReason,
   type StreamInterruptionOutcome
 } from "agents/chat";
@@ -658,6 +658,17 @@ export class AIChatAgent<
    */
   private _pendingResumeConnections: Set<string> = new Set();
 
+  /** Where every chat frame to tabs goes out (the shared `ChatFrames`). */
+  private readonly _frames = new ChatFrames({
+    broadcast: (message, without) => this.broadcast(message, without),
+    kv: this.ctx.storage.kv,
+    resuming: this._pendingResumeConnections,
+    storedOriginIds: (requestId) =>
+      this._resumableStream.getOriginMessageIds(requestId),
+    recoveryOriginIds: () => this._activeChatRecoveryOriginIds,
+    clientView: (messages) => this._turns.clientView(messages)
+  });
+
   /** Lazily-built shared resume-handshake driver (Tier-2). */
   private _resumeHandshakeInstance: ResumeHandshake | null = null;
 
@@ -982,7 +993,7 @@ export class AIChatAgent<
           lastClientTools: context
             ? context.clientTools
             : this._lastClientTools,
-          originMessageIds: this._originMessageIdsFor(requestId)
+          originMessageIds: this._frames.originIds(requestId)
         })
       },
       fn
@@ -1241,7 +1252,7 @@ export class AIChatAgent<
               : "submit-message";
           const requestOriginIds = originMessageIds(messages);
           if (requestOriginIds) {
-            this._requestOriginMessageIds.set(chatMessageId, requestOriginIds);
+            this._frames.requestOrigins.set(chatMessageId, requestOriginIds);
           }
           try {
             await this._turns.runClientRequest(
@@ -1263,7 +1274,7 @@ export class AIChatAgent<
               })
             );
           } finally {
-            this._requestOriginMessageIds.delete(chatMessageId);
+            this._frames.requestOrigins.delete(chatMessageId);
           }
           return;
         }
@@ -1478,7 +1489,7 @@ export class AIChatAgent<
     options: { messageId?: string; continuation?: boolean } = {}
   ): string {
     const originIds =
-      this._requestOriginMessageIds.get(requestId) ??
+      this._frames.requestOrigins.get(requestId) ??
       this._activeChatRecoveryOriginIds;
     const streamId = this._resumableStream.start(requestId, {
       ...options,
@@ -1488,10 +1499,6 @@ export class AIChatAgent<
     // continuation it runs go into the normal STREAM_RESUMING path now that
     // a stream exists.
     this._turns.streamStarted(requestId, (c) => this._notifyStreamResuming(c));
-    // Arm on START as well as finish so cleanup still has a belt-and-suspenders
-    // wake if fiber recovery cannot finalize a stream. The last-activity sweep
-    // threshold keeps an actively streaming run from being reclaimed before it
-    // goes quiet (#1706).
     return streamId;
   }
 
@@ -1849,68 +1856,26 @@ export class AIChatAgent<
     }
   }
 
-  /**
-   * User message ids a WebSocket chat request originated from (#2280), keyed
-   * by request id while the request is handled. After that (or after a
-   * restart) the request's stream metadata is the fallback.
-   */
-  private _requestOriginMessageIds = new Map<string, string[]>();
-
-  private _originMessageIdsFor(requestId: string): string[] | undefined {
-    return (
-      this._requestOriginMessageIds.get(requestId) ??
-      this._resumableStream.getOriginMessageIds(requestId) ??
-      this._activeChatRecoveryOriginIds
-    );
-  }
-
-  private _withOriginMessageIds(message: OutgoingMessage): OutgoingMessage {
-    if (
-      message.type !== MessageType.CF_AGENT_USE_CHAT_RESPONSE ||
-      !(message.done || message.error)
-    ) {
-      return message;
-    }
-    return withOriginMessageIds(message, this._originMessageIdsFor(message.id));
-  }
-
-  /**
-   * A message list for tabs ends with the messages waiting requests hold,
-   * named in `queuedMessageIds` (`ChatTurns.clientView`).
-   */
-  private _withQueuedMessages(message: OutgoingMessage): OutgoingMessage {
-    if (message.type !== MessageType.CF_AGENT_CHAT_MESSAGES) return message;
-    const view = this._turns.clientView(message.messages);
-    if (!view.queuedMessageIds) return message;
-    return { ...message, ...view };
-  }
-
   private _broadcastChatMessage(message: OutgoingMessage, exclude?: string[]) {
-    message = this._withQueuedMessages(this._withOriginMessageIds(message));
     if (
       message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
       (message.done || message.error)
     ) {
       const held = this._heldTerminalFrames.get(message.id);
       if (held) {
-        held.push({ message, exclude });
+        // Named now: the stream that holds the request's origin ids is gone
+        // once the reply is stored, before the frame is released.
+        held.push({
+          message: withOriginMessageIds(
+            message,
+            this._frames.originIds(message.id)
+          ),
+          exclude
+        });
         return;
       }
     }
-    // Combine explicit exclusions with connections pending stream resume.
-    // Pending connections should not receive live stream chunks until they ACK,
-    // at which point they'll receive the full replay via _sendStreamChunks.
-    const allExclusions = [
-      ...(exclude || []),
-      ...this._pendingResumeConnections
-    ];
-    this.broadcast(JSON.stringify(message), allExclusions);
-    // A tab that is away when the request ends gets this frame when it
-    // resumes (`recent-terminals.ts`). After the broadcast: the record can
-    // fail, and the frame must still go out.
-    if (message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE) {
-      recordRecentChatTerminal(this.ctx.storage.kv, message);
-    }
+    this._frames.broadcast(message, exclude);
   }
 
   /**
@@ -2069,17 +2034,6 @@ export class AIChatAgent<
     return [...this.messages, inFlight];
   }
 
-  private _sendDirectMessage(
-    connection: Connection,
-    message: OutgoingMessage
-  ): void {
-    try {
-      connection.send(JSON.stringify(this._withQueuedMessages(message)));
-    } catch {
-      // Connection closed before the server could reply.
-    }
-  }
-
   /**
    * One client chat request, as the turn core runs it: decide, accept
    * (pre-stream mark and abort controller, so a cancel while it waits in the
@@ -2168,9 +2122,9 @@ export class AIChatAgent<
           };
     const requestId = record.requestId;
     if (stored.originMessageIds) {
-      this._requestOriginMessageIds.set(requestId, stored.originMessageIds);
+      this._frames.requestOrigins.set(requestId, stored.originMessageIds);
     }
-    const forget = () => this._requestOriginMessageIds.delete(requestId);
+    const forget = () => this._frames.requestOrigins.delete(requestId);
     const request = this._clientChatRequest({
       requestId,
       trigger: stored.trigger,
@@ -2453,7 +2407,7 @@ export class AIChatAgent<
       // skipped request it never streamed, so only the tab that sent
       // it was ever shown it.
       onCancelledBeforeStart: () =>
-        this._endUnstartedRequest(connection, chatMessageId, "aborted"),
+        this._frames.endUnstarted(connection, chatMessageId, "aborted"),
       run: async (_prepared, signal) => {
         // Regenerate: drop every reply after the messages the client
         // sent, including one that landed while this request waited
@@ -2612,42 +2566,11 @@ export class AIChatAgent<
     };
   }
 
-  /**
-   * Send the terminal frame of a request that ended before its turn started
-   * (skipped or cancelled in the queue) to the connection that sent it. No
-   * other connection was shown the request.
-   */
-  private _endUnstartedRequest(
-    connection: Connection | null,
-    requestId: string,
-    outcome: "skipped" | "aborted"
-  ): void {
-    const frame = this._withOriginMessageIds({
-      body: "",
-      done: true,
-      id: requestId,
-      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
-      outcome
-    });
-    // A request replayed after a reset has no connection: the tab that sent
-    // it may be any of them now.
-    if (!connection) {
-      this._broadcastChatMessage(frame);
-      return;
-    }
-    this._sendDirectMessage(connection, frame);
-    // Recorded like every terminal, so the tab that sent it gets it when it
-    // resumes by request id, if it was away when it was sent.
-    if (frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE) {
-      recordRecentChatTerminal(this.ctx.storage.kv, frame);
-    }
-  }
-
   private _completeSkippedRequest(
     connection: Connection | null,
     requestId: string
   ) {
-    this._endUnstartedRequest(connection, requestId, "skipped");
+    this._frames.endUnstarted(connection, requestId, "skipped");
     // A skipped turn settles out of the pre-stream set, but must NOT release
     // parked connections (#1784): a skip happens because a NEWER turn was
     // admitted (latest/merge supersede) or the queue generation advanced. The
@@ -2681,7 +2604,7 @@ export class AIChatAgent<
   }
 
   private _rollbackDroppedSubmit(connection: Connection) {
-    this._sendDirectMessage(connection, {
+    this._frames.send(connection, {
       messages: this._messagesForClientSync(),
       type: MessageType.CF_AGENT_CHAT_MESSAGES
     });
@@ -3973,7 +3896,7 @@ export class AIChatAgent<
         recordTerminalError: (requestId, errorText) =>
           this._recordChatTerminal(requestId, errorText),
         endSkippedRequest: (requestId) =>
-          this._endUnstartedRequest(null, requestId, "skipped"),
+          this._frames.endUnstarted(null, requestId, "skipped"),
         reconcileAgentToolChildRuns: () => this._agentToolRuns.reconcileOwn(),
         trackAlarmWork: (turn) => this.lifecycle.trackAlarmWork(turn),
         attemptScope: new AsyncLocalStorage<ChatRecoveryAttemptScope>(),
@@ -4102,7 +4025,7 @@ export class AIChatAgent<
           // re-run persists either way) while dropping the live banner on the
           // failing pass — so ai-chat matches `Think`'s broadcast-first.
           const messageIds =
-            this._originMessageIdsFor(ctx.requestId) ?? originMessageIds;
+            this._frames.originIds(ctx.requestId) ?? originMessageIds;
           this._broadcastChatMessage({
             body: ctx.terminalMessage,
             done: true,
@@ -4137,7 +4060,7 @@ export class AIChatAgent<
   private async _recordChatTerminal(
     requestId: string,
     body: string,
-    messageIds = this._originMessageIdsFor(requestId)
+    messageIds = this._frames.originIds(requestId)
   ): Promise<void> {
     await recordChatTerminal(this.ctx.storage, requestId, body, messageIds);
   }
@@ -4351,7 +4274,7 @@ export class AIChatAgent<
   ): Promise<void> {
     const { incident, options, snapshot, recoveryRootRequestId } = input;
     const originIds =
-      this._originMessageIdsFor(input.requestId) ?? snapshot?.originMessageIds;
+      this._frames.originIds(input.requestId) ?? snapshot?.originMessageIds;
     const leaf = this._recoveryLeaf();
     const lostPartialUserId =
       snapshot?.continuation === false &&
@@ -4501,7 +4424,7 @@ export class AIChatAgent<
       backoff: input.backoff,
       error: input.error,
       latestUserMessageId,
-      originMessageIds: this._originMessageIdsFor(input.requestId),
+      originMessageIds: this._frames.originIds(input.requestId),
       // A new turn (not a continuation) whose question is still the latest
       // message has nothing stored to continue.
       retryTargetUserId: async () => {

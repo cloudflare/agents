@@ -30,11 +30,21 @@ export { TurnQueue, type TurnResult, type EnqueueOptions } from "./turn-queue";
 
 export { originMessageIds, withOriginMessageIds } from "./origin-message-ids";
 
+/** @internal How `AIChatAgent` and `Think` send chat frames. Not a public API. */
+export {
+  ChatFrames,
+  type ChatFrame,
+  type ChatFrameConnection,
+  type ChatFramesOptions
+} from "./chat-frames";
+
+/** @internal Host helpers for `AIChatAgent` and `Think`. Not a public API. */
 export {
   mergeQueuedUserMessages,
   mergeUserMessages
 } from "./merge-user-messages";
 
+/** @internal Host helpers for `AIChatAgent` and `Think`. Not a public API. */
 export {
   PROVIDER_TOOL_MAX_STRING_LENGTH,
   truncateProviderToolPayloads
