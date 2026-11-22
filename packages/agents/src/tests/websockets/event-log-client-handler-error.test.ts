@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { followEventLog } from "../../client";
+import { followEventLog } from "../../internal";
 
 /**
  * A throwing `onEvent` must not cost the follower the rest of the frame.
