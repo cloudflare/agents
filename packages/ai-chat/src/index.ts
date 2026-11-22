@@ -499,10 +499,7 @@ export class AIChatAgent<
    */
   private readonly _abortRegistry = this._turns.aborts;
 
-  /**
-   * Durable chat history for this Agent. On start it lifts the table
-   * ai-chat stored messages in before Sessions.
-   */
+  /** Durable chat history for this Agent (lifts the pre-Sessions table). */
   readonly sessions = new Sessions({
     legacyFlatMessages: {
       table: LEGACY_MESSAGES_TABLE,
