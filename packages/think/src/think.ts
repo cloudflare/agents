@@ -1779,6 +1779,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       );
 
       // 8. User's onStart
+      // Rows of the retired submissions table move before the app's start:
+      // legacy fiber recovery there looks them up.
+      await this._runBestEffortOnStartStep(
+        "durable-work-recovery",
+        () => this._migrateLegacySubmissions(),
+        "Submissions of the retired table were not moved on this wake; the " +
+          "next successful wake moves them."
+      );
       await _onStart(props);
 
       // 9. Declarative scheduled tasks are code-defined and should reconcile
@@ -5964,6 +5972,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   async listSubmissions(
     options?: ListSubmissionsOptions
   ): Promise<ThinkSubmissionInspection[]> {
+    if (Array.isArray(options?.status) && options.status.length === 0) {
+      return [];
+    }
     return this._submissions
       .list({
         kind: SUBMISSION_KIND,
@@ -6067,6 +6078,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         if (messages.length === 0) {
           throw new Error("submitMessages requires at least one message");
         }
+        // A retry must find a submission still in the retired table.
+        await this._migrateLegacySubmissions();
         const existingById = options?.submissionId
           ? this._submissions.get(options.submissionId)
           : undefined;
@@ -6100,7 +6113,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             await this._submissions.submit(
               SUBMISSION_KIND,
               this._submissions.payload<SubmissionPayload>(existing.id)!,
-              { id: existing.id }
+              { id: existing.id, start: this._submissionStart() }
             );
           }
           return { ...submissionInspection(existing), accepted: false };
@@ -6111,7 +6124,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           {
             id: options?.submissionId,
             idempotencyKey: options?.idempotencyKey,
-            metadata: options?.metadata
+            metadata: options?.metadata,
+            start: this._submissionStart()
           }
         );
         return { ...submissionInspection(request), accepted: true };
@@ -6137,9 +6151,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     if (run.attempt > 1) {
       const outcome = await this._reconcileInterruptedSubmission(row);
       if (outcome !== "rerun") return outcome;
-    }
-    if (this._submissionsBehindRecovery.delete(run.id)) {
-      await this._afterChatRecovery(run.signal);
     }
     return this._admitTurn({
       admission: "execute-submission",
@@ -6237,31 +6248,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /**
-   * Resolve once no interrupted chat turn waits for recovery. A submission
-   * accepted before a reset runs after the turn the reset cut off, as a
-   * client request queued behind it does.
-   */
-  private async _afterChatRecovery(signal: AbortSignal): Promise<void> {
-    while (!signal.aborted && (await this._chatRecoveryNames())) {
-      await new Promise<void>((resolve) => {
-        const done = () => {
-          clearTimeout(timer);
-          signal.removeEventListener("abort", done);
-          this._chatRecoverySettledWaiters.delete(done);
-          resolve();
-        };
-        // Look again now and then, in case a settle was missed.
-        const timer = setTimeout(done, 30_000);
-        signal.addEventListener("abort", done, { once: true });
-        this._chatRecoverySettledWaiters.add(done);
-      });
-    }
-  }
-
-  /** Woken when a chat recovery settles. */
-  private readonly _chatRecoverySettledWaiters = new Set<() => void>();
-
-  /**
    * What an interrupted submission does next, from its stored evidence:
    * run again when none of its messages were applied, wait for the chat
    * recovery that owns its turn (`detached`), or end.
@@ -6335,28 +6321,91 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /**
-   * Startup work for submissions: move rows of the retired table, note which
-   * open submissions run behind chat recovery, and end the running ones the
-   * stored evidence already decides. The inbox runs the rest again, and
-   * their next attempt reads the same evidence: those chat recovery owns
-   * wait for it (`detached`), the others run.
+   * Startup work for submissions: move rows of the retired table, end the
+   * running ones the stored evidence already decides, and hold the lane
+   * while a chat turn the reset cut off waits for recovery. Submissions an
+   * earlier isolate accepted run after that recovery, in order, as a client
+   * request queued behind it does; the inbox runs the interrupted ones again,
+   * and their next attempt reads the same evidence.
    */
   private async _recoverSubmissionsOnStart(): Promise<void> {
     await this._migrateLegacySubmissions();
-    for (const request of this._submissions.list({
-      kind: SUBMISSION_KIND,
-      status: ["pending", "running"],
-      limit: 500
-    })) {
-      this._submissionsBehindRecovery.add(request.id);
-      if (request.status !== "running") continue;
-      const outcome = await this._reconcileInterruptedSubmission(
-        submissionRow(request)
-      );
-      if (outcome !== "rerun" && outcome.status !== "detached") {
-        await this._submissions.settle(request.id, outcome);
+    if (await this._chatRecoveryNames()) {
+      this._submissions.hold(SUBMISSION_KIND);
+      this._recheckSubmissionHold();
+    }
+    // Every running one, however many are open: the oldest run first.
+    let before: number | undefined;
+    for (;;) {
+      const page = this._submissions.list({
+        kind: SUBMISSION_KIND,
+        status: "running",
+        limit: 500,
+        ...(before !== undefined && { before })
+      });
+      for (const request of page) {
+        const outcome = await this._reconcileInterruptedSubmission(
+          submissionRow(request)
+        );
+        if (outcome !== "rerun" && outcome.status !== "detached") {
+          await this._submissions.settle(request.id, outcome);
+        }
+      }
+      if (page.length < 500) break;
+      before = page[page.length - 1].createdAt;
+    }
+    // A facet's lane has no alarm to start it: submitting the oldest open
+    // submission again starts the lane here.
+    if (this._submissionStart() === "now") {
+      const [oldest] = this._submissions.list({
+        kind: SUBMISSION_KIND,
+        status: ["pending", "running"],
+        order: "oldest",
+        limit: 1
+      });
+      const payload =
+        oldest && this._submissions.payload<SubmissionPayload>(oldest.id);
+      if (oldest && payload) {
+        await this._submissions.submit(SUBMISSION_KIND, payload, {
+          id: oldest.id,
+          start: "now"
+        });
       }
     }
+  }
+
+  /**
+   * Where a submission's lane starts. A facet has no alarm of its own, so its
+   * lane starts in the calling invocation, and its start below runs what an
+   * earlier isolate left. (Facets as agents are going away; until then.)
+   */
+  private _submissionStart(): "alarm" | "now" {
+    return this.parentPath.length > 0 ? "now" : "alarm";
+  }
+
+  /** Let held submissions run once no chat turn waits for recovery. */
+  private _releaseSubmissionsAfterRecovery(): void {
+    if (!this._submissions.isHeld(SUBMISSION_KIND)) return;
+    void this._chatRecoveryNames().then(
+      (pending) => {
+        if (!pending) this._submissions.release(SUBMISSION_KIND);
+      },
+      (error: unknown) => {
+        console.error("[Think] failed to check chat recovery", error);
+      }
+    );
+  }
+
+  /**
+   * Look again now and then while the lane is held, in case a recovery
+   * settled without telling us.
+   */
+  private _recheckSubmissionHold(): void {
+    setTimeout(() => {
+      if (!this._submissions.isHeld(SUBMISSION_KIND)) return;
+      this._releaseSubmissionsAfterRecovery();
+      this._recheckSubmissionHold();
+    }, 30_000);
   }
 
   /**
@@ -6377,12 +6426,28 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         "SELECT * FROM cf_think_submissions ORDER BY created_at ASC, submission_id ASC"
       )
       .toArray() as unknown as LegacySubmissionRow[];
+    let failed = 0;
     for (const row of rows) {
-      await this._submissions.import(legacySubmissionImport(row));
+      try {
+        await this._submissions.import(legacySubmissionImport(row));
+      } catch (error) {
+        // Left in the old table for the next start; the rest still move.
+        failed++;
+        console.error(
+          `[Think] Submission ${row.submission_id} was not moved`,
+          error
+        );
+        continue;
+      }
+      this.ctx.storage.sql.exec(
+        "DELETE FROM cf_think_submissions WHERE submission_id = ?",
+        row.submission_id
+      );
       // Its run item is the inbox's now.
       await this.dequeue(submissionRunItemId(row.submission_id));
     }
-    this.ctx.storage.sql.exec("DROP TABLE cf_think_submissions");
+    if (failed === 0)
+      this.ctx.storage.sql.exec("DROP TABLE cf_think_submissions");
   }
 
   private async _getSubmissionMessagesAppliedState(
@@ -10701,7 +10766,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       },
       recoverySettled: () => {
         this._resumeAdmissions();
-        for (const wake of [...this._chatRecoverySettledWaiters]) wake();
+        this._releaseSubmissionsAfterRecovery();
       },
       emitRecoveryEvent: (event) => {
         this._emit(event.type, {
@@ -10944,13 +11009,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * so the submission runner must leave them `running`.
    */
   private _recoveryOwnedSubmissions = new Set<string>();
-  /**
-   * Submissions that were pending when this isolate started. They were
-   * accepted behind a turn the reset may have cut off, so they run after
-   * that turn's recovery, as a client request queued behind it does
-   * (`ChatTurns.resumeAdmissions`).
-   */
-  private _submissionsBehindRecovery = new Set<string>();
 
   private _claimSubmissionForRecovery(
     submissionId: string | undefined,

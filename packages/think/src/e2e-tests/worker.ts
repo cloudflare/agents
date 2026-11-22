@@ -1991,6 +1991,18 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
   @callable()
   async startRecoveryAtLedgerGap(submissionId: string): Promise<void> {
     await this.seedRunningSubmission(submissionId, submissionId, true);
+    // No restart here: move the seeded row now, as recovery owning it, so
+    // the recovery below finds it and nothing else runs it.
+    await (
+      this as unknown as { _migrateLegacySubmissions(): Promise<void> }
+    )._migrateLegacySubmissions();
+    this.ctx.storage.sql.exec(
+      "UPDATE cf_agents_inbox SET detached = 1 WHERE id = ?",
+      submissionId
+    );
+    this.ctx.storage.sql.exec(
+      "DELETE FROM cf_agents_jobs WHERE capability = 'inbox' AND fn = 'drain'"
+    );
     const userMessage: UIMessage = {
       id: `user-${submissionId}`,
       role: "user",
