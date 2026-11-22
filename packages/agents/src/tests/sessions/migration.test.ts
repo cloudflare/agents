@@ -248,3 +248,246 @@ describe("Sessions legacy migration", () => {
     );
   });
 });
+
+describe("Sessions lift of a legacy flat message table", () => {
+  function flatTable(rows: Array<{ id: string; body: string; at: number }>) {
+    return [
+      `CREATE TABLE legacy_flat_messages (
+        id TEXT PRIMARY KEY,
+        message TEXT NOT NULL,
+        created_at INTEGER
+      )`,
+      ...rows.map(
+        (row) =>
+          `INSERT INTO legacy_flat_messages (id, message, created_at)
+           VALUES (${sqlLiteral(row.id)}, ${sqlLiteral(row.body)}, ${row.at})`
+      )
+    ];
+  }
+
+  it("lifts every row oldest first into one chain and drops the table", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    // More rows than one lift window holds (25), stored out of order.
+    const ids = Array.from({ length: 30 }, (_, i) => `f${i}`);
+    await runInDurableObject(stub, (instance: SessionHarnessObject) => {
+      instance.seedLegacy(
+        flatTable(
+          [...ids].reverse().map((id, i) => ({
+            id,
+            body: JSON.stringify(message(id, id, i % 2 ? "user" : "assistant")),
+            at: 1000 + ids.length - i
+          }))
+        )
+      );
+    });
+    await evictDurableObject(stub);
+
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const history = await instance.sessions.session().getHistory();
+      expect(history.map((m) => m.id)).toEqual(ids);
+      expect(instance.tableNames()).not.toContain("legacy_flat_messages");
+    });
+  });
+
+  it("keeps the table while a row cannot be lifted, and finishes on a later start", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, (instance: SessionHarnessObject) => {
+      instance.seedLegacy(
+        flatTable([
+          { id: "a", body: JSON.stringify(message("a", "one", "user")), at: 1 },
+          { id: "bad", body: JSON.stringify({ id: "bad" }), at: 2 },
+          { id: "c", body: "{not json", at: 3 }
+        ])
+      );
+    });
+    await evictDurableObject(stub);
+
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      await instance.sessions.session().getHistory();
+      expect(instance.tableNames()).toContain("legacy_flat_messages");
+      expect(
+        instance.eventsOfType("session:migration:incomplete")[0]?.payload
+      ).toMatchObject({ table: "legacy_flat_messages", source: 3, copied: 1 });
+      instance.seedLegacy([
+        `UPDATE legacy_flat_messages
+         SET message = ${sqlLiteral(JSON.stringify(message("bad", "two", "assistant")))}
+         WHERE id = 'bad'`,
+        `UPDATE legacy_flat_messages
+         SET message = ${sqlLiteral(JSON.stringify(message("c", "three", "user")))}
+         WHERE id = 'c'`
+      ]);
+    });
+    await evictDurableObject(stub);
+
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const history = await instance.sessions.session().getHistory();
+      expect(history.map((m) => m.id)).toEqual(["a", "bad", "c"]);
+      expect(instance.tableNames()).not.toContain("legacy_flat_messages");
+    });
+  });
+
+  it("does not fork the chain for a repaired row an earlier lift skipped", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, (instance: SessionHarnessObject) => {
+      instance.seedLegacy(
+        flatTable([
+          { id: "a", body: JSON.stringify(message("a", "one", "user")), at: 1 },
+          { id: "bad", body: JSON.stringify({ id: "bad" }), at: 2 },
+          {
+            id: "c",
+            body: JSON.stringify(message("c", "three", "user")),
+            at: 3
+          }
+        ])
+      );
+    });
+    await evictDurableObject(stub);
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      await instance.sessions.session().getHistory();
+      instance.seedLegacy([
+        `UPDATE legacy_flat_messages
+         SET message = ${sqlLiteral(JSON.stringify(message("bad", "two", "assistant")))}
+         WHERE id = 'bad'`
+      ]);
+    });
+    await evictDurableObject(stub);
+
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const history = await instance.sessions.session().getHistory();
+      // The chain moved past `bad`: it stays in the table, recoverable,
+      // rather than landing on a branch that hides `c`.
+      expect(history.map((m) => m.id)).toEqual(["a", "c"]);
+      expect(instance.tableNames()).toContain("legacy_flat_messages");
+      expect(
+        instance.eventsOfType("session:migration:incomplete")[0]?.payload
+      ).toMatchObject({ table: "legacy_flat_messages", source: 3, copied: 2 });
+    });
+  });
+
+  it("keeps the table when a row's id holds a different message", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      await instance.sessions
+        .session()
+        .appendMessage(message("x", "squatter", "user"));
+      instance.seedLegacy(
+        flatTable([
+          {
+            id: "x",
+            body: JSON.stringify(message("x", "legacy", "user")),
+            at: 1
+          }
+        ])
+      );
+    });
+    await evictDurableObject(stub);
+
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      await instance.sessions.session().getHistory();
+      expect(instance.tableNames()).toContain("legacy_flat_messages");
+      expect(
+        instance.eventsOfType("session:migration:incomplete")[0]?.payload
+      ).toMatchObject({ table: "legacy_flat_messages", source: 1, copied: 0 });
+    });
+  });
+
+  it("leaves the table alone once the chat moved on past a partial lift", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      await instance.sessions
+        .session()
+        .appendMessage(message("x", "squatter", "user"));
+      await instance.sessions
+        .session()
+        .appendMessage(message("y", "reply", "assistant"));
+      instance.seedLegacy(
+        flatTable([
+          { id: "a", body: JSON.stringify(message("a", "one", "user")), at: 1 },
+          {
+            id: "x",
+            body: JSON.stringify(message("x", "legacy", "user")),
+            at: 2
+          }
+        ])
+      );
+    });
+    await evictDurableObject(stub);
+
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      // Importing `a` now would make it the newest message and hide `x` and
+      // `y`. It stays in the table instead.
+      const ids = (await instance.sessions.session().getHistory()).map(
+        (m) => m.id
+      );
+      expect(ids).toEqual(["x", "y"]);
+      expect(instance.tableNames()).toContain("legacy_flat_messages");
+      expect(
+        instance.eventsOfType("session:migration:incomplete")[0]?.payload
+      ).toMatchObject({ table: "legacy_flat_messages", source: 2, copied: 0 });
+    });
+  });
+
+  it("lifts a table whose ids together pass the bound-value limit", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    // About 9 MB of ids: one query binding all of them throws SQLITE_TOOBIG
+    // (the limit measured on a deployed object is about 8 MB).
+    const ids = Array.from(
+      { length: 1800 },
+      (_, i) => `${String(i).padStart(5, "0")}-${"i".repeat(5000)}`
+    );
+    await runInDurableObject(stub, (instance: SessionHarnessObject) => {
+      instance.seedLegacy(
+        flatTable(
+          ids.map((id, i) => ({
+            id,
+            body: JSON.stringify(message(id, "m", "user")),
+            at: i + 1
+          }))
+        )
+      );
+    });
+    await evictDurableObject(stub);
+
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const history = await instance.sessions.session().getHistory();
+      expect(history).toHaveLength(ids.length);
+      expect(instance.tableNames()).not.toContain("legacy_flat_messages");
+    });
+  });
+
+  it("does not lift a repaired row once the chat moved on after a partial lift", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, (instance: SessionHarnessObject) => {
+      instance.seedLegacy(
+        flatTable([
+          { id: "a", body: JSON.stringify(message("a", "one", "user")), at: 1 },
+          { id: "b", body: JSON.stringify({ id: "b" }), at: 2 }
+        ])
+      );
+    });
+    await evictDurableObject(stub);
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      // The partial lift landed `a`; the chat then goes on.
+      await instance.sessions
+        .session()
+        .appendMessage(message("n", "after", "assistant"));
+      instance.seedLegacy([
+        `UPDATE legacy_flat_messages
+         SET message = ${sqlLiteral(JSON.stringify(message("b", "two", "user")))}
+         WHERE id = 'b'`
+      ]);
+    });
+    await evictDurableObject(stub);
+
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const ids = (await instance.sessions.session().getHistory()).map(
+        (m) => m.id
+      );
+      expect(ids).toEqual(["a", "n"]);
+      expect(instance.tableNames()).toContain("legacy_flat_messages");
+      expect(
+        instance.eventsOfType("session:migration:incomplete")[0]?.payload
+      ).toMatchObject({ table: "legacy_flat_messages", source: 2, copied: 1 });
+    });
+  });
+});

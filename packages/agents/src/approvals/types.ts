@@ -157,6 +157,12 @@ export type ApprovalsOptions = {
    */
   readonly retention?: () => ApprovalsRetention;
   /**
+   * Whether `onStart` sweeps expired rows. Default `true`. A host that
+   * imports older rows after startup sets `false` and calls `sweep()` once
+   * they are in.
+   */
+  readonly sweepOnStart?: boolean;
+  /**
    * How long a decided continuation may run before its recovery job treats
    * the isolate that ran it as gone. Default: 60 seconds. A continuation
    * still running in this isolate when the job fires is left to run and

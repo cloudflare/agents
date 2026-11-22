@@ -103,7 +103,11 @@ const receipt = await this.tasks.run("build-report@v1", input, {
 `run()` durably accepts the work and returns a receipt without waiting for
 completion. The same `idempotencyKey` (or a caller-selected `runId`) joins
 the existing run instead of creating a second one; `accepted: false` on the
-receipt marks that join. Pass `metadata` to retain JSON alongside the run and
+receipt marks that join. The join needs the same input: a reused key or run ID
+with a different input throws an error named `TaskInputConflictError` rather
+than handing back a run that does other work. Object key order does not count
+as a difference, except for input nested too deeply to sort, which is
+compared exactly as stored. Pass `metadata` to retain JSON alongside the run and
 `retain: false` to remove the record after terminal settlement.
 
 `run()` and `handle()` type the definition name and its input against the

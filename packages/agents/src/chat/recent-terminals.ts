@@ -31,6 +31,18 @@ export const RECENT_TERMINALS_MAX = 16;
 export const RECENT_TERMINAL_BODY_MAX = 8_192;
 
 /** One request's terminal frame, as it was sent. */
+/**
+ * Largest entry, in JSON code units, the record keeps. The body is cut to
+ * {@link RECENT_TERMINAL_BODY_MAX} first, and further when escaping still
+ * makes the entry too large. Ids come from clients and are kept whole, so an
+ * entry whose ids alone make it larger than this is not recorded at all,
+ * rather than crowding out every other tab's terminal.
+ * SDK-made ids are about 21 characters, so a real entry is far below it.
+ *
+ * @internal
+ */
+export const RECENT_TERMINAL_ENTRY_MAX = 16_384;
+
 export interface ChatRecentTerminal {
   requestId: string;
   body: string;
@@ -87,6 +99,22 @@ export function recordRecentChatTerminal(
       )
     })
   };
+  // JSON escaping can make a body longer than its cut. Shorten the body
+  // until the entry fits; drop the entry only when its ids alone do not.
+  let size = JSON.stringify(entry).length;
+  while (size > RECENT_TERMINAL_ENTRY_MAX && entry.body.length > 0) {
+    entry.body = entry.body.slice(
+      0,
+      Math.max(0, entry.body.length - (size - RECENT_TERMINAL_ENTRY_MAX))
+    );
+    size = JSON.stringify(entry).length;
+  }
+  if (size > RECENT_TERMINAL_ENTRY_MAX) {
+    console.warn(
+      "[chat] not recording a terminal frame whose ids are too large to keep"
+    );
+    return;
+  }
   try {
     const kept = read(kv).filter((stored) => stored.requestId !== frame.id);
     kept.push(entry);

@@ -1,6 +1,5 @@
 import {
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext,
-  type AgentContextStore,
   type AgentEmail
 } from "./internal_context";
 export { __DO_NOT_USE_WILL_BREAK__agentContext } from "./internal_context";
@@ -28,13 +27,8 @@ export type {
   SubAgentPathMatch
 } from "./sub-routing";
 import {
-  isClosedWebSocketSendError,
-  registerFacetStreamingDelivery,
-  sendFacetRpcResponseIfOpen,
-  sendFacetStreamingResponse,
   DynamicAgentConnectionBridge as SubAgentConnectionBridge,
-  dynamicAgentRpcReplyContext as subAgentRpcReplyContext,
-  waitForFacetStreamingResponseDeliveries
+  dynamicAgentRpcReplyContext as subAgentRpcReplyContext
 } from "./dynamic-agents/bridges";
 import {
   CF_SUB_AGENT_OUTER_URL_KEY,
@@ -141,9 +135,7 @@ import {
 import { agentSpanAttributes } from "./observability/agent-span-attributes";
 import { tracer } from "./observability/tracing/cloudflare";
 import {
-  withInvocationScope,
   writeSpanAttributes,
-  type InvocationScopeOptions,
   type TraceAttributes
 } from "./observability/tracing/tracer";
 import { DisposableStore } from "./core/events";
@@ -160,11 +152,24 @@ import {
   type MCPServersState
 } from "./mcp/client/agent-servers";
 import { Scheduler, setSchedulerCallbackResolver } from "./schedules/scheduler";
-import {
-  DEFAULT_KEEP_ALIVE_INTERVAL_MS,
-  KeepAlive
-} from "./lifecycle/keep-alive";
+import { KeepAlive } from "./lifecycle/keep-alive";
 import { Queue, setQueueCallbackResolver } from "./queue/queue";
+import {
+  runInInvocation,
+  stateHookMode,
+  wrapCustomMethods
+} from "./agent-invocation";
+import {
+  DEFAULT_AGENT_TOOL_REATTACH_MAX_WINDOW_MS,
+  DEFAULT_AGENT_TOOL_REATTACH_NO_PROGRESS_TIMEOUT_MS,
+  resolveAgentOptions,
+  type AgentStaticOptions,
+  type ResolvedAgentOptions
+} from "./agent-options";
+export {
+  DEFAULT_AGENT_STATIC_OPTIONS,
+  type AgentStaticOptions
+} from "./agent-options";
 import { Workflows } from "./workflow-tracking/workflows";
 import { Fibers, stashCurrentFiber, withFiberStash } from "./fibers/fibers";
 import type {
@@ -261,16 +266,12 @@ export type {
   WSMessage
 } from "./lifecycle/durable-object-lifecycle";
 export { MessageType } from "./types";
-
-/**
- * RPC request message from client
- */
-export type RPCRequest = {
-  type: "rpc";
-  id: string;
-  method: string;
-  args: unknown[];
-};
+import { dispatchCallableRpc, isRPCRequest } from "./callable-rpc";
+export {
+  StreamingResponse,
+  type RPCRequest,
+  type RPCResponse
+} from "./callable-rpc";
 
 /**
  * State update message from client
@@ -281,74 +282,6 @@ export type StateUpdateMessage = {
 };
 
 /**
- * RPC response message to client
- */
-export type RPCResponse = {
-  type: MessageType.RPC;
-  id: string;
-} & (
-  | {
-      success: true;
-      result: unknown;
-      done?: false;
-    }
-  | {
-      success: true;
-      result: unknown;
-      done: true;
-    }
-  | {
-      success: false;
-      error: string;
-    }
-);
-
-/**
- * Enters an agent invocation: the context every handler reads, plus the span
- * scope that stops invocation-bounded spans from outliving it. Scopes do not
- * nest, so the outermost live entry point owns the boundary — pass
- * `detached` for work that deliberately runs on past its caller.
- */
-function runInInvocation<T>(
-  store: AgentContextStore,
-  body: () => T,
-  options?: InvocationScopeOptions
-): T {
-  return agentContext.run(store, () => withInvocationScope(body, options));
-}
-
-function sendRpcResponseIfOpen(
-  connection: Connection,
-  response: RPCResponse
-): boolean {
-  try {
-    connection.send(JSON.stringify(response));
-    return true;
-  } catch (error) {
-    if (isClosedWebSocketSendError(error)) return false;
-    throw error;
-  }
-}
-
-/**
- * Type guard for RPC request messages
- */
-function isRPCRequest(msg: unknown): msg is RPCRequest {
-  return (
-    typeof msg === "object" &&
-    msg !== null &&
-    "type" in msg &&
-    msg.type === MessageType.RPC &&
-    "id" in msg &&
-    typeof msg.id === "string" &&
-    "method" in msg &&
-    typeof msg.method === "string" &&
-    "args" in msg &&
-    Array.isArray((msg as RPCRequest).args)
-  );
-}
-
-/**
  * Type guard for state update messages
  */
 export {
@@ -357,9 +290,7 @@ export {
   type CallableMetadata
 } from "./callable-decorator";
 import {
-  copyCallableMetadata,
   decoratedMethods,
-  getCallableMetadata,
   isCallableMethod,
   type CallableMetadata
 } from "./callable-decorator";
@@ -472,44 +403,6 @@ const HOST_JOB_DESTROY_ID = "cf:destroy";
 // small delay lets the response flush before the abort. Teardown latency of a
 // second is irrelevant for an already-abandoned session.
 const DESTROY_ALARM_DELAY_MS = 1_000;
-// Re-attaching to a still-running child agent-tool run (parent recovery /
-// duplicate-runId re-issue) tails it to its REAL terminal result instead of
-// abandoning it as `interrupted` and re-running already-completed child work
-// (#1630). The budget is PROGRESS-KEYED, not a flat wall clock: it bounds how
-// long the parent waits with NO forward progress from the child, and resets
-// every time the child forwards a chunk. A child that keeps streaming toward
-// terminal is therefore never abandoned mid-flight (the previous flat 120s
-// budget abandoned healthy, still-advancing children); only a genuinely
-// silent/hung child seals `interrupted` after a full no-progress window.
-const DEFAULT_AGENT_TOOL_REATTACH_NO_PROGRESS_TIMEOUT_MS = 120_000;
-// Optional hard wall-clock ceiling on a single re-attach. Defaults to NO cap
-// (#1672): the SDK does not impose an implicit wall-clock bound on a child that
-// keeps making forward
-// progress — a re-attached parent follows a healthy, still-streaming child for
-// as long as it advances, exactly as it would on the live (never-evicted) path.
-// A hung/silent child is already bounded by the progress-keyed no-progress
-// budget above, and a content-runaway is bounded uniformly (live AND recovery)
-// by the child's own `maxRecoveryWork` / `shouldKeepRecovering` — not by a
-// parent-only timer that would fire only after an eviction. Integrators that
-// want a hard wall-clock cap (and the `window-exceeded` child teardown it
-// triggers) can still set `agentToolReattachMaxWindowMs` to a finite value.
-const DEFAULT_AGENT_TOOL_REATTACH_MAX_WINDOW_MS = Number.POSITIVE_INFINITY;
-// Absolute safety ceiling on a DETACHED ("background") agent-tool run
-// (rfc-detached-agent-tools). A detached run has no awaiting parent turn and no
-// live observer, so unlike the re-attach window above this defaults to a FINITE
-// value: an abandoned detached run otherwise holds a concurrency slot + live
-// facet forever with nobody to notice the leak. On expiry the parent gives up
-// watching (delivers the completion hook with `interrupted`/`budget-exceeded`)
-// and tears the child down. 24h is generous enough for video renders / large
-// batch jobs while still bounding a genuinely stuck run.
-const DEFAULT_DETACHED_MAX_BUDGET_MS = 24 * 60 * 60 * 1000;
-// Resetting no-progress window for detached runs: once a child has emitted at
-// least one `reportProgress` signal, the parent gives up if it then goes silent
-// for this long (the window resets on every signal). A child that never signals
-// is bounded only by the absolute `detachedMaxBudgetMs` ceiling — we never give
-// up on a run merely for taking a long time, only for going silent after it
-// started reporting. Matches `rfc-chat-recovery-work-budget`.
-const DEFAULT_DETACHED_NO_PROGRESS_BUDGET_MS = 60 * 60 * 1000;
 // How long a detached terminal-delivery claim is leased before another delivery
 // path (a backbone reconcile racing the warm fast path, or a re-delivery after
 // a crash mid-handler) may re-claim it. Guards against a double-fire on the
@@ -577,201 +470,10 @@ registerInternalConnectionKeys(
 );
 
 /**
- * Tracks which agent constructors have already emitted the onStateUpdate
- * deprecation warning, so it fires at most once per class.
- */
-const _onStateUpdateWarnedClasses = new WeakSet<Function>();
-
-/**
  * Tracks which agent constructors have already emitted the
  * sendIdentityOnConnect deprecation warning, so it fires at most once per class.
  */
 const _sendIdentityWarnedClasses = new WeakSet<Function>();
-
-/**
- * Default options for Agent configuration.
- * Child classes can override specific options without spreading.
- */
-export const DEFAULT_AGENT_STATIC_OPTIONS = {
-  /** Whether to send identity (name, agent) to clients on connect */
-  sendIdentityOnConnect: true,
-  /**
-   * Timeout in seconds before a running interval schedule is considered "hung"
-   * and force-reset. Increase this if you have callbacks that legitimately
-   * take longer than 30 seconds.
-   */
-  hungScheduleTimeoutSeconds: 30,
-  /**
-   * Interval in milliseconds for keepAlive() alarm heartbeats.
-   * Lower values mean faster recovery after eviction but more frequent alarms.
-   */
-  keepAliveIntervalMs: DEFAULT_KEEP_ALIVE_INTERVAL_MS,
-  /** Default retry options for schedule(), queue(), and this.retry() */
-  retry: {
-    maxAttempts: 3,
-    baseDelayMs: 100,
-    maxDelayMs: 3000
-  } satisfies Required<RetryOptions>,
-  /** Timeout for internal framework fiber recovery hooks. */
-  fiberRecoveryHookTimeoutMs: 10_000,
-  /** Soft deadline for one interrupted-fiber recovery scan. */
-  fiberRecoveryScanDeadlineMs: 10_000,
-  /**
-   * Maximum age of an unmanaged interrupted-fiber row before recovery gives
-   * up. Bounds repeated retries of a `onFiberRecovered()` hook that keeps
-   * throwing so a poison row cannot re-trigger forever across boots.
-   */
-  fiberRecoveryMaxAgeMs: 24 * 60 * 60 * 1000,
-  /**
-   * No-progress budget (ms) for re-attaching to a still-running agent-tool
-   * child after a deploy / parent recovery (#1630). Bounds how long the parent
-   * waits with NO forward progress from the child; it resets on every forwarded
-   * chunk, so a child that keeps streaming is never abandoned mid-flight. Only a
-   * genuinely silent/hung child seals `interrupted` after a full window. Raise
-   * for children with long quiet stretches between outputs.
-   */
-  agentToolReattachNoProgressTimeoutMs:
-    DEFAULT_AGENT_TOOL_REATTACH_NO_PROGRESS_TIMEOUT_MS,
-  /**
-   * Optional hard wall-clock ceiling (ms) on a single agent-tool re-attach
-   * (#1630). Caps the total wait even as the no-progress budget re-arms across
-   * stream-closes. Defaults to `Infinity` (no implicit cap, #1672): a healthy,
-   * still-advancing child is followed for as long as it makes progress — a
-   * hung child is bounded by
-   * the no-progress budget, and a content-runaway by the child's own
-   * `maxRecoveryWork` / `shouldKeepRecovering`. Set a finite value to impose a
-   * wall-clock cap (which also tears the child down on `window-exceeded`).
-   */
-  agentToolReattachMaxWindowMs: DEFAULT_AGENT_TOOL_REATTACH_MAX_WINDOW_MS,
-  detachedMaxBudgetMs: DEFAULT_DETACHED_MAX_BUDGET_MS,
-  detachedNoProgressBudgetMs: DEFAULT_DETACHED_NO_PROGRESS_BUDGET_MS,
-  /**
-   * Consecutive alarm invocations that may end in a Durable Object memory-limit
-   * reset (the isolate exceeded its 128 MB limit) before the alarm-boundary
-   * circuit breaker stops the platform's auto-retry loop and seals the looping
-   * work (#1825). A small budget tolerates a genuinely transient memory spike;
-   * a deterministic OOM (the work's footprint, not the platform, is the cause)
-   * is bounded here regardless of whether the in-DO recovery budgets could run.
-   */
-  maxAlarmMemoryLimitStrikes: 3
-};
-
-/**
- * Fully resolved agent options — all fields are defined with concrete values.
- */
-interface ResolvedAgentOptions {
-  sendIdentityOnConnect: boolean;
-  hungScheduleTimeoutSeconds: number;
-  keepAliveIntervalMs: number;
-  retry: Required<RetryOptions>;
-  fiberRecoveryHookTimeoutMs: number;
-  fiberRecoveryScanDeadlineMs: number;
-  fiberRecoveryMaxAgeMs: number;
-  agentToolReattachNoProgressTimeoutMs: number;
-  agentToolReattachMaxWindowMs: number;
-  detachedMaxBudgetMs: number;
-  detachedNoProgressBudgetMs: number;
-  maxAlarmMemoryLimitStrikes: number;
-}
-
-/**
- * Configuration options for the Agent.
- * Override in subclasses via `static options`.
- * All fields are optional - defaults are applied at runtime.
- */
-export interface AgentStaticOptions {
-  sendIdentityOnConnect?: boolean;
-  hungScheduleTimeoutSeconds?: number;
-  /**
-   * Interval in milliseconds for keepAlive() alarm heartbeats.
-   * Default: 30000 (30 seconds). Lower values mean faster recovery
-   * after eviction but more frequent alarms.
-   */
-  keepAliveIntervalMs?: number;
-  /** Default retry options for schedule(), queue(), and this.retry(). */
-  retry?: RetryOptions;
-  /**
-   * Timeout in milliseconds for internal framework fiber recovery hooks.
-   * User-defined `onFiberRecovered()` hooks are not timed out by default.
-   */
-  fiberRecoveryHookTimeoutMs?: number;
-  /** Soft deadline in milliseconds for one interrupted-fiber recovery scan. */
-  fiberRecoveryScanDeadlineMs?: number;
-  /**
-   * Maximum age in milliseconds of an unmanaged interrupted-fiber row before
-   * recovery stops retrying a repeatedly-throwing `onFiberRecovered()` hook
-   * and discards the row (emitting `fiber:recovery:skipped` with reason
-   * `max_age_exceeded`). Defaults to 24h.
-   *
-   * Set to `0` to retain rows indefinitely. NOTE: with `0`, a hook that keeps
-   * throwing is retried forever — the recovery alarm backs off exponentially
-   * (capped at 5 minutes) so it is not a busy-loop, but the Durable Object
-   * stays warm (never idle-evicts) for as long as the un-recoverable row
-   * exists. Prefer a finite age unless you intend to inspect/clear such rows
-   * yourself.
-   */
-  fiberRecoveryMaxAgeMs?: number;
-  /**
-   * No-progress budget in milliseconds for re-attaching to a still-running
-   * agent-tool child after a deploy / parent recovery (#1630). Resets on every
-   * forwarded chunk, so a steadily-streaming child is never abandoned; only a
-   * genuinely silent child seals `interrupted` after a full window.
-   * Default: 120000 (2 minutes). Set to `0` to skip waiting (collect only an
-   * already-terminal child). Set to `Infinity` to never seal on no-progress —
-   * a silent-but-alive child is then followed until its stream closes (or the
-   * `agentToolReattachMaxWindowMs` ceiling fires), mirroring that knob's
-   * "Infinity = off" convention.
-   */
-  agentToolReattachNoProgressTimeoutMs?: number;
-  /**
-   * Optional hard wall-clock ceiling in milliseconds on a single agent-tool
-   * re-attach (#1630). Caps the total wait even as the no-progress budget
-   * re-arms across stream-closes. Default: `Infinity` (no implicit cap,
-   * #1672) — a healthy, still-advancing child is followed for as long as it
-   * makes progress, exactly
-   * as on the live (never-evicted) path. Set a finite value to impose a
-   * wall-clock cap (which also tears the child down on `window-exceeded`); `0`
-   * also disables the ceiling.
-   */
-  agentToolReattachMaxWindowMs?: number;
-  /**
-   * Absolute safety ceiling in milliseconds for a DETACHED ("background")
-   * agent-tool run dispatched via `runAgentTool(cls, { detached: ... })`
-   * (rfc-detached-agent-tools). A detached run has no awaiting parent turn, so
-   * on expiry the parent gives up watching — delivers the completion hook with
-   * `interrupted` / `budget-exceeded` and tears the child down — rather than
-   * holding a concurrency slot + live facet forever. Unlike the re-attach
-   * window this defaults to a FINITE value (24h) precisely because an abandoned
-   * detached run has no observer to notice the leak. Override per-run via
-   * `detached: { maxBudgetMs }`.
-   */
-  detachedMaxBudgetMs?: number;
-  /**
-   * Resetting no-progress window in milliseconds for a DETACHED agent-tool run
-   * (rfc-detached-agent-tools §progress). Once the child has emitted at least
-   * one `reportProgress` signal, the parent gives up if the run then goes
-   * silent for this long; the window resets on every subsequent signal. A child
-   * that never reports progress is bounded only by `detachedMaxBudgetMs` — we
-   * never give up on a run merely for taking a long time, only for going silent
-   * after it began reporting. Default: 1h. Set `0`/`Infinity` to disable (rely
-   * on the absolute ceiling only). Override per-run via
-   * `detached: { noProgressBudgetMs }`.
-   */
-  detachedNoProgressBudgetMs?: number;
-  /**
-   * Consecutive alarm invocations that may end in a Durable Object memory-limit
-   * reset (the isolate exceeded its 128 MB limit) before the alarm-boundary
-   * circuit breaker stops the platform's auto-retry loop and seals the looping
-   * recovery work (#1825). Default: 3. Set to `0` to seal on the first such
-   * reset. The strike counter is written after the reset, so it only advances
-   * when that isolate's storage still accepts writes, for example when the
-   * reset error came from another isolate such as D1. A Durable Object's own
-   * memory-limit reset rejects every later storage call in that invocation, so
-   * chat recovery does not rely on this counter: it counts each interrupted
-   * attempt in the next isolate (`chatRecovery.maxInterruptedAttempts`, #2613).
-   */
-  maxAlarmMemoryLimitStrikes?: number;
-}
 
 // `isDurableObjectCodeUpdateReset` / `isPlatformTransientError` live in
 // ./retries and remain re-exported from the package root so higher layers
@@ -781,77 +483,6 @@ export interface AgentStaticOptions {
 export const getCurrentAgent = getCurrentLifecycleAgent as <
   T extends DurableObject = Agent<Cloudflare.Env>
 >() => CurrentAgentContext<T, AgentEmail>;
-
-const AsyncFunction: Function = Object.getPrototypeOf(
-  async () => {}
-).constructor;
-
-/** Functions produced by {@link withAgentContext}, so they are wrapped once. */
-const agentContextWrappers = new WeakSet<Function>();
-
-/**
- * Restore Agent context when a public method is entered outside a Lifecycle
- * hook, notably through native Durable Object RPC or cross-Agent re-entry.
- * Lifecycle already owns context for its capability and semantic user hooks.
- *
- * Native RPC bypasses the lifecycle's runtime handlers, so an `async` method
- * entered from outside this Agent's context first starts the lifecycle when
- * the call is the one that wakes a cold instance. Synchronous methods are
- * never deferred, so they keep their synchronous return type.
- */
-
-// oxlint-disable-next-line @typescript-eslint/no-explicit-any -- generic callable constraint
-function withAgentContext<T extends (...args: any[]) => any>(
-  method: T
-): (
-  this: Agent<Cloudflare.Env, unknown>,
-  ...args: Parameters<T>
-) => ReturnType<T> {
-  const enter = function (
-    this: Agent<Cloudflare.Env, unknown>,
-    ...args: Parameters<T>
-  ): ReturnType<T> {
-    const { agent } = getCurrentAgent();
-
-    if (agent === this) {
-      // already wrapped, so we can just call the method
-      return method.apply(this, args);
-    }
-    // Crossing to a different Agent must not carry native I/O handles
-    // from the previous request/WebSocket/email turn into the new DO.
-    return runInInvocation(
-      {
-        agent: this,
-        connection: undefined,
-        request: undefined,
-        email: undefined
-      },
-      () => {
-        return method.apply(this, args);
-      }
-    );
-  };
-
-  if (!(method instanceof AsyncFunction)) {
-    agentContextWrappers.add(enter);
-    return enter;
-  }
-
-  const enterStarted = async function (
-    this: Agent<Cloudflare.Env, unknown>,
-    ...args: Parameters<T>
-  ): Promise<unknown> {
-    if (getCurrentAgent().agent !== this && !this.lifecycle.isStarted()) {
-      await this.lifecycle.start();
-    }
-    return enter.apply(this, args);
-  };
-  agentContextWrappers.add(enterStarted);
-  return enterStarted as unknown as (
-    this: Agent<Cloudflare.Env, unknown>,
-    ...args: Parameters<T>
-  ) => ReturnType<T>;
-}
 
 /**
  * Extract string keys from Env where the value is a Workflow binding.
@@ -1196,54 +827,9 @@ export class Agent<
    */
   private _cachedOptions?: ResolvedAgentOptions;
   private get _resolvedOptions(): ResolvedAgentOptions {
-    if (this._cachedOptions) return this._cachedOptions;
-    const ctor = this.constructor as typeof Agent;
-    const userRetry = ctor.options?.retry;
-    this._cachedOptions = {
-      sendIdentityOnConnect:
-        ctor.options?.sendIdentityOnConnect ??
-        DEFAULT_AGENT_STATIC_OPTIONS.sendIdentityOnConnect,
-      hungScheduleTimeoutSeconds:
-        ctor.options?.hungScheduleTimeoutSeconds ??
-        DEFAULT_AGENT_STATIC_OPTIONS.hungScheduleTimeoutSeconds,
-      keepAliveIntervalMs:
-        ctor.options?.keepAliveIntervalMs ??
-        DEFAULT_AGENT_STATIC_OPTIONS.keepAliveIntervalMs,
-      retry: {
-        maxAttempts:
-          userRetry?.maxAttempts ??
-          DEFAULT_AGENT_STATIC_OPTIONS.retry.maxAttempts,
-        baseDelayMs:
-          userRetry?.baseDelayMs ??
-          DEFAULT_AGENT_STATIC_OPTIONS.retry.baseDelayMs,
-        maxDelayMs:
-          userRetry?.maxDelayMs ?? DEFAULT_AGENT_STATIC_OPTIONS.retry.maxDelayMs
-      },
-      fiberRecoveryHookTimeoutMs:
-        ctor.options?.fiberRecoveryHookTimeoutMs ??
-        DEFAULT_AGENT_STATIC_OPTIONS.fiberRecoveryHookTimeoutMs,
-      fiberRecoveryScanDeadlineMs:
-        ctor.options?.fiberRecoveryScanDeadlineMs ??
-        DEFAULT_AGENT_STATIC_OPTIONS.fiberRecoveryScanDeadlineMs,
-      fiberRecoveryMaxAgeMs:
-        ctor.options?.fiberRecoveryMaxAgeMs ??
-        DEFAULT_AGENT_STATIC_OPTIONS.fiberRecoveryMaxAgeMs,
-      agentToolReattachNoProgressTimeoutMs:
-        ctor.options?.agentToolReattachNoProgressTimeoutMs ??
-        DEFAULT_AGENT_STATIC_OPTIONS.agentToolReattachNoProgressTimeoutMs,
-      agentToolReattachMaxWindowMs:
-        ctor.options?.agentToolReattachMaxWindowMs ??
-        DEFAULT_AGENT_STATIC_OPTIONS.agentToolReattachMaxWindowMs,
-      detachedMaxBudgetMs:
-        ctor.options?.detachedMaxBudgetMs ??
-        DEFAULT_AGENT_STATIC_OPTIONS.detachedMaxBudgetMs,
-      detachedNoProgressBudgetMs:
-        ctor.options?.detachedNoProgressBudgetMs ??
-        DEFAULT_AGENT_STATIC_OPTIONS.detachedNoProgressBudgetMs,
-      maxAlarmMemoryLimitStrikes:
-        ctor.options?.maxAlarmMemoryLimitStrikes ??
-        DEFAULT_AGENT_STATIC_OPTIONS.maxAlarmMemoryLimitStrikes
-    };
+    this._cachedOptions ??= resolveAgentOptions(
+      (this.constructor as typeof Agent).options
+    );
     return this._cachedOptions;
   }
 
@@ -1759,44 +1345,9 @@ export class Agent<
         });
       })
     );
-    // Compute persistence-hook dispatch mode once.
-    // Throws immediately if both hooks are overridden on the same class.
-    {
-      const proto = Object.getPrototypeOf(this);
-      const hasOwnNew = Object.prototype.hasOwnProperty.call(
-        proto,
-        "onStateChanged"
-      );
-      const hasOwnOld = Object.prototype.hasOwnProperty.call(
-        proto,
-        "onStateUpdate"
-      );
-
-      if (hasOwnNew && hasOwnOld) {
-        throw new Error(
-          `[Agent] Cannot override both onStateChanged and onStateUpdate. ` +
-            `Remove onStateUpdate — it has been renamed to onStateChanged.`
-        );
-      }
-
-      if (hasOwnOld) {
-        const ctor = this.constructor;
-        if (!_onStateUpdateWarnedClasses.has(ctor)) {
-          _onStateUpdateWarnedClasses.add(ctor);
-          console.warn(
-            `[Agent] onStateUpdate is deprecated. Rename to onStateChanged — the behavior is identical.`
-          );
-        }
-      }
-
-      const base = Agent.prototype;
-      if (proto.onStateChanged !== base.onStateChanged) {
-        this._persistenceHookMode = "new";
-      } else if (proto.onStateUpdate !== base.onStateUpdate) {
-        this._persistenceHookMode = "old";
-      }
-      // default "none" already set in field initializer
-    }
+    // Which state hook to call, decided once per instance. Throws if a
+    // class overrides both onStateChanged and onStateUpdate.
+    this._persistenceHookMode = stateHookMode(this, Agent.prototype);
 
     const _onAlarm = this.onAlarm.bind(this);
     this.onAlarm = async () => {
@@ -1854,88 +1405,10 @@ export class Agent<
           }
 
           if (isRPCRequest(parsed)) {
-            try {
-              const { id, method, args } = parsed;
-
-              // Check if method exists and is callable
-              const methodFn = this[method as keyof this];
-              if (typeof methodFn !== "function") {
-                throw new Error(`Method ${method} does not exist`);
-              }
-
-              if (!this._isCallable(method)) {
-                throw new Error(`Method ${method} is not callable`);
-              }
-
-              const metadata = getCallableMetadata(methodFn as Function);
-
-              // For streaming methods, pass a StreamingResponse object
-              if (metadata?.streaming) {
-                const stream = new StreamingResponse(connection, id);
-                if (replyBridge) {
-                  registerFacetStreamingDelivery(stream, replyBridge);
-                }
-
-                this._emit("rpc", { method, streaming: true });
-
-                try {
-                  await methodFn.apply(this, [stream, ...args]);
-                } catch (err) {
-                  console.error(`Error in streaming method "${method}":`, err);
-                  this._emit("rpc:error", {
-                    method,
-                    error: err instanceof Error ? err.message : String(err)
-                  });
-                  // Auto-close stream with error if method throws before closing
-                  if (!stream.isClosed) {
-                    stream.error(
-                      err instanceof Error ? err.message : String(err)
-                    );
-                  }
-                }
-                await waitForFacetStreamingResponseDeliveries(stream);
-                return;
-              }
-
-              // For regular methods, execute and send response
-              const result = await methodFn.apply(this, args);
-
-              this._emit("rpc", { method, streaming: metadata?.streaming });
-
-              const response: RPCResponse = {
-                done: true,
-                id,
-                result,
-                success: true,
-                type: MessageType.RPC
-              };
-              if (replyBridge) {
-                await sendFacetRpcResponseIfOpen(replyBridge, response)
-                  .completion;
-              } else {
-                sendRpcResponseIfOpen(connection, response);
-              }
-            } catch (e) {
-              const response: RPCResponse = {
-                error:
-                  e instanceof Error ? e.message : "Unknown error occurred",
-                id: parsed.id,
-                success: false,
-                type: MessageType.RPC
-              };
-              if (replyBridge) {
-                await sendFacetRpcResponseIfOpen(replyBridge, response)
-                  .completion;
-              } else {
-                sendRpcResponseIfOpen(connection, response);
-              }
-
-              console.error("RPC error:", e);
-              this._emit("rpc:error", {
-                method: parsed.method,
-                error: e instanceof Error ? e.message : String(e)
-              });
-            }
+            await dispatchCallableRpc(this, connection, parsed, {
+              replyBridge,
+              emit: (type, payload) => this._emit(type, payload)
+            });
             return;
           }
 
@@ -2629,61 +2102,7 @@ export class Agent<
    * native Durable Object RPC. Lifecycle hooks already have Agent context.
    */
   private _autoWrapCustomMethods() {
-    // Agent.prototype traversal also covers the DurableObject base class.
-    const basePrototypes = [Agent.prototype];
-    const baseMethods = new Set<string>();
-    for (const baseProto of basePrototypes) {
-      let proto = baseProto;
-      while (proto && proto !== Object.prototype) {
-        const methodNames = Object.getOwnPropertyNames(proto);
-        for (const methodName of methodNames) {
-          baseMethods.add(methodName);
-        }
-        proto = Object.getPrototypeOf(proto);
-      }
-    }
-    // The nearest descriptor for a name is authoritative: a subclass getter
-    // or field that shadows an inherited method must not be replaced by a
-    // wrapper around the inherited method.
-    const seen = new Set<string>();
-    let proto = Object.getPrototypeOf(this);
-    while (proto && proto !== Agent.prototype && proto !== Object.prototype) {
-      const methodNames = Object.getOwnPropertyNames(proto);
-      for (const methodName of methodNames) {
-        if (seen.has(methodName)) continue;
-        seen.add(methodName);
-        const descriptor = Object.getOwnPropertyDescriptor(proto, methodName);
-
-        // Skip if it's a private method, a base method, a getter, or not a function,
-        if (
-          baseMethods.has(methodName) ||
-          methodName.startsWith("_") ||
-          !descriptor ||
-          !!descriptor.get ||
-          typeof descriptor.value !== "function" ||
-          agentContextWrappers.has(descriptor.value)
-        ) {
-          continue;
-        }
-
-        const method = descriptor.value as Function;
-        /* oxlint-disable @typescript-eslint/no-explicit-any -- dynamic method wrapping requires any */
-        const wrappedFunction = withAgentContext(
-          method as (...args: any[]) => any
-        ) as any;
-        /* oxlint-enable @typescript-eslint/no-explicit-any */
-
-        // if the method is callable, copy the metadata from the original method
-        if (this._isCallable(methodName)) {
-          copyCallableMetadata(method, wrappedFunction);
-        }
-
-        // set the wrapped function on the prototype
-        this.constructor.prototype[methodName as keyof this] = wrappedFunction;
-      }
-
-      proto = Object.getPrototypeOf(proto);
-    }
+    wrapCustomMethods(this, Agent.prototype, (name) => this._isCallable(name));
   }
 
   onError(connection: Connection, error: unknown): void | Promise<void>;
@@ -7673,92 +7092,4 @@ export async function routeAgentEmail<
     _secureRouted: routingInfo._secureRouted,
     _bridge: bridge
   });
-}
-
-/**
- * A wrapper for streaming responses in callable methods
- */
-export class StreamingResponse {
-  private _connection: Connection;
-  private _id: string;
-  private _closed = false;
-
-  constructor(connection: Connection, id: string) {
-    this._connection = connection;
-    this._id = id;
-  }
-
-  private _send(response: RPCResponse): boolean {
-    const facetSent = sendFacetStreamingResponse(this, response);
-    if (facetSent !== null) return facetSent;
-    return sendRpcResponseIfOpen(this._connection, response);
-  }
-
-  /**
-   * Whether the stream has been closed (via end() or error())
-   */
-  get isClosed(): boolean {
-    return this._closed;
-  }
-
-  /**
-   * Send a chunk of data to the client
-   * @param chunk The data to send
-   * @returns false if stream is already closed (no-op), true if sent
-   */
-  send(chunk: unknown): boolean {
-    if (this._closed) {
-      console.warn(
-        "StreamingResponse.send() called after stream was closed - data not sent"
-      );
-      return false;
-    }
-    const response: RPCResponse = {
-      done: false,
-      id: this._id,
-      result: chunk,
-      success: true,
-      type: MessageType.RPC
-    };
-    return this._send(response);
-  }
-
-  /**
-   * End the stream and send the final chunk (if any)
-   * @param finalChunk Optional final chunk of data to send
-   * @returns false if stream is already closed (no-op), true if sent
-   */
-  end(finalChunk?: unknown): boolean {
-    if (this._closed) {
-      return false;
-    }
-    this._closed = true;
-    const response: RPCResponse = {
-      done: true,
-      id: this._id,
-      result: finalChunk,
-      success: true,
-      type: MessageType.RPC
-    };
-    return this._send(response);
-  }
-
-  /**
-   * Send an error to the client and close the stream
-   * @param message Error message to send
-   * @returns false if stream is already closed (no-op), true if sent
-   */
-  error(message: string): boolean {
-    if (this._closed) {
-      return false;
-    }
-    this._closed = true;
-    const response: RPCResponse = {
-      error: message,
-      id: this._id,
-      success: false,
-      type: MessageType.RPC
-    };
-    return this._send(response);
-  }
 }

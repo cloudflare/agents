@@ -61,8 +61,12 @@ After a reset, the recovery job finds a `decided` row with nothing running
 it in this isolate and runs `onDecided` again. It finds a settled row nobody
 acknowledged and calls `onSettled` again with `redelivered: true`. `onStart`
 pushes a due job for every such row, so a lost alarm is repaired on the next
-wake. A continuation that throws stays `decided` and the job retries it; the
-third failure settles the decision with the error.
+wake. Each attempt is counted, and the count synced to disk (`storage.sync()`),
+before the continuation runs: a reset before the continuation's first I/O
+rolls back unsynced writes (measured, RUNTIME-FACTS.md), so without the sync
+a continuation that keeps ending the isolate would never give up. A
+continuation that throws stays `decided` and the job retries it; the third
+failed or cut-off attempt settles the decision with the error.
 
 `wait(id)` resolves when the decision is settled. It waits in memory; a
 decision that settled earlier resolves at once, and a sweep that deletes the

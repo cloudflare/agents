@@ -259,9 +259,11 @@ Durable chat recovery is an invariant in both hosts: every chat entry path runs 
 **Two host-supplied seams:**
 
 - **`ChatRecoveryAdapter`** — the incident/budget I/O the engine drives (read/write/sweep incidents, read progress, emit lifecycle events, resolve the recovery stream, give-up/exhaust). Stable across a session.
-- **`ChatFiberWakeHooks<TClassify>`** — the per-wake "divergent organs": classify the turn (`retry`/`continue`), unwrap the fiber snapshot, the base persist gate, `persistOrphanedStream`, `completeRecoveredStream`, and the retry/continue/skip dispatch. Passed per `handleChatFiberRecovery` call so the adapter stays focused.
+- **`ChatFiberWakeHooks<TClassify>`** — the per-wake "divergent organs": classify the turn (`retry`/`continue`), the base persist gate, `persistOrphanedStream`, `completeRecoveredStream`, and the retry/continue/skip dispatch. Passed per `recoverInterruptedTurn` call so the adapter stays focused.
 
-**The engine owns the lifecycle and its ordering invariants**: non-chat-fiber dispatch first → chat-fiber name gate → parse request id / unwrap snapshot / resolve stream / reconstruct partial → classify → open incident → **if the budget is exhausted**, persist the settled partial _before_ sealing (so non-idempotent tool results aren't discarded, #1631) and terminalize → **else** (inside a `failed`-on-throw guard) invoke `onChatRecovery`, apply the shared persist gate (`persist !== false || hasSettledToolResults`), complete the live stream, then hand the decision to `dispatchRecoveredTurn`. The budget math is the pure `evaluateChatRecoveryIncident`. `experimental/pi-recovery` is a third adapter implementation driving a **non-AI-SDK codec** — the forcing function that keeps the engine host-agnostic.
+**The engine owns the lifecycle and its ordering invariants**: resolve stream / reconstruct partial → classify → open incident → **if the budget is exhausted**, persist the settled partial _before_ sealing (so non-idempotent tool results aren't discarded, #1631) and terminalize → **else** (inside a `failed`-on-throw guard) invoke `onChatRecovery`, apply the shared persist gate (`persist !== false || hasSettledToolResults`), complete the live stream, then hand the decision to `dispatchRecoveredTurn`. The budget math is the pure `evaluateChatRecoveryIncident`. `experimental/pi-recovery` is a third adapter implementation driving a **non-AI-SDK codec** — the forcing function that keeps the engine host-agnostic.
+
+`recoverInterruptedTurn` takes the turn as its record left it: the request id, the unwrapped snapshot, the stash data and the run's creation time (`InterruptedChatTurn`). A chat-turn Task run replayed with no live closure reaches it through the host's `_recoverChatTurn`, which `ChatTurnTaskHooks.recover` calls. A chat fiber row an older version left reaches the same method through the host's `_handleInternalFiberRecovery` override, which also asks `Think`'s messenger runtime first about its reply fibers. Hosts unwrap the snapshot themselves, so the engine never reads a fiber.
 
 **Orphan-persist seams** (`persistOrphanedStream`'s internals). The engine owns _whether_ to persist; the host owns _how_, in four steps:
 
@@ -281,8 +283,10 @@ Task calls the existing bounded `_chatRecoveryContinue` / `_chatRecoveryRetry`
 entry point; both hosts run it through the shared
 `dispatchChatRecoveryToHandoff`, which returns at model handoff so a long turn
 never blocks the Lifecycle job loop and registers the turn as tracked alarm
-work (on the root; on a facet `trackAlarmWork` declines, and the detached turn
-stays outside the breaker until Tasks supports routed child wakes). A platform
+work (on the root; on a facet `trackAlarmWork` declines, because the facet runs
+its routed dispatch outside an alarm scope and the root tracks only the routed
+call, which returns at handoff, so the detached turn stays outside the
+breaker). A platform
 failure before handoff propagates through the
 current Task or compatibility schedule; after handoff that execution has
 settled, so the detached continuation enqueues exactly one replacement attempt.

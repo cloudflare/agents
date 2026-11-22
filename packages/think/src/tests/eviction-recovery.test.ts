@@ -2,7 +2,7 @@
  * Wake-driven chat recovery after forced Durable Object eviction.
  *
  * This explicitly tears down a running test actor, then routes back through
- * partyserver so the normal startup wrapper discovers the persisted fiber. It
+ * partyserver so startup finds the interrupted chat-turn Task run. It
  * does not assert natural idle hibernation or hibernation eligibility.
  */
 import type { UIMessage } from "ai";
@@ -81,7 +81,7 @@ describe("Think chat recovery after forced Durable Object eviction", () => {
     let agent = await recoveryAgent(name);
     await seedInterruptedContinueTurn(agent);
 
-    expect(await agent.getActiveFibers()).toHaveLength(1);
+    expect(await agent.getUnfinishedChatTurnCountForTest()).toBe(1);
     expect(
       await agent.getScheduledChatRecoveryCountForTest("_chatRecoveryContinue")
     ).toBe(0);
@@ -93,7 +93,9 @@ describe("Think chat recovery after forced Durable Object eviction", () => {
     // The zero-delay schedule may execute as soon as startup releases the DO,
     // so observe the real alarm path instead of manually invoking its callback.
     await waitFor(async () => (await agent.getTurnCallCount()) === 1);
-    await waitFor(async () => (await agent.getActiveFibers()).length === 0);
+    await waitFor(
+      async () => (await agent.getUnfinishedChatTurnCountForTest()) === 0
+    );
 
     // Let any duplicate zero-delay alarm surface before pinning exactly-once.
     await new Promise((resolve) => setTimeout(resolve, 100));

@@ -361,6 +361,8 @@ export class Tasks<
    * Durably accept one run of a declared definition and return a receipt
    * without waiting for terminal state. The same `idempotencyKey` or `runId`
    * joins the existing run (`accepted: false`) instead of creating a second.
+   * A reused one with a different input throws an error named
+   * `TaskInputConflictError`; object key order does not count as different.
    */
   async run<Name extends keyof Handlers & string>(
     definition: Name,
@@ -368,7 +370,7 @@ export class Tasks<
     options?: TaskRunOptions
   ): Promise<TaskReceipt> {
     this.#validateDefinitionName(definition);
-    return this.#accept(definition, input, options);
+    return this.#accept(definition, input, options, "warm", true);
   }
 
   /**
@@ -985,7 +987,8 @@ export class Tasks<
     definition: string,
     input: unknown,
     options: TaskRunOptions = {},
-    startMode: TaskStartMode = "warm"
+    startMode: TaskStartMode = "warm",
+    inputMustMatch = false
   ): Promise<TaskReceipt> {
     await this.lifecycle.ready();
     if (options.runId !== undefined && options.runId.length === 0) {
@@ -1009,10 +1012,12 @@ export class Tasks<
       `metadata for Task definition "${definition}"`
     );
 
-    const existing =
-      (options.runId !== undefined
+    const byRunId =
+      options.runId !== undefined
         ? this.#store.getRun(options.runId)
-        : undefined) ??
+        : undefined;
+    const existing =
+      byRunId ??
       (options.idempotencyKey !== undefined
         ? this.#store.getRunByKey(options.idempotencyKey)
         : undefined);
@@ -1040,12 +1045,22 @@ export class Tasks<
             `refusing to join it with conflicting key "${options.idempotencyKey}"`
         );
       }
-      // A prior accept can throw after already durably inserting this row —
-      // most likely here, on the wake mirror, rather than on the insert
-      // itself — so a caller retrying the same runId or idempotencyKey
-      // after a failure needs this join to repair a missing or stale
-      // mirror, not just report accepted:false against a row nothing will
-      // ever wake.
+      // Joining a run that was started with other input would drop the
+      // caller's work without a word. The same data in another key order
+      // is the same input.
+      if (
+        inputMustMatch &&
+        existing.input !== inputJson &&
+        canonicalJson(existing.input) !== canonicalJson(inputJson)
+      ) {
+        const error = new Error(
+          `Task run "${existing.run_id}" was started with a different input; ` +
+            `a reused ${byRunId ? "run ID" : "idempotency key"} ` +
+            `must carry the same input`
+        );
+        error.name = "TaskInputConflictError";
+        throw error;
+      }
       // A prior accept can throw after already durably inserting this row —
       // most likely here, on the wake mirror, rather than on the insert
       // itself — so a caller retrying the same runId or idempotencyKey
@@ -1487,4 +1502,35 @@ export class Tasks<
   #emit(type: TaskEventType | string, payload: Record<string, unknown>): void {
     this.lifecycle.events.emit(type, payload);
   }
+}
+
+/**
+ * Stored JSON text in a form where object keys are sorted at every depth,
+ * so two serializations of the same data compare equal.
+ */
+function canonicalJson(json: string | null): string | null {
+  if (json === null) return null;
+  // Deeply nested input can exhaust the stack while sorting; compare it as
+  // stored instead.
+  try {
+    return sortedJson(json);
+  } catch (error) {
+    if (error instanceof RangeError) return json;
+    throw error;
+  }
+}
+
+function sortedJson(json: string): string {
+  const sort = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(sort);
+    if (value !== null && typeof value === "object") {
+      return Object.fromEntries(
+        Object.keys(value)
+          .sort()
+          .map((key) => [key, sort((value as Record<string, unknown>)[key])])
+      );
+    }
+    return value;
+  };
+  return JSON.stringify(sort(JSON.parse(json)));
 }

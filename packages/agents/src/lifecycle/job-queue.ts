@@ -238,6 +238,22 @@ export class JobQueue {
     this.#tableEnsured = true;
   }
 
+  /**
+   * Whether the queue holds any job. Reads without creating the table, so
+   * an object that never pushed a job gets no schema write from asking.
+   */
+  hasJobs(): boolean {
+    if (!this.#tableEnsured) {
+      const table = [
+        ...this.#storage.sql.exec(
+          "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cf_agents_jobs'"
+        )
+      ];
+      if (table.length === 0) return false;
+    }
+    return this.#sql("SELECT 1 FROM cf_agents_jobs LIMIT 1").length > 0;
+  }
+
   #revise(id: string): void {
     const entry = this.#inFlight.get(id);
     if (entry) entry.revision += 1;

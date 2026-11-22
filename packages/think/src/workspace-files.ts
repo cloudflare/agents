@@ -209,3 +209,19 @@ function joinPath(directory: string, name: string): string {
     ? `${directory}${name}`
     : `${directory}/${name}`;
 }
+
+/**
+ * Whether a workspace is a Computer `Workspace` this agent owns, as opposed
+ * to a client for one another Durable Object owns. Checked by shape so a
+ * second copy of `@cloudflare/computer` in the bundle still matches.
+ */
+export function isLocalWorkspace(
+  workspace: ThinkWorkspace
+): workspace is ThinkWorkspace & Pick<Workspace, "ready" | "stub"> {
+  return (
+    "ready" in workspace &&
+    typeof workspace.ready === "function" &&
+    "stub" in workspace &&
+    typeof workspace.stub === "function"
+  );
+}

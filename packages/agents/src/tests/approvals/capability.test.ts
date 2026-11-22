@@ -211,7 +211,7 @@ describe("Approvals effect ledger", () => {
           Date.now() - 10_000
         );
         instance.retention = { effectPendingMs: 1000 };
-        expect(await instance.approvals.sweep({ force: true })).toEqual({
+        expect(await instance.approvals.sweep({ force: true })).toMatchObject({
           effects: 0,
           decisions: 0
         });
@@ -678,6 +678,32 @@ describe("Approvals decisions", () => {
     );
   });
 
+  it("gives up on a continuation that keeps ending the isolate", async () => {
+    const name = crypto.randomUUID();
+    let stub = env.ApprovalsHarnessObject.getByName(name);
+    const id = await stub.decideCrashing().catch(() => "");
+    stub = env.ApprovalsHarnessObject.getByName(name);
+    const parkedId =
+      id ||
+      (await runInDurableObject(stub, (_i, state) => {
+        const [row] = [
+          ...state.storage.sql.exec("SELECT id FROM cf_agents_decisions")
+        ];
+        return String(row.id);
+      }));
+    for (let n = 0; n < 4; n++) {
+      stub = env.ApprovalsHarnessObject.getByName(name);
+      await runInDurableObject(stub, (_i, state) => {
+        backdateDecisionJob(state.storage, parkedId);
+      });
+      await runDurableObjectAlarm(stub).catch(() => {});
+    }
+    stub = env.ApprovalsHarnessObject.getByName(name);
+    expect(await stub.attempts(parkedId)).toBe(3);
+    expect(await stub.status(parkedId)).toBe("settled");
+    expect(await stub.error(parkedId)).toMatch(/did not finish in 3 attempts/);
+  });
+
   it("finishes a continuation a real reset cut off", async () => {
     const name = crypto.randomUUID();
     let stub = env.ApprovalsHarnessObject.getByName(name);
@@ -749,7 +775,14 @@ describe("Approvals decisions", () => {
           decisionPendingMs: 1000
         };
         const swept = await instance.approvals.sweep({ force: true });
-        expect(swept).toEqual({ effects: 1, decisions: 1 });
+        expect(swept).toEqual({
+          effects: 1,
+          decisions: 1,
+          settledEffects: 1,
+          pendingEffects: 0,
+          pendingDecisions: 1,
+          settledDecisions: 0
+        });
         expect(instance.approvals.effect("old-settled")).toBeUndefined();
         expect(instance.approvals.effect("old-pending")).toBeDefined();
         expect(instance.approvals.get("old-pending")).toBeUndefined();
@@ -757,7 +790,7 @@ describe("Approvals decisions", () => {
         expect(instance.approvals.get("decided")).toBeDefined();
 
         // Throttled: a second sweep within the hour does nothing.
-        expect(await instance.approvals.sweep()).toEqual({
+        expect(await instance.approvals.sweep()).toMatchObject({
           effects: 0,
           decisions: 0
         });

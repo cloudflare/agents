@@ -4,14 +4,12 @@
  * Every chat turn runs as one journaled step on the `tasks` capability. A
  * live turn executes its closure under the fiber stash context (so
  * `this.stash()` keeps persisting the recovery snapshot into host storage);
- * a replay whose closure is gone — the producing isolate died — drives the
- * same recovery seam the legacy fiber scan used, so the ChatRecoveryEngine
- * and every hook behind it are unchanged. Hosts supply their protected
- * internals through {@link ChatTurnTaskHooks}; the turn logic, the snapshot
- * key vocabulary, and the settle plumbing live here once.
+ * a replay whose closure is gone — the producing isolate died — hands the
+ * turn's stored snapshot to the host's chat recovery. Hosts supply their
+ * protected internals through {@link ChatTurnTaskHooks}; the turn logic, the
+ * snapshot key vocabulary, and the settle plumbing live here once.
  */
 
-import type { FiberRecoveryContext } from "agents";
 import type { TaskStep } from "../tasks";
 
 /** One live turn closure, registered under its nonce while this isolate runs it. */
@@ -31,8 +29,6 @@ export type ChatTurnClosureEntry = {
 
 /** The host internals one chat-turn definition runs against. */
 export type ChatTurnTaskHooks = {
-  /** The registered definition name (the host's `CHAT_FIBER_NAME`). */
-  readonly definitionName: string;
   readonly storage: DurableObjectStorage;
   /** The run row's creation time, for recovery staleness accounting. */
   getRunCreatedAt(runId: string): Promise<number | null>;
@@ -47,8 +43,18 @@ export type ChatTurnTaskHooks = {
     },
     fn: () => Promise<T>
   ): Promise<T>;
-  /** The unchanged recovery seam (ChatRecoveryEngine behind it). */
-  handleRecovery(ctx: FiberRecoveryContext): Promise<unknown>;
+  /**
+   * Recover the turn of a run replayed after its isolate died
+   * (`ChatRecoveryEngine.recoverInterruptedTurn` behind it).
+   *
+   * @param turn - `persisted` is the snapshot envelope the turn stored, or
+   *   `null` when none survived.
+   */
+  recover(turn: {
+    requestId: string;
+    persisted: unknown;
+    createdAt: number;
+  }): Promise<void>;
 };
 
 /** Durable snapshot key for one chat turn's stash envelope. */
@@ -81,12 +87,10 @@ export function createChatTurnTaskDefinition(
           // drive user-visible recovery.
           const persisted = await hooks.storage.get(snapshotKey);
           const createdAt = (await hooks.getRunCreatedAt(runId)) ?? Date.now();
-          await hooks.handleRecovery({
-            id: runId,
-            name: `${hooks.definitionName}:${requestId}`,
-            snapshot: (persisted ?? null) as unknown,
-            createdAt,
-            recoveryReason: "interrupted"
+          await hooks.recover({
+            requestId,
+            persisted: persisted ?? null,
+            createdAt
           });
           await hooks.storage.delete(snapshotKey);
           return undefined;

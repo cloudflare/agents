@@ -54,10 +54,12 @@ import {
   CHAT_MESSAGE_TYPES,
   CHAT_RECOVERY_TASK_NAME,
   chatRecoveryTaskRunOptions,
+  dispatchChatProtocol,
   sanitizeMessage,
   enforceRowSizeLimit,
   StreamAccumulator,
-  toolResultUpdate
+  toolResultUpdate,
+  type ChatProtocolHost
 } from "agents/chat";
 import type {
   ChatTurns,
@@ -70,8 +72,30 @@ import type { Schedule } from "agents";
 import type { DeclaredScheduleInfo } from "agents/schedules";
 import type { Session } from "../../think";
 import type { ContextConfig } from "agents/context";
+import { stableHash, type Approvals } from "agents/approvals";
 import { z } from "zod";
 import { WorkspaceFiles } from "../../workspace-files";
+
+/**
+ * Send one chat wire message through the real protocol dispatch, as a socket
+ * would. `connection` only needs what the handler for that message reads.
+ */
+async function dispatchChatMessageForTest(
+  agent: Think,
+  connection: { id: string; send(message: string): void; readyState?: number },
+  message: Record<string, unknown>
+): Promise<void> {
+  // SAFETY: tests reach the private protocol host; a fake connection carries
+  // the id and send the handlers read.
+  const host = (
+    agent as unknown as { _chatProtocol: ChatProtocolHost<Connection> }
+  )._chatProtocol;
+  await dispatchChatProtocol(
+    connection as unknown as Connection,
+    JSON.stringify(message),
+    host
+  );
+}
 
 // ── Test result type ────────────────────────────────────────────
 
@@ -92,6 +116,73 @@ export type RpcJsonObject = Record<
   | null
   | ReadonlyArray<string | number | boolean | null>
 >;
+
+/**
+ * Leave an interrupted turn the way production leaves one. A chat turn
+ * (`CHAT_FIBER_NAME:<requestId>`) is a chat-turn Task run whose closure died
+ * with its isolate, plus the snapshot it stored; anything else is a fiber
+ * row. A restart replays the run as Tasks does any unfinished run, and
+ * {@link recoverInterruptedTurnsForTest} replays it at once.
+ */
+async function insertInterruptedTurnForTest(
+  agent: Think,
+  storage: DurableObjectStorage,
+  name: string,
+  snapshot?: unknown
+): Promise<void> {
+  const prefix = `${Think.CHAT_FIBER_NAME}:`;
+  if (!name.startsWith(prefix)) {
+    agent.sql`
+      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
+      VALUES (${`fiber-${crypto.randomUUID()}`}, ${name},
+              ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
+    `;
+    return;
+  }
+  const nonce = crypto.randomUUID();
+  const runId = `chat_${nonce}`;
+  const requestId = name.slice(prefix.length);
+  if (snapshot) {
+    await storage.put(`__cf_chat_turn_snapshot:${runId}`, snapshot);
+  }
+  // Make sure the Tasks tables exist before writing a row into them.
+  await agent.tasks.get(runId);
+  const now = Date.now();
+  agent.sql`
+    INSERT INTO cf_agents_task_runs
+      (run_id, definition, input, state, metadata, idempotency_key, retain,
+       attempt, next_at, cancel_requested, created_at, updated_at)
+    VALUES
+      (${runId}, ${Think.CHAT_FIBER_NAME},
+       ${JSON.stringify({ requestId, continuation: false, nonce })}, 'pending',
+       ${JSON.stringify({ requestId })}, NULL, 0, 0, ${now}, 0, ${now}, ${now})
+  `;
+}
+
+/**
+ * Replay what {@link insertInterruptedTurnForTest} left, as a wake does: each
+ * unfinished chat-turn Task run runs again with no live closure, which hands
+ * its turn to chat recovery, then the fiber scan recovers fiber rows.
+ */
+async function recoverInterruptedTurnsForTest(agent: Think): Promise<void> {
+  const runs = agent.sql<{ run_id: string; input: string; metadata: string }>`
+    SELECT run_id, input, metadata FROM cf_agents_task_runs
+    WHERE definition = ${Think.CHAT_FIBER_NAME} AND state = 'pending'
+    ORDER BY created_at
+  `;
+  for (const run of runs) {
+    // Accepted again under its id, so this invocation runs it.
+    agent.sql`DELETE FROM cf_agents_task_runs WHERE run_id = ${run.run_id}`;
+    await agent.tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
+      Think.CHAT_FIBER_NAME,
+      JSON.parse(run.input),
+      { runId: run.run_id, retain: false, metadata: JSON.parse(run.metadata) }
+    );
+  }
+  await (
+    agent as unknown as { _checkRunFibers(): Promise<void> }
+  )._checkRunFibers();
+}
 
 function recoveryTransportCountsForTest(
   agent: Think,
@@ -2383,7 +2474,7 @@ export class ThinkTestAgent extends Think {
     // broadcast paths with a real connection returned by this Agent instance.
     const internals = this as unknown as {
       _notifyStreamResuming(connection: Connection): void;
-      _broadcastChat(message: Record<string, unknown>): void;
+      _frames: { broadcast(message: Record<string, unknown>): void };
     };
     internals._notifyStreamResuming(connection);
     if (close === "finish") {
@@ -2394,7 +2485,7 @@ export class ThinkTestAgent extends Think {
     } else {
       this._errorResumableStream(streamId);
     }
-    internals._broadcastChat({
+    internals._frames.broadcast({
       type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
       id: requestId,
       done: true,
@@ -2671,16 +2762,18 @@ export class ThinkTestAgent extends Think {
     let errorFrames = 0;
     const terminalOutcomes: string[] = [];
     const self = this as unknown as {
-      _broadcastChat(frame: Record<string, unknown>): void;
+      _frames: {
+        broadcast(frame: Record<string, unknown>, exclude?: string[]): void;
+      };
       _emit(type: string, payload: unknown): void;
     };
-    const broadcastChat = self._broadcastChat;
-    self._broadcastChat = (frame) => {
+    const broadcastChat = self._frames.broadcast;
+    self._frames.broadcast = (frame, exclude) => {
       if (frame.error === true) errorFrames++;
       if (frame.done === true && typeof frame.outcome === "string") {
         terminalOutcomes.push(frame.outcome);
       }
-      return broadcastChat.call(this, frame);
+      return broadcastChat.call(self._frames, frame, exclude);
     };
     let run: { status: string | null; error: string | null } | null = null;
     let failedEvents = 0;
@@ -2766,7 +2859,7 @@ export class ThinkTestAgent extends Think {
         run
       };
     } finally {
-      self._broadcastChat = broadcastChat;
+      self._frames.broadcast = broadcastChat;
       self._emit = emit;
       this._turnConfigOverride = null;
       this._beforeTurnAbortWait = null;
@@ -3149,14 +3242,11 @@ export class ThinkTestAgent extends Think {
         this.abortAllRequests();
       } else {
         // What the `cancel` WebSocket message does.
-        await (
-          this as unknown as {
-            _handleProtocolEvent(
-              connection: unknown,
-              event: { type: "cancel"; id: string }
-            ): Promise<void>;
-          }
-        )._handleProtocolEvent(undefined, { type: "cancel", id: requestId });
+        await dispatchChatMessageForTest(
+          this,
+          { id: "cancel-probe", send() {} },
+          { type: CHAT_MESSAGE_TYPES.CHAT_REQUEST_CANCEL, id: requestId }
+        );
       }
       // The stop's bookkeeping, then whatever recovery is still queued.
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -4903,6 +4993,17 @@ export class ThinkTestAgent extends Think {
     );
   }
 
+  /** Send one chat wire message through the protocol dispatch, as a tab would. */
+  async sendChatProtocolMessageForTest(
+    message: Record<string, unknown>
+  ): Promise<void> {
+    await dispatchChatMessageForTest(
+      this,
+      { id: "protocol-probe", send() {} },
+      message
+    );
+  }
+
   async getChatErrorLog(): Promise<string[]> {
     return this._chatErrorLog;
   }
@@ -5099,23 +5200,17 @@ export class ThinkTestAgent extends Think {
     return log.length > 0 ? log[log.length - 1].system : null;
   }
 
-  /** Insert a fiber-ledger row so `_checkRunFibers` finds it interrupted. */
+  /** Leave an interrupted turn (see `insertInterruptedTurnForTest`). */
   async insertInterruptedFiber(
     name: string,
     snapshot?: unknown
   ): Promise<void> {
-    const id = `fiber-${crypto.randomUUID()}`;
-    this.sql`
-      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
-      VALUES (${id}, ${name}, ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
-    `;
+    await insertInterruptedTurnForTest(this, this.ctx.storage, name, snapshot);
   }
 
-  /** Drive this facet's own fiber-recovery scan, exactly as a real wake would. */
+  /** Replay this agent's interrupted turns, as a wake does. */
   async triggerFiberRecovery(): Promise<void> {
-    await (
-      this as unknown as { _checkRunFibers(): Promise<void> }
-    )._checkRunFibers();
+    await recoverInterruptedTurnsForTest(this);
   }
 }
 
@@ -7605,6 +7700,7 @@ export class ThinkToolsTestAgent extends Think {
             : mode === "ledger-key" ||
                 mode === "ledger-throw" ||
                 mode === "ledger-large-output" ||
+                mode === "ledger-oversize-output" ||
                 mode === "ledger-slow" ||
                 mode === "ledger-symbol-output" ||
                 mode === "ledger-approval" ||
@@ -7666,6 +7762,10 @@ export class ThinkToolsTestAgent extends Think {
           if (mode === "ledger-large-output") {
             return `echo: ${message} ${"x".repeat(25_000)}`;
           }
+          if (mode === "ledger-oversize-output") {
+            // Past SQLite's 2 MB row limit before the model-output cap.
+            return `echo: ${message} ${"x".repeat(3 * 1024 * 1024)}`;
+          }
           if (mode === "non-json-output") {
             const output: { count: bigint; self?: unknown } = { count: 12n };
             output.self = output;
@@ -7715,6 +7815,7 @@ export class ThinkToolsTestAgent extends Think {
     | "ledger-key"
     | "ledger-throw"
     | "ledger-large-output"
+    | "ledger-oversize-output"
     | "ledger-slow"
     | "ledger-symbol-output"
     | "ledger-approval"
@@ -7787,6 +7888,8 @@ export class ThinkToolsTestAgent extends Think {
       | "ledger-key"
       | "ledger-throw"
       | "ledger-large-output"
+      | "ledger-oversize-output"
+      | "ledger-oversize-output"
       | "ledger-slow"
       | "ledger-symbol-output"
       | "ledger-approval"
@@ -7920,9 +8023,7 @@ export class ThinkToolsTestAgent extends Think {
       updated_at: number;
     }>
   > {
-    (
-      this as unknown as { _ensureActionLedgerTable: () => void }
-    )._ensureActionLedgerTable();
+    this._approvalsForTest().importRecords({});
     return this.sql<{
       key: string;
       action_name: string;
@@ -7931,8 +8032,9 @@ export class ThinkToolsTestAgent extends Think {
       result_json: string | null;
       updated_at: number;
     }>`
-      SELECT key, action_name, input_hash, status, result_json, updated_at
-      FROM cf_think_action_ledger
+      SELECT key, name AS action_name, input_hash, status, result_json,
+             updated_at
+      FROM cf_agents_effects
       ORDER BY key ASC
     `;
   }
@@ -7945,30 +8047,27 @@ export class ThinkToolsTestAgent extends Think {
     output?: unknown;
     updatedAt?: number;
   }): Promise<void> {
-    (
-      this as unknown as { _ensureActionLedgerTable: () => void }
-    )._ensureActionLedgerTable();
-    const inputHash = (
-      this as unknown as { _actionInputHash: (input: unknown) => string }
-    )._actionInputHash(options.input ?? { message: "hello" });
-    const output =
-      options.status === "settled"
-        ? JSON.stringify({
-            valuePresent: options.output !== undefined,
-            value: options.output
-          })
-        : null;
     const now = options.updatedAt ?? Date.now();
-    this.sql`
-      INSERT INTO cf_think_action_ledger (
-        key, action_name, request_id, tool_call_id, input_hash, status,
-        result_json, created_at, updated_at
-      )
-      VALUES (
-        ${options.key}, ${options.actionName ?? "echo"}, ${null}, ${"tc-seeded"},
-        ${inputHash}, ${options.status ?? "pending"}, ${output}, ${now}, ${now}
-      )
-    `;
+    this._approvalsForTest().importRecords({
+      effects: [
+        {
+          key: options.key,
+          name: options.actionName ?? "echo",
+          inputHash: stableHash(options.input ?? { message: "hello" }),
+          status: options.status ?? "pending",
+          resultJson:
+            options.status === "settled"
+              ? JSON.stringify({
+                  valuePresent: options.output !== undefined,
+                  value: options.output
+                })
+              : null,
+          context: { toolCallId: "tc-seeded" },
+          createdAt: now,
+          updatedAt: now
+        }
+      ]
+    });
   }
 
   async sweepActionLedgerForTest(): Promise<{
@@ -7977,11 +8076,60 @@ export class ThinkToolsTestAgent extends Think {
   }> {
     return (
       this as unknown as {
-        _sweepActionLedger: (options: {
+        _sweepApprovals: (options: {
           force?: boolean;
         }) => Promise<{ settled: number; pending: number }>;
       }
-    )._sweepActionLedger({ force: true });
+    )._sweepApprovals({ force: true });
+  }
+
+  /** Seed a row in the table an earlier version used, for the migration. */
+  async insertLegacyActionLedgerRowForTest(options: {
+    key: string;
+    output: unknown;
+  }): Promise<void> {
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_think_action_ledger (
+        key TEXT PRIMARY KEY,
+        action_name TEXT NOT NULL,
+        request_id TEXT,
+        tool_call_id TEXT,
+        input_hash TEXT NOT NULL,
+        status TEXT NOT NULL,
+        result_json TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )
+    `;
+    const now = Date.now();
+    this.sql`
+      INSERT INTO cf_think_action_ledger (
+        key, action_name, request_id, tool_call_id, input_hash, status,
+        result_json, created_at, updated_at
+      )
+      VALUES (
+        ${options.key}, ${"echo"}, ${null}, ${"tc-legacy"},
+        ${stableHash({ message: "hello" })}, ${"settled"},
+        ${JSON.stringify({ valuePresent: true, value: options.output })},
+        ${now}, ${now}
+      )
+    `;
+  }
+
+  async migrateLegacyActionLedgerForTest(): Promise<boolean> {
+    await (
+      this as unknown as { _migrateLegacyActionLedger: () => Promise<void> }
+    )._migrateLegacyActionLedger();
+    return (
+      this.sql<{ name: string }>`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name = 'cf_think_action_ledger'
+      `.length > 0
+    );
+  }
+
+  private _approvalsForTest(): Approvals {
+    return (this as unknown as { _approvals: Approvals })._approvals;
   }
 
   // ── Durable-pause action test helpers ───────────────────────────
@@ -8379,24 +8527,22 @@ export class ThinkToolsTestAgent extends Think {
     );
   }
 
+  /**
+   * Leave an interrupted turn: a chat turn (`CHAT_FIBER_NAME:<requestId>`)
+   * as a chat-turn Task run, anything else as a fiber row.
+   */
   async insertInterruptedFiber(
     name: string,
     snapshot?: unknown
   ): Promise<void> {
-    const id = `fiber-${crypto.randomUUID()}`;
-    this.sql`
-      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
-      VALUES (${id}, ${name}, ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
-    `;
+    await insertInterruptedTurnForTest(this, this.ctx.storage, name, snapshot);
   }
 
   async triggerFiberRecovery(): Promise<{
     scheduledContinueCount: number;
     scheduledRetryCount: number;
   }> {
-    await (
-      this as unknown as { _checkRunFibers(): Promise<void> }
-    )._checkRunFibers();
+    await recoverInterruptedTurnsForTest(this);
     // Read recovery state synchronously inside the same invocation: an
     // immediate alarm may consume it after this RPC releases the object.
     return {
@@ -9781,7 +9927,6 @@ export class ThinkProgrammaticTestAgent extends Think {
         storeChunk(streamId: string, body: string): unknown;
         flushBuffer(): void;
       };
-      _checkRunFibers(): Promise<void>;
     };
     const streamId = internals._resumableStream.start(input.requestId);
     for (const chunk of input.chunks) {
@@ -9801,13 +9946,13 @@ export class ThinkProgrammaticTestAgent extends Think {
       },
       user: null
     };
-    this.sql`
-      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
-      VALUES (${`fiber-${crypto.randomUUID()}`},
-              ${`${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${input.requestId}`},
-              ${JSON.stringify(snapshot)}, ${Date.now()})
-    `;
-    await internals._checkRunFibers();
+    await insertInterruptedTurnForTest(
+      this,
+      this.ctx.storage,
+      `${Think.CHAT_FIBER_NAME}:${input.requestId}`,
+      snapshot
+    );
+    await recoverInterruptedTurnsForTest(this);
     return {
       scheduledContinueCount: recoveryWorkCountForTest(
         this,
@@ -10265,12 +10410,9 @@ export class ThinkProgrammaticTestAgent extends Think {
         resumeFrames.push(JSON.parse(message));
       }
     };
-    // SAFETY: the real resume driver only needs this open connection's id and
-    // send method on its idle path; the private host method has this signature.
-    const host = this as unknown as {
-      _handleStreamResumeRequest(target: typeof connection): Promise<void>;
-    };
-    await host._handleStreamResumeRequest(connection);
+    await dispatchChatMessageForTest(this, connection, {
+      type: CHAT_MESSAGE_TYPES.STREAM_RESUME_REQUEST
+    });
     return {
       streamStatus:
         this._resumableStream.latestStreamInfoForRequest(requestId)?.status ??
@@ -10877,6 +11019,16 @@ export class ThinkRecoveryTestAgent extends Think {
     `;
   }
 
+  /** Chat-turn Task runs that have not finished: live or interrupted turns. */
+  async getUnfinishedChatTurnCountForTest(): Promise<number> {
+    const rows = this.sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM cf_agents_task_runs
+      WHERE definition = ${Think.CHAT_FIBER_NAME}
+        AND state IN ('pending', 'running', 'waiting')
+    `;
+    return rows[0]?.count ?? 0;
+  }
+
   async getTurnCallCount(): Promise<number> {
     return this._turnCallCount;
   }
@@ -11254,7 +11406,7 @@ export class ThinkRecoveryTestAgent extends Think {
   }
 
   /**
-   * Drive a real chat request through `_handleChatRequest` that fails before
+   * Drive a real chat request through the protocol dispatch that fails before
    * the stream starts (a `beforeTurn` throw stands in for a message
    * reconciliation or persistence failure). The recovery fiber must propagate
    * the error to the outer request handler.
@@ -11266,8 +11418,8 @@ export class ThinkRecoveryTestAgent extends Think {
   }): Promise<void> {
     this._throwBeforeTurnMessage = input.error;
     const connection = { id: "c-prestream", send() {} };
-    const event = {
-      type: "chat-request" as const,
+    await dispatchChatMessageForTest(this, connection, {
+      type: CHAT_MESSAGE_TYPES.USE_CHAT_REQUEST,
       id: input.requestId,
       init: {
         method: "POST",
@@ -11281,11 +11433,7 @@ export class ThinkRecoveryTestAgent extends Think {
           ]
         })
       }
-    };
-    const self = this as unknown as {
-      _handleChatRequest(c: unknown, e: unknown): Promise<void>;
-    };
-    await self._handleChatRequest(connection, event);
+    });
   }
 
   /** What `onConnect` replays to a reconnecting client (no active stream). */
@@ -11505,24 +11653,19 @@ export class ThinkRecoveryTestAgent extends Think {
     await this.ageIncidentForTest(begun.incidentId, 60_000);
 
     let terminalBroadcast: string | undefined;
-    const realBroadcast = (
+    const frames = (
       this as unknown as {
-        _broadcastChat(m: {
-          body?: string;
-          error?: boolean;
-          done?: boolean;
-        }): void;
+        _frames: {
+          broadcast(m: {
+            body?: string;
+            error?: boolean;
+            done?: boolean;
+          }): void;
+        };
       }
-    )._broadcastChat.bind(this);
-    (
-      this as unknown as {
-        _broadcastChat: (m: {
-          body?: string;
-          error?: boolean;
-          done?: boolean;
-        }) => void;
-      }
-    )._broadcastChat = (m) => {
+    )._frames;
+    const realBroadcast = frames.broadcast.bind(frames);
+    frames.broadcast = (m) => {
       if (m.error && m.done) terminalBroadcast = m.body;
       realBroadcast(m);
     };
@@ -11549,9 +11692,7 @@ export class ThinkRecoveryTestAgent extends Think {
         persistPartial: async () => undefined
       });
     } finally {
-      (
-        this as unknown as { _broadcastChat: (m: unknown) => void }
-      )._broadcastChat = realBroadcast as (m: unknown) => void;
+      frames.broadcast = realBroadcast;
     }
 
     const incidents = await this.ctx.storage.list<{ status: string }>({
@@ -11655,24 +11796,19 @@ export class ThinkRecoveryTestAgent extends Think {
     }
 
     let terminalBroadcast: string | undefined;
-    const realBroadcast = (
+    const frames = (
       this as unknown as {
-        _broadcastChat(m: {
-          body?: string;
-          error?: boolean;
-          done?: boolean;
-        }): void;
+        _frames: {
+          broadcast(m: {
+            body?: string;
+            error?: boolean;
+            done?: boolean;
+          }): void;
+        };
       }
-    )._broadcastChat.bind(this);
-    (
-      this as unknown as {
-        _broadcastChat: (m: {
-          body?: string;
-          error?: boolean;
-          done?: boolean;
-        }) => void;
-      }
-    )._broadcastChat = (m) => {
+    )._frames;
+    const realBroadcast = frames.broadcast.bind(frames);
+    frames.broadcast = (m) => {
       if (m.error && m.done) terminalBroadcast = m.body;
       realBroadcast(m);
     };
@@ -11702,9 +11838,7 @@ export class ThinkRecoveryTestAgent extends Think {
     } catch {
       threw = true;
     } finally {
-      (
-        this as unknown as { _broadcastChat: (m: unknown) => void }
-      )._broadcastChat = realBroadcast as (m: unknown) => void;
+      frames.broadcast = realBroadcast;
     }
 
     const incidents = await this.ctx.storage.list<{ status: string }>({
@@ -11777,19 +11911,17 @@ export class ThinkRecoveryTestAgent extends Think {
 
     let terminalBroadcast: string | undefined;
     const self = this as unknown as {
-      _broadcastChat(m: {
-        body?: string;
-        error?: boolean;
-        done?: boolean;
-      }): void;
+      _frames: {
+        broadcast(m: { body?: string; error?: boolean; done?: boolean }): void;
+      };
       _recordTerminalChatStatus(
         status: string,
         requestId: string,
         body: string
       ): Promise<void>;
     };
-    const realBroadcast = self._broadcastChat.bind(this);
-    self._broadcastChat = (m) => {
+    const realBroadcast = self._frames.broadcast.bind(self._frames);
+    self._frames.broadcast = (m) => {
       if (m.error && m.done) terminalBroadcast = m.body;
       realBroadcast(m);
     };
@@ -11829,7 +11961,7 @@ export class ThinkRecoveryTestAgent extends Think {
     } catch {
       secondThrew = true;
     } finally {
-      self._broadcastChat = realBroadcast;
+      self._frames.broadcast = realBroadcast;
       self._recordTerminalChatStatus = realRecordTerminal;
     }
     const incidentStatusAfterSecond = await readIncidentStatus();
@@ -11952,7 +12084,7 @@ export class ThinkRecoveryTestAgent extends Think {
       _chatRecoveryOriginIdsScope: {
         run<R>(store: string[], fn: () => R): R;
       };
-      _originMessageIdsFor(requestId: string): string[] | undefined;
+      _frames: { originIds(requestId: string): string[] | undefined };
     };
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
@@ -11960,9 +12092,9 @@ export class ThinkRecoveryTestAgent extends Think {
     });
     const scoped = self._chatRecoveryOriginIdsScope.run(ids, async () => {
       await gate;
-      return self._originMessageIdsFor("successor");
+      return self._frames.originIds("successor");
     });
-    const unrelated = self._originMessageIdsFor("unrelated");
+    const unrelated = self._frames.originIds("unrelated");
     release();
     return { successor: await scoped, unrelated };
   }
@@ -12134,24 +12266,22 @@ export class ThinkRecoveryTestAgent extends Think {
     )._completeResumableStream(streamId);
   }
 
+  /**
+   * Leave an interrupted turn: a chat turn (`CHAT_FIBER_NAME:<requestId>`)
+   * as a chat-turn Task run, anything else as a fiber row.
+   */
   async insertInterruptedFiber(
     name: string,
     snapshot?: unknown
   ): Promise<void> {
-    const id = `fiber-${crypto.randomUUID()}`;
-    this.sql`
-      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
-      VALUES (${id}, ${name}, ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
-    `;
+    await insertInterruptedTurnForTest(this, this.ctx.storage, name, snapshot);
   }
 
   async triggerFiberRecovery(): Promise<{
     scheduledContinueCount: number;
     scheduledRetryCount: number;
   }> {
-    await (
-      this as unknown as { _checkRunFibers(): Promise<void> }
-    )._checkRunFibers();
+    await recoverInterruptedTurnsForTest(this);
     // Read recovery state synchronously inside the same invocation: an
     // immediate alarm may consume it after this RPC releases the object.
     return {
@@ -12166,10 +12296,18 @@ export class ThinkRecoveryTestAgent extends Think {
   async triggerFiberRecoveryWithTransportForTest(
     callback: string
   ): Promise<{ tasks: number; schedules: number }> {
-    await (
-      this as unknown as { _checkRunFibers(): Promise<void> }
-    )._checkRunFibers();
+    await recoverInterruptedTurnsForTest(this);
     return recoveryTransportCountsForTest(this, callback);
+  }
+
+  /** Leave a chat turn's fiber row, as a version before Tasks did. */
+  insertLegacyChatFiberForTest(requestId: string, snapshot?: unknown): void {
+    this.sql`
+      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
+      VALUES (${`fiber-${crypto.randomUUID()}`},
+              ${`${Think.CHAT_FIBER_NAME}:${requestId}`},
+              ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
+    `;
   }
 
   async persistTestMessage(msg: UIMessage): Promise<void> {
@@ -13510,6 +13648,50 @@ export class ThinkMediaEvictionAgent extends Think {
   /** Re-run the budgeted cache refresh (a windowed read schedules eviction). */
   async resyncForTest(): Promise<number> {
     return (await this.syncMessagesFromStorage()).length;
+  }
+
+  /**
+   * Seed aged media on sub-agent facets of this agent, all before any pass
+   * runs. A name prefixed `auto:` is a `ThinkMediaEvictionAutoAgent` facet.
+   */
+  async seedFacetMediaForTest(...names: string[]): Promise<void> {
+    const children = await Promise.all(
+      names.map((name) => this._facetForTest(name))
+    );
+    await Promise.all(
+      children.map((child) =>
+        child.setMediaEvictionForTest({
+          keepRecentMessages: 2,
+          minPartBytes: 10_000
+        })
+      )
+    );
+    await Promise.all(
+      children.map((child) => child.seedMediaHistoryForTest("f"))
+    );
+  }
+
+  /** A stored message of a sub-agent facet of this agent. */
+  async getFacetStoredMessageForTest(
+    name: string,
+    id: string
+  ): Promise<UIMessage | null> {
+    return (await this._facetForTest(name)).getStoredMessageForTest(id);
+  }
+
+  private async _facetForTest(
+    name: string
+  ): Promise<
+    Pick<
+      ThinkMediaEvictionAgent,
+      | "setMediaEvictionForTest"
+      | "seedMediaHistoryForTest"
+      | "getStoredMessageForTest"
+    >
+  > {
+    return name.startsWith("auto:")
+      ? this.subAgent(ThinkMediaEvictionAutoAgent, name.slice("auto:".length))
+      : this.subAgent(ThinkMediaEvictionAgent, name);
   }
 
   async getStoredMessageForTest(id: string): Promise<UIMessage | null> {

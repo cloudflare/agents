@@ -25,6 +25,9 @@ import type {
 } from "agents/chat";
 import type { SessionMessage } from "agents/sessions";
 import type { DeliveryKind, MessengerContext } from "./messengers";
+// Type-only, for the `{@link Think.*}` references in this file's docs.
+// oxlint-disable-next-line no-unused-vars
+import type { Think } from "./think";
 
 /**
  * A best-effort internal `onStart` step that failed on this wake and was
@@ -961,18 +964,6 @@ export interface ExtensionConfig {
   /** JavaScript source code defining the extension's tools. */
   source: string;
 }
-
-/**
- * @internal The subset of the AI SDK's `ToolExecuteOptions` that Think's
- * tool wrapper reads when resolving a `beforeToolCall` decision.
- */
-export type ToolDecisionOptions = {
-  toolCallId: string;
-  messages: ModelMessage[];
-  abortSignal?: AbortSignal;
-  context?: unknown;
-  experimental_context?: unknown; // v6 alias kept for local wrappers if present
-};
 
 /**
  * Keys of the global `AiModels` interface (from `@cloudflare/workers-types`)

@@ -5,7 +5,11 @@
  * stabilizing.
  */
 export { Approvals } from "./approvals";
-export type { ImportedDecision, ImportedEffect } from "./approvals";
+export type {
+  ImportedDecision,
+  ImportedEffect,
+  SweepResult
+} from "./approvals";
 export { stableHash, stableStringify } from "./hash";
 export type {
   ApprovalsEventType,

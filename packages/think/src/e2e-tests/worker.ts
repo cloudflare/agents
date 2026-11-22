@@ -14,6 +14,7 @@ import {
   wrapChatFiberSnapshot
 } from "agents/chat";
 import type { ResumableStream } from "agents/chat";
+import { stableHash, type Approvals } from "agents/approvals";
 import { agentTool } from "agents/agent-tools";
 import type { Adapter } from "chat";
 import {
@@ -2666,7 +2667,7 @@ export class ThinkActionPauseRecoveryE2EAgent extends Think<Env> {
 
 // ── Action ledger pending-retry lease recovery (crash → reclaim) ────
 //
-// A crashed executor leaves a `pending` row in `cf_think_action_ledger`. We
+// A crashed executor leaves a `pending` row in `cf_agents_effects`. We
 // represent that crash artifact deterministically by seeding a stale `pending`
 // row (a crash leaves exactly such a row), then prove it survives a REAL deploy
 // (SIGKILL + restart) and is reclaimed by a subsequent invocation: an action
@@ -2786,25 +2787,21 @@ export class ThinkActionLedgerRecoveryE2EAgent extends Think<Env> {
    */
   @callable()
   async seedStalePendingRow(): Promise<void> {
-    const ensure = this as unknown as {
-      _ensureActionLedgerTable: () => void;
-      _actionInputHash: (input: unknown) => string;
-    };
-    ensure._ensureActionLedgerTable();
-    const inputHash = ensure._actionInputHash({
-      message: LEDGER_RECOVERY_MESSAGE
-    });
     const past = Date.now() - 600_000;
-    this.sql`
-      INSERT INTO cf_think_action_ledger (
-        key, action_name, request_id, tool_call_id, input_hash, status,
-        result_json, created_at, updated_at
-      )
-      VALUES (
-        ${`action:slowAction:${LEDGER_RECOVERY_KEY}`}, ${"slowAction"}, ${null},
-        ${"tc-crashed"}, ${inputHash}, ${"pending"}, ${null}, ${past}, ${past}
-      )
-    `;
+    (this as unknown as { _approvals: Approvals })._approvals.importRecords({
+      effects: [
+        {
+          key: `action:slowAction:${LEDGER_RECOVERY_KEY}`,
+          name: "slowAction",
+          inputHash: stableHash({ message: LEDGER_RECOVERY_MESSAGE }),
+          status: "pending",
+          resultJson: null,
+          context: { toolCallId: "tc-crashed" },
+          createdAt: past,
+          updatedAt: past
+        }
+      ]
+    });
   }
 
   @callable()
@@ -2818,11 +2815,9 @@ export class ThinkActionLedgerRecoveryE2EAgent extends Think<Env> {
   async listLedgerRows(): Promise<
     Array<{ key: string; status: string; updated_at: number }>
   > {
-    (
-      this as unknown as { _ensureActionLedgerTable: () => void }
-    )._ensureActionLedgerTable();
+    (this as unknown as { _approvals: Approvals })._approvals.importRecords({});
     return this.sql<{ key: string; status: string; updated_at: number }>`
-      SELECT key, status, updated_at FROM cf_think_action_ledger
+      SELECT key, status, updated_at FROM cf_agents_effects
       ORDER BY key ASC
     `;
   }

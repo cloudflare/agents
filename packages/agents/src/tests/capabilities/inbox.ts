@@ -26,6 +26,8 @@ export class InboxHarnessObject extends DurableObject<Cloudflare.Env> {
   /** Every handler call parks on this until {@link release}. */
   #hold: { promise: Promise<void>; open: () => void } | null = null;
   slowStatus = 0;
+  /** Called from every report, after it is recorded in {@link statuses}. */
+  reportHook: ((request: InboxRequest) => void | Promise<void>) | null = null;
   /** Milliseconds each `pending` report takes. */
   slowPending = 0;
 
@@ -62,6 +64,18 @@ export class InboxHarnessObject extends DurableObject<Cloudflare.Env> {
         this.#record("bigint", null, run);
         return { n: BigInt(1) };
       },
+      once: async (_payload: null, run: InboxRun) => {
+        this.#record("once", null, run);
+        let calls = 0;
+        // Serializes once; a second serialization throws.
+        return {
+          toJSON() {
+            calls += 1;
+            if (calls > 1) throw new Error("serialized twice");
+            return { value: "first" };
+          }
+        };
+      },
       big: async (payload: string, run: InboxRun) => {
         this.#record("big", payload.length, run);
         return payload;
@@ -77,6 +91,7 @@ export class InboxHarnessObject extends DurableObject<Cloudflare.Env> {
     },
     onStatus: async (request: InboxRequest) => {
       this.statuses.push({ id: request.id, status: request.status });
+      await this.reportHook?.(request);
       if (this.slowPending > 0 && request.status === "pending") {
         await new Promise((resolve) => setTimeout(resolve, this.slowPending));
         this.statuses.push({ id: request.id, status: "pending:done" });

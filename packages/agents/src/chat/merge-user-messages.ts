@@ -12,6 +12,8 @@ import type { TextUIPart, UIMessage } from "ai";
  * the last message's id and fields.
  *
  * @throws When `messages` is empty.
+ *
+ * @internal
  */
 export function mergeUserMessages(messages: readonly UIMessage[]): UIMessage {
   const [first, ...rest] = messages;
@@ -38,6 +40,8 @@ export function mergeUserMessages(messages: readonly UIMessage[]): UIMessage {
  * merged into one message, or `null` when fewer than two are there.
  *
  * @param warn - Told when `start` does not point at a user message.
+ *
+ * @internal
  */
 export function mergeQueuedUserMessages(
   messages: readonly UIMessage[],

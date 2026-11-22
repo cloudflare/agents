@@ -80,6 +80,9 @@ export class Sessions extends LifecycleCapability {
         );
       }
     }
+    // Not gated on the version: a lift that left rows behind retries on
+    // every start until the table is gone.
+    this.#core.liftLegacyFlatMessages();
   }
 
   // ── Surface ──────────────────────────────────────────────────────────────
