@@ -64,7 +64,16 @@ class BilledRows {
  */
 export class SessionHarnessObject extends DurableObject<Cloudflare.Env> {
   readonly sessions = new Sessions({
-    reservedMetadataKeys: ["channel", "turnMetadata"]
+    reservedMetadataKeys: ["channel", "turnMetadata"],
+    // A flat table of JSON messages, the shape ai-chat stored before
+    // Sessions. A row whose message has no `parts` is skipped.
+    legacyFlatMessages: {
+      table: "legacy_flat_messages",
+      parse: (raw) => {
+        const message = raw as SessionMessage | null;
+        return message && Array.isArray(message.parts) ? message : undefined;
+      }
+    }
   });
   readonly lifecycle = Lifecycle.install(this).use(this.sessions);
   readonly events: RecordedEvent[] = [];

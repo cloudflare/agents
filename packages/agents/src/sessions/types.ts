@@ -157,6 +157,25 @@ export interface SessionsOptions {
    * writes marked `source: "client"`. Default: none.
    */
   readonly reservedMetadataKeys?: readonly string[];
+  /**
+   * A flat legacy table of messages (`id`, `message` JSON, `created_at`) to
+   * lift into the default session on start, oldest first, as one chain.
+   * The table is dropped once every row has a copy, and left for the next
+   * start otherwise.
+   *
+   * @internal For `AIChatAgent`'s pre-Sessions table. Not a public API.
+   */
+  readonly legacyFlatMessages?: LegacyFlatMessages;
+}
+
+/**
+ * @internal A legacy flat message table and how one of its rows becomes a
+ * message. Not a public API.
+ */
+export interface LegacyFlatMessages {
+  readonly table: string;
+  /** The message a stored row holds, or `undefined` to skip the row. */
+  parse(raw: unknown, id: string): SessionMessage | undefined;
 }
 
 /** Trust policy shared by append and update writes. */
