@@ -41,6 +41,8 @@ export { QueueHarnessObject } from "./capabilities/queue.ts";
 import type { QueueHarnessObject } from "./capabilities/queue.ts";
 export { ApprovalsHarnessObject } from "./capabilities/approvals.ts";
 import type { ApprovalsHarnessObject } from "./capabilities/approvals.ts";
+export { ApprovalsReviewObject } from "./capabilities/approvals-review-harness.ts";
+import type { ApprovalsReviewObject } from "./capabilities/approvals-review-harness.ts";
 export {
   TaskHarnessObject,
   TaskSchedulerCoexistObject
@@ -264,6 +266,7 @@ export type Env = {
   SchedulerStartupWarnObject: DurableObjectNamespace<SchedulerStartupWarnObject>;
   QueueHarnessObject: DurableObjectNamespace<QueueHarnessObject>;
   ApprovalsHarnessObject: DurableObjectNamespace<ApprovalsHarnessObject>;
+  ApprovalsReviewObject: DurableObjectNamespace<ApprovalsReviewObject>;
   TaskHarnessObject: DurableObjectNamespace<TaskHarnessObject>;
   TaskSchedulerCoexistObject: DurableObjectNamespace<TaskSchedulerCoexistObject>;
   StreamHarnessObject: DurableObjectNamespace<StreamHarnessObject>;

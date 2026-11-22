@@ -159,6 +159,91 @@ describe("Approvals effect ledger", () => {
     );
   });
 
+  it("answers conflict, not the running value, for the same key with another input", async () => {
+    await runInDurableObject(
+      harness(),
+      async (instance: ApprovalsHarnessObject) => {
+        let finish!: () => void;
+        const gate = new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        const first = instance.approvals.once({
+          key: "refund:o1",
+          name: "refund",
+          input: { amount: 40 },
+          run: async () => {
+            await gate;
+            return "refunded 40";
+          }
+        });
+        const second = await instance.approvals.once({
+          key: "refund:o1",
+          name: "refund",
+          input: { amount: 60 },
+          run: () => "refunded 60"
+        });
+        expect(second).toEqual({ status: "conflict" });
+        finish();
+        expect(await first).toEqual({ status: "ran", value: "refunded 40" });
+      }
+    );
+  });
+
+  it("keeps a running claim through a sweep, however old", async () => {
+    await runInDurableObject(
+      harness(),
+      async (instance: ApprovalsHarnessObject, state) => {
+        let finish!: () => void;
+        const gate = new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        const running = instance.approvals.once({
+          key: "slow",
+          name: "n",
+          input: null,
+          run: async () => {
+            await gate;
+            return "done";
+          }
+        });
+        state.storage.sql.exec(
+          "UPDATE cf_agents_effects SET updated_at = ? WHERE key = 'slow'",
+          Date.now() - 10_000
+        );
+        instance.retention = { effectPendingMs: 1000 };
+        expect(await instance.approvals.sweep({ force: true })).toEqual({
+          effects: 0,
+          decisions: 0
+        });
+        finish();
+        expect(await running).toEqual({ status: "ran", value: "done" });
+        expect(instance.approvals.effect("slow")?.status).toBe("settled");
+      }
+    );
+  });
+
+  it("tells two dates apart in an input", async () => {
+    await runInDurableObject(
+      harness(),
+      async (instance: ApprovalsHarnessObject) => {
+        await instance.approvals.once({
+          key: "invoice-1",
+          name: "remind",
+          input: { due: new Date("2026-03-01T00:00:00Z") },
+          run: () => "march"
+        });
+        expect(
+          await instance.approvals.once({
+            key: "invoice-1",
+            name: "remind",
+            input: { due: new Date("2026-04-01T00:00:00Z") },
+            run: () => "april"
+          })
+        ).toEqual({ status: "conflict" });
+      }
+    );
+  });
+
   it("answers in-doubt for a claim an ended attempt left, and reclaims it only when allowed", async () => {
     await runInDurableObject(
       harness(),
@@ -366,6 +451,46 @@ describe("Approvals decisions", () => {
     );
   });
 
+  it("settles with an error when the outcome is too large to store", async () => {
+    await runInDurableObject(
+      harness(),
+      async (instance: ApprovalsHarnessObject) => {
+        instance.nextOutcome = { report: "x".repeat(2_500_000) };
+        const { id } = instance.approvals.park({ kind: "action", subject: 1 });
+        const result = await instance.approvals.decide(id, { approved: true });
+        expect(result.status).toBe("settled");
+        if (result.status !== "settled") return;
+        expect(result.decision.outcome).toBeUndefined();
+        expect(result.decision.error).toMatch(/could not be stored/);
+        expect(instance.continued).toEqual([id]);
+      }
+    );
+  });
+
+  it("records a decision made elsewhere and hands its outcome off", async () => {
+    await runInDurableObject(
+      harness(),
+      async (instance: ApprovalsHarnessObject) => {
+        const decision = await instance.approvals.record({
+          id: "made-elsewhere",
+          kind: "codemode",
+          subject: { executionId: "e1" },
+          verdict: { approved: true },
+          outcome: { status: "completed" }
+        });
+        expect(decision).toMatchObject({
+          status: "settled",
+          outcome: { status: "completed" },
+          acknowledged: true
+        });
+        expect(instance.continued).toEqual([]);
+        expect(instance.handedOff).toEqual([
+          { id: "made-elsewhere", redelivered: false }
+        ]);
+      }
+    );
+  });
+
   it("returns the existing record when the same id is parked again, and refuses another subject", async () => {
     await runInDurableObject(
       harness(),
@@ -381,6 +506,18 @@ describe("Approvals decisions", () => {
           subject: { a: 1 }
         });
         expect(again).toEqual(first);
+        const reordered = instance.approvals.park({
+          id: "p2",
+          kind: "action",
+          subject: { x: { b: 2, a: 1 } }
+        });
+        expect(
+          instance.approvals.park({
+            id: "p2",
+            kind: "action",
+            subject: { x: { a: 1, b: 2 } }
+          })
+        ).toEqual(reordered);
         expect(() =>
           instance.approvals.park({
             id: "p1",
@@ -521,6 +658,47 @@ describe("Approvals decisions", () => {
         );
       }
     );
+  });
+
+  it("fails a waiter when its decision expires", async () => {
+    await runInDurableObject(
+      harness(),
+      async (instance: ApprovalsHarnessObject, state) => {
+        const { id } = instance.approvals.park({ kind: "action", subject: 1 });
+        const waiting = instance.approvals.wait(id);
+        state.storage.sql.exec(
+          "UPDATE cf_agents_decisions SET created_at = ? WHERE id = ?",
+          Date.now() - 10_000,
+          id
+        );
+        instance.retention = { decisionPendingMs: 1000 };
+        await instance.approvals.sweep({ force: true });
+        await expect(waiting).rejects.toThrow(/expired/);
+      }
+    );
+  });
+
+  it("finishes a continuation a real reset cut off", async () => {
+    const name = crypto.randomUUID();
+    let stub = env.ApprovalsHarnessObject.getByName(name);
+    const id = await stub.decideHeld();
+    await stub.restart().catch(() => {});
+
+    stub = env.ApprovalsHarnessObject.getByName(name);
+    expect(await stub.status(id)).toBe("decided");
+    await runInDurableObject(stub, (_instance, state) => {
+      backdateDecisionJob(state.storage, id);
+    });
+    await runDurableObjectAlarm(stub);
+    await runInDurableObject(stub, async (instance: ApprovalsHarnessObject) => {
+      const settled = await instance.approvals.wait(id, { timeoutMs: 5000 });
+      expect(settled).toMatchObject({
+        status: "settled",
+        outcome: { status: "done", effect: "ran" }
+      });
+      expect(instance.continued).toEqual([id]);
+      expect(instance.sideEffects).toBe(1);
+    });
   });
 
   it("sweeps expired rows per retention, and never a decided one", async () => {

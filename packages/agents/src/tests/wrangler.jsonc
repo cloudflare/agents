@@ -69,6 +69,10 @@
         "name": "ApprovalsHarnessObject"
       },
       {
+        "class_name": "ApprovalsReviewObject",
+        "name": "ApprovalsReviewObject"
+      },
+      {
         "class_name": "BrowserHarnessObject",
         "name": "BrowserHarnessObject"
       },
@@ -492,6 +496,7 @@
         "SchedulerStartupWarnObject",
         "QueueHarnessObject",
         "ApprovalsHarnessObject",
+        "ApprovalsReviewObject",
         "BrowserHarnessObject",
         "InternalHostsPlainObject",
         "InternalHostsNoMethodObject",
