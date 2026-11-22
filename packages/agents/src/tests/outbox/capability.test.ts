@@ -464,6 +464,53 @@ describe("Outbox capability", () => {
     });
   });
 
+  it("raises the version of a key sent again after its value was delivered", async () => {
+    const { stub } = stubFor();
+    await runInDurableObject(stub, async (instance: OutboxHarnessObject) => {
+      const first = await instance.outbox.send(
+        "record",
+        { value: "a" },
+        { key: "v" }
+      );
+      await waitFor(() => drained(instance));
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const second = await instance.outbox.send(
+        "record",
+        { value: "b" },
+        { key: "v", hold: true }
+      );
+      expect(second.version).toBeGreaterThan(first.version);
+    });
+  });
+
+  it("ignores a checkpoint from an attempt that ran before retry()", async () => {
+    const { stub } = stubFor();
+    await runInDurableObject(stub, async (instance: OutboxHarnessObject) => {
+      const saves: Array<(value: unknown) => Promise<void>> = [];
+      instance.outbox.register("__cf_stale", {
+        deliver: (_payload: string, delivery) => {
+          saves.push(delivery.saveCheckpoint);
+          return new Promise<void>(() => {});
+        },
+        retry: { attemptTimeoutMs: 20, maxAttempts: 1 }
+      });
+      await instance.outbox.send("__cf_stale", "x", { key: "k" });
+      await waitFor(
+        async () =>
+          (await instance.outbox.get("__cf_stale", "k"))?.status === "failed"
+      );
+      expect(await instance.outbox.retry("__cf_stale", "k")).toBe(true);
+      await waitFor(() => saves.length === 2);
+      await saves[1]("new");
+      await expect(saves[0]("old")).rejects.toThrow("no longer owns");
+      const row = instance.sql(
+        "SELECT checkpoint FROM cf_agents_outbox WHERE key = 'k'"
+      ) as Array<{ checkpoint: string }>;
+      expect(row[0]?.checkpoint).toBe(JSON.stringify("new"));
+      await instance.outbox.cancel("__cf_stale", "k");
+    });
+  });
+
   it("cuts long errors, caps checkpoints, and versions each value of a key", async () => {
     const { stub } = stubFor();
     await runInDurableObject(stub, async (instance: OutboxHarnessObject) => {
@@ -483,9 +530,8 @@ describe("Outbox capability", () => {
         key: "k",
         hold: true
       });
-      expect(first.version).toBe(1);
       const second = await instance.outbox.send("__cf_big", "b", { key: "k" });
-      expect(second.version).toBe(2);
+      expect(second.version).toBeGreaterThan(first.version);
       await waitFor(
         async () =>
           (await instance.outbox.get("__cf_big", "k"))?.status === "failed"

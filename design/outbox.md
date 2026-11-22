@@ -10,14 +10,14 @@ A delivery is a row in `cf_agents_outbox`, unique on `(sink, key)`. `send(sink, 
 
 When the job fires, the Outbox:
 
-1. Counts the attempt in the row and sets the next wake one attempt timeout (default 60 seconds) out, before the sink runs.
+1. Counts the attempt in the row, gives it a claim token, and sets the next wake at the attempt timeout (default 60 seconds) or the give-up deadline, whichever is first, before the sink runs.
 2. Runs the sink inside host context.
 3. On return, deletes the row if it still holds the value this attempt read (compared by idempotency key).
 4. On a throw, sets the next attempt `min(maxDelayMs, baseDelayMs * 2^(attempt-1))` out, or gives up.
 
 A sink still running after five seconds is handed to the alarm's memory-limit breaker with `trackAlarmWork`, and the alarm loop moves on. The wake set in step 1 covers an isolate that dies mid-attempt. Tasks uses the same pattern.
 
-An attempt that outlives its timeout counts as failed and backs off like a throw. The sink is not cancelled, so it may still return: a late return acknowledges the value (it was delivered), and a late throw changes nothing. Every write an attempt makes is guarded on the value's idempotency key and the attempt number, so an old attempt cannot re-time, fail or overwrite the checkpoint of a newer one. Its `saveCheckpoint` throws instead, so a sink that delivers in steps stops at its next step rather than repeating the steps the newer attempt takes. A sink that never settles still gives up at `giveUpAfterMs`. Each value also carries a `version` that counts the sends under its key, so a receiver that sees two attempts overlap can keep the newer value.
+An attempt that outlives its timeout counts as failed and backs off like a throw. The sink is not cancelled, so it may still return: a late return acknowledges the value (it was delivered), and a late throw changes nothing. Every write an attempt makes is guarded on the value's idempotency key and the attempt's claim token, so an old attempt cannot re-time, fail or overwrite the checkpoint of a newer one. Its `saveCheckpoint` throws instead, so a sink that delivers in steps stops at its next step rather than repeating the steps the newer attempt takes. A sink that never settles still gives up at `giveUpAfterMs`. Each value also carries a `version`, higher for every later send of its key (the send's epoch ms, raised past the stored value's when the row still exists, so it keeps rising after a delivered row is deleted), so a receiver that sees two attempts overlap can keep the newer value. Each attempt holds a claim token in the row; the attempt's writes match on it, so a late write from a timed-out attempt, or from before a `retry()`, changes nothing, and its `saveCheckpoint` throws.
 
 Giving up sets the row to `failed`, emits `outbox:give_up` and calls the sink's `onGiveUp`. Failed rows stay readable and can be started over with `retry()`. Startup purges failed rows older than seven days.
 
@@ -62,7 +62,7 @@ Events go to the `agents:outbox` diagnostics channel: `outbox:send`, `outbox:del
 
 **The attempt counts before the sink runs.** A value that takes the isolate down every time would otherwise loop forever, because the failure is never recorded. Counting first means the crash loop runs out of attempts like any other failure. The cost is that an attempt cut short by an unrelated reset also counts.
 
-**Replacing a value starts it over.** The attempt count, the give-up window and the checkpoint reset, and the value gets a new idempotency key. A new value is new intent. An attempt already running finishes with the old value, and its acknowledgement cannot delete the new one.
+**Replacing a value starts it over.** The attempt count, the give-up window and the checkpoint reset, and the value gets a new idempotency key. A new value is new intent. An attempt already running finishes with the old value, and its acknowledgement cannot delete the new one. The new value waits for that attempt in this isolate, but only until the attempt's timeout: after it, the old attempt may still be running while the new value is delivered.
 
 **Hold.** `send(..., { hold: true })` stores a value without delivering it, and `release()` delivers it. `release` reads and writes in one step, so two racing releases deliver once. Think's messenger recovery needs this. The reply's destination is known before recovery knows what the reply is.
 

@@ -83,6 +83,7 @@ type OutboxRow = {
   last_error: string | null;
   checkpoint: string | null;
   version: number;
+  claim: string | null;
   created_at: number;
   updated_at: number;
 };
@@ -132,6 +133,23 @@ function validatePolicy(policy: OutboxRetryPolicy | undefined): void {
   if (policy.maxAttempts !== undefined && policy.maxAttempts < 1) {
     throw new Error("Outbox retry.maxAttempts must be at least 1");
   }
+}
+
+/**
+ * When to look at a running attempt again: at its timeout, or at the
+ * give-up deadline if that comes first.
+ */
+function runningWake(
+  row: { first_attempt_at: number | null },
+  policy: Required<OutboxRetryPolicy>,
+  now: number
+): number {
+  const timeout = now + policy.attemptTimeoutMs;
+  if (row.first_attempt_at === null) return timeout;
+  return Math.max(
+    now + 1,
+    Math.min(timeout, row.first_attempt_at + policy.giveUpAfterMs)
+  );
 }
 
 /** JSON has no Infinity: an unlimited bound is stored as `"unlimited"`. */
@@ -348,8 +366,8 @@ export class Outbox<
       `INSERT INTO cf_agents_outbox
          (id, sink, key, payload, idempotency_key, status, retry_options,
           attempts, first_attempt_at, next_at, last_error, checkpoint,
-          created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, NULL, NULL, ?, ?)
+          version, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, NULL, NULL, ?, ?, ?)
        ON CONFLICT (sink, key) DO UPDATE SET
          payload = excluded.payload,
          idempotency_key = excluded.idempotency_key,
@@ -360,7 +378,8 @@ export class Outbox<
          next_at = excluded.next_at,
          last_error = NULL,
          checkpoint = NULL,
-         version = cf_agents_outbox.version + 1,
+         claim = NULL,
+         version = max(excluded.version, cf_agents_outbox.version + 1),
          updated_at = excluded.updated_at`,
       nanoid(),
       sink,
@@ -370,6 +389,7 @@ export class Outbox<
       status,
       options.retry ? encodePolicy(options.retry) : null,
       options.hold ? null : now,
+      now,
       now,
       now
     );
@@ -474,7 +494,7 @@ export class Outbox<
     this.#write(
       `UPDATE cf_agents_outbox
        SET status = 'pending', attempts = 0, first_attempt_at = NULL,
-           next_at = ?, last_error = NULL, updated_at = ?
+           next_at = ?, last_error = NULL, claim = NULL, updated_at = ?
        WHERE id = ?`,
       Date.now(),
       Date.now(),
@@ -519,7 +539,7 @@ export class Outbox<
           return this.#wakeOutcome(id);
         }
         this.lifecycle.trackAlarmWork(active);
-        return { rescheduleAt: Date.now() + policy.attemptTimeoutMs };
+        return { rescheduleAt: runningWake(running, policy, Date.now()) };
       }
       // A newer value waits for the old attempt, which re-arms it when it
       // ends; look again in a second rather than spinning the alarm loop.
@@ -551,24 +571,27 @@ export class Outbox<
 
     // Count the attempt before it runs, so an attempt that takes the
     // isolate down still counts toward giving up.
-    const attempt = row.attempts + 1;
+    // Each attempt holds its own claim: a late write from an attempt that
+    // timed out, or from before a `retry()`, matches no row.
+    const claimed: OutboxRow = {
+      ...row,
+      attempts: row.attempts + 1,
+      first_attempt_at: row.first_attempt_at ?? now,
+      claim: nanoid()
+    };
     this.#write(
       `UPDATE cf_agents_outbox
-       SET attempts = ?, first_attempt_at = coalesce(first_attempt_at, ?),
-           next_at = ?, updated_at = ?
+       SET attempts = ?, first_attempt_at = ?, claim = ?, next_at = ?,
+           updated_at = ?
        WHERE id = ? AND idempotency_key = ?`,
-      attempt,
-      now,
-      now + policy.attemptTimeoutMs,
+      claimed.attempts,
+      claimed.first_attempt_at,
+      claimed.claim,
+      runningWake(claimed, policy, now),
       now,
       id,
       row.idempotency_key
     );
-    const claimed: OutboxRow = {
-      ...row,
-      attempts: attempt,
-      first_attempt_at: row.first_attempt_at ?? now
-    };
     const run = this.#attempt(claimed).finally(() => {
       if (this.#active.get(id) === run) this.#active.delete(id);
     });
@@ -589,7 +612,7 @@ export class Outbox<
       ]);
       if (winner === "budget") {
         this.lifecycle.trackAlarmWork(run);
-        return { rescheduleAt: Date.now() + policy.attemptTimeoutMs };
+        return { rescheduleAt: runningWake(claimed, policy, Date.now()) };
       }
     } finally {
       clearTimeout(timer);
@@ -601,7 +624,7 @@ export class Outbox<
    * Run one attempt. It fails when the sink throws or outlives the
    * attempt timeout. A sink that returns after its attempt timed out still
    * acknowledges the value; a late throw changes nothing. Writes for this
-   * attempt are guarded on its value and attempt number, so a late attempt
+   * attempt are guarded on its value and its claim token, so a late attempt
    * never re-times or overwrites a newer one.
    */
   async #attempt(row: OutboxRow): Promise<void> {
@@ -626,13 +649,13 @@ export class Outbox<
         }
         const saved = this.#write(
           `UPDATE cf_agents_outbox SET checkpoint = ?, updated_at = ?
-           WHERE id = ? AND idempotency_key = ? AND attempts = ?
+           WHERE id = ? AND idempotency_key = ? AND claim IS ?
              AND status = 'pending'`,
           json,
           Date.now(),
           row.id,
           row.idempotency_key,
-          row.attempts
+          row.claim
         );
         // This attempt timed out and a newer one owns the value, or the
         // value was replaced, cancelled or acknowledged: stop the sink at
@@ -660,6 +683,9 @@ export class Outbox<
         timedOut
       ]);
       if (winner === "timeout") {
+        // Still the alarm's work: a memory-limit reset it reports late
+        // counts against the breaker like one before the timeout.
+        this.lifecycle.trackAlarmWork(delivered);
         delivered.then(
           () => this.#acknowledge(row),
           () => {}
@@ -722,14 +748,14 @@ export class Outbox<
     const changed = this.#write(
       `UPDATE cf_agents_outbox
        SET next_at = ?, last_error = ?, updated_at = ?
-       WHERE id = ? AND idempotency_key = ? AND attempts = ?
+       WHERE id = ? AND idempotency_key = ? AND claim IS ?
          AND status = 'pending'`,
       nextAt,
       errorMessage(error),
       now,
       row.id,
       row.idempotency_key,
-      row.attempts
+      row.claim
     );
     if (changed > 0) {
       console.warn(
@@ -754,13 +780,13 @@ export class Outbox<
     const changed = this.#write(
       `UPDATE cf_agents_outbox
        SET status = 'failed', next_at = NULL, last_error = ?, updated_at = ?
-       WHERE id = ? AND idempotency_key = ? AND attempts = ?
+       WHERE id = ? AND idempotency_key = ? AND claim IS ?
          AND status = 'pending'`,
       errorMessage(error),
       now,
       row.id,
       row.idempotency_key,
-      row.attempts
+      row.claim
     );
     if (changed === 0) return;
     console.error(
@@ -986,6 +1012,7 @@ export class Outbox<
         last_error TEXT,
         checkpoint TEXT,
         version INTEGER NOT NULL DEFAULT 1,
+        claim TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         UNIQUE (sink, key)

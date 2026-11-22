@@ -58,9 +58,11 @@ export type OutboxDelivery<T = unknown> = {
   /** Message of the last failed attempt, cut at 4,000 characters. */
   readonly lastError: string | null;
   /**
-   * Counts the values sent under this key, starting at 1. A receiver that
-   * can see two attempts of one key (an attempt that timed out and returned
-   * late) keeps the higher version.
+   * Higher for every later value sent under this key, including after an
+   * earlier value was delivered and its row deleted: the epoch ms of the
+   * send, raised past the stored value's version when the row still
+   * exists. A receiver that can see two attempts of one key (an attempt
+   * that timed out and returned late) keeps the higher version.
    */
   readonly version: number;
   /** Epoch ms the key was first sent. */
