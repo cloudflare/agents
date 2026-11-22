@@ -123,6 +123,9 @@ export function followEventLog<T = unknown, S = unknown>(
     if (!frame || frame.log !== log) return;
     // An answer to another follower's subscribe on this socket.
     if (frame.id !== undefined && frame.id !== id) return;
+    // A crash resync for every follower, while this follower's own
+    // subscribe is unanswered: that answer is computed later, so it wins.
+    if (replaying && frame.type === EVENT_LOG_RESYNC && frame.id !== id) return;
     switch (frame.type) {
       case EVENT_LOG_EVENTS: {
         // Before the first resync there is nothing to apply events to.

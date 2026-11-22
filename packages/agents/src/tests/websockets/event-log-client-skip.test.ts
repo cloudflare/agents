@@ -67,4 +67,28 @@ describe("followEventLog skip guard", () => {
     });
     expect(applied).toEqual([11, 12, 13, 14, 15, 16, 17]);
   });
+
+  it("calls onResync once when a crash resync for everyone crosses its own subscribe", () => {
+    const socket = new FakeSocket();
+    const resyncs: number[] = [];
+    followEventLog(socket, "feed", {
+      onEvent: () => {},
+      onResync: (_snapshot, seq) => resyncs.push(seq)
+    });
+    const id = socket.sent[0].id as string;
+    socket.deliver({
+      type: "cf_agent_log_resync",
+      log: "feed",
+      epoch: "e",
+      seq: 4
+    });
+    socket.deliver({
+      type: "cf_agent_log_resync",
+      log: "feed",
+      epoch: "e",
+      seq: 4,
+      id
+    });
+    expect(resyncs).toEqual([4]);
+  });
 });
