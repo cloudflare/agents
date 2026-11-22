@@ -1211,7 +1211,6 @@ function dropGenerationAfterToolCall(
   return kept.length === parts.length ? parts : kept;
 }
 
-
 /** Payload of one queued workflow notification. */
 type WorkflowNotificationPayload = {
   workflowName: string;
