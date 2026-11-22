@@ -1,4 +1,6 @@
-import { OutboxPayloadTooLargeError, type OutboxSink } from "agents/chat";
+import { MAX_OUTBOX_PAYLOAD_BYTES, type OutboxSink } from "agents/chat";
+
+const encoder = new TextEncoder();
 
 /**
  * The workflow event a terminal submission owes, delivered through the
@@ -50,38 +52,41 @@ export function workflowNotificationSink(
 
 /**
  * Store a notification for delivery. One whose output is too large for
- * the Outbox is replaced by an error notification under the same key, so
- * the workflow's `step.prompt()` fails instead of waiting for an event that
- * never comes.
+ * the Outbox is replaced, before anything is written, by an error
+ * notification under the same key, so the workflow's `step.prompt()` fails
+ * instead of waiting for an event that never comes. One send either way, so
+ * the write still commits with the caller's synchronous writes.
  */
 export async function sendWorkflowNotification(
   send: (notification: WorkflowNotification, key: string) => Promise<unknown>,
   notification: WorkflowNotification,
   key: string
 ): Promise<void> {
-  try {
+  if (
+    encoder.encode(JSON.stringify(notification)).byteLength <=
+    MAX_OUTBOX_PAYLOAD_BYTES
+  ) {
     await send(notification, key);
-  } catch (error) {
-    if (!(error instanceof OutboxPayloadTooLargeError)) throw error;
-    const { submissionId } = (notification.event.payload ?? {}) as {
-      submissionId?: string;
-    };
-    await send(
-      {
-        ...notification,
-        event: {
-          type: notification.event.type,
-          payload: {
-            submissionId,
-            status: "error",
-            error:
-              "The submission's output is too large to deliver to the workflow (over 1 MB of JSON)."
-          }
-        }
-      },
-      key
-    );
+    return;
   }
+  const { submissionId } = (notification.event.payload ?? {}) as {
+    submissionId?: string;
+  };
+  await send(
+    {
+      ...notification,
+      event: {
+        type: notification.event.type,
+        payload: {
+          submissionId,
+          status: "error",
+          error:
+            "The submission's output is too large to deliver to the workflow (over 1 MB of JSON)."
+        }
+      }
+    },
+    key
+  );
 }
 
 /**

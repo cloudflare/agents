@@ -138,7 +138,8 @@ Object RPC open.
    Think records a pending workflow notification.
 4. Think delivers the notification with `sendWorkflowEvent()`, retrying with
    backoff until the Workflow accepts it. Delivery gives up
-   twelve hours after the first attempt and reports the failure to `onError`.
+   within twelve hours of the first attempt (when the next retry would land
+   past that) and reports the failure to `onError`.
 5. `step.waitForEvent("<name>:wait", ...)` resumes the Workflow.
 6. `step.prompt()` validates the structured output or throws a typed error.
 
