@@ -50,7 +50,9 @@ for each other row calls the host's internal recovery first
 and then `onFiberRecovered()`, both inside the host invocation context. It
 then marks managed ledger rows with no run row (accepted, never started)
 `interrupted` and recovers them the same way. One scan runs at a time; a
-caller that arrives during a scan joins it.
+caller that arrives during a scan joins it. So a user `onFiberRecovered()` that never
+returns holds every later recovery wake, as it already held startup.
+Only the internal hook has a timeout.
 
 Agent runs a scan during startup, before the user's `onStart()`, so chat
 recovery sees its budgets before user code changes them.
