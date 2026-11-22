@@ -77,6 +77,34 @@ describe("jobs whose owner is not installed", () => {
     });
   });
 
+  it("re-arms for an installed owner while a hundred owners are missing", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const jobs = new Jobs("installed-owner");
+      const { lifecycle } = install(jobs);
+      await lifecycle.start();
+      // Creates the queue table, then fills it with a hundred jobs whose
+      // owners are not installed.
+      await jobs.push({ id: "seed", fn: "run", time: Date.now() + 600_000 });
+      const now = Date.now();
+      for (let i = 0; i < 100; i++) {
+        storage.sql.exec(
+          `INSERT INTO cf_agents_jobs (id, capability, fn, time)
+           VALUES (?, ?, 'run', ?)`,
+          `gone-${i}`,
+          `gone-owner-${i}`,
+          now - 1
+        );
+      }
+      await lifecycle.alarm();
+
+      // All hundred are held; an installed owner can still push and its
+      // earlier deadline becomes the wake.
+      const due = Date.now() + 10_000;
+      await jobs.push({ id: "mine", fn: "run", time: due });
+      expect(await storage.getAlarm()).toBe(due);
+    });
+  });
+
   it("reports a job whose unreported attempts ran out", async () => {
     await withCapabilityHarness(async ({ install, storage }) => {
       const jobs = new Jobs("exhausted-owner");
