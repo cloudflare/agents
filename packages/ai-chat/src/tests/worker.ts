@@ -1143,9 +1143,8 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   isChatTurnActiveForTest(): boolean {
-    return (
-      this as unknown as { isChatTurnActive(): boolean }
-    ).isChatTurnActive();
+    return (this as unknown as { _turnQueue: { isActive: boolean } })._turnQueue
+      .isActive;
   }
 
   async waitForIdleForTest(): Promise<void> {
@@ -2173,9 +2172,8 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
   }
 
   isChatTurnActiveForTest(): boolean {
-    return (
-      this as unknown as { isChatTurnActive(): boolean }
-    ).isChatTurnActive();
+    return (this as unknown as { _turnQueue: { isActive: boolean } })._turnQueue
+      .isActive;
   }
 
   async waitForIdleForTest(): Promise<boolean> {
@@ -5373,16 +5371,18 @@ export class RecoveryThrowingAgent extends AIChatAgent<Env> {
       this._shouldThrow = false;
     }
     const internals = this as unknown as {
-      _liveChatRecoveryTurns: Map<string, unknown>;
-      _liveChatTurnClosures: Map<string, unknown>;
+      _chatTurnFibers: {
+        liveTurns: Map<string, unknown>;
+        liveClosures: Map<string, unknown>;
+      };
       _abortRegistry: { size: number };
       _turnQueue: { isActive: boolean };
     };
     return {
       thrown,
       onErrorSeen: [...this._onErrorSeen],
-      liveRecoveryTurns: internals._liveChatRecoveryTurns.size,
-      liveClosures: internals._liveChatTurnClosures.size,
+      liveRecoveryTurns: internals._chatTurnFibers.liveTurns.size,
+      liveClosures: internals._chatTurnFibers.liveClosures.size,
       fibers: this.getActiveFibers().length,
       abortControllers: internals._abortRegistry.size,
       queueIdle: !internals._turnQueue.isActive
