@@ -98,34 +98,45 @@ export function matchAgentToolRunRequest(
 }
 
 /**
+ * @internal Where a run's child is, for a drill-in: its class and name;
+ * `"facet-era"` for a run from when children were facets, whose child cannot
+ * be opened; `"never-started"` for a run refused at dispatch, which has no
+ * child; or `null` when the parent has no such run.
+ */
+export type AgentToolRunChildAddress =
+  | { className: string; childName: string }
+  | "facet-era"
+  | "never-started"
+  | null;
+
+const UNREACHABLE_CHILD = {
+  "facet-era":
+    "This agent tool run's child was kept by an earlier version and cannot be opened",
+  "never-started": "This agent tool run never started, so it has no child"
+} as const;
+
+/**
  * @internal Forward a request (HTTP or WebSocket upgrade) to a run's child. After an
  * upgrade the child owns the socket, so its frames never wake the parent.
  *
- * @param child - For a run id: the child's class and name, `"unreachable"`
- *   for a run of this parent that has no child to reach (it is from when
- *   children were facets), or `null` when the parent has no such run.
- * @returns The child's response; `404` for a run whose child cannot be
- *   reached, so the request never lands on the parent's own chat; or
- *   `undefined` when no candidate in the path is a run of this parent, so
- *   the agent handles the request itself.
+ * @param child - Where the child of a run id is.
+ * @returns The child's response for the first candidate that names a run
+ *   with a child; else `404` when a candidate names a run whose child cannot
+ *   be opened, so the request never lands on the parent's own chat; else
+ *   `undefined`, so the agent handles the request itself.
  */
 export async function forwardAgentToolRunRequest(
   ctx: DurableObjectState,
   request: Request,
-  child: (
-    runId: string
-  ) => { className: string; childName: string } | "unreachable" | null
+  child: (runId: string) => AgentToolRunChildAddress
 ): Promise<Response | undefined> {
-  const matches = matchAgentToolRunRequest(request);
-  if (matches.length === 0) return undefined;
-  for (const match of matches) {
+  let unreachable: "facet-era" | "never-started" | undefined;
+  for (const match of matchAgentToolRunRequest(request)) {
     const target = child(match.runId);
     if (!target) continue;
-    if (target === "unreachable") {
-      return new Response(
-        "This agent tool run's child was kept by an earlier version and cannot be opened",
-        { status: 404 }
-      );
+    if (typeof target === "string") {
+      unreachable ??= target;
+      continue;
     }
     const stub = await agentToolChildStub(
       ctx,
@@ -133,6 +144,9 @@ export async function forwardAgentToolRunRequest(
       target.childName
     );
     return stub.fetch(new Request(match.url, request));
+  }
+  if (unreachable) {
+    return new Response(UNREACHABLE_CHILD[unreachable], { status: 404 });
   }
   // No candidate is a run: the segment belongs to the agent's own name or
   // one of its own routes, so the request is the agent's.

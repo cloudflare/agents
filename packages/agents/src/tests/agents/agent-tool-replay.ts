@@ -624,6 +624,20 @@ export class TestAgentToolReplayAgent extends Agent {
     return { status: response.status, body: await response.text() };
   }
 
+  /** A run the concurrency limit refuses: it records that it has no child. */
+  async runRefusedForTest(runId: string): Promise<RunAgentToolResult> {
+    const limit = this.maxConcurrentAgentTools;
+    this.maxConcurrentAgentTools = 0;
+    try {
+      return await this.runDeterministicAgentToolForTest({
+        runId,
+        chunkBodies: []
+      });
+    } finally {
+      this.maxConcurrentAgentTools = limit;
+    }
+  }
+
   /** A finished run from when children were facets: it has no child name. */
   seedFinishedFacetEraRunForTest(runId: string): void {
     this.sql`
