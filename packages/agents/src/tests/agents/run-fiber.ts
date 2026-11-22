@@ -760,12 +760,16 @@ export class TestRunFiberAgent extends Agent {
       // write. Wait until the run row records the body's outcome: the settle
       // and delete attempts happen in the same synchronous block, so after
       // that the triggers can go.
-      for (let attempt = 0; attempt < 200; attempt++) {
+      let settled = false;
+      for (let attempt = 0; attempt < 200 && !settled; attempt++) {
         const rows = this.sql<{ outcome: string | null }>`
           SELECT outcome FROM cf_agents_runs WHERE id = ${fiberId}
         `;
-        if (rows[0]?.outcome) break;
-        await this.waitFor(10);
+        settled = Boolean(rows[0]?.outcome);
+        if (!settled) await this.waitFor(10);
+      }
+      if (!settled) {
+        throw new Error("managed fiber never recorded its outcome");
       }
     } finally {
       this.sql`DROP TRIGGER fail_managed_fiber_settle`;
