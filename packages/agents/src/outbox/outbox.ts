@@ -157,6 +157,11 @@ function runningWake(
   );
 }
 
+/** A delivery's id, unique per sink and key, so one key serves as both. */
+function deliveryId(sink: string, key: string): string {
+  return JSON.stringify([sink, key]);
+}
+
 /** JSON has no Infinity: an unlimited bound is stored as `"unlimited"`. */
 function encodePolicy(policy: OutboxRetryPolicy): string {
   return JSON.stringify(policy, (_key, value: unknown) =>
@@ -416,45 +421,54 @@ export class Outbox<
     const json = this.#encode(sink, payload);
     const key = options.key ?? nanoid();
     const now = Date.now();
-    this.#ensureTable();
     const status: OutboxDeliveryStatus = options.hold ? "held" : "pending";
-    this.#write(
-      `INSERT INTO cf_agents_outbox
-         (id, sink, key, payload, idempotency_key, status, retry_options,
-          attempts, first_attempt_at, next_at, last_error, checkpoint,
-          version, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, NULL, NULL, ?, ?, ?)
-       ON CONFLICT (sink, key) DO UPDATE SET
-         payload = excluded.payload,
-         idempotency_key = excluded.idempotency_key,
-         status = excluded.status,
-         retry_options = excluded.retry_options,
-         attempts = 0,
-         first_attempt_at = NULL,
-         next_at = excluded.next_at,
-         last_error = NULL,
-         checkpoint = NULL,
-         claim = NULL,
-         version = max(excluded.version, cf_agents_outbox.version + 1),
-         updated_at = excluded.updated_at`,
-      nanoid(),
-      sink,
-      key,
-      json,
-      nanoid(),
-      status,
-      options.retry ? encodePolicy(options.retry) : null,
-      options.hold ? null : now,
-      now,
-      now,
-      now
-    );
-    const row = this.#rowByKey(sink, key);
+    const upsert = () =>
+      this.#sql<OutboxRow>(
+        `INSERT INTO cf_agents_outbox
+           (id, sink, key, payload, idempotency_key, status, retry_options,
+            attempts, first_attempt_at, next_at, last_error, checkpoint,
+            version, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, NULL, NULL, ?, ?, ?)
+         ON CONFLICT (id) DO UPDATE SET
+           payload = excluded.payload,
+           idempotency_key = excluded.idempotency_key,
+           status = excluded.status,
+           retry_options = excluded.retry_options,
+           attempts = 0,
+           first_attempt_at = NULL,
+           next_at = excluded.next_at,
+           last_error = NULL,
+           checkpoint = NULL,
+           claim = NULL,
+           version = max(excluded.version, cf_agents_outbox.version + 1),
+           updated_at = excluded.updated_at
+         RETURNING *`,
+        deliveryId(sink, key),
+        sink,
+        key,
+        json,
+        nanoid(),
+        status,
+        options.retry ? encodePolicy(options.retry) : null,
+        options.hold ? null : now,
+        now,
+        now,
+        now
+      )[0];
+    this.#ensureTable();
+    let row = upsert();
+    if (!row) {
+      // A rolled-back transaction dropped the table this isolate created.
+      this.#ensureTable();
+      row = upsert();
+    }
     if (!row)
       throw new Error(`Failed to store Outbox delivery "${sink}/${key}"`);
-    const wake = this.#syncWake(row.id);
     this.#emit("outbox:send", { sink, key, id: row.id, held: !!options.hold });
-    await wake;
+    // A held value has no wake. One that was pending before keeps its job
+    // until it fires and finds the row held, which costs one empty wake
+    // instead of a read and a job write on every held send.
+    if (!options.hold) await this.#wakeFor(row);
     return this.#delivery(row);
   }
 
@@ -524,7 +538,7 @@ export class Outbox<
     return this.#sql<OutboxRow>(
       `SELECT * FROM cf_agents_outbox
        ${where.length > 0 ? `WHERE ${where.join(" AND ")}` : ""}
-       ORDER BY created_at ASC, rowid ASC`,
+       ORDER BY created_at ASC, id ASC`,
       ...params
     ).map((row) => this.#delivery<T>(row));
   }
@@ -532,10 +546,14 @@ export class Outbox<
   /** Drop one delivery, whatever its status. Returns false when none matched. */
   async cancel(sink: string, key: string): Promise<boolean> {
     await this.lifecycle.ready();
-    const row = this.#rowByKey(sink, key);
-    if (!row) return false;
-    this.#write(`DELETE FROM cf_agents_outbox WHERE id = ?`, row.id);
-    await this.#syncWake(row.id);
+    const deleted = this.#sql<{ id: string; status: OutboxDeliveryStatus }>(
+      `DELETE FROM cf_agents_outbox WHERE id = ? RETURNING id, status`,
+      deliveryId(sink, key)
+    )[0];
+    if (!deleted) return false;
+    // Only a pending delivery has a wake job.
+    if (deleted.status === "pending")
+      await this.#wakeFor(undefined, deleted.id);
     return true;
   }
 
@@ -904,7 +922,14 @@ export class Outbox<
    * which owns the alarm; the row stays here.
    */
   async #syncWake(id: string): Promise<void> {
-    const row = this.#row(id);
+    await this.#wakeFor(this.#row(id), id);
+  }
+
+  /** Mirror a row already read (or known gone) into its wake job. */
+  async #wakeFor(
+    row: OutboxRow | undefined,
+    id: string = row?.id ?? ""
+  ): Promise<void> {
     const time =
       row?.status === "pending" && row.next_at !== null ? row.next_at : null;
     if (this.lifecycle.routes.source) {
@@ -1056,11 +1081,7 @@ export class Outbox<
   }
 
   #rowByKey(sink: string, key: string): OutboxRow | undefined {
-    return this.#sql<OutboxRow>(
-      `SELECT * FROM cf_agents_outbox WHERE sink = ? AND key = ?`,
-      sink,
-      key
-    )[0];
+    return this.#row(deliveryId(sink, key));
   }
 
   /**
@@ -1068,6 +1089,7 @@ export class Outbox<
    * transaction that rolls back takes the table with it.
    */
   #ensureTable(): void {
+    if (this.#tableSeen) return;
     this.lifecycle.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS cf_agents_outbox (
         id TEXT PRIMARY KEY NOT NULL,
@@ -1085,9 +1107,8 @@ export class Outbox<
         version INTEGER NOT NULL DEFAULT 1,
         claim TEXT,
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        UNIQUE (sink, key)
-      )`);
+        updated_at INTEGER NOT NULL
+      ) WITHOUT ROWID`);
     this.#tableSeen = true;
   }
 

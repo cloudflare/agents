@@ -180,6 +180,24 @@ describe("Outbox capability", () => {
     });
   });
 
+  it("does not deliver a value held again over a pending one", async () => {
+    const { stub } = stubFor();
+    await runInDurableObject(stub, async (instance: OutboxHarnessObject) => {
+      await instance.outbox.send("record", { value: "a" }, { key: "k" });
+      await instance.outbox.send(
+        "record",
+        { value: "b" },
+        { key: "k", hold: true }
+      );
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(instance.attempts).toEqual([]);
+      expect(await instance.outbox.get("record", "k")).toMatchObject({
+        status: "held",
+        payload: { value: "b" }
+      });
+    });
+  });
+
   it("delivers a value replaced during an attempt after that attempt", async () => {
     const { stub } = stubFor();
     await runInDurableObject(stub, async (instance: OutboxHarnessObject) => {
@@ -231,6 +249,8 @@ describe("Outbox capability", () => {
         Date.now() - 1,
         delivery.id
       );
+      // The held send wrote no job, so make the job queue's table exist.
+      await instance.lifecycle.rearmAlarm();
       instance.sql(
         `INSERT INTO cf_agents_jobs (id, capability, fn, time, payload, retry_options)
          VALUES (?, 'outbox', 'deliver', ?, ?, ?)`,

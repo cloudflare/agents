@@ -6,7 +6,7 @@ The `Outbox` capability (`packages/agents/src/outbox`) delivers a value to a nam
 
 ## How it works
 
-A delivery is a row in `cf_agents_outbox`, unique on `(sink, key)`. `send(sink, payload, { key })` inserts the row, or replaces the value of an existing one, and pushes one Lifecycle job (`outbox:<id>`) due now. The row is the source of truth. The job only wakes it, and startup re-pushes a job for every pending row. A pending row that still holds a claim at startup belongs to an attempt that died with the previous isolate; startup clears the claim and makes it due at once, so a reset mid-attempt retries right away instead of after the attempt timeout.
+A delivery is a row in `cf_agents_outbox` (`WITHOUT ROWID`, keyed on its id `[sink, key]` as JSON, so one b-tree and no second index). `send(sink, payload, { key })` inserts the row, or replaces the value of an existing one, and pushes one Lifecycle job (`outbox:<id>`) due now. The row is the source of truth. The job only wakes it, and startup re-pushes a job for every pending row. A pending row that still holds a claim at startup belongs to an attempt that died with the previous isolate; startup clears the claim and makes it due at once, so a reset mid-attempt retries right away instead of after the attempt timeout.
 
 When the job fires, the Outbox:
 
@@ -83,6 +83,9 @@ Delivery is at least once. A sink can run again for a value it already handled, 
 Values are capped at 1 MB of JSON because SQLite rows stop at 2 MB.
 
 ## Tradeoffs
+
+- A pending row's `next_at` and its wake job's `time` hold the same fact. That is the interim until the Outbox runs on Tasks; the row is the truth and startup re-syncs the job from it.
+- A held send writes only its row: no read-back and no job. A value held again over a pending one keeps the old job until it fires once and finds the row held.
 
 - One job per pending delivery. A burst of thousands of deliveries is thousands of job rows. Every current user sends a handful.
 - An attempt that dies with its isolate runs again at the next start, or after one attempt timeout if nothing starts the object first. A memory-limit strike that backs the wake off is the exception: the delivery keeps the breaker's backoff.
