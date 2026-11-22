@@ -1,6 +1,6 @@
 # RFC: hosts that only compose capabilities
 
-Status: accepted (22 Nov 2025, with the revision in [The decision](#the-decision))
+Status: accepted (22 Nov 2026, with the revision in [The decision](#the-decision))
 
 Related:
 
@@ -252,7 +252,7 @@ Each step is a set of small PRs, each green alone. A step only starts when the s
 1. Done or merging: the shared stream pump in `agents/chat`; the event log; declared schedules on Scheduler and `KeepAlive`; Workflows out of `Agent`; Think's periphery in modules and AIChatAgent's helpers in the chat core; the interim Inbox, Outbox and Approvals capabilities and their first adoptions (Think submissions, `ChatLane`, workflow notifications, messenger replies, Think's decision ledgers), whose host-facing seams do not change in the fold.
 2. T1: Tasks gets the record, the checkpoint, the crash contract and `local`, with every current Tasks call site updated in the same PR.
 3. T2: lanes and arrival policies move from the Inbox into Tasks; Think submissions and `ChatLane` call Tasks; the Inbox is deleted.
-4. After T2, each in its own PR and each bringing only the Tasks verbs it needs: fibers as one-step runs (F); the Outbox on Tasks (O); Approvals on Tasks (A); the chat turn's input, stash, budget and recovery attempts inside its own lane run, so a request and its turn are one run (C); agent-tool runs on both sides (R). F, O and A share one shape for a run settled from outside.
+4. The adopters, each in its own PR and each bringing only the Tasks verbs it needs. After T1: fibers as one-step runs (F), and the Approvals effect ledger (A); Approvals' decisions follow with the verbs they bring. After T2: the chat turn's input, stash, budget and recovery attempts inside its own lane run, so a request and its turn are one run (C), and agent-tool runs on both sides (R). The Outbox on Tasks (O) needs no lane and lands with the hold and replace verbs it brings. F, O and A share one shape for a run settled from outside.
 5. `AgentRuns` over ordinary Durable Objects: the sub-agent facet API and Lifecycle route envelopes are removed (major). A run left open by the earlier version ends `error` on the parent's first start, with the terminal event and hooks the parent expects. Facet storage is not deleted, only no longer reached: apps that kept data in sub-agent facets (`examples/multi-ai-chat` keeps conversations there) read it once through `ctx.facets.get` and write it to the new child objects, and the migration guide shows how.
 6. The `Chat` module, after C. `ChatTurns`, the pump, recovery and the protocol become one module on a Tasks lane; the host interfaces are deleted; both hosts become a responder and hooks.
 7. Schema. The last tables in `Agent._ensureSchema` move to the capability that owns them.
@@ -279,7 +279,7 @@ Each step is a set of small PRs, each green alone. A step only starts when the s
 
 ## The decision
 
-Accepted on 22 Nov 2025, with one revision made the same day.
+Accepted on 22 Nov 2026, with one revision made the same day.
 
 The RFC as first accepted built the Inbox, Fibers, the Outbox and Approvals as separate capabilities, and rejected "build everything on Tasks" because Tasks had no lanes, no mutable checkpoint and no outside resolution. Once the four were built, they had the same parts: a record with an id and an idempotency key, an attempt counted before user code, a wake job and a report on settle. The revision makes Tasks the one engine and gives it those three missing things. The capability table, the `Chat` section and the order of landing above describe the revised design; the rejected alternative is recorded under [The alternatives](#the-alternatives).
 
