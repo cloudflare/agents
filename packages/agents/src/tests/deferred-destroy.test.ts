@@ -349,10 +349,18 @@ describe("deferred destroy (#1625)", () => {
         createExecutionContext()
       );
       expect(response.status, request.method).toBe(404);
-      await expectTeardownCompleted(
-        namespace,
-        `streamable-http:${request.headers.get("mcp-session-id")}`
-      );
+
+      // The 404 scheduled the teardown. Without that the object would have
+      // no marker either, and would hold its tables forever.
+      const name = `streamable-http:${request.headers.get("mcp-session-id")}`;
+      const stub = await getAgentByName(namespace, name);
+      await runInDurableObject(stub, async (_instance, state) => {
+        expect(
+          await state.storage.get(DESTROY_PENDING_KEY),
+          request.method
+        ).toBeDefined();
+      });
+      await expectTeardownCompleted(namespace, name);
     }
   });
 });

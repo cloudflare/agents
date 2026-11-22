@@ -495,10 +495,10 @@ export class StreamableHTTPServerTransport implements Transport {
       // streams that finished long enough ago.
       if (this._eventStore && isClearableEventStore(this._eventStore)) {
         const expired = await agent.finishStream(streamId);
-        for (const expiredStreamId of expired) {
+        for (const { streamId: expiredStreamId } of expired) {
           await this._eventStore.clearStream(expiredStreamId);
         }
-        await agent.forgetFinishedStreams(expired);
+        await agent.forgetFinishedStreams(expired.map(({ record }) => record));
       }
     }
   }

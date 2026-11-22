@@ -205,26 +205,36 @@ export abstract class McpAgent<
    * expired streams are collected when a later stream finishes, and the
    * session's teardown removes whatever is left.
    *
+   * Records are keyed by finish time, so the scan reads only the expired
+   * range, oldest first, however many streams finished since. It takes up
+   * to 128 per call, which outpaces the one record each call adds.
+   *
    * @internal
    */
-  async finishStream(streamId: string, now = Date.now()): Promise<string[]> {
+  async finishStream(
+    streamId: string,
+    now = Date.now()
+  ): Promise<Array<{ streamId: string; record: string }>> {
     const prefix = McpAgent.STREAM_DONE_KEY_PREFIX;
-    await this.ctx.storage.put<number>(`${prefix}${streamId}`, now);
-    const rows = await this.ctx.storage.list<number>({ prefix, limit: 128 });
-    const expired: string[] = [];
-    for (const [key, finishedAt] of rows) {
-      if (now - finishedAt >= McpAgent.FINISHED_STREAM_RETENTION_MS) {
-        expired.push(key.slice(prefix.length));
-      }
-    }
-    return expired;
+    const stamp = (time: number) => String(Math.max(0, time)).padStart(16, "0");
+    await this.ctx.storage.put(`${prefix}${stamp(now)}:${streamId}`, true);
+    const rows = await this.ctx.storage.list({
+      prefix,
+      // Exclusive: everything that finished at or before the cutoff.
+      end: `${prefix}${stamp(now - McpAgent.FINISHED_STREAM_RETENTION_MS + 1)}`,
+      limit: 128
+    });
+    return [...rows.keys()].map((key) => {
+      const record = key.slice(prefix.length);
+      return { streamId: record.slice(record.indexOf(":") + 1), record };
+    });
   }
 
   /** Drop the finish records of streams whose events were cleared. @internal */
-  async forgetFinishedStreams(streamIds: string[]): Promise<void> {
-    if (streamIds.length === 0) return;
+  async forgetFinishedStreams(records: string[]): Promise<void> {
+    if (records.length === 0) return;
     await this.ctx.storage.delete(
-      streamIds.map((id) => `${McpAgent.STREAM_DONE_KEY_PREFIX}${id}`)
+      records.map((record) => `${McpAgent.STREAM_DONE_KEY_PREFIX}${record}`)
     );
   }
 

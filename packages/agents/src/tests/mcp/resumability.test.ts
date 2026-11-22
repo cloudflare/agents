@@ -495,14 +495,22 @@ describe("McpAgent SSE resumability (#1583)", () => {
     );
     const retention = 5 * 60_000;
 
-    expect(await stub.finishStream("first", 1_000)).toEqual([]);
-    expect(await stub.finishStream("second", 1_000 + retention - 1)).toEqual(
-      []
-    );
-    expect(await stub.finishStream("third", 1_000 + retention)).toEqual([
-      "first"
-    ]);
-    await stub.forgetFinishedStreams(["first"]);
-    expect(await stub.finishStream("fourth", 1_000 + retention)).toEqual([]);
+    const expiredAt = async (streamId: string, now: number) =>
+      (await stub.finishStream(streamId, now)).map((entry) => entry.streamId);
+
+    expect(await expiredAt("zz-oldest", 1_000)).toEqual([]);
+    // More streams than one scan reads finish inside the retention window.
+    // Their IDs sort before the oldest one and must not hide it.
+    for (let i = 0; i < 130; i++) {
+      expect(
+        await expiredAt(`a-${i}`, 1_000 + retention - 1),
+        `stream a-${i}`
+      ).toEqual([]);
+    }
+
+    const expired = await stub.finishStream("later", 1_000 + retention);
+    expect(expired.map((entry) => entry.streamId)).toEqual(["zz-oldest"]);
+    await stub.forgetFinishedStreams(expired.map((entry) => entry.record));
+    expect(await expiredAt("last", 1_000 + retention)).toEqual([]);
   });
 });

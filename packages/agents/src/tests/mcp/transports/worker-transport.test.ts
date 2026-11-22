@@ -2263,6 +2263,23 @@ describe("WorkerTransport", () => {
       expect(body.error.message).toContain("Session not found");
     });
 
+    it("does not store a DELETE on a transport without sessions", async () => {
+      let stored: TransportState | undefined;
+      const storage = {
+        get: () => stored,
+        set: (state: TransportState) => {
+          stored = state;
+        }
+      };
+
+      const transport = await setupTransport(createTestServer(), { storage });
+      const deleted = await transport.handleRequest(
+        new Request("http://example.com/", { method: "DELETE" })
+      );
+      expect(deleted.status).toBe(200);
+      expect(stored).toBeUndefined();
+    });
+
     it("should reject DELETE with wrong session ID", async () => {
       const server = createTestServer();
       const transport = await setupTransport(server, {

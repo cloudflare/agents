@@ -170,8 +170,14 @@ export class WorkerTransport extends WebStandardStreamableHTTPServerTransport {
 
     // A deleted session has to stay deleted after a restart, so the end of
     // the session is stored too. Without it the next cold start would
-    // restore the session from storage and answer for it again.
-    if (request.method === "DELETE" && this.isClosed()) {
+    // restore the session from storage and answer for it again. A transport
+    // without sessions has nothing to end: the SDK accepts its DELETE too,
+    // and storing that would make every later transport answer 404.
+    if (
+      request.method === "DELETE" &&
+      this.sessionId !== undefined &&
+      this.isClosed()
+    ) {
       await this.saveState();
     }
 
