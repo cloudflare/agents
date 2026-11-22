@@ -200,10 +200,13 @@ describe("event log", () => {
     expect(events(frames)).toEqual([{ seq: 2, data: "t2" }]);
     expect(await stub(name).rows()).toEqual([{ seq_from: 0, seq_to: 2 }]);
 
-    // Closing writes t3 into the same block, in one row write.
+    // Closing writes t3 as the next block: one INSERT per flush.
     expect(await stub(name).append("t3")).toBe(3);
     await stub(name).closeBatch();
-    expect(await stub(name).rows()).toEqual([{ seq_from: 0, seq_to: 3 }]);
+    expect(await stub(name).rows()).toEqual([
+      { seq_from: 0, seq_to: 2 },
+      { seq_from: 2, seq_to: 3 }
+    ]);
     live.close();
     late.close();
   });
@@ -264,6 +267,69 @@ describe("event log", () => {
     const frames = await survivor.until(isType("synced"));
     expect(events(frames)).toEqual([{ seq: 5, data: "after" }]);
     survivor.close();
+  });
+
+  it("judges a cursor after writing the buffer, so a trim on that write cannot drop what it needs", async () => {
+    const name = crypto.randomUUID();
+    for (let i = 1; i <= 5; i++) await stub(name).publishSized(150_000);
+    const { epoch } = await stub(name).head();
+    await stub(name).openBatch();
+    // Buffered: its write puts the log over 5 events and trims event 1.
+    await stub(name).appendSized(10);
+    const client = await connect(name);
+    client.subscribe("feed", { epoch, seq: 0 });
+    // Event 1 is gone once the buffer is written: a resync, not a replay
+    // that silently starts at event 2.
+    await client.until(isType("resync"));
+    client.close();
+  });
+
+  it("never reuses the seqs of the first buffer after a wake, even when that isolate crashes", async () => {
+    const name = crypto.randomUUID();
+    expect(await stub(name).publish("feed", "stored")).toBe(1);
+    const { epoch } = await stub(name).head();
+    await evictDurableObject(stub(name));
+    await stub(name).openBatch();
+    // The skip's first chunk is written at once; the next stays buffered.
+    expect(await stub(name).append("first")).toBe(5);
+    expect(await stub(name).append("lost")).toBe(6);
+    await stub(name)
+      .crash()
+      .catch(() => {});
+    expect(await stub(name).publish("feed", "after")).toBe(9);
+    const client = await connect(name);
+    client.subscribe("feed", { epoch, seq: 6 });
+    await client.until(isType("resync"));
+    client.close();
+  });
+
+  it("trims by stored bytes, counting multi-byte characters the way storage does", async () => {
+    const name = crypto.randomUUID();
+    // 20,000 emoji: 80 KB stored, 40,000 UTF-16 units, 20,000 characters.
+    await stub(name).publishText("small", "😀".repeat(20_000), 10);
+    // 300 KB of retention holds 3 of them (a 4th would be 320 KB).
+    expect(await stub(name).rows("small")).toHaveLength(3);
+  });
+
+  it("stores and replays the very payload it sent live, however `toJSON` behaves", async () => {
+    const name = crypto.randomUUID();
+    const live = await connect(name);
+    const { epoch } = await follow(live);
+    await stub(name).publishCounter();
+    const [sent] = events(await live.until(isType("events")));
+    const late = await connect(name);
+    late.subscribe("feed", { epoch, seq: 0 });
+    const frames = await late.until(isType("synced"));
+    expect(events(frames)).toEqual([sent]);
+    live.close();
+    late.close();
+  });
+
+  it("accepts an event up to the log's own size limit, above Streams' default", async () => {
+    const name = crypto.randomUUID();
+    expect(await stub(name).publishText("small", "x".repeat(1_200_000))).toBe(
+      1
+    );
   });
 
   it("keeps a connection's subscriptions across hibernation", async () => {
@@ -376,7 +442,7 @@ describe("event log", () => {
     expect((await stub(name).head()).seq).toBe(0);
   });
 
-  it("splits a write into rows under the row limit and replays them all", async () => {
+  it("writes a large flush as one block and replays it all", async () => {
     const name = crypto.randomUUID();
     const { epoch } = await stub(name).head();
     await stub(name).openBatch();
@@ -386,11 +452,9 @@ describe("event log", () => {
     // Publishing writes the buffer and this event: 600 KB, two rows.
     expect(await stub(name).publishSized(400_000)).toBe(3);
     await stub(name).closeBatch();
-    // The small event and the 200 KB one share a block; the 400 KB one
-    // does not fit beside them.
-    expect((await stub(name).rows()).map((row) => row.seq_from)).toEqual([
-      0, 2
-    ]);
+    // One flush, one block: the publish wrote the buffer and its own event
+    // together.
+    expect(await stub(name).rows()).toEqual([{ seq_from: 0, seq_to: 3 }]);
     const client = await connect(name);
     client.subscribe("feed", { epoch, seq: 0 });
     const frames = await client.until(isType("synced"));

@@ -305,6 +305,9 @@ export class EventLog<T = unknown, S = unknown> {
       return;
     }
     const epoch = this.#open();
+    // Buffered events are written (and retention applied) before the
+    // cursor is judged, so the replay reads exactly what was judged.
+    this.#flush();
     if (cursor && cursor.epoch === epoch && this.#canReplay(cursor.seq)) {
       this.#replay(connection, cursor.seq, id);
       trySend(
@@ -368,8 +371,6 @@ export class EventLog<T = unknown, S = unknown> {
   }
 
   #replay(connection: Connection, after: number, id?: string): void {
-    // Buffered events are written first, so the replay reads them too.
-    this.#flush();
     const prefix = `{"type":"${EVENT_LOG_EVENTS}","log":${JSON.stringify(
       this.name
     )},${id === undefined ? "" : `"id":${JSON.stringify(id)},`}"events":`;
@@ -492,8 +493,10 @@ export class EventLog<T = unknown, S = unknown> {
         `Event of ${bytes} bytes exceeds the ${this.#maxEventBytes}-byte limit of event log "${this.name}"`
       );
     }
+    // Serialized once: the live frame and the stored chunk are the same
+    // text, whatever `toJSON` does on a second call.
     const seq =
-      this.#streams.append(this.#streamId, data as never, this.#batching) + 1;
+      this.#streams.appendJson(this.#streamId, dataJson, this.#batching) + 1;
     return { seq, json: `{"seq":${seq},"data":${dataJson}}` };
   }
 

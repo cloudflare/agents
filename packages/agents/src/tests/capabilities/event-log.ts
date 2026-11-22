@@ -67,6 +67,13 @@ export class EventLogObject extends DurableObject<Cloudflare.Env> {
     streams: this.#streams
   });
 
+  /** Byte retention (300 KB) and a 1.5 MB event ceiling. */
+  readonly #small = declareEventLog(this.#webSockets, "small", {
+    streams: this.#streams,
+    retention: { maxBytes: 300_000 },
+    maxEventBytes: 1_500_000
+  });
+
   readonly #guarded = declareEventLog(this.#webSockets, "guarded", {
     streams: this.#streams,
     canSubscribe: (connection) =>
@@ -82,6 +89,7 @@ export class EventLogObject extends DurableObject<Cloudflare.Env> {
   #log(name: string) {
     if (name === "feed") return this.#feed;
     if (name === "bare") return this.#bare;
+    if (name === "small") return this.#small;
     return this.#guarded;
   }
 
@@ -105,6 +113,21 @@ export class EventLogObject extends DurableObject<Cloudflare.Env> {
     } catch (error) {
       return error instanceof Error ? error.message : String(error);
     }
+  }
+
+  /** Publish `count` events of `text`; returns the last seq. */
+  async publishText(log: string, text: string, count = 1): Promise<number> {
+    await this.lifecycle.start();
+    let seq = 0;
+    for (let i = 0; i < count; i++) seq = this.#log(log).publish(text);
+    return seq;
+  }
+
+  /** Publish an object whose `toJSON` gives a new value on every call. */
+  async publishCounter(): Promise<number> {
+    await this.lifecycle.start();
+    let calls = 0;
+    return this.#feed.publish({ toJSON: () => ++calls });
   }
 
   async openBatch(log = "feed"): Promise<void> {
