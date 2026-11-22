@@ -139,8 +139,11 @@ Five named rules define what a job owner can and cannot rely on:
    time, headed the due list on every alarm and stopped every job behind
    it for as long as the downstream kept failing.
 5. **Attempts are counted durably, before `onJob` runs.** The row's
-   `attempts` column is written and synced before each dispatch attempt,
-   and `context.attempt` reads it. An attempt that takes its isolate down
+   `attempts` column is written before each dispatch attempt, and the
+   driver yields one macrotask so the write starts before `onJob` runs;
+   `context.attempt` reads it. A started write survives a CPU-limit kill or
+   `ctx.abort()` that follows; `storage.sync()` would also work but costs
+   about 38 ms per dispatch. An attempt that takes its isolate down
    (CPU limit, the 15-minute alarm wall-time limit, a reset) is still
    counted, so the next alarm continues the count. When a job starts with
    its count at `maxAttempts`, an owner with `onJobError` gets a
@@ -185,8 +188,8 @@ and `Lifecycle` wires them to the host and capabilities through the narrow
    - a job whose durable attempt count already reached `maxAttempts` goes
      to `onJobError` (or, with no `onJobError`, is backed off and run once);
    - dispatch `onJob` inside `tryN` using the job's retry options (defaults
-     3 attempts / 100 ms base / 3000 ms cap), counting and syncing each
-     attempt in the row first;
+     3 attempts / 100 ms base / 3000 ms cap), counting each attempt in the
+     row and yielding one macrotask first;
    - a reset or memory-limit failure preserves the job and re-throws so a
      fresh invocation runs the rest or the breaker engages; any other
      platform-class failure (on exhaustion) moves the job 30 s out and the
