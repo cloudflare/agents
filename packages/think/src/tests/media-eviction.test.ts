@@ -294,7 +294,7 @@ describe("mediaEviction — aged media leaves the conversation (#1710)", () => {
       env.ThinkMediaEvictionAgent,
       uniqueName("evict-facet")
     )) as unknown as {
-      seedFacetMediaForTest(name: string): Promise<void>;
+      seedFacetMediaForTest(...names: string[]): Promise<void>;
       getFacetStoredMessageForTest(
         name: string,
         id: string
@@ -308,6 +308,29 @@ describe("mediaEviction — aged media leaves the conversation (#1710)", () => {
           "f0"
         );
         expect(JSON.stringify(message)).toContain("[evicted image/png,");
+      },
+      { timeout: 10_000, interval: 100 }
+    );
+  });
+
+  it("evicts aged media on sibling facets that queue passes together", async () => {
+    const parent = (await getAgentByName(
+      env.ThinkMediaEvictionAgent,
+      uniqueName("evict-facets")
+    )) as unknown as {
+      seedFacetMediaForTest(...names: string[]): Promise<void>;
+      getFacetStoredMessageForTest(
+        name: string,
+        id: string
+      ): Promise<UIMessage | null>;
+    };
+    await parent.seedFacetMediaForTest("left", "right");
+    await vi.waitFor(
+      async () => {
+        for (const name of ["left", "right"]) {
+          const message = await parent.getFacetStoredMessageForTest(name, "f0");
+          expect(JSON.stringify(message)).toContain("[evicted image/png,");
+        }
       },
       { timeout: 10_000, interval: 100 }
     );

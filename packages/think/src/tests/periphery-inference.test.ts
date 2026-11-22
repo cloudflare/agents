@@ -259,4 +259,41 @@ describe("inference stream helpers", () => {
     expect(drains).toHaveLength(1);
     await drains[0];
   });
+
+  it("registers the wrapped result for draining too", () => {
+    let original: object | undefined;
+    const result = createInferenceInvocation({
+      config: {},
+      model: createMockModel("hello"),
+      system: "s",
+      messages: [{ role: "user", content: "hi" }],
+      tools: {},
+      maxSteps: 1,
+      sendReasoning: false,
+      continuation: false,
+      telemetry: { className: "T", agentId: "a", conversationId: "c" },
+      invocationBounded: false,
+      storeMessages: false,
+      storeTools: false,
+      hooks: {
+        compactBeforeStep: async () => undefined,
+        beforeStep: () => undefined,
+        onChunk: async () => {},
+        onStepEnd: async () => {},
+        afterToolCall: async () => {},
+        requestId: () => undefined,
+        resolveModel: () => createMockModel("x"),
+        transformResult: (r) => {
+          original = r;
+          return { ...r };
+        }
+      }
+    })();
+    const drains: Promise<void>[] = [];
+    // The wrapper first: it must have its own registration.
+    drainInferenceStream(result, (promise) => drains.push(promise));
+    expect(drains).toHaveLength(1);
+    drainInferenceStream(original!, (promise) => drains.push(promise));
+    expect(drains).toHaveLength(1);
+  });
 });

@@ -2218,8 +2218,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         ...totals,
         externalizedBytes: totals.bytes
       }),
+    // Sibling facets share the root's queue, so each names its own pass.
     queueRouted: () =>
-      this.queue("_cfEvictAgedMedia", undefined, { id: "media-eviction" })
+      this.queue("_cfEvictAgedMedia", undefined, {
+        id: `media-eviction:${this.name}`
+      })
   });
 
   private get _mediaEvictionRunning(): boolean {

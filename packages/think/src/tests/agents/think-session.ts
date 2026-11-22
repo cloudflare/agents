@@ -13626,14 +13626,22 @@ export class ThinkMediaEvictionAgent extends Think {
     return (await this.syncMessagesFromStorage()).length;
   }
 
-  /** Seed aged media on a sub-agent facet of this agent. */
-  async seedFacetMediaForTest(name: string): Promise<void> {
-    const child = await this.subAgent(ThinkMediaEvictionAgent, name);
-    await child.setMediaEvictionForTest({
-      keepRecentMessages: 2,
-      minPartBytes: 10_000
-    });
-    await child.seedMediaHistoryForTest("f");
+  /** Seed aged media on sub-agent facets of this agent, all before any pass runs. */
+  async seedFacetMediaForTest(...names: string[]): Promise<void> {
+    const children = await Promise.all(
+      names.map((name) => this.subAgent(ThinkMediaEvictionAgent, name))
+    );
+    await Promise.all(
+      children.map((child) =>
+        child.setMediaEvictionForTest({
+          keepRecentMessages: 2,
+          minPartBytes: 10_000
+        })
+      )
+    );
+    await Promise.all(
+      children.map((child) => child.seedMediaHistoryForTest("f"))
+    );
   }
 
   /** A stored message of a sub-agent facet of this agent. */
