@@ -201,11 +201,13 @@ import {
   toSaveMessagesResult,
   type ServerTurnStatus,
   type ToolInteractionOutcome,
+  type ToolPartUpdate,
   AgentToolRuns,
   abortReasonText,
   createAgentToolRunStore,
   createToolsFromClientSchemas,
-  applyToolUpdate,
+  applyToolPartUpdate,
+  unexecutedToolNames,
   toolResultUpdate,
   crossMessageToolResultUpdate,
   toolApprovalUpdate,
@@ -8010,7 +8012,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // `_lastClientTools`. The executor is a live RPC ref that dies with the
     // isolate, so unlike the WebSocket path there is no SPA that could ever
     // replay a `tool-result` after an eviction. Persisting the names would put
-    // them in `_clientResolvableToolNames()`, causing recovery to misclassify a
+    // them in `_requestContext.clientToolNames()`, causing recovery to misclassify a
     // dangling `input-available` orphan as a pending human interaction and park
     // forever. Keeping them per-turn lets such an orphan recover like a server
     // tool: `continueLastTurn`'s transcript repair errors it and the model
@@ -11869,11 +11871,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         // duplicate or a result for a call that is gone changes nothing.
         this._turns.applyInteraction(
           this._requestContext.applyingToolResult(event.clientTools, () =>
-            this._applyToolResult(
-              event.toolCallId,
-              event.output,
-              event.state as "output-error" | undefined,
-              event.errorText
+            this._applyToolUpdateToMessages(
+              toolResultUpdate(
+                event.toolCallId,
+                event.output,
+                event.state as "output-error" | undefined,
+                event.errorText
+              )
             )
           ),
           event.autoContinue === true,
@@ -11886,7 +11890,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
       case "tool-approval": {
         this._turns.applyInteraction(
-          () => this._applyToolApproval(event.toolCallId, event.approved),
+          () =>
+            this._applyToolUpdateToMessages(
+              toolApprovalUpdate(event.toolCallId, event.approved)
+            ),
           event.autoContinue === true,
           () => this._continuationSpec(connection),
           (run) => this._enqueueInteractionOutcome(run),
@@ -14390,29 +14397,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     return found;
   }
 
-  private async _applyToolResult(
-    toolCallId: string,
-    output: unknown,
-    overrideState?: "output-error",
-    errorText?: string
-  ): Promise<ToolInteractionOutcome> {
-    const update = toolResultUpdate(
-      toolCallId,
-      output,
-      overrideState,
-      errorText
-    );
-    return this._applyToolUpdateToMessages(update);
-  }
-
-  private async _applyToolApproval(
-    toolCallId: string,
-    approved: boolean
-  ): Promise<ToolInteractionOutcome> {
-    const update = toolApprovalUpdate(toolCallId, approved);
-    return this._applyToolUpdateToMessages(update);
-  }
-
   // ── Durable execution approvals (codemode HITL) ──────────────────
   //
   // A `requiresApproval` connector call inside the execute tool pauses the
@@ -15068,107 +15052,44 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     }
   }
 
-  private async _applyToolUpdateToMessages(update: {
-    toolCallId: string;
-    matchStates: string[];
-    apply: (part: Record<string, unknown>) => Record<string, unknown>;
-  }): Promise<ToolInteractionOutcome> {
-    // The message to update can live in two places. During a streaming turn
-    // the assistant message exists ONLY in the in-flight accumulator until
-    // `_persistAssistantMessage` writes it at a turn boundary; a parallel-
-    // batch sibling can also have been persisted already by stall recovery.
-    // Apply to BOTH so the result is correct regardless of where the message
-    // currently is and survives the eventual `accumulator.toMessage()` persist
-    // (which would otherwise downgrade an applied result back to
-    // `input-available` — #1649). Mirrors `@cloudflare/ai-chat`'s streaming-
-    // message handling, generalized to also cover the post-persist case.
-    let broadcastMessage: UIMessage | undefined;
-    // `undefined`: no part found; `null`: found, already settled.
-    let changedMessageId: string | null | undefined;
-
-    // (1) In-flight accumulator. A client tool result that arrives over the
-    // WebSocket before the end-of-stream persist would be missed by a
-    // storage-only lookup and later repaired as "interrupted". Writing it in
-    // place lets it ride into the persist.
+  /**
+   * Apply a tool update to its part with the shared `applyToolPartUpdate`:
+   * in the in-flight accumulator (a client result can arrive before the
+   * end-of-stream persist) and in the stored owner (a partial stall recovery
+   * persisted, or an earlier message a cross-message result targets). The
+   * owner is resolved without reading the transcript; the live cache is
+   * patched in place rather than re-synced, because a full re-read during a
+   * streaming turn drops in-flight messages whose parent chain is not
+   * persisted yet.
+   */
+  private async _applyToolUpdateToMessages(
+    update: ToolPartUpdate
+  ): Promise<ToolInteractionOutcome> {
     const streaming = this._streamingAssistant;
-    let accumulatorOwnsCall = false;
-    if (streaming) {
-      const accParts = streaming.parts as unknown as Array<
-        Record<string, unknown>
-      >;
-      const result = applyToolUpdate(accParts, update);
-      if (result) {
-        accumulatorOwnsCall = true;
-        changedMessageId ??= null;
-        if (result.parts[result.index] !== accParts[result.index]) {
-          // `accParts` is a typed alias of the accumulator's live array, so
-          // this in-place write is reflected by `streaming.toMessage()` and
-          // the eventual end-of-stream persist.
-          accParts[result.index] = result.parts[result.index];
-          broadcastMessage = streaming.toMessage();
-          changedMessageId = streaming.messageId;
-          // The reply may be being stored from a copy built before this.
-          if (this._replyBeingStored?.accumulator === streaming) {
-            this._replyBeingStored.dirty = true;
+    return applyToolPartUpdate<UIMessage>(update, {
+      inFlight: streaming
+        ? {
+            id: streaming.messageId,
+            parts: streaming.parts as unknown as Array<Record<string, unknown>>,
+            snapshot: () => streaming.toMessage(),
+            changed: () => {
+              // The reply may be being stored from a copy built before this.
+              if (this._replyBeingStored?.accumulator === streaming) {
+                this._replyBeingStored.dirty = true;
+              }
+            }
           }
-        }
-      }
-    }
-
-    // (2) Durable storage. Handles messages already persisted — including
-    // partials written mid-stream by stall recovery and cross-message tool
-    // results that target an earlier message than this turn's.
-    //
-    // The owning row is resolved without reading the transcript (see
-    // `_resolveToolCallOwner`) and read as one row, so the apply stays a
-    // first-write-wins read-modify-write of the STORED form: when `apply`
-    // leaves the matched part untouched (same reference) — e.g. a provider
-    // replay of an already-settled cross-message tool result (#1404) — there
-    // is nothing to persist, and the durable write and the redundant
-    // `MESSAGE_UPDATED` broadcast are both skipped so clients don't churn.
-    const owner = await this._resolveToolCallOwner(
-      update.toolCallId,
-      accumulatorOwnsCall && streaming ? streaming.messageId : undefined
-    );
-    if (owner) {
-      const ownerParts = owner.parts as Array<Record<string, unknown>>;
-      const result = applyToolUpdate(ownerParts, update);
-      if (result) changedMessageId ??= null;
-      if (result && result.parts[result.index] !== ownerParts[result.index]) {
-        const updatedMsg = {
-          ...owner,
-          parts: result.parts as UIMessage["parts"]
-        };
-        const safe = await this._updateMessageInHistory(updatedMsg);
-        // Session change callbacks may run after an immediately scheduled
-        // continuation begins. Keep its input cache coherent synchronously.
-        // Patch the live cache in place instead of doing a full
-        // `_syncMessages()` round-trip: a full re-read during a streaming
-        // turn drops in-flight messages whose parent chain hasn't been
-        // persisted yet (see commits 3f615a24 "revert _syncMessages in
-        // _applyToolUpdateToMessages" and 6e76bd49 "update cached messages
-        // in-place"). The cache is the source of truth during a turn; we only
-        // reconcile it here to reflect the tool update just written.
+        : null,
+      storedOwner: (toolCallId, inFlightId) =>
+        this._resolveToolCallOwner(toolCallId, inFlightId),
+      write: async (message) => {
+        const safe = await this._updateMessageInHistory(message);
         this._patchCachedMessage(safe);
-        broadcastMessage = safe;
-        // The live reply, when it also holds the call, is the one a
-        // continuation answers: keep it as the changed message.
-        if (typeof changedMessageId !== "string") changedMessageId = owner.id;
-      }
-    }
-
-    if (broadcastMessage) {
-      this._broadcast({
-        type: MSG_MESSAGE_UPDATED,
-        message: broadcastMessage
-      });
-    }
-    if (typeof changedMessageId === "string") {
-      return { status: "changed", messageId: changedMessageId };
-    }
-    return changedMessageId === null
-      ? { status: "unchanged" }
-      : { status: "missing" };
+        return safe;
+      },
+      broadcast: (message) =>
+        this._broadcast({ type: MSG_MESSAGE_UPDATED, message })
+    });
   }
 
   /**
@@ -15259,18 +15180,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /**
-   * Names of the tools whose interrupted `input-available` part can still be
-   * resolved by the CLIENT after a restart — i.e. the client tools (no server
-   * `execute`) from the last request, which the SPA answers by replaying a
-   * `tool-result` over the WebSocket. A server tool is intentionally absent:
-   * its `execute()` promise died with the evicted isolate, so nothing will
-   * ever post its result.
-   */
-  private _clientResolvableToolNames(): Set<string> {
-    return this._requestContext.clientToolNames();
-  }
-
-  /**
    * Every tool a client may answer: the tools the client sent a schema for,
    * and the tools the server declares with no `execute` (an app answers
    * those from the client, without ever sending their schema). A call for
@@ -15278,30 +15187,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * is dead: an older version stored cut-off replies as they were.
    */
   private _clientAnswerableToolNames(): Set<string> {
-    const names = this._clientResolvableToolNames();
+    // The client tools from the last request, which the SPA answers by
+    // replaying a `tool-result` after a restart.
+    const names = this._requestContext.clientToolNames();
     for (const name of this._unexecutedToolNames()) names.add(name);
     return names;
-  }
-
-  /**
-   * Names of the tools in `tools` the server does not run: no `execute`,
-   * and not run by the provider.
-   */
-  private static _unexecutedToolNamesOf(tools: ToolSet): string[] {
-    return Object.entries(tools)
-      .filter(([, definition]) => {
-        const candidate = definition as {
-          execute?: unknown;
-          type?: unknown;
-        };
-        return (
-          typeof candidate.execute !== "function" &&
-          candidate.type !== "provider" &&
-          candidate.type !== "provider-defined"
-        );
-      })
-      .map(([name]) => name)
-      .sort();
   }
 
   /**
@@ -15309,7 +15199,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * there after a restart, before any turn has assembled its tools again.
    */
   private _recordUnexecutedTools(tools: ToolSet): void {
-    const names = Think._unexecutedToolNamesOf(tools);
+    const names = unexecutedToolNames(tools);
     this._unexecutedTools = names;
     // `_configSet` skips the write when the value has not changed.
     this._configSet("unexecutedTools", JSON.stringify(names));
@@ -15340,7 +15230,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       }
     }
     try {
-      this._unexecutedTools = Think._unexecutedToolNamesOf(this.getTools());
+      this._unexecutedTools = unexecutedToolNames(this.getTools());
     } catch {
       // `getTools()` can need turn-time context. Without it, only the
       // client's own tools are known to be a client's.
@@ -15442,7 +15332,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         }
       },
       // Hibernation ordering guard. The budget decision consults
-      // `hasPendingInteraction()` -> `_clientResolvableToolNames()` ->
+      // `hasPendingInteraction()` -> `_requestContext.clientToolNames()` ->
       // `_lastClientTools` to keep a HITL turn (parked on a client-tool
       // `input-available` orphan) budget-free. On a fresh wake the base Agent
       // runs the boot-recovery path (`_handleInternalFiberRecovery`) BEFORE
