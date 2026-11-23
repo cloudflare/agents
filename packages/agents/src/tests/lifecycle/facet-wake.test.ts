@@ -260,4 +260,15 @@ describe("facet wake", () => {
     expect(await agent.armReportCount()).toBe(0);
     expect(await agent.rootJobs()).toEqual([]);
   });
+
+  it("reports a facet's new wake to the root without a sync", async () => {
+    const agent = await root();
+    await agent.middlePush("m", "first", 120_000);
+    await agent.middleCountSyncs("m");
+    await agent.middlePush("m", "sooner", 60_000);
+    // The report moved the root's wake, and the facet did not sync for it.
+    const [wake] = await agent.rootJobs();
+    expect(wake!.time).toBeLessThan(Date.now() + 61_000);
+    expect(await agent.middleSyncCount("m")).toBe(0);
+  });
 });
