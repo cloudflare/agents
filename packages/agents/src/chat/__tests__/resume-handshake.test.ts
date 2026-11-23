@@ -624,6 +624,33 @@ describe("ResumeHandshake (driver → golden frames)", () => {
       });
     });
 
+    it("follows a stream that closed into recovery with the end a stop recorded since", async () => {
+      const kv = kvStore();
+      recordRecentChatTerminal(kv, {
+        id: "req-cut",
+        done: true,
+        body: "",
+        outcome: "aborted"
+      });
+      const frames: SentFrame[] = [];
+      const { resumableStream } = makeStream({
+        replayCompletedReturn: true,
+        outcome: "recovering"
+      });
+      const handshake = new ResumeHandshake({
+        ...makeHost({ resumableStream }),
+        recentTerminal: (ids) => recentChatTerminal(kv, ids)
+      });
+
+      await handshake.handleResumeAck(makeConnection("c1", frames), "req-cut");
+      expect(frames.at(-1)).toMatchObject({
+        id: "req-cut",
+        done: true,
+        replay: true,
+        outcome: "aborted"
+      });
+    });
+
     it("says idle for a tab that waits on nothing that ended", async () => {
       const kv = kvStore();
       recordRecentChatTerminal(kv, { id: "req-other", done: true });

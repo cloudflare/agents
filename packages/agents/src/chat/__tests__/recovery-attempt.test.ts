@@ -425,7 +425,7 @@ describe("runRecoveredTurn", () => {
     // else would send the tab a terminal for the request it stopped.
     const t = setup();
     expect(await t.engine.cancelScheduledRecovery(ROOT)).toBe(true);
-    expect(t.log).toEqual([`end-aborted:${ROOT}`]);
+    expect(t.log).toEqual(["reconcile", `end-aborted:${ROOT}`]);
   });
 
   it("ends the stopped request for the tabs when a stop reaches an attempt before its turn starts", async () => {
@@ -869,6 +869,8 @@ describe("runRecoveredTurn", () => {
     expect(t.log).not.toContain("turn");
     expect(t.log).toContain("stopped");
     expect(t.incident()).toMatchObject(cancelled);
+    // The tab that stopped it waits on that id: it is ended too.
+    expect(t.log).toContain("end-aborted:request-cut-off");
   });
 
   it("a stop by the recovered turn's own request id reaches the attempt", async () => {

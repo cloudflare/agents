@@ -283,10 +283,15 @@ export class ResumeHandshake {
       // Delivered the pending terminal error frame on the resumed stream the
       // client just ACKed (#1645).
     } else if (
-      !resumableStream.replayCompletedChunksByRequestId(
-        connection,
-        requestId
-      ) &&
+      resumableStream.replayCompletedChunksByRequestId(connection, requestId)
+    ) {
+      // A stream that closed into recovery ends on "recovering", which is
+      // not an end for the tab. A stop since then recorded the request's
+      // real end; send it after the replay.
+      if (resumableStream.getOutcome(requestId) === "recovering") {
+        this._replayRecentTerminalOnAck(connection, requestId);
+      }
+    } else if (
       // No stored stream to replay: the recorded terminal frame of a request
       // that ended while this tab was away (a replayed request that never
       // streamed, or a stream whose rows its cutover deleted).

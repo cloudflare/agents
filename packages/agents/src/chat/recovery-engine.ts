@@ -1332,10 +1332,16 @@ export class ChatRecoveryEngine {
       running?.stopped.abort();
       if (!applied) continue;
       cancelled = true;
-      // No attempt runs for it (it waits out its backoff), so nothing else
-      // will send the tab a terminal for the request it stopped. A running
-      // attempt ends the request itself when it stops (`runRecoveredTurn`).
-      if (!running) endedHere = true;
+      // A running attempt ends its root request when it stops
+      // (`runRecoveredTurn`), and its turn ends its own. Any other id the
+      // stop named (the request a chained attempt's tab last saw cut off,
+      // or any id while the recovery waits out its backoff) gets no
+      // terminal from anything else.
+      const endsItself =
+        running !== undefined &&
+        (requestId === incident.recoveryRootRequestId ||
+          requestId === running.turnRequestId);
+      if (!endsItself) endedHere = true;
     }
     if (endedHere) this.adapter.turns?.endRequest?.(requestId, "aborted");
     return cancelled;
