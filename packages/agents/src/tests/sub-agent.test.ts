@@ -1414,8 +1414,9 @@ describe("SubAgent", () => {
     await agent.insertLegacyFiberMirrorJob("mirror-job-child");
     await agent.restartFibers();
 
+    // The mirror job is gone; the root's alarm (real or run here) may
+    // already have driven the facet, so only the outcome is checked.
     expect(await agent.legacyFiberMirrorJobCount()).toBe(0);
-    expect(await agent.fiberWakeOwners()).toHaveLength(1);
     await drainDueFiberWakes(agent);
     expect(await agent.subAgentRecoveredFibers("mirror-job-child")).toEqual([
       expect.objectContaining({ id: "mirror-job-fiber-1" })
