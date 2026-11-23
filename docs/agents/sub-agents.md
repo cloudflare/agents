@@ -96,7 +96,7 @@ Dynamic agents are backed by workerd **facets**. The properties below are what t
 
 - **Separate isolate, same machine.** Each facet runs in its own isolate (its own JS heap), colocated with the parent for cheap RPC. The whole tree shares the parent's physical placement and moves or dies with it — facets never scatter across the edge.
 - **Own SQLite database.** Each facet's storage is invisible to its siblings and to the parent's SQL. The runtime stores the databases together as one logical root object; do not treat a facet as an independently placed top-level storage object.
-- **No independent alarms.** Facets cannot set a physical alarm; the top-level parent owns the one alarm slot and the SDK routes scheduled callbacks back into children (see [Scheduling](#scheduling)).
+- **No independent alarms.** Facets cannot set a physical alarm; the top-level parent owns the one alarm slot and wakes each child that has work due (see [Scheduling](#scheduling)).
 - **Supervised lifecycle.** The parent can abort a child transitively (storage survives), delete it (storage wiped), and restart the same storage under a _different class_ — a code upgrade on stable state. A broken facet breaks the whole actor, except when the parent itself aborted it.
 - **Independent hibernation.** A facet hibernates and restarts independently of its parent, but cannot outlive the root Durable Object's placement.
 - **Private addressability.** A facet is reachable only through its parent; siblings cannot see each other unless the parent passes references.
@@ -122,17 +122,17 @@ export class JobRunner extends Agent {
 }
 ```
 
-The top-level parent still owns the underlying Durable Object alarm because facets do not have independent alarm slots. The Agents SDK stores a logical owner path for the child's schedule, wakes the parent when the alarm fires, then dispatches the callback back into the child. The callback runs with the child as `this`, so it uses the child's SQLite storage, state, `parentPath`, and `getCurrentAgent()` context.
+The child stores its schedules in its own SQLite storage. The top-level parent still owns the underlying Durable Object alarm because facets do not have independent alarm slots: it keeps one wake per child that has work due, and when the alarm fires it calls into the child, which runs its due work. The callback runs with the child as `this`, so it uses the child's SQLite storage, state, `parentPath`, and `getCurrentAgent()` context.
 
-`cancelSchedule()`, `getScheduleById()`, and `listSchedules()` also work inside dynamic agents. They are scoped to the calling child — a child cannot cancel or list a sibling's schedules by id. To clear every schedule under a child (and any of its descendants), call `this.dynamicAgents.delete(Cls, name)` from the parent. The older synchronous `getSchedule()` and `getSchedules()` APIs throw inside dynamic agents because scheduled rows are stored on the top-level parent.
+`cancelSchedule()`, `getScheduleById()`, and `listSchedules()` also work inside dynamic agents. They are scoped to the calling child — a child cannot cancel or list a sibling's schedules by id. To clear every schedule under a child (and any of its descendants), call `this.dynamicAgents.delete(Cls, name)` from the parent. The older synchronous `getSchedule()` and `getSchedules()` APIs work inside dynamic agents too.
 
-Calling `this.destroy()` inside a dynamic agent delegates the same teardown back to the parent: it cancels the child's parent-owned schedules (and descendants), removes the child from the parent's registry, and asks the runtime to wipe the child's storage. Because the underlying `ctx.facets.delete` call aborts the child's isolate, treat `this.destroy()` as fire-and-forget — it may not return cleanly to the caller.
+Calling `this.destroy()` inside a dynamic agent delegates the same teardown back to the parent: it drops the parent's wakes for the child (and descendants), removes the child from the parent's registry, and asks the runtime to wipe the child's storage. Because the underlying `ctx.facets.delete` call aborts the child's isolate, treat `this.destroy()` as fire-and-forget — it may not return cleanly to the caller.
 
 ### Durable execution and chat recovery
 
 Dynamic agents can use `runFiber()` and Think's `chatRecovery` just like top-level agents. Fiber rows live in the child's own SQLite database, so recovery hooks run with the child as `this` and see the child's state, storage, `parentPath`, and `getCurrentAgent()` context.
 
-Because facets do not have independent alarm slots, the top-level parent owns the physical alarm heartbeat for child fibers. The child still stores fiber rows and snapshots in its own SQLite database, while the parent stores a small root-side index of active facet fibers. When the parent alarm fires, it checks that index and routes recovery checks back into the owning child. Think's chat recovery can schedule its recovered continuation from inside the child; the parent owns the physical alarm and routes the continuation back to the child.
+Because facets do not have independent alarm slots, the top-level parent's alarm wakes child fibers the same way: the child stores fiber rows, snapshots and its recovery wake in its own SQLite database, and the parent keeps one wake for the child. Think's chat recovery runs in the child the same way.
 
 Dynamic agents can also start [Workflows](./workflows.md) with `this.runWorkflow()`. Workflow tracking is local to the child's SQLite database, and `AgentWorkflow.agent` routes RPC, callbacks, state updates, and broadcasts back to the originating child. Parent agents do not automatically list or control child-started workflows. Because the child stub only exposes user-defined child methods, add child wrapper methods for controls such as `getWorkflow()`, `approveWorkflow()`, or `terminateWorkflow()`, then call those wrappers through `await this.dynamicAgents.get(Child, name)`. If you pass `runWorkflow(..., { agentBinding })` from a child, use the root Agent binding name, not a child binding name.
 
@@ -436,7 +436,7 @@ Dynamic agents can schedule their own callbacks and run durable fibers:
 - `this.getScheduleById()` / `this.listSchedules()` work on a child.
 - `this.runFiber()` and Think `chatRecovery` work on a child.
 
-The top-level parent still owns the physical alarm because facets do not have independent alarm slots. The Agents SDK stores the child owner path with each schedule row, wakes the parent, and routes the callback back into the child. `keepAlive()` and `keepAliveWhile()` work in dynamic agents by delegating their heartbeat ref to the top-level parent. `runFiber()` also works in dynamic agents: fiber rows and snapshots live in the child's own SQLite database, and the parent keeps a copy of the child's recovery alarm so it can route recovery back into idle children.
+The top-level parent still owns the physical alarm because facets do not have independent alarm slots. Each child keeps its schedules, queue, fibers and keep-alive heartbeat in its own storage; the parent keeps one wake per child with work due and calls into the child when it fires. `keepAlive()` and `keepAliveWhile()` in a child keep the whole tree awake.
 
 ## Broadcasts
 
