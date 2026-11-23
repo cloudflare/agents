@@ -2350,6 +2350,27 @@ export class TestSubAgentParent extends Agent {
     this.insertLegacyFacetRunIndexRow(await child.getSelfPath(), id);
   }
 
+  /** Leave a fiber wake mirror job as the previous release kept it. */
+  async insertLegacyFiberMirrorJob(subAgentName: string): Promise<void> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    const selfPath = await child.getSelfPath();
+    const key = agentPathKey(selfPath) ?? "";
+    this.sql`
+      INSERT INTO cf_agents_jobs (id, capability, fn, time, payload)
+      VALUES (${`fibers:recover:${key}`}, 'fibers', 'recover', ${Date.now()},
+        ${JSON.stringify({ owner_path: JSON.stringify(selfPath), owner_path_key: key })})
+    `;
+  }
+
+  legacyFiberMirrorJobCount(): number {
+    return (
+      this.sql<{ count: number }>`
+        SELECT COUNT(*) AS count FROM cf_agents_jobs
+        WHERE capability = 'fibers' AND id LIKE 'fibers:recover:%'
+      `[0]?.count ?? 0
+    );
+  }
+
   /** Run the Fibers capability's startup migration again. */
   async restartFibers(): Promise<void> {
     await (
