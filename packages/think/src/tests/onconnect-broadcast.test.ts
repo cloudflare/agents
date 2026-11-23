@@ -1,5 +1,5 @@
 import { env, exports } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { getAgentByName, getSubAgentByName } from "agents";
 import { ThinkTestAgent } from "./agents/think-session";
 
@@ -322,18 +322,27 @@ describe("Think — message lists inside a facet", () => {
       );
 
       const child = await getSubAgentByName(parent, ThinkTestAgent, childRoom);
-      const frames = collectMessages(ws);
+      const lists: Array<Array<{ role: string }>> = [];
+      ws.addEventListener("message", (event: MessageEvent) => {
+        const frame = JSON.parse(event.data as string) as {
+          type?: string;
+          messages?: Array<{ role: string }>;
+        };
+        if (frame.type === MSG_CHAT_MESSAGES && frame.messages) {
+          lists.push(frame.messages);
+        }
+      });
       const result = await child.testChat("hello from the facet");
       expect(result.done).toBe(true);
-      const lists = (await frames).filter(
-        (frame) => frame.type === MSG_CHAT_MESSAGES
+      // Forwarding to a facet's sockets is not awaited by the broadcast.
+      await vi.waitFor(
+        () =>
+          expect(lists.at(-1)?.map((message) => message.role)).toEqual([
+            "user",
+            "assistant"
+          ]),
+        { timeout: 5000 }
       );
-      expect(lists.length).toBeGreaterThan(0);
-      const last = lists[lists.length - 1].messages as Array<{ role: string }>;
-      expect(last.map((message) => message.role)).toEqual([
-        "user",
-        "assistant"
-      ]);
     } finally {
       await closeWS(ws);
     }
