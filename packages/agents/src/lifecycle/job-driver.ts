@@ -164,6 +164,27 @@ export type JobDriverOptions = {
   readonly reset: (reason: string) => void;
 };
 
+/**
+ * Due rows with the owners whose first due job has attempts that never
+ * reported back moved to the end, each owner's own order kept. Such a job
+ * most likely ended its isolate last time (a memory-limit reset takes every
+ * job in flight with it), so every other owner's due job runs before it is
+ * tried again. Exclusive jobs keep their place.
+ */
+function suspectsLast(due: JobStorageRow[]): JobStorageRow[] {
+  const suspects = new Set<string>();
+  const seen = new Set<string>();
+  for (const row of due) {
+    if (seen.has(row.capability)) continue;
+    seen.add(row.capability);
+    if ((row.attempts ?? 0) > 0) suspects.add(row.capability);
+  }
+  if (suspects.size === 0) return due;
+  const moved = (row: JobStorageRow) =>
+    suspects.has(row.capability) && !row.exclusive;
+  return due.filter((row) => !moved(row)).concat(due.filter(moved));
+}
+
 /** The dispatch an async flow belongs to while an alarm drives it. */
 type AlarmScope = { readonly executing: JobStorageRow | undefined };
 
@@ -440,7 +461,7 @@ export class JobDriver {
    */
   async #driveDueJobs(): Promise<DeferredDrive | undefined> {
     const nowMs = Date.now();
-    const due = this.#options.queue.due(nowMs);
+    const due = suspectsLast(this.#options.queue.due(nowMs));
     if (due.length === 0) return undefined;
     let deferred: DeferredDrive | undefined;
     this.#warnBacklog(due);

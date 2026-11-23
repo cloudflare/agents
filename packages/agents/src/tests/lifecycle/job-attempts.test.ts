@@ -81,6 +81,49 @@ function interrupted(storage: DurableObjectStorage, id: string, n: number) {
   );
 }
 
+/** Records which owner's job ran, in order. */
+class Ordered extends LifecycleCapability {
+  constructor(
+    id: string,
+    readonly ran: string[]
+  ) {
+    super(id);
+  }
+
+  onJob({ job }: LifecycleJobContext): void {
+    this.ran.push(job.id);
+  }
+
+  push(options: LifecycleJobPushOptions) {
+    return this.lifecycle.jobs.push(options);
+  }
+}
+
+describe("jobs after an attempt that ended its isolate", () => {
+  it("run every other owner's due job first, keeping the suspect owner's order", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const ran: string[] = [];
+      const suspect = new Ordered("suspect-owner", ran);
+      const other = new Ordered("other-owner", ran);
+      const { lifecycle } = install(suspect);
+      lifecycle.use(other);
+      await lifecycle.start();
+      const now = Date.now();
+      await suspect.push({ id: "s1", fn: "run", time: now + 60_000 });
+      await suspect.push({ id: "s2", fn: "run", time: now + 60_001 });
+      await other.push({ id: "o1", fn: "run", time: now + 60_002 });
+      // s1's last attempt ended with its isolate; all three are now due.
+      storage.sql.exec(
+        "UPDATE cf_agents_jobs SET time = time - 120000, attempts = CASE id WHEN 's1' THEN 1 ELSE 0 END"
+      );
+
+      await lifecycle.alarm();
+
+      expect(ran).toEqual(["o1", "s1", "s2"]);
+    });
+  });
+});
+
 describe("durable job attempts", () => {
   it("does not retry a job in an isolate whose storage was reset", async () => {
     await withCapabilityHarness(async ({ install }) => {
