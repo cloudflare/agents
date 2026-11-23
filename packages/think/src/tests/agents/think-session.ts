@@ -11023,11 +11023,6 @@ export class ThinkScheduledTasksTestAgent extends ThinkProgrammaticTestAgent {
     return child.reconcileScheduledTasksWarningsForTest();
   }
 
-  async listChildSchedulesForTest(name: string): Promise<Schedule<unknown>[]> {
-    const child = await this.subAgent(ThinkScheduledTasksTestAgent, name);
-    return child.listSchedulesForTest();
-  }
-
   // ── #1703: alarm() must not arm a keepAlive heartbeat when there are
   // no pending workflow notifications, otherwise the DO fires every 30s
   // forever and never hibernates.

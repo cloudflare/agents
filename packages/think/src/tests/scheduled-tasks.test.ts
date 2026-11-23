@@ -51,9 +51,6 @@ type ThinkScheduledTasksTestStub = {
   ): Promise<void>;
   reconcileChildScheduledTasksWarningsForTest(name: string): Promise<string[]>;
   listChildDeclaredForTest(name: string): Promise<DeclaredScheduleInfo[]>;
-  listChildSchedulesForTest(
-    name: string
-  ): Promise<Array<{ id: string; payload: unknown }>>;
   getKeepAliveRefsForTest(): Promise<number>;
   runAlarmForTest(): Promise<{
     keepAliveRefs: number;
@@ -261,7 +258,7 @@ describe("Think scheduled tasks", () => {
     expect(await nextRunAt(agent, "workflow")).toBeGreaterThan(scheduledFor);
   });
 
-  it("arms declared tasks on the root only, and says so on a sub-agent (#1877)", async () => {
+  it("arms declared tasks on a sub-agent too, without a warning", async () => {
     const parent = await freshAgent();
     const tasks = {
       digest: { schedule: "every 1 minute", prompt: "Daily digest" }
@@ -273,10 +270,10 @@ describe("Think scheduled tasks", () => {
     const warnings =
       await parent.reconcileChildScheduledTasksWarningsForTest("alpha");
 
+    // A sub-agent keeps its own declared schedules; its root wakes it.
     expect(await parent.listDeclaredForTest()).toHaveLength(1);
-    expect(await parent.listChildDeclaredForTest("alpha")).toEqual([]);
-    expect(await parent.listChildSchedulesForTest("alpha")).toEqual([]);
-    expect(warnings.join("\n")).toMatch(/declared schedules run only on/);
+    expect(await parent.listChildDeclaredForTest("alpha")).toHaveLength(1);
+    expect(warnings.join("\n")).not.toMatch(/declared schedules run only on/);
   });
 
   it("does not arm a keepAlive heartbeat on alarm() when no workflow notifications are pending (#1703)", async () => {
