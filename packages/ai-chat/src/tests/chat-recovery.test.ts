@@ -675,6 +675,77 @@ describe("chatRecovery", () => {
     });
   });
 
+  it("tells a tab that comes back how a declined, discarded reply's request ended, without its chunks", async () => {
+    const room = crypto.randomUUID();
+    const stub = (await getAgentByName(
+      env.ChatRecoveryTestAgent,
+      room
+    )) as unknown as ChatTestStub;
+    await stub.setRecoveryOverride({ persist: false, continue: false });
+    await stub.persistMessages([
+      { id: "user-1", role: "user", parts: [{ type: "text", text: "Hi" }] }
+    ] as ChatMessage[]);
+    await stub.insertInterruptedStream("stream-gone", "req-gone", [
+      {
+        body: JSON.stringify({ type: "start", messageId: "a-gone" }),
+        index: 0
+      },
+      { body: JSON.stringify({ type: "text-start" }), index: 1 },
+      {
+        body: JSON.stringify({ type: "text-delta", delta: "Discarded" }),
+        index: 2
+      }
+    ]);
+    await stub.insertInterruptedFiber("__cf_internal_chat_turn:req-gone");
+    await stub.triggerFiberRecovery();
+
+    // The tab comes back still waiting on req-gone.
+    const { ws } = await connectChatWS(
+      `/agents/chat-recovery-test-agent/${room}`
+    );
+    const heard: Array<Record<string, unknown>> = [];
+    ws.addEventListener("message", (event: MessageEvent) => {
+      const m = JSON.parse(event.data as string) as Record<string, unknown>;
+      heard.push(m);
+      if (m.type === MessageType.CF_AGENT_STREAM_RESUMING) {
+        ws.send(
+          JSON.stringify({
+            type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+            id: m.id
+          })
+        );
+      }
+    });
+    ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST,
+        requestIds: ["req-gone"]
+      })
+    );
+
+    await vi.waitFor(() =>
+      expect(
+        heard.some(
+          (m) =>
+            isUseChatResponseMessage(m) &&
+            m.id === "req-gone" &&
+            m.done === true &&
+            (m as { outcome?: string }).outcome === "aborted"
+        )
+      ).toBe(true)
+    );
+    // The reply the app discarded does not come back.
+    expect(
+      heard.some(
+        (m) =>
+          isUseChatResponseMessage(m) &&
+          typeof m.body === "string" &&
+          m.body.includes("Discarded")
+      )
+    ).toBe(false);
+    ws.close();
+  });
+
   describe("recovery preserves settled work (#1631)", () => {
     it("persists the settled partial when the recovery budget is exhausted", async () => {
       const room = crypto.randomUUID();
