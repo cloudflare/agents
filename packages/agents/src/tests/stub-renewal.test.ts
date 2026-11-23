@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "..";
-import { renewingStub } from "../stub-renewal";
+import { renewingStub, stubRenewals } from "../stub-renewal";
 
 type Settings = Promise<{ enabled: boolean }> & { enabled: Promise<boolean> };
 
@@ -76,5 +76,23 @@ describe("renewingStub", () => {
     // the original, started Agent.
     await expect(renewing.crashForTest()).rejects.toThrow();
     await expect(renewing.startedGetterForTest).resolves.toBe(true);
+  });
+
+  it("keeps the stub when the callee's own code threw", async () => {
+    let opened = 0;
+    const hookError = Object.assign(new Error("hook failed"), { remote: true });
+    const renewing = renewingStub<{ ping(): Promise<string> }>(
+      { ping: () => Promise.reject(hookError) },
+      () => {
+        opened += 1;
+        return { ping: () => Promise.resolve("pong") };
+      }
+    );
+    await expect(renewing.ping()).rejects.toThrow("hook failed");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(opened).toBe(0);
+    expect((renewing as unknown as Record<symbol, number>)[stubRenewals]).toBe(
+      0
+    );
   });
 });

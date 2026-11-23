@@ -10,9 +10,8 @@
  *
  * The failed call still rejects and is not retried here: the caller's own
  * retry (a workflow step's retries, say) runs on the new stub. An error the
- * callee threw itself does not break a stub, but telling the two apart is
- * not reliable, so any rejection renews it; a new stub to the same object
- * costs nothing.
+ * callee threw itself (`remote: true`) does not break a stub and does not
+ * renew it; any other rejection does.
  *
  * Every property read is forwarded to the current stub's own RPC property,
  * so awaiting a remote getter and reading nested properties work as on the
@@ -43,8 +42,11 @@ export function renewingStub<T extends object>(
   /** The current stub still needs `prepare` before its first call. */
   let unprepared = false;
   let preparing: Promise<unknown> | undefined;
-  const renew = (failed: T) => {
+  const renew = (failed: T, error?: unknown) => {
     if (current !== failed) return;
+    // An error the callee's own code threw arrives with `remote: true` and
+    // leaves the stub working (measured); only the others mean a reset.
+    if (isRemoteError(error)) return;
     current = open();
     renewals += 1;
     unprepared = prepare !== undefined;
@@ -63,7 +65,7 @@ export function renewingStub<T extends object>(
           if (current === stub) unprepared = false;
         },
         (error: unknown) => {
-          renew(stub);
+          renew(stub, error);
           throw error;
         }
       );
@@ -78,7 +80,7 @@ export function renewingStub<T extends object>(
       // callbacks to be functions.
       result.then(
         () => {},
-        () => renew(stub)
+        (error: unknown) => renew(stub, error)
       );
     }
     return result;
@@ -104,7 +106,7 @@ export function renewingStub<T extends object>(
           try {
             return observe(stub, call());
           } catch (error) {
-            renew(stub);
+            renew(stub, error);
             throw error;
           }
         },
@@ -121,7 +123,7 @@ export function renewingStub<T extends object>(
               Reflect.apply(member, target, [
                 onFulfilled ?? ((result: unknown) => result),
                 (error: unknown) => {
-                  renew(stub);
+                  renew(stub, error);
                   if (onRejected) return onRejected(error);
                   throw error;
                 }
@@ -133,6 +135,14 @@ export function renewingStub<T extends object>(
       });
     }
   });
+}
+
+function isRemoteError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { remote?: unknown }).remote === true
+  );
 }
 
 function isThenable(value: unknown): value is PromiseLike<unknown> {
