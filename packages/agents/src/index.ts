@@ -182,6 +182,7 @@ import {
   cancelFiber,
   createFiberTaskDefinition,
   deleteFibers,
+  fiberByKey,
   importLegacyFibers,
   inspectFiber,
   listFibers,
@@ -2478,10 +2479,7 @@ export class Agent<
   async inspectFiberByKey(
     idempotencyKey: string
   ): Promise<FiberInspection | null> {
-    return inspectFiber(
-      this.tasks,
-      this.tasks.peekByIdempotencyKey(idempotencyKey)
-    );
+    return inspectFiber(this.tasks, fiberByKey(this.tasks, idempotencyKey));
   }
 
   async listFibers(options?: ListFibersOptions): Promise<FiberInspection[]> {
@@ -2498,7 +2496,7 @@ export class Agent<
   ): Promise<boolean> {
     return cancelFiber(
       this.tasks,
-      this.tasks.peekByIdempotencyKey(idempotencyKey),
+      fiberByKey(this.tasks, idempotencyKey),
       reason
     );
   }

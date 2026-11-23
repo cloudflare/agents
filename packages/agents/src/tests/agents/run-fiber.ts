@@ -1,4 +1,4 @@
-import { Agent } from "../../index.ts";
+import { Agent, getCurrentAgent } from "../../index.ts";
 import type { Tasks } from "../../tasks/tasks";
 import { importLegacyFibers } from "../../fiber-runs";
 import { createLegacyFiberTables, OPEN_FIBER_RUNS_SQL } from "./legacy-fibers";
@@ -6,6 +6,7 @@ import type {
   FiberInspection,
   FiberRecoveryContext,
   FiberRecoveryResult,
+  FiberStatus,
   ListFibersOptions,
   StartFiberResult
 } from "../../index.ts";
@@ -54,6 +55,18 @@ export class TestRunFiberAgent extends Agent {
         snapshot: { recovered: true },
         metadata: { recovered: true }
       };
+    }
+    if (ctx.name === "managed-resolves-itself") {
+      // As Think's messenger recovery does: record a stage, then complete.
+      await this.resolveFiber(ctx.id, {
+        status: "interrupted",
+        snapshot: { stage: "posting" }
+      });
+      await this.resolveFiber(ctx.id, {
+        status: "completed",
+        snapshot: { stage: "done" }
+      });
+      return;
     }
     if (ctx.name === "managed-recovery-throws") {
       throw new Error("Recovery failed");
@@ -451,7 +464,8 @@ export class TestRunFiberAgent extends Agent {
   async insertInterruptedLedgerFiber(
     id: string,
     createdAt: number,
-    interruptedAt: number
+    interruptedAt: number,
+    reason: string | null = null
   ): Promise<void> {
     this._legacyFiberTables();
     this.sql`
@@ -459,9 +473,74 @@ export class TestRunFiberAgent extends Agent {
         (fiber_id, idempotency_key, name, status, snapshot, metadata_json,
          error_message, created_at, started_at, completed_at)
       VALUES
-        (${id}, ${`key:${id}`}, ${"managed"}, 'interrupted', NULL, NULL, NULL,
+        (${id}, ${`key:${id}`}, ${"managed"}, 'interrupted', NULL, NULL, ${reason},
          ${createdAt}, ${createdAt}, ${interruptedAt})
     `;
+  }
+
+  /** A managed fiber's run accepted and not yet claimed (its wake far off). */
+  async insertPendingManagedRun(id: string): Promise<void> {
+    const now = Date.now();
+    this.sql`
+      INSERT INTO cf_agents_task_runs
+        (run_id, definition, input, status, retain, attempt, next_at,
+         cancel_requested, created_at, updated_at)
+      VALUES (${id}, '__cf_managed_fiber', ${JSON.stringify({ name: "later" })},
+        'pending', 1, 0, ${now + 3_600_000}, 0, ${now}, ${now})
+    `;
+  }
+
+  /** A run of another definition holding `key` in Tasks' one key space. */
+  async insertOtherTaskWithKey(key: string): Promise<void> {
+    await this.tasks.importRun({
+      runId: `other-${key}`,
+      definition: "other",
+      status: "completed",
+      attempt: 1,
+      idempotencyKey: key,
+      createdAt: Date.now()
+    });
+  }
+
+  /** Two starts of the same key racing each other. */
+  async startManagedTwice(
+    key: string
+  ): Promise<Array<{ accepted: boolean; fiberId: string }>> {
+    const start = () =>
+      this.startFiber("raced", async () => {}, { idempotencyKey: key });
+    const results = await Promise.all([start(), start()]);
+    return results.map(({ accepted, fiberId }) => ({ accepted, fiberId }));
+  }
+
+  /** Start and complete a managed fiber, then return its inspection. */
+  async completeManaged(key: string): Promise<FiberInspection | null> {
+    const result = await this.startFiber("done", async () => {}, {
+      idempotencyKey: key,
+      waitForCompletion: true
+    });
+    return this.inspectFiber(result.fiberId);
+  }
+
+  async listFibersFor(
+    status: FiberStatus | FiberStatus[],
+    limit: number
+  ): Promise<string[]> {
+    return (await this.listFibers({ status, limit })).map((f) => f.fiberId);
+  }
+
+  async deleteFibersFor(status: FiberStatus[], limit: number): Promise<number> {
+    return this.deleteFibers({ status, limit });
+  }
+
+  override async onRequest(request: Request): Promise<Response> {
+    if (new URL(request.url).pathname.endsWith("/fiber-context")) {
+      const seen = await this.runFiber(
+        "context",
+        async () => getCurrentAgent().request?.url ?? null
+      );
+      return Response.json({ seen });
+    }
+    return new Response("not found", { status: 404 });
   }
 
   async deleteInterruptedFibersBefore(time: number): Promise<number> {

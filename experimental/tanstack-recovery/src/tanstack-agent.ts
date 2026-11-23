@@ -932,7 +932,9 @@ export class TanStackAgent extends Agent<Env> {
     bufferedChars: number;
   }> {
     const fiberRows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_runs
+      SELECT COUNT(*) as count FROM cf_agents_task_runs
+      WHERE definition IN ('__cf_fiber', '__cf_managed_fiber')
+        AND status IN ('pending', 'running') AND coalesce(wait_reason, '') != 'park'
     `;
     // Chars currently reconstructable from the ACTIVE stream buffer — lets the
     // real-provider e2e wait until content has actually streamed (past the

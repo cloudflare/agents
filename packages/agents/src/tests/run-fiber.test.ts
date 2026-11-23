@@ -38,6 +38,14 @@ describe("runFiber", () => {
   // ── Basic execution ───────────────────────────────────────────
 
   describe("execution", () => {
+    it("runs the fiber in its caller's request context", async () => {
+      const stub = await getAgentByName(env.TestRunFiberAgent, "fiber-context");
+      const response = await stub.fetch("https://example.com/fiber-context");
+      await expect(response.json()).resolves.toEqual({
+        seen: "https://example.com/fiber-context"
+      });
+    });
+
     it("should run a fiber and return the result", async () => {
       const agent = await getAgentByName(env.TestRunFiberAgent, "run-basic");
 
@@ -972,6 +980,98 @@ describe("runFiber", () => {
       await expect(
         agent.inspectManagedFiber("parked-late")
       ).resolves.toMatchObject({ status: "interrupted" });
+    });
+
+    it("lets a managed fiber's recovery hook resolve it, stages first", async () => {
+      const agent = await freshManagedAgent("managed-resolves-itself");
+      await agent.insertInterruptedManagedFiber(
+        "resolves-itself",
+        "managed-resolves-itself",
+        { stage: "start" }
+      );
+      await agent.triggerRecoveryCheck();
+
+      await expect(
+        agent.inspectManagedFiber("resolves-itself")
+      ).resolves.toMatchObject({
+        status: "completed",
+        snapshot: { stage: "done" }
+      });
+    });
+
+    it("keeps a managed fiber's key apart from other Task runs' keys", async () => {
+      const agent = await freshManagedAgent("managed-key-space");
+      await agent.insertOtherTaskWithKey("shared");
+
+      const done = await agent.completeManaged("shared");
+      expect(done).toMatchObject({
+        status: "completed",
+        idempotencyKey: "shared"
+      });
+      await expect(
+        agent.inspectManagedFiberByKey("shared")
+      ).resolves.toMatchObject({ fiberId: done?.fiberId });
+    });
+
+    it("joins two racing starts of the same key", async () => {
+      const agent = await freshManagedAgent("managed-raced");
+      const [a, b] = await agent.startManagedTwice("raced-key");
+      expect([a.accepted, b.accepted].sort()).toEqual([false, true]);
+      expect(a.fiberId).toBe(b.fiberId);
+    });
+
+    it("keeps an older release's interruption reason", async () => {
+      const agent = await freshManagedAgent("managed-reason");
+      const now = Date.now();
+      await agent.insertInterruptedLedgerFiber(
+        "with-reason",
+        now - 1000,
+        now - 500,
+        "waiting for manual reconciliation"
+      );
+      await agent.triggerRecoveryCheck();
+      await expect(
+        agent.inspectManagedFiber("with-reason")
+      ).resolves.toMatchObject({
+        status: "interrupted",
+        error: "waiting for manual reconciliation"
+      });
+    });
+
+    it("lists only interrupted fibers when asked, whatever the limit", async () => {
+      const agent = await freshManagedAgent("managed-list-parked");
+      const now = Date.now();
+      await agent.insertInterruptedLedgerFiber(
+        "parked-1",
+        now - 2000,
+        now - 1500
+      );
+      await agent.triggerRecoveryCheck();
+      await agent.insertPendingManagedRun("later-pending");
+
+      await expect(agent.listFibersFor("interrupted", 1)).resolves.toEqual([
+        "parked-1"
+      ]);
+    });
+
+    it("deletes the oldest settled fiber first across interrupted and completed", async () => {
+      const agent = await freshManagedAgent("managed-delete-order");
+      const now = Date.now();
+      await agent.insertInterruptedLedgerFiber(
+        "old-parked",
+        now - 60_000,
+        now - 50_000
+      );
+      await agent.triggerRecoveryCheck();
+      await agent.completeManaged("newer-done");
+
+      await expect(
+        agent.deleteFibersFor(["interrupted", "completed"], 1)
+      ).resolves.toBe(1);
+      await expect(agent.inspectManagedFiber("old-parked")).resolves.toBeNull();
+      await expect(
+        agent.inspectManagedFiberByKey("newer-done")
+      ).resolves.toMatchObject({ status: "completed" });
     });
 
     it("should preserve interrupted fibers during default cleanup", async () => {

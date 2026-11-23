@@ -50,6 +50,13 @@ export const MANAGED_FIBER_TASK = "__cf_managed_fiber";
 const SNAPSHOT = "snapshot";
 /** Recovery attempts that ended the isolate before the hook returned. */
 const CRASHES = "crashes";
+/** Why a managed fiber is `interrupted`, carried over from an older release. */
+const INTERRUPTED_REASON = "interruptedReason";
+/**
+ * Managed fibers keep their idempotency keys apart from other Task runs':
+ * Tasks has one key space for every definition.
+ */
+const KEY_PREFIX = "fiber:";
 /** When a managed fiber became `interrupted` (its `settledAt`). */
 const INTERRUPTED_AT = "interruptedAt";
 /** Consecutive recovery attempts whose hook threw. */
@@ -66,9 +73,12 @@ type FiberInput = { name: string };
 
 type FiberLocal = {
   fn: (ctx: FiberContext) => Promise<unknown>;
+  /** The caller's async context (request, connection, email), re-entered for the closure. */
+  context: <R>(fn: () => R) => R;
   internal?: InternalFiberOptions;
-  /** Resolved when the closure starts. */
+  /** Called when the closure starts, after `runId` is set. */
   started?: () => void;
+  runId?: string;
   outcome?: { ok: true; value: unknown } | { ok: false; error: unknown };
 };
 
@@ -158,12 +168,15 @@ async function runBody(
   const stash = (data: unknown) => write(wrap ? wrap(data) : data);
   const startedAt = Date.now();
   host.emit("fiber:run:started", { fiberId: id, fiberName: name, managed });
+  local.runId = id;
   local.started?.();
   try {
     // The run's claim wake, renewed every heartbeat while this runs, keeps
     // the object alive.
-    const value = await fiberStash.run({ id, signal, stash }, () =>
-      local.fn({ id, signal, stash, snapshot: null })
+    const value = await local.context(() =>
+      fiberStash.run({ id, signal, stash }, () =>
+        local.fn({ id, signal, stash, snapshot: null })
+      )
     );
     local.outcome = { ok: true, value };
     host.emit("fiber:run:completed", {
@@ -204,7 +217,7 @@ async function recover(
     recoveryReason: "interrupted"
   };
   if (managed) {
-    ctx.idempotencyKey = record?.idempotencyKey;
+    ctx.idempotencyKey = publicKey(record?.idempotencyKey);
     ctx.metadata = record?.metadata ?? null;
     ctx.status = "interrupted";
   }
@@ -217,7 +230,12 @@ async function recover(
   // own budget.
   const counted = managed || !host.ownsRecoveryBudget(name);
   const crashes = step.checkpoint.get<number>(CRASHES) ?? 0;
-  if (managed && crashes >= 1) return parkInterrupted(step);
+  if (managed && crashes >= 1) {
+    return parkInterrupted(
+      step,
+      TaskSettlement.park(step.checkpoint.get<string>(INTERRUPTED_REASON))
+    );
+  }
   const payload = { fiberId: id, fiberName: name, managed };
   const elapsedMs = Date.now() - ctx.createdAt;
   host.emit("fiber:recovery:detected", {
@@ -250,12 +268,20 @@ async function recover(
   });
   let result: void | FiberRecoveryResult = undefined;
   let handled: boolean;
+  // A managed fiber's hook may resolve the fiber itself (Think's messenger
+  // replies record their delivery stages that way): `resolveFiber` during
+  // this attempt writes through this attempt and is its settlement.
+  const resolving = managed ? recovering(host.tasks) : undefined;
+  const own: Resolution = { step };
+  resolving?.set(id, own);
   try {
     handled = await withTimeout(host, ctx, () =>
       host.handleInternalRecovery(ctx)
     );
     if (!handled) result = await host.onRecovered(ctx);
+    result ??= own.result;
   } catch (error) {
+    resolving?.delete(id);
     if (counted) step.checkpoint.set(CRASHES, crashes);
     host.emit("fiber:recovery:failed", {
       ...payload,
@@ -287,6 +313,7 @@ async function recover(
     );
     return null;
   }
+  resolving?.delete(id);
   host.emit("fiber:recovery:handled", {
     ...payload,
     recoveryReason: "interrupted",
@@ -303,6 +330,27 @@ async function recover(
   return settlement?.kind === "park"
     ? parkInterrupted(step, settlement)
     : settlement;
+}
+
+type Resolution = { step: TaskStep; result?: FiberRecoveryResult };
+/** Managed fibers whose recovery hook runs now, per Tasks (one per Agent). */
+const recoveries = new WeakMap<Tasks, Map<string, Resolution>>();
+function recovering(tasks: Tasks): Map<string, Resolution> {
+  let map = recoveries.get(tasks);
+  if (!map) recoveries.set(tasks, (map = new Map()));
+  return map;
+}
+
+function publicKey(key: string | undefined): string | undefined {
+  return key?.startsWith(KEY_PREFIX) ? key.slice(KEY_PREFIX.length) : key;
+}
+
+/** @internal The managed fiber holding an idempotency key. */
+export function fiberByKey(
+  tasks: Tasks,
+  idempotencyKey: string
+): TaskRecord | undefined {
+  return tasks.peekByIdempotencyKey(KEY_PREFIX + idempotencyKey);
 }
 
 /** Park a managed fiber `interrupted`, keeping when that happened. */
@@ -380,7 +428,11 @@ export async function runFiber<T>(
   fn: (ctx: FiberContext) => Promise<T>,
   internal?: InternalFiberOptions
 ): Promise<T> {
-  const local: FiberLocal = { fn, internal };
+  const local: FiberLocal = {
+    fn,
+    internal,
+    context: AsyncLocalStorage.snapshot()
+  };
   const runId = nanoid();
   try {
     await tasks.run(FIBER_TASK, { name } satisfies FiberInput, {
@@ -420,7 +472,7 @@ export async function startFiber(
   const byKey =
     idempotencyKey === undefined
       ? undefined
-      : tasks.peekByIdempotencyKey(idempotencyKey);
+      : fiberByKey(tasks, idempotencyKey);
   if (byKey && fiberId !== undefined && byKey.runId !== fiberId) {
     throw new Error("fiberId and idempotencyKey refer to different fibers");
   }
@@ -428,23 +480,20 @@ export async function startFiber(
     throw new Error(`fiberId "${fiberId}" is not a managed fiber`);
   }
   const existing = byId ?? byKey;
-  if (existing) {
-    if (options.waitForCompletion && !isFiberTerminal(tasks, existing)) {
-      const waited = await waitForFiber(tasks, existing.runId);
-      if (!waited) throw new Error(`Fiber ${existing.runId} no longer exists`);
-      return { ...waited, accepted: false };
-    }
-    return { ...inspection(tasks, existing), accepted: false };
-  }
+  if (existing) return joinFiber(tasks, existing.runId, options);
 
   let started!: () => void;
   const startedPromise = new Promise<void>((resolve) => (started = resolve));
-  const local: FiberLocal = { fn, started };
-  const runId = fiberId ?? nanoid();
+  const local: FiberLocal = {
+    fn,
+    started,
+    context: AsyncLocalStorage.snapshot()
+  };
   const run = tasks
     .run(MANAGED_FIBER_TASK, { name } satisfies FiberInput, {
-      runId,
-      idempotencyKey,
+      runId: fiberId ?? nanoid(),
+      idempotencyKey:
+        idempotencyKey === undefined ? undefined : KEY_PREFIX + idempotencyKey,
       metadata: options.metadata as Record<string, TaskJson> | undefined,
       start: "now",
       local
@@ -452,19 +501,25 @@ export async function startFiber(
     .then((receipt) => {
       if (local.outcome && !local.outcome.ok) {
         console.error(
-          `[Agent] Managed fiber "${name}" (${runId}) failed:`,
+          `[Agent] Managed fiber "${name}" (${receipt.runId}) failed:`,
           local.outcome.error
         );
       }
       return receipt;
     });
+  // Accepting is what deduplicates: a start that raced this one to the same
+  // id or key is joined, and the receipt names the run that won.
+  const first = await Promise.race([run, startedPromise.then(() => undefined)]);
+  void run.catch(() => {});
+  if (first && !first.accepted) {
+    return joinFiber(tasks, first.runId, options);
+  }
+  // SAFETY: either the receipt came first, or the body started and set it.
+  const runId = first?.runId ?? (local.runId as string);
   if (options.waitForCompletion) {
     // A cancel settles the run even while a body that ignores its signal
     // still runs.
     await Promise.race([run, tasks.wait(runId)]);
-  } else {
-    await Promise.race([startedPromise, run]);
-    void run.catch(() => {});
   }
   const record = tasks.peek(runId);
   if (!record) throw new Error(`Fiber ${runId} no longer exists`);
@@ -475,6 +530,22 @@ export async function startFiber(
     delete accepted.startedAt;
   }
   return { ...accepted, accepted: true };
+}
+
+/** A start that found its fiber: `accepted: false`, after waiting if asked. */
+async function joinFiber(
+  tasks: Tasks,
+  runId: string,
+  options: StartFiberOptions
+): Promise<StartFiberResult> {
+  const record = tasks.peek(runId);
+  if (record && options.waitForCompletion && !isFiberTerminal(tasks, record)) {
+    const waited = await waitForFiber(tasks, runId);
+    if (!waited) throw new Error(`Fiber ${runId} no longer exists`);
+    return { ...waited, accepted: false };
+  }
+  if (!record) throw new Error(`Fiber ${runId} no longer exists`);
+  return { ...inspection(tasks, record), accepted: false };
 }
 
 /** @internal A managed fiber's inspection, or null. */
@@ -506,12 +577,17 @@ export function listFibers(
     ? new Set(Array.isArray(options.status) ? options.status : [options.status])
     : undefined;
   if (statuses?.size === 0) return [];
+  // `pending` and `interrupted` are both pending Task runs; asking for one
+  // of them filters on the park in the query, so the limit counts only it.
+  const pending = statuses?.has("pending");
+  const interrupted = statuses?.has("interrupted");
   return tasks
     .peekList({
       definition: MANAGED_FIBER_TASK,
       status: statuses && [
         ...new Set([...statuses].map((s) => STATUS_TO_TASK[s]))
       ],
+      parked: pending === interrupted ? undefined : interrupted,
       input: options.name === undefined ? undefined : { name: options.name },
       order: "newest",
       limit
@@ -537,6 +613,16 @@ export async function resolveFiber(
   fiberId: string,
   result: FiberRecoveryResult
 ): Promise<boolean> {
+  const own = recoveries.get(tasks)?.get(fiberId);
+  if (own) {
+    // Its recovery hook resolving it: the attempt applies this when it
+    // ends; an `interrupted` result records a stage and leaves it parked.
+    if (result.snapshot !== undefined) {
+      own.step.checkpoint.set(SNAPSHOT, toJson(result.snapshot));
+    }
+    own.result = result;
+    return true;
+  }
   const record = tasks.peek(fiberId);
   if (record?.definition !== MANAGED_FIBER_TASK) return false;
   if (!isParked(record)) return false;
@@ -550,49 +636,74 @@ export async function resolveFiber(
   );
 }
 
-/** @internal Delete settled managed fibers, oldest settled first. */
+/**
+ * @internal Delete settled managed fibers, oldest settled first: a terminal
+ * one by when it settled, an interrupted one by when it was interrupted.
+ */
 export async function deleteFibers(
   tasks: Tasks,
   options: DeleteFibersOptions = {}
 ): Promise<number> {
-  const requested = options.status
-    ? Array.isArray(options.status)
-      ? options.status
-      : [options.status]
-    : (["completed", "aborted", "error"] as FiberStatus[]);
+  const requested = new Set(
+    options.status
+      ? Array.isArray(options.status)
+        ? options.status
+        : [options.status]
+      : (["completed", "aborted", "error"] as FiberStatus[])
+  );
   const limit = Math.min(Math.max(options.limit ?? 100, 1), 500);
-  const settled = [...new Set(requested)].filter(
+  const settled = [...requested].filter(
     (status): status is "completed" | "aborted" | "error" =>
       status === "completed" || status === "aborted" || status === "error"
   );
-  let deleted =
-    settled.length === 0
-      ? 0
-      : await tasks.delete({
-          definition: MANAGED_FIBER_TASK,
-          status: settled,
-          settledBefore: options.settledBefore,
-          limit
-        });
-  if (requested.includes("interrupted") && deleted < limit) {
-    const before = options.settledBefore?.getTime();
-    for (const record of tasks.peekList({
+  if (!requested.has("interrupted")) {
+    if (settled.length === 0) return 0;
+    return tasks.delete({
       definition: MANAGED_FIBER_TASK,
-      status: ["pending"],
+      status: settled,
+      settledBefore: options.settledBefore,
+      limit
+    });
+  }
+  // Interrupted fibers are parked runs, so they and the terminal ones are
+  // ordered together here. Each kind is read up to `limit` candidates.
+  const before = options.settledBefore?.getTime() ?? Infinity;
+  const candidates: { record: TaskRecord; at: number }[] = [];
+  const read = (status: TaskStatus[], parked?: boolean) =>
+    tasks.peekList({
+      definition: MANAGED_FIBER_TASK,
+      status,
+      parked,
       order: "oldest",
-      limit: limit - deleted
-    })) {
-      if (!isParked(record)) continue;
-      // An interrupted fiber counts as settled when it was interrupted.
-      const interruptedAt =
-        tasks.checkpointOf<number>(record.runId, INTERRUPTED_AT) ??
-        record.createdAt;
-      if (before !== undefined && interruptedAt >= before) continue;
-      if (!(await tasks.settle(record.runId, TaskSettlement.aborted()))) {
-        continue;
-      }
-      if (tasks.deleteRun(record.runId)) deleted++;
+      limit: 500
+    });
+  for (const record of read(["pending"], true)) {
+    const at =
+      tasks.checkpointOf<number>(record.runId, INTERRUPTED_AT) ??
+      record.createdAt;
+    if (at < before) candidates.push({ record, at });
+  }
+  if (settled.length > 0) {
+    for (const record of read(settled)) {
+      const at = record.settledAt ?? record.createdAt;
+      if (at < before) candidates.push({ record, at });
     }
+  }
+  candidates.sort(
+    (a, b) =>
+      a.at - b.at ||
+      a.record.createdAt - b.record.createdAt ||
+      a.record.runId.localeCompare(b.record.runId)
+  );
+  let deleted = 0;
+  for (const { record } of candidates.slice(0, limit)) {
+    if (
+      isParked(record) &&
+      !(await tasks.settle(record.runId, TaskSettlement.aborted()))
+    ) {
+      continue;
+    }
+    if (tasks.deleteRun(record.runId)) deleted++;
   }
   return deleted;
 }
@@ -619,9 +730,8 @@ function inspection(tasks: Tasks, record: TaskRecord): FiberInspection {
     status,
     createdAt: record.createdAt
   };
-  if (record.idempotencyKey !== undefined) {
-    fiber.idempotencyKey = record.idempotencyKey;
-  }
+  const key = publicKey(record.idempotencyKey);
+  if (key !== undefined) fiber.idempotencyKey = key;
   const snapshot = tasks.checkpointOf(record.runId, SNAPSHOT);
   if (snapshot !== undefined) fiber.snapshot = snapshot;
   const error = status === "error" ? record.error?.message : record.reason;
@@ -827,10 +937,12 @@ async function importManaged(
     state.status === "interrupted" || state.status === "pending"
       ? "running"
       : state.status;
-  // An `interrupted` row already had its one recovery: it stays parked.
+  // An `interrupted` row already had its one recovery: it stays parked,
+  // with its reason and the time it was interrupted.
   if (interrupted) {
     checkpoint[CRASHES] = 1;
     if (state.settledAt !== null) checkpoint[INTERRUPTED_AT] = state.settledAt;
+    if (state.error !== null) checkpoint[INTERRUPTED_REASON] = state.error;
   }
   await tasks.importRun({
     runId: row.fiber_id,
@@ -841,7 +953,10 @@ async function importManaged(
     metadata: parseJson(row.metadata_json) as
       | Record<string, TaskJson>
       | undefined,
-    idempotencyKey: row.idempotency_key ?? undefined,
+    idempotencyKey:
+      row.idempotency_key === null
+        ? undefined
+        : KEY_PREFIX + row.idempotency_key,
     error: state.error ?? undefined,
     checkpoint,
     createdAt: row.created_at,
