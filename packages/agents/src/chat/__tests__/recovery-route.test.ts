@@ -117,6 +117,8 @@ function setup(scenario: Scenario = {}) {
       attemptScope: new AsyncLocalStorage<ChatRecoveryAttemptScope>(),
       latestMessage: () => undefined,
       originMessageIdsScope: new AsyncLocalStorage<string[] | undefined>(),
+      endRequest: (requestId, outcome) =>
+        void log.push(`end-${outcome}:${requestId}`),
       recordTerminalError: async (requestId, errorText) => {
         log.push("terminal-record");
         terminalErrors.push({ requestId, errorText });
@@ -208,6 +210,18 @@ describe("routeStreamInterruption", () => {
     expect(t.incident()?.scheduleCount).toBe(1);
   });
 
+  it("ends a request stopped before its interruption was routed after keeping its reply", async () => {
+    const t = setup({ storedReplyId: "assistant-1" });
+    // The stop lands before the incident exists: nothing to cancel yet.
+    expect(await t.engine.cancelScheduledRecovery("request-1")).toBe(false);
+
+    expect(await t.run()).toBe("stopped");
+    // The end follows the stored reply, so the tab sees the final transcript.
+    const keep = t.log.indexOf("keep");
+    expect(keep).toBeGreaterThanOrEqual(0);
+    expect(t.log.indexOf("end-aborted:request-1")).toBeGreaterThan(keep);
+  });
+
   it("schedules nothing for a turn a user stopped while it was routed", async () => {
     const t = setup({ storedReplyId: "assistant-1" });
     // The stop lands while the app's hook runs: the incident is open but
@@ -230,6 +244,8 @@ describe("routeStreamInterruption", () => {
       t.events.filter((event) => event.type === "chat:recovery:skipped")
     ).toHaveLength(1);
     expect(t.log).not.toContain("after-schedule");
+    // The tab's last frame for it said "recovering": it is ended.
+    expect(t.log).toContain("end-aborted:request-1");
   });
 
   it("retries the question when the turn produced nothing", async () => {

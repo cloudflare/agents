@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   ChatRecoveryEngine,
   buildChatRecoveryExhaustedContext,
@@ -1833,6 +1833,7 @@ describe("ChatRecoveryEngine.recoverInterruptedTurn (fake adapter + wake hooks)"
     };
 
     return {
+      adapter,
       engine: new ChatRecoveryEngine(adapter),
       turn,
       wake,
@@ -1845,6 +1846,48 @@ describe("ChatRecoveryEngine.recoverInterruptedTurn (fake adapter + wake hooks)"
       config
     };
   }
+
+  it("ends the stopped request for the tabs even when storing the cut-off reply fails", async () => {
+    const h = makeHarness();
+    const ended: string[] = [];
+    h.adapter.turns = {
+      attemptScope: new AsyncLocalStorage(),
+      endRequest: (requestId: string, outcome: string) =>
+        void ended.push(`${outcome}:${requestId}`)
+    } as unknown as ChatRecoveryTurnBindings;
+    h.wake.persistOrphanedStream = () =>
+      Promise.reject(new Error("storage failed"));
+    // The stop lands before the replay opened its incident.
+    expect(await h.engine.cancelScheduledRecovery("req-1")).toBe(false);
+
+    await expect(
+      h.engine.recoverInterruptedTurn(h.turn, h.wake)
+    ).rejects.toThrow("storage failed");
+    expect(ended).toEqual(["aborted:req-1"]);
+  });
+
+  it("keeps the storage failure when ending the stopped request fails too", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const h = makeHarness();
+    h.adapter.turns = {
+      attemptScope: new AsyncLocalStorage(),
+      endRequest: () => {
+        throw new Error("send failed");
+      }
+    } as unknown as ChatRecoveryTurnBindings;
+    h.wake.persistOrphanedStream = () =>
+      Promise.reject(new Error("storage failed"));
+    await h.engine.cancelScheduledRecovery("req-1");
+
+    try {
+      await expect(
+        h.engine.recoverInterruptedTurn(h.turn, h.wake)
+      ).rejects.toThrow("storage failed");
+      expect(error).toHaveBeenCalled();
+    } finally {
+      error.mockRestore();
+    }
+  });
 
   it("ends a wake whose turn the user stopped as stopped, even with the budget spent", async () => {
     const h = makeHarness({ seedExhausted: true });

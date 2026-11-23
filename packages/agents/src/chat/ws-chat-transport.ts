@@ -484,7 +484,13 @@ export class WebSocketChatTransport<
             }
 
             if (data.done) {
-              finish(() => controller.close());
+              // "recovering" closes this stream, not the server turn: a Stop
+              // while recovery waits must still be able to cancel it.
+              finish(
+                () => controller.close(),
+                false,
+                data.outcome !== "recovering"
+              );
             }
           } catch {
             // Ignore non-JSON messages
@@ -1007,7 +1013,11 @@ export class WebSocketChatTransport<
 
             if (data.done) {
               transport.appliedChunks.forget(requestId);
-              finish(() => controller.close());
+              finish(
+                () => controller.close(),
+                false,
+                data.outcome !== "recovering"
+              );
             }
           } catch {
             // Ignore non-JSON messages

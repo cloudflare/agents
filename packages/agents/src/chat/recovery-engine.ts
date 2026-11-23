@@ -328,11 +328,12 @@ export interface ChatRecoveryTurnBindings {
    */
   recordTerminalError(requestId: string, errorText: string): Promise<void>;
   /**
-   * Tell the tabs that a request recovery took over ended `skipped`: the
-   * recovered turn found nothing to do. Optional: without it the tab that
+   * Tell the tabs that a request recovery took over ended: `skipped` when
+   * the recovered turn found nothing to do, `aborted` when a stop reached the
+   * recovery before its turn started. Optional: without it the tab that
    * waits on the request learns only that recovery is over.
    */
-  endSkippedRequest?(requestId: string): void;
+  endRequest?(requestId: string, outcome: "skipped" | "aborted"): void;
   /** Close agent-tool child runs a recovered turn settled. */
   reconcileAgentToolChildRuns(): Promise<void>;
   /** Keep a detached recovered turn inside the current alarm's domain. */
@@ -779,6 +780,8 @@ export class ChatRecoveryEngine {
         }
         if (streamStillActive) await wake.completeRecoveredStream(streamId);
       } finally {
+        // Even when storing what it streamed failed, the tab is told.
+        this.endStopped(incident);
         this.#settled();
       }
       return;
@@ -1130,6 +1133,7 @@ export class ChatRecoveryEngine {
           reason: CHAT_RECOVERY_CANCELLED_REASON
         });
       }
+      this.endStopped(stored ?? incident);
       await this.adapter.setRecovering(false);
       return false;
     }
@@ -1179,6 +1183,25 @@ export class ChatRecoveryEngine {
       (incident.recoveryRootRequestId !== undefined &&
         this.#stoppedRequestIds.has(incident.recoveryRootRequestId))
     );
+  }
+
+  /**
+   * A stop that landed while the turn was routed into recovery, before
+   * anything was scheduled: the tab's last frame for the ids it stopped
+   * said "recovering", and nothing else will end them. Called once what the
+   * turn streamed is stored, so the end follows the final transcript.
+   */
+  endStopped(incident: ChatRecoveryIncident): void {
+    const ids = new Set([incident.recoveryRootRequestId, incident.requestId]);
+    for (const id of ids) {
+      if (id === undefined || !this.#stoppedRequestIds.has(id)) continue;
+      // A frame that fails to go out must not stop the cleanup around it.
+      try {
+        this.adapter.turns?.endRequest?.(id, "aborted");
+      } catch (error) {
+        console.error(`[chat] failed to end stopped request ${id}`, error);
+      }
+    }
   }
 
   /**
@@ -1311,6 +1334,7 @@ export class ChatRecoveryEngine {
     this.#noteStoppedRequest(requestId);
     const incidents = (await this.adapter.listActiveIncidents?.()) ?? [];
     let cancelled = false;
+    let endedHere = false;
     for (const incident of incidents) {
       const running = this.#runningAttempts.get(incident.incidentId);
       const named = (current: ChatRecoveryIncident): boolean =>
@@ -1328,8 +1352,20 @@ export class ChatRecoveryEngine {
         named
       );
       running?.stopped.abort();
-      if (applied) cancelled = true;
+      if (!applied) continue;
+      cancelled = true;
+      // A running attempt ends its root request when it stops
+      // (`runRecoveredTurn`), and its turn ends its own. Any other id the
+      // stop named (the request a chained attempt's tab last saw cut off,
+      // or any id while the recovery waits out its backoff) gets no
+      // terminal from anything else.
+      const endsItself =
+        running !== undefined &&
+        (requestId === incident.recoveryRootRequestId ||
+          requestId === running.turnRequestId);
+      if (!endsItself) endedHere = true;
     }
+    if (endedHere) this.adapter.turns?.endRequest?.(requestId, "aborted");
     return cancelled;
   }
 

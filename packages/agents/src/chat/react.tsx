@@ -2531,7 +2531,10 @@ export function useAgentChat<
                 streamStateRef.current = { status: "idle" };
                 setIsServerStreaming(false);
               }
-              customTransport.handleServerTurnCompleted(data.id);
+              // A turn closed into recovery is not over: Stop still cancels it.
+              if (data.outcome !== "recovering") {
+                customTransport.handleServerTurnCompleted(data.id);
+              }
               const openedId =
                 localResponseIds.get(data.id) ??
                 (data.continuation ? data.messageId : undefined);
