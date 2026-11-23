@@ -156,12 +156,13 @@ export type JobDriverOptions = {
    * 38 ms) per dispatch. A facet driven by its root syncs: a job over the
    * memory limit there resets the whole tree, root included (measured).
    */
-  readonly commitAttempt: (jobId: string) => Promise<boolean>;
+  readonly commitAttempt: (jobId: string, live: boolean) => Promise<boolean>;
   /**
    * An attempt of `jobId` reported back, and no work it handed off is still
    * running: it did not end with the isolate. Pairs with `commitAttempt`,
    * whose `true` means the job's attempts kept ending with the isolate and
-   * the job is sealed instead of run.
+   * the job is sealed instead of run. `live` there: work this job handed
+   * off is still running in this isolate, so the dispatch renews it.
    */
   readonly attemptSettled: (jobId: string) => void;
   /**
@@ -726,7 +727,12 @@ export class JobDriver {
             // the failure before it took its count off.
             if (local > 1) queue.setAttempts(row.id, prior + 1);
             // The count must outlast an isolate this attempt ends.
-            if (await this.#options.commitAttempt(row.id)) {
+            if (
+              await this.#options.commitAttempt(
+                row.id,
+                this.#outstandingByJob.has(row.id)
+              )
+            ) {
               await this.#sealCrashedJob(row.id);
               return SUPERSEDED;
             }

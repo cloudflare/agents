@@ -329,6 +329,20 @@ describe("facet wake", () => {
     });
   });
 
+  it("does not count a wake of a facet job whose handed-off work still runs", async () => {
+    const agent = await root();
+    // Woken every 100 ms while its 1.5 s of handed-off work runs.
+    await agent.middlePush("m", "handoff-x", 0);
+
+    await vi.waitFor(
+      async () => {
+        expect(await agent.middleRan("m")).toContain("handoff-x");
+      },
+      { timeout: 6_000 }
+    );
+    expect(await agent.middleRan("m")).not.toContain("sealed:handoff-x");
+  });
+
   it("does not hold a cancelled facet job's crashes against its replacement", async () => {
     const agent = await root();
     await agent.middlePush("m", "reused", 60_000);

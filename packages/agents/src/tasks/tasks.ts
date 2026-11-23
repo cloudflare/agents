@@ -499,22 +499,23 @@ export class Tasks<
       // woken through the root. A gone path drops the mirror.
       // The call is bounded like any dispatch: a slow sub-agent start runs
       // on by itself, and the mirror is looked at again later.
-      const handOver = this.lifecycle.routes.to(
-        {
-          key: timing.owner_path_key ?? timing.owner_path,
-          data: timing.owner_path
-        },
-        { type: "adopt" } satisfies TaskAdoptMessage
-      );
-      const call = handOver.then(
-        () => "done" as const,
-        (error: unknown) => {
-          // Kept for a later try, whatever failed: a failed hand-over is
-          // not the run's own failure.
-          console.error(`error handing Task run "${runId}" over`, error);
-          return "failed" as const;
-        }
-      );
+      const call = this.lifecycle.routes
+        .to(
+          {
+            key: timing.owner_path_key ?? timing.owner_path,
+            data: timing.owner_path
+          },
+          { type: "adopt" } satisfies TaskAdoptMessage
+        )
+        .then(
+          () => "done" as const,
+          (error: unknown) => {
+            // Kept for a later try, whatever failed: a failed hand-over is
+            // not the run's own failure.
+            console.error(`error handing Task run "${runId}" over`, error);
+            return "failed" as const;
+          }
+        );
       let budgetTimer: ReturnType<typeof setTimeout> | undefined;
       const budget = new Promise<"budget">((resolve) => {
         budgetTimer = setTimeout(() => resolve("budget"), DISPATCH_BUDGET_MS);
@@ -522,8 +523,9 @@ export class Tasks<
       try {
         const winner = await Promise.race([call, budget]);
         if (winner === "done") return undefined;
-        // The call itself, so a late reset it reports still counts.
-        if (winner === "budget") this.lifecycle.trackAlarmWork(handOver);
+        // The caught call: a failure in the sub-agent is its own, and must
+        // not strike (and so seal) the root's only wake for the run.
+        if (winner === "budget") this.lifecycle.trackAlarmWork(call);
         return { rescheduleAt: Date.now() + DISPATCH_BUDGET_MS * 6 };
       } finally {
         clearTimeout(budgetTimer);

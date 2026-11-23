@@ -1,7 +1,8 @@
 import { Agent } from "../../index.ts";
 import {
   LifecycleCapability,
-  type LifecycleJobContext
+  type LifecycleJobContext,
+  type LifecycleJobOutcome
 } from "../../lifecycle/index.ts";
 
 /**
@@ -21,7 +22,32 @@ class WakeProbe extends LifecycleCapability {
       .sql`INSERT INTO facet_wake_runs (id, at) VALUES ('start', ${Date.now()})`;
   }
 
-  async onJob({ job }: LifecycleJobContext): Promise<void> {
+  /** `handoff-*` jobs' handed-off work, keyed by job id. */
+  readonly #handedOff = new Map<string, Promise<void>>();
+
+  async onJob({
+    job
+  }: LifecycleJobContext): Promise<LifecycleJobOutcome | void> {
+    // `handoff-*` hands off 1.5 s of work and returns at once, woken again
+    // meanwhile (a renewal) until the work is done.
+    if (job.id.startsWith("handoff")) {
+      let work = this.#handedOff.get(job.id);
+      if (!work) {
+        work = new Promise((resolve) => setTimeout(resolve, 1_500));
+        this.#handedOff.set(job.id, work);
+        void work.then(() => {
+          this.host
+            .sql`INSERT INTO facet_wake_runs (id, at) VALUES (${job.id}, ${Date.now()})`;
+        });
+      }
+      this.lifecycle.trackAlarmWork(work);
+      const done = await Promise.race([
+        work.then(() => true),
+        Promise.resolve(false)
+      ]);
+      if (!done) return { rescheduleAt: Date.now() + 100 };
+      return undefined;
+    }
     // `slow-*` outruns the root's drive budget; `fail-*` throws; `abort-*`
     // ends the isolate, the way a job over the memory limit does.
     if (job.id.startsWith("abort")) {

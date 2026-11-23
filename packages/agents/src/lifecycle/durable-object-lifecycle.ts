@@ -395,7 +395,7 @@ export class Lifecycle<
         this.#emitCapabilityEvent({ source: "lifecycle", type, payload }),
       rearm: (deferral) => this.#rearm(deferral),
       drivenByRoot: () => this.#drivingFromRoot,
-      commitAttempt: async (jobId) => {
+      commitAttempt: async (jobId, live) => {
         if (!this.#drivingFromRoot) {
           await new Promise((resolve) => setTimeout(resolve, 0));
           return false;
@@ -403,11 +403,15 @@ export class Lifecycle<
         const kv = this.#ctx.storage.kv;
         const key = FACET_UNSETTLED_PREFIX + jobId;
         const unsettled = kv.get<number>(key) ?? 0;
-        if (unsettled >= FACET_UNSETTLED_LIMIT) {
-          kv.delete(key);
-          return true;
+        // A wake for an attempt still running here renews it: no new
+        // attempt, so nothing to count.
+        if (!live) {
+          if (unsettled >= FACET_UNSETTLED_LIMIT) {
+            kv.delete(key);
+            return true;
+          }
+          kv.put(key, unsettled + 1);
         }
-        kv.put(key, unsettled + 1);
         await this.#ctx.storage.sync();
         return false;
       },
@@ -1201,11 +1205,12 @@ export class Lifecycle<
         rearmAfter(() => this.#jobQueue.push(owner, options)),
       cancel: (id: string) =>
         rearmAfter(() => {
+          const cancelled = this.#jobQueue.cancel(owner, id);
           // A job pushed again under this id starts with no crashes.
-          if (this.#facetAddress()) {
+          if (cancelled && this.#facetAddress()) {
             this.#ctx.storage.kv.delete(FACET_UNSETTLED_PREFIX + id);
           }
-          return this.#jobQueue.cancel(owner, id);
+          return cancelled;
         }),
       reschedule: (id: string, time: number) =>
         rearmAfter(() => this.#jobQueue.reschedule(owner, id, time)),
