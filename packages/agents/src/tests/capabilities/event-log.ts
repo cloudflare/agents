@@ -74,6 +74,13 @@ export class EventLogObject extends DurableObject<Cloudflare.Env> {
     batching: { maxEvents: 10, maxDelayMs: 60_000 }
   });
 
+  /** Retention of 20 events, for trims that read more than one page. */
+  readonly #paged = declareEventLog(this.#webSockets, "paged", {
+    streams: this.#streams,
+    retention: { maxEvents: 20 },
+    batching: { maxEvents: 100, maxDelayMs: 60_000 }
+  });
+
   /** Byte retention (300 KB) and the highest event ceiling (1.9 MB). */
   readonly #small = declareEventLog(this.#webSockets, "small", {
     streams: this.#streams,
@@ -104,6 +111,7 @@ export class EventLogObject extends DurableObject<Cloudflare.Env> {
     if (name === "bare") return this.#bare;
     if (name === "small") return this.#small;
     if (name === "fractional") return this.#fractional;
+    if (name === "paged") return this.#paged;
     if (name === "big") return this.#big;
     return this.#guarded;
   }
@@ -149,6 +157,52 @@ export class EventLogObject extends DurableObject<Cloudflare.Env> {
     } catch (error) {
       return error instanceof Error ? error.message : String(error);
     }
+  }
+
+  /**
+   * Run `write` and return the SQL rows it read and the rows it left in the
+   * log's stream.
+   */
+  async #counted(
+    log: string,
+    write: () => void
+  ): Promise<{ rowsRead: number; rows: number }> {
+    await this.lifecycle.start();
+    const sql = this.ctx.storage.sql;
+    const exec = sql.exec.bind(sql);
+    const cursors: Array<{ rowsRead: number }> = [];
+    sql.exec = ((query: string, ...params: SqlStorageValue[]) => {
+      const cursor = exec(query, ...params);
+      cursors.push(cursor);
+      return cursor;
+    }) as typeof sql.exec;
+    try {
+      write();
+    } finally {
+      sql.exec = exec;
+    }
+    const rowsRead = cursors.reduce((sum, cursor) => sum + cursor.rowsRead, 0);
+    return { rowsRead, rows: (await this.rows(log)).length };
+  }
+
+  /** Publish `text` and count the rows the publish read. */
+  async publishCounted(
+    log: string,
+    text: string
+  ): Promise<{ rowsRead: number; rows: number }> {
+    return this.#counted(log, () => this.#log(log).publish(text));
+  }
+
+  /** Append `count` events in one batch, close it, and count rows read. */
+  async appendBatchCounted(
+    log: string,
+    count: number
+  ): Promise<{ rowsRead: number; rows: number }> {
+    return this.#counted(log, () => {
+      const batch = this.#log(log).batch();
+      for (let i = 0; i < count; i++) batch.append(i);
+      batch.close();
+    });
   }
 
   /** Append `count` events in one batch and close it (one block). */

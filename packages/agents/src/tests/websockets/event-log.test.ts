@@ -198,6 +198,34 @@ describe("event log", () => {
     expect(await stub(name).publish("fractional", "next")).toBe(41);
   });
 
+  it("reads about the blocks a byte trim deletes, even when one large block clears the excess", async () => {
+    const name = crypto.randomUUID();
+    // `small`: 300 KB retention. 8 small blocks, one of 100 KB, then enough
+    // 900-byte blocks to sit just under the 337.5 KB trigger.
+    await stub(name).publishText("small", "x".repeat(100), 8);
+    await stub(name).publishText("small", "x".repeat(100_000));
+    await stub(name).publishText("small", "x".repeat(900), 260);
+    const { rowsRead, rows } = await stub(name).publishCounted(
+      "small",
+      "x".repeat(10_000)
+    );
+    // The trim deletes the 9 oldest blocks; it reads pages of at most 8
+    // beyond them, not 256.
+    expect(rows).toBe(261);
+    expect(rowsRead).toBeLessThan(40);
+  });
+
+  it("trims across more than one page, reading about what it deletes", async () => {
+    const name = crypto.randomUUID();
+    // `paged`: retention 20. 20 one-event blocks, then a batch of 30.
+    for (let i = 0; i < 20; i++) await stub(name).publish("paged", i);
+    const { rowsRead, rows } = await stub(name).appendBatchCounted("paged", 30);
+    // The 20 old blocks go (8, then the 12 left); the batch is the newest
+    // block and stays.
+    expect(rows).toBe(1);
+    expect(rowsRead).toBeLessThan(50);
+  });
+
   it("sends batched events at once, stores them in batches, and replays the buffered tail", async () => {
     const name = crypto.randomUUID();
     const live = await connect(name);

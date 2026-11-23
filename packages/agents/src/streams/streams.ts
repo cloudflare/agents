@@ -927,15 +927,24 @@ export class Streams extends LifecycleCapability {
           bytes: seen.bytes + row.bytes
         };
       }
-      const need = Math.max(
+      // Chunks: at most the chunk excess left, since every block holds one.
+      // Bytes give no such bound (one large block can clear the excess), so
+      // their estimate asks for at most 8 blocks per page.
+      const chunkNeed =
         chunks > maxChunks
-          ? (chunks - maxChunks) / (seen.chunks / seen.blocks || 1)
-          : 0,
+          ? Math.min(
+              Math.ceil((chunks - maxChunks) / (seen.chunks / seen.blocks)),
+              Math.ceil(chunks - maxChunks)
+            )
+          : 0;
+      const byteNeed =
         bytes > maxBytes
-          ? (bytes - maxBytes) / (seen.bytes / seen.blocks || 1)
-          : 0
-      );
-      limit = Math.min(256, Math.max(1, Math.ceil(need)));
+          ? Math.min(
+              8,
+              Math.ceil((bytes - maxBytes) / (seen.bytes / seen.blocks))
+            )
+          : 0;
+      limit = Math.min(256, Math.max(1, chunkNeed, byteNeed));
     }
     if (cut === undefined) return;
     this.#sql`
