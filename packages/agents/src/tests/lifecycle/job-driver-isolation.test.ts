@@ -35,6 +35,10 @@ class Jobs extends LifecycleCapability {
   get(id: string) {
     return this.lifecycle.jobs.get(id);
   }
+
+  cancel(id: string) {
+    return this.lifecycle.jobs.cancel(id);
+  }
 }
 
 const QUICK = { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 };
@@ -543,7 +547,7 @@ describe("job driver hold and a reused id", () => {
       free.onJob = async ({ job }: LifecycleJobContext) => {
         ran.push(`free:${job.id}`);
         if (job.id === "first") {
-          await free.lifecycle.jobs.cancel("x");
+          await free.cancel("x");
           await held.push({ id: "x", fn: "ok", time: now - 2 });
         }
       };
