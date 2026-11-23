@@ -396,17 +396,26 @@ export function legacySubmissionImport(row: LegacySubmissionRow): {
     !Array.isArray(metadata)
       ? (metadata as Record<string, TaskJson>)
       : {};
-  if (
-    jsonBytes({ ...appFields, [SUBMISSION_PROGRESS_KEY]: progress }) >
-    MAX_FRAMEWORK_METADATA_BYTES
-  ) {
-    console.warn(
-      `[Think] Submission "${row.submission_id}": its metadata is too large to keep and was dropped`
+  const fits = () =>
+    jsonBytes({ ...appFields, [SUBMISSION_PROGRESS_KEY]: progress }) <=
+    MAX_FRAMEWORK_METADATA_BYTES;
+  if (!fits()) {
+    // Drop the largest fields first, keeping every one that still fits.
+    appFields = { ...appFields };
+    const fields = appFields;
+    const largestFirst = Object.keys(fields).sort(
+      (a, b) => jsonBytes(fields[b]) - jsonBytes(fields[a])
     );
-    appFields = {};
-    if (jsonBytes(progress) > MAX_FRAMEWORK_METADATA_BYTES) {
-      delete progress.output;
+    const dropped: string[] = [];
+    for (const key of largestFirst) {
+      if (fits()) break;
+      delete fields[key];
+      dropped.push(key);
     }
+    if (!fits()) delete progress.output;
+    console.warn(
+      `[Think] Submission "${row.submission_id}": metadata too large to keep; dropped ${dropped.length > 0 ? `fields ${dropped.join(", ")}` : "its recorded output"}`
+    );
   }
   let result = completed ? output : undefined;
   if (result !== undefined && jsonBytes(result) > MAX_SERIALIZED_BYTES) {

@@ -2093,7 +2093,7 @@ describe("Think durable submissions", () => {
     ).resolves.toMatchObject({ accepted: false, submissionId: "legacy-large" });
   });
 
-  it("moves a legacy submission whose metadata or output a run cannot hold, dropping only those", async () => {
+  it("moves a legacy submission whose metadata or output a run cannot hold, dropping only what does not fit", async () => {
     const agent = await freshAgent();
     const now = Date.now();
     await agent.seedLegacySubmissionTableForTest([
@@ -2101,7 +2101,10 @@ describe("Think durable submissions", () => {
         submissionId: "legacy-huge-metadata",
         status: "completed",
         idempotencyKey: "legacy-huge-key",
-        metadataJson: JSON.stringify({ big: "m".repeat(1_950_000) }),
+        metadataJson: JSON.stringify({
+          big: "m".repeat(1_950_000),
+          kept: "small"
+        }),
         createdAt: now - 2_000,
         completedAt: now - 1_500,
         messageId: "legacy-huge-assistant"
@@ -2124,7 +2127,7 @@ describe("Think durable submissions", () => {
       idempotencyKey: "legacy-huge-key",
       messageId: "legacy-huge-assistant"
     });
-    expect(metadataDropped?.metadata).toBeUndefined();
+    expect(metadataDropped?.metadata).toEqual({ kept: "small" });
     await expect(
       agent.inspectSubmissionForTest("legacy-huge-output")
     ).resolves.toMatchObject({
