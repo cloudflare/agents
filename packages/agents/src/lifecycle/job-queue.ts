@@ -423,7 +423,8 @@ export class JobQueue {
     // A reschedule is new intent, like a push: the count starts again.
     this.#sql(
       `UPDATE cf_agents_jobs
-       SET time = ?, running = 0, execution_started_at = NULL, attempts = 0
+       SET time = ?, running = 0, execution_started_at = NULL, attempts = 0,
+           held_since = NULL
        WHERE id = ? AND capability = ?`,
       Math.floor(time),
       id,
