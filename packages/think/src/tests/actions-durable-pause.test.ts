@@ -1183,6 +1183,36 @@ describe("resolving a durable pause drops pending-state generation (#2054)", () 
     expect(await agent.decisionOutputCountForTest()).toBe(0);
   });
 
+  it("writes a large error from an approved action, capped, when writing it is retried", async () => {
+    const agent = await freshPauseAgent(
+      `dp-large-error-${crypto.randomUUID()}`
+    );
+    await agent.useDurablePauseActionForTest({ execThrows: "large" });
+    expect((await agent.testChat("call pauseAction")).done).toBe(true);
+    const [pending] = await agent.listActionPendingForTest();
+    await agent.failNextToolUpdateForTest();
+
+    await agent.approveExecutionForTest(pending.execution_id);
+    await agent.restartTasksForTest();
+
+    await vi.waitFor(
+      async () => {
+        expect(await agent.hasDecisionRunForTest(pending.execution_id)).toBe(
+          false
+        );
+      },
+      { timeout: 5000, interval: 50 }
+    );
+    expect(await agent.getDurablePauseExecCount()).toBe(1);
+    const resolved = ownerOf(
+      (await agent.getStoredMessages()) as UIMessage[],
+      "dp1"
+    );
+    expect(JSON.stringify(toolOutput(resolved, "dp1")).length).toBeLessThan(
+      30_000
+    );
+  });
+
   it("gives up on a decided action that keeps ending the isolate", async () => {
     const { agent, executionId } = await parkInTurn("dp-reset-give-up");
     await agent.decideWithoutReportForTest(executionId, 3);

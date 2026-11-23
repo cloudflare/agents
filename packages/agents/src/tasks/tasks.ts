@@ -1737,11 +1737,20 @@ export class Tasks<
     return record;
   }
 
-  #pushReportJob(delayMs = 0): Promise<unknown> {
-    return this.lifecycle.jobs.push({
+  /**
+   * Arm the report job for `delayMs` from now. A job already due sooner is
+   * left alone (a burst of settles must not keep postponing a retry); one
+   * in flight is pushed again, so it outlives its dispatch.
+   */
+  async #pushReportJob(delayMs = 0): Promise<void> {
+    const now = Date.now();
+    const time = now + delayMs;
+    const existing = this.lifecycle.jobs.get(REPORT_JOB_ID);
+    if (existing && existing.time > now && existing.time <= time) return;
+    await this.lifecycle.jobs.push({
       id: REPORT_JOB_ID,
       fn: REPORT_JOB_FN,
-      time: Date.now() + delayMs,
+      time,
       retry: WAKE_JOB_RETRY
     });
   }
@@ -1761,11 +1770,15 @@ export class Tasks<
     `;
     // A report that fails (it re-pushed the job) does not hold back the
     // ones after it.
+    let failed = false;
     for (const row of rows) {
-      await this.#deliverTerminal(row.run_id, row.retain !== 0);
+      if (!(await this.#deliverTerminal(row.run_id, row.retain !== 0))) {
+        failed = true;
+      }
     }
-    // More may be waiting past this batch: the next one runs now.
-    if (rows.length === REPORT_BATCH) await this.#pushReportJob();
+    // More may be waiting past this batch: the next one runs now, unless a
+    // failure here keeps its back-off (the same runs would come first).
+    if (rows.length === REPORT_BATCH && !failed) await this.#pushReportJob();
   }
 
   /**

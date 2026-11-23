@@ -235,4 +235,82 @@ describe("Tasks attached definitions", () => {
       }
     );
   });
+
+  it("keep a report retry's deadline when later runs settle", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        const stuck = "__cf_test_retry_report" as unknown as "pipeline";
+        const fine = "__cf_test_later_report" as unknown as "pipeline";
+        instance.tasks.register(stuck, async () => "x", {
+          attached: true,
+          onStatus: (record) => {
+            if (record.status === "completed") throw new Error("not yet");
+          }
+        });
+        instance.tasks.register(fine, async () => "x", {
+          attached: true,
+          onStatus: () => {}
+        });
+        const reportTime = () =>
+          state.storage.sql
+            .exec<{ time: number }>(
+              "SELECT time FROM cf_agents_jobs WHERE id = 'tasks:reports'"
+            )
+            .toArray()[0]?.time;
+
+        await instance.tasks.run(stuck, undefined as never, { start: "now" });
+        const retryAt = reportTime();
+        expect(retryAt).toBeDefined();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        await instance.tasks.run(fine, undefined as never, { start: "now" });
+
+        expect(reportTime()).toBe(retryAt);
+      }
+    );
+  });
+
+  it("keep the back-off when a whole batch of reports fails", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        const stuck = "__cf_test_batch_report" as unknown as "pipeline";
+        instance.tasks.register(stuck, async () => "x", {
+          attached: true,
+          onStatus: (record) => {
+            if (record.status === "completed") throw new Error("not yet");
+          }
+        });
+        const now = Date.now();
+        for (let i = 0; i < 100; i++) {
+          await instance.tasks.importRun({
+            runId: `stuck-${i}`,
+            definition: stuck,
+            status: "completed",
+            attempt: 1,
+            createdAt: now - 1000 + i,
+            settledAt: now - 1000 + i
+          });
+        }
+        state.storage.sql.exec(
+          "UPDATE cf_agents_task_runs SET notified = NULL"
+        );
+
+        await instance.tasks.onJob({
+          job: { id: "tasks:reports", fn: "reports" }
+        } as never);
+
+        const [job] = state.storage.sql
+          .exec<{ time: number }>(
+            "SELECT time FROM cf_agents_jobs WHERE id = 'tasks:reports'"
+          )
+          .toArray();
+        expect(job.time).toBeGreaterThan(Date.now() + 20_000);
+      }
+    );
+  });
 });

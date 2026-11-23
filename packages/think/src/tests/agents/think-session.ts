@@ -7900,6 +7900,9 @@ export class ThinkToolsTestAgent extends Think {
           if (this._durablePauseAttachReply) {
             ctx.attachReply({ type: "voice_note" });
           }
+          if (this._durablePauseExecThrows === "large") {
+            throw new Error(`durable pause failed ${"x".repeat(1_200_000)}`);
+          }
           if (this._durablePauseExecThrows) {
             throw new Error("durable pause execute failed");
           }
@@ -8118,7 +8121,7 @@ export class ThinkToolsTestAgent extends Think {
     undefined;
   private _durablePauseIdempotencyKey: string | null = null;
   private _durablePauseExecCount = 0;
-  private _durablePauseExecThrows = false;
+  private _durablePauseExecThrows: boolean | "large" = false;
   private _durablePauseAttachReply = false;
   private _actionDelayMs = 25;
   private _actionGrantedPermissions: string[] | null | undefined = undefined;
@@ -8418,7 +8421,7 @@ export class ThinkToolsTestAgent extends Think {
   async useDurablePauseActionForTest(options?: {
     approval?: boolean | "predicate-hello";
     idempotencyKey?: string;
-    execThrows?: boolean;
+    execThrows?: boolean | "large";
     attachReply?: boolean;
   }): Promise<void> {
     this._useDurablePauseAction = true;

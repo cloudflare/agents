@@ -8656,12 +8656,20 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       executionId = input.executionId;
       verdict = input.verdict as unknown as DecisionVerdict;
       output = input.output;
-    } else if (record.metadata?.outcome !== undefined) {
-      // The action already ran and its outcome was kept: only the
-      // transcript write is left, so the action is not run again.
+    } else if (
+      record.metadata?.outcome !== undefined ||
+      record.metadata?.resolvedPause !== undefined
+    ) {
+      // The action already ran and its outcome was kept (before the
+      // transcript write, or in the resolved pause): only the write is
+      // left, so the action is not run again.
       executionId = decisionIdOf(runId);
       verdict = record.result as unknown as DecisionVerdict;
-      output = (record.metadata.outcome as { output?: unknown }).output;
+      output = (
+        (record.metadata.outcome ?? record.metadata.resolvedPause) as {
+          output?: unknown;
+        }
+      ).output;
     } else {
       executionId = decisionIdOf(runId);
       verdict = record.result as unknown as DecisionVerdict;
@@ -8807,7 +8815,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         ]);
         return prepareActionOutputForModel(out);
       };
-      return await this._runLedgeredAction({
+      const output = await this._runLedgeredAction({
         toolName: subject.action,
         idempotencyKey,
         input: subject.input,
@@ -8817,8 +8825,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         // once the lease lets it, instead of settling an error.
         onReclaimableInDoubt: () => DEFER_DECISION
       });
+      // Capped as an action output is, error envelopes included: the
+      // outcome is kept on the decision until the transcript has it.
+      return output === DEFER_DECISION
+        ? output
+        : prepareActionOutputForModel(output);
     } catch (error) {
-      return actionErrorEnvelope(error);
+      return prepareActionOutputForModel(actionErrorEnvelope(error));
     } finally {
       if (onAbort) signal.removeEventListener("abort", onAbort);
       cleanup();
@@ -9098,14 +9111,18 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   ): Promise<void> {
     await this._loadResolvedPauses();
     this._deferredResolvedPauses.set(toolCallId, outcome);
-    this.tasks.updateMetadata(outcome.runId, (metadata) => ({
-      ...metadata,
-      resolvedPause: {
-        toolCallId,
-        executionId: outcome.executionId,
-        output: outcome.output as TaskJson
-      }
-    }));
+    this.tasks.updateMetadata(outcome.runId, (metadata) => {
+      // The outcome moves into the resolved pause: one copy of it.
+      const { outcome: _kept, ...rest } = metadata;
+      return {
+        ...rest,
+        resolvedPause: {
+          toolCallId,
+          executionId: outcome.executionId,
+          output: outcome.output as TaskJson
+        }
+      };
+    });
   }
 
   private async _forgetResolvedPause(toolCallId: string): Promise<void> {
