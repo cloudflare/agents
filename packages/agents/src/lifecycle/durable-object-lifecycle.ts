@@ -567,7 +567,7 @@ export class Lifecycle<
   /** True while the root is driving this facet's jobs. */
   #drivingFromRoot = false;
   /** The wake time this facet last gave its root. */
-  #reportedWake: number | null | undefined;
+  #reportedWake: number | null = null;
 
   async #onFacetWake(envelope: LifecycleRouteEnvelope): Promise<unknown> {
     const message = envelope.payload as FacetWakeMessage;
