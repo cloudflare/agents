@@ -11,6 +11,7 @@ import { RpcTarget } from "cloudflare:workers";
 import { MessageType } from "../../types.ts";
 import { agentPathKey } from "../../dynamic-agents/identity.ts";
 import type { Tasks } from "../../tasks/tasks.ts";
+import { EventLogSubAgent } from "./event-log-sub-agent.ts";
 
 const STALE_FRAME_PROBE = "stale-frame-probe";
 
@@ -2447,6 +2448,38 @@ export class TestSubAgentParent extends Agent {
   }
 
   // ── Broadcast / setState regression tests ────────────────────────
+
+  async eventLogFacetPublish(child: string, data: string): Promise<number> {
+    return (await this.subAgent(EventLogSubAgent, child)).publish(data);
+  }
+
+  async eventLogFacetHead(
+    child: string
+  ): Promise<{ epoch: string; seq: number }> {
+    return (await this.subAgent(EventLogSubAgent, child)).head();
+  }
+
+  async eventLogFacetRows(
+    child: string
+  ): Promise<{ seq_from: number; seq_to: number }[]> {
+    return (await this.subAgent(EventLogSubAgent, child)).rows();
+  }
+
+  /** End this object (and its facets) as a crash would. */
+  crashForTest(): void {
+    this.ctx.abort("test crash");
+  }
+
+  /** Whether the root's own SQLite has a stream block table (it must not). */
+  rootHasStreamBlocks(): boolean {
+    return (
+      this.ctx.storage.sql
+        .exec(
+          `SELECT 1 FROM sqlite_master WHERE name = 'cf_agents_stream_blocks'`
+        )
+        .toArray().length > 0
+    );
+  }
 
   async subAgentTryBroadcast(
     subAgentName: string,

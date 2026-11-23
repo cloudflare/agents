@@ -32,7 +32,8 @@ import type {
   StreamSettleOptions,
   StreamState,
   StreamStatus,
-  StreamWriter
+  StreamWriter,
+  StreamBatching
 } from "./types";
 
 const STREAM_SCHEMA_VERSION_KEY = "cf_agents:streams_schema_version";
@@ -45,6 +46,22 @@ const CURRENT_STREAM_SCHEMA_VERSION = 2;
  * that a replay page parses one block at a time.
  */
 const BLOCK_MAX_CHARS = 256 * 1024;
+/**
+ * Most bytes one buffered flush puts in a row; more chunks go to the next
+ * block. A buffered chunk is at most this (`appendJson` callers check), and
+ * a row this size plus its other columns fits SQLite's 2 MB limit.
+ */
+const FLUSH_ROW_MAX_BYTES = 1_900_000;
+const INSERT_BLOCK = `INSERT INTO cf_agents_stream_blocks
+  (stream_id, block, seq_from, seq_to, body, created_at, updated_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?)`;
+
+type Buffered = { readonly firstSeq: number; readonly jsons: string[] };
+
+/** The seq after a buffer's last chunk. */
+function bufferEnd(buffer: Buffered | undefined): number | undefined {
+  return buffer && buffer.firstSeq + buffer.jsons.length;
+}
 /** Rows read per page while folding one stream's v1 chunk rows into blocks. */
 const LEGACY_FOLD_PAGE_ROWS = 500;
 
@@ -85,8 +102,43 @@ export interface StreamsSyncInternal {
   ): void;
   /** Replace a stream row's metadata, whatever its state. */
   setMetadata(streamId: string, metadata: Record<string, StreamJson>): void;
-  /** The read-fenced append: one chunk insert at the log tail, reader wakeup. */
+  /** The read-fenced append: one chunk at the log tail, reader wakeup. */
   append(streamId: string, chunk: StreamJson): number;
+  /**
+   * A buffered append of a chunk given as its JSON text and its UTF-8
+   * size: the caller serialized and measured it once and checked its own
+   * size limit (at most 1.9 MB, so
+   * it fits a row). It gets its seq now and waits in memory with the
+   * stream's earlier buffered chunks; all of them are written as one new
+   * block (one INSERT) once `maxChunks` or `maxBytes` is reached, on
+   * `flush()`, before a direct `append`, or when the stream settles (dropped
+   * by a cutover that discards). A crash loses what is buffered: at most
+   * `maxChunks - 1` chunks.
+   */
+  appendJson(
+    streamId: string,
+    json: string,
+    bytes: number,
+    batch: StreamBatching
+  ): number;
+  /** Write a stream's buffered chunks now, or every stream's. */
+  flush(streamId?: string): void;
+  /**
+   * The seqs a stream holds: `oldest` is the first stored seq (`head` when
+   * none is), `head` the next seq to assign, buffered chunks included.
+   */
+  bounds(streamId: string): { oldest: number; head: number };
+  /** Whether `seq` is a stored chunk of the stream (not in a hole). */
+  holds(streamId: string, seq: number): boolean;
+  /**
+   * Delete the stream's oldest blocks while it holds more than
+   * `maxChunks` chunks or `maxBytes` stored UTF-8 bytes, never the newest
+   * block. Totals are read once per isolate and kept in memory.
+   */
+  trim(
+    streamId: string,
+    retention: { maxChunks: number; maxBytes: number }
+  ): void;
   /**
    * The newest chunk's timestamp, or null for an empty log. One PK-served
    * read — the per-append liveness signal retention sweeps verify against
@@ -184,6 +236,49 @@ export class Streams extends LifecycleCapability {
   readonly #maxChunkBytes: number;
   /** Wakeup callbacks for readers tailing a live stream, per stream. */
   readonly #wakeups = new Map<string, Set<() => void>>();
+  /**
+   * Chunks appended with a batch and not written yet, per stream: their
+   * serialized texts, byte total and the seq of the first. Bounded by each
+   * batch's limits; an entry leaves on flush, settle or delete.
+   */
+  readonly #buffers = new Map<
+    string,
+    {
+      readonly firstSeq: number;
+      readonly jsons: string[];
+      /** Each chunk's UTF-8 size, as the caller measured it. */
+      readonly sizes: number[];
+      bytes: number;
+    }
+  >();
+  /**
+   * Streams this isolate created or has buffered into. The first buffer of
+   * any other stream starts `maxChunks + 1` seqs past the durable head:
+   * what an earlier isolate buffered and lost (a crash, or a dropped
+   * buffer of up to `maxChunks`) is never given to a new chunk, and leaves
+   * a hole of at least one seq that a reader can detect (`holds`, or a
+   * live seq that is not the next one).
+   */
+  readonly #bufferedHere = new Set<string>();
+  /**
+   * The first seq a stream's next buffer may use, after a buffer was
+   * dropped because its write failed: one past the dropped seqs, so a
+   * follower that applied them sees a gap. Leaves with that next buffer,
+   * a settle or a delete.
+   */
+  readonly #seqFloors = new Map<string, number>();
+  /**
+   * The open block of each stream buffered into, and that it is live: read
+   * once, then kept up to date by buffered writes, so a flush costs its one
+   * row write and no reads of its own. Dropped on any other write path to
+   * the stream (direct append, settle, delete, import).
+   */
+  readonly #liveTails = new Map<
+    string,
+    { block: number; seq_to: number } | null
+  >();
+  /** Stored chunk and character totals per trimmed stream, read once. */
+  readonly #totals = new Map<string, { chunks: number; bytes: number }>();
   /**
    * Whether the schema v1 `cf_agents_stream_chunks` table still exists.
    * Its rows are folded into blocks one stream at a time, on first touch
@@ -430,6 +525,14 @@ export class Streams extends LifecycleCapability {
    * break without notice; never use from application code.
    */
   __DO_NOT_USE_WILL_BREAK__sync(): StreamsSyncInternal {
+    // One object for every caller: building it allocates a closure per
+    // method, and hot paths reach the aperture several times per write.
+    return (this.#syncAperture ??= this.#buildSyncAperture());
+  }
+
+  #syncAperture: StreamsSyncInternal | undefined;
+
+  #buildSyncAperture(): StreamsSyncInternal {
     return {
       ensureTables: () => this.#ensureTables(),
       getStream: (streamId) => this.#getStream(streamId),
@@ -446,6 +549,8 @@ export class Streams extends LifecycleCapability {
           VALUES
             (${streamId}, 'streaming', ${tag}, ${metadataJson}, 0, ${now}, ${now})
         `;
+        // Born in this isolate: no earlier isolate buffered into it.
+        this.#bufferedHere.add(streamId);
         this.#emit("stream:opened", { streamId });
       },
       setMetadata: (streamId, metadata) => {
@@ -459,6 +564,46 @@ export class Streams extends LifecycleCapability {
         `;
       },
       append: (streamId, chunk) => this.#append(streamId, chunk),
+      appendJson: (streamId, json, bytes, batch) =>
+        this.#appendBuffered(streamId, json, bytes, batch),
+      flush: (streamId) => {
+        if (streamId !== undefined) {
+          this.#flushBuffer(streamId);
+          return;
+        }
+        for (const id of [...this.#buffers.keys()]) this.#flushBuffer(id);
+      },
+      bounds: (streamId) => {
+        const head =
+          bufferEnd(this.#buffers.get(streamId)) ??
+          this.#tail(streamId).nextSeq;
+        const oldest = this.#sql<{ seq_from: number | null }>`
+          SELECT MIN(seq_from) AS seq_from FROM cf_agents_stream_blocks
+          WHERE stream_id = ${streamId}
+        `[0]?.seq_from;
+        return {
+          oldest: oldest ?? this.#buffers.get(streamId)?.firstSeq ?? head,
+          head
+        };
+      },
+      holds: (streamId, seq) => {
+        const buffer = this.#buffers.get(streamId);
+        if (
+          buffer &&
+          seq >= buffer.firstSeq &&
+          seq < buffer.firstSeq + buffer.jsons.length
+        ) {
+          return true;
+        }
+        return (
+          this.#sql<{ one: number }>`
+            SELECT 1 AS one FROM cf_agents_stream_blocks
+            WHERE stream_id = ${streamId} AND seq_from <= ${seq} AND seq_to > ${seq}
+            LIMIT 1
+          `.length > 0
+        );
+      },
+      trim: (streamId, retention) => this.#trim(streamId, retention),
       lastChunkAt: (streamId) => this.#tail(streamId).lastChunkAt,
       cursor: (streamId) => this.#tail(streamId).nextSeq,
       onDelete: (hook) => {
@@ -517,6 +662,7 @@ export class Streams extends LifecycleCapability {
         `;
       },
       importChunk: (streamId, chunk, createdAt) => {
+        this.#liveTails.delete(streamId);
         const chunkJson = this.#serialize(
           chunk,
           `chunk for stream "${streamId}"`
@@ -544,6 +690,11 @@ export class Streams extends LifecycleCapability {
   }
 
   #append(streamId: string, chunk: StreamJson): number {
+    // Buffered chunks hold earlier seqs: written first, in order.
+    this.#flushBuffer(streamId);
+    // This path reads and writes the tail itself; the buffered path's
+    // cached copy would go stale.
+    this.#liveTails.delete(streamId);
     // Serialization runs BEFORE the fence read: JSON.stringify can execute
     // user toJSON() methods, which may synchronously re-enter this stream.
     const chunkJson = this.#serialize(chunk, `chunk for stream "${streamId}"`);
@@ -570,6 +721,188 @@ export class Streams extends LifecycleCapability {
     const seq = this.#writeChunk(streamId, chunkJson, Date.now());
     this.#wake(streamId);
     return seq;
+  }
+
+  #appendBuffered(
+    streamId: string,
+    chunkJson: string,
+    chunkBytes: number,
+    batch: StreamBatching
+  ): number {
+    let skipped = false;
+    let buffer = this.#buffers.get(streamId);
+    if (!buffer) {
+      // The fence, once per isolate: chunks join a buffer only while the
+      // stream is live, and settling or deleting it drops the cache.
+      if (!this.#liveTails.has(streamId)) {
+        const state = this.#state(streamId);
+        if (state !== "streaming") {
+          throw new StreamClosedError(
+            streamId,
+            state !== undefined
+              ? `already settled as ${state}`
+              : "it was deleted"
+          );
+        }
+        const tail = this.#blockTail(streamId);
+        this.#liveTails.set(
+          streamId,
+          tail ? { block: tail.block, seq_to: tail.seq_to } : null
+        );
+      }
+      const durable = this.#liveTails.get(streamId)?.seq_to ?? 0;
+      const floor = this.#seqFloors.get(streamId);
+      this.#seqFloors.delete(streamId);
+      skipped = !this.#bufferedHere.has(streamId) || floor !== undefined;
+      const firstSeq = Math.max(
+        this.#bufferedHere.has(streamId)
+          ? durable
+          : durable + batch.maxChunks + 1,
+        floor ?? 0
+      );
+      this.#bufferedHere.add(streamId);
+      buffer = { firstSeq, jsons: [], sizes: [], bytes: 0 };
+      this.#buffers.set(streamId, buffer);
+    }
+    const seq = buffer.firstSeq + buffer.jsons.length;
+    buffer.jsons.push(chunkJson);
+    buffer.sizes.push(chunkBytes);
+    buffer.bytes += chunkBytes + 1;
+    // The first chunk after a skip is written at once, so the skip itself
+    // is durable: a crash before the next flush cannot make the next
+    // isolate hand out these seqs again.
+    if (
+      skipped ||
+      buffer.jsons.length >= batch.maxChunks ||
+      buffer.bytes >= batch.maxBytes
+    ) {
+      this.#flushBuffer(streamId);
+    }
+    return seq;
+  }
+
+  /**
+   * Write a stream's buffered chunks as one new block: one INSERT, no read,
+   * and no rewrite of an earlier block. Wakes readers.
+   */
+  #flushBuffer(streamId: string): void {
+    const buffer = this.#buffers.get(streamId);
+    if (!buffer) return;
+    const tail = this.#liveTails.has(streamId)
+      ? this.#liveTails.get(streamId)
+      : this.#blockTail(streamId);
+    const firstBlock = (tail?.block ?? -1) + 1;
+    let block = firstBlock;
+    const { firstSeq, jsons, sizes } = buffer;
+    const at = Date.now();
+    // One block per flush, split only where the flush would pass the row
+    // limit: each chunk is at most FLUSH_ROW_MAX_BYTES (callers check), so
+    // every block fits a row.
+    const rows: (string | number)[][] = [];
+    let start = 0;
+    while (start < jsons.length) {
+      let end = start + 1;
+      let bytes = sizes[start];
+      while (
+        end < jsons.length &&
+        bytes + sizes[end] + 1 <= FLUSH_ROW_MAX_BYTES
+      ) {
+        bytes += sizes[end] + 1;
+        end += 1;
+      }
+      const body =
+        start === 0 && end === jsons.length
+          ? jsons.length === 1
+            ? jsons[0]
+            : jsons.join(",")
+          : jsons.slice(start, end).join(",");
+      rows.push([
+        streamId,
+        block,
+        firstSeq + start,
+        firstSeq + end,
+        body,
+        at,
+        at
+      ]);
+      block += 1;
+      start = end;
+    }
+    try {
+      if (rows.length === 1) this.#sqlWrite(INSERT_BLOCK, rows[0]);
+      else {
+        // All blocks or none: a retry writes the same seqs, never half.
+        this.lifecycle.storage.transactionSync(() => {
+          for (const row of rows) this.#sqlWrite(INSERT_BLOCK, row);
+        });
+      }
+    } catch (error) {
+      // A failed write drops the buffer, as a crash would: a log that kept
+      // it would retry a write that may never succeed, and stop. The next
+      // buffer starts one past the dropped seqs (a gap a follower sees)
+      // and writes its first chunk at once, so it never returns a seq
+      // before its reservation is stored. The tail is read again.
+      this.#liveTails.delete(streamId);
+      this.#buffers.delete(streamId);
+      this.#seqFloors.set(streamId, firstSeq + jsons.length + 1);
+      throw error;
+    }
+    this.#buffers.delete(streamId);
+    if (this.#liveTails.has(streamId)) {
+      this.#liveTails.set(streamId, {
+        block: block - 1,
+        seq_to: firstSeq + jsons.length
+      });
+    }
+    const totals = this.#totals.get(streamId);
+    if (totals) {
+      totals.chunks += jsons.length;
+      // UTF-8 bytes as SQLite counts them (`length(CAST(body AS BLOB))`),
+      // so what a trim subtracts matches what a flush added. `bytes` counts
+      // a comma per chunk; a block has one fewer.
+      totals.bytes += buffer.bytes - (block - firstBlock);
+    }
+    this.#wake(streamId);
+  }
+
+  #trim(
+    streamId: string,
+    retention: { maxChunks: number; maxBytes: number }
+  ): void {
+    let totals = this.#totals.get(streamId);
+    if (!totals) {
+      const row = this.#sql<{ chunks: number | null; bytes: number | null }>`
+        SELECT SUM(seq_to - seq_from) AS chunks,
+          SUM(length(CAST(body AS BLOB))) AS bytes
+        FROM cf_agents_stream_blocks WHERE stream_id = ${streamId}
+      `[0];
+      totals = { chunks: row?.chunks ?? 0, bytes: row?.bytes ?? 0 };
+      this.#totals.set(streamId, totals);
+    }
+    while (
+      totals.chunks > retention.maxChunks ||
+      totals.bytes > retention.maxBytes
+    ) {
+      const blocks = this.#sql<{
+        block: number;
+        chunks: number;
+        bytes: number;
+      }>`
+        SELECT block, seq_to - seq_from AS chunks,
+          length(CAST(body AS BLOB)) AS bytes
+        FROM cf_agents_stream_blocks WHERE stream_id = ${streamId}
+        ORDER BY block ASC LIMIT 2
+      `;
+      // The newest block is never trimmed, so the head is never reused.
+      if (blocks.length < 2) break;
+      const oldest = blocks[0];
+      this.#sql`
+        DELETE FROM cf_agents_stream_blocks
+        WHERE stream_id = ${streamId} AND block = ${oldest.block}
+      `;
+      totals.chunks -= oldest.chunks;
+      totals.bytes -= oldest.bytes;
+    }
   }
 
   /**
@@ -654,6 +987,11 @@ export class Streams extends LifecycleCapability {
    * gone; this is the single point every delete path passes through.
    */
   #deleteRows(streamId: string): number {
+    this.#buffers.delete(streamId);
+    this.#liveTails.delete(streamId);
+    this.#totals.delete(streamId);
+    this.#bufferedHere.delete(streamId);
+    this.#seqFloors.delete(streamId);
     if (this.#deleteHooks.length > 0) {
       const row = this.#getStream(streamId);
       if (row) {
@@ -683,6 +1021,17 @@ export class Streams extends LifecycleCapability {
     reason: string | null,
     options?: StreamSettleOptions
   ): boolean {
+    // Buffered chunks are part of what the stream produced: written first,
+    // unless the cutover discards the rows anyway. A buffer exists only
+    // while the stream is live, so this costs nothing without one.
+    if (this.#buffers.has(streamId)) {
+      if (options?.discard) this.#buffers.delete(streamId);
+      else this.#flushBuffer(streamId);
+    }
+    this.#liveTails.delete(streamId);
+    // A settled stream takes no more buffered chunks.
+    this.#bufferedHere.delete(streamId);
+    this.#seqFloors.delete(streamId);
     if (!options?.commit && !options?.discard) {
       const settled = this.#settleRow(streamId, state, reason);
       if (settled) this.#emitSettled(streamId, state, reason);

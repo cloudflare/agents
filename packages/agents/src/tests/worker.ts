@@ -165,6 +165,7 @@ export {
   LeafSubAgent,
   CallbackSubAgent,
   BroadcastSubAgent,
+  EventLogSubAgent,
   SlowReplySubAgent,
   TestConnectionUriAgent,
   SpikeSubParent,
