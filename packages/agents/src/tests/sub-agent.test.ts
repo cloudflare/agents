@@ -1561,33 +1561,6 @@ describe("SubAgent", () => {
     ]);
   });
 
-  it("moves the previous release's root fiber mirror jobs onto facet wakes", async () => {
-    const name = uniqueName();
-    const agent = await getAgentByName(env.TestSubAgentParent, name);
-
-    // The rows of an earlier release: the sub-agent's fiber, and only the
-    // root's mirror job for its wake.
-    await agent.insertSubAgentInterruptedFiberRowsOnly(
-      "mirror-job-child",
-      "mirror-job-fiber-1",
-      "work"
-    );
-    await agent.insertLegacyFiberMirrorJob("mirror-job-child");
-    expect(await agent.fiberWakeOwners()).toEqual([]);
-    await agent.restartFibers();
-
-    // The mirror became the facet wake for that path.
-    expect(await agent.legacyFiberMirrorJobCount()).toBe(0);
-    expect(await agent.fiberWakeOwners()).toHaveLength(1);
-
-    // After the upgrade the sub-agent starts fresh and arms its own wake.
-    await agent.subAgentArmOwnFiberWake("mirror-job-child");
-    await drainDueFiberWakes(agent);
-    expect(await agent.subAgentRecoveredFibers("mirror-job-child")).toEqual([
-      expect.objectContaining({ id: "mirror-job-fiber-1" })
-    ]);
-  });
-
   it("moves the old root facet fiber index onto facet wakes", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);

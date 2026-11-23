@@ -57,7 +57,9 @@ describe("runFiber", () => {
       await expect(agent.runWithFailingCleanup("completed")).resolves.toBe(
         "completed"
       );
-      expect((await agent.getRunningFiberCount()) as unknown as number).toBe(1);
+      // The settle landed; only the delete of the settled row failed, so
+      // nothing is left to recover.
+      expect((await agent.getRunningFiberCount()) as unknown as number).toBe(0);
 
       await agent.triggerRecoveryCheck();
       expect((await agent.getRunningFiberCount()) as unknown as number).toBe(0);
@@ -73,7 +75,9 @@ describe("runFiber", () => {
       await expect(agent.runFailingWithFailingCleanup()).resolves.toBe(
         "body failed"
       );
-      expect((await agent.getRunningFiberCount()) as unknown as number).toBe(1);
+      // The settle landed; only the delete of the settled row failed, so
+      // nothing is left to recover.
+      expect((await agent.getRunningFiberCount()) as unknown as number).toBe(0);
 
       await agent.triggerRecoveryCheck();
       expect((await agent.getRunningFiberCount()) as unknown as number).toBe(0);
@@ -89,7 +93,9 @@ describe("runFiber", () => {
       await expect(agent.runFailingWithFailingCleanup(true)).resolves.toBe(
         "body failed synchronously"
       );
-      expect((await agent.getRunningFiberCount()) as unknown as number).toBe(1);
+      // The settle landed; only the delete of the settled row failed, so
+      // nothing is left to recover.
+      expect((await agent.getRunningFiberCount()) as unknown as number).toBe(0);
 
       await agent.triggerRecoveryCheck();
       expect((await agent.getRunningFiberCount()) as unknown as number).toBe(0);
@@ -304,6 +310,21 @@ describe("runFiber", () => {
       expect(typeof recovered[0].createdAt).toBe("number");
       expect(recovered[0].createdAt).toBeGreaterThanOrEqual(before);
       expect(recovered[0].createdAt).toBeLessThanOrEqual(Date.now());
+    });
+
+    it("recovers a fiber row from the oldest released table shape", async () => {
+      const agent = await getAgentByName(
+        env.TestRunFiberAgent,
+        "recovery-oldest-shape"
+      );
+      await agent.insertOldestShapeInterruptedFiber("oldest-1", "research");
+      await agent.triggerRecoveryCheck();
+
+      const recovered =
+        (await agent.getRecoveredFibers()) as unknown as FiberRecoveryContext[];
+      expect(recovered.map((fiber) => [fiber.id, fiber.snapshot])).toEqual([
+        ["oldest-1", { step: 1 }]
+      ]);
     });
 
     it("should pass snapshot data to recovery", async () => {
@@ -571,7 +592,7 @@ describe("runFiber", () => {
       expect((await agent.getRunningFiberCount()) as unknown as number).toBe(1);
     });
 
-    it("resets the backoff when a scan makes forward progress", async () => {
+    it("backs off each poison fiber on its own: another fiber recovering does not reset it", async () => {
       const agent = await getAgentByName(
         env.TestRunFiberAgent,
         "recovery-alarm-reset"
@@ -586,12 +607,18 @@ describe("runFiber", () => {
       const beforeAlarm = await agent.simulateAlarmCycle();
       const beforeDelta = (beforeAlarm as number) - Date.now();
 
-      // A recoverable row that succeeds is forward progress → the backoff
-      // resets, so the poison row's next scan is due right away.
+      // Each fiber is its own run with its own wake: a fiber that recovers
+      // fine is done, and the poison one keeps backing off.
       await agent.insertInterruptedFiber("good-1", "research");
       const afterAlarm = await agent.simulateAlarmCycle();
       const afterDelta = (afterAlarm as number) - Date.now();
-      expect(afterDelta).toBeLessThan(beforeDelta);
+      expect(afterDelta).toBeGreaterThan(beforeDelta);
+      expect(
+        (
+          (await agent.getRecoveredFibers()) as unknown as FiberRecoveryContext[]
+        ).some((fiber) => fiber.id === "good-1")
+      ).toBe(true);
+      expect((await agent.getRunningFiberCount()) as unknown as number).toBe(1);
     });
 
     it("arms no follow-up alarm once recovery has fully drained", async () => {
@@ -734,12 +761,11 @@ describe("runFiber", () => {
     it("should mark setup failures before the callback as errors", async () => {
       const agent = await freshManagedAgent("managed-setup-failure");
 
-      const result = await agent.startManagedWithRunCollision(
-        "managed-collides-with-run"
-      );
-      const failed = await waitForFiberStatus(agent, result.fiberId, "error");
-
-      expect(failed.error).toContain("UNIQUE constraint failed");
+      // A fiber id is a Task run id: one a plain fiber's run holds is refused
+      // before the callback could run.
+      await expect(
+        agent.startManagedWithRunCollision("managed-collides-with-run")
+      ).resolves.toContain("is not a managed fiber");
       const log = (await agent.getExecutionLog()) as unknown as string[];
       expect(log).not.toContain("should-not-run");
     });
@@ -1048,22 +1074,16 @@ describe("runFiber", () => {
         "duplicate",
         "key:managed-waiting-recovery"
       );
-      const earlyResult = await Promise.race([
-        waitResult.then((result) => result.status),
-        new Promise<"still-waiting">((resolve) =>
-          setTimeout(() => resolve("still-waiting"), 50)
-        )
-      ]);
-      expect(earlyResult).toBe("still-waiting");
-
-      await agent.releaseBlockedRecovery();
-      await recovery;
-
+      // Each fiber is its own run: the wait ends with that fiber's own
+      // recovery, while another fiber's recovery is still blocked.
       await expect(waitResult).resolves.toMatchObject({
         accepted: false,
         status: "completed",
         fiberId: "managed-waiting-recovery"
       });
+
+      await agent.releaseBlockedRecovery();
+      await recovery;
     });
 
     it("should not recover terminal managed fibers with stale run rows", async () => {
@@ -1142,23 +1162,22 @@ describe("runFiber", () => {
       expect(types).not.toContain("fiber:run:interrupted");
     });
 
-    it("keeps a failed managed fiber's error when its settle and cleanup both failed", async () => {
+    it("recovers a managed fiber whose settle write failed as interrupted", async () => {
       const agent = await freshManagedAgent("managed-failed-settle-failure");
 
+      // The settle is one write; when it fails nothing of the outcome is
+      // stored, so the run is recovered like one whose isolate died.
       await agent.runManagedFailingWithFailedSettle("managed-settle-failed");
-      // No check for the in-between `running` state: the leftover run row
-      // arms the fiber's recovery wake for now, so the real alarm may settle
-      // the ledger from the row's outcome before this test looks. Either
-      // path ends in the same state.
       await agent.triggerRecoveryCheck();
 
-      expect(await agent.getRecoveredFibers()).toEqual([]);
+      expect(
+        (
+          (await agent.getRecoveredFibers()) as unknown as FiberRecoveryContext[]
+        ).map((fiber) => fiber.id)
+      ).toEqual(["managed-settle-failed"]);
       await expect(
         agent.inspectManagedFiber("managed-settle-failed")
-      ).resolves.toMatchObject({
-        status: "error",
-        error: "managed body failed"
-      });
+      ).resolves.toMatchObject({ status: "interrupted" });
       await expect(agent.getRunningFiberCount()).resolves.toBe(0);
     });
 

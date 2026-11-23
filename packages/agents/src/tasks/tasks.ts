@@ -314,8 +314,9 @@ export class Tasks<
     this.#onError = options.onError;
   }
 
-  #claimTimeoutMs(): number {
-    return this.#stepDefaults.timeoutMs + CLAIM_SLACK_MS;
+  #claimTimeoutMs(definition: string): number {
+    const claimMs = this.#registeredOptions.get(definition)?.claimMs;
+    return claimMs ?? this.#stepDefaults.timeoutMs + CLAIM_SLACK_MS;
   }
 
   /** The SQL store over this Lifecycle's storage (see `store.ts`). */
@@ -406,7 +407,12 @@ export class Tasks<
       );
     }
     this.#registered.set(name, definition);
-    if (options.onStatus || options.maxAttempts !== undefined) {
+    if (
+      options.onStatus ||
+      options.maxAttempts !== undefined ||
+      options.keepCheckpoint ||
+      options.claimMs !== undefined
+    ) {
       this.#registeredOptions.set(name, options);
     }
   }
@@ -590,9 +596,10 @@ export class Tasks<
 
   /** Push a live attempt's durable claim deadline forward one claim window. */
   #refreshClaim(runId: string): void {
+    const definition = this.#store.getRun(runId)?.definition ?? "";
     this.#store.sql`
       UPDATE cf_agents_task_runs
-      SET next_at = ${Date.now() + this.#claimTimeoutMs()}, updated_at = ${Date.now()}
+      SET next_at = ${Date.now() + this.#claimTimeoutMs(definition)}, updated_at = ${Date.now()}
       WHERE run_id = ${runId} AND status = 'running'
     `;
   }
@@ -1216,12 +1223,17 @@ export class Tasks<
     // published after it (a reset in between leaves the row's deadline,
     // which the next start mirrors).
     await this.#report(runId);
-    try {
-      await this.#syncWake(runId);
-    } catch (error) {
-      // The caller gets the throw and owns its closure again.
-      this.#locals.delete(runId);
-      throw error;
+    // A run started now outside a lane gets its first wake from the claim
+    // that follows at once; until then its row's deadline is the wake a
+    // restart reconciles.
+    if (startMode !== "attached" || lane !== null) {
+      try {
+        await this.#syncWake(runId);
+      } catch (error) {
+        // The caller gets the throw and owns its closure again.
+        this.#locals.delete(runId);
+        throw error;
+      }
     }
     this.#emit("task:accepted", { runId, definition, accepted: true });
 
@@ -1305,7 +1317,7 @@ export class Tasks<
       UPDATE cf_agents_task_runs
       SET status = 'running', attempt = ${attempt}, generation = ${generation},
           started_at = coalesce(started_at, ${now}),
-          next_at = ${now + this.#claimTimeoutMs()}, wait_reason = NULL,
+          next_at = ${now + this.#claimTimeoutMs(row.definition)}, wait_reason = NULL,
           updated_at = ${now}
       WHERE run_id = ${runId}
         AND status IN ('pending', 'running')
@@ -1424,16 +1436,23 @@ export class Tasks<
         output,
         `result of Task definition "${row.definition}"`
       );
-      const settled = this.#store.fencedWrite(
-        runId,
-        generation,
-        `UPDATE cf_agents_task_runs
-         SET status = 'completed', result = ?, generation = NULL, next_at = NULL,
-             settled_at = ?, updated_at = ?
-         WHERE run_id = ? AND generation = ? AND status = 'running'
-           AND cancel_requested = 0`,
-        [resultJson, Date.now(), Date.now()]
-      );
+      // A run nobody keeps, reports or waits for is deleted in one write.
+      const unread =
+        row.retain === 0 &&
+        !this.#registeredOptions.get(row.definition)?.onStatus &&
+        !this.#waiters.has(runId);
+      const settled =
+        (unread && this.#deleteUnread(runId, generation)) ||
+        this.#store.fencedWrite(
+          runId,
+          generation,
+          `UPDATE cf_agents_task_runs
+           SET status = 'completed', result = ?, generation = NULL, next_at = NULL,
+               settled_at = ?, updated_at = ?
+           WHERE run_id = ? AND generation = ? AND status = 'running'
+             AND cancel_requested = 0`,
+          [resultJson, Date.now(), Date.now()]
+        );
       if (settled) {
         this.#emit("task:completed", { runId, definition: row.definition });
         await this.#finishTerminalSettlement(runId, row);
@@ -1446,6 +1465,27 @@ export class Tasks<
       // would be a redundant job-row write.
     } catch (thrown) {
       await this.#settleThrown(row, generation, thrown);
+    }
+  }
+
+  /**
+   * Complete a run nobody keeps, reports or waits for by deleting it.
+   * When the delete fails it is completed in place instead, so a finished
+   * attempt is never taken for an interrupted one (#2305).
+   */
+  #deleteUnread(runId: string, generation: string): boolean {
+    try {
+      return this.#store.fencedWrite(
+        runId,
+        generation,
+        `DELETE FROM cf_agents_task_runs
+         WHERE run_id = ? AND generation = ? AND status = 'running'
+           AND cancel_requested = 0`,
+        []
+      );
+    } catch (error) {
+      console.error(`[tasks] deleting finished run "${runId}" failed`, error);
+      return false;
     }
   }
 
@@ -1542,7 +1582,8 @@ export class Tasks<
    */
   async settle(
     runId: string,
-    outcome: TaskSettlement | TaskValue
+    outcome: TaskSettlement | TaskValue,
+    options: { checkpoint?: Record<string, TaskJson> } = {}
   ): Promise<boolean> {
     await this.lifecycle.ready();
     if (this.#liveAttempt(runId)) return false;
@@ -1561,6 +1602,9 @@ export class Tasks<
       [generation, Date.now(), runId, row.status, row.generation]
     );
     if (claimed === 0) return false;
+    for (const [key, value] of Object.entries(options.checkpoint ?? {})) {
+      this.#store.setCheckpoint(runId, generation, key, value);
+    }
     if (outcome instanceof TaskSettlement) {
       await this.#settleReturned(row, generation, outcome);
       return true;
@@ -1679,7 +1723,7 @@ export class Tasks<
       runId,
       generation,
       signal: controller.signal,
-      claimTimeoutMs: () => this.#claimTimeoutMs(),
+      claimTimeoutMs: () => this.#claimTimeoutMs(definition),
       claimedAtMs,
       claimRefreshAfterMs: CLAIM_SLACK_MS / 2,
       defaults: this.#stepDefaults,
@@ -1795,8 +1839,10 @@ export class Tasks<
     runId: string,
     row: TaskRunRow | undefined
   ): Promise<void> {
-    // Nothing reads a settled run's checkpoint.
-    this.#store.deleteCheckpoint(runId);
+    // Nothing reads a settled run's checkpoint unless its definition keeps it.
+    if (!(row && this.#registeredOptions.get(row.definition)?.keepCheckpoint)) {
+      this.#store.deleteCheckpoint(runId);
+    }
     const onStatus =
       row && this.#registeredOptions.get(row.definition)?.onStatus;
     if (onStatus && !this.lifecycle.routes.source) {
@@ -2058,12 +2104,18 @@ export class Tasks<
     status?: readonly TaskStatus[];
     /** Pending runs match only when parked (true) or only when not (false). */
     parked?: boolean;
+    /** Only runs accepted with exactly this input. */
+    input?: TaskJson;
     order?: "oldest" | "newest";
     limit?: number;
   }): TaskRecord[] {
     if (options.status?.length === 0) return [];
     const params: (string | number)[] = [options.definition];
     let query = "SELECT * FROM cf_agents_task_runs WHERE definition = ?";
+    if (options.input !== undefined) {
+      query += " AND input = ?";
+      params.push(serializeTaskValue(options.input, "input filter") ?? "");
+    }
     if (options.status) {
       query += ` AND status IN (${options.status.map(() => "?").join(", ")})`;
       params.push(...options.status);
@@ -2123,6 +2175,7 @@ export class Tasks<
     /** A completed run's result. */
     result?: TaskJson;
     retain?: boolean;
+    checkpoint?: Record<string, TaskJson>;
     createdAt: number;
     startedAt?: number;
     settledAt?: number;
@@ -2167,6 +2220,12 @@ export class Tasks<
          ${open ? null : record.status}, ${importedInput.parts},
          ${record.status === "completed" ? serializeTaskValue(record.result, `result of imported run "${record.runId}"`) : null})
     `;
+    for (const [key, value] of Object.entries(record.checkpoint ?? {})) {
+      this.#store.sql`
+        INSERT INTO cf_agents_task_checkpoint (run_id, key, value)
+        VALUES (${record.runId}, ${key}, ${JSON.stringify(value)})
+      `;
+    }
     if (open && !queued) await this.#syncWake(record.runId);
     return true;
   }
@@ -2174,6 +2233,35 @@ export class Tasks<
   /** @internal Whether {@link holdLane} holds `lane` in this isolate. */
   isLaneHeld(lane: string): boolean {
     return this.#heldLanes.has(lane);
+  }
+
+  /** @internal A checkpoint entry of a run, read from host code. */
+  checkpointOf<T extends TaskJson>(runId: string, key: string): T | undefined {
+    return this.#store.getCheckpoint(runId, key) as T | undefined;
+  }
+
+  /**
+   * @internal Run the due runs of `definition` now, one at a time, instead
+   * of waiting for their wake; none is started after `deadline`. A host
+   * calls it at startup so interrupted work is handled before its own code.
+   *
+   * @returns The first due run left for its wake by the deadline, if any.
+   */
+  async runDue(
+    definition: string,
+    deadline?: number
+  ): Promise<string | undefined> {
+    const rows = this.#store.sql<{ run_id: string }>`
+      SELECT run_id FROM cf_agents_task_runs
+      WHERE definition = ${definition} AND status IN ('pending', 'running')
+        AND next_at IS NOT NULL AND next_at <= ${Date.now()}
+      ORDER BY created_at
+    `;
+    for (const { run_id } of rows) {
+      if (deadline !== undefined && Date.now() > deadline) return run_id;
+      await this.#executeRun(run_id);
+    }
+    return undefined;
   }
 
   /** @internal A run's input as accepted, or `undefined` for an unknown run. */

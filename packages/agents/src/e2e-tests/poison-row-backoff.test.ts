@@ -2,7 +2,7 @@
  * E2E test: recovery-alarm backoff cadence for a retain-forever poison row.
  *
  * PoisonBackoffAgent sets `fiberRecoveryMaxAgeMs: 0` (retain forever) and a
- * recovery hook that always throws, so the orphaned `cf_agents_runs` row is
+ * recovery hook that always throws, so the orphaned fiber run is
  * never recovered and never aged out. Without backoff the recovery follow-up
  * alarm would fire every `keepAliveIntervalMs` forever (the perpetual-heartbeat
  * hazard). This asserts the retries back off exponentially (the inter-attempt

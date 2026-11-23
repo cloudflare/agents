@@ -47,6 +47,17 @@ import type {
   TurnContext
 } from "../think";
 
+/** The fiber run table of a release before fibers ran on Tasks. */
+function createLegacyFiberTableForTest(sql: SqlStorage): void {
+  sql.exec(`
+    CREATE TABLE IF NOT EXISTS cf_agents_runs (
+      id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, snapshot TEXT,
+      created_at INTEGER NOT NULL, completed_at INTEGER, outcome TEXT,
+      error_message TEXT, recovery_crashes INTEGER NOT NULL DEFAULT 0
+    )
+  `);
+}
+
 type Env = {
   TestAssistant: DurableObjectNamespace<TestAssistant>;
   ThinkRecoveryE2EAgent: DurableObjectNamespace<ThinkRecoveryE2EAgent>;
@@ -255,7 +266,7 @@ export class ThinkToolRollbackE2EAgent extends Think<Env> {
       SELECT idx, COUNT(*) as count FROM tool_ledger GROUP BY idx ORDER BY idx
     `;
     const fiberRows = this.sql<{ c: number }>`
-      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
+      SELECT (SELECT COUNT(*) FROM cf_agents_task_runs WHERE definition IN ('__cf_fiber', '__cf_managed_fiber') AND status IN ('pending', 'running'))
            + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
     `;
     return {
@@ -346,7 +357,7 @@ export class ThinkPersistFalseE2EAgent extends Think<Env> {
       SELECT idx, COUNT(*) as count FROM tool_ledger GROUP BY idx ORDER BY idx
     `;
     const fiberRows = this.sql<{ c: number }>`
-      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
+      SELECT (SELECT COUNT(*) FROM cf_agents_task_runs WHERE definition IN ('__cf_fiber', '__cf_managed_fiber') AND status IN ('pending', 'running'))
            + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
     `;
     const assistant = this.messages.filter((m) => m.role === "assistant");
@@ -562,10 +573,10 @@ export class ThinkRecoveryE2EAgent extends Think<Env> {
   @callable()
   async hasFiberRows(): Promise<boolean> {
     // Chat turns run on the Tasks capability (cf_agents_task_runs); facet
-    // turns stay on the legacy fiber engine (cf_agents_runs). An in-flight
+    // turns an older release ran as fibers are fiber runs. An in-flight
     // durable turn exists if either engine holds a row.
     const rows = this.sql<{ count: number }>`
-      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
+      SELECT (SELECT COUNT(*) FROM cf_agents_task_runs WHERE definition IN ('__cf_fiber', '__cf_managed_fiber') AND status IN ('pending', 'running'))
            + (SELECT COUNT(*) FROM cf_agents_task_runs) as count
     `;
     return rows[0].count > 0;
@@ -657,7 +668,7 @@ export class ThinkStallRecoveryE2EAgent extends Think<Env> {
           .join("")
       : "";
     const fiberRows = this.sql<{ c: number }>`
-      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
+      SELECT (SELECT COUNT(*) FROM cf_agents_task_runs WHERE definition IN ('__cf_fiber', '__cf_managed_fiber') AND status IN ('pending', 'running'))
            + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
     `;
     return {
@@ -809,7 +820,7 @@ export class ThinkTaskParentE2EAgent extends Think<Env> {
       this.sql<{ c: number }>`SELECT COUNT(*) as c FROM parent_task_log`[0]
         ?.c ?? 0;
     const fiberRows = this.sql<{ c: number }>`
-      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
+      SELECT (SELECT COUNT(*) FROM cf_agents_task_runs WHERE definition IN ('__cf_fiber', '__cf_managed_fiber') AND status IN ('pending', 'running'))
            + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
     `;
     let child: {
@@ -916,7 +927,7 @@ export class ThinkAgentToolNaturalParentE2EAgent extends Think<Env> {
       LIMIT 1
     `;
     const fiberRows = this.sql<{ c: number }>`
-      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
+      SELECT (SELECT COUNT(*) FROM cf_agents_task_runs WHERE definition IN ('__cf_fiber', '__cf_managed_fiber') AND status IN ('pending', 'running'))
            + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
     `;
     let child: {
@@ -1035,7 +1046,7 @@ export class ThinkSlowChildE2EAgent extends Think<Env> {
       SELECT idx, COUNT(*) as count FROM tool_ledger GROUP BY idx ORDER BY idx
     `;
     const fiberRows = this.sql<{ c: number }>`
-      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
+      SELECT (SELECT COUNT(*) FROM cf_agents_task_runs WHERE definition IN ('__cf_fiber', '__cf_managed_fiber') AND status IN ('pending', 'running'))
            + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
     `;
     return {
@@ -1108,7 +1119,7 @@ export class ThinkSlowChildParentE2EAgent extends Think<Env> {
       LIMIT 1
     `;
     const fiberRows = this.sql<{ c: number }>`
-      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
+      SELECT (SELECT COUNT(*) FROM cf_agents_task_runs WHERE definition IN ('__cf_fiber', '__cf_managed_fiber') AND status IN ('pending', 'running'))
            + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
     `;
     let child: {
@@ -1973,6 +1984,8 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
       snapshot,
       null
     );
+    createLegacyFiberTableForTest(this.ctx.storage.sql);
+
     this.sql`
       INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
       VALUES (
@@ -2152,7 +2165,7 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
   async hasFiberRows(): Promise<boolean> {
     // Either durable engine may hold the in-flight turn (see hasFiberRows above).
     const rows = this.sql<{ c: number }>`
-      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
+      SELECT (SELECT COUNT(*) FROM cf_agents_task_runs WHERE definition IN ('__cf_fiber', '__cf_managed_fiber') AND status IN ('pending', 'running'))
            + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
     `;
     return (rows[0]?.c ?? 0) > 0;
@@ -2331,7 +2344,7 @@ export class ThinkMessengerRecoveryE2EAgent extends Think<Env> {
   async hasFiberRows(): Promise<boolean> {
     // Either durable engine may hold the in-flight turn (see hasFiberRows above).
     const rows = this.sql<{ c: number }>`
-      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
+      SELECT (SELECT COUNT(*) FROM cf_agents_task_runs WHERE definition IN ('__cf_fiber', '__cf_managed_fiber') AND status IN ('pending', 'running'))
            + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
     `;
     return (rows[0]?.c ?? 0) > 0;
@@ -2507,7 +2520,7 @@ export class ThinkWorkflowRecoveryE2EAgent extends Think<Env> {
   async hasFiberRows(): Promise<boolean> {
     // Either durable engine may hold the in-flight turn (see hasFiberRows above).
     const rows = this.sql<{ c: number }>`
-      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
+      SELECT (SELECT COUNT(*) FROM cf_agents_task_runs WHERE definition IN ('__cf_fiber', '__cf_managed_fiber') AND status IN ('pending', 'running'))
            + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
     `;
     return (rows[0]?.c ?? 0) > 0;
@@ -2692,7 +2705,7 @@ export class ThinkActionPauseRecoveryE2EAgent extends Think<Env> {
   async hasFiberRows(): Promise<boolean> {
     // Either durable engine may hold the in-flight turn (see hasFiberRows above).
     const rows = this.sql<{ c: number }>`
-      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
+      SELECT (SELECT COUNT(*) FROM cf_agents_task_runs WHERE definition IN ('__cf_fiber', '__cf_managed_fiber') AND status IN ('pending', 'running'))
            + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
     `;
     return (rows[0]?.c ?? 0) > 0;

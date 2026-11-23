@@ -1,4 +1,6 @@
 import { Agent } from "../../index.ts";
+import { importLegacyFibers } from "../../fiber-runs";
+import { createLegacyFiberTables, OPEN_FIBER_RUNS_SQL } from "./legacy-fibers";
 import type {
   FiberInspection,
   FiberRecoveryContext,
@@ -72,8 +74,8 @@ export class TestRunFiberAgent extends Agent {
   async runWithFailingCleanup(value: string): Promise<string> {
     this.sql`
       CREATE TRIGGER fail_run_fiber_cleanup
-      BEFORE DELETE ON cf_agents_runs
-      WHEN OLD.name = 'cleanup-failure'
+      BEFORE DELETE ON cf_agents_task_runs
+      WHEN json_extract(OLD.input, '$.name') = 'cleanup-failure'
       BEGIN
         SELECT RAISE(FAIL, 'simulated fiber cleanup failure');
       END
@@ -92,8 +94,8 @@ export class TestRunFiberAgent extends Agent {
   ): Promise<string | null> {
     this.sql`
       CREATE TRIGGER fail_run_fiber_cleanup
-      BEFORE DELETE ON cf_agents_runs
-      WHEN OLD.name = 'cleanup-failure-after-error'
+      BEFORE DELETE ON cf_agents_task_runs
+      WHEN json_extract(OLD.input, '$.name') = 'cleanup-failure-after-error'
       BEGIN
         SELECT RAISE(FAIL, 'simulated fiber cleanup failure');
       END
@@ -222,16 +224,20 @@ export class TestRunFiberAgent extends Agent {
     );
   }
 
-  async startManagedWithRunCollision(
-    fiberId: string
-  ): Promise<StartFiberResult> {
+  /** Start a managed fiber under the id of a plain fiber's run; returns the error. */
+  async startManagedWithRunCollision(fiberId: string): Promise<string> {
     await this.insertInterruptedFiber(fiberId, "preexisting-run");
+    await importLegacyFibers(this.tasks, this.ctx.storage, async () => {});
     return this.startFiber(
       "managed-setup-failure",
       async () => {
         this.executionLog.push("should-not-run");
       },
       { fiberId }
+    ).then(
+      () => "accepted",
+      (error: unknown) =>
+        error instanceof Error ? error.message : String(error)
     );
   }
 
@@ -591,19 +597,21 @@ export class TestRunFiberAgent extends Agent {
     return this._keepAlive.holds;
   }
 
+  /** Fiber runs not yet settled or parked (a body running or awaiting recovery). */
   async getRunningFiberCount(): Promise<number> {
-    const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_runs
-    `;
-    return rows[0].count;
+    return Number(this.ctx.storage.sql.exec(OPEN_FIBER_RUNS_SQL).one().count);
   }
 
   private _readRunSnapshot(id: string): unknown {
-    const rows = this.sql<{ snapshot: string | null }>`
-      SELECT snapshot FROM cf_agents_runs WHERE id = ${id} LIMIT 1
+    const rows = this.sql<{ value: string }>`
+      SELECT value FROM cf_agents_task_checkpoint
+      WHERE run_id = ${id} AND key = 'snapshot' LIMIT 1
     `;
-    const snapshot = rows[0]?.snapshot;
-    return snapshot ? JSON.parse(snapshot) : null;
+    return rows[0] ? JSON.parse(rows[0].value) : null;
+  }
+
+  private _legacyFiberTables(): void {
+    createLegacyFiberTables(this.ctx.storage.sql);
   }
 
   async waitFor(ms: number): Promise<void> {
@@ -642,9 +650,27 @@ export class TestRunFiberAgent extends Agent {
     name: string,
     snapshot?: unknown
   ): Promise<void> {
+    this._legacyFiberTables();
     this.sql`
       INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
       VALUES (${id}, ${name}, ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
+    `;
+  }
+
+  /** An interrupted fiber row in the oldest released table shape (no outcome columns). */
+  async insertOldestShapeInterruptedFiber(
+    id: string,
+    name: string
+  ): Promise<void> {
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agents_runs (
+        id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, snapshot TEXT,
+        created_at INTEGER NOT NULL
+      )
+    `;
+    this.sql`
+      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
+      VALUES (${id}, ${name}, ${JSON.stringify({ step: 1 })}, ${Date.now()})
     `;
   }
 
@@ -654,6 +680,7 @@ export class TestRunFiberAgent extends Agent {
     name: string,
     crashes: number
   ): Promise<void> {
+    this._legacyFiberTables();
     this.sql`
       INSERT INTO cf_agents_runs (id, name, snapshot, created_at, recovery_crashes)
       VALUES (${id}, ${name}, NULL, ${Date.now()}, ${crashes})
@@ -675,6 +702,7 @@ export class TestRunFiberAgent extends Agent {
     name: string,
     ageMs: number
   ): Promise<void> {
+    this._legacyFiberTables();
     this.sql`
       INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
       VALUES (${id}, ${name}, NULL, ${Date.now() - ageMs})
@@ -686,6 +714,7 @@ export class TestRunFiberAgent extends Agent {
     name: string,
     snapshot?: unknown
   ): Promise<void> {
+    this._legacyFiberTables();
     const now = Date.now();
     this.sql`
       INSERT INTO cf_agents_fibers
@@ -705,6 +734,7 @@ export class TestRunFiberAgent extends Agent {
     status: "pending" | "running",
     snapshot?: unknown
   ): Promise<void> {
+    this._legacyFiberTables();
     const now = Date.now();
     this.sql`
       INSERT INTO cf_agents_fibers
@@ -723,6 +753,7 @@ export class TestRunFiberAgent extends Agent {
     name: string,
     snapshot?: unknown
   ): Promise<void> {
+    this._legacyFiberTables();
     const now = Date.now();
     this.sql`
       INSERT INTO cf_agents_fibers
@@ -744,6 +775,7 @@ export class TestRunFiberAgent extends Agent {
     id: string,
     name: string
   ): Promise<void> {
+    this._legacyFiberTables();
     const now = Date.now();
     this.sql`
       INSERT INTO cf_agents_fibers
@@ -761,24 +793,17 @@ export class TestRunFiberAgent extends Agent {
   }
 
   /**
-   * Runs a managed fiber whose body throws while both its ledger settle write
-   * and its run-row delete fail, leaving only the run row's settlement stamp.
+   * Runs a managed fiber whose body throws while its settle write fails, so
+   * its run stays `running` as if the isolate had died.
    */
   async runManagedFailingWithFailedSettle(fiberId: string): Promise<void> {
     this.sql`
       CREATE TRIGGER fail_managed_fiber_settle
-      BEFORE UPDATE OF status ON cf_agents_fibers
-      WHEN OLD.name = 'managed-settle-failure' AND NEW.status != 'running'
+      BEFORE UPDATE OF status ON cf_agents_task_runs
+      WHEN json_extract(OLD.input, '$.name') = 'managed-settle-failure'
+        AND NEW.status = 'error'
       BEGIN
-        SELECT RAISE(FAIL, 'simulated ledger settle failure');
-      END
-    `;
-    this.sql`
-      CREATE TRIGGER fail_managed_fiber_cleanup
-      BEFORE DELETE ON cf_agents_runs
-      WHEN OLD.name = 'managed-settle-failure'
-      BEGIN
-        SELECT RAISE(FAIL, 'simulated fiber cleanup failure');
+        SELECT RAISE(FAIL, 'simulated settle failure');
       END
     `;
     try {
@@ -787,34 +812,22 @@ export class TestRunFiberAgent extends Agent {
         async () => {
           throw new Error("managed body failed");
         },
-        { fiberId }
-      );
-      // The execution runs after startFiber returns, behind the wake's alarm
-      // write. Wait until the run row records the body's outcome: the settle
-      // and delete attempts happen in the same synchronous block, so after
-      // that the triggers can go.
-      const settled = () =>
-        Boolean(
-          this.sql<{ outcome: string | null }>`
-            SELECT outcome FROM cf_agents_runs WHERE id = ${fiberId}
-          `[0]?.outcome
-        );
-      for (let attempt = 0; attempt < 200 && !settled(); attempt++) {
-        await this.waitFor(10);
-      }
-      if (!settled()) {
-        throw new Error("managed fiber never recorded its outcome");
-      }
+        { fiberId, waitForCompletion: true }
+      ).catch(() => {});
     } finally {
       this.sql`DROP TRIGGER fail_managed_fiber_settle`;
-      this.sql`DROP TRIGGER fail_managed_fiber_cleanup`;
     }
+    // Due now, as the next start's reconcile makes a run left `running`.
+    this.sql`
+      UPDATE cf_agents_task_runs SET next_at = ${Date.now()}
+      WHERE run_id = ${fiberId} AND status = 'running'
+    `;
   }
 
   async triggerRecoveryCheck(): Promise<void> {
     await (
-      this as unknown as { _fibers: { recover(): Promise<void> } }
-    )._fibers.recover();
+      this as unknown as { _recoverFibers(): Promise<void> }
+    )._recoverFibers();
   }
 
   /** Read the physical DO alarm (epoch ms) or null when none is armed. */
@@ -822,11 +835,12 @@ export class TestRunFiberAgent extends Agent {
     return this.ctx.storage.getAlarm();
   }
 
-  /** The Fibers capability's wake (epoch ms), or null when none is armed. */
+  /** The earliest wake of a fiber run (epoch ms), or null when none is armed. */
   async getFiberWakeTime(): Promise<number | null> {
-    const rows = this.sql<{ time: number }>`
-      SELECT time FROM cf_agents_jobs
-      WHERE capability = 'fibers' AND id = 'fibers:recover'
+    const rows = this.sql<{ time: number | null }>`
+      SELECT min(next_at) AS time FROM cf_agents_task_runs
+      WHERE definition IN ('__cf_fiber', '__cf_managed_fiber')
+        AND status IN ('pending', 'running')
     `;
     return rows[0]?.time ?? null;
   }
@@ -837,9 +851,15 @@ export class TestRunFiberAgent extends Agent {
    * spawning a real process or waiting on timers.
    */
   async simulateAlarmCycle(): Promise<number | null> {
+    // A retry waits out its backoff; this cycle stands in for that wake.
+    this.sql`
+      UPDATE cf_agents_task_runs SET next_at = ${Date.now()}
+      WHERE definition IN ('__cf_fiber', '__cf_managed_fiber')
+        AND status = 'pending' AND next_at IS NOT NULL
+    `;
     await (
-      this as unknown as { _fibers: { recover(): Promise<void> } }
-    )._fibers.recover();
+      this as unknown as { _recoverFibers(): Promise<void> }
+    )._recoverFibers();
     return this.ctx.storage.getAlarm();
   }
 }

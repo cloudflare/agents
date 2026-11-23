@@ -29,20 +29,6 @@ import { getAgentByName } from "..";
  *   3. Update this snapshot to match the new DDL
  */
 const EXPECTED_SCHEMA_DDL = [
-  // The Fibers capability creates its two tables on first use; startup's
-  // recovery scan is that first use.
-  `CREATE TABLE cf_agents_fibers (
-          fiber_id TEXT PRIMARY KEY,
-          idempotency_key TEXT UNIQUE,
-          name TEXT NOT NULL,
-          status TEXT NOT NULL,
-          snapshot TEXT,
-          metadata_json TEXT,
-          error_message TEXT,
-          created_at INTEGER NOT NULL,
-          started_at INTEGER,
-          completed_at INTEGER
-        )`,
   `CREATE TABLE cf_agents_jobs (
         id TEXT PRIMARY KEY NOT NULL,
         capability TEXT NOT NULL,
@@ -68,16 +54,6 @@ const EXPECTED_SCHEMA_DDL = [
       auth_url TEXT,
       server_options TEXT
     )`,
-  `CREATE TABLE cf_agents_runs (
-          id TEXT PRIMARY KEY NOT NULL,
-          name TEXT NOT NULL,
-          snapshot TEXT,
-          created_at INTEGER NOT NULL,
-          completed_at INTEGER,
-          outcome TEXT,
-          error_message TEXT,
-          recovery_crashes INTEGER NOT NULL DEFAULT 0
-        )`,
   `CREATE TABLE cf_agents_state (
         id TEXT PRIMARY KEY NOT NULL,
         state TEXT
@@ -198,9 +174,9 @@ describe("schema version gating", () => {
     expect(await agent.tableExists("cf_agents_jobs")).toBe(true);
     expect(await agent.tableExists("cf_agents_workflows")).toBe(true);
     expect(await agent.tableExists("cf_agents_mcp_servers")).toBe(true);
-    expect(await agent.tableExists("cf_agents_runs")).toBe(true);
-    expect(await agent.tableExists("cf_agents_fibers")).toBe(true);
-    // The old root-side facet fiber index; fiber wakes mirror on the root now.
+    // Fibers are Task runs: their old tables are not created.
+    expect(await agent.tableExists("cf_agents_runs")).toBe(false);
+    expect(await agent.tableExists("cf_agents_fibers")).toBe(false);
     expect(await agent.tableExists("cf_agents_facet_runs")).toBe(false);
   });
 

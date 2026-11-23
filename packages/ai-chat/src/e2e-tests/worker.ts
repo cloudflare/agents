@@ -92,10 +92,10 @@ abstract class ExhaustionBaseAgent extends AIChatAgent<Env> {
   @callable()
   hasFiberRows(): boolean {
     // Chat turns run on the Tasks capability (cf_agents_task_runs); facet
-    // turns remain on the legacy fiber engine (cf_agents_runs). An in-flight
+    // turns an older release ran as fibers are fiber runs. An in-flight
     // durable turn exists if either engine holds a row.
     const rows = this.sql<{ count: number }>`
-      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
+      SELECT (SELECT COUNT(*) FROM cf_agents_task_runs WHERE definition IN ('__cf_fiber', '__cf_managed_fiber') AND status IN ('pending', 'running'))
            + (SELECT COUNT(*) FROM cf_agents_task_runs) as count
     `;
     return rows[0].count > 0;
@@ -325,10 +325,10 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   @callable()
   hasFiberRows(): boolean {
     // Chat turns run on the Tasks capability (cf_agents_task_runs); facet
-    // turns remain on the legacy fiber engine (cf_agents_runs). An in-flight
+    // turns an older release ran as fibers are fiber runs. An in-flight
     // durable turn exists if either engine holds a row.
     const rows = this.sql<{ count: number }>`
-      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
+      SELECT (SELECT COUNT(*) FROM cf_agents_task_runs WHERE definition IN ('__cf_fiber', '__cf_managed_fiber') AND status IN ('pending', 'running'))
            + (SELECT COUNT(*) FROM cf_agents_task_runs) as count
     `;
     return rows[0].count > 0;

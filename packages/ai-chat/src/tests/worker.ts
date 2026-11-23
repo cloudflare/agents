@@ -44,6 +44,17 @@ import {
   type ToolPartUpdate
 } from "agents/chat";
 
+/** The fiber run table of a release before fibers ran on Tasks. */
+function createLegacyFiberTableForTest(sql: SqlStorage): void {
+  sql.exec(`
+    CREATE TABLE IF NOT EXISTS cf_agents_runs (
+      id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, snapshot TEXT,
+      created_at INTEGER NOT NULL, completed_at INTEGER, outcome TEXT,
+      error_message TEXT, recovery_crashes INTEGER NOT NULL DEFAULT 0
+    )
+  `);
+}
+
 // Type helper for tool call parts - extracts from ChatMessage parts
 type TestToolCallPart = Extract<
   ChatMessage["parts"][number],
@@ -67,6 +78,10 @@ async function insertInterruptedTurnForTest(
 ): Promise<void> {
   const prefix = `${AIChatAgent.CHAT_FIBER_NAME}:`;
   if (!name.startsWith(prefix)) {
+    createLegacyFiberTableForTest(
+      (agent as unknown as { ctx: DurableObjectState }).ctx.storage.sql
+    );
+
     agent.sql`
       INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
       VALUES (${`fiber-${crypto.randomUUID()}`}, ${name},
@@ -124,8 +139,8 @@ async function recoverInterruptedTurnsForTest(
     });
   }
   await (
-    agent as unknown as { _fibers: { recover(): Promise<void> } }
-  )._fibers.recover();
+    agent as unknown as { _recoverFibers(): Promise<void> }
+  )._recoverFibers();
 }
 
 /** The STORED rows, reassembled from their continuation rows. */
@@ -5045,7 +5060,9 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
   getRunFiberCountForTest(): number {
     const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_runs
+      SELECT COUNT(*) AS count FROM cf_agents_task_runs
+      WHERE definition IN ('__cf_fiber', '__cf_managed_fiber')
+        AND status IN ('pending', 'running')
     `;
     return rows[0]?.count ?? 0;
   }
@@ -5149,6 +5166,8 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
   /** Leave a chat turn's fiber row, as a version before Tasks did. */
   insertLegacyChatFiberForTest(requestId: string, snapshot?: unknown): void {
+    createLegacyFiberTableForTest(this.ctx.storage.sql);
+
     this.sql`
       INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
       VALUES (${`fiber-${crypto.randomUUID()}`},
@@ -5191,7 +5210,8 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   getActiveFibers(): Array<{ id: string; name: string }> {
     return (
       this.sql<{ id: string; name: string }>`
-        SELECT id, name FROM cf_agents_runs
+        SELECT run_id AS id, json_extract(input, '$.name') AS name FROM cf_agents_task_runs
+      WHERE definition = '__cf_fiber' AND status IN ('pending', 'running')
       ` || []
     );
   }
@@ -5304,7 +5324,8 @@ export class NonChatRecoveryTestAgent extends AIChatAgent<Env> {
   getActiveFibers(): Array<{ id: string; name: string }> {
     return (
       this.sql<{ id: string; name: string }>`
-        SELECT id, name FROM cf_agents_runs
+        SELECT run_id AS id, json_extract(input, '$.name') AS name FROM cf_agents_task_runs
+      WHERE definition = '__cf_fiber' AND status IN ('pending', 'running')
       ` || []
     );
   }
@@ -5413,7 +5434,8 @@ export class RecoveryThrowingAgent extends AIChatAgent<Env> {
   getActiveFibers(): Array<{ id: string; name: string }> {
     return (
       this.sql<{ id: string; name: string }>`
-        SELECT id, name FROM cf_agents_runs
+        SELECT run_id AS id, json_extract(input, '$.name') AS name FROM cf_agents_task_runs
+      WHERE definition = '__cf_fiber' AND status IN ('pending', 'running')
       ` || []
     );
   }
@@ -5487,7 +5509,8 @@ export class RecoverySlowStreamAgent extends SlowStreamAgent {
   getActiveFibers(): Array<{ id: string; name: string }> {
     return (
       this.sql<{ id: string; name: string }>`
-        SELECT id, name FROM cf_agents_runs
+        SELECT run_id AS id, json_extract(input, '$.name') AS name FROM cf_agents_task_runs
+      WHERE definition = '__cf_fiber' AND status IN ('pending', 'running')
       ` || []
     );
   }
@@ -5903,7 +5926,9 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
         AND status IN ('pending', 'running')
     `;
     const fibers = this.sql<{ count: number }>`
-      SELECT COUNT(*) AS count FROM cf_agents_runs
+      SELECT COUNT(*) AS count FROM cf_agents_task_runs
+      WHERE definition IN ('__cf_fiber', '__cf_managed_fiber')
+        AND status IN ('pending', 'running')
     `;
     return {
       taskRuns: taskRuns[0]?.count ?? 0,

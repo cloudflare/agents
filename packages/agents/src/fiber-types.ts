@@ -113,16 +113,11 @@ export type FiberStashContext = {
 
 /** @internal Options framework hosts pass when running a fiber. */
 export type InternalFiberOptions = {
-  signal?: AbortSignal;
-  managed?: boolean;
   initialSnapshot?: unknown;
   wrapStash?: (data: unknown) => unknown;
-  beforeRunCleanup?: (
-    outcome: { ok: true } | { ok: false; error: unknown }
-  ) => void;
 };
 
-/** @internal Raw `cf_agents_fibers` row. */
+/** @internal A `cf_agents_fibers` row from a release before fibers ran on Tasks. */
 export type FiberLedgerRow = {
   fiber_id: string;
   idempotency_key: string | null;
@@ -136,7 +131,7 @@ export type FiberLedgerRow = {
   completed_at: number | null;
 };
 
-/** @internal Raw `cf_agents_runs` row. */
+/** @internal A `cf_agents_runs` row from a release before fibers ran on Tasks. */
 export type FiberRunRow = {
   id: string;
   name: string;

@@ -441,7 +441,9 @@ export function interruptedTurnRequestIds(
     const prefix = `${turnName}:`;
     for (const row of sql
       .exec(
-        `select name from cf_agents_runs where substr(name, 1, ?) = ?`,
+        `select json_extract(input, '$.name') as name from cf_agents_task_runs
+         where definition = '__cf_fiber' and status in ('pending', 'running')
+           and substr(json_extract(input, '$.name'), 1, ?) = ?`,
         prefix.length,
         prefix
       )
@@ -449,7 +451,7 @@ export function interruptedTurnRequestIds(
       ids.push(String(row.name).slice(prefix.length));
     }
   } catch {
-    // No fiber table yet.
+    // No Tasks table yet.
   }
   return ids;
 }

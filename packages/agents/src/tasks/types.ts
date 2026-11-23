@@ -456,6 +456,18 @@ export interface TaskRegisterOptions {
    * and committed, before the handler runs. Omitted: no limit.
    */
   maxAttempts?: number;
+  /**
+   * Keep a run's checkpoint after it settles, until the run is deleted:
+   * managed fibers are inspected with their last snapshot.
+   */
+  keepCheckpoint?: boolean;
+  /**
+   * How long an attempt's claim lasts before its run counts as interrupted;
+   * renewed by its wake while the attempt runs in this isolate, so that
+   * wake is also the object's keep-alive. Fibers use the keep-alive
+   * interval. Omitted: the step timeout plus slack.
+   */
+  claimMs?: number;
 }
 
 /** @internal Raw `cf_agents_task_steps` SQLite row. */

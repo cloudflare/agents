@@ -6319,11 +6319,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   private _hasRecoverableChatTurn(requestId: string): boolean {
-    // A settled fiber whose row delete failed keeps `completed_at` (#2363).
-    const fiberRows = this.sql<{ id: string }>`
-      SELECT id FROM cf_agents_runs
-      WHERE name = ${(this.constructor as typeof Think).CHAT_FIBER_NAME + ":" + requestId}
-        AND completed_at IS NULL
+    // A chat turn an older release ran as a fiber, carried forward as a
+    // fiber run.
+    const fiberRows = this.sql<{ run_id: string }>`
+      SELECT run_id FROM cf_agents_task_runs
+      WHERE definition = '__cf_fiber'
+        AND json_extract(input, '$.name') = ${(this.constructor as typeof Think).CHAT_FIBER_NAME + ":" + requestId}
+        AND status IN ('pending', 'running')
       LIMIT 1
     `;
     if (fiberRows.length > 0) return true;
@@ -6342,9 +6344,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       Date.now() - (this.constructor as typeof Think).submissionRecoveryStaleMs;
 
     const fiberRows = this.sql<{ created_at: number }>`
-      SELECT created_at FROM cf_agents_runs
-      WHERE name = ${(this.constructor as typeof Think).CHAT_FIBER_NAME + ":" + row.request_id}
-        AND completed_at IS NULL
+      SELECT created_at FROM cf_agents_task_runs
+      WHERE definition = '__cf_fiber'
+        AND json_extract(input, '$.name') = ${(this.constructor as typeof Think).CHAT_FIBER_NAME + ":" + row.request_id}
+        AND status IN ('pending', 'running')
       LIMIT 1
     `;
     if (fiberRows[0] && fiberRows[0].created_at >= cutoff) return true;

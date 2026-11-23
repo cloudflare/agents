@@ -22,7 +22,7 @@ A definition from `register()` (a framework definition) joins an existing run of
 
 ## The checkpoint (internal)
 
-`step.checkpoint.get(key)` and `step.checkpoint.set(key, value)` keep JSON state the next attempt reads. Rows of `cf_agents_task_checkpoint (run_id, key, value)`. A write is synchronous and fenced on the attempt's generation: once a newer attempt claimed the run, the write does nothing. The rows are deleted when the run settles (with the run when `retain: false`), because nothing reads a settled run's checkpoint yet.
+`step.checkpoint.get(key)` and `step.checkpoint.set(key, value)` keep JSON state the next attempt reads. Rows of `cf_agents_task_checkpoint (run_id, key, value)`. A write is synchronous and fenced on the attempt's generation: once a newer attempt claimed the run, the write does nothing. The rows are deleted when the run settles (with the run when `retain: false`), unless the definition is registered with `keepCheckpoint: true`: then they stay until the run is deleted (managed fibers are inspected with their last snapshot). Host code reads an entry with `checkpointOf(runId, key)`.
 
 Two ways to record progress, and no third:
 
@@ -35,15 +35,21 @@ Two ways to record progress, and no third:
 
 ## Framework definitions: reports, attempt cap, settlements (internal)
 
-`register(name, handler, { onStatus, maxAttempts })`:
+`register(name, handler, { onStatus, maxAttempts, keepCheckpoint, claimMs })`:
 
 - `onStatus(record)` gets the run's stored record and runs in host context when a run is accepted (before its wake is published, so the run starts only after it), when an attempt claims it, and when it ends. The terminal call happens at least once: `notified` takes the status after it returns; a throw retries it 30 s later through the `tasks:reports` job, and a reset before the write delivers it again from the start. A `retain: false` run stays until its terminal report returned. Reports run inside the request or alarm that moved the run, so they need no keep-alive hold.
 - A framework definition's input may be up to 16 MiB: past 500,000 UTF-16 code units it is stored in pieces in `cf_agents_task_parts (run_id, piece, data)`, never splitting a surrogate pair, and joined when the attempt or `inputOf` reads it. The pieces go with the run. Other definitions keep the 1 MiB value limit.
 - `maxAttempts`: the claim is committed with `storage.sync()` before the handler runs, and a run whose attempts are spent ends `error` (`TaskInterruptedError`).
 - The handler may return a `TaskSettlement`: `aborted`, `skipped`, `failed` (no retry), or `park` (the run stays `pending` with wait reason `park`, no deadline, its lane held, until `settle()` ends it).
-- `settle(runId, outcome)` ends a run no attempt runs in this isolate (parked, or left `running` by a reset) with a settlement or a completing value; a racing second settle gets `false`.
+- `settle(runId, outcome, { checkpoint })` ends a run no attempt runs in this isolate (parked, or left `running` by a reset) with a settlement or a completing value, writing `checkpoint` entries under the same fence; a racing second settle gets `false`. This is the one way to settle from outside: fibers (`resolveFiber`) and approvals use it.
+- `claimMs`: how long an attempt's claim lasts before the run counts as interrupted. The claim's wake renews it while the attempt runs in this isolate, so that wake is also the object's keep-alive. Fibers set it to the keep-alive interval; omitted, it is the step timeout plus slack.
+- `runDue(definition, deadline?)` runs the due runs of a definition now, one at a time; none starts after `deadline`, and it returns the first one it left. The Agent calls it at startup so interrupted fibers are recovered before `onStart`.
 - `wait(runId)` resolves with the run's record after its terminal report; with the record as it is on a timeout, and with its last record when it is deleted (a report in flight resolves its waiters when it returns). Waiters belong to one run, not to its id.
-- Host code reads records synchronously (`peek`, `peekByIdempotencyKey`, `peekList`), reads a run's input (`inputOf`), merges metadata (`updateMetadata`), deletes a terminal run (`deleteRun`) and carries runs forward from its own older storage (`importRun`, once per id).
+- Host code reads records synchronously (`peek`, `peekByIdempotencyKey`, `peekList`), reads a run's input (`inputOf`), merges metadata (`updateMetadata`), deletes a terminal run (`deleteRun`) and carries runs forward from its own older storage (`importRun`, once per id, with checkpoint entries). `peekList` filters on an exact `input` (fibers list by name).
+
+## Writes on the hot path
+
+A run started now (`start: "now"`) outside a lane gets its first wake from the claim that follows at once, not from the accept; until then the row's deadline is the wake a restart reconciles. A finished run that nobody keeps (`retain: false`), reports or waits for is deleted in one fenced write instead of completed and then deleted; if that delete fails it is completed in place, so a finished attempt is never taken for an interrupted one (#2305).
 
 ## Cancel
 
@@ -56,3 +62,7 @@ Per isolate: one abort controller and one promise per running attempt (`#active`
 ## The chat turn
 
 The chat-turn definition (`chat/turn-task.ts`) passes the turn's closure as `local` and keeps the turn's stash envelope in the checkpoint entry `snapshot`. A turn accepted by a version before checkpoints kept the envelope in storage under `__cf_chat_turn_snapshot:chat_<nonce>`; its recovery reads that key once when no checkpoint entry exists, then deletes it.
+
+## Fibers
+
+`runFiber()` and `startFiber()` are one-step runs of `__cf_fiber` (`retain: false`) and `__cf_managed_fiber` (`keepCheckpoint: true`), defined in `fiber-runs.ts`. See [fibers.md](./fibers.md).
