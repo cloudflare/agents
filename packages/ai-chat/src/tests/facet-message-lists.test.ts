@@ -11,6 +11,13 @@ function framesOf(ws: WebSocket): Array<Record<string, unknown>> {
   return frames;
 }
 
+function closed(ws: WebSocket): Promise<void> {
+  return new Promise((resolve) => {
+    ws.addEventListener("close", () => resolve(), { once: true });
+    ws.close(1000);
+  });
+}
+
 describe("AIChatAgent message lists inside a facet", () => {
   it("sends a tab's list update to the other tabs of a sub-agent, not back to the sender", async () => {
     const path = `/agents/test-chat-agent/${crypto.randomUUID()}/sub/test-chat-agent/${crypto.randomUUID()}`;
@@ -40,7 +47,8 @@ describe("AIChatAgent message lists inside a facet", () => {
     );
     expect(lists(sender)).toEqual([]);
 
-    ws1.close();
-    ws2.close(1000);
+    // Wait for both closes: the root forwards each one to the facet, and a
+    // forward still in flight when the file ends fails the run.
+    await Promise.all([closed(ws1), closed(ws2)]);
   });
 });
