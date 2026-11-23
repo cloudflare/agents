@@ -323,4 +323,29 @@ describe("Sessions path reads cut by a window", () => {
       expect(read).toBeLessThan(120_000);
     });
   }, 120_000);
+
+  it("skips every summary of a start on another branch and applies the next start on the path", async () => {
+    const stub = await open();
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const sql = sqlOf(instance);
+      seed(sql, 1, 2000, 1000);
+      // A sibling of m2 under m1, numbered before every other row: two
+      // summaries start there and rank first by start.
+      sql.exec(
+        `INSERT INTO cf_agents_session_messages
+          (session_id, id, seq, parent_id, role, content, token_estimate, created_at)
+         VALUES ('', 's', 0, 'm1', 'user',
+           '{"id":"s","role":"user","parts":[{"type":"text","text":"s"}]}', 1, 0)`
+      );
+      const session = instance.sessions.session();
+      await session.addCompaction("sibling a", "s", "m1985");
+      await session.addCompaction("sibling b", "s", "m1990");
+      const onPath = await session.addCompaction("on path", "m4", "m1980");
+      const recent = await session.getRecentHistory(1024 * 1024);
+      expect(
+        recent.messages.filter(isCompactionMessage).map((m) => m.id)
+      ).toEqual([`compaction_${onPath.id}`]);
+      expect(recent.messages.at(-1)?.id).toBe("m2000");
+    });
+  });
 });
