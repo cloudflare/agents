@@ -467,7 +467,8 @@ describe("SubAgent", () => {
     expect(row?.ownerPath).toContain("CounterSubAgent");
 
     await agent.backdateSchedule(scheduleId);
-    await runDurableObjectAlarm(agent);
+    // The real alarm may be the one that drives it; wait for the drive.
+    await drainDueFiberWakes(agent);
 
     const log = await agent.subAgentScheduleLog("sched-child");
     expect(log).toEqual([
@@ -522,7 +523,8 @@ describe("SubAgent", () => {
     );
     expect(ids).toHaveLength(1);
     await agent.backdateSchedule(ids[0]!);
-    await runDurableObjectAlarm(agent);
+    // The real alarm may be the one that drives it; wait for the drive.
+    await drainDueFiberWakes(agent);
 
     await vi.waitFor(async () => {
       expect(await agent.subAgentScheduleLog("declared-child")).toEqual([
@@ -608,7 +610,8 @@ describe("SubAgent", () => {
     expect(second).toBe(first);
 
     await agent.backdateSchedule(first);
-    await runDurableObjectAlarm(agent);
+    // The real alarm may be the one that drives it; wait for the drive.
+    await drainDueFiberWakes(agent);
 
     expect(await agent.subAgentScheduleLog("interval-child")).toHaveLength(1);
     const rows = await agent.rootScheduleRows();
@@ -629,7 +632,8 @@ describe("SubAgent", () => {
     );
 
     await agent.backdateSchedule(scheduleId);
-    await runDurableObjectAlarm(agent);
+    // The real alarm may be the one that drives it; wait for the drive.
+    await drainDueFiberWakes(agent);
 
     expect(await agent.subAgentScheduleLog("cancel-child")).toEqual([]);
     expect(
@@ -749,7 +753,8 @@ describe("SubAgent", () => {
     );
 
     await agent.backdateSchedule(scheduleId);
-    await runDurableObjectAlarm(agent);
+    // The real alarm may be the one that drives it; wait for the drive.
+    await drainDueFiberWakes(agent);
 
     expect(
       await agent.nestedGetValue(
@@ -831,7 +836,8 @@ describe("SubAgent", () => {
     // Backdate and run the alarm; the cron callback should dispatch
     // into the facet, then the row's `time` is rescheduled forward.
     await agent.backdateSchedule(scheduleId);
-    await runDurableObjectAlarm(agent);
+    // The real alarm may be the one that drives it; wait for the drive.
+    await drainDueFiberWakes(agent);
 
     const log = await agent.subAgentScheduleLog("cron-child");
     expect(log).toHaveLength(1);
@@ -943,7 +949,8 @@ describe("SubAgent", () => {
     );
 
     await agent.backdateSchedule(scheduleId);
-    await runDurableObjectAlarm(agent);
+    // The real alarm may be the one that drives it; wait for the drive.
+    await drainDueFiberWakes(agent);
 
     // The callback ran (log entry written) and the row is gone
     // (one-shot rows are deleted post-execute regardless).
