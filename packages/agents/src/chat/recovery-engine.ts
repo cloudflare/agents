@@ -1034,6 +1034,7 @@ export class ChatRecoveryEngine {
           reason: CHAT_RECOVERY_CANCELLED_REASON
         });
       }
+      this.#endStopped(incident);
       await adapter.setRecovering(false);
       return {
         incident: after !== undefined && after !== "delete" ? after : incident,
@@ -1131,6 +1132,7 @@ export class ChatRecoveryEngine {
           reason: CHAT_RECOVERY_CANCELLED_REASON
         });
       }
+      this.#endStopped(stored ?? incident);
       await this.adapter.setRecovering(false);
       return false;
     }
@@ -1180,6 +1182,20 @@ export class ChatRecoveryEngine {
       (incident.recoveryRootRequestId !== undefined &&
         this.#stoppedRequestIds.has(incident.recoveryRootRequestId))
     );
+  }
+
+  /**
+   * A stop that landed while the turn was routed into recovery, before
+   * anything was scheduled: the tab's last frame for the ids it stopped
+   * said "recovering", and nothing else will end them.
+   */
+  #endStopped(incident: ChatRecoveryIncident): void {
+    const ids = new Set([incident.recoveryRootRequestId, incident.requestId]);
+    for (const id of ids) {
+      if (id !== undefined && this.#stoppedRequestIds.has(id)) {
+        this.adapter.turns?.endRequest?.(id, "aborted");
+      }
+    }
   }
 
   /**

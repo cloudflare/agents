@@ -117,6 +117,8 @@ function setup(scenario: Scenario = {}) {
       attemptScope: new AsyncLocalStorage<ChatRecoveryAttemptScope>(),
       latestMessage: () => undefined,
       originMessageIdsScope: new AsyncLocalStorage<string[] | undefined>(),
+      endRequest: (requestId, outcome) =>
+        void log.push(`end-${outcome}:${requestId}`),
       recordTerminalError: async (requestId, errorText) => {
         log.push("terminal-record");
         terminalErrors.push({ requestId, errorText });
@@ -230,6 +232,8 @@ describe("routeStreamInterruption", () => {
       t.events.filter((event) => event.type === "chat:recovery:skipped")
     ).toHaveLength(1);
     expect(t.log).not.toContain("after-schedule");
+    // The tab's last frame for it said "recovering": it is ended.
+    expect(t.log).toContain("end-aborted:request-1");
   });
 
   it("retries the question when the turn produced nothing", async () => {
