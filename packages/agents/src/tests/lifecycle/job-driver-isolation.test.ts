@@ -7,43 +7,18 @@ import {
 import { JobQueue } from "../../lifecycle/job-queue";
 import { Queue } from "../../queue";
 import { withCapabilityHarness } from "../shared/capability-harness";
+import { TestJobs } from "./test-jobs";
 
 /** An error the platform marks retryable, as a failing downstream stub does. */
+/** A `poison` job fails with a retryable error. */
+function poisonThrows({ job }: LifecycleJobContext): void {
+  if (job.fn === "poison") throw retryableError();
+}
+
 function retryableError(): Error {
   return Object.assign(new Error("downstream object is restarting"), {
     retryable: true
   });
-}
-
-/** Runs `fn` as a job; `poison` jobs always fail with a platform-class error. */
-class Jobs extends LifecycleCapability {
-  constructor(
-    id: string,
-    readonly ran: string[]
-  ) {
-    super(id);
-  }
-
-  onJob({ job }: LifecycleJobContext): void {
-    this.ran.push(job.id);
-    if (job.fn === "poison") throw retryableError();
-  }
-
-  push(options: LifecycleJobPushOptions) {
-    return this.lifecycle.jobs.push(options);
-  }
-
-  get(id: string) {
-    return this.lifecycle.jobs.get(id);
-  }
-
-  reschedule(id: string, time: number) {
-    return this.lifecycle.jobs.reschedule(id, time);
-  }
-
-  cancel(id: string) {
-    return this.lifecycle.jobs.cancel(id);
-  }
 }
 
 const QUICK = { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 };
@@ -52,8 +27,14 @@ describe("job driver isolation", () => {
   it("runs other owners' due jobs when one fails with a platform-class error", async () => {
     await withCapabilityHarness(async ({ install }) => {
       const ran: string[] = [];
-      const failing = new Jobs("isolation-failing", ran);
-      const other = new Jobs("isolation-other", ran);
+      const failing = new TestJobs("isolation-failing", {
+        ran: ran,
+        onJob: poisonThrows
+      });
+      const other = new TestJobs("isolation-other", {
+        ran: ran,
+        onJob: poisonThrows
+      });
       const { lifecycle } = install(failing);
       lifecycle.use(other);
       await lifecycle.start();
@@ -77,7 +58,10 @@ describe("job driver isolation", () => {
 
   it("keeps earlier memory-limit strikes through a pass that deferred a failure", async () => {
     await withCapabilityHarness(async ({ install, storage }) => {
-      const failing = new Jobs("isolation-failing", []);
+      const failing = new TestJobs("isolation-failing", {
+        ran: [],
+        onJob: poisonThrows
+      });
       const { lifecycle } = install(failing);
       await lifecycle.start();
       await storage.put("cf_agents:oom_alarm_strikes", 2);
@@ -98,7 +82,10 @@ describe("job driver isolation", () => {
   it("holds back the failing owner's later jobs, in order, for the deferral", async () => {
     await withCapabilityHarness(async ({ install, storage }) => {
       const ran: string[] = [];
-      const jobs = new Jobs("isolation-failing", ran);
+      const jobs = new TestJobs("isolation-failing", {
+        ran: ran,
+        onJob: poisonThrows
+      });
       const { lifecycle } = install(jobs);
       await lifecycle.start();
       const now = Date.now();
@@ -177,8 +164,14 @@ describe("job driver deferral", () => {
   it("keeps holding the failing owner when another owner's alarm comes first", async () => {
     await withCapabilityHarness(async ({ install }) => {
       const ran: string[] = [];
-      const failing = new Jobs("isolation-failing", ran);
-      const other = new Jobs("isolation-other", ran);
+      const failing = new TestJobs("isolation-failing", {
+        ran: ran,
+        onJob: poisonThrows
+      });
+      const other = new TestJobs("isolation-other", {
+        ran: ran,
+        onJob: poisonThrows
+      });
       const { lifecycle } = install(failing);
       lifecycle.use(other);
       await lifecycle.start();
@@ -204,8 +197,14 @@ describe("job driver hold within one scan", () => {
   it("keeps skipping a held owner when its hold ends during the scan", async () => {
     await withCapabilityHarness(async ({ install }) => {
       const ran: string[] = [];
-      const queued = new Jobs("isolation-failing", ran);
-      const slow = new Jobs("isolation-other", ran);
+      const queued = new TestJobs("isolation-failing", {
+        ran: ran,
+        onJob: poisonThrows
+      });
+      const slow = new TestJobs("isolation-other", {
+        ran: ran,
+        onJob: poisonThrows
+      });
       const { lifecycle } = install(queued);
       lifecycle.use(slow);
       await lifecycle.start();
@@ -243,8 +242,14 @@ describe("job driver hold within one scan", () => {
   it("does not wake early for a held owner when another job is pushed", async () => {
     await withCapabilityHarness(async ({ install, storage }) => {
       const ran: string[] = [];
-      const failing = new Jobs("isolation-failing", ran);
-      const other = new Jobs("isolation-other", ran);
+      const failing = new TestJobs("isolation-failing", {
+        ran: ran,
+        onJob: poisonThrows
+      });
+      const other = new TestJobs("isolation-other", {
+        ran: ran,
+        onJob: poisonThrows
+      });
       const { lifecycle } = install(failing);
       lifecycle.use(other);
       await lifecycle.start();
@@ -272,8 +277,14 @@ describe("job driver hold and the alarm", () => {
     >[0]["install"]
   ) {
     const ran: string[] = [];
-    const failing = new Jobs("isolation-failing", ran);
-    const other = new Jobs("isolation-other", ran);
+    const failing = new TestJobs("isolation-failing", {
+      ran: ran,
+      onJob: poisonThrows
+    });
+    const other = new TestJobs("isolation-other", {
+      ran: ran,
+      onJob: poisonThrows
+    });
     const { lifecycle } = install(failing);
     lifecycle.use(other);
     await lifecycle.start();
@@ -338,15 +349,14 @@ describe("job driver hold and the alarm", () => {
   });
 });
 
-/** Jobs with an error hook: only such an owner's hold has a clock. */
-class HookedJobs extends Jobs {
-  onJobError(): void {}
-}
-
 describe("job driver hold limit", () => {
   it("starts a job's hold clock again when its owner reschedules it", async () => {
     await withCapabilityHarness(async ({ install, storage }) => {
-      const jobs = new HookedJobs("hold-reschedule", []);
+      // An owner with an error hook: only such an owner's hold has a clock.
+      const jobs = new TestJobs("hold-reschedule", {
+        onJob: poisonThrows,
+        recordFailures: true
+      });
       const { lifecycle } = install(jobs);
       await lifecycle.start();
       await jobs.push({
@@ -454,7 +464,10 @@ describe("memory-limit breaker when an owner's start fails", () => {
 describe("exclusive jobs without an owner", () => {
   it("do not hold back other owners' wakes", async () => {
     await withCapabilityHarness(async ({ install, storage }) => {
-      const other = new Jobs("present-owner", []);
+      const other = new TestJobs("present-owner", {
+        ran: [],
+        onJob: poisonThrows
+      });
       const { lifecycle } = install(other);
       await lifecycle.start();
       // Due before the missing owner's hold (at least a minute) ends.
@@ -480,9 +493,12 @@ describe("job driver staggered holds", () => {
   it("wakes for each held owner at its own hold's end, and lets an earlier ordinary job win", async () => {
     await withCapabilityHarness(async ({ install, storage }) => {
       const ran: string[] = [];
-      const a = new Jobs("hold-a", ran);
-      const b = new Jobs("hold-b", ran);
-      const other = new Jobs("hold-other", ran);
+      const a = new TestJobs("hold-a", { ran: ran, onJob: poisonThrows });
+      const b = new TestJobs("hold-b", { ran: ran, onJob: poisonThrows });
+      const other = new TestJobs("hold-other", {
+        ran: ran,
+        onJob: poisonThrows
+      });
       const { lifecycle } = install(a);
       lifecycle.use(b);
       lifecycle.use(other);
@@ -575,7 +591,10 @@ describe("job driver hold limit", () => {
     await withCapabilityHarness(async ({ install, storage }) => {
       let fail = true;
       const make = () => {
-        const jobs = new Jobs("isolation-outcome", []);
+        const jobs = new TestJobs("isolation-outcome", {
+          ran: [],
+          onJob: poisonThrows
+        });
         jobs.onJob = () => {
           if (fail) throw retryableError();
           return { rescheduleAt: Date.now() + 60_000 };
@@ -652,7 +671,10 @@ describe("job driver hold limit without onJobError", () => {
   it("keeps holding a job past the limit when its owner has no onJobError", async () => {
     await withCapabilityHarness(async ({ install, storage }) => {
       const ran: string[] = [];
-      const first = new Jobs("isolation-hookless", ran);
+      const first = new TestJobs("isolation-hookless", {
+        ran: ran,
+        onJob: poisonThrows
+      });
       const { lifecycle } = install(first);
       await lifecycle.start();
       await first.push({
@@ -677,7 +699,9 @@ describe("job driver hold limit without onJobError", () => {
 
       // A fresh isolate, past the limit: the job is kept (it may be its
       // owner's only wake) and still has a wake.
-      const fresh = install(new Jobs("isolation-hookless", ran)).lifecycle;
+      const fresh = install(
+        new TestJobs("isolation-hookless", { ran: ran, onJob: poisonThrows })
+      ).lifecycle;
       await fresh.start();
       await expect(fresh.alarm()).rejects.toThrow("restarting");
       expect(
@@ -692,8 +716,14 @@ describe("job driver hold and a reused id", () => {
   it("runs a free owner's job that took over a held owner's id mid-scan", async () => {
     await withCapabilityHarness(async ({ install }) => {
       const ran: string[] = [];
-      const held = new Jobs("retake-held", ran);
-      const free = new Jobs("retake-free", ran);
+      const held = new TestJobs("retake-held", {
+        ran: ran,
+        onJob: poisonThrows
+      });
+      const free = new TestJobs("retake-free", {
+        ran: ran,
+        onJob: poisonThrows
+      });
       const { lifecycle } = install(held);
       lifecycle.use(free);
       await lifecycle.start();
@@ -727,8 +757,14 @@ describe("job driver hold and a reused id", () => {
   it("does not run a held owner's job that took over an id mid-scan", async () => {
     await withCapabilityHarness(async ({ install }) => {
       const ran: string[] = [];
-      const held = new Jobs("reuse-held", ran);
-      const free = new Jobs("reuse-free", ran);
+      const held = new TestJobs("reuse-held", {
+        ran: ran,
+        onJob: poisonThrows
+      });
+      const free = new TestJobs("reuse-free", {
+        ran: ran,
+        onJob: poisonThrows
+      });
       const { lifecycle } = install(held);
       lifecycle.use(free);
       await lifecycle.start();

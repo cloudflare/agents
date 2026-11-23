@@ -6,45 +6,7 @@ import {
 } from "../../lifecycle";
 import { Queue } from "../../queue";
 import { withCapabilityHarness } from "../shared/capability-harness";
-
-/** Records every dispatch and every terminal failure it is told about. */
-class Jobs extends LifecycleCapability {
-  readonly attempts: number[] = [];
-  readonly failures: { attempt: number; name: string }[] = [];
-  failWith: (() => Error) | undefined;
-
-  constructor() {
-    super("attempts-probe");
-  }
-
-  onJob({ attempt }: LifecycleJobContext): void {
-    this.attempts.push(attempt);
-    if (this.failWith) throw this.failWith();
-  }
-
-  onJobError({ attempt }: LifecycleJobContext, error: unknown): void {
-    this.failures.push({
-      attempt,
-      name: error instanceof Error ? error.name : String(error)
-    });
-  }
-
-  push(options: LifecycleJobPushOptions) {
-    return this.lifecycle.jobs.push(options);
-  }
-
-  get(id: string) {
-    return this.lifecycle.jobs.get(id);
-  }
-
-  cancel(id: string) {
-    return this.lifecycle.jobs.cancel(id);
-  }
-
-  reschedule(id: string, time: number) {
-    return this.lifecycle.jobs.reschedule(id, time);
-  }
-}
+import { TestJobs } from "./test-jobs";
 
 /** An owner with no onJobError: its job is its only wake. */
 class WakeOnly extends LifecycleCapability {
@@ -156,7 +118,7 @@ describe("jobs after an attempt that ended its isolate", () => {
 describe("durable job attempts", () => {
   it("does not retry a job in an isolate whose storage was reset", async () => {
     await withCapabilityHarness(async ({ install }) => {
-      const jobs = new Jobs();
+      const jobs = new TestJobs("attempts-probe", { recordFailures: true });
       const { lifecycle } = install(jobs);
       await lifecycle.start();
       jobs.failWith = () =>
@@ -180,7 +142,7 @@ describe("durable job attempts", () => {
 
   it("continues the count after attempts that ended with their isolate", async () => {
     await withCapabilityHarness(async ({ install, storage }) => {
-      const jobs = new Jobs();
+      const jobs = new TestJobs("attempts-probe", { recordFailures: true });
       const { lifecycle } = install(jobs);
       await lifecycle.start();
       await jobs.push({ id: "job", fn: "run", time: Date.now() + 60_000 });
@@ -195,7 +157,7 @@ describe("durable job attempts", () => {
 
   it("starts the count again when a job reschedules itself", async () => {
     await withCapabilityHarness(async ({ install, storage }) => {
-      const jobs = new Jobs();
+      const jobs = new TestJobs("attempts-probe", { recordFailures: true });
       const { lifecycle } = install(jobs);
       await lifecycle.start();
       await jobs.push({ id: "job", fn: "run", time: Date.now() + 60_000 });
@@ -220,7 +182,7 @@ describe("durable job attempts", () => {
 
   it("stops running a job whose every attempt ended with its isolate", async () => {
     await withCapabilityHarness(async ({ install, storage }) => {
-      const jobs = new Jobs();
+      const jobs = new TestJobs("attempts-probe", { recordFailures: true });
       const { lifecycle } = install(jobs);
       await lifecycle.start();
       await jobs.push({
@@ -268,7 +230,7 @@ describe("durable job attempts", () => {
     await withCapabilityHarness(async ({ install, storage }) => {
       // A deploy that resets the isolate mid-attempt also leaves the attempt
       // unreported. A one-shot with maxAttempts 1 must still run again.
-      const jobs = new Jobs();
+      const jobs = new TestJobs("attempts-probe", { recordFailures: true });
       const { lifecycle } = install(jobs);
       await lifecycle.start();
       await jobs.push({
@@ -288,7 +250,7 @@ describe("durable job attempts", () => {
 
   it("keeps the in-invocation retry budget when a platform error comes first", async () => {
     await withCapabilityHarness(async ({ install, storage }) => {
-      const jobs = new Jobs();
+      const jobs = new TestJobs("attempts-probe", { recordFailures: true });
       const { lifecycle } = install(jobs);
       await lifecycle.start();
       const errors = [
@@ -318,7 +280,7 @@ describe("durable job attempts", () => {
 
   it("does not start a job cancelled while its attempt count is written", async () => {
     await withCapabilityHarness(async ({ install }) => {
-      const jobs = new Jobs();
+      const jobs = new TestJobs("attempts-probe", { recordFailures: true });
       const { lifecycle } = install(jobs);
       await lifecycle.start();
       const now = Date.now();
@@ -367,7 +329,7 @@ describe("durable job attempts", () => {
 
   it("counts an attempt in storage before onJob runs", async () => {
     await withCapabilityHarness(async ({ install, storage }) => {
-      const jobs = new Jobs();
+      const jobs = new TestJobs("attempts-probe", { recordFailures: true });
       const { lifecycle } = install(jobs);
       await lifecycle.start();
       let seen: unknown;
@@ -388,7 +350,7 @@ describe("durable job attempts", () => {
 
   it("does not count an attempt that ended in a platform failure", async () => {
     await withCapabilityHarness(async ({ install, storage }) => {
-      const jobs = new Jobs();
+      const jobs = new TestJobs("attempts-probe", { recordFailures: true });
       const { lifecycle } = install(jobs);
       await lifecycle.start();
       jobs.failWith = () =>
@@ -416,7 +378,7 @@ describe("durable job attempts", () => {
 
   it("starts the count again when the job is pushed again", async () => {
     await withCapabilityHarness(async ({ install, storage }) => {
-      const jobs = new Jobs();
+      const jobs = new TestJobs("attempts-probe", { recordFailures: true });
       const { lifecycle } = install(jobs);
       await lifecycle.start();
       await jobs.push({ id: "job", fn: "run", time: Date.now() + 60_000 });
@@ -452,7 +414,7 @@ describe("durable job attempts", () => {
          VALUES ('old', 'attempts-probe', 'run', ?)`,
         Date.now() - 1
       );
-      const jobs = new Jobs();
+      const jobs = new TestJobs("attempts-probe", { recordFailures: true });
       const { lifecycle } = install(jobs);
       await lifecycle.start();
 
