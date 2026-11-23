@@ -374,12 +374,13 @@ describe("Think submission recovery e2e", () => {
     await expect(callAgent(agent, "getStatusLog")).resolves.toEqual([
       `${submissionId}:completed`
     ]);
-    // Startup settled the ledger and cleared the stamp. Nothing leaks forever.
+    // Startup settled the submission; the stamp stays on its record and
+    // goes with it.
     await expect(
       callAgent(agent, "reclaimDuringSubmissionGap", [submissionId])
     ).resolves.toEqual({
       streamStatus: null,
-      resultStatus: null
+      resultStatus: "completed"
     });
   });
 

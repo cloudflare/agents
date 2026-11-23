@@ -2084,11 +2084,7 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
           null)
         : null,
       resultStatus: ((
-        (
-          this as unknown as {
-            _submissions: { get(id: string): { progress?: unknown } };
-          }
-        )._submissions.get(submissionId)?.progress as
+        this.tasks.peek(submissionId)?.metadata?.__cf_progress as
           | { resultStatus?: string }
           | undefined
       )?.resultStatus ?? null) as string | null

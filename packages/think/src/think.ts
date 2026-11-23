@@ -5821,11 +5821,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     return this.tasks
       .peekList({
         definition: SUBMISSION_KIND,
-        ...(status && { status: submissionTaskStatuses(status) }),
+        ...(status && submissionTaskStatuses(status)),
         limit: Math.min(Math.max(options?.limit ?? 50, 1), 100)
       })
-      .map(submissionInspection)
-      .filter((submission) => !status || status.includes(submission.status));
+      .map(submissionInspection);
   }
 
   async deleteSubmission(submissionId: string): Promise<boolean> {
@@ -6200,17 +6199,23 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     }
     // End the interrupted ones the stored evidence already decides; the
     // rest run again as their next attempt, which reads the same evidence.
+    // A parked one (chat recovery owned its turn) is decided the same way:
+    // a reset may have cut its recovery off after the turn's outcome was
+    // stamped, and nothing else would settle it.
     for (const record of this.tasks.peekList({
       definition: SUBMISSION_KIND,
-      status: ["running"],
+      status: ["running", "pending"],
+      parked: true,
       order: "oldest",
       limit: 500
     })) {
       const outcome = await this._reconcileInterruptedSubmission(
         submissionRow(record)
       );
-      if (outcome !== "rerun")
-        await this._settleSubmission(record.runId, outcome);
+      if (outcome === "rerun") continue;
+      if (record.status === "pending" && outcome.status === "detached")
+        continue;
+      await this._settleSubmission(record.runId, outcome);
     }
   }
 

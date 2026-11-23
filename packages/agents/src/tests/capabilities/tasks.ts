@@ -416,6 +416,8 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
   failReports = 0;
   /** `__cf_reported` parks on this when set. */
   reportedGate: Promise<void> | null = null;
+  /** `__cf_reported` terminal reports wait on this when set. */
+  terminalReportGate: Promise<void> | null = null;
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
@@ -431,8 +433,9 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
       },
       {
         maxAttempts: 2,
-        onStatus: (snapshot) => {
+        onStatus: async (snapshot) => {
           const terminal = !["pending", "running"].includes(snapshot.status);
+          if (terminal) await this.terminalReportGate;
           if (terminal && this.failReports > 0) {
             this.failReports--;
             throw new Error("report failed");

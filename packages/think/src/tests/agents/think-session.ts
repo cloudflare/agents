@@ -9893,6 +9893,7 @@ export class ThinkProgrammaticTestAgent extends Think {
       errorMessage?: string | null;
       messageId?: string | null;
       metadataJson?: string;
+      outputJson?: string;
     }>
   ): Promise<void> {
     this.ctx.storage.sql.exec(`
@@ -9918,8 +9919,8 @@ export class ThinkProgrammaticTestAgent extends Think {
         `INSERT INTO cf_think_submissions (
            submission_id, idempotency_key, request_id, status, messages_json,
            metadata_json, error_message, created_at, started_at,
-           completed_at, message_id
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           completed_at, message_id, output_json
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         row.submissionId,
         row.idempotencyKey ?? null,
         row.submissionId,
@@ -9937,9 +9938,33 @@ export class ThinkProgrammaticTestAgent extends Think {
         row.createdAt,
         row.startedAt ?? null,
         row.completedAt ?? null,
-        row.messageId ?? null
+        row.messageId ?? null,
+        row.outputJson ?? null
       );
     }
+  }
+
+  /** A submission's run result as stored. */
+  async submissionResultForTest(submissionId: string): Promise<unknown> {
+    return this.tasks.peek(submissionId)?.result ?? null;
+  }
+
+  /**
+   * Leave a seeded submission parked, as chat recovery leaves one that owns
+   * its turn, with what its turn recorded.
+   */
+  async parkSubmissionForTest(
+    submissionId: string,
+    progress: SubmissionProgressForTest
+  ): Promise<void> {
+    this.ctx.storage.sql.exec(
+      `UPDATE cf_agents_task_runs
+       SET status = 'pending', wait_reason = 'park', next_at = NULL,
+           generation = NULL
+       WHERE run_id = ?`,
+      submissionId
+    );
+    patchSubmissionProgressForTest(this, submissionId, progress);
   }
 
   async hasLegacySubmissionTableForTest(): Promise<boolean> {

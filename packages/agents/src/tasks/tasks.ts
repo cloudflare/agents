@@ -44,6 +44,7 @@ import {
 } from "./replay";
 import {
   deserializeTaskValue,
+  MAX_FRAMEWORK_METADATA_BYTES,
   MAX_PARTED_INPUT_BYTES,
   MAX_SERIALIZED_BYTES,
   serializeTaskValue
@@ -144,6 +145,9 @@ const WAKE_JOB_PREFIX = "task:";
 /** The job that delivers terminal reports a reset or a throw cut short. */
 const REPORT_JOB_ID = "tasks:reports";
 const REPORT_JOB_FN = "reports";
+/** Terminal reports one report job delivers before it hands on to the next. */
+const REPORT_BATCH = 100;
+
 /** Wait before delivering again a report whose `onStatus` threw. */
 const REPORT_RETRY_MS = 30_000;
 /** Normal Task deadline dispatch. */
@@ -601,7 +605,16 @@ export class Tasks<
   async #dispatchRun(runId: string): Promise<LifecycleJobOutcome> {
     // A held lane's run (or one queued behind its head) waits for
     // releaseLane() or its head's settle to wake it again.
-    if (!this.#laneAllows(this.#store.getRun(runId))) return undefined;
+    const row = this.#store.getRun(runId);
+    if (row && TERMINAL_STATUSES.has(row.status)) {
+      // A wake kept for a terminal report a reset cut short.
+      if (this.#reporting.has(runId)) {
+        return { rescheduleAt: Date.now() + REPORT_RETRY_MS };
+      }
+      await this.#deliverTerminal(runId, row.retain !== 0);
+      return undefined;
+    }
+    if (!this.#laneAllows(row)) return undefined;
     const active = this.#liveAttempt(runId);
     if (active) {
       // A live attempt in this isolate; push the claim backstop forward so
@@ -1092,7 +1105,10 @@ export class Tasks<
     );
     const metadataJson = serializeTaskValue(
       options.metadata,
-      `metadata for Task definition "${definition}"`
+      `metadata for Task definition "${definition}"`,
+      this.#registered.has(definition)
+        ? MAX_FRAMEWORK_METADATA_BYTES
+        : MAX_SERIALIZED_BYTES
     );
 
     const byRunId =
@@ -1769,7 +1785,18 @@ export class Tasks<
   ): Promise<void> {
     // Nothing reads a settled run's checkpoint.
     this.#store.deleteCheckpoint(runId);
-    await this.#syncWake(runId);
+    const onStatus =
+      row && this.#registeredOptions.get(row.definition)?.onStatus;
+    if (onStatus && !this.lifecycle.routes.source) {
+      // The terminal report must outlive a reset before it returns: the
+      // run's wake stays until then (when due it delivers the report), and
+      // a run with none (queued in a lane) gets the report job.
+      if (!this.lifecycle.jobs.get(`${WAKE_JOB_PREFIX}${runId}`)) {
+        await this.#pushReportJob(REPORT_RETRY_MS);
+      }
+    } else {
+      await this.#syncWake(runId);
+    }
     // Only the head settling moves its lane on: a run queued behind it that
     // ends (a cancel, a clear) leaves the head where it is.
     if (row?.lane != null && row.seq != null) {
@@ -1786,10 +1813,8 @@ export class Tasks<
       if (row?.retain === 0) this.#store.deleteRun(runId);
       return;
     }
-    const snapshot = await this.#reportTerminal(runId);
-    if (!snapshot) return;
-    if (row.retain === 0) this.#store.deleteRun(runId);
-    this.#resolveWaiters(runId, snapshot);
+    await this.#deliverTerminal(runId, row.retain !== 0);
+    if (onStatus && !this.lifecycle.routes.source) await this.#syncWake(runId);
   }
 
   /**
@@ -1861,14 +1886,29 @@ export class Tasks<
       WHERE status IN ('completed', 'error', 'aborted', 'skipped')
         AND (notified IS NULL OR notified != status)
         AND definition IN (SELECT value FROM json_each(${JSON.stringify(names)}))
-      ORDER BY settled_at LIMIT 100
+      ORDER BY settled_at LIMIT ${REPORT_BATCH}
     `;
     for (const row of rows) {
-      const snapshot = await this.#reportTerminal(row.run_id);
-      if (!snapshot) return;
-      if (row.retain === 0) this.#store.deleteRun(row.run_id);
-      this.#resolveWaiters(row.run_id, snapshot);
+      if (!(await this.#deliverTerminal(row.run_id, row.retain !== 0))) {
+        return;
+      }
     }
+    // More may be waiting past this batch: the next one runs now.
+    if (rows.length === REPORT_BATCH) await this.#pushReportJob();
+  }
+
+  /**
+   * Report a terminal run, then drop it if it is not retained and answer
+   * its waiters.
+   *
+   * @returns False when the report did not go through (it is retried).
+   */
+  async #deliverTerminal(runId: string, retain: boolean): Promise<boolean> {
+    const record = await this.#reportTerminal(runId);
+    if (!record) return false;
+    if (!retain) this.#store.deleteRun(runId);
+    this.#resolveWaiters(runId, record);
+    return true;
   }
 
   /** Resolve the waiters of this run (not of an earlier one of its id). */
@@ -2002,6 +2042,8 @@ export class Tasks<
   peekList(options: {
     definition: string;
     status?: readonly TaskStatus[];
+    /** Pending runs match only when parked (true) or only when not (false). */
+    parked?: boolean;
     order?: "oldest" | "newest";
     limit?: number;
   }): TaskRecord[] {
@@ -2011,6 +2053,10 @@ export class Tasks<
     if (options.status) {
       query += ` AND status IN (${options.status.map(() => "?").join(", ")})`;
       params.push(...options.status);
+    }
+    if (options.parked !== undefined) {
+      query += ` AND (status != 'pending' OR (coalesce(wait_reason, '') = 'park') = ?)`;
+      params.push(options.parked ? 1 : 0);
     }
     const direction = options.order === "oldest" ? "ASC" : "DESC";
     query += ` ORDER BY created_at ${direction}, run_id ${direction} LIMIT ?`;
@@ -2060,6 +2106,8 @@ export class Tasks<
     idempotencyKey?: string;
     lane?: string;
     error?: string;
+    /** A completed run's result. */
+    result?: TaskJson;
     retain?: boolean;
     createdAt: number;
     startedAt?: number;
@@ -2085,12 +2133,12 @@ export class Tasks<
         (run_id, definition, input, status, metadata, idempotency_key, retain,
          attempt, generation, next_at, error_name, error_message,
          cancel_requested, cancel_reason, created_at, started_at, updated_at,
-         settled_at, lane, seq, notified, input_parts)
+         settled_at, lane, seq, notified, input_parts, result)
       VALUES
         (${record.runId}, ${record.definition},
          ${importedInput.input},
          ${record.status},
-         ${serializeTaskValue(record.metadata, `metadata of imported run "${record.runId}"`)},
+         ${serializeTaskValue(record.metadata, `metadata of imported run "${record.runId}"`, MAX_FRAMEWORK_METADATA_BYTES)},
          ${record.idempotencyKey ?? null}, ${record.retain === false ? 0 : 1},
          ${record.attempt},
          ${record.status === "running" ? "imported" : null},
@@ -2102,7 +2150,8 @@ export class Tasks<
          ${record.createdAt}, ${record.startedAt ?? null}, ${now},
          ${open ? null : (record.settledAt ?? now)}, ${lane},
          ${lane === null ? null : this.#store.nextLaneSeq(lane)},
-         ${open ? null : record.status}, ${importedInput.parts})
+         ${open ? null : record.status}, ${importedInput.parts},
+         ${record.status === "completed" ? serializeTaskValue(record.result, `result of imported run "${record.runId}"`) : null})
     `;
     if (open && !queued) await this.#syncWake(record.runId);
     return true;
@@ -2139,7 +2188,10 @@ export class Tasks<
         : (JSON.parse(row.metadata) as Record<string, TaskJson>);
     const json = serializeTaskValue(
       update(current),
-      `metadata of Task run "${runId}"`
+      `metadata of Task run "${runId}"`,
+      this.#registered.has(row.definition)
+        ? MAX_FRAMEWORK_METADATA_BYTES
+        : MAX_SERIALIZED_BYTES
     );
     this.#store.sql`
       UPDATE cf_agents_task_runs SET metadata = ${json}, updated_at = ${Date.now()}

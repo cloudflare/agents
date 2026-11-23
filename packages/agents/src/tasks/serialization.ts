@@ -75,6 +75,13 @@ export function deserializeTaskValue(stored: string | null): unknown {
 export const MAX_PARTED_INPUT_BYTES = 16 * 1_048_576;
 
 /**
+ * Largest metadata a framework definition's run may keep: what one SQLite
+ * row (2 MB) leaves once its input is in pieces. Think's released
+ * submissions stored metadata in a row of their own.
+ */
+export const MAX_FRAMEWORK_METADATA_BYTES = 1_900_000;
+
+/**
  * Longest input kept in the run's own row, in UTF-16 code units: SQLite
  * stores a row in at most 2 MB, which the run's other columns share.
  */

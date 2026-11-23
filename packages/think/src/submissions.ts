@@ -173,19 +173,22 @@ export function isTerminalSubmissionStatus(
 }
 
 /**
- * The run statuses to read for these submission statuses: a `running`
- * submission may also be a parked run (chat recovery owns its turn), so
- * callers filter the records by {@link submissionRow}'s status after.
+ * The run filter for these submission statuses: a `running` submission may
+ * also be a parked `pending` run (chat recovery owns its turn), so a
+ * `pending` run matches only as the statuses asked for it.
  */
 export function submissionTaskStatuses(
   statuses: readonly ThinkSubmissionStatus[]
-): TaskStatus[] {
-  const out = new Set<TaskStatus>();
-  for (const status of statuses) {
-    out.add(status);
-    if (status === "running") out.add("pending");
-  }
-  return [...out];
+): { status: TaskStatus[]; parked?: boolean } {
+  const out = new Set<TaskStatus>(statuses);
+  const running = out.has("running");
+  const pending = out.has("pending");
+  out.add("pending");
+  if (running && pending) return { status: [...out] };
+  if (running) return { status: [...out], parked: true };
+  if (pending) return { status: [...out], parked: false };
+  out.delete("pending");
+  return { status: [...out] };
 }
 
 /** A Task status as the submission status it is. */
@@ -350,11 +353,19 @@ export function legacySubmissionImport(row: LegacySubmissionRow): {
   idempotencyKey?: string;
   lane: string;
   error?: string;
+  result?: TaskJson;
   createdAt: number;
   startedAt?: number;
   settledAt?: number;
 } {
   const messages = parseJsonValue(row.messages_json);
+  // A completed submission's output is its run's result; an open one's is
+  // evidence its turn recorded, kept with the rest of its progress.
+  const output =
+    row.output_json != null
+      ? (parseJsonValue(row.output_json) as TaskJson)
+      : undefined;
+  const completed = row.status === "completed";
   const metadata = parseJsonValue(row.metadata_json);
   const progress: SubmissionProgress = {
     ...(row.request_id !== null && { requestId: row.request_id }),
@@ -363,9 +374,7 @@ export function legacySubmissionImport(row: LegacySubmissionRow): {
       messagesAppliedAt: row.messages_applied_at
     }),
     ...(row.result_status != null && { resultStatus: row.result_status }),
-    ...(row.output_json != null && {
-      output: parseJsonValue(row.output_json)
-    }),
+    ...(output !== undefined && !completed && { output }),
     ...(row.message_id != null && { messageId: row.message_id })
   };
   return {
@@ -391,6 +400,7 @@ export function legacySubmissionImport(row: LegacySubmissionRow): {
     },
     lane: SUBMISSION_LANE,
     ...(row.error_message !== null && { error: row.error_message }),
+    ...(output !== undefined && completed && { result: output }),
     createdAt: row.created_at,
     ...(row.started_at !== null && { startedAt: row.started_at }),
     ...(row.completed_at !== null && { settledAt: row.completed_at })

@@ -277,3 +277,197 @@ describe("Tasks input past one row", () => {
     });
   });
 });
+
+describe("Tasks terminal reports across a reset", () => {
+  it("keeps a run's wake until its terminal report returned, and gives a run with none the report job", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const jobIds = () =>
+          state.storage.sql
+            .exec<{ id: string }>("SELECT id FROM cf_agents_jobs ORDER BY id")
+            .toArray()
+            .map((row) => row.id);
+        let open!: () => void;
+        instance.terminalReportGate = new Promise(
+          (resolve) => (open = resolve)
+        );
+        instance.reportedGate = new Promise(() => {});
+
+        // A run with a wake: cancelled while it waits to start.
+        await instance.tasks.run(reported, undefined as never, {
+          runId: "woken",
+          start: "alarm"
+        });
+        expect(jobIds()).toContain("task:woken");
+        const cancelled = instance.tasks.cancel("woken");
+        await until(() => instance.reports.includes("woken:pending"));
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        // Aborted, its report under way: a reset now would find the wake.
+        expect((await instance.tasks.get("woken"))?.status).toBe("aborted");
+        expect(jobIds()).toContain("task:woken");
+        open();
+        await cancelled;
+        expect(instance.reports).toContain("woken:aborted");
+        expect(jobIds()).not.toContain("task:woken");
+      }
+    );
+  });
+
+  it("delivers the report a reset cut short when the kept wake comes due", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        // As a reset leaves it: aborted, unreported, its wake still there.
+        await instance.tasks.run(reported, undefined as never, {
+          runId: "cut",
+          start: "alarm"
+        });
+        state.storage.sql.exec(
+          "UPDATE cf_agents_task_runs SET status = 'aborted', next_at = NULL, settled_at = ? WHERE run_id = 'cut'",
+          Date.now()
+        );
+        state.storage.sql.exec(
+          "UPDATE cf_agents_jobs SET time = ? WHERE id = 'task:cut'",
+          Date.now() - 1
+        );
+      }
+    );
+    await runDurableObjectAlarm(stub);
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      expect(instance.reports).toContain("cut:aborted");
+      expect(instance.tasks.isSettled("cut")).toBe(true);
+    });
+  });
+
+  it("gives a cancelled run queued in a lane the report job while its report runs", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        instance.reportedGate = new Promise(() => {});
+        let open!: () => void;
+        await instance.tasks.run(reported, undefined as never, {
+          runId: "head",
+          lane: "l",
+          start: "alarm"
+        });
+        await instance.tasks.run(reported, undefined as never, {
+          runId: "queued",
+          lane: "l",
+          start: "alarm"
+        });
+        instance.terminalReportGate = new Promise(
+          (resolve) => (open = resolve)
+        );
+        const cancelled = instance.tasks.cancel("queued");
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(
+          state.storage.sql
+            .exec("SELECT id FROM cf_agents_jobs WHERE id = 'tasks:reports'")
+            .toArray()
+        ).toHaveLength(1);
+        open();
+        await cancelled;
+        expect(instance.reports).toContain("queued:aborted");
+      }
+    );
+  });
+
+  it("replays more terminal reports than one batch holds", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        instance.failReports = 1;
+        await instance.tasks.run(reported, undefined as never, {
+          runId: "first",
+          start: "now"
+        });
+        const now = Date.now();
+        for (let i = 0; i < 120; i++) {
+          state.storage.sql.exec(
+            `INSERT INTO cf_agents_task_runs
+               (run_id, definition, status, retain, attempt, cancel_requested,
+                created_at, updated_at, settled_at)
+             VALUES (?, '__cf_reported', 'skipped', 1, 0, 0, ?, ?, ?)`,
+            `s${i}`,
+            now,
+            now,
+            now + i
+          );
+        }
+        state.storage.sql.exec(
+          "UPDATE cf_agents_jobs SET time = ? WHERE id = 'tasks:reports'",
+          now - 1
+        );
+      }
+    );
+    await runDurableObjectAlarm(stub);
+    await runDurableObjectAlarm(stub);
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      expect(
+        instance.reports.filter((entry) => entry.endsWith(":skipped"))
+      ).toHaveLength(120);
+      expect(instance.reports).toContain("first:completed");
+    });
+  });
+});
+
+describe("Tasks record reads for framework definitions", () => {
+  it("lists pending runs by whether they are parked", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const parking = "__cf_parking" as unknown as "pipeline";
+      await instance.tasks.run(parking, undefined as never, {
+        runId: "parked",
+        start: "now"
+      });
+      await instance.tasks.run(parking, undefined as never, {
+        runId: "waiting",
+        start: "alarm"
+      });
+      const ids = (parked: boolean) =>
+        instance.tasks
+          .peekList({
+            definition: "__cf_parking",
+            status: ["pending"],
+            parked,
+            limit: 1
+          })
+          .map((record) => record.runId);
+      expect(ids(true)).toEqual(["parked"]);
+      expect(ids(false)).toEqual(["waiting"]);
+    });
+  });
+
+  it("imports a completed run with its result and metadata past 1 MiB", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const big = "m".repeat(1_200_000);
+      expect(
+        await instance.tasks.importRun({
+          runId: "old",
+          definition: "__cf_echo",
+          status: "completed",
+          attempt: 1,
+          metadata: { big },
+          result: { answer: 42 },
+          createdAt: 1,
+          settledAt: 2
+        })
+      ).toBe(true);
+      const record = instance.tasks.peek("old");
+      expect(record?.result).toEqual({ answer: 42 });
+      expect(String(record?.metadata?.big).length).toBe(1_200_000);
+      expect(
+        instance.tasks.updateMetadata("old", (metadata) => ({
+          ...metadata,
+          more: true
+        }))
+      ).toBe(true);
+    });
+  });
+});

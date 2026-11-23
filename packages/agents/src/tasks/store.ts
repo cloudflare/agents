@@ -32,7 +32,7 @@ const RUNS_COLUMNS = `
         error_message TEXT,
         status_message TEXT,
         metadata TEXT,
-        idempotency_key TEXT UNIQUE,
+        idempotency_key TEXT,
         retain INTEGER NOT NULL DEFAULT 1,
         attempt INTEGER NOT NULL DEFAULT 0,
         generation TEXT,
@@ -224,7 +224,8 @@ export class TaskStore {
    * keeping every run. From schema 1 the `state` column becomes `status`,
    * with `waiting` folded into `pending` (its `wait_reason` says why),
    * `failed` renamed `error` and `cancelled` renamed `aborted`. From 1 or 2
-   * the table gains lanes (`lane`, `seq`) and the `skipped` status.
+   * the table gains lanes (`lane`, `seq`) and the `skipped` status, and
+   * the idempotency key's index becomes partial (keyless runs write none).
    */
   rebuildRuns(): void {
     const columns = new Set(
@@ -296,6 +297,12 @@ export class TaskStore {
     rawSql(`
       CREATE INDEX IF NOT EXISTS cf_agents_task_runs_definition
       ON cf_agents_task_runs (definition, created_at)
+    `);
+    // Partial: a run without a key (most of them) writes no entry here.
+    rawSql(`
+      CREATE UNIQUE INDEX IF NOT EXISTS cf_agents_task_runs_idempotency_key
+      ON cf_agents_task_runs (idempotency_key)
+      WHERE idempotency_key IS NOT NULL
     `);
     // A lane's head and next run are read on every lane settle; only lane
     // runs carry an entry.

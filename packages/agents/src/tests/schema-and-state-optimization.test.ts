@@ -109,7 +109,7 @@ const EXPECTED_SCHEMA_DDL = [
         error_message TEXT,
         status_message TEXT,
         metadata TEXT,
-        idempotency_key TEXT UNIQUE,
+        idempotency_key TEXT,
         retain INTEGER NOT NULL DEFAULT 1,
         attempt INTEGER NOT NULL DEFAULT 0,
         generation TEXT,
