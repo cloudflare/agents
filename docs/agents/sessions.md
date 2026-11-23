@@ -99,7 +99,7 @@ Deleting a message splices its children to its parent. Removing a message in the
 
 ### Row budget
 
-Sessions stores messages. One SQLite row holds up to 1.5 MiB of serialized JSON, which is more than the overwhelming majority of messages need: they occupy exactly one row, and cost exactly one billed row write.
+Sessions stores messages. One SQLite row holds up to 1.9 MB of serialized JSON, which is more than the overwhelming majority of messages need: they occupy exactly one row, and cost exactly one billed row write.
 
 A message that does not fit is split across continuation rows and reassembled on read. Nothing is truncated, nothing is summarized, and no message is too large to store — a 5 MB message is one message row plus three continuation rows, and reads back byte for byte. There is no error to catch and nothing to configure.
 
@@ -161,7 +161,7 @@ recent.totalContentBytes;
 
 The second argument is a minimum number of recent messages. The minimum can exceed the byte budget, so choose it deliberately.
 
-The budget counts what hydration actually costs. Each row is charged its full stored size — the message row plus every continuation row it was split across — so a 12 MB message is charged 12 MB, not the 1.5 MiB its first slice occupies. That is what makes the budget a bound on isolate memory.
+The budget counts what hydration actually costs. Each row is charged its full stored size — the message row plus every continuation row it was split across — so a 12 MB message is charged 12 MB, not the 1.9 MB its first slice occupies. That is what makes the budget a bound on isolate memory.
 
 `getHistory()` materializes the selected path and exists for consumers that require an array:
 

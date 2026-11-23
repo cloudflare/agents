@@ -1890,10 +1890,15 @@ export class SessionsCore {
     replace: boolean
   ): void {
     if (!this.#fts) return;
-    const text = message.parts
-      .filter((part) => part.type === "text")
-      .map((part) => part.text ?? "")
-      .join(" ");
+    // The index holds a message's text in one row, so only the first
+    // row-budget of it is searchable; the rest would not fit (TOOBIG).
+    const text =
+      splitContent(
+        message.parts
+          .filter((part) => part.type === "text")
+          .map((part) => part.text ?? "")
+          .join(" ")
+      )[0] ?? "";
     if (replace) {
       const existing = this.io.sql<{ content: string }>(
         "SELECT content FROM cf_agents_session_fts WHERE id = ? AND session_id = ?",

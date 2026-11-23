@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { MAX_INLINE_ROW_BYTES } from "../../sessions/chunking";
 import type {
   SessionBenchObject,
   SessionSearchHarnessObject
@@ -50,9 +51,11 @@ describe("Sessions storage-ops benchmark", () => {
   it("decides a chunked update from the row's digest, never its continuations", async () => {
     const stub = env.SessionBenchObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionBenchObject) => {
-      // A 3.2 MiB body spans the 1.5 MiB row budget three times: one message
+      // A body just over twice the row budget spans three rows: one message
       // row plus two continuations.
-      const bench = await instance.benchChunkedUpdates(3.2 * 1024 * 1024);
+      const bench = await instance.benchChunkedUpdates(
+        2 * MAX_INLINE_ROW_BYTES + 200_000
+      );
       expect(bench.chunks).toBe(2);
 
       // An identical re-send is one key-side probe of the message row: its
