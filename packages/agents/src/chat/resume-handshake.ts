@@ -223,7 +223,11 @@ export class ResumeHandshake {
       // active, pending, terminal-replay, and pre-stream branch was exhausted.
       // The reason is backward-compatible (older clients ignore it) and lets a
       // reconnecting hook reconcile fallback streaming state without confusing
-      // continuation-affinity denial for idle (#1914).
+      // continuation-affinity denial for idle (#1914). A request the tab
+      // waits on that a recovery finished while it was away ends first.
+      for (const requestId of requestIds) {
+        this.sendEnded(connection, requestId);
+      }
       this._sendResumeNone(
         connection,
         STREAM_RESUME_NONE_REASONS.IDLE,
@@ -253,12 +257,19 @@ export class ResumeHandshake {
     const stream = recent
       ? null
       : resumableStream.latestStreamInfoForRequest(requestId);
-    if (!recent && stream?.status !== "completed") return false;
-    const messageIds =
-      recent?.messageIds ?? resumableStream.getOriginMessageIds(requestId);
     const outcome = recent
       ? recent.outcome
       : resumableStream.getOutcome(requestId);
+    // Ended: a recorded terminal, a closed stream, or a stream whose rows
+    // its cutover already deleted (its outcome is still remembered).
+    const ended = recent
+      ? true
+      : stream
+        ? stream.status === "completed"
+        : outcome !== undefined;
+    if (!ended) return false;
+    const messageIds =
+      recent?.messageIds ?? resumableStream.getOriginMessageIds(requestId);
     return sendIfOpen(
       connection,
       JSON.stringify({

@@ -737,6 +737,40 @@ describe("ResumeHandshake (driver → golden frames)", () => {
       expect(frames[1]).toMatchObject({ id: "req-cont" });
     });
 
+    it("ends a request whose stream rows are gone but whose outcome is remembered", () => {
+      // The continuation's cutover deleted the cut-off stream's rows; the
+      // stream store still remembers how it ended.
+      const frames: SentFrame[] = [];
+      const { resumableStream } = makeStream({ outcome: "aborted" });
+      const handshake = new ResumeHandshake(makeHost({ resumableStream }));
+      expect(handshake.sendEnded(makeConnection("c1", frames), "req-cut")).toBe(
+        true
+      );
+      expect(frames[0]).toMatchObject({
+        id: "req-cut",
+        done: true,
+        outcome: "aborted"
+      });
+    });
+
+    it("ends a request the tab waits on that a recovery finished, then says idle", async () => {
+      const frames: SentFrame[] = [];
+      const { resumableStream } = makeStream({ outcome: "aborted" });
+      const handshake = new ResumeHandshake(makeHost({ resumableStream }));
+
+      await handshake.handleResumeRequest(
+        makeConnection("c1", frames),
+        "probe-1",
+        ["req-cut"]
+      );
+      expect(frames[0]).toMatchObject({
+        id: "req-cut",
+        done: true,
+        outcome: "aborted"
+      });
+      expect(frames[1]).toMatchObject({ type: "cf_agent_stream_resume_none" });
+    });
+
     it("sends no end for the active request, an open stream, or a request with none", () => {
       const frames: SentFrame[] = [];
       const { resumableStream } = makeStream({
