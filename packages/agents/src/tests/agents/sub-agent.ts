@@ -1814,8 +1814,16 @@ export class TestSubAgentParent extends Agent {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     await this.subAgentCancelSchedule(subAgentName, id);
-    // The retry waits 300 ms: a second attempt would be logged by now.
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    // The retry starts 300 ms after the first attempt, then crosses to the
+    // facet. Watch for 3 s, ten times the backoff, and stop early if a
+    // second attempt shows up.
+    const settle = Date.now() + 3_000;
+    while (
+      (await this.subAgentScheduleLog(subAgentName)).length < 2 &&
+      Date.now() < settle
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
     return (await this.subAgentScheduleLog(subAgentName)).length;
   }
 
