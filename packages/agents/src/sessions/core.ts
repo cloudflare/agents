@@ -2372,7 +2372,7 @@ export class SessionsCore {
     } else {
       resume = this.#overlayResume(sessionId, from, toMessageId);
     }
-    const carried = this.#annotationsToCarry(sessionId, from, toMessageId);
+    const carried = this.#annotationsToCarry(sessionId, resume, toMessageId);
     this.io.transaction(() => {
       const seq =
         this.io.sql<{ seq: number }>(
@@ -2499,14 +2499,17 @@ export class SessionsCore {
   }
 
   /**
-   * For each kind, the annotation of the newest row in `from..to` (on the
-   * path from `to` back to `from`), or of an overlay ending there: what a
-   * new overlay over that range carries. Ids only, no content. A read, so
-   * the walk runs before the overlay's write transaction, never inside it.
+   * For each kind, the newest annotation among what a new overlay over
+   * `to` hides: the rows from `to` down to, not including, `resume` (the
+   * row the walk continues at below it; `''` for the root), and the
+   * summaries of overlays the walk would apply at those rows. Bounded by
+   * `resume`, not by the start row, because deletes keep `resume` right
+   * and can remove the start. Ids only, no content. A read, so the walk
+   * runs before the overlay's write transaction, never inside it.
    */
   #annotationsToCarry(
     sessionId: string,
-    fromMessageId: string,
+    resume: string,
     toMessageId: string
   ): Array<{ kind: string; value: string }> {
     if (!this.#hasAnnotations(sessionId)) return [];
@@ -2518,20 +2521,26 @@ export class SessionsCore {
         SELECT m.id, m.parent_id, s.depth + 1 FROM span s
         CROSS JOIN cf_agents_session_messages m
           ON m.session_id = ?1 AND m.id = s.parent_id
-        WHERE s.id <> ?3
+        WHERE s.parent_id <> ?3
       ),
       found AS (
         SELECT a.kind, a.value, span.depth, 0 AS on_overlay
         FROM span CROSS JOIN cf_agents_session_annotations a
           ON a.session_id = ?1 AND a.message_id = span.id
         UNION ALL
-        -- An overlay hidden by this one may carry its own annotation (set
-        -- on its summary message): it sits where that overlay ends, and
-        -- outranks the rows it hid there.
+        -- An overlay this one hides may carry its own annotation (set on
+        -- its summary message). Only the overlay the walk applies at a row
+        -- counts: the newest there with a known continuation. It sits where
+        -- it ends and outranks the rows it hid there.
         SELECT a.kind, a.value, span.depth, 1 AS on_overlay
         FROM span
         CROSS JOIN cf_agents_session_compactions c
           ON c.session_id = ?1 AND c.to_message_id = span.id
+            AND c.resume_id IS NOT NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM cf_agents_session_compactions n
+              WHERE n.session_id = ?1 AND n.to_message_id = c.to_message_id
+                AND n.resume_id IS NOT NULL AND n.seq > c.seq)
         CROSS JOIN cf_agents_session_annotations a
           ON a.session_id = ?1 AND a.message_id = '${COMPACTION_PREFIX}' || c.id
       ),
@@ -2543,7 +2552,7 @@ export class SessionsCore {
         FROM found
       )
       SELECT kind, value FROM ranked WHERE rank = 1`,
-      [sessionId, toMessageId, fromMessageId]
+      [sessionId, toMessageId, resume]
     );
   }
 

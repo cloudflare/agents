@@ -162,9 +162,10 @@ describe("Sessions tail index", () => {
       } finally {
         (sql as { exec: SqlStorage["exec"] }).exec = exec;
       }
-      // The scan for the newest row, then the leaf's content.
+      // The scan for the newest row, then the leaf's content and schema
+      // checks: far from a count of the session (another ~3,000 rows).
       expect(cursors.reduce((sum, c) => sum + c.rowsRead, 0)).toBeLessThan(
-        scan.rowsRead + 10
+        scan.rowsRead + 100
       );
     });
   });

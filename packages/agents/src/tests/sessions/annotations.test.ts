@@ -144,6 +144,52 @@ describe("Session annotations", () => {
     });
   });
 
+  it("carries the summary the walk applies, not one it superseded at the same row", async () => {
+    await withSession(async (session) => {
+      await appendAll(session, 1, 20);
+      const older = await session.addCompaction("older", "m2", "m10");
+      await session.internal_setAnnotation(
+        "ctx",
+        `compaction_${older.id}`,
+        "stale"
+      );
+      // A re-summary over the same range: the walk now applies this one.
+      const newer = await session.addCompaction("newer", "m2", "m10");
+      await session.internal_setAnnotation(
+        "ctx",
+        `compaction_${newer.id}`,
+        "fresh"
+      );
+      const wider = await session.addCompaction("wider", "m2", "m15");
+      const id = `compaction_${wider.id}`;
+      expect((await session.internal_annotations("ctx", [id])).get(id)).toBe(
+        "fresh"
+      );
+    });
+  });
+
+  it("carries nothing from the kept head after a summary's start row is deleted", async () => {
+    await withSession(async (session) => {
+      await appendAll(session, 1, 20);
+      await session.internal_setAnnotation("ctx", "m2", "head");
+      await session.addCompaction("s", "m4", "m10");
+      await session.deleteMessages(["m4"]);
+      session.onCompaction(async (messages) => ({
+        summary: "extended",
+        fromMessageId: messages[3].id,
+        toMessageId: messages[messages.length - 3].id
+      }));
+      await session.compact();
+      const history = await session.getHistory();
+      const overlay = history.find((m) => m.id.startsWith("compaction_"));
+      expect(overlay?.parts[0]).toMatchObject({ text: "extended" });
+      expect(history.slice(0, 3).map((m) => m.id)).toEqual(["m1", "m2", "m3"]);
+      expect(
+        (await session.internal_annotations("ctx", [overlay?.id ?? ""])).size
+      ).toBe(0);
+    });
+  });
+
   it("compact() carries annotations onto its overlay", async () => {
     await withSession(async (session) => {
       await appendAll(session, 1, 10);
