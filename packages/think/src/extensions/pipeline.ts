@@ -54,7 +54,7 @@ const EXTENSION_SCALAR_CONFIG_KEYS = [
  *
  * @internal
  */
-export interface ThinkExtensionManagerOptions {
+interface ThinkExtensionManagerOptions {
   readonly loader: WorkerLoader;
   readonly storage: DurableObjectStorage;
   readonly agentClassName: string;

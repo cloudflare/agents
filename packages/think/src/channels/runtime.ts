@@ -91,10 +91,7 @@ export function resolveChannelContext(
  *
  * @internal
  */
-export function noticeMessage(
-  text: string,
-  kind: DeliveryKind = "notice"
-): UIMessage {
+function noticeMessage(text: string, kind: DeliveryKind = "notice"): UIMessage {
   return {
     id: crypto.randomUUID(),
     role: "assistant",
@@ -108,7 +105,7 @@ export function noticeMessage(
  *
  * @internal
  */
-export interface ChannelNoticeTarget {
+interface ChannelNoticeTarget {
   /** The channel to deliver to. */
   readonly channelId: string;
   readonly registry:

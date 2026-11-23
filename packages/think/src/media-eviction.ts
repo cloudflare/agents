@@ -66,7 +66,7 @@ export interface MediaEvictionConfig {
   externalizeToWorkspace?: boolean;
 }
 
-export interface ResolvedMediaEvictionConfig {
+interface ResolvedMediaEvictionConfig {
   keepRecentMessages: number;
   minPartBytes: number;
   maxRowsPerPass: number;
@@ -89,7 +89,7 @@ export function resolveMediaEvictionConfig(
  * byte-identical, so a transcript evicted before and after the Sessions
  * replatform reads the same and old markers keep resolving.
  */
-export function evictionMarker(
+function evictionMarker(
   bytes: number,
   path: string,
   mediaType?: string
@@ -98,7 +98,7 @@ export function evictionMarker(
   return `[evicted ${media}${bytes} bytes; preserved at ${path}]`;
 }
 
-export interface EvictMessageOptions {
+interface EvictMessageOptions {
   /** Minimum decoded payload size to evict. */
   minPartBytes: number;
   /**
@@ -112,7 +112,7 @@ export interface EvictMessageOptions {
   ): Promise<string>;
 }
 
-export interface EvictMessageResult {
+interface EvictMessageResult {
   /** Rewritten message, or the original reference when nothing was evicted. */
   message: UIMessage;
   changed: boolean;
@@ -134,7 +134,7 @@ interface WalkState {
  * bytes to the Workspace first. Returns a new message — the input is never
  * mutated, and nothing is written when nothing qualifies.
  */
-export async function evictMediaFromMessage(
+async function evictMediaFromMessage(
   message: UIMessage,
   options: EvictMessageOptions
 ): Promise<EvictMessageResult> {
@@ -301,7 +301,7 @@ export function hasEvictableMedia(
 }
 
 /** Decode a `data:` URL into raw bytes. Returns null when it is malformed. */
-export function decodeDataUrl(
+function decodeDataUrl(
   url: string
 ): { bytes: Uint8Array; mediaType?: string } | null {
   const comma = url.indexOf(",");
@@ -336,7 +336,7 @@ export function extensionFor(mediaType: string | undefined): string {
 }
 
 /** Workspace path for the n-th value evicted from a message. */
-export function evictedFilePath(
+function evictedFilePath(
   messageId: string,
   index: number,
   mediaType: string | undefined
@@ -361,7 +361,7 @@ export interface MediaEvictionPassResult {
  *
  * @internal
  */
-export interface MediaEvictionPassHost {
+interface MediaEvictionPassHost {
   /** The resolved `mediaEviction` setting; `null` when eviction is off. */
   config(): ResolvedMediaEvictionConfig | null;
   truncationStep(): number;

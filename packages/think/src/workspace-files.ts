@@ -37,7 +37,7 @@ export type ThinkWorkspace = {
 } & Partial<Pick<ToolsWorkspace, "runtime" | "sessionId" | "assets">>;
 
 /** One file, directory, or symlink in a Workspace. */
-export type WorkspaceEntry = {
+type WorkspaceEntry = {
   /** Absolute path. */
   readonly path: string;
   /** Last path segment. */

@@ -47,7 +47,7 @@ function jsonSafe(value: unknown, depth = 0): unknown {
  * Passed to extension Workers during beforeTurn hook dispatch.
  * Plain data — no methods, no functions, no classes.
  */
-export interface TurnContextSnapshot {
+interface TurnContextSnapshot {
   system: string;
   toolNames: string[];
   messageCount: number;
@@ -109,7 +109,7 @@ export function parseHookResult(
 // stash references there.
 
 /** Snapshot for the `beforeToolCall` hook. */
-export interface ToolCallStartSnapshot {
+interface ToolCallStartSnapshot {
   toolName: string;
   toolCallId: string;
   input: unknown;
@@ -118,7 +118,7 @@ export interface ToolCallStartSnapshot {
 }
 
 /** Snapshot for the `afterToolCall` hook. */
-export interface ToolCallFinishSnapshot {
+interface ToolCallFinishSnapshot {
   toolName: string;
   toolCallId: string;
   input: unknown;
@@ -132,7 +132,7 @@ export interface ToolCallFinishSnapshot {
 }
 
 /** Snapshot for the `onStepFinish` hook. */
-export interface StepFinishSnapshot {
+interface StepFinishSnapshot {
   stepNumber: number;
   finishReason: string;
   text: string;
@@ -153,7 +153,7 @@ export interface StepFinishSnapshot {
 }
 
 /** Snapshot for the `onChunk` hook. High-frequency — keep minimal. */
-export interface ChunkSnapshot {
+interface ChunkSnapshot {
   type: string;
   text?: string;
   toolName?: string;
