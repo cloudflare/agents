@@ -533,6 +533,22 @@ describe("SubAgent", () => {
     });
   });
 
+  it("drops a schedule the root held for a deleted sub-agent", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.insertLegacyRootSchedule(
+      "sched-gone",
+      "old-gone",
+      "lost",
+      60_000
+    );
+    await agent.subAgentDelete("sched-gone");
+    expect(
+      (await agent.rootScheduleRows()).some((row) => row.id === "old-gone")
+    ).toBe(false);
+  });
+
   it("hands a schedule the root held for a sub-agent to that sub-agent", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
