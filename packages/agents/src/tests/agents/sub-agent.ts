@@ -559,12 +559,20 @@ export class CounterSubAgent extends Agent {
       (error: unknown) =>
         error instanceof Error ? error.message : String(error)
     );
+    let bodyStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      bodyStarted = resolve;
+    });
     void this.runFiber("second-held", async () => {
+      // The body runs only after its wake is set up.
+      bodyStarted();
       await new Promise<void>((resolve) => {
         this._releaseHeldFiber = resolve;
       });
     }).catch(console.error);
-    return first;
+    const result = await first;
+    await started;
+    return result;
   }
 
   async releaseHeldFiber(): Promise<void> {

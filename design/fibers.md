@@ -96,7 +96,9 @@ facet code of its own.
 Older releases kept facet wakes on the root: first an index table,
 `cf_agents_facet_runs`, then mirror jobs `fibers:recover:<owner key>`. On
 its first start after the upgrade, a root's Fibers moves both onto facet
-wakes due at the same time and deletes them.
+wakes and deletes them; the same start then makes every facet wake due at
+once (the Lifecycle's restart rule), so each such facet is driven right
+away.
 
 ### Observability
 
