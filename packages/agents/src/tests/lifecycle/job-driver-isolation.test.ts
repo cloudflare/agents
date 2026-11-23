@@ -516,3 +516,43 @@ describe("job driver hold limit without onJobError", () => {
     });
   });
 });
+
+describe("job driver hold and a reused id", () => {
+  it("does not run a held owner's job that took over an id mid-scan", async () => {
+    await withCapabilityHarness(async ({ install }) => {
+      const ran: string[] = [];
+      const held = new Jobs("reuse-held", ran);
+      const free = new Jobs("reuse-free", ran);
+      const { lifecycle } = install(held);
+      lifecycle.use(free);
+      await lifecycle.start();
+      await held.push({
+        id: "p",
+        fn: "poison",
+        time: Date.now() - 1,
+        retry: QUICK
+      });
+      await lifecycle.alarm().catch(() => {});
+      ran.length = 0;
+
+      // In the next scan, the free owner's first job cancels its own "x",
+      // and the held owner pushes a job under the same id.
+      const now = Date.now();
+      await free.push({ id: "first", fn: "ok", time: now - 3 });
+      await free.push({ id: "x", fn: "ok", time: now - 2 });
+      free.onJob = async ({ job }: LifecycleJobContext) => {
+        ran.push(`free:${job.id}`);
+        if (job.id === "first") {
+          await free.lifecycle.jobs.cancel("x");
+          await held.push({ id: "x", fn: "ok", time: now - 2 });
+        }
+      };
+      held.onJob = ({ job }: LifecycleJobContext) => {
+        ran.push(`held:${job.id}`);
+      };
+      await lifecycle.alarm();
+
+      expect(ran).toEqual(["free:first"]);
+    });
+  });
+});
