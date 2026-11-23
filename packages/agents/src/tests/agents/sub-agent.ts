@@ -297,11 +297,9 @@ export class CounterSubAgent extends Agent {
   async scheduleFlakyCallback(value: string): Promise<string> {
     const schedule = await this.schedule(
       60,
-      "flakyScheduledCallback",
+      "flakyCancelledCallback",
       { value },
-      // The retry waits long enough for a test to cancel during it, even on
-      // a loaded runner.
-      { retry: { maxAttempts: 2, baseDelayMs: 1_500, maxDelayMs: 1_500 } }
+      { retry: { maxAttempts: 2, baseDelayMs: 300, maxDelayMs: 300 } }
     );
     return schedule.id;
   }
@@ -338,6 +336,29 @@ export class CounterSubAgent extends Agent {
         (${payload.value}, ${this.name}, null, ${this.parentPath.at(-1)?.className ?? ""}, ${schedule.id}, ${schedule.callback})
     `;
     if (count === 0) throw new Error("first attempt fails");
+  }
+
+  /**
+   * Fails its first attempt after cancelling its own schedule, so the
+   * cancel lands before the retry's wait however short the jittered wait.
+   */
+  async flakyCancelledCallback(
+    payload: { value: string },
+    schedule: { id: string; callback: string }
+  ) {
+    const [{ count }] = this.sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM schedule_log WHERE schedule_id = ${schedule.id}
+    `;
+    this.sql`
+      INSERT INTO schedule_log
+        (value, agent_name, current_agent_name, parent_class, schedule_id, callback)
+      VALUES
+        (${payload.value}, ${this.name}, null, ${this.parentPath.at(-1)?.className ?? ""}, ${schedule.id}, ${schedule.callback})
+    `;
+    if (count === 0) {
+      await this.cancelSchedule(schedule.id);
+      throw new Error("first attempt fails");
+    }
   }
 
   async selfDestruct(): Promise<void> {
@@ -2022,9 +2043,14 @@ export class TestSubAgentParent extends Agent {
    * `alarm()` here would race the platform alarm that any re-arm sets for
    * the overdue row, and both could run the first attempt.
    */
+  /**
+   * Make the schedule due and let the sub-agent run it; its first attempt
+   * cancels it and fails. Returns how many attempts ran once a retry would
+   * have had time to.
+   */
   async runAlarmCancellingDuringRetry(
     subAgentName: string,
-    id: string
+    _id: string
   ): Promise<number> {
     await this.lifecycle.rearmAlarm();
     const deadline = Date.now() + 5_000;
@@ -2034,16 +2060,8 @@ export class TestSubAgentParent extends Agent {
     ) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    await this.subAgentCancelSchedule(subAgentName, id);
-    // The retry starts 1.5 s after the first attempt, in the sub-agent's own
-    // driver. Watch for 4 s and stop early if a second attempt shows up.
-    const settle = Date.now() + 4_000;
-    while (
-      (await this.subAgentScheduleLog(subAgentName)).length < 2 &&
-      Date.now() < settle
-    ) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
+    // The retry would start within 300 ms; watch ten times that.
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
     return (await this.subAgentScheduleLog(subAgentName)).length;
   }
 
