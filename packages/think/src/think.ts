@@ -2426,7 +2426,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   // loaded once per isolate.
   private _deferredResolvedPauses = new Map<string, ResolvedPauseOutcome>();
   private _deferredResolvedPausesLoad: Promise<void> | undefined;
-  private readonly _submitConcurrency = this._turns.submits;
   private static MESSAGE_DEBOUNCE_MS = 750;
   /**
    * Everything this agent does when a parent runs it as a tool: the run

@@ -1819,11 +1819,7 @@ export class ThinkClientToolsAgent extends Think {
   }
 
   getOverlappingSubmitCountForTest(): number {
-    return (
-      this as unknown as {
-        _submitConcurrency: { overlappingSubmitCount: number };
-      }
-    )._submitConcurrency.overlappingSubmitCount;
+    return this["_turns"].submits.overlappingSubmitCount;
   }
 
   private _interactionAppliesSeen = 0;
