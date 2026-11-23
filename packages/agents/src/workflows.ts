@@ -40,7 +40,7 @@ import type {
   WorkflowStepEvent
 } from "cloudflare:workers";
 import { getAgentByName, type Agent } from "./index";
-import { renewingStub } from "./stub-renewal";
+import { renewingStub, stubRenewals } from "./stub-renewal";
 import type {
   AgentWorkflowParams,
   AgentWorkflowStep,
@@ -514,7 +514,18 @@ export class AgentWorkflow<
    * @param callback - Callback payload to send
    */
   protected async notifyAgent(callback: WorkflowCallback): Promise<void> {
-    await this.agent._workflow_handleCallback(callback);
+    const renewed = () =>
+      (this.agent as unknown as { [stubRenewals]?: number })[stubRenewals];
+    const before = renewed();
+    try {
+      await this.agent._workflow_handleCallback(callback);
+    } catch (error) {
+      // Called outside a step, nothing retries this. When it failed only
+      // because the Agent was reset (the stub was renewed), make it once
+      // more on the new stub; callbacks are idempotent.
+      if (renewed() === before) throw error;
+      await this.agent._workflow_handleCallback(callback);
+    }
   }
 
   /**

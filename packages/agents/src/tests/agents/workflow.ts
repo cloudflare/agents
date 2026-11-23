@@ -775,6 +775,16 @@ export class TestWorkflowAgent extends Agent {
     return this.runWorkflow("AGENT_RESET_WORKFLOW", {}, { id: workflowId });
   }
 
+  async runAgentResetBetweenStepsWorkflowTest(
+    workflowId: string
+  ): Promise<string> {
+    return this.runWorkflow(
+      "AGENT_RESET_BETWEEN_STEPS_WORKFLOW",
+      { agentName: this.name },
+      { id: workflowId }
+    );
+  }
+
   async runThrowInRunWorkflowTest(
     workflowId: string,
     params: { message: string }

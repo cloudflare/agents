@@ -278,6 +278,34 @@ export class AgentResetWorkflow extends AgentWorkflow<
 }
 
 /**
+ * The Agent is reset by someone else between two steps, and the run's next
+ * call to it is outside a step (#1918).
+ */
+export class AgentResetBetweenStepsWorkflow extends AgentWorkflow<
+  TestWorkflowAgent,
+  { agentName: string }
+> {
+  async run(
+    event: AgentWorkflowEvent<{ agentName: string }>,
+    step: AgentWorkflowStep
+  ) {
+    await step.do("reset-agent", async () => {
+      const other = (
+        this.env as { TestWorkflowAgent: DurableObjectNamespace }
+      ).TestWorkflowAgent.getByName(event.payload.agentName) as unknown as {
+        crashForTest(): Promise<void>;
+      };
+      await other.crashForTest().catch(() => {});
+      return true;
+    });
+    await this.reportProgress({ step: "after-reset", percent: 0.5 });
+    return await step.do("after-reset", async () =>
+      this.agent.echoForTest("after reset")
+    );
+  }
+}
+
+/**
  * Test workflow that throws directly in run() (outside any step.do).
  * Used to verify that unhandled errors trigger onWorkflowError on the Agent.
  */

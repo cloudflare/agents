@@ -31,4 +31,23 @@ describe("AgentWorkflow across an Agent reset", () => {
     });
     await expect(instance.waitForStatus("complete")).resolves.not.toThrow();
   });
+
+  it("survives a call outside a step after someone else reset the Agent (#1918)", async () => {
+    const agent = await getAgentByName(
+      env.TestWorkflowAgent,
+      `agent-reset-between-${crypto.randomUUID()}`
+    );
+    const workflowId = `agent-reset-between-wf-${crypto.randomUUID()}`;
+    await using instance = await introspectWorkflowInstance(
+      env.AGENT_RESET_BETWEEN_STEPS_WORKFLOW,
+      workflowId
+    );
+
+    await agent.runAgentResetBetweenStepsWorkflowTest(workflowId);
+
+    await expect(
+      instance.waitForStepResult({ name: "after-reset" })
+    ).resolves.toEqual("after reset");
+    await expect(instance.waitForStatus("complete")).resolves.not.toThrow();
+  });
 });

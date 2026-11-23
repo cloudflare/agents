@@ -24,18 +24,29 @@
  *
  * @internal
  */
+/**
+ * Read from a renewing stub: how many times it was renewed. A caller that
+ * may repeat its call (an idempotent callback) compares it before and
+ * after a failure to tell "the stub was broken" from any other error.
+ *
+ * @internal
+ */
+export const stubRenewals: unique symbol = Symbol("stubRenewals");
+
 export function renewingStub<T extends object>(
   first: T,
   open: () => T,
   prepare?: (stub: T) => Promise<unknown>
 ): T {
   let current = first;
+  let renewals = 0;
   /** The current stub still needs `prepare` before its first call. */
   let unprepared = false;
   let preparing: Promise<unknown> | undefined;
   const renew = (failed: T) => {
     if (current !== failed) return;
     current = open();
+    renewals += 1;
     unprepared = prepare !== undefined;
     preparing = undefined;
   };
@@ -77,6 +88,7 @@ export function renewingStub<T extends object>(
   // empty target is never read.
   return new Proxy({} as T, {
     get(_target, prop) {
+      if (prop === stubRenewals) return renewals;
       const stub = current;
       const value: unknown = Reflect.get(stub, prop);
       if (typeof value !== "function") return value;
