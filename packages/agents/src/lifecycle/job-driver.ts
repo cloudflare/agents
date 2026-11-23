@@ -93,11 +93,11 @@ function attemptsExhaustedError(row: JobStorageRow): Error {
 /**
  * Owners whose jobs a transient platform failure held back in this alarm.
  * Their due jobs keep their times (so a Queue keeps its order) and wait
- * until `until`; everything else re-arms as usual.
+ * until their owner's hold ends; everything else re-arms as usual.
  */
 export type JobDeferral = {
-  readonly owners: readonly string[];
-  readonly until: number;
+  /** Each held owner with the time its hold ends. */
+  readonly holds: ReadonlyArray<readonly [owner: string, until: number]>;
 };
 
 /** The dispatch hooks one job owner exposes to the driver. */
@@ -381,7 +381,7 @@ export class JobDriver {
   }
 
   /**
-   * The owners still held back, re-armed no sooner than the earliest end.
+   * The owners still held back, each with the end of its hold.
    * Every re-arm uses it, so a push during a hold does not wake the object
    * early for a held owner's overdue job.
    */
@@ -391,10 +391,7 @@ export class JobDriver {
       if (until <= now) this.#heldOwners.delete(owner);
     }
     if (this.#heldOwners.size === 0) return undefined;
-    return {
-      owners: [...this.#heldOwners.keys()],
-      until: Math.min(...this.#heldOwners.values())
-    };
+    return { holds: [...this.#heldOwners] };
   }
 
   /**
@@ -414,7 +411,7 @@ export class JobDriver {
     // failure holds during it. A hold that ends mid-scan must not let a
     // later job of that owner run ahead of the head it skipped; the re-arm
     // at the end starts a fresh scan from the head.
-    const skip = new Set(this.currentDeferral()?.owners);
+    const skip = new Set(this.currentDeferral()?.holds.map(([owner]) => owner));
 
     // Deadman pre-arm: before driving any job, arm a fallback alarm so a
     // death mid-drive that the platform cannot retry (or that swallows its
