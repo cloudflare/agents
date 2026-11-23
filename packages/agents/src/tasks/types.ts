@@ -1,4 +1,5 @@
 import type { TaskDurationString } from "./duration";
+import type { TaskSettlement } from "./settlement";
 
 /**
  * JSON-serializable data accepted as Task input, step results, metadata,
@@ -53,6 +54,15 @@ export type TaskCallbacks = Record<
   string,
   (input: unknown, step: TaskStep) => TaskValue | Promise<TaskValue>
 >;
+
+/**
+ * @internal A framework definition (`Tasks.register`): it may also end its
+ * attempt with a returned {@link TaskSettlement}.
+ */
+export type TaskFrameworkDefinition = (
+  input: unknown,
+  step: TaskStep
+) => TaskValue | TaskSettlement | Promise<TaskValue | TaskSettlement>;
 
 /**
  * The input type a registered Task definition accepts.
@@ -180,6 +190,12 @@ export interface TaskStep {
   /** @internal When the run was accepted. */
   readonly createdAt: number;
 
+  /**
+   * @internal What `Tasks.release()` handed a parked run, on the attempt it
+   * started; `undefined` otherwise.
+   */
+  readonly released: TaskJson | undefined;
+
   /** The stable external deduplication key `step.do(name, ...)` would get. */
   idempotencyKey(name: string): string;
 }
@@ -209,7 +225,11 @@ export type TaskStatus =
   | "skipped";
 
 /** Why a pending run that already ran waits (`wakeAt`). */
-export type TaskWaitReason = "sleep" | "retry";
+export type TaskWaitReason =
+  | "sleep"
+  | "retry"
+  /** @internal Parked by its handler until `Tasks.release()`. */
+  | "park";
 
 /** Safe projection of an error retained with a run that ended `error`. */
 export interface TaskError {

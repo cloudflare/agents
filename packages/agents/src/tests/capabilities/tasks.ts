@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { getCurrentAgent, Lifecycle } from "../../lifecycle";
+import { TaskSettlement } from "../../tasks/settlement";
 import { Tasks, NonRetryableError, type TaskStep } from "../../tasks";
 import { Scheduler } from "../../schedules";
 
@@ -410,6 +411,11 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
+    this.tasks.register("__cf_parking", async (_input, step) =>
+      step.released !== undefined
+        ? step.released
+        : TaskSettlement.park("detached")
+    );
     this.tasks.register(
       "__cf_reported",
       async () => {

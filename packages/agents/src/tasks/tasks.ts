@@ -30,6 +30,7 @@ import { TaskStore } from "./store";
 import { createTaskStepEngine } from "./engine-port";
 import { parseTaskDuration } from "./duration";
 import { MissingTaskDefinitionError } from "./errors";
+import { TaskSettlement } from "./settlement";
 import type { TaskEventType, TasksOptions } from "./options";
 import {
   AttemptSupersededError,
@@ -50,6 +51,7 @@ import type {
   TaskJson,
   TaskOutput,
   TaskRegisterOptions,
+  TaskFrameworkDefinition,
   TaskReceipt,
   TaskRunOptions,
   TaskRunRow,
@@ -250,7 +252,7 @@ export class Tasks<
   Handlers extends TaskHandlers = TaskCallbacks
 > extends LifecycleCapability {
   readonly #definitions: TaskHandlers;
-  readonly #registered = new Map<string, TaskCallbacks[string]>();
+  readonly #registered = new Map<string, TaskFrameworkDefinition>();
   readonly #active = new Map<string, ActiveAttempt>();
   /**
    * `local` of each run accepted in this isolate whose caller still waits
@@ -368,7 +370,7 @@ export class Tasks<
    */
   register(
     name: string,
-    definition: TaskCallbacks[string],
+    definition: TaskFrameworkDefinition,
     options: TaskRegisterOptions = {}
   ): void {
     if (typeof name !== "string" || name.length === 0) {
@@ -1238,7 +1240,10 @@ export class Tasks<
     }
 
     const cap = this.#registeredOptions.get(row.definition)?.maxAttempts;
-    if (cap !== undefined && row.attempt >= cap) {
+    // An attempt a release started is not a re-run after a reset.
+    const released =
+      cap === undefined ? undefined : this.#store.getReleased(runId);
+    if (cap !== undefined && released === undefined && row.attempt >= cap) {
       await this.#settleFailed(runId, null, {
         name: "TaskInterruptedError",
         message: `Interrupted ${row.attempt} times`
@@ -1327,6 +1332,10 @@ export class Tasks<
       interrupted,
       local,
       createdAt: row.created_at,
+      // Only a framework definition can park, so only its runs are read.
+      released: this.#registered.has(row.definition)
+        ? store.getReleased(runId)
+        : undefined,
       checkpoint: {
         get: <T extends TaskJson>(key: string) =>
           store.getCheckpoint(runId, key) as T | undefined,
@@ -1338,6 +1347,10 @@ export class Tasks<
       const output = await this.lifecycle.runInHostContext(() =>
         handler(input, step)
       );
+      if (output instanceof TaskSettlement) {
+        await this.#settleReturned(row, generation, output);
+        return;
+      }
       const resultJson = serializeTaskValue(
         output,
         `result of Task definition "${row.definition}"`
@@ -1361,6 +1374,98 @@ export class Tasks<
     } catch (thrown) {
       await this.#settleThrown(row, generation, thrown);
     }
+  }
+
+  /** Persist a settlement a handler returned. */
+  async #settleReturned(
+    row: TaskRunRow,
+    generation: string,
+    settlement: TaskSettlement
+  ): Promise<void> {
+    const runId = row.run_id;
+    const now = Date.now();
+    if (settlement.kind === "failed") {
+      await this.#settleFailed(
+        runId,
+        generation,
+        toErrorSummary(settlement.error)
+      );
+      return;
+    }
+    if (settlement.kind === "aborted") {
+      await this.#settleCancelled(runId, generation, settlement.reason);
+      return;
+    }
+    if (settlement.kind === "skipped") {
+      const settled = this.#store.fencedWrite(
+        runId,
+        generation,
+        `UPDATE cf_agents_task_runs
+         SET status = 'skipped', cancel_reason = ?, generation = NULL,
+             next_at = NULL, settled_at = ?, updated_at = ?
+         WHERE run_id = ? AND generation = ? AND status = 'running'`,
+        [settlement.reason ?? null, now, now]
+      );
+      if (settled) {
+        this.#emit("task:skipped", {
+          runId,
+          definition: row.definition,
+          reason: settlement.reason ?? null
+        });
+        await this.#finishTerminalSettlement(runId, row);
+      }
+      return;
+    }
+    const parked = this.#store.fencedWrite(
+      runId,
+      generation,
+      `UPDATE cf_agents_task_runs
+       SET status = 'pending', wait_reason = 'park', cancel_reason = ?,
+           generation = NULL, next_at = NULL, updated_at = ?
+       WHERE run_id = ? AND generation = ? AND status = 'running'`,
+      [settlement.reason ?? null, now]
+    );
+    if (parked) {
+      this.#emit("task:waiting", {
+        runId,
+        definition: row.definition,
+        reason: "park",
+        wakeAt: null
+      });
+      await this.#syncWake(runId);
+      await this.#report(runId);
+    }
+  }
+
+  /**
+   * @internal Wake a parked run: its next attempt runs now and sees `value`
+   * as `step.released`.
+   *
+   * @returns False unless the run was parked.
+   */
+  async release(
+    runId: string,
+    update: { value?: TaskJson } = {}
+  ): Promise<boolean> {
+    await this.lifecycle.ready();
+    const row = this.#store.getRun(runId);
+    if (row?.status !== "pending" || row.wait_reason !== "park") return false;
+    if (row.generation !== null) return false;
+    const now = Date.now();
+    // The write that unparks is the one that wins a race of two releases.
+    const released = this.#store.write(
+      `UPDATE cf_agents_task_runs
+       SET wait_reason = NULL, cancel_reason = NULL, next_at = ?, updated_at = ?
+       WHERE run_id = ? AND status = 'pending' AND wait_reason = 'park'`,
+      [now, now, runId]
+    );
+    if (released === 0) return false;
+    this.#store.putReleased(runId, update.value ?? null);
+    await this.#syncWake(runId);
+    if (row.lane === null || this.#laneAllows(runId)) {
+      void this.#executeRun(runId).catch(() => {});
+    }
+    return true;
   }
 
   /** Persist a non-completed attempt outcome. */
@@ -1751,7 +1856,11 @@ export class Tasks<
     if (this.#heldLanes.has(lane)) return;
     const head = this.#store.laneHead(lane);
     if (!head) return;
-    if (head.status === "pending" && head.next_at === null) {
+    if (
+      head.status === "pending" &&
+      head.next_at === null &&
+      head.wait_reason !== "park"
+    ) {
       const now = Date.now();
       this.#store.sql`
         UPDATE cf_agents_task_runs SET next_at = ${now}, updated_at = ${now}
@@ -1821,7 +1930,8 @@ export class Tasks<
     // behind their lane's head; repair any without one.
     this.#store.sql`
       UPDATE cf_agents_task_runs SET next_at = ${now}, updated_at = ${now}
-      WHERE status = 'pending' AND next_at IS NULL AND (
+      WHERE status = 'pending' AND next_at IS NULL
+        AND (wait_reason IS NULL OR wait_reason != 'park') AND (
         lane IS NULL OR run_id = (
           SELECT head.run_id FROM cf_agents_task_runs AS head
           WHERE head.lane = cf_agents_task_runs.lane

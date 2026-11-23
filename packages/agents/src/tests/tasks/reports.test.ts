@@ -100,3 +100,46 @@ describe("Tasks reports, wait and the attempt cap", () => {
     });
   });
 });
+
+describe("Tasks park and release", () => {
+  const parking = "__cf_parking" as unknown as "pipeline";
+
+  it("parks a run until release hands its next attempt a value; a second release gets false", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.tasks.run(parking, undefined as never, {
+          runId: "p",
+          lane: "l",
+          start: "now"
+        });
+        await instance.tasks.run("laned", { label: "behind" }, { lane: "l" });
+        expect(await instance.tasks.get("p")).toMatchObject({
+          status: "pending",
+          waitReason: "park"
+        });
+        // Parked: no deadline, no job, and its lane waits behind it.
+        expect(
+          state.storage.sql
+            .exec("SELECT id FROM cf_agents_jobs WHERE id = 'task:p'")
+            .toArray()
+        ).toEqual([]);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        expect(instance.lanedStarted).toEqual([]);
+
+        expect(await instance.tasks.release("p", { value: "done" })).toBe(true);
+        expect(await instance.tasks.release("p", { value: "again" })).toBe(
+          false
+        );
+        await until(
+          async () => (await instance.tasks.get("p"))?.status === "completed"
+        );
+        expect(await instance.tasks.get("p")).toMatchObject({
+          result: "done"
+        });
+        await until(() => instance.lanedStarted.length === 1);
+      }
+    );
+  });
+});
