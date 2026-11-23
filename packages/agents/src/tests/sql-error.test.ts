@@ -26,16 +26,39 @@ describe("SqlError", () => {
       expect(message).toContain("SQLITE_TOOBIG");
       expect(message).toContain("8 MiB in production");
       expect(message).toContain("Upgrade an older local runtime");
+      expect(message).toContain("SQLITE_TOOBIG. A row");
+      expect(message).toContain("2,000,000 bytes");
     });
   });
 
-  it("says a statement is too long, not a row", () => {
-    const error = new SqlError(
-      "SELECT ...",
-      new Error("statement too long: SQLITE_TOOBIG")
+  it("says a statement is too long, not a row", async () => {
+    const stub = await getAgentByName(
+      env.TestAlarmInitAgent,
+      crypto.randomUUID()
     );
-    expect(error.message).toContain("at most 100,000 bytes");
-    expect(error.message).not.toContain("8 MiB");
+    await runInDurableObject(stub, async (agent: TestAlarmInitAgent) => {
+      // A literal past the 100,000-byte statement cap, through Agent.sql.
+      const query = `SELECT '${"x".repeat(100_100)}'`;
+      const strings = Object.assign([query], { raw: [query] });
+      let error: unknown;
+      try {
+        agent.sql(strings as unknown as TemplateStringsArray);
+      } catch (e) {
+        error = e;
+      }
+      expect(error).toBeInstanceOf(SqlError);
+      const message = (error as Error).message;
+      expect(message).toContain("statement too long");
+      expect(message).toContain("at most 100,000 bytes");
+      expect(message).not.toContain("8 MiB");
+    });
+  });
+
+  it("adds no size hint to an error that only quotes the words", () => {
+    expect(
+      new SqlError("q", new Error('near "statement too long": syntax error'))
+        .message
+    ).toBe('SQL query failed: near "statement too long": syntax error');
   });
 
   it("leaves other errors as they were", () => {
