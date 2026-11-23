@@ -1189,7 +1189,6 @@ export class Lifecycle<
     const transport = lifecycleRouteTransports.get(this);
     if (!transport) return;
     try {
-      await this.#ctx.storage.sync();
       await transport.toRoot({
         capability: FACET_WAKE,
         source: facet,
