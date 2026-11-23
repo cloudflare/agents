@@ -159,4 +159,20 @@ describe("facet wake", () => {
       { timeout: 8_000 }
     );
   }, 20_000);
+
+  it("wakes every facet with jobs at once when the root starts again", async () => {
+    const name = crypto.randomUUID();
+    const agent = await getAgentByName(env.FacetWakeRoot, name);
+    await agent.middlePush("m", "later", 60_000);
+    expect((await agent.rootJobs())[0]!.time).toBeGreaterThan(
+      Date.now() + 50_000
+    );
+
+    await agent.resetTree().catch(() => {});
+    // The next instance makes the facet's wake due, so the facet starts and
+    // recovers whatever the reset cut off, instead of waiting a minute.
+    const again = await getAgentByName(env.FacetWakeRoot, name);
+    const [wake] = await again.rootJobs();
+    expect(wake!.time).toBeLessThanOrEqual(Date.now());
+  });
 });

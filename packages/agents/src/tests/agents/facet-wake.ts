@@ -129,6 +129,11 @@ export class FacetWakeRoot extends WakeAgent {
     return (await this.subAgent(FacetWakeMiddle, name)).pendingJobs();
   }
 
+  /** End this root's isolate, and its facets with it. */
+  resetTree(): void {
+    this.ctx.abort("test reset");
+  }
+
   failNextFacetDrives(count: number): void {
     failingDrives = count;
   }

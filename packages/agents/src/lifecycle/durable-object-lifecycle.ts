@@ -643,6 +643,42 @@ export class Lifecycle<
   }
 
   /**
+   * At the root, on start: make every facet's wake due now (within its
+   * back-off). A root that starts may have been reset with its whole tree,
+   * and a facet's own start is what recovers its interrupted work, so each
+   * facet with jobs is woken once instead of at its next due time. Returns
+   * whether any wake moved.
+   */
+  #facetWakesDueNow(): boolean {
+    if (!this.#jobQueue.hasJobs()) return false;
+    const now = Date.now();
+    const prefix = `${FACET_WAKE}:`;
+    const rows = this.#ctx.storage.sql
+      .exec<{ capability: string }>(
+        `SELECT capability FROM cf_agents_jobs
+         WHERE substr(capability, 1, ?) = ? AND time > ?`,
+        prefix.length,
+        prefix,
+        now
+      )
+      .toArray();
+    let moved = false;
+    for (const { capability } of rows) {
+      const path = capability.slice(prefix.length);
+      const notBefore = facetDriveNotBefore(
+        this.#ctx.storage.kv.get<FacetDriveCount>(facetDriveKey(path))
+      );
+      this.#jobQueue.reschedule(
+        capability,
+        facetWakeJobId(path),
+        Math.max(now, notBefore)
+      );
+      moved = true;
+    }
+    return moved;
+  }
+
+  /**
    * At the root: drop the wake jobs of a facet path and its descendants,
    * when the sub-tree is deleted.
    */
@@ -977,6 +1013,9 @@ export class Lifecycle<
       throw error;
     }
     this.#deliverPendingEvents();
+    if (!this.#facetAddress() && this.#facetWakesDueNow()) {
+      this.#rearmRequestedDuringStart = true;
+    }
     if (this.#rearmRequestedDuringStart) {
       this.#rearmRequestedDuringStart = false;
       await this.rearmAlarm();

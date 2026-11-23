@@ -106,6 +106,11 @@ drives it with the same driver as a root. Only arming differs:
   stays until the reply re-arms it.
 - On startup, a facet with jobs reports its next wake once, in case the
   root lost it.
+- On startup, a root makes every facet wake due now (within its back-off).
+  A root that starts may have been reset with its whole tree, and a facet's
+  own start is what recovers its interrupted work (for example a turn whose
+  claim would otherwise wait for its deadline), so each facet with jobs is
+  woken once at once.
 - Deleting a facet sub-tree drops the wake jobs of that path and every path
   below it.
 
