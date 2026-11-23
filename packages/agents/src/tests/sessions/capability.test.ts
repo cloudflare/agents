@@ -1080,6 +1080,26 @@ describe("Sessions capability", () => {
   });
 
   describe("row chunking", () => {
+    it("splits at the row budget, not before", () => {
+      expect(splitContent("x".repeat(MAX_INLINE_ROW_BYTES))).toHaveLength(1);
+      expect(splitContent("x".repeat(MAX_INLINE_ROW_BYTES + 1))).toHaveLength(
+        2
+      );
+    });
+
+    it("keeps a 1.7 MB message in one row", async () => {
+      // Under the 1.9 MB row budget; the 1.5 MiB budget before split it.
+      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        const session = instance.sessions.session();
+        const original = text("mid", "z".repeat(1_700_000));
+        await session.appendMessage(original);
+
+        expect(instance.contentChunks("", "mid")).toBe(0);
+        expect(await session.getMessage("mid")).toEqual(original);
+      });
+    });
+
     it("keeps a message the row can hold in exactly one row", async () => {
       const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
       await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
@@ -1125,7 +1145,8 @@ describe("Sessions capability", () => {
         const original = text("big-text", body);
         await session.appendMessage(original);
 
-        expect(instance.contentChunks("", "big-text")).toBe(3);
+        // Three rows of at most 1.9 MB: the message row and two continuations.
+        expect(instance.contentChunks("", "big-text")).toBe(2);
         const stored = await session.getMessage("big-text");
         expect(stored?.parts[0].text).toBe(body);
         expect(stored).toEqual(original);
@@ -1199,7 +1220,7 @@ describe("Sessions capability", () => {
         await session.appendMessage(
           text("shrink", "s".repeat(5 * 1000 * 1000))
         );
-        expect(instance.contentChunks("", "shrink")).toBe(3);
+        expect(instance.contentChunks("", "shrink")).toBe(2);
 
         await session.updateMessage(
           text("shrink", "s".repeat(2 * 1000 * 1000))
