@@ -66,20 +66,24 @@ describe("ChatTurnFibers", () => {
     expect(fibers.liveTurns.size).toBe(0);
   });
 
-  it("runs the turn in the caller's async context even when another context starts it", async () => {
+  it("runs the turn in the caller's async context even when another context starts it, with the stash scope inside", async () => {
     const caller = new AsyncLocalStorage<string>();
-    // The alarm, not the caller, claims the run and starts the closure.
+    const stashScope = new AsyncLocalStorage<string>();
+    // The alarm, not the caller, claims the run and starts the closure; the
+    // definition enters the turn's stash scope around it.
     host.runTask = (_input, closure) =>
       caller.run("alarm", async () => {
-        closure.settle.resolve(await closure.run((fn) => fn()));
+        closure.settle.resolve(
+          await closure.run((fn) => stashScope.run("stash", fn))
+        );
       });
     const seen = await caller.run("caller", () =>
       fibers.run(
         { requestId: "r1", continuation: false, snapshot: snapshot("r1") },
-        async () => caller.getStore()
+        async () => [caller.getStore(), stashScope.getStore()]
       )
     );
-    expect(seen).toBe("caller");
+    expect(seen).toEqual(["caller", "stash"]);
   });
 
   it("names the turn's request id to the recovery engine, so a stop by it reaches a recovery attempt", async () => {
