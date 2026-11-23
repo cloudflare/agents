@@ -255,6 +255,7 @@ import type {
   RoutedChatAgent,
   TestSubAgentParent,
   EventLogFacetParent,
+  FacetWakeRoot,
   CustomBoundSubAgentParent,
   TestConnectionUriAgent,
   SpikeSubParent,
@@ -350,6 +351,7 @@ export type Env = {
   RoutedChatAgent: DurableObjectNamespace<RoutedChatAgent>;
   TestSubAgentParent: DurableObjectNamespace<TestSubAgentParent>;
   EventLogFacetParent: DurableObjectNamespace<EventLogFacetParent>;
+  FacetWakeRoot: DurableObjectNamespace<FacetWakeRoot>;
   CUSTOM_BOUND_SUB_AGENT_PARENT: DurableObjectNamespace<CustomBoundSubAgentParent>;
   TestUnboundParentAgent: DurableObjectNamespace<TestUnboundParentAgent>;
   TestMinifiedNameParentAgent: DurableObjectNamespace<TestMinifiedNameParentAgent>;
