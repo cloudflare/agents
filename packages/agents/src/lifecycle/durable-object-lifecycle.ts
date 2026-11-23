@@ -1237,9 +1237,10 @@ export class Lifecycle<
   #driveDeferral: JobDeferral | undefined;
 
   /**
-   * Tell the root this facet's next wake, when it changed. The job rows are
-   * synced first: this call is not a reply, so a reset could otherwise lose
-   * a row the root has already been told about.
+   * Tell the root this facet's next wake, when it changed. No sync first: if
+   * a reset loses a row the root was already told about, the root's wake
+   * only drives the facet once for nothing, and the job itself was lost
+   * whether or not the root had heard of it.
    */
   async #reportWakeToRoot(
     facet: LifecycleRouteAddress,
@@ -1249,7 +1250,6 @@ export class Lifecycle<
     const transport = lifecycleRouteTransports.get(this);
     if (!transport) return;
     try {
-      await this.#ctx.storage.sync();
       await transport.toRoot({
         capability: FACET_WAKE,
         source: facet,
