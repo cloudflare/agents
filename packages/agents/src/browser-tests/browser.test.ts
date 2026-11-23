@@ -17,7 +17,12 @@ function sleep(ms: number): Promise<void> {
 
 function killProcessOnPort(port: number): void {
   try {
-    const output = execSync(`lsof -ti tcp:${port} 2>/dev/null || true`)
+    // Only the process listening on the port: without -sTCP:LISTEN, lsof
+    // also lists this worker while it still holds client sockets to it,
+    // and the worker kills itself ("Worker exited unexpectedly").
+    const output = execSync(
+      `lsof -ti tcp:${port} -sTCP:LISTEN 2>/dev/null || true`
+    )
       .toString()
       .trim();
     if (output) {
