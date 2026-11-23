@@ -215,8 +215,15 @@ async function runPrefix(seed: number): Promise<void> {
           branchShown !== values.environment;
         const sent = built.messages.at(-1);
         expect(sent?.id, label).toBe(userId);
+        // Right after a compaction the first user message may also carry a
+        // restatement of what the hidden turns delivered.
+        const restated =
+          busted === "compaction" &&
+          (sent?.parts[0]?.text ?? "").startsWith("These context blocks")
+            ? 1
+            : 0;
         expect(sent?.parts.length, `${label}: reminder only on change`).toBe(
-          expectReminder ? 2 : 1
+          (expectReminder ? 2 : 1) + restated
         );
 
         const reply = text(`a${id++}`, "assistant", "reply");

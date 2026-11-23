@@ -150,12 +150,14 @@ export class Think<
       context: (_handle, id) =>
         id === this.harness.session().id ? this.#context : undefined,
       model: async () => this.resolveModel(await this.getModel()),
-      // As in Think, getSystemPrompt() is the fallback for an agent with no
-      // context blocks.
+      // As in Think: an overridden getSystemPrompt() stays above the
+      // context blocks; the default is only the fallback for no blocks.
       system: () =>
-        this.#context && this.#context.getBlocks().length > 0
-          ? undefined
-          : this.getSystemPrompt(),
+        this.getSystemPrompt !== Think.prototype.getSystemPrompt ||
+        !this.#context ||
+        this.#context.getBlocks().length === 0
+          ? this.getSystemPrompt()
+          : undefined,
       tools: () => this.getTools(),
       get maxSteps() {
         return self.maxSteps;

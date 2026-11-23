@@ -37,8 +37,12 @@ import {
 } from "./blocks";
 import { AgentContextProvider, type SqlProvider } from "./sqlite-provider";
 
-/** Annotation kind of a context record. */
-const RECORD = "context";
+/**
+ * @internal Annotation kind of a context record: what a session copy
+ * (a fork) carries over with its messages.
+ */
+export const CONTEXT_RECORD_KIND = "context";
+const RECORD = CONTEXT_RECORD_KIND;
 /** Session config key of a refresh asked for and not yet recorded. */
 const REFRESH = "transcript:context:refresh";
 
@@ -239,7 +243,11 @@ export class Context {
       delivered = await this.#carriedForward(delivered);
     }
 
-    if (!delivered.system || refresh) {
+    // A pending refresh applies only to a turn that can record it; a
+    // regeneration keeps its branch's prompt and leaves the refresh pending.
+    const refreshes =
+      refresh && (!delivered.system || (await target()) !== undefined);
+    if (!delivered.system || refreshes) {
       // A new snapshot reads every block afresh, even after a refresh: a
       // block may have changed since the refresh was asked for.
       await this.#blocks.load();
@@ -313,40 +321,58 @@ export class Context {
     messages: readonly SessionMessage[]
   ): Promise<SessionMessage[]> {
     const records = await this.#records(messages.map((message) => message.id));
+    // A reminder recorded before the latest snapshot is superseded by it:
+    // the snapshot holds the value, and the refresh that took it already
+    // gave up the cached prefix.
+    let start = 0;
+    messages.forEach((message, index) => {
+      if (records.get(message.id)?.system) start = index;
+    });
     const projected: SessionMessage[] = [];
-    let carried: string[] = [];
-    for (const message of messages) {
-      // An overlay carries the record of the messages it hides so a later
-      // turn can find it; it is not a delivery, and the summary replaces
-      // what it hides.
-      const changes = isCompactionMessage(message)
-        ? undefined
-        : records.get(message.id)?.changes;
-      const reminder =
-        changes && changes.length > 0
-          ? renderReminder(changes.map(([, text]) => text))
-          : undefined;
-      if (message.role !== "user") {
-        // Changes are recorded against user messages; one found elsewhere
-        // rides on the next user message.
-        if (reminder) carried.push(reminder);
+    // Sections waiting for the next user message: a restatement after a
+    // summary, or a change found on another message.
+    let carried: Section[] = [];
+    for (const [index, message] of messages.entries()) {
+      const record = index >= start ? records.get(message.id) : undefined;
+      if (isCompactionMessage(message)) {
+        // The summary was written from the stored messages, which never
+        // held a reminder: restate what the hidden turns delivered.
+        if (record)
+          carried = mergeSections(
+            carried,
+            await this.#restated(record, records)
+          );
         projected.push(message);
         continue;
       }
-      const before = carried.map(textPart);
+      const changes = record?.changes ?? [];
+      if (message.role !== "user") {
+        carried = mergeSections(carried, changes);
+        projected.push(message);
+        continue;
+      }
+      // A value this message delivers again is not restated before it.
+      const own = new Set(changes.map(([label]) => label));
+      const before = carried.filter(([label]) => !own.has(label));
       carried = [];
-      const after = reminder ? [textPart(reminder)] : [];
+      const parts = [
+        ...(before.length > 0
+          ? [textPart(renderReminder(before.map(([, text]) => text)))]
+          : []),
+        ...message.parts,
+        ...(changes.length > 0
+          ? [textPart(renderReminder(changes.map(([, text]) => text)))]
+          : [])
+      ];
       projected.push(
-        before.length === 0 && after.length === 0
-          ? message
-          : { ...message, parts: [...before, ...message.parts, ...after] }
+        parts.length === message.parts.length ? message : { ...message, parts }
       );
     }
     if (carried.length > 0) {
       projected.push({
         id: "cf_agents_context_reminder",
         role: "user",
-        parts: carried.map(textPart)
+        parts: [textPart(renderReminder(carried.map(([, text]) => text)))]
       });
     }
     return projected;
@@ -541,6 +567,26 @@ export class Context {
   async #setRefresh(pending: boolean): Promise<void> {
     await this.#session.internal_setConfig(REFRESH, pending ? "1" : null);
     this.#refresh = pending;
+  }
+
+  /**
+   * What an overlay's record says the hidden turns delivered beyond the
+   * snapshot: the remind sections whose text differs from the snapshot's.
+   */
+  async #restated(
+    record: ContextRecord,
+    records: ReadonlyMap<string, ContextRecord>
+  ): Promise<Section[]> {
+    if (record.system) return [...(record.changes ?? [])];
+    const base = record.base;
+    if (!base) return [];
+    const snapshot = (
+      records.get(base) ?? (await this.#records([base])).get(base)
+    )?.system;
+    const sent = new Map<string, string>(snapshot ?? []);
+    return (record.delivered ?? []).filter(
+      ([label, text]) => sent.get(label) !== text
+    );
   }
 
   /** Remind blocks whose section differs from the one last delivered. */

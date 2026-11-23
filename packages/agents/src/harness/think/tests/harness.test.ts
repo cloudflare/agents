@@ -714,6 +714,18 @@ describe("ThinkHarness context", () => {
     expect(prompt).toMatch(/\|user:[^|]*Today is Tuesday\.[^|]*$/);
   });
 
+  it("gives a fork the prompt its turns were sent with", async () => {
+    const stub = fresh();
+    await stub.prompt("hello", session);
+    const [original] = await stub.promptTexts();
+    await stub.setCatalogue("Nails.");
+    const fork = await stub.fork(session);
+    await stub.prompt("in fork", fork);
+    const forked = (await stub.promptTexts()).at(-1) ?? "";
+    expect(forked.split("|")[0]).toBe(original.split("|")[0]);
+    expect(forked).not.toContain("Nails.");
+  });
+
   it("offers set_context, which writes the block", async () => {
     const stub = fresh();
     const result = await stub.prompt("remember likes tea", session);

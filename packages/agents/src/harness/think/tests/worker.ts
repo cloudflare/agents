@@ -31,6 +31,7 @@ const RELEASE_KEY = "test:gate:release";
 const DANGEROUS_RUNS_KEY = "test:dangerous:runs";
 const SYSTEM_KEY = "test:system";
 const ENVIRONMENT_KEY = "test:environment";
+const CATALOGUE_KEY = "test:catalogue";
 /** The session that has context blocks. */
 const CONTEXT_SESSION = "with-context";
 const BLOCK_KEY = "test:block";
@@ -143,6 +144,8 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     this.#releaseSlow = resolve;
   });
   #overflowed = false;
+  /** Sessions that have context: the context session and its forks. */
+  readonly #contextSessions = new Set<string>([CONTEXT_SESSION]);
   /** Sessions handles, as configureSession hands them over. */
   readonly #handles = new Map<string, Session>();
 
@@ -214,11 +217,18 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
       }
     },
     context: (session, id) =>
-      id === CONTEXT_SESSION
+      this.#contextSessions.has(id)
         ? new Context(session, {
             sql: storageSql(this.ctx.storage),
             blocks: [
               { label: "soul", provider: { get: async () => "Be kind." } },
+              {
+                label: "catalogue",
+                provider: {
+                  get: async () =>
+                    this.ctx.storage.kv.get<string>(CATALOGUE_KEY) ?? "Hammers."
+                }
+              },
               { label: "memory", description: "Learned facts" },
               {
                 label: "environment",
@@ -704,7 +714,9 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
   }
 
   async fork(from: string): Promise<string> {
-    return (await this.harness.sessions.fork(from)).id;
+    const id = (await this.harness.sessions.fork(from)).id;
+    if (this.#contextSessions.has(from)) this.#contextSessions.add(id);
+    return id;
   }
 
   listSessions() {
@@ -801,6 +813,10 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
       { source: "client" }
     );
     await this.harness.session(CONTEXT_SESSION).wait(receipt.operationId);
+  }
+
+  setCatalogue(value: string): void {
+    this.ctx.storage.kv.put(CATALOGUE_KEY, value);
   }
 
   setEnvironment(value: string): void {

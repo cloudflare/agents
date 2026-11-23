@@ -437,6 +437,87 @@ describe("Context", () => {
     });
   });
 
+  it("restates a change that compaction hid from the model", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const { session, context, setDate } = await setup(storage, (s) =>
+        install(s)
+      );
+      await session.appendMessage(user("u1", "hello"));
+      const first = await context.build();
+      await session.appendMessage(assistant("a1", "hi"));
+      setDate("Tuesday");
+      await session.appendMessage(user("u2", "what day?"));
+      await context.build();
+      await session.appendMessage(assistant("a2", "Tuesday"));
+      await session.appendMessage(user("u3", "more"));
+      await context.build();
+      await session.appendMessage(assistant("a3", "ok"));
+      // The summary hides u1..a2, including the turn that delivered Tuesday.
+      await session.addCompaction("earlier turns", "u1", "a2");
+
+      await session.appendMessage(user("u4", "and now?"));
+      const after = await context.build();
+      expect(after.system).toBe(first.system);
+      const sent = JSON.stringify(after.messages);
+      expect(sent.split("Today is Tuesday.").length - 1).toBe(1);
+      // Restated right after the summary, and in the same place next time.
+      // (Compare what the model is sent: an overlay's createdAt is set when
+      // Sessions reads it.)
+      const again = await context.build();
+      const shape = (m: typeof again.messages) =>
+        m.map(({ id, role, parts }) => ({ id, role, parts }));
+      expect(shape(again.messages)).toEqual(shape(after.messages));
+    });
+  });
+
+  it("drops reminders a refresh superseded", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const { session, context, setDate } = await setup(storage, (s) =>
+        install(s)
+      );
+      await session.appendMessage(user("u1", "hello"));
+      await context.build();
+      await session.appendMessage(assistant("a1", "hi"));
+      setDate("Tuesday");
+      await session.appendMessage(user("u2", "what day?"));
+      await context.build();
+      await session.appendMessage(assistant("a2", "Tuesday"));
+
+      setDate("Wednesday");
+      await context.refreshSystemPrompt();
+      await session.appendMessage(user("u3", "and now?"));
+      const after = await context.build();
+      expect(after.system).toContain("Today is Wednesday.");
+      const sent = JSON.stringify(after.messages);
+      expect(sent).not.toContain("Today is Tuesday.");
+      expect(sent).not.toContain("These context blocks changed");
+    });
+  });
+
+  it("keeps a regeneration on its branch's prompt while a refresh waits", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const { session, context, setDate } = await setup(storage, (s) =>
+        install(s)
+      );
+      await session.appendMessage(user("u1", "hello"));
+      const monday = await context.build();
+      await session.appendMessage(assistant("a1", "hi"));
+      setDate("Friday");
+      await context.refreshSystemPrompt();
+
+      // Regenerate a1: the history ends at the answered u1.
+      const regenerated = await context.prepare({
+        messages: [(await session.getMessage("u1"))!]
+      });
+      expect(regenerated.system).toBe(monday.system);
+      expect(regenerated.reminder).toContain("Today is Friday.");
+
+      // The refresh is still pending and lands on the next new turn.
+      await session.appendMessage(user("u2", "again"));
+      expect((await context.build()).system).toContain("Today is Friday.");
+    });
+  });
+
   it("projects the same history to the same messages", async () => {
     await withCapabilityHarness(async ({ storage, install }) => {
       const { session, context, setDate } = await setup(storage, (s) =>

@@ -797,7 +797,7 @@ there is nothing to opt into: a cold wake reuses the exact prompt the model
 already cached.
 
 The assembled blocks are available as `this.context` once the Lifecycle has
-started. See [Context](https://github.com/cloudflare/agents/blob/main/docs/agents/context.md)
+started. See [Context](https://github.com/cloudflare/agents/blob/main/docs/think/context.md)
 for providers, tools, and frozen-prompt behavior.
 
 ### Upgrading from 0.17

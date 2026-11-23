@@ -41,7 +41,7 @@ import type {
 } from "../../experimental/channels/harness";
 import type { CompactResult } from "../../sessions/compaction-helpers";
 import type { Session } from "../../sessions/handle";
-import type { Context } from "../../context/context";
+import { CONTEXT_RECORD_KIND, type Context } from "../../context/context";
 import type { SearchResult, SessionMessage } from "../../sessions/types";
 import type { StreamJson } from "../../streams/types";
 import {
@@ -819,6 +819,19 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       if (!message) continue;
       await target.appendMessage(message, { parentId });
       parentId = message.id;
+    }
+    // The copied turns keep the context they were sent with, so the fork's
+    // next request opens with the same prompt as the session it came from.
+    const records = await source.internal_annotations(
+      CONTEXT_RECORD_KIND,
+      rows.map((row) => row.id)
+    );
+    for (const [messageId, value] of records) {
+      await target.internal_setAnnotation(
+        CONTEXT_RECORD_KIND,
+        messageId,
+        value
+      );
     }
     return fork;
   }
