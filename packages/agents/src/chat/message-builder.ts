@@ -45,6 +45,8 @@ export type StreamChunkData = {
   /** Optional framework-specific metadata for the approval request. */
   approvalDescriptor?: unknown;
   providerMetadata?: Record<string, unknown>;
+  /** Metadata declared by the tool, carried on tool-input-* chunks */
+  toolMetadata?: unknown;
   /** Whether the tool was executed by the provider (e.g. Gemini code execution) */
   providerExecuted?: boolean;
   /** Payload for data-* parts (developer-defined typed JSON) */
@@ -179,6 +181,9 @@ export function applyLateToolInput(
   }
   if (chunk.providerMetadata != null) {
     p.callProviderMetadata = chunk.providerMetadata;
+  }
+  if (chunk.toolMetadata != null) {
+    p.toolMetadata = chunk.toolMetadata;
   }
   if (chunk.title != null) {
     p.title = chunk.title;
@@ -378,6 +383,9 @@ export function applyChunkToParts(
         ...(chunk.providerMetadata != null
           ? { callProviderMetadata: chunk.providerMetadata }
           : {}),
+        ...(chunk.toolMetadata != null
+          ? { toolMetadata: chunk.toolMetadata }
+          : {}),
         ...(chunk.title != null ? { title: chunk.title } : {})
       } as MessagePart);
       return true;
@@ -429,6 +437,9 @@ export function applyChunkToParts(
           if (chunk.providerMetadata != null) {
             p.callProviderMetadata = chunk.providerMetadata;
           }
+          if (chunk.toolMetadata != null) {
+            p.toolMetadata = chunk.toolMetadata;
+          }
           if (chunk.title != null) {
             p.title = chunk.title;
           }
@@ -450,6 +461,9 @@ export function applyChunkToParts(
           : {}),
         ...(chunk.providerMetadata != null
           ? { callProviderMetadata: chunk.providerMetadata }
+          : {}),
+        ...(chunk.toolMetadata != null
+          ? { toolMetadata: chunk.toolMetadata }
           : {}),
         ...(chunk.title != null ? { title: chunk.title } : {})
       } as MessagePart);
@@ -480,6 +494,9 @@ export function applyChunkToParts(
         if (chunk.providerMetadata != null) {
           p.callProviderMetadata = chunk.providerMetadata;
         }
+        if (chunk.toolMetadata != null) {
+          p.toolMetadata = chunk.toolMetadata;
+        }
       } else {
         parts.push({
           type: `tool-${chunk.toolName}`,
@@ -493,6 +510,9 @@ export function applyChunkToParts(
             : {}),
           ...(chunk.providerMetadata != null
             ? { callProviderMetadata: chunk.providerMetadata }
+            : {}),
+          ...(chunk.toolMetadata != null
+            ? { toolMetadata: chunk.toolMetadata }
             : {})
         } as MessagePart);
       }
