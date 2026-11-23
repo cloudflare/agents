@@ -31,7 +31,16 @@ A runtime cannot read a row larger than its own cap. A 5 MB value written by wor
 
 **The budget is the lowest cap, not production's.** `wrangler dev` and the vitest pool run the workerd the developer installed, and older releases cap rows at 2.2 MB. Data written above that cap would be unreadable after a wrangler downgrade with persisted local state, or in a test pool on an older release. So `SQLITE_ROW_BYTES` is 2,000,000 today. That is below every runtime measured, even though production allows 8 MiB.
 
-**Raising it is one edit.** When the SDK requires a runtime with the 8 MiB cap (workerd 1.20260930 or later), `SQLITE_ROW_BYTES` can go up in one change, with a boundary test for each budget. Rolling back the SDK after that is safe: the runtime enforces the cap, not our code.
+**Raising it is one edit, once every runtime the SDK runs on holds 8 MiB.** The condition: the released `@cloudflare/vitest-pool-workers` and the released `wrangler` both ship workerd 1.20260930 or later. On 23 Nov 2026 wrangler did (4.145.0 ships 1.20260930.2), but the pool did not (0.23.0 ships 1.20260815.1, measured at 2,199,995 bytes). A floor above the pool's cap would make our tests, and every app's tests, fail with `SQLITE_TOOBIG` on rows production accepts.
+
+`packages/agents/src/tests/platform-limits.test.ts` checks this on every run. It binds an 8,000,000-byte value in the pool (no row written). While the pool refuses it, the test passes. When a pool release accepts it, the test fails with a message that says the floor can now move. That failure is the signal to open the raising change:
+
+- Edit only `SQLITE_ROW_BYTES`. Every budget follows: `ROW_VALUE_BYTES`, `ROW_MAX_BYTES`, `ROW_PIECE_UNITS`, and through them the Streams flush, event log, chat stream and harness stream ceilings, chat message compaction, held-message and Tasks input pieces, and Sessions chunks. Keep a margin under the measured 8,388,637 bytes for the other columns in a row. 8,000,000 leaves 388 KB.
+- Bump the pool, and wrangler if needed, to releases on workerd 1.20260930 or later. Flip the check in `platform-limits.test.ts` to assert the pool holds 8 MB.
+- Add a boundary test per budget: a value exactly at it is stored in one row, and one byte more splits, is compacted, or is refused, as that caller does today.
+- Put cost in the PR: rows written per 2, 5 and 10 MB value, before and after.
+- Probe on a deployment: write 2-8 MB values with the new code, then deploy the previous SDK release over the same objects and read them back. Sessions has been measured reading slices of either size; Streams, chat and Tasks need the same check.
+- In the changeset and in the docs where the SDK lists its requirements, state the minimum wrangler and pool versions for local development. #3065's `SqlError` message already names the caps and says an older local runtime must be upgraded.
 
 **No runtime detection.** A probe per isolate would be cheap: one `SELECT length(?)` binding about 8 MB, writing no row, around 9 ms on a deployment. But it measures the runtime that writes, and the risk is a different runtime that reads later. It would also make tests and production take different split paths.
 
