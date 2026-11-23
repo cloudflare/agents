@@ -291,6 +291,8 @@ import type { Streams } from "agents/streams";
 import { TaskSettlement, type TaskRecord } from "agents/internal";
 import {
   DECISION_TASK,
+  decisionIdOf,
+  decisionRunId,
   createEffectState,
   isPendingDecision,
   migrateLegacyActionRecords,
@@ -7672,7 +7674,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       typeof o.executionId === "string" ? o.executionId : undefined;
 
     if (executionId?.startsWith(ACTION_PAUSE_ID_PREFIX)) {
-      const record = this.tasks.peek(executionId);
+      const record = this.tasks.peek(decisionRunId(executionId));
       return isPendingDecision(record)
         ? (record?.metadata?.descriptor as ActionApprovalDescriptor | undefined)
         : undefined;
@@ -8399,11 +8401,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const out: PendingApproval[] = [];
 
     for (const record of pendingDecisions(this.tasks)) {
-      if (executionId && record.runId !== executionId) continue;
+      const id = decisionIdOf(record.runId);
+      if (executionId && id !== executionId) continue;
       const descriptor = record.metadata?.descriptor;
       if (descriptor === undefined) continue;
       out.push({
-        executionId: record.runId,
+        executionId: id,
         source: "action",
         descriptor: descriptor as unknown as ActionApprovalDescriptor
       });
@@ -8507,15 +8510,16 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       error: `Execution "${executionId}" is no longer pending — it was approved or rejected elsewhere.`
     };
     if (executionId.startsWith(ACTION_PAUSE_ID_PREFIX)) {
-      if (!isPendingDecision(this.tasks.peek(executionId))) {
+      const runId = decisionRunId(executionId);
+      if (!isPendingDecision(this.tasks.peek(runId))) {
         return alreadyResolved;
       }
       const settled = await this.tasks.settle(
-        executionId,
+        runId,
         decided as unknown as TaskJson
       );
       if (!settled) return alreadyResolved;
-      if (!this._decisionOutputs.has(executionId)) {
+      if (!this._decisionOutputs.has(runId)) {
         return {
           status: "error",
           executionId,
@@ -8524,8 +8528,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             "action can run."
         };
       }
-      const output = this._decisionOutputs.get(executionId);
-      this._decisionOutputs.delete(executionId);
+      const output = this._decisionOutputs.get(runId);
+      this._decisionOutputs.delete(runId);
       return output;
     }
     const runtime = this._codemodeRuntime();
@@ -8577,7 +8581,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         verdict: decided as unknown as TaskJson,
         output: output as TaskJson
       } satisfies DecisionInput,
-      { runId: `codemode_${crypto.randomUUID()}`, start: "now" }
+      { runId: decisionRunId(`codemode_${crypto.randomUUID()}`), start: "now" }
     );
     return output;
   }
@@ -8618,7 +8622,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       verdict = recorded.verdict;
       output = recorded.output;
     } else {
-      executionId = runId;
+      executionId = decisionIdOf(runId);
       verdict = result as DecisionVerdict;
       output =
         tries > MAX_DECISION_TRIES
@@ -8628,7 +8632,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               action: input.action,
               error: `The approved action did not finish in ${MAX_DECISION_TRIES} tries.`
             }
-          : await this._continueActionPause(runId, input, verdict);
+          : await this._continueActionPause(executionId, input, verdict);
       if (output === DEFER_DECISION) {
         // Its claim is still held by an attempt a reset cut off: give the
         // try back and report again later, once the lease lets it run.

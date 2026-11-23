@@ -85,6 +85,38 @@ describe("Tasks attached definitions", () => {
     });
   });
 
+  it("wake on the next start a run a reset cut off between its accept and its claim", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        instance.tasks.register(attached, async () => "late", {
+          attached: true
+        });
+        // Accepted, never claimed, and no wake job: what a reset between
+        // the two leaves.
+        seedTaskRun(state.storage, {
+          runId: "accepted",
+          definition: attached,
+          status: "pending",
+          nextAt: Date.now()
+        });
+        state.storage.sql.exec("DELETE FROM cf_agents_jobs");
+
+        await instance.tasks.onStart();
+        expect(jobIds(state.storage)).toContain("task:accepted");
+      }
+    );
+    await runDurableObjectAlarm(stub);
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      expect(await instance.tasks.get("accepted")).toMatchObject({
+        status: "completed",
+        result: "late"
+      });
+    });
+  });
+
   it("arm the report job during a reportWake report, and cancel it once the report returns", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(

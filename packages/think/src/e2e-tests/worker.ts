@@ -14,7 +14,12 @@ import {
   wrapChatFiberSnapshot
 } from "agents/chat";
 import type { ResumableStream } from "agents/chat";
-import { EFFECT_TASK, effectRunId, stableHash } from "../action-ledger";
+import {
+  EFFECT_TASK,
+  effectKeyOf,
+  effectRunId,
+  stableHash
+} from "../action-ledger";
 import { agentTool } from "agents/agent-tools";
 import type { Adapter } from "chat";
 import {
@@ -2855,7 +2860,7 @@ export class ThinkActionLedgerRecoveryE2EAgent extends Think<Env> {
     return this.tasks
       .peekList({ definition: EFFECT_TASK, order: "oldest" })
       .map((record) => ({
-        key: record.runId.slice("effect:".length),
+        key: effectKeyOf(record.runId),
         status: record.status === "completed" ? "settled" : "pending",
         updated_at: record.settledAt ?? record.createdAt
       }));

@@ -14,7 +14,7 @@
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { tool } from "ai";
 import { z } from "zod";
-import { DECISION_TASK } from "../../action-ledger";
+import { DECISION_TASK, decisionRunId } from "../../action-ledger";
 import { Think } from "../../think";
 import { createExecuteTool } from "../../tools/execute";
 
@@ -212,7 +212,7 @@ export class ThinkExecuteHitlAgent extends Think {
     executionId: string,
     output: { status: string; executionId: string; result: string }
   ): Promise<void> {
-    const runId = `codemode_${crypto.randomUUID()}`;
+    const runId = decisionRunId(`codemode_${crypto.randomUUID()}`);
     await this.tasks.importRun({
       runId,
       definition: DECISION_TASK,

@@ -80,7 +80,10 @@ import type { Session } from "../../think";
 import type { ContextConfig } from "agents/context";
 import {
   DECISION_TASK,
+  decisionIdOf,
+  decisionRunId,
   EFFECT_TASK,
+  effectKeyOf,
   effectRunId,
   migrateLegacyActionRecords,
   pendingDecisions,
@@ -7696,7 +7699,7 @@ export class ThinkToolsTestAgent extends Think {
 
   private _listActionPendingRowsForTest(): Array<{ execution_id: string }> {
     return pendingDecisions(this.tasks).map((record) => ({
-      execution_id: record.runId
+      execution_id: decisionIdOf(record.runId)
     }));
   }
 
@@ -8294,7 +8297,7 @@ export class ThinkToolsTestAgent extends Think {
           record.runId
         );
         return {
-          key: record.runId.slice("effect:".length),
+          key: effectKeyOf(record.runId),
           action_name: input?.name ?? "",
           input_hash: input?.inputHash ?? "",
           status: record.status === "completed" ? "settled" : "pending",
@@ -8486,7 +8489,7 @@ export class ThinkToolsTestAgent extends Think {
       }>(record.runId);
       const descriptor = record.metadata?.descriptor;
       return {
-        execution_id: record.runId,
+        execution_id: decisionIdOf(record.runId),
         action_name: input?.action ?? "",
         tool_call_id: input?.toolCallId ?? "",
         input_json: JSON.stringify(input?.input),
@@ -8541,7 +8544,8 @@ export class ThinkToolsTestAgent extends Think {
   ): Promise<void> {
     this.sql`
       UPDATE cf_agents_task_runs SET created_at = ${createdAt}
-      WHERE run_id = ${executionId} AND definition = ${DECISION_TASK}
+      WHERE run_id = ${decisionRunId(executionId)}
+        AND definition = ${DECISION_TASK}
     `;
   }
 
@@ -8640,7 +8644,8 @@ export class ThinkToolsTestAgent extends Think {
           updated_at = ${now},
           metadata = json_set(COALESCE(metadata, '{}'), '$.tries', ${tries}),
           notified = NULL
-      WHERE run_id = ${executionId} AND definition = ${DECISION_TASK}
+      WHERE run_id = ${decisionRunId(executionId)}
+        AND definition = ${DECISION_TASK}
     `;
   }
 
@@ -8659,7 +8664,9 @@ export class ThinkToolsTestAgent extends Think {
 
   /** Whether a decision run is still stored under this id. */
   async hasDecisionRunForTest(executionId: string): Promise<boolean> {
-    return this.tasks.peek(executionId)?.definition === DECISION_TASK;
+    return (
+      this.tasks.peek(decisionRunId(executionId))?.definition === DECISION_TASK
+    );
   }
 
   /** Derive a descriptor for a paused output (codemode-style) for unit tests. */

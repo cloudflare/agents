@@ -108,9 +108,27 @@ export function createEffectState(): EffectState {
   return { running: new Map(), unrecorded: new Map() };
 }
 
-/** The run id of an effect key. */
+const EFFECT_RUN_PREFIX = "__cf_effect:";
+const DECISION_RUN_PREFIX = "__cf_decision:";
+
+/** The run id of an effect key. Run ids are one space per agent. */
 export function effectRunId(key: string): string {
-  return `effect:${key}`;
+  return `${EFFECT_RUN_PREFIX}${key}`;
+}
+
+/** The effect key of an effect run id. */
+export function effectKeyOf(runId: string): string {
+  return runId.slice(EFFECT_RUN_PREFIX.length);
+}
+
+/** The run id of a decision, from the id shown to callers. */
+export function decisionRunId(id: string): string {
+  return `${DECISION_RUN_PREFIX}${id}`;
+}
+
+/** The id shown to callers, from a decision run id. */
+export function decisionIdOf(runId: string): string {
+  return runId.slice(DECISION_RUN_PREFIX.length);
 }
 
 /**
@@ -335,7 +353,7 @@ export async function parkDecision(
   options: { id: string; input: DecisionInput; descriptor?: TaskJson }
 ): Promise<void> {
   await tasks.run(DECISION_TASK, options.input, {
-    runId: options.id,
+    runId: decisionRunId(options.id),
     start: "now",
     ...(options.descriptor !== undefined && {
       metadata: { descriptor: options.descriptor }
@@ -470,7 +488,7 @@ export async function migrateLegacyActionRecords(
   if (!deferred) return false;
   for (const [toolCallId, outcome] of deferred) {
     await tasks.importRun({
-      runId: `migrated_${outcome.executionId}_${toolCallId}`,
+      runId: decisionRunId(`migrated_${outcome.executionId}_${toolCallId}`),
       definition: DECISION_TASK,
       status: "completed",
       attempt: 1,
