@@ -2342,6 +2342,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   /** Where every chat frame to tabs goes out (the shared `ChatFrames`). */
   private readonly _frames = new ChatFrames({
     broadcast: (message, without) => this.broadcast(message, without),
+    connectionIds: () =>
+      Array.from(this.getConnections(), (connection) => connection.id),
     kv: this.ctx.storage.kv,
     resuming: this._pendingResumeConnections,
     storedOriginIds: (requestId) =>

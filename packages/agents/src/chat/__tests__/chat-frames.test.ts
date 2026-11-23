@@ -9,9 +9,11 @@ function setup(overrides: Partial<ChatFramesOptions> = {}) {
   const sent: Array<{ frame: Record<string, unknown>; without: string[] }> = [];
   const store = new Map<string, unknown>();
   const resuming = new Set<string>();
+  const connections: string[] = ["t1", "t2", "waiting"];
   const frames = new ChatFrames({
     broadcast: (message, without) =>
       sent.push({ frame: JSON.parse(message), without }),
+    connectionIds: () => connections,
     kv: {
       get: <T>(key: string) => store.get(key) as T | undefined,
       put: (key, value) => {
@@ -74,11 +76,14 @@ describe("ChatFrames", () => {
     frames.broadcast({ type: RESPONSE, id: "r1", done: true });
     // The broadcast leaves out the tab told already, and the waiting one.
     expect(sent[0].without).toEqual(["waiting", "t1"]);
-    expect(frames.ended.has("other", "r1")).toBe(true);
+    expect(frames.ended.has("t2", "r1")).toBe(true);
     expect(frames.ended.has("waiting", "r1")).toBe(false);
-    // A second broadcast of the same end goes to no one.
+    // A tab that connects later was told nothing.
+    expect(frames.ended.has("later", "r1")).toBe(false);
+    // A second broadcast reaches only the tabs not told yet.
+    resuming.clear();
     frames.broadcast({ type: RESPONSE, id: "r1", done: true });
-    expect(sent).toHaveLength(1);
+    expect(sent[1].without).toEqual(["t1", "t2"]);
     // "recovering" is not an end.
     frames.broadcast({
       type: RESPONSE,
@@ -86,13 +91,7 @@ describe("ChatFrames", () => {
       done: true,
       outcome: "recovering"
     });
-    frames.broadcast({
-      type: RESPONSE,
-      id: "r2",
-      done: true,
-      outcome: "aborted"
-    });
-    expect(sent).toHaveLength(3);
+    expect(frames.ended.has("t2", "r2")).toBe(false);
   });
 
   it("adds the queued messages to a message list", () => {

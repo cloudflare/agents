@@ -44,6 +44,8 @@ export interface ChatFrameConnection {
 export interface ChatFramesOptions {
   /** Send to every connection except the `without` ids. */
   broadcast(message: string, without: string[]): void;
+  /** The ids of the connections a broadcast reaches. */
+  connectionIds(): Iterable<string>;
   /** Where recent terminal frames are recorded. */
   kv: RecentTerminalsKv;
   /** Connections that were told a stream resumes and have not acked yet. */
@@ -75,54 +77,31 @@ export interface ChatFramesOptions {
  */
 export class EndedRequests {
   static readonly MAX = 64;
-  /**
-   * By request: the tabs it was sent to, and, once it was broadcast, the
-   * tabs that broadcast left out (a tab waiting on its resume ack).
-   */
-  readonly #ended = new Map<
-    string,
-    { to: Set<string>; broadcastExcept?: Set<string> }
-  >();
+  /** By request: the tabs it was sent to. */
+  readonly #ended = new Map<string, Set<string>>();
 
   /** Whether `connectionId` was sent the end of `requestId`. */
   has(connectionId: string, requestId: string): boolean {
-    const entry = this.#ended.get(requestId);
-    if (!entry) return false;
-    return (
-      entry.to.has(connectionId) ||
-      (entry.broadcastExcept !== undefined &&
-        !entry.broadcastExcept.has(connectionId))
-    );
+    return this.#ended.get(requestId)?.has(connectionId) ?? false;
   }
 
-  /**
-   * The tabs a broadcast of `requestId`'s end must leave out, besides
-   * `without`, or `null` when it was broadcast already: a tab that broadcast
-   * left out is told by its resume, not by a second broadcast.
-   */
-  broadcastWithout(requestId: string, without: string[]): string[] | null {
-    const entry = this.#entry(requestId);
-    if (entry.broadcastExcept !== undefined) return null;
-    entry.broadcastExcept = new Set(without);
-    return [...without, ...entry.to];
+  /** The tabs `requestId`'s end was sent to. */
+  sentTo(requestId: string): Iterable<string> {
+    return this.#ended.get(requestId) ?? [];
   }
 
   /** `connectionId` was sent the end of `requestId`. */
   note(connectionId: string, requestId: string): void {
-    this.#entry(requestId).to.add(connectionId);
-  }
-
-  #entry(requestId: string) {
-    let entry = this.#ended.get(requestId);
-    if (!entry) {
-      entry = { to: new Set() };
-      this.#ended.set(requestId, entry);
+    let to = this.#ended.get(requestId);
+    if (!to) {
+      to = new Set();
+      this.#ended.set(requestId, to);
       if (this.#ended.size > EndedRequests.MAX) {
         const oldest = this.#ended.keys().next().value;
         if (oldest !== undefined) this.#ended.delete(oldest);
       }
     }
-    return entry;
+    to.add(connectionId);
   }
 }
 
@@ -167,13 +146,15 @@ export class ChatFrames {
   /** Send `frame` to every tab except `exclude` and resuming tabs. */
   broadcast(frame: ChatFrame, exclude: readonly string[] = []): void {
     const ready = this.#prepare(frame);
-    let without = [...exclude, ...this.options.resuming];
+    const without = [...exclude, ...this.options.resuming];
     const ends = endedRequestOf(ready);
     if (ends !== undefined) {
       // A tab is told a request's end once.
-      const skip = this.ended.broadcastWithout(ends, without);
-      if (skip === null) return;
-      without = skip;
+      without.push(...this.ended.sentTo(ends));
+      const left = new Set(without);
+      for (const id of this.options.connectionIds()) {
+        if (!left.has(id)) this.ended.note(id, ends);
+      }
     }
     this.options.broadcast(JSON.stringify(ready), without);
     this.#record(ready);
