@@ -1896,8 +1896,13 @@ export class TestSubAgentParent extends Agent {
       async () => (await this.subAgentScheduleLog(subAgentName)).length > 0
     );
     await child.queueFlakyCallback("flaky-item", "same");
+    // Wait for the replacement's run, then for longer than the old item's
+    // retry delay (300 ms), so a retry that wrongly survived has run too.
+    await waitFor(
+      async () => (await this.subAgentScheduleLog(subAgentName)).length >= 2
+    );
     await waitFor(async () => (await child.queueRowIds()).length === 0);
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await new Promise((resolve) => setTimeout(resolve, 700));
     return (await this.subAgentScheduleLog(subAgentName)).length;
   }
 
