@@ -19,18 +19,28 @@ const LEGACY_CONFIG_KEYS = [
 ] as const;
 
 /**
- * Whether `table` exists. Preparing a query against it fails when it does
- * not, which reads no rows; a `sqlite_master` lookup reads every schema row.
- * For one-way migration checks that run on every wake.
+ * Whether a table named exactly `table` exists. Preparing a query against a
+ * missing table fails and reads no rows, while a `sqlite_master` lookup reads
+ * every schema row, so the catalog is only consulted once the cheap probe
+ * finds something (it also accepts views and other letter cases). For one-way
+ * migration checks that run on every wake.
  * @internal
  */
 export function tableExists(sql: SqlStorage, table: string): boolean {
   try {
     sql.exec(`SELECT 1 FROM "${table}" LIMIT 0`);
-    return true;
-  } catch {
-    return false;
+  } catch (error) {
+    if (String(error).includes("no such table")) return false;
+    throw error;
   }
+  return (
+    sql
+      .exec(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        table
+      )
+      .toArray().length > 0
+  );
 }
 
 /** @internal */
