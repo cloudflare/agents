@@ -249,6 +249,8 @@ export class Streams extends LifecycleCapability {
       /** Each chunk's UTF-8 size, as the caller measured it. */
       readonly sizes: number[];
       bytes: number;
+      /** A write of this buffer failed once already. */
+      failed?: true;
     }
   >();
   /**
@@ -258,6 +260,12 @@ export class Streams extends LifecycleCapability {
    * chunk, and leaves a hole a reader can detect (`holds`).
    */
   readonly #bufferedHere = new Set<string>();
+  /**
+   * The first seq a stream's next buffer may use, after a buffer was
+   * dropped for failing twice. Leaves with that next buffer, a settle or a
+   * delete.
+   */
+  readonly #seqFloors = new Map<string, number>();
   /**
    * The open block of each stream buffered into, and that it is live: read
    * once, then kept up to date by buffered writes, so a flush costs its one
@@ -742,8 +750,13 @@ export class Streams extends LifecycleCapability {
         );
       }
       const durable = this.#liveTails.get(streamId)?.seq_to ?? 0;
-      skipped = !this.#bufferedHere.has(streamId);
-      const firstSeq = skipped ? durable + batch.maxChunks : durable;
+      const floor = this.#seqFloors.get(streamId);
+      this.#seqFloors.delete(streamId);
+      skipped = !this.#bufferedHere.has(streamId) || floor !== undefined;
+      const firstSeq = Math.max(
+        this.#bufferedHere.has(streamId) ? durable : durable + batch.maxChunks,
+        floor ?? 0
+      );
       this.#bufferedHere.add(streamId);
       buffer = { firstSeq, jsons: [], sizes: [], bytes: 0 };
       this.#buffers.set(streamId, buffer);
@@ -812,14 +825,27 @@ export class Streams extends LifecycleCapability {
       block += 1;
       start = end;
     }
-    if (rows.length === 1) this.#sqlWrite(INSERT_BLOCK, rows[0]);
-    else {
-      // All blocks or none: a retry after a failure writes the same seqs.
-      this.lifecycle.storage.transactionSync(() => {
-        for (const row of rows) this.#sqlWrite(INSERT_BLOCK, row);
-      });
+    try {
+      if (rows.length === 1) this.#sqlWrite(INSERT_BLOCK, rows[0]);
+      else {
+        // All blocks or none: a retry writes the same seqs, never half.
+        this.lifecycle.storage.transactionSync(() => {
+          for (const row of rows) this.#sqlWrite(INSERT_BLOCK, row);
+        });
+      }
+    } catch (error) {
+      // The retry rule: the next flush re-reads the tail, so a stale block
+      // number cannot fail it again. A buffer that fails twice is dropped,
+      // as a crash would lose it; the stream's next buffer starts past
+      // every seq the dropped one handed out, and its first chunk is
+      // written at once (as after a skip), so no seq is handed out twice.
+      this.#liveTails.delete(streamId);
+      if (buffer.failed) {
+        this.#buffers.delete(streamId);
+        this.#seqFloors.set(streamId, firstSeq + jsons.length);
+      } else buffer.failed = true;
+      throw error;
     }
-    // Dropped only once written: a failed write leaves the chunks buffered.
     this.#buffers.delete(streamId);
     if (this.#liveTails.has(streamId)) {
       this.#liveTails.set(streamId, {
@@ -964,6 +990,7 @@ export class Streams extends LifecycleCapability {
     this.#liveTails.delete(streamId);
     this.#totals.delete(streamId);
     this.#bufferedHere.delete(streamId);
+    this.#seqFloors.delete(streamId);
     if (this.#deleteHooks.length > 0) {
       const row = this.#getStream(streamId);
       if (row) {
@@ -1003,6 +1030,7 @@ export class Streams extends LifecycleCapability {
     this.#liveTails.delete(streamId);
     // A settled stream takes no more buffered chunks.
     this.#bufferedHere.delete(streamId);
+    this.#seqFloors.delete(streamId);
     if (!options?.commit && !options?.discard) {
       const settled = this.#settleRow(streamId, state, reason);
       if (settled) this.#emitSettled(streamId, state, reason);

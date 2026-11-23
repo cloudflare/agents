@@ -130,6 +130,19 @@ export class EventLogObject extends DurableObject<Cloudflare.Env> {
     return seq;
   }
 
+  /**
+   * Publish one event; returns its seq, or the error message when the
+   * publish throws (a rejected RPC would surface as unhandled).
+   */
+  async tryPublish(log: string, data: string): Promise<number | string> {
+    await this.lifecycle.start();
+    try {
+      return this.#log(log).publish(data);
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
   /** Publish an object whose `toJSON` gives a new value on every call. */
   async publishCounter(): Promise<number> {
     await this.lifecycle.start();
@@ -184,6 +197,19 @@ export class EventLogObject extends DurableObject<Cloudflare.Env> {
        VALUES (?, ?, 1000000, 1000001, '0', 0, 0)`,
       `log:${log}`,
       block
+    );
+  }
+
+  /** Make every block write of a log's stream fail, or stop doing so. */
+  async failWrites(log: string, fail: boolean): Promise<void> {
+    await this.lifecycle.start();
+    const trigger = `fail_${log}`;
+    this.ctx.storage.sql.exec(`DROP TRIGGER IF EXISTS ${trigger}`);
+    if (!fail) return;
+    this.ctx.storage.sql.exec(
+      `CREATE TRIGGER ${trigger} BEFORE INSERT ON cf_agents_stream_blocks
+       WHEN NEW.stream_id = 'log:${log}'
+       BEGIN SELECT RAISE(ABORT, 'planted write failure'); END`
     );
   }
 

@@ -357,14 +357,50 @@ describe("event log", () => {
     expect(await stub(name).appendSized(200_000)).toBe(1);
     // The second block of the coming split flush is taken, so its write fails.
     await stub(name).plantBlock("big", 1);
-    await expect(
-      stub(name).publishText("big", "y".repeat(1_800_000))
-    ).rejects.toThrow();
+    expect(await stub(name).tryPublish("big", "y".repeat(1_800_000))).toMatch(
+      /UNIQUE constraint failed/
+    );
     // The first block was rolled back with it: no stored seq is left behind
     // for a retry to write again.
     expect(await stub(name).rows("big")).toEqual([
       { seq_from: 1_000_000, seq_to: 1_000_001 }
     ]);
+    // The retry re-reads the tail, so the next write succeeds with
+    // everything buffered, after the planted block.
+    expect(await stub(name).publishText("big", "z")).toBe(3);
+    expect(await stub(name).rows("big")).toEqual([
+      { seq_from: 1_000_000, seq_to: 1_000_001 },
+      { seq_from: 0, seq_to: 1 },
+      { seq_from: 1, seq_to: 3 }
+    ]);
+  });
+
+  it("drops a buffer whose write fails twice, and never hands its seqs out again", async () => {
+    const name = crypto.randomUUID();
+    expect(await stub(name).publish("feed", "stored")).toBe(1);
+    const { epoch } = await stub(name).head();
+    await stub(name).openBatch();
+    expect(await stub(name).append("a")).toBe(2);
+    await stub(name).failWrites("feed", true);
+    expect(await stub(name).tryPublish("feed", "b")).toMatch(
+      /planted write failure/
+    );
+    // The second failure drops the buffer (events 2 and 3, sent live).
+    expect(await stub(name).tryPublish("feed", "c")).toMatch(
+      /planted write failure/
+    );
+    await stub(name).failWrites("feed", false);
+    // The log is not stuck, and the next event starts past the dropped ones.
+    expect(await stub(name).publish("feed", "after")).toBe(5);
+    expect(await stub(name).rows()).toEqual([
+      { seq_from: 0, seq_to: 1 },
+      { seq_from: 4, seq_to: 5 }
+    ]);
+    // A cursor at a dropped event resyncs.
+    const client = await connect(name);
+    client.subscribe("feed", { epoch, seq: 2 });
+    await client.until(isType("resync"));
+    client.close();
   });
 
   it("keeps a connection's subscriptions across hibernation", async () => {
