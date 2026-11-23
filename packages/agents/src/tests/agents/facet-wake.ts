@@ -145,6 +145,12 @@ export class FacetWakeRoot extends WakeAgent {
     return (await this.subAgent(FacetWakeMiddle, name)).pendingJobs();
   }
 
+  /** Make every facet wake due now, keeping any unreported drive counts. */
+  makeFacetWakesDueKeepingDrives(): void {
+    this.sql`UPDATE cf_agents_jobs SET time = ${Date.now() - 1}
+      WHERE capability LIKE 'cf:facet-wake:%'`;
+  }
+
   /** End this root's isolate, and its facets with it. */
   resetTree(): void {
     this.ctx.abort("test reset");

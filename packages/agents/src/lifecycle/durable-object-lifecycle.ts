@@ -654,33 +654,31 @@ export class Lifecycle<
     const now = Date.now();
     const prefix = `${FACET_WAKE}:`;
     const rows = this.#ctx.storage.sql
-      .exec<{ capability: string }>(
-        `SELECT capability FROM cf_agents_jobs
-         WHERE substr(capability, 1, ?) = ? AND time > ?`,
+      .exec<{ capability: string; time: number }>(
+        `SELECT capability, time FROM cf_agents_jobs
+         WHERE substr(capability, 1, ?) = ?`,
         prefix.length,
-        prefix,
-        now
+        prefix
       )
       .toArray();
     let moved = false;
-    for (const { capability } of rows) {
+    for (const { capability, time } of rows) {
       const path = capability.slice(prefix.length);
       // A path whose last drive never replied (perhaps the very reset that
-      // restarted this root) keeps its recheck delay and back-off.
+      // restarted this root) keeps its recheck delay and back-off, even when
+      // its wake is already due: nothing in this fresh isolate is driving it.
       const drives = this.#ctx.storage.kv.get<FacetDriveCount>(
         facetDriveKey(path)
       );
-      const notBefore = drives
+      const target = drives
         ? Math.max(
+            now,
             drives.at + FACET_DRIVE_RECHECK_MS,
             facetDriveNotBefore(drives)
           )
-        : 0;
-      this.#jobQueue.reschedule(
-        capability,
-        facetWakeJobId(path),
-        Math.max(now, notBefore)
-      );
+        : Math.min(time, now);
+      if (target === time) continue;
+      this.#jobQueue.reschedule(capability, facetWakeJobId(path), target);
       moved = true;
     }
     return moved;

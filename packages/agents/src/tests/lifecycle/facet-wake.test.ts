@@ -172,11 +172,28 @@ describe("facet wake", () => {
     const again = await getAgentByName(env.FacetWakeRoot, name);
     await again.rootJobs();
     await new Promise((resolve) => setTimeout(resolve, 500));
-    const before = Date.now() - 300;
     // The facet started (its own start recovers what the reset cut off)
-    // well before this test reached it, so the root's restart drove it.
+    // before this test reached it, so the root's restart drove it.
+    const before = Date.now();
     const starts = await again.middleStarts("m");
     expect(starts.some((at) => at > resetAt && at < before)).toBe(true);
+  });
+
+  it("keeps the recheck delay of an unreplied drive whose wake was already due when the root starts again", async () => {
+    const name = crypto.randomUUID();
+    const agent = await getAgentByName(env.FacetWakeRoot, name);
+    await agent.middlePush("m", "due", 60_000);
+    const key = (await agent.rootJobs())[0]!.id.slice("facet:".length);
+    // A drive went unanswered because it took the tree down with it; its
+    // claimed wake is still due.
+    await agent.markUnreportedDrives(key, 1);
+    await agent.makeFacetWakesDueKeepingDrives();
+    const marked = Date.now();
+
+    await agent.resetTree().catch(() => {});
+    const again = await getAgentByName(env.FacetWakeRoot, name);
+    const [wake] = await again.rootJobs();
+    expect(wake!.time).toBeGreaterThanOrEqual(marked + 25_000);
   });
 
   it("keeps the recheck delay for a facet whose last drive never replied", async () => {
