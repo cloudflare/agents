@@ -52,6 +52,29 @@ export * from "./types";
 
 const LEGACY_NAME_STORAGE_KEY = "__ps_name";
 
+/**
+ * Route envelope and job owner of the facet wake. A facet has no alarm:
+ * its Lifecycle asks its root to hold one job per facet path ("arm"), and
+ * the root calls down to run the facet's due jobs ("drive").
+ */
+const FACET_WAKE = "cf:facet-wake";
+
+type FacetWakeMessage =
+  | { readonly type: "arm"; readonly time: number | null }
+  | { readonly type: "drive" };
+
+/**
+ * The root's wake job for one facet path: its own owner id, so a facet that
+ * keeps failing holds back only its own wake and not its siblings'.
+ */
+function facetWakeOwner(key: string): string {
+  return `${FACET_WAKE}:${key}`;
+}
+
+function facetWakeJobId(key: string): string {
+  return `facet:${key}`;
+}
+
 function mutableRequest(request: Request): Request {
   return new Request(request);
 }
@@ -256,6 +279,10 @@ export class Lifecycle<
       emit: (type, payload) =>
         this.#emitCapabilityEvent({ source: "lifecycle", type, payload }),
       rearm: () => this.rearmAlarm(),
+      armFallback: async (time) => {
+        if (this.#facetAddress()) return;
+        await this.#ctx.storage.setAlarm(time);
+      },
       // Deferred a tick so the current invocation settles (its RPC/alarm
       // completes and its writes confirm) before the instance resets —
       // `abort()` throws an uncatchable error, mirroring Agent.destroy().
@@ -443,6 +470,7 @@ export class Lifecycle<
   }
 
   async #dispatchRoute(envelope: LifecycleRouteEnvelope): Promise<unknown> {
+    if (envelope.capability === FACET_WAKE) return this.#onFacetWake(envelope);
     await this.#ensureInitialized();
     return runWithoutCurrentAgent(() =>
       this.#capabilityRunner.route(envelope.capability, {
@@ -455,6 +483,80 @@ export class Lifecycle<
   /** @internal Deliver a generic capability envelope to this Lifecycle. */
   route(envelope: LifecycleRouteEnvelope): Promise<unknown> {
     return this.#dispatchRoute(envelope);
+  }
+
+  /** This Lifecycle's address when it runs in a facet, else undefined. */
+  #facetAddress(): LifecycleRouteAddress | undefined {
+    return lifecycleRouteTransports.get(this)?.source;
+  }
+
+  /** True while the root is driving this facet's jobs. */
+  #drivingFromRoot = false;
+  /** The wake time this facet last gave its root. */
+  #reportedWake: number | null | undefined;
+
+  async #onFacetWake(envelope: LifecycleRouteEnvelope): Promise<unknown> {
+    const message = envelope.payload as FacetWakeMessage;
+    if (message.type === "arm") {
+      // At the root: hold, move or drop the one wake job for that facet.
+      if (!envelope.source) {
+        throw new Error("A facet wake needs the facet's address");
+      }
+      const jobs = this.#jobsForOwner(facetWakeOwner(envelope.source.key));
+      const id = facetWakeJobId(envelope.source.key);
+      if (message.time === null) await jobs.cancel(id);
+      else {
+        await jobs.push({
+          id,
+          fn: "wake",
+          time: message.time,
+          payload: envelope.source
+        });
+      }
+      return true;
+    }
+    // In the facet: run its due jobs as a root's alarm would, and reply with
+    // the next due time. The reply re-arms the root's job, so no report is
+    // sent meanwhile; the reply is also what makes the job rows durable
+    // before the root acts on it.
+    this.#drivingFromRoot = true;
+    try {
+      await this.alarm();
+    } catch (error) {
+      // The driver already held or retried the failing job and re-armed;
+      // the root must not treat the facet as failed for it.
+      console.error(this.#errorLogPrefix("facet wake"), error);
+    } finally {
+      this.#drivingFromRoot = false;
+    }
+    const next = this.#jobQueue.nextAlarmTime(Date.now());
+    this.#reportedWake = next;
+    return { next };
+  }
+
+  /**
+   * At the root: drop the wake jobs of a facet path and its descendants,
+   * when the sub-tree is deleted.
+   *
+   * @internal
+   */
+  async forgetFacetWakes(key: string): Promise<void> {
+    if (!this.#jobQueue.hasJobs()) return;
+    const owner = facetWakeOwner(key);
+    const rows = this.#ctx.storage.sql
+      .exec<{ capability: string }>(
+        `SELECT capability FROM cf_agents_jobs
+         WHERE capability = ? OR substr(capability, 1, ?) = ?`,
+        owner,
+        owner.length + 1,
+        `${owner}/`
+      )
+      .toArray();
+    for (const { capability } of rows) {
+      await this.#jobsForOwner(capability).cancel(
+        facetWakeJobId(capability.slice(FACET_WAKE.length + 1))
+      );
+    }
   }
 
   #emitCapabilityEvent(event: LifecycleEvent): void {
@@ -788,7 +890,14 @@ export class Lifecycle<
     if (this.#alarmsDisabled) return;
     try {
       if (!this.#jobQueue.hasJobs()) return;
-      if ((await this.#ctx.storage.getAlarm()) !== null) return;
+      // A facet has no alarm to read: it tells its root its next wake once
+      // per start, in case the root lost it.
+      if (
+        !this.#facetAddress() &&
+        (await this.#ctx.storage.getAlarm()) !== null
+      ) {
+        return;
+      }
       await this.rearmAlarm();
     } catch (error) {
       console.error(this.#errorLogPrefix("wake check"), error);
@@ -862,6 +971,21 @@ export class Lifecycle<
       return;
     }
 
+    const facet = this.#facetAddress();
+    if (facet) {
+      // The root's call that is driving this facet carries the next wake in
+      // its reply.
+      if (this.#drivingFromRoot) return;
+      await this.#serializeAlarmWrite(async () => {
+        if (this.#alarmsDisabled) return;
+        await this.#reportWakeToRoot(
+          facet,
+          this.#jobQueue.nextAlarmTime(Date.now())
+        );
+      });
+      return;
+    }
+
     await this.#serializeAlarmWrite(async () => {
       if (this.#alarmsDisabled) return;
       const alarm = this.#jobQueue.nextAlarmTime(Date.now());
@@ -874,6 +998,27 @@ export class Lifecycle<
         await this.#ctx.storage.setAlarm(alarm);
       }
     });
+  }
+
+  /**
+   * Tell the root this facet's next wake, when it changed. The job rows are
+   * synced first: this call is not a reply, so a reset could otherwise lose
+   * a row the root has already been told about.
+   */
+  async #reportWakeToRoot(
+    facet: LifecycleRouteAddress,
+    time: number | null
+  ): Promise<void> {
+    if (time === this.#reportedWake) return;
+    const transport = lifecycleRouteTransports.get(this);
+    if (!transport) return;
+    await this.#ctx.storage.sync();
+    await transport.toRoot({
+      capability: FACET_WAKE,
+      source: facet,
+      payload: { type: "arm", time } satisfies FacetWakeMessage
+    });
+    this.#reportedWake = time;
   }
 
   /**
@@ -906,7 +1051,14 @@ export class Lifecycle<
   async disableAlarms(): Promise<void> {
     this.#alarmsDisabled = true;
     await this.#alarmRearmQueue.catch(() => {});
-    await this.#ctx.storage.deleteAlarm();
+    const facet = this.#facetAddress();
+    if (!facet) {
+      await this.#ctx.storage.deleteAlarm();
+      return;
+    }
+    // A facet has no alarm; its root drops its wake job. Best-effort: a
+    // facet being destroyed is also removed from the root's sub-tree.
+    await this.#reportWakeToRoot(facet, null).catch(() => {});
   }
 
   /**
@@ -932,6 +1084,7 @@ export class Lifecycle<
    * context, like every other capability hook.
    */
   async #resolveJobDispatch(owner: string): Promise<JobDispatch | undefined> {
+    if (owner.startsWith(`${FACET_WAKE}:`)) return this.#facetWakeDispatch();
     if (owner === HOST_JOB_CAPABILITY) {
       const host = this.#host;
       if (!host.onJob) return undefined;
@@ -951,6 +1104,31 @@ export class Lifecycle<
         ? async (context, error) =>
             runWithoutCurrentAgent(() => capability.onJobError!(context, error))
         : undefined
+    };
+  }
+
+  /**
+   * At the root: a facet wake job calls down its path and runs the facet's
+   * due jobs. The reply is the facet's next due time: the job moves there,
+   * or completes when the facet has nothing left. A path that no longer
+   * exists completes it too. A failed call goes through the driver's usual
+   * failure handling, so a reset facet is retried with a fresh stub.
+   */
+  #facetWakeDispatch(): JobDispatch | undefined {
+    const transport = lifecycleRouteTransports.get(this);
+    if (!transport) return undefined;
+    return {
+      onJob: async ({ job }) => {
+        const target = job.payload as LifecycleRouteAddress;
+        const reply = await transport.to(target, {
+          capability: FACET_WAKE,
+          source: transport.source,
+          payload: { type: "drive" } satisfies FacetWakeMessage
+        });
+        if (reply === false) return undefined;
+        const next = (reply as { next: number | null }).next;
+        return next === null ? undefined : { rescheduleAt: next };
+      }
     };
   }
 }

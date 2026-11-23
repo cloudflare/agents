@@ -343,6 +343,18 @@
         "name": "TestSubAgentParent"
       },
       {
+        "class_name": "FacetWakeRoot",
+        "name": "FacetWakeRoot"
+      },
+      {
+        "class_name": "FacetWakeMiddle",
+        "name": "FacetWakeMiddle"
+      },
+      {
+        "class_name": "FacetWakeLeaf",
+        "name": "FacetWakeLeaf"
+      },
+      {
         "class_name": "CustomBoundSubAgentParent",
         "name": "CUSTOM_BOUND_SUB_AGENT_PARENT"
       },
@@ -593,6 +605,9 @@
         "RoutingOwnerAgent",
         "RoutedChatAgent",
         "TestSubAgentParent",
+        "FacetWakeRoot",
+        "FacetWakeMiddle",
+        "FacetWakeLeaf",
         "CustomBoundSubAgentParent",
         "TestWorkflowSubAgent",
         "TestWorkflowOnStartSubAgent",

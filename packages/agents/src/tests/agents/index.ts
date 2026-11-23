@@ -81,3 +81,4 @@ export {
   BodyProbeRootAgent
 } from "./sub-agent";
 export { TestFetchErrorAgent } from "./fetch-error";
+export { FacetWakeRoot, FacetWakeMiddle, FacetWakeLeaf } from "./facet-wake";

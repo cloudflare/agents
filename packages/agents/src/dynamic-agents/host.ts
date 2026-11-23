@@ -23,6 +23,7 @@ export interface DynamicAgentHostPort {
   readonly ctx: DurableObjectState;
   readonly lifecycle: {
     route(envelope: LifecycleRouteEnvelope): Promise<unknown>;
+    forgetFacetWakes(key: string): Promise<void>;
     readonly name: string;
   };
   sql<T = Record<string, string | number | boolean | null>>(

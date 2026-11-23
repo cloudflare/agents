@@ -300,6 +300,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
   async cleanupPrefix(ownerPath: ReadonlyArray<AgentPathStep>): Promise<void> {
     const prefix = agentPathKey(ownerPath);
     if (prefix) {
+      await this.#host.lifecycle.forgetFacetWakes(prefix);
       await this.#host.scheduler.__DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(
         prefix
       );
