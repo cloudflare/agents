@@ -518,6 +518,79 @@ describe("Context", () => {
     });
   });
 
+  it("reads only the new messages' records each turn", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const sessions = new Sessions();
+      install(sessions);
+      const session = sessions.session();
+      let asked = 0;
+      const counting = new Proxy(session, {
+        get(target, key, receiver) {
+          if (key === "internal_annotations") {
+            return (kind: string, ids: readonly string[]) => {
+              asked += ids.length;
+              return target.internal_annotations(kind, ids);
+            };
+          }
+          const value = Reflect.get(target, key, receiver);
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+      });
+      let date = "Monday";
+      const context = new Context(counting, {
+        sql: storageSql(storage),
+        blocks: [
+          {
+            label: "environment",
+            provider: { get: async () => `Today is ${date}.` },
+            whenChanged: "remind"
+          }
+        ]
+      });
+      const perTurn: number[] = [];
+      for (let turn = 1; turn <= 12; turn++) {
+        if (turn % 4 === 0) date = `day ${turn}`;
+        await session.appendMessage(user(`u${turn}`, "q"));
+        asked = 0;
+        await context.build();
+        perTurn.push(asked);
+        await session.appendMessage(assistant(`a${turn}`, "a"));
+      }
+      // Two new messages a turn (the answer and the question), never the
+      // whole transcript.
+      expect(Math.max(...perTurn.slice(1))).toBeLessThanOrEqual(2);
+    });
+  });
+
+  it("reads a record afresh for an id reused after a clear and refresh", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const { session, context, setDate } = await setup(storage, (s) =>
+        install(s)
+      );
+      await session.appendMessage(user("u1", "hello"));
+      await context.build();
+      await session.appendMessage(assistant("a1", "hi"));
+      setDate("Tuesday");
+      await session.appendMessage(user("u2", "what day?"));
+      expect(JSON.stringify((await context.build()).messages)).toContain(
+        "Today is Tuesday."
+      );
+
+      // As Think clears: the transcript, then a refresh.
+      await session.clearMessages();
+      await context.refreshSystemPrompt();
+      setDate("Wednesday");
+      await session.appendMessage(user("u1", "again"));
+      expect((await context.build()).system).toContain("Today is Wednesday.");
+      await session.appendMessage(assistant("a1", "hi"));
+      // u2 had a record delivering Tuesday before the clear.
+      await session.appendMessage(user("u2", "and?"));
+      const sent = JSON.stringify((await context.build()).messages);
+      expect(sent).not.toContain("Today is Tuesday.");
+      expect(sent).not.toContain("These context blocks changed");
+    });
+  });
+
   it("projects the same history to the same messages", async () => {
     await withCapabilityHarness(async ({ storage, install }) => {
       const { session, context, setDate } = await setup(storage, (s) =>

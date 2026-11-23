@@ -186,6 +186,11 @@ export class Context {
   #frozen: string | null | undefined;
   /** Whether a refresh waits to be recorded; read from the session once. */
   #refresh: boolean | undefined;
+  /** Records by message id, as last read or written (see `#records`). */
+  readonly #cache = new Map<
+    string,
+    { stamp: string | undefined; record: ContextRecord | null }
+  >();
 
   constructor(session: ContextSession, options: ContextOptions = {}) {
     this.#session = session;
@@ -320,7 +325,7 @@ export class Context {
   async project(
     messages: readonly SessionMessage[]
   ): Promise<SessionMessage[]> {
-    const records = await this.#records(messages.map((message) => message.id));
+    const records = await this.#records(messages);
     // A reminder recorded before the latest snapshot is superseded by it:
     // the snapshot holds the value, and the refresh that took it already
     // gave up the cached prefix.
@@ -402,6 +407,9 @@ export class Context {
    * deliberate cache bust.
    */
   async refreshSystemPrompt(): Promise<string> {
+    // Also the step after clearing the transcript (Think does both): the
+    // records read so far may belong to messages that are gone.
+    this.#cache.clear();
     await this.#blocks.load();
     await this.#setRefresh(true);
     return renderSystem(await this.#blocks.internal_sections());
@@ -487,7 +495,7 @@ export class Context {
     const last = history.at(-1);
     if (!last) return none;
 
-    const records = await this.#records(history.map((message) => message.id));
+    const records = await this.#records(history);
     let found: { id: string; record: ContextRecord } | undefined;
     for (let index = history.length - 1; index >= 0; index--) {
       const message = history[index];
@@ -595,11 +603,63 @@ export class Context {
     return current.filter(([label, text]) => delivered.get(label) !== text);
   }
 
-  async #records(ids: readonly string[]): Promise<Map<string, ContextRecord>> {
-    const raw = await this.#session.internal_annotations(RECORD, ids);
-    return new Map(
-      [...raw].map(([id, value]) => [id, JSON.parse(value) as ContextRecord])
+  /**
+   * The records of these messages. A record is written only through this
+   * instance (`#put`) and an overlay's id is never reused, so a message
+   * looked up once is not read again: a turn reads only its new messages.
+   * A stored message is matched on its `createdAt` too, so an id reused
+   * after a clear or delete is read afresh. The cache holds the last
+   * window's ids and is cut back to it when it grows past twice that.
+   */
+  async #records(
+    messages: readonly (SessionMessage | string)[]
+  ): Promise<Map<string, ContextRecord>> {
+    const stampOf = (message: SessionMessage | string) =>
+      typeof message === "string" || isCompactionMessage(message)
+        ? undefined
+        : String(message.createdAt ?? "");
+    const ids = messages.map((message) =>
+      typeof message === "string" ? message : message.id
     );
+    const missing = messages.filter((message, index) => {
+      const cached = this.#cache.get(ids[index]);
+      const stamp = stampOf(message);
+      return (
+        !cached ||
+        (stamp !== undefined &&
+          cached.stamp !== undefined &&
+          cached.stamp !== stamp)
+      );
+    });
+    if (missing.length > 0) {
+      const raw = await this.#session.internal_annotations(
+        RECORD,
+        missing.map((message) =>
+          typeof message === "string" ? message : message.id
+        )
+      );
+      for (const message of missing) {
+        const id = typeof message === "string" ? message : message.id;
+        const value = raw.get(id);
+        this.#cache.set(id, {
+          stamp: stampOf(message),
+          record:
+            value === undefined ? null : (JSON.parse(value) as ContextRecord)
+        });
+      }
+    }
+    const found = new Map<string, ContextRecord>();
+    for (const id of ids) {
+      const record = this.#cache.get(id)?.record;
+      if (record) found.set(id, record);
+    }
+    if (this.#cache.size > 2 * ids.length + 64) {
+      const keep = new Set(ids);
+      for (const id of this.#cache.keys()) {
+        if (!keep.has(id)) this.#cache.delete(id);
+      }
+    }
+    return found;
   }
 
   async #put(id: string, record: ContextRecord): Promise<void> {
@@ -608,6 +668,8 @@ export class Context {
       id,
       JSON.stringify(record)
     );
+    const cached = this.#cache.get(id);
+    this.#cache.set(id, { stamp: cached?.stamp, record });
   }
 }
 

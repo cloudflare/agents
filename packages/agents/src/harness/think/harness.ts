@@ -706,6 +706,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       else this.#ownClears.set(session, left);
     }
     this.#tables().deleteSettled(session);
+    // The session's context read records of the messages just cleared.
+    this.#contexts.delete(session);
     this.#events.emit(session, { type: "reset" });
     if (handoff) {
       const note: UIMessage = {
