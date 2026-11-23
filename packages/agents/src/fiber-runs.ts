@@ -279,7 +279,7 @@ async function recover(
   // replies record their delivery stages that way): `resolveFiber` during
   // this attempt writes through this attempt and is its settlement.
   const resolving = managed ? recovering(host.tasks) : undefined;
-  const own: Resolution = { step };
+  const own: Resolution = { step, sync: () => host.sync() };
   resolving?.set(id, own);
   try {
     handled = await withTimeout(host, ctx, () =>
@@ -348,7 +348,11 @@ async function recover(
     : settlement;
 }
 
-type Resolution = { step: TaskStep; result?: FiberRecoveryResult };
+type Resolution = {
+  step: TaskStep;
+  sync: () => Promise<void>;
+  result?: FiberRecoveryResult;
+};
 type StoredResolution = {
   status: FiberRecoveryResult["status"];
   reason?: string;
@@ -673,6 +677,9 @@ export async function resolveFiber(
     }
     own.step.checkpoint.set(RESOLVED, stored);
     own.result = result;
+    // Committed before the hook goes on: a reset (`ctx.abort()`) right
+    // after would otherwise roll it back (measured on a deployment).
+    await own.sync();
     return true;
   }
   const record = tasks.peek(fiberId);
