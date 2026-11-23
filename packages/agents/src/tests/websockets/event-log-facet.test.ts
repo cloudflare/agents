@@ -24,13 +24,14 @@ type Frame = {
 
 const unique = () => crypto.randomUUID().slice(0, 8);
 
-/** Every socket a test opened, closed and drained after it. */
+/** Every socket a test opened, and the roots they reached. */
 const opened: WebSocket[] = [];
+const roots = new Set<string>();
 
 afterEach(async () => {
   // A facet's close handler and its queued writes to the root run after the
-  // client closes. Let them finish inside the test, so none is still
-  // waiting on the pool when the next file's environment starts.
+  // client closes. Wait until each root has dropped every socket, so none
+  // of that work is still running when the next file's environment starts.
   for (const ws of opened.splice(0)) {
     try {
       ws.close();
@@ -38,7 +39,15 @@ afterEach(async () => {
       // already closed
     }
   }
-  await new Promise((resolve) => setTimeout(resolve, 100));
+  for (const name of [...roots]) {
+    const root = await getAgentByName(env.TestSubAgentParent, name);
+    await vi.waitFor(
+      async () =>
+        expect(Object.keys(await root.rootEventLogFlags())).toEqual([]),
+      { timeout: 2000 }
+    );
+  }
+  roots.clear();
 });
 
 async function connect(path: string) {
@@ -49,6 +58,8 @@ async function connect(path: string) {
   const ws = res.webSocket as WebSocket;
   ws.accept();
   opened.push(ws);
+  const root = /^\/agents\/test-sub-agent-parent\/([^/]+)\//.exec(path)?.[1];
+  if (root) roots.add(root);
   const frames: Frame[] = [];
   ws.addEventListener("message", (event) => {
     try {
