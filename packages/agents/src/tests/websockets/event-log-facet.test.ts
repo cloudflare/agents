@@ -6,7 +6,7 @@
  * reloading its connections from the root.
  */
 import { env, exports } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { getAgentByName } from "../../index";
 import {
   EVENT_LOG_EVENTS,
@@ -296,13 +296,19 @@ describe("event log in a facet", () => {
     await tab.until(EVENT_LOG_RESYNC);
     await other.until(EVENT_LOG_RESYNC);
     tab.unsubscribe();
-    tab.ws.send("noop");
-    const ids = await parent.eventLogFacetConnectionIds(child);
-    // A relay's stale copy of the socket's state, as it lands after the
-    // unsubscribe.
-    for (const id of ids) {
-      await parent._cf_setSubAgentConnectionState(id, { _cf_logs: ["feed"] });
-    }
+    // Wait until the root has applied the unsubscribe: one socket left
+    // following.
+    let unsubscribed: string | undefined;
+    await vi.waitFor(async () => {
+      const flags = Object.entries(await parent.rootEventLogFlags());
+      expect(flags.filter(([, logs]) => logs !== null)).toHaveLength(1);
+      unsubscribed = flags.find(([, logs]) => logs === null)?.[0];
+      expect(unsubscribed).toBeDefined();
+    });
+    // Then a relay's older copy of that socket's state lands.
+    await parent._cf_setSubAgentConnectionState(unsubscribed!, {
+      _cf_logs: ["feed"]
+    });
     await parent.eventLogFacetRehydrate(child);
     await parent.eventLogFacetPublish(child, "after");
     expect(seqs(await other.until(EVENT_LOG_EVENTS))).toEqual([1]);

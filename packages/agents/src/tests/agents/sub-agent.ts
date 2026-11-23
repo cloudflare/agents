@@ -2470,8 +2470,21 @@ export class TestSubAgentParent extends Agent {
     this.ctx.abort("test crash");
   }
 
-  async eventLogFacetConnectionIds(child: string): Promise<string[]> {
-    return (await this.subAgent(EventLogSubAgent, child)).connectionIds();
+  /** The event logs each root socket is recorded as following, by id. */
+  rootEventLogFlags(): Record<string, unknown> {
+    const flags: Record<string, unknown> = {};
+    // SAFETY: a test reads the root's own sockets, child-routed ones
+    // included, which `getConnections()` leaves out.
+    const webSockets = (
+      this as unknown as {
+        _webSockets: { getConnections(): Iterable<Connection> };
+      }
+    )._webSockets;
+    for (const connection of webSockets.getConnections()) {
+      flags[connection.id] =
+        this._unsafe_getConnectionFlag(connection, "_cf_logs") ?? null;
+    }
+    return flags;
   }
 
   async eventLogFacetRehydrate(child: string): Promise<void> {
