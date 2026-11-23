@@ -134,6 +134,8 @@ function setup() {
     | Array<{ id: string; role: string; parts?: unknown[] }>
     | undefined;
   let holdList: Promise<void> | undefined;
+  let keepAliveError: Error | undefined;
+  let keepAliveGate: Promise<void> = Promise.resolve();
   const lifecycles: Promise<unknown>[] = [];
   let requestIds = 0;
   let flushes = 0;
@@ -174,6 +176,10 @@ function setup() {
     responseType: "response",
     resetError: "cleared",
     keepAliveWhile: (fn) => {
+      if (keepAliveError) {
+        const error = keepAliveError;
+        return keepAliveGate.then(() => Promise.reject(error));
+      }
       const running = fn();
       lifecycles.push(running);
       return running;
@@ -234,6 +240,11 @@ function setup() {
     },
     setActiveRequest: (requestId: string | null) => {
       activeRequestId = requestId;
+    },
+    /** Make holding the isolate fail before the run's lifecycle runs. */
+    failKeepAlive: (error: Error, gate?: Promise<void>) => {
+      keepAliveError = error;
+      if (gate) keepAliveGate = gate;
     },
     setActiveStream: (requestId: string | null) => {
       activeStream = requestId;
@@ -332,6 +343,42 @@ describe("agentToolRunOutcome", () => {
 });
 
 describe("AgentToolRuns", () => {
+  it("settles a run error when holding the isolate fails before it runs", async () => {
+    const { runs, store, failKeepAlive } = setup();
+    failKeepAlive(new Error("Subrequest depth limit exceeded"));
+    const turn = heldTurn();
+    await runs.start("run-1", START, turn.run);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Nothing runs the turn, so the parent must not wait on it forever.
+    expect(store.terminal("run-1")).toEqual({
+      status: "error",
+      error: "Subrequest depth limit exceeded"
+    });
+    expect(runs.isLive("run-1")).toBe(false);
+  });
+
+  it("closes a tail opened before holding the isolate failed", async () => {
+    const { runs, failKeepAlive } = setup();
+    let release = () => {};
+    failKeepAlive(
+      new Error("Subrequest depth limit exceeded"),
+      new Promise<void>((resolve) => {
+        release = resolve;
+      })
+    );
+    await runs.start("run-1", START, heldTurn().run);
+    const reader = runs.tail("run-1").getReader();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    release();
+    const ended = await Promise.race([
+      reader.read().then((next) => next.done),
+      new Promise((resolve) => setTimeout(() => resolve("still open"), 200))
+    ]);
+    expect(ended).toBe(true);
+  });
+
   it("runs the turn and writes its outcome once, then forgets the run", async () => {
     const { runs, store, settled } = setup();
     const turn = heldTurn();

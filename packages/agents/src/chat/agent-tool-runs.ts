@@ -470,7 +470,9 @@ export class AgentToolRuns {
       }
     }
 
+    let lifecycleRan = false;
     const lifecycle = async () => {
+      lifecycleRan = true;
       // Set when the run is left open for chat recovery to finish.
       let recovering = false;
       try {
@@ -537,7 +539,19 @@ export class AgentToolRuns {
         if (!recovering) this.closeTailers(runId);
       }
     };
-    void this.host.keepAliveWhile(lifecycle);
+    this.host.keepAliveWhile(lifecycle).catch((error: unknown) => {
+      // The lifecycle settles the run on every way out once it runs. If
+      // holding the isolate failed before it ran (a facet past the
+      // platform's subrequest depth), nothing will: settle it here, or the
+      // parent waits on a run that never runs.
+      if (lifecycleRan) return;
+      this.#settle(runId, () => ({
+        status: "error",
+        error: error instanceof Error ? error.message : String(error)
+      }));
+      this.controllers.delete(runId);
+      this.closeTailers(runId);
+    });
     return { runId, status: "running", startedAt };
   }
 
