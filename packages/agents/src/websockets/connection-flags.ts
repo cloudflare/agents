@@ -218,6 +218,25 @@ export function setConnectionFlag(
   accessors.setRaw(withFlags(userState(raw), flags) ?? null);
 }
 
+/**
+ * Apply state a sub-agent wrote back through a bridged connection: as
+ * `setState`, which keeps the root's flags over the ones it brings, except
+ * the flag the sub-agent owns for a connection that ends at it, its
+ * event-log subscriptions, which it may also remove.
+ */
+export function applyForwardedConnectionState(
+  connection: Connection,
+  state: unknown
+): void {
+  ensureConnectionWrapped(connection);
+  connection.setState(state);
+  setConnectionFlag(
+    connection,
+    CF_EVENT_LOGS_KEY,
+    isRecord(state) ? state[CF_EVENT_LOGS_KEY] : undefined
+  );
+}
+
 export function isConnectionReadonly(connection: Connection): boolean {
   return !!getConnectionFlag(connection, CF_READONLY_KEY);
 }

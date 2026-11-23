@@ -116,16 +116,6 @@ export interface WebSocketsOptions {
   readonly state?: SyncedState;
 
   /**
-   * The connections event logs fan out to and look up followers in.
-   * Default: this capability's own open connections. A host whose clients
-   * are not all its own sockets passes its own source, such as an `Agent`
-   * facet, whose sockets the root owns and bridges in.
-   *
-   * @internal Not a public API (event logs are internal).
-   */
-  readonly connections?: () => Iterable<Connection>;
-
-  /**
    * Tags attached to each accepted connection, queryable through
    * `getConnections(tag)`. The connection id is always the first tag.
    */

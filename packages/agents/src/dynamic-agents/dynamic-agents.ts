@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
+  applyForwardedConnectionState,
   ensureConnectionWrapped,
   getConnectionRawState,
   setConnectionProtocolEnabled
@@ -158,6 +159,8 @@ export class DynamicAgentsInternal extends LifecycleCapability {
 
   /** Per-connection operation queues (send/setState/close ordering). */
   #connectionOperationTails = new Map<string, Promise<void>>();
+  /** State writes of a virtual connection still on their way to the root. */
+  #pendingStateWrites = new Map<string, number>();
 
   /**
    * The newest queued send batch per connection, while it can still take
@@ -808,6 +811,17 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     });
 
     this.#connectionOperationTails.set(connectionId, completion);
+    if (operationName === "setState") {
+      this.#pendingStateWrites.set(
+        connectionId,
+        (this.#pendingStateWrites.get(connectionId) ?? 0) + 1
+      );
+      void completion.then(() => {
+        const left = (this.#pendingStateWrites.get(connectionId) ?? 1) - 1;
+        if (left > 0) this.#pendingStateWrites.set(connectionId, left);
+        else this.#pendingStateWrites.delete(connectionId);
+      });
+    }
     this.#host.ctx.waitUntil(completion);
     void completion.then(() => {
       if (this.#connectionOperationTails.get(connectionId) === completion) {
@@ -1031,8 +1045,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     if (!connection || !this.connectionHasChildTarget(connection)) {
       return null;
     }
-    ensureConnectionWrapped(connection);
-    connection.setState(state);
+    applyForwardedConnectionState(connection, state);
     return this.getForwardedState(connection);
   }
 
@@ -1432,7 +1445,12 @@ export class DynamicAgentsInternal extends LifecycleCapability {
   createBridgeConnection(meta: DynamicAgentConnectionMeta): Connection {
     let stored = this.#virtualConnections.get(meta.id);
     if (stored) {
-      stored.meta = meta;
+      // While a state write of this facet is still on its way to the root,
+      // the root's copy in `meta` is older than ours: keep ours, or the
+      // next message would undo the write (an event-log unsubscribe).
+      stored.meta = this.#pendingStateWrites.has(meta.id)
+        ? { ...meta, state: stored.meta.state }
+        : meta;
       if (stored.connection) {
         (
           stored.connection as unknown as {

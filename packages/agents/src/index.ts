@@ -87,7 +87,10 @@ import {
 } from "./lifecycle/current-agent";
 import { getAgentByName } from "./agent-routing";
 import { WebSockets } from "./websockets";
-import { applyEventLogFrame } from "./websockets/websockets";
+import {
+  applyEventLogFrame,
+  setEventLogConnections
+} from "./websockets/websockets";
 import {
   ensureConnectionWrapped,
   getConnectionFlag,
@@ -529,9 +532,6 @@ export class Agent<
     // does not run it: `protocol: false`.
     protocol: false,
     state: this._state,
-    // Event logs fan out to the Agent's connections: on a facet, the
-    // sockets the root bridges in.
-    connections: () => this.getConnections(),
     getConnectionTags: (connection, ctx) =>
       this.getConnectionTags(connection, ctx)
   });
@@ -1299,6 +1299,14 @@ export class Agent<
       }
     );
 
+    // Event logs fan out to the connections that end at this Agent: on a
+    // facet, the sockets the root bridges in, without those a facet only
+    // forwards to a sub-agent of its own.
+    setEventLogConnections(this._webSockets, () =>
+      [...this.getConnections()].filter(
+        (connection) => !this._dynamicAgents.connectionTargetsChild(connection)
+      )
+    );
     // Agent's WebSocket connections ride the WebSockets capability —
     // Lifecycle itself no longer models connections. The handlers call
     // through `this.*` so they always hit the framework-wrapped hooks.

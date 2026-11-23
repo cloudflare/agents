@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { serializeRpcResponse } from "../websockets/frame-limit";
 import { RpcTarget } from "cloudflare:workers";
 import type { Connection } from "../lifecycle/durable-object-lifecycle";
+import { applyForwardedConnectionState } from "../websockets/connection-flags";
 import type { RPCResponse, StreamingResponse } from "../callable-rpc";
 import type {
   RootFacetRpcSurface,
@@ -165,7 +166,8 @@ export class DynamicAgentConnectionBridge
   }
 
   setState(state: unknown): unknown {
-    return this.#connection.setState(state);
+    applyForwardedConnectionState(this.#connection, state);
+    return state;
   }
 
   broadcast(

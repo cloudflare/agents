@@ -12,7 +12,8 @@ import {
   EVENT_LOG_EVENTS,
   EVENT_LOG_RESYNC,
   EVENT_LOG_SUBSCRIBE,
-  EVENT_LOG_SYNCED
+  EVENT_LOG_SYNCED,
+  EVENT_LOG_UNSUBSCRIBE
 } from "../../websockets/event-log-protocol";
 
 type Frame = {
@@ -53,6 +54,10 @@ async function connect(path: string) {
         }
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
+    },
+    frames,
+    unsubscribe() {
+      ws.send(JSON.stringify({ type: EVENT_LOG_UNSUBSCRIBE, log: "feed" }));
     },
     subscribe(cursor?: { epoch: string; seq: number }) {
       ws.send(
@@ -194,5 +199,56 @@ describe("event log in a facet", () => {
     });
     tab.ws.close();
     rootTab.ws.close();
+  });
+  it("stops sending to a facet follower after it unsubscribes, even after its next message", async () => {
+    const parentName = unique();
+    const child = unique();
+    const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+    const tab = await follow(parentName, child);
+    const other = await follow(parentName, child);
+    tab.subscribe();
+    other.subscribe();
+    await tab.until(EVENT_LOG_RESYNC);
+    await other.until(EVENT_LOG_RESYNC);
+    tab.ws.send("publish:before");
+    expect(seqs(await tab.until(EVENT_LOG_EVENTS))).toEqual([1]);
+
+    tab.unsubscribe();
+    // The next message from the same socket carries its state again.
+    tab.ws.send("publish:after");
+    expect(seqs(await other.until(EVENT_LOG_EVENTS, 2))).toEqual([1, 2]);
+    await parent.eventLogFacetPublish(child, "later");
+    expect(seqs(await other.until(EVENT_LOG_EVENTS, 3))).toEqual([1, 2, 3]);
+    expect(seqs(tab.frames.filter((f) => f.log === "feed"))).toEqual([1]);
+    tab.ws.close();
+    other.ws.close();
+  });
+
+  it("sends a nested facet's follower only that facet's events, not its parent facet's log of the same name", async () => {
+    const parentName = unique();
+    const outer = unique();
+    const inner = unique();
+    const base = `/agents/test-sub-agent-parent/${parentName}/sub/event-log-sub-agent/${outer}`;
+    const innerTab = await connect(`${base}/sub/event-log-sub-agent/${inner}`);
+    const outerTab = await connect(base);
+    innerTab.subscribe();
+    outerTab.subscribe();
+    await innerTab.until(EVENT_LOG_RESYNC);
+    await outerTab.until(EVENT_LOG_RESYNC);
+    // A message through the outer facet carries the inner subscription.
+    innerTab.ws.send("publish:inner");
+    expect(seqs(await innerTab.until(EVENT_LOG_EVENTS))).toEqual([1]);
+    outerTab.ws.send("publish:outer");
+    outerTab.ws.send("publish:outer");
+    expect(seqs(await outerTab.until(EVENT_LOG_EVENTS, 2))).toEqual([1, 2]);
+    innerTab.ws.send("publish:inner");
+    expect(seqs(await innerTab.until(EVENT_LOG_EVENTS, 2))).toEqual([1, 2]);
+    const innerData = innerTab.frames
+      .filter((f) => f.type === EVENT_LOG_EVENTS)
+      .flatMap((f) => f.events ?? [])
+      .map((e) => e.data);
+    expect(innerData).toEqual(["inner", "inner"]);
+    innerTab.ws.close();
+    outerTab.ws.close();
   });
 });
