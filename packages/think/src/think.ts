@@ -205,7 +205,6 @@ import type {
 import { declareSchedules } from "agents/internal";
 import {
   sanitizeMessage,
-  enforceRowSizeLimit,
   CHAT_MESSAGE_TYPES,
   ChatFrames,
   ResumableStream,
@@ -5392,14 +5391,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     }));
   }
 
-  private _sanitizeSubmissionMessages(messages: UIMessage[]): UIMessage[] {
-    return messages.map((message) =>
-      enforceRowSizeLimit(sanitizeMessage(message), {
-        warn: (warning) => console.warn(`[Think] ${warning}`)
-      })
-    );
-  }
-
   private _readWorkflowPromptContext(
     metadata: Record<string, unknown> | null | undefined
   ): ThinkWorkflowPromptContext | null {
@@ -5869,7 +5860,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         const receipt = await this.tasks.run(
           SUBMISSION_KIND,
           {
-            messages: this._sanitizeSubmissionMessages(messages)
+            messages: messages.map(sanitizeMessage)
           } as unknown as TaskJson,
           {
             ...(options?.submissionId && { runId: options.submissionId }),
