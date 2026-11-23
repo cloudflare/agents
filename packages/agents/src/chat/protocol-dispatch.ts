@@ -273,10 +273,10 @@ export async function dispatchChatProtocol<TConnection extends Connection>(
  */
 export function releaseChatConnection<TConnection extends Connection>(
   turns: ChatTurns<TConnection>,
-  pendingResume: Set<string>,
+  resume: Pick<ResumeHandshake, "release">,
   connectionId: string
 ): void {
-  pendingResume.delete(connectionId);
+  resume.release(connectionId);
   turns.continuation.releaseConnection(connectionId);
   turns.preStream.release(connectionId);
 }

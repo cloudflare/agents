@@ -454,9 +454,13 @@ describe("dispatchChatProtocol", () => {
 describe("releaseChatConnection", () => {
   it("releases the resume offer, the continuation wait and a parked turn", () => {
     const { host, calls } = recordingHost();
-    const pending = new Set(["c1", "c2"]);
-    releaseChatConnection(host.turns, pending, "c1");
-    expect([...pending]).toEqual(["c2"]);
+    const released: string[] = [];
+    releaseChatConnection(
+      host.turns,
+      { release: (id) => released.push(id) },
+      "c1"
+    );
+    expect(released).toEqual(["c1"]);
     expect(calls).toEqual([
       ["continuation.releaseConnection", "c1"],
       ["preStream.release", "c1"]

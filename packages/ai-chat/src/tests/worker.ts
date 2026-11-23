@@ -1712,6 +1712,11 @@ export class TestChatAgent extends AIChatAgent<Env> {
       this.streams,
       this.sql.bind(this)
     );
+    // A woken isolate builds its resume handshake again, around the new
+    // stream. SAFETY: a test resets the host's private lazy instance.
+    (
+      this as unknown as { _resumeHandshakeInstance: unknown }
+    )._resumeHandshakeInstance = null;
   }
 
   /**

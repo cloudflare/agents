@@ -195,6 +195,55 @@ describe("ResumeHandshake (driver → golden frames)", () => {
     ]);
   });
 
+  it("#2703: a REQUEST after the ACK does not park the connection again", async () => {
+    const frames: SentFrame[] = [];
+    const { resumableStream } = makeStream({
+      active: true,
+      activeRequestId: "req-1"
+    });
+    const pendingResumeConnections = new Set<string>();
+    const handshake = new ResumeHandshake(
+      makeHost({ resumableStream, pendingResumeConnections })
+    );
+    const conn = makeConnection("c1", frames);
+
+    handshake.notifyStreamResuming(conn);
+    await handshake.handleResumeAck(conn, "req-1");
+    expect(pendingResumeConnections.has("c1")).toBe(false);
+
+    // The tab's own probe arrives after it already ACKed. The tab dedupes
+    // the second STREAM_RESUMING and never ACKs again, so a connection
+    // parked here gets no live chunks until the stream ends.
+    await handshake.handleResumeRequest(conn, "probe-1");
+
+    expect(pendingResumeConnections.has("c1")).toBe(false);
+    // The probe is still answered, so the tab's resume does not time out.
+    expect(frames.at(-1)).toMatchObject({ id: "req-1", probeId: "probe-1" });
+  });
+
+  it("#2703: a connection that closed and reconnects with the same id is parked again until it ACKs", async () => {
+    const frames: SentFrame[] = [];
+    const { resumableStream } = makeStream({
+      active: true,
+      activeRequestId: "req-1"
+    });
+    const pendingResumeConnections = new Set<string>();
+    const handshake = new ResumeHandshake(
+      makeHost({ resumableStream, pendingResumeConnections })
+    );
+    const conn = makeConnection("c1", frames);
+
+    handshake.notifyStreamResuming(conn);
+    await handshake.handleResumeAck(conn, "req-1");
+    // The tab drops; PartySocket reconnects with the same id.
+    handshake.release("c1");
+    const again = makeConnection("c1", frames);
+    handshake.notifyStreamResuming(again);
+
+    // Parked: no live chunks before its ACK, so the replay comes first.
+    expect(pendingResumeConnections.has("c1")).toBe(true);
+  });
+
   it("REQUEST while a DIFFERENT connection owns the active continuation → RESUME_NONE", async () => {
     const frames: SentFrame[] = [];
     const { resumableStream } = makeStream({
