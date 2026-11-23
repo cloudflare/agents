@@ -209,6 +209,18 @@ describe("Think HITL — approve/reject paused executions", () => {
     ws.close();
   });
 
+  it("stores nothing for approvals of ids nothing is pending under", async () => {
+    const { agent, ws } = await runTurnToPause(crypto.randomUUID());
+    for (let i = 0; i < 3; i++) {
+      const answer = (await agent.approveExecution(
+        `bogus-${i}`
+      )) as PausedOutput;
+      expect(answer.status).toBe("error");
+    }
+    expect(await agent.decisionRunCountForTest()).toBe(0);
+    ws.close();
+  });
+
   it("reject applies a rejected output with the reason and continues", async () => {
     const room = crypto.randomUUID();
     const { agent, ws, executionId } = await runTurnToPause(room);

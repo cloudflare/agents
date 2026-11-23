@@ -231,6 +231,12 @@ export class ThinkExecuteHitlAgent extends Think {
       .sql`UPDATE cf_agents_task_runs SET notified = NULL WHERE run_id = ${runId}`;
   }
 
+  /** How many decision runs are stored. */
+  async decisionRunCountForTest(): Promise<number> {
+    return this.tasks.peekList({ definition: DECISION_TASK, limit: 1000 })
+      .length;
+  }
+
   /** Start Tasks again, as a new isolate does: undelivered reports replay. */
   async restartTasksForTest(): Promise<void> {
     await this.tasks.onStart();
