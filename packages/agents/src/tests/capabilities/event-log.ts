@@ -188,27 +188,19 @@ export class EventLogObject extends DurableObject<Cloudflare.Env> {
     return this.#log(log).head;
   }
 
-  /** Store a block at `block` of a log's stream, so a later write there fails. */
-  async plantBlock(log: string, block: number): Promise<void> {
-    await this.lifecycle.start();
-    this.ctx.storage.sql.exec(
-      `INSERT INTO cf_agents_stream_blocks
-         (stream_id, block, seq_from, seq_to, body, created_at, updated_at)
-       VALUES (?, ?, 1000000, 1000001, '0', 0, 0)`,
-      `log:${log}`,
-      block
-    );
-  }
-
-  /** Make every block write of a log's stream fail, or stop doing so. */
-  async failWrites(log: string, fail: boolean): Promise<void> {
+  /**
+   * Make block writes of a log's stream fail (only block number `block`
+   * when given), or stop doing so.
+   */
+  async failWrites(log: string, fail: boolean, block?: number): Promise<void> {
     await this.lifecycle.start();
     const trigger = `fail_${log}`;
     this.ctx.storage.sql.exec(`DROP TRIGGER IF EXISTS ${trigger}`);
     if (!fail) return;
+    const only = block === undefined ? "" : ` AND NEW.block = ${block}`;
     this.ctx.storage.sql.exec(
       `CREATE TRIGGER ${trigger} BEFORE INSERT ON cf_agents_stream_blocks
-       WHEN NEW.stream_id = 'log:${log}'
+       WHEN NEW.stream_id = 'log:${log}'${only}
        BEGIN SELECT RAISE(ABORT, 'planted write failure'); END`
     );
   }

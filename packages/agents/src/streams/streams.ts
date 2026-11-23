@@ -249,21 +249,22 @@ export class Streams extends LifecycleCapability {
       /** Each chunk's UTF-8 size, as the caller measured it. */
       readonly sizes: number[];
       bytes: number;
-      /** A write of this buffer failed once already. */
-      failed?: true;
     }
   >();
   /**
    * Streams this isolate created or has buffered into. The first buffer of
-   * any other stream starts `maxChunks` seqs past the durable head: what
-   * an earlier isolate buffered and lost in a crash is never given to a new
-   * chunk, and leaves a hole a reader can detect (`holds`).
+   * any other stream starts `maxChunks + 1` seqs past the durable head:
+   * what an earlier isolate buffered and lost (a crash, or a dropped
+   * buffer of up to `maxChunks`) is never given to a new chunk, and leaves
+   * a hole of at least one seq that a reader can detect (`holds`, or a
+   * live seq that is not the next one).
    */
   readonly #bufferedHere = new Set<string>();
   /**
    * The first seq a stream's next buffer may use, after a buffer was
-   * dropped for failing twice. Leaves with that next buffer, a settle or a
-   * delete.
+   * dropped because its write failed: one past the dropped seqs, so a
+   * follower that applied them sees a gap. Leaves with that next buffer,
+   * a settle or a delete.
    */
   readonly #seqFloors = new Map<string, number>();
   /**
@@ -754,7 +755,9 @@ export class Streams extends LifecycleCapability {
       this.#seqFloors.delete(streamId);
       skipped = !this.#bufferedHere.has(streamId) || floor !== undefined;
       const firstSeq = Math.max(
-        this.#bufferedHere.has(streamId) ? durable : durable + batch.maxChunks,
+        this.#bufferedHere.has(streamId)
+          ? durable
+          : durable + batch.maxChunks + 1,
         floor ?? 0
       );
       this.#bufferedHere.add(streamId);
@@ -834,16 +837,14 @@ export class Streams extends LifecycleCapability {
         });
       }
     } catch (error) {
-      // The retry rule: the next flush re-reads the tail, so a stale block
-      // number cannot fail it again. A buffer that fails twice is dropped,
-      // as a crash would lose it; the stream's next buffer starts past
-      // every seq the dropped one handed out, and its first chunk is
-      // written at once (as after a skip), so no seq is handed out twice.
+      // A failed write drops the buffer, as a crash would: a log that kept
+      // it would retry a write that may never succeed, and stop. The next
+      // buffer starts one past the dropped seqs (a gap a follower sees)
+      // and writes its first chunk at once, so it never returns a seq
+      // before its reservation is stored. The tail is read again.
       this.#liveTails.delete(streamId);
-      if (buffer.failed) {
-        this.#buffers.delete(streamId);
-        this.#seqFloors.set(streamId, firstSeq + jsons.length);
-      } else buffer.failed = true;
+      this.#buffers.delete(streamId);
+      this.#seqFloors.set(streamId, firstSeq + jsons.length + 1);
       throw error;
     }
     this.#buffers.delete(streamId);

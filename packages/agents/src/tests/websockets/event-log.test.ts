@@ -223,28 +223,28 @@ describe("event log", () => {
       .crash()
       .catch(() => {});
 
-    // The new isolate starts 3 (the batch size) past the stored seqs: seq
-    // 2 is never reused, and seqs 2..4 are a hole.
+    // The new isolate starts 4 (the batch size + 1) past the stored seqs:
+    // seq 2 is never reused, and seqs 2..5 are a hole.
     expect(await stub(name).head()).toEqual({ epoch, seq: 1 });
-    expect(await stub(name).publish("feed", "after")).toBe(5);
+    expect(await stub(name).publish("feed", "after")).toBe(6);
     expect(await stub(name).rows()).toEqual([
       { seq_from: 0, seq_to: 1 },
-      { seq_from: 4, seq_to: 5 }
+      { seq_from: 5, seq_to: 6 }
     ]);
 
     // A cursor in the hole saw a lost event: resync.
     const sawLost = await connect(name);
     sawLost.subscribe("feed", { epoch, seq: 2 });
     expect((await sawLost.until(isType("resync"))).at(-1)).toMatchObject({
-      seq: 5,
-      snapshot: { at: 5 }
+      seq: 6,
+      snapshot: { at: 6 }
     });
 
     // A cursor before the hole replays across it.
     const before = await connect(name);
     before.subscribe("feed", { epoch, seq: 1 });
     const frames = await before.until(isType("synced"));
-    expect(events(frames)).toEqual([{ seq: 5, data: "after" }]);
+    expect(events(frames)).toEqual([{ seq: 6, data: "after" }]);
     sawLost.close();
     before.close();
   });
@@ -257,15 +257,15 @@ describe("event log", () => {
     await survivor.until(isType("events"));
     await evictDurableObject(stub(name));
 
-    // The first write of the new isolate skips the batch size.
-    expect(await stub(name).publish("feed", "after")).toBe(5);
+    // The first write of the new isolate skips the batch size + 1.
+    expect(await stub(name).publish("feed", "after")).toBe(6);
     expect(events(await survivor.until(isType("events")))).toEqual([
-      { seq: 5, data: "after" }
+      { seq: 6, data: "after" }
     ]);
     // The client's skip guard asks again from its cursor: a replay.
     survivor.subscribe("feed", { epoch, seq: 1 });
     const frames = await survivor.until(isType("synced"));
-    expect(events(frames)).toEqual([{ seq: 5, data: "after" }]);
+    expect(events(frames)).toEqual([{ seq: 6, data: "after" }]);
     survivor.close();
   });
 
@@ -291,14 +291,14 @@ describe("event log", () => {
     await evictDurableObject(stub(name));
     await stub(name).openBatch();
     // The skip's first chunk is written at once; the next stays buffered.
-    expect(await stub(name).append("first")).toBe(5);
-    expect(await stub(name).append("lost")).toBe(6);
+    expect(await stub(name).append("first")).toBe(6);
+    expect(await stub(name).append("lost")).toBe(7);
     await stub(name)
       .crash()
       .catch(() => {});
-    expect(await stub(name).publish("feed", "after")).toBe(9);
+    expect(await stub(name).publish("feed", "after")).toBe(11);
     const client = await connect(name);
-    client.subscribe("feed", { epoch, seq: 6 });
+    client.subscribe("feed", { epoch, seq: 7 });
     await client.until(isType("resync"));
     client.close();
   });
@@ -355,51 +355,59 @@ describe("event log", () => {
     await stub(name).head("big");
     await stub(name).openBatch("big");
     expect(await stub(name).appendSized(200_000)).toBe(1);
-    // The second block of the coming split flush is taken, so its write fails.
-    await stub(name).plantBlock("big", 1);
+    // The second block of the coming split flush fails to write.
+    await stub(name).failWrites("big", true, 1);
     expect(await stub(name).tryPublish("big", "y".repeat(1_800_000))).toMatch(
-      /UNIQUE constraint failed/
+      /planted write failure/
     );
-    // The first block was rolled back with it: no stored seq is left behind
-    // for a retry to write again.
-    expect(await stub(name).rows("big")).toEqual([
-      { seq_from: 1_000_000, seq_to: 1_000_001 }
-    ]);
-    // The retry re-reads the tail, so the next write succeeds with
-    // everything buffered, after the planted block.
-    expect(await stub(name).publishText("big", "z")).toBe(3);
-    expect(await stub(name).rows("big")).toEqual([
-      { seq_from: 1_000_000, seq_to: 1_000_001 },
-      { seq_from: 0, seq_to: 1 },
-      { seq_from: 1, seq_to: 3 }
-    ]);
+    // The first block was rolled back with it.
+    expect(await stub(name).rows("big")).toEqual([]);
+    await stub(name).failWrites("big", false);
+    // The buffer was dropped; the log goes on past the dropped seqs.
+    expect(await stub(name).tryPublish("big", "z")).toBe(4);
+    expect(await stub(name).rows("big")).toEqual([{ seq_from: 3, seq_to: 4 }]);
   });
 
-  it("drops a buffer whose write fails twice, and never hands its seqs out again", async () => {
+  it("drops a buffer whose write fails, leaves a gap a follower sees, and is not stuck", async () => {
     const name = crypto.randomUUID();
+    const live = await connect(name);
+    const { epoch } = await follow(live);
     expect(await stub(name).publish("feed", "stored")).toBe(1);
-    const { epoch } = await stub(name).head();
     await stub(name).openBatch();
     expect(await stub(name).append("a")).toBe(2);
+    // Sent live, never stored.
+    expect(events(await live.until(isType("events")))).toEqual([
+      { seq: 1, data: "stored" }
+    ]);
+    expect(events(await live.until(isType("events")))).toEqual([
+      { seq: 2, data: "a" }
+    ]);
     await stub(name).failWrites("feed", true);
     expect(await stub(name).tryPublish("feed", "b")).toMatch(
       /planted write failure/
     );
-    // The second failure drops the buffer (events 2 and 3, sent live).
+    // Still failing: the next write reserves past the dropped seqs (2, 3)
+    // and fails too, before any seq is handed out.
     expect(await stub(name).tryPublish("feed", "c")).toMatch(
       /planted write failure/
     );
     await stub(name).failWrites("feed", false);
-    // The log is not stuck, and the next event starts past the dropped ones.
-    expect(await stub(name).publish("feed", "after")).toBe(5);
+    // One past each dropped range: 4 was left free after 2..3, and 6
+    // after 5.
+    expect(await stub(name).publish("feed", "after")).toBe(7);
     expect(await stub(name).rows()).toEqual([
       { seq_from: 0, seq_to: 1 },
-      { seq_from: 4, seq_to: 5 }
+      { seq_from: 6, seq_to: 7 }
+    ]);
+    // The follower that applied 2 gets 7: not the next seq, so it resyncs.
+    expect(events(await live.until(isType("events")))).toEqual([
+      { seq: 7, data: "after" }
     ]);
     // A cursor at a dropped event resyncs.
     const client = await connect(name);
     client.subscribe("feed", { epoch, seq: 2 });
     await client.until(isType("resync"));
+    live.close();
     client.close();
   });
 
@@ -409,10 +417,10 @@ describe("event log", () => {
     await follow(client);
     await evictDurableObject(stub(name));
     await stub(name).publish("feed", "woke");
-    // The new isolate's first write starts 3 (the batch size) past the
-    // stored seqs: seq 4.
+    // The new isolate's first write starts 4 (the batch size + 1) past
+    // the stored seqs: seq 5.
     expect(events(await client.until(isType("events")))).toEqual([
-      { seq: 4, data: "woke" }
+      { seq: 5, data: "woke" }
     ]);
     client.close();
   });

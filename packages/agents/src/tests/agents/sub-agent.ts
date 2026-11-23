@@ -2465,6 +2465,11 @@ export class TestSubAgentParent extends Agent {
     return (await this.subAgent(EventLogSubAgent, child)).rows();
   }
 
+  /** End this object (and its facets) as a crash would. */
+  crashForTest(): void {
+    this.ctx.abort("test crash");
+  }
+
   /** Whether the root's own SQLite has a stream block table (it must not). */
   rootHasStreamBlocks(): boolean {
     return (
