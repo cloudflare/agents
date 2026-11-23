@@ -308,3 +308,45 @@ describe("job driver hold and the alarm", () => {
     });
   });
 });
+
+describe("job driver staggered holds", () => {
+  it("wakes for each held owner at its own hold's end, and lets an earlier ordinary job win", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const ran: string[] = [];
+      const a = new Jobs("hold-a", ran);
+      const b = new Jobs("hold-b", ran);
+      const other = new Jobs("hold-other", ran);
+      const { lifecycle } = install(a);
+      lifecycle.use(b);
+      lifecycle.use(other);
+      await lifecycle.start();
+      await a.push({
+        id: "a",
+        fn: "poison",
+        time: Date.now() - 2,
+        retry: QUICK
+      });
+      await lifecycle.alarm().catch(() => {});
+      // b is held later than a.
+      await b.push({
+        id: "b",
+        fn: "poison",
+        time: Date.now() - 1,
+        retry: QUICK
+      });
+      await lifecycle.alarm().catch(() => {});
+      // a's job goes; only b's held job and an ordinary job remain.
+      storage.sql.exec("DELETE FROM cf_agents_jobs WHERE id = 'a'");
+      const now = Date.now();
+      await other.push({ id: "soon", fn: "ok", time: now + 5_000 });
+      // The ordinary job is earlier than any hold's end: it is the wake.
+      expect(await storage.getAlarm()).toBe(now + 5_000);
+      storage.sql.exec("DELETE FROM cf_agents_jobs WHERE id = 'soon'");
+      await lifecycle.rearmAlarm();
+      // Without it, the wake is b's own hold's end, not a's earlier one.
+      const alarm = await storage.getAlarm();
+      expect(alarm).not.toBeNull();
+      expect(alarm!).toBeGreaterThanOrEqual(now + 25_000);
+    });
+  });
+});
