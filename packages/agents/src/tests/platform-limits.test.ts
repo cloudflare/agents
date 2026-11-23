@@ -31,7 +31,7 @@ describe("platform row cap in the test pool", () => {
       expect(holds(SQLITE_ROW_BYTES)).toBe(true);
       if (holds(8_000_000)) {
         expect.fail(
-          "The vitest pool now holds an 8 MB value (its workerd is 1.20260930 " +
+          "The vitest pool this repo installs now holds an 8 MB value (its workerd is 1.20260930 " +
             'or later). The row floor can be raised: follow "Raising it" in ' +
             "design/platform-limits.md, then flip this check."
         );

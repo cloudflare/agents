@@ -55,8 +55,8 @@ describe("State capability", () => {
       await lifecycle.start();
       capability.set("small");
 
-      // Over the 2.2 MB row cap of the workerd the test pool runs.
-      expect(() => capability.set("x".repeat(3_000_000))).toThrow(
+      // Over every runtime's row cap (8,388,637 bytes is the largest measured).
+      expect(() => capability.set("x".repeat(9_000_000))).toThrow(
         /SQLITE_TOOBIG.*8 MiB in production/
       );
       expect(capability.get()).toBe("small");
