@@ -6,7 +6,7 @@
  * reloading its connections from the root.
  */
 import { env, exports } from "cloudflare:workers";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { getAgentByName } from "../../index";
 import {
   EVENT_LOG_EVENTS,
@@ -24,6 +24,23 @@ type Frame = {
 
 const unique = () => crypto.randomUUID().slice(0, 8);
 
+/** Every socket a test opened, closed and drained after it. */
+const opened: WebSocket[] = [];
+
+afterEach(async () => {
+  // A facet's close handler and its queued writes to the root run after the
+  // client closes. Let them finish inside the test, so none is still
+  // waiting on the pool when the next file's environment starts.
+  for (const ws of opened.splice(0)) {
+    try {
+      ws.close();
+    } catch {
+      // already closed
+    }
+  }
+  await new Promise((resolve) => setTimeout(resolve, 100));
+});
+
 async function connect(path: string) {
   const res = await exports.default.fetch(`http://example.com${path}`, {
     headers: { Upgrade: "websocket" }
@@ -31,6 +48,7 @@ async function connect(path: string) {
   expect(res.status).toBe(101);
   const ws = res.webSocket as WebSocket;
   ws.accept();
+  opened.push(ws);
   const frames: Frame[] = [];
   ws.addEventListener("message", (event) => {
     try {

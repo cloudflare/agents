@@ -217,6 +217,8 @@ describe("ResumeHandshake (driver → golden frames)", () => {
     await handshake.handleResumeRequest(conn, "probe-1");
 
     expect(pendingResumeConnections.has("c1")).toBe(false);
+    // The probe is still answered, so the tab's resume does not time out.
+    expect(frames.at(-1)).toMatchObject({ id: "req-1", probeId: "probe-1" });
   });
 
   it("#2703: a connection that closed and reconnects with the same id is parked again until it ACKs", async () => {
