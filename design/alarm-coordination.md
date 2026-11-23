@@ -117,7 +117,8 @@ drives it with the same driver as a root. Only arming differs:
 Fibers, KeepAlive, Queue and Scheduler (declared schedules too) in a facet
 use the facet's own job queue and contain no facet code. A queue item a
 root still holds for a facet from an earlier release is handed to the facet
-when it comes due (they are due at once). A schedule it still holds is made
+when it comes due: at once for most, at its retry time for one waiting out
+a retry. A schedule it still holds is made
 due at the root's next start, its own time kept, and handed over on that
 start's first alarm; the facet takes it at its own time, and a copy the
 facet already made of it since the upgrade is kept once, at the earlier
