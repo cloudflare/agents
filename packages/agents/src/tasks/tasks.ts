@@ -791,13 +791,25 @@ export class Tasks<
    */
   async #syncWake(
     runId: string,
-    options: { struck?: boolean } = {}
+    options: { struck?: boolean; createdAt?: number } = {}
   ): Promise<boolean> {
-    const rows = this.#store.sql<{ next_at: number | null }>`
-      SELECT next_at FROM cf_agents_task_runs
+    const rows = this.#store.sql<{
+      next_at: number | null;
+      created_at: number;
+    }>`
+      SELECT next_at, created_at FROM cf_agents_task_runs
       WHERE run_id = ${runId}
         AND status IN ('pending', 'running')
     `;
+    // A later run took this id (the earlier one was deleted): its wake is
+    // its own.
+    if (
+      options.createdAt !== undefined &&
+      rows[0] !== undefined &&
+      rows[0].created_at !== options.createdAt
+    ) {
+      return true;
+    }
     const next = rows[0]?.next_at ?? null;
 
     if (this.lifecycle.routes.source) {
@@ -1814,7 +1826,9 @@ export class Tasks<
       return;
     }
     await this.#deliverTerminal(runId, row.retain !== 0);
-    if (onStatus && !this.lifecycle.routes.source) await this.#syncWake(runId);
+    if (onStatus && !this.lifecycle.routes.source) {
+      await this.#syncWake(runId, { createdAt: row.created_at });
+    }
   }
 
   /**

@@ -2093,6 +2093,55 @@ describe("Think durable submissions", () => {
     ).resolves.toMatchObject({ accepted: false, submissionId: "legacy-large" });
   });
 
+  it("moves a legacy submission whose metadata or output a run cannot hold, dropping only those", async () => {
+    const agent = await freshAgent();
+    const now = Date.now();
+    await agent.seedLegacySubmissionTableForTest([
+      {
+        submissionId: "legacy-huge-metadata",
+        status: "completed",
+        idempotencyKey: "legacy-huge-key",
+        metadataJson: JSON.stringify({ big: "m".repeat(1_950_000) }),
+        createdAt: now - 2_000,
+        completedAt: now - 1_500,
+        messageId: "legacy-huge-assistant"
+      },
+      {
+        submissionId: "legacy-huge-output",
+        status: "completed",
+        outputJson: JSON.stringify({ text: "o".repeat(1_500_000) }),
+        createdAt: now - 1_000,
+        completedAt: now - 500
+      }
+    ]);
+    await agent.recoverSubmissionsForTest();
+    expect(await agent.hasLegacySubmissionTableForTest()).toBe(false);
+    const metadataDropped = await agent.inspectSubmissionForTest(
+      "legacy-huge-metadata"
+    );
+    expect(metadataDropped).toMatchObject({
+      status: "completed",
+      idempotencyKey: "legacy-huge-key",
+      messageId: "legacy-huge-assistant"
+    });
+    expect(metadataDropped?.metadata).toBeUndefined();
+    await expect(
+      agent.inspectSubmissionForTest("legacy-huge-output")
+    ).resolves.toMatchObject({
+      status: "completed",
+      metadata: { from: "legacy" }
+    });
+    await expect(
+      agent.submissionResultForTest("legacy-huge-output")
+    ).resolves.toBeNull();
+    await expect(
+      agent.testSubmitMessages("again", { idempotencyKey: "legacy-huge-key" })
+    ).resolves.toMatchObject({
+      accepted: false,
+      submissionId: "legacy-huge-metadata"
+    });
+  });
+
   it("lists the running submission when newer ones wait behind it", async () => {
     const agent = await freshAgent();
     const now = Date.now();

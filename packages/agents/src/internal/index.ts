@@ -13,6 +13,10 @@
  */
 
 export { TaskSettlement } from "../tasks/settlement";
+export {
+  MAX_FRAMEWORK_METADATA_BYTES,
+  MAX_SERIALIZED_BYTES
+} from "../tasks/serialization";
 export type {
   TaskFrameworkDefinition,
   TaskRecord,

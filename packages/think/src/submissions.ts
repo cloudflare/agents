@@ -6,7 +6,12 @@
 
 import type { UIMessage } from "ai";
 import type { TaskJson, TaskStatus } from "agents/tasks";
-import { TaskSettlement, type TaskRecord } from "agents/internal";
+import {
+  MAX_FRAMEWORK_METADATA_BYTES,
+  MAX_SERIALIZED_BYTES,
+  TaskSettlement,
+  type TaskRecord
+} from "agents/internal";
 
 export type ThinkSubmissionStatus =
   | "pending"
@@ -333,6 +338,12 @@ export function submissionSettlement(
   }
 }
 
+const utf8 = new TextEncoder();
+
+function jsonBytes(value: unknown): number {
+  return utf8.encode(JSON.stringify(value)).byteLength;
+}
+
 function parseJsonValue(value: string | null | undefined): unknown {
   if (typeof value !== "string") return null;
   try {
@@ -377,6 +388,33 @@ export function legacySubmissionImport(row: LegacySubmissionRow): {
     ...(output !== undefined && !completed && { output }),
     ...(row.message_id != null && { messageId: row.message_id })
   };
+  // Released versions had no limit but the row's: what a run cannot hold
+  // is dropped (and logged), so the submission itself still moves.
+  let appFields =
+    metadata !== null &&
+    typeof metadata === "object" &&
+    !Array.isArray(metadata)
+      ? (metadata as Record<string, TaskJson>)
+      : {};
+  if (
+    jsonBytes({ ...appFields, [SUBMISSION_PROGRESS_KEY]: progress }) >
+    MAX_FRAMEWORK_METADATA_BYTES
+  ) {
+    console.warn(
+      `[Think] Submission "${row.submission_id}": its metadata is too large to keep and was dropped`
+    );
+    appFields = {};
+    if (jsonBytes(progress) > MAX_FRAMEWORK_METADATA_BYTES) {
+      delete progress.output;
+    }
+  }
+  let result = completed ? output : undefined;
+  if (result !== undefined && jsonBytes(result) > MAX_SERIALIZED_BYTES) {
+    console.warn(
+      `[Think] Submission "${row.submission_id}": its output is too large to keep and was dropped`
+    );
+    result = undefined;
+  }
   return {
     runId: row.submission_id,
     definition: SUBMISSION_KIND,
@@ -391,16 +429,12 @@ export function legacySubmissionImport(row: LegacySubmissionRow): {
       input: { messages } as unknown as TaskJson
     }),
     metadata: {
-      ...(metadata !== null &&
-      typeof metadata === "object" &&
-      !Array.isArray(metadata)
-        ? (metadata as Record<string, TaskJson>)
-        : {}),
+      ...appFields,
       [SUBMISSION_PROGRESS_KEY]: progress as TaskJson
     },
     lane: SUBMISSION_LANE,
     ...(row.error_message !== null && { error: row.error_message }),
-    ...(output !== undefined && completed && { result: output }),
+    ...(result !== undefined && { result }),
     createdAt: row.created_at,
     ...(row.started_at !== null && { startedAt: row.started_at }),
     ...(row.completed_at !== null && { settledAt: row.completed_at })
