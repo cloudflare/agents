@@ -1313,6 +1313,17 @@ describe("SubAgent", () => {
     expect(await agent.fiberWakeOwners()).toHaveLength(1);
   });
 
+  it("restarts a facet with an open Task run through a stub it already had", async () => {
+    // Tasks wakes open runs while capabilities start, before Agent's own
+    // startup reads the stored facet flag. A wake that took the facet for a
+    // root would arm an alarm the facet does not have, and the first call
+    // after the reset would fail.
+    const agent = await getAgentByName(env.TestSubAgentParent, uniqueName());
+    await expect(
+      agent.subAgentHangingRunAfterKeptStubRestart("hanging-child")
+    ).resolves.toBe("running");
+  });
+
   it("runs a facet's lane runs one after the other, woken through the root", async () => {
     const agent = await getAgentByName(env.TestSubAgentParent, uniqueName());
     await expect(agent.subAgentRunLane("lane-child")).resolves.toEqual([
