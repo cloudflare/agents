@@ -1,17 +1,12 @@
 /**
  * Durable programmatic submissions: the public types, and how a submission
- * maps onto its request in the Inbox capability. `Think` runs the turn; the
- * inbox keeps the record, its order and its waiters.
+ * maps onto its run on the Tasks capability. `Think` runs the turn; Tasks
+ * keeps the record, its order in the submissions lane and its waiters.
  */
 
 import type { UIMessage } from "ai";
-import {
-  Inbox,
-  type InboxImport,
-  type InboxRequest,
-  type InboxSettlement,
-  type InboxTerminalStatus
-} from "agents/internal";
+import type { TaskJson, TaskStatus } from "agents/tasks";
+import { TaskSettlement, type TaskRecord } from "agents/internal";
 
 export type ThinkSubmissionStatus =
   | "pending"
@@ -95,13 +90,16 @@ export type SubmissionTurnResult =
   | { status: "completed"; output?: unknown }
   | { status: "aborted" | "retry" | "error" };
 
-/** Inbox kind (and lane) of programmatic submissions. */
-export const SUBMISSION_KIND = "submission";
+/** The Task definition (and lane) of programmatic submissions. */
+export const SUBMISSION_KIND = "__cf_think_submission";
+export const SUBMISSION_LANE = "submissions";
+/** The metadata key holding what a submission's turn records about itself. */
+export const SUBMISSION_PROGRESS_KEY = "__cf_progress";
 
-/** What a submission's inbox request carries. */
+/** What a submission's run carries as its input. */
 export type SubmissionPayload = { messages: UIMessage[] };
 
-/** What a submission's turn records about itself, as inbox progress. */
+/** What a submission's turn records about itself, in its run's metadata. */
 export type SubmissionProgress = {
   /** The request id of the turn answering it; recovery moves it. */
   requestId?: string;
@@ -133,7 +131,7 @@ export type ThinkSubmissionRow = {
   result_status: SubmissionTurnResult["status"] | null;
   output: unknown;
   message_id: string | null;
-  /** Chat recovery owns its turn and ends it. */
+  /** Chat recovery owns its turn and ends it (the run is parked). */
   detached: boolean;
 };
 
@@ -156,7 +154,12 @@ export type LegacySubmissionRow = {
   message_id?: string | null;
 };
 
-export const TERMINAL_SUBMISSION_STATUSES: InboxTerminalStatus[] = [
+export type TerminalSubmissionStatus = Exclude<
+  ThinkSubmissionStatus,
+  "pending" | "running"
+>;
+
+export const TERMINAL_SUBMISSION_STATUSES: TerminalSubmissionStatus[] = [
   "completed",
   "aborted",
   "skipped",
@@ -165,64 +168,165 @@ export const TERMINAL_SUBMISSION_STATUSES: InboxTerminalStatus[] = [
 
 export function isTerminalSubmissionStatus(
   status: ThinkSubmissionStatus
-): status is InboxTerminalStatus {
+): status is TerminalSubmissionStatus {
   return status !== "pending" && status !== "running";
 }
 
-export function submissionRow(request: InboxRequest): ThinkSubmissionRow {
-  const progress = (request.progress ?? {}) as SubmissionProgress;
+/**
+ * The run statuses to read for these submission statuses: a `running`
+ * submission may also be a parked run (chat recovery owns its turn), so
+ * callers filter the records by {@link submissionRow}'s status after.
+ */
+export function submissionTaskStatuses(
+  statuses: readonly ThinkSubmissionStatus[]
+): TaskStatus[] {
+  const out = new Set<TaskStatus>();
+  for (const status of statuses) {
+    out.add(status);
+    if (status === "running") out.add("pending");
+  }
+  return [...out];
+}
+
+/** A Task status as the submission status it is. */
+function submissionStatus(record: TaskRecord): ThinkSubmissionStatus {
+  // A parked submission's turn is still under way, owned by chat recovery.
+  if (record.status === "pending" && record.waitReason === "park") {
+    return "running";
+  }
+  return record.status;
+}
+
+/** What a submission's turn recorded about itself. */
+export function submissionProgress(record: TaskRecord): SubmissionProgress {
+  return (record.metadata?.[SUBMISSION_PROGRESS_KEY] ??
+    {}) as SubmissionProgress;
+}
+
+/** The metadata the app gave, without what Think keeps there. */
+function appMetadata(record: TaskRecord): Record<string, unknown> | undefined {
+  if (!record.metadata) return undefined;
+  const { [SUBMISSION_PROGRESS_KEY]: _progress, ...rest } = record.metadata;
+  return Object.keys(rest).length > 0 ? rest : undefined;
+}
+
+/** The error message a submission ended with (an abort's reason). */
+function submissionError(record: TaskRecord): string | undefined {
+  if (record.error) return record.error.message;
+  if (record.status === "aborted" || record.status === "skipped") {
+    return record.reason;
+  }
+  return undefined;
+}
+
+export function submissionRow(record: TaskRecord): ThinkSubmissionRow {
+  const progress = submissionProgress(record);
   return {
-    submission_id: request.id,
-    idempotency_key: request.idempotencyKey ?? null,
-    request_id: progress.requestId ?? request.id,
+    submission_id: record.runId,
+    idempotency_key: record.idempotencyKey ?? null,
+    request_id: progress.requestId ?? record.runId,
     stream_id: progress.streamId ?? null,
-    status: request.status,
-    metadata: request.metadata ?? null,
-    error_message: request.error ?? null,
-    created_at: request.createdAt,
+    status: submissionStatus(record),
+    metadata: appMetadata(record) ?? null,
+    error_message: submissionError(record) ?? null,
+    created_at: record.createdAt,
     messages_applied_at: progress.messagesAppliedAt ?? null,
-    started_at: request.startedAt ?? null,
-    completed_at: request.settledAt ?? null,
+    started_at: record.startedAt ?? null,
+    completed_at: record.settledAt ?? null,
     result_status: progress.resultStatus ?? null,
     output: progress.output,
     message_id: progress.messageId ?? null,
-    detached: request.detached
+    detached: record.status === "pending" && record.waitReason === "park"
   };
 }
 
 export function submissionInspection(
-  request: InboxRequest
+  record: TaskRecord
 ): ThinkSubmissionInspection {
-  const progress = (request.progress ?? {}) as SubmissionProgress;
+  const progress = submissionProgress(record);
+  const metadata = appMetadata(record);
+  const error = submissionError(record);
   return {
-    submissionId: request.id,
-    idempotencyKey: request.idempotencyKey,
-    requestId: progress.requestId ?? request.id,
-    status: request.status,
-    error: request.error,
-    metadata: request.metadata,
-    createdAt: request.createdAt,
-    startedAt: request.startedAt,
-    completedAt: request.settledAt,
+    submissionId: record.runId,
+    ...(record.idempotencyKey !== undefined && {
+      idempotencyKey: record.idempotencyKey
+    }),
+    requestId: progress.requestId ?? record.runId,
+    status: submissionStatus(record),
+    ...(error !== undefined && { error }),
+    ...(metadata !== undefined && { metadata }),
+    createdAt: record.createdAt,
+    ...(record.startedAt !== undefined && { startedAt: record.startedAt }),
+    ...(record.settledAt !== undefined && { completedAt: record.settledAt }),
     ...(progress.messageId !== undefined && { messageId: progress.messageId })
   };
 }
 
-/** How a submission with this final status ends its inbox request. */
+/** What a submission's outcome is, as the value a release hands its run. */
+export type SubmissionOutcome = {
+  status: TerminalSubmissionStatus;
+  error?: string;
+  output?: TaskJson;
+};
+
+/** A cancel reason as the text a cancelled submission reports. */
+export function cancelReason(reason: unknown): string | undefined {
+  if (reason === undefined) return undefined;
+  if (reason instanceof Error) return reason.message;
+  return typeof reason === "string" ? reason : String(reason);
+}
+
+/** What a submission's turn or its recovery decided. */
+export type SubmissionResult = SubmissionOutcome | { status: "detached" };
+
+/** Chat recovery owns the turn now and ends the submission later. */
+export function submissionDetached(): SubmissionResult {
+  return { status: "detached" };
+}
+
+/** End a submission `error`. */
+export function submissionFailed(error?: unknown): SubmissionOutcome {
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : undefined;
+  return { status: "error", ...(message !== undefined && { error: message }) };
+}
+
+/** How a submission with this final status ends its run. */
 export function submissionOutcome(
   status: ThinkSubmissionStatus,
   error: string | null | undefined,
   output?: unknown
-): InboxSettlement {
-  switch (status) {
+): SubmissionOutcome {
+  if (status === "completed") {
+    return output === undefined
+      ? { status }
+      : { status, output: output as TaskJson };
+  }
+  if (status === "aborted" || status === "skipped") return { status };
+  return { status: "error", ...(error ? { error } : {}) };
+}
+
+/** What a submission's run returns for a result. */
+export function submissionSettlement(
+  outcome: SubmissionResult
+): TaskSettlement | TaskJson | undefined {
+  switch (outcome.status) {
+    case "detached":
+      return TaskSettlement.park("detached");
     case "completed":
-      return Inbox.completed(output);
+      return outcome.output;
     case "aborted":
-      return Inbox.aborted();
+      return TaskSettlement.aborted();
     case "skipped":
-      return Inbox.skipped();
+      return TaskSettlement.skipped();
     default:
-      return Inbox.failed(error ?? undefined);
+      return TaskSettlement.failed(
+        new Error(outcome.error ?? "Submission failed")
+      );
   }
 }
 
@@ -235,13 +339,38 @@ function parseJsonValue(value: string | null | undefined): unknown {
   }
 }
 
-/** The inbox record of a row of the retired `cf_think_submissions` table. */
-export function legacySubmissionImport(row: LegacySubmissionRow): InboxImport {
+/** The run of a row of the retired `cf_think_submissions` table. */
+export function legacySubmissionImport(row: LegacySubmissionRow): {
+  runId: string;
+  definition: string;
+  status: TaskStatus;
+  attempt: number;
+  input?: TaskJson;
+  metadata?: Record<string, TaskJson>;
+  idempotencyKey?: string;
+  lane: string;
+  error?: string;
+  createdAt: number;
+  startedAt?: number;
+  settledAt?: number;
+} {
   const messages = parseJsonValue(row.messages_json);
   const metadata = parseJsonValue(row.metadata_json);
+  const progress: SubmissionProgress = {
+    ...(row.request_id !== null && { requestId: row.request_id }),
+    ...(row.stream_id !== null && { streamId: row.stream_id }),
+    ...(row.messages_applied_at !== null && {
+      messagesAppliedAt: row.messages_applied_at
+    }),
+    ...(row.result_status != null && { resultStatus: row.result_status }),
+    ...(row.output_json != null && {
+      output: parseJsonValue(row.output_json)
+    }),
+    ...(row.message_id != null && { messageId: row.message_id })
+  };
   return {
-    id: row.submission_id,
-    kind: SUBMISSION_KIND,
+    runId: row.submission_id,
+    definition: SUBMISSION_KIND,
     status: row.status,
     // Only a running row has a run under way; a pending one starts afresh.
     attempt: row.status === "running" ? 1 : 0,
@@ -249,26 +378,18 @@ export function legacySubmissionImport(row: LegacySubmissionRow): InboxImport {
       idempotencyKey: row.idempotency_key
     }),
     // Messages that do not parse fail the submission when it runs.
-    ...(Array.isArray(messages) && { payload: { messages } }),
-    ...(metadata !== null &&
+    ...(Array.isArray(messages) && {
+      input: { messages } as unknown as TaskJson
+    }),
+    metadata: {
+      ...(metadata !== null &&
       typeof metadata === "object" &&
-      !Array.isArray(metadata) && {
-        metadata: metadata as Record<string, unknown>
-      }),
-    progress: {
-      ...(row.request_id !== null && { requestId: row.request_id }),
-      ...(row.stream_id !== null && { streamId: row.stream_id }),
-      ...(row.messages_applied_at !== null && {
-        messagesAppliedAt: row.messages_applied_at
-      }),
-      ...(row.result_status != null && {
-        resultStatus: row.result_status
-      }),
-      ...(row.output_json != null && {
-        output: parseJsonValue(row.output_json)
-      }),
-      ...(row.message_id != null && { messageId: row.message_id })
-    } satisfies SubmissionProgress,
+      !Array.isArray(metadata)
+        ? (metadata as Record<string, TaskJson>)
+        : {}),
+      [SUBMISSION_PROGRESS_KEY]: progress as TaskJson
+    },
+    lane: SUBMISSION_LANE,
     ...(row.error_message !== null && { error: row.error_message }),
     createdAt: row.created_at,
     ...(row.started_at !== null && { startedAt: row.started_at }),

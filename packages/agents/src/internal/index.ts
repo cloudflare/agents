@@ -13,6 +13,12 @@
  */
 
 export * from "../inbox";
+export { TaskSettlement } from "../tasks/settlement";
+export type {
+  TaskFrameworkDefinition,
+  TaskRecord,
+  TaskRegisterOptions
+} from "../tasks/types";
 export * from "../approvals";
 export {
   KeepAlive,

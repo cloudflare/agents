@@ -1371,12 +1371,16 @@ export class Tasks<
         `UPDATE cf_agents_task_runs
          SET status = 'completed', result = ?, generation = NULL, next_at = NULL,
              settled_at = ?, updated_at = ?
-         WHERE run_id = ? AND generation = ? AND status = 'running'`,
+         WHERE run_id = ? AND generation = ? AND status = 'running'
+           AND cancel_requested = 0`,
         [resultJson, Date.now(), Date.now()]
       );
       if (settled) {
         this.#emit("task:completed", { runId, definition: row.definition });
         await this.#finishTerminalSettlement(runId, row);
+      } else {
+        // A cancel requested while the attempt ran wins over its result.
+        await this.#settleRequestedCancel(runId, generation);
       }
       // Fence rejected: a newer generation owns the run, and every deadline
       // mutation it makes funnels through its own #syncWake — a push here
@@ -1384,6 +1388,28 @@ export class Tasks<
     } catch (thrown) {
       await this.#settleThrown(row, generation, thrown);
     }
+  }
+
+  /**
+   * Settle a run `aborted` when a cancel was requested while the attempt
+   * holding `generation` ran.
+   *
+   * @returns Whether it did.
+   */
+  async #settleRequestedCancel(
+    runId: string,
+    generation: string
+  ): Promise<boolean> {
+    const current = this.#store.getRun(runId);
+    if (current?.cancel_requested !== 1 || current.generation !== generation) {
+      return false;
+    }
+    await this.#settleCancelled(
+      runId,
+      generation,
+      current.cancel_reason ?? undefined
+    );
+    return true;
   }
 
   /** Persist a settlement a handler returned. */
@@ -1394,6 +1420,7 @@ export class Tasks<
   ): Promise<void> {
     const runId = row.run_id;
     const now = Date.now();
+    if (await this.#settleRequestedCancel(runId, generation)) return;
     if (settlement.kind === "failed") {
       await this.#settleFailed(
         runId,
@@ -1505,6 +1532,8 @@ export class Tasks<
       await this.#settleCancelled(runId, generation, thrown.reason);
       return;
     }
+    // The attempt failed because a requested cancel aborted it.
+    if (await this.#settleRequestedCancel(runId, generation)) return;
 
     if (isTaskSuspension(thrown)) {
       // A cancel requested mid-attempt wins over parking the run.
@@ -1886,6 +1915,12 @@ export class Tasks<
    */
   peek(runId: string): TaskRecord | undefined {
     const row = this.#store.getRun(runId);
+    return row && this.#store.rowToRecord(row);
+  }
+
+  /** @internal The run holding an idempotency key, read synchronously. */
+  peekByIdempotencyKey(idempotencyKey: string): TaskRecord | undefined {
+    const row = this.#store.getRunByKey(idempotencyKey);
     return row && this.#store.rowToRecord(row);
   }
 

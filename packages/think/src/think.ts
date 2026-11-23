@@ -295,18 +295,26 @@ import {
   stableHash,
   stableStringify,
   type EffectOutcome,
-  Inbox,
-  type InboxRequest,
-  type InboxRun,
-  type InboxSettlement
+  type TaskRecord,
+  type TaskSettlement
 } from "agents/internal";
+import type { TaskJson, TaskStep } from "agents/tasks";
 import {
+  cancelReason,
   isTerminalSubmissionStatus,
   legacySubmissionImport,
   SUBMISSION_KIND,
+  SUBMISSION_LANE,
+  SUBMISSION_PROGRESS_KEY,
+  submissionDetached,
+  submissionFailed,
   submissionInspection,
   submissionOutcome,
+  submissionProgress,
   submissionRow,
+  submissionSettlement,
+  submissionTaskStatuses,
+  type SubmissionResult,
   TERMINAL_SUBMISSION_STATUSES,
   type CancelSubmissionResult,
   type DeleteSubmissionsOptions,
@@ -1575,7 +1583,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     this.lifecycle.use(this._cfMediaEviction);
     this.lifecycle.use(this.streams);
     this.lifecycle.use(this._approvals);
-    this.lifecycle.use(this._submissions);
+    this._registerSubmissionTaskDefinition();
     this._registerChatTurnTaskDefinition();
     this._registerChatRecoveryTaskDefinition();
     this.#messengerReplies = new MessengerReplies(
@@ -5445,23 +5453,31 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   // ── Durable programmatic submissions ───────────────────────────
 
   /**
-   * Submissions are requests on the Inbox capability, all in one lane. The
-   * inbox owns the record, its order, cancel, reset, waiters and the replay
-   * after a reset; Think runs the turn and keeps what the turn learns about
-   * itself (its request id, whether its messages were applied, its cutover
-   * outcome) in the request's progress.
+   * Submissions are runs of one Task definition, all in one lane. Tasks owns
+   * the record, its order, cancel, reset, waiters and the replay after a
+   * reset; Think runs the turn and keeps what the turn learns about itself
+   * (its request id, whether its messages were applied, its cutover
+   * outcome) in the run's metadata.
    */
-  private readonly _submissions = new Inbox({
-    handlers: {
-      submission: (payload: SubmissionPayload, run: InboxRun) =>
-        this._runSubmission(payload, run)
-    },
-    onStatus: (request) => this._onSubmissionStatus(request)
-  });
+  private _registerSubmissionTaskDefinition(): void {
+    this.tasks.register(
+      SUBMISSION_KIND,
+      (input, step) => this._runSubmission(input as SubmissionPayload, step),
+      {
+        maxAttempts: 3,
+        onStatus: (snapshot) => this._onSubmissionStatus(snapshot.runId)
+      }
+    );
+  }
+
+  private _submissionRecord(submissionId: string): TaskRecord | undefined {
+    const record = this.tasks.peek(submissionId);
+    return record?.definition === SUBMISSION_KIND ? record : undefined;
+  }
 
   private _readSubmission(submissionId: string): ThinkSubmissionRow | null {
-    const request = this._submissions.get(submissionId);
-    return request?.kind === SUBMISSION_KIND ? submissionRow(request) : null;
+    const record = this._submissionRecord(submissionId);
+    return record ? submissionRow(record) : null;
   }
 
   /** Merge `patch` into a submission's progress. */
@@ -5469,11 +5485,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     submissionId: string,
     patch: Partial<SubmissionProgress>
   ): void {
-    const request = this._submissions.get(submissionId);
-    if (!request) return;
-    this._submissions.checkpoint(submissionId, {
-      ...(request.progress as SubmissionProgress | undefined),
-      ...patch
+    const record = this._submissionRecord(submissionId);
+    if (!record) return;
+    this.tasks.updateMetadata(submissionId, {
+      [SUBMISSION_PROGRESS_KEY]: {
+        ...submissionProgress(record),
+        ...patch
+      } as TaskJson
     });
   }
 
@@ -5544,10 +5562,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * workflow event first: the inbox repeats a terminal report a reset cut
    * short, and the queue item's stable id makes the repeat a replace.
    */
-  private async _onSubmissionStatus(request: InboxRequest): Promise<void> {
-    if (request.kind !== SUBMISSION_KIND) return;
-    const inspection = submissionInspection(request);
-    if (request.status === "pending" && request.attempt === 0) {
+  private async _onSubmissionStatus(submissionId: string): Promise<void> {
+    const record = this._submissionRecord(submissionId);
+    if (!record) return;
+    const inspection = submissionInspection(record);
+    if (record.status === "pending" && record.attempt === 0) {
       this._emit("submission:create", {
         submissionId: inspection.submissionId,
         requestId: inspection.requestId,
@@ -5556,13 +5575,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     }
     // Queued once per submission: a repeated report (a reset cut the user
     // hook below short) must not queue an event the workflow already got.
-    const progress = request.progress as SubmissionProgress | undefined;
+    const progress = submissionProgress(record);
     if (
       isTerminalSubmissionStatus(inspection.status) &&
-      !progress?.workflowNotified &&
-      this._insertWorkflowNotification(inspection, request.result)
+      !progress.workflowNotified &&
+      this._insertWorkflowNotification(inspection, record.result)
     ) {
-      this._updateSubmissionProgress(request.id, { workflowNotified: true });
+      this._updateSubmissionProgress(submissionId, { workflowNotified: true });
     }
     this._emit("submission:status", {
       submissionId: inspection.submissionId,
@@ -5618,8 +5637,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     submissionId: string,
     options?: WaitForSubmissionOptions
   ): Promise<ThinkSubmissionInspection | null> {
-    if (!this._readSubmission(submissionId)) return null;
-    if (!this._submissions.isSettled(submissionId)) {
+    const current = this._readSubmission(submissionId);
+    if (!current) return null;
+    if (!isTerminalSubmissionStatus(current.status)) {
       const hook = submissionStatusHookContext.getStore();
       if (hook?.agent === this && !hook.ended) {
         throw new Error(
@@ -5632,10 +5652,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         );
       }
     }
-    const request = await this._submissions.wait(submissionId, {
-      timeoutMs: options?.timeoutMs
-    });
-    return request ? submissionInspection(request) : null;
+    await this.tasks.wait(submissionId, { timeoutMs: options?.timeoutMs });
+    // On a timeout, the submission as it is then (or null once deleted).
+    const record = this._submissionRecord(submissionId);
+    return record ? submissionInspection(record) : null;
   }
 
   protected onSubmissionStatus(
@@ -5786,10 +5806,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   async inspectSubmission(
     submissionId: string
   ): Promise<ThinkSubmissionInspection | null> {
-    const request = this._submissions.get(submissionId);
-    return request?.kind === SUBMISSION_KIND
-      ? submissionInspection(request)
-      : null;
+    const record = this._submissionRecord(submissionId);
+    return record ? submissionInspection(record) : null;
   }
 
   async listSubmissions(
@@ -5798,19 +5816,25 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     if (Array.isArray(options?.status) && options.status.length === 0) {
       return [];
     }
-    return this._submissions
-      .list({
-        kind: SUBMISSION_KIND,
-        status: options?.status,
+    const status = options?.status
+      ? Array.isArray(options.status)
+        ? options.status
+        : [options.status]
+      : undefined;
+    return this.tasks
+      .peekList({
+        definition: SUBMISSION_KIND,
+        ...(status && { status: submissionTaskStatuses(status) }),
         limit: Math.min(Math.max(options?.limit ?? 50, 1), 100)
       })
-      .map(submissionInspection);
+      .map(submissionInspection)
+      .filter((submission) => !status || status.includes(submission.status));
   }
 
   async deleteSubmission(submissionId: string): Promise<boolean> {
     const row = this._readSubmission(submissionId);
     if (!row || !isTerminalSubmissionStatus(row.status)) return false;
-    return this._submissions.delete(submissionId);
+    return this.tasks.deleteRun(submissionId);
   }
 
   async deleteSubmissions(options?: DeleteSubmissionsOptions): Promise<number> {
@@ -5821,14 +5845,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       : TERMINAL_SUBMISSION_STATUSES;
     const status = requested.filter(isTerminalSubmissionStatus);
     if (status.length === 0) return 0;
-    return this._submissions.purgeBefore(
-      options?.completedBefore?.getTime() ?? Number.MAX_SAFE_INTEGER,
-      {
-        kind: SUBMISSION_KIND,
-        status,
-        limit: Math.min(Math.max(options?.limit ?? 100, 1), 500)
-      }
-    );
+    return this.tasks.delete({
+      definition: SUBMISSION_KIND,
+      status,
+      ...(options?.completedBefore && {
+        settledBefore: options.completedBefore
+      }),
+      limit: Math.min(Math.max(options?.limit ?? 100, 1), 500)
+    });
   }
 
   async cancelSubmission(
@@ -5854,10 +5878,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     this._submissionAbortControllers.get(submissionId)?.abort(reason);
     if (row.request_id) this.abortRequest(row.request_id, reason);
 
-    const cancelled = await this._submissions.cancel(submissionId, reason);
-    if (!cancelled) return { outcome: "not_found", submissionId };
-    const submission = submissionInspection(cancelled.request);
-    if (isTerminalSubmissionStatus(cancelled.previous)) {
+    const cancelled = await this.tasks.cancel(
+      submissionId,
+      cancelReason(reason)
+    );
+    const record = this._submissionRecord(submissionId);
+    if (!record) return { outcome: "not_found", submissionId };
+    const submission = submissionInspection(record);
+    if (!cancelled) {
       return { outcome: "already_terminal", submissionId, submission };
     }
     // A submission claimed before a restart has no in-memory record of its
@@ -5904,21 +5932,18 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         // A retry must find a submission still in the retired table.
         await this._migrateLegacySubmissions();
         const existingById = options?.submissionId
-          ? this._submissions.get(options.submissionId)
+          ? this.tasks.peek(options.submissionId)
           : undefined;
         const existingByKey = options?.idempotencyKey
-          ? this._submissions.list({
-              idempotencyKey: options.idempotencyKey,
-              limit: 1
-            })[0]
+          ? this.tasks.peekByIdempotencyKey(options.idempotencyKey)
           : undefined;
         if (
           (existingById &&
             existingByKey &&
-            existingById.id !== existingByKey.id) ||
+            existingById.runId !== existingByKey.runId) ||
           (existingByKey &&
             options?.submissionId &&
-            existingByKey.id !== options.submissionId) ||
+            existingByKey.runId !== options.submissionId) ||
           (existingById &&
             options?.idempotencyKey &&
             existingById.idempotencyKey !== undefined &&
@@ -5932,26 +5957,40 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         // one is submitted again as stored, which wakes its lane.
         const existing = existingById ?? existingByKey;
         if (existing) {
-          if (!isTerminalSubmissionStatus(existing.status)) {
-            await this._submissions.submit(
+          if (existing.definition !== SUBMISSION_KIND) {
+            throw new Error(
+              "submissionId and idempotencyKey refer to different submissions"
+            );
+          }
+          if (!isTerminalSubmissionStatus(submissionRow(existing).status)) {
+            // Accepted again under its id, which repairs a lost wake.
+            await this.tasks.run(
               SUBMISSION_KIND,
-              this._submissions.payload<SubmissionPayload>(existing.id)!,
-              { id: existing.id, start: this._submissionStart() }
+              this.tasks.inputOf<TaskJson>(existing.runId),
+              { runId: existing.runId, lane: SUBMISSION_LANE, start: "alarm" }
             );
           }
           return { ...submissionInspection(existing), accepted: false };
         }
-        const { request } = await this._submissions.submit(
+        const receipt = await this.tasks.run(
           SUBMISSION_KIND,
-          { messages: this._sanitizeSubmissionMessages(messages) },
           {
-            id: options?.submissionId,
-            idempotencyKey: options?.idempotencyKey,
-            metadata: options?.metadata,
-            start: this._submissionStart()
+            messages: this._sanitizeSubmissionMessages(messages)
+          } as unknown as TaskJson,
+          {
+            ...(options?.submissionId && { runId: options.submissionId }),
+            ...(options?.idempotencyKey && {
+              idempotencyKey: options.idempotencyKey
+            }),
+            ...(options?.metadata && {
+              metadata: options.metadata as Record<string, TaskJson>
+            }),
+            lane: SUBMISSION_LANE,
+            start: "alarm"
           }
         );
-        return { ...submissionInspection(request), accepted: true };
+        const record = this._submissionRecord(receipt.runId)!;
+        return { ...submissionInspection(record), accepted: true };
       }
     });
   }
@@ -5964,29 +6003,40 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    */
   private async _runSubmission(
     payload: SubmissionPayload,
-    run: InboxRun
-  ): Promise<InboxSettlement> {
-    const row = this._readSubmission(run.id);
-    if (row?.status !== "running") return Inbox.skipped();
-    if (!Array.isArray(payload?.messages)) {
-      return Inbox.failed("Stored submission messages are invalid");
+    step: TaskStep
+  ): Promise<TaskSettlement | TaskJson | undefined> {
+    // Chat recovery finished the turn of a submission it took over.
+    if (step.released !== undefined) {
+      return submissionSettlement(step.released as SubmissionResult);
     }
-    if (run.attempt > 1) {
+    return submissionSettlement(await this._decideSubmission(payload, step));
+  }
+
+  private async _decideSubmission(
+    payload: SubmissionPayload,
+    step: TaskStep
+  ): Promise<SubmissionResult> {
+    const row = this._readSubmission(step.id);
+    if (row?.status !== "running") return { status: "skipped" };
+    if (!Array.isArray(payload?.messages)) {
+      return submissionFailed("Stored submission messages are invalid");
+    }
+    if (step.attempt > 1) {
       const outcome = await this._reconcileInterruptedSubmission(row);
       if (outcome !== "rerun") return outcome;
     }
     return this._admitTurn({
       admission: "execute-submission",
       trigger: "submission",
-      execute: () => this._executeSubmission(row, payload.messages, run)
+      execute: () => this._executeSubmission(row, payload.messages, step)
     });
   }
 
   private async _executeSubmission(
     row: ThinkSubmissionRow,
     messages: UIMessage[],
-    run: InboxRun
-  ): Promise<InboxSettlement> {
+    run: TaskStep
+  ): Promise<SubmissionResult> {
     const submissionId = row.submission_id;
     const requestId = row.request_id ?? submissionId;
     const controller = new AbortController();
@@ -6033,7 +6083,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       );
       // Recovery took the turn over and completes the submission.
       if (this._recoveryOwnedSubmissions.delete(submissionId)) {
-        return Inbox.detached();
+        return submissionDetached();
       }
       const streamId = this._resumableStream
         .getAllStreamMetadata()
@@ -6077,7 +6127,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    */
   private async _reconcileInterruptedSubmission(
     row: ThinkSubmissionRow
-  ): Promise<InboxSettlement | "rerun"> {
+  ): Promise<SubmissionResult | "rerun"> {
     // A cutover fact wins even if an old Task/recovery callback remains.
     // Streams also complete on abort and overflow retry, so their lifecycle
     // alone cannot tell us whether this submission produced an answer.
@@ -6087,7 +6137,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           row,
           row.result_status,
           null
-        )) ?? Inbox.detached()
+        )) ?? submissionDetached()
       );
     }
     if (row.messages_applied_at === null) {
@@ -6095,10 +6145,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       try {
         appliedState = await this._getSubmissionMessagesAppliedState(row);
       } catch (error) {
-        return Inbox.failed(error);
+        return submissionFailed(error);
       }
       if (appliedState === "none") return "rerun";
-      return Inbox.failed(
+      return submissionFailed(
         appliedState === "all"
           ? "Submission was interrupted after messages were applied."
           : "Submission was interrupted after messages were partially applied."
@@ -6110,7 +6160,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         this._hasFreshRecoverableSubmissionEvidence(row)) ||
         (await this._hasScheduledChatRecovery(row)))
     ) {
-      return Inbox.detached();
+      return submissionDetached();
     }
     // An error stamp survives its stream rows being reclaimed by a later
     // turn; pending recovery above still takes priority, so it settles the
@@ -6135,83 +6185,35 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           row,
           errored ? "error" : "completed",
           errored ? "Recovered chat stream had already errored." : null
-        )) ?? Inbox.detached()
+        )) ?? submissionDetached()
       );
     }
-    return Inbox.failed(
+    return submissionFailed(
       "Submission was interrupted after messages were applied."
     );
   }
 
   /**
-   * Startup work for submissions: move rows of the retired table, end the
-   * running ones the stored evidence already decides, and hold the lane
-   * while a chat turn the reset cut off waits for recovery. Submissions an
-   * earlier isolate accepted run after that recovery, in order, as a client
-   * request queued behind it does; the inbox runs the interrupted ones again,
-   * and their next attempt reads the same evidence.
+   * Startup work for submissions: move rows of the retired table, and hold
+   * the lane while a chat turn the reset cut off waits for recovery.
+   * Submissions an earlier isolate accepted run after that recovery, in
+   * order, as a client request queued behind it does; an interrupted one's
+   * next attempt decides from the stored evidence whether it runs again.
    */
   private async _recoverSubmissionsOnStart(): Promise<void> {
     await this._migrateLegacySubmissions();
     if (await this._chatRecoveryNames()) {
-      this._submissions.hold(SUBMISSION_KIND);
+      this.tasks.holdLane(SUBMISSION_LANE);
       this._recheckSubmissionHold();
     }
-    // Every running one, however many are open: the oldest run first.
-    let before: number | undefined;
-    for (;;) {
-      const page = this._submissions.list({
-        kind: SUBMISSION_KIND,
-        status: "running",
-        limit: 500,
-        ...(before !== undefined && { before })
-      });
-      for (const request of page) {
-        const outcome = await this._reconcileInterruptedSubmission(
-          submissionRow(request)
-        );
-        if (outcome !== "rerun" && outcome.status !== "detached") {
-          await this._submissions.settle(request.id, outcome);
-        }
-      }
-      if (page.length < 500) break;
-      before = page[page.length - 1].createdAt;
-    }
-    // A facet's lane has no alarm to start it: submitting the oldest open
-    // submission again starts the lane here.
-    if (this._submissionStart() === "now") {
-      const [oldest] = this._submissions.list({
-        kind: SUBMISSION_KIND,
-        status: ["pending", "running"],
-        order: "oldest",
-        limit: 1
-      });
-      const payload =
-        oldest && this._submissions.payload<SubmissionPayload>(oldest.id);
-      if (oldest && payload) {
-        await this._submissions.submit(SUBMISSION_KIND, payload, {
-          id: oldest.id,
-          start: "now"
-        });
-      }
-    }
-  }
-
-  /**
-   * Where a submission's lane starts. A facet has no alarm of its own, so its
-   * lane starts in the calling invocation, and its start below runs what an
-   * earlier isolate left. (Facets as agents are going away; until then.)
-   */
-  private _submissionStart(): "alarm" | "now" {
-    return this.parentPath.length > 0 ? "now" : "alarm";
   }
 
   /** Let held submissions run once no chat turn waits for recovery. */
   private _releaseSubmissionsAfterRecovery(): void {
-    if (!this._submissions.isHeld(SUBMISSION_KIND)) return;
+    if (!this.tasks.isLaneHeld(SUBMISSION_LANE)) return;
     void this._chatRecoveryNames().then(
       (pending) => {
-        if (!pending) this._submissions.release(SUBMISSION_KIND);
+        if (!pending) void this.tasks.releaseLane(SUBMISSION_LANE);
       },
       (error: unknown) => {
         console.error("[Think] failed to check chat recovery", error);
@@ -6225,14 +6227,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    */
   private _recheckSubmissionHold(): void {
     setTimeout(() => {
-      if (!this._submissions.isHeld(SUBMISSION_KIND)) return;
+      if (!this.tasks.isLaneHeld(SUBMISSION_LANE)) return;
       this._releaseSubmissionsAfterRecovery();
       this._recheckSubmissionHold();
     }, 30_000);
   }
 
   /**
-   * Move every `cf_think_submissions` row into the inbox and drop the table.
+   * Move every `cf_think_submissions` row into a run and drop the table.
    * A `running` row counts as interrupted and is reconciled by its next
    * attempt. Idempotent: a missing table means a fresh object or a finished
    * migration.
@@ -6252,7 +6254,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     let failed = 0;
     for (const row of rows) {
       try {
-        await this._submissions.import(legacySubmissionImport(row));
+        await this.tasks.importRun(legacySubmissionImport(row));
       } catch (error) {
         // Left in the old table for the next start; the rest still move.
         failed++;
@@ -6266,7 +6268,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         "DELETE FROM cf_think_submissions WHERE submission_id = ?",
         row.submission_id
       );
-      // Its run item is the inbox's now.
+      // Its run item is Tasks' now.
       await this.dequeue(submissionRunItemId(row.submission_id));
     }
     if (failed === 0)
@@ -6276,7 +6278,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   private async _getSubmissionMessagesAppliedState(
     row: ThinkSubmissionRow
   ): Promise<"none" | "partial" | "all"> {
-    const messages = this._submissions.payload<SubmissionPayload>(
+    const messages = this.tasks.inputOf<SubmissionPayload>(
       row.submission_id
     )?.messages;
     if (!Array.isArray(messages)) {
@@ -7532,8 +7534,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     this._submissionAbortControllers.clear();
     // Every open submission ends skipped. The writes land before this
     // returns; the status reports follow.
-    const skipping = this._submissions.clear(
-      SUBMISSION_KIND,
+    const skipping = this.tasks.clear(
+      SUBMISSION_LANE,
       "Submission was skipped by turn reset."
     );
     void this.keepAliveWhile(() => skipping).catch((error) => {
@@ -8277,8 +8279,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     requestId: string,
     messageId: string
   ): void {
-    const row = this._submissions
-      .list({ kind: SUBMISSION_KIND, status: "aborted", limit: 50 })
+    const row = this.tasks
+      .peekList({ definition: SUBMISSION_KIND, status: ["aborted"], limit: 50 })
       .map(submissionRow)
       .find(
         (candidate) =>
@@ -10409,10 +10411,17 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const exact = this._readSubmission(recoveredRequestId);
     if (exact) return exact.status === "running" ? exact : null;
     return (
-      this._submissions
-        .list({ kind: SUBMISSION_KIND, status: "running", limit: 500 })
+      this.tasks
+        .peekList({
+          definition: SUBMISSION_KIND,
+          status: ["running", "pending"],
+          limit: 500
+        })
         .map(submissionRow)
-        .find((row) => row.request_id === recoveredRequestId) ?? null
+        .find(
+          (row) =>
+            row.status === "running" && row.request_id === recoveredRequestId
+        ) ?? null
     );
   }
 
@@ -10426,7 +10435,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       resultStatus: undefined,
       output: undefined
     });
-    await this._submissions.settle(row.submission_id, Inbox.failed(message));
+    await this._settleSubmission(row.submission_id, submissionFailed(message));
   }
 
   /**
@@ -10438,7 +10447,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     row: ThinkSubmissionRow,
     status: ThinkSubmissionStatus,
     errorMessage: string | null
-  ): Promise<InboxSettlement | null> {
+  ): Promise<SubmissionResult | null> {
     let output: unknown;
     if (row.result_status === "completed" || row.result_status === "aborted") {
       status = row.result_status;
@@ -10460,7 +10469,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       ) {
         return null;
       }
-      return Inbox.failed(
+      return submissionFailed(
         "Submission was interrupted after messages were applied."
       );
     }
@@ -10487,7 +10496,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const streamId = requestId
       ? this._resumableStream.latestStreamInfoForRequest(requestId)?.id
       : undefined;
-    // The inbox settles a running request once: competing startup and
+    // A parked run is released once: competing startup and
     // detached-finalizer paths cannot both end it.
     this._updateSubmissionProgress(row.submission_id, {
       ...(requestId !== null && { requestId }),
@@ -10495,7 +10504,21 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       resultStatus: undefined,
       output: undefined
     });
-    await this._submissions.settle(row.submission_id, outcome);
+    await this._settleSubmission(row.submission_id, outcome);
+  }
+
+  /**
+   * End a submission whose turn chat recovery owns: its parked run's next
+   * attempt returns `result`. A run that is not parked (its own attempt is
+   * under way, or comes next after a reset) decides from the same evidence.
+   */
+  private async _settleSubmission(
+    submissionId: string,
+    result: SubmissionResult
+  ): Promise<void> {
+    await this.tasks.release(submissionId, {
+      value: result as unknown as TaskJson
+    });
   }
 
   protected async onChatRecovery(
