@@ -1171,6 +1171,10 @@ export class Tasks<
     if (options.local !== undefined && startMode !== "queued") {
       this.#locals.set(runId, options.local);
     }
+    // The run starts only once its `pending` report returned: its wake is
+    // published after it (a reset in between leaves the row's deadline,
+    // which the next start mirrors).
+    await this.#report(runId);
     try {
       await this.#syncWake(runId);
     } catch (error) {
@@ -1179,7 +1183,6 @@ export class Tasks<
       throw error;
     }
     this.#emit("task:accepted", { runId, definition, accepted: true });
-    await this.#report(runId);
 
     // Warm path: begin the first attempt immediately when the host is past
     // startup. The durable deadline above is authoritative either way.
