@@ -906,7 +906,7 @@ export class Approvals extends LifecycleCapability {
       console.error(`[Approvals] Hand-off of "${id}" failed:`, error);
       return this.get(id) ?? decision;
     }
-    if (this.#canWake()) await this.lifecycle.jobs.cancel(resumeJobId(id));
+    await this.lifecycle.jobs.cancel(resumeJobId(id));
     return this.get(id) ?? decision;
   }
 
@@ -925,17 +925,7 @@ export class Approvals extends LifecycleCapability {
     );
   }
 
-  /**
-   * Whether this object can wake itself. A routed sub-agent (a facet) has
-   * no alarm of its own, so it keeps no recovery jobs, and an unfinished
-   * decision there is not resumed after a reset.
-   */
-  #canWake(): boolean {
-    return this.lifecycle.routes.source === undefined;
-  }
-
   async #pushResume(id: string, time: number): Promise<void> {
-    if (!this.#canWake()) return;
     await this.lifecycle.jobs.push({
       id: resumeJobId(id),
       fn: RESUME_FN,

@@ -1,4 +1,5 @@
 import { Agent } from "../../index.ts";
+import { Approvals } from "../../approvals/index.ts";
 import {
   LifecycleCapability,
   type LifecycleJobContext
@@ -118,6 +119,38 @@ export class FacetWakeMiddle extends WakeAgent {
     return this.syncs;
   }
 
+  readonly approvals = new Approvals({
+    onDecided: (decision) => {
+      this
+        .sql`INSERT INTO facet_wake_runs (id, at) VALUES (${`decided:${decision.id}`}, ${Date.now()})`;
+      return { status: "done" };
+    }
+  });
+
+  constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
+    super(ctx, env);
+    this.lifecycle.use(this.approvals);
+  }
+
+  /**
+   * Park a decision and leave it decided with its continuation not run, as
+   * an isolate that ended right after the verdict would; then start
+   * Approvals again, as the next instance does.
+   */
+  async parkDecidedThenRestart(): Promise<string> {
+    const { id } = this.approvals.park({ kind: "action", subject: {} });
+    this.ctx.storage.sql.exec(
+      `UPDATE cf_agents_decisions
+       SET status = 'decided', verdict_json = ?, decided_at = ?
+       WHERE id = ?`,
+      JSON.stringify({ approved: true }),
+      Date.now(),
+      id
+    );
+    await this.approvals.onStart();
+    return id;
+  }
+
   override async _cf_routeLifecycle(
     target: Parameters<Agent["_cf_routeLifecycle"]>[0],
     envelope: Parameters<Agent["_cf_routeLifecycle"]>[1]
@@ -225,6 +258,12 @@ export class FacetWakeRoot extends WakeAgent {
 
   async middleSyncCount(name: string): Promise<number> {
     return (await this.subAgent(FacetWakeMiddle, name)).syncCount();
+  }
+
+  async middleParkDecidedThenRestart(name: string): Promise<string> {
+    return (
+      await this.subAgent(FacetWakeMiddle, name)
+    ).parkDecidedThenRestart();
   }
 
   failNextFacetDrives(count: number): void {

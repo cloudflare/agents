@@ -260,4 +260,14 @@ describe("facet wake", () => {
     expect(await agent.armReportCount()).toBe(0);
     expect(await agent.rootJobs()).toEqual([]);
   });
+
+  it("resumes a sub-agent's decided approval from the root's alarm", async () => {
+    const agent = await root();
+    const id = await agent.middleParkDecidedThenRestart("m");
+    await runDurableObjectAlarm(agent);
+
+    await vi.waitFor(async () => {
+      expect(await agent.middleRan("m")).toContain(`decided:${id}`);
+    });
+  });
 });

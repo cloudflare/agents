@@ -122,8 +122,10 @@ any fiber wakes it mirrored for facets (old mirror jobs and the old
 `cf_agents_facet_runs` index) onto facet wakes and drops them; a facet
 starting after the upgrade arms its own fiber wake when it finds fibers
 left behind. Capabilities that still route a facet's work to the root
-themselves (Tasks, Scheduler, Approvals) keep working beside this.
-They move onto it one at a time, and their routing is removed as they do.
+themselves (Tasks, Scheduler) keep working beside this.
+They move onto it one at a time, and their routing is removed as they do. Approvals,
+which used to skip its recovery jobs in a facet, now keeps them in the
+facet's queue like any other capability.
 
 ## When the alarm fires
 
