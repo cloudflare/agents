@@ -168,6 +168,23 @@ describe("Sessions capability", () => {
     });
   });
 
+  it("indexes the first row budget of a message whose text is larger than a row", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      await session.search("warm");
+      // 3 MB of text: stored across continuation rows, more than one FTS
+      // row can hold.
+      const body = `needle ${"x ".repeat(1_500_000)}`;
+      await session.appendMessage(text("big", body));
+      expect((await session.search("needle")).map((hit) => hit.id)).toEqual([
+        "big"
+      ]);
+      const [stored] = await session.getHistory();
+      expect(stored.parts[0]).toMatchObject({ text: body });
+    });
+  });
+
   it("splices children to the grandparent on mid-chain delete", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
