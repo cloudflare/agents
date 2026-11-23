@@ -2,6 +2,7 @@ import path from "node:path";
 import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
 import { stripNodeModulesSourceMapReferences } from "../../../../../../scripts/vitest/strip-node-modules-source-map-references";
 import { defineConfig } from "vitest/config";
+import { stubModelsDevSnapshot } from "./models-dev-snapshot";
 
 const testsDir = import.meta.dirname;
 
@@ -18,31 +19,9 @@ export default defineConfig({
           : null
     },
     {
-      // OpenCode inlines models.dev's catalog as one 8 MB string, too large
-      // for the message that carries a module into the test runtime. These
-      // tests turn catalog fetches off and use only the Cloudflare provider,
-      // so an empty catalog stands in. If OpenCode's build changes shape,
-      // fail here rather than at the module transfer.
       name: "empty-models-dev-snapshot",
       enforce: "pre",
-      transform: (code, id) => {
-        if (
-          !id.includes("/@opencode/core/dist/") ||
-          !code.includes("// src/models-dev/snapshot.txt")
-        ) {
-          return null;
-        }
-        const stubbed = code.replace(
-          /(\/\/ src\/models-dev\/snapshot\.txt\nvar snapshot_default = )'.*';/,
-          "$1'{}';"
-        );
-        if (stubbed === code) {
-          throw new Error(
-            `empty-models-dev-snapshot: no snapshot literal to replace in ${id}; update the pattern for this @opencode/core build`
-          );
-        }
-        return stubbed;
-      }
+      transform: stubModelsDevSnapshot
     },
     stripNodeModulesSourceMapReferences(),
     cloudflareTest({
