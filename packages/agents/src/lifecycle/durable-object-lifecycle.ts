@@ -665,9 +665,17 @@ export class Lifecycle<
     let moved = false;
     for (const { capability } of rows) {
       const path = capability.slice(prefix.length);
-      const notBefore = facetDriveNotBefore(
-        this.#ctx.storage.kv.get<FacetDriveCount>(facetDriveKey(path))
+      // A path whose last drive never replied (perhaps the very reset that
+      // restarted this root) keeps its recheck delay and back-off.
+      const drives = this.#ctx.storage.kv.get<FacetDriveCount>(
+        facetDriveKey(path)
       );
+      const notBefore = drives
+        ? Math.max(
+            drives.at + FACET_DRIVE_RECHECK_MS,
+            facetDriveNotBefore(drives)
+          )
+        : 0;
       this.#jobQueue.reschedule(
         capability,
         facetWakeJobId(path),

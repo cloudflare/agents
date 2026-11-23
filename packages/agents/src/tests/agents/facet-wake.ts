@@ -17,6 +17,8 @@ class WakeProbe extends LifecycleCapability {
     this.host.sql`CREATE TABLE IF NOT EXISTS facet_wake_runs (
       id TEXT NOT NULL, at INTEGER NOT NULL
     )`;
+    this.host
+      .sql`INSERT INTO facet_wake_runs (id, at) VALUES ('start', ${Date.now()})`;
   }
 
   async onJob({ job }: LifecycleJobContext): Promise<void> {
@@ -58,7 +60,17 @@ abstract class WakeAgent extends Agent<Cloudflare.Env> {
   ran(): string[] {
     return this.sql<{
       id: string;
-    }>`SELECT id FROM facet_wake_runs ORDER BY at`.map((row) => row.id);
+    }>`SELECT id FROM facet_wake_runs WHERE id != 'start' ORDER BY at`.map(
+      (row) => row.id
+    );
+  }
+
+  /** When this object started, each time. */
+  starts(): number[] {
+    return this.sql<{ at: number }>`
+      SELECT at FROM facet_wake_runs WHERE id = 'start' ORDER BY at`.map(
+      (row) => row.at
+    );
   }
 
   pendingJobs(): string[] {
@@ -123,6 +135,10 @@ export class FacetWakeRoot extends WakeAgent {
 
   async leafPending(middle: string, leaf: string): Promise<string[]> {
     return (await this.subAgent(FacetWakeMiddle, middle)).leafPending(leaf);
+  }
+
+  async middleStarts(name: string): Promise<number[]> {
+    return (await this.subAgent(FacetWakeMiddle, name)).starts();
   }
 
   async middlePending(name: string): Promise<string[]> {

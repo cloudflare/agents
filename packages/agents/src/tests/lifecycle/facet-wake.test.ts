@@ -164,15 +164,33 @@ describe("facet wake", () => {
     const name = crypto.randomUUID();
     const agent = await getAgentByName(env.FacetWakeRoot, name);
     await agent.middlePush("m", "later", 60_000);
-    expect((await agent.rootJobs())[0]!.time).toBeGreaterThan(
-      Date.now() + 50_000
-    );
+
+    const resetAt = Date.now();
+    await agent.resetTree().catch(() => {});
+    // Start the root again and leave the facet alone: only the root's wake
+    // can start it now.
+    const again = await getAgentByName(env.FacetWakeRoot, name);
+    await again.rootJobs();
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const before = Date.now() - 300;
+    // The facet started (its own start recovers what the reset cut off)
+    // well before this test reached it, so the root's restart drove it.
+    const starts = await again.middleStarts("m");
+    expect(starts.some((at) => at > resetAt && at < before)).toBe(true);
+  });
+
+  it("keeps the recheck delay for a facet whose last drive never replied", async () => {
+    const name = crypto.randomUUID();
+    const agent = await getAgentByName(env.FacetWakeRoot, name);
+    await agent.middlePush("m", "later", 60_000);
+    const key = (await agent.rootJobs())[0]!.id.slice("facet:".length);
+    await agent.markUnreportedDrives(key, 1);
+    const marked = Date.now();
 
     await agent.resetTree().catch(() => {});
-    // The next instance makes the facet's wake due, so the facet starts and
-    // recovers whatever the reset cut off, instead of waiting a minute.
     const again = await getAgentByName(env.FacetWakeRoot, name);
     const [wake] = await again.rootJobs();
-    expect(wake!.time).toBeLessThanOrEqual(Date.now());
+    expect(wake!.time).toBeGreaterThanOrEqual(marked + 25_000);
+    expect(wake!.time).toBeLessThan(marked + 60_000);
   });
 });
