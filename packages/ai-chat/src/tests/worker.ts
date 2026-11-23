@@ -1148,7 +1148,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   async waitForIdleForTest(): Promise<void> {
-    await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
+    await this["_turns"].waitForIdle();
   }
 
   getChatMessageCallCountForTest(): number {
@@ -2123,7 +2123,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
         (value) => value.status,
         (error) => `threw: ${error instanceof Error ? error.message : error}`
       );
-      await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
+      await this["_turns"].waitForIdle();
       return {
         status,
         responses: this._chatResponseResults.map((r) => r.status),
@@ -2177,7 +2177,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
   }
 
   async waitForIdleForTest(): Promise<boolean> {
-    await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
+    await this["_turns"].waitForIdle();
     return true;
   }
 
@@ -2656,7 +2656,7 @@ export class ResponseAgent extends AIChatAgent<Env> {
   }
 
   async waitForIdleForTest(): Promise<void> {
-    await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
+    await this["_turns"].waitForIdle();
   }
 
   getPersistedMessages(): Promise<ChatMessage[]> {
@@ -2794,7 +2794,7 @@ export class ResponseSaveMessagesAgent extends AIChatAgent<Env> {
   }
 
   async waitForIdleForTest(): Promise<void> {
-    await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
+    await this["_turns"].waitForIdle();
   }
 
   getPersistedMessages(): Promise<ChatMessage[]> {
@@ -4014,7 +4014,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       UPDATE cf_agents_jobs SET time = ${past} WHERE id LIKE 'task:%'
     `;
     await this.alarm();
-    await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
+    await this["_turns"].waitForIdle();
   }
 
   async rvContinueWithStreamErrorForTest(message: string): Promise<string> {
@@ -4323,7 +4323,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       await new Promise((resolve) => setTimeout(resolve, 50));
       inspection = await this.inspectAgentToolRun(runId);
     }
-    await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
+    await this["_turns"].waitForIdle();
     return { status: inspection?.status, body: self._lastBody };
   }
 
@@ -4362,7 +4362,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       await new Promise((resolve) => setTimeout(resolve, 50));
       inspection = await this.inspectAgentToolRun(runId);
     }
-    await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
+    await this["_turns"].waitForIdle();
     const followUp = this._followUpRequestId;
     const row = this["_agentToolRuns"].store.read(runId);
     const followUpStream = followUp
@@ -4761,7 +4761,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       WHERE id = ${`task:${runId}`}
     `;
     await this.alarm();
-    await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
+    await this["_turns"].waitForIdle();
     return true;
   }
 
@@ -4801,7 +4801,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       LIMIT 1
     `;
     if (!rows[0]) {
-      await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
+      await this["_turns"].waitForIdle();
       return;
     }
     await this._chatRecoveryRetryDetached(
@@ -4824,7 +4824,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       LIMIT 1
     `;
     if (!rows[0]) {
-      await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
+      await this["_turns"].waitForIdle();
       return;
     }
     await this._chatRecoveryContinueDetached(
@@ -5058,7 +5058,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   }
 
   async waitForIdleForTest(): Promise<void> {
-    await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
+    await this["_turns"].waitForIdle();
   }
 
   async triggerInterruptedStreamCheck(): Promise<void> {
@@ -5302,7 +5302,7 @@ export class NonChatRecoveryTestAgent extends AIChatAgent<Env> {
   }
 
   async waitForIdleForTest(): Promise<void> {
-    await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
+    await this["_turns"].waitForIdle();
   }
 }
 
@@ -5414,7 +5414,7 @@ export class RecoveryThrowingAgent extends AIChatAgent<Env> {
   }
 
   async waitForIdleForTest(): Promise<void> {
-    await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
+    await this["_turns"].waitForIdle();
   }
 }
 

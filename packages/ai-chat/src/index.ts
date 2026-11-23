@@ -110,7 +110,6 @@ import {
 } from "agents/chat";
 import {
   replyIsEmpty,
-  settleInterruptedPart,
   type ClientToolSchema,
   type PinnedTurnContext,
   type RecoveryLeafCheck,
@@ -722,13 +721,6 @@ export class AIChatAgent<
   protected set _lastBody(body: Record<string, unknown> | undefined) {
     this._requestContext.body = body;
   }
-
-  /**
-   * Shared auto-continuation barrier (#1649 / #1650): owns the coalesce timer
-   * and the double-fire guard. Parameterized by this agent's stream-active
-   * signal, apply-drain, and continuation-turn pipeline (`_fireAutoContinuation`).
-   */
-  private readonly _autoContinuation = this._turns.autoContinuation;
 
   /** Default wait for trailing-edge debounced overlapping submits. */
   private static MESSAGE_DEBOUNCE_MS = 750;
@@ -1481,21 +1473,6 @@ export class AIChatAgent<
       await this.onError(e);
       throw e;
     }
-  }
-
-  /**
-   * Wait until the agent is fully idle — both the turn queue is drained
-   * AND no submits are in flight between the concurrency decision and
-   * `_runExclusiveChatTurn` (mid-`persistMessages` etc.).
-   *
-   * Just awaiting `_turnQueue.waitForIdle()` would miss submits whose
-   * handlers have bumped `_latestOverlappingSubmitSequence` and
-   * incremented `_pendingEnqueueCount` but haven't yet reached
-   * `_runExclusiveChatTurn` — those would race with anything calling
-   * `waitForIdle()` (tests, `waitUntilStable`, recovery code).
-   */
-  private async waitForIdle(): Promise<void> {
-    return this._turns.waitForIdle();
   }
 
   /** Remember where a merge strategy's queued user messages start. */
@@ -4162,26 +4139,6 @@ export class AIChatAgent<
     }
 
     return undefined;
-  }
-
-  private _createStreamingAssistantMessage(continuation: boolean): UIMessage {
-    if (continuation) {
-      const lastAssistant = this._findLastAssistantMessage();
-      if (lastAssistant) {
-        // A text or reasoning part the interruption left streaming is closed
-        // (the shared `settleInterruptedPart`). The continuation opens parts
-        // of its own after it, so its reasoning and text follow in the order
-        // the model wrote them.
-        const clone = structuredClone(lastAssistant);
-        return { ...clone, parts: clone.parts.map(settleInterruptedPart) };
-      }
-    }
-
-    return {
-      id: `assistant_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`,
-      role: "assistant",
-      parts: []
-    };
   }
 
   /**
