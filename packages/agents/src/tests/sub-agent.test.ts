@@ -527,6 +527,15 @@ describe("SubAgent", () => {
     expect(await agent.rootQueueRows()).toEqual([]);
   });
 
+  it("leaves other owners' jobs alone when a sub-agent is deleted", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.insertOtherOwnerJobNamingSubAgent("named-child");
+    await agent.subAgentDelete("named-child");
+    expect(await agent.otherOwnerJobCount()).toBe(1);
+  });
+
   it("drops a queue item the root held for a deleted sub-agent", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);

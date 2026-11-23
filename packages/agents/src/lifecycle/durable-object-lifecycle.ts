@@ -101,6 +101,13 @@ const FACET_REPORT_RETRY_MS = 100;
 /** Longest wait between report retries. */
 const FACET_REPORT_RETRY_MAX_MS = 30_000;
 
+/**
+ * TEMPORARY: owners that hand over rows an earlier release kept on the root
+ * for a facet. Each joins this list in the change that moves it into the
+ * facet's own queue.
+ */
+const LEGACY_HANDOVER_OWNERS: readonly string[] = ["queue"];
+
 type FacetWakeMessage =
   | {
       readonly type: "arm";
@@ -746,15 +753,17 @@ export class Lifecycle<
       this.#ctx.storage.kv.delete(facetDriveKey(path));
     }
     // TEMPORARY: rows an earlier release kept on the root for this facet
-    // sub-tree (queue items, schedules, wake mirrors), which their owners
-    // hand over when they come due. A deleted sub-tree's rows must not
-    // reach a sub-agent created later on the same path. Remove with the
-    // hand-overs, in the next minor release.
+    // sub-tree, which their owners hand over when they come due. A deleted
+    // sub-tree's rows must not reach a sub-agent created later on the same
+    // path. Only the owners that hand rows over are matched, never a host's
+    // own jobs. Remove with the hand-overs, in the next minor release.
     const legacy = this.#ctx.storage.sql
       .exec<{ capability: string; id: string }>(
         `SELECT capability, id FROM cf_agents_jobs
-         WHERE json_extract(payload, '$.owner_path_key') = ?
-            OR substr(json_extract(payload, '$.owner_path_key'), 1, ?) = ?`,
+         WHERE capability IN (${LEGACY_HANDOVER_OWNERS.map(() => "?").join(", ")})
+           AND (json_extract(payload, '$.owner_path_key') = ?
+             OR substr(json_extract(payload, '$.owner_path_key'), 1, ?) = ?)`,
+        ...LEGACY_HANDOVER_OWNERS,
         key,
         key.length + 1,
         `${key}/`

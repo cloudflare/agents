@@ -1723,6 +1723,26 @@ export class TestSubAgentParent extends Agent {
     await this.lifecycle.rearmAlarm();
   }
 
+  /** A job of another owner whose payload happens to name a sub-agent path. */
+  async insertOtherOwnerJobNamingSubAgent(subAgentName: string): Promise<void> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    const selfPath = await child.getSelfPath();
+    this.sql`
+      INSERT INTO cf_agents_jobs (id, capability, fn, time, payload)
+      VALUES ('other-owner-job', 'other-owner', 'run', ${Date.now() + 60_000},
+        ${JSON.stringify({ owner_path_key: agentPathKey(selfPath) })})
+    `;
+  }
+
+  otherOwnerJobCount(): number {
+    return (
+      this.sql<{ count: number }>`
+        SELECT COUNT(*) AS count FROM cf_agents_jobs
+        WHERE capability = 'other-owner'
+      `[0]?.count ?? 0
+    );
+  }
+
   async rootQueueRows(): Promise<
     Array<{ id: string; callback: string; ownerPath: string | null }>
   > {
