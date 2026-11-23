@@ -220,4 +220,17 @@ describe("unexecuted tool record", () => {
     expect((await child.testChat("hello")).done).toBe(true);
     expect(await child.thinkConfigRowForTest("unexecutedTools")).toBe(null);
   });
+
+  it("replaces a stored client-tool list with an empty one", async () => {
+    const stub = await getAgentByName(
+      env.ThinkTestAgent as unknown as DurableObjectNamespace<ThinkTestAgent>,
+      `periphery-unexecuted-reset-${crypto.randomUUID()}`
+    );
+    await stub.seedThinkConfigRowForTest(
+      "unexecutedTools",
+      JSON.stringify(["client_tool"])
+    );
+    expect((await stub.testChat("hello")).done).toBe(true);
+    expect(await stub.thinkConfigRowForTest("unexecutedTools")).toBe("[]");
+  });
 });
