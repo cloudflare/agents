@@ -302,9 +302,6 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     const prefix = agentPathKey(ownerPath);
     if (prefix) {
       await forgetFacetWakes(this.#host.lifecycle, prefix);
-      await this.#host.scheduler.__DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(
-        prefix
-      );
       await this.#host.tasks.__DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(
         prefix
       );

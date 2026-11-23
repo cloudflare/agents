@@ -10,6 +10,7 @@ import type {
 import { RpcTarget } from "cloudflare:workers";
 import { MessageType } from "../../types.ts";
 import { agentPathKey } from "../../dynamic-agents/identity.ts";
+import { declareSchedules } from "../../schedules/scheduler.ts";
 import { armFacetWake } from "../../lifecycle/durable-object-lifecycle.ts";
 import type { Tasks } from "../../tasks/tasks.ts";
 import { EventLogSubAgent } from "./event-log-sub-agent.ts";
@@ -21,6 +22,14 @@ const STALE_FRAME_PROBE = "stale-frame-probe";
 // A SubAgent with its own SQLite counter table.
 
 export class CounterSubAgent extends Agent {
+  async treeScheduleRows(): Promise<TreeScheduleRow[]> {
+    return treeScheduleRows(this, false);
+  }
+
+  async treeBackdateSchedule(id: string): Promise<void> {
+    await treeBackdateSchedule(this, id);
+  }
+
   private _heldKeepAliveDisposers: Array<() => void> = [];
   private _constructorName = this.name;
   /** What `remember` saw, and the checkpoint rows while it ran. */
@@ -214,6 +223,24 @@ export class CounterSubAgent extends Agent {
     return this.queue("queuedCallback", { value });
   }
 
+  /** Declare one schedule every 5 minutes that logs `value` when it runs. */
+  async declareLoggingSchedule(value: string): Promise<string[]> {
+    await declareSchedules(this.scheduler, {
+      tick: {
+        schedule: "every 5 minutes",
+        run: () => {
+          this.scheduledCallback(
+            { value },
+            { id: "declared:tick", callback: "tick" }
+          );
+        }
+      }
+    });
+    return this.sql<{ id: string }>`
+      SELECT id FROM cf_agents_jobs WHERE capability = 'scheduler'
+    `.map((row) => row.id);
+  }
+
   /** Ids of the items in this sub-agent's own queue. */
   queueRowIds(): string[] {
     return this.sql<{ id: string }>`
@@ -362,8 +389,7 @@ export class CounterSubAgent extends Agent {
 
   trySyncGetSchedule(id: string): string {
     try {
-      this.getSchedule(id);
-      return "";
+      return this.getSchedule(id)?.id ?? "";
     } catch (e) {
       return e instanceof Error ? e.message : String(e);
     }
@@ -371,8 +397,9 @@ export class CounterSubAgent extends Agent {
 
   trySyncGetSchedules(): string {
     try {
-      this.getSchedules();
-      return "";
+      return this.getSchedules()
+        .map((s) => s.id)
+        .join(",");
     } catch (e) {
       return e instanceof Error ? e.message : String(e);
     }
@@ -790,6 +817,14 @@ export class CounterSubAgent extends Agent {
 // A SubAgent that itself spawns a child SubAgent.
 
 export class InnerSubAgent extends Agent {
+  async treeScheduleRows(): Promise<TreeScheduleRow[]> {
+    return treeScheduleRows(this, false);
+  }
+
+  async treeBackdateSchedule(id: string): Promise<void> {
+    await treeBackdateSchedule(this, id);
+  }
+
   onStart() {
     this.sql`
       CREATE TABLE IF NOT EXISTS kv (
@@ -976,6 +1011,14 @@ export class InnerSubAgent extends Agent {
 }
 
 export class OuterSubAgent extends Agent {
+  async treeScheduleRows(): Promise<TreeScheduleRow[]> {
+    return treeScheduleRows(this, false);
+  }
+
+  async treeBackdateSchedule(id: string): Promise<void> {
+    await treeBackdateSchedule(this, id);
+  }
+
   async outerPing(): Promise<string> {
     return `outer:${this.name}`;
   }
@@ -1769,6 +1812,39 @@ export class TestSubAgentParent extends Agent {
     return child.queueRowIds();
   }
 
+  async subAgentDeclareLoggingSchedule(
+    subAgentName: string,
+    value: string
+  ): Promise<string[]> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.declareLoggingSchedule(value);
+  }
+
+  /**
+   * Leave a delayed schedule for a sub-agent in this root, due now, as the
+   * previous release kept it.
+   */
+  async insertLegacyRootSchedule(
+    subAgentName: string,
+    id: string,
+    value: string
+  ): Promise<void> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    const selfPath = await child.getSelfPath();
+    this.sql`
+      INSERT INTO cf_agents_jobs (id, capability, fn, time, payload)
+      VALUES (${id}, 'scheduler', 'scheduledCallback', ${Date.now()},
+        ${JSON.stringify({
+          payload: { value },
+          type: "delayed",
+          delayInSeconds: 1,
+          owner_path: JSON.stringify(selfPath),
+          owner_path_key: agentPathKey(selfPath)
+        })})
+    `;
+    await this.lifecycle.rearmAlarm();
+  }
+
   /**
    * Leave a queue item for a sub-agent in this root, due now, as the
    * previous release kept it.
@@ -2038,8 +2114,7 @@ export class TestSubAgentParent extends Agent {
   }
 
   async backdateSchedule(id: string): Promise<void> {
-    const past = Date.now() - 1_000;
-    this.sql`UPDATE cf_agents_jobs SET time = ${past} WHERE id = ${id}`;
+    await treeBackdateSchedule(this, id);
   }
 
   /** Drive a routed Task wake for a facet that is not in the registry. */
@@ -2068,41 +2143,9 @@ export class TestSubAgentParent extends Agent {
     `;
   }
 
-  async rootScheduleRows(): Promise<
-    Array<{
-      id: string;
-      callback: string;
-      ownerPath: string | null;
-      ownerPathKey: string | null;
-      type: string;
-      running: number;
-    }>
-  > {
-    return this.sql<{
-      id: string;
-      callback: string;
-      owner_path: string | null;
-      owner_path_key: string | null;
-      type: string;
-      running: number | null;
-    }>`
-      SELECT id,
-             fn AS callback,
-             json_extract(payload, '$.owner_path') AS owner_path,
-             json_extract(payload, '$.owner_path_key') AS owner_path_key,
-             json_extract(payload, '$.type') AS type,
-             COALESCE(running, 0) AS running
-      FROM cf_agents_jobs
-      WHERE capability = 'scheduler'
-      ORDER BY id
-    `.map((row) => ({
-      id: row.id,
-      callback: row.callback,
-      ownerPath: row.owner_path,
-      ownerPathKey: row.owner_path_key,
-      type: row.type,
-      running: row.running ?? 0
-    }));
+  /** Schedule rows across this root and its sub-agents. */
+  async rootScheduleRows(): Promise<TreeScheduleRow[]> {
+    return treeScheduleRows(this, true);
   }
 
   async subAgentRegistryRows(): Promise<
@@ -3585,5 +3628,87 @@ export class BodyProbeSubAgent extends Agent {
 export class BodyProbeRootAgent extends Agent {
   override async onRequest(request: Request): Promise<Response> {
     return handleBodyProbe(this.name, request);
+  }
+}
+
+/** A schedule row anywhere in a sub-agent tree, with the path that holds it. */
+type TreeScheduleRow = {
+  id: string;
+  callback: string;
+  ownerPath: string | null;
+  ownerPathKey: string | null;
+  type: string;
+  running: number;
+};
+
+/** Sub-agent classes the tree helpers walk into. */
+function treeClasses(): Record<
+  string,
+  typeof CounterSubAgent | typeof InnerSubAgent | typeof OuterSubAgent
+> {
+  return { CounterSubAgent, InnerSubAgent, OuterSubAgent };
+}
+
+function registeredSubAgents(
+  agent: Agent
+): Array<{ class: string; name: string }> {
+  try {
+    return agent.sql<{ class: string; name: string }>`
+      SELECT class, name FROM cf_agents_sub_agents ORDER BY class, name`;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Every schedule row in `agent` and the sub-agents below it. Each sub-agent
+ * keeps its own schedules, so a test reads the tree, not only the root.
+ */
+async function treeScheduleRows(
+  agent: Agent,
+  isRoot: boolean
+): Promise<TreeScheduleRow[]> {
+  const ownerPath = isRoot ? null : JSON.stringify(agent.selfPath);
+  const ownerPathKey = isRoot ? null : (agentPathKey(agent.selfPath) ?? null);
+  const rows: TreeScheduleRow[] = agent.sql<{
+    id: string;
+    callback: string;
+    type: string;
+    running: number;
+  }>`
+    SELECT id, fn AS callback, json_extract(payload, '$.type') AS type,
+           COALESCE(running, 0) AS running
+    FROM cf_agents_jobs WHERE capability = 'scheduler'
+  `.map((row) => ({ ...row, ownerPath, ownerPathKey }));
+  for (const child of registeredSubAgents(agent)) {
+    const cls = treeClasses()[child.class];
+    if (!cls) continue;
+    const stub = (await agent.subAgent(
+      cls as typeof CounterSubAgent,
+      child.name
+    )) as unknown as {
+      treeScheduleRows(): Promise<TreeScheduleRow[]>;
+    };
+    rows.push(...(await stub.treeScheduleRows()));
+  }
+  return rows.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+/** Make schedule `id` due, wherever in the tree it lives. */
+async function treeBackdateSchedule(agent: Agent, id: string): Promise<void> {
+  const past = Date.now() - 1_000;
+  const changed = agent.sql<{ id: string }>`
+    UPDATE cf_agents_jobs SET time = ${past} WHERE id = ${id} RETURNING id`;
+  if (changed.length > 0) await agent.lifecycle.rearmAlarm();
+  for (const child of registeredSubAgents(agent)) {
+    const cls = treeClasses()[child.class];
+    if (!cls) continue;
+    const stub = (await agent.subAgent(
+      cls as typeof CounterSubAgent,
+      child.name
+    )) as unknown as {
+      treeBackdateSchedule(id: string): Promise<void>;
+    };
+    await stub.treeBackdateSchedule(id);
   }
 }

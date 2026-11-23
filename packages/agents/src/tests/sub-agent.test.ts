@@ -512,6 +512,42 @@ describe("SubAgent", () => {
     expect(await agent.subAgentQueueRowIds("queue-child")).toEqual([]);
   });
 
+  it("runs a declared schedule inside a sub-agent", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const ids = await agent.subAgentDeclareLoggingSchedule(
+      "declared-child",
+      "declared"
+    );
+    expect(ids).toHaveLength(1);
+    await agent.backdateSchedule(ids[0]!);
+    await runDurableObjectAlarm(agent);
+
+    await vi.waitFor(async () => {
+      expect(await agent.subAgentScheduleLog("declared-child")).toEqual([
+        expect.objectContaining({ value: "declared" })
+      ]);
+    });
+  });
+
+  it("hands a schedule the root held for a sub-agent to that sub-agent", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.insertLegacyRootSchedule("sched-handover", "old-sched", "kept");
+    await runDurableObjectAlarm(agent);
+
+    await vi.waitFor(async () => {
+      expect(await agent.subAgentScheduleLog("sched-handover")).toEqual([
+        expect.objectContaining({ value: "kept", scheduleId: "old-sched" })
+      ]);
+    });
+    expect(
+      (await agent.rootScheduleRows()).some((row) => row.id === "old-sched")
+    ).toBe(false);
+  });
+
   it("hands a queue item the root held for a sub-agent to that sub-agent", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
@@ -661,7 +697,7 @@ describe("SubAgent", () => {
     ]);
   });
 
-  it("should throw from sync schedule query APIs inside a sub-agent", async () => {
+  it("reads a sub-agent's schedules through the sync query APIs", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
 
@@ -673,10 +709,10 @@ describe("SubAgent", () => {
 
     await expect(
       agent.subAgentTrySyncGetSchedule("sync-query-child", scheduleId)
-    ).resolves.toMatch(/getSchedule\(\) is synchronous/);
+    ).resolves.toBe(scheduleId);
     await expect(
       agent.subAgentTrySyncGetSchedules("sync-query-child")
-    ).resolves.toMatch(/getSchedules\(\) is synchronous/);
+    ).resolves.toBe(scheduleId);
   });
 
   it("should prune a stale sub-agent schedule when the registry entry is gone", async () => {
