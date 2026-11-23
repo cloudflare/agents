@@ -65,6 +65,24 @@ const COMPACTIONS_COLUMNS = `
   created_at INTEGER NOT NULL,
   PRIMARY KEY (session_id, to_message_id, seq)`;
 
+/**
+ * Session size at which the message table gets a `(session_id, seq)` index
+ * for finding the newest row (`#tail`). Derived from prices, not tuned:
+ *
+ * - Without the index, each wake and each delete finds the tail by scanning
+ *   the session: 2N rows read for N stored rows.
+ * - With it, the tail is one row, but every append writes one more row, and
+ *   a row written costs about R = 1,000 rows read. Building it writes about
+ *   N rows once, R x N.
+ * - A wake appends about A = 3 rows (the user message, the reply, a tool
+ *   row). Assume a session has as many wakes ahead as it has had, N / A.
+ *
+ * The index pays when (N / A) x (2N - A x R) > R x N, that is N > A x R =
+ * 3,000. Below it a session never pays a write for an index it does not
+ * need, which is most sessions. The answer is the same with or without it.
+ */
+const TAIL_INDEX_ROWS = 3 * 1_000;
+
 /** Steps one walk statement takes before the reader asks for the next batch. */
 const WALK_BATCH_STEPS = 512;
 
@@ -170,7 +188,13 @@ function hiddenOverlayRowSql(idColumn: string, sessionExpr: string): string {
 type PathRow = { id: string; bytes: number };
 
 /** The newest row of a session: what an append attaches to and numbers from. */
-type Tail = { leafId: string | null; nextSeq: number };
+/**
+ * A session's newest row and the next `seq`. While the tail index doesn't
+ * exist, `rows` is an upper bound on the session's stored rows (its newest
+ * `seq` at first, then exact once counted); `null` once the index exists.
+ * Rows are counted only when the bound reaches `TAIL_INDEX_ROWS`.
+ */
+type Tail = { leafId: string | null; nextSeq: number; rows: number | null };
 
 /**
  * The memoised context-size estimate for a session: the leaf it was
@@ -273,6 +297,10 @@ export class SessionsCore {
   #fts = false;
   /** True once this isolate knows every split message is in the index. */
   #ftsBackfilled = false;
+  /** True once the tail index is known to exist in this isolate. */
+  #tailIndexed = false;
+  /** True once building the tail index failed in this isolate. */
+  #tailIndexFailed = false;
 
   constructor(options: SessionsOptions, io: SessionsIo) {
     this.io = io;
@@ -954,15 +982,110 @@ export class SessionsCore {
   #tail(sessionId: string): Tail {
     const cached = this.#tails.get(sessionId);
     if (cached) return cached;
-    const [row] = this.io.sql<{ id: string; seq: number }>(
-      "SELECT id, seq FROM cf_agents_session_messages WHERE session_id = ? ORDER BY seq DESC LIMIT 1",
-      [sessionId]
-    );
-    const tail: Tail = row
-      ? { leafId: row.id, nextSeq: row.seq + 1 }
-      : { leafId: null, nextSeq: 1 };
+    let tail: Tail;
+    if (this.#hasTailIndex()) {
+      const [row] = this.io.sql<{ id: string; seq: number }>(
+        "SELECT id, seq FROM cf_agents_session_messages WHERE session_id = ? ORDER BY seq DESC LIMIT 1",
+        [sessionId]
+      );
+      tail = row
+        ? { leafId: row.id, nextSeq: row.seq + 1, rows: null }
+        : { leafId: null, nextSeq: 1, rows: null };
+    } else {
+      const [row] = this.io.sql<{ id: string; seq: number }>(
+        "SELECT id, seq FROM cf_agents_session_messages WHERE session_id = ? ORDER BY seq DESC LIMIT 1",
+        [sessionId]
+      );
+      tail = row
+        ? {
+            leafId: row.id,
+            nextSeq: row.seq + 1,
+            rows: this.#rowsOrIndex(sessionId, row.seq)
+          }
+        : { leafId: null, nextSeq: 1, rows: 0 };
+    }
     this.#tails.set(sessionId, tail);
     return tail;
+  }
+
+  /**
+   * The tail after appending `leafId` as row `tail.nextSeq`. The tail moves
+   * first: the row is stored, so the next append must number from it even
+   * if building the index then fails.
+   */
+  #appended(sessionId: string, tail: Tail, leafId: string): void {
+    const next: Tail = {
+      leafId,
+      nextSeq: tail.nextSeq + 1,
+      rows: tail.rows === null ? null : tail.rows + 1
+    };
+    this.#tails.set(sessionId, next);
+    if (next.rows !== null) {
+      next.rows = this.#rowsOrIndex(sessionId, next.rows);
+    }
+  }
+
+  /**
+   * Given an upper bound on a session's stored rows, return a bound to keep,
+   * or `null` once there is nothing left to count for (the index exists, or
+   * building it failed in this isolate). Below `TAIL_INDEX_ROWS` the bound
+   * is enough; at it, the rows are counted (a retention-trimmed chat has a
+   * high `seq` and few rows), and the index is created if they are there.
+   */
+  #rowsOrIndex(sessionId: string, atMost: number): number | null {
+    if (atMost < TAIL_INDEX_ROWS) return atMost;
+    // The index couldn't be built in this isolate: stop counting.
+    if (this.#tailIndexFailed) return null;
+    const [{ rows }] = this.io.sql<{ rows: number }>(
+      "SELECT count(*) AS rows FROM cf_agents_session_messages WHERE session_id = ?",
+      [sessionId]
+    );
+    if (rows < TAIL_INDEX_ROWS) return rows;
+    this.#ensureTailIndex(sessionId);
+    return null;
+  }
+
+  /** Whether the tail index exists; a positive answer is remembered. */
+  #hasTailIndex(): boolean {
+    if (!this.#tailIndexed) {
+      this.#tailIndexed =
+        this.io.sql<{ one: number }>(
+          "SELECT 1 AS one FROM sqlite_master WHERE type = 'index' AND name = 'cf_agents_session_messages_by_seq'",
+          []
+        ).length > 0;
+    }
+    return this.#tailIndexed;
+  }
+
+  /**
+   * Index the message table by `(session_id, seq)`, so finding a session's
+   * newest row reads one row instead of scanning the session. Created the
+   * first time a session holds `TAIL_INDEX_ROWS` stored rows (counted, not
+   * its newest `seq`, which retention leaves high); the only place the
+   * index is made. It covers every session in the object from then on.
+   */
+  #ensureTailIndex(sessionId: string): boolean {
+    if (this.#tailIndexed) return true;
+    if (this.#tailIndexFailed) return false;
+    try {
+      this.io.sqlWrite(
+        `CREATE INDEX IF NOT EXISTS cf_agents_session_messages_by_seq
+         ON cf_agents_session_messages (session_id, seq)`,
+        []
+      );
+    } catch (error) {
+      // The index only speeds the lookup up. One that can't be built (the
+      // database is near its size limit) leaves the scan in place, and
+      // this isolate doesn't try again.
+      this.#tailIndexFailed = true;
+      this.io.emit("session:error", {
+        sessionId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return false;
+    }
+    this.#tailIndexed = true;
+    return true;
   }
 
   /**
@@ -973,6 +1096,8 @@ export class SessionsCore {
    */
   forgetCaches(sessionId: string): void {
     this.#tails.delete(sessionId);
+    // A rolled-back transaction may have taken a just-built index with it.
+    this.#tailIndexed = false;
     this.#pathTokens.delete(sessionId);
   }
 
@@ -1734,7 +1859,7 @@ export class SessionsCore {
 
     // The freshly inserted row is the most recent childless node, so it is
     // now the latest leaf — true even for an explicit-parent branch append.
-    this.#tails.set(sessionId, { leafId: message.id, nextSeq: seq + 1 });
+    this.#appended(sessionId, tail, message.id);
     const memo = this.#pathTokens.get(sessionId);
     if (memo) {
       if (memo.leafId === parent) {
@@ -2047,7 +2172,11 @@ export class SessionsCore {
         );
       }
     });
-    this.#tails.set(sessionId, { leafId: null, nextSeq: 1 });
+    this.#tails.set(sessionId, {
+      leafId: null,
+      nextSeq: 1,
+      rows: this.#tailIndexed ? null : 0
+    });
     this.#pathTokens.delete(sessionId);
     this.io.emit("session:cleared", { sessionId });
   }
@@ -2304,10 +2433,7 @@ export class SessionsCore {
       this.#indexFts(sessionId, staged, false);
     });
     if (inserted === 0) return false;
-    this.#tails.set(sessionId, {
-      leafId: message.id,
-      nextSeq: tail.nextSeq + 1
-    });
+    this.#appended(sessionId, tail, message.id);
     this.#pathTokens.delete(sessionId);
     return true;
   }
