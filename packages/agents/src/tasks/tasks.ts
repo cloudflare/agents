@@ -497,20 +497,37 @@ export class Tasks<
       // TEMPORARY hand-over (see #handOverSoon): any call starts the
       // sub-agent, whose own start reconciles the run into its own queue,
       // woken through the root. A gone path drops the mirror.
-      try {
-        await this.lifecycle.routes.to(
+      // The call is bounded like any dispatch: a slow sub-agent start runs
+      // on by itself, and the mirror is looked at again later.
+      const call = this.lifecycle.routes
+        .to(
           {
             key: timing.owner_path_key ?? timing.owner_path,
             data: timing.owner_path
           },
           { type: "adopt" } satisfies TaskAdoptMessage
+        )
+        .then(
+          () => "done" as const,
+          (error: unknown) => {
+            // Kept for a later try, whatever failed: a failed hand-over is
+            // not the run's own failure.
+            console.error(`error handing Task run "${runId}" over`, error);
+            return "failed" as const;
+          }
         );
-      } catch (error) {
-        if (isPlatformFailure(error)) throw error;
-        console.error(`error handing Task run "${runId}" over`, error);
-        return "yield";
+      let budgetTimer: ReturnType<typeof setTimeout> | undefined;
+      const budget = new Promise<"budget">((resolve) => {
+        budgetTimer = setTimeout(() => resolve("budget"), DISPATCH_BUDGET_MS);
+      });
+      try {
+        const winner = await Promise.race([call, budget]);
+        if (winner === "done") return undefined;
+        if (winner === "budget") this.lifecycle.trackAlarmWork(call);
+        return { rescheduleAt: Date.now() + DISPATCH_BUDGET_MS * 6 };
+      } finally {
+        clearTimeout(budgetTimer);
       }
-      return undefined;
     }
 
     return this.#dispatchRun(runId);

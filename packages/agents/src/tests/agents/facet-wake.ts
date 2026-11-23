@@ -38,6 +38,16 @@ class WakeProbe extends LifecycleCapability {
   }
 
   /** A job given up after its attempts: record it, and drop the job. */
+  /** A memory-limit seal or back-off for one of this object's jobs. */
+  onMemoryLimit(context: {
+    sealed: boolean;
+    executing?: { id: string };
+  }): void {
+    if (!context.sealed || !context.executing) return;
+    this.host
+      .sql`INSERT INTO facet_wake_runs (id, at) VALUES (${`sealed:${context.executing.id}`}, ${Date.now()})`;
+  }
+
   onJobError({ job }: LifecycleJobContext): void {
     this.host
       .sql`INSERT INTO facet_wake_runs (id, at) VALUES (${`gave-up:${job.id}`}, ${Date.now()})`;
@@ -57,6 +67,11 @@ class WakeProbe extends LifecycleCapability {
 }
 
 abstract class WakeAgent extends Agent<Cloudflare.Env> {
+  /** Leave the mark a root's drive leaves while it runs `id`. */
+  markDispatching(id: string): void {
+    this.ctx.storage.kv.put("cf_agents:facet_dispatching", id);
+  }
+
   /** Recompute this object's wake, as any queue change does. */
   async rearm(): Promise<void> {
     await this.lifecycle.rearmAlarm();
@@ -268,11 +283,15 @@ export class FacetWakeRoot extends WakeAgent {
   }
 
   /** Record that a path's drives ended unreported, as after a tree reset. */
-  markUnreportedDrives(key: string, count: number): void {
+  markUnreportedDrives(key: string, count: number, agoMs = 0): void {
     this.ctx.storage.kv.put(`cf_agents:facet_drives:${key}`, {
       count,
-      at: Date.now()
+      at: Date.now() - agoMs
     });
+  }
+
+  async middleMarkDispatching(name: string, id: string): Promise<void> {
+    await (await this.subAgent(FacetWakeMiddle, name)).markDispatching(id);
   }
 
   async deleteMiddle(name: string): Promise<void> {

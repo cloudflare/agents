@@ -544,6 +544,14 @@ export class JobQueue {
     );
   }
 
+  /** One job's row, whoever owns it. */
+  row(id: string): JobStorageRow | undefined {
+    return this.#sql<JobStorageRow>(
+      "SELECT * FROM cf_agents_jobs WHERE id = ?",
+      id
+    )[0];
+  }
+
   delete(id: string): void {
     this.#revise(id);
     this.#sql("DELETE FROM cf_agents_jobs WHERE id = ?", id);

@@ -156,7 +156,7 @@ export type JobDriverOptions = {
    * 38 ms) per dispatch. A facet driven by its root syncs: a job over the
    * memory limit there resets the whole tree, root included (measured).
    */
-  readonly commitAttempt: () => Promise<void>;
+  readonly commitAttempt: (jobId: string) => Promise<void>;
   /**
    * Schedule an isolate reset after a memory-limit strike is fully
    * recorded, suppressing any retry of the current alarm. Returns
@@ -347,6 +347,34 @@ export class JobDriver {
     // wins over the platform's own retry, so this never spends its
     // six-retry budget (RUNTIME-FACTS, 22 Nov).
     if (deferred) throw deferred.failure.cause;
+  }
+
+  /**
+   * Seal one job, as the memory-limit breaker seals a struck one: delete it
+   * and run the owners' and host's memory-limit policy. A facet's root asks
+   * for it when its drives of the facet keep dying: such a reset (a job
+   * over the memory limit takes the whole tree) leaves the facet no chance
+   * to count its own strikes.
+   */
+  async sealCrashedJob(id: string): Promise<void> {
+    const queue = this.#options.queue;
+    const row = queue.row(id);
+    if (!row) return;
+    try {
+      queue.delete(row.id);
+    } catch {
+      return;
+    }
+    try {
+      await this.#options.onMemoryLimit({
+        sealed: true,
+        nextTime: undefined,
+        executing: jobFromRow(row),
+        purgedRecoveryLoopJobs: undefined
+      });
+    } catch {
+      // best-effort domain policy, as for a strike
+    }
   }
 
   /**
@@ -665,7 +693,7 @@ export class JobDriver {
             // the failure before it took its count off.
             if (local > 1) queue.setAttempts(row.id, prior + 1);
             // The count must outlast an isolate this attempt ends.
-            await this.#options.commitAttempt();
+            await this.#options.commitAttempt(row.id);
             // The wait let requests run: a cancel or same-id push made
             // meanwhile is newer intent.
             if (disabled() || !owned()) return SUPERSEDED;

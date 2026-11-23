@@ -294,4 +294,23 @@ describe("facet wake", () => {
       ).holdRootAlarms(false);
     }
   });
+
+  it("seals a facet job whose drives kept dying with the isolate", async () => {
+    const agent = await root();
+    await agent.middlePush("m", "crasher", 60_000);
+    const key = (await agent.rootJobs())[0]!.id.slice("facet:".length);
+    // Three drives ended with the tree, the last while "crasher" ran. Its
+    // own row may have been rewritten since (a start that re-arms it).
+    await agent.middleMarkDispatching("m", "crasher");
+    await agent.markUnreportedDrives(key, 3, 10 * 60_000);
+    await agent.makeFacetWakesDueKeepingDrives();
+
+    await runDurableObjectAlarm(agent);
+
+    // Sealed like a struck job at a root: its owner was told and it is gone.
+    await vi.waitFor(async () => {
+      expect(await agent.middleRan("m")).toContain("sealed:crasher");
+      expect(await agent.middlePending("m")).toEqual([]);
+    });
+  });
 });
