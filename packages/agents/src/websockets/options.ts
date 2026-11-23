@@ -82,9 +82,10 @@ export interface WebSocketsOptions {
    *   ordinary messages and use callables. For binary-only clients.
    * - `false`: the host drives the connect sequence itself with
    *   `sendConnectFrames()` (or `sendIdentity()` and `sendState()`
-   *   separately), and applies client state frames
-   *   with `applyStateFrame()` — `Agent` does this, since it must decide
-   *   whether a connection belongs to a facet before any frame is sent.
+   *   separately), and applies client state and event-log frames with
+   *   `applyStateFrame()` and `applyEventLogFrame()` (internal) — `Agent` does this, since
+   *   it must decide whether a connection belongs to a facet before any
+   *   frame is sent or applied.
    */
   readonly protocol?:
     | boolean
@@ -113,6 +114,16 @@ export interface WebSocketsOptions {
    * state is never sent or accepted over connections.
    */
   readonly state?: SyncedState;
+
+  /**
+   * The connections event logs fan out to and look up followers in.
+   * Default: this capability's own open connections. A host whose clients
+   * are not all its own sockets passes its own source, such as an `Agent`
+   * facet, whose sockets the root owns and bridges in.
+   *
+   * @internal Not a public API (event logs are internal).
+   */
+  readonly connections?: () => Iterable<Connection>;
 
   /**
    * Tags attached to each accepted connection, queryable through

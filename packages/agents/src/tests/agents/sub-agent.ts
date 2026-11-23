@@ -2470,6 +2470,10 @@ export class TestSubAgentParent extends Agent {
     this.ctx.abort("test crash");
   }
 
+  async eventLogFacetRehydrate(child: string): Promise<void> {
+    await (await this.subAgent(EventLogSubAgent, child)).rehydrateConnections();
+  }
+
   /** Whether the root's own SQLite has a stream block table (it must not). */
   rootHasStreamBlocks(): boolean {
     return (

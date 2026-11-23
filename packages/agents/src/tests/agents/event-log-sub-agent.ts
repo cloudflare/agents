@@ -46,6 +46,16 @@ export class EventLogSubAgent extends Agent {
     return this.feed.head;
   }
 
+  /** Drop the facet's in-memory bridged connections and reload them from the root, as a wake does. */
+  async rehydrateConnections(): Promise<void> {
+    (
+      this as unknown as {
+        _dynamicAgents: { clearVirtualConnections(): void };
+      }
+    )._dynamicAgents.clearVirtualConnections();
+    await this._cf_hydrateSubAgentConnectionsFromRoot();
+  }
+
   rows(): { seq_from: number; seq_to: number }[] {
     return this.ctx.storage.sql
       .exec<{ seq_from: number; seq_to: number }>(
@@ -53,5 +63,32 @@ export class EventLogSubAgent extends Agent {
          WHERE stream_id = 'log:feed' ORDER BY block`
       )
       .toArray();
+  }
+}
+
+/**
+ * A root that declares a log of the same name as its facet's, so a test
+ * can tell whose log a facet socket's frame reached.
+ */
+export class EventLogFacetParent extends Agent {
+  readonly streams = new Streams();
+  readonly feed = declareEventLog<unknown>(
+    // SAFETY: as above.
+    (this as unknown as { _webSockets: WebSockets })._webSockets,
+    "feed",
+    { streams: this.streams }
+  );
+
+  constructor(...args: ConstructorParameters<typeof Agent>) {
+    super(...args);
+    this.lifecycle.use(this.streams);
+  }
+
+  publishRoot(data: string): number {
+    return this.feed.publish(data);
+  }
+
+  async publishChild(child: string, data: string): Promise<number> {
+    return (await this.subAgent(EventLogSubAgent, child)).publish(data);
   }
 }

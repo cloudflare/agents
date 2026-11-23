@@ -87,6 +87,7 @@ import {
 } from "./lifecycle/current-agent";
 import { getAgentByName } from "./agent-routing";
 import { WebSockets } from "./websockets";
+import { applyEventLogFrame } from "./websockets/websockets";
 import {
   ensureConnectionWrapped,
   getConnectionFlag,
@@ -528,6 +529,9 @@ export class Agent<
     // does not run it: `protocol: false`.
     protocol: false,
     state: this._state,
+    // Event logs fan out to the Agent's connections: on a facet, the
+    // sockets the root bridges in.
+    connections: () => this.getConnections(),
     getConnectionTags: (connection, ctx) =>
       this.getConnectionTags(connection, ctx)
   });
@@ -1382,10 +1386,13 @@ export class Agent<
             return this._tryCatch(() => _onMessage(connection, message));
           }
 
-          // State frames: readonly check, validation, error replies — all
-          // the capability's. Root sockets never reach here with one (the
-          // capability consumed it); bridged facet connections do.
-          if (this._webSockets.applyStateFrame(connection, parsed)) {
+          // State and event-log frames: the capability answers them, and
+          // Agent applies them here, after the facet forward above, so a
+          // frame for a sub-agent reaches the sub-agent's own capability.
+          if (
+            this._webSockets.applyStateFrame(connection, parsed) ||
+            applyEventLogFrame(this._webSockets, connection, parsed)
+          ) {
             return;
           }
 

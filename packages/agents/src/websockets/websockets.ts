@@ -178,6 +178,29 @@ export function declareEventLog<T = unknown, S = unknown>(
   return declareEventLogOn<T, S>(webSockets, name, options);
 }
 
+let applyLogFrameOn: (
+  webSockets: WebSockets,
+  connection: Connection,
+  frame: unknown
+) => boolean;
+
+/**
+ * Apply a parsed event-log frame from a client (`cf_agent_log_subscribe`
+ * or `cf_agent_log_unsubscribe`), for hosts with `protocol: false`. Call it
+ * inside the host's invocation context, so a log's `snapshot` and
+ * `canSubscribe` see the connection.
+ *
+ * @returns Whether the frame was an event-log frame (handled either way).
+ * @internal Not a public API (event logs are internal).
+ */
+export function applyEventLogFrame(
+  webSockets: WebSockets,
+  connection: Connection,
+  frame: unknown
+): boolean {
+  return applyLogFrameOn(webSockets, connection, frame);
+}
+
 export class WebSockets extends LifecycleCapability {
   /** Claims every upgrade, so Lifecycle dispatches it after all others. */
   override readonly claims = "catch-all";
@@ -187,6 +210,7 @@ export class WebSockets extends LifecycleCapability {
   readonly #added: WebSocketHandlers[] = [];
   readonly #getConnectionTags: WebSocketsOptions["getConnectionTags"];
   readonly #protocol: WebSocketsOptions["protocol"];
+  readonly #connections: WebSocketsOptions["connections"];
   readonly #readonly: WebSocketsOptions["readonly"];
   readonly #state: SyncedState | undefined;
   /**
@@ -209,6 +233,7 @@ export class WebSockets extends LifecycleCapability {
     this.#handlers = options.handlers;
     this.#getConnectionTags = options.getConnectionTags;
     this.#protocol = options.protocol ?? true;
+    this.#connections = options.connections;
     this.#readonly = options.readonly;
     this.#state = options.state;
     this.#callables = options.callables
@@ -298,6 +323,13 @@ export class WebSockets extends LifecycleCapability {
   // ── Event logs ─────────────────────────────────────────────────────────
 
   static {
+    applyLogFrameOn = (webSockets, connection, frame) => {
+      if (webSockets.#logs.size === 0) return false;
+      const logFrame = parseEventLogClientFrame(frame);
+      if (!logFrame) return false;
+      webSockets.#logFrame(connection, logFrame);
+      return true;
+    };
     declareEventLogOn = <T, S>(
       webSockets: WebSockets,
       name: string,
@@ -307,7 +339,8 @@ export class WebSockets extends LifecycleCapability {
         throw new Error(`Event log "${name}" is already declared`);
       }
       const log = new EventLog<T, S>(name, options, {
-        connections: () => webSockets.getConnections()
+        connections:
+          webSockets.#connections ?? (() => webSockets.getConnections())
       });
       webSockets.#logs.set(name, log);
       return log;
@@ -400,6 +433,7 @@ export class WebSockets extends LifecycleCapability {
   ): Promise<void> {
     if (
       this.#logs.size > 0 &&
+      this.#protocol !== false &&
       typeof message === "string" &&
       // Skip the second JSON parse for every other frame (chat messages
       // can be megabytes).

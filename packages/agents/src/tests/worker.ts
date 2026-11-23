@@ -166,6 +166,7 @@ export {
   CallbackSubAgent,
   BroadcastSubAgent,
   EventLogSubAgent,
+  EventLogFacetParent,
   SlowReplySubAgent,
   TestConnectionUriAgent,
   SpikeSubParent,
@@ -250,6 +251,7 @@ import type {
   RoutingOwnerAgent,
   RoutedChatAgent,
   TestSubAgentParent,
+  EventLogFacetParent,
   CustomBoundSubAgentParent,
   TestConnectionUriAgent,
   SpikeSubParent,
@@ -344,6 +346,7 @@ export type Env = {
   RoutingOwnerAgent: DurableObjectNamespace<RoutingOwnerAgent>;
   RoutedChatAgent: DurableObjectNamespace<RoutedChatAgent>;
   TestSubAgentParent: DurableObjectNamespace<TestSubAgentParent>;
+  EventLogFacetParent: DurableObjectNamespace<EventLogFacetParent>;
   CUSTOM_BOUND_SUB_AGENT_PARENT: DurableObjectNamespace<CustomBoundSubAgentParent>;
   TestUnboundParentAgent: DurableObjectNamespace<TestUnboundParentAgent>;
   TestMinifiedNameParentAgent: DurableObjectNamespace<TestMinifiedNameParentAgent>;
