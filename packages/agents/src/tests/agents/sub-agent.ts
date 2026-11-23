@@ -44,6 +44,26 @@ export class CounterSubAgent extends Agent {
     `[0].n;
   }
 
+  /**
+   * Queue two `remember` runs in one lane from the alarm (which a facet
+   * only gets through its root) and wait for both.
+   */
+  async runLaneForTest(): Promise<Array<string | undefined>> {
+    const first = await this.tasks.run("remember", undefined, {
+      lane: "facet-lane",
+      start: "alarm"
+    });
+    const second = await this.tasks.run("remember", undefined, {
+      lane: "facet-lane",
+      start: "alarm"
+    });
+    const records = [
+      await this.tasks.wait(first.runId, { timeoutMs: 5_000 }),
+      await this.tasks.wait(second.runId, { timeoutMs: 5_000 })
+    ];
+    return records.map((record) => record?.status);
+  }
+
   /** Run `remember` in this facet with a `local`, and report what it saw. */
   async runRememberForTest(): Promise<{
     status: string | undefined;
@@ -1567,6 +1587,13 @@ export class TestSubAgentParent extends Agent {
       INSERT OR IGNORE INTO cf_agents_sub_agents (class, name, created_at)
       VALUES (${"CounterSubAgent"}, ${subAgentName}, ${Date.now()})
     `;
+  }
+
+  async subAgentRunLane(
+    subAgentName: string
+  ): Promise<Array<string | undefined>> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.runLaneForTest();
   }
 
   async subAgentRunRememberTask(subAgentName: string): Promise<{

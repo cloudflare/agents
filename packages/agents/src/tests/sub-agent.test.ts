@@ -1313,6 +1313,14 @@ describe("SubAgent", () => {
     expect(await agent.fiberWakeOwners()).toHaveLength(1);
   });
 
+  it("runs a facet's lane runs one after the other, woken through the root", async () => {
+    const agent = await getAgentByName(env.TestSubAgentParent, uniqueName());
+    await expect(agent.subAgentRunLane("lane-child")).resolves.toEqual([
+      "completed",
+      "completed"
+    ]);
+  });
+
   it("runs a Task in a facet with its local and checkpoint, and clears the checkpoint on settle", async () => {
     const agent = await getAgentByName(env.TestSubAgentParent, uniqueName());
     await expect(
