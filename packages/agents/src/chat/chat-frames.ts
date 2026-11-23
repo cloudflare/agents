@@ -44,8 +44,8 @@ export interface ChatFrameConnection {
 export interface ChatFramesOptions {
   /** Send to every connection except the `without` ids. */
   broadcast(message: string, without: string[]): void;
-  /** The ids of the connections a broadcast reaches. */
-  connectionIds(): Iterable<string>;
+  /** The connections a broadcast reaches. */
+  connections(): Iterable<{ readonly id: string }>;
   /** Where recent terminal frames are recorded. */
   kv: RecentTerminalsKv;
   /** Connections that were told a stream resumes and have not acked yet. */
@@ -67,41 +67,37 @@ export interface ChatFramesOptions {
 }
 
 /**
- * Which tabs were sent each recent request's end, so a tab is sent it once
- * (`OneTerminalPerRequest`): a stop, a resume and a recovery's broadcast
- * can each want to tell it. Bounded to the newest requests; an older one
- * that comes up again is sent its end again. In memory: a tab that
- * reconnects after a hibernation is a new connection anyway.
+ * Which sockets were sent each recent request's end, so a socket is sent it
+ * once (`OneTerminalPerRequest`): a stop, a resume and a recovery's
+ * broadcast can each want to tell it. Keyed by the connection object, not
+ * its id: a tab that reconnects keeps its id on a new socket, and that
+ * socket was told nothing. Bounded to the newest requests; an older one
+ * that comes up again is sent its end again. In memory.
  *
  * @internal
  */
 export class EndedRequests {
   static readonly MAX = 64;
-  /** By request: the tabs it was sent to. */
-  readonly #ended = new Map<string, Set<string>>();
+  /** By request: the sockets it was sent to. */
+  readonly #ended = new Map<string, WeakSet<object>>();
 
-  /** Whether `connectionId` was sent the end of `requestId`. */
-  has(connectionId: string, requestId: string): boolean {
-    return this.#ended.get(requestId)?.has(connectionId) ?? false;
+  /** Whether `connection` was sent the end of `requestId`. */
+  has(connection: object, requestId: string): boolean {
+    return this.#ended.get(requestId)?.has(connection) ?? false;
   }
 
-  /** The tabs `requestId`'s end was sent to. */
-  sentTo(requestId: string): Iterable<string> {
-    return this.#ended.get(requestId) ?? [];
-  }
-
-  /** `connectionId` was sent the end of `requestId`. */
-  note(connectionId: string, requestId: string): void {
+  /** `connection` was sent the end of `requestId`. */
+  note(connection: object, requestId: string): void {
     let to = this.#ended.get(requestId);
     if (!to) {
-      to = new Set();
+      to = new WeakSet();
       this.#ended.set(requestId, to);
       if (this.#ended.size > EndedRequests.MAX) {
         const oldest = this.#ended.keys().next().value;
         if (oldest !== undefined) this.#ended.delete(oldest);
       }
     }
-    to.add(connectionId);
+    to.add(connection);
   }
 }
 
@@ -149,11 +145,12 @@ export class ChatFrames {
     const without = [...exclude, ...this.options.resuming];
     const ends = endedRequestOf(ready);
     if (ends !== undefined) {
-      // A tab is told a request's end once.
-      without.push(...this.ended.sentTo(ends));
+      // A socket is told a request's end once.
       const left = new Set(without);
-      for (const id of this.options.connectionIds()) {
-        if (!left.has(id)) this.ended.note(id, ends);
+      for (const connection of this.options.connections()) {
+        if (left.has(connection.id)) continue;
+        if (this.ended.has(connection, ends)) without.push(connection.id);
+        else this.ended.note(connection, ends);
       }
     }
     this.options.broadcast(JSON.stringify(ready), without);
@@ -193,8 +190,8 @@ export class ChatFrames {
     const ready = this.#prepare(frame);
     const ends = endedRequestOf(ready);
     if (ends !== undefined) {
-      if (this.ended.has(connection.id, ends)) return;
-      this.ended.note(connection.id, ends);
+      if (this.ended.has(connection, ends)) return;
+      this.ended.note(connection, ends);
     }
     try {
       connection.send(JSON.stringify(ready));

@@ -126,8 +126,8 @@ export class ResumeHandshake {
               JSON.parse(message) as Record<string, unknown>
             );
             if (requestId !== undefined) {
-              if (ended.has(target.id, requestId)) return;
-              ended.note(target.id, requestId);
+              if (ended.has(target, requestId)) return;
+              ended.note(target, requestId);
             }
           }
           target.send(message);
@@ -282,7 +282,10 @@ export class ResumeHandshake {
     requestId: string,
     frame: string | null = this.endedFrame(requestId)
   ): boolean {
-    return frame !== null && sendIfOpen(this.#once(connection), frame);
+    if (frame === null || this.host.ended?.has(connection, requestId)) {
+      return false;
+    }
+    return sendIfOpen(this.#once(connection), frame);
   }
 
   /**
@@ -362,6 +365,7 @@ export class ResumeHandshake {
     connection: Connection,
     requestId: string
   ): Promise<void> {
+    const toldEnd = this.host.ended?.has(connection, requestId) ?? false;
     connection = this.#once(connection);
     const { resumableStream, pendingResumeConnections, responseMessageType } =
       this.host;
@@ -378,7 +382,7 @@ export class ResumeHandshake {
     // The tab was told this request ended (live, or by a stop): its replay
     // would only repeat what the transcript holds, and its end again.
     if (
-      this.host.ended?.has(connection.id, requestId) &&
+      toldEnd &&
       !(
         resumableStream.hasActiveStream() &&
         resumableStream.activeRequestId === requestId

@@ -821,7 +821,14 @@ describe("ResumeHandshake (driver → golden frames)", () => {
       expect(
         frames.filter((f) => f.id === "req-cut" && f.done === true)
       ).toHaveLength(1);
-      expect(ended.has("c1", "req-cut")).toBe(true);
+      expect(ended.has(conn, "req-cut")).toBe(true);
+      // The same tab back on a new socket (its id kept) gets the end again.
+      const again: SentFrame[] = [];
+      const back = makeConnection("c1", again);
+      await handshake.handleResumeRequest(back, "probe-2", ["req-cut"]);
+      expect(
+        again.filter((f) => f.id === "req-cut" && f.done === true)
+      ).toHaveLength(1);
     });
 
     it("tells a tab directly how a request it stops ended", async () => {

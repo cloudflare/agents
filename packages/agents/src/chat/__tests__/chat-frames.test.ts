@@ -9,11 +9,11 @@ function setup(overrides: Partial<ChatFramesOptions> = {}) {
   const sent: Array<{ frame: Record<string, unknown>; without: string[] }> = [];
   const store = new Map<string, unknown>();
   const resuming = new Set<string>();
-  const connections: string[] = ["t1", "t2", "waiting"];
+  const connections = [{ id: "t1" }, { id: "t2" }, { id: "waiting" }];
   const frames = new ChatFrames({
     broadcast: (message, without) =>
       sent.push({ frame: JSON.parse(message), without }),
-    connectionIds: () => connections,
+    connections: () => connections,
     kv: {
       get: <T>(key: string) => store.get(key) as T | undefined,
       put: (key, value) => {
@@ -32,7 +32,7 @@ function setup(overrides: Partial<ChatFramesOptions> = {}) {
       store.set(key, value);
     }
   };
-  return { frames, sent, resuming, kv };
+  return { frames, sent, resuming, kv, connections };
 }
 
 describe("ChatFrames", () => {
@@ -63,10 +63,11 @@ describe("ChatFrames", () => {
     expect(sent[0].without).toEqual(["self", "waiting"]);
   });
 
-  it("tells each tab a request's end once", () => {
-    const { frames, sent, resuming } = setup();
+  it("tells each socket a request's end once", () => {
+    const { frames, sent, resuming, connections } = setup();
     const direct: string[] = [];
-    const tab = { id: "t1", send: (m: string) => void direct.push(m) };
+    const [t1, t2, waiting] = connections;
+    const tab = Object.assign(t1, { send: (m: string) => void direct.push(m) });
     // One tab was sent the end directly (a stop); another waits on its
     // resume ack.
     frames.send(tab, { type: RESPONSE, id: "r1", done: true });
@@ -76,11 +77,11 @@ describe("ChatFrames", () => {
     frames.broadcast({ type: RESPONSE, id: "r1", done: true });
     // The broadcast leaves out the tab told already, and the waiting one.
     expect(sent[0].without).toEqual(["waiting", "t1"]);
-    expect(frames.ended.has("t2", "r1")).toBe(true);
-    expect(frames.ended.has("waiting", "r1")).toBe(false);
-    // A tab that connects later was told nothing.
-    expect(frames.ended.has("later", "r1")).toBe(false);
-    // A second broadcast reaches only the tabs not told yet.
+    expect(frames.ended.has(t2, "r1")).toBe(true);
+    expect(frames.ended.has(waiting, "r1")).toBe(false);
+    // A tab that reconnects keeps its id on a new socket: told nothing.
+    expect(frames.ended.has({ id: "t2" }, "r1")).toBe(false);
+    // A second broadcast reaches only the sockets not told yet.
     resuming.clear();
     frames.broadcast({ type: RESPONSE, id: "r1", done: true });
     expect(sent[1].without).toEqual(["t1", "t2"]);
@@ -91,7 +92,7 @@ describe("ChatFrames", () => {
       done: true,
       outcome: "recovering"
     });
-    expect(frames.ended.has("t2", "r2")).toBe(false);
+    expect(frames.ended.has(t2, "r2")).toBe(false);
   });
 
   it("adds the queued messages to a message list", () => {
