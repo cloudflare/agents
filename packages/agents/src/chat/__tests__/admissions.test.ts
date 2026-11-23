@@ -544,7 +544,7 @@ describe("chatRecoveryNames", () => {
   function setup(incidents: Array<Record<string, unknown>>) {
     const db = new DatabaseSync(":memory:");
     db.exec(
-      "create table cf_agents_task_runs (definition text, state text, input text)"
+      "create table cf_agents_task_runs (definition text, status text, input text)"
     );
     db.prepare("insert into cf_agents_task_runs values (?, ?, ?)").run(
       "turn",

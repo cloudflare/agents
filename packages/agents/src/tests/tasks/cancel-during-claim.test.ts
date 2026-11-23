@@ -76,11 +76,11 @@ describe("Tasks cancel during the claim", () => {
         await new Promise((resolve) => setTimeout(resolve, 10));
         const stored = storage.sql
           .exec(
-            "SELECT state FROM cf_agents_task_runs WHERE run_id = ?",
+            "SELECT status FROM cf_agents_task_runs WHERE run_id = ?",
             receipt.runId
           )
           .one();
-        expect(stored.state).toBe("cancelled");
+        expect(stored.status).toBe("aborted");
 
         // Register: the claim's write returns.
         hold.release();
@@ -88,7 +88,7 @@ describe("Tasks cancel during the claim", () => {
         await new Promise((resolve) => setTimeout(resolve, 50));
 
         expect(entries).toEqual([]);
-        expect((await tasks.get(receipt.runId))?.state).toBe("cancelled");
+        expect((await tasks.get(receipt.runId))?.status).toBe("aborted");
       } finally {
         hold.restore();
       }

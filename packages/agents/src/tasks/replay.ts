@@ -23,6 +23,7 @@ import {
 } from "./errors";
 import { deserializeTaskValue } from "./serialization";
 import type {
+  TaskCheckpoint,
   TaskStep,
   TaskStepAttempt,
   TaskStepConfig,
@@ -215,17 +216,26 @@ export class ReplayStep implements TaskStep {
     readonly name: string;
     readonly attempt: number;
   } | null;
+  readonly local: unknown;
+  readonly checkpoint: TaskCheckpoint;
+  readonly createdAt: number;
 
   constructor(
     engine: TaskStepEngine,
     options: {
       startsLive: boolean;
       interrupted?: { name: string; attempt: number } | null;
+      local?: unknown;
+      checkpoint: TaskCheckpoint;
+      createdAt: number;
     }
   ) {
     this.#engine = engine;
     this.#live = options.startsLive;
     this.interrupted = options.interrupted ?? null;
+    this.local = options.local;
+    this.checkpoint = options.checkpoint;
+    this.createdAt = options.createdAt;
   }
 
   do<T extends TaskValue>(

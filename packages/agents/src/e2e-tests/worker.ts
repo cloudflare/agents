@@ -869,12 +869,12 @@ export class TaskKillTestAgent extends Agent<Record<string, unknown>> {
   @callable()
   async getRunState(
     runId: string
-  ): Promise<{ state: string; result: unknown } | null> {
+  ): Promise<{ status: string; result: unknown } | null> {
     const snapshot = await this.tasks.get(runId);
     if (!snapshot) return null;
     return {
-      state: snapshot.state,
-      result: snapshot.state === "completed" ? snapshot.result : null
+      status: snapshot.status,
+      result: snapshot.status === "completed" ? snapshot.result : null
     };
   }
 
@@ -973,12 +973,12 @@ export class StreamKillTestAgent extends Agent<Record<string, unknown>> {
   @callable()
   async getRunState(
     runId: string
-  ): Promise<{ state: string; result: unknown } | null> {
+  ): Promise<{ status: string; result: unknown } | null> {
     const snapshot = await this.tasks.get(runId);
     if (!snapshot) return null;
     return {
-      state: snapshot.state,
-      result: snapshot.state === "completed" ? snapshot.result : null
+      status: snapshot.status,
+      result: snapshot.status === "completed" ? snapshot.result : null
     };
   }
 

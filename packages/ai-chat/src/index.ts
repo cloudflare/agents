@@ -797,16 +797,18 @@ export class AIChatAgent<
     snapshotKey: "__cfAIChatFiberSnapshot",
     generateId: () => nanoid(),
     turnSignal: (requestId) => this._abortRegistry.getExistingSignal(requestId),
-    runTask: ({ requestId, continuation, nonce }) =>
-      this.tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
+    runTask: ({ requestId, continuation, nonce }, local) =>
+      this.tasks.run(
         (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME,
         { requestId, continuation, nonce },
-        { runId: `chat_${nonce}`, retain: false, metadata: { requestId } }
+        {
+          runId: `chat_${nonce}`,
+          retain: false,
+          metadata: { requestId },
+          start: "now",
+          local
+        }
       ),
-    captureContext: () => {
-      const ambient = agentContext.getStore();
-      return (fn) => (ambient ? agentContext.run(ambient, fn) : fn());
-    },
     turnBody: (continuation, body, requestId) =>
       this._chatRecoveryEngine().turnBody(continuation, body, requestId),
     turnAccepted: (requestId) => this._turns.turnAccepted(requestId),
@@ -825,9 +827,6 @@ export class AIChatAgent<
       chatFiberName,
       createChatTurnTaskDefinition({
         storage: this.ctx.storage,
-        getRunCreatedAt: async (runId) =>
-          (await this.tasks.get(runId))?.createdAt ?? null,
-        getLiveClosure: (nonce) => this._chatTurnFibers.liveClosures.get(nonce),
         keepAliveWhile: (fn) => this.keepAliveWhile(fn),
         withStash: (context, fn) => this._withFiberStash(context, fn),
         recover: (turn) => this._recoverChatTurn(turn)

@@ -17,8 +17,8 @@
  * - a recovery attempt's turn that throws does not fail its fiber: the
  *   attempt owns the turn, and a failed fiber would be recovered again as
  *   an interrupted turn;
- * - register the live closure, start the chat-turn Task
- *   ({@link createChatTurnTaskDefinition} runs the closure) and wait for its
+ * - start the chat-turn Task with the live closure as its `local`
+ *   ({@link createChatTurnTaskDefinition} runs it) and wait for its
  *   outcome. A facet's turn runs on Tasks too: its run lives on the facet
  *   and the root's alarm wakes it.
  *
@@ -28,6 +28,7 @@
  * `@cloudflare/think`, not a public API.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { wrapChatFiberSnapshot, type ChatFiberSnapshot } from "./recovery";
 import { isTurnStopped } from "./turn-stop";
 import { isDurableObjectMemoryLimitReset } from "../retries";
@@ -39,22 +40,19 @@ export interface ChatTurnFiberHost {
   fiberName: string;
   /** The key the turn's snapshot is stored under in the stash envelope. */
   snapshotKey: string;
-  /** Mint the nonce of a live turn closure. */
+  /** Mint the nonce a turn's run id is made from. */
   generateId(): string;
   /** The abort signal of the turn running under `requestId`, if it has one. */
   turnSignal(requestId: string): AbortSignal | undefined;
-  /** Start the chat-turn Task for a registered live closure. */
-  runTask(input: {
-    requestId: string;
-    continuation: boolean;
-    nonce: string;
-  }): Promise<unknown>;
-  /**
-   * Capture the caller's invocation context (live connection, request) now,
-   * and return a function that runs a turn inside it later: the Task's host
-   * boundary carries no connection.
-   */
-  captureContext(): <T>(fn: () => Promise<T>) => Promise<T>;
+  /** Start the chat-turn Task, with the turn's closure as its `local`. */
+  runTask(
+    input: {
+      requestId: string;
+      continuation: boolean;
+      nonce: string;
+    },
+    local: ChatTurnClosureEntry
+  ): Promise<unknown>;
   /**
    * Wrap a turn body so a turn that continues the latest reply can take it
    * over from a scheduled recovery (`ChatRecoveryEngine.turnBody`). The
@@ -105,12 +103,6 @@ export class ChatTurnFibers {
       snapshot: ChatFiberSnapshot<string>;
     }
   >();
-  /**
-   * Live turn closures by run nonce. A closure exists only in the isolate
-   * that accepted the turn. Recovery after an interruption never re-runs it.
-   */
-  readonly liveClosures = new Map<string, ChatTurnClosureEntry>();
-
   constructor(private readonly host: ChatTurnFiberHost) {}
 
   /**
@@ -219,23 +211,24 @@ export class ChatTurnFibers {
     // the outcome is awaited below. Mark it handled so the runtime does not
     // report an unhandled rejection this function is about to consume.
     outcome.catch(() => {});
-    const inContext = this.host.captureContext();
-    this.liveClosures.set(nonce, {
-      initial: wrap(null),
-      wrap,
-      run: () => {
-        // Tasks accepted the run durably before it invokes the closure.
-        this.host.turnAccepted?.(requestId);
-        turn.onAccepted?.(requestId);
-        return inContext(body);
-      },
-      settle: { resolve: resolveOutcome, reject: rejectOutcome }
-    });
-    try {
-      await this.host.runTask({ requestId, continuation, nonce });
-      return (await outcome) as T;
-    } finally {
-      this.liveClosures.delete(nonce);
-    }
+    // The turn runs in the async context of this call (its connection, its
+    // request, a caller's result capture), whichever attempt claims it: the
+    // caller's, or the alarm's when that claims the run first.
+    const inCaller = AsyncLocalStorage.snapshot();
+    await this.host.runTask(
+      { requestId, continuation, nonce },
+      {
+        initial: wrap(null),
+        wrap,
+        run: (inside) => {
+          // Tasks accepted the run durably before it invokes the closure.
+          this.host.turnAccepted?.(requestId);
+          turn.onAccepted?.(requestId);
+          return inCaller(() => inside(body));
+        },
+        settle: { resolve: resolveOutcome, reject: rejectOutcome }
+      }
+    );
+    return (await outcome) as T;
   }
 }

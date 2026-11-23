@@ -2059,11 +2059,13 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
   async hasWaitingRecoveryRetry(submissionId: string): Promise<boolean> {
     const runs = await this.tasks.list({
       definition: CHAT_RECOVERY_TASK_NAME,
-      status: ["waiting"],
+      status: ["pending"],
       limit: Number.MAX_SAFE_INTEGER
     });
     return runs.some(
       (run) =>
+        run.status === "pending" &&
+        run.waitReason !== undefined &&
         run.metadata?.callback === "_chatRecoveryRetry" &&
         typeof run.metadata.incidentId === "string" &&
         run.metadata.recoveredRequestId === submissionId

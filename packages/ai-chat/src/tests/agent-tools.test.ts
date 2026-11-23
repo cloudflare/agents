@@ -322,7 +322,7 @@ type ParentStub = DurableObjectStub & {
     childName: string,
     runId: string
   ): Promise<{
-    state: string;
+    status: string;
     generation: string | null;
     next_at: number | null;
   } | null>;
@@ -554,7 +554,7 @@ describe("AIChatAgent as an agent-tool child", () => {
     // facet startup before the backoff elapses read it as an interrupted
     // attempt and reconcile it due again now, resurrecting the run through
     // the breaker.
-    expect(runState?.state).toBe("running");
+    expect(runState?.status).toBe("running");
     expect(runState?.generation).toBeNull();
     expect(runState?.next_at).toBeGreaterThan(Date.now());
   });

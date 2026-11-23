@@ -28,9 +28,29 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
   statusCounter = 0;
   /** Guarded handler entries, recorded as entry:input:interrupted-step. */
   readonly guardedEntries: string[] = [];
+  /** What each `remembering` attempt saw: its `local` and checkpoint. */
+  readonly rememberingSeen: Array<{ local: unknown; note: unknown }> = [];
+  /** `remembering` parks on this until a test opens it. */
+  rememberingGate: Promise<void> | null = null;
 
   readonly tasks = new Tasks({
     definitions: {
+      /**
+       * Records its `local` and checkpoint note, writes a note, parks on
+       * {@link rememberingGate} (a reset there leaves it running), then
+       * writes `after`.
+       */
+      remembering: async (_input: undefined, step: TaskStep) => {
+        this.rememberingSeen.push({
+          local: step.local,
+          note: step.checkpoint.get("note") ?? null
+        });
+        step.checkpoint.set("note", { attempt: this.rememberingSeen.length });
+        await this.rememberingGate;
+        step.checkpoint.set("after", true);
+        return "done";
+      },
+
       /** Two journaled steps, then a host-context probe in the return value. */
       pipeline: async (
         input: { label: string; tags?: Record<string, number> },
@@ -454,7 +474,9 @@ export function seedTaskRun(
     readonly runId: string;
     readonly definition: string;
     readonly input?: unknown;
-    readonly state: "pending" | "running" | "waiting";
+    readonly status: "pending" | "running";
+    /** A pending run that already ran waits for its `nextAt`. */
+    readonly waitReason?: "sleep" | "retry";
     readonly generation?: string;
     readonly attempt?: number;
     readonly nextAt: number;
@@ -465,13 +487,15 @@ export function seedTaskRun(
   const now = Date.now();
   storage.sql.exec(
     `INSERT INTO cf_agents_task_runs
-       (run_id, definition, input, state, generation, attempt, next_at,
-        idempotency_key, retain, cancel_requested, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+       (run_id, definition, input, status, wait_reason, generation, attempt,
+        next_at, idempotency_key, retain, cancel_requested, created_at,
+        updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
     options.runId,
     options.definition,
     options.input === undefined ? null : JSON.stringify(options.input),
-    options.state,
+    options.status,
+    options.waitReason ?? null,
     options.generation ?? null,
     options.attempt ?? 0,
     options.nextAt,

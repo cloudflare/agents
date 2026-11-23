@@ -12,6 +12,7 @@ import { MessageType } from "../../types.ts";
 import { agentPathKey } from "../../dynamic-agents/identity.ts";
 import type { Tasks } from "../../tasks/tasks.ts";
 import { EventLogSubAgent } from "./event-log-sub-agent.ts";
+import type { TaskStep } from "../../tasks/types.ts";
 
 const STALE_FRAME_PROBE = "stale-frame-probe";
 
@@ -21,6 +22,43 @@ const STALE_FRAME_PROBE = "stale-frame-probe";
 export class CounterSubAgent extends Agent {
   private _heldKeepAliveDisposers: Array<() => void> = [];
   private _constructorName = this.name;
+  /** What `remember` saw, and the checkpoint rows while it ran. */
+  readonly rememberSeen: Array<{ local: unknown; rows: number }> = [];
+
+  override readonly taskDefinitions = {
+    /** Writes a checkpoint entry, then records `local` and the rows. */
+    remember: async (_input: undefined, step: TaskStep) => {
+      step.checkpoint.set("note", "kept");
+      this.rememberSeen.push({
+        local: step.local,
+        rows: this.checkpointRowCount()
+      });
+      return step.checkpoint.get<string>("note") ?? null;
+    }
+  };
+
+  checkpointRowCount(): number {
+    return this.sql<{ n: number }>`
+      SELECT COUNT(*) AS n FROM cf_agents_task_checkpoint
+    `[0].n;
+  }
+
+  /** Run `remember` in this facet with a `local`, and report what it saw. */
+  async runRememberForTest(): Promise<{
+    status: string | undefined;
+    seen: Array<{ local: unknown; rows: number }>;
+    rowsAfter: number;
+  }> {
+    const receipt = await this.tasks.run("remember", undefined, {
+      start: "now",
+      local: { from: "caller" }
+    });
+    return {
+      status: (await this.tasks.get(receipt.runId))?.status,
+      seen: this.rememberSeen,
+      rowsAfter: this.checkpointRowCount()
+    };
+  }
 
   onStart() {
     this.sql`
@@ -1488,6 +1526,15 @@ export class TestSubAgentParent extends Agent {
       INSERT OR IGNORE INTO cf_agents_sub_agents (class, name, created_at)
       VALUES (${"CounterSubAgent"}, ${subAgentName}, ${Date.now()})
     `;
+  }
+
+  async subAgentRunRememberTask(subAgentName: string): Promise<{
+    status: string | undefined;
+    seen: Array<{ local: unknown; rows: number }>;
+    rowsAfter: number;
+  }> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.runRememberForTest();
   }
 
   async subAgentIncrement(

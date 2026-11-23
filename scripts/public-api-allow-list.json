@@ -4219,7 +4219,7 @@
     "TaskReplayDivergedError.stepName",
     "TaskRunOptions",
     "TaskRunSnapshot",
-    "TaskRunState",
+    "TaskStatus",
     "Tasks",
     "Tasks.cancel",
     "Tasks.capabilityId",

@@ -53,8 +53,8 @@ curl -X POST http://localhost:8787/agents/report-object/demo/reports \
   -H "content-type: application/json" \
   -d '{"topic": "durable execution", "holdSeconds": 10}'
 
-# The run parks on the sleep: state "waiting", reason "sleep", and the last
-# step.status() message. Published reports appear once the hold passes.
+# The run parks on the sleep: status "pending", waitReason "sleep", and the
+# last step.status() message. Published reports appear once the hold passes.
 curl http://localhost:8787/agents/report-object/demo
 
 # Repeating the same topic joins the existing run instead of starting a

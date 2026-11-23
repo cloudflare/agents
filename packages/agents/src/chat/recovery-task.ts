@@ -204,7 +204,7 @@ export function chatRecoveryTaskRunOptions(
  */
 export async function enqueueChatRecoveryTask(
   tasks: {
-    __DO_NOT_USE_WILL_BREAK__enqueue(
+    run(
       name: string,
       input: ChatRecoveryTaskInput,
       options: TaskRunOptions
@@ -214,11 +214,12 @@ export async function enqueueChatRecoveryTask(
   reason: ChatRecoveryTaskReason,
   dedupeKey?: string
 ): Promise<void> {
-  await tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-    CHAT_RECOVERY_TASK_NAME,
-    input,
-    chatRecoveryTaskRunOptions(input, reason, dedupeKey)
-  );
+  // From the alarm, where `trackAlarmWork` keeps the continuation's model
+  // turn inside the memory-limit breaker.
+  await tasks.run(CHAT_RECOVERY_TASK_NAME, input, {
+    ...chatRecoveryTaskRunOptions(input, reason, dedupeKey),
+    start: "alarm"
+  });
 }
 
 /** Build the shared recovery Task handler for one chat host. */

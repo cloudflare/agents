@@ -85,13 +85,18 @@ const EXPECTED_SCHEMA_DDL = [
   // The Tasks capability creates its tables during Lifecycle startup (its own
   // version key gates the migration), so they are part of a started Agent's
   // canonical schema even though the Agent constructor does not create them.
+  `CREATE TABLE cf_agents_task_checkpoint (
+        run_id TEXT NOT NULL,
+        key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        PRIMARY KEY (run_id, key)
+      ) WITHOUT ROWID`,
   `CREATE TABLE cf_agents_task_runs (
         run_id TEXT PRIMARY KEY,
         definition TEXT NOT NULL,
         input TEXT,
-        state TEXT NOT NULL CHECK (state IN (
-          'pending', 'running', 'waiting',
-          'completed', 'failed', 'cancelled'
+        status TEXT NOT NULL CHECK (status IN (
+          'pending', 'running', 'completed', 'error', 'aborted'
         )),
         result TEXT,
         error_name TEXT,

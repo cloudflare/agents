@@ -132,7 +132,6 @@ export type RpcJsonObject = Record<
  */
 async function insertInterruptedTurnForTest(
   agent: Think,
-  storage: DurableObjectStorage,
   name: string,
   snapshot?: unknown
 ): Promise<void> {
@@ -148,15 +147,18 @@ async function insertInterruptedTurnForTest(
   const nonce = crypto.randomUUID();
   const runId = `chat_${nonce}`;
   const requestId = name.slice(prefix.length);
-  if (snapshot) {
-    await storage.put(`__cf_chat_turn_snapshot:${runId}`, snapshot);
-  }
   // Make sure the Tasks tables exist before writing a row into them.
   await agent.tasks.get(runId);
+  if (snapshot) {
+    agent.sql`
+      INSERT INTO cf_agents_task_checkpoint (run_id, key, value)
+      VALUES (${runId}, 'snapshot', ${JSON.stringify(snapshot)})
+    `;
+  }
   const now = Date.now();
   agent.sql`
     INSERT INTO cf_agents_task_runs
-      (run_id, definition, input, state, metadata, idempotency_key, retain,
+      (run_id, definition, input, status, metadata, idempotency_key, retain,
        attempt, next_at, cancel_requested, created_at, updated_at)
     VALUES
       (${runId}, ${Think.CHAT_FIBER_NAME},
@@ -173,17 +175,18 @@ async function insertInterruptedTurnForTest(
 async function recoverInterruptedTurnsForTest(agent: Think): Promise<void> {
   const runs = agent.sql<{ run_id: string; input: string; metadata: string }>`
     SELECT run_id, input, metadata FROM cf_agents_task_runs
-    WHERE definition = ${Think.CHAT_FIBER_NAME} AND state = 'pending'
+    WHERE definition = ${Think.CHAT_FIBER_NAME} AND status = 'pending'
     ORDER BY created_at
   `;
   for (const run of runs) {
     // Accepted again under its id, so this invocation runs it.
     agent.sql`DELETE FROM cf_agents_task_runs WHERE run_id = ${run.run_id}`;
-    await agent.tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
-      Think.CHAT_FIBER_NAME,
-      JSON.parse(run.input),
-      { runId: run.run_id, retain: false, metadata: JSON.parse(run.metadata) }
-    );
+    await agent.tasks.run(Think.CHAT_FIBER_NAME, JSON.parse(run.input), {
+      runId: run.run_id,
+      retain: false,
+      metadata: JSON.parse(run.metadata),
+      start: "now"
+    });
   }
   await (
     agent as unknown as { _fibers: { recover(): Promise<void> } }
@@ -201,7 +204,7 @@ function recoveryTransportCountsForTest(
   const tasks = agent.sql<{ count: number }>`
     SELECT COUNT(*) AS count FROM cf_agents_task_runs
     WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
-      AND state IN ('pending', 'running', 'waiting')
+      AND status IN ('pending', 'running')
       AND json_extract(metadata, '$.callback') = ${callback}
   `;
   return {
@@ -222,7 +225,7 @@ async function runQueuedRecoveryTaskForTest(
   const rows = agent.sql<{ run_id: string }>`
     SELECT run_id FROM cf_agents_task_runs
     WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
-      AND state IN ('pending', 'running', 'waiting')
+      AND status IN ('pending', 'running')
       AND json_extract(metadata, '$.callback') = ${callback}
     ORDER BY created_at ASC
     LIMIT 1
@@ -4077,7 +4080,7 @@ export class ThinkTestAgent extends Think {
         SELECT json_extract(input, '$.delaySeconds') AS delay, idempotency_key
         FROM cf_agents_task_runs
         WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
-          AND state IN ('pending', 'waiting')
+          AND status = 'pending'
         ORDER BY created_at DESC
         LIMIT 1
       `[0];
@@ -5268,7 +5271,7 @@ export class ThinkTestAgent extends Think {
     name: string,
     snapshot?: unknown
   ): Promise<void> {
-    await insertInterruptedTurnForTest(this, this.ctx.storage, name, snapshot);
+    await insertInterruptedTurnForTest(this, name, snapshot);
   }
 
   /** Replay this agent's interrupted turns, as a wake does. */
@@ -8597,7 +8600,7 @@ export class ThinkToolsTestAgent extends Think {
     name: string,
     snapshot?: unknown
   ): Promise<void> {
-    await insertInterruptedTurnForTest(this, this.ctx.storage, name, snapshot);
+    await insertInterruptedTurnForTest(this, name, snapshot);
   }
 
   async triggerFiberRecovery(): Promise<{
@@ -9941,11 +9944,10 @@ export class ThinkProgrammaticTestAgent extends Think {
       data,
       delaySeconds: 60
     };
-    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-      CHAT_RECOVERY_TASK_NAME,
-      input,
-      chatRecoveryTaskRunOptions(input, "redefer")
-    );
+    await this.tasks.run(CHAT_RECOVERY_TASK_NAME, input, {
+      ...chatRecoveryTaskRunOptions(input, "redefer"),
+      start: "alarm"
+    });
   }
 
   /** Mark matching Task attempts terminal without removing their metadata. */
@@ -9954,7 +9956,7 @@ export class ThinkProgrammaticTestAgent extends Think {
   ): Promise<void> {
     this.sql`
       UPDATE cf_agents_task_runs
-      SET state = 'completed', next_at = NULL
+      SET status = 'completed', next_at = NULL
       WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
         AND json_extract(metadata, '$.recoveredRequestId') = ${requestId}
     `;
@@ -10011,7 +10013,6 @@ export class ThinkProgrammaticTestAgent extends Think {
     };
     await insertInterruptedTurnForTest(
       this,
-      this.ctx.storage,
       `${Think.CHAT_FIBER_NAME}:${input.requestId}`,
       snapshot
     );
@@ -11090,7 +11091,7 @@ export class ThinkRecoveryTestAgent extends Think {
     const rows = this.sql<{ count: number }>`
       SELECT COUNT(*) AS count FROM cf_agents_task_runs
       WHERE definition = ${Think.CHAT_FIBER_NAME}
-        AND state IN ('pending', 'running', 'waiting')
+        AND status IN ('pending', 'running')
     `;
     return rows[0]?.count ?? 0;
   }
@@ -12358,7 +12359,7 @@ export class ThinkRecoveryTestAgent extends Think {
     name: string,
     snapshot?: unknown
   ): Promise<void> {
-    await insertInterruptedTurnForTest(this, this.ctx.storage, name, snapshot);
+    await insertInterruptedTurnForTest(this, name, snapshot);
   }
 
   async triggerFiberRecovery(): Promise<{
@@ -12871,7 +12872,7 @@ export class ThinkRecoveryTestAgent extends Think {
       const chatTasks = this.sql<{ count: number }>`
         SELECT COUNT(*) AS count FROM cf_agents_task_runs
         WHERE definition = ${ThinkRecoveryTestAgent.CHAT_FIBER_NAME}
-          AND state IN ('pending', 'running', 'waiting', 'recovering')
+          AND status IN ('pending', 'running')
       `;
       const row = this.sql<{ request_id: string }>`
         SELECT request_id FROM cf_think_submissions
@@ -12993,7 +12994,7 @@ export class ThinkRecoveryTestAgent extends Think {
           this.sql<{ run_id: string }>`
               SELECT run_id FROM cf_agents_task_runs
               WHERE definition = ${ThinkRecoveryTestAgent.CHAT_FIBER_NAME}
-                AND state = 'running'
+                AND status = 'running'
                 AND metadata = ${JSON.stringify({ requestId })}
             `.length === 1;
       },
@@ -13160,11 +13161,10 @@ export class ThinkRecoveryTestAgent extends Think {
       data,
       delaySeconds: 60
     };
-    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-      CHAT_RECOVERY_TASK_NAME,
-      input,
-      chatRecoveryTaskRunOptions(input, "redefer")
-    );
+    await this.tasks.run(CHAT_RECOVERY_TASK_NAME, input, {
+      ...chatRecoveryTaskRunOptions(input, "redefer"),
+      start: "alarm"
+    });
   }
 
   async getIncidentAttemptForTest(incidentId: string): Promise<{
@@ -13195,11 +13195,10 @@ export class ThinkRecoveryTestAgent extends Think {
       data,
       delaySeconds: 60
     };
-    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-      CHAT_RECOVERY_TASK_NAME,
-      input,
-      chatRecoveryTaskRunOptions(input, "redefer")
-    );
+    await this.tasks.run(CHAT_RECOVERY_TASK_NAME, input, {
+      ...chatRecoveryTaskRunOptions(input, "redefer"),
+      start: "alarm"
+    });
   }
 
   async getScheduledChatRecoveryPayloadForTest(
@@ -13214,7 +13213,7 @@ export class ThinkRecoveryTestAgent extends Think {
       SELECT json_extract(input, '$.data') AS payload
       FROM cf_agents_task_runs
       WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
-        AND state IN ('pending', 'running', 'waiting')
+        AND status IN ('pending', 'running')
         AND json_extract(metadata, '$.callback') = ${callback}
       ORDER BY created_at ASC
       LIMIT 1

@@ -63,13 +63,14 @@ export class MessengerReplies extends LifecycleCapability {
     idempotencyKey: string;
     metadata: Record<string, unknown>;
   }): Promise<{ accepted: boolean }> {
-    const receipt = await this.#tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
+    const receipt = await this.#tasks.run(
       MESSENGER_REPLY_TASK_DEFINITION,
       { nonce: input.nonce },
       {
         runId: runIdFor(input.nonce),
         idempotencyKey: input.idempotencyKey,
-        metadata: input.metadata as Record<string, TaskJson>
+        metadata: input.metadata as Record<string, TaskJson>,
+        start: "now"
       }
     );
     return { accepted: receipt.accepted };

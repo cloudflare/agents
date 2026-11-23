@@ -61,7 +61,9 @@ async function insertInterruptedTurnForTest(
   agent: AIChatAgent,
   storage: DurableObjectStorage,
   name: string,
-  snapshot?: unknown
+  snapshot?: unknown,
+  /** Keep the snapshot where turns before checkpoints did. */
+  legacySnapshot = false
 ): Promise<void> {
   const prefix = `${AIChatAgent.CHAT_FIBER_NAME}:`;
   if (!name.startsWith(prefix)) {
@@ -75,15 +77,21 @@ async function insertInterruptedTurnForTest(
   const nonce = crypto.randomUUID();
   const runId = `chat_${nonce}`;
   const requestId = name.slice(prefix.length);
-  if (snapshot) {
+  if (snapshot && legacySnapshot) {
     await storage.put(`__cf_chat_turn_snapshot:${runId}`, snapshot);
   }
   // Make sure the Tasks tables exist before writing a row into them.
   await agent.tasks.get(runId);
+  if (snapshot && !legacySnapshot) {
+    agent.sql`
+      INSERT INTO cf_agents_task_checkpoint (run_id, key, value)
+      VALUES (${runId}, 'snapshot', ${JSON.stringify(snapshot)})
+    `;
+  }
   const now = Date.now();
   agent.sql`
     INSERT INTO cf_agents_task_runs
-      (run_id, definition, input, state, metadata, idempotency_key, retain,
+      (run_id, definition, input, status, metadata, idempotency_key, retain,
        attempt, next_at, cancel_requested, created_at, updated_at)
     VALUES
       (${runId}, ${AIChatAgent.CHAT_FIBER_NAME},
@@ -102,17 +110,18 @@ async function recoverInterruptedTurnsForTest(
 ): Promise<void> {
   const runs = agent.sql<{ run_id: string; input: string; metadata: string }>`
     SELECT run_id, input, metadata FROM cf_agents_task_runs
-    WHERE definition = ${AIChatAgent.CHAT_FIBER_NAME} AND state = 'pending'
+    WHERE definition = ${AIChatAgent.CHAT_FIBER_NAME} AND status = 'pending'
     ORDER BY created_at
   `;
   for (const run of runs) {
     // Accepted again under its id, so this invocation runs it.
     agent.sql`DELETE FROM cf_agents_task_runs WHERE run_id = ${run.run_id}`;
-    await agent.tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
-      AIChatAgent.CHAT_FIBER_NAME,
-      JSON.parse(run.input),
-      { runId: run.run_id, retain: false, metadata: JSON.parse(run.metadata) }
-    );
+    await agent.tasks.run(AIChatAgent.CHAT_FIBER_NAME, JSON.parse(run.input), {
+      runId: run.run_id,
+      retain: false,
+      metadata: JSON.parse(run.metadata),
+      start: "now"
+    });
   }
   await (
     agent as unknown as { _fibers: { recover(): Promise<void> } }
@@ -3990,7 +3999,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       this.sql<{ count: number }>`
         SELECT COUNT(*) AS count FROM cf_agents_task_runs
         WHERE definition = '__cf_internal_chat_turn'
-          AND state IN ('pending', 'running', 'waiting')
+          AND status IN ('pending', 'running')
       `[0]?.count ?? 0
     );
   }
@@ -4001,7 +4010,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     this.sql`
       UPDATE cf_agents_task_runs SET next_at = ${past}
       WHERE definition = '__cf_internal_chat_turn'
-        AND state IN ('pending', 'running', 'waiting')
+        AND status IN ('pending', 'running')
     `;
     this.sql`
       UPDATE cf_agents_task_steps SET next_at = ${past}
@@ -4040,11 +4049,10 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       data,
       delaySeconds: 60
     };
-    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-      CHAT_RECOVERY_TASK_NAME,
-      input,
-      chatRecoveryTaskRunOptions(input, "redefer")
-    );
+    await this.tasks.run(CHAT_RECOVERY_TASK_NAME, input, {
+      ...chatRecoveryTaskRunOptions(input, "redefer"),
+      start: "alarm"
+    });
   }
 
   /** Retry-path twin of {@link preScheduleRecoveryContinueForTest}. */
@@ -4056,11 +4064,10 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       data,
       delaySeconds: 60
     };
-    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-      CHAT_RECOVERY_TASK_NAME,
-      input,
-      chatRecoveryTaskRunOptions(input, "redefer")
-    );
+    await this.tasks.run(CHAT_RECOVERY_TASK_NAME, input, {
+      ...chatRecoveryTaskRunOptions(input, "redefer"),
+      start: "alarm"
+    });
   }
 
   async getChatRecoveringForTest(): Promise<{ requestId?: string } | null> {
@@ -4738,7 +4745,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     const rows = this.sql<{ run_id: string }>`
       SELECT run_id FROM cf_agents_task_runs
       WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
-        AND state IN ('pending', 'running', 'waiting')
+        AND status IN ('pending', 'running')
         AND json_extract(metadata, '$.callback') = ${callback}
       ORDER BY created_at ASC
       LIMIT 1
@@ -4957,7 +4964,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     const tasks = this.sql<{ count: number }>`
       SELECT COUNT(*) AS count FROM cf_agents_task_runs
       WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
-        AND state IN ('pending', 'running', 'waiting')
+        AND status IN ('pending', 'running')
         AND json_extract(metadata, '$.callback') = ${callback}
     `;
     return {
@@ -5030,7 +5037,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     const tasks = this.sql<{ count: number }>`
       SELECT COUNT(*) AS count FROM cf_agents_task_runs
       WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
-        AND state IN ('pending', 'running', 'waiting')
+        AND status IN ('pending', 'running')
         AND json_extract(metadata, '$.callback') = ${callback}
     `;
     return (scheduled[0]?.count ?? 0) + (tasks[0]?.count ?? 0);
@@ -5123,9 +5130,16 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
    */
   async insertInterruptedFiber(
     name: string,
-    snapshot?: unknown
+    snapshot?: unknown,
+    legacySnapshot?: boolean
   ): Promise<void> {
-    await insertInterruptedTurnForTest(this, this.ctx.storage, name, snapshot);
+    await insertInterruptedTurnForTest(
+      this,
+      this.ctx.storage,
+      name,
+      snapshot,
+      legacySnapshot
+    );
   }
 
   /** Replay every interrupted turn, as a wake does. */
@@ -5351,7 +5365,7 @@ export class RecoveryThrowingAgent extends AIChatAgent<Env> {
     thrown: string | null;
     onErrorSeen: string[];
     liveRecoveryTurns: number;
-    liveClosures: number;
+    checkpointEntries: number;
     fibers: number;
     abortControllers: number;
     queueIdle: boolean;
@@ -5371,10 +5385,7 @@ export class RecoveryThrowingAgent extends AIChatAgent<Env> {
       this._shouldThrow = false;
     }
     const internals = this as unknown as {
-      _chatTurnFibers: {
-        liveTurns: Map<string, unknown>;
-        liveClosures: Map<string, unknown>;
-      };
+      _chatTurnFibers: { liveTurns: Map<string, unknown> };
       _abortRegistry: { size: number };
       _turnQueue: { isActive: boolean };
     };
@@ -5382,7 +5393,9 @@ export class RecoveryThrowingAgent extends AIChatAgent<Env> {
       thrown,
       onErrorSeen: [...this._onErrorSeen],
       liveRecoveryTurns: internals._chatTurnFibers.liveTurns.size,
-      liveClosures: internals._chatTurnFibers.liveClosures.size,
+      checkpointEntries: this.sql<{ n: number }>`
+        SELECT COUNT(*) AS n FROM cf_agents_task_checkpoint
+      `[0].n,
       fibers: this.getActiveFibers().length,
       abortControllers: internals._abortRegistry.size,
       queueIdle: !internals._turnQueue.isActive
@@ -5537,17 +5550,12 @@ export class RecoverySlowStreamAgent extends SlowStreamAgent {
 
     // Root turns now start on the tasks capability; stub its internal start
     // path the same way so the simulated failure covers the migrated engine.
-    type RunAttached = (...args: unknown[]) => Promise<unknown>;
-    const tasksInternal = this.tasks as unknown as {
-      __DO_NOT_USE_WILL_BREAK__runAttached: RunAttached;
-    };
-    const originalRunAttached =
-      tasksInternal.__DO_NOT_USE_WILL_BREAK__runAttached.bind(
-        this.tasks
-      ) as RunAttached;
-    tasksInternal.__DO_NOT_USE_WILL_BREAK__runAttached = (() => {
+    type Run = (...args: unknown[]) => Promise<unknown>;
+    const tasksInternal = this.tasks as unknown as { run: Run };
+    const originalRun = tasksInternal.run.bind(this.tasks) as Run;
+    tasksInternal.run = (() => {
       throw new Error("simulated runFiber failure");
-    }) as RunAttached;
+    }) as Run;
 
     let threw = false;
     try {
@@ -5566,7 +5574,7 @@ export class RecoverySlowStreamAgent extends SlowStreamAgent {
       threw = true;
     } finally {
       fiberMethods._runFiberWithStashWrapper = originalRunFiberWithStashWrapper;
-      tasksInternal.__DO_NOT_USE_WILL_BREAK__runAttached = originalRunAttached;
+      tasksInternal.run = originalRun;
     }
 
     return {
@@ -5705,14 +5713,14 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
         lastAttemptAt: now
       }
     );
-    const receipt = await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+    const receipt = await this.tasks.run(
       definition,
       { incidentId },
-      { retain: false }
+      { retain: false, start: "alarm" }
     );
     for (let i = 0; i < 50; i++) {
       const run = await this.tasks.get(receipt.runId);
-      if (run?.state === "waiting") break;
+      if (run?.status === "pending" && run.waitReason !== undefined) break;
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     return receipt.runId;
@@ -5736,16 +5744,16 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
 
   /** This facet's own run row state, to check a routed strike reached it. */
   getFacetRecoveryOomRunStateForTest(runId: string): {
-    state: string;
+    status: string;
     generation: string | null;
     next_at: number | null;
   } | null {
     const rows = this.sql<{
-      state: string;
+      status: string;
       generation: string | null;
       next_at: number | null;
     }>`
-      SELECT state, generation, next_at FROM cf_agents_task_runs
+      SELECT status, generation, next_at FROM cf_agents_task_runs
       WHERE run_id = ${runId}
     `;
     return rows[0] ?? null;
@@ -5779,7 +5787,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     const rows = this.sql<{ count: number }>`
       SELECT COUNT(*) AS count FROM cf_agents_task_runs
       WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
-        AND state IN ('pending', 'running', 'waiting')
+        AND status IN ('pending', 'running')
         AND json_extract(metadata, '$.callback') = ${callback}
     `;
     return rows[0]?.count ?? 0;
@@ -5892,7 +5900,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     const taskRuns = this.sql<{ count: number }>`
       SELECT COUNT(*) AS count FROM cf_agents_task_runs
       WHERE definition = ${AIChatAgent.CHAT_FIBER_NAME}
-        AND state IN ('pending', 'running', 'waiting')
+        AND status IN ('pending', 'running')
     `;
     const fibers = this.sql<{ count: number }>`
       SELECT COUNT(*) AS count FROM cf_agents_runs
@@ -5916,10 +5924,10 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       this._turnRecoveriesForTest.push(turn.requestId);
       return original(turn);
     };
-    const receipt = await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+    const receipt = await this.tasks.run(
       AIChatAgent.CHAT_FIBER_NAME,
       { requestId, continuation: false, nonce: `gone-${requestId}` },
-      { metadata: { requestId } }
+      { metadata: { requestId }, start: "alarm" }
     );
     return receipt.runId;
   }
@@ -5936,7 +5944,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
   markRunInterruptedForTest(runId: string, deadline: number): void {
     this.sql`
       UPDATE cf_agents_task_runs
-      SET state = 'running', generation = 'dead-isolate', attempt = 1,
+      SET status = 'running', generation = 'dead-isolate', attempt = 1,
           next_at = ${deadline}
       WHERE run_id = ${runId}
     `;
@@ -5944,9 +5952,9 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
 
   getTaskRunStateForTest(runId: string): string | null {
     return (
-      this.sql<{ state: string }>`
-        SELECT state FROM cf_agents_task_runs WHERE run_id = ${runId}
-      `[0]?.state ?? null
+      this.sql<{ status: string }>`
+        SELECT status FROM cf_agents_task_runs WHERE run_id = ${runId}
+      `[0]?.status ?? null
     );
   }
 
@@ -7280,7 +7288,7 @@ export class AIChatAgentToolParent extends Agent<Env> {
     childName: string,
     runId: string
   ): Promise<{
-    state: string;
+    status: string;
     generation: string | null;
     next_at: number | null;
   } | null> {
@@ -7445,7 +7453,7 @@ export class AIChatAgentToolParent extends Agent<Env> {
     await this.alarm();
     for (let i = 0; i < 100; i++) {
       const state = await child.getTaskRunStateForTest(runId);
-      if (state === "completed" || state === "failed") break;
+      if (state === "completed" || state === "error") break;
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     return {

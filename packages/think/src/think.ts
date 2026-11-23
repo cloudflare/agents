@@ -2982,26 +2982,24 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     return this._chatTurnFibers.liveTurns;
   }
 
-  private get _liveChatTurnClosures() {
-    return this._chatTurnFibers.liveClosures;
-  }
-
   /** Runs each chat turn as a durable fiber. Shared with `AIChatAgent`. */
   private readonly _chatTurnFibers = new ChatTurnFibers({
     fiberName: (this.constructor as typeof Think).CHAT_FIBER_NAME,
     snapshotKey: "__cfThinkChatFiberSnapshot",
     generateId: () => crypto.randomUUID(),
     turnSignal: (requestId) => this._turns.aborts.getExistingSignal(requestId),
-    runTask: ({ requestId, continuation, nonce }) =>
-      this.tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
+    runTask: ({ requestId, continuation, nonce }, local) =>
+      this.tasks.run(
         (this.constructor as typeof Think).CHAT_FIBER_NAME,
         { requestId, continuation, nonce },
-        { runId: `chat_${nonce}`, retain: false, metadata: { requestId } }
+        {
+          runId: `chat_${nonce}`,
+          retain: false,
+          metadata: { requestId },
+          start: "now",
+          local
+        }
       ),
-    captureContext: () => {
-      const ambient = agentContext.getStore();
-      return (fn) => (ambient ? agentContext.run(ambient, fn) : fn());
-    },
     turnBody: (continuation, body, requestId) =>
       this._chatRecoveryEngine().turnBody(continuation, body, requestId),
     turnAccepted: (requestId) => this._turns.turnAccepted(requestId),
@@ -3019,9 +3017,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       chatFiberName,
       createChatTurnTaskDefinition({
         storage: this.ctx.storage,
-        getRunCreatedAt: async (runId) =>
-          (await this.tasks.get(runId))?.createdAt ?? null,
-        getLiveClosure: (nonce) => this._liveChatTurnClosures.get(nonce),
         keepAliveWhile: (fn) => this.keepAliveWhile(fn),
         withStash: (context, fn) => this._withFiberStash(context, fn),
         recover: (turn) => this._recoverChatTurn(turn)
@@ -6802,7 +6797,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const rows = this.sql<{ created_at: number }>`
       SELECT created_at FROM cf_agents_task_runs
       WHERE definition = ${(this.constructor as typeof Think).CHAT_FIBER_NAME}
-        AND state IN ('pending', 'running', 'waiting', 'recovering')
+        AND status IN ('pending', 'running')
         AND metadata = ${JSON.stringify({ requestId })}
       LIMIT 1
     `;
@@ -6867,7 +6862,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
     const recoveryRuns = await this.tasks.list({
       definition: CHAT_RECOVERY_TASK_NAME,
-      status: ["pending", "running", "waiting"],
+      status: ["pending", "running"],
       limit: Number.MAX_SAFE_INTEGER
     });
     if (

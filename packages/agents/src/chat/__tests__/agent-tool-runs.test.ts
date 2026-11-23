@@ -526,7 +526,7 @@ describe("AgentToolRuns", () => {
     store.seed("run-1");
     store.bindRequest("run-1", "req-1");
     store.raw(
-      `create table cf_agents_task_runs (run_id text, definition text, input text, state text)`
+      `create table cf_agents_task_runs (run_id text, definition text, input text, status text)`
     );
     store.raw(
       `insert into cf_agents_task_runs values ('chat_x', 'chat-turn', '{"requestId":"req-1"}', 'running')`
@@ -541,7 +541,7 @@ describe("AgentToolRuns", () => {
     skipped.store.seed("run-1");
     skipped.store.bindRequest("run-1", "req-1");
     skipped.store.raw(
-      `create table cf_agents_task_runs (run_id text, definition text, input text, state text)`
+      `create table cf_agents_task_runs (run_id text, definition text, input text, status text)`
     );
     skipped.store.raw(
       `insert into cf_agents_task_runs values ('chat_x', 'chat-turn', '{"requestId":"req-1"}', 'running')`
@@ -555,7 +555,7 @@ describe("AgentToolRuns", () => {
     expect(skipped.store.read("run-1")?.status).toBe("error");
 
     // Once that run settles, the stale row is settled as before.
-    store.raw(`update cf_agents_task_runs set state = 'completed'`);
+    store.raw(`update cf_agents_task_runs set status = 'completed'`);
     await runs.reconcileStale("run-1");
     expect(store.terminal("run-1")).toEqual({
       status: "error",

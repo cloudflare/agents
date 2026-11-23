@@ -150,7 +150,7 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
         runId,
         generation,
         `UPDATE cf_agents_task_runs SET next_at = ?, updated_at = ?
-           WHERE run_id = ? AND generation = ? AND state = 'running'`,
+           WHERE run_id = ? AND generation = ? AND status = 'running'`,
         [now + deps.claimTimeoutMs(), now]
       );
       if (written) lastClaimWriteAt = now;
@@ -161,7 +161,7 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
         runId,
         generation,
         `UPDATE cf_agents_task_runs SET status_message = ?, updated_at = ?
-           WHERE run_id = ? AND generation = ? AND state = 'running'`,
+           WHERE run_id = ? AND generation = ? AND status = 'running'`,
         [message, Date.now()]
       );
       if (written) lastStatusMessage = message;
