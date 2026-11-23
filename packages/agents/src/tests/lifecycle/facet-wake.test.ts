@@ -194,6 +194,8 @@ describe("facet wake", () => {
     const again = await getAgentByName(env.FacetWakeRoot, name);
     const [wake] = await again.rootJobs();
     expect(wake!.time).toBeGreaterThanOrEqual(marked + 25_000);
+    // The root's alarm follows the moved wake, not the old minute.
+    expect(await again.alarmAt()).toBe(wake!.time);
   });
 
   it("keeps the recheck delay for a facet whose last drive never replied", async () => {
@@ -209,5 +211,6 @@ describe("facet wake", () => {
     const [wake] = await again.rootJobs();
     expect(wake!.time).toBeGreaterThanOrEqual(marked + 25_000);
     expect(wake!.time).toBeLessThan(marked + 60_000);
+    expect(await again.alarmAt()).toBe(wake!.time);
   });
 });
