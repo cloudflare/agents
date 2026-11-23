@@ -123,8 +123,8 @@ function signature(checker: ts.TypeChecker, symbol: ts.Symbol): string {
 
 /**
  * The public and protected members of an exported class, instance and
- * static: what a caller or a subclass can reach. Private members and `_`-prefixed internals
- * are left out.
+ * static: what a caller or a subclass can reach. Private members, `_`-prefixed internals
+ * and members documented `@internal` are left out.
  */
 function classMembers(checker: ts.TypeChecker, symbol: ts.Symbol): string[] {
   const target =
@@ -142,6 +142,16 @@ function classMembers(checker: ts.TypeChecker, symbol: ts.Symbol): string[] {
     if (
       declaration &&
       ts.getCombinedModifierFlags(declaration) & ts.ModifierFlags.Private
+    ) {
+      return;
+    }
+    // A member documented `@internal` is sibling-package support, as an
+    // internal entry is.
+    if (
+      declaration &&
+      ts
+        .getJSDocTags(declaration)
+        .some((tag) => tag.tagName.text === "internal")
     ) {
       return;
     }

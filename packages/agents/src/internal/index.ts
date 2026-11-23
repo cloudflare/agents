@@ -12,7 +12,6 @@
  * @packageDocumentation
  */
 
-export * from "../inbox";
 export { TaskSettlement } from "../tasks/settlement";
 export type {
   TaskFrameworkDefinition,
