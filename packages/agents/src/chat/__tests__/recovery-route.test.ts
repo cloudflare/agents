@@ -210,6 +210,18 @@ describe("routeStreamInterruption", () => {
     expect(t.incident()?.scheduleCount).toBe(1);
   });
 
+  it("ends a request stopped before its interruption was routed after keeping its reply", async () => {
+    const t = setup({ storedReplyId: "assistant-1" });
+    // The stop lands before the incident exists: nothing to cancel yet.
+    expect(await t.engine.cancelScheduledRecovery("request-1")).toBe(false);
+
+    expect(await t.run()).toBe("stopped");
+    // The end follows the stored reply, so the tab sees the final transcript.
+    const keep = t.log.indexOf("keep");
+    expect(keep).toBeGreaterThanOrEqual(0);
+    expect(t.log.indexOf("end-aborted:request-1")).toBeGreaterThan(keep);
+  });
+
   it("schedules nothing for a turn a user stopped while it was routed", async () => {
     const t = setup({ storedReplyId: "assistant-1" });
     // The stop lands while the app's hook runs: the incident is open but

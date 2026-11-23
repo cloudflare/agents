@@ -261,6 +261,7 @@ async function route(
     // A user stopped the turn while it was routed: what it streamed is kept,
     // nothing is scheduled and nothing gives up.
     await host.resolvePartial(true);
+    engine.endStopped(incident);
     return "stopped";
   }
 

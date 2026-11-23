@@ -779,6 +779,7 @@ export class ChatRecoveryEngine {
           await wake.persistOrphanedStream(streamId);
         }
         if (streamStillActive) await wake.completeRecoveredStream(streamId);
+        this.endStopped(incident);
       } finally {
         this.#settled();
       }
@@ -1034,7 +1035,6 @@ export class ChatRecoveryEngine {
           reason: CHAT_RECOVERY_CANCELLED_REASON
         });
       }
-      this.#endStopped(incident);
       await adapter.setRecovering(false);
       return {
         incident: after !== undefined && after !== "delete" ? after : incident,
@@ -1132,7 +1132,7 @@ export class ChatRecoveryEngine {
           reason: CHAT_RECOVERY_CANCELLED_REASON
         });
       }
-      this.#endStopped(stored ?? incident);
+      this.endStopped(stored ?? incident);
       await this.adapter.setRecovering(false);
       return false;
     }
@@ -1187,9 +1187,10 @@ export class ChatRecoveryEngine {
   /**
    * A stop that landed while the turn was routed into recovery, before
    * anything was scheduled: the tab's last frame for the ids it stopped
-   * said "recovering", and nothing else will end them.
+   * said "recovering", and nothing else will end them. Called once what the
+   * turn streamed is stored, so the end follows the final transcript.
    */
-  #endStopped(incident: ChatRecoveryIncident): void {
+  endStopped(incident: ChatRecoveryIncident): void {
     const ids = new Set([incident.recoveryRootRequestId, incident.requestId]);
     for (const id of ids) {
       if (id !== undefined && this.#stoppedRequestIds.has(id)) {
