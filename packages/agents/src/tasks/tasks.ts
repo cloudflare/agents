@@ -163,6 +163,11 @@ type TaskWakeJobPayload = {
   readonly runId: string;
   readonly owner_path?: string | null;
   readonly owner_path_key?: string | null;
+  /**
+   * A routed run backing off after a memory-limit strike: its deadline is
+   * the breaker's, and waking it early would only read as a clean pass.
+   */
+  readonly struck?: true;
 };
 
 function isTaskWakeJobPayload(value: unknown): value is TaskWakeJobPayload {
@@ -179,6 +184,7 @@ type TaskRouteMessage =
       readonly type: "syncWake";
       readonly runId: string;
       readonly next: number | null;
+      readonly struck?: true;
     }
   | { readonly type: "dispatch"; readonly runId: string }
   | {
@@ -417,6 +423,34 @@ export class Tasks<
     }
     this.#reconcile();
     await this.#syncAllWakes();
+    await this.#reviveRoutedWakes();
+  }
+
+  /**
+   * Make this root's mirrors of routed facet runs due now. A facet's runs
+   * live in its own storage, where `#reconcile` cannot reach them, and a
+   * facet starts only when something calls it. A root that restarts after a
+   * reset took its facets down with it, so an attempt that was running there
+   * would otherwise wait for its claim deadline (minutes) before anything
+   * woke the facet. The dispatch starts the facet, whose own reconcile
+   * reclaims an interrupted attempt; a run that is not due answers with its
+   * real deadline, and the mirror moves back to it.
+   */
+  async #reviveRoutedWakes(): Promise<void> {
+    const now = Date.now();
+    for (const job of this.lifecycle.jobs.list()) {
+      if (
+        job.time > now &&
+        isTaskWakeJobPayload(job.payload) &&
+        job.payload.owner_path &&
+        // A struck run waits out the breaker's backoff: waking it early
+        // retries nothing and would read as a clean pass, which clears the
+        // strikes that are to seal it.
+        !job.payload.struck
+      ) {
+        await this.lifecycle.jobs.reschedule(job.id, now);
+      }
+    }
   }
 
   /** Drive one due run's wake dispatched by the Lifecycle event loop. */
@@ -638,7 +672,7 @@ export class Tasks<
          AND state IN ('pending', 'waiting', 'running')`,
       [context.nextTime, context.nextTime, now, runId]
     );
-    await this.#syncWake(runId);
+    await this.#syncWake(runId, { struck: true });
   }
 
   /**
@@ -724,7 +758,10 @@ export class Tasks<
    * @returns False when the queue already carried exactly this wake and
    * nothing was written — a same-values upsert is still a billed row write.
    */
-  async #syncWake(runId: string): Promise<boolean> {
+  async #syncWake(
+    runId: string,
+    options: { struck?: boolean } = {}
+  ): Promise<boolean> {
     const rows = this.#store.sql<{ next_at: number | null }>`
       SELECT next_at FROM cf_agents_task_runs
       WHERE run_id = ${runId}
@@ -738,7 +775,8 @@ export class Tasks<
       return (await this.lifecycle.routes.toRoot({
         type: "syncWake",
         runId,
-        next
+        next,
+        ...(options.struck && { struck: true })
       } satisfies TaskRouteMessage)) as boolean;
     }
 
@@ -772,7 +810,12 @@ export class Tasks<
       case "syncWake": {
         const owner = context.source;
         if (!owner) throw new Error("Routed Tasks message missing source");
-        return this.#syncRoutedWake(owner, message.runId, message.next);
+        return this.#syncRoutedWake(
+          owner,
+          message.runId,
+          message.next,
+          message.struck === true
+        );
       }
       case "dispatch":
         return this.#dispatchRoutedRun(message.runId);
@@ -797,7 +840,8 @@ export class Tasks<
   async #syncRoutedWake(
     owner: LifecycleRouteAddress,
     runId: string,
-    next: number | null
+    next: number | null,
+    struck = false
   ): Promise<boolean> {
     const jobId = `${WAKE_JOB_PREFIX}${owner.key}:${runId}`;
     if (next === null) {
@@ -805,10 +849,21 @@ export class Tasks<
       return true;
     }
     const existing = this.lifecycle.jobs.get(jobId);
+    // A struck wake stays struck while its deadline holds: the facet's own
+    // startup re-sends that deadline without knowing of the strike.
+    if (
+      existing?.time === next &&
+      isTaskWakeJobPayload(existing.payload) &&
+      existing.payload.struck === true
+    ) {
+      struck = true;
+    }
     if (
       existing?.fn === WAKE_JOB_FN &&
       existing.time === next &&
-      existing.retry?.maxAttempts === WAKE_JOB_RETRY.maxAttempts
+      existing.retry?.maxAttempts === WAKE_JOB_RETRY.maxAttempts &&
+      isTaskWakeJobPayload(existing.payload) &&
+      (existing.payload.struck === true) === struck
     ) {
       return false;
     }
@@ -819,7 +874,8 @@ export class Tasks<
       payload: {
         runId,
         owner_path: owner.data,
-        owner_path_key: owner.key
+        owner_path_key: owner.key,
+        ...(struck && { struck: true as const })
       } satisfies TaskWakeJobPayload,
       retry: WAKE_JOB_RETRY
     });

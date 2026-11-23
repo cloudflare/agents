@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { evictDurableObject, runDurableObjectAlarm } from "cloudflare:test";
 import type {
   AgentToolEventMessage,
   AgentToolLifecycleResult,
@@ -333,6 +334,13 @@ type ParentStub = DurableObjectStub & {
     status: string;
     stores: Array<{ taskRuns: number; fibers: number }>;
   }>;
+  seedInterruptedFacetTurnForTest(childName: string): Promise<string>;
+  facetWakeTimeForTest(runId: string): Promise<number | null>;
+  oomStrikesForTest(): Promise<number | null>;
+  facetRunStateForTest(
+    childName: string,
+    runId: string
+  ): Promise<string | null>;
   facetOrphanTurnReplayForTest(childName: string): Promise<{
     mirrored: number;
     recoveries: string[];
@@ -551,6 +559,42 @@ describe("AIChatAgent as an agent-tool child", () => {
     expect(runState?.next_at).toBeGreaterThan(Date.now());
   });
 
+  it("does not wake a struck facet run early when the root restarts, so its strikes stand", async () => {
+    const parentName = crypto.randomUUID();
+    const parent = await getParent(parentName);
+    const executing = {
+      childName: crypto.randomUUID(),
+      incidentId: `facet-backoff-restart-${crypto.randomUUID()}`
+    };
+    const runId = await parent.driveFacetRecoveryOomBackoffForTest(executing);
+    // The strike resets the root's isolate. A request then restarts it,
+    // during the breaker's backoff.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const restarted = await getParent(parentName);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    // The struck run's mirror keeps the backoff deadline: no early alarm
+    // dispatches it and reads as a clean pass that clears the strike.
+    expect(await restarted.facetWakeTimeForTest(runId)).toBeGreaterThan(
+      Date.now() + 1_000
+    );
+    expect(await restarted.oomStrikesForTest()).toBe(1);
+
+    // The facet starts again and re-sends its deadline, which knows nothing
+    // of the strike. A second root restart must still leave the run alone.
+    await restarted.facetRecoveryIncidentStatusForTest(
+      executing.childName,
+      executing.incidentId
+    );
+    await evictDurableObject(restarted as unknown as DurableObjectStub);
+    const again = await getParent(parentName);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(await again.facetWakeTimeForTest(runId)).toBeGreaterThan(
+      Date.now() + 1_000
+    );
+    expect(await again.oomStrikesForTest()).toBe(1);
+  });
+
   it("seals a routed run whose failure lands after root detaches at the dispatch budget", async () => {
     const parentName = crypto.randomUUID();
     const parent = await getParent(parentName);
@@ -605,6 +649,42 @@ describe("AIChatAgent as an agent-tool child", () => {
     // Task run, so an interrupted turn replays like a root agent's.
     expect(stores).toEqual([{ taskRuns: 1, fibers: 0 }]);
   });
+
+  it("recovers a facet's chat turn soon after the root restarts, not at its claim deadline", async () => {
+    const name = crypto.randomUUID();
+    const childName = crypto.randomUUID();
+    const parent = await getParent(name);
+    const runId = await parent.seedInterruptedFacetTurnForTest(childName);
+    expect(await parent.facetWakeTimeForTest(runId)).toBeGreaterThan(
+      Date.now() + 300_000
+    );
+
+    // The root resets and takes its facets with it. Nothing calls the facet,
+    // nor the root: its own alarm (keep-alive or deadman, well before the
+    // claim deadline) starts it and drives what is due in one invocation.
+    await evictDurableObject(parent as unknown as DurableObjectStub);
+    const namespace = (env as Env).AIChatAgentToolParent;
+    // The alarm ran: the start came from it, not from the request below.
+    expect(
+      await runDurableObjectAlarm(namespace.get(namespace.idFromName(name)))
+    ).toBe(true);
+    const restarted = await getParent(name);
+
+    // The restarted root re-drives the facet's wake at once: the facet starts,
+    // reclaims the interrupted attempt and settles the run, which removes the
+    // mirror. Read only the root until then: a call to the facet would start
+    // it and hide a wake left at the claim deadline.
+    const deadline = Date.now() + 5_000;
+    let wake = await restarted.facetWakeTimeForTest(runId);
+    while (wake !== null && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      wake = await restarted.facetWakeTimeForTest(runId);
+    }
+    expect(wake).toBeNull();
+    expect(await restarted.facetRunStateForTest(childName, runId)).toBe(
+      "completed"
+    );
+  }, 15_000);
 
   it("replays a facet's interrupted chat-turn Task run from the root alarm into chat recovery", async () => {
     const parent = await getParent();
