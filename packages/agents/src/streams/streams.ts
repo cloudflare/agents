@@ -1124,8 +1124,10 @@ export class Streams extends LifecycleCapability {
         ) {
           // A non-async function that returns a promise is only caught
           // after it ran: the throw below rolls back its synchronous writes,
-          // but not work it scheduled for later. Swallow a later rejection.
-          Promise.resolve(result).catch(() => {});
+          // but not work it scheduled for later. Swallow a native promise's
+          // later rejection; never call another thenable's `then`, which
+          // could start work the callback only returned.
+          if (result instanceof Promise) result.catch(() => {});
           throw new TypeError(
             "Stream close `commit` must be synchronous; it returned a promise."
           );

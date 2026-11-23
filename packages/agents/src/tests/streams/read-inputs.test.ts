@@ -49,6 +49,42 @@ describe("streams contract gaps", () => {
     });
   });
 
+  it("rolls back the writes of a commit that returns a promise, and never calls a returned thenable", async () => {
+    const stub = env.StreamHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: StreamHarnessObject, state) => {
+        await instance.lifecycle.start();
+        const sql = state.storage.sql;
+        sql.exec("CREATE TABLE IF NOT EXISTS caller_writes (n INTEGER)");
+        const stream = await instance.streams.open("s-thenable");
+        let thenCalls = 0;
+        const lazy = {
+          then() {
+            thenCalls += 1;
+          }
+        };
+        expect(() =>
+          stream.close({
+            commit: (() => {
+              sql.exec("INSERT INTO caller_writes (n) VALUES (1)");
+              return lazy;
+            }) as unknown as () => void
+          })
+        ).toThrow(TypeError);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        // The caller's write went with the rolled-back close.
+        expect(
+          sql.exec("SELECT COUNT(*) AS n FROM caller_writes").one().n
+        ).toBe(0);
+        expect(thenCalls).toBe(0);
+        expect((await instance.streams.status("s-thenable"))?.state).toBe(
+          "streaming"
+        );
+      }
+    );
+  });
+
   it("rejects an async commit before it runs", async () => {
     const stub = env.StreamHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: StreamHarnessObject) => {
