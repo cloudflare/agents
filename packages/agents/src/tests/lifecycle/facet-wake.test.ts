@@ -252,4 +252,12 @@ describe("facet wake", () => {
     // One sync for the claim of "now", before its job ran.
     expect(await agent.middleSyncCount("m")).toBeGreaterThan(afterReport);
   });
+
+  it("sends its root no report while it has no jobs", async () => {
+    const agent = await root();
+    await agent.middleRearm("m");
+    await agent.middleRearm("m");
+    expect(await agent.armReportCount()).toBe(0);
+    expect(await agent.rootJobs()).toEqual([]);
+  });
 });

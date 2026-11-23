@@ -57,6 +57,11 @@ class WakeProbe extends LifecycleCapability {
 }
 
 abstract class WakeAgent extends Agent<Cloudflare.Env> {
+  /** Recompute this object's wake, as any queue change does. */
+  async rearm(): Promise<void> {
+    await this.lifecycle.rearmAlarm();
+  }
+
   readonly probe = new WakeProbe(this);
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
@@ -141,6 +146,26 @@ export class FacetWakeMiddle extends WakeAgent {
 }
 
 export class FacetWakeRoot extends WakeAgent {
+  armReports = 0;
+
+  override async _cf_routeLifecycle(
+    target: Parameters<Agent["_cf_routeLifecycle"]>[0],
+    envelope: Parameters<Agent["_cf_routeLifecycle"]>[1]
+  ): Promise<unknown> {
+    if ((envelope.payload as { type?: string }).type === "arm") {
+      this.armReports += 1;
+    }
+    return super._cf_routeLifecycle(target, envelope);
+  }
+
+  armReportCount(): number {
+    return this.armReports;
+  }
+
+  async middleRearm(name: string): Promise<void> {
+    await (await this.subAgent(FacetWakeMiddle, name)).rearm();
+  }
+
   async middlePush(name: string, id: string, delayMs: number) {
     return (await this.subAgent(FacetWakeMiddle, name)).pushJob(id, delayMs);
   }
