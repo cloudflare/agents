@@ -1870,6 +1870,38 @@ export class Tasks<
     await this.#syncWake(head.run_id);
   }
 
+  /** @internal A run's input as accepted, or `undefined` for an unknown run. */
+  inputOf<T = unknown>(runId: string): T | undefined {
+    const row = this.#store.getRun(runId);
+    return row ? (deserializeTaskValue(row.input) as T) : undefined;
+  }
+
+  /**
+   * @internal Merge `patch` into a run's metadata, from host code (a run's
+   * progress its caller tracks). A `null` value removes the key.
+   *
+   * @returns False for an unknown run.
+   */
+  updateMetadata(runId: string, patch: Record<string, TaskJson>): boolean {
+    const row = this.#store.getRun(runId);
+    if (!row) return false;
+    const current =
+      row.metadata === null
+        ? {}
+        : (JSON.parse(row.metadata) as Record<string, TaskJson>);
+    const next: Record<string, TaskJson> = { ...current };
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === null) delete next[key];
+      else next[key] = value;
+    }
+    const json = serializeTaskValue(next, `metadata of Task run "${runId}"`);
+    this.#store.sql`
+      UPDATE cf_agents_task_runs SET metadata = ${json}, updated_at = ${Date.now()}
+      WHERE run_id = ${runId}
+    `;
+    return true;
+  }
+
   /**
    * @internal End every open run of `lane` as `skipped`, a running attempt
    * included (its signal aborts; nothing it writes afterwards lands). The
