@@ -59,6 +59,43 @@ const LEGACY_NAME_STORAGE_KEY = "__ps_name";
  */
 const FACET_WAKE = "cf:facet-wake";
 
+/**
+ * How long the root waits on a facet's drive before it lets the call run on
+ * by itself: a slow job in one facet must not hold the root's own jobs and
+ * the facet's siblings for the job's whole length.
+ */
+const FACET_DRIVE_BUDGET_MS = 5_000;
+/** The root's wake for a facet whose drive outran the budget or was busy. */
+const FACET_DRIVE_RECHECK_MS = 30_000;
+/**
+ * Drives of one facet path that may end without a reply (the isolate was
+ * reset, for example by a job over the memory limit, which takes the root
+ * with it) before the root backs off that path.
+ */
+const FACET_DRIVE_UNREPORTED_LIMIT = 3;
+/** Longest back-off between drives of a path that keeps ending unreported. */
+const FACET_DRIVE_MAX_BACKOFF_MS = 60 * 60_000;
+
+type FacetDriveCount = { readonly count: number; readonly at: number };
+
+/** The root's storage key counting one path's drives that never replied. */
+function facetDriveKey(key: string): string {
+  return `cf_agents:facet_drives:${key}`;
+}
+
+/** When a path whose drives keep ending unreported may be driven again. */
+function facetDriveNotBefore(drives: FacetDriveCount | undefined): number {
+  if (!drives || drives.count < FACET_DRIVE_UNREPORTED_LIMIT) return 0;
+  const over = drives.count - FACET_DRIVE_UNREPORTED_LIMIT;
+  return (
+    drives.at +
+    Math.min(
+      FACET_DRIVE_MAX_BACKOFF_MS,
+      FACET_DRIVE_RECHECK_MS * 2 ** Math.min(over, 10)
+    )
+  );
+}
+
 /** First wait before a facet reports its wake again after a failed report. */
 const FACET_REPORT_RETRY_MS = 100;
 /** Longest wait between report retries. */
@@ -523,19 +560,12 @@ export class Lifecycle<
       if (!envelope.source) {
         throw new Error("A facet wake needs the facet's address");
       }
-      const jobs = this.#jobsForOwner(facetWakeOwner(envelope.source.key));
-      const id = facetWakeJobId(envelope.source.key);
-      if (message.time === null) await jobs.cancel(id);
-      else {
-        await jobs.push({
-          id,
-          fn: "wake",
-          time: message.time,
-          payload: envelope.source
-        });
-      }
+      await this.#holdFacetWake(envelope.source, message.time);
       return true;
     }
+    // One drive at a time: a root that let a slow drive run on asks again
+    // later, and must not start the same jobs twice meanwhile.
+    if (this.#drivingFromRoot) return { busy: true };
     // In the facet: run its due jobs as a root's alarm would, and reply with
     // the next due time. The reply re-arms the root's job, so no report is
     // sent meanwhile; the reply is also what makes the job rows durable
@@ -556,6 +586,32 @@ export class Lifecycle<
   }
 
   /**
+   * At the root: hold, move or drop the wake job of one facet path. A path
+   * whose drives keep ending without a reply is not woken before its
+   * back-off ends, however often the facet reports.
+   */
+  async #holdFacetWake(
+    address: LifecycleRouteAddress,
+    time: number | null
+  ): Promise<void> {
+    const jobs = this.#jobsForOwner(facetWakeOwner(address.key));
+    const id = facetWakeJobId(address.key);
+    if (time === null) {
+      await jobs.cancel(id);
+      return;
+    }
+    const notBefore = facetDriveNotBefore(
+      this.#ctx.storage.kv.get<FacetDriveCount>(facetDriveKey(address.key))
+    );
+    await jobs.push({
+      id,
+      fn: "wake",
+      time: Math.max(time, notBefore),
+      payload: address
+    });
+  }
+
+  /**
    * At the root: drop the wake jobs of a facet path and its descendants,
    * when the sub-tree is deleted.
    */
@@ -572,9 +628,9 @@ export class Lifecycle<
       )
       .toArray();
     for (const { capability } of rows) {
-      await this.#jobsForOwner(capability).cancel(
-        facetWakeJobId(capability.slice(FACET_WAKE.length + 1))
-      );
+      const path = capability.slice(FACET_WAKE.length + 1);
+      await this.#jobsForOwner(capability).cancel(facetWakeJobId(path));
+      this.#ctx.storage.kv.delete(facetDriveKey(path));
     }
   }
 
@@ -1158,17 +1214,65 @@ export class Lifecycle<
   #facetWakeDispatch(): JobDispatch | undefined {
     const transport = lifecycleRouteTransports.get(this);
     if (!transport) return undefined;
+    const kv = this.#ctx.storage.kv;
     return {
       onJob: async ({ job }) => {
         const target = job.payload as LifecycleRouteAddress;
-        const reply = await transport.to(target, {
-          capability: FACET_WAKE,
-          source: transport.source,
-          payload: { type: "drive" } satisfies FacetWakeMessage
+        const countKey = facetDriveKey(target.key);
+        const drives = kv.get<FacetDriveCount>(countKey);
+        const notBefore = facetDriveNotBefore(drives);
+        if (Date.now() < notBefore) return { rescheduleAt: notBefore };
+
+        // Count the drive before it starts, durably: a facet job that takes
+        // the isolate down (memory limit) resets this root too, so nothing
+        // after the call would record it. The count clears on any reply.
+        kv.put(countKey, {
+          count: (drives?.count ?? 0) + 1,
+          at: Date.now()
+        } satisfies FacetDriveCount);
+        await this.#ctx.storage.sync();
+
+        const call = transport
+          .to(target, {
+            capability: FACET_WAKE,
+            source: transport.source,
+            payload: { type: "drive" } satisfies FacetWakeMessage
+          })
+          .finally(() => kv.delete(countKey));
+        const settled = (reply: unknown) =>
+          reply === false
+            ? null
+            : (reply as { busy?: true; next?: number | null }).busy
+              ? Date.now() + FACET_DRIVE_RECHECK_MS
+              : ((reply as { next: number | null }).next ?? null);
+
+        let budgetTimer: ReturnType<typeof setTimeout> | undefined;
+        const budget = new Promise<"budget">((resolve) => {
+          budgetTimer = setTimeout(
+            () => resolve("budget"),
+            FACET_DRIVE_BUDGET_MS
+          );
         });
-        if (reply === false) return undefined;
-        const next = (reply as { next: number | null }).next;
-        return next === null ? undefined : { rescheduleAt: next };
+        try {
+          const winner = await Promise.race([
+            call.then((reply) => ({ reply })),
+            budget
+          ]);
+          if (winner !== "budget") {
+            const next = settled(winner.reply);
+            return next === null ? undefined : { rescheduleAt: next };
+          }
+        } finally {
+          clearTimeout(budgetTimer);
+        }
+        // The facet's drive runs on by itself; its reply re-arms the path
+        // when it comes. Meanwhile the path keeps a recheck wake.
+        this.trackAlarmWork(call);
+        call.then(
+          (reply) => this.#holdFacetWake(target, settled(reply)),
+          () => {}
+        );
+        return { rescheduleAt: Date.now() + FACET_DRIVE_RECHECK_MS };
       }
     };
   }

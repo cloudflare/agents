@@ -79,4 +79,43 @@ describe("facet wake", () => {
       expect(await agent.rootJobs()).toEqual([]);
     });
   });
+
+  it("backs off a path whose drives keep ending without a reply", async () => {
+    const agent = await root();
+    await agent.middlePush("m", "first", 60_000);
+    const key = (await agent.rootJobs())[0]!.id.slice("facet:".length);
+    // Three drives of this path ended with the isolate (a job over the
+    // memory limit takes the root down with it, so nothing replied).
+    agent.markUnreportedDrives(key, 3);
+
+    const now = Date.now();
+    await agent.middlePush("m", "due-now", 0);
+    // The report is held to the path's back-off, not woken at once.
+    const [wake] = await agent.rootJobs();
+    expect(wake?.time).toBeGreaterThanOrEqual(now + 25_000);
+  });
+
+  it("does not hold the root's own jobs behind a slow facet job", async () => {
+    const agent = await root();
+    await agent.middlePush("m", "slow-job", 0);
+    await agent.pushJob("root-job", 0);
+
+    const started = Date.now();
+    await runDurableObjectAlarm(agent);
+    // The root waited on the facet no longer than its drive budget, and its
+    // own job ran in the same alarm.
+    expect(Date.now() - started).toBeLessThan(6_500);
+    expect(await agent.ran()).toContain("root-job");
+
+    // The facet's job finished on its own and re-armed nothing left.
+    await vi.waitFor(
+      async () => {
+        expect(await agent.middleRan("m")).toEqual(["slow-job"]);
+        expect(
+          (await agent.rootJobs()).filter((job) => job.id.startsWith("facet:"))
+        ).toEqual([]);
+      },
+      { timeout: 8_000 }
+    );
+  }, 20_000);
 });

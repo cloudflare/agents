@@ -107,6 +107,14 @@ export class FacetWakeRoot extends WakeAgent {
     return (await this.subAgent(FacetWakeMiddle, name)).pendingJobs();
   }
 
+  /** Record that a path's drives ended unreported, as after a tree reset. */
+  markUnreportedDrives(key: string, count: number): void {
+    this.ctx.storage.kv.put(`cf_agents:facet_drives:${key}`, {
+      count,
+      at: Date.now()
+    });
+  }
+
   async deleteMiddle(name: string): Promise<void> {
     await this.deleteSubAgent(FacetWakeMiddle, name);
   }
