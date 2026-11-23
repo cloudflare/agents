@@ -697,8 +697,13 @@ describe("SubAgent", () => {
     await agent.dropRootJobForTest("old-drop");
     await agent.releaseFailingAdoptForTest();
     await alarm;
-
+    // Whichever alarm reached the gate, wait for its failure to come back;
+    // what is left of the hand-over then is one row check and its outcome.
+    await vi.waitFor(async () => {
+      expect(await agent.failingAdoptThrownForTest()).toBe(true);
+    });
     await new Promise((resolve) => setTimeout(resolve, 200));
+
     expect(await agent.rootJobPayload("old-drop")).toBeUndefined();
   });
 

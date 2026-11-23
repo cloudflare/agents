@@ -25,7 +25,12 @@ const STALE_FRAME_PROBE = "stale-frame-probe";
 let failingAdopts = 0;
 /** Held open while a failing hand-over is in flight, until released. */
 let failingAdoptGate:
-  | { entered: boolean; release: () => void; released: Promise<void> }
+  | {
+      entered: boolean;
+      thrown: boolean;
+      release: () => void;
+      released: Promise<void>;
+    }
   | undefined;
 
 export class CounterSubAgent extends Agent {
@@ -42,7 +47,7 @@ export class CounterSubAgent extends Agent {
       if (gate) {
         gate.entered = true;
         await gate.released;
-        failingAdoptGate = undefined;
+        gate.thrown = true;
       }
       throw Object.assign(new Error("simulated hand-over failure"), {
         retryable: true
@@ -1865,7 +1870,7 @@ export class TestSubAgentParent extends Agent {
     const released = new Promise<void>((resolve) => {
       release = resolve;
     });
-    failingAdoptGate = { entered: false, release, released };
+    failingAdoptGate = { entered: false, thrown: false, release, released };
   }
 
   failingAdoptEnteredForTest(): boolean {
@@ -1874,6 +1879,13 @@ export class TestSubAgentParent extends Agent {
 
   releaseFailingAdoptForTest(): void {
     failingAdoptGate?.release();
+  }
+
+  /** The held hand-over has failed back to this root. */
+  failingAdoptThrownForTest(): boolean {
+    const thrown = failingAdoptGate?.thrown ?? false;
+    if (thrown) failingAdoptGate = undefined;
+    return thrown;
   }
 
   dropRootJobForTest(id: string): void {
