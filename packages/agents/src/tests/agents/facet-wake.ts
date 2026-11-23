@@ -22,13 +22,25 @@ class WakeProbe extends LifecycleCapability {
   }
 
   async onJob({ job }: LifecycleJobContext): Promise<void> {
-    // `slow-*` outruns the root's drive budget; `fail-*` throws.
+    // `slow-*` outruns the root's drive budget; `fail-*` throws; `abort-*`
+    // ends the isolate, the way a job over the memory limit does.
+    if (job.id.startsWith("abort")) {
+      (this.host as unknown as { ctx: DurableObjectState }).ctx.abort(
+        "job ended its isolate"
+      );
+    }
     if (job.id.startsWith("slow")) {
       await new Promise((resolve) => setTimeout(resolve, 6_500));
     }
     this.host
       .sql`INSERT INTO facet_wake_runs (id, at) VALUES (${job.id}, ${Date.now()})`;
     if (job.id.startsWith("fail")) throw new Error("facet job failed");
+  }
+
+  /** A job given up after its attempts: record it, and drop the job. */
+  onJobError({ job }: LifecycleJobContext): void {
+    this.host
+      .sql`INSERT INTO facet_wake_runs (id, at) VALUES (${`gave-up:${job.id}`}, ${Date.now()})`;
   }
 
   push(id: string, delayMs: number) {
@@ -71,6 +83,10 @@ abstract class WakeAgent extends Agent<Cloudflare.Env> {
       SELECT at FROM facet_wake_runs WHERE id = 'start' ORDER BY at`.map(
       (row) => row.at
     );
+  }
+
+  jobRows(): unknown[] {
+    return this.sql`SELECT id, time, running, attempts FROM cf_agents_jobs`;
   }
 
   pendingJobs(): string[] {
@@ -141,6 +157,10 @@ export class FacetWakeRoot extends WakeAgent {
     return (await this.subAgent(FacetWakeMiddle, name)).starts();
   }
 
+  async middleJobRows(name: string): Promise<unknown[]> {
+    return (await this.subAgent(FacetWakeMiddle, name)).jobRows();
+  }
+
   async middlePending(name: string): Promise<string[]> {
     return (await this.subAgent(FacetWakeMiddle, name)).pendingJobs();
   }
@@ -149,6 +169,16 @@ export class FacetWakeRoot extends WakeAgent {
   makeFacetWakesDueKeepingDrives(): void {
     this.sql`UPDATE cf_agents_jobs SET time = ${Date.now() - 1}
       WHERE capability LIKE 'cf:facet-wake:%'`;
+  }
+
+  /** Make every facet wake due now and forget unreported drives. */
+  makeFacetWakesDue(): void {
+    this.makeFacetWakesDueKeepingDrives();
+    for (const [key] of this.ctx.storage.kv.list({
+      prefix: "cf_agents:facet_drives:"
+    })) {
+      this.ctx.storage.kv.delete(key);
+    }
   }
 
   /** End this root's isolate, and its facets with it. */

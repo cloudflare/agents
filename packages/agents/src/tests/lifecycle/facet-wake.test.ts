@@ -213,4 +213,28 @@ describe("facet wake", () => {
     expect(wake!.time).toBeLessThan(marked + 60_000);
     expect(await again.alarmAt()).toBe(wake!.time);
   });
+
+  it("gives up a facet job that keeps ending its isolate", async () => {
+    const name = crypto.randomUUID();
+    // The job ends the isolate, which may take this stub's root with it, so
+    // every step gets a fresh stub.
+    const fresh = () => getAgentByName(env.FacetWakeRoot, name);
+    await (await fresh()).middlePush("m", "abort-always", 0);
+    for (let wake = 0; wake < 8; wake++) {
+      await (await fresh()).makeFacetWakesDue().catch(() => {});
+      await runDurableObjectAlarm(await fresh()).catch(() => {});
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const pending = await (
+        await fresh()
+      )
+        .middlePending("m")
+        .catch(() => ["unreachable"]);
+      if (pending.length === 0) break;
+    }
+    // The facet's own driver counted each attempt before it ran, so after
+    // the attempts ran out it gave the job up instead of running it again.
+    const agent = await fresh();
+    expect(await agent.middlePending("m")).toEqual([]);
+    expect(await agent.middleRan("m")).toContain("gave-up:abort-always");
+  }, 20_000);
 });
