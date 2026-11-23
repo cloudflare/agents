@@ -426,11 +426,11 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
   reportedGate: Promise<void> | null = null;
   /** `__cf_reported` terminal reports wait on this when set. */
   terminalReportGate: Promise<void> | null = null;
-  #owedReporting = false;
+  #owedReports = 0;
 
-  /** Whether the terminal report of the run "owed" has started. */
-  reportingOwedForTest(): boolean {
-    return this.#owedReporting;
+  /** How many terminal reports of the run "owed" have started. */
+  owedReportsForTest(): number {
+    return this.#owedReports;
   }
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
@@ -449,7 +449,7 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
         maxAttempts: 2,
         onStatus: async (snapshot) => {
           const terminal = !["pending", "running"].includes(snapshot.status);
-          if (terminal && snapshot.runId === "owed") this.#owedReporting = true;
+          if (terminal && snapshot.runId === "owed") this.#owedReports++;
           if (terminal) await this.terminalReportGate;
           if (terminal && this.failReports > 0) {
             this.failReports--;

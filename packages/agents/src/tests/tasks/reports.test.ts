@@ -454,7 +454,8 @@ describe("Tasks terminal reports across a reset", () => {
     await runInDurableObject(
       stub,
       async (instance: TaskHarnessObject, state) => {
-        await until(() => instance.reportingOwedForTest());
+        // The first report (in the cancel) threw; the replay's is the second.
+        await until(() => instance.owedReportsForTest() === 2);
         // A guarded report runs through and returns while the replay waits.
         instance.terminalReportGate = null;
         await instance.tasks.cancel("queued");
