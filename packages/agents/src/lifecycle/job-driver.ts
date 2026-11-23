@@ -108,6 +108,8 @@ function attemptsExhaustedError(row: JobStorageRow): Error {
 export type JobDeferral = {
   /** Each held owner with the time its hold ends. */
   readonly holds: ReadonlyArray<readonly [owner: string, until: number]>;
+  /** Held owners that are held because they are not installed. */
+  readonly ownerless?: readonly string[];
 };
 
 /** The dispatch hooks one job owner exposes to the driver. */
@@ -214,6 +216,8 @@ export class JobDriver {
    * them too, and an eviction just lets them run again.
    */
   readonly #heldOwners = new Map<string, number>();
+  /** Held owners whose hold is for not being installed. */
+  readonly #ownerlessOwners = new Set<string>();
   /** Owners already reported missing in this isolate. */
   readonly #reportedOwnerless = new Set<string>();
   /**
@@ -412,10 +416,19 @@ export class JobDriver {
   currentDeferral(): JobDeferral | undefined {
     const now = Date.now();
     for (const [owner, until] of this.#heldOwners) {
-      if (until <= now) this.#heldOwners.delete(owner);
+      if (until <= now) {
+        this.#heldOwners.delete(owner);
+        this.#ownerlessOwners.delete(owner);
+      }
     }
     if (this.#heldOwners.size === 0) return undefined;
-    return { holds: [...this.#heldOwners] };
+    const ownerless = [...this.#ownerlessOwners].filter((owner) =>
+      this.#heldOwners.has(owner)
+    );
+    return {
+      holds: [...this.#heldOwners],
+      ...(ownerless.length > 0 && { ownerless })
+    };
   }
 
   /**
@@ -457,12 +470,11 @@ export class JobDriver {
       // A held owner is skipped before its row is read again. A cancelled
       // id can be pushed again by another owner, so the fresh row's owner
       // is checked too.
-      if (skip.has(stale.capability)) continue;
+      // The row is read again first: its id may now belong to another
+      // owner (a cancel and a same-id push), whose hold is what counts.
       const row = this.#options.queue.dueRow(stale.id, nowMs);
       if (!row) continue;
-      if (row.capability !== stale.capability && skip.has(row.capability)) {
-        continue;
-      }
+      if (skip.has(row.capability)) continue;
 
       const dispatch = await this.#options.resolveDispatch(row.capability);
       if (!dispatch) {
@@ -506,6 +518,7 @@ export class JobDriver {
             row.capability,
             Date.now() + DEADMAN_ALARM_DELAY_MS
           );
+          this.#ownerlessOwners.delete(row.capability);
         }
       } finally {
         this.#options.queue.release(claim);
@@ -657,13 +670,15 @@ export class JobDriver {
       );
     } catch (error) {
       if (disabled()) return undefined;
+      let heldForMs = 0;
       const holdSpent =
         isPlatformFailure(error) &&
         dispatch.onJobError !== undefined &&
         !isDurableObjectMemoryLimitReset(error) &&
         !isDurableObjectResetError(error) &&
         owned() &&
-        Date.now() - queue.markHeld(row.id, Date.now()) >= MAX_HOLD_MS;
+        (heldForMs = Date.now() - queue.markHeld(row.id, Date.now())) >=
+          MAX_HOLD_MS;
       if (isPlatformFailure(error) && !holdSpent) {
         // Carry the row out with the error rather than through a shared
         // field: an overlapping alarm's own #driveJob may already be
@@ -716,7 +731,7 @@ export class JobDriver {
           capability: row.capability,
           fn: row.fn,
           id: row.id,
-          heldForMs: MAX_HOLD_MS
+          heldForMs
         });
         console.error(
           `Job ${row.id} (${row.capability}/${row.fn}) kept failing with ` +
@@ -751,6 +766,7 @@ export class JobDriver {
       Math.max(OWNERLESS_RETRY_MS, Math.floor(ageMs / 2))
     );
     this.#heldOwners.set(row.capability, Date.now() + retryInMs);
+    this.#ownerlessOwners.add(row.capability);
     if (this.#reportedOwnerless.has(row.capability)) return;
     this.#reportedOwnerless.add(row.capability);
     console.error(
@@ -812,6 +828,15 @@ export class JobDriver {
     } catch {
       // a stale strike only costs one extra tolerated spike later
     }
+  }
+
+  /** Of `owners`, those with no installed capability or host handler. */
+  async #ownersNotInstalled(owners: readonly string[]): Promise<string[]> {
+    const missing: string[] = [];
+    for (const owner of new Set(owners)) {
+      if (!(await this.#options.resolveDispatch(owner))) missing.push(owner);
+    }
+    return missing;
   }
 
   /**
@@ -939,8 +964,14 @@ export class JobDriver {
     // runs afterward, when the loop is already broken, and uses this snapshot
     // only to terminalize durable state owned outside the alarm host.
     let purgedRecoveryLoopJobs: LifecycleJob[] | undefined;
+    // A job whose owner is not installed is left untouched (rule 6): it is
+    // no part of a loop that runs, and its owner may come back to it.
+    let ownerless: string[] = [];
     try {
-      if (sealed) purgedRecoveryLoopJobs = queue.recoveryLoopJobs();
+      ownerless = await this.#ownersNotInstalled(
+        queue.recoveryLoopJobs().map((job) => job.capability)
+      );
+      if (sealed) purgedRecoveryLoopJobs = queue.recoveryLoopJobs(ownerless);
     } catch {
       // best-effort at a failure boundary
     }
@@ -950,9 +981,9 @@ export class JobDriver {
       // would re-trigger it on the next wake, so they back off (or purge)
       // together with the row that struck.
       if (sealed) {
-        queue.purgeRecoveryLoopJobs();
+        queue.purgeRecoveryLoopJobs(ownerless);
       } else if (nextTime !== undefined) {
-        queue.delayRecoveryLoopJobs(nextTime);
+        queue.delayRecoveryLoopJobs(nextTime, ownerless);
       }
     } catch {
       // best-effort at a failure boundary

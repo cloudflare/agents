@@ -560,19 +560,24 @@ export class JobQueue {
    * re-trigger it on the next wake. Unguarded like {@link retime}: the
    * breaker's backoff must land regardless of any dispatch.
    */
-  delayRecoveryLoopJobs(time: number): void {
+  delayRecoveryLoopJobs(time: number, except: readonly string[] = []): void {
+    const keep = JSON.stringify(except);
     for (const { id } of this.#sql<{ id: string }>(
-      "SELECT id FROM cf_agents_jobs WHERE recovery_loop = 1 AND time <= ?",
-      Math.floor(time)
+      `SELECT id FROM cf_agents_jobs WHERE recovery_loop = 1 AND time <= ?
+         AND capability NOT IN (SELECT value FROM json_each(?))`,
+      Math.floor(time),
+      keep
     )) {
       this.#revise(id);
     }
     this.#sql(
       `UPDATE cf_agents_jobs
        SET time = ?, running = 0, execution_started_at = NULL
-       WHERE recovery_loop = 1 AND time <= ?`,
+       WHERE recovery_loop = 1 AND time <= ?
+         AND capability NOT IN (SELECT value FROM json_each(?))`,
       Math.floor(time),
-      Math.floor(time)
+      Math.floor(time),
+      keep
     );
   }
 
@@ -581,9 +586,12 @@ export class JobQueue {
    * policy phase uses this snapshot after the rows are purged so routed owners
    * can terminalize their own durable recovery state.
    */
-  recoveryLoopJobs(): LifecycleJob[] {
+  recoveryLoopJobs(except: readonly string[] = []): LifecycleJob[] {
     return this.#sql(
-      "SELECT * FROM cf_agents_jobs WHERE recovery_loop = 1 ORDER BY time ASC"
+      `SELECT * FROM cf_agents_jobs WHERE recovery_loop = 1
+         AND capability NOT IN (SELECT value FROM json_each(?))
+       ORDER BY time ASC`,
+      JSON.stringify(except)
     ).map(jobFromRow);
   }
 
@@ -591,13 +599,20 @@ export class JobQueue {
    * Purge every recovery-loop job when the breaker seals at its strike
    * budget (#1825). Unrelated jobs are untouched.
    */
-  purgeRecoveryLoopJobs(): void {
+  purgeRecoveryLoopJobs(except: readonly string[] = []): void {
+    const keep = JSON.stringify(except);
     for (const { id } of this.#sql<{ id: string }>(
-      "SELECT id FROM cf_agents_jobs WHERE recovery_loop = 1"
+      `SELECT id FROM cf_agents_jobs WHERE recovery_loop = 1
+         AND capability NOT IN (SELECT value FROM json_each(?))`,
+      keep
     )) {
       this.#revise(id);
     }
-    this.#sql("DELETE FROM cf_agents_jobs WHERE recovery_loop = 1");
+    this.#sql(
+      `DELETE FROM cf_agents_jobs WHERE recovery_loop = 1
+         AND capability NOT IN (SELECT value FROM json_each(?))`,
+      keep
+    );
   }
 
   /**
@@ -658,6 +673,7 @@ export class JobQueue {
     nowMs: number,
     hold?: {
       readonly holds: ReadonlyArray<readonly [owner: string, until: number]>;
+      readonly ownerless?: readonly string[];
     }
   ): number | null {
     // Owners held back after a failure are left out of every candidate and
@@ -670,6 +686,9 @@ export class JobQueue {
         ? ""
         : " AND capability NOT IN (SELECT json_extract(value, '$[0]') FROM json_each(?))";
     const excludeOwners = held === null ? [] : [held];
+    // An owner held because it is not installed cannot run its exclusive
+    // job, so that job suppresses nothing; it wakes like an ordinary one.
+    const ownerless = JSON.stringify(hold?.ownerless ?? []);
     const heldWake = (exclusiveOnly: boolean): number | null =>
       held === null
         ? null
@@ -677,8 +696,13 @@ export class JobQueue {
             `SELECT MIN(max(j.time, json_extract(h.value, '$[1]'))) AS time
              FROM cf_agents_jobs j
              JOIN json_each(?) h ON j.capability = json_extract(h.value, '$[0]')
-             ${exclusiveOnly ? "WHERE j.exclusive = 1" : ""}`,
-            held
+             ${
+               exclusiveOnly
+                 ? "WHERE j.exclusive = 1 AND j.capability NOT IN (SELECT value FROM json_each(?))"
+                 : ""
+             }`,
+            held,
+            ...(exclusiveOnly ? [ownerless] : [])
           )[0]?.time ?? null);
     const exclusive = this.#sql<{ time: number | null }>(
       `SELECT MIN(time) AS time FROM cf_agents_jobs WHERE exclusive = 1${owners}`,
