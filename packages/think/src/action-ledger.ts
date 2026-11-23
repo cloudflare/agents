@@ -7,6 +7,7 @@
  * @internal
  */
 
+import { tableExists } from "./config-store";
 import type { TaskJson, TaskValue, Tasks } from "agents/tasks";
 import { TaskSettlement, type TaskRecord } from "agents/internal";
 
@@ -369,4 +370,123 @@ export async function sweepDecisions(
     if (tasks.deleteRun(record.runId)) swept += 1;
   }
   return swept;
+}
+
+/**
+ * Move what an earlier Think version stored for actions into runs, one way,
+ * then drop it:
+ * - `cf_think_action_ledger` rows become effect runs. Keys, input hashes and
+ *   recorded values keep their form, so a settled action still replays; an
+ *   unsettled claim comes back in doubt.
+ * - `cf_think_action_pending_approvals` rows are parked again under their
+ *   ids, so they wait for a verdict at once (their TTL counts from now).
+ * - `cf_think_deferred_resolved_pauses` entries become completed decisions
+ *   carrying `resolvedPause`, which the next inference writes.
+ *
+ * @returns Whether deferred pauses were moved.
+ */
+export async function migrateLegacyActionRecords(
+  storage: DurableObjectStorage,
+  tasks: Tasks
+): Promise<boolean> {
+  if (tableExists(storage.sql, "cf_think_action_ledger")) {
+    const rows = storage.sql
+      .exec<{
+        key: string;
+        action_name: string;
+        input_hash: string;
+        status: "pending" | "settled";
+        result_json: string | null;
+        updated_at: number;
+      }>(
+        `SELECT key, action_name, input_hash, status, result_json, updated_at
+         FROM cf_think_action_ledger`
+      )
+      .toArray();
+    for (const row of rows) {
+      const recorded = parseJson(row.result_json) as
+        | { valuePresent?: boolean; value?: TaskJson }
+        | undefined;
+      await tasks.importRun({
+        runId: effectRunId(row.key),
+        definition: EFFECT_TASK,
+        status: row.status === "settled" ? "completed" : "running",
+        attempt: 1,
+        input: { name: row.action_name, inputHash: row.input_hash },
+        ...(row.status === "settled" && {
+          result:
+            recorded?.valuePresent === true ? (recorded.value ?? null) : null
+        }),
+        // The claim's age is what a reclaim measures.
+        createdAt: row.updated_at,
+        settledAt: row.updated_at
+      });
+    }
+    storage.sql.exec("DROP TABLE cf_think_action_ledger");
+    await storage.delete("cf_think_action_ledger:last_swept_at");
+  }
+  if (tableExists(storage.sql, "cf_think_action_pending_approvals")) {
+    const rows = storage.sql
+      .exec<{
+        execution_id: string;
+        action_name: string;
+        tool_call_id: string;
+        request_id: string | null;
+        input_json: string;
+        descriptor_json: string | null;
+      }>(
+        `SELECT execution_id, action_name, tool_call_id, request_id,
+                input_json, descriptor_json
+         FROM cf_think_action_pending_approvals`
+      )
+      .toArray();
+    for (const row of rows) {
+      await parkDecision(tasks, {
+        id: row.execution_id,
+        input: {
+          kind: "action",
+          action: row.action_name,
+          toolCallId: row.tool_call_id,
+          requestId: row.request_id,
+          input: parseJson(row.input_json) ?? {}
+        },
+        descriptor: parseJson(row.descriptor_json)
+      });
+    }
+    storage.sql.exec("DROP TABLE cf_think_action_pending_approvals");
+    await storage.delete("cf_think_action_pending_approvals:last_swept_at");
+  }
+  const deferredKey = "cf_think_deferred_resolved_pauses";
+  const deferred =
+    await storage.get<
+      Array<[string, { executionId: string; output: TaskJson }]>
+    >(deferredKey);
+  if (!deferred) return false;
+  for (const [toolCallId, outcome] of deferred) {
+    await tasks.importRun({
+      runId: `migrated_${outcome.executionId}_${toolCallId}`,
+      definition: DECISION_TASK,
+      status: "completed",
+      attempt: 1,
+      metadata: {
+        resolvedPause: {
+          toolCallId,
+          executionId: outcome.executionId,
+          output: outcome.output
+        }
+      },
+      createdAt: Date.now()
+    });
+  }
+  await storage.delete(deferredKey);
+  return true;
+}
+
+function parseJson(json: string | null): TaskJson | undefined {
+  if (json === null) return undefined;
+  try {
+    return JSON.parse(json) as TaskJson;
+  } catch {
+    return undefined;
+  }
 }

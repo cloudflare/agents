@@ -291,10 +291,9 @@ import type { Streams } from "agents/streams";
 import { TaskSettlement, type TaskRecord } from "agents/internal";
 import {
   DECISION_TASK,
-  EFFECT_TASK,
   createEffectState,
-  effectRunId,
   isPendingDecision,
+  migrateLegacyActionRecords,
   parkDecision,
   pendingDecisions,
   registerDecisionTask,
@@ -1795,8 +1794,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               // The app's onStart is done: replays may run from here on,
               // also when a step below fails.
               this._appStartedForAdmissions = true;
-              await this._migrateLegacyActionLedger();
-              await this._migrateLegacyPauseRecords();
+              if (
+                await migrateLegacyActionRecords(this.ctx.storage, this.tasks)
+              ) {
+                this._deferredResolvedPausesLoad = undefined;
+              }
               await this._sweepApprovals();
               await this._migrateLegacyWorkflowNotifications();
               await this._replayPendingResponseHooks();
@@ -5209,134 +5211,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       });
     }
     return { ...swept, decisions };
-  }
-
-  /**
-   * Move action ledger rows an earlier version wrote in
-   * `cf_think_action_ledger` into effect runs, then drop the table. One way.
-   * Keys, input hashes and recorded values keep their form, so a settled
-   * action still replays; an unsettled claim comes back in doubt.
-   */
-  private async _migrateLegacyActionLedger(): Promise<void> {
-    if (!tableExists(this.ctx.storage.sql, "cf_think_action_ledger")) return;
-    const rows = this.sql<{
-      key: string;
-      action_name: string;
-      input_hash: string;
-      status: "pending" | "settled";
-      result_json: string | null;
-      created_at: number;
-      updated_at: number;
-    }>`
-      SELECT key, action_name, input_hash, status, result_json, created_at,
-             updated_at
-      FROM cf_think_action_ledger
-    `;
-    for (const row of rows) {
-      const recorded =
-        row.result_json === null
-          ? undefined
-          : (JSON.parse(row.result_json) as {
-              valuePresent?: boolean;
-              value?: TaskJson;
-            });
-      await this.tasks.importRun({
-        runId: effectRunId(row.key),
-        definition: EFFECT_TASK,
-        status: row.status === "settled" ? "completed" : "running",
-        attempt: 1,
-        input: { name: row.action_name, inputHash: row.input_hash },
-        ...(row.status === "settled" && {
-          result:
-            recorded?.valuePresent === true ? (recorded.value ?? null) : null
-        }),
-        // The claim's age is what a reclaim measures.
-        createdAt: row.updated_at,
-        settledAt: row.updated_at
-      });
-    }
-    this.sql`DROP TABLE cf_think_action_ledger`;
-    await this.ctx.storage.delete("cf_think_action_ledger:last_swept_at");
-  }
-
-  /**
-   * Move what an earlier version stored for paused actions into decision
-   * runs, one way: parked `cf_think_action_pending_approvals` rows become
-   * parked decisions under the same ids, and resolved pauses whose outcome
-   * may not have reached the transcript (`cf_think_deferred_resolved_pauses`)
-   * become settled decisions the next inference finishes.
-   */
-  private async _migrateLegacyPauseRecords(): Promise<void> {
-    const [table] = this.sql<{ name: string }>`
-      SELECT name FROM sqlite_master
-      WHERE type = 'table' AND name = 'cf_think_action_pending_approvals'
-    `;
-    if (table) {
-      const rows = this.sql<{
-        execution_id: string;
-        action_name: string;
-        tool_call_id: string;
-        request_id: string | null;
-        input_json: string;
-        descriptor_json: string | null;
-      }>`
-        SELECT execution_id, action_name, tool_call_id, request_id,
-               input_json, descriptor_json
-        FROM cf_think_action_pending_approvals
-      `;
-      const parse = (json: string | null): TaskJson | undefined => {
-        if (json === null) return undefined;
-        try {
-          return JSON.parse(json) as TaskJson;
-        } catch {
-          return undefined;
-        }
-      };
-      for (const row of rows) {
-        // Parked again through the definition, so it waits for its verdict
-        // at once. Its TTL counts from now.
-        await parkDecision(this.tasks, {
-          id: row.execution_id,
-          input: {
-            kind: "action",
-            action: row.action_name,
-            toolCallId: row.tool_call_id,
-            requestId: row.request_id,
-            input: parse(row.input_json) ?? {}
-          },
-          descriptor: parse(row.descriptor_json)
-        });
-      }
-      this.sql`DROP TABLE cf_think_action_pending_approvals`;
-      await this.ctx.storage.delete(
-        "cf_think_action_pending_approvals:last_swept_at"
-      );
-    }
-    const deferredKey = "cf_think_deferred_resolved_pauses";
-    const deferred =
-      await this.ctx.storage.get<
-        Array<[string, { executionId: string; output: TaskJson }]>
-      >(deferredKey);
-    if (deferred) {
-      for (const [toolCallId, outcome] of deferred) {
-        await this.tasks.importRun({
-          runId: `migrated_${outcome.executionId}_${toolCallId}`,
-          definition: DECISION_TASK,
-          status: "completed",
-          attempt: 1,
-          metadata: {
-            resolvedPause: {
-              toolCallId,
-              executionId: outcome.executionId,
-              output: outcome.output
-            }
-          },
-          createdAt: Date.now()
-        });
-      }
-      await this.ctx.storage.delete(deferredKey);
-      this._deferredResolvedPausesLoad = undefined;
-    }
   }
 
   // ── Durable-pause action approvals ──────────────────────────────

@@ -82,6 +82,7 @@ import {
   DECISION_TASK,
   EFFECT_TASK,
   effectRunId,
+  migrateLegacyActionRecords,
   pendingDecisions,
   stableHash
 } from "../../action-ledger";
@@ -8379,9 +8380,7 @@ export class ThinkToolsTestAgent extends Think {
   }
 
   async migrateLegacyActionLedgerForTest(): Promise<boolean> {
-    await (
-      this as unknown as { _migrateLegacyActionLedger: () => Promise<void> }
-    )._migrateLegacyActionLedger();
+    await migrateLegacyActionRecords(this.ctx.storage, this.tasks);
     return (
       this.sql<{ name: string }>`
         SELECT name FROM sqlite_master
@@ -8597,9 +8596,7 @@ export class ThinkToolsTestAgent extends Think {
 
   /** Run the pause migration; true when the old table is still there. */
   async migrateLegacyPauseRecordsForTest(): Promise<boolean> {
-    await (
-      this as unknown as { _migrateLegacyPauseRecords: () => Promise<void> }
-    )._migrateLegacyPauseRecords();
+    await migrateLegacyActionRecords(this.ctx.storage, this.tasks);
     return (
       this.sql<{ name: string }>`
         SELECT name FROM sqlite_master
