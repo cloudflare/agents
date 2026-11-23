@@ -6,6 +6,7 @@ import { connectChatWS, isUseChatResponseMessage } from "./test-utils";
 import { MessageType } from "../types";
 
 interface ChatTestStub {
+  recentTerminalForTest(requestId: string): Promise<unknown>;
   getPersistedMessages(): Promise<ChatMessage[]>;
   getActiveFibers(): Promise<Array<{ id: string; name: string }>>;
   getOnChatMessageCallCount(): Promise<number>;
@@ -621,6 +622,37 @@ describe("chatRecovery", () => {
         expect(lastCtx.streamId).toBe("stream-stash");
       }
     );
+  });
+
+  it("ends a cut-off request for the tabs when the app declines to continue it", async () => {
+    const room = crypto.randomUUID();
+    const stub = (await getAgentByName(
+      env.ChatRecoveryTestAgent,
+      room
+    )) as unknown as ChatTestStub;
+    await stub.setRecoveryOverride({ continue: false });
+    await stub.persistMessages([
+      { id: "user-1", role: "user", parts: [{ type: "text", text: "Hi" }] }
+    ] as ChatMessage[]);
+    await stub.insertInterruptedStream("stream-decl", "req-decl", [
+      {
+        body: JSON.stringify({ type: "start", messageId: "a-decl" }),
+        index: 0
+      },
+      { body: JSON.stringify({ type: "text-start" }), index: 1 },
+      {
+        body: JSON.stringify({ type: "text-delta", delta: "Part" }),
+        index: 2
+      }
+    ]);
+    await stub.insertInterruptedFiber("__cf_internal_chat_turn:req-decl");
+
+    await stub.triggerFiberRecovery();
+
+    // Recorded, so a tab that comes back later learns the request ended.
+    expect(await stub.recentTerminalForTest("req-decl")).toMatchObject({
+      outcome: "aborted"
+    });
   });
 
   describe("recovery preserves settled work (#1631)", () => {
