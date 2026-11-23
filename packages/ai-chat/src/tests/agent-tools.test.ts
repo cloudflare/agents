@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { evictDurableObject } from "cloudflare:test";
 import type {
   AgentToolEventMessage,
   AgentToolLifecycleResult,
@@ -333,6 +334,13 @@ type ParentStub = DurableObjectStub & {
     status: string;
     stores: Array<{ taskRuns: number; fibers: number }>;
   }>;
+  seedInterruptedFacetTurnForTest(childName: string): Promise<string>;
+  facetWakeTimeForTest(runId: string): Promise<number | null>;
+  rootAlarmForTest(): Promise<void>;
+  facetRunStateForTest(
+    childName: string,
+    runId: string
+  ): Promise<string | null>;
   facetOrphanTurnReplayForTest(childName: string): Promise<{
     mirrored: number;
     recoveries: string[];
@@ -605,6 +613,37 @@ describe("AIChatAgent as an agent-tool child", () => {
     // Task run, so an interrupted turn replays like a root agent's.
     expect(stores).toEqual([{ taskRuns: 1, fibers: 0 }]);
   });
+
+  it("recovers a facet's chat turn soon after the root restarts, not at its claim deadline", async () => {
+    const name = crypto.randomUUID();
+    const childName = crypto.randomUUID();
+    const parent = await getParent(name);
+    const runId = await parent.seedInterruptedFacetTurnForTest(childName);
+    expect(await parent.facetWakeTimeForTest(runId)).toBeGreaterThan(
+      Date.now() + 300_000
+    );
+
+    // The root resets and takes its facets with it. Nothing calls the facet.
+    await evictDurableObject(parent as unknown as DurableObjectStub);
+    const restarted = await getParent(name);
+    // Its keep-alive or deadman alarm fires, well before the claim deadline.
+    await restarted.rootAlarmForTest();
+
+    // The restarted root re-drives the facet's wake at once: the facet starts,
+    // reclaims the interrupted attempt and settles the run, which removes the
+    // mirror. Read only the root until then: a call to the facet would start
+    // it and hide a wake left at the claim deadline.
+    const deadline = Date.now() + 5_000;
+    let wake = await restarted.facetWakeTimeForTest(runId);
+    while (wake !== null && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      wake = await restarted.facetWakeTimeForTest(runId);
+    }
+    expect(wake).toBeNull();
+    expect(await restarted.facetRunStateForTest(childName, runId)).toBe(
+      "completed"
+    );
+  }, 15_000);
 
   it("replays a facet's interrupted chat-turn Task run from the root alarm into chat recovery", async () => {
     const parent = await getParent();

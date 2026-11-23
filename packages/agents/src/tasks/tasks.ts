@@ -417,6 +417,30 @@ export class Tasks<
     }
     this.#reconcile();
     await this.#syncAllWakes();
+    await this.#reviveRoutedWakes();
+  }
+
+  /**
+   * Make this root's mirrors of routed facet runs due now. A facet's runs
+   * live in its own storage, where `#reconcile` cannot reach them, and a
+   * facet starts only when something calls it. A root that restarts after a
+   * reset took its facets down with it, so an attempt that was running there
+   * would otherwise wait for its claim deadline (minutes) before anything
+   * woke the facet. The dispatch starts the facet, whose own reconcile
+   * reclaims an interrupted attempt; a run that is not due answers with its
+   * real deadline, and the mirror moves back to it.
+   */
+  async #reviveRoutedWakes(): Promise<void> {
+    const now = Date.now();
+    for (const job of this.lifecycle.jobs.list()) {
+      if (
+        job.time > now &&
+        isTaskWakeJobPayload(job.payload) &&
+        job.payload.owner_path
+      ) {
+        await this.lifecycle.jobs.reschedule(job.id, now);
+      }
+    }
   }
 
   /** Drive one due run's wake dispatched by the Lifecycle event loop. */

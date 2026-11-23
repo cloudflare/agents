@@ -5928,6 +5928,20 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     return this._turnRecoveriesForTest;
   }
 
+  /**
+   * Turn a seeded chat-turn run into one whose attempt was running when the
+   * isolate died: claimed under a generation no isolate holds, with its claim
+   * deadline (the only durable wake) a full claim window out.
+   */
+  markRunInterruptedForTest(runId: string, deadline: number): void {
+    this.sql`
+      UPDATE cf_agents_task_runs
+      SET state = 'running', generation = 'dead-isolate', attempt = 1,
+          next_at = ${deadline}
+      WHERE run_id = ${runId}
+    `;
+  }
+
   getTaskRunStateForTest(runId: string): string | null {
     return (
       this.sql<{ state: string }>`
@@ -7362,6 +7376,51 @@ export class AIChatAgentToolParent extends Agent<Env> {
     if (this.finishRunIdsToThrow.has(run.runId)) {
       throw new Error(`finish failed for ${run.runId}`);
     }
+  }
+
+  /**
+   * Leave a facet chat turn interrupted the way a root reset leaves it: the
+   * run claimed on the facet, and this root's mirror of its wake a full
+   * claim window out. Returns the run id.
+   */
+  async seedInterruptedFacetTurnForTest(childName: string): Promise<string> {
+    const child = await this.subAgent(AIChatAgentToolChild, childName);
+    const runId = await child.seedOrphanChatTurnRunForTest("req-root-reset");
+    const deadline = Date.now() + 330_000;
+    await child.markRunInterruptedForTest(runId, deadline);
+    this.sql`
+      UPDATE cf_agents_jobs SET time = ${deadline}
+      WHERE capability = 'tasks' AND json_extract(payload, '$.runId') = ${runId}
+    `;
+    // A root reset takes its facets down with it.
+    await child.resetIsolateForTest().catch(() => {});
+    return runId;
+  }
+
+  /**
+   * What wakes a root after a reset: its own alarm (the keep-alive or the
+   * deadman job). The Lifecycle starts, then drives what is due.
+   */
+  async rootAlarmForTest(): Promise<void> {
+    await this.alarm();
+  }
+
+  /** This root's mirror of a facet run's wake: its time, or null when gone. */
+  facetWakeTimeForTest(runId: string): number | null {
+    return (
+      this.sql<{ time: number }>`
+        SELECT time FROM cf_agents_jobs
+        WHERE capability = 'tasks' AND json_extract(payload, '$.runId') = ${runId}
+      `[0]?.time ?? null
+    );
+  }
+
+  async facetRunStateForTest(
+    childName: string,
+    runId: string
+  ): Promise<string | null> {
+    const child = await this.subAgent(AIChatAgentToolChild, childName);
+    return child.getTaskRunStateForTest(runId);
   }
 
   /** Replay an interrupted facet chat turn from the root's alarm. */
