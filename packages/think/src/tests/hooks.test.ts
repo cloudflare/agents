@@ -954,12 +954,14 @@ describe("Think — actions compile into guarded tools", () => {
       `action-ledger-sweep-${crypto.randomUUID()}`
     );
     await agent.useEchoActionForTest("ledger-key");
+    // Windows far wider than the test takes, so a fresh row on a slow
+    // runner is not old yet.
     await agent.setActionLedgerRetentionForTest({
-      settledMs: 10,
-      pendingMs: 10,
+      settledMs: 30_000,
+      pendingMs: 30_000,
       maxSweepRows: 10
     });
-    const old = Date.now() - 1_000;
+    const old = Date.now() - 60_000;
     await agent.insertActionLedgerRowForTest({
       key: "action:echo:old-settled",
       status: "settled",
