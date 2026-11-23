@@ -832,11 +832,12 @@ export class JobDriver {
   async #ownersNotInstalled(owners: readonly string[]): Promise<string[]> {
     const missing: string[] = [];
     for (const owner of new Set(owners)) {
-      // An owner that cannot be resolved (its start failed) counts as
-      // missing too: its jobs are left alone.
+      // An owner that cannot be resolved because its start failed is still
+      // installed: the breaker treats its jobs as any owner's, or a start
+      // that keeps failing (a memory-limit reset in it) would wake forever.
       const dispatch = await this.#options
         .resolveDispatch(owner)
-        .catch(() => undefined);
+        .catch(() => "installed" as const);
       if (!dispatch) missing.push(owner);
     }
     return missing;
