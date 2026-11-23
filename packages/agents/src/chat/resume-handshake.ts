@@ -360,6 +360,14 @@ export class ResumeHandshake {
       // Delivered the pending terminal error frame on the resumed stream the
       // client just ACKed (#1645).
     } else if (
+      resumableStream.latestStreamInfoForRequest(requestId)?.cutOff &&
+      this._replayRecentTerminalOnAck(connection, requestId)
+    ) {
+      // A stream closed with no producer left (a recovery took the request
+      // over, or the app declined it): what it held is in the transcript if
+      // the app kept it, and must not come back if it did not. Only its
+      // recorded end is sent.
+    } else if (
       resumableStream.replayCompletedChunksByRequestId(connection, requestId)
     ) {
       // A stream that closed into recovery ends on "recovering", which is

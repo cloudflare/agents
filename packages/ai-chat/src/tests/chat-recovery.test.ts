@@ -626,6 +626,14 @@ describe("chatRecovery", () => {
 
   it("ends a cut-off request for the tabs when the app declines to continue it", async () => {
     const room = crypto.randomUUID();
+    // A tab connected while recovery runs hears the end live.
+    const { ws } = await connectChatWS(
+      `/agents/chat-recovery-test-agent/${room}`
+    );
+    const heard: unknown[] = [];
+    ws.addEventListener("message", (event: MessageEvent) => {
+      heard.push(JSON.parse(event.data as string));
+    });
     const stub = (await getAgentByName(
       env.ChatRecoveryTestAgent,
       room
@@ -649,6 +657,18 @@ describe("chatRecovery", () => {
 
     await stub.triggerFiberRecovery();
 
+    await vi.waitFor(() =>
+      expect(
+        heard.some(
+          (m) =>
+            isUseChatResponseMessage(m) &&
+            m.id === "req-decl" &&
+            m.done === true &&
+            (m as { outcome?: string }).outcome === "aborted"
+        )
+      ).toBe(true)
+    );
+    ws.close();
     // Recorded, so a tab that comes back later learns the request ended.
     expect(await stub.recentTerminalForTest("req-decl")).toMatchObject({
       outcome: "aborted"

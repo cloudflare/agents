@@ -747,6 +747,51 @@ describe("ResumeHandshake (driver → golden frames)", () => {
       expect(frames[1]).toMatchObject({ id: "req-cont" });
     });
 
+    it("sends only the recorded end of a cut-off stream on ACK, not its chunks", async () => {
+      // The app declined the recovery with `persist: false`: the stream's
+      // chunks are a reply it discarded.
+      const kv = kvStore();
+      recordRecentChatTerminal(kv, {
+        id: "req-cut",
+        done: true,
+        body: "",
+        outcome: "aborted"
+      });
+      const frames: SentFrame[] = [];
+      const { state, resumableStream } = makeStream({
+        replayCompletedReturn: true
+      });
+      (
+        resumableStream as unknown as {
+          latestStreamInfoForRequest: (id: string) => unknown;
+        }
+      ).latestStreamInfoForRequest = () => ({
+        id: "s-cut",
+        status: "completed",
+        createdAt: 0,
+        cutOff: true
+      });
+      let replayed = false;
+      (
+        resumableStream as unknown as {
+          replayCompletedChunksByRequestId: () => boolean;
+        }
+      ).replayCompletedChunksByRequestId = () => (replayed = true);
+      const handshake = new ResumeHandshake({
+        ...makeHost({ resumableStream }),
+        recentTerminal: (ids) => recentChatTerminal(kv, ids)
+      });
+
+      await handshake.handleResumeAck(makeConnection("c1", frames), "req-cut");
+      expect(replayed).toBe(false);
+      expect(state.calls.replayChunks).toEqual([]);
+      expect(frames.at(-1)).toMatchObject({
+        id: "req-cut",
+        done: true,
+        outcome: "aborted"
+      });
+    });
+
     it("tells a tab directly how a request it stops ended", async () => {
       const kv = kvStore();
       recordRecentChatTerminal(kv, {
