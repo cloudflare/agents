@@ -129,10 +129,13 @@ const REPORT_JOB_FN = "reports";
  * {@link LIVE_WAKE_MS} from now while it runs.
  */
 function wakeTime(
-  row: { next_at: number | null; status: string } | undefined
+  row:
+    | { next_at: number | null; status: string; generation: string | null }
+    | undefined
 ): number | null {
   if (row?.next_at == null) return null;
-  return row.status === "running"
+  // A claimed run only: a struck one (claim stripped) waits out its backoff.
+  return row.status === "running" && row.generation !== null
     ? Math.min(row.next_at, Date.now() + LIVE_WAKE_MS)
     : row.next_at;
 }
@@ -247,6 +250,10 @@ export class Tasks<
 > extends LifecycleCapability {
   readonly #definitions: TaskHandlers;
   readonly #registered = new Map<string, TaskFrameworkDefinition>();
+  /** Terminal reports under way whose guard is the report job. */
+  #guardedReports = 0;
+  /** Reports are owed to the report job; nothing may cancel it. */
+  #reportsOwed = false;
   readonly #active = new Map<string, ActiveAttempt>();
   /**
    * `local` of each run accepted in this isolate whose caller still waits
@@ -723,8 +730,12 @@ export class Tasks<
    * again either way.
    */
   #wakeOutcome(runId: string): LifecycleJobOutcome {
-    const rows = this.#store.sql<{ next_at: number | null; status: string }>`
-      SELECT next_at, status FROM cf_agents_task_runs
+    const rows = this.#store.sql<{
+      next_at: number | null;
+      status: string;
+      generation: string | null;
+    }>`
+      SELECT next_at, status, generation FROM cf_agents_task_runs
       WHERE run_id = ${runId}
         AND status IN ('pending', 'running')
     `;
@@ -750,9 +761,10 @@ export class Tasks<
     const rows = this.#store.sql<{
       next_at: number | null;
       status: string;
+      generation: string | null;
       created_at: number;
     }>`
-      SELECT next_at, status, created_at FROM cf_agents_task_runs
+      SELECT next_at, status, generation, created_at FROM cf_agents_task_runs
       WHERE run_id = ${runId}
         AND status IN ('pending', 'running')
     `;
@@ -1694,12 +1706,15 @@ export class Tasks<
   ): Promise<void> {
     const onStatus =
       row && this.#registeredOptions.get(row.definition)?.onStatus;
+    let guarded = false;
     if (onStatus && !this.lifecycle.routes.source) {
       // The terminal report must outlive a reset before it returns: the
       // run's wake stays until then (when due it delivers the report), and
       // a run with none (queued in a lane) gets the report job.
       if (!this.lifecycle.jobs.get(`${WAKE_JOB_PREFIX}${runId}`)) {
-        await this.#pushReportJob(REPORT_RETRY_MS);
+        guarded = true;
+        this.#guardedReports++;
+        await this.#pushReportJob(REPORT_RETRY_MS, false);
       }
     } else {
       await this.#syncWake(runId);
@@ -1723,7 +1738,11 @@ export class Tasks<
       if (row?.retain === 0) this.#store.deleteRun(runId);
       return;
     }
-    await this.#deliverTerminal(runId, row.retain !== 0);
+    try {
+      await this.#deliverTerminal(runId, row.retain !== 0);
+    } finally {
+      if (guarded) await this.#releaseReportGuard();
+    }
     if (onStatus && !this.lifecycle.routes.source) {
       await this.#syncWake(runId, { createdAt: row.created_at });
     }
@@ -1788,8 +1807,13 @@ export class Tasks<
    * Arm the report job for `delayMs` from now. A job already due sooner is
    * left alone (a burst of settles must not keep postponing a retry); one
    * in flight is pushed again, so it outlives its dispatch.
+   *
+   * @param owed - Reports are owed to the job (a throw, a reset, a batch
+   *   left over), so nothing may cancel it until it runs. False for the
+   *   guard a terminal report holds only while it is under way.
    */
-  async #pushReportJob(delayMs = 0): Promise<void> {
+  async #pushReportJob(delayMs = 0, owed = true): Promise<void> {
+    if (owed) this.#reportsOwed = true;
     const now = Date.now();
     const time = now + delayMs;
     const existing = this.lifecycle.jobs.get(REPORT_JOB_ID);
@@ -1802,8 +1826,21 @@ export class Tasks<
     });
   }
 
+  /**
+   * A terminal report that held the report job as its guard returned: the
+   * job goes when no other report holds it and none is owed to it, so it
+   * does not wake the object for nothing.
+   */
+  async #releaseReportGuard(): Promise<void> {
+    this.#guardedReports--;
+    if (this.#guardedReports === 0 && !this.#reportsOwed) {
+      await this.lifecycle.jobs.cancel(REPORT_JOB_ID);
+    }
+  }
+
   /** Deliver the terminal reports a reset or a throw left undelivered. */
   async #replayReports(): Promise<void> {
+    this.#reportsOwed = false;
     const names = [...this.#registeredOptions.keys()].filter(
       (name) => this.#registeredOptions.get(name)?.onStatus
     );

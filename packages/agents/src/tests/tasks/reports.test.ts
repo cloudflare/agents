@@ -372,6 +372,41 @@ describe("Tasks terminal reports across a reset", () => {
         open();
         await cancelled;
         expect(instance.reports).toContain("queued:aborted");
+        // Nothing is left to report: the job does not stay to wake the
+        // object for nothing.
+        expect(
+          state.storage.sql
+            .exec("SELECT id FROM cf_agents_jobs WHERE id = 'tasks:reports'")
+            .toArray()
+        ).toHaveLength(0);
+      }
+    );
+  });
+
+  it("keeps the report job when a guarded report fails", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        instance.reportedGate = new Promise(() => {});
+        await instance.tasks.run(reported, undefined as never, {
+          runId: "head",
+          lane: "l",
+          start: "alarm"
+        });
+        await instance.tasks.run(reported, undefined as never, {
+          runId: "queued",
+          lane: "l",
+          start: "alarm"
+        });
+        instance.failReports = 1;
+        await instance.tasks.cancel("queued");
+        expect(instance.reports).not.toContain("queued:aborted");
+        expect(
+          state.storage.sql
+            .exec("SELECT id FROM cf_agents_jobs WHERE id = 'tasks:reports'")
+            .toArray()
+        ).toHaveLength(1);
       }
     );
   });
