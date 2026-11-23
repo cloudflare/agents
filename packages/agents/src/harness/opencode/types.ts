@@ -42,7 +42,9 @@ export type OpenCodeEvent =
  * carries its sequence number in `durable.seq`.
  */
 export type OpenCodeLogEvent =
-  ReturnType<OpenCode["sessions"]["log"]> extends AsyncIterable<infer E>
+  ReturnType<OpenCode["experimental"]["session"]["log"]> extends AsyncIterable<
+    infer E
+  >
     ? E
     : never;
 

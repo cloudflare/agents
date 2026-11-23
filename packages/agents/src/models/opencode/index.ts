@@ -50,15 +50,12 @@ export const CLOUDFLARE_PROVIDER_ID = "cloudflare";
 /**
  * The AI SDK package OpenCode is told the provider uses. OpenCode builds an
  * AI SDK model in two hook steps: `sdk` (load the package) and `language`
- * (make the model). Its `sdk` step can only load packages it bundles; any
- * other is handed to an npm installer that cannot run in workerd, and an
- * external plugin's `sdk` hook runs after that installer. So the provider
- * names `@ai-sdk/vercel`, which OpenCode bundles and loads in-process, and
- * this plugin's `language` hook replaces the model it would make. The
- * Vercel client is built but never called: its base URL does not resolve.
+ * (make the model). No package by this name exists: this plugin's `sdk` hook
+ * answers for the provider before OpenCode's npm loader would try to install
+ * it (OpenCode 2.2.3 and later run that loader after plugin hooks), and its
+ * `language` hook makes the model.
  */
-const CARRIER_PACKAGE = "aisdk:@ai-sdk/vercel";
-const UNREACHABLE_BASE_URL = "https://workers-ai.binding.invalid/v1";
+const CARRIER_PACKAGE = "aisdk:agents/models/opencode";
 
 /**
  * A model as OpenCode references one: pass it to `OpenCodeHarness`'s
@@ -136,13 +133,19 @@ export function createAI(settings: AISettings): AI {
             id: providerID,
             name: "Cloudflare",
             activation: "enabled",
-            package: CARRIER_PACKAGE,
-            settings: { baseURL: UNREACHABLE_BASE_URL, apiKey: "binding" }
+            package: CARRIER_PACKAGE
           },
           models: [...models].map(([id, options]) => info(id, options))
         });
       });
-      const hook = await ctx.aisdk.hook(
+      const sdk = await ctx.aisdk.hook(
+        "sdk",
+        (event) => {
+          event.sdk = { provider: CLOUDFLARE_PROVIDER_ID };
+        },
+        { providerID }
+      );
+      const language = await ctx.aisdk.hook(
         "language",
         (event) => {
           const id = event.model.modelID ?? event.model.id;
@@ -156,7 +159,8 @@ export function createAI(settings: AISettings): AI {
       reloads.add(reload);
       return async () => {
         reloads.delete(reload);
-        await hook.dispose();
+        await language.dispose();
+        await sdk.dispose();
         await transform.dispose();
       };
     }
