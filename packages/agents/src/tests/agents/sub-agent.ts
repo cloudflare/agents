@@ -299,7 +299,9 @@ export class CounterSubAgent extends Agent {
       60,
       "flakyScheduledCallback",
       { value },
-      { retry: { maxAttempts: 2, baseDelayMs: 300, maxDelayMs: 300 } }
+      // The retry waits long enough for a test to cancel during it, even on
+      // a loaded runner.
+      { retry: { maxAttempts: 2, baseDelayMs: 1_500, maxDelayMs: 1_500 } }
     );
     return schedule.id;
   }
@@ -2033,10 +2035,9 @@ export class TestSubAgentParent extends Agent {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     await this.subAgentCancelSchedule(subAgentName, id);
-    // The retry starts 300 ms after the first attempt, then crosses to the
-    // facet. Watch for 3 s, ten times the backoff, and stop early if a
-    // second attempt shows up.
-    const settle = Date.now() + 3_000;
+    // The retry starts 1.5 s after the first attempt, in the sub-agent's own
+    // driver. Watch for 4 s and stop early if a second attempt shows up.
+    const settle = Date.now() + 4_000;
     while (
       (await this.subAgentScheduleLog(subAgentName)).length < 2 &&
       Date.now() < settle
