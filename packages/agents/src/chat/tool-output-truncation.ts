@@ -1,4 +1,4 @@
-export interface TruncatedToolOutput {
+interface TruncatedToolOutput {
   output: unknown;
   truncated: boolean;
   originalLength: number;

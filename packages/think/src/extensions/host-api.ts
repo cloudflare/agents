@@ -52,7 +52,7 @@ export type ThinkHostOperation = keyof ThinkHostApi;
  *
  * @internal
  */
-export interface ThinkHostApiOptions {
+interface ThinkHostApiOptions {
   readonly workspace: () => ThinkWorkspace;
   readonly context: () => ContextBlocks;
   readonly messages: () => UIMessage[];

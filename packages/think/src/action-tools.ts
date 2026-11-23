@@ -85,7 +85,7 @@ export function actionErrorEnvelope(error: unknown): {
 }
 
 /** @internal */
-export function actionAuthorizationErrorEnvelope(
+function actionAuthorizationErrorEnvelope(
   reason: string | undefined,
   permissions: string[]
 ): {

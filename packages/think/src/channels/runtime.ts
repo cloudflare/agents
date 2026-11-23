@@ -91,7 +91,7 @@ export function resolveChannelContext(
  *
  * @internal
  */
-export function noticeMessage(
+function noticeMessage(
   text: string,
   kind: DeliveryKind = "notice"
 ): UIMessage {
@@ -108,7 +108,7 @@ export function noticeMessage(
  *
  * @internal
  */
-export interface ChannelNoticeTarget {
+interface ChannelNoticeTarget {
   /** The channel to deliver to. */
   readonly channelId: string;
   readonly registry:

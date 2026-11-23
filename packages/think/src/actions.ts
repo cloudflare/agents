@@ -7,7 +7,7 @@
 import type { FlexibleSchema, InferSchema, ModelMessage } from "ai";
 import type { Think } from "./think";
 
-export const ACTION_BRAND: unique symbol = Symbol.for(
+const ACTION_BRAND: unique symbol = Symbol.for(
   "cf.think.action"
 ) as typeof ACTION_BRAND;
 

@@ -47,7 +47,7 @@ export const MODEL_TRUNCATION_STEP = 8;
  *
  * @internal
  */
-export function truncationStepSize(step: number): number {
+function truncationStepSize(step: number): number {
   if (step === Number.POSITIVE_INFINITY) return step;
   return Number.isFinite(step) ? Math.max(1, Math.floor(step)) : 1;
 }
@@ -124,7 +124,7 @@ export function toProviderSafeExecutionOutcomeMessage(
 // Ephemeral user message appended when a model request would otherwise end in
 // an assistant message (see `ensureValidContinueCheckpoint`).
 /** @internal */
-export const CONTINUE_CHECKPOINT_PROMPT =
+const CONTINUE_CHECKPOINT_PROMPT =
   "Continue your previous response from exactly where it left off. Do not repeat any of it.";
 
 /**
@@ -184,7 +184,7 @@ export function withContextReminder(
  *
  * @internal
  */
-export interface ModelMessagesOptions {
+interface ModelMessagesOptions {
   readonly tools: ToolSet;
   /** The agent's `truncationStep`. */
   readonly truncationStep: number;

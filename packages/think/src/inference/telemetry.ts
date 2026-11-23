@@ -7,7 +7,7 @@
 import type { streamText } from "ai";
 
 /** @internal */
-export type TurnTelemetrySettings = Parameters<
+type TurnTelemetrySettings = Parameters<
   typeof streamText
 >[0]["experimental_telemetry"];
 
@@ -16,7 +16,7 @@ export type TurnTelemetrySettings = Parameters<
  *
  * @internal
  */
-export interface TelemetryTurn {
+interface TelemetryTurn {
   readonly requestId: string;
   readonly trigger: string;
   readonly admission: string;

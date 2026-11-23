@@ -27,7 +27,7 @@ export function isWorkersAIModelId(model: string): boolean {
  *
  * @internal
  */
-export interface ThinkModelResolverOptions {
+interface ThinkModelResolverOptions {
   /** The Workers AI binding. Read once, when the first string model resolves. */
   readonly binding: () => Ai;
   /** AI Gateway options for a string model. Must return synchronously. */

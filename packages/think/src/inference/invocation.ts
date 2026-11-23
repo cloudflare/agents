@@ -203,7 +203,7 @@ export function drainInferenceStream(
  *
  * @internal
  */
-export interface InferenceHooks {
+interface InferenceHooks {
   /**
    * Proactive context guard, run before `beforeStep`. Returns recompacted
    * messages for the upcoming step, or `undefined` to leave them.
@@ -243,7 +243,7 @@ export interface InferenceHooks {
  *
  * @internal
  */
-export interface InferenceInvocationInput {
+interface InferenceInvocationInput {
   /** The merged config from `beforeTurn` and extensions. */
   readonly config: TurnConfig;
   readonly model: LanguageModel;

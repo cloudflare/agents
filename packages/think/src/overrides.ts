@@ -7,7 +7,7 @@
  */
 
 /** @internal */
-export interface DeclaredOverrides {
+interface DeclaredOverrides {
   /** Record the members each prototype below the base declares. Call before `super()`. */
   snapshot(prototype: object): void;
   /** Whether `instance`'s class (below the base) declares `methodName`. */
