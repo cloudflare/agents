@@ -11,6 +11,7 @@
  * Event seq n is chunk n - 1 of that stream. See design/event-log.md.
  */
 
+import { ROW_VALUE_BYTES } from "../internal/platform-limits";
 import type { Connection } from "../lifecycle";
 import type { Streams, StreamsSyncInternal } from "../streams/streams";
 import {
@@ -32,8 +33,6 @@ import {
  * @internal
  */
 export const DEFAULT_MAX_EVENT_BYTES = 1_048_576;
-/** Highest `maxEventBytes` a log accepts: one event must fit one row. */
-const MAX_EVENT_BYTES_LIMIT = 1_900_000;
 /** Events per replay frame. */
 const REPLAY_PAGE_EVENTS = 100;
 const MAX_LOG_NAME_LENGTH = 128;
@@ -85,7 +84,8 @@ export interface EventLogOptions<S = unknown> {
   };
   /**
    * Ceiling for one serialized event. `publish` and `append` throw for a
-   * larger one before assigning it a seq. Default 1 MiB; at most 1.9 MB.
+   * larger one before assigning it a seq. Default 1 MiB; at most
+   * `ROW_VALUE_BYTES` (1.9 MB), so one event fits one row.
    */
   readonly maxEventBytes?: number;
   /**
@@ -222,7 +222,7 @@ export class EventLog<T = unknown, S = unknown> {
     );
     this.#maxEventBytes = Math.min(
       positive(options.maxEventBytes, DEFAULT_MAX_EVENT_BYTES),
-      MAX_EVENT_BYTES_LIMIT
+      ROW_VALUE_BYTES
     );
     this.#snapshot = options.snapshot;
     this.#canSubscribe = options.canSubscribe;
