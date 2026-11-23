@@ -51,6 +51,7 @@ import type {
   TaskJson,
   TaskOutput,
   TaskRegisterOptions,
+  TaskRecord,
   TaskFrameworkDefinition,
   TaskReceipt,
   TaskRunOptions,
@@ -230,6 +231,8 @@ export type TaskListOptions = {
 
 /** Filters accepted by {@link Tasks.delete}. */
 export type TaskDeleteOptions = {
+  /** Only runs of this definition. */
+  definition?: string;
   status?: Array<"completed" | "error" | "aborted" | "skipped">;
   settledBefore?: Date;
   limit?: number;
@@ -1028,6 +1031,10 @@ export class Tasks<
     if (states.length === 0) return 0;
     let query = `SELECT run_id, definition FROM cf_agents_task_runs WHERE status IN (${states.map(() => "?").join(", ")})`;
     const params: (string | number)[] = [...states];
+    if (options.definition !== undefined) {
+      query += " AND definition = ?";
+      params.push(options.definition);
+    }
     if (options.settledBefore) {
       query += " AND settled_at < ?";
       params.push(options.settledBefore.getTime());
@@ -1331,6 +1338,9 @@ export class Tasks<
       startsLive: attempt === 1,
       interrupted,
       local,
+      id: runId,
+      attempt,
+      signal: controller.signal,
       createdAt: row.created_at,
       // Only a framework definition can park, so only its runs are read.
       released: this.#registered.has(row.definition)
@@ -1868,6 +1878,119 @@ export class Tasks<
       `;
     }
     await this.#syncWake(head.run_id);
+  }
+
+  /**
+   * @internal One run's record, read synchronously (Tasks must have
+   * started), or `undefined` for an unknown run.
+   */
+  peek(runId: string): TaskRecord | undefined {
+    const row = this.#store.getRun(runId);
+    return row && this.#store.rowToRecord(row);
+  }
+
+  /**
+   * @internal Records of one definition, read synchronously, oldest or
+   * newest first. An empty `status` list matches nothing.
+   */
+  peekList(options: {
+    definition: string;
+    status?: readonly TaskStatus[];
+    order?: "oldest" | "newest";
+    limit?: number;
+  }): TaskRecord[] {
+    if (options.status?.length === 0) return [];
+    const params: (string | number)[] = [options.definition];
+    let query = "SELECT * FROM cf_agents_task_runs WHERE definition = ?";
+    if (options.status) {
+      query += ` AND status IN (${options.status.map(() => "?").join(", ")})`;
+      params.push(...options.status);
+    }
+    const direction = options.order === "oldest" ? "ASC" : "DESC";
+    query += ` ORDER BY created_at ${direction}, run_id ${direction} LIMIT ?`;
+    params.push(options.limit ?? DEFAULT_LIST_LIMIT);
+    let rows: unknown[];
+    try {
+      rows = this.lifecycle.storage.sql.exec(query, ...params).toArray();
+    } catch (cause) {
+      throw new SqlError(query, cause);
+    }
+    // SAFETY: the query selects * from Tasks' own schema.
+    return (rows as TaskRunRow[]).map((row) => this.#store.rowToRecord(row));
+  }
+
+  /**
+   * @internal Delete one terminal run and what it kept.
+   *
+   * @returns False when the run is unknown or still open.
+   */
+  deleteRun(runId: string): boolean {
+    const row = this.#store.getRun(runId);
+    if (!row || !TERMINAL_STATUSES.has(row.status)) return false;
+    this.#store.deleteRun(runId);
+    this.#emit("task:deleted", { runId, definition: row.definition });
+    return true;
+  }
+
+  /**
+   * @internal Write a run that an adopter carries forward from its own
+   * older storage, once: a run already under `runId` is left alone. A
+   * `running` one comes back as interrupted (its next attempt re-runs it);
+   * terminal ones count as reported.
+   *
+   * @returns False when a run with this id exists.
+   */
+  async importRun(record: {
+    runId: string;
+    definition: string;
+    status: TaskStatus;
+    attempt: number;
+    input?: TaskJson;
+    metadata?: Record<string, TaskJson>;
+    idempotencyKey?: string;
+    lane?: string;
+    error?: string;
+    retain?: boolean;
+    createdAt: number;
+    startedAt?: number;
+    settledAt?: number;
+  }): Promise<boolean> {
+    await this.lifecycle.ready();
+    if (this.#store.getRun(record.runId)) return false;
+    const open = record.status === "pending" || record.status === "running";
+    const lane = record.lane ?? null;
+    const queued =
+      open && lane !== null && this.#store.laneHead(lane) !== undefined;
+    const now = Date.now();
+    this.#store.sql`
+      INSERT INTO cf_agents_task_runs
+        (run_id, definition, input, status, metadata, idempotency_key, retain,
+         attempt, generation, next_at, error_name, error_message,
+         cancel_requested, created_at, started_at, updated_at, settled_at,
+         lane, seq, notified)
+      VALUES
+        (${record.runId}, ${record.definition},
+         ${serializeTaskValue(record.input, `input of imported run "${record.runId}"`)},
+         ${record.status},
+         ${serializeTaskValue(record.metadata, `metadata of imported run "${record.runId}"`)},
+         ${record.idempotencyKey ?? null}, ${record.retain === false ? 0 : 1},
+         ${record.attempt},
+         ${record.status === "running" ? "imported" : null},
+         ${open && !queued ? now : null},
+         ${record.status === "error" ? "Error" : null},
+         ${record.status === "error" ? (record.error ?? null) : null},
+         0, ${record.createdAt}, ${record.startedAt ?? null}, ${now},
+         ${open ? null : (record.settledAt ?? now)}, ${lane},
+         ${lane === null ? null : this.#store.nextLaneSeq(lane)},
+         ${open ? null : record.status})
+    `;
+    if (open && !queued) await this.#syncWake(record.runId);
+    return true;
+  }
+
+  /** @internal Whether {@link holdLane} holds `lane` in this isolate. */
+  isLaneHeld(lane: string): boolean {
+    return this.#heldLanes.has(lane);
   }
 
   /** @internal A run's input as accepted, or `undefined` for an unknown run. */

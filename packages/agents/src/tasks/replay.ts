@@ -221,6 +221,9 @@ export class ReplayStep implements TaskStep {
   readonly checkpoint: TaskCheckpoint;
   readonly createdAt: number;
   readonly released: TaskJson | undefined;
+  readonly id: string;
+  readonly attempt: number;
+  readonly signal: AbortSignal;
 
   constructor(
     engine: TaskStepEngine,
@@ -231,6 +234,9 @@ export class ReplayStep implements TaskStep {
       checkpoint: TaskCheckpoint;
       createdAt: number;
       released?: TaskJson;
+      id: string;
+      attempt: number;
+      signal: AbortSignal;
     }
   ) {
     this.#engine = engine;
@@ -240,6 +246,9 @@ export class ReplayStep implements TaskStep {
     this.checkpoint = options.checkpoint;
     this.createdAt = options.createdAt;
     this.released = options.released;
+    this.id = options.id;
+    this.attempt = options.attempt;
+    this.signal = options.signal;
   }
 
   do<T extends TaskValue>(

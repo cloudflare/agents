@@ -187,6 +187,18 @@ export interface TaskStep {
    */
   readonly checkpoint: TaskCheckpoint;
 
+  /** @internal The run's id. */
+  readonly id: string;
+
+  /** @internal This attempt's number: 1 for the first. */
+  readonly attempt: number;
+
+  /**
+   * @internal Aborts when the run is cancelled or its lane cleared while
+   * this attempt runs.
+   */
+  readonly signal: AbortSignal;
+
   /** @internal When the run was accepted. */
   readonly createdAt: number;
 
@@ -408,6 +420,28 @@ export type TaskRunRow = {
   seq: number | null;
   notified: string | null;
 };
+
+/**
+ * @internal One run as host code reads it synchronously: every field the
+ * record keeps, whatever its status.
+ */
+export interface TaskRecord {
+  readonly runId: string;
+  readonly definition: string;
+  readonly status: TaskStatus;
+  readonly attempt: number;
+  readonly idempotencyKey?: string;
+  readonly metadata?: Record<string, TaskJson>;
+  /** A pending run that waits: `sleep`, `retry` or `park`. */
+  readonly waitReason?: TaskWaitReason;
+  readonly result?: TaskValue;
+  readonly error?: TaskError;
+  /** Why an `aborted`, `skipped` or parked run ended or waits. */
+  readonly reason?: string;
+  readonly createdAt: number;
+  readonly startedAt?: number;
+  readonly settledAt?: number;
+}
 
 /**
  * @internal Options of a framework definition (`Tasks.register`).

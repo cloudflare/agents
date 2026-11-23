@@ -7,7 +7,13 @@
 
 import { SqlError } from "../sql-error";
 import { deserializeTaskValue } from "./serialization";
-import type { TaskJson, TaskRunRow, TaskRunSnapshot, TaskValue } from "./types";
+import type {
+  TaskJson,
+  TaskRecord,
+  TaskRunRow,
+  TaskRunSnapshot,
+  TaskValue
+} from "./types";
 
 /**
  * The checkpoint entry holding a release's value. Handlers' keys never start
@@ -302,6 +308,36 @@ export class TaskStore {
         value TEXT NOT NULL,
         PRIMARY KEY (run_id, key)
       ) WITHOUT ROWID`);
+  }
+
+  rowToRecord(row: TaskRunRow): TaskRecord {
+    return {
+      runId: row.run_id,
+      definition: row.definition,
+      status: row.status,
+      attempt: row.attempt,
+      ...(row.idempotency_key !== null && {
+        idempotencyKey: row.idempotency_key
+      }),
+      ...(row.metadata !== null && {
+        metadata: JSON.parse(row.metadata) as Record<string, TaskJson>
+      }),
+      ...(row.status === "pending" &&
+        row.wait_reason !== null && { waitReason: row.wait_reason }),
+      ...(row.status === "completed" && {
+        result: deserializeTaskValue(row.result) as TaskValue
+      }),
+      ...(row.status === "error" && {
+        error: {
+          name: row.error_name ?? "Error",
+          message: row.error_message ?? "Task run failed"
+        }
+      }),
+      ...(row.cancel_reason !== null && { reason: row.cancel_reason }),
+      createdAt: row.created_at,
+      ...(row.started_at !== null && { startedAt: row.started_at }),
+      ...(row.settled_at !== null && { settledAt: row.settled_at })
+    };
   }
 
   rowToSnapshot<Output extends TaskValue>(
