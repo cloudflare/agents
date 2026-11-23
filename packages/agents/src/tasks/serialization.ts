@@ -7,6 +7,7 @@
  * plain: `"null"` is JSON `null`, column `NULL` is `undefined`.
  */
 
+import { ROW_PIECE_UNITS, ROW_VALUE_BYTES } from "../internal/platform-limits";
 import { TaskSerializationError } from "./errors";
 
 /** Default ceiling for one serialized value (1 MiB). */
@@ -76,16 +77,16 @@ export const MAX_PARTED_INPUT_BYTES = 16 * 1_048_576;
 
 /**
  * Largest metadata a framework definition's run may keep: what one SQLite
- * row (2 MB) leaves once its input is in pieces. Think's released
- * submissions stored metadata in a row of their own.
+ * row leaves once its input is in pieces. Think's released submissions
+ * stored metadata in a row of their own.
  */
-export const MAX_FRAMEWORK_METADATA_BYTES = 1_900_000;
+export const MAX_FRAMEWORK_METADATA_BYTES = ROW_VALUE_BYTES;
 
 /**
- * Longest input kept in the run's own row, in UTF-16 code units: SQLite
- * stores a row in at most 2 MB, which the run's other columns share.
+ * Longest input kept in the run's own row, in UTF-16 code units: the row's
+ * other columns share what is left.
  */
-export const INLINE_INPUT_UNITS = 500_000;
+export const INLINE_INPUT_UNITS = ROW_PIECE_UNITS;
 
 /**
  * `text` in pieces of at most `size` code units, never between the two
