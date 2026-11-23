@@ -19,9 +19,14 @@ class WakeProbe extends LifecycleCapability {
     )`;
   }
 
-  onJob({ job }: LifecycleJobContext): void {
+  async onJob({ job }: LifecycleJobContext): Promise<void> {
+    // `slow-*` outruns the root's drive budget; `fail-*` throws.
+    if (job.id.startsWith("slow")) {
+      await new Promise((resolve) => setTimeout(resolve, 6_500));
+    }
     this.host
       .sql`INSERT INTO facet_wake_runs (id, at) VALUES (${job.id}, ${Date.now()})`;
+    if (job.id.startsWith("fail")) throw new Error("facet job failed");
   }
 
   push(id: string, delayMs: number) {
@@ -61,10 +66,27 @@ abstract class WakeAgent extends Agent<Cloudflare.Env> {
   }
 }
 
+/** Drive calls into a middle facet that fail before they reach it. */
+let failingDrives = 0;
+
 /** Third level: root -> middle -> leaf. */
 export class FacetWakeLeaf extends WakeAgent {}
 
 export class FacetWakeMiddle extends WakeAgent {
+  override async _cf_routeLifecycle(
+    target: Parameters<Agent["_cf_routeLifecycle"]>[0],
+    envelope: Parameters<Agent["_cf_routeLifecycle"]>[1]
+  ): Promise<unknown> {
+    if (
+      failingDrives > 0 &&
+      (envelope.payload as { type?: string }).type === "drive"
+    ) {
+      failingDrives -= 1;
+      throw new Error("simulated facet start failure");
+    }
+    return super._cf_routeLifecycle(target, envelope);
+  }
+
   async leafPush(name: string, id: string, delayMs: number) {
     return (await this.subAgent(FacetWakeLeaf, name)).pushJob(id, delayMs);
   }
@@ -105,6 +127,23 @@ export class FacetWakeRoot extends WakeAgent {
 
   async middlePending(name: string): Promise<string[]> {
     return (await this.subAgent(FacetWakeMiddle, name)).pendingJobs();
+  }
+
+  failNextFacetDrives(count: number): void {
+    failingDrives = count;
+  }
+
+  /** Send this root a facet's wake report, as the facet would. */
+  async reportFacetWake(
+    key: string,
+    time: number | null,
+    stamp: number
+  ): Promise<void> {
+    await this._cf_routeLifecycle(undefined, {
+      capability: "cf:facet-wake",
+      source: { key, data: "[]" },
+      payload: { type: "arm", time, stamp }
+    });
   }
 
   /** Record that a path's drives ended unreported, as after a tree reset. */

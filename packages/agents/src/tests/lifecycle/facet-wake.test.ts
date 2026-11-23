@@ -76,8 +76,42 @@ describe("facet wake", () => {
     // call did not fail, and nothing is left to wake.
     await vi.waitFor(async () => {
       expect(await agent.middleRan("m")).toContain("fail-always");
-      expect(await agent.rootJobs()).toEqual([]);
     });
+    // The facet's driver retries it later; the root holds a wake for that
+    // retry, and nothing failed at the root.
+    expect(await agent.middlePending("m")).toEqual(["fail-always"]);
+    const [wake] = await agent.rootJobs();
+    expect(wake?.id.startsWith("facet:")).toBe(true);
+  });
+
+  it("keeps a facet's wake, backed off, when the call down fails", async () => {
+    const agent = await root();
+    await agent.failNextFacetDrives(1);
+    await agent.middlePush("m", "after-failure", 0);
+
+    const started = Date.now();
+    await runDurableObjectAlarm(agent);
+    // The failure stayed out of the root's driver: the wake is still there
+    // for a later try, and the job has not run. (The real alarm may be the
+    // one that drove it, so wait for its outcome.)
+    await vi.waitFor(async () => {
+      const [wake] = await agent.rootJobs();
+      expect(wake?.time).toBeGreaterThanOrEqual(started + 25_000);
+    });
+    expect(await agent.middleRan("m")).toEqual([]);
+  });
+
+  it("ignores a wake report older than the one it holds", async () => {
+    const agent = await root();
+    await agent.reportFacetWake(
+      "FacetWakeRoot:x/FacetWakeMiddle:y",
+      50_000 + Date.now(),
+      200
+    );
+    await agent.reportFacetWake("FacetWakeRoot:x/FacetWakeMiddle:y", null, 100);
+    expect(await agent.rootJobs()).toHaveLength(1);
+    await agent.reportFacetWake("FacetWakeRoot:x/FacetWakeMiddle:y", null, 300);
+    expect(await agent.rootJobs()).toEqual([]);
   });
 
   it("backs off a path whose drives keep ending without a reply", async () => {
@@ -100,12 +134,15 @@ describe("facet wake", () => {
     await agent.middlePush("m", "slow-job", 0);
     await agent.pushJob("root-job", 0);
 
-    const started = Date.now();
+    // Whichever alarm drives it (the real one may), the root waits on the
+    // facet no longer than its drive budget: its own job runs while the
+    // facet's slow job is still going.
     await runDurableObjectAlarm(agent);
-    // The root waited on the facet no longer than its drive budget, and its
-    // own job ran in the same alarm.
-    expect(Date.now() - started).toBeLessThan(6_500);
-    expect(await agent.ran()).toContain("root-job");
+    await vi.waitFor(
+      async () => expect(await agent.ran()).toContain("root-job"),
+      { timeout: 6_000 }
+    );
+    expect(await agent.middleRan("m")).toEqual([]);
 
     // The facet's job finished on its own and re-armed nothing left.
     await vi.waitFor(
