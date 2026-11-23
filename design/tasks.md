@@ -22,7 +22,7 @@ A definition from `register()` (a framework definition) joins an existing run of
 
 ## The checkpoint (internal)
 
-`step.checkpoint.get(key)` and `step.checkpoint.set(key, value)` keep JSON state the next attempt reads. Rows of `cf_agents_task_checkpoint (run_id, key, value)`. A write is synchronous and fenced on the attempt's generation: once a newer attempt claimed the run, the write does nothing. The rows are deleted when the run settles (with the run when `retain: false`), unless the definition is registered with `keepCheckpoint: true`: then they stay until the run is deleted (managed fibers are inspected with their last snapshot). Host code reads an entry with `checkpointOf(runId, key)`.
+`step.checkpoint.get(key)` and `step.checkpoint.set(key, value)` keep JSON state the next attempt reads. The entries are one JSON object in the run row's `checkpoint` column. A write is one synchronous `UPDATE` of that row (`json_set`), fenced on the attempt's generation: once a newer attempt claimed the run, the write does nothing. The terminal update clears the column in the same statement, unless the definition is registered with `keepCheckpoint: true` (managed fibers are inspected with their last snapshot); then it stays until the run is deleted. Host code reads an entry with `checkpointOf(runId, key)`. One column instead of a table of its own: a set and a settle write one row less each, at the price of sharing the run row's size limit with its metadata and result (a chat turn's snapshot and a fiber's stash are small). Schema 4 moved schema 2–3's `cf_agents_task_checkpoint` rows into the column and dropped the table.
 
 Two ways to record progress, and no third:
 

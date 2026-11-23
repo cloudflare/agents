@@ -415,6 +415,8 @@ export type TaskRunRow = {
   notified: string | null;
   /** Pieces in `cf_agents_task_parts` holding an input too large for the row. */
   input_parts: number | null;
+  /** The run's checkpoint entries as one JSON object, until it settles. */
+  checkpoint: string | null;
 };
 
 /**

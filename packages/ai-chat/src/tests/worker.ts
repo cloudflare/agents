@@ -98,21 +98,18 @@ async function insertInterruptedTurnForTest(
   }
   // Make sure the Tasks tables exist before writing a row into them.
   await agent.tasks.get(runId);
-  if (snapshot && !legacySnapshot) {
-    agent.sql`
-      INSERT INTO cf_agents_task_checkpoint (run_id, key, value)
-      VALUES (${runId}, 'snapshot', ${JSON.stringify(snapshot)})
-    `;
-  }
+  const checkpoint =
+    snapshot && !legacySnapshot ? JSON.stringify({ snapshot }) : null;
   const now = Date.now();
   agent.sql`
     INSERT INTO cf_agents_task_runs
       (run_id, definition, input, status, metadata, idempotency_key, retain,
-       attempt, next_at, cancel_requested, created_at, updated_at)
+       attempt, next_at, cancel_requested, created_at, updated_at, checkpoint)
     VALUES
       (${runId}, ${AIChatAgent.CHAT_FIBER_NAME},
        ${JSON.stringify({ requestId, continuation: false, nonce })}, 'pending',
-       ${JSON.stringify({ requestId })}, NULL, 0, 0, ${now}, 0, ${now}, ${now})
+       ${JSON.stringify({ requestId })}, NULL, 0, 0, ${now}, 0, ${now}, ${now},
+       ${checkpoint})
   `;
 }
 
@@ -5426,7 +5423,7 @@ export class RecoveryThrowingAgent extends AIChatAgent<Env> {
       onErrorSeen: [...this._onErrorSeen],
       liveRecoveryTurns: internals._chatTurnFibers.liveTurns.size,
       checkpointEntries: this.sql<{ n: number }>`
-        SELECT COUNT(*) AS n FROM cf_agents_task_checkpoint
+        SELECT COUNT(*) AS n FROM cf_agents_task_runs WHERE checkpoint IS NOT NULL
       `[0].n,
       fibers: this.getActiveFibers().length,
       abortControllers: internals._abortRegistry.size,

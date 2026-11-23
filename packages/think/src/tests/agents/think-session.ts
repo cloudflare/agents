@@ -313,21 +313,17 @@ async function insertInterruptedTurnForTest(
   const requestId = name.slice(prefix.length);
   // Make sure the Tasks tables exist before writing a row into them.
   await agent.tasks.get(runId);
-  if (snapshot) {
-    agent.sql`
-      INSERT INTO cf_agents_task_checkpoint (run_id, key, value)
-      VALUES (${runId}, 'snapshot', ${JSON.stringify(snapshot)})
-    `;
-  }
+  const checkpoint = snapshot ? JSON.stringify({ snapshot }) : null;
   const now = Date.now();
   agent.sql`
     INSERT INTO cf_agents_task_runs
       (run_id, definition, input, status, metadata, idempotency_key, retain,
-       attempt, next_at, cancel_requested, created_at, updated_at)
+       attempt, next_at, cancel_requested, created_at, updated_at, checkpoint)
     VALUES
       (${runId}, ${Think.CHAT_FIBER_NAME},
        ${JSON.stringify({ requestId, continuation: false, nonce })}, 'pending',
-       ${JSON.stringify({ requestId })}, NULL, 0, 0, ${now}, 0, ${now}, ${now})
+       ${JSON.stringify({ requestId })}, NULL, 0, 0, ${now}, 0, ${now}, ${now},
+       ${checkpoint})
   `;
 }
 
