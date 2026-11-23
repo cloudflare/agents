@@ -382,13 +382,16 @@ export class ResumableStream {
   }
 
   /**
-   * Carry the pre-derivation KV counter forward: the marker must not read
-   * lower after the upgrade than the high-water mark an in-flight incident
-   * already recorded, or a progressing turn would look stuck until the log
-   * caught up. The counter is never written again, so its value is a
-   * constant this folds into its own column by max — idempotent across
-   * isolates, and never touching segments retired before the seed landed.
-   * A no-op for zero, so a fresh object never writes.
+   * Carry the KV counter forward: the marker must not read lower than the
+   * high-water mark an in-flight incident already recorded, or a
+   * progressing turn would look stuck until the log caught up. The counter
+   * is either the pre-derivation one or the hosts' mirror of this marker's
+   * durable part (`retired + legacy`, written by `onProgress`). Either way
+   * it already counts every segment retired here, so the seed raises
+   * `legacy` only to `counter - retired`: the marker then reads at least
+   * the counter, and a mirrored value folds in as a no-op instead of adding
+   * the retired history again on every isolate (#2702). Idempotent, and a
+   * no-op for zero, so a fresh object never writes.
    *
    * The counter already credited a stream that was in flight at the
    * upgrade, and that stream's live segments count again here, so the
@@ -402,7 +405,7 @@ export class ResumableStream {
       INSERT INTO cf_agents_chat_progress (key, retired, legacy)
       VALUES ('chat', 0, ${legacyTotal})
       ON CONFLICT(key) DO UPDATE
-        SET legacy = MAX(legacy, excluded.legacy)
+        SET legacy = MAX(legacy, excluded.legacy - retired)
     `;
   }
 

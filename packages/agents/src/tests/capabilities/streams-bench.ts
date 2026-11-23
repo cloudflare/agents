@@ -136,13 +136,39 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
     adapter.clearAll();
     marker.cleared = adapter.progressMarker();
 
-    // Seeding takes the max, never lowering the marker.
+    // Seeding raises the marker to the counter at most, never lowering it.
     adapter.seedProgress(2);
     marker.seededLow = adapter.progressMarker();
     adapter.seedProgress(marker.cleared + 40);
     marker.seededHigh = adapter.progressMarker();
 
     return { marker, rowsWritten: this.#totalChanges() - before };
+  }
+
+  /**
+   * What both chat hosts do (#2702): mirror every reported durable marker
+   * into the legacy KV key, and seed each new isolate from that key.
+   */
+  async probeMirroredSeed(): Promise<Record<string, number>> {
+    await this.lifecycle.start();
+    const adapter = this.#adapter();
+    const marker: Record<string, number> = {};
+    const first = adapter.start("mirror-req-1");
+    for (let i = 0; i < 20; i++) adapter.storeChunk(first, this.#body(i, 60));
+    adapter.finish(first);
+    adapter.cutover(first, () => {});
+    marker.afterTurn = adapter.progressMarker();
+    for (let isolate = 1; isolate <= 3; isolate++) {
+      // The host's `onProgress` wrote the last report to KV; a new isolate
+      // reads it back and seeds it.
+      const mirrored = this.progressReports.at(-1) ?? 0;
+      const next = this.#adapter();
+      next.seedProgress(mirrored);
+      marker[`isolate${isolate}`] = next.progressMarker();
+      // One retire in this isolate, as any turn produces.
+      next.creditProgress();
+    }
+    return marker;
   }
 
   /**
