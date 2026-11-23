@@ -2201,10 +2201,6 @@ export class Agent<
     return this._dynamicAgents.routeLifecycle(target, envelope);
   }
 
-  private _rootAlarmOwner(): Promise<RootFacetRpcSurface> {
-    return this._dynamicAgents.rootAlarmOwner();
-  }
-
   // ── Scheduling (delegates to agents/schedules) ─────────────────────────
 
   /**
@@ -3101,9 +3097,15 @@ export class Agent<
   _cf_initAsFacet(
     name: string,
     parentPath: ReadonlyArray<{ className: string; name: string }> = [],
-    identityName = name
+    identityName = name,
+    rootChannel?: RootFacetRpcSurface
   ): Promise<void> {
-    return this._dynamicAgents.init(name, parentPath, identityName);
+    return this._dynamicAgents.init(
+      name,
+      parentPath,
+      identityName,
+      rootChannel
+    );
   }
 
   get name(): string {
@@ -6263,7 +6265,7 @@ export class Agent<
   async destroy() {
     if (this._isFacet) {
       this._emit("destroy");
-      const root = await this._rootAlarmOwner();
+      const root = this._dynamicAgents.rootStub();
       // The chain: root → … → direct-parent runs ctx.facets.delete
       // on this facet, which aborts this isolate. The await may
       // throw an abort error or never resolve depending on timing —

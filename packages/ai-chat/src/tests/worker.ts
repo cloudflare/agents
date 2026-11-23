@@ -7250,6 +7250,12 @@ type AgentToolFinishForTest = {
 };
 
 export class AIChatAgentToolParent extends Agent<Env> {
+  /** Reset one sub-agent's isolate, as its root's reset does. */
+  async resetChildForTest(childName: string): Promise<void> {
+    const child = await this.subAgent(AIChatAgentToolChild, childName);
+    await child.resetIsolateForTest().catch(() => {});
+  }
+
   private events: AgentToolEventMessage[] = [];
   private finishes: AgentToolFinishForTest[] = [];
   private finishRunIdsToThrow = new Set<string>();
@@ -7455,9 +7461,23 @@ export class AIChatAgentToolParent extends Agent<Env> {
     const deadline = Date.now() + 330_000;
     await child.markRunInterruptedForTest(runId, deadline);
     await child.dueTaskForTest(runId, deadline);
+    // Let a drive the child's report started finish first: a drive cut off
+    // by the reset would hold the wake back as a crashed one.
+    await this.facetDrivesSettledForTest();
     // A root reset takes its facets down with it.
     await child.resetIsolateForTest().catch(() => {});
     return runId;
+  }
+
+  /** Wait until no drive of a sub-agent from this root is unreplied. */
+  async facetDrivesSettledForTest(): Promise<void> {
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const open = [
+        ...this.ctx.storage.kv.list({ prefix: "cf_agents:facet_drives:" })
+      ];
+      if (open.length === 0) return;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
   }
 
   /** A sub-agent's alarm memory-limit strike count, or null when none. */

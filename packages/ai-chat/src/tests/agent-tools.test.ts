@@ -19,6 +19,7 @@ import type { Env } from "./worker";
 import { connectChatWS } from "./test-utils";
 
 type ParentStub = DurableObjectStub & {
+  resetChildForTest(childName: string): Promise<void>;
   runChild(
     input: {
       prompt: string;
@@ -590,6 +591,9 @@ describe("AIChatAgent as an agent-tool child", () => {
       executing.childName,
       executing.incidentId
     );
+    // A root eviction takes its sub-agents with it; the test runtime keeps
+    // them, so reset the sub-agent here as the platform would.
+    await restarted.resetChildForTest(executing.childName);
     await evictDurableObject(restarted as unknown as DurableObjectStub);
     const again = await getParent(parentName);
     await new Promise((resolve) => setTimeout(resolve, 300));

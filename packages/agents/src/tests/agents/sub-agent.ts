@@ -2629,6 +2629,15 @@ export class TestSubAgentParent extends Agent {
     return child.trySchedule();
   }
 
+  /** `keepAlive()` in `count` new sub-agents, one after the other, here. */
+  async keepAliveInNewSubAgentsForTest(count: number): Promise<string[]> {
+    const errors: string[] = [];
+    for (let i = 0; i < count; i++) {
+      errors.push(await this.subAgentTryKeepAlive(`ka-many-${i}`));
+    }
+    return errors;
+  }
+
   async subAgentTryKeepAlive(subAgentName: string): Promise<string> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.tryKeepAlive();
