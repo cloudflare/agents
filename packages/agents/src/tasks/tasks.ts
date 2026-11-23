@@ -1772,9 +1772,12 @@ export class Tasks<
     // ones after it.
     let failed = false;
     for (const row of rows) {
-      if (!(await this.#deliverTerminal(row.run_id, row.retain !== 0))) {
-        failed = true;
-      }
+      const delivered = await this.#deliverTerminal(
+        row.run_id,
+        row.retain !== 0
+      );
+      // A run deleted meanwhile has nothing to retry.
+      if (!delivered && this.#store.getRun(row.run_id)) failed = true;
     }
     // More may be waiting past this batch: the next one runs now, unless a
     // failure here keeps its back-off (the same runs would come first).

@@ -591,6 +591,17 @@ function keepResolvedPauses(
 const ACTION_PAUSE_ID_PREFIX = "actpause_";
 /** An approved action whose claim waits for its lease: try the decision again later. */
 const DEFER_DECISION = Symbol("think.deferDecision");
+/** Whether `output` is the envelope an action that threw answers with. */
+function isActionErrorEnvelope(output: unknown): boolean {
+  if (output === null || typeof output !== "object") return false;
+  const error = (output as { error?: unknown }).error;
+  return (
+    error !== null &&
+    typeof error === "object" &&
+    typeof (error as { message?: unknown }).message === "string"
+  );
+}
+
 /** A caller waits for this decision's outcome; its report has not run yet. */
 const DECISION_OUTPUT_PENDING = Symbol("think.decisionOutputPending");
 /** Tries a decided action gets before its outcome is an error. */
@@ -8825,11 +8836,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         // once the lease lets it, instead of settling an error.
         onReclaimableInDoubt: () => DEFER_DECISION
       });
-      // Capped as an action output is, error envelopes included: the
-      // outcome is kept on the decision until the transcript has it.
-      return output === DEFER_DECISION
-        ? output
-        : prepareActionOutputForModel(output);
+      // An error envelope is capped as an action output is (an output
+      // already was): the outcome is kept on the decision until the
+      // transcript has it.
+      return isActionErrorEnvelope(output)
+        ? prepareActionOutputForModel(output)
+        : output;
     } catch (error) {
       return prepareActionOutputForModel(actionErrorEnvelope(error));
     } finally {

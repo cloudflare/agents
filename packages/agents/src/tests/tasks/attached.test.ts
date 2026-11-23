@@ -272,13 +272,13 @@ describe("Tasks attached definitions", () => {
     );
   });
 
-  it("keep the back-off when a whole batch of reports fails", async () => {
+  it("keep the back-off when a whole batch of reports fails, through the alarm", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    const stuck = "__cf_test_batch_report" as unknown as "pipeline";
     await runInDurableObject(
       stub,
       async (instance: TaskHarnessObject, state) => {
         await instance.lifecycle.start();
-        const stuck = "__cf_test_batch_report" as unknown as "pipeline";
         instance.tasks.register(stuck, async () => "x", {
           attached: true,
           onStatus: (record) => {
@@ -299,6 +299,50 @@ describe("Tasks attached definitions", () => {
         state.storage.sql.exec(
           "UPDATE cf_agents_task_runs SET notified = NULL"
         );
+        await instance.tasks.onStart();
+      }
+    );
+
+    await runDurableObjectAlarm(stub);
+
+    await runInDurableObject(stub, async (_instance, state) => {
+      const [job] = state.storage.sql
+        .exec<{ time: number }>(
+          "SELECT time FROM cf_agents_jobs WHERE id = 'tasks:reports'"
+        )
+        .toArray();
+      expect(job.time).toBeGreaterThan(Date.now() + 20_000);
+    });
+  });
+
+  it("run the next batch at once when a run in this one was deleted meanwhile", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        const fine = "__cf_test_cleanup_report" as unknown as "pipeline";
+        instance.tasks.register(fine, async () => "x", {
+          attached: true,
+          onStatus: (record) => {
+            if (record.runId === "run-0") instance.tasks.deleteRun("run-50");
+          }
+        });
+        const now = Date.now();
+        for (let i = 0; i < 101; i++) {
+          await instance.tasks.importRun({
+            runId: `run-${i}`,
+            definition: fine,
+            status: "completed",
+            attempt: 1,
+            createdAt: now - 1000 + i,
+            settledAt: now - 1000 + i
+          });
+        }
+        state.storage.sql.exec(
+          "UPDATE cf_agents_task_runs SET notified = NULL"
+        );
+        state.storage.sql.exec("DELETE FROM cf_agents_jobs");
 
         await instance.tasks.onJob({
           job: { id: "tasks:reports", fn: "reports" }
@@ -309,7 +353,7 @@ describe("Tasks attached definitions", () => {
             "SELECT time FROM cf_agents_jobs WHERE id = 'tasks:reports'"
           )
           .toArray();
-        expect(job.time).toBeGreaterThan(Date.now() + 20_000);
+        expect(job?.time).toBeLessThanOrEqual(Date.now());
       }
     );
   });
