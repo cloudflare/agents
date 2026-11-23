@@ -339,7 +339,6 @@ export function registerDecisionTask(
     },
     {
       attached: true,
-      reportWake: true,
       onStatus: async (snapshot) => {
         if (snapshot.status === "completed") await onSettled(snapshot.runId);
       }

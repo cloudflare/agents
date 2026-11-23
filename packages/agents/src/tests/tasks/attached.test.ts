@@ -117,7 +117,7 @@ describe("Tasks attached definitions", () => {
     });
   });
 
-  it("arm the report job during a reportWake report, and cancel it once the report returns", async () => {
+  it("keep the report job through an attached run's terminal report", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(
       stub,
@@ -128,7 +128,6 @@ describe("Tasks attached definitions", () => {
         let reports = 0;
         instance.tasks.register(reportName, async () => "done", {
           attached: true,
-          reportWake: true,
           onStatus: async (record) => {
             if (record.status !== "completed") return;
             reports += 1;
@@ -141,9 +140,48 @@ describe("Tasks attached definitions", () => {
           start: "now"
         });
 
-        // A reset inside the report would leave this job to deliver it.
+        // A reset inside the report leaves this job to deliver it.
         expect(jobsDuringReport).toEqual(["tasks:reports"]);
-        expect(jobIds(state.storage)).toEqual([]);
+        expect(reports).toBe(1);
+      }
+    );
+  });
+
+  it("do not start a terminal report twice when its job fires while it still runs", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        const name = "__cf_test_long_report" as unknown as "pipeline";
+        let open!: () => void;
+        const gate = new Promise<void>((resolve) => (open = resolve));
+        let reports = 0;
+        instance.tasks.register(name, async () => "done", {
+          attached: true,
+          onStatus: async (record) => {
+            if (record.status !== "completed") return;
+            reports += 1;
+            await gate;
+          }
+        });
+
+        const running = instance.tasks.run(name, undefined as never, {
+          runId: "long",
+          start: "now"
+        });
+        for (let i = 0; i < 100 && reports === 0; i++) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        // The report job comes due while the report still runs.
+        await instance.tasks.onJob({
+          job: { id: "tasks:reports", fn: "reports" }
+        } as never);
+        expect(reports).toBe(1);
+        expect(jobIds(state.storage)).toEqual(["tasks:reports"]);
+
+        open();
+        await running;
         expect(reports).toBe(1);
       }
     );

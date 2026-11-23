@@ -475,12 +475,6 @@ export interface TaskRegisterOptions {
    * attempt due and wakes it then.
    */
   attached?: true;
-  /**
-   * Arm the report job before each terminal report, and cancel it when the
-   * report returns: a reset during a long `onStatus` is delivered again by
-   * the job (30 s later), with no request to start the object.
-   */
-  reportWake?: true;
 }
 
 /** @internal Raw `cf_agents_task_steps` SQLite row. */
