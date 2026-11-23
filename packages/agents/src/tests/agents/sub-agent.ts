@@ -177,6 +177,13 @@ export class CounterSubAgent extends Agent {
     return this.queue("queuedCallback", { value });
   }
 
+  /** Ids of the items in this sub-agent's own queue. */
+  queueRowIds(): string[] {
+    return this.sql<{ id: string }>`
+      SELECT id FROM cf_agents_jobs WHERE capability = 'queue' ORDER BY time
+    `.map((row) => row.id);
+  }
+
   async scheduleDelayedCallback(
     delaySeconds: number,
     value: string,
@@ -1686,17 +1693,54 @@ export class TestSubAgentParent extends Agent {
    * run it, then delete the facet. Returns the root queue rows after each
    * step so a test can assert the deletion cleaned the routed item up.
    */
-  async subAgentQueueThenDelete(subAgentName: string): Promise<{
-    beforeDelete: string[];
-    afterDelete: string[];
-  }> {
-    const itemId = await this.subAgentQueue(subAgentName, "orphan");
-    this
-      .sql`UPDATE cf_agents_jobs SET time = ${Date.now() + 86_400_000} WHERE id = ${itemId}`;
-    const beforeDelete = (await this.rootQueueRows()).map((row) => row.id);
-    await this.deleteSubAgent(CounterSubAgent, subAgentName);
-    const afterDelete = (await this.rootQueueRows()).map((row) => row.id);
-    return { beforeDelete, afterDelete };
+  async subAgentQueueRowIds(subAgentName: string): Promise<string[]> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.queueRowIds();
+  }
+
+  /**
+   * Leave a queue item for a sub-agent in this root, due now, as the
+   * previous release kept it.
+   */
+  async insertLegacyRootQueueItem(
+    subAgentName: string,
+    id: string,
+    value: string,
+    delayMs = 0
+  ): Promise<void> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    const selfPath = await child.getSelfPath();
+    this.sql`
+      INSERT INTO cf_agents_jobs (id, capability, fn, time, payload)
+      VALUES (${id}, 'queue', 'queuedCallback', ${Date.now() + delayMs},
+        ${JSON.stringify({
+          payload: { value },
+          owner_path: JSON.stringify(selfPath),
+          owner_path_key: agentPathKey(selfPath),
+          push_id: "old"
+        })})
+    `;
+    await this.lifecycle.rearmAlarm();
+  }
+
+  /** A job of another owner whose payload happens to name a sub-agent path. */
+  async insertOtherOwnerJobNamingSubAgent(subAgentName: string): Promise<void> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    const selfPath = await child.getSelfPath();
+    this.sql`
+      INSERT INTO cf_agents_jobs (id, capability, fn, time, payload)
+      VALUES ('other-owner-job', 'other-owner', 'run', ${Date.now() + 60_000},
+        ${JSON.stringify({ owner_path_key: agentPathKey(selfPath) })})
+    `;
+  }
+
+  otherOwnerJobCount(): number {
+    return (
+      this.sql<{ count: number }>`
+        SELECT COUNT(*) AS count FROM cf_agents_jobs
+        WHERE capability = 'other-owner'
+      `[0]?.count ?? 0
+    );
   }
 
   async rootQueueRows(): Promise<
@@ -1781,7 +1825,7 @@ export class TestSubAgentParent extends Agent {
       async () => (await this.subAgentScheduleLog(subAgentName)).length > 0
     );
     await child.queueFlakyCallback("flaky-item", "same");
-    await waitFor(async () => (await this.rootQueueRows()).length === 0);
+    await waitFor(async () => (await child.queueRowIds()).length === 0);
     await new Promise((resolve) => setTimeout(resolve, 500));
     return (await this.subAgentScheduleLog(subAgentName)).length;
   }
