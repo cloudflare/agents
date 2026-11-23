@@ -1278,6 +1278,9 @@ export class Tasks<
       return;
     }
     if (row.next_at !== null && row.next_at > now) return;
+    // A parked run waits for settle(); a wake that raced its park (a
+    // facet's routed dispatch, say) must not run it again.
+    if (row.status === "pending" && row.wait_reason === "park") return;
 
     const handler = this.#resolveDefinition(row.definition);
     if (!handler) {

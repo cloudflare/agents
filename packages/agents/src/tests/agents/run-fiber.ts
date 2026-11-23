@@ -1,4 +1,5 @@
 import { Agent } from "../../index.ts";
+import type { Tasks } from "../../tasks/tasks";
 import { importLegacyFibers } from "../../fiber-runs";
 import { createLegacyFiberTables, OPEN_FIBER_RUNS_SQL } from "./legacy-fibers";
 import type {
@@ -468,6 +469,13 @@ export class TestRunFiberAgent extends Agent {
       status: "interrupted",
       settledBefore: new Date(time)
     });
+  }
+
+  /** Deliver a fiber run's wake job now, as a late alarm or routed dispatch does. */
+  async dispatchFiberWake(fiberId: string): Promise<void> {
+    await this.tasks.onJob({
+      job: { id: `task:${fiberId}`, fn: "wake", payload: { runId: fiberId } }
+    } as unknown as Parameters<Tasks["onJob"]>[0]);
   }
 
   async deleteInterruptedManagedFibers(): Promise<number> {

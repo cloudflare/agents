@@ -958,6 +958,22 @@ describe("runFiber", () => {
       });
     });
 
+    it("does not run a parked interrupted fiber's recovery again when a late wake arrives", async () => {
+      const agent = await freshManagedAgent("managed-parked-late-wake");
+      await agent.insertInterruptedManagedFiber("parked-late", "managed", {
+        step: 1
+      });
+      await agent.triggerRecoveryCheck();
+      await agent.dispatchFiberWake("parked-late");
+
+      const recovered =
+        (await agent.getRecoveredFibers()) as unknown as FiberRecoveryContext[];
+      expect(recovered.map((fiber) => fiber.id)).toEqual(["parked-late"]);
+      await expect(
+        agent.inspectManagedFiber("parked-late")
+      ).resolves.toMatchObject({ status: "interrupted" });
+    });
+
     it("should preserve interrupted fibers during default cleanup", async () => {
       const agent = await freshManagedAgent("managed-delete-default");
 
