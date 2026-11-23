@@ -142,7 +142,7 @@ describe("AIChatAgent pending interaction helpers", () => {
 
     expect(await agentStub.hasPendingInteractionForTest()).toBe(true);
 
-    // Send tool result over WS — sets _pendingInteractionPromise
+    // Send tool result over WS — sets ChatTurns.pendingInteraction
     ws.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_TOOL_RESULT,
