@@ -24,6 +24,7 @@ class WakeProbe extends LifecycleCapability {
 
   /** `handoff-*` jobs' handed-off work, keyed by job id. */
   readonly #handedOff = new Map<string, Promise<void>>();
+  readonly #handedOffDone = new Set<string>();
 
   async onJob({
     job
@@ -36,17 +37,14 @@ class WakeProbe extends LifecycleCapability {
         work = new Promise((resolve) => setTimeout(resolve, 1_500));
         this.#handedOff.set(job.id, work);
         void work.then(() => {
+          this.#handedOffDone.add(job.id);
           this.host
             .sql`INSERT INTO facet_wake_runs (id, at) VALUES (${job.id}, ${Date.now()})`;
         });
       }
+      if (this.#handedOffDone.has(job.id)) return undefined;
       this.lifecycle.trackAlarmWork(work);
-      const done = await Promise.race([
-        work.then(() => true),
-        Promise.resolve(false)
-      ]);
-      if (!done) return { rescheduleAt: Date.now() + 100 };
-      return undefined;
+      return { rescheduleAt: Date.now() + 100 };
     }
     // `slow-*` outruns the root's drive budget; `fail-*` throws; `abort-*`
     // ends the isolate, the way a job over the memory limit does.

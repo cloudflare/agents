@@ -341,6 +341,10 @@ describe("facet wake", () => {
       { timeout: 6_000 }
     );
     expect(await agent.middleRan("m")).not.toContain("sealed:handoff-x");
+    // Once the work is done the job ends, and its wake with it.
+    await vi.waitFor(async () => {
+      expect(await agent.middlePending("m")).toEqual([]);
+    });
   });
 
   it("does not hold a cancelled facet job's crashes against its replacement", async () => {
