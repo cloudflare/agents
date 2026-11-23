@@ -95,4 +95,24 @@ describe("renewingStub", () => {
       0
     );
   });
+
+  it("prepares again after a startup the callee's code failed", async () => {
+    let prepares = 0;
+    const renewing = renewingStub<{ ping(): Promise<string> }>(
+      { ping: () => Promise.reject(new Error("reset")) },
+      () => ({ ping: () => Promise.resolve("pong") }),
+      () => {
+        prepares += 1;
+        return prepares === 1
+          ? Promise.reject(
+              Object.assign(new Error("onStart failed"), { remote: true })
+            )
+          : Promise.resolve();
+      }
+    );
+    await expect(renewing.ping()).rejects.toThrow("reset");
+    await expect(renewing.ping()).rejects.toThrow("onStart failed");
+    await expect(renewing.ping()).resolves.toBe("pong");
+    expect(prepares).toBe(2);
+  });
 });

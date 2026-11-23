@@ -305,6 +305,24 @@ export class AgentResetBetweenStepsWorkflow extends AgentWorkflow<
   }
 }
 
+/** Its progress callback makes the Agent's hook throw, outside a step. */
+export class HookThrowsWorkflow extends AgentWorkflow<
+  TestWorkflowAgent,
+  Record<string, never>
+> {
+  async run(
+    _event: AgentWorkflowEvent<Record<string, never>>,
+    _step: AgentWorkflowStep
+  ) {
+    try {
+      await this.reportProgress({ step: "throw" });
+      return "no error";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+}
+
 /**
  * Test workflow that throws directly in run() (outside any step.do).
  * Used to verify that unhandled errors trigger onWorkflowError on the Agent.

@@ -50,4 +50,24 @@ describe("AgentWorkflow across an Agent reset", () => {
     ).resolves.toEqual("after reset");
     await expect(instance.waitForStatus("complete")).resolves.not.toThrow();
   });
+
+  it("does not repeat a callback whose Agent hook threw", async () => {
+    const agent = await getAgentByName(
+      env.TestWorkflowAgent,
+      `hook-throws-${crypto.randomUUID()}`
+    );
+    const workflowId = `hook-throws-wf-${crypto.randomUUID()}`;
+    await using instance = await introspectWorkflowInstance(
+      env.HOOK_THROWS_WORKFLOW,
+      workflowId
+    );
+
+    await agent.runHookThrowsWorkflowTest(workflowId);
+
+    await expect(instance.waitForStatus("complete")).resolves.not.toThrow();
+    await expect(instance.getOutput()).resolves.toContain(
+      "progress hook failed"
+    );
+    expect(await agent.getProgressThrows()).toBe(1);
+  });
 });

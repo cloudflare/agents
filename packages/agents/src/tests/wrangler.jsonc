@@ -496,6 +496,11 @@
       "class_name": "AgentResetWorkflow"
     },
     {
+      "name": "hook-throws-workflow",
+      "binding": "HOOK_THROWS_WORKFLOW",
+      "class_name": "HookThrowsWorkflow"
+    },
+    {
       "name": "agent-reset-between-steps-workflow",
       "binding": "AGENT_RESET_BETWEEN_STEPS_WORKFLOW",
       "class_name": "AgentResetBetweenStepsWorkflow"

@@ -65,6 +65,9 @@ export function renewingStub<T extends object>(
           if (current === stub) unprepared = false;
         },
         (error: unknown) => {
+          // The next call starts again, whatever the error: the Agent
+          // clears a failed startup and may succeed then.
+          if (preparing === attempt) preparing = undefined;
           renew(stub, error);
           throw error;
         }
