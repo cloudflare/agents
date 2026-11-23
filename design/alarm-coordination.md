@@ -114,15 +114,20 @@ drives it with the same driver as a root. Only arming differs:
 - Deleting a facet sub-tree drops the wake jobs of that path and every path
   below it.
 
-Fibers, KeepAlive and Queue in a facet use the facet's own job queue and
-contain no facet code. A queue item a root still holds for a facet from an
-earlier release is handed to the facet when it comes due (dropped if the
-facet is gone). On its first start after the upgrade, a root's Fibers moves
+Fibers, KeepAlive, Queue and Scheduler (declared schedules too) in a facet
+use the facet's own job queue and contain no facet code. A queue item a
+root still holds for a facet from an earlier release is handed to the facet
+when it comes due: at once for most, at its retry time for one waiting out
+a retry. A schedule it still holds is made
+due at the root's next start, its own time kept, and handed over on that
+start's first alarm; the facet takes it at its own time, and a copy the
+facet already made of it since the upgrade is kept once, at the earlier
+time. Both are dropped if the facet is gone, or deleted with it. On its first start after the upgrade, a root's Fibers moves
 any fiber wakes it mirrored for facets (old mirror jobs and the old
 `cf_agents_facet_runs` index) onto facet wakes and drops them; a facet
 starting after the upgrade arms its own fiber wake when it finds fibers
 left behind. Capabilities that still route a facet's work to the root
-themselves (Tasks, Scheduler, Approvals) keep working beside this.
+themselves (Tasks, Approvals) keep working beside this.
 They move onto it one at a time, and their routing is removed as they do.
 
 ## When the alarm fires

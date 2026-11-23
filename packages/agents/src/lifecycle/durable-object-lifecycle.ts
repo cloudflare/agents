@@ -106,7 +106,7 @@ const FACET_REPORT_RETRY_MAX_MS = 30_000;
  * for a facet. Each joins this list in the change that moves it into the
  * facet's own queue.
  */
-const LEGACY_HANDOVER_OWNERS: readonly string[] = ["queue"];
+const LEGACY_HANDOVER_OWNERS: readonly string[] = ["queue", "scheduler"];
 
 type FacetWakeMessage =
   | {

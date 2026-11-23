@@ -2297,8 +2297,7 @@ export class Agent<
    * @template T Type of the payload data
    * @param id ID of the scheduled task
    * @returns The Schedule object or undefined if not found
-   * @deprecated Use {@link getScheduleById}. This synchronous API cannot cross
-   * Durable Object boundaries and throws inside sub-agents.
+   * @deprecated Use {@link getScheduleById}.
    */
   getSchedule<T = string>(id: string): Schedule<T> | undefined {
     return this.scheduler.__DO_NOT_USE_WILL_REMOVE__getSchedule<T>(id);
@@ -2307,8 +2306,6 @@ export class Agent<
   /**
    * Get a scheduled task by ID.
    *
-   * Unlike the deprecated synchronous {@link getSchedule}, this works inside
-   * sub-agents by delegating to the top-level parent that owns the alarm.
    *
    * @param id ID of the scheduled task
    * @returns The Schedule object or undefined if not found
@@ -2322,8 +2319,7 @@ export class Agent<
    * @template T Type of the payload data
    * @param criteria Criteria to filter schedules
    * @returns Array of matching Schedule objects
-   * @deprecated Use {@link listSchedules}. This synchronous API cannot cross
-   * Durable Object boundaries and throws inside sub-agents.
+   * @deprecated Use {@link listSchedules}.
    */
   getSchedules<T = string>(criteria: ScheduleCriteria = {}): Schedule<T>[] {
     return this.scheduler.__DO_NOT_USE_WILL_REMOVE__getSchedules<T>(criteria);
@@ -2332,8 +2328,6 @@ export class Agent<
   /**
    * List scheduled tasks matching the given criteria.
    *
-   * Unlike the deprecated synchronous {@link getSchedules}, this works inside
-   * sub-agents by delegating to the top-level parent that owns the alarm.
    *
    * @param criteria Criteria to filter schedules
    * @returns Array of matching Schedule objects

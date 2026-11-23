@@ -239,7 +239,6 @@ export class DeclaredScheduleSet {
   /** Calls are numbered when made; a group keeps its newest accepted one. */
   #calls = 0;
   readonly #accepted = new Map<string, number>();
-  #warnedRouted = false;
 
   constructor(config: DeclaredScheduleConfig) {
     this.#config = config;
@@ -282,12 +281,6 @@ export class DeclaredScheduleSet {
     call: number
   ): Promise<void> {
     if ((this.#accepted.get(group) ?? 0) > call) return;
-    if (this.#lifecycle.routes.source) {
-      this.#declarations.set(group, candidate);
-      await this.#warnRouted(candidate);
-      return;
-    }
-
     let declared: Map<string, NormalizedDeclared>;
     try {
       declared = await this.#read(candidate);
@@ -493,7 +486,7 @@ export class DeclaredScheduleSet {
         }
       }
     }
-    if (!lifecycle.routes.source && Object.keys(next).length > 0) {
+    if (Object.keys(next).length > 0) {
       await storage.put(LEGACY_NEXT_RUN_KEY, { ...next });
     }
     if (tables.length > 0) {
@@ -609,24 +602,5 @@ export class DeclaredScheduleSet {
       });
     }
     return normalized;
-  }
-
-  async #warnRouted({ source }: Declaration): Promise<void> {
-    if (this.#warnedRouted) return;
-    let count: number;
-    try {
-      count = Object.keys(
-        typeof source === "function" ? await source() : source
-      ).length;
-    } catch {
-      return;
-    }
-    if (count === 0) return;
-    this.#warnedRouted = true;
-    console.warn(
-      `[Scheduler] "${this.#lifecycle.name}" declares ${count} schedule(s) ` +
-        `but is a sub-agent: declared schedules run only on a top-level ` +
-        `Durable Object, so none are armed here.`
-    );
   }
 }

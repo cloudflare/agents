@@ -467,7 +467,8 @@ describe("SubAgent", () => {
     expect(row?.ownerPath).toContain("CounterSubAgent");
 
     await agent.backdateSchedule(scheduleId);
-    await runDurableObjectAlarm(agent);
+    // The real alarm may be the one that drives it; wait for the drive.
+    await drainDueFiberWakes(agent);
 
     const log = await agent.subAgentScheduleLog("sched-child");
     expect(log).toEqual([
@@ -510,6 +511,110 @@ describe("SubAgent", () => {
       }
     ]);
     expect(await agent.subAgentQueueRowIds("queue-child")).toEqual([]);
+  });
+
+  it("runs a declared schedule inside a sub-agent", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const ids = await agent.subAgentDeclareLoggingSchedule(
+      "declared-child",
+      "declared"
+    );
+    expect(ids).toHaveLength(1);
+    await agent.backdateSchedule(ids[0]!);
+    // The real alarm may be the one that drives it; wait for the drive.
+    await drainDueFiberWakes(agent);
+
+    await vi.waitFor(async () => {
+      expect(await agent.subAgentScheduleLog("declared-child")).toEqual([
+        expect.objectContaining({ value: "declared" })
+      ]);
+    });
+  });
+
+  it("hands over a schedule the root held for a sub-agent on the root's next start, at its own time", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const before = Date.now();
+    await agent.insertLegacyRootSchedule(
+      "sched-soon",
+      "old-later",
+      "later",
+      120_000
+    );
+    await agent.restartSchedulerForTest();
+    await runDurableObjectAlarm(agent);
+
+    await vi.waitFor(async () => {
+      const [row] = await agent.subAgentScheduleTimes("sched-soon");
+      expect(row?.id).toBe("old-later");
+      // Its own time, not the hand-over time.
+      expect(row!.time).toBeGreaterThanOrEqual(before + 119_000);
+    });
+    expect(
+      (await agent.rootScheduleRows()).filter((r) => r.ownerPath === null)
+    ).toEqual([]);
+  });
+
+  it("keeps one copy when a sub-agent scheduled the same thing again before the hand-over", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.insertLegacyRootSchedule(
+      "sched-dup",
+      "old-dup",
+      "same",
+      60_000
+    );
+    // The sub-agent's start schedules it again, idempotently, without seeing
+    // the root's copy.
+    const own = await agent.subAgentScheduleDelayed("sched-dup", 300, "same", {
+      idempotent: true
+    });
+    await agent.restartSchedulerForTest();
+    await runDurableObjectAlarm(agent);
+
+    await vi.waitFor(async () => {
+      const rows = await agent.subAgentScheduleTimes("sched-dup");
+      // One schedule, at the earlier of the two times.
+      expect(rows.map((row) => row.id)).toEqual([own]);
+      expect(rows[0]!.time).toBeLessThan(Date.now() + 61_000);
+    });
+  });
+
+  it("drops a schedule the root held for a deleted sub-agent", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.insertLegacyRootSchedule(
+      "sched-gone",
+      "old-gone",
+      "lost",
+      60_000
+    );
+    await agent.subAgentDelete("sched-gone");
+    expect(
+      (await agent.rootScheduleRows()).some((row) => row.id === "old-gone")
+    ).toBe(false);
+  });
+
+  it("hands a schedule the root held for a sub-agent to that sub-agent", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.insertLegacyRootSchedule("sched-handover", "old-sched", "kept");
+    await runDurableObjectAlarm(agent);
+
+    await vi.waitFor(async () => {
+      expect(await agent.subAgentScheduleLog("sched-handover")).toEqual([
+        expect.objectContaining({ value: "kept", scheduleId: "old-sched" })
+      ]);
+    });
+    expect(
+      (await agent.rootScheduleRows()).some((row) => row.id === "old-sched")
+    ).toBe(false);
   });
 
   it("hands a queue item the root held for a sub-agent to that sub-agent", async () => {
@@ -572,7 +677,8 @@ describe("SubAgent", () => {
     expect(second).toBe(first);
 
     await agent.backdateSchedule(first);
-    await runDurableObjectAlarm(agent);
+    // The real alarm may be the one that drives it; wait for the drive.
+    await drainDueFiberWakes(agent);
 
     expect(await agent.subAgentScheduleLog("interval-child")).toHaveLength(1);
     const rows = await agent.rootScheduleRows();
@@ -593,7 +699,8 @@ describe("SubAgent", () => {
     );
 
     await agent.backdateSchedule(scheduleId);
-    await runDurableObjectAlarm(agent);
+    // The real alarm may be the one that drives it; wait for the drive.
+    await drainDueFiberWakes(agent);
 
     expect(await agent.subAgentScheduleLog("cancel-child")).toEqual([]);
     expect(
@@ -661,7 +768,7 @@ describe("SubAgent", () => {
     ]);
   });
 
-  it("should throw from sync schedule query APIs inside a sub-agent", async () => {
+  it("reads a sub-agent's schedules through the sync query APIs", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
 
@@ -673,10 +780,10 @@ describe("SubAgent", () => {
 
     await expect(
       agent.subAgentTrySyncGetSchedule("sync-query-child", scheduleId)
-    ).resolves.toMatch(/getSchedule\(\) is synchronous/);
+    ).resolves.toBe(scheduleId);
     await expect(
       agent.subAgentTrySyncGetSchedules("sync-query-child")
-    ).resolves.toMatch(/getSchedules\(\) is synchronous/);
+    ).resolves.toBe(scheduleId);
   });
 
   it("should prune a stale sub-agent schedule when the registry entry is gone", async () => {
@@ -713,7 +820,8 @@ describe("SubAgent", () => {
     );
 
     await agent.backdateSchedule(scheduleId);
-    await runDurableObjectAlarm(agent);
+    // The real alarm may be the one that drives it; wait for the drive.
+    await drainDueFiberWakes(agent);
 
     expect(
       await agent.nestedGetValue(
@@ -795,7 +903,8 @@ describe("SubAgent", () => {
     // Backdate and run the alarm; the cron callback should dispatch
     // into the facet, then the row's `time` is rescheduled forward.
     await agent.backdateSchedule(scheduleId);
-    await runDurableObjectAlarm(agent);
+    // The real alarm may be the one that drives it; wait for the drive.
+    await drainDueFiberWakes(agent);
 
     const log = await agent.subAgentScheduleLog("cron-child");
     expect(log).toHaveLength(1);
@@ -907,7 +1016,8 @@ describe("SubAgent", () => {
     );
 
     await agent.backdateSchedule(scheduleId);
-    await runDurableObjectAlarm(agent);
+    // The real alarm may be the one that drives it; wait for the drive.
+    await drainDueFiberWakes(agent);
 
     // The callback ran (log entry written) and the row is gone
     // (one-shot rows are deleted post-execute regardless).
