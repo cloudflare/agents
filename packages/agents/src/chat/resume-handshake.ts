@@ -100,6 +100,15 @@ export class ResumeHandshake {
   constructor(private readonly host: ResumeHandshakeHost) {}
 
   /**
+   * The connections that ACKed the active stream, and its request id. A
+   * connection in it already has the replay and the live broadcast, so a
+   * later notice (the answer to its own resume request) must not park it
+   * again: the tab dedupes that notice and never ACKs twice (#2703). Reset
+   * when another request streams, so it holds at most one stream's tabs.
+   */
+  #acked: { requestId: string; ids: Set<string> } | null = null;
+
+  /**
    * Notify a connection that an active stream can be resumed; it should reply
    * with `STREAM_RESUME_ACK` to receive the replay.
    *
@@ -123,7 +132,11 @@ export class ResumeHandshake {
         ...(probeId ? { probeId } : {})
       })
     );
-    if (sent) {
+    const requestId = resumableStream.activeRequestId;
+    const acked =
+      this.#acked?.requestId === requestId &&
+      this.#acked.ids.has(connection.id);
+    if (sent && !acked) {
       // Add to pending set — excluded from live broadcasts until they ACK to
       // receive the full stream replay.
       pendingResumeConnections.add(connection.id);
@@ -256,6 +269,15 @@ export class ResumeHandshake {
       resumableStream.activeRequestId === requestId
     ) {
       pendingResumeConnections.delete(connection.id);
+    }
+    if (
+      resumableStream.hasActiveStream() &&
+      resumableStream.activeRequestId === requestId
+    ) {
+      if (this.#acked?.requestId !== requestId) {
+        this.#acked = { requestId, ids: new Set() };
+      }
+      this.#acked.ids.add(connection.id);
     }
 
     if (

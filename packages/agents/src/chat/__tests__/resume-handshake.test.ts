@@ -195,6 +195,30 @@ describe("ResumeHandshake (driver → golden frames)", () => {
     ]);
   });
 
+  it("#2703: a REQUEST after the ACK does not park the connection again", async () => {
+    const frames: SentFrame[] = [];
+    const { resumableStream } = makeStream({
+      active: true,
+      activeRequestId: "req-1"
+    });
+    const pendingResumeConnections = new Set<string>();
+    const handshake = new ResumeHandshake(
+      makeHost({ resumableStream, pendingResumeConnections })
+    );
+    const conn = makeConnection("c1", frames);
+
+    handshake.notifyStreamResuming(conn);
+    await handshake.handleResumeAck(conn, "req-1");
+    expect(pendingResumeConnections.has("c1")).toBe(false);
+
+    // The tab's own probe arrives after it already ACKed. The tab dedupes
+    // the second STREAM_RESUMING and never ACKs again, so a connection
+    // parked here gets no live chunks until the stream ends.
+    await handshake.handleResumeRequest(conn, "probe-1");
+
+    expect(pendingResumeConnections.has("c1")).toBe(false);
+  });
+
   it("REQUEST while a DIFFERENT connection owns the active continuation → RESUME_NONE", async () => {
     const frames: SentFrame[] = [];
     const { resumableStream } = makeStream({
