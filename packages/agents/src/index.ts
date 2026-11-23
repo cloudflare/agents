@@ -1262,7 +1262,7 @@ export class Agent<
         if (!wrappedClasses.has(this.constructor)) {
           // Auto-wrap custom methods with agent context
           wrapCustomMethods(this, Agent.prototype, (name) =>
-            this._isCallable(name)
+            isCallableMethod(this[name as keyof this] as Function)
           );
           wrappedClasses.add(this.constructor);
         }
@@ -6274,15 +6274,6 @@ export class Agent<
       return;
     }
     await this._deferredDestroy.schedule();
-  }
-
-  /**
-   * Check if a method is callable
-   * @param method The method name to check
-   * @returns True if the method is marked as callable
-   */
-  private _isCallable(method: string): boolean {
-    return isCallableMethod(this[method as keyof this] as Function);
   }
 
   /**

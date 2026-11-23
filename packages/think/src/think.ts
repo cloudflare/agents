@@ -7855,7 +7855,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       isSubmitMessage,
       concurrency: this.messageConcurrency,
       onDropped: () => {
-        if (connection) this._rollbackDroppedSubmit(connection);
+        if (connection) {
+          connection.send(
+            JSON.stringify(this._frames.messagesFrame(this.messages))
+          );
+        }
         this._completeSkippedRequest(connection, requestId);
       },
       // A genuinely-new turn supersedes any pending terminal record (#1645)
@@ -11125,10 +11129,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // stream start, or the final surviving turn's settle releases it. (Chat
     // clear releases parked connections explicitly via `resetTurnState`.)
     this._turns.settlePreStreamTurn(requestId, { releaseParked: false });
-  }
-
-  private _rollbackDroppedSubmit(connection: Connection): void {
-    connection.send(JSON.stringify(this._frames.messagesFrame(this.messages)));
   }
 
   // ── Auto-continuation ──────────────────────────────────────────
