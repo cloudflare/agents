@@ -68,8 +68,10 @@ facet's Lifecycle keeps its own `cf_agents_jobs` in its own storage and
 drives it with the same driver as a root. Only arming differs:
 
 - Where a root writes `setAlarm(T)`, a facet tells its root "wake path P at
-  T". It does not sync first: if a reset loses a row the root was told
-  about, the root drives the facet once for nothing. The report is skipped when the time has not changed since the last one.
+  T". It does not sync first. An outgoing call from a Durable Object waits
+  for its pending writes to be confirmed (its output gate), and if a reset
+  still loses a row the root was told about, the root only drives the facet
+  once for nothing. The report is skipped when the time has not changed since the last one.
 - The root holds one job per facet path, id `facet:<path key>`, owned by
   the Lifecycle itself under an owner id per path. A facet that keeps
   failing therefore holds back only its own wake.

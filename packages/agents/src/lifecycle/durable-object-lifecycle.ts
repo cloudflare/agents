@@ -1237,10 +1237,10 @@ export class Lifecycle<
   #driveDeferral: JobDeferral | undefined;
 
   /**
-   * Tell the root this facet's next wake, when it changed. No sync first: if
-   * a reset loses a row the root was already told about, the root's wake
-   * only drives the facet once for nothing, and the job itself was lost
-   * whether or not the root had heard of it.
+   * Tell the root this facet's next wake, when it changed. No sync first:
+   * the outgoing call already waits for this facet's pending writes (the
+   * output gate), and if a reset still loses a row the root was told about,
+   * the root's wake only drives the facet once for nothing.
    */
   async #reportWakeToRoot(
     facet: LifecycleRouteAddress,
