@@ -1325,6 +1325,17 @@ describe("SubAgent", () => {
     await expectRootKeepAliveRefCount(agent, 0);
   });
 
+  it("lets many new sub-agents reach the root in one call", async () => {
+    // Each sub-agent's keep-alive is a call to the root. Through a root stub,
+    // calls from more than about 14 new sub-agents in one invocation hit the
+    // subrequest depth limit (measured on a deployment).
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const errors = await agent.keepAliveInNewSubAgentsForTest(30);
+    expect(errors.filter((error) => error !== "")).toEqual([]);
+  });
+
   it("keepAliveWhile() runs to completion inside a sub-agent", async () => {
     // Mirror AIChatAgent._reply's exact call shape.
     const name = uniqueName();

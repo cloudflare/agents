@@ -37,6 +37,11 @@ import {
   type DynamicAgentRpcReplyInvocationContext
 } from "./bridges";
 import type { DynamicAgentHostPort } from "./host";
+import {
+  isStaleRootChannelError,
+  markLiveRoot,
+  RootFacetChannel
+} from "./root-channel";
 import type {
   DynamicAgentBridgeInvocationContext,
   DynamicAgentConnectionBridgeLike,
@@ -175,9 +180,19 @@ export class DynamicAgentsInternal extends LifecycleCapability {
   /** One-way barrier so facet broadcasts wait for older queued operations. */
   #broadcastOperationTail?: Promise<void>;
 
+  /**
+   * The channel to the root: at the root, the one it hands its facets; in
+   * a facet, the one its parent handed down at the latest init. Calls
+   * through it do not loop back into the runtime as a root stub does.
+   */
+  #rootChannel?: RootFacetRpcSurface;
+
   constructor(host: DynamicAgentHostPort) {
     super("dynamic-agents");
     this.#host = host;
+    // The newest instance of this object in the isolate; a channel an older
+    // instance handed out stops working.
+    markLiveRoot(host.ctx.id.toString(), host);
     this.registry = new DynamicAgentRegistry({
       sql: host.sql.bind(host),
       execRawSql: (sql) => void host.ctx.storage.sql.exec(sql)
@@ -256,7 +271,57 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       : this.#host.lifecycle.route(envelope);
   }
 
+  /**
+   * What this agent hands a child facet as its channel to the root: a root
+   * its own, a facet the one it was handed.
+   */
+  #channelForChildren(): RootFacetRpcSurface | undefined {
+    if (this.#host._isFacet) return this.#rootChannel;
+    this.#rootChannel ??= new RootFacetChannel(
+      this.#host as unknown as RootFacetRpcSurface,
+      this.#host.ctx.id.toString(),
+      (body) => this.#host._runFacetInitInvocation(body)
+    );
+    return this.#rootChannel;
+  }
+
   async rootAlarmOwner(): Promise<RootFacetRpcSurface> {
+    if (!this.#host._isFacet || !this.#rootChannel) return this.rootStub();
+    // Each call takes the channel current when it is made: an init between
+    // two calls of one caller (a nested delete) replaces and disposes the
+    // old one. A channel from a root instance that has since been replaced
+    // refuses the call before running it; the call is made through a stub
+    // instead, and the channel dropped until the next init. Any other
+    // failure is the call's own.
+    type Call = (...args: unknown[]) => Promise<unknown>;
+    const byName = (target: unknown, name: string) =>
+      (target as Record<string, Call>)[name];
+    return new Proxy({} as RootFacetRpcSurface, {
+      get: (_target, prop) => {
+        if (typeof prop !== "string" || !prop.startsWith("_cf_")) {
+          return undefined;
+        }
+        return async (...args: unknown[]) => {
+          const channel = this.#rootChannel;
+          if (!channel) return byName(this.rootStub(), prop)(...args);
+          try {
+            return await byName(channel, prop)(...args);
+          } catch (error) {
+            if (!isStaleRootChannelError(error)) throw error;
+            if (this.#rootChannel === channel) this.#rootChannel = undefined;
+            return byName(this.rootStub(), prop)(...args);
+          }
+        };
+      }
+    });
+  }
+
+  /**
+   * A stub of the root, for a call that may end the calling facet (its own
+   * destroy): measured in the test runtime, a facet deleted while its call
+   * through the channel is open takes the whole process down.
+   */
+  rootStub(): RootFacetRpcSurface {
     const root = this.#host._parentPath[0];
     if (!root) {
       throw new Error("Facet routing requires a root parent.");
@@ -556,10 +621,16 @@ export class DynamicAgentsInternal extends LifecycleCapability {
             _cf_initAsFacet(
               name: string,
               parentPath: ReadonlyArray<{ className: string; name: string }>,
-              identityName: string
+              identityName: string,
+              rootChannel?: RootFacetRpcSurface
             ): Promise<void>;
           }
-        )._cf_initAsFacet(name, childParentPath, identity.name);
+        )._cf_initAsFacet(
+          name,
+          childParentPath,
+          identity.name,
+          this.#channelForChildren()
+        );
       });
     } catch (error) {
       if (!identity.existing) {
@@ -611,10 +682,16 @@ export class DynamicAgentsInternal extends LifecycleCapability {
             _cf_initAsFacet(
               name: string,
               parentPath: ReadonlyArray<{ className: string; name: string }>,
-              identityName: string
+              identityName: string,
+              rootChannel?: RootFacetRpcSurface
             ): Promise<void>;
           }
-        )._cf_initAsFacet(name, childParentPath, identityName);
+        )._cf_initAsFacet(
+          name,
+          childParentPath,
+          identityName,
+          this.#channelForChildren()
+        );
       });
     } catch (error) {
       // A concurrent delete aborts the facet mid-init; treat that as a drop.
@@ -787,7 +864,10 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     } else {
       pending = (previousConnectionOperation ?? Promise.resolve()).then(
         async () => {
-          const root = await this.rootAlarmOwner();
+          // A stub, not the channel: socket operations keep their order
+          // with the root's own socket events this way (a call through
+          // the channel overtook a following message's state, in tests).
+          const root = this.rootStub();
           await operation(
             new RootDynamicAgentConnectionBridge(root, connectionId)
           );
@@ -893,7 +973,8 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       }
     } else {
       pending = Promise.all(previousOperations).then(async () => {
-        const root = await this.rootAlarmOwner();
+        // A stub, for the same order as the connection operations above.
+        const root = this.rootStub();
         await root._cf_broadcastToSubAgent(ownerPath, message, without);
       });
     }
@@ -1621,7 +1702,9 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       return;
     }
 
-    const root = await this.rootAlarmOwner();
+    // A stub: this runs in the facet's start, which a root's own start can
+    // be waiting on; through the channel the call would wait for that start.
+    const root = this.rootStub();
     const metas = await root._cf_subAgentConnectionMetas(this.#host.selfPath);
     for (const meta of metas) {
       // A connection forwarded while the root read was in flight is fresher.
@@ -1786,8 +1869,22 @@ export class DynamicAgentsInternal extends LifecycleCapability {
   async init(
     name: string,
     parentPath: ReadonlyArray<{ className: string; name: string }> = [],
-    identityName = name
+    identityName = name,
+    rootChannel?: RootFacetRpcSurface
   ): Promise<void> {
+    if (rootChannel) {
+      // Kept past this call; the newest one replaces the last.
+      const kept = (
+        rootChannel as RootFacetRpcSurface & { dup?: () => RootFacetRpcSurface }
+      ).dup?.();
+      const previous = this.#rootChannel as
+        | (RootFacetRpcSurface & { [Symbol.dispose]?: () => void })
+        | undefined;
+      this.#rootChannel = kept ?? rootChannel;
+      if (previous && previous !== this.#rootChannel) {
+        previous[Symbol.dispose]?.();
+      }
+    }
     const routedName = this.#host.lifecycle.name;
     if (routedName !== identityName) {
       throw new Error(
