@@ -206,6 +206,9 @@ export async function dispatchChatProtocol<TConnection extends Connection>(
       // Aborts the request's turn, queued or running, a recovery attempt
       // running for it, and the continuations waiting on it.
       await host.turns.cancel(event.id);
+      // A stop of a request that already ended while this tab was away (a
+      // recovery finished it under another id) still gets its end.
+      host.resumeHandshake().sendEnded(connection, event.id);
       host.emit("message:cancel", { requestId: event.id });
       return true;
 

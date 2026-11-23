@@ -61,6 +61,8 @@ interface FakeStreamState {
   replayErroredReturn: boolean;
   originMessageIds?: string[];
   outcome?: ChatTurnOutcome;
+  /** The latest stored stream of each request, by request id. */
+  streams?: Record<string, "streaming" | "completed" | "error">;
   calls: {
     replayChunks: string[];
     replayErrored: string[];
@@ -96,6 +98,12 @@ function makeStream(over: Partial<FakeStreamState> = {}): {
     },
     replayCompletedChunksByRequestId: () => state.replayCompletedReturn,
     getOriginMessageIds: () => state.originMessageIds,
+    latestStreamInfoForRequest: (requestId: string) => {
+      const status = state.streams?.[requestId];
+      return status
+        ? { id: `s-${requestId}`, status, createdAt: 0, cutOff: false }
+        : null;
+    },
     getOutcome: () => state.outcome,
     replayErroredChunksByRequestId: (_c: Connection, requestId: string) => {
       state.calls.replayErrored.push(requestId);
@@ -698,6 +706,50 @@ describe("ResumeHandshake (driver → golden frames)", () => {
         replay: true,
         outcome: "aborted"
       });
+    });
+
+    it("ends a request the tab waits on that a recovery finished under another id", async () => {
+      // A root reset cut req-cut off. Recovery closed its stream `aborted`
+      // and now streams the continuation under req-cont. The tab was away
+      // the whole time and still waits on req-cut.
+      const frames: SentFrame[] = [];
+      const { resumableStream } = makeStream({
+        active: true,
+        activeRequestId: "req-cont",
+        activeStreamId: "s-cont",
+        streams: { "req-cut": "completed", "req-cont": "streaming" },
+        outcome: "aborted"
+      });
+      const handshake = new ResumeHandshake(makeHost({ resumableStream }));
+
+      await handshake.handleResumeRequest(
+        makeConnection("c1", frames),
+        "probe-1",
+        ["req-cut"]
+      );
+      expect(frames[0]).toMatchObject({
+        id: "req-cut",
+        done: true,
+        replay: true,
+        outcome: "aborted"
+      });
+      // Then it resumes the continuation, as before.
+      expect(frames[1]).toMatchObject({ id: "req-cont" });
+    });
+
+    it("sends no end for the active request, an open stream, or a request with none", () => {
+      const frames: SentFrame[] = [];
+      const { resumableStream } = makeStream({
+        active: true,
+        activeRequestId: "req-live",
+        streams: { "req-live": "streaming", "req-open": "streaming" }
+      });
+      const handshake = new ResumeHandshake(makeHost({ resumableStream }));
+      const conn = makeConnection("c1", frames);
+      expect(handshake.sendEnded(conn, "req-live")).toBe(false);
+      expect(handshake.sendEnded(conn, "req-open")).toBe(false);
+      expect(handshake.sendEnded(conn, "req-none")).toBe(false);
+      expect(frames).toEqual([]);
     });
 
     it("says idle for a tab that waits on nothing that ended", async () => {

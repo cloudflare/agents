@@ -74,6 +74,10 @@ function recordingHost() {
     },
     handleResumeAck: async (connection: Connection, id: string) => {
       calls.push(["resume.ack", connection.id, id]);
+    },
+    sendEnded: (connection: Connection, id: string) => {
+      calls.push(["resume.ended", connection.id, id]);
+      return false;
     }
   };
   const stored = new Map<string, unknown>();
@@ -355,6 +359,8 @@ describe("dispatchChatProtocol", () => {
     );
     expect(calls).toEqual([
       ["turns.cancel", "r1"],
+      // A request that already ended while the tab was away gets its end.
+      ["resume.ended", connection.id, "r1"],
       ["emit", "message:cancel", { requestId: "r1" }]
     ]);
   });

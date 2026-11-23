@@ -167,6 +167,12 @@ export class ResumeHandshake {
   ): Promise<void> {
     const { resumableStream, continuation, preStream } = this.host;
     if (resumableStream.hasActiveStream()) {
+      // A request the tab waits on that ended while it was away, and a
+      // recovery now streams under another id: end it first, or the tab
+      // never learns it is over.
+      for (const requestId of requestIds) {
+        this.sendEnded(connection, requestId);
+      }
       if (
         continuation.activeRequestId === resumableStream.activeRequestId &&
         continuation.activeConnectionId !== null &&
@@ -224,6 +230,48 @@ export class ResumeHandshake {
         probeId
       );
     }
+  }
+
+  /**
+   * Tell `connection` how `requestId` ended, if it has ended: a recorded
+   * terminal, or a stored stream that closed (a recovery completes a cut-off
+   * stream `aborted` and continues under its own id). Nothing for the active
+   * stream's request, for a request with no stream, or for a stream still
+   * open.
+   *
+   * @returns Whether a terminal frame was sent.
+   */
+  sendEnded(connection: Connection, requestId: string): boolean {
+    const { resumableStream } = this.host;
+    if (
+      resumableStream.hasActiveStream() &&
+      resumableStream.activeRequestId === requestId
+    ) {
+      return false;
+    }
+    const recent = this.host.recentTerminal?.([requestId]);
+    const stream = recent
+      ? null
+      : resumableStream.latestStreamInfoForRequest(requestId);
+    if (!recent && stream?.status !== "completed") return false;
+    const messageIds =
+      recent?.messageIds ?? resumableStream.getOriginMessageIds(requestId);
+    const outcome = recent
+      ? recent.outcome
+      : resumableStream.getOutcome(requestId);
+    return sendIfOpen(
+      connection,
+      JSON.stringify({
+        body: recent?.body ?? "",
+        done: true,
+        id: requestId,
+        type: this.host.responseMessageType,
+        replay: true,
+        ...(recent?.error && { error: true }),
+        ...(messageIds && { messageIds }),
+        ...(outcome !== undefined && { outcome })
+      })
+    );
   }
 
   private _sendResumeNone(
