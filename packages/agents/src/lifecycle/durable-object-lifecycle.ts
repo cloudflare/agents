@@ -383,6 +383,7 @@ export class Lifecycle<
       emit: (type, payload) =>
         this.#emitCapabilityEvent({ source: "lifecycle", type, payload }),
       rearm: (deferral) => this.#rearm(deferral),
+      drivenByRoot: () => this.#drivingFromRoot,
       commitAttempt: async () => {
         if (this.#drivingFromRoot) await this.#ctx.storage.sync();
         else await new Promise((resolve) => setTimeout(resolve, 0));

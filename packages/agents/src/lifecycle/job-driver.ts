@@ -146,6 +146,8 @@ export type JobDriverOptions = {
   readonly armFallback: (time: number) => Promise<void>;
   /** Recompute the physical alarm from queue state. */
   readonly rearm: (deferral?: JobDeferral) => Promise<void>;
+  /** Whether this pass is a facet's drive called by its root. */
+  readonly drivenByRoot: () => boolean;
   /**
    * Make the claimed attempt's count outlast an isolate that ends during
    * the attempt, before user code runs. A root yields one macrotask: a
@@ -222,6 +224,8 @@ type MemoryLimitStrike = {
 
 /** @internal Drives the job queue when the Durable Object alarm fires. */
 export class JobDriver {
+  /** Jobs claimed by the alarm pass in progress. */
+  #claimedThisPass = 0;
   readonly #options: JobDriverOptions;
   /**
    * Ambient dispatch identity for `trackAlarmWork`. Read through the async
@@ -295,6 +299,7 @@ export class JobDriver {
     // job for some LATER, genuinely clean invocation or handoff settlement.
     let clean = false;
     let deferred: DeferredDrive | undefined;
+    this.#claimedThisPass = 0;
     try {
       try {
         await this.armStartupFallback();
@@ -304,7 +309,12 @@ export class JobDriver {
         // A pass that deferred a failing job still failed: it must not clear
         // memory-limit strikes, or failed passes between resets would keep
         // the breaker from ever sealing.
-        clean = deferred === undefined;
+        clean =
+          deferred === undefined &&
+          // A facet driven by its root with nothing due proves nothing about
+          // the work that struck: the root may drive it early (on a restart),
+          // and that must not clear the strikes that are to seal it.
+          (this.#claimedThisPass > 0 || !this.#options.drivenByRoot());
       } catch (error) {
         // A platform failure from #driveJob carries its row out of the
         // rethrow; anything else (initialize/runHostAlarm) has no job to
@@ -527,6 +537,7 @@ export class JobDriver {
       // drive result (see JobQueue.applyOutcome). The running marker it
       // sets feeds single-flight skipping and hung recovery.
       const claim = this.#options.queue.claim(row.id, nowMs, takeover);
+      this.#claimedThisPass += 1;
       try {
         const failure = await this.#driveJob(row, claim, dispatch);
         if (failure) {

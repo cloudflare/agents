@@ -116,21 +116,26 @@ drives it with the same driver as a root. Only arming differs:
 - Deleting a facet sub-tree drops the wake jobs of that path and every path
   below it.
 
-Fibers, KeepAlive, Queue and Scheduler (declared schedules too) in a facet
-use the facet's own job queue and contain no facet code. A queue item a
-root still holds for a facet from an earlier release is handed to the facet
-when it comes due: at once for most, at its retry time for one waiting out
-a retry. A schedule it still holds is made
-due at the root's next start, its own time kept, and handed over on that
-start's first alarm; the facet takes it at its own time, and a copy the
-facet already made of it since the upgrade is kept once, at the earlier
-time. Both are dropped if the facet is gone, or deleted with it. On its first start after the upgrade, a root's Fibers moves
+Fibers, KeepAlive, Queue, Scheduler (declared schedules too) and Tasks in a
+facet use the facet's own job queue and contain no facet code. A queue item
+a root still holds for a facet from an earlier release is handed to the
+facet when it comes due: at once for most, at its retry time for one
+waiting out a retry. A Task wake it still holds is made due at the root's
+start and handed over then. A schedule it still holds is made due at the
+root's next start, its own time kept, and handed over on that start's first
+alarm; the facet takes it at its own time, and a copy the facet already made
+of it since the upgrade is kept once, at the earlier time. All are dropped
+if the facet is gone, or deleted with it. On its first start after the upgrade, a root's Fibers moves
 any fiber wakes it mirrored for facets (old mirror jobs and the old
 `cf_agents_facet_runs` index) onto facet wakes and drops them; a facet
 starting after the upgrade arms its own fiber wake when it finds fibers
-left behind. Capabilities that still route a facet's work to the root
-themselves (Tasks, Approvals) keep working beside this.
-They move onto it one at a time, and their routing is removed as they do.
+left behind.
+
+A Task run that hits the memory limit in a facet is struck by the facet's
+own breaker, and its policy (claim stripped, deadline pushed, seal) applies
+in the facet, as at a root. A facet driven by its root with nothing due is
+no clean pass, so an early drive (a root restart) does not clear those
+strikes.
 
 ## When the alarm fires
 
@@ -173,13 +178,9 @@ five-second job handoff it registers the still-running attempt with Lifecycle.
 AI Chat and Think register the post-handoff model dispatch when the callback
 runs under the alarm owner's dispatch — root Task runs and legacy root-owned
 Scheduler rows. Root chat recovery uses the reserved
-`__cf_internal_chat_recovery` definition. Routed dynamic-agent recovery
-temporarily keeps its root-owned Scheduler rows; its callback executes on the
-facet's own Lifecycle, outside any alarm, so `trackAlarmWork` declines there
-and the facet's post-handoff turn is bounded by the incident's own memory-reset
-budget rather than the breaker until Tasks can mirror child wakes to the alarm
-owner. A sealing strike still reaches the facet through the routed
-compatibility bridge.
+`__cf_internal_chat_recovery` definition. A facet's chat recovery runs as a Task run in the facet, under
+the facet's own alarm pass (driven by its root), so `trackAlarmWork` and the
+breaker apply there as at a root.
 
 ## Agent integration
 
