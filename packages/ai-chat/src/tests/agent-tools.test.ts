@@ -313,7 +313,7 @@ type ParentStub = DurableObjectStub & {
     childName: string,
     incidentId: string
   ): Promise<string | null>;
-  rootHasRoutedTaskWakeForTest(runId: string): Promise<boolean>;
+  childHasTaskWakeForTest(childName: string, runId: string): Promise<boolean>;
   driveFacetRecoveryOomBackoffForTest(executing: {
     childName: string;
     incidentId: string;
@@ -335,8 +335,8 @@ type ParentStub = DurableObjectStub & {
     stores: Array<{ taskRuns: number; fibers: number }>;
   }>;
   seedInterruptedFacetTurnForTest(childName: string): Promise<string>;
-  facetWakeTimeForTest(runId: string): Promise<number | null>;
-  oomStrikesForTest(): Promise<number | null>;
+  facetWakeTimeForTest(childName: string): Promise<number | null>;
+  childOomStrikesForTest(childName: string): Promise<number | null>;
   facetRunStateForTest(
     childName: string,
     runId: string
@@ -348,7 +348,7 @@ type ParentStub = DurableObjectStub & {
   }>;
   driveFacetChatRecoveryDetectionForTest(childName: string): Promise<{
     taskRunOnChild: number;
-    routedWakeOnRoot: number;
+    facetWakeOnRoot: number;
     schedules: number;
   }>;
 };
@@ -505,11 +505,14 @@ describe("AIChatAgent as an agent-tool child", () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
     const freshParent = await getParent(parentName);
 
-    // The struck run's wake mirror is gone and its incident sealed on the
-    // owning facet, through the routed memory-limit forwarding.
-    expect(await freshParent.rootHasRoutedTaskWakeForTest(executingRunId)).toBe(
-      false
-    );
+    // The struck run's wake is gone and its incident sealed, by the
+    // breaker in the sub-agent that owns the run.
+    expect(
+      await freshParent.childHasTaskWakeForTest(
+        executing.childName,
+        executingRunId
+      )
+    ).toBe(false);
     expect(
       await freshParent.facetRecoveryIncidentStatusForTest(
         executing.childName,
@@ -520,9 +523,9 @@ describe("AIChatAgent as an agent-tool child", () => {
     // Tasks backs off per struck run instead of Scheduler's old blanket
     // purge-on-seal: a pending incident that never came due this cycle
     // keeps its wake and stays scheduled.
-    expect(await freshParent.rootHasRoutedTaskWakeForTest(pendingRunId)).toBe(
-      true
-    );
+    expect(
+      await freshParent.childHasTaskWakeForTest(pending.childName, pendingRunId)
+    ).toBe(true);
     expect(
       await freshParent.facetRecoveryIncidentStatusForTest(
         pending.childName,
@@ -566,19 +569,20 @@ describe("AIChatAgent as an agent-tool child", () => {
       childName: crypto.randomUUID(),
       incidentId: `facet-backoff-restart-${crypto.randomUUID()}`
     };
-    const runId = await parent.driveFacetRecoveryOomBackoffForTest(executing);
+    await parent.driveFacetRecoveryOomBackoffForTest(executing);
     // The strike resets the root's isolate. A request then restarts it,
     // during the breaker's backoff.
     await new Promise((resolve) => setTimeout(resolve, 100));
     const restarted = await getParent(parentName);
     await new Promise((resolve) => setTimeout(resolve, 300));
 
-    // The struck run's mirror keeps the backoff deadline: no early alarm
-    // dispatches it and reads as a clean pass that clears the strike.
-    expect(await restarted.facetWakeTimeForTest(runId)).toBeGreaterThan(
-      Date.now() + 1_000
-    );
-    expect(await restarted.oomStrikesForTest()).toBe(1);
+    // The struck run keeps the backoff deadline: the root's wake for the
+    // sub-agent may drive it, but the run is not due, so no early attempt
+    // reads as a clean pass that clears the strike.
+    expect(
+      await restarted.facetWakeTimeForTest(executing.childName)
+    ).toBeGreaterThan(Date.now() + 1_000);
+    expect(await restarted.childOomStrikesForTest(executing.childName)).toBe(1);
 
     // The facet starts again and re-sends its deadline, which knows nothing
     // of the strike. A second root restart must still leave the run alone.
@@ -589,10 +593,10 @@ describe("AIChatAgent as an agent-tool child", () => {
     await evictDurableObject(restarted as unknown as DurableObjectStub);
     const again = await getParent(parentName);
     await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(await again.facetWakeTimeForTest(runId)).toBeGreaterThan(
-      Date.now() + 1_000
-    );
-    expect(await again.oomStrikesForTest()).toBe(1);
+    expect(
+      await again.facetWakeTimeForTest(executing.childName)
+    ).toBeGreaterThan(Date.now() + 1_000);
+    expect(await again.childOomStrikesForTest(executing.childName)).toBe(1);
   });
 
   it("seals a routed run whose failure lands after root detaches at the dispatch budget", async () => {
@@ -639,7 +643,9 @@ describe("AIChatAgent as an agent-tool child", () => {
     // attempt eventually settles cleanly.
     const runId = await parent.driveFacetRecoverySlowOomSealForTest(executing);
 
-    expect(await parent.rootHasRoutedTaskWakeForTest(runId)).toBe(true);
+    expect(
+      await parent.childHasTaskWakeForTest(executing.childName, runId)
+    ).toBe(true);
 
     // Let the delayed failure land and seal inside this test.
     await new Promise((resolve) => setTimeout(resolve, 4_000));
@@ -668,7 +674,7 @@ describe("AIChatAgent as an agent-tool child", () => {
     const childName = crypto.randomUUID();
     const parent = await getParent(name);
     const runId = await parent.seedInterruptedFacetTurnForTest(childName);
-    expect(await parent.facetWakeTimeForTest(runId)).toBeGreaterThan(
+    expect(await parent.facetWakeTimeForTest(childName)).toBeGreaterThan(
       Date.now() + 300_000
     );
 
@@ -688,10 +694,10 @@ describe("AIChatAgent as an agent-tool child", () => {
     // mirror. Read only the root until then: a call to the facet would start
     // it and hide a wake left at the claim deadline.
     const deadline = Date.now() + 5_000;
-    let wake = await restarted.facetWakeTimeForTest(runId);
+    let wake = await restarted.facetWakeTimeForTest(childName);
     while (wake !== null && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 50));
-      wake = await restarted.facetWakeTimeForTest(runId);
+      wake = await restarted.facetWakeTimeForTest(childName);
     }
     expect(wake).toBeNull();
     expect(await restarted.facetRunStateForTest(childName, runId)).toBe(
@@ -726,7 +732,7 @@ describe("AIChatAgent as an agent-tool child", () => {
     // dead.
     expect(transport).toEqual({
       taskRunOnChild: 1,
-      routedWakeOnRoot: 1,
+      facetWakeOnRoot: 1,
       schedules: 0
     });
   });

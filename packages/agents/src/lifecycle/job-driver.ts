@@ -146,6 +146,8 @@ export type JobDriverOptions = {
   readonly armFallback: (time: number) => Promise<void>;
   /** Recompute the physical alarm from queue state. */
   readonly rearm: (deferral?: JobDeferral) => Promise<void>;
+  /** Whether this pass is a facet's drive called by its root. */
+  readonly drivenByRoot: () => boolean;
   /**
    * Make the claimed attempt's count outlast an isolate that ends during
    * the attempt, before user code runs. A root yields one macrotask: a
@@ -154,7 +156,15 @@ export type JobDriverOptions = {
    * 38 ms) per dispatch. A facet driven by its root syncs: a job over the
    * memory limit there resets the whole tree, root included (measured).
    */
-  readonly commitAttempt: () => Promise<void>;
+  readonly commitAttempt: (jobId: string, live: boolean) => Promise<boolean>;
+  /**
+   * An attempt of `jobId` reported back, and no work it handed off is still
+   * running: it did not end with the isolate. Pairs with `commitAttempt`,
+   * whose `true` means the job's attempts kept ending with the isolate and
+   * the job is sealed instead of run. `live` there: work this job handed
+   * off is still running in this isolate, so the dispatch renews it.
+   */
+  readonly attemptSettled: (jobId: string) => void;
   /**
    * Schedule an isolate reset after a memory-limit strike is fully
    * recorded, suppressing any retry of the current alarm. Returns
@@ -222,6 +232,8 @@ type MemoryLimitStrike = {
 
 /** @internal Drives the job queue when the Durable Object alarm fires. */
 export class JobDriver {
+  /** Jobs claimed by the alarm pass in progress. */
+  #claimedThisPass = 0;
   readonly #options: JobDriverOptions;
   /**
    * Ambient dispatch identity for `trackAlarmWork`. Read through the async
@@ -248,6 +260,8 @@ export class JobDriver {
    * memory reset that alarm started.
    */
   readonly #outstandingAlarmWork = new Set<Promise<unknown>>();
+  /** Handed-off work still running, per job that handed it off. */
+  readonly #outstandingByJob = new Map<string, number>();
   /**
    * The strike being recorded for the current memory-limit event. One reset
    * is often observed by several flows (an in-alarm job plus handed-off work,
@@ -295,6 +309,7 @@ export class JobDriver {
     // job for some LATER, genuinely clean invocation or handoff settlement.
     let clean = false;
     let deferred: DeferredDrive | undefined;
+    this.#claimedThisPass = 0;
     try {
       try {
         await this.armStartupFallback();
@@ -304,7 +319,12 @@ export class JobDriver {
         // A pass that deferred a failing job still failed: it must not clear
         // memory-limit strikes, or failed passes between resets would keep
         // the breaker from ever sealing.
-        clean = deferred === undefined;
+        clean =
+          deferred === undefined &&
+          // A facet driven by its root with nothing due proves nothing about
+          // the work that struck: the root may drive it early (on a restart),
+          // and that must not clear the strikes that are to seal it.
+          (this.#claimedThisPass > 0 || !this.#options.drivenByRoot());
       } catch (error) {
         // A platform failure from #driveJob carries its row out of the
         // rethrow; anything else (initialize/runHostAlarm) has no job to
@@ -340,6 +360,34 @@ export class JobDriver {
   }
 
   /**
+   * Seal one job, as the memory-limit breaker seals a struck one: delete it
+   * and run the owners' and host's memory-limit policy. For a job whose
+   * attempts kept ending with the isolate (`commitAttempt`): in a facet such
+   * a reset (a job over the memory limit takes the whole tree) leaves no
+   * chance to count a strike.
+   */
+  async #sealCrashedJob(id: string): Promise<void> {
+    const queue = this.#options.queue;
+    const row = queue.row(id);
+    if (!row) return;
+    try {
+      queue.delete(row.id);
+    } catch {
+      return;
+    }
+    try {
+      await this.#options.onMemoryLimit({
+        sealed: true,
+        nextTime: undefined,
+        executing: jobFromRow(row),
+        purgedRecoveryLoopJobs: undefined
+      });
+    } catch {
+      // best-effort domain policy, as for a strike
+    }
+  }
+
+  /**
    * Keep work a job handed off at a bounded return inside this alarm's
    * memory-limit breaker domain (#1825). The alarm itself returns promptly,
    * so other jobs stay live; the handoff is classified when it settles. A
@@ -352,11 +400,26 @@ export class JobDriver {
    * the same promise again (a claim-backstop wake for an attempt already
    * handed off) is a no-op.
    */
+  #attemptSettled(jobId: string): void {
+    try {
+      this.#options.attemptSettled(jobId);
+    } catch {
+      // a condemned isolate's storage; the count stays
+    }
+  }
+
   trackAlarmWork(work: Promise<unknown>): boolean {
     const scope = this.#alarmScope.getStore();
     if (!scope) return false;
     if (this.#outstandingAlarmWork.has(work)) return true;
     this.#outstandingAlarmWork.add(work);
+    const jobId = scope.executing?.id;
+    if (jobId !== undefined) {
+      this.#outstandingByJob.set(
+        jobId,
+        (this.#outstandingByJob.get(jobId) ?? 0) + 1
+      );
+    }
     void work.then(
       () => this.#settleAlarmWork(work, undefined, scope.executing),
       (error) => this.#settleAlarmWork(work, error, scope.executing)
@@ -379,6 +442,15 @@ export class JobDriver {
       }
     } finally {
       this.#outstandingAlarmWork.delete(work);
+      const jobId = executing?.id;
+      if (jobId !== undefined) {
+        const left = (this.#outstandingByJob.get(jobId) ?? 1) - 1;
+        if (left > 0) this.#outstandingByJob.set(jobId, left);
+        else {
+          this.#outstandingByJob.delete(jobId);
+          if (!isIsolateEndingError(error)) this.#attemptSettled(jobId);
+        }
+      }
     }
     // This settle is itself a quiescence transition — re-check freshly
     // rather than trusting whether an alarm looked in flight before this
@@ -527,6 +599,7 @@ export class JobDriver {
       // drive result (see JobQueue.applyOutcome). The running marker it
       // sets feeds single-flight skipping and hung recovery.
       const claim = this.#options.queue.claim(row.id, nowMs, takeover);
+      this.#claimedThisPass += 1;
       try {
         const failure = await this.#driveJob(row, claim, dispatch);
         if (failure) {
@@ -654,13 +727,31 @@ export class JobDriver {
             // the failure before it took its count off.
             if (local > 1) queue.setAttempts(row.id, prior + 1);
             // The count must outlast an isolate this attempt ends.
-            await this.#options.commitAttempt();
+            if (
+              await this.#options.commitAttempt(
+                row.id,
+                this.#outstandingByJob.has(row.id)
+              )
+            ) {
+              await this.#sealCrashedJob(row.id);
+              return SUPERSEDED;
+            }
             // The wait let requests run: a cancel or same-id push made
             // meanwhile is newer intent.
             if (disabled() || !owned()) return SUPERSEDED;
             try {
-              return await dispatch.onJob({ job, attempt });
+              const result = await dispatch.onJob({ job, attempt });
+              if (!this.#outstandingByJob.has(row.id)) {
+                this.#attemptSettled(row.id);
+              }
+              return result;
             } catch (error) {
+              if (
+                !isIsolateEndingError(error) &&
+                !this.#outstandingByJob.has(row.id)
+              ) {
+                this.#attemptSettled(row.id);
+              }
               // The attempt reported back: it no longer counts as one that
               // ended with its isolate.
               try {
@@ -1033,4 +1124,11 @@ export class JobDriver {
 
     return { strikes, limit, sealed, nextTime, purgedRecoveryLoopJobs };
   }
+}
+
+/** The isolate is going away with this error: the attempt did not settle. */
+function isIsolateEndingError(error: unknown): boolean {
+  return (
+    isDurableObjectMemoryLimitReset(error) || isDurableObjectResetError(error)
+  );
 }

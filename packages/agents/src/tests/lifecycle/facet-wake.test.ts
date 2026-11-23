@@ -294,4 +294,65 @@ describe("facet wake", () => {
       ).holdRootAlarms(false);
     }
   });
+
+  it("seals a facet job whose attempts kept ending with the isolate", async () => {
+    const agent = await root();
+    await agent.middlePush("m", "crasher", 60_000);
+    // Three attempts started and never settled: each took the tree down.
+    await agent.middleMarkUnsettled("m", "crasher", 3);
+    await agent.makeFacetWakesDueKeepingDrives();
+    await agent.middleMakeDue("m");
+
+    await runDurableObjectAlarm(agent);
+
+    // Sealed like a struck job at a root: its owner was told and it is gone.
+    await vi.waitFor(async () => {
+      const ran = await agent.middleRan("m");
+      expect(ran).toContain("sealed:crasher");
+      expect(ran).not.toContain("crasher");
+      expect(await agent.middlePending("m")).toEqual([]);
+    });
+  });
+
+  it("forgets a facet job's unsettled attempts once one settles", async () => {
+    const agent = await root();
+    await agent.middlePush("m", "flaky", 60_000);
+    await agent.middleMarkUnsettled("m", "flaky", 2);
+    await agent.makeFacetWakesDueKeepingDrives();
+    await agent.middleMakeDue("m");
+
+    await runDurableObjectAlarm(agent);
+
+    await vi.waitFor(async () => {
+      expect(await agent.middleRan("m")).toContain("flaky");
+      expect(await agent.middleUnsettled("m", "flaky")).toBeUndefined();
+    });
+  });
+
+  it("does not count a wake of a facet job whose handed-off work still runs", async () => {
+    const agent = await root();
+    // Woken every 100 ms while its 1.5 s of handed-off work runs.
+    await agent.middlePush("m", "handoff-x", 0);
+
+    await vi.waitFor(
+      async () => {
+        expect(await agent.middleRan("m")).toContain("handoff-x");
+      },
+      { timeout: 6_000 }
+    );
+    expect(await agent.middleRan("m")).not.toContain("sealed:handoff-x");
+    // Once the work is done the job ends, and its wake with it.
+    await vi.waitFor(async () => {
+      expect(await agent.middlePending("m")).toEqual([]);
+    });
+  });
+
+  it("does not hold a cancelled facet job's crashes against its replacement", async () => {
+    const agent = await root();
+    await agent.middlePush("m", "reused", 60_000);
+    await agent.middleMarkUnsettled("m", "reused", 3);
+    await agent.middleCancel("m", "reused");
+
+    expect(await agent.middleUnsettled("m", "reused")).toBeUndefined();
+  });
 });

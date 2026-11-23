@@ -96,6 +96,17 @@ function facetDriveNotBefore(drives: FacetDriveCount | undefined): number {
   );
 }
 
+/**
+ * In a facet, per job: its attempts that started and never settled. A job
+ * over the memory limit there resets the whole tree before the facet can
+ * count a strike, and its owner may rewrite the row (and its attempt count)
+ * on the next start, so the count is kept apart from the row.
+ */
+const FACET_UNSETTLED_PREFIX = "cf_agents:facet_unsettled:";
+
+/** Unsettled attempts after which a facet seals the job instead of running it. */
+const FACET_UNSETTLED_LIMIT = 3;
+
 /** First wait before a facet reports its wake again after a failed report. */
 const FACET_REPORT_RETRY_MS = 100;
 /** Longest wait between report retries. */
@@ -106,7 +117,11 @@ const FACET_REPORT_RETRY_MAX_MS = 30_000;
  * for a facet. Each joins this list in the change that moves it into the
  * facet's own queue.
  */
-const LEGACY_HANDOVER_OWNERS: readonly string[] = ["queue", "scheduler"];
+const LEGACY_HANDOVER_OWNERS: readonly string[] = [
+  "queue",
+  "scheduler",
+  "tasks"
+];
 
 type FacetWakeMessage =
   | {
@@ -379,9 +394,31 @@ export class Lifecycle<
       emit: (type, payload) =>
         this.#emitCapabilityEvent({ source: "lifecycle", type, payload }),
       rearm: (deferral) => this.#rearm(deferral),
-      commitAttempt: async () => {
-        if (this.#drivingFromRoot) await this.#ctx.storage.sync();
-        else await new Promise((resolve) => setTimeout(resolve, 0));
+      drivenByRoot: () => this.#drivingFromRoot,
+      commitAttempt: async (jobId, live) => {
+        if (!this.#drivingFromRoot) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          return false;
+        }
+        const kv = this.#ctx.storage.kv;
+        const key = FACET_UNSETTLED_PREFIX + jobId;
+        const unsettled = kv.get<number>(key) ?? 0;
+        // A wake for an attempt still running here renews it: no new
+        // attempt, so nothing to count.
+        if (!live) {
+          if (unsettled >= FACET_UNSETTLED_LIMIT) {
+            kv.delete(key);
+            return true;
+          }
+          kv.put(key, unsettled + 1);
+        }
+        await this.#ctx.storage.sync();
+        return false;
+      },
+      attemptSettled: (jobId) => {
+        if (this.#facetAddress()) {
+          this.#ctx.storage.kv.delete(FACET_UNSETTLED_PREFIX + jobId);
+        }
       },
       armFallback: async (time) => {
         if (this.#facetAddress()) return;
@@ -1167,7 +1204,14 @@ export class Lifecycle<
       push: (options: LifecycleJobPushOptions) =>
         rearmAfter(() => this.#jobQueue.push(owner, options)),
       cancel: (id: string) =>
-        rearmAfter(() => this.#jobQueue.cancel(owner, id)),
+        rearmAfter(() => {
+          const cancelled = this.#jobQueue.cancel(owner, id);
+          // A job pushed again under this id starts with no crashes.
+          if (cancelled && this.#facetAddress()) {
+            this.#ctx.storage.kv.delete(FACET_UNSETTLED_PREFIX + id);
+          }
+          return cancelled;
+        }),
       reschedule: (id: string, time: number) =>
         rearmAfter(() => this.#jobQueue.reschedule(owner, id, time)),
       get: (id: string) => this.#jobQueue.get(owner, id),

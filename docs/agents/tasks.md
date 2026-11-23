@@ -239,8 +239,8 @@ Cancelling settles the run `aborted` at once. A live attempt's signal aborts, an
 ## Current limits
 
 The first release is deliberately narrow: no `waitForCompletion` mode on
-`run()`. A run accepted on a routed sub-agent lives on the sub-agent, and
-the root agent's alarm wakes it. The legacy
+`run()`. A run accepted on a sub-agent lives on the sub-agent, with its
+wake in the sub-agent's own queue; the root agent's alarm wakes it. The legacy
 `runFiber()`/`startFiber()` APIs are released public API and remain
 unchanged, still recovered by their own scan. The design and its evolution
 are recorded in

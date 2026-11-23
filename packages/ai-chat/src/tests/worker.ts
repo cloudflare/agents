@@ -5761,6 +5761,42 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
   }
 
   /** Force this facet's own run row due now, past its journaled sleep. */
+  /**
+   * Move one Task run's wake in this sub-agent's own queue (due now by
+   * default), optionally with banked memory-limit strikes, and tell the
+   * root, as any queue change does.
+   */
+  async dueTaskForTest(
+    runId: string,
+    time = Date.now() - 1_000,
+    strikes?: number
+  ): Promise<void> {
+    this.sql`
+      UPDATE cf_agents_jobs SET time = ${time}
+      WHERE capability = 'tasks' AND json_extract(payload, '$.runId') = ${runId}
+    `;
+    if (strikes !== undefined) {
+      await this.ctx.storage.put("cf_agents:oom_alarm_strikes", strikes);
+    }
+    await this.lifecycle.rearmAlarm();
+  }
+
+  taskWakeTimeForTest(runId: string): number | null {
+    return (
+      this.sql<{ time: number }>`
+        SELECT time FROM cf_agents_jobs
+        WHERE capability = 'tasks' AND json_extract(payload, '$.runId') = ${runId}
+      `[0]?.time ?? null
+    );
+  }
+
+  async oomStrikesForTest(): Promise<number | null> {
+    return (
+      (await this.ctx.storage.get<number>("cf_agents:oom_alarm_strikes")) ??
+      null
+    );
+  }
+
   async armFacetRecoveryOomForTest(runId: string): Promise<void> {
     const now = Date.now();
     // The run row's own deadline AND its journaled sleep step's deadline
@@ -7247,13 +7283,8 @@ export class AIChatAgentToolParent extends Agent<Env> {
     // past its journaled sleep, so this alarm cycle drives it and leaves
     // the pending one untouched.
     await executingChild.armFacetRecoveryOomForTest(executingRunId);
-    this.sql`
-      UPDATE cf_agents_jobs
-      SET time = ${Date.now() - 1_000}
-      WHERE capability = 'tasks'
-        AND json_extract(payload, '$.runId') = ${executingRunId}
-    `;
-    await this.ctx.storage.put("cf_agents:oom_alarm_strikes", 2);
+    // The run and its breaker live in the sub-agent; two strikes banked.
+    await executingChild.dueTaskForTest(executingRunId, undefined, 2);
     await this.alarm();
     return [executingRunId, pendingRunId];
   }
@@ -7274,14 +7305,9 @@ export class AIChatAgentToolParent extends Agent<Env> {
     );
     const runId = await child.seedFacetRecoveryOomForTest(executing.incidentId);
     await child.armFacetRecoveryOomForTest(runId);
-    this.sql`
-      UPDATE cf_agents_jobs
-      SET time = ${Date.now() - 1_000}
-      WHERE capability = 'tasks' AND json_extract(payload, '$.runId') = ${runId}
-    `;
     // One strike under the 3-strike seal threshold (#1825): the breaker
     // backs off without sealing.
-    await this.ctx.storage.put("cf_agents:oom_alarm_strikes", 0);
+    await child.dueTaskForTest(runId, undefined, 0);
     await this.alarm();
     return runId;
   }
@@ -7307,14 +7333,9 @@ export class AIChatAgentToolParent extends Agent<Env> {
       "__cf_test_facetRecoverySlowOom"
     );
     await child.armFacetRecoveryOomForTest(runId);
-    this.sql`
-      UPDATE cf_agents_jobs
-      SET time = ${Date.now() - 1_000}
-      WHERE capability = 'tasks' AND json_extract(payload, '$.runId') = ${runId}
-    `;
     // Two strikes already banked: the slow run's eventual (delayed)
     // failure is the third, sealing strike (#1825).
-    await this.ctx.storage.put("cf_agents:oom_alarm_strikes", 2);
+    await child.dueTaskForTest(runId, undefined, 2);
     await this.alarm();
     return runId;
   }
@@ -7333,12 +7354,13 @@ export class AIChatAgentToolParent extends Agent<Env> {
   }
 
   /** Whether a routed Task run still has a wake job mirrored on this root. */
-  rootHasRoutedTaskWakeForTest(runId: string): boolean {
-    const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) AS count FROM cf_agents_jobs
-      WHERE capability = 'tasks' AND json_extract(payload, '$.runId') = ${runId}
-    `;
-    return (rows[0]?.count ?? 0) > 0;
+  /** Whether a sub-agent still holds a wake for one of its Task runs. */
+  async childHasTaskWakeForTest(
+    childName: string,
+    runId: string
+  ): Promise<boolean> {
+    const child = await this.subAgent(AIChatAgentToolChild, childName);
+    return (await child.taskWakeTimeForTest(runId)) !== null;
   }
 
   /** Read a child facet's durable recovery incident after root sealing. */
@@ -7369,7 +7391,7 @@ export class AIChatAgentToolParent extends Agent<Env> {
    */
   async driveFacetChatRecoveryDetectionForTest(childName: string): Promise<{
     taskRunOnChild: number;
-    routedWakeOnRoot: number;
+    facetWakeOnRoot: number;
     schedules: number;
   }> {
     const child = await this.subAgent(AIChatAgentToolChild, childName);
@@ -7382,14 +7404,14 @@ export class AIChatAgentToolParent extends Agent<Env> {
       SELECT COUNT(*) AS count FROM cf_agents_jobs
       WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
     `;
-    const routedWakeOnRoot = this.sql<{ count: number }>`
+    const facetWakeOnRoot = this.sql<{ count: number }>`
       SELECT COUNT(*) AS count FROM cf_agents_jobs
-      WHERE capability = 'tasks'
-        AND json_extract(payload, '$.owner_path') IS NOT NULL
+      WHERE substr(id, 1, 6) = 'facet:'
+          AND substr(id, -length(${`/AIChatAgentToolChild:${encodeURIComponent(childName)}`})) = ${`/AIChatAgentToolChild:${encodeURIComponent(childName)}`}
     `;
     return {
       taskRunOnChild,
-      routedWakeOnRoot: routedWakeOnRoot[0]?.count ?? 0,
+      facetWakeOnRoot: facetWakeOnRoot[0]?.count ?? 0,
       schedules: schedules[0]?.count ?? 0
     };
   }
@@ -7432,29 +7454,28 @@ export class AIChatAgentToolParent extends Agent<Env> {
     const runId = await child.seedOrphanChatTurnRunForTest("req-root-reset");
     const deadline = Date.now() + 330_000;
     await child.markRunInterruptedForTest(runId, deadline);
-    this.sql`
-      UPDATE cf_agents_jobs SET time = ${deadline}
-      WHERE capability = 'tasks' AND json_extract(payload, '$.runId') = ${runId}
-    `;
+    await child.dueTaskForTest(runId, deadline);
     // A root reset takes its facets down with it.
     await child.resetIsolateForTest().catch(() => {});
     return runId;
   }
 
-  /** The root's alarm memory-limit strike count, or null when none. */
-  async oomStrikesForTest(): Promise<number | null> {
-    return (
-      (await this.ctx.storage.get<number>("cf_agents:oom_alarm_strikes")) ??
-      null
-    );
+  /** A sub-agent's alarm memory-limit strike count, or null when none. */
+  async childOomStrikesForTest(childName: string): Promise<number | null> {
+    const child = await this.subAgent(AIChatAgentToolChild, childName);
+    return child.oomStrikesForTest();
   }
 
-  /** This root's mirror of a facet run's wake: its time, or null when gone. */
-  facetWakeTimeForTest(runId: string): number | null {
+  /**
+   * The root's wake for one sub-agent, read from the root alone (a call to
+   * the sub-agent would start it).
+   */
+  facetWakeTimeForTest(childName: string): number | null {
     return (
       this.sql<{ time: number }>`
         SELECT time FROM cf_agents_jobs
-        WHERE capability = 'tasks' AND json_extract(payload, '$.runId') = ${runId}
+        WHERE substr(id, 1, 6) = 'facet:'
+          AND substr(id, -length(${`/AIChatAgentToolChild:${encodeURIComponent(childName)}`})) = ${`/AIChatAgentToolChild:${encodeURIComponent(childName)}`}
       `[0]?.time ?? null
     );
   }
@@ -7475,17 +7496,8 @@ export class AIChatAgentToolParent extends Agent<Env> {
   }> {
     const child = await this.subAgent(AIChatAgentToolChild, childName);
     const runId = await child.seedOrphanChatTurnRunForTest("req-orphan");
-    const mirrored =
-      this.sql<{ count: number }>`
-      SELECT COUNT(*) AS count FROM cf_agents_jobs
-      WHERE capability = 'tasks'
-        AND json_extract(payload, '$.runId') = ${runId}
-        AND json_extract(payload, '$.owner_path') IS NOT NULL
-    `[0]?.count ?? 0;
-    this.sql`
-      UPDATE cf_agents_jobs SET time = ${Date.now() - 1_000}
-      WHERE capability = 'tasks' AND json_extract(payload, '$.runId') = ${runId}
-    `;
+    const mirrored = this.facetWakeTimeForTest(childName) === null ? 0 : 1;
+    await child.dueTaskForTest(runId);
     await this.alarm();
     for (let i = 0; i < 100; i++) {
       const state = await child.getTaskRunStateForTest(runId);

@@ -1,7 +1,8 @@
 import { Agent } from "../../index.ts";
 import {
   LifecycleCapability,
-  type LifecycleJobContext
+  type LifecycleJobContext,
+  type LifecycleJobOutcome
 } from "../../lifecycle/index.ts";
 
 /**
@@ -21,7 +22,30 @@ class WakeProbe extends LifecycleCapability {
       .sql`INSERT INTO facet_wake_runs (id, at) VALUES ('start', ${Date.now()})`;
   }
 
-  async onJob({ job }: LifecycleJobContext): Promise<void> {
+  /** `handoff-*` jobs' handed-off work, keyed by job id. */
+  readonly #handedOff = new Map<string, Promise<void>>();
+  readonly #handedOffDone = new Set<string>();
+
+  async onJob({
+    job
+  }: LifecycleJobContext): Promise<LifecycleJobOutcome | void> {
+    // `handoff-*` hands off 1.5 s of work and returns at once, woken again
+    // meanwhile (a renewal) until the work is done.
+    if (job.id.startsWith("handoff")) {
+      let work = this.#handedOff.get(job.id);
+      if (!work) {
+        work = new Promise((resolve) => setTimeout(resolve, 1_500));
+        this.#handedOff.set(job.id, work);
+        void work.then(() => {
+          this.#handedOffDone.add(job.id);
+          this.host
+            .sql`INSERT INTO facet_wake_runs (id, at) VALUES (${job.id}, ${Date.now()})`;
+        });
+      }
+      if (this.#handedOffDone.has(job.id)) return undefined;
+      this.lifecycle.trackAlarmWork(work);
+      return { rescheduleAt: Date.now() + 100 };
+    }
     // `slow-*` outruns the root's drive budget; `fail-*` throws; `abort-*`
     // ends the isolate, the way a job over the memory limit does.
     if (job.id.startsWith("abort")) {
@@ -38,6 +62,16 @@ class WakeProbe extends LifecycleCapability {
   }
 
   /** A job given up after its attempts: record it, and drop the job. */
+  /** A memory-limit seal or back-off for one of this object's jobs. */
+  onMemoryLimit(context: {
+    sealed: boolean;
+    executing?: { id: string };
+  }): void {
+    if (!context.sealed || !context.executing) return;
+    this.host
+      .sql`INSERT INTO facet_wake_runs (id, at) VALUES (${`sealed:${context.executing.id}`}, ${Date.now()})`;
+  }
+
   onJobError({ job }: LifecycleJobContext): void {
     this.host
       .sql`INSERT INTO facet_wake_runs (id, at) VALUES (${`gave-up:${job.id}`}, ${Date.now()})`;
@@ -51,12 +85,35 @@ class WakeProbe extends LifecycleCapability {
     });
   }
 
+  cancel(id: string) {
+    return this.lifecycle.jobs.cancel(id);
+  }
+
   list() {
     return this.lifecycle.jobs.list().map((job) => job.id);
   }
 }
 
 abstract class WakeAgent extends Agent<Cloudflare.Env> {
+  /** Make this object's own jobs due, keeping their order. */
+  makeJobsDue(): void {
+    this
+      .sql`UPDATE cf_agents_jobs SET time = time - 120000 WHERE capability = 'facet-wake-probe'`;
+  }
+
+  /** Record `count` attempts of job `id` that ended with the isolate. */
+  markUnsettled(id: string, count: number): void {
+    this.ctx.storage.kv.put(`cf_agents:facet_unsettled:${id}`, count);
+  }
+
+  unsettled(id: string): number | undefined {
+    return this.ctx.storage.kv.get<number>(`cf_agents:facet_unsettled:${id}`);
+  }
+
+  cancelJob(id: string): Promise<boolean> {
+    return this.probe.cancel(id);
+  }
+
   /** Recompute this object's wake, as any queue change does. */
   async rearm(): Promise<void> {
     await this.lifecycle.rearmAlarm();
@@ -268,11 +325,31 @@ export class FacetWakeRoot extends WakeAgent {
   }
 
   /** Record that a path's drives ended unreported, as after a tree reset. */
-  markUnreportedDrives(key: string, count: number): void {
+  markUnreportedDrives(key: string, count: number, agoMs = 0): void {
     this.ctx.storage.kv.put(`cf_agents:facet_drives:${key}`, {
       count,
-      at: Date.now()
+      at: Date.now() - agoMs
     });
+  }
+
+  async middleMarkUnsettled(
+    name: string,
+    id: string,
+    count: number
+  ): Promise<void> {
+    await (await this.subAgent(FacetWakeMiddle, name)).markUnsettled(id, count);
+  }
+
+  async middleMakeDue(name: string): Promise<void> {
+    await (await this.subAgent(FacetWakeMiddle, name)).makeJobsDue();
+  }
+
+  async middleUnsettled(name: string, id: string): Promise<number | undefined> {
+    return (await this.subAgent(FacetWakeMiddle, name)).unsettled(id);
+  }
+
+  async middleCancel(name: string, id: string): Promise<boolean> {
+    return (await this.subAgent(FacetWakeMiddle, name)).cancelJob(id);
   }
 
   async deleteMiddle(name: string): Promise<void> {
