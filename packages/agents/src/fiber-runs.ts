@@ -50,6 +50,11 @@ export const MANAGED_FIBER_TASK = "__cf_managed_fiber";
 const SNAPSHOT = "snapshot";
 /** Recovery attempts that ended the isolate before the hook returned. */
 const CRASHES = "crashes";
+/**
+ * A resolution a managed fiber's recovery hook gave it (`resolveFiber`),
+ * kept so a reset before the attempt ends still applies it.
+ */
+const RESOLVED = "resolved";
 /** Why a managed fiber is `interrupted`, carried over from an older release. */
 const INTERRUPTED_REASON = "interruptedReason";
 /**
@@ -231,6 +236,8 @@ async function recover(
   const counted = managed || !host.ownsRecoveryBudget(name);
   const crashes = step.checkpoint.get<number>(CRASHES) ?? 0;
   if (managed && crashes >= 1) {
+    const resolved = step.checkpoint.get<StoredResolution>(RESOLVED);
+    if (resolved) return settleResolved(host.tasks, step, resolved);
     return parkInterrupted(
       step,
       TaskSettlement.park(step.checkpoint.get<string>(INTERRUPTED_REASON))
@@ -294,6 +301,10 @@ async function recover(
       `[Agent] Fiber recovery failed for "${name}" (${id}):`,
       error
     );
+    // A resolution the hook gave before it threw stands, as when
+    // `resolveFiber` settled the fiber at once.
+    const resolved = step.checkpoint.get<StoredResolution>(RESOLVED);
+    if (managed && resolved) return settleResolved(host.tasks, step, resolved);
     if (managed) return TaskSettlement.failed(error);
     if (host.maxAgeMs > 0 && Date.now() - ctx.createdAt > host.maxAgeMs) {
       host.emit("fiber:recovery:skipped", {
@@ -333,6 +344,29 @@ async function recover(
 }
 
 type Resolution = { step: TaskStep; result?: FiberRecoveryResult };
+type StoredResolution = {
+  status: FiberRecoveryResult["status"];
+  reason?: string;
+  error?: string;
+  metadata?: Record<string, TaskJson>;
+};
+
+/** Settle a managed fiber with the resolution its hook stored. */
+function settleResolved(
+  tasks: Tasks,
+  step: TaskStep,
+  resolved: StoredResolution
+): null | TaskSettlement {
+  const settlement = settlementOf(tasks, step.id, {
+    status: resolved.status,
+    reason: resolved.reason,
+    error: resolved.error,
+    metadata: resolved.metadata
+  } as FiberRecoveryResult);
+  return settlement?.kind === "park"
+    ? parkInterrupted(step, settlement)
+    : settlement;
+}
 /** Managed fibers whose recovery hook runs now, per Tasks (one per Agent). */
 const recoveries = new WeakMap<Tasks, Map<string, Resolution>>();
 function recovering(tasks: Tasks): Map<string, Resolution> {
@@ -620,6 +654,19 @@ export async function resolveFiber(
     if (result.snapshot !== undefined) {
       own.step.checkpoint.set(SNAPSHOT, toJson(result.snapshot));
     }
+    // Stored with the snapshot, so a reset before the attempt ends still
+    // settles the fiber this way on its next attempt.
+    const stored: StoredResolution = { status: result.status };
+    if ("reason" in result && result.reason !== undefined) {
+      stored.reason = result.reason;
+    }
+    if (result.status === "error" && result.error !== undefined) {
+      stored.error = errorMessage(result.error);
+    }
+    if (result.status === "completed" && result.metadata !== undefined) {
+      stored.metadata = toJson(result.metadata) as Record<string, TaskJson>;
+    }
+    own.step.checkpoint.set(RESOLVED, stored);
     own.result = result;
     return true;
   }

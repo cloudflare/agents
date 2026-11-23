@@ -1195,8 +1195,7 @@ export class DeployChurnAgent extends Think<Env> {
   private _hasFiberRows(): boolean {
     const rows = this.sql<{ count: number }>`
       SELECT COUNT(*) as count FROM cf_agents_task_runs
-      WHERE definition IN ('__cf_fiber', '__cf_managed_fiber')
-        AND status IN ('pending', 'running') AND coalesce(wait_reason, '') != 'park'
+      WHERE status IN ('pending', 'running') AND coalesce(wait_reason, '') != 'park'
     `;
     return (rows[0]?.count ?? 0) > 0;
   }

@@ -999,6 +999,32 @@ describe("runFiber", () => {
       });
     });
 
+    it("keeps a resolution the recovery hook gave even when the hook then throws", async () => {
+      const agent = await freshManagedAgent("managed-resolves-then-throws");
+      await agent.insertInterruptedManagedFiber(
+        "resolves-then-throws",
+        "managed-resolves-then-throws"
+      );
+      await agent.triggerRecoveryCheck();
+      await expect(
+        agent.inspectManagedFiber("resolves-then-throws")
+      ).resolves.toMatchObject({ status: "completed" });
+    });
+
+    it("applies a resolution the recovery hook gave before its isolate was reset", async () => {
+      const agent = await freshManagedAgent("managed-resolved-then-reset");
+      await agent.insertResolvedThenResetManagedRun("resolved-then-reset");
+      await agent.triggerRecoveryCheck();
+
+      await expect(
+        agent.inspectManagedFiber("resolved-then-reset")
+      ).resolves.toMatchObject({
+        status: "completed",
+        snapshot: { stage: "done" }
+      });
+      expect(await agent.getRecoveredFibers()).toEqual([]);
+    });
+
     it("keeps a managed fiber's key apart from other Task runs' keys", async () => {
       const agent = await freshManagedAgent("managed-key-space");
       await agent.insertOtherTaskWithKey("shared");

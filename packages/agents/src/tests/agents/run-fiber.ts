@@ -68,6 +68,10 @@ export class TestRunFiberAgent extends Agent {
       });
       return;
     }
+    if (ctx.name === "managed-resolves-then-throws") {
+      await this.resolveFiber(ctx.id, { status: "completed" });
+      throw new Error("after resolving");
+    }
     if (ctx.name === "managed-recovery-throws") {
       throw new Error("Recovery failed");
     }
@@ -488,6 +492,31 @@ export class TestRunFiberAgent extends Agent {
       VALUES (${id}, '__cf_managed_fiber', ${JSON.stringify({ name: "later" })},
         'pending', 1, 0, ${now + 3_600_000}, 0, ${now}, ${now})
     `;
+  }
+
+  /**
+   * A managed fiber whose recovery hook resolved it and then lost its
+   * isolate before the attempt ended: its run is still `running`.
+   */
+  async insertResolvedThenResetManagedRun(id: string): Promise<void> {
+    const now = Date.now();
+    this.sql`
+      INSERT INTO cf_agents_task_runs
+        (run_id, definition, input, status, retain, attempt, generation,
+         next_at, cancel_requested, created_at, updated_at)
+      VALUES (${id}, '__cf_managed_fiber', ${JSON.stringify({ name: "managed" })},
+        'running', 1, 2, 'dead', ${now}, 0, ${now}, ${now})
+    `;
+    for (const [key, value] of [
+      ["crashes", 1],
+      ["snapshot", { stage: "done" }],
+      ["resolved", { status: "completed" }]
+    ] as const) {
+      this.sql`
+        INSERT INTO cf_agents_task_checkpoint (run_id, key, value)
+        VALUES (${id}, ${key}, ${JSON.stringify(value)})
+      `;
+    }
   }
 
   /** A run of another definition holding `key` in Tasks' one key space. */
