@@ -9,6 +9,7 @@ import type {
 import { validateClientMetadataUrl } from "@modelcontextprotocol/client";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { nanoid } from "nanoid";
+import { KV_DELETE_MAX_KEYS } from "../../internal/platform-limits";
 
 const STATE_EXPIRATION_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -462,9 +463,8 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
         })
       ).keys()
     ];
-    // DO storage caps a multi-key delete at 128 keys.
-    for (let i = 0; i < keys.length; i += 128) {
-      await this.storage.delete(keys.slice(i, i + 128));
+    for (let i = 0; i < keys.length; i += KV_DELETE_MAX_KEYS) {
+      await this.storage.delete(keys.slice(i, i + KV_DELETE_MAX_KEYS));
     }
   }
 

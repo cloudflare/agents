@@ -27,8 +27,8 @@ import type { Connection } from "agents";
 import { Streams, type StreamsSyncInternal } from "../streams/streams";
 import type { StreamJson, StreamRow, StreamState } from "../streams/types";
 import { sendReplayBodies, sendReplayControl } from "./replay-frames";
-import { CHUNK_MAX_BYTES, storedChunkBytes } from "./chunk-size";
-import { ROW_VALUE_BYTES } from "../internal/platform-limits";
+import { storedChunkBytes } from "./chunk-size";
+import { ROW_MAX_BYTES, ROW_VALUE_BYTES } from "../internal/platform-limits";
 import type { ChatTurnOutcome } from "./wire-types";
 
 /** Number of chunks to pack into a single stored segment before flushing */
@@ -37,7 +37,7 @@ const CHUNK_BUFFER_SIZE = 10;
 const CHUNK_BUFFER_MAX_SIZE = 100;
 /**
  * Max accumulated raw chunk bytes packed into one segment before forcing a
- * flush. The SQLite row limit is 2 MB; packing serializes bodies into a JSON
+ * flush, well under `ROW_VALUE_BYTES`: packing serializes bodies into a JSON
  * array, which re-escapes their contents (quotes/backslashes), so we keep the
  * raw total well under the limit to leave generous headroom for escaping
  * overhead. A chunk larger than this is flushed as its own (unwrapped)
@@ -827,7 +827,7 @@ export class ResumableStream {
     // on the stored (JSON-escaped) encoding. The chunk is still broadcast to
     // live clients; only replay storage is skipped.
     const bodyBytes = storedChunkBytes(body);
-    if (bodyBytes > CHUNK_MAX_BYTES) {
+    if (bodyBytes > ROW_MAX_BYTES) {
       console.warn(
         `[ResumableStream] Skipping oversized chunk (${bodyBytes} bytes) ` +
           `to prevent SQLite row limit crash. Live clients still receive it.`

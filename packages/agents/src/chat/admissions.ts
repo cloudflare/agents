@@ -44,6 +44,7 @@
  * `@cloudflare/think`, not a public API.
  */
 
+import { ROW_PIECE_UNITS } from "../internal/platform-limits";
 import type { AgentToolSql } from "./agent-tool-run-store";
 import type { NormalizedMessageConcurrency } from "./submit-concurrency";
 
@@ -142,14 +143,6 @@ export interface ChatAdmissionStore {
 export const CHAT_ADMISSIONS_TABLE = "cf_agents_chat_admissions";
 
 /**
- * The longest piece of held-message JSON kept in one row. A JS string unit
- * is at most three bytes of UTF-8, so a piece stays under the 2 MB row
- * limit. Longer JSON (a message with large files) is split across rows of
- * the `_messages` table.
- */
-const HELD_MESSAGES_PIECE = 500_000;
-
-/**
  * A {@link ChatAdmissionStore} on the host's SQLite. The table is created on
  * first write, so an object that never takes a client request pays nothing
  * for it.
@@ -226,9 +219,9 @@ export function createChatAdmissionStore(
       const payload =
         record.payload === undefined ? null : JSON.stringify(record.payload);
       // The row holds the messages and the payload (client tools, body)
-      // together, so it is their combined size that must fit.
-      const split =
-        messages.length + (payload?.length ?? 0) > HELD_MESSAGES_PIECE;
+      // together, so it is their combined size that must fit. Longer JSON (a
+      // message with large files) goes to the pieces table.
+      const split = messages.length + (payload?.length ?? 0) > ROW_PIECE_UNITS;
       let count = 0;
       if (split) {
         withPieces.add(record.requestId);
@@ -237,7 +230,7 @@ export function createChatAdmissionStore(
           messages: record.messages,
           payload: record.payload ?? null
         });
-        for (const piece of splitPieces(both, HELD_MESSAGES_PIECE)) {
+        for (const piece of splitPieces(both, ROW_PIECE_UNITS)) {
           run(
             `insert into ${pieces} (request_id, piece, data) values (?, ?, ?)`,
             record.requestId,

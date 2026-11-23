@@ -24,6 +24,7 @@
  * RFC's "Cutover invariants" table) and MUST NOT change without a migration.
  */
 
+import { KV_DELETE_MAX_KEYS } from "../internal/platform-limits";
 import type {
   ChatRecoveryConfig,
   ChatRecoveryProgressContext,
@@ -280,8 +281,6 @@ export const DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE =
  * abandoned and swept so durable storage does not grow without bound.
  */
 export const CHAT_RECOVERY_INCIDENT_TTL_MS = 60 * 60 * 1000;
-/** Max keys per Durable Object KV `delete([...])` call. */
-export const KV_DELETE_MAX_KEYS = 128;
 /**
  * PRIMARY recovery bound (#1637): seal an incident that has made no forward
  * progress for this long. Keyed to `lastProgressAt`, which resets on every

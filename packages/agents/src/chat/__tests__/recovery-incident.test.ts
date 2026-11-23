@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { KV_DELETE_MAX_KEYS } from "../../internal/platform-limits";
 import type { ResolvedChatRecoveryConfig } from "../lifecycle";
 import {
   AGENT_TOOL_STREAM_PROGRESS_BUMP_THROTTLE_MS,
@@ -22,7 +23,6 @@ import {
   admitChatRecoveryAttempt,
   evaluateChatRecoveryIncident,
   finishChatRecoveryAttempt,
-  KV_DELETE_MAX_KEYS,
   listActiveChatRecoveryIncidents,
   readChatRecoveryProgress,
   resolveChatRecoveryConfig,
