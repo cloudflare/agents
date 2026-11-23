@@ -579,6 +579,20 @@ describe("AIChatAgent as an agent-tool child", () => {
       Date.now() + 1_000
     );
     expect(await restarted.oomStrikesForTest()).toBe(1);
+
+    // The facet starts again and re-sends its deadline, which knows nothing
+    // of the strike. A second root restart must still leave the run alone.
+    await restarted.facetRecoveryIncidentStatusForTest(
+      executing.childName,
+      executing.incidentId
+    );
+    await evictDurableObject(restarted as unknown as DurableObjectStub);
+    const again = await getParent(parentName);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(await again.facetWakeTimeForTest(runId)).toBeGreaterThan(
+      Date.now() + 1_000
+    );
+    expect(await again.oomStrikesForTest()).toBe(1);
   });
 
   it("seals a routed run whose failure lands after root detaches at the dispatch budget", async () => {
@@ -650,7 +664,10 @@ describe("AIChatAgent as an agent-tool child", () => {
     // claim deadline) starts it and drives what is due in one invocation.
     await evictDurableObject(parent as unknown as DurableObjectStub);
     const namespace = (env as Env).AIChatAgentToolParent;
-    await runDurableObjectAlarm(namespace.get(namespace.idFromName(name)));
+    // The alarm ran: the start came from it, not from the request below.
+    expect(
+      await runDurableObjectAlarm(namespace.get(namespace.idFromName(name)))
+    ).toBe(true);
     const restarted = await getParent(name);
 
     // The restarted root re-drives the facet's wake at once: the facet starts,

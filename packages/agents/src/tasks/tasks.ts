@@ -786,6 +786,15 @@ export class Tasks<
       return true;
     }
     const existing = this.lifecycle.jobs.get(jobId);
+    // A struck wake stays struck while its deadline holds: the facet's own
+    // startup re-sends that deadline without knowing of the strike.
+    if (
+      existing?.time === next &&
+      isTaskWakeJobPayload(existing.payload) &&
+      existing.payload.struck === true
+    ) {
+      struck = true;
+    }
     if (
       existing?.fn === WAKE_JOB_FN &&
       existing.time === next &&
@@ -849,6 +858,15 @@ export class Tasks<
       return true;
     }
     const existing = this.lifecycle.jobs.get(jobId);
+    // A struck wake stays struck while its deadline holds: the facet's own
+    // startup re-sends that deadline without knowing of the strike.
+    if (
+      existing?.time === next &&
+      isTaskWakeJobPayload(existing.payload) &&
+      existing.payload.struck === true
+    ) {
+      struck = true;
+    }
     if (
       existing?.fn === WAKE_JOB_FN &&
       existing.time === next &&
