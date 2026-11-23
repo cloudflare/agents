@@ -1,7 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
-  applyForwardedConnectionState,
+  CF_EVENT_LOGS_KEY,
   ensureConnectionWrapped,
+  setConnectionFlag,
+  setConnectionFlagWriter,
   getConnectionRawState,
   setConnectionProtocolEnabled
 } from "../websockets/connection-flags";
@@ -811,7 +813,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     });
 
     this.#connectionOperationTails.set(connectionId, completion);
-    if (operationName === "setState") {
+    if (operationName === "setState" || operationName === "setFlag") {
       this.#pendingStateWrites.set(
         connectionId,
         (this.#pendingStateWrites.get(connectionId) ?? 0) + 1
@@ -1045,8 +1047,20 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     if (!connection || !this.connectionHasChildTarget(connection)) {
       return null;
     }
-    applyForwardedConnectionState(connection, state);
+    ensureConnectionWrapped(connection);
+    connection.setState(state);
     return this.getForwardedState(connection);
+  }
+
+  /**
+   * Root-side: set a sub-agent socket's event-log subscriptions, the one
+   * flag a facet writes on its own (see `createBridgeConnection`).
+   */
+  setConnectionFlag(connectionId: string, key: string, value: unknown): void {
+    if (key !== CF_EVENT_LOGS_KEY) return;
+    const connection = this.#host._webSockets.getConnection(connectionId);
+    if (!connection || !this.connectionHasChildTarget(connection)) return;
+    setConnectionFlag(connection, key, value);
   }
 
   #connectionMetaForPath(
@@ -1137,6 +1151,41 @@ export class DynamicAgentsInternal extends LifecycleCapability {
         CF_SUB_AGENT_OUTER_URL_KEY
       ) === "string"
     );
+  }
+
+  /**
+   * Whether this Agent forwards `connection`'s messages to a sub-agent,
+   * by the same rule as `forwardWebSocketMessage` (a leading segment that
+   * names this Agent itself is skipped).
+   */
+  connectionRoutesToChild(connection: Connection): boolean {
+    ensureConnectionWrapped(connection);
+    const outerUri = this.#host._unsafe_getConnectionFlag(
+      connection,
+      CF_SUB_AGENT_OUTER_URL_KEY
+    );
+    const uri = typeof outerUri === "string" ? outerUri : connection.uri;
+    return !!uri && this.#childMatch(uri) !== null;
+  }
+
+  /**
+   * The sub-agent a connection URI routes to from here, skipping a leading
+   * segment that names this Agent itself; `null` when it ends here.
+   */
+  #childMatch(uri: string): ReturnType<typeof parseSubAgentPath> {
+    const ctx = this.#host.ctx as unknown as Partial<FacetCapableCtx>;
+    const knownClasses = ctx.exports ? Object.keys(ctx.exports) : undefined;
+    const match = parseSubAgentPath(uri, { knownClasses });
+    if (
+      !match ||
+      this.#host._ParentClass.name !== match.childClass ||
+      this.#host.name !== match.childName
+    ) {
+      return match;
+    }
+    const tailUri = new URL(uri);
+    tailUri.pathname = match.remainingPath;
+    return parseSubAgentPath(tailUri.toString(), { knownClasses });
   }
 
   connectionTargetsChild(connection: Connection): boolean {
@@ -1277,22 +1326,8 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       return { status: "dropped" };
     }
 
-    const ctx = this.#host.ctx as unknown as Partial<FacetCapableCtx>;
-    let match = parseSubAgentPath(uri, {
-      knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
-    });
+    const match = this.#childMatch(uri);
     if (!match) return { status: "no-match" };
-    if (
-      this.#host._ParentClass.name === match.childClass &&
-      this.#host.name === match.childName
-    ) {
-      const tailUri = new URL(uri);
-      tailUri.pathname = match.remainingPath;
-      match = parseSubAgentPath(tailUri.toString(), {
-        knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
-      });
-      if (!match) return { status: "no-match" };
-    }
 
     const { request } = options;
     let forwardReq = request;
@@ -1510,6 +1545,15 @@ export class DynamicAgentsInternal extends LifecycleCapability {
 
     stored.connection = connection;
     ensureConnectionWrapped(connection);
+    // The facet's event-log subscriptions go to the root as that one flag,
+    // so the root applies them, removal included, over any older full-state
+    // write from a facet this socket passes through.
+    setConnectionFlagWriter(connection, CF_EVENT_LOGS_KEY, (value, raw) => {
+      updateStoredState(raw);
+      owner.routeConnectionOperation(meta.id, "setFlag", (bridge) =>
+        bridge.setFlag(CF_EVENT_LOGS_KEY, value)
+      );
+    });
     return connection;
   }
 

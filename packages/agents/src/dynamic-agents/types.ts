@@ -58,6 +58,11 @@ export type DynamicAgentConnectionBridgeLike = {
   ): void | Promise<void>;
   close(code?: number, reason?: string): void | Promise<void>;
   setState(state: unknown): unknown | Promise<unknown>;
+  /**
+   * Set (or, with `undefined`, remove) one internal flag on the root
+   * socket, over whatever the root holds for it.
+   */
+  setFlag(key: string, value: unknown): void | Promise<void>;
   broadcast(
     ownerPath: ReadonlyArray<{ className: string; name: string }>,
     message: string | ArrayBuffer | ArrayBufferView,
@@ -65,7 +70,11 @@ export type DynamicAgentConnectionBridgeLike = {
   ): void | Promise<void>;
 };
 
-export type DynamicAgentConnectionOperationName = "send" | "setState" | "close";
+export type DynamicAgentConnectionOperationName =
+  | "send"
+  | "setState"
+  | "setFlag"
+  | "close";
 
 export type StoredDynamicAgentConnection = {
   meta: DynamicAgentConnectionMeta;
@@ -175,6 +184,11 @@ export type RootFacetRpcSurface = {
     connectionId: string,
     state: unknown
   ): Promise<unknown>;
+  _cf_setSubAgentConnectionFlag(
+    connectionId: string,
+    key: string,
+    value: unknown
+  ): Promise<void>;
   _cf_closeSubAgentConnectionsForPrefix(
     prefix: ReadonlyArray<AgentPathStep>,
     code: number,

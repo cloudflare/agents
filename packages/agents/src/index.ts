@@ -1304,7 +1304,7 @@ export class Agent<
     // forwards to a sub-agent of its own.
     setEventLogConnections(this._webSockets, () =>
       [...this.getConnections()].filter(
-        (connection) => !this._dynamicAgents.connectionTargetsChild(connection)
+        (connection) => !this._dynamicAgents.connectionRoutesToChild(connection)
       )
     );
     // Agent's WebSocket connections ride the WebSockets capability —
@@ -2832,8 +2832,17 @@ export class Agent<
     return this._dynamicAgents.setConnectionState(connectionId, state);
   }
 
+  async _cf_setSubAgentConnectionFlag(
+    connectionId: string,
+    key: string,
+    value: unknown
+  ): Promise<void> {
+    await this.__unsafe_ensureInitialized();
+    this._dynamicAgents.setConnectionFlag(connectionId, key, value);
+  }
+
   protected _cf_connectionTargetsSubAgent(connection: Connection): boolean {
-    return this._dynamicAgents.connectionTargetsChild(connection);
+    return this._dynamicAgents.connectionRoutesToChild(connection);
   }
 
   /**

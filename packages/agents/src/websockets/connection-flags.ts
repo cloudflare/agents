@@ -204,6 +204,28 @@ export function getConnectionFlag(
  * the user state as it was, or `null`. User state of any shape keeps its
  * shape.
  */
+/**
+ * Writers for one flag of a connection whose state lives elsewhere (a
+ * sub-agent's bridged connection, whose socket the root owns): they get the
+ * change and the resulting raw state.
+ */
+const flagWriters = new WeakMap<
+  Connection,
+  { key: string; write: (value: unknown, raw: unknown) => void }
+>();
+
+/**
+ * Send changes of `connection`'s flag `key` to `write` instead of writing
+ * its state, so the owner of the real socket applies exactly that flag.
+ */
+export function setConnectionFlagWriter(
+  connection: Connection,
+  key: string,
+  write: (value: unknown, raw: unknown) => void
+): void {
+  flagWriters.set(connection, { key, write });
+}
+
 export function setConnectionFlag(
   connection: Connection,
   key: string,
@@ -215,26 +237,10 @@ export function setConnectionFlag(
   const flags = isRecord(raw) ? extractInternalFlags(raw) : {};
   if (value === undefined) delete flags[key];
   else flags[key] = value;
-  accessors.setRaw(withFlags(userState(raw), flags) ?? null);
-}
-
-/**
- * Apply state a sub-agent wrote back through a bridged connection: as
- * `setState`, which keeps the root's flags over the ones it brings, except
- * the flag the sub-agent owns for a connection that ends at it, its
- * event-log subscriptions, which it may also remove.
- */
-export function applyForwardedConnectionState(
-  connection: Connection,
-  state: unknown
-): void {
-  ensureConnectionWrapped(connection);
-  connection.setState(state);
-  setConnectionFlag(
-    connection,
-    CF_EVENT_LOGS_KEY,
-    isRecord(state) ? state[CF_EVENT_LOGS_KEY] : undefined
-  );
+  const next = withFlags(userState(raw), flags) ?? null;
+  const writer = flagWriters.get(connection);
+  if (writer?.key === key) writer.write(value, next);
+  else accessors.setRaw(next);
 }
 
 export function isConnectionReadonly(connection: Connection): boolean {

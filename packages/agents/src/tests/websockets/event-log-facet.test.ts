@@ -251,4 +251,38 @@ describe("event log in a facet", () => {
     innerTab.ws.close();
     outerTab.ws.close();
   });
+  it("sends live events to a socket whose path names the same facet twice, as its messages are routed", async () => {
+    const parentName = unique();
+    const name = unique();
+    // Routing skips a segment that names the Agent itself, so this socket
+    // ends at the first `event-log-sub-agent/<name>`.
+    const tab = await connect(
+      `/agents/test-sub-agent-parent/${parentName}/sub/event-log-sub-agent/${name}/sub/event-log-sub-agent/${name}`
+    );
+    tab.subscribe();
+    await tab.until(EVENT_LOG_RESYNC);
+    tab.ws.send("publish:one");
+    expect(seqs(await tab.until(EVENT_LOG_EVENTS))).toEqual([1]);
+    tab.ws.close();
+  });
+
+  it("keeps a nested follower's subscription through the messages its parent facet relays", async () => {
+    const parentName = unique();
+    const outer = unique();
+    const inner = unique();
+    const base = `/agents/test-sub-agent-parent/${parentName}/sub/event-log-sub-agent/${outer}`;
+    const innerTab = await connect(`${base}/sub/event-log-sub-agent/${inner}`);
+    innerTab.ws.send("noop");
+    innerTab.subscribe();
+    // Every relayed message makes the outer facet write the socket's whole
+    // state to the root. The subscription travels as its own flag write,
+    // which those full-state writes cannot undo, whatever order they land
+    // in (the pool lands them in order; a deployment need not).
+    for (let i = 0; i < 5; i++) innerTab.ws.send("noop");
+    await innerTab.until(EVENT_LOG_RESYNC);
+    innerTab.ws.send("publish:one");
+    innerTab.ws.send("publish:two");
+    expect(seqs(await innerTab.until(EVENT_LOG_EVENTS, 2))).toEqual([1, 2]);
+    innerTab.ws.close();
+  });
 });
