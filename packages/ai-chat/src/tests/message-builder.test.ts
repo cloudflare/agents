@@ -868,6 +868,53 @@ describe("applyChunkToParts", () => {
     });
   });
 
+  describe("toolMetadata", () => {
+    const toolMetadata = { placement: "answer" };
+    const find = (parts: MessageParts) =>
+      parts[0] as unknown as Record<string, unknown>;
+
+    it("is kept from tool-input-start through tool-input-available", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-start",
+        toolCallId: "c1",
+        toolName: "search",
+        toolMetadata
+      });
+      expect(find(parts).toolMetadata).toEqual(toolMetadata);
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "c1",
+        toolName: "search",
+        input: {},
+        toolMetadata: { placement: "steps" }
+      });
+      expect(find(parts).toolMetadata).toEqual({ placement: "steps" });
+    });
+
+    it("is kept on a new tool-input-available and tool-input-error part", () => {
+      const a = makeParts();
+      applyChunkToParts(a, {
+        type: "tool-input-available",
+        toolCallId: "c1",
+        toolName: "search",
+        input: {},
+        toolMetadata
+      });
+      expect(find(a).toolMetadata).toEqual(toolMetadata);
+      const b = makeParts();
+      applyChunkToParts(b, {
+        type: "tool-input-error",
+        toolCallId: "c1",
+        toolName: "search",
+        input: {},
+        errorText: "bad",
+        toolMetadata
+      });
+      expect(find(b).toolMetadata).toEqual(toolMetadata);
+    });
+  });
+
   describe("tool provider metadata (callProviderMetadata, providerExecuted, title)", () => {
     it("tool-input-available preserves callProviderMetadata from providerMetadata", () => {
       const parts = makeParts();
