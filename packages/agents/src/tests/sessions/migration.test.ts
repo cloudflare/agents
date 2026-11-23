@@ -123,7 +123,7 @@ describe("Sessions legacy migration", () => {
       ]);
       expect(
         await instance.kvGet<number>("cf_agents:sessions_schema_version")
-      ).toBe(1);
+      ).toBe(2);
 
       // Every lifted source is dropped once its rows are verified present.
       // Keeping them would leave the object storing its history twice, and a

@@ -374,7 +374,15 @@ interface MediaEvictionPassHost {
   agedRowsHiddenFromCache(): boolean;
   /** Stored content bytes the last hydration measured, if known. */
   storedBytes(): number | null;
-  rowStats(): Promise<ReadonlyArray<{ id: string; bytes: number }>>;
+  /** Rows on the stored path, rows under an overlay included. */
+  storedPathLength(): Promise<number>;
+  /** A page of the stored path from the newest row back, with sizes. */
+  storedPathRows(options: {
+    skip: number;
+    limit: number;
+    measure: true;
+    after?: string;
+  }): Promise<ReadonlyArray<{ id: string; bytes: number }>>;
   readMessage(id: string): Promise<UIMessage | null>;
   /**
    * A file writer for one pass, opened once at the start of the pass so every
@@ -390,6 +398,9 @@ interface MediaEvictionPassHost {
    */
   queueRouted(): Promise<unknown>;
 }
+
+/** Aged rows one stored-path read returns. */
+const MEDIA_EVICTION_PAGE_ROWS = 256;
 
 /** One pass at a time: requests coalesce on this job id. */
 const PASS_JOB_ID = "think-media-eviction:pass";
@@ -564,47 +575,62 @@ export class MediaEvictionPasses extends LifecycleCapability {
     };
     try {
       const files = this.#host.openFiles();
-      const stats = await this.#host.rowStats();
-      const aged = stats.slice(
-        0,
+      // The aged rows are the stored path past the newest `keep`, read a
+      // page at a time from the cutoff back, so a pass holds one page
+      // whatever the path's length.
+      const total = await this.#host.storedPathLength();
+      const keep =
+        total -
         mediaEvictionCutoff(
-          stats.length,
+          total,
           config.keepRecentMessages,
           this.#host.truncationStep()
-        )
-      );
+        );
 
       let processed = 0;
-      for (const row of aged) {
-        // The stored row is not large enough to hold an evictable payload —
-        // skip without reading it. A rewritten row drops below this line and
-        // is skipped by every later pass.
-        if (row.bytes < config.minPartBytes) continue;
-        if (processed >= config.maxRowsPerPass) {
-          totals.backlogRemains = true;
-          break;
-        }
-        processed++;
-
-        const message = await this.#host.readMessage(row.id);
-        if (!message) continue;
-
-        const result = await evictMediaFromMessage(message, {
-          minPartBytes: config.minPartBytes,
-          write: async (index, bytes, mediaType) => {
-            const path = evictedFilePath(message.id, index, mediaType);
-            await files.write(path, bytes);
-            return path;
+      // The first page skips the newest `keep` rows; each later one starts
+      // below the last row read, so a pass walks the path once.
+      let after: string | undefined;
+      pages: for (let read = keep; read < total;) {
+        const page = await this.#host.storedPathRows(
+          after === undefined
+            ? { skip: keep, limit: MEDIA_EVICTION_PAGE_ROWS, measure: true }
+            : { skip: 0, limit: MEDIA_EVICTION_PAGE_ROWS, measure: true, after }
+        );
+        if (page.length === 0) break;
+        read += page.length;
+        after = page[page.length - 1].id;
+        for (const row of page) {
+          // The stored row is not large enough to hold an evictable payload —
+          // skip without reading it. A rewritten row drops below this line and
+          // is skipped by every later pass.
+          if (row.bytes < config.minPartBytes) continue;
+          if (processed >= config.maxRowsPerPass) {
+            totals.backlogRemains = true;
+            break pages;
           }
-        });
-        if (!result.changed) continue;
+          processed++;
 
-        // The rewritten row no longer carries the payload, so the bytes now
-        // exist only as the Workspace file.
-        await this.#host.updateMessage(result.message);
-        totals.messages++;
-        totals.parts += result.parts;
-        totals.bytes += result.bytes;
+          const message = await this.#host.readMessage(row.id);
+          if (!message) continue;
+
+          const result = await evictMediaFromMessage(message, {
+            minPartBytes: config.minPartBytes,
+            write: async (index, bytes, mediaType) => {
+              const path = evictedFilePath(message.id, index, mediaType);
+              await files.write(path, bytes);
+              return path;
+            }
+          });
+          if (!result.changed) continue;
+
+          // The rewritten row no longer carries the payload, so the bytes now
+          // exist only as the Workspace file.
+          await this.#host.updateMessage(result.message);
+          totals.messages++;
+          totals.parts += result.parts;
+          totals.bytes += result.bytes;
+        }
       }
 
       const storedBytes = this.#host.storedBytes();

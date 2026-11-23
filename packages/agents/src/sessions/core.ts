@@ -17,7 +17,7 @@ import { AttachmentStore } from "./attachment-store";
 import { splitContent } from "./chunking";
 import { COMPACTION_PREFIX } from "./compaction-helpers";
 import type { SessionsIo } from "./io";
-import { overlayMessage, planOverlays, type OverlaySpan } from "./overlays";
+import { overlayMessage } from "./overlays";
 import {
   estimateAttachmentTokens,
   estimatedDataUrlBytes,
@@ -54,11 +54,82 @@ const HISTORY_CONTENT_CHUNK_BYTES = 4 * 1024 * 1024;
 const NEWEST_FIRST_WINDOW_ROWS = 8;
 
 /**
- * Deepest path a history read follows: the root row is depth 0, so a read
- * returns at most this many rows plus one. A longer branch shows its most
- * recent rows only, and `getRecentHistory` reports that as truncated.
+ * The compactions table, keyed by where an overlay ends, so "does an
+ * overlay end at this row" is a primary-key probe. `resume_id` is the row
+ * the visible path continues at below the overlay: `''` for the root, NULL
+ * while not yet derived (a row written by an earlier release). An overlay
+ * applies only once `resume_id` is known. Same name and the same columns as
+ * before schema version 2 plus one, so an earlier release still reads and
+ * writes it after a rollback.
  */
-const MAX_PATH_DEPTH = 10_000;
+const COMPACTIONS_COLUMNS = `
+  session_id TEXT NOT NULL,
+  to_message_id TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  id TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  from_message_id TEXT NOT NULL,
+  resume_id TEXT,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (session_id, to_message_id, seq)`;
+
+/** Steps one walk statement takes before the reader asks for the next batch. */
+const WALK_BATCH_STEPS = 512;
+
+/** First batch of a byte-budgeted read: most budgets stop within it. */
+const RECENT_FIRST_BATCH_STEPS = 64;
+
+/**
+ * Bound on root-first whole-path reads (`getHistory()`, `history()`,
+ * `getHistoryRowStats()`). They hold one entry per visible message before
+ * any content is read; 200,000 keeps that list near 16 MiB in a 128 MB
+ * isolate that a facet tree shares. Past it the read throws: it never
+ * returns a shorter path. Newest-first and byte-budgeted reads hold only
+ * what they return and have no bound.
+ */
+const MAX_ROOT_FIRST_STEPS = 200_000;
+
+/**
+ * Ids bound per statement in `deleteMessages`. One bound value holds about
+ * 300,000 ids before `SQLITE_TOOBIG` in production (measured); older local
+ * runtimes cap a value at about 2.2 MB, which 20,000 ids stay well under.
+ */
+const DELETE_BATCH_IDS = 20_000;
+
+/**
+ * The error a root-first read throws past `MAX_ROOT_FIRST_STEPS`. Named
+ * `SessionPathTooLongError` so a caller can recognise it by `name`; the
+ * message says how to read the path instead.
+ */
+function pathTooLong(leafId: string | null | undefined): Error {
+  const error = new Error(
+    `Sessions: the path${leafId ? ` to "${leafId}"` : ""} holds more than ` +
+      `${MAX_ROOT_FIRST_STEPS.toLocaleString("en-US")} visible messages, too many to read root-first. ` +
+      "Read it newest-first with history({ newestFirst: true }), use " +
+      "getRecentHistory(), or compact the session."
+  );
+  error.name = "SessionPathTooLongError";
+  return error;
+}
+
+/**
+ * SQL for the bytes a message row costs once hydrated: the row, its
+ * continuation rows, and the payloads it points at, charged at the size
+ * they take once inlined, so a byte budget bounds real memory. `am` is the
+ * message row.
+ */
+const ROW_BYTES_SQL = `(LENGTH(CAST(am.content AS BLOB)) + CASE WHEN am.content_chunks = 0 THEN 0
+    ELSE COALESCE((
+      SELECT SUM(LENGTH(CAST(c.content AS BLOB)))
+      FROM cf_agents_session_message_chunks c
+      WHERE c.session_id = am.session_id AND c.id = am.id
+    ), 0) END
+  + COALESCE((
+      SELECT SUM((meta.bytes + 2) / 3 * 4)
+      FROM cf_agents_session_attachment_refs r
+      JOIN cf_agents_session_attachment_meta meta ON meta.hash = r.hash
+      WHERE r.session_id = am.session_id AND r.message_id = am.id
+    ), 0))`;
 
 /** Bounds for one window of a legacy flat-table lift: rows and summed bytes. */
 const LEGACY_LIFT_WINDOW_ROWS = 25;
@@ -99,23 +170,47 @@ type PathRow = { id: string; bytes: number };
 type Tail = { leafId: string | null; nextSeq: number };
 
 /**
- * The memoised context-size estimate for a session's active path: the leaf it
- * was computed for, the ids on that path whose own estimate counts (rows under
- * a compaction overlay are replaced by the summary and do not), and the total.
- * A tail append and an update of a counted row adjust it in place; every other
- * write (branch append, delete, clear, compaction, import) drops it, and the
- * next `tokenEstimate` re-derives it from one path walk.
+ * The memoised context-size estimate for a session: the leaf it was
+ * computed for and the total along the visible walk. A tail append and an
+ * update of that leaf adjust it in place; every other write drops it, and
+ * the next `tokenEstimate` re-derives it from one walk. Two fields per
+ * session, whatever the path length.
  */
-type PathTokens = {
-  leafId: string | null;
-  counted: Set<string>;
-  total: number;
-  /**
-   * Stored rows the walk visited, hidden overlay rows included, since the
-   * path cap counts those: the memo is only extended while under the cap.
-   */
-  depth: number;
+type PathTokens = { leafId: string | null; total: number };
+
+/** One step of the visible walk (see `SessionsCore.#walk`). */
+type VisibleStep = {
+  id: string;
+  role: string;
+  tokenEstimate: number;
+  /** The `seq` of the overlay that ends at this row and applies, or null. */
+  overlaySeq: number | null;
+  overlayId: string | null;
+  /** Where the walk continues: the parent, or the overlay's `resume_id`. */
+  next: string | null;
+  /** A legacy stored overlay row: walked through, never shown. */
+  hidden: boolean;
+  /** Hydrated size, when the walk measured. */
+  bytes?: number;
 };
+
+type CompactionRow = {
+  id: string;
+  summary: string;
+  from_message_id: string;
+  to_message_id: string;
+  created_at: number;
+};
+
+function toStoredCompaction(row: CompactionRow): StoredCompaction {
+  return {
+    id: row.id,
+    summary: row.summary,
+    fromMessageId: row.from_message_id,
+    toMessageId: row.to_message_id,
+    createdAt: new Date(row.created_at).toISOString()
+  };
+}
 
 export type UpdateOutcome = "missing" | "unchanged" | "updated";
 
@@ -133,11 +228,6 @@ export class SessionsCore {
   readonly #listeners = new Set<SessionChangeListener>();
   readonly #tails = new Map<string, Tail>();
   readonly #pathTokens = new Map<string, PathTokens>();
-  /**
-   * Per session, per overlay id: whether its start is an ancestor of its
-   * end. One boolean per stored overlay; cleared by delete and clear.
-   */
-  readonly #overlayAncestry = new Map<string, Map<string, boolean>>();
   readonly #attachments: AttachmentStore;
   #tablesEnsured = false;
   /** True once the FTS index exists; it is built on the first `search()`. */
@@ -185,16 +275,7 @@ export class SessionsCore {
       []
     );
     this.io.sqlWrite(
-      `CREATE TABLE IF NOT EXISTS cf_agents_session_compactions (
-        session_id TEXT NOT NULL,
-        id TEXT NOT NULL,
-        seq INTEGER NOT NULL,
-        summary TEXT NOT NULL,
-        from_message_id TEXT NOT NULL,
-        to_message_id TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        PRIMARY KEY (session_id, id)
-      ) WITHOUT ROWID`,
+      `CREATE TABLE IF NOT EXISTS cf_agents_session_compactions (${COMPACTIONS_COLUMNS}) WITHOUT ROWID`,
       []
     );
     this.io.sqlWrite(
@@ -277,6 +358,109 @@ export class SessionsCore {
   }
 
   /**
+   * Schema version 2: rebuild the compactions table keyed by its end, with
+   * `resume_id` (NULL until derived). Every row is copied, summaries
+   * included. A no-op on a table that already has the column, so a start
+   * interrupted after the rebuild repeats nothing.
+   */
+  rebuildCompactions(): void {
+    const rebuilt =
+      this.io.sql<{ one: number }>(
+        `SELECT 1 AS one FROM pragma_table_info('cf_agents_session_compactions')
+         WHERE name = 'resume_id'`,
+        []
+      ).length > 0;
+    if (rebuilt) return;
+    this.io.transaction(() => {
+      this.io.sqlWrite(
+        `CREATE TABLE cf_agents_session_compactions_v2 (${COMPACTIONS_COLUMNS}) WITHOUT ROWID`,
+        []
+      );
+      this.io.sqlWrite(
+        `INSERT INTO cf_agents_session_compactions_v2
+          (session_id, to_message_id, seq, id, summary, from_message_id, resume_id, created_at)
+         SELECT session_id, to_message_id, seq, id, summary, from_message_id, NULL, created_at
+         FROM cf_agents_session_compactions`,
+        []
+      );
+      this.io.sqlWrite("DROP TABLE cf_agents_session_compactions", []);
+      this.io.sqlWrite(
+        "ALTER TABLE cf_agents_session_compactions_v2 RENAME TO cf_agents_session_compactions",
+        []
+      );
+    });
+  }
+
+  /**
+   * Derive `resume_id` for overlays that have none: rows from before schema
+   * version 2, and rows an earlier release wrote after a rollback. Runs on
+   * every start; normally it finds no row. An overlay is derived only when
+   * its start and end rows exist and the start is not newer than the end;
+   * for the newest pending overlay of each session the start must also be
+   * an ancestor of the end. The rest stay NULL and never apply, as they
+   * never applied before. Nothing is deleted: `getCompactions()` lists them,
+   * and their count is reported in `session:overlays:unresolved`.
+   */
+  resolveOverlays(): void {
+    const pending = this.io.sql<{
+      session_id: string;
+      to_message_id: string;
+      seq: number;
+      from_message_id: string;
+      from_seq: number | null;
+      from_parent: string | null;
+      to_seq: number | null;
+    }>(
+      `SELECT c.session_id, c.to_message_id, c.seq, c.from_message_id,
+         f.seq AS from_seq, f.parent_id AS from_parent, t.seq AS to_seq
+       FROM cf_agents_session_compactions c
+       LEFT JOIN cf_agents_session_messages f
+         ON f.session_id = c.session_id AND f.id = c.from_message_id
+       LEFT JOIN cf_agents_session_messages t
+         ON t.session_id = c.session_id AND t.id = c.to_message_id
+       WHERE c.resume_id IS NULL`,
+      []
+    );
+    if (pending.length === 0) return;
+    const newest = new Map<string, number>();
+    for (const row of pending) {
+      newest.set(
+        row.session_id,
+        Math.max(newest.get(row.session_id) ?? 0, row.seq)
+      );
+    }
+    // The checks are reads (the ancestry walk can cover a long span): they
+    // run first, and the transaction holds only the writes.
+    const resolved = pending.filter(
+      (row) =>
+        row.from_seq !== null &&
+        row.to_seq !== null &&
+        row.from_seq <= row.to_seq &&
+        (newest.get(row.session_id) !== row.seq ||
+          row.from_message_id === row.to_message_id ||
+          this.#isAncestor(
+            row.session_id,
+            { id: row.from_message_id, seq: row.from_seq },
+            row.to_message_id
+          ))
+    );
+    const unresolved = pending.length - resolved.length;
+    this.io.transaction(() => {
+      for (const row of resolved) {
+        this.io.sqlWrite(
+          `UPDATE cf_agents_session_compactions SET resume_id = ?
+           WHERE session_id = ? AND to_message_id = ? AND seq = ?`,
+          [row.from_parent ?? "", row.session_id, row.to_message_id, row.seq]
+        );
+        this.#pathTokens.delete(row.session_id);
+      }
+    });
+    if (unresolved > 0) {
+      this.io.emit("session:overlays:unresolved", { count: unresolved });
+    }
+  }
+
+  /**
    * Lift the legacy `assistant_*` message and compaction tables.
    *
    * The copy is pure SQL, so SQLite streams it rather than materializing rows
@@ -290,7 +474,6 @@ export class SessionsCore {
    */
   migrateLegacy(): boolean {
     this.#pathTokens.clear();
-    this.#overlayAncestry.clear();
     let complete = true;
     const drop = (name: string): void => {
       if (this.#tableExists(name)) this.io.sqlWrite(`DROP TABLE ${name}`, []);
@@ -752,349 +935,283 @@ export class SessionsCore {
     return result;
   }
 
+  // ── Reads ────────────────────────────────────────────────────────────────
+  //
+  // What the model sees is resolved from the leaf towards the root. At each
+  // row the walk asks whether an overlay ends there (the newest one whose
+  // `resume_id` is known). If one does, it yields the overlay's summary and
+  // continues at `resume_id`, the row below the overlay. Otherwise it yields
+  // the row and continues at its parent. Nothing below an overlay is read,
+  // so a read costs the visible path, not the stored history, and no depth
+  // bound is needed: `seq` falls at every step, including the jump.
+
   /**
-   * The active branch path as content-free rows, root → leaf. Recurses over
-   * (id, parent_id) only — carrying content through the recursive queue
-   * materializes the transcript several times inside SQLite (#1710).
-   * `bytes` counts the message row, its continuation rows, AND the payloads
-   * it points at, charged at the size they take once inlined, so a byte
-   * budget over these rows bounds real hydrated memory.
+   * One batch of the visible walk: at most `maxSteps` steps from `startId`
+   * towards the root, leaf-back. Ids, roles and stamped estimates only;
+   * content never rides the recursion (#1710). With `measure`, each step
+   * also carries its hydrated size: the row, its continuation rows and the
+   * payloads it points at (inlined size), or an overlay's summary.
    */
-  pathRowStats(sessionId: string, leafId?: string | null): SessionRowStat[] {
-    return this.#pathRows(sessionId, leafId).rows;
+  #walk(
+    sessionId: string,
+    startId: string,
+    maxSteps: number,
+    measure: boolean
+  ): VisibleStep[] {
+    const overlayJoin = (
+      row: string
+    ) => `LEFT JOIN cf_agents_session_compactions o
+        ON o.session_id = ?1 AND o.to_message_id = ${row}.id
+          AND o.resume_id IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM cf_agents_session_compactions n
+            WHERE n.session_id = o.session_id
+              AND n.to_message_id = o.to_message_id
+              AND n.resume_id IS NOT NULL AND n.seq > o.seq)`;
+    const next = `CASE WHEN o.seq IS NULL THEN m.parent_id
+        ELSE NULLIF(o.resume_id, '') END`;
+    // The row's stored length and chunk count ride the recursion as numbers;
+    // content never does (#1710). With them the final select needs no second
+    // lookup of the message row.
+    const measured = measure
+      ? `, CASE WHEN walk.overlay_seq IS NOT NULL THEN (
+            SELECT LENGTH(CAST(c.summary AS BLOB))
+            FROM cf_agents_session_compactions c
+            WHERE c.session_id = ?1
+              AND c.to_message_id = walk.id AND c.seq = walk.overlay_seq)
+          ELSE walk.length + CASE WHEN walk.chunks = 0 THEN 0
+            ELSE COALESCE((
+              SELECT SUM(LENGTH(CAST(k.content AS BLOB)))
+              FROM cf_agents_session_message_chunks k
+              WHERE k.session_id = ?1 AND k.id = walk.id
+            ), 0) END
+          + COALESCE((
+              SELECT SUM((meta.bytes + 2) / 3 * 4)
+              FROM cf_agents_session_attachment_refs r
+              JOIN cf_agents_session_attachment_meta meta ON meta.hash = r.hash
+              WHERE r.session_id = ?1 AND r.message_id = walk.id
+            ), 0) END AS bytes`
+      : "";
+    const row = (m: string) =>
+      measure
+        ? `LENGTH(CAST(${m}.content AS BLOB)), ${m}.content_chunks`
+        : "0, 0";
+    // A recursive CTE yields its rows in the order it generates them, which
+    // is the walk's order: no sort.
+    const steps = this.io.sql<VisibleStep>(
+      `WITH RECURSIVE walk(id, role, token_estimate, overlay_seq, overlay_id, next, length, chunks, step) AS (
+        SELECT m.id, m.role, m.token_estimate, o.seq, o.id, ${next}, ${row("m")}, 0
+        FROM cf_agents_session_messages m
+        ${overlayJoin("m")}
+        WHERE m.session_id = ?1 AND m.id = ?2
+        UNION ALL
+        SELECT m.id, m.role, m.token_estimate, o.seq, o.id, ${next}, ${row("m")}, walk.step + 1
+        FROM walk
+        CROSS JOIN cf_agents_session_messages m
+          ON m.session_id = ?1 AND m.id = walk.next
+        ${overlayJoin("m")}
+        WHERE walk.step + 1 < ?3
+      )
+      SELECT walk.id AS id, walk.role AS role,
+        walk.token_estimate AS tokenEstimate,
+        walk.overlay_seq AS overlaySeq, walk.overlay_id AS overlayId,
+        walk.next AS next
+        ${measured}
+      FROM walk`,
+      [sessionId, startId, maxSteps]
+    );
+    // Legacy stored overlay rows are rare and prefixed: checked here, so the
+    // walk never probes the overlay table by id for an ordinary row.
+    const hidden = this.#hiddenOverlayIds(
+      sessionId,
+      steps.filter((step) => step.overlaySeq === null).map((step) => step.id)
+    );
+    for (const step of steps) step.hidden = hidden.has(step.id);
+    return steps;
   }
 
   /**
-   * `pathRowStats` plus what the walk itself saw: the path cap counts stored
-   * rows, hidden overlay rows included, so whether the walk was cut short
-   * is judged from the unfiltered path. `cut` is true when the oldest row
-   * walked still names a parent: the rows returned do not reach the root.
-   *
-   * The join reads the path first (`CROSS JOIN` fixes SQLite's loop order):
-   * left to the planner, the message table is the outer loop and every row
-   * of the session is scanned on each read.
+   * The visible walk from `leafId` (default: the latest leaf) in batches,
+   * leaf-back. The first batch holds `firstBatch` steps and later ones grow
+   * to `WALK_BATCH_STEPS`, so a reader that stops early pays for little
+   * more than it took. The walk ends at the root.
    */
-  #pathRows(
+  *#walkBatches(
     sessionId: string,
-    leafId?: string | null
-  ): { rows: SessionRowStat[]; walked: number; cut: boolean } {
+    leafId: string | null | undefined,
+    measure: boolean,
+    firstBatch = WALK_BATCH_STEPS
+  ): Generator<VisibleStep[], void, undefined> {
+    let next = this.#resolveLeafId(sessionId, leafId);
+    let size = firstBatch;
+    while (next !== null) {
+      const batch = this.#walk(sessionId, next, size, measure);
+      if (batch.length === 0) return;
+      yield batch;
+      next = batch[batch.length - 1].next;
+      size = Math.min(size * 4, WALK_BATCH_STEPS);
+    }
+  }
+
+  /**
+   * Every visible step from the leaf, root → leaf, for readers that must
+   * start at the root. They hold one step per visible message before any
+   * content is read, so the list is bounded: past `MAX_ROOT_FIRST_STEPS`
+   * the read throws, and never returns a shorter path.
+   */
+  #visiblePath(
+    sessionId: string,
+    leafId: string | null | undefined,
+    measure: boolean
+  ): VisibleStep[] {
+    const steps: VisibleStep[] = [];
+    for (const batch of this.#walkBatches(sessionId, leafId, measure)) {
+      for (const step of batch) if (!step.hidden) steps.push(step);
+      if (steps.length > MAX_ROOT_FIRST_STEPS) {
+        throw pathTooLong(leafId);
+      }
+    }
+    return steps.reverse();
+  }
+
+  /** The stored overlay a walk step applied. */
+  #overlayAt(
+    sessionId: string,
+    step: { id: string; overlaySeq: number | null }
+  ): StoredCompaction {
+    const [row] = this.io.sql<CompactionRow>(
+      `SELECT id, summary, from_message_id, to_message_id, created_at
+       FROM cf_agents_session_compactions
+       WHERE session_id = ? AND to_message_id = ? AND seq = ?`,
+      [sessionId, step.id, step.overlaySeq]
+    );
+    return toStoredCompaction(row);
+  }
+
+  /**
+   * The raw stored path, root → leaf, as content-free rows: every row on
+   * it, rows under an overlay included, legacy hidden overlay rows left
+   * out. For callers that count stored rows (retention, fork). Root-first,
+   * so it is bounded like `#visiblePath`.
+   */
+  pathRowStats(sessionId: string, leafId?: string | null): SessionRowStat[] {
     const leaf = this.#resolveLeafId(sessionId, leafId);
-    if (!leaf) return { rows: [], walked: 0, cut: false };
-    const walked = this.io.sql<
-      SessionRowStat & { hidden: number; parentId: string | null }
-    >(
+    if (!leaf) return [];
+    const walked = this.io.sql<SessionRowStat>(
       `WITH RECURSIVE path(id, parent_id, depth) AS (
         SELECT id, parent_id, 0 FROM cf_agents_session_messages
         WHERE session_id = ? AND id = ?
         UNION ALL
-        SELECT m.id, m.parent_id, p.depth + 1 FROM cf_agents_session_messages m
-        JOIN path p ON m.id = p.parent_id
-        WHERE m.session_id = ? AND p.depth < ${MAX_PATH_DEPTH}
+        SELECT m.id, m.parent_id, p.depth + 1 FROM path p
+        CROSS JOIN cf_agents_session_messages m
+          ON m.session_id = ? AND m.id = p.parent_id
+        WHERE p.depth < ${MAX_ROOT_FIRST_STEPS}
       )
-      SELECT path.id AS id, am.role AS role,
-        LENGTH(CAST(am.content AS BLOB)) + CASE WHEN am.content_chunks = 0 THEN 0
-          ELSE COALESCE((
-            SELECT SUM(LENGTH(CAST(c.content AS BLOB)))
-            FROM cf_agents_session_message_chunks c
-            WHERE c.session_id = am.session_id AND c.id = am.id
-          ), 0) END
-        + COALESCE((
-            SELECT SUM((meta.bytes + 2) / 3 * 4)
-            FROM cf_agents_session_attachment_refs r
-            JOIN cf_agents_session_attachment_meta meta ON meta.hash = r.hash
-            WHERE r.session_id = am.session_id AND r.message_id = am.id
-          ), 0) AS bytes,
-        am.token_estimate AS tokenEstimate,
-        ${hiddenOverlayRowSql("path.id", "am.session_id")} AS hidden,
-        path.parent_id AS parentId
+      SELECT path.id AS id, am.role AS role, ${ROW_BYTES_SQL} AS bytes,
+        am.token_estimate AS tokenEstimate
       FROM path CROSS JOIN cf_agents_session_messages am
         ON am.session_id = ? AND am.id = path.id
       ORDER BY path.depth DESC`,
       [sessionId, leaf, sessionId, sessionId]
     );
-    const rows: SessionRowStat[] = [];
-    for (const { hidden, parentId: _parentId, ...row } of walked) {
-      if (!hidden) rows.push(row);
+    if (walked.length > MAX_ROOT_FIRST_STEPS) {
+      throw pathTooLong(leafId);
     }
-    return {
-      rows,
-      walked: walked.length,
-      cut: walked[0] !== undefined && walked[0].parentId !== null
-    };
+    const hidden = this.#hiddenOverlayIds(
+      sessionId,
+      walked.map((row) => row.id)
+    );
+    return hidden.size === 0
+      ? walked
+      : walked.filter((row) => !hidden.has(row.id));
   }
 
   /**
-   * The active branch path as ids alone, root → leaf. The cheapest walk the
-   * tree allows — one row per step, following `parent_id` by primary key —
-   * for readers that will hydrate only a few rows and do not need the sizes
-   * `pathRowStats` charges per row.
+   * How many rows the stored path holds, rows under an overlay included: a
+   * count over an id walk, holding nothing. For callers that count stored
+   * rows on a path of any length (media eviction's cutoff).
    */
-  #pathIds(
-    sessionId: string,
-    leafId?: string | null
-  ): { ids: string[]; cut: boolean } {
+  storedPathLength(sessionId: string, leafId?: string | null): number {
     const leaf = this.#resolveLeafId(sessionId, leafId);
-    if (!leaf) return { ids: [], cut: false };
-    const walked = this.io.sql<{
-      id: string;
-      parentId: string | null;
-      hidden: number;
-    }>(
+    if (!leaf) return 0;
+    return (
+      this.io.sql<{ n: number }>(
+        `WITH RECURSIVE path(id, parent_id) AS (
+          SELECT id, parent_id FROM cf_agents_session_messages
+          WHERE session_id = ? AND id = ?
+          UNION ALL
+          SELECT m.id, m.parent_id FROM path p
+          CROSS JOIN cf_agents_session_messages m
+            ON m.session_id = ? AND m.id = p.parent_id
+        )
+        SELECT COUNT(*) AS n FROM path`,
+        [sessionId, leaf, sessionId]
+      )[0]?.n ?? 0
+    );
+  }
+
+  /**
+   * A page of the stored path from the leaf back: the rows at depth `skip`
+   * to `skip + limit - 1` (the leaf is depth 0), or counted from the parent
+   * of `after`, rows under an overlay included, legacy hidden overlay rows
+   * left out. With `measure`, each
+   * carries its hydrated size. Holds one page, so a caller can work through
+   * a path of any length (retention, media eviction).
+   */
+  storedPathRows(
+    sessionId: string,
+    options: { skip: number; limit: number; measure?: boolean; after?: string }
+  ): Array<{ id: string; bytes: number }> {
+    // `after` continues from a row a previous page returned: the walk starts
+    // at its parent, so paging never re-walks from the leaf.
+    const leaf =
+      options.after === undefined
+        ? this.latestLeafId(sessionId)
+        : (this.io.sql<{ parent_id: string | null }>(
+            "SELECT parent_id FROM cf_agents_session_messages WHERE session_id = ? AND id = ?",
+            [sessionId, options.after]
+          )[0]?.parent_id ?? null);
+    if (!leaf || options.limit <= 0) return [];
+    const rows = this.io.sql<{ id: string; bytes: number }>(
       `WITH RECURSIVE path(id, parent_id, depth) AS (
         SELECT id, parent_id, 0 FROM cf_agents_session_messages
         WHERE session_id = ? AND id = ?
         UNION ALL
-        SELECT m.id, m.parent_id, p.depth + 1 FROM cf_agents_session_messages m
-        JOIN path p ON m.id = p.parent_id
-        WHERE m.session_id = ? AND p.depth < ${MAX_PATH_DEPTH}
+        SELECT m.id, m.parent_id, p.depth + 1 FROM path p
+        CROSS JOIN cf_agents_session_messages m
+          ON m.session_id = ? AND m.id = p.parent_id
+        WHERE p.depth + 1 < ?
       )
-      SELECT path.id AS id, path.parent_id AS parentId,
-        ${hiddenOverlayRowSql("path.id", "?")} AS hidden
-      FROM path
-      ORDER BY depth DESC`,
-      [sessionId, leaf, sessionId, sessionId]
-    );
-    return {
-      ids: walked.filter((row) => !row.hidden).map((row) => row.id),
-      cut: walked[0] !== undefined && walked[0].parentId !== null
-    };
-  }
-
-  /**
-   * Plan the overlays over a path window, root → leaf, with the result a
-   * read of the whole path would give, clipped to the window. A window that
-   * does not reach the root (`cut`: the depth cap or a byte budget stopped
-   * it) can start inside an overlay; before, such an overlay was dropped
-   * and the raw rows came back (#2871).
-   *
-   * Such an overlay applies only if its start is an ancestor of its end
-   * (checked once per overlay and remembered until a delete), and only if
-   * no other overlay that the full read would apply first covers its start.
-   * When another overlay might (by `seq`), the walk goes on up the real
-   * parents until it holds every start that matters and plans over that
-   * range; `compact()` never writes such overlaps, so this is rare.
-   * `complete` says nothing older than the window is missing: it is not
-   * cut, or the overlay covering its first row starts at a root.
-   */
-  #planWindow(
-    sessionId: string,
-    ids: readonly string[],
-    cut: boolean,
-    compactions: readonly StoredCompaction[] = this.getCompactions(sessionId)
-  ): { spans: OverlaySpan[]; complete: boolean } {
-    if (!cut) return { spans: planOverlays(ids, compactions), complete: true };
-    const inWindow = new Set(ids);
-    const candidates = compactions.filter(
-      (c) => inWindow.has(c.toMessageId) && !inWindow.has(c.fromMessageId)
-    );
-    if (candidates.length === 0) {
-      return { spans: planOverlays(ids, compactions), complete: false };
-    }
-    const anchors = new Map(
-      this.io
-        .sql<{ id: string; seq: number; parent_id: string | null }>(
-          `SELECT id, seq, parent_id FROM cf_agents_session_messages
-           WHERE session_id = ? AND id IN (SELECT value FROM json_each(?))`,
-          [
+      SELECT path.id AS id, ${options.measure ? ROW_BYTES_SQL : "0"} AS bytes
+      FROM path ${
+        options.measure
+          ? `CROSS JOIN cf_agents_session_messages am
+               ON am.session_id = ? AND am.id = path.id`
+          : ""
+      }
+      WHERE path.depth >= ?`,
+      options.measure
+        ? [
             sessionId,
-            JSON.stringify([
-              ids[0],
-              ...compactions.flatMap((c) => [c.fromMessageId, c.toMessageId])
-            ])
+            leaf,
+            sessionId,
+            options.skip + options.limit,
+            sessionId,
+            options.skip
           ]
-        )
-        .map((row) => [row.id, row] as const)
+        : [
+            sessionId,
+            leaf,
+            sessionId,
+            options.skip + options.limit,
+            options.skip
+          ]
     );
-    const firstSeq = anchors.get(ids[0])?.seq ?? -Infinity;
-    const order = new Map(compactions.map((c, index) => [c.id, index]));
-    const startSeq = (c: StoredCompaction) =>
-      anchors.get(c.fromMessageId)?.seq ?? Infinity;
-    const live = candidates.filter((c) => startSeq(c) < firstSeq);
-    if (live.length === 0) {
-      return { spans: planOverlays(ids, compactions), complete: false };
-    }
-    // Another overlay ending between a candidate's start and the window,
-    // starting earlier (or at the same row and newer), may win first.
-    const contested = compactions.some((other) => {
-      if (inWindow.has(other.toMessageId)) return false;
-      const end = anchors.get(other.toMessageId)?.seq;
-      const from = anchors.get(other.fromMessageId)?.seq;
-      if (end === undefined || from === undefined || end >= firstSeq) {
-        return false;
-      }
-      return live.some(
-        (c) =>
-          end >= startSeq(c) &&
-          (from < startSeq(c) ||
-            (other.fromMessageId === c.fromMessageId &&
-              (order.get(other.id) ?? 0) > (order.get(c.id) ?? 0)))
-      );
-    });
-    if (contested) return this.#planByPrefix(sessionId, ids, compactions);
-
-    // Precedence order: earliest start, then the newest overlay. Every
-    // candidate ends in the window, so a start older than the window's
-    // first row is an ancestor of all their ends or of none: only the first
-    // candidate of each start is checked, and the first start on the path
-    // wins. `compact()` chains share one start, so a read walks once.
-    const ranked = [...live].sort(
-      (a, b) =>
-        startSeq(a) - startSeq(b) ||
-        (order.get(b.id) ?? 0) - (order.get(a.id) ?? 0)
+    const hidden = this.#hiddenOverlayIds(
+      sessionId,
+      rows.map((row) => row.id)
     );
-    const offPath = new Set<string>();
-    let chosen: StoredCompaction | undefined;
-    for (const c of ranked) {
-      if (offPath.has(c.fromMessageId)) continue;
-      if (this.#startsAncestor(sessionId, c, anchors)) {
-        chosen = c;
-        break;
-      }
-      offPath.add(c.fromMessageId);
-    }
-    if (!chosen) {
-      return { spans: planOverlays(ids, compactions), complete: false };
-    }
-    const endIndex = ids.indexOf(chosen.toMessageId);
-    const spans: OverlaySpan[] = [
-      { startIndex: 0, endIndex, compaction: chosen }
-    ];
-    for (const span of planOverlays(ids.slice(endIndex + 1), compactions)) {
-      spans.push({
-        startIndex: span.startIndex + endIndex + 1,
-        endIndex: span.endIndex + endIndex + 1,
-        compaction: span.compaction
-      });
-    }
-    const complete = anchors.get(chosen.fromMessageId)?.parent_id === null;
-    return { spans, complete };
-  }
-
-  /**
-   * Whether an overlay's start is an ancestor of its end: an id walk up from
-   * the end, stopped once `seq` falls below the start's. Remembered per
-   * overlay until the next delete or clear, which are the only writes that
-   * move a row's ancestors.
-   */
-  #startsAncestor(
-    sessionId: string,
-    compaction: StoredCompaction,
-    anchors: ReadonlyMap<string, { id: string; seq: number }>
-  ): boolean {
-    let known = this.#overlayAncestry.get(sessionId);
-    const cached = known?.get(compaction.id);
-    if (cached !== undefined) return cached;
-    const from = anchors.get(compaction.fromMessageId);
-    const ok =
-      from !== undefined &&
-      this.io.sql<{ hit: number }>(
-        `WITH RECURSIVE up(id, parent_id) AS (
-          SELECT id, parent_id FROM cf_agents_session_messages
-          WHERE session_id = ? AND id = ?
-          UNION ALL
-          SELECT m.id, m.parent_id FROM up
-          CROSS JOIN cf_agents_session_messages m
-            ON m.session_id = ? AND m.id = up.parent_id
-          WHERE up.id <> ? AND m.seq >= ?
-        )
-        SELECT 1 AS hit FROM up WHERE id = ? LIMIT 1`,
-        [
-          sessionId,
-          compaction.toMessageId,
-          sessionId,
-          from.id,
-          from.seq,
-          from.id
-        ]
-      ).length > 0;
-    if (!known) {
-      known = new Map();
-      this.#overlayAncestry.set(sessionId, known);
-    }
-    known.set(compaction.id, ok);
-    return ok;
-  }
-
-  /**
-   * The exact plan for a cut window: walk up the real parents, ids only,
-   * until every row an overlay ending in the extended range starts at is
-   * held, plan over that range as a full read would, and clip to the
-   * window. An anchor that is not an ancestor is never reached.
-   */
-  #planByPrefix(
-    sessionId: string,
-    ids: readonly string[],
-    compactions: readonly StoredCompaction[]
-  ): { spans: OverlaySpan[]; complete: boolean } {
-    const known = new Set(ids);
-    // Collected nearest-first, reversed once at the end.
-    const upward: string[] = [];
-    let [top] = this.io.sql<{
-      id: string;
-      parent_id: string | null;
-      seq: number;
-    }>(
-      `SELECT id, parent_id, seq FROM cf_agents_session_messages
-       WHERE session_id = ? AND id = ?`,
-      [sessionId, ids[0]]
-    );
-    while (top?.parent_id) {
-      const outside = compactions
-        .filter((c) => known.has(c.toMessageId) && !known.has(c.fromMessageId))
-        .map((c) => c.fromMessageId);
-      if (outside.length === 0) break;
-      const [lowest] = this.io.sql<{ seq: number | null }>(
-        `SELECT MIN(seq) AS seq FROM cf_agents_session_messages
-         WHERE session_id = ? AND id IN (SELECT value FROM json_each(?))
-           AND seq < ?`,
-        [sessionId, JSON.stringify(outside), top.seq]
-      );
-      if (lowest?.seq == null) break;
-      const walked = this.io.sql<{
-        id: string;
-        parent_id: string | null;
-        seq: number;
-      }>(
-        `WITH RECURSIVE up(id, parent_id, seq, depth) AS (
-          SELECT id, parent_id, seq, 0 FROM cf_agents_session_messages
-          WHERE session_id = ? AND id = ?
-          UNION ALL
-          SELECT m.id, m.parent_id, m.seq, up.depth + 1 FROM up
-          CROSS JOIN cf_agents_session_messages m
-            ON m.session_id = ? AND m.id = up.parent_id
-          WHERE m.seq >= ?
-        )
-        SELECT id, parent_id, seq FROM up WHERE seq >= ? ORDER BY depth`,
-        [sessionId, top.parent_id, sessionId, lowest.seq, lowest.seq]
-      );
-      if (walked.length === 0) break;
-      const hidden = this.#hiddenOverlayIds(
-        sessionId,
-        walked.map((row) => row.id)
-      );
-      for (const row of walked) {
-        known.add(row.id);
-        if (!hidden.has(row.id)) upward.push(row.id);
-      }
-      top = walked[walked.length - 1];
-    }
-    const prefix = upward.reverse();
-    const spans: OverlaySpan[] = [];
-    for (const span of planOverlays([...prefix, ...ids], compactions)) {
-      if (span.endIndex < prefix.length) continue;
-      spans.push({
-        startIndex: Math.max(0, span.startIndex - prefix.length),
-        endIndex: span.endIndex - prefix.length,
-        compaction: span.compaction
-      });
-    }
-    const first = spans[0];
-    const complete =
-      first !== undefined &&
-      first.startIndex === 0 &&
-      prefix[0] === first.compaction.fromMessageId &&
-      top?.parent_id === null;
-    return { spans, complete };
+    return hidden.size === 0 ? rows : rows.filter((row) => !hidden.has(row.id));
   }
 
   /**
@@ -1140,8 +1257,8 @@ export class SessionsCore {
       content_chunks: number;
     }>(
       `SELECT id, content, content_chunks FROM cf_agents_session_messages
-       WHERE session_id = ? AND id IN (SELECT value FROM json_each(?))`,
-      [sessionId, JSON.stringify(rows.map((row) => row.id))]
+       WHERE session_id = ? AND id IN (${rows.map(() => "?").join(", ")})`,
+      [sessionId, ...rows.map((row) => row.id)]
     );
     const continued = this.#continuations(
       sessionId,
@@ -1159,53 +1276,40 @@ export class SessionsCore {
   }
 
   /**
-   * Stream a known path window without retaining earlier content chunks.
-   *
-   * The path is first cut into segments — a compaction overlay, or a run of
-   * raw rows between overlays — in root → leaf order. `newestFirst` walks
-   * those segments, and the rows inside each, from the leaf instead, in
-   * small fixed windows, so the first content fetched is the newest and a
-   * consumer that stops early never touches older rows. `spans` are the
-   * window's overlays, planned by `#planWindow` over the same rows.
+   * Stream walk steps in the order given: an overlay step as its summary
+   * message, runs of rows in bounded content windows (`windowRows` rows,
+   * and `HISTORY_CONTENT_CHUNK_BYTES` when the steps carry sizes). Peak
+   * memory is one window.
    */
-  async *#streamStats(
+  async *#streamSteps(
     sessionId: string,
-    stats: readonly PathRow[],
-    spans: readonly OverlaySpan[],
-    signal?: AbortSignal,
-    newestFirst = false
+    steps: readonly VisibleStep[],
+    windowRows: number,
+    signal?: AbortSignal
   ): AsyncGenerator<SessionMessage, void, undefined> {
-    const spanByStart = new Map(spans.map((span) => [span.startIndex, span]));
-
-    type Segment = { overlay: StoredCompaction } | { rows: readonly PathRow[] };
-    const segments: Segment[] = [];
     let index = 0;
-    while (index < stats.length) {
-      const span = spanByStart.get(index);
-      if (span) {
-        segments.push({ overlay: span.compaction });
-        index = span.endIndex + 1;
-        continue;
-      }
-      let runEnd = index + 1;
-      while (runEnd < stats.length && !spanByStart.has(runEnd)) runEnd++;
-      segments.push({ rows: stats.slice(index, runEnd) });
-      index = runEnd;
-    }
-    if (newestFirst) segments.reverse();
-
-    for (const segment of segments) {
+    while (index < steps.length) {
       if (signal?.aborted) {
         throw signal.reason ?? new Error("History read aborted");
       }
-      if ("overlay" in segment) {
-        yield overlayMessage(segment.overlay);
+      const step = steps[index];
+      if (step.hidden) {
+        index++;
         continue;
       }
-      const rows = newestFirst ? [...segment.rows].reverse() : segment.rows;
-      const windowRows = newestFirst
-        ? NEWEST_FIRST_WINDOW_ROWS
-        : HISTORY_CONTENT_CHUNK_SIZE;
+      if (step.overlaySeq !== null) {
+        yield overlayMessage(this.#overlayAt(sessionId, step));
+        index++;
+        continue;
+      }
+      let runEnd = index + 1;
+      while (runEnd < steps.length && steps[runEnd].overlaySeq === null) {
+        runEnd++;
+      }
+      const rows = steps
+        .slice(index, runEnd)
+        .filter((row) => !row.hidden)
+        .map((row) => ({ id: row.id, bytes: row.bytes ?? 0 }));
       for (const chunk of this.#boundedStatsChunks(rows, windowRows)) {
         const content = this.#contentByStats(sessionId, chunk);
         for (const row of chunk) {
@@ -1216,122 +1320,85 @@ export class SessionsCore {
           throw signal.reason ?? new Error("History read aborted");
         }
       }
+      index = runEnd;
     }
   }
 
   /**
-   * Stream the path ending at `leafId` (default: active leaf), root → leaf
-   * (or leaf → root with `newestFirst`), compaction overlays collapsed. Peak
-   * memory is one bounded content window — never the whole transcript.
+   * Stream the visible path ending at `leafId` (default: active leaf),
+   * root → leaf, or leaf → root with `newestFirst`. Newest-first is the walk
+   * itself: a consumer that stops early has read only the steps it took.
    */
   async *streamHistory(
     sessionId: string,
     options: HistoryReadOptions
   ): AsyncGenerator<SessionMessage, void, undefined> {
     if (options.newestFirst === true) {
-      yield* this.#walkFromLeaf(sessionId, options.leafId, options.signal);
+      yield* this.#newestFirst(sessionId, options.leafId, options.signal);
       return;
     }
-    const { rows: stats, cut } = this.#pathRows(sessionId, options.leafId);
-    if (stats.length === 0) return;
-    const { spans } = this.#planWindow(
+    const steps = this.#visiblePath(sessionId, options.leafId, true);
+    yield* this.#streamSteps(
       sessionId,
-      stats.map((row) => row.id),
-      cut
+      steps,
+      HISTORY_CONTENT_CHUNK_SIZE,
+      options.signal
     );
-    yield* this.#streamStats(sessionId, stats, spans, options.signal);
   }
 
   /**
-   * The path leaf → root as a chain of point reads: each row names its
-   * parent, so the next read is known before the current message is
-   * yielded, and a consumer that stops early has paid for exactly the rows it
-   * saw.
-   *
-   * Compaction overlays are honored without planning them up front. An
-   * overlay that applies to this branch ends at a row the walk reaches
-   * before any row it covers, so the raw walk is exact until it lands on
-   * some compaction's `toMessageId`. Only then is the remaining prefix read
-   * as ids and planned root → leaf — the order overlay selection is defined
-   * in — and streamed leaf-first with the overlays collapsed. A lookup that
-   * stops in the messages after the last compaction never pays for that.
+   * The visible walk as point reads, newest first: one statement per step
+   * reads the row with its content and probes for an overlay ending there.
+   * Each message costs about one row read, and a consumer that stops early
+   * (a tool-call owner lookup) has paid for exactly the steps it took.
    */
-  async *#walkFromLeaf(
+  async *#newestFirst(
     sessionId: string,
     leafId: string | null | undefined,
     signal?: AbortSignal
   ): AsyncGenerator<SessionMessage, void, undefined> {
-    const compactions = this.getCompactions(sessionId);
-    const spanEnds = new Set(compactions.map((c) => c.toMessageId));
-    const hiddenIds = new Set(
-      compactions.map((c) => `${COMPACTION_PREFIX}${c.id}`)
-    );
     let next = this.#resolveLeafId(sessionId, leafId);
-    let depth = 0;
-    while (next !== null && depth <= MAX_PATH_DEPTH) {
+    while (next !== null) {
       if (signal?.aborted) {
         throw signal.reason ?? new Error("History read aborted");
       }
-      if (spanEnds.has(next)) {
-        yield* this.#streamOverlaidPrefix(
-          sessionId,
-          leafId,
-          next,
-          compactions,
-          signal
-        );
-        return;
-      }
       const [row] = this.io.sql<{
         parent_id: string | null;
-        content: string;
+        content: string | null;
         content_chunks: number;
+        overlay_seq: number | null;
+        resume_id: string | null;
       }>(
-        `SELECT parent_id, content, content_chunks FROM cf_agents_session_messages
-         WHERE session_id = ? AND id = ?`,
+        `SELECT m.parent_id, CASE WHEN o.seq IS NULL THEN m.content END AS content,
+           m.content_chunks, o.seq AS overlay_seq, o.resume_id
+         FROM cf_agents_session_messages m
+         LEFT JOIN cf_agents_session_compactions o
+           ON o.session_id = m.session_id AND o.to_message_id = m.id
+             AND o.resume_id IS NOT NULL
+         WHERE m.session_id = ? AND m.id = ?
+         ORDER BY o.seq DESC LIMIT 1`,
         [sessionId, next]
       );
       if (!row) return;
-      if (!hiddenIds.has(next)) {
+      const id: string = next;
+      if (row.overlay_seq !== null) {
+        yield overlayMessage(
+          this.#overlayAt(sessionId, { id, overlaySeq: row.overlay_seq })
+        );
+        next = row.resume_id || null;
+        continue;
+      }
+      if (!this.#hiddenOverlayIds(sessionId, [id]).has(id)) {
         const json =
           row.content_chunks === 0
-            ? row.content
-            : row.content +
-              (this.#continuations(sessionId, [next]).get(next) ?? "");
+            ? (row.content ?? "")
+            : (row.content ?? "") +
+              (this.#continuations(sessionId, [id]).get(id) ?? "");
         const parsed = this.#parse(json);
         if (parsed) yield this.#inline(parsed);
       }
       next = row.parent_id;
-      depth++;
     }
-  }
-
-  /**
-   * The path from `fromId` down to the root, leaf-first with overlays
-   * collapsed. Spans are planned over the WHOLE path (selection is
-   * root → leaf and a chosen span suppresses overlaps inside it), then only
-   * those ending at or before `fromId` apply: `fromId` is some compaction's
-   * end, and a chosen span reaching past it would have ended at a row the
-   * raw walk visited first.
-   */
-  async *#streamOverlaidPrefix(
-    sessionId: string,
-    leafId: string | null | undefined,
-    fromId: string,
-    compactions: readonly StoredCompaction[],
-    signal?: AbortSignal
-  ): AsyncGenerator<SessionMessage, void, undefined> {
-    const { ids, cut } = this.#pathIds(sessionId, leafId);
-    const end = ids.indexOf(fromId);
-    if (end === -1) return;
-    const spans = this.#planWindow(sessionId, ids, cut, compactions).spans;
-    yield* this.#streamStats(
-      sessionId,
-      ids.slice(0, end + 1).map((id) => ({ id, bytes: 0 })),
-      spans.filter((span) => span.endIndex <= end),
-      signal,
-      true
-    );
   }
 
   async getHistory(
@@ -1346,120 +1413,79 @@ export class SessionsCore {
   }
 
   /**
-   * Byte-budgeted read of the most recent messages on the active branch
-   * path — the longest suffix whose stored size fits `maxContentBytes`.
-   *
-   * There is no message-count floor: one used to exist, and it admitted
-   * rows regardless of size, so a window of media-heavy messages could
-   * hydrate far past the limit meant to bound it. The newest message is
-   * always returned even if it alone exceeds the budget, since returning
-   * nothing is worse. An overlay that starts before the window and ends
-   * inside it applies from the window's first row (see `#planWindow`).
+   * Byte-budgeted read of the most recent visible messages: the walk from
+   * the leaf, until the next message would pass `maxContentBytes`. An
+   * overlay counts as its summary. The newest message is always returned,
+   * even alone over the budget, since returning nothing is worse. There is
+   * no message-count floor: one used to admit rows regardless of size.
+   * `totalContentBytes` is the size of the visible path. Once the budget
+   * stops the read, the walk finishes the batch it is in and stops, so on a
+   * long path the total is the measured part (already past the budget),
+   * not a walk to the root.
    */
   async getRecentHistory(
     sessionId: string,
     maxContentBytes: number,
     leafId?: string | null
   ): Promise<RecentHistoryResult> {
-    const { rows: stats, walked, cut } = this.#pathRows(sessionId, leafId);
-    if (stats.length === 0) {
-      return { messages: [], truncated: false, totalContentBytes: 0 };
-    }
-    const totalContentBytes = stats.reduce((sum, row) => sum + row.bytes, 0);
-    let start = stats.length - 1;
-    let used = stats[start].bytes;
-    while (start > 0) {
-      const next = stats[start - 1].bytes;
-      if (used + next > maxContentBytes) break;
-      start--;
-      used += next;
-    }
-
-    // The path cap hides older rows exactly as the budget does. A read that
-    // filled the cap is truncated only if the oldest row it walked still
-    // has a parent; a branch of exactly the cap's length is complete.
-    const capped = walked > MAX_PATH_DEPTH && cut;
-    let window = stats.slice(start);
-    let { spans, complete } = this.#planWindow(
+    const window: VisibleStep[] = [];
+    let used = 0;
+    let truncated = false;
+    let totalContentBytes = 0;
+    for (const batch of this.#walkBatches(
       sessionId,
-      window.map((row) => row.id),
-      start > 0 || cut
-    );
-    // The budget was taken over raw rows. An overlay clipped at the head of
-    // the window replaces some of them with its summary, which can be the
-    // larger: then the window starts after that overlay.
-    const head = spans[0];
-    if (
-      head?.startIndex === 0 &&
-      head.endIndex < window.length - 1 &&
-      !window.some((row) => row.id === head.compaction.fromMessageId) &&
-      this.#visibleBytes(window, spans) > maxContentBytes
-    ) {
-      start += head.endIndex + 1;
-      window = stats.slice(start);
-      ({ spans, complete } = this.#planWindow(
-        sessionId,
-        window.map((row) => row.id),
-        true
-      ));
+      leafId,
+      true,
+      RECENT_FIRST_BATCH_STEPS
+    )) {
+      for (const step of batch) {
+        if (step.hidden) continue;
+        const bytes = step.bytes ?? 0;
+        totalContentBytes += bytes;
+        if (truncated) continue;
+        if (window.length > 0 && used + bytes > maxContentBytes) {
+          truncated = true;
+          continue;
+        }
+        window.push(step);
+        used += bytes;
+      }
+      if (truncated) break;
     }
     const messages: SessionMessage[] = [];
-    for await (const message of this.#streamStats(sessionId, window, spans)) {
+    for await (const message of this.#streamSteps(
+      sessionId,
+      window.reverse(),
+      HISTORY_CONTENT_CHUNK_SIZE
+    )) {
       messages.push(message);
     }
-    const truncated = (start > 0 || capped) && !complete;
     return { messages, truncated, totalContentBytes };
   }
 
-  /** Bytes a window shows: rows outside the spans, each span as its summary. */
-  #visibleBytes(
-    rows: readonly PathRow[],
-    spans: readonly OverlaySpan[]
-  ): number {
-    let bytes = 0;
-    let index = 0;
-    for (const span of spans) {
-      for (; index < span.startIndex; index++) bytes += rows[index].bytes;
-      bytes += new TextEncoder().encode(span.compaction.summary).byteLength;
-      index = span.endIndex + 1;
-    }
-    for (; index < rows.length; index++) bytes += rows[index].bytes;
-    return bytes;
-  }
-
   /**
-   * Heuristic token estimate for the active path with compaction overlays
-   * applied: stamped per-row estimates, minus compacted spans, plus their
-   * summaries. Derived from content-free rows on each call; it gates cheap
-   * triggers only, and model-reported usage stays authoritative.
+   * Heuristic token estimate for what the model sees: stamped per-row
+   * estimates along the visible walk, an overlay counted as its summary.
+   * Ids and stamped numbers only; it gates cheap triggers, and
+   * model-reported usage stays authoritative.
    */
   tokenEstimate(sessionId: string): number {
     const leafId = this.latestLeafId(sessionId);
     const memo = this.#pathTokens.get(sessionId);
-    if (memo && memo.leafId === leafId)
+    if (memo && memo.leafId === leafId) {
       return Math.max(0, Math.ceil(memo.total));
-
-    const { rows: stats, walked, cut } = this.#pathRows(sessionId);
-    const counted = new Set(stats.map((row) => row.id));
-    let tokens = stats.reduce((sum, row) => sum + row.tokenEstimate, 0);
-    const { spans } = this.#planWindow(
-      sessionId,
-      stats.map((row) => row.id),
-      cut
-    );
-    for (const span of spans) {
-      for (let i = span.startIndex; i <= span.endIndex; i++) {
-        tokens -= stats[i].tokenEstimate;
-        counted.delete(stats[i].id);
-      }
-      tokens += estimateStringTokens(span.compaction.summary);
     }
-    this.#pathTokens.set(sessionId, {
-      leafId,
-      counted,
-      total: tokens,
-      depth: walked
-    });
+    let tokens = 0;
+    for (const batch of this.#walkBatches(sessionId, leafId, false)) {
+      for (const step of batch) {
+        if (step.hidden) continue;
+        tokens +=
+          step.overlaySeq === null
+            ? step.tokenEstimate
+            : estimateStringTokens(this.#overlayAt(sessionId, step).summary);
+      }
+    }
+    this.#pathTokens.set(sessionId, { leafId, total: tokens });
     return Math.max(0, Math.ceil(tokens));
   }
 
@@ -1598,15 +1624,12 @@ export class SessionsCore {
     this.#tails.set(sessionId, { leafId: message.id, nextSeq: seq + 1 });
     const memo = this.#pathTokens.get(sessionId);
     if (memo) {
-      if (memo.leafId === parent && memo.depth <= MAX_PATH_DEPTH) {
+      if (memo.leafId === parent) {
         // The row extends the memoised path: count it, no re-walk.
         memo.leafId = message.id;
-        memo.counted.add(message.id);
         memo.total += tokenEstimate;
-        memo.depth += 1;
       } else {
-        // A branch, or a path at the cap: the walk would drop its oldest
-        // row, which the memo cannot see. Re-derive on the next read.
+        // A branch: a different path. Re-derive on the next read.
         this.#pathTokens.delete(sessionId);
       }
     }
@@ -1697,8 +1720,11 @@ export class SessionsCore {
       this.#indexFts(sessionId, staged, true);
     });
     const memo = this.#pathTokens.get(sessionId);
-    if (memo?.counted.has(message.id)) {
+    if (memo?.leafId === message.id) {
       memo.total += tokenEstimate - (old.token_estimate ?? 0);
+    } else if (memo) {
+      // Whether an older row is visible is not known without a walk.
+      this.#pathTokens.delete(sessionId);
     }
     this.io.emit("session:message:updated", {
       sessionId,
@@ -1716,67 +1742,148 @@ export class SessionsCore {
   deleteMessages(sessionId: string, messageIds: string[]): void {
     const uniqueIds = [...new Set(messageIds)];
     if (uniqueIds.length === 0) return;
-    const ids = JSON.stringify(uniqueIds);
 
     this.io.transaction(() => {
-      this.io.sqlWrite(
-        `WITH RECURSIVE
-         deleted(id) AS (SELECT value FROM json_each(?)),
-         rewire(child_id, ancestor_id, depth) AS (
-           SELECT child.id, child.parent_id, 0
-           FROM cf_agents_session_messages AS child
-           JOIN deleted ON deleted.id = child.parent_id
-           WHERE child.session_id = ?
-             AND child.id NOT IN (SELECT id FROM deleted)
-           UNION ALL
-           SELECT rewire.child_id, parent.parent_id, rewire.depth + 1
-           FROM rewire
-           JOIN cf_agents_session_messages AS parent
-             ON parent.id = rewire.ancestor_id
-           JOIN deleted ON deleted.id = parent.id
-           WHERE parent.session_id = ? AND rewire.depth < 10000
-         ),
-         nearest(child_id, ancestor_id) AS (
-           SELECT child_id, ancestor_id FROM rewire
-           WHERE ancestor_id IS NULL
-              OR ancestor_id NOT IN (SELECT id FROM deleted)
-         )
-       UPDATE cf_agents_session_messages
-       SET parent_id = (
-         SELECT nearest.ancestor_id FROM nearest
-         WHERE nearest.child_id = cf_agents_session_messages.id
-       )
-         WHERE session_id = ?
-           AND id IN (SELECT child_id FROM nearest)`,
-        [ids, sessionId, sessionId, sessionId]
-      );
-      this.io.sqlWrite(
-        `DELETE FROM cf_agents_session_messages
-         WHERE session_id = ? AND id IN (SELECT value FROM json_each(?))`,
-        [sessionId, ids]
-      );
-      this.io.sqlWrite(
-        `DELETE FROM cf_agents_session_message_chunks
-         WHERE session_id = ? AND id IN (SELECT value FROM json_each(?))`,
-        [sessionId, ids]
-      );
-      this.#attachments.releaseMessages(sessionId, uniqueIds);
-      if (this.#fts) {
-        this.io.sqlWrite(
-          `DELETE FROM cf_agents_session_fts
-           WHERE session_id = ? AND id IN (SELECT value FROM json_each(?))`,
-          [sessionId, ids]
-        );
+      // One bound JSON value holds a limited number of ids, so the delete
+      // runs in batches. Batches compose: after one, its rows are gone and
+      // their children already point past them.
+      for (let i = 0; i < uniqueIds.length; i += DELETE_BATCH_IDS) {
+        this.#deleteBatch(sessionId, uniqueIds.slice(i, i + DELETE_BATCH_IDS));
       }
     });
     // The leaf may be among the deleted rows; re-derive on the next append.
     this.#tails.delete(sessionId);
     this.#pathTokens.delete(sessionId);
-    this.#overlayAncestry.delete(sessionId);
     this.io.emit("session:messages:deleted", {
       sessionId,
       count: uniqueIds.length
     });
+  }
+
+  #deleteBatch(sessionId: string, batch: readonly string[]): void {
+    const ids = JSON.stringify(batch);
+    this.#overlaysFollowSplice(sessionId, batch);
+    this.io.sqlWrite(
+      `WITH RECURSIVE
+       deleted(id) AS (SELECT value FROM json_each(?)),
+       rewire(child_id, ancestor_id) AS (
+         SELECT child.id, child.parent_id
+         FROM cf_agents_session_messages AS child
+         JOIN deleted ON deleted.id = child.parent_id
+         WHERE child.session_id = ?
+           AND child.id NOT IN (SELECT id FROM deleted)
+         UNION ALL
+         SELECT rewire.child_id, parent.parent_id
+         FROM rewire
+         JOIN cf_agents_session_messages AS parent
+           ON parent.id = rewire.ancestor_id
+         JOIN deleted ON deleted.id = parent.id
+         WHERE parent.session_id = ?
+       ),
+       nearest(child_id, ancestor_id) AS (
+         SELECT child_id, ancestor_id FROM rewire
+         WHERE ancestor_id IS NULL
+            OR ancestor_id NOT IN (SELECT id FROM deleted)
+       )
+     UPDATE cf_agents_session_messages
+     SET parent_id = (
+       SELECT nearest.ancestor_id FROM nearest
+       WHERE nearest.child_id = cf_agents_session_messages.id
+     )
+       WHERE session_id = ?
+         AND id IN (SELECT child_id FROM nearest)`,
+      [ids, sessionId, sessionId, sessionId]
+    );
+    this.io.sqlWrite(
+      `DELETE FROM cf_agents_session_messages
+       WHERE session_id = ? AND id IN (SELECT value FROM json_each(?))`,
+      [sessionId, ids]
+    );
+    this.io.sqlWrite(
+      `DELETE FROM cf_agents_session_message_chunks
+       WHERE session_id = ? AND id IN (SELECT value FROM json_each(?))`,
+      [sessionId, ids]
+    );
+    this.#attachments.releaseMessages(sessionId, batch);
+    if (this.#fts) {
+      this.io.sqlWrite(
+        `DELETE FROM cf_agents_session_fts
+         WHERE session_id = ? AND id IN (SELECT value FROM json_each(?))`,
+        [sessionId, ids]
+      );
+    }
+  }
+
+  /**
+   * Keep overlays applying across a splice, before the rows go. An overlay
+   * whose end row is deleted ends at that row's nearest surviving ancestor;
+   * one whose continuation row is deleted continues at that row's nearest
+   * surviving ancestor. An overlay left with nothing between its
+   * continuation and its end covers no row and is deleted.
+   */
+  #overlaysFollowSplice(sessionId: string, batch: readonly string[]): void {
+    const ids = JSON.stringify(batch);
+    const affected = this.io.sql<{
+      seq: number;
+      id: string;
+      to_message_id: string;
+      resume_id: string;
+    }>(
+      `SELECT seq, id, to_message_id, resume_id
+       FROM cf_agents_session_compactions
+       WHERE session_id = ? AND resume_id IS NOT NULL
+         AND (to_message_id IN (SELECT value FROM json_each(?))
+           OR resume_id IN (SELECT value FROM json_each(?)))`,
+      [sessionId, ids, ids]
+    );
+    if (affected.length === 0) return;
+    const gone = new Set(batch);
+    const starts = [
+      ...new Set(
+        affected.flatMap((o) =>
+          [o.to_message_id, o.resume_id].filter((id) => gone.has(id))
+        )
+      )
+    ];
+    const survivor = new Map(
+      this.io
+        .sql<{ start: string; ancestor: string | null }>(
+          `WITH RECURSIVE
+           deleted(id) AS (SELECT value FROM json_each(?)),
+           up(start, cur) AS (
+             SELECT value, value FROM json_each(?)
+             UNION ALL
+             SELECT up.start, m.parent_id FROM up
+             CROSS JOIN cf_agents_session_messages m
+               ON m.session_id = ? AND m.id = up.cur
+             WHERE up.cur IN (SELECT id FROM deleted)
+           )
+           SELECT start, cur AS ancestor FROM up
+           WHERE cur IS NULL OR cur NOT IN (SELECT id FROM deleted)`,
+          [ids, JSON.stringify(starts), sessionId]
+        )
+        .map((row) => [row.start, row.ancestor] as const)
+    );
+    const moved = (id: string) =>
+      gone.has(id) ? (survivor.get(id) ?? null) : id;
+    for (const overlay of affected) {
+      const resume =
+        overlay.resume_id === "" ? "" : (moved(overlay.resume_id) ?? "");
+      const to = moved(overlay.to_message_id);
+      if (to === null || to === resume) {
+        this.io.sqlWrite(
+          `DELETE FROM cf_agents_session_compactions
+           WHERE session_id = ? AND to_message_id = ? AND seq = ?`,
+          [sessionId, overlay.to_message_id, overlay.seq]
+        );
+        continue;
+      }
+      this.io.sqlWrite(
+        `UPDATE cf_agents_session_compactions SET to_message_id = ?, resume_id = ?
+         WHERE session_id = ? AND to_message_id = ? AND seq = ?`,
+        [to, resume, sessionId, overlay.to_message_id, overlay.seq]
+      );
+    }
   }
 
   clearMessages(sessionId: string): void {
@@ -1803,64 +1910,160 @@ export class SessionsCore {
     });
     this.#tails.set(sessionId, { leafId: null, nextSeq: 1 });
     this.#pathTokens.delete(sessionId);
-    this.#overlayAncestry.delete(sessionId);
     this.io.emit("session:cleared", { sessionId });
   }
 
   // ── Compaction storage ───────────────────────────────────────────────────
 
+  /**
+   * Store an overlay replacing `from..to` on read. `from` must be `to` or an
+   * ancestor of it; the walk continues below the overlay at `from`'s parent
+   * (`resume_id`, `''` for the root). With `extendsId`, the new overlay
+   * keeps that overlay's start and continuation (iterative compaction keeps
+   * the head where the first compaction left it). Throws when the anchors
+   * cannot apply, where an overlay that never applies used to be stored.
+   */
   addCompaction(
     sessionId: string,
     summary: string,
     fromMessageId: string,
-    toMessageId: string
+    toMessageId: string,
+    extendsId?: string
   ): StoredCompaction {
     const id = crypto.randomUUID();
     const now = Date.now();
-    const seq =
-      this.io.sql<{ seq: number }>(
-        "SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM cf_agents_session_compactions WHERE session_id = ?",
-        [sessionId]
-      )[0]?.seq ?? 1;
-    this.io.sqlWrite(
-      `INSERT INTO cf_agents_session_compactions
-        (session_id, id, seq, summary, from_message_id, to_message_id, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [sessionId, id, seq, summary, fromMessageId, toMessageId, now]
-    );
+    // Validation is a read (the ancestry walk can cover the whole span): it
+    // runs before the write transaction, so the transaction holds writes
+    // only. Nothing awaits in between.
+    let from = fromMessageId;
+    let resume: string;
+    const extended = extendsId
+      ? this.io.sql<{ from_message_id: string; resume_id: string | null }>(
+          `SELECT from_message_id, resume_id FROM cf_agents_session_compactions
+           WHERE session_id = ? AND id = ?`,
+          [sessionId, extendsId]
+        )[0]
+      : undefined;
+    if (extended && extended.resume_id !== null) {
+      from = extended.from_message_id;
+      resume = extended.resume_id;
+      this.#assertOverlayEnd(sessionId, resume, toMessageId);
+    } else {
+      resume = this.#overlayResume(sessionId, from, toMessageId);
+    }
+    this.io.transaction(() => {
+      const seq =
+        this.io.sql<{ seq: number }>(
+          "SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM cf_agents_session_compactions WHERE session_id = ?",
+          [sessionId]
+        )[0]?.seq ?? 1;
+      this.io.sqlWrite(
+        `INSERT INTO cf_agents_session_compactions
+          (session_id, to_message_id, seq, id, summary, from_message_id, resume_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [sessionId, toMessageId, seq, id, summary, from, resume, now]
+      );
+    });
     // The new overlay changes which rows count; re-derive on the next read.
     this.#pathTokens.delete(sessionId);
     this.io.emit("session:compacted", { sessionId, compactionId: id });
     return {
       id,
       summary,
-      fromMessageId,
+      fromMessageId: from,
       toMessageId,
       createdAt: new Date(now).toISOString()
     };
   }
 
+  /**
+   * Where the walk continues below an overlay `from..to`: `from`'s parent,
+   * or `''` when `from` is a root. Throws unless both rows exist and `from`
+   * is `to` or an ancestor of it (an id walk up from `to`, stopped once
+   * `seq` falls below `from`'s).
+   */
+  #overlayResume(sessionId: string, from: string, to: string): string {
+    const rows = this.io.sql<{
+      id: string;
+      seq: number;
+      parent_id: string | null;
+    }>(
+      `SELECT id, seq, parent_id FROM cf_agents_session_messages
+       WHERE session_id = ? AND id IN (?, ?)`,
+      [sessionId, from, to]
+    );
+    const start = rows.find((row) => row.id === from);
+    const end = rows.find((row) => row.id === to);
+    if (!start || !end) {
+      throw new Error(
+        `Sessions: cannot store a compaction from "${from}" to "${to}": ` +
+          `"${start ? to : from}" is not a message of this session.`
+      );
+    }
+    if (from !== to && !this.#isAncestor(sessionId, start, to)) {
+      throw new Error(
+        `Sessions: cannot store a compaction from "${from}" to "${to}": ` +
+          `"${from}" is not on the path to "${to}".`
+      );
+    }
+    return start.parent_id ?? "";
+  }
+
+  /** Throw unless an extended overlay's continuation lies below `to`. */
+  #assertOverlayEnd(sessionId: string, resume: string, to: string): void {
+    const [end] = this.io.sql<{ seq: number }>(
+      "SELECT seq FROM cf_agents_session_messages WHERE session_id = ? AND id = ?",
+      [sessionId, to]
+    );
+    if (!end) {
+      throw new Error(
+        `Sessions: cannot store a compaction to "${to}": it is not a message of this session.`
+      );
+    }
+    if (resume === "") return;
+    const [below] = this.io.sql<{ id: string; seq: number }>(
+      "SELECT id, seq FROM cf_agents_session_messages WHERE session_id = ? AND id = ?",
+      [sessionId, resume]
+    );
+    if (!below || resume === to || !this.#isAncestor(sessionId, below, to)) {
+      throw new Error(
+        `Sessions: cannot extend a compaction to "${to}": it is not past the compacted range.`
+      );
+    }
+  }
+
+  /** Whether `ancestor` is on the path from `id` to the root (ids only). */
+  #isAncestor(
+    sessionId: string,
+    ancestor: { id: string; seq: number },
+    id: string
+  ): boolean {
+    return (
+      this.io.sql<{ hit: number }>(
+        `WITH RECURSIVE up(id, parent_id, seq) AS (
+          SELECT id, parent_id, seq FROM cf_agents_session_messages
+          WHERE session_id = ? AND id = ?
+          UNION ALL
+          SELECT m.id, m.parent_id, m.seq FROM up
+          CROSS JOIN cf_agents_session_messages m
+            ON m.session_id = ? AND m.id = up.parent_id
+          WHERE up.id <> ? AND m.seq >= ?
+        )
+        SELECT 1 AS hit FROM up WHERE id = ? LIMIT 1`,
+        [sessionId, id, sessionId, ancestor.id, ancestor.seq, ancestor.id]
+      ).length > 0
+    );
+  }
+
   getCompactions(sessionId: string): StoredCompaction[] {
     return this.io
-      .sql<{
-        id: string;
-        summary: string;
-        from_message_id: string;
-        to_message_id: string;
-        created_at: number;
-      }>(
+      .sql<CompactionRow>(
         `SELECT id, summary, from_message_id, to_message_id, created_at
          FROM cf_agents_session_compactions
          WHERE session_id = ? ORDER BY seq ASC`,
         [sessionId]
       )
-      .map((row) => ({
-        id: row.id,
-        summary: row.summary,
-        fromMessageId: row.from_message_id,
-        toMessageId: row.to_message_id,
-        createdAt: new Date(row.created_at).toISOString()
-      }));
+      .map(toStoredCompaction);
   }
 
   // ── Search ───────────────────────────────────────────────────────────────

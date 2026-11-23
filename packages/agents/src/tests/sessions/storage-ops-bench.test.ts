@@ -98,12 +98,11 @@ describe("Sessions storage-ops benchmark", () => {
     await runInDurableObject(stub, async (instance: SessionBenchObject) => {
       const lookup = await instance.benchOwnerLookup(200);
       expect(lookup.found).toBe("bench-197");
-      // A full read pays the sized path walk — several billed rows per
-      // message for the byte subqueries — and then hydrates every row. The
-      // newest-first read follows parent pointers from the leaf and stops at
-      // the owner, three rows in, so its cost has no transcript term at all:
-      // the rows it read, plus the compactions probe and the leaf lookup.
-      expect(lookup.fullRead).toBeGreaterThan(1000);
+      // A full read walks every message and then hydrates every row: at
+      // least two rows per message. The newest-first read follows parent
+      // pointers from the leaf and stops at the owner, three rows in, so its
+      // cost has no transcript term at all.
+      expect(lookup.fullRead).toBeGreaterThan(200 * 2);
       expect(lookup.newestFirst).toBeLessThan(12);
     });
   });
