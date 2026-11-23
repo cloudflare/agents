@@ -87,21 +87,3 @@ export const MAX_FRAMEWORK_METADATA_BYTES = ROW_VALUE_BYTES;
  * other columns share what is left.
  */
 export const INLINE_INPUT_UNITS = ROW_PIECE_UNITS;
-
-/**
- * `text` in pieces of at most `size` code units, never between the two
- * halves of a surrogate pair: SQLite stores text as UTF-8, which cannot
- * hold half a pair.
- */
-export function splitPieces(text: string, size: number): string[] {
-  const pieces: string[] = [];
-  let at = 0;
-  while (at < text.length) {
-    let end = Math.min(at + size, text.length);
-    const last = text.charCodeAt(end - 1);
-    if (end < text.length && last >= 0xd800 && last <= 0xdbff) end--;
-    pieces.push(text.slice(at, end));
-    at = end;
-  }
-  return pieces;
-}

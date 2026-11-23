@@ -28,6 +28,8 @@
  * @experimental The API may change before it stabilizes.
  */
 
+import { splitPieces } from "../../internal/platform-limits";
+
 /** A JSON value, as the store keeps it. */
 export type JsonValue =
   | string
@@ -105,9 +107,9 @@ export type HarnessStoreOptions = {
 const DEFAULT_PREFIX = "harness_";
 
 /**
- * Characters per stored chunk of a JSON value. A Durable Object row holds
- * at most 2 MB and a character is at most 4 bytes of UTF-8, so a quarter of
- * a megabyte of characters always fits with room for the other columns.
+ * UTF-16 code units per stored chunk of a JSON value, split by
+ * `splitPieces` so a chunk never ends inside a surrogate pair. A code unit
+ * is at most 3 bytes of UTF-8, so a chunk stays far under the row budget.
  */
 const CHUNK_CHARS = 256 * 1024;
 
@@ -168,15 +170,6 @@ function isStatus(value: string): value is OperationStatus {
     value === "done" ||
     value === "unanswered"
   );
-}
-
-function chunks(text: string): string[] {
-  if (text.length <= CHUNK_CHARS) return [text];
-  const parts: string[] = [];
-  for (let at = 0; at < text.length; at += CHUNK_CHARS) {
-    parts.push(text.slice(at, at + CHUNK_CHARS));
-  }
-  return parts;
 }
 
 /**
@@ -778,18 +771,20 @@ export class HarnessStore {
       log,
       seq
     );
-    chunks(JSON.stringify(entry.data)).forEach((part, index) => {
-      sql.exec(
-        `INSERT INTO ${this.#log} (session, log, seq, part, id, data, created_at)
+    splitPieces(JSON.stringify(entry.data), CHUNK_CHARS).forEach(
+      (part, index) => {
+        sql.exec(
+          `INSERT INTO ${this.#log} (session, log, seq, part, id, data, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        session,
-        log,
-        seq,
-        index,
-        entry.id ?? null,
-        part,
-        createdAt
-      );
-    });
+          session,
+          log,
+          seq,
+          index,
+          entry.id ?? null,
+          part,
+          createdAt
+        );
+      }
+    );
   }
 }

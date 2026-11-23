@@ -131,6 +131,15 @@ describe("HarnessStore", () => {
       expect(store.read("s", "big").map((e) => e.data)).toEqual(["small"]);
     }));
 
+  it("never splits an entry between the halves of a surrogate pair", () =>
+    withStore((store) => {
+      // JSON opens with a quote, so every pair after it starts at an odd
+      // index: a split at an even code-unit count falls inside a pair.
+      const emoji = "\u{1F600}".repeat(600_000);
+      store.append("s", "emoji", [{ data: emoji }]);
+      expect(store.read("s", "emoji")[0]?.data).toBe(emoji);
+    }));
+
   it("copies a log onto another session and clears logs", () =>
     withStore((store) => {
       store.append("from", "engine", [{ data: 1 }, { id: "x", data: 2 }]);
