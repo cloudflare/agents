@@ -91,10 +91,7 @@ export function resolveChannelContext(
  *
  * @internal
  */
-function noticeMessage(
-  text: string,
-  kind: DeliveryKind = "notice"
-): UIMessage {
+function noticeMessage(text: string, kind: DeliveryKind = "notice"): UIMessage {
   return {
     id: crypto.randomUUID(),
     role: "assistant",
