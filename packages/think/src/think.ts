@@ -5637,9 +5637,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     submissionId: string,
     options?: WaitForSubmissionOptions
   ): Promise<ThinkSubmissionInspection | null> {
-    const current = this._readSubmission(submissionId);
-    if (!current) return null;
-    if (!isTerminalSubmissionStatus(current.status)) {
+    if (!this._readSubmission(submissionId)) return null;
+    if (!this.tasks.isSettled(submissionId)) {
       const hook = submissionStatusHookContext.getStore();
       if (hook?.agent === this && !hook.ended) {
         throw new Error(
@@ -5652,9 +5651,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         );
       }
     }
-    await this.tasks.wait(submissionId, { timeoutMs: options?.timeoutMs });
-    // On a timeout, the submission as it is then (or null once deleted).
-    const record = this._submissionRecord(submissionId);
+    const record = await this.tasks.wait(submissionId, {
+      timeoutMs: options?.timeoutMs
+    });
     return record ? submissionInspection(record) : null;
   }
 

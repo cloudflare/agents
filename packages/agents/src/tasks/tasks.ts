@@ -266,10 +266,9 @@ export class Tasks<
   /** Options of definitions registered with any. */
   readonly #registeredOptions = new Map<string, TaskRegisterOptions>();
   /** Callers of {@link wait}, by run id; removed when they resolve. */
-  readonly #waiters = new Map<
-    string,
-    Set<(snapshot: TaskRunSnapshot<TaskValue>) => void>
-  >();
+  readonly #waiters = new Map<string, Set<(record: TaskRecord) => void>>();
+  /** Runs whose terminal report is being delivered in this isolate. */
+  readonly #reporting = new Set<string>();
   /** Lanes {@link holdLane} holds in this isolate. */
   readonly #heldLanes = new Set<string>();
   #storeInstance: TaskStore | undefined;
@@ -1757,26 +1756,29 @@ export class Tasks<
    *
    * @returns The reported snapshot, or null when it is still unreported.
    */
-  async #reportTerminal(
-    runId: string
-  ): Promise<TaskRunSnapshot<TaskValue> | null> {
+  async #reportTerminal(runId: string): Promise<TaskRecord | null> {
     const row = this.#store.getRun(runId);
     if (!row || !TERMINAL_STATUSES.has(row.status)) return null;
-    const snapshot = this.#store.rowToSnapshot(row);
+    const record = this.#store.rowToRecord(row);
     const onStatus = this.#registeredOptions.get(row.definition)?.onStatus;
-    if (!onStatus || row.notified === row.status) return snapshot;
+    if (!onStatus || row.notified === row.status) return record;
+    this.#reporting.add(runId);
     try {
-      await this.lifecycle.runInHostContext(() => onStatus(snapshot));
+      await this.lifecycle.runInHostContext(() =>
+        onStatus(this.#store.rowToSnapshot(row))
+      );
     } catch (error) {
       console.error(`[tasks] onStatus of "${row.definition}" failed`, error);
       await this.#pushReportJob(REPORT_RETRY_MS);
       return null;
+    } finally {
+      this.#reporting.delete(runId);
     }
     this.#store.sql`
       UPDATE cf_agents_task_runs SET notified = ${row.status}
       WHERE run_id = ${runId} AND status = ${row.status}
     `;
-    return snapshot;
+    return record;
   }
 
   #pushReportJob(delayMs = 0): Promise<unknown> {
@@ -1809,48 +1811,57 @@ export class Tasks<
     }
   }
 
-  #resolveWaiters(runId: string, snapshot: TaskRunSnapshot<TaskValue>): void {
+  #resolveWaiters(runId: string, record: TaskRecord): void {
     const waiters = this.#waiters.get(runId);
     if (!waiters) return;
     this.#waiters.delete(runId);
-    for (const resolve of waiters) resolve(snapshot);
+    for (const resolve of waiters) resolve(record);
   }
 
   /**
-   * @internal Resolve with a run's snapshot once it is terminal and its
-   * terminal `onStatus` returned; at once for one that already is, and with
-   * `null` for an unknown id, on `timeoutMs`, or when `signal` aborts. The
-   * wait lives in this isolate's memory.
+   * @internal Whether a run is terminal and its terminal report (if its
+   * definition has `onStatus`) returned.
+   */
+  isSettled(runId: string): boolean {
+    const row = this.#store.getRun(runId);
+    if (!row || !TERMINAL_STATUSES.has(row.status)) return false;
+    const onStatus = this.#registeredOptions.get(row.definition)?.onStatus;
+    return !onStatus || row.notified === row.status;
+  }
+
+  /**
+   * @internal Resolve with a run's record once it is settled
+   * ({@link isSettled}); at once for one that already is, with the record
+   * as it is on `timeoutMs`, with the record it had when deleted, and with
+   * `null` for an unknown id or when `signal` aborts. The wait lives in this
+   * isolate's memory.
    */
   async wait(
     runId: string,
     options: { timeoutMs?: number; signal?: AbortSignal } = {}
-  ): Promise<TaskRunSnapshot<TaskValue> | null> {
+  ): Promise<TaskRecord | null> {
     await this.lifecycle.ready();
     const row = this.#store.getRun(runId);
     if (!row) return null;
-    const onStatus = this.#registeredOptions.get(row.definition)?.onStatus;
-    if (
-      TERMINAL_STATUSES.has(row.status) &&
-      (!onStatus || row.notified === row.status)
-    ) {
-      return this.#store.rowToSnapshot(row);
-    }
+    if (this.isSettled(runId)) return this.#store.rowToRecord(row);
     if (options.signal?.aborted) return null;
     return new Promise((resolve) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const done = (snapshot: TaskRunSnapshot<TaskValue> | null) => {
+      const done = (record: TaskRecord | null) => {
         clearTimeout(timer);
         options.signal?.removeEventListener("abort", onAbort);
         const set = this.#waiters.get(runId);
         set?.delete(done);
         if (set?.size === 0) this.#waiters.delete(runId);
-        resolve(snapshot);
+        resolve(record);
       };
       const onAbort = () => done(null);
       options.signal?.addEventListener("abort", onAbort, { once: true });
       if (options.timeoutMs !== undefined) {
-        timer = setTimeout(() => done(null), options.timeoutMs);
+        timer = setTimeout(
+          () => done(this.peek(runId) ?? null),
+          options.timeoutMs
+        );
       }
       let set = this.#waiters.get(runId);
       if (!set) this.#waiters.set(runId, (set = new Set()));
@@ -1959,6 +1970,10 @@ export class Tasks<
     if (!row || !TERMINAL_STATUSES.has(row.status)) return false;
     this.#store.deleteRun(runId);
     this.#emit("task:deleted", { runId, definition: row.definition });
+    // A report in flight resolves its waiters when it returns.
+    if (!this.#reporting.has(runId)) {
+      this.#resolveWaiters(runId, this.#store.rowToRecord(row));
+    }
     return true;
   }
 
