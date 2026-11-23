@@ -14,6 +14,7 @@ import type {
   AgentToolMilestone,
   AgentToolProgressSnapshot
 } from "../agent-tool-types";
+import { interruptedTurnRequestIds } from "./admissions";
 
 /** One run row. */
 export interface AgentToolRunRecord {
@@ -81,6 +82,11 @@ export interface AgentToolRunStore {
   read(runId: string): AgentToolRunRecord | null;
   /** The open run whose row names `requestId`, or `null`. */
   openForRequest(requestId: string): AgentToolRunRecord | null;
+  /**
+   * Request ids of chat turns whose run has not settled: running, or cut off
+   * and waiting for chat recovery to run it again.
+   */
+  openTurnRequestIds(): string[];
   /**
    * The run whose row names `requestId` as its current or its first request
    * id, open or not, or `null`. Does not create the tables: every
@@ -160,6 +166,11 @@ export interface AgentToolTableNames {
   milestones: string;
   /** The index on the run table's `request_id`. */
   requestIndex: string;
+  /**
+   * The host's chat-turn Task definition (`CHAT_FIBER_NAME`): an open run of
+   * it names a turn that is running or waits to be recovered.
+   */
+  turnDefinition: string;
 }
 
 const OPEN = "status in ('starting', 'running')";
@@ -338,6 +349,8 @@ export function createAgentToolRunStore(
       ensure();
       return one(`request_id = ? and ${OPEN} limit 1`, requestId);
     },
+    openTurnRequestIds: () =>
+      interruptedTurnRequestIds(sql(), tables.turnDefinition),
     forRequest: (requestId) =>
       existing()
         ? one(

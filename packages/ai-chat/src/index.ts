@@ -638,7 +638,8 @@ export class AIChatAgent<
     store: createAgentToolRunStore(() => this.ctx.storage.sql, {
       runs: "cf_ai_chat_agent_tool_runs",
       milestones: "cf_ai_chat_agent_tool_milestones",
-      requestIndex: "idx_ai_chat_agent_tool_request_id"
+      requestIndex: "idx_ai_chat_agent_tool_request_id",
+      turnDefinition: (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME
     }),
     streams: () => this._resumableStream,
     storage: () => this.ctx.storage,

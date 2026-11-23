@@ -989,7 +989,8 @@ export class AgentToolRuns {
 
   /**
    * The state of chat recovery for the run's turn: the incidents that name
-   * one of the row's request ids, and no others.
+   * one of the row's request ids, and no others, and an unsettled run of the
+   * turn itself.
    */
   async #recoveryOf(
     run: AgentToolRunRecord
@@ -1019,7 +1020,14 @@ export class AgentToolRuns {
       if (incident.reason === CHAT_RECOVERY_CANCELLED_REASON) cancelled = true;
     }
     if (cancelled) return "cancelled";
-    return failed ? "failed" : undefined;
+    if (failed) return "failed";
+    // A turn cut off with its isolate opens its incident only when its run
+    // is replayed. Until then the open run is the evidence that recovery
+    // will come (a facet's run waits for its root to wake it).
+    if (this.host.store.openTurnRequestIds().some((id) => ids.has(id))) {
+      return "in-progress";
+    }
+    return undefined;
   }
 
   // ── Writes ─────────────────────────────────────────────────────────
