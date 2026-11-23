@@ -135,6 +135,7 @@ function setup() {
     | undefined;
   let holdList: Promise<void> | undefined;
   let keepAliveError: Error | undefined;
+  let keepAliveGate: Promise<void> = Promise.resolve();
   const lifecycles: Promise<unknown>[] = [];
   let requestIds = 0;
   let flushes = 0;
@@ -175,7 +176,10 @@ function setup() {
     responseType: "response",
     resetError: "cleared",
     keepAliveWhile: (fn) => {
-      if (keepAliveError) return Promise.reject(keepAliveError);
+      if (keepAliveError) {
+        const error = keepAliveError;
+        return keepAliveGate.then(() => Promise.reject(error));
+      }
       const running = fn();
       lifecycles.push(running);
       return running;
@@ -238,8 +242,9 @@ function setup() {
       activeRequestId = requestId;
     },
     /** Make holding the isolate fail before the run's lifecycle runs. */
-    failKeepAlive: (error: Error) => {
+    failKeepAlive: (error: Error, gate?: Promise<void>) => {
       keepAliveError = error;
+      if (gate) keepAliveGate = gate;
     },
     setActiveStream: (requestId: string | null) => {
       activeStream = requestId;
@@ -351,6 +356,27 @@ describe("AgentToolRuns", () => {
       error: "Subrequest depth limit exceeded"
     });
     expect(runs.isLive("run-1")).toBe(false);
+  });
+
+  it("closes a tail opened before holding the isolate failed", async () => {
+    const { runs, failKeepAlive } = setup();
+    let release = () => {};
+    failKeepAlive(
+      new Error("Subrequest depth limit exceeded"),
+      new Promise<void>((resolve) => {
+        release = resolve;
+      })
+    );
+    await runs.start("run-1", START, heldTurn().run);
+    const reader = runs.tail("run-1").getReader();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    release();
+    const ended = await Promise.race([
+      reader.read().then((next) => next.done),
+      new Promise((resolve) => setTimeout(() => resolve("still open"), 200))
+    ]);
+    expect(ended).toBe(true);
   });
 
   it("runs the turn and writes its outcome once, then forgets the run", async () => {
