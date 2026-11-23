@@ -49,6 +49,7 @@ import type {
   TaskInput,
   TaskJson,
   TaskOutput,
+  TaskRegisterOptions,
   TaskReceipt,
   TaskRunOptions,
   TaskRunRow,
@@ -132,6 +133,11 @@ const MAX_DEFINITION_NAME_LENGTH = 256;
  * job id space.
  */
 const WAKE_JOB_PREFIX = "task:";
+/** The job that delivers terminal reports a reset or a throw cut short. */
+const REPORT_JOB_ID = "tasks:reports";
+const REPORT_JOB_FN = "reports";
+/** Wait before delivering again a report whose `onStatus` threw. */
+const REPORT_RETRY_MS = 30_000;
 /** Normal Task deadline dispatch. */
 const WAKE_JOB_FN = "wake";
 /**
@@ -252,6 +258,13 @@ export class Tasks<
    * attempt) ends.
    */
   readonly #locals = new Map<string, unknown>();
+  /** Options of definitions registered with any. */
+  readonly #registeredOptions = new Map<string, TaskRegisterOptions>();
+  /** Callers of {@link wait}, by run id; removed when they resolve. */
+  readonly #waiters = new Map<
+    string,
+    Set<(snapshot: TaskRunSnapshot<TaskValue>) => void>
+  >();
   /** Lanes {@link holdLane} holds in this isolate. */
   readonly #heldLanes = new Set<string>();
   #storeInstance: TaskStore | undefined;
@@ -353,7 +366,11 @@ export class Tasks<
    * registered, which is always a real conflict: this method runs exactly
    * once per name per Tasks construction.
    */
-  register(name: string, definition: TaskCallbacks[string]): void {
+  register(
+    name: string,
+    definition: TaskCallbacks[string],
+    options: TaskRegisterOptions = {}
+  ): void {
     if (typeof name !== "string" || name.length === 0) {
       throw new Error("Task definition names must be non-empty strings");
     }
@@ -373,6 +390,9 @@ export class Tasks<
       );
     }
     this.#registered.set(name, definition);
+    if (options.onStatus || options.maxAttempts !== undefined) {
+      this.#registeredOptions.set(name, options);
+    }
   }
 
   // ── Starting runs ────────────────────────────────────────────────────────
@@ -456,6 +476,7 @@ export class Tasks<
     this.#reconcile();
     await this.#syncAllWakes();
     await this.#reviveRoutedWakes();
+    if (this.#hasUnreported()) await this.#pushReportJob();
   }
 
   /**
@@ -489,6 +510,10 @@ export class Tasks<
   async onJob(
     context: LifecycleJobContext
   ): Promise<LifecycleJobOutcome | void> {
+    if (context.job.fn === REPORT_JOB_FN) {
+      await this.#replayReports();
+      return undefined;
+    }
     const timing = isTaskWakeJobPayload(context.job.payload)
       ? context.job.payload
       : undefined;
@@ -1148,6 +1173,7 @@ export class Tasks<
       throw error;
     }
     this.#emit("task:accepted", { runId, definition, accepted: true });
+    await this.#report(runId);
 
     // Warm path: begin the first attempt immediately when the host is past
     // startup. The durable deadline above is authoritative either way.
@@ -1211,6 +1237,14 @@ export class Tasks<
       });
     }
 
+    const cap = this.#registeredOptions.get(row.definition)?.maxAttempts;
+    if (cap !== undefined && row.attempt >= cap) {
+      await this.#settleFailed(runId, null, {
+        name: "TaskInterruptedError",
+        message: `Interrupted ${row.attempt} times`
+      });
+      return;
+    }
     const generation = nanoid();
     const attempt = row.attempt + 1;
     this.#store.sql`
@@ -1230,6 +1264,15 @@ export class Tasks<
     await this.#syncWake(runId);
     // A cancel() that ran during that await found no live attempt and
     // settled the run itself. The claim is void then: start no handler.
+    if (this.#store.getRun(runId)?.generation !== generation) return;
+    const capped = this.#registeredOptions.get(row.definition)?.maxAttempts;
+    if (capped !== undefined) {
+      // The attempt counts only once it is durable: a reset before the first
+      // I/O would roll the claim back and the same attempt would run again.
+      await this.lifecycle.storage.sync();
+      if (this.#store.getRun(runId)?.generation !== generation) return;
+    }
+    await this.#report(runId);
     if (this.#store.getRun(runId)?.generation !== generation) return;
 
     const controller = new AbortController();
@@ -1532,10 +1575,148 @@ export class Tasks<
     row: TaskRunRow | undefined
   ): Promise<void> {
     // Nothing reads a settled run's checkpoint.
-    if (row?.retain === 0) this.#store.deleteRun(runId);
-    else this.#store.deleteCheckpoint(runId);
+    this.#store.deleteCheckpoint(runId);
     await this.#syncWake(runId);
     if (row?.lane != null) await this.#wakeLane(row.lane);
+    const reported =
+      row !== undefined &&
+      (this.#registeredOptions.get(row.definition)?.onStatus !== undefined ||
+        this.#waiters.has(runId));
+    if (!reported) {
+      if (row?.retain === 0) this.#store.deleteRun(runId);
+      return;
+    }
+    const snapshot = await this.#reportTerminal(runId);
+    if (!snapshot) return;
+    if (row.retain === 0) this.#store.deleteRun(runId);
+    this.#resolveWaiters(runId, snapshot);
+  }
+
+  /**
+   * Report a run's status to its definition's `onStatus`, in host context.
+   * A throw is logged; a non-terminal report is not repeated.
+   */
+  async #report(runId: string): Promise<void> {
+    if (this.#registeredOptions.size === 0) return;
+    const row = this.#store.getRun(runId);
+    const onStatus =
+      row && this.#registeredOptions.get(row.definition)?.onStatus;
+    if (!row || !onStatus) return;
+    try {
+      await this.lifecycle.runInHostContext(() =>
+        onStatus(this.#store.rowToSnapshot(row))
+      );
+    } catch (error) {
+      console.error(`[tasks] onStatus of "${row.definition}" failed`, error);
+    }
+  }
+
+  /**
+   * Report a terminal run at least once: `notified` takes its status after
+   * `onStatus` returns. A throw (or a reset before the write) leaves it
+   * unreported, and the report job delivers it again.
+   *
+   * @returns The reported snapshot, or null when it is still unreported.
+   */
+  async #reportTerminal(
+    runId: string
+  ): Promise<TaskRunSnapshot<TaskValue> | null> {
+    const row = this.#store.getRun(runId);
+    if (!row || !TERMINAL_STATUSES.has(row.status)) return null;
+    const snapshot = this.#store.rowToSnapshot(row);
+    const onStatus = this.#registeredOptions.get(row.definition)?.onStatus;
+    if (!onStatus || row.notified === row.status) return snapshot;
+    try {
+      await this.lifecycle.runInHostContext(() => onStatus(snapshot));
+    } catch (error) {
+      console.error(`[tasks] onStatus of "${row.definition}" failed`, error);
+      await this.#pushReportJob(REPORT_RETRY_MS);
+      return null;
+    }
+    this.#store.sql`
+      UPDATE cf_agents_task_runs SET notified = ${row.status}
+      WHERE run_id = ${runId} AND status = ${row.status}
+    `;
+    return snapshot;
+  }
+
+  #pushReportJob(delayMs = 0): Promise<unknown> {
+    return this.lifecycle.jobs.push({
+      id: REPORT_JOB_ID,
+      fn: REPORT_JOB_FN,
+      time: Date.now() + delayMs,
+      retry: WAKE_JOB_RETRY
+    });
+  }
+
+  /** Deliver the terminal reports a reset or a throw left undelivered. */
+  async #replayReports(): Promise<void> {
+    const names = [...this.#registeredOptions.keys()].filter(
+      (name) => this.#registeredOptions.get(name)?.onStatus
+    );
+    if (names.length === 0) return;
+    const rows = this.#store.sql<TaskRunRow>`
+      SELECT * FROM cf_agents_task_runs
+      WHERE status IN ('completed', 'error', 'aborted', 'skipped')
+        AND (notified IS NULL OR notified != status)
+        AND definition IN (SELECT value FROM json_each(${JSON.stringify(names)}))
+      ORDER BY settled_at LIMIT 100
+    `;
+    for (const row of rows) {
+      const snapshot = await this.#reportTerminal(row.run_id);
+      if (!snapshot) return;
+      if (row.retain === 0) this.#store.deleteRun(row.run_id);
+      this.#resolveWaiters(row.run_id, snapshot);
+    }
+  }
+
+  #resolveWaiters(runId: string, snapshot: TaskRunSnapshot<TaskValue>): void {
+    const waiters = this.#waiters.get(runId);
+    if (!waiters) return;
+    this.#waiters.delete(runId);
+    for (const resolve of waiters) resolve(snapshot);
+  }
+
+  /**
+   * @internal Resolve with a run's snapshot once it is terminal and its
+   * terminal `onStatus` returned; at once for one that already is, and with
+   * `null` for an unknown id, on `timeoutMs`, or when `signal` aborts. The
+   * wait lives in this isolate's memory.
+   */
+  async wait(
+    runId: string,
+    options: { timeoutMs?: number; signal?: AbortSignal } = {}
+  ): Promise<TaskRunSnapshot<TaskValue> | null> {
+    await this.lifecycle.ready();
+    const row = this.#store.getRun(runId);
+    if (!row) return null;
+    const onStatus = this.#registeredOptions.get(row.definition)?.onStatus;
+    if (
+      TERMINAL_STATUSES.has(row.status) &&
+      (!onStatus || row.notified === row.status)
+    ) {
+      return this.#store.rowToSnapshot(row);
+    }
+    if (options.signal?.aborted) return null;
+    return new Promise((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const done = (snapshot: TaskRunSnapshot<TaskValue> | null) => {
+        clearTimeout(timer);
+        options.signal?.removeEventListener("abort", onAbort);
+        const set = this.#waiters.get(runId);
+        set?.delete(done);
+        if (set?.size === 0) this.#waiters.delete(runId);
+        resolve(snapshot);
+      };
+      const onAbort = () => done(null);
+      options.signal?.addEventListener("abort", onAbort, { once: true });
+      if (options.timeoutMs !== undefined) {
+        timer = setTimeout(() => done(null), options.timeoutMs);
+      }
+      let set = this.#waiters.get(runId);
+      if (!set) this.#waiters.set(runId, (set = new Set()));
+      set.add(done);
+    });
   }
 
   /**
@@ -1547,6 +1728,22 @@ export class Tasks<
     if (row?.lane == null) return true;
     if (this.#heldLanes.has(row.lane)) return false;
     return this.#store.laneHead(row.lane)?.run_id === runId;
+  }
+
+  #hasUnreported(): boolean {
+    const names = [...this.#registeredOptions.keys()].filter(
+      (name) => this.#registeredOptions.get(name)?.onStatus
+    );
+    if (names.length === 0) return false;
+    return (
+      this.#store.sql`
+        SELECT 1 FROM cf_agents_task_runs
+        WHERE status IN ('completed', 'error', 'aborted', 'skipped')
+          AND (notified IS NULL OR notified != status)
+          AND definition IN (SELECT value FROM json_each(${JSON.stringify(names)}))
+        LIMIT 1
+      `.length > 0
+    );
   }
 
   /** Give a lane's head a deadline of now if it waits without one. */

@@ -386,7 +386,26 @@ export type TaskRunRow = {
   settled_at: number | null;
   lane: string | null;
   seq: number | null;
+  notified: string | null;
 };
+
+/**
+ * @internal Options of a framework definition (`Tasks.register`).
+ */
+export interface TaskRegisterOptions {
+  /**
+   * Called in host context when a run of this definition is accepted, when
+   * an attempt claims it, and when it ends. The terminal call happens at
+   * least once: a throw or a reset before it returns delivers it again
+   * (30 s later after a throw), and `wait()` resolves only after it returned.
+   */
+  onStatus?(snapshot: TaskRunSnapshot<TaskValue>): void | Promise<void>;
+  /**
+   * Attempts a run may start before it ends `error`: an attempt is counted,
+   * and committed, before the handler runs. Omitted: no limit.
+   */
+  maxAttempts?: number;
+}
 
 /** @internal Raw `cf_agents_task_steps` SQLite row. */
 export type TaskStepRow = {

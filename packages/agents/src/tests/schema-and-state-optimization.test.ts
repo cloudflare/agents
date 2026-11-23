@@ -116,7 +116,8 @@ const EXPECTED_SCHEMA_DDL = [
         updated_at INTEGER NOT NULL,
         settled_at INTEGER,
         lane TEXT,
-        seq INTEGER
+        seq INTEGER,
+        notified TEXT
       ) WITHOUT ROWID`,
   `CREATE TABLE cf_agents_task_steps (
         run_id TEXT NOT NULL,

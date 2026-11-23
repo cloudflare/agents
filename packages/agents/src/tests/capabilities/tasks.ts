@@ -401,6 +401,35 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
     }
   });
 
+  /** Statuses `__cf_reported` runs reported, as `runId:status`. */
+  readonly reports: string[] = [];
+  /** `__cf_reported` terminal reports throw while this is above zero. */
+  failReports = 0;
+  /** `__cf_reported` parks on this when set. */
+  reportedGate: Promise<void> | null = null;
+
+  constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
+    super(ctx, env);
+    this.tasks.register(
+      "__cf_reported",
+      async () => {
+        await this.reportedGate;
+        return "ok";
+      },
+      {
+        maxAttempts: 2,
+        onStatus: (snapshot) => {
+          const terminal = !["pending", "running"].includes(snapshot.status);
+          if (terminal && this.failReports > 0) {
+            this.failReports--;
+            throw new Error("report failed");
+          }
+          this.reports.push(`${snapshot.runId}:${snapshot.status}`);
+        }
+      }
+    );
+  }
+
   readonly lifecycle = Lifecycle.install(this).use(this.tasks);
 }
 

@@ -35,7 +35,8 @@ const RUNS_COLUMNS = `
         updated_at INTEGER NOT NULL,
         settled_at INTEGER,
         lane TEXT,
-        seq INTEGER
+        seq INTEGER,
+        notified TEXT
       `;
 
 /** @internal SQL-backed store for one Tasks capability instance. */
@@ -194,6 +195,7 @@ export class TaskStore {
          END`
       : "status";
     const lane = columns.has("lane") ? "lane, seq" : "NULL, NULL";
+    const notified = columns.has("notified") ? "notified" : "NULL";
     this.#storage.transactionSync(() => {
       const exec = (query: string) => {
         try {
@@ -211,14 +213,14 @@ export class TaskStore {
           error_message, status_message, metadata, idempotency_key, retain,
           attempt, generation, next_at, wait_reason, cancel_requested,
           cancel_reason, created_at, started_at, updated_at, settled_at,
-          lane, seq
+          lane, seq, notified
         )
         SELECT
           run_id, definition, input, ${status},
           result, error_name, error_message, status_message, metadata,
           idempotency_key, retain, attempt, generation, next_at, wait_reason,
           cancel_requested, cancel_reason, created_at, started_at, updated_at,
-          settled_at, ${lane}
+          settled_at, ${lane}, ${notified}
         FROM cf_agents_task_runs`);
       exec(`DROP TABLE cf_agents_task_runs`);
       exec(
