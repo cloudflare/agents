@@ -123,8 +123,9 @@ describe("jobs after an attempt that ended its isolate", () => {
 
       await lifecycle.alarm();
 
-      // The suspect's exclusive job does not jump ahead of its own s1.
-      expect(ran.indexOf("s1")).toBeLessThan(ran.indexOf("s2"));
+      // The other owner first; the suspect's exclusive job stays behind its
+      // own s1.
+      expect(ran).toEqual(["o1", "s1", "s2"]);
     });
   });
 
