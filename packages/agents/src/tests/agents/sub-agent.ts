@@ -1795,15 +1795,17 @@ export class TestSubAgentParent extends Agent {
   }
 
   /**
-   * Run the alarm by hand; once the facet's first attempt has failed and it
-   * waits to retry, cancel the schedule from the facet. Returns how many
-   * attempts the facet logged.
+   * Let the platform alarm run the backdated schedule; once the facet's
+   * first attempt has failed and it waits to retry, cancel the schedule from
+   * the facet. Returns how many attempts the facet logged. A manual
+   * `alarm()` here would race the platform alarm that any re-arm sets for
+   * the overdue row, and both could run the first attempt.
    */
   async runAlarmCancellingDuringRetry(
     subAgentName: string,
     id: string
   ): Promise<number> {
-    const alarm = this.alarm();
+    await this.lifecycle.rearmAlarm();
     const deadline = Date.now() + 5_000;
     while (
       (await this.subAgentScheduleLog(subAgentName)).length === 0 &&
@@ -1812,7 +1814,8 @@ export class TestSubAgentParent extends Agent {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     await this.subAgentCancelSchedule(subAgentName, id);
-    await alarm;
+    // The retry waits 300 ms: a second attempt would be logged by now.
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
     return (await this.subAgentScheduleLog(subAgentName)).length;
   }
 
