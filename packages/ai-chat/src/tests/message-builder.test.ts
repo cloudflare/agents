@@ -913,6 +913,66 @@ describe("applyChunkToParts", () => {
       });
       expect(find(b).toolMetadata).toEqual(toolMetadata);
     });
+
+    it("is retained when a later chunk omits it", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-start",
+        toolCallId: "c1",
+        toolName: "search",
+        toolMetadata
+      });
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "c1",
+        toolName: "search",
+        input: {}
+      });
+      expect(find(parts).state).toBe("input-available");
+      expect(find(parts).toolMetadata).toEqual(toolMetadata);
+
+      const errored = makeParts();
+      applyChunkToParts(errored, {
+        type: "tool-input-start",
+        toolCallId: "c1",
+        toolName: "search",
+        toolMetadata
+      });
+      applyChunkToParts(errored, {
+        type: "tool-input-error",
+        toolCallId: "c1",
+        toolName: "search",
+        input: {},
+        errorText: "bad"
+      });
+      expect(find(errored).state).toBe("output-error");
+      expect(find(errored).toolMetadata).toEqual(toolMetadata);
+    });
+
+    it("is added by a late tool-input-available while the approval stays pending", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-start",
+        toolCallId: "c1",
+        toolName: "search"
+      });
+      applyChunkToParts(parts, {
+        type: "tool-approval-request",
+        toolCallId: "c1",
+        approvalId: "ap1"
+      });
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "c1",
+        toolName: "search",
+        input: { q: "x" },
+        toolMetadata
+      });
+      expect(find(parts).state).toBe("approval-requested");
+      expect(find(parts).approval).toEqual({ id: "ap1" });
+      expect(find(parts).input).toEqual({ q: "x" });
+      expect(find(parts).toolMetadata).toEqual(toolMetadata);
+    });
   });
 
   describe("tool provider metadata (callProviderMetadata, providerExecuted, title)", () => {
