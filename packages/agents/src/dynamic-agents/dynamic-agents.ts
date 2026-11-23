@@ -1162,14 +1162,23 @@ export class DynamicAgentsInternal extends LifecycleCapability {
    * names this Agent itself is skipped).
    */
   connectionRoutesToChild(connection: Connection): boolean {
+    // A connection's route is fixed when it connects, and event-log fan-out
+    // asks for every connection on every publish: parse it once per object
+    // (a woken isolate has new objects, so the cache follows hibernation).
+    const cached = this.#routesToChild.get(connection);
+    if (cached !== undefined) return cached;
     ensureConnectionWrapped(connection);
     const outerUri = this.#host._unsafe_getConnectionFlag(
       connection,
       CF_SUB_AGENT_OUTER_URL_KEY
     );
     const uri = typeof outerUri === "string" ? outerUri : connection.uri;
-    return !!uri && this.#childMatch(uri) !== null;
+    const routes = !!uri && this.#childMatch(uri) !== null;
+    this.#routesToChild.set(connection, routes);
+    return routes;
   }
+
+  readonly #routesToChild = new WeakMap<Connection, boolean>();
 
   /**
    * The sub-agent a connection URI routes to from here, skipping a leading
