@@ -1395,6 +1395,12 @@ describe("SubAgent", () => {
 
     expect(await agent.subAgentRunningFiberCount("recover-child")).toBe(0);
     expect(await agent.fiberWakeOwners()).toEqual([]);
+    // A facet empties the old tables instead of dropping them: a facet's
+    // drop reset its tree's storage on a deployment (RUNTIME-FACTS).
+    expect(await agent.subAgentLegacyFiberTables("recover-child")).toEqual({
+      cf_agents_runs: 0,
+      cf_agents_fibers: 0
+    });
     expect(await agent.subAgentRecoveredFibers("recover-child")).toEqual([
       expect.objectContaining({
         id: "fiber-recover-1",

@@ -583,7 +583,11 @@ export async function deleteFibers(
       limit: limit - deleted
     })) {
       if (!isParked(record)) continue;
-      if (before !== undefined && record.createdAt >= before) continue;
+      // An interrupted fiber counts as settled when it was interrupted.
+      const interruptedAt =
+        tasks.checkpointOf<number>(record.runId, INTERRUPTED_AT) ??
+        record.createdAt;
+      if (before !== undefined && interruptedAt >= before) continue;
       if (!(await tasks.settle(record.runId, TaskSettlement.aborted()))) {
         continue;
       }
@@ -679,18 +683,38 @@ function parseJson(text: string | null): TaskJson | undefined {
 
 /**
  * @internal Carry `cf_agents_runs` and `cf_agents_fibers` rows from a
- * release before fibers ran on Tasks into fiber runs, once, then drop both
- * tables and the old capability's wake jobs. An unsettled body comes back
+ * release before fibers ran on Tasks into fiber runs, once, then drop the
+ * tables (empty them, in a facet). An unsettled body comes back
  * interrupted, so its next attempt is its recovery.
  */
 export async function importLegacyFibers(
   tasks: Tasks,
   storage: DurableObjectStorage,
+  facet: boolean,
   armFacetWake: (address: LifecycleRouteAddress, time: number) => Promise<void>
 ): Promise<void> {
   const tables = legacyTables(storage);
+  if (tables.size === 0) return;
+  // In a facet the tables are emptied, not dropped: a facet dropping
+  // indexed tables reset the storage of the tree it was started in on a
+  // deployment (RUNTIME-FACTS), so an empty table stays.
+  if (
+    facet &&
+    [...tables].every(
+      (table) =>
+        storage.sql.exec(`SELECT 1 FROM ${table} LIMIT 1`).toArray().length ===
+        0
+    )
+  ) {
+    return;
+  }
+  const discard = (table: string) =>
+    storage.sql.exec(
+      facet ? `DELETE FROM ${table}` : `DROP TABLE IF EXISTS ${table}`
+    );
   if (tables.has(LEGACY_FACET_INDEX)) {
     await moveLegacyFacetWakes(storage, armFacetWake);
+    discard(LEGACY_FACET_INDEX);
   }
   const hasRuns = tables.has("cf_agents_runs");
   const hasLedger = tables.has("cf_agents_fibers");
@@ -758,8 +782,8 @@ export async function importLegacyFibers(
     });
   }
 
-  storage.sql.exec("DROP TABLE IF EXISTS cf_agents_runs");
-  storage.sql.exec("DROP TABLE IF EXISTS cf_agents_fibers");
+  if (hasRuns) discard("cf_agents_runs");
+  if (hasLedger) discard("cf_agents_fibers");
   storage.kv.delete(LEGACY_SCHEMA_KEY);
 }
 
@@ -783,7 +807,6 @@ async function moveLegacyFacetWakes(
       Date.now()
     );
   }
-  storage.sql.exec(`DROP TABLE ${LEGACY_FACET_INDEX}`);
 }
 
 async function importManaged(

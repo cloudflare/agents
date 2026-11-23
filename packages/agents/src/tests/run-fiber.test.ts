@@ -934,6 +934,30 @@ describe("runFiber", () => {
       ).resolves.toBeNull();
     });
 
+    it("deletes interrupted fibers by when they were interrupted", async () => {
+      const agent = await freshManagedAgent("managed-interrupted-before");
+      const now = Date.now();
+      await agent.insertInterruptedLedgerFiber(
+        "early",
+        now - 60_000,
+        now - 50_000
+      );
+      await agent.insertInterruptedLedgerFiber("late", now - 60_000, now);
+      await agent.triggerRecoveryCheck();
+
+      await expect(agent.inspectManagedFiber("early")).resolves.toMatchObject({
+        status: "interrupted",
+        settledAt: now - 50_000
+      });
+      await expect(
+        agent.deleteInterruptedFibersBefore(now - 10_000)
+      ).resolves.toBe(1);
+      await expect(agent.inspectManagedFiber("early")).resolves.toBeNull();
+      await expect(agent.inspectManagedFiber("late")).resolves.toMatchObject({
+        status: "interrupted"
+      });
+    });
+
     it("should preserve interrupted fibers during default cleanup", async () => {
       const agent = await freshManagedAgent("managed-delete-default");
 

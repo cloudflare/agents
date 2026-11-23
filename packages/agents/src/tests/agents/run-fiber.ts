@@ -227,7 +227,12 @@ export class TestRunFiberAgent extends Agent {
   /** Start a managed fiber under the id of a plain fiber's run; returns the error. */
   async startManagedWithRunCollision(fiberId: string): Promise<string> {
     await this.insertInterruptedFiber(fiberId, "preexisting-run");
-    await importLegacyFibers(this.tasks, this.ctx.storage, async () => {});
+    await importLegacyFibers(
+      this.tasks,
+      this.ctx.storage,
+      false,
+      async () => {}
+    );
     return this.startFiber(
       "managed-setup-failure",
       async () => {
@@ -439,6 +444,30 @@ export class TestRunFiberAgent extends Agent {
 
   async deleteManagedFibers(): Promise<number> {
     return this.deleteFibers();
+  }
+
+  /** A ledger row an older release marked `interrupted` at `interruptedAt`. */
+  async insertInterruptedLedgerFiber(
+    id: string,
+    createdAt: number,
+    interruptedAt: number
+  ): Promise<void> {
+    this._legacyFiberTables();
+    this.sql`
+      INSERT INTO cf_agents_fibers
+        (fiber_id, idempotency_key, name, status, snapshot, metadata_json,
+         error_message, created_at, started_at, completed_at)
+      VALUES
+        (${id}, ${`key:${id}`}, ${"managed"}, 'interrupted', NULL, NULL, NULL,
+         ${createdAt}, ${createdAt}, ${interruptedAt})
+    `;
+  }
+
+  async deleteInterruptedFibersBefore(time: number): Promise<number> {
+    return this.deleteFibers({
+      status: "interrupted",
+      settledBefore: new Date(time)
+    });
   }
 
   async deleteInterruptedManagedFibers(): Promise<number> {

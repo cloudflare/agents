@@ -2519,8 +2519,11 @@ export class Agent<
    * dead isolate left, before onStart runs.
    */
   private async _recoverFibers(): Promise<void> {
-    await importLegacyFibers(this.tasks, this.ctx.storage, (source, time) =>
-      this._armFacetWake(source, time)
+    await importLegacyFibers(
+      this.tasks,
+      this.ctx.storage,
+      this._isFacet,
+      (source, time) => this._armFacetWake(source, time)
     );
     const scanMs = this._resolvedOptions.fiberRecoveryScanDeadlineMs;
     const startedAt = Date.now();

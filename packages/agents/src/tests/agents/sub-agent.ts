@@ -702,7 +702,12 @@ export class CounterSubAgent extends Agent {
     `;
     // Carried into an interrupted fiber run, as a restarted facet does; its
     // Task wake then reaches the root.
-    await importLegacyFibers(this.tasks, this.ctx.storage, async () => {});
+    await importLegacyFibers(
+      this.tasks,
+      this.ctx.storage,
+      true,
+      async () => {}
+    );
   }
 
   /**
@@ -755,6 +760,19 @@ export class CounterSubAgent extends Agent {
         : null,
       createdAt: row.created_at
     }));
+  }
+
+  legacyFiberTables(): Record<string, number> {
+    const tables: Record<string, number> = {};
+    for (const { name } of this.sql<{ name: string }>`
+      SELECT name FROM sqlite_master WHERE type = 'table'
+        AND name IN ('cf_agents_runs', 'cf_agents_fibers')
+    `) {
+      tables[name] = Number(
+        this.ctx.storage.sql.exec(`SELECT COUNT(*) AS n FROM ${name}`).one().n
+      );
+    }
+    return tables;
   }
 
   getRunningFiberCount(): number {
@@ -919,7 +937,12 @@ export class InnerSubAgent extends Agent {
     `;
     // Carried into an interrupted fiber run, as a restarted facet does; its
     // Task wake then reaches the root.
-    await importLegacyFibers(this.tasks, this.ctx.storage, async () => {});
+    await importLegacyFibers(
+      this.tasks,
+      this.ctx.storage,
+      true,
+      async () => {}
+    );
   }
 
   /**
@@ -2541,6 +2564,14 @@ export class TestSubAgentParent extends Agent {
   ): Promise<string> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.runFiberWithFailingCleanup(value, failBody);
+  }
+
+  /** Row counts of a sub-agent's old fiber tables that still exist. */
+  async subAgentLegacyFiberTables(
+    subAgentName: string
+  ): Promise<Record<string, number>> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.legacyFiberTables();
   }
 
   async subAgentRunningFiberCount(subAgentName: string): Promise<number> {
