@@ -15,10 +15,7 @@
 
 import { nanoid } from "nanoid";
 import { LifecycleCapability } from "../lifecycle/capability";
-import type {
-  LifecycleRouteAddress,
-  LifecycleRouteContext
-} from "../lifecycle/capability";
+import type { LifecycleRouteContext } from "../lifecycle/capability";
 import type { MemoryLimitContext } from "../lifecycle/capability-runner";
 import type {
   LifecycleJobContext,
@@ -94,25 +91,6 @@ export function setTaskDefinitionResolver(
   taskDefinitionResolvers.set(tasks, resolver);
 }
 
-const taskRoutedMemoryLimitHandlers = new WeakMap<
-  object,
-  (context: MemoryLimitContext) => void | Promise<void>
->();
-
-/**
- * @internal Supply a composition-root bridge from a routed run's sealed
- * strike to the owning host's own `onAlarmMemoryLimit` hook. A root's own
- * local runs already reach that hook through Lifecycle's alarm dispatch on
- * the same Durable Object; a routed run's owner is a different instance,
- * whose Lifecycle never observes the root's alarm directly.
- */
-export function setTaskRoutedMemoryLimitHandler(
-  tasks: Tasks<never>,
-  handler: (context: MemoryLimitContext) => void | Promise<void>
-): void {
-  taskRoutedMemoryLimitHandlers.set(tasks, handler);
-}
-
 const FIBER_SCHEMA_VERSION_KEY = "cf_agents:tasks_schema_version";
 /**
  * 2 renames the run statuses and adds `cf_agents_task_checkpoint`; 3 adds
@@ -179,19 +157,14 @@ const TERMINAL_STATUSES: ReadonlySet<TaskStatus> = new Set([
 ]);
 
 /**
- * A wake job's payload. Owner fields are set only for a routed run's mirror
- * on the root Lifecycle — the run row and step journal stay on the owning
- * facet, which is where `dispatch` and `memoryLimit` route back to.
+ * A wake job's payload. Owner fields are set only on a wake a root mirrored
+ * for a sub-agent's run before sub-agents kept their own; the root hands
+ * those over when they come due.
  */
 type TaskWakeJobPayload = {
   readonly runId: string;
   readonly owner_path?: string | null;
   readonly owner_path_key?: string | null;
-  /**
-   * A routed run backing off after a memory-limit strike: its deadline is
-   * the breaker's, and waking it early would only read as a clean pass.
-   */
-  readonly struck?: true;
 };
 
 function isTaskWakeJobPayload(value: unknown): value is TaskWakeJobPayload {
@@ -202,20 +175,8 @@ function isTaskWakeJobPayload(value: unknown): value is TaskWakeJobPayload {
   );
 }
 
-/** Tasks protocol messages routed between a facet and the root Lifecycle. */
-type TaskRouteMessage =
-  | {
-      readonly type: "syncWake";
-      readonly runId: string;
-      readonly next: number | null;
-      readonly struck?: true;
-    }
-  | { readonly type: "dispatch"; readonly runId: string }
-  | {
-      readonly type: "memoryLimit";
-      readonly runId: string;
-      readonly context: MemoryLimitContext;
-    };
+/** A root handing a run wake it mirrored for a sub-agent back to it. */
+type TaskAdoptMessage = { readonly type: "adopt" };
 
 /**
  * Who drives an accepted run's first attempt (`TaskRunOptions.start`):
@@ -497,31 +458,22 @@ export class Tasks<
     }
     this.#reconcile();
     await this.#syncAllWakes();
-    await this.#reviveRoutedWakes();
+    await this.#handOverSoon();
     if (this.#hasUnreported()) await this.#pushReportJob();
   }
 
   /**
-   * Make this root's mirrors of routed facet runs due now. A facet's runs
-   * live in its own storage, where `#reconcile` cannot reach them, and a
-   * facet starts only when something calls it. A root that restarts after a
-   * reset took its facets down with it, so an attempt that was running there
-   * would otherwise wait for its claim deadline (minutes) before anything
-   * woke the facet. The dispatch starts the facet, whose own reconcile
-   * reclaims an interrupted attempt; a run that is not due answers with its
-   * real deadline, and the mirror moves back to it.
+   * TEMPORARY, for wakes a root mirrored for a sub-agent's runs before this
+   * release: make them due now, so each is handed over on this start's
+   * first alarm. Remove with the next minor release.
    */
-  async #reviveRoutedWakes(): Promise<void> {
+  async #handOverSoon(): Promise<void> {
     const now = Date.now();
     for (const job of this.lifecycle.jobs.list()) {
       if (
         job.time > now &&
         isTaskWakeJobPayload(job.payload) &&
-        job.payload.owner_path &&
-        // A struck run waits out the breaker's backoff: waking it early
-        // retries nothing and would read as a clean pass, which clears the
-        // strikes that are to seal it.
-        !job.payload.struck
+        job.payload.owner_path
       ) {
         await this.lifecycle.jobs.reschedule(job.id, now);
       }
@@ -542,53 +494,23 @@ export class Tasks<
     const runId = timing?.runId ?? context.job.id.slice(WAKE_JOB_PREFIX.length);
 
     if (timing?.owner_path) {
-      // This root mirrors a routed facet's wake; the run and its step
-      // journal live on the owning facet, so dispatch routes back there.
-      // The facet fully awaits its own dispatch — no local budget to race,
-      // since this root now races its own await of the call and, on
-      // budget, keeps the still-pending call tracked against this alarm's
-      // memory-limit breaker domain instead of discarding it. Verified
-      // against a deployed repro: a callee's real memory-limit reset mid
-      // RPC rejects the caller's pending call with the platform's own
-      // "exceeded its memory limit" text, exactly what the breaker already
-      // matches on — so a late failure on the facet is attributed here
-      // just like a local detached attempt would be.
-      const target = {
-        key: timing.owner_path_key ?? timing.owner_path,
-        data: timing.owner_path
-      };
-      const call = this.lifecycle.routes.to(target, {
-        type: "dispatch",
-        runId
-      } satisfies TaskRouteMessage);
-      let budgetTimer: ReturnType<typeof setTimeout> | undefined;
-      const budget = new Promise<"budget">((resolve) => {
-        budgetTimer = setTimeout(() => resolve("budget"), DISPATCH_BUDGET_MS);
-      });
+      // TEMPORARY hand-over (see #handOverSoon): any call starts the
+      // sub-agent, whose own start reconciles the run into its own queue,
+      // woken through the root. A gone path drops the mirror.
       try {
-        const winner = await Promise.race([
-          call.then((outcome) => ({ outcome })),
-          budget
-        ]);
-        if (winner === "budget") {
-          this.lifecycle.trackAlarmWork(call);
-          // The facet's own routed #syncWake, made whenever it eventually
-          // settles, supersedes whatever this returns (newer pushes win
-          // over drive results), same as the local path below.
-          return undefined;
-        }
-        // `false` means the owner facet is gone: the route already cleaned
-        // up its prefix, so drop this mirrored wake instead of handing the
-        // queue an outcome it rejects.
-        if (winner.outcome === false) return undefined;
-        return winner.outcome as LifecycleJobOutcome;
+        await this.lifecycle.routes.to(
+          {
+            key: timing.owner_path_key ?? timing.owner_path,
+            data: timing.owner_path
+          },
+          { type: "adopt" } satisfies TaskAdoptMessage
+        );
       } catch (error) {
         if (isPlatformFailure(error)) throw error;
-        console.error(`error dispatching routed Task run "${runId}"`, error);
+        console.error(`error handing Task run "${runId}" over`, error);
         return "yield";
-      } finally {
-        clearTimeout(budgetTimer);
       }
+      return undefined;
     }
 
     return this.#dispatchRun(runId);
@@ -664,26 +586,6 @@ export class Tasks<
   }
 
   /**
-   * Drive one routed dispatch to completion on this owning facet. There is
-   * no local budget to race here: the root that sent this message races
-   * its own await of the call instead, so a full await is safe regardless
-   * of how long the attempt takes — the call keeps running on this facet
-   * either way. An already-active attempt only needs its claim refreshed:
-   * it is already tracked against whichever alarm's breaker domain
-   * originally dispatched it (a root's pending routed call, or this
-   * facet's own local alarm).
-   */
-  async #dispatchRoutedRun(runId: string): Promise<LifecycleJobOutcome> {
-    const active = this.#liveAttempt(runId);
-    if (active) {
-      this.#refreshClaim(runId);
-      return this.#wakeOutcome(runId);
-    }
-    await this.#executeRun(runId);
-    return this.#wakeOutcome(runId);
-  }
-
-  /**
    * Alarm memory-limit breaker policy (#1825) for the run whose wake struck.
    *
    * The run row is the durable source of truth: startup reconciliation
@@ -703,40 +605,12 @@ export class Tasks<
     const timing = isTaskWakeJobPayload(job.payload) ? job.payload : undefined;
     const runId = timing?.runId ?? job.id.slice(WAKE_JOB_PREFIX.length);
 
-    if (timing?.owner_path) {
-      // The struck job was this root's mirror of a routed facet's wake; the
-      // run row and its claim live on the facet, so the strike is forwarded
-      // there to apply the same policy locally — clearing the claim and
-      // backing off (or terminally failing, when sealed). Forwarding a
-      // non-sealed strike too matters: this root's own mirror job backs off
-      // on its own, but the facet's run row would otherwise keep its old
-      // claim, and any facet startup before the backoff elapses would read
-      // that claim as an interrupted attempt and reconcile it due again now
-      // — resurrecting the run through the breaker.
-      try {
-        await this.lifecycle.routes.to(
-          {
-            key: timing.owner_path_key ?? timing.owner_path,
-            data: timing.owner_path
-          },
-          { type: "memoryLimit", runId, context } satisfies TaskRouteMessage
-        );
-      } catch (error) {
-        console.error(
-          `Failed to route memory-limit policy for Task run "${runId}"`,
-          error
-        );
-      }
-      return;
-    }
+    // A wake mirrored for a sub-agent (see #handOverSoon) owns no run here.
+    if (timing?.owner_path) return;
     await this.#applyMemoryLimit(runId, context);
   }
 
-  /**
-   * Apply the alarm memory-limit breaker policy (#1825) to one run, local to
-   * whichever Lifecycle owns its storage — the root for an unrouted run, or
-   * the owning facet when {@link onMemoryLimit} forwarded a routed strike.
-   */
+  /** Apply the alarm memory-limit breaker policy (#1825) to one run. */
   async #applyMemoryLimit(
     runId: string,
     context: MemoryLimitContext
@@ -764,7 +638,7 @@ export class Tasks<
          AND status IN ('pending', 'running')`,
       [context.nextTime, context.nextTime, now, runId]
     );
-    await this.#syncWake(runId, { struck: true });
+    await this.#syncWake(runId);
   }
 
   /**
@@ -798,7 +672,7 @@ export class Tasks<
    */
   async #syncWake(
     runId: string,
-    options: { struck?: boolean; createdAt?: number } = {}
+    options: { createdAt?: number } = {}
   ): Promise<boolean> {
     const rows = this.#store.sql<{
       next_at: number | null;
@@ -818,17 +692,6 @@ export class Tasks<
       return true;
     }
     const next = rows[0]?.next_at ?? null;
-
-    if (this.lifecycle.routes.source) {
-      // The run row stays here; only its deadline mirrors to the root that
-      // owns the physical alarm.
-      return (await this.lifecycle.routes.toRoot({
-        type: "syncWake",
-        runId,
-        next,
-        ...(options.struck && { struck: true })
-      } satisfies TaskRouteMessage)) as boolean;
-    }
 
     const jobId = `${WAKE_JOB_PREFIX}${runId}`;
     if (next === null) {
@@ -853,106 +716,16 @@ export class Tasks<
     return true;
   }
 
-  /** Handle Tasks protocol messages routed by another Lifecycle. */
-  async onRoute(context: LifecycleRouteContext): Promise<unknown> {
-    const message = context.payload as TaskRouteMessage;
-    switch (message.type) {
-      case "syncWake": {
-        const owner = context.source;
-        if (!owner) throw new Error("Routed Tasks message missing source");
-        return this.#syncRoutedWake(
-          owner,
-          message.runId,
-          message.next,
-          message.struck === true
-        );
-      }
-      case "dispatch":
-        return this.#dispatchRoutedRun(message.runId);
-      case "memoryLimit": {
-        await this.#applyMemoryLimit(message.runId, message.context);
-        // The owner's own Lifecycle never observes the root's alarm; this
-        // is its only path to the same `onAlarmMemoryLimit` host hook a
-        // root's own local strike reaches through Lifecycle's alarm
-        // dispatch.
-        const handler = taskRoutedMemoryLimitHandlers.get(this);
-        if (handler) {
-          await this.lifecycle.runInHostContext(() => handler(message.context));
-        }
-        return true;
-      }
-      default:
-        throw new Error("Unknown routed Tasks message");
-    }
-  }
-
-  /** Mirror a routed facet's run deadline into this root's job queue. */
-  async #syncRoutedWake(
-    owner: LifecycleRouteAddress,
-    runId: string,
-    next: number | null,
-    struck = false
-  ): Promise<boolean> {
-    const jobId = `${WAKE_JOB_PREFIX}${owner.key}:${runId}`;
-    if (next === null) {
-      await this.lifecycle.jobs.cancel(jobId);
-      return true;
-    }
-    const existing = this.lifecycle.jobs.get(jobId);
-    // A struck wake stays struck while its deadline holds: the facet's own
-    // startup re-sends that deadline without knowing of the strike.
-    if (
-      existing?.time === next &&
-      isTaskWakeJobPayload(existing.payload) &&
-      existing.payload.struck === true
-    ) {
-      struck = true;
-    }
-    if (
-      existing?.fn === WAKE_JOB_FN &&
-      existing.time === next &&
-      existing.retry?.maxAttempts === WAKE_JOB_RETRY.maxAttempts &&
-      isTaskWakeJobPayload(existing.payload) &&
-      (existing.payload.struck === true) === struck
-    ) {
-      return false;
-    }
-    await this.lifecycle.jobs.push({
-      id: jobId,
-      fn: WAKE_JOB_FN,
-      time: next,
-      payload: {
-        runId,
-        owner_path: owner.data,
-        owner_path_key: owner.key,
-        ...(struck && { struck: true as const })
-      } satisfies TaskWakeJobPayload,
-      retry: WAKE_JOB_RETRY
-    });
-    return true;
-  }
-
   /**
-   * @internal Framework aperture: bulk-cancel this root's routed wake
-   * mirrors for every run owned by a deleted facet subtree. The runs and
-   * their step journals live on the deleted facets' own storage and are
-   * wiped with them; only this root's mirror job needs an explicit cancel,
-   * or it stays due forever, retrying a dispatch to a facet that is gone.
+   * In a sub-agent: the root handing over a wake it mirrored. Being called
+   * started this sub-agent, and its start already put the run's wake in its
+   * own queue, so there is nothing left to do.
    */
-  async __DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(
-    prefix: string
-  ): Promise<void> {
-    for (const job of this.lifecycle.jobs.list()) {
-      const timing = isTaskWakeJobPayload(job.payload)
-        ? job.payload
-        : undefined;
-      const ownerKey = timing?.owner_path_key ?? timing?.owner_path;
-      if (!timing?.owner_path || ownerKey === null || ownerKey === undefined) {
-        continue;
-      }
-      if (ownerKey !== prefix && !ownerKey.startsWith(`${prefix}/`)) continue;
-      await this.lifecycle.jobs.cancel(job.id);
+  async onRoute(context: LifecycleRouteContext): Promise<unknown> {
+    if ((context.payload as TaskAdoptMessage).type !== "adopt") {
+      throw new Error("Unknown routed Tasks message");
     }
+    return true;
   }
 
   /** Mirror every non-terminal run into the queue (startup reconcile). */
