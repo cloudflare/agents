@@ -166,6 +166,47 @@ RPC if you need parent-side side effects.
 - Class names whose kebab-case equals `"sub"` are rejected (e.g. `Sub`, `SUB`,
   `Sub_`) because they collide with the `/sub/` URL separator.
 
+## Platform limits (measured)
+
+Measured on a deployment on 23 Nov 2026, on a plain Durable Object with a
+facet class from the same Worker. The design has to stay inside these.
+
+- **Depth.** A facet tree is at most 4 deep including the root: a root, its
+  facets, their facets and one more level. The fourth `ctx.facets.get()` throws
+  `Facet nesting depth limit exceeded`. A session's object can therefore hold
+  three levels of sub-agents, and a nested agent-tool chain over facets stops
+  there.
+- **One isolate.** A facet runs in its parent's isolate, on the same thread,
+  and shares its `globalThis` and its 128 MB. Facets isolate data, not memory
+  or CPU: two facets each running CPU work take about twice as long together,
+  and a facet that runs out of memory resets the parent and every sibling.
+- **Resets.** A facet that throws keeps running. A facet that calls
+  `ctx.abort()` is reset alone; the root keeps its instance, old stubs to that
+  facet fail for good and a fresh `ctx.facets.get()` starts a new instance. A
+  root `ctx.abort()` resets the whole tree.
+- **Storage.** Each facet has its own SQLite database, isolated both ways and
+  deleted with the facet. Nothing commits parent and facet rows together, and
+  the runtime cannot list facets, which is why the parent keeps the registry.
+  A write in a facet follows the same rule as in a root: it is lost to a reset
+  that comes before any I/O unless `storage.sync()` ran first. A write the
+  facet made before its RPC returned to the parent survived a root reset
+  straight after the call.
+- **No alarm.** `setAlarm()` in a facet rejects with `Facets currently cannot
+  set alarms.`, and one that is not awaited breaks that facet instance. A facet
+  is woken only by a call from its parent. No capability may call `setAlarm`
+  in a facet.
+- **Sockets.** The root owns every socket and forwards events to the facet. A
+  hibernatable socket a facet accepted itself did wake only the facet, but
+  after a deploy it stopped answering without a close frame (2 runs of 2),
+  while a root's hibernated sockets survive a deploy.
+- **Calls.** A call from parent to facet takes about 0 ms and is not a
+  subrequest hop. A `ReadableStream` returned over RPC errors with
+  `ReadableStream received over RPC disconnected prematurely.` when its
+  producer resets, so a reader needs a cursor and must attach again.
+
+Not measured: how facets are billed, how their CPU is accounted, and whether
+an object's facets share a storage total.
+
 ## Design tradeoffs
 
 - **Good:** direct child connections, low-latency parent↔child RPC, clean
@@ -173,7 +214,9 @@ RPC if you need parent-side side effects.
 - **Good:** parent-owned registry gives us strict gating and enumeration for free.
 - **Good:** sub-agent code can use the normal scheduling API even though the
   parent owns the runtime alarm.
-- **Tradeoff:** no independent physical alarms on facets yet; the root parent
-  multiplexes schedules for the whole facet tree.
+- **Tradeoff:** no independent physical alarms on facets; the root parent
+  multiplexes wakes for the whole facet tree.
+- **Tradeoff:** three levels of sub-agents at most, and one memory limit for
+  the tree (see [Platform limits](#platform-limits-measured)).
 - **Tradeoff:** `parentAgent(Cls)` only does the one-hop case; deeper ancestor
   lookup stays explicit.
