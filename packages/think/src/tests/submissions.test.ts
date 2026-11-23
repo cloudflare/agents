@@ -2145,6 +2145,36 @@ describe("Think durable submissions", () => {
     });
   });
 
+  it("moves an open legacy submission with metadata near the limit, and it still runs", async () => {
+    const agent = await freshAgent();
+    const fields: Record<string, string> = {};
+    // Many small fields, near the row's room: the cut must stay cheap and
+    // leave the run room to record its progress.
+    for (let i = 0; i < 19_500; i++) fields[`item_${i}`] = "x".repeat(86);
+    await agent.seedLegacySubmissionTableForTest([
+      {
+        submissionId: "legacy-open-near-limit",
+        status: "pending",
+        text: "still answered",
+        metadataJson: JSON.stringify(fields),
+        createdAt: Date.now() - 1_000
+      }
+    ]);
+    const started = Date.now();
+    await agent.recoverSubmissionsForTest();
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(await agent.hasLegacySubmissionTableForTest()).toBe(false);
+    await agent.drainSubmissionsForTest();
+    const inspected = await agent.inspectSubmissionForTest(
+      "legacy-open-near-limit"
+    );
+    expect(inspected?.status).toBe("completed");
+    expect(inspected?.messageId).toBeDefined();
+    expect(Object.keys(inspected?.metadata ?? {}).length).toBeGreaterThan(
+      17_000
+    );
+  });
+
   it("lists the running submission when newer ones wait behind it", async () => {
     const agent = await freshAgent();
     const now = Date.now();

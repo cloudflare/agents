@@ -340,6 +340,9 @@ export function submissionSettlement(
 
 const utf8 = new TextEncoder();
 
+/** Room a migrated open submission keeps for the progress it records. */
+const PROGRESS_HEADROOM_BYTES = 100_000;
+
 function jsonBytes(value: unknown): number {
   return utf8.encode(JSON.stringify(value)).byteLength;
 }
@@ -396,23 +399,31 @@ export function legacySubmissionImport(row: LegacySubmissionRow): {
     !Array.isArray(metadata)
       ? (metadata as Record<string, TaskJson>)
       : {};
-  const fits = () =>
-    jsonBytes({ ...appFields, [SUBMISSION_PROGRESS_KEY]: progress }) <=
-    MAX_FRAMEWORK_METADATA_BYTES;
-  if (!fits()) {
-    // Drop the largest fields first, keeping every one that still fits.
+  // An open submission still records its progress as it runs: leave room.
+  const budget =
+    MAX_FRAMEWORK_METADATA_BYTES - (completed ? 0 : PROGRESS_HEADROOM_BYTES);
+  let bytes = jsonBytes({ ...appFields, [SUBMISSION_PROGRESS_KEY]: progress });
+  if (bytes > budget) {
+    // Drop the largest fields first (key and value, as stored), keeping
+    // every one that still fits. Sizes are measured once.
+    const sized = Object.entries(appFields)
+      .map(([key, value]) => ({
+        key,
+        size: jsonBytes(key) + jsonBytes(value) + 2
+      }))
+      .sort((a, b) => b.size - a.size);
     appFields = { ...appFields };
-    const fields = appFields;
-    const largestFirst = Object.keys(fields).sort(
-      (a, b) => jsonBytes(fields[b]) - jsonBytes(fields[a])
-    );
     const dropped: string[] = [];
-    for (const key of largestFirst) {
-      if (fits()) break;
-      delete fields[key];
+    for (const { key, size } of sized) {
+      if (bytes <= budget) break;
+      delete appFields[key];
       dropped.push(key);
+      bytes -= size;
     }
-    if (!fits()) delete progress.output;
+    if (bytes > budget && progress.output !== undefined) {
+      bytes -= jsonBytes(progress.output);
+      delete progress.output;
+    }
     console.warn(
       `[Think] Submission "${row.submission_id}": metadata too large to keep; dropped ${dropped.length > 0 ? `fields ${dropped.join(", ")}` : "its recorded output"}`
     );
