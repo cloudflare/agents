@@ -8,10 +8,11 @@ import {
   getConnectionRawState,
   setConnectionProtocolEnabled
 } from "../websockets/connection-flags";
-import type {
-  Connection,
-  LifecycleRouteEnvelope,
-  WSMessage
+import {
+  forgetFacetWakes,
+  type Connection,
+  type LifecycleRouteEnvelope,
+  type WSMessage
 } from "../lifecycle/durable-object-lifecycle";
 import {
   LifecycleCapability,
@@ -300,6 +301,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
   async cleanupPrefix(ownerPath: ReadonlyArray<AgentPathStep>): Promise<void> {
     const prefix = agentPathKey(ownerPath);
     if (prefix) {
+      await forgetFacetWakes(this.#host.lifecycle, prefix);
       await this.#host.scheduler.__DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(
         prefix
       );

@@ -80,6 +80,13 @@ export type JobDriverOptions = {
   readonly onMemoryLimit: (context: MemoryLimitContext) => void | Promise<void>;
   /** Best-effort lifecycle telemetry. */
   readonly emit: (type: string, payload: unknown) => void;
+  /**
+   * Arm a fallback wake directly (the startup fallback and the deadman). A
+   * root writes its alarm; a facet, which has no alarm, does nothing: its
+   * root's wake job for it stays until the facet's reply re-arms it, so it
+   * is the facet's fallback.
+   */
+  readonly armFallback: (time: number) => Promise<void>;
   /** Recompute the physical alarm from queue state. */
   readonly rearm: () => Promise<void>;
   /**
@@ -305,7 +312,7 @@ export class JobDriver {
     const nowMs = Date.now();
     const next = this.#options.queue.nextAlarmTime(nowMs);
     if (next === null) return;
-    await this.#options.storage.setAlarm(
+    await this.#options.armFallback(
       Math.max(next, nowMs + DEADMAN_ALARM_DELAY_MS)
     );
   }
@@ -322,7 +329,7 @@ export class JobDriver {
     // error) still wakes this object to resume. The normal re-arm at the end
     // of the alarm phase overwrites it.
     if (!this.#options.disabled()) {
-      await this.#options.storage.setAlarm(nowMs + DEADMAN_ALARM_DELAY_MS);
+      await this.#options.armFallback(nowMs + DEADMAN_ALARM_DELAY_MS);
     }
 
     for (const stale of due) {
