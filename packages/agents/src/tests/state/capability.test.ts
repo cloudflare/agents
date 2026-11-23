@@ -12,6 +12,20 @@ import { State, type StateChangeSource } from "../../state";
  */
 
 describe("State capability", () => {
+  it("names the row limit when a state is too large to store, and keeps the old state", async () => {
+    await withCapabilityHarness(async ({ install }) => {
+      const { capability, lifecycle } = install(new State<string>());
+      await lifecycle.start();
+      capability.set("small");
+
+      // Over the 2.2 MB row cap of the workerd the test pool runs.
+      expect(() => capability.set("x".repeat(3_000_000))).toThrow(
+        /SQLITE_TOOBIG.*8 MiB in production/
+      );
+      expect(capability.get()).toBe("small");
+    });
+  });
+
   it("reads state before lifecycle startup", async () => {
     await withCapabilityHarness(async ({ install }) => {
       const { capability, lifecycle } = install(new State<number>());
