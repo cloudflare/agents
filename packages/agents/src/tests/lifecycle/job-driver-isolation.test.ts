@@ -326,8 +326,11 @@ describe("job driver staggered holds", () => {
         time: Date.now() - 2,
         retry: QUICK
       });
+      const aHeldBy = Date.now();
       await lifecycle.alarm().catch(() => {});
-      // b is held later than a.
+      // b is held a full second later than a, so the two hold ends differ.
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      const bHeldFrom = Date.now();
       await b.push({
         id: "b",
         fn: "poison",
@@ -346,7 +349,8 @@ describe("job driver staggered holds", () => {
       // Without it, the wake is b's own hold's end, not a's earlier one.
       const alarm = await storage.getAlarm();
       expect(alarm).not.toBeNull();
-      expect(alarm!).toBeGreaterThanOrEqual(now + 25_000);
+      expect(alarm!).toBeGreaterThanOrEqual(bHeldFrom + 30_000);
+      expect(alarm!).toBeGreaterThan(aHeldBy + 30_000 + 500);
     });
   });
 });
