@@ -5485,14 +5485,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     submissionId: string,
     patch: Partial<SubmissionProgress>
   ): void {
-    const record = this._submissionRecord(submissionId);
-    if (!record) return;
-    this.tasks.updateMetadata(submissionId, {
+    this.tasks.updateMetadata(submissionId, (metadata) => ({
+      ...metadata,
       [SUBMISSION_PROGRESS_KEY]: {
-        ...submissionProgress(record),
+        ...((metadata[SUBMISSION_PROGRESS_KEY] ?? {}) as SubmissionProgress),
         ...patch
       } as TaskJson
-    });
+    }));
   }
 
   private _sanitizeSubmissionMessages(messages: UIMessage[]): UIMessage[] {
@@ -6247,13 +6246,21 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * attempt. Idempotent: a missing table means a fresh object or a finished
    * migration.
    */
+  /** Whether `cf_think_submissions` is known to be gone in this isolate. */
+  private _legacySubmissionsGone = false;
+
   private async _migrateLegacySubmissions(): Promise<void> {
+    // Once the table is gone it never comes back: look it up once per isolate.
+    if (this._legacySubmissionsGone) return;
     const tables = this.ctx.storage.sql
       .exec(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='cf_think_submissions'"
       )
       .toArray();
-    if (tables.length === 0) return;
+    if (tables.length === 0) {
+      this._legacySubmissionsGone = true;
+      return;
+    }
     const rows = this.ctx.storage.sql
       .exec(
         "SELECT * FROM cf_think_submissions ORDER BY created_at ASC, submission_id ASC"
@@ -6281,6 +6288,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     }
     if (failed === 0)
       this.ctx.storage.sql.exec("DROP TABLE cf_think_submissions");
+    if (failed === 0) this._legacySubmissionsGone = true;
   }
 
   private async _getSubmissionMessagesAppliedState(

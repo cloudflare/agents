@@ -175,11 +175,14 @@ function patchSubmissionProgressForTest(
   submissionId: string,
   patch: SubmissionProgressForTest
 ): void {
-  const record = agent.tasks.peek(submissionId);
-  if (!record) throw new Error(`No submission ${submissionId}`);
-  agent.tasks.updateMetadata(submissionId, {
-    [PROGRESS_KEY]: { ...progressOf(record), ...patch } as TaskJson
-  });
+  const updated = agent.tasks.updateMetadata(submissionId, (metadata) => ({
+    ...metadata,
+    [PROGRESS_KEY]: {
+      ...((metadata[PROGRESS_KEY] ?? {}) as SubmissionProgressForTest),
+      ...patch
+    } as TaskJson
+  }));
+  if (!updated) throw new Error(`No submission ${submissionId}`);
 }
 
 /** The running submission whose turn has this request id. */
@@ -9892,6 +9895,10 @@ export class ThinkProgrammaticTestAgent extends Think {
       metadataJson?: string;
     }>
   ): Promise<void> {
+    // The table comes back, as an older release left it.
+    (
+      this as unknown as { _legacySubmissionsGone: boolean }
+    )._legacySubmissionsGone = false;
     this.ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS cf_think_submissions (
         submission_id TEXT PRIMARY KEY,

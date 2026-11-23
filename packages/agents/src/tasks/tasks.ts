@@ -2094,24 +2094,25 @@ export class Tasks<
   }
 
   /**
-   * @internal Merge `patch` into a run's metadata, from host code (a run's
-   * progress its caller tracks). A `null` value removes the key.
+   * @internal Rewrite a run's metadata from host code (progress its caller
+   * tracks): `update` gets the current metadata and returns the next.
    *
    * @returns False for an unknown run.
    */
-  updateMetadata(runId: string, patch: Record<string, TaskJson>): boolean {
+  updateMetadata(
+    runId: string,
+    update: (metadata: Record<string, TaskJson>) => Record<string, TaskJson>
+  ): boolean {
     const row = this.#store.getRun(runId);
     if (!row) return false;
     const current =
       row.metadata === null
         ? {}
         : (JSON.parse(row.metadata) as Record<string, TaskJson>);
-    const next: Record<string, TaskJson> = { ...current };
-    for (const [key, value] of Object.entries(patch)) {
-      if (value === null) delete next[key];
-      else next[key] = value;
-    }
-    const json = serializeTaskValue(next, `metadata of Task run "${runId}"`);
+    const json = serializeTaskValue(
+      update(current),
+      `metadata of Task run "${runId}"`
+    );
     this.#store.sql`
       UPDATE cf_agents_task_runs SET metadata = ${json}, updated_at = ${Date.now()}
       WHERE run_id = ${runId}
