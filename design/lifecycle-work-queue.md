@@ -166,6 +166,11 @@ Six named rules define what a job owner can and cannot rely on:
    zero. Retries within one invocation stay bounded by `maxAttempts`.
    Without this, a job that exceeded the CPU limit ran again every 30 s
    forever with `attempt: 1` (measured on a deployed Worker, 22 Nov 2026).
+   An owner whose first due job has such attempts goes last in the scan,
+   its own order kept: every other owner's due job runs before the suspect
+   is tried again, so a job that keeps resetting the isolate (a memory-limit
+   reset takes every job in flight with it) no longer holds other owners
+   back until it is given up.
 6. **A job whose owner is not installed is kept.** The owner may come back
    (a rollback, a capability installed conditionally), and the job may be
    its only record of the work. The driver does not claim it and writes

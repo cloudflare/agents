@@ -340,21 +340,36 @@ export class CounterSubAgent extends Agent {
     return schedule.id;
   }
 
-  /** Queue an item whose callback throws on its first attempt. */
-  async queueFlakyCallback(id: string, value: string): Promise<string> {
+  /**
+   * Queue an item whose first attempt pushes the same item again (same id,
+   * same payload) and then fails, so the push always lands before the
+   * retry's wait, however short the jittered wait.
+   */
+  async queueRequeuingCallback(id: string, value: string): Promise<string> {
     return this.queue(
-      "flakyQueuedCallback",
+      "requeuingQueuedCallback",
       { value },
       { id, retry: { maxAttempts: 2, baseDelayMs: 300, maxDelayMs: 300 } }
     );
   }
 
-  /** Logs every call; the first call for an item id throws. */
-  flakyQueuedCallback(
+  async requeuingQueuedCallback(
     payload: { value: string },
     item: { id: string; callback: string }
   ) {
-    this.flakyScheduledCallback(payload, item);
+    const [{ count }] = this.sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM schedule_log WHERE schedule_id = ${item.id}
+    `;
+    this.sql`
+      INSERT INTO schedule_log
+        (value, agent_name, current_agent_name, parent_class, schedule_id, callback)
+      VALUES
+        (${payload.value}, ${this.name}, null, ${this.parentPath.at(-1)?.className ?? ""}, ${item.id}, ${item.callback})
+    `;
+    if (count === 0) {
+      await this.queueRequeuingCallback(item.id, payload.value);
+      throw new Error("first attempt fails");
+    }
   }
 
   /** Logs every attempt; the first one for a schedule throws. */
@@ -2132,17 +2147,13 @@ export class TestSubAgentParent extends Agent {
     subAgentName: string
   ): Promise<number> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
-    await child.queueFlakyCallback("flaky-item", "same");
+    await child.queueRequeuingCallback("flaky-item", "same");
     const waitFor = async (done: () => Promise<boolean>) => {
       const deadline = Date.now() + 5_000;
       while (!(await done()) && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
     };
-    await waitFor(
-      async () => (await this.subAgentScheduleLog(subAgentName)).length > 0
-    );
-    await child.queueFlakyCallback("flaky-item", "same");
     // Wait for the replacement's run, then for longer than the old item's
     // retry delay (300 ms), so a retry that wrongly survived has run too.
     await waitFor(

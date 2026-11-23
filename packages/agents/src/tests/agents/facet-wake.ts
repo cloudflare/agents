@@ -97,6 +97,8 @@ abstract class WakeAgent extends Agent<Cloudflare.Env> {
 
 /** Drive calls into a middle facet that fail before they reach it. */
 let failingDrives = 0;
+/** Set: a root's alarms do nothing, so a test can read what start left. */
+let rootAlarmsHeld = false;
 
 /** Third level: root -> middle -> leaf. */
 export class FacetWakeLeaf extends WakeAgent {}
@@ -214,7 +216,28 @@ export class FacetWakeRoot extends WakeAgent {
     }
   }
 
+  setRootJobAttempts(id: string, attempts: number): void {
+    this.sql`UPDATE cf_agents_jobs SET attempts = ${attempts} WHERE id = ${id}`;
+  }
+
+  rootJobAttempts(id: string): number | null {
+    return (
+      this.sql<{ attempts: number }>`
+        SELECT attempts FROM cf_agents_jobs WHERE id = ${id}
+      `[0]?.attempts ?? null
+    );
+  }
+
   /** End this root's isolate, and its facets with it. */
+  override async alarm(): Promise<void> {
+    if (rootAlarmsHeld) return;
+    return super.alarm();
+  }
+
+  holdRootAlarms(held: boolean): void {
+    rootAlarmsHeld = held;
+  }
+
   resetTree(): void {
     this.ctx.abort("test reset");
   }

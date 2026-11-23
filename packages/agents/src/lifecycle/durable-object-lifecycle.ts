@@ -725,7 +725,9 @@ export class Lifecycle<
           )
         : Math.min(time, now);
       if (target === time) continue;
-      this.#jobQueue.reschedule(capability, facetWakeJobId(path), target);
+      // Retimed in place: its attempt count is the sign that the last drive
+      // crashed, which the scan reads to run other owners' jobs first.
+      this.#jobQueue.setTime(facetWakeJobId(path), target);
       moved = true;
     }
     return moved;
