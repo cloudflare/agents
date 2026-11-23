@@ -9,8 +9,7 @@
  * they protected.
  */
 
-import { nanoid } from "nanoid";
-import { LifecycleCapability, type LifecycleRouteContext } from "./capability";
+import { LifecycleCapability } from "./capability";
 import type { LifecycleJobContext, LifecycleJobOutcome } from "./job-queue";
 
 /**
@@ -22,10 +21,6 @@ export const DEFAULT_KEEP_ALIVE_INTERVAL_MS = 30_000;
 
 /** Job ids are one namespace across owners, so this one names its owner. */
 const HEARTBEAT_JOB_ID = "keep-alive:heartbeat";
-
-type KeepAliveRouteMessage =
-  | { readonly type: "acquire" }
-  | { readonly type: "release"; readonly token: string };
 
 /**
  * Options for {@link KeepAlive}.
@@ -40,23 +35,21 @@ export type KeepAliveOptions = {
 /**
  * Holds that keep a Durable Object awake, as one heartbeat job.
  *
- * On a routed Lifecycle (a sub-agent, which has no alarm of its own) a hold
- * is taken on the root's KeepAlive instead, so install KeepAlive on both.
+ * In a sub-agent the heartbeat is a job in the sub-agent's own queue, which
+ * its root wakes like any other, so the whole tree stays awake.
  *
  * @internal
  */
 export class KeepAlive extends LifecycleCapability {
   readonly #intervalMs: number;
   #holds = 0;
-  /** Holds taken here on behalf of routed children, by token. */
-  readonly #routedHolds = new Set<string>();
 
   constructor(options: KeepAliveOptions = {}) {
     super("keep-alive");
     this.#intervalMs = options.intervalMs ?? DEFAULT_KEEP_ALIVE_INTERVAL_MS;
   }
 
-  /** Open holds on this object, including those taken for routed children. */
+  /** Open holds on this object. */
   get holds(): number {
     return this.#holds;
   }
@@ -66,17 +59,6 @@ export class KeepAlive extends LifecycleCapability {
    * again does nothing.
    */
   async acquire(): Promise<() => void> {
-    const routes = this.lifecycle.routes;
-    if (routes.source) {
-      const token = (await routes.toRoot({
-        type: "acquire"
-      } satisfies KeepAliveRouteMessage)) as string;
-      return this.#once(() =>
-        routes
-          .toRoot({ type: "release", token } satisfies KeepAliveRouteMessage)
-          .then(() => {})
-      );
-    }
     await this.#open();
     return this.#once(() => this.#close());
   }
@@ -96,21 +78,6 @@ export class KeepAlive extends LifecycleCapability {
     return this.#holds > 0
       ? { rescheduleAt: Date.now() + this.#intervalMs }
       : undefined;
-  }
-
-  /** Holds requested by routed children. */
-  async onRoute(context: LifecycleRouteContext): Promise<unknown> {
-    const message = context.payload as KeepAliveRouteMessage;
-    if (message.type === "acquire") {
-      const token = nanoid(12);
-      await this.#open();
-      this.#routedHolds.add(token);
-      return token;
-    }
-    if (message.type === "release" && this.#routedHolds.delete(message.token)) {
-      await this.#close();
-    }
-    return undefined;
   }
 
   /** Count a hold; a hold whose heartbeat could not be armed is not counted. */

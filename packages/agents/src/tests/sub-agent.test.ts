@@ -1121,13 +1121,16 @@ describe("SubAgent", () => {
     await agent.subAgentAcquireHeldKeepAlive("keepalive-sibling-a");
     await agent.subAgentAcquireHeldKeepAlive("keepalive-sibling-b");
 
-    expect(await agent.getRootKeepAliveRefCount()).toBe(3);
+    // Each sub-agent holds its own heartbeat; the root holds one wake per
+    // sub-agent path, which keeps the whole tree awake.
+    expect(await agent.getRootKeepAliveRefCount()).toBe(0);
+    await expectFiberWakeOwners(agent, 2);
 
     await agent.subAgentReleaseHeldKeepAlives("keepalive-sibling-a");
-    await expectRootKeepAliveRefCount(agent, 1);
+    await expectFiberWakeOwners(agent, 1);
 
     await agent.subAgentReleaseHeldKeepAlives("keepalive-sibling-b");
-    await expectRootKeepAliveRefCount(agent, 0);
+    await expectFiberWakeOwners(agent, 0);
   });
 
   it("mirrors a sub-agent's fiber wake on the root while the fiber is active", async () => {
@@ -1402,6 +1405,9 @@ describe("SubAgent", () => {
     expect(await agent.legacyFacetRunIndexExists()).toBe(false);
     expect(await agent.fiberWakeOwners()).toHaveLength(1);
 
+    // After the upgrade the sub-agent starts fresh and arms its own fiber
+    // wake, which the root's wake for its path then drives.
+    await agent.subAgentArmOwnFiberWake("legacy-index-child");
     await drainDueFiberWakes(agent);
 
     expect(await agent.fiberWakeOwners()).toEqual([]);

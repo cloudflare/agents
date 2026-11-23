@@ -10,6 +10,7 @@ import type {
 import { RpcTarget } from "cloudflare:workers";
 import { MessageType } from "../../types.ts";
 import { agentPathKey } from "../../dynamic-agents/identity.ts";
+import { armFacetWake } from "../../lifecycle/durable-object-lifecycle.ts";
 import type { Tasks } from "../../tasks/tasks.ts";
 import { EventLogSubAgent } from "./event-log-sub-agent.ts";
 
@@ -545,6 +546,16 @@ export class CounterSubAgent extends Agent {
     `;
   }
 
+  /**
+   * Arm this facet's own fiber wake the way a fresh instance does on start
+   * when it finds fibers an earlier isolate left behind.
+   */
+  async armOwnFiberWake(): Promise<void> {
+    await (
+      this as unknown as { _fibers: { onStart(): Promise<void> } }
+    )._fibers.onStart();
+  }
+
   async insertInterruptedManagedFiber(
     id: string,
     name: string,
@@ -742,6 +753,16 @@ export class InnerSubAgent extends Agent {
       INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
       VALUES (${id}, ${name}, ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
     `;
+  }
+
+  /**
+   * Arm this facet's own fiber wake the way a fresh instance does on start
+   * when it finds fibers an earlier isolate left behind.
+   */
+  async armOwnFiberWake(): Promise<void> {
+    await (
+      this as unknown as { _fibers: { onStart(): Promise<void> } }
+    )._fibers.onStart();
   }
 
   getRecoveredFibers(): Array<{
@@ -986,6 +1007,7 @@ export class OuterSubAgent extends Agent {
   ): Promise<Array<{ className: string; name: string }>> {
     const inner = await this.subAgent(InnerSubAgent, innerName);
     await inner.insertInterruptedFiber(id, name, snapshot);
+    await inner.armOwnFiberWake();
     return inner.getSelfPath();
   }
 
@@ -1252,8 +1274,8 @@ export class TestSubAgentParent extends Agent {
   ): Promise<unknown> {
     if (
       this._fiberWakeRouteFailuresRemaining > 0 &&
-      envelope.capability === "fibers" &&
-      (envelope.payload as { type?: string }).type === "syncWake"
+      envelope.capability === "cf:facet-wake" &&
+      (envelope.payload as { type?: string }).type === "arm"
     ) {
       this._fiberWakeRouteFailuresRemaining -= 1;
       throw new Error("simulated fiber wake route failure");
@@ -2193,6 +2215,11 @@ export class TestSubAgentParent extends Agent {
     child.releaseHeldKeepAlives();
   }
 
+  async subAgentArmOwnFiberWake(subAgentName: string): Promise<void> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    await child.armOwnFiberWake();
+  }
+
   getRootKeepAliveRefCount(): number {
     return this._keepAlive.holds;
   }
@@ -2261,7 +2288,7 @@ export class TestSubAgentParent extends Agent {
   ): Promise<void> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     await child.insertInterruptedFiber(id, name, snapshot);
-    await this.armFacetFiberWake(await child.getSelfPath());
+    await child.armOwnFiberWake();
   }
 
   async insertSubAgentInterruptedManagedFiber(
@@ -2272,7 +2299,7 @@ export class TestSubAgentParent extends Agent {
   ): Promise<void> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     await child.insertInterruptedManagedFiber(id, name, snapshot);
-    await this.armFacetFiberWake(await child.getSelfPath());
+    await child.armOwnFiberWake();
   }
 
   async armSubAgentFiberWakeOnly(subAgentName: string): Promise<void> {
@@ -2281,49 +2308,35 @@ export class TestSubAgentParent extends Agent {
   }
 
   /**
-   * Mirror a facet's fiber wake on this root, due now, the way the facet's
-   * own Fibers capability routes it while a fiber runs there.
+   * Hold a facet wake for a path on this root, due now, as a root does for a
+   * facet that reported a due job.
    */
   async armFacetFiberWake(
     selfPath: Array<{ className: string; name: string }>
   ): Promise<void> {
-    await (
-      this as unknown as {
-        _fibers: {
-          onRoute(context: {
-            source: { key: string; data: string };
-            payload: unknown;
-          }): Promise<unknown>;
-        };
-      }
-    )._fibers.onRoute({
-      source: {
-        key: agentPathKey(selfPath) ?? "",
-        data: JSON.stringify(selfPath)
-      },
-      payload: { type: "syncWake", next: Date.now() }
-    });
+    await armFacetWake(
+      this.lifecycle,
+      { key: agentPathKey(selfPath) ?? "", data: JSON.stringify(selfPath) },
+      Date.now()
+    );
   }
 
   dueFiberWakeCount(): number {
     return (
       this.sql<{ count: number }>`
         SELECT COUNT(*) AS count FROM cf_agents_jobs
-        WHERE capability = 'fibers' AND time <= ${Date.now()}
+        WHERE capability LIKE 'cf:facet-wake:%' AND time <= ${Date.now()}
       `[0]?.count ?? 0
     );
   }
 
-  /** Owner keys of facet fiber wakes this root mirrors. */
+  /** Path keys of the facet wakes this root holds. */
   fiberWakeOwners(): string[] {
     return this.sql<{ payload: string }>`
       SELECT payload FROM cf_agents_jobs
-      WHERE capability = 'fibers' AND id LIKE 'fibers:recover:%'
+      WHERE capability LIKE 'cf:facet-wake:%'
       ORDER BY id
-    `.map(
-      (row) =>
-        (JSON.parse(row.payload) as { owner_path_key: string }).owner_path_key
-    );
+    `.map((row) => (JSON.parse(row.payload) as { key: string }).key);
   }
 
   async insertSubAgentInterruptedFiberWithLegacyIndex(
