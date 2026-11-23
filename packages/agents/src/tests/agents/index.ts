@@ -58,7 +58,7 @@ export { TestNativeRpcAgent } from "./native-rpc";
 export { RoutingOwnerAgent, RoutedChatAgent } from "./routed-agents";
 export type { RoutedChatMetadata } from "./routed-agents";
 export { SpikeSubParent, SpikeSubChild } from "./spike-sub-agent-routing";
-export { EventLogSubAgent } from "./event-log-sub-agent";
+export { EventLogSubAgent, EventLogFacetParent } from "./event-log-sub-agent";
 export {
   TestSubAgentParent,
   CustomBoundSubAgentParent,

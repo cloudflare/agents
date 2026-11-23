@@ -2,6 +2,10 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { serializeRpcResponse } from "../websockets/frame-limit";
 import { RpcTarget } from "cloudflare:workers";
 import type { Connection } from "../lifecycle/durable-object-lifecycle";
+import {
+  setConnectionFlag,
+  withoutEventLogFlag
+} from "../websockets/connection-flags";
 import type { RPCResponse, StreamingResponse } from "../callable-rpc";
 import type {
   RootFacetRpcSurface,
@@ -165,7 +169,11 @@ export class DynamicAgentConnectionBridge
   }
 
   setState(state: unknown): unknown {
-    return this.#connection.setState(state);
+    return this.#connection.setState(withoutEventLogFlag(state));
+  }
+
+  setFlag(key: string, value: unknown): void {
+    setConnectionFlag(this.#connection, key, value);
   }
 
   broadcast(
@@ -213,6 +221,14 @@ export class RootDynamicAgentConnectionBridge implements DynamicAgentConnectionB
 
   setState(state: unknown): Promise<unknown> {
     return this.#root._cf_setSubAgentConnectionState(this.#connectionId, state);
+  }
+
+  setFlag(key: string, value: unknown): Promise<void> {
+    return this.#root._cf_setSubAgentConnectionFlag(
+      this.#connectionId,
+      key,
+      value
+    );
   }
 
   broadcast(

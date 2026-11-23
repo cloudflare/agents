@@ -387,6 +387,10 @@
         "class_name": "EventLogSubAgent",
         "name": "EventLogSubAgent"
       },
+      {
+        "class_name": "EventLogFacetParent",
+        "name": "EventLogFacetParent"
+      },
       // Request-body forwarding probes (issue #2015). The sub-agent is
       // facet-only (binding is a harness requirement, no migration); the
       // root agent is the canonical control path and needs storage.
@@ -512,6 +516,7 @@
         "PlainLifecycleObject",
         "StatefulPlainObject",
         "EventLogObject",
+        "EventLogFacetParent",
         "RetryableStartObject",
         "AlarmStartFailureObject",
         "ConcurrentStartObject",

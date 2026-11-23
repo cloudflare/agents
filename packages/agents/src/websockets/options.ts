@@ -82,9 +82,10 @@ export interface WebSocketsOptions {
    *   ordinary messages and use callables. For binary-only clients.
    * - `false`: the host drives the connect sequence itself with
    *   `sendConnectFrames()` (or `sendIdentity()` and `sendState()`
-   *   separately), and applies client state frames
-   *   with `applyStateFrame()` — `Agent` does this, since it must decide
-   *   whether a connection belongs to a facet before any frame is sent.
+   *   separately), and applies client state and event-log frames with
+   *   `applyStateFrame()` and `applyEventLogFrame()` (internal) — `Agent` does this, since
+   *   it must decide whether a connection belongs to a facet before any
+   *   frame is sent or applied.
    */
   readonly protocol?:
     | boolean

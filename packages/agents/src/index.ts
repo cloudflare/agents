@@ -88,6 +88,10 @@ import {
 import { getAgentByName } from "./agent-routing";
 import { WebSockets } from "./websockets";
 import {
+  applyEventLogFrame,
+  setEventLogConnections
+} from "./websockets/websockets";
+import {
   ensureConnectionWrapped,
   getConnectionFlag,
   isConnectionProtocolEnabled as connectionProtocolEnabled,
@@ -1295,6 +1299,14 @@ export class Agent<
       }
     );
 
+    // Event logs fan out to the connections that end at this Agent: on a
+    // facet, the sockets the root bridges in, without those a facet only
+    // forwards to a sub-agent of its own.
+    setEventLogConnections(this._webSockets, () =>
+      [...this.getConnections()].filter(
+        (connection) => !this._dynamicAgents.connectionRoutesToChild(connection)
+      )
+    );
     // Agent's WebSocket connections ride the WebSockets capability —
     // Lifecycle itself no longer models connections. The handlers call
     // through `this.*` so they always hit the framework-wrapped hooks.
@@ -1382,10 +1394,13 @@ export class Agent<
             return this._tryCatch(() => _onMessage(connection, message));
           }
 
-          // State frames: readonly check, validation, error replies — all
-          // the capability's. Root sockets never reach here with one (the
-          // capability consumed it); bridged facet connections do.
-          if (this._webSockets.applyStateFrame(connection, parsed)) {
+          // State and event-log frames: the capability answers them, and
+          // Agent applies them here, after the facet forward above, so a
+          // frame for a sub-agent reaches the sub-agent's own capability.
+          if (
+            this._webSockets.applyStateFrame(connection, parsed) ||
+            applyEventLogFrame(this._webSockets, connection, parsed)
+          ) {
             return;
           }
 
@@ -2817,8 +2832,17 @@ export class Agent<
     return this._dynamicAgents.setConnectionState(connectionId, state);
   }
 
+  async _cf_setSubAgentConnectionFlag(
+    connectionId: string,
+    key: string,
+    value: unknown
+  ): Promise<void> {
+    await this.__unsafe_ensureInitialized();
+    this._dynamicAgents.setConnectionFlag(connectionId, key, value);
+  }
+
   protected _cf_connectionTargetsSubAgent(connection: Connection): boolean {
-    return this._dynamicAgents.connectionTargetsChild(connection);
+    return this._dynamicAgents.connectionRoutesToChild(connection);
   }
 
   /**
