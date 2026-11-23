@@ -809,10 +809,6 @@ export class AIChatAgent<
           local
         }
       ),
-    captureContext: () => {
-      const ambient = agentContext.getStore();
-      return (fn) => (ambient ? agentContext.run(ambient, fn) : fn());
-    },
     turnBody: (continuation, body, requestId) =>
       this._chatRecoveryEngine().turnBody(continuation, body, requestId),
     turnAccepted: (requestId) => this._turns.turnAccepted(requestId),

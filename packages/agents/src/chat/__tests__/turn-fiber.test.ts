@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { describe, it, expect, beforeEach } from "vitest";
 import { createChatFiberSnapshot } from "../recovery";
 import { ChatTurnFibers, type ChatTurnFiberHost } from "../turn-fiber";
@@ -35,13 +36,6 @@ describe("ChatTurnFibers", () => {
           closure.settle.reject(error);
         }
       },
-      captureContext: () => {
-        log.push("context:captured");
-        return (fn) => {
-          log.push("context:entered");
-          return fn();
-        };
-      },
       turnBody: (continuation, body) => () =>
         body(async () => void log.push(`takeReply:${continuation}`))
     };
@@ -64,14 +58,28 @@ describe("ChatTurnFibers", () => {
     expect(value).toBe("reply");
     expect(liveDuringRun).toBe(true);
     expect(log).toEqual([
-      "context:captured",
       "task:r1:true:nonce-1",
-      "context:entered",
       "model",
       "takeReply:true",
       "run"
     ]);
     expect(fibers.liveTurns.size).toBe(0);
+  });
+
+  it("runs the turn in the caller's async context even when another context starts it", async () => {
+    const caller = new AsyncLocalStorage<string>();
+    // The alarm, not the caller, claims the run and starts the closure.
+    host.runTask = (_input, closure) =>
+      caller.run("alarm", async () => {
+        closure.settle.resolve(await closure.run());
+      });
+    const seen = await caller.run("caller", () =>
+      fibers.run(
+        { requestId: "r1", continuation: false, snapshot: snapshot("r1") },
+        async () => caller.getStore()
+      )
+    );
+    expect(seen).toBe("caller");
   });
 
   it("names the turn's request id to the recovery engine, so a stop by it reaches a recovery attempt", async () => {

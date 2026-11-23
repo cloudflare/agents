@@ -28,6 +28,7 @@
  * `@cloudflare/think`, not a public API.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { wrapChatFiberSnapshot, type ChatFiberSnapshot } from "./recovery";
 import { isTurnStopped } from "./turn-stop";
 import { isDurableObjectMemoryLimitReset } from "../retries";
@@ -52,12 +53,6 @@ export interface ChatTurnFiberHost {
     },
     local: ChatTurnClosureEntry
   ): Promise<unknown>;
-  /**
-   * Capture the caller's invocation context (live connection, request) now,
-   * and return a function that runs a turn inside it later: the Task's host
-   * boundary carries no connection.
-   */
-  captureContext(): <T>(fn: () => Promise<T>) => Promise<T>;
   /**
    * Wrap a turn body so a turn that continues the latest reply can take it
    * over from a scheduled recovery (`ChatRecoveryEngine.turnBody`). The
@@ -216,7 +211,10 @@ export class ChatTurnFibers {
     // the outcome is awaited below. Mark it handled so the runtime does not
     // report an unhandled rejection this function is about to consume.
     outcome.catch(() => {});
-    const inContext = this.host.captureContext();
+    // The turn runs in the async context of this call (its connection, its
+    // request, a caller's result capture), whichever attempt claims it: the
+    // caller's, or the alarm's when that claims the run first.
+    const inCaller = AsyncLocalStorage.snapshot();
     await this.host.runTask(
       { requestId, continuation, nonce },
       {
@@ -226,7 +224,7 @@ export class ChatTurnFibers {
           // Tasks accepted the run durably before it invokes the closure.
           this.host.turnAccepted?.(requestId);
           turn.onAccepted?.(requestId);
-          return inContext(body);
+          return inCaller(body);
         },
         settle: { resolve: resolveOutcome, reject: rejectOutcome }
       }

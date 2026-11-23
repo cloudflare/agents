@@ -1121,7 +1121,13 @@ export class Tasks<
     if (options.local !== undefined && startMode !== "queued") {
       this.#locals.set(runId, options.local);
     }
-    await this.#syncWake(runId);
+    try {
+      await this.#syncWake(runId);
+    } catch (error) {
+      // The caller gets the throw and owns its closure again.
+      this.#locals.delete(runId);
+      throw error;
+    }
     this.#emit("task:accepted", { runId, definition, accepted: true });
 
     // Warm path: begin the first attempt immediately when the host is past
