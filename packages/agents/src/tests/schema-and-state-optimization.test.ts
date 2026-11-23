@@ -91,6 +91,12 @@ const EXPECTED_SCHEMA_DDL = [
         value TEXT NOT NULL,
         PRIMARY KEY (run_id, key)
       ) WITHOUT ROWID`,
+  `CREATE TABLE cf_agents_task_parts (
+        run_id TEXT NOT NULL,
+        piece INTEGER NOT NULL,
+        data TEXT NOT NULL,
+        PRIMARY KEY (run_id, piece)
+      ) WITHOUT ROWID`,
   `CREATE TABLE cf_agents_task_runs (
         run_id TEXT PRIMARY KEY,
         definition TEXT NOT NULL,
@@ -117,7 +123,8 @@ const EXPECTED_SCHEMA_DDL = [
         settled_at INTEGER,
         lane TEXT,
         seq INTEGER,
-        notified TEXT
+        notified TEXT,
+        input_parts INTEGER
       ) WITHOUT ROWID`,
   `CREATE TABLE cf_agents_task_steps (
         run_id TEXT NOT NULL,

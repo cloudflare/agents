@@ -42,7 +42,12 @@ import {
   type TaskStepEngine,
   type ResolvedStepPolicy
 } from "./replay";
-import { deserializeTaskValue, serializeTaskValue } from "./serialization";
+import {
+  deserializeTaskValue,
+  MAX_PARTED_INPUT_BYTES,
+  MAX_SERIALIZED_BYTES,
+  serializeTaskValue
+} from "./serialization";
 import type {
   Task,
   TaskCallbacks,
@@ -1076,9 +1081,14 @@ export class Tasks<
       );
     }
 
+    // A framework definition's input may outgrow one row (Think's
+    // submissions carry whole message lists).
     const inputJson = serializeTaskValue(
       input,
-      `input for Task definition "${definition}"`
+      `input for Task definition "${definition}"`,
+      this.#registered.has(definition)
+        ? MAX_PARTED_INPUT_BYTES
+        : MAX_SERIALIZED_BYTES
     );
     const metadataJson = serializeTaskValue(
       options.metadata,
@@ -1153,18 +1163,21 @@ export class Tasks<
     const runId = options.runId ?? `task_${nanoid()}`;
     const now = Date.now();
     const lane = options.lane ?? null;
+    const placed = this.#store.placeInput(runId, inputJson);
     // A run queued behind its lane's open run waits with no deadline (and
     // no wake job) until that run settles.
     const queued = lane !== null && this.#store.laneHead(lane) !== undefined;
     this.#store.sql`
       INSERT INTO cf_agents_task_runs
         (run_id, definition, input, status, metadata, idempotency_key, retain,
-         attempt, next_at, cancel_requested, created_at, updated_at, lane, seq)
+         attempt, next_at, cancel_requested, created_at, updated_at, lane, seq,
+         input_parts)
       VALUES
-        (${runId}, ${definition}, ${inputJson}, 'pending', ${metadataJson},
+        (${runId}, ${definition}, ${placed.input}, 'pending', ${metadataJson},
          ${options.idempotencyKey ?? null}, ${options.retain === false ? 0 : 1},
          0, ${queued ? null : now}, 0, ${now}, ${now}, ${lane},
-         ${lane === null ? null : this.#store.nextLaneSeq(lane)})
+         ${lane === null ? null : this.#store.nextLaneSeq(lane)},
+         ${placed.parts})
     `;
     // Before the wake is published: an attempt this isolate starts from it
     // (the alarm can win the claim) still gets the caller's `local`.
@@ -1347,7 +1360,7 @@ export class Tasks<
     local: unknown
   ): Promise<void> {
     const runId = row.run_id;
-    const input = deserializeTaskValue(row.input);
+    const input = deserializeTaskValue(this.#store.inputJson(row));
     const engine = this.#createEngine(
       runId,
       row.definition,
@@ -2062,15 +2075,23 @@ export class Tasks<
     const queued =
       open && lane !== null && this.#store.laneHead(lane) !== undefined;
     const now = Date.now();
+    const importedInput = this.#store.placeInput(
+      record.runId,
+      serializeTaskValue(
+        record.input,
+        `input of imported run "${record.runId}"`,
+        MAX_PARTED_INPUT_BYTES
+      )
+    );
     this.#store.sql`
       INSERT INTO cf_agents_task_runs
         (run_id, definition, input, status, metadata, idempotency_key, retain,
          attempt, generation, next_at, error_name, error_message,
          cancel_requested, cancel_reason, created_at, started_at, updated_at,
-         settled_at, lane, seq, notified)
+         settled_at, lane, seq, notified, input_parts)
       VALUES
         (${record.runId}, ${record.definition},
-         ${serializeTaskValue(record.input, `input of imported run "${record.runId}"`)},
+         ${importedInput.input},
          ${record.status},
          ${serializeTaskValue(record.metadata, `metadata of imported run "${record.runId}"`)},
          ${record.idempotencyKey ?? null}, ${record.retain === false ? 0 : 1},
@@ -2084,7 +2105,7 @@ export class Tasks<
          ${record.createdAt}, ${record.startedAt ?? null}, ${now},
          ${open ? null : (record.settledAt ?? now)}, ${lane},
          ${lane === null ? null : this.#store.nextLaneSeq(lane)},
-         ${open ? null : record.status})
+         ${open ? null : record.status}, ${importedInput.parts})
     `;
     if (open && !queued) await this.#syncWake(record.runId);
     return true;
@@ -2098,7 +2119,9 @@ export class Tasks<
   /** @internal A run's input as accepted, or `undefined` for an unknown run. */
   inputOf<T = unknown>(runId: string): T | undefined {
     const row = this.#store.getRun(runId);
-    return row ? (deserializeTaskValue(row.input) as T) : undefined;
+    return row
+      ? (deserializeTaskValue(this.#store.inputJson(row)) as T)
+      : undefined;
   }
 
   /**

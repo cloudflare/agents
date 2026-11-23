@@ -220,3 +220,60 @@ describe("Tasks outcomes a run cannot keep as they are", () => {
     });
   });
 });
+
+describe("Tasks input past one row", () => {
+  it("keeps a framework run's large input in pieces, hands it whole to the handler, and deletes the pieces with the run", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        // 1.2 million code units, ending on a character outside the BMP so a
+        // piece boundary could fall between the halves of its pair.
+        const big = `${"a".repeat(499_999)}😀${"b".repeat(700_000)}`;
+        await instance.tasks.run(
+          "__cf_echo" as unknown as "pipeline",
+          big as never,
+          { runId: "big", retain: false, start: "now" }
+        );
+        expect(instance.tasks.inputOf("big")).toBeUndefined();
+        const pieces = state.storage.sql
+          .exec("SELECT COUNT(*) AS n FROM cf_agents_task_parts")
+          .one().n;
+        expect(pieces).toBe(0);
+        await instance.tasks.run(
+          "__cf_echo" as unknown as "pipeline",
+          big as never,
+          { runId: "kept", start: "alarm" }
+        );
+        expect(instance.tasks.inputOf("kept")).toBe(big);
+        expect(
+          state.storage.sql
+            .exec("SELECT COUNT(*) AS n FROM cf_agents_task_parts")
+            .one().n
+        ).toBe(3);
+        await instance.tasks.cancel("kept");
+        expect(instance.tasks.deleteRun("kept")).toBe(true);
+        expect(
+          state.storage.sql
+            .exec("SELECT COUNT(*) AS n FROM cf_agents_task_parts")
+            .one().n
+        ).toBe(0);
+      }
+    );
+  });
+
+  it("hands a large input to the handler whole", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const big = "c".repeat(1_500_000);
+      await instance.tasks.run(
+        "__cf_echo" as unknown as "pipeline",
+        big as never,
+        { runId: "echo", start: "now" }
+      );
+      const record = instance.tasks.peek("echo");
+      expect(record?.status).toBe("completed");
+      expect(record?.result).toBe(1_500_000);
+    });
+  });
+});

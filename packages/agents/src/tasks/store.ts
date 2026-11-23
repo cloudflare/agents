@@ -6,7 +6,11 @@
  */
 
 import { SqlError } from "../sql-error";
-import { deserializeTaskValue } from "./serialization";
+import {
+  deserializeTaskValue,
+  INLINE_INPUT_UNITS,
+  splitPieces
+} from "./serialization";
 import type {
   TaskJson,
   TaskRecord,
@@ -42,7 +46,8 @@ const RUNS_COLUMNS = `
         settled_at INTEGER,
         lane TEXT,
         seq INTEGER,
-        notified TEXT
+        notified TEXT,
+        input_parts INTEGER
       `;
 
 /** @internal SQL-backed store for one Tasks capability instance. */
@@ -137,7 +142,43 @@ export class TaskStore {
     return rows[0];
   }
 
+  /**
+   * Store a run's input: in its row, or past the row's room in pieces.
+   *
+   * @returns What the row's `input` and `input_parts` columns hold.
+   */
+  placeInput(
+    runId: string,
+    json: string | null
+  ): { input: string | null; parts: number | null } {
+    if (json === null || json.length <= INLINE_INPUT_UNITS) {
+      return { input: json, parts: null };
+    }
+    const pieces = splitPieces(json, INLINE_INPUT_UNITS);
+    pieces.forEach((data, piece) => {
+      this.sql`
+        INSERT INTO cf_agents_task_parts (run_id, piece, data)
+        VALUES (${runId}, ${piece}, ${data})
+      `;
+    });
+    return { input: null, parts: pieces.length };
+  }
+
+  /** A run's input JSON, joined from its pieces when it has them. */
+  inputJson(row: TaskRunRow): string | null {
+    if (row.input_parts === null || row.input_parts === undefined) {
+      return row.input;
+    }
+    return this.sql<{ data: string }>`
+      SELECT data FROM cf_agents_task_parts
+      WHERE run_id = ${row.run_id} ORDER BY piece
+    `
+      .map((part) => part.data)
+      .join("");
+  }
+
   deleteRun(runId: string): void {
+    this.sql`DELETE FROM cf_agents_task_parts WHERE run_id = ${runId}`;
     this.deleteCheckpoint(runId);
     this.sql`DELETE FROM cf_agents_task_steps WHERE run_id = ${runId}`;
     this.sql`DELETE FROM cf_agents_task_runs WHERE run_id = ${runId}`;
@@ -202,6 +243,7 @@ export class TaskStore {
       : "status";
     const lane = columns.has("lane") ? "lane, seq" : "NULL, NULL";
     const notified = columns.has("notified") ? "notified" : "NULL";
+    const parts = columns.has("input_parts") ? "input_parts" : "NULL";
     this.#storage.transactionSync(() => {
       const exec = (query: string) => {
         try {
@@ -219,14 +261,14 @@ export class TaskStore {
           error_message, status_message, metadata, idempotency_key, retain,
           attempt, generation, next_at, wait_reason, cancel_requested,
           cancel_reason, created_at, started_at, updated_at, settled_at,
-          lane, seq, notified
+          lane, seq, notified, input_parts
         )
         SELECT
           run_id, definition, input, ${status},
           result, error_name, error_message, status_message, metadata,
           idempotency_key, retain, attempt, generation, next_at, wait_reason,
           cancel_requested, cancel_reason, created_at, started_at, updated_at,
-          settled_at, ${lane}, ${notified}
+          settled_at, ${lane}, ${notified}, ${parts}
         FROM cf_agents_task_runs`);
       exec(`DROP TABLE cf_agents_task_runs`);
       exec(
@@ -279,6 +321,13 @@ export class TaskStore {
         updated_at INTEGER NOT NULL,
         completed_at INTEGER,
         PRIMARY KEY (run_id, step_name)
+      ) WITHOUT ROWID`);
+    rawSql(`
+      CREATE TABLE IF NOT EXISTS cf_agents_task_parts (
+        run_id TEXT NOT NULL,
+        piece INTEGER NOT NULL,
+        data TEXT NOT NULL,
+        PRIMARY KEY (run_id, piece)
       ) WITHOUT ROWID`);
     rawSql(`
       CREATE TABLE IF NOT EXISTS cf_agents_task_checkpoint (

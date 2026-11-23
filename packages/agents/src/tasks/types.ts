@@ -413,6 +413,8 @@ export type TaskRunRow = {
   lane: string | null;
   seq: number | null;
   notified: string | null;
+  /** Pieces in `cf_agents_task_parts` holding an input too large for the row. */
+  input_parts: number | null;
 };
 
 /**
