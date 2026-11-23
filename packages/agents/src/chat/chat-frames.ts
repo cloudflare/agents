@@ -56,6 +56,12 @@ export interface ChatFramesOptions {
   clientView<TMessage extends { id: string }>(
     messages: ReadonlyArray<TMessage>
   ): { messages: TMessage[]; queuedMessageIds?: string[] };
+  /**
+   * Whether message lists also go to tabs waiting on a resume ack. `Think`
+   * sends them (its lists never carry the in-flight reply); `AIChatAgent`
+   * withholds them, like every other frame.
+   */
+  listsReachResumingTabs?: boolean;
 }
 
 /** @internal */
@@ -85,6 +91,34 @@ export class ChatFrames {
       ...this.options.resuming
     ]);
     this.#record(ready);
+  }
+
+  /**
+   * The message list frame for `messages`: the transcript, then the messages
+   * waiting requests hold, named in `queuedMessageIds`.
+   */
+  messagesFrame<TMessage extends { id: string }>(
+    messages: ReadonlyArray<TMessage>,
+    extra?: Readonly<Record<string, unknown>>
+  ): ChatFrame {
+    return {
+      type: CHAT_MESSAGE_TYPES.CHAT_MESSAGES,
+      ...this.options.clientView(messages),
+      ...extra
+    };
+  }
+
+  /** Send the message list for `messages` to every tab except `exclude`. */
+  broadcastMessages<TMessage extends { id: string }>(
+    messages: ReadonlyArray<TMessage>,
+    exclude: readonly string[] = []
+  ): void {
+    this.options.broadcast(
+      JSON.stringify(this.messagesFrame(messages)),
+      this.options.listsReachResumingTabs
+        ? [...exclude]
+        : [...exclude, ...this.options.resuming]
+    );
   }
 
   /** Send `frame` to one tab. A closed socket is ignored. */

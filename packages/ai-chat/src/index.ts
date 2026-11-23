@@ -432,10 +432,7 @@ export class AIChatAgent<
       stopped: (requestId, reason) => this._afterStop(requestId, reason),
       // A waiting message that will not join: tabs stop drawing it.
       waitingChanged: () =>
-        this._frames.broadcast({
-          messages: this._messagesForClientSync(),
-          type: MessageType.CF_AGENT_CHAT_MESSAGES
-        })
+        this._frames.broadcastMessages(this._messagesForClientSync())
     },
     {
       defaultDebounceMs: AIChatAgent.MESSAGE_DEBOUNCE_MS,
@@ -1319,10 +1316,7 @@ export class AIChatAgent<
       // drops what is no longer in it.
       remove: async (ids) => {
         await this._deleteMessagesByIds(ids);
-        this._frames.broadcast({
-          messages: this._messagesForClientSync(),
-          type: MessageType.CF_AGENT_CHAT_MESSAGES
-        });
+        this._frames.broadcastMessages(this._messagesForClientSync());
       },
       emitRepaired: (event) => this._emit("chat:transcript:repaired", event)
     };
@@ -1771,11 +1765,8 @@ export class AIChatAgent<
             "cloudflare.agents.turn.trigger": requestTrigger
           },
           async () => {
-            this._frames.broadcast(
-              {
-                messages: held.length > 0 ? this.messages : sent,
-                type: MessageType.CF_AGENT_CHAT_MESSAGES
-              },
+            this._frames.broadcastMessages(
+              held.length > 0 ? this.messages : sent,
               connection ? [connection.id] : []
             );
 
@@ -4175,13 +4166,7 @@ export class AIChatAgent<
       );
     }
 
-    this._frames.broadcast(
-      {
-        messages: mergedMessages,
-        type: MessageType.CF_AGENT_CHAT_MESSAGES
-      },
-      excludeBroadcastIds
-    );
+    this._frames.broadcastMessages(mergedMessages, excludeBroadcastIds);
   }
 
   private _findLastAssistantMessage(): UIMessage | undefined {
@@ -4483,10 +4468,7 @@ export class AIChatAgent<
       streams: this._replyStreams,
       send: (frame) => this._frames.broadcast(frame),
       broadcastTranscript: () =>
-        this._frames.broadcast({
-          messages: this._messagesForClientSync(),
-          type: MessageType.CF_AGENT_CHAT_MESSAGES
-        }),
+        this._frames.broadcastMessages(this._messagesForClientSync()),
       emit: ({ type, ...event }) =>
         type === "message:error"
           ? this._emit(type, event as { error: string })

@@ -129,4 +129,37 @@ describe("ChatFrames", () => {
       )
     ).not.toThrow();
   });
+
+  it("sends the message list with the waiting messages, to resuming tabs only when the host says so", () => {
+    const view = {
+      clientView: <T extends { id: string }>(messages: ReadonlyArray<T>) => ({
+        messages: [...messages],
+        queuedMessageIds: ["q"]
+      })
+    };
+    const withheld = setup(view);
+    withheld.resuming.add("waiting");
+    withheld.frames.broadcastMessages([{ id: "m" }], ["self"]);
+    expect(withheld.sent[0].frame).toEqual({
+      type: MESSAGES,
+      messages: [{ id: "m" }],
+      queuedMessageIds: ["q"]
+    });
+    expect(withheld.sent[0].without).toEqual(["self", "waiting"]);
+
+    const sent = setup({ ...view, listsReachResumingTabs: true });
+    sent.resuming.add("waiting");
+    sent.frames.broadcastMessages([{ id: "m" }], ["self"]);
+    expect(sent.sent[0].without).toEqual(["self"]);
+    sent.frames.broadcastMessages([{ id: "m" }]);
+    expect(sent.sent[1].without).toEqual([]);
+    withheld.frames.broadcastMessages([{ id: "m" }]);
+    expect(withheld.sent[1].without).toEqual(["waiting"]);
+    expect(
+      sent.frames.messagesFrame([{ id: "m" }], { connect: true })
+    ).toMatchObject({
+      type: MESSAGES,
+      connect: true
+    });
+  });
 });
