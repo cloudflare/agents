@@ -286,32 +286,30 @@ export class DynamicAgentsInternal extends LifecycleCapability {
   }
 
   async rootAlarmOwner(): Promise<RootFacetRpcSurface> {
-    const channel = this.#host._isFacet ? this.#rootChannel : undefined;
-    if (!channel) return this.rootStub();
-    // A channel from a root instance that has since been replaced refuses
-    // the call before running it; the call is made through a stub instead,
-    // and the channel dropped until the next init. Any other failure is the
-    // call's own.
-    return new Proxy(channel, {
-      get: (target, prop) => {
+    if (!this.#host._isFacet || !this.#rootChannel) return this.rootStub();
+    // Each call takes the channel current when it is made: an init between
+    // two calls of one caller (a nested delete) replaces and disposes the
+    // old one. A channel from a root instance that has since been replaced
+    // refuses the call before running it; the call is made through a stub
+    // instead, and the channel dropped until the next init. Any other
+    // failure is the call's own.
+    type Call = (...args: unknown[]) => Promise<unknown>;
+    const byName = (target: unknown, name: string) =>
+      (target as Record<string, Call>)[name];
+    return new Proxy({} as RootFacetRpcSurface, {
+      get: (_target, prop) => {
         if (typeof prop !== "string" || !prop.startsWith("_cf_")) {
-          return Reflect.get(target, prop) as unknown;
+          return undefined;
         }
-        const call = target as unknown as Record<
-          string,
-          (...a: unknown[]) => Promise<unknown>
-        >;
         return async (...args: unknown[]) => {
+          const channel = this.#rootChannel;
+          if (!channel) return byName(this.rootStub(), prop)(...args);
           try {
-            return await call[prop](...args);
+            return await byName(channel, prop)(...args);
           } catch (error) {
             if (!isStaleRootChannelError(error)) throw error;
             if (this.#rootChannel === channel) this.#rootChannel = undefined;
-            const stub = this.rootStub() as unknown as Record<
-              string,
-              (...a: unknown[]) => Promise<unknown>
-            >;
-            return stub[prop](...args);
+            return byName(this.rootStub(), prop)(...args);
           }
         };
       }

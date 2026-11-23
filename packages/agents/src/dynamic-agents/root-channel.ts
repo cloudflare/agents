@@ -5,20 +5,21 @@ import type { AgentPathStep } from "../sub-routing";
 import type { RootFacetRpcSurface } from "./types";
 
 /**
- * The root's side of the calls its facets make to it, handed down at facet
- * init. A facet that calls this instead of a stub of its root does not loop
- * back into the runtime: measured, calls from more than about 14 new facets
- * in one invocation through a root stub fail with "Subrequest depth limit
- * exceeded", and through this all succeed.
- *
- * @internal
+ * The newest instance per Durable Object id in this isolate, held weakly:
+ * an evicted instance is not kept alive by it. Dead entries are swept as
+ * the map grows, so it stays about as big as the live instances.
  */
-/** The newest root instance per Durable Object id, in this isolate. */
-const liveRoots = new Map<string, object>();
+const liveRoots = new Map<string, WeakRef<object>>();
+let sweepAt = 64;
 
 /** @internal Record `root` as its object's live instance in this isolate. */
 export function markLiveRoot(id: string, root: object): void {
-  liveRoots.set(id, root);
+  liveRoots.set(id, new WeakRef(root));
+  if (liveRoots.size < sweepAt) return;
+  for (const [key, ref] of liveRoots) {
+    if (ref.deref() === undefined) liveRoots.delete(key);
+  }
+  sweepAt = Math.max(64, liveRoots.size * 2);
 }
 
 const STALE_ROOT_CHANNEL =
@@ -33,6 +34,15 @@ export function isStaleRootChannelError(error: unknown): boolean {
   return error instanceof Error && error.message === STALE_ROOT_CHANNEL;
 }
 
+/**
+ * The root's side of the calls its facets make to it, handed down at facet
+ * init. A facet that calls this instead of a stub of its root does not loop
+ * back into the runtime: measured, calls from more than about 14 new facets
+ * in one invocation through a root stub fail with "Subrequest depth limit
+ * exceeded", and through this all succeed.
+ *
+ * @internal
+ */
 export class RootFacetChannel extends RpcTarget implements RootFacetRpcSurface {
   readonly #root: RootFacetRpcSurface;
   readonly #run: <T>(body: () => Promise<T>) => Promise<T>;
@@ -51,7 +61,7 @@ export class RootFacetChannel extends RpcTarget implements RootFacetRpcSurface {
     // A facet can outlive the root instance that handed it this channel (an
     // eviction that keeps the isolate): its calls must reach the new one.
     this.#run = (body) => {
-      if (liveRoots.get(id) !== root) {
+      if (liveRoots.get(id)?.deref() !== root) {
         return Promise.reject(new Error(STALE_ROOT_CHANNEL));
       }
       return run(body);

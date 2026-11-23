@@ -7478,6 +7478,7 @@ export class AIChatAgentToolParent extends Agent<Env> {
       if (open.length === 0) return;
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
+    throw new Error("A drive of a sub-agent is still unreplied after 2 s");
   }
 
   /** A sub-agent's alarm memory-limit strike count, or null when none. */
