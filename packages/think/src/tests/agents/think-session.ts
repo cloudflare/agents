@@ -84,6 +84,17 @@ import { WorkspaceFiles } from "../../workspace-files";
 import type { TaskRecord } from "agents/internal";
 import type { TaskJson } from "agents/tasks";
 
+/** The fiber run table of a release before fibers ran on Tasks. */
+function createLegacyFiberTableForTest(sql: SqlStorage): void {
+  sql.exec(`
+    CREATE TABLE IF NOT EXISTS cf_agents_runs (
+      id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, snapshot TEXT,
+      created_at INTEGER NOT NULL, completed_at INTEGER, outcome TEXT,
+      error_message TEXT, recovery_crashes INTEGER NOT NULL DEFAULT 0
+    )
+  `);
+}
+
 // ── Submission fixtures ─────────────────────────────────────────────
 
 const SUBMISSION_DEFINITION = "__cf_think_submission";
@@ -271,6 +282,10 @@ async function insertInterruptedTurnForTest(
 ): Promise<void> {
   const prefix = `${Think.CHAT_FIBER_NAME}:`;
   if (!name.startsWith(prefix)) {
+    createLegacyFiberTableForTest(
+      (agent as unknown as { ctx: DurableObjectState }).ctx.storage.sql
+    );
+
     agent.sql`
       INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
       VALUES (${`fiber-${crypto.randomUUID()}`}, ${name},
@@ -323,8 +338,8 @@ async function recoverInterruptedTurnsForTest(agent: Think): Promise<void> {
     });
   }
   await (
-    agent as unknown as { _fibers: { recover(): Promise<void> } }
-  )._fibers.recover();
+    agent as unknown as { _recoverFibers(): Promise<void> }
+  )._recoverFibers();
 }
 
 function recoveryTransportCountsForTest(
@@ -8792,7 +8807,8 @@ export class ThinkToolsTestAgent extends Think {
 
   async getActiveFibers(): Promise<Array<{ id: string; name: string }>> {
     return this.sql<{ id: string; name: string }>`
-      SELECT id, name FROM cf_agents_runs
+      SELECT run_id AS id, json_extract(input, '$.name') AS name FROM cf_agents_task_runs
+      WHERE definition = '__cf_fiber' AND status IN ('pending', 'running')
     `;
   }
 }
@@ -10431,13 +10447,17 @@ export class ThinkProgrammaticTestAgent extends Think {
     requestId: string,
     createdAt: number
   ): Promise<void> {
+    // A chat turn an older release ran as a fiber, carried forward as a
+    // fiber run left by a dead isolate.
+    const now = Date.now();
     this.sql`
-      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
+      INSERT INTO cf_agents_task_runs
+        (run_id, definition, input, status, retain, attempt, generation,
+         next_at, cancel_requested, created_at, updated_at)
       VALUES (
-        ${`fiber-${requestId}`},
-        ${(this.constructor as typeof Think).CHAT_FIBER_NAME + ":" + requestId},
-        NULL,
-        ${createdAt}
+        ${`fiber-${requestId}`}, '__cf_fiber',
+        ${JSON.stringify({ name: (this.constructor as typeof Think).CHAT_FIBER_NAME + ":" + requestId })},
+        'running', 0, 1, 'imported', ${now + 60_000}, 0, ${createdAt}, ${now}
       )
     `;
   }
@@ -11340,7 +11360,8 @@ export class ThinkRecoveryTestAgent extends Think {
 
   async getActiveFibers(): Promise<Array<{ id: string; name: string }>> {
     return this.sql<{ id: string; name: string }>`
-      SELECT id, name FROM cf_agents_runs
+      SELECT run_id AS id, json_extract(input, '$.name') AS name FROM cf_agents_task_runs
+      WHERE definition = '__cf_fiber' AND status IN ('pending', 'running')
     `;
   }
 
@@ -12638,6 +12659,8 @@ export class ThinkRecoveryTestAgent extends Think {
 
   /** Leave a chat turn's fiber row, as a version before Tasks did. */
   insertLegacyChatFiberForTest(requestId: string, snapshot?: unknown): void {
+    createLegacyFiberTableForTest(this.ctx.storage.sql);
+
     this.sql`
       INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
       VALUES (${`fiber-${crypto.randomUUID()}`},
@@ -12720,12 +12743,20 @@ export class ThinkRecoveryTestAgent extends Think {
     completed: boolean
   ): Promise<{ recoverable: boolean; freshEvidence: boolean }> {
     const now = Date.now();
+    // A chat turn an older release ran as a fiber, carried forward as a
+    // fiber run (settled when `completed`).
     this.sql`
-      INSERT INTO cf_agents_runs (id, name, snapshot, created_at, completed_at)
+      INSERT INTO cf_agents_task_runs
+        (run_id, definition, input, status, retain, attempt, generation,
+         next_at, cancel_requested, created_at, updated_at, settled_at,
+         notified)
       VALUES (
-        ${`fiber-${crypto.randomUUID()}`},
-        ${`${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${requestId}`},
-        ${null}, ${now}, ${completed ? now : null}
+        ${`fiber-${crypto.randomUUID()}`}, '__cf_fiber',
+        ${JSON.stringify({ name: `${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${requestId}` })},
+        ${completed ? "completed" : "running"}, 0, 1,
+        ${completed ? null : "imported"}, ${completed ? null : now + 60_000},
+        0, ${now}, ${now}, ${completed ? now : null},
+        ${completed ? "completed" : null}
       )
     `;
     const self = this as unknown as {
@@ -13514,7 +13545,8 @@ export class ThinkNonRecoveryTestAgent extends Think {
 
   async getActiveFibers(): Promise<Array<{ id: string; name: string }>> {
     return this.sql<{ id: string; name: string }>`
-      SELECT id, name FROM cf_agents_runs
+      SELECT run_id AS id, json_extract(input, '$.name') AS name FROM cf_agents_task_runs
+      WHERE definition = '__cf_fiber' AND status IN ('pending', 'running')
     `;
   }
 

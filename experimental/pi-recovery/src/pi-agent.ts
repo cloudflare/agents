@@ -720,7 +720,9 @@ export class PiAgent extends Agent<Env> {
     partialPrefixChars: number;
   }> {
     const fiberRows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_runs
+      SELECT COUNT(*) as count FROM cf_agents_task_runs
+      WHERE definition IN ('__cf_fiber', '__cf_managed_fiber')
+        AND status IN ('pending', 'running') AND coalesce(wait_reason, '') != 'park'
     `;
     const incidents = await this.ctx.storage.list({
       prefix: "cf:chat-recovery:incident:"

@@ -1,145 +1,58 @@
 # Fibers
 
-**Internal.** Not a public API. Nothing new from the slim-hosts work is exposed to apps until it has shipped inside `Think` and `AIChatAgent` for a release and is shown correct ([rfc-slim-hosts.md](./rfc-slim-hosts.md#exposure)). It is not exported at all: `Agent` installs it and delegates its public methods to it.
+**Internal.** Not a public API. Nothing new from the slim-hosts work is exposed to apps until it has shipped inside `Think` and `AIChatAgent` for a release and is shown correct ([rfc-slim-hosts.md](./rfc-slim-hosts.md#exposure)).
 
-A fiber is a closure that runs once, checkpoints with `stash()`, and hands
-an interruption to a recovery hook. `Agent.runFiber()`, `startFiber()`,
-`stash()`, `inspectFiber()`, `listFibers()`, `cancelFiber()`,
-`resolveFiber()`, `deleteFibers()` and the `onFiberRecovered()` hook are the
-public API. Since this change they are one-line delegates to the `Fibers`
-Lifecycle capability in `packages/agents/src/fibers/`. It is an internal
-module (`@internal`, no package export): Agent installs it, and a plain
-Durable Object that wants durable background work should use Tasks.
+A fiber is a closure that runs once, checkpoints with `stash()`, and hands an interruption to a recovery hook. `Agent.runFiber()`, `startFiber()`, `stash()`, `inspectFiber()`, `listFibers()`, `cancelFiber()`, `resolveFiber()`, `deleteFibers()` and the `onFiberRecovered()` hook are the public API and keep their signatures.
 
-[Tasks](./rfc-fibers.md) is the replayable engine: a named handler re-runs
-from its step journal. Fibers are the other shape and stay separate (see
-"Why not Tasks" below).
+**A fiber is a one-step [Task](./tasks.md) run.** There is no Fibers engine, table or recovery scan. `packages/agents/src/fiber-runs.ts` is a plain module with no storage of its own: two framework definitions, the functions behind Agent's fiber methods, and the one-way import of rows from older releases.
 
 ## How it works
 
-### Storage
+- `runFiber(name, fn)` is a `__cf_fiber` run: `input = { name }`, `retain: false`, `start: "now"`, and the closure as its `local`. Attempt 1 runs the closure; its result or throw goes back to the caller from memory, never stored. The run is deleted when it finishes.
+- `startFiber(name, fn, options)` is a `__cf_managed_fiber` run: `fiberId` is the run id, `idempotencyKey` and `metadata` are the run's, and the definition keeps its checkpoint after settling (`keepCheckpoint`), so `inspectFiber()` shows the last snapshot until `deleteFibers()`.
+- `stash(data)` writes the checkpoint entry `snapshot`: a synchronous SQLite write fenced on the attempt. `this.stash()` finds the current fiber through an AsyncLocalStorage (`withFiberStash`), which the chat hosts also enter for their turns.
+- The claim lasts `keepAliveIntervalMs` (`claimMs`), and its wake renews it while the closure runs: that wake is the object's keep-alive, as the old fiber heartbeat was. A running fiber holds no `keepAlive()` ref.
+- A later attempt has no closure (`step.local` is undefined after a reset). It calls the host's recovery: `_handleInternalFiberRecovery` first (chat hosts' legacy turn fibers), then `onFiberRecovered`, with the last snapshot.
+- At startup, before `onStart`, the Agent imports older rows, then runs the due fiber runs (`tasks.runDue`), bounded by `fiberRecoveryScanDeadlineMs`. What the deadline leaves runs from its own wake (`fiber:recovery:skipped`, reason `scan_deadline_exceeded`).
 
-Two tables, owned by the capability and created on first use under the KV
-key `cf_agents:fibers_schema_version`:
+### Recovery rules (from the Fibers capability, kept)
 
-- `cf_agents_runs`: one row per fiber whose body has started and not
-  settled. Inserted before the body runs, deleted after it settles.
-  `stash()` writes the snapshot here, synchronously. If the delete fails
-  after the body settled, the row keeps `completed_at` and `outcome`, and
-  the next scan deletes it without calling the hook (#2305).
-- `cf_agents_fibers`: the managed ledger for `startFiber()`. Id, unique
-  idempotency key, name, status, snapshot, metadata, error, timestamps.
-  Kept until `deleteFibers()` removes it.
+- **Commit before the hook.** The attempt is counted in the checkpoint (`crashes`) and committed with `storage.sync()` before the hook runs. A hook that ends the isolate before its first I/O would otherwise roll the count back, and every start would run it again (RUNTIME-FACTS).
+- **Crash budget.** The count is taken back when the hook returns or throws. A plain fiber whose hook never returned three times ends `aborted` without the hook (`fiber:recovery:skipped`, `recovery_crashed`). A managed fiber's recovery runs at most once; after one crash it is parked `interrupted`. Only a chat host's legacy turn fibers (`${CHAT_FIBER_NAME}:<id>`) are exempt: their engine keeps its own budget.
+- **A throwing hook.** A plain fiber is retried after `keepAliveIntervalMs * 2^n` (capped at 5 min) through a durable sleep of its own run, until it is older than `fiberRecoveryMaxAgeMs` (`max_age_exceeded`). Each fiber backs off on its own. A managed fiber ends `error`.
+- **Recovery results.** A managed fiber's hook may return a `FiberRecoveryResult`: `completed` (snapshot and metadata applied), `error`, `aborted`, or `interrupted`. Nothing returned leaves it `interrupted`: the run is parked (`TaskSettlement.park`) until `resolveFiber()` settles it once from outside (`tasks.settle(runId, outcome, { checkpoint })`), the shape approvals use too.
+- **Settled but not cleaned up (#2305).** Finishing is one write; when deleting a finished `retain: false` run fails, it is completed in place, so a finished body is never recovered.
+- **Starting fails.** If the run's first wake cannot be written, the caller gets the throw and the run is cancelled, so no recovery runs a closure whose caller was told it failed.
 
-### What is durable and what is in memory
+### Statuses
 
-| Durable (SQLite)             | In memory (lost on eviction)               |
-| ---------------------------- | ------------------------------------------ |
-| run rows and their snapshots | the closure itself                         |
-| managed ledger rows          | the AbortController behind `cancelFiber()` |
-| the recovery wake job        | the set of fibers running in this isolate  |
-|                              | `waitForCompletion` waiters                |
+| Fiber status  | Task run                                |
+| ------------- | --------------------------------------- |
+| `pending`     | `pending` (as returned by `startFiber`) |
+| `running`     | `running`                               |
+| `completed`   | `completed`                             |
+| `error`       | `error`                                 |
+| `aborted`     | `aborted`                               |
+| `interrupted` | `pending` with wait reason `park`       |
 
-A body runs at most once. After an eviction it never runs again: the
-recovery hook gets the last snapshot and decides. The hook runs at least
-once per interrupted row: an unmanaged row whose hook throws stays and is
-retried until `fiberRecoveryMaxAgeMs`; a managed row is marked `error`. A hook that kills the isolate
-instead of returning is a different case: before running it, the scan
-commits what must survive a reset with `storage.sync()` (a reset before the
-first I/O rolls back uncommitted writes). A managed row's `interrupted` mark
-is committed, so the next scan does not run its hook again. A user's plain row
-gets an attempt in `recovery_crashes`, taken back when the hook returns or
-throws. After three attempts that never returned, the row is dropped
-without the hook (`fiber:recovery:skipped`, reason `recovery_crashed`).
-Only a chat host's legacy turn fibers are not counted: names
-`${CHAT_FIBER_NAME}:<id>`, where the host class sets `static CHAT_FIBER_NAME`
-(AIChatAgent, Think). Their chat recovery engine keeps its own durable
-interruption budget and ends the turn with a terminal outcome. Any other
-name, `__cf_internal*` included, is counted.
+`cancelFiber()` is `tasks.cancel()`: the run is `aborted` at once and the closure's signal aborts. `deleteFibers()` deletes settled managed runs, oldest settled first; an `interrupted` one is settled `aborted` first.
 
-### Recovery
+### Durable and in memory
 
-A scan reads `cf_agents_runs`, skips fibers running in this isolate, and
-for each other row calls the host's internal recovery first
-(`_handleInternalFiberRecovery`, bounded by `fiberRecoveryHookTimeoutMs`)
-and then `onFiberRecovered()`, both inside the host invocation context. It
-then marks managed ledger rows with no run row (accepted, never started)
-`interrupted` and recovers them the same way. One scan runs at a time; a
-caller that arrives during a scan joins it. So a user `onFiberRecovered()` that never
-returns holds every later recovery wake, as it already held startup.
-Only the internal hook has a timeout. The wake is a Lifecycle job, so a slow hook also
-delays the host's `onAlarm` and other jobs in the same alarm; the old
-housekeeping scan ran after `onAlarm` in the same alarm and waited on the hook
-the same way.
+| Durable (SQLite)                                                | In memory (lost on eviction)                   |
+| --------------------------------------------------------------- | ---------------------------------------------- |
+| the run row, its checkpoint (`snapshot`, `crashes`, `failures`) | the closure and its result (the run's `local`) |
+| the run's wake job                                              | the attempt's abort controller (Tasks)         |
 
-Agent runs a scan during startup, before the user's `onStart()`, so chat
-recovery sees its budgets before user code changes them.
+Memory: one `local` per fiber started in this isolate, dropped when its attempt ends (Tasks' `#locals`). Nothing else.
 
-### The wake
+### Facets
 
-One Lifecycle job, `fibers:recover`, wakes the object for the scan:
+A fiber in a facet is a Task run in the facet's storage; its wake reaches the root as every facet job does. A root from a release before this kept `cf_agents_facet_runs`; startup moves each facet in it onto the facet wake (Lifecycle's `armFacetWake`), due now, and drops the table. The facet's own start carries its rows forward, and a facet empties its old tables instead of dropping them: a facet's drop reset its tree on a deployment (RUNTIME-FACTS).
 
-- While any fiber runs in this isolate it is due every `heartbeatMs`
-  (Agent passes `keepAliveIntervalMs`). That alarm is also what keeps the
-  object alive: fibers take no `keepAlive()` ref.
-- With orphaned rows left it is due now. After a scan that recovered
-  nothing it backs off: `heartbeatMs * 2^n`, at most 5 minutes, reset by
-  any scan that made progress.
-- With nothing left it is cancelled.
+### Rows from older releases
 
-A facet has no alarm slot. Its Fibers capability keeps the `recover` job in
-the facet's own queue like a root does, and the Lifecycle wakes it through
-the root's one wake job for that facet path
-([alarm-coordination.md](./alarm-coordination.md), "Facets"). Fibers has no
-facet code of its own.
+`importLegacyFibers` runs at startup, once (it finds the old tables in one schema read; the root drops them, a facet empties them):
 
-Older releases kept facet wakes on the root: first an index table,
-`cf_agents_facet_runs`, then mirror jobs `fibers:recover:<owner key>`. On
-its first start after the upgrade, a root's Fibers moves both onto facet
-wakes and deletes them; the same start then makes every facet wake due at
-once (the Lifecycle's restart rule), so each such facet is driven right
-away, except one whose last drive never replied, which keeps its recheck
-delay and back-off.
-
-### Observability
-
-Events keep their names and payloads (`fiber:run:started`, `completed`,
-`failed`, `interrupted`; `fiber:recovery:detected`, `attempt`, `handled`,
-`skipped`, `failed`). They go through `lifecycle.events`, which Agent
-forwards to its observability sink. The per-statement storage spans Agent
-used to open around fiber writes are gone.
-
-## Key decisions
-
-### Why not Tasks
-
-A Task handler is named, declared on every wake, and replayed from a step
-journal. A fiber is an inline closure that cannot be found again after an
-eviction, so recovery is a hook with a checkpoint, and a managed fiber left
-`interrupted` can be settled from outside later (`resolveFiber()`). To run
-fibers on Tasks, Tasks would need a mutable checkpoint, settling a run from
-outside after it ended, and claims with no deadline. That makes Tasks worse
-and fibers no simpler. Both use the Lifecycle job queue.
-
-### The wake is the heartbeat
-
-The old engine held an Agent `keepAlive()` ref per fiber and relied on
-Agent's housekeeping scanning on every alarm. Now the capability owns one
-job whose due time is derived from its own rows and in-memory set. Agent's
-`_syncHostJobs()` no longer knows about fibers, and facets stop taking a
-root keepAlive ref per fiber.
-
-## Tradeoffs
-
-- Two tables stay for now. About sixty tests in agents, ai-chat and think
-  insert `cf_agents_runs` rows to fake an interrupted chat turn on a facet.
-  When the chat turn stops using the legacy fiber path, the two tables merge
-  into one with a `retain` flag.
-- An orphan in a live isolate (cleanup failed) is scanned right away rather
-  than after a heartbeat. That is the only way such a row appears outside
-  startup, and its body is done, so the scan only deletes it.
-
-## History
-
-- [rfc-fibers.md](./rfc-fibers.md): Tasks, which started under the name
-  "Fibers".
+- a `cf_agents_runs` row with no `completed_at` becomes an interrupted `__cf_fiber` run (`snapshot` → checkpoint, `recovery_crashes` → `crashes`); its next attempt is its recovery. One with `completed_at` settled and is dropped (#2305).
+- a `cf_agents_fibers` row becomes a `__cf_managed_fiber` run with its id, key, metadata, status, error and timestamps. `pending`/`running` ones come back interrupted (their run row, if any, merged into them); `interrupted` ones stay parked without running the hook again.

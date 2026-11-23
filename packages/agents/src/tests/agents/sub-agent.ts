@@ -1,3 +1,5 @@
+import { createLegacyFiberTables, OPEN_FIBER_RUNS_SQL } from "./legacy-fibers";
+import { importLegacyFibers } from "../../fiber-runs";
 import { Agent, callable, getCurrentAgent } from "../../index.ts";
 import type {
   Connection,
@@ -643,7 +645,8 @@ export class CounterSubAgent extends Agent {
   ): Promise<string> {
     this.sql`
       CREATE TRIGGER fail_run_fiber_cleanup
-      BEFORE DELETE ON cf_agents_runs
+      BEFORE DELETE ON cf_agents_task_runs
+      WHEN json_extract(OLD.input, '$.name') = 'cleanup-failure'
       BEGIN
         SELECT RAISE(FAIL, 'simulated fiber cleanup failure');
       END
@@ -726,10 +729,19 @@ export class CounterSubAgent extends Agent {
     name: string,
     snapshot?: unknown
   ): Promise<void> {
+    createLegacyFiberTables(this.ctx.storage.sql);
     this.sql`
       INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
       VALUES (${id}, ${name}, ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
     `;
+    // Carried into an interrupted fiber run, as a restarted facet does; its
+    // Task wake then reaches the root.
+    await importLegacyFibers(
+      this.tasks,
+      this.ctx.storage,
+      true,
+      async () => {}
+    );
   }
 
   /**
@@ -737,9 +749,12 @@ export class CounterSubAgent extends Agent {
    * when it finds fibers an earlier isolate left behind.
    */
   async armOwnFiberWake(): Promise<void> {
-    await (
-      this as unknown as { _fibers: { onStart(): Promise<void> } }
-    )._fibers.onStart();
+    await importLegacyFibers(
+      this.tasks,
+      this.ctx.storage,
+      true,
+      this.lifecycle
+    );
   }
 
   async insertInterruptedManagedFiber(
@@ -748,6 +763,7 @@ export class CounterSubAgent extends Agent {
     snapshot?: unknown
   ): Promise<void> {
     const now = Date.now();
+    createLegacyFiberTables(this.ctx.storage.sql);
     this.sql`
       INSERT INTO cf_agents_fibers
         (fiber_id, idempotency_key, name, status, snapshot, metadata_json,
@@ -785,11 +801,21 @@ export class CounterSubAgent extends Agent {
     }));
   }
 
+  legacyFiberTables(): Record<string, number> {
+    const tables: Record<string, number> = {};
+    for (const { name } of this.sql<{ name: string }>`
+      SELECT name FROM sqlite_master WHERE type = 'table'
+        AND name IN ('cf_agents_runs', 'cf_agents_fibers')
+    `) {
+      tables[name] = Number(
+        this.ctx.storage.sql.exec(`SELECT COUNT(*) AS n FROM ${name}`).one().n
+      );
+    }
+    return tables;
+  }
+
   getRunningFiberCount(): number {
-    const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_runs
-    `;
-    return rows[0]?.count ?? 0;
+    return Number(this.ctx.storage.sql.exec(OPEN_FIBER_RUNS_SQL).one().count);
   }
 
   getLocalJobIds(): string[] {
@@ -943,10 +969,19 @@ export class InnerSubAgent extends Agent {
     name: string,
     snapshot?: unknown
   ): Promise<void> {
+    createLegacyFiberTables(this.ctx.storage.sql);
     this.sql`
       INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
       VALUES (${id}, ${name}, ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
     `;
+    // Carried into an interrupted fiber run, as a restarted facet does; its
+    // Task wake then reaches the root.
+    await importLegacyFibers(
+      this.tasks,
+      this.ctx.storage,
+      true,
+      async () => {}
+    );
   }
 
   /**
@@ -954,9 +989,12 @@ export class InnerSubAgent extends Agent {
    * when it finds fibers an earlier isolate left behind.
    */
   async armOwnFiberWake(): Promise<void> {
-    await (
-      this as unknown as { _fibers: { onStart(): Promise<void> } }
-    )._fibers.onStart();
+    await importLegacyFibers(
+      this.tasks,
+      this.ctx.storage,
+      true,
+      this.lifecycle
+    );
   }
 
   getRecoveredFibers(): Array<{
@@ -1476,8 +1514,8 @@ export class TestSubAgentParent extends Agent {
   ): Promise<unknown> {
     if (
       this._fiberWakeRouteFailuresRemaining > 0 &&
-      envelope.capability === "cf:facet-wake" &&
-      (envelope.payload as { type?: string }).type === "arm"
+      envelope.capability === "tasks" &&
+      (envelope.payload as { type?: string }).type === "syncWake"
     ) {
       this._fiberWakeRouteFailuresRemaining -= 1;
       throw new Error("simulated fiber wake route failure");
@@ -2625,6 +2663,14 @@ export class TestSubAgentParent extends Agent {
     return child.runFiberWithFailingCleanup(value, failBody);
   }
 
+  /** Row counts of a sub-agent's old fiber tables that still exist. */
+  async subAgentLegacyFiberTables(
+    subAgentName: string
+  ): Promise<Record<string, number>> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.legacyFiberTables();
+  }
+
   async subAgentRunningFiberCount(subAgentName: string): Promise<number> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.getRunningFiberCount();
@@ -2687,7 +2733,9 @@ export class TestSubAgentParent extends Agent {
     return (
       this.sql<{ count: number }>`
         SELECT COUNT(*) AS count FROM cf_agents_jobs
-        WHERE capability LIKE 'cf:facet-wake:%' AND time <= ${Date.now()}
+        WHERE (capability LIKE 'cf:facet-wake%'
+          OR (capability = 'tasks' AND payload LIKE '%owner_path_key%'))
+          AND time <= ${Date.now()}
       `[0]?.count ?? 0
     );
   }
@@ -2696,9 +2744,18 @@ export class TestSubAgentParent extends Agent {
   fiberWakeOwners(): string[] {
     return this.sql<{ payload: string }>`
       SELECT payload FROM cf_agents_jobs
-      WHERE capability LIKE 'cf:facet-wake:%'
+      WHERE capability LIKE 'cf:facet-wake%'
+        OR (capability = 'tasks' AND payload LIKE '%owner_path_key%')
       ORDER BY id
-    `.map((row) => (JSON.parse(row.payload) as { key: string }).key);
+    `
+      .map((row) => {
+        const payload = JSON.parse(row.payload) as {
+          key?: string;
+          owner_path_key?: string;
+        };
+        return payload.key ?? payload.owner_path_key ?? "";
+      })
+      .filter((key, index, keys) => keys.indexOf(key) === index);
   }
 
   async insertSubAgentInterruptedFiberWithLegacyIndex(
@@ -2712,42 +2769,11 @@ export class TestSubAgentParent extends Agent {
     this.insertLegacyFacetRunIndexRow(await child.getSelfPath(), id);
   }
 
-  /** Leave interrupted fiber rows in a sub-agent without arming its wake. */
-  async insertSubAgentInterruptedFiberRowsOnly(
-    subAgentName: string,
-    id: string,
-    name: string
-  ): Promise<void> {
-    const child = await this.subAgent(CounterSubAgent, subAgentName);
-    await child.insertInterruptedFiber(id, name);
-  }
-
-  /** Leave a fiber wake mirror job as the previous release kept it. */
-  async insertLegacyFiberMirrorJob(subAgentName: string): Promise<void> {
-    const child = await this.subAgent(CounterSubAgent, subAgentName);
-    const selfPath = await child.getSelfPath();
-    const key = agentPathKey(selfPath) ?? "";
-    this.sql`
-      INSERT INTO cf_agents_jobs (id, capability, fn, time, payload)
-      VALUES (${`fibers:recover:${key}`}, 'fibers', 'recover', ${Date.now() + 60_000},
-        ${JSON.stringify({ owner_path: JSON.stringify(selfPath), owner_path_key: key })})
-    `;
-  }
-
-  legacyFiberMirrorJobCount(): number {
-    return (
-      this.sql<{ count: number }>`
-        SELECT COUNT(*) AS count FROM cf_agents_jobs
-        WHERE capability = 'fibers' AND id LIKE 'fibers:recover:%'
-      `[0]?.count ?? 0
-    );
-  }
-
-  /** Run the Fibers capability's startup migration again. */
+  /** Run the startup fiber recovery again, which carries old rows forward. */
   async restartFibers(): Promise<void> {
     await (
-      this as unknown as { _fibers: { onStart(): Promise<void> } }
-    )._fibers.onStart();
+      this as unknown as { _recoverFibers(): Promise<void> }
+    )._recoverFibers();
   }
 
   legacyFacetRunIndexExists(): boolean {

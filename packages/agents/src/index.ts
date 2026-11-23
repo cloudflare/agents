@@ -176,7 +176,23 @@ export {
   type AgentStaticOptions
 } from "./agent-options";
 import { Workflows } from "./workflow-tracking/workflows";
-import { Fibers, stashCurrentFiber, withFiberStash } from "./fibers/fibers";
+import {
+  FIBER_TASK,
+  MANAGED_FIBER_TASK,
+  cancelFiber,
+  createFiberTaskDefinition,
+  deleteFibers,
+  fiberByKey,
+  importLegacyFibers,
+  inspectFiber,
+  listFibers,
+  resolveFiber,
+  runFiber,
+  stashCurrentFiber,
+  startFiber,
+  withFiberStash,
+  type FiberHost
+} from "./fiber-runs";
 import type {
   DeleteFibersOptions,
   FiberContext,
@@ -188,7 +204,7 @@ import type {
   ListFibersOptions,
   StartFiberOptions,
   StartFiberResult
-} from "./fibers/types";
+} from "./fiber-types";
 import type { QueueItem } from "./queue/types";
 export type { QueueItem } from "./queue/types";
 import {
@@ -344,7 +360,7 @@ export type {
   ListFibersOptions,
   StartFiberOptions,
   StartFiberResult
-} from "./fibers/types";
+} from "./fiber-types";
 
 export type { TransportType } from "./mcp/types";
 export type { RetryOptions } from "./retries";
@@ -736,9 +752,6 @@ export class Agent<
   declare readonly taskDefinitions?: TaskHandlers;
 
   readonly mcp: MCPClientManager;
-
-  /** Durable fibers; `runFiber()`, `startFiber()` and friends delegate to it. */
-  private readonly _fibers: Fibers;
 
   /** Workflow instances this Agent started; `runWorkflow()` and friends delegate to it. */
   private readonly _workflows: Workflows;
@@ -1239,7 +1252,11 @@ export class Agent<
             }
     });
 
-    this._fibers = new Fibers({
+    const fiberHost: FiberHost = {
+      tasks: this.tasks,
+      sync: () => this.ctx.storage.sync(),
+      emit: (type, payload) =>
+        this._emit(type as ObservabilityEvent["type"], payload),
       handleInternalRecovery: (ctx) => this._handleInternalFiberRecovery(ctx),
       // A chat host (AIChatAgent, Think, released versions included) names
       // its legacy turn fibers `${CHAT_FIBER_NAME}:<id>` and recovers them
@@ -1254,9 +1271,19 @@ export class Agent<
       onRecovered: (ctx) => this.onFiberRecovered(ctx),
       heartbeatMs: this._resolvedOptions.keepAliveIntervalMs,
       recoveryHookTimeoutMs: this._resolvedOptions.fiberRecoveryHookTimeoutMs,
-      scanDeadlineMs: this._resolvedOptions.fiberRecoveryScanDeadlineMs,
       maxAgeMs: this._resolvedOptions.fiberRecoveryMaxAgeMs
-    });
+    };
+    const claimMs = this._resolvedOptions.keepAliveIntervalMs;
+    this.tasks.register(
+      FIBER_TASK,
+      createFiberTaskDefinition(fiberHost, false),
+      { claimMs }
+    );
+    this.tasks.register(
+      MANAGED_FIBER_TASK,
+      createFiberTaskDefinition(fiberHost, true),
+      { claimMs, keepCheckpoint: true }
+    );
 
     this.mcp = this._withAgentSpan(
       "agent_initialization",
@@ -1319,7 +1346,6 @@ export class Agent<
       .use(this._state)
       .use(this._webSockets)
       .use(this.tasks)
-      .use(this._fibers)
       .use(this._workflows)
       // Registered for capability identity/services; its hot paths are
       // wired directly (see the DynamicAgentsInternal class doc).
@@ -1583,7 +1609,7 @@ export class Agent<
               "startup",
               {},
               async () => {
-                await this._fibers.recover();
+                await this._recoverFibers();
                 // Interrupted Task runs (including chat turns) recover via
                 // the Lifecycle job queue: their mirror jobs are overdue and
                 // re-fire on the post-startup alarm derivation.
@@ -2407,7 +2433,7 @@ export class Agent<
     }
   }
 
-  // ── Fibers (the `Fibers` capability, ./fibers) ─────────────────────
+  // ── Fibers (one-step Task runs, ./fiber-runs) ─────────────────────
 
   /**
    * Run a function as a durable fiber and return its result. The fiber is
@@ -2416,7 +2442,7 @@ export class Agent<
    * `onFiberRecovered`. The function itself never runs again.
    */
   runFiber<T>(name: string, fn: (ctx: FiberContext) => Promise<T>): Promise<T> {
-    return this._fibers.run(name, fn);
+    return runFiber(this.tasks, name, fn);
   }
 
   /**
@@ -2431,7 +2457,7 @@ export class Agent<
     fn: (ctx: FiberContext) => Promise<T>,
     options: Pick<InternalFiberOptions, "initialSnapshot" | "wrapStash">
   ): Promise<T> {
-    return this._fibers.run(name, fn, options);
+    return runFiber(this.tasks, name, fn, options);
   }
 
   /**
@@ -2443,43 +2469,75 @@ export class Agent<
     fn: (ctx: FiberContext) => Promise<void>,
     options?: StartFiberOptions
   ): Promise<StartFiberResult> {
-    return this._fibers.start(name, fn, options);
+    return startFiber(this.tasks, name, fn, options);
   }
 
   async inspectFiber(fiberId: string): Promise<FiberInspection | null> {
-    return this._fibers.inspect(fiberId);
+    return inspectFiber(this.tasks, this.tasks.peek(fiberId));
   }
 
   async inspectFiberByKey(
     idempotencyKey: string
   ): Promise<FiberInspection | null> {
-    return this._fibers.inspectByKey(idempotencyKey);
+    return inspectFiber(this.tasks, fiberByKey(this.tasks, idempotencyKey));
   }
 
   async listFibers(options?: ListFibersOptions): Promise<FiberInspection[]> {
-    return this._fibers.list(options);
+    return listFibers(this.tasks, options);
   }
 
   async cancelFiber(fiberId: string, reason?: string): Promise<boolean> {
-    return this._fibers.cancel(fiberId, reason);
+    return cancelFiber(this.tasks, this.tasks.peek(fiberId), reason);
   }
 
   async cancelFiberByKey(
     idempotencyKey: string,
     reason?: string
   ): Promise<boolean> {
-    return this._fibers.cancelByKey(idempotencyKey, reason);
+    return cancelFiber(
+      this.tasks,
+      fiberByKey(this.tasks, idempotencyKey),
+      reason
+    );
   }
 
   async resolveFiber(
     fiberId: string,
     result: FiberRecoveryResult
   ): Promise<boolean> {
-    return this._fibers.resolve(fiberId, result);
+    return resolveFiber(this.tasks, fiberId, result);
   }
 
   async deleteFibers(options?: DeleteFibersOptions): Promise<number> {
-    return this._fibers.delete(options);
+    return deleteFibers(this.tasks, options);
+  }
+
+  /**
+   * Carry fiber rows from older releases forward, then recover the fibers a
+   * dead isolate left, before onStart runs.
+   */
+  private async _recoverFibers(): Promise<void> {
+    await importLegacyFibers(
+      this.tasks,
+      this.ctx.storage,
+      this._isFacet,
+      this.lifecycle
+    );
+    const scanMs = this._resolvedOptions.fiberRecoveryScanDeadlineMs;
+    const startedAt = Date.now();
+    const deadline = scanMs > 0 ? startedAt + scanMs : undefined;
+    // What the deadline leaves runs from its own wake, after startup.
+    const left =
+      (await this.tasks.runDue(FIBER_TASK, deadline)) ??
+      (await this.tasks.runDue(MANAGED_FIBER_TASK, deadline));
+    if (left !== undefined) {
+      this._emit("fiber:recovery:skipped", {
+        fiberId: left,
+        fiberName: this.tasks.inputOf<{ name: string }>(left)?.name,
+        reason: "scan_deadline_exceeded",
+        elapsedMs: Date.now() - startedAt
+      });
+    }
   }
 
   /**

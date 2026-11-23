@@ -2,7 +2,7 @@
  * E2E test: poison-row aging (fiberRecoveryMaxAgeMs → max_age_exceeded).
  *
  * An UNMANAGED runFiber whose `onFiberRecovered` always throws leaves an
- * orphaned `cf_agents_runs` row after a SIGKILL. On restart the alarm-driven
+ * orphaned fiber run after a SIGKILL. On restart the alarm-driven
  * scan retries the recovery hook every keepAlive tick; because the hook keeps
  * throwing, the row is RETAINED for retry — until it exceeds
  * `fiberRecoveryMaxAgeMs`, at which point it is DROPPED, a `max_age_exceeded`

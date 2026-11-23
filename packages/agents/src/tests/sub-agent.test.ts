@@ -1488,6 +1488,12 @@ describe("SubAgent", () => {
 
     expect(await agent.subAgentRunningFiberCount("recover-child")).toBe(0);
     expect(await agent.fiberWakeOwners()).toEqual([]);
+    // A facet empties the old tables instead of dropping them: a facet's
+    // drop reset its tree's storage on a deployment (RUNTIME-FACTS).
+    expect(await agent.subAgentLegacyFiberTables("recover-child")).toEqual({
+      cf_agents_runs: 0,
+      cf_agents_fibers: 0
+    });
     expect(await agent.subAgentRecoveredFibers("recover-child")).toEqual([
       expect.objectContaining({
         id: "fiber-recover-1",
@@ -1611,8 +1617,9 @@ describe("SubAgent", () => {
       []
     );
 
-    // The continuation is a schedule due now, on the root's real alarm.
-    for (let attempt = 0; attempt < 100; attempt++) {
+    // The continuation is a schedule due now, on the root's real alarm,
+    // which reaches the child through its facet wake: allow it 5 s.
+    for (let attempt = 0; attempt < 500; attempt++) {
       if ((await agent.subAgentScheduleLog("chat-recovery-child")).length > 0) {
         break;
       }
@@ -1651,33 +1658,6 @@ describe("SubAgent", () => {
         name: "nested-work",
         snapshot: { value: "nested-checkpoint" }
       })
-    ]);
-  });
-
-  it("moves the previous release's root fiber mirror jobs onto facet wakes", async () => {
-    const name = uniqueName();
-    const agent = await getAgentByName(env.TestSubAgentParent, name);
-
-    // The rows of an earlier release: the sub-agent's fiber, and only the
-    // root's mirror job for its wake.
-    await agent.insertSubAgentInterruptedFiberRowsOnly(
-      "mirror-job-child",
-      "mirror-job-fiber-1",
-      "work"
-    );
-    await agent.insertLegacyFiberMirrorJob("mirror-job-child");
-    expect(await agent.fiberWakeOwners()).toEqual([]);
-    await agent.restartFibers();
-
-    // The mirror became the facet wake for that path.
-    expect(await agent.legacyFiberMirrorJobCount()).toBe(0);
-    expect(await agent.fiberWakeOwners()).toHaveLength(1);
-
-    // After the upgrade the sub-agent starts fresh and arms its own wake.
-    await agent.subAgentArmOwnFiberWake("mirror-job-child");
-    await drainDueFiberWakes(agent);
-    expect(await agent.subAgentRecoveredFibers("mirror-job-child")).toEqual([
-      expect.objectContaining({ id: "mirror-job-fiber-1" })
     ]);
   });
 
