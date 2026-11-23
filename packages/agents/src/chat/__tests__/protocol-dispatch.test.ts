@@ -78,6 +78,10 @@ function recordingHost(endedFrame: string | null = null) {
     endedFrame: (id: string) => {
       calls.push(["resume.endedFrame", id]);
       return endedFrame;
+    },
+    sendEnded: (connection: Connection, _id: string, frame: string) => {
+      connection.send(frame);
+      return true;
     }
   };
   const stored = new Map<string, unknown>();

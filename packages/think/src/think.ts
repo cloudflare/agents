@@ -11488,6 +11488,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       holdsTerminalFrames: (requestId) =>
         this._turns.liveReply?.requestId === requestId &&
         this._turns.liveReply.ended,
+      ended: this._frames.ended,
       recentTerminal: (requestIds) =>
         recentChatTerminal(this.ctx.storage.kv, requestIds)
     }));

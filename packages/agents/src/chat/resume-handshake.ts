@@ -29,6 +29,7 @@ import type { ContinuationState } from "./continuation-state";
 import type { PreStreamTurns } from "./pre-stream-turns";
 import type { ResumableStream } from "./resumable-stream";
 import type { ChatRecentTerminal } from "./recent-terminals";
+import { endedRequestOf, type EndedRequests } from "./chat-frames";
 
 /** A pending terminal outcome captured before connect (#1645). */
 export interface PendingChatTerminal {
@@ -87,6 +88,11 @@ export interface ResumeHandshakeHost {
    * away when its request ended learns nothing on resume.
    */
   recentTerminal?(requestIds: readonly string[]): ChatRecentTerminal | null;
+  /**
+   * Which tabs were sent which request's end (the host's
+   * `ChatFrames.ended`), so the handshake tells a tab each end once.
+   */
+  readonly ended?: EndedRequests;
 }
 
 /**
@@ -98,6 +104,39 @@ export interface ResumeHandshakeHost {
  */
 export class ResumeHandshake {
   constructor(private readonly host: ResumeHandshakeHost) {}
+
+  /**
+   * `connection`, sending each request's end at most once to it: an end it
+   * was sent already (live, by a replay, or by a stop) is dropped.
+   */
+  readonly #wrapped = new WeakSet<Connection>();
+
+  #once(connection: Connection): Connection {
+    const ended = this.host.ended;
+    if (!ended || this.#wrapped.has(connection)) return connection;
+    const once = new Proxy(connection, {
+      get(target, key) {
+        if (key !== "send") {
+          const value = Reflect.get(target, key, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return (message: string) => {
+          if (message.includes('"done":true')) {
+            const requestId = endedRequestOf(
+              JSON.parse(message) as Record<string, unknown>
+            );
+            if (requestId !== undefined) {
+              if (ended.has(target.id, requestId)) return;
+              ended.note(target.id, requestId);
+            }
+          }
+          target.send(message);
+        };
+      }
+    });
+    this.#wrapped.add(once);
+    return once;
+  }
 
   /**
    * The connections that ACKed the active stream, and its request id. A
@@ -165,6 +204,7 @@ export class ResumeHandshake {
     /** The request ids the tab still waits on, newest last. */
     requestIds: readonly string[] = []
   ): Promise<void> {
+    connection = this.#once(connection);
     const { resumableStream, continuation, preStream } = this.host;
     if (resumableStream.hasActiveStream()) {
       // A request the tab waits on that ended while it was away, and a
@@ -237,9 +277,12 @@ export class ResumeHandshake {
    *
    * @returns Whether a terminal frame was sent.
    */
-  sendEnded(connection: Connection, requestId: string): boolean {
-    const frame = this.endedFrame(requestId);
-    return frame !== null && sendIfOpen(connection, frame);
+  sendEnded(
+    connection: Connection,
+    requestId: string,
+    frame: string | null = this.endedFrame(requestId)
+  ): boolean {
+    return frame !== null && sendIfOpen(this.#once(connection), frame);
   }
 
   /**
@@ -319,6 +362,7 @@ export class ResumeHandshake {
     connection: Connection,
     requestId: string
   ): Promise<void> {
+    connection = this.#once(connection);
     const { resumableStream, pendingResumeConnections, responseMessageType } =
       this.host;
     // An ACK for a stream other than the active one (a notice from before
@@ -330,6 +374,17 @@ export class ResumeHandshake {
       resumableStream.activeRequestId === requestId
     ) {
       pendingResumeConnections.delete(connection.id);
+    }
+    // The tab was told this request ended (live, or by a stop): its replay
+    // would only repeat what the transcript holds, and its end again.
+    if (
+      this.host.ended?.has(connection.id, requestId) &&
+      !(
+        resumableStream.hasActiveStream() &&
+        resumableStream.activeRequestId === requestId
+      )
+    ) {
+      return;
     }
     if (
       resumableStream.hasActiveStream() &&

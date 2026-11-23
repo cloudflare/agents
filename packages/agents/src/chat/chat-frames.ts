@@ -64,8 +64,89 @@ export interface ChatFramesOptions {
   listsReachResumingTabs?: boolean;
 }
 
+/**
+ * Which tabs were sent each recent request's end, so a tab is sent it once
+ * (`OneTerminalPerRequest`): a stop, a resume and a recovery's broadcast
+ * can each want to tell it. Bounded to the newest requests; an older one
+ * that comes up again is sent its end again. In memory: a tab that
+ * reconnects after a hibernation is a new connection anyway.
+ *
+ * @internal
+ */
+export class EndedRequests {
+  static readonly MAX = 64;
+  /**
+   * By request: the tabs it was sent to, and, once it was broadcast, the
+   * tabs that broadcast left out (a tab waiting on its resume ack).
+   */
+  readonly #ended = new Map<
+    string,
+    { to: Set<string>; broadcastExcept?: Set<string> }
+  >();
+
+  /** Whether `connectionId` was sent the end of `requestId`. */
+  has(connectionId: string, requestId: string): boolean {
+    const entry = this.#ended.get(requestId);
+    if (!entry) return false;
+    return (
+      entry.to.has(connectionId) ||
+      (entry.broadcastExcept !== undefined &&
+        !entry.broadcastExcept.has(connectionId))
+    );
+  }
+
+  /**
+   * The tabs a broadcast of `requestId`'s end must leave out, besides
+   * `without`, or `null` when it was broadcast already: a tab that broadcast
+   * left out is told by its resume, not by a second broadcast.
+   */
+  broadcastWithout(requestId: string, without: string[]): string[] | null {
+    const entry = this.#entry(requestId);
+    if (entry.broadcastExcept !== undefined) return null;
+    entry.broadcastExcept = new Set(without);
+    return [...without, ...entry.to];
+  }
+
+  /** `connectionId` was sent the end of `requestId`. */
+  note(connectionId: string, requestId: string): void {
+    this.#entry(requestId).to.add(connectionId);
+  }
+
+  #entry(requestId: string) {
+    let entry = this.#ended.get(requestId);
+    if (!entry) {
+      entry = { to: new Set() };
+      this.#ended.set(requestId, entry);
+      if (this.#ended.size > EndedRequests.MAX) {
+        const oldest = this.#ended.keys().next().value;
+        if (oldest !== undefined) this.#ended.delete(oldest);
+      }
+    }
+    return entry;
+  }
+}
+
+/** The request a frame ends, if it is a terminal: a `done` that is not "recovering". */
+export function endedRequestOf(frame: ChatFrame): string | undefined {
+  const fields = frame as {
+    type?: unknown;
+    id?: unknown;
+    done?: unknown;
+    outcome?: unknown;
+  };
+  return fields.type === CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE &&
+    typeof fields.id === "string" &&
+    fields.done === true &&
+    fields.outcome !== "recovering"
+    ? fields.id
+    : undefined;
+}
+
 /** @internal */
 export class ChatFrames {
+  /** Which tabs were sent which request's end. */
+  readonly ended = new EndedRequests();
+
   /**
    * Origin ids of the socket requests being handled, by request id. After
    * a request is handled (or after a restart) its stream holds them.
@@ -86,10 +167,15 @@ export class ChatFrames {
   /** Send `frame` to every tab except `exclude` and resuming tabs. */
   broadcast(frame: ChatFrame, exclude: readonly string[] = []): void {
     const ready = this.#prepare(frame);
-    this.options.broadcast(JSON.stringify(ready), [
-      ...exclude,
-      ...this.options.resuming
-    ]);
+    let without = [...exclude, ...this.options.resuming];
+    const ends = endedRequestOf(ready);
+    if (ends !== undefined) {
+      // A tab is told a request's end once.
+      const skip = this.ended.broadcastWithout(ends, without);
+      if (skip === null) return;
+      without = skip;
+    }
+    this.options.broadcast(JSON.stringify(ready), without);
     this.#record(ready);
   }
 
@@ -124,6 +210,11 @@ export class ChatFrames {
   /** Send `frame` to one tab. A closed socket is ignored. */
   send(connection: ChatFrameConnection, frame: ChatFrame): void {
     const ready = this.#prepare(frame);
+    const ends = endedRequestOf(ready);
+    if (ends !== undefined) {
+      if (this.ended.has(connection.id, ends)) return;
+      this.ended.note(connection.id, ends);
+    }
     try {
       connection.send(JSON.stringify(ready));
     } catch {

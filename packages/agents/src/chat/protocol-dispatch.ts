@@ -23,7 +23,6 @@ import type {
 import type { ChatTurns } from "./chat-turns";
 import type { ClientToolSchema } from "./client-tools";
 import type { ChatFrames } from "./chat-frames";
-import { sendIfOpen } from "./connection";
 import { CHAT_MESSAGE_TYPES } from "./protocol";
 import { parseProtocolMessage, type ChatProtocolEvent } from "./parse-protocol";
 import type { ChatRequestContext } from "./request-context";
@@ -212,7 +211,9 @@ export async function dispatchChatProtocol<TConnection extends Connection>(
       // Aborts the request's turn, queued or running, a recovery attempt
       // running for it, and the continuations waiting on it.
       await host.turns.cancel(event.id);
-      if (ended !== null) sendIfOpen(connection, ended);
+      if (ended !== null) {
+        host.resumeHandshake().sendEnded(connection, event.id, ended);
+      }
       host.emit("message:cancel", { requestId: event.id });
       return true;
     }

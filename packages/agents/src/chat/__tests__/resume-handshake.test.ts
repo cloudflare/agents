@@ -10,6 +10,7 @@ import {
   type PendingChatTerminal,
   type ResumeHandshakeHost
 } from "../resume-handshake";
+import { EndedRequests } from "../chat-frames";
 import { ContinuationState } from "../continuation-state";
 import type { ResumableStream } from "../resumable-stream";
 import { PreStreamTurns } from "../pre-stream-turns";
@@ -790,6 +791,37 @@ describe("ResumeHandshake (driver → golden frames)", () => {
         done: true,
         outcome: "aborted"
       });
+    });
+
+    it("tells a tab a request's end once across a resume, a replay and a stop", async () => {
+      const kv = kvStore();
+      recordRecentChatTerminal(kv, {
+        id: "req-cut",
+        done: true,
+        body: "",
+        outcome: "aborted"
+      });
+      const frames: SentFrame[] = [];
+      const { resumableStream } = makeStream({
+        active: true,
+        activeRequestId: "req-cont",
+        activeStreamId: "s-cont"
+      });
+      const ended = new EndedRequests();
+      const handshake = new ResumeHandshake({
+        ...makeHost({ resumableStream }),
+        recentTerminal: (ids) => recentChatTerminal(kv, ids),
+        ended
+      });
+      const conn = makeConnection("c1", frames);
+
+      await handshake.handleResumeRequest(conn, "probe-1", ["req-cut"]);
+      await handshake.handleResumeAck(conn, "req-cut");
+      handshake.sendEnded(conn, "req-cut");
+      expect(
+        frames.filter((f) => f.id === "req-cut" && f.done === true)
+      ).toHaveLength(1);
+      expect(ended.has("c1", "req-cut")).toBe(true);
     });
 
     it("tells a tab directly how a request it stops ended", async () => {

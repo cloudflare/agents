@@ -61,6 +61,40 @@ describe("ChatFrames", () => {
     expect(sent[0].without).toEqual(["self", "waiting"]);
   });
 
+  it("tells each tab a request's end once", () => {
+    const { frames, sent, resuming } = setup();
+    const direct: string[] = [];
+    const tab = { id: "t1", send: (m: string) => void direct.push(m) };
+    // One tab was sent the end directly (a stop); another waits on its
+    // resume ack.
+    frames.send(tab, { type: RESPONSE, id: "r1", done: true });
+    frames.send(tab, { type: RESPONSE, id: "r1", done: true });
+    expect(direct).toHaveLength(1);
+    resuming.add("waiting");
+    frames.broadcast({ type: RESPONSE, id: "r1", done: true });
+    // The broadcast leaves out the tab told already, and the waiting one.
+    expect(sent[0].without).toEqual(["waiting", "t1"]);
+    expect(frames.ended.has("other", "r1")).toBe(true);
+    expect(frames.ended.has("waiting", "r1")).toBe(false);
+    // A second broadcast of the same end goes to no one.
+    frames.broadcast({ type: RESPONSE, id: "r1", done: true });
+    expect(sent).toHaveLength(1);
+    // "recovering" is not an end.
+    frames.broadcast({
+      type: RESPONSE,
+      id: "r2",
+      done: true,
+      outcome: "recovering"
+    });
+    frames.broadcast({
+      type: RESPONSE,
+      id: "r2",
+      done: true,
+      outcome: "aborted"
+    });
+    expect(sent).toHaveLength(3);
+  });
+
   it("adds the queued messages to a message list", () => {
     const { frames, sent } = setup({
       clientView: <T extends { id: string }>(messages: ReadonlyArray<T>) => ({
