@@ -81,6 +81,120 @@ import type { ContextConfig } from "agents/context";
 import { stableHash, type Approvals } from "agents/internal";
 import { z } from "zod";
 import { WorkspaceFiles } from "../../workspace-files";
+import type { Inbox } from "agents/internal";
+
+// ── Submission fixtures ─────────────────────────────────────────────
+
+/** Think's submission inbox, which the fixtures below read and seed. */
+function submissionInbox(agent: Think): Inbox {
+  return (agent as unknown as { _submissions: Inbox })._submissions;
+}
+
+/** The progress fields a submission's turn records. */
+type SubmissionProgressForTest = {
+  requestId?: string;
+  streamId?: string;
+  messagesAppliedAt?: number;
+  resultStatus?: string;
+  output?: unknown;
+  messageId?: string;
+};
+
+/**
+ * Write a submission the way a test needs it, as an earlier isolate would
+ * have left it, without waking the inbox: it stays as written until the
+ * test drains or recovers submissions.
+ */
+async function seedSubmissionForTest(
+  agent: Think,
+  storage: DurableObjectStorage,
+  options: {
+    submissionId: string;
+    status: ThinkSubmissionStatus;
+    messages?: unknown[] | null;
+    metadata?: Record<string, unknown>;
+    progress?: SubmissionProgressForTest;
+    error?: string | null;
+    createdAt?: number;
+    startedAt?: number | null;
+    settledAt?: number | null;
+  }
+): Promise<void> {
+  const inbox = submissionInbox(agent);
+  const now = options.createdAt ?? Date.now();
+  await inbox.import({
+    id: options.submissionId,
+    kind: "submission",
+    status: options.status,
+    attempt: options.status === "running" ? 1 : 0,
+    ...(options.messages !== null && {
+      payload: { messages: options.messages ?? [] }
+    }),
+    ...(options.metadata !== undefined && { metadata: options.metadata }),
+    progress: options.progress ?? {},
+    ...(options.error != null && { error: options.error }),
+    createdAt: now,
+    ...(options.startedAt != null && { startedAt: options.startedAt }),
+    ...(options.settledAt != null && { settledAt: options.settledAt })
+  });
+  storage.sql.exec(
+    "DELETE FROM cf_agents_jobs WHERE capability = 'inbox' AND fn = 'drain'"
+  );
+}
+
+/** Merge `patch` into a seeded submission's progress. */
+function patchSubmissionProgressForTest(
+  agent: Think,
+  submissionId: string,
+  patch: SubmissionProgressForTest
+): void {
+  const inbox = submissionInbox(agent);
+  const request = inbox.get(submissionId);
+  if (!request) throw new Error(`No submission ${submissionId}`);
+  inbox.checkpoint(submissionId, {
+    ...(request.progress as SubmissionProgressForTest | undefined),
+    ...patch
+  });
+}
+
+/** The running submission whose turn has this request id. */
+function runningSubmissionForRequest(agent: Think, requestId: string) {
+  return submissionInbox(agent)
+    .list({ kind: "submission", status: "running", limit: 500 })
+    .find(
+      (request) =>
+        ((request.progress as SubmissionProgressForTest | undefined)
+          ?.requestId ?? request.id) === requestId
+    );
+}
+
+/** Wake the submission lane and wait until nothing in it is left to run. */
+async function drainSubmissionInboxForTest(
+  agent: Think,
+  timeoutMs = 10_000
+): Promise<void> {
+  const inbox = submissionInbox(agent);
+  await inbox.onStart();
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const open = inbox
+      .list({ kind: "submission", status: ["pending", "running"], limit: 500 })
+      .filter((request) => !request.detached);
+    const reported = inbox
+      .list({ kind: "submission", limit: 500 })
+      .every(
+        (request) =>
+          request.status === "running" ||
+          inbox.isSettled(request.id) ||
+          request.status === "pending"
+      );
+    if (open.length === 0 && reported) return;
+    if (Date.now() > deadline) {
+      throw new Error("submissions did not drain in time");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
 
 /**
  * Send one chat wire message through the real protocol dispatch, as a socket
@@ -3140,11 +3254,13 @@ export class ThinkTestAgent extends Think {
     stream.complete = (streamId, outcome) => {
       complete(streamId, outcome);
       if (via === "submit" && stampAtClose === undefined) {
-        stampAtClose =
-          this.sql<{ result_status: string | null }>`
-            SELECT result_status FROM cf_think_submissions
-            WHERE status = 'running'
-          `[0]?.result_status ?? null;
+        stampAtClose = ((
+          submissionInbox(this).list({
+            kind: "submission",
+            status: "running",
+            limit: 1
+          })[0]?.progress as SubmissionProgressForTest | undefined
+        )?.resultStatus ?? null) as string | null;
       }
     };
     try {
@@ -8751,6 +8867,15 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   override onStart(): void {
     this._coldRpcOnStartCount++;
+    this._legacySubmissionAtStart =
+      submissionInbox(this).get("legacy-at-start")?.status ?? null;
+  }
+
+  /** What the app's onStart saw of the submission `legacy-at-start`. */
+  private _legacySubmissionAtStart: string | null = null;
+
+  async getLegacySubmissionAtStartForTest(): Promise<string | null> {
+    return this._legacySubmissionAtStart;
   }
 
   /**
@@ -8871,10 +8996,12 @@ export class ThinkProgrammaticTestAgent extends Think {
     this._responseLog.push(result);
     // Capture the real cutover, BEFORE the submission finalizer writes its
     // ledger outcome. Tests restore exactly this durable crash-window row.
-    const row = this.sql<Record<string, string | number | null>>`
-      SELECT * FROM cf_think_submissions
-      WHERE request_id = ${result.requestId} AND status = 'running'
-    `[0];
+    const running = runningSubmissionForRequest(this, result.requestId);
+    const row = running
+      ? this.sql<Record<string, string | number | null>>`
+          SELECT * FROM cf_agents_inbox WHERE id = ${running.id}
+        `[0]
+      : undefined;
     if (row) this._submissionSettlementRows.set(result.requestId, row);
   }
 
@@ -8899,7 +9026,7 @@ export class ThinkProgrammaticTestAgent extends Think {
     const columns = Object.keys(row);
     // Column names and values come only from SELECT * on our own SQLite table.
     this.ctx.storage.sql.exec(
-      `INSERT OR REPLACE INTO cf_think_submissions (${columns.join(", ")})
+      `INSERT OR REPLACE INTO cf_agents_inbox (${columns.join(", ")})
        VALUES (${columns.map(() => "?").join(", ")})`,
       ...Object.values(row)
     );
@@ -9260,6 +9387,17 @@ export class ThinkProgrammaticTestAgent extends Think {
     return this._serverErrorLog;
   }
 
+  /** Emulate a reset that cut a submission's terminal report short. */
+  async repeatSubmissionReportForTest(submissionId: string): Promise<void> {
+    this.ctx.storage.sql.exec(
+      "UPDATE cf_agents_inbox SET notified = NULL WHERE id = ?",
+      submissionId
+    );
+    const inbox = submissionInbox(this);
+    await inbox.onStart();
+    await inbox.wait(submissionId);
+  }
+
   async getWorkflowEventsForTest(): Promise<
     Array<{
       workflowName: string;
@@ -9470,29 +9608,30 @@ export class ThinkProgrammaticTestAgent extends Think {
   }> {
     const submissionId = `alarm-owned-${crypto.randomUUID()}`;
     const internal = this as unknown as {
-      _cfRunSubmission(payload: { submissionId: string }): Promise<void>;
-      _executeSubmission(row: unknown): Promise<void>;
-      _queueSubmissionRun(submissionId: string): Promise<void>;
+      _runSubmission(payload: unknown, run: unknown): Promise<unknown>;
     };
-    const originalRun = internal._cfRunSubmission;
-    const originalExecute = internal._executeSubmission;
+    const originalRun = internal._runSubmission;
     let alarmDrainCalls = 0;
     let inlineDrainCalls = 0;
+    let accepting = true;
 
-    // Probe the two entrypoints directly. The queue callback is the
-    // alarm-owned path; _executeSubmission is the private inline worker,
-    // which submitMessages must never reach on its own.
-    internal._cfRunSubmission = async () => {
-      alarmDrainCalls += 1;
-    };
-    internal._executeSubmission = async () => {
-      inlineDrainCalls += 1;
+    // The inbox calls the run from its alarm. A call made before
+    // submitMessages returned would be the accepting invocation's own.
+    internal._runSubmission = function (
+      this: unknown,
+      payload: unknown,
+      run: unknown
+    ) {
+      if (accepting) inlineDrainCalls += 1;
+      else alarmDrainCalls += 1;
+      return originalRun.call(this, payload, run);
     };
 
     try {
       const submission = await this.testSubmitMessages("alarm owned", {
         submissionId
       });
+      accepting = false;
       // The run is delivered by a platform-scheduled alarm whose firing
       // latency is not bounded by our timer ticks — give it a generous (~5s)
       // deadline; the happy path still exits on the first tick after it fires.
@@ -9501,11 +9640,7 @@ export class ThinkProgrammaticTestAgent extends Think {
       }
       return { alarmDrainCalls, inlineDrainCalls, submission };
     } finally {
-      internal._cfRunSubmission = originalRun;
-      internal._executeSubmission = originalExecute;
-      // The probe's no-op callback consumed the queue item while leaving the
-      // submission pending. Re-queue the real run for the eventual assertion.
-      await internal._queueSubmissionRun(submissionId);
+      internal._runSubmission = originalRun;
     }
   }
 
@@ -9690,9 +9825,9 @@ export class ThinkProgrammaticTestAgent extends Think {
     status: ThinkSubmissionStatus
   ): Promise<void> {
     this.sql`
-      UPDATE cf_think_submissions
-      SET status = ${status}, completed_at = ${Date.now()}
-      WHERE submission_id = ${submissionId}
+      UPDATE cf_agents_inbox
+      SET status = ${status}, settled_at = ${Date.now()}
+      WHERE id = ${submissionId}
     `;
   }
 
@@ -9705,14 +9840,11 @@ export class ThinkProgrammaticTestAgent extends Think {
   }
 
   /**
-   * Queue a run for every pending submission (rows inserted directly by a
-   * test have none) and wait until the alarm loop has run them all.
+   * Wake the submission lane (rows a test seeds do not wake it) and wait
+   * until the inbox has run them all.
    */
   async drainSubmissionsForTest(): Promise<void> {
-    await (
-      this as unknown as { _queuePendingSubmissionRuns: () => Promise<void> }
-    )._queuePendingSubmissionRuns();
-    await this._waitForQueueDrainForTest("_cfRunSubmission");
+    await drainSubmissionInboxForTest(this);
   }
 
   private async _waitForQueueDrainForTest(
@@ -9731,24 +9863,96 @@ export class ThinkProgrammaticTestAgent extends Think {
     throw new Error(`queued ${callback} items did not drain in time`);
   }
 
+  /** Write rows into the table submissions lived in before the inbox. */
+  async seedLegacySubmissionTableForTest(
+    rows: Array<{
+      submissionId: string;
+      status: ThinkSubmissionStatus;
+      idempotencyKey?: string;
+      text?: string;
+      messagesJson?: string;
+      createdAt: number;
+      startedAt?: number | null;
+      completedAt?: number | null;
+      errorMessage?: string | null;
+      messageId?: string | null;
+      metadataJson?: string;
+    }>
+  ): Promise<void> {
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS cf_think_submissions (
+        submission_id TEXT PRIMARY KEY,
+        idempotency_key TEXT UNIQUE,
+        request_id TEXT,
+        stream_id TEXT,
+        status TEXT NOT NULL,
+        messages_json TEXT NOT NULL,
+        metadata_json TEXT,
+        error_message TEXT,
+        created_at INTEGER NOT NULL,
+        messages_applied_at INTEGER,
+        started_at INTEGER,
+        completed_at INTEGER,
+        result_status TEXT,
+        output_json TEXT,
+        message_id TEXT
+      )`);
+    for (const row of rows) {
+      this.ctx.storage.sql.exec(
+        `INSERT INTO cf_think_submissions (
+           submission_id, idempotency_key, request_id, status, messages_json,
+           metadata_json, error_message, created_at, started_at,
+           completed_at, message_id
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        row.submissionId,
+        row.idempotencyKey ?? null,
+        row.submissionId,
+        row.status,
+        row.messagesJson ??
+          JSON.stringify([
+            {
+              id: `${row.submissionId}-message`,
+              role: "user",
+              parts: [{ type: "text", text: row.text ?? row.submissionId }]
+            }
+          ]),
+        row.metadataJson ?? JSON.stringify({ from: "legacy" }),
+        row.errorMessage ?? null,
+        row.createdAt,
+        row.startedAt ?? null,
+        row.completedAt ?? null,
+        row.messageId ?? null
+      );
+    }
+  }
+
+  async hasLegacySubmissionTableForTest(): Promise<boolean> {
+    return (
+      this.ctx.storage.sql
+        .exec(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='cf_think_submissions'"
+        )
+        .toArray().length > 0
+    );
+  }
+
   async recoverSubmissionsForTest(): Promise<void> {
     await (
       this as unknown as { _recoverSubmissionsOnStart: () => Promise<void> }
     )._recoverSubmissionsOnStart();
   }
 
-  /** Emulate an upgrade from the table definition without cutover columns. */
+  /** Emulate a row written before submissions stamped cutover facts. */
   async useLegacySubmissionSchemaForTest(): Promise<void> {
-    this.ctx.storage.sql.exec(
-      "ALTER TABLE cf_think_submissions DROP COLUMN result_status"
-    );
-    this.ctx.storage.sql.exec(
-      "ALTER TABLE cf_think_submissions DROP COLUMN output_json"
-    );
-    // SAFETY: startup's once-per-isolate DDL guard is reset to model a new isolate.
-    (
-      this as unknown as { _submissionTableEnsured: boolean }
-    )._submissionTableEnsured = false;
+    for (const request of submissionInbox(this).list({
+      kind: "submission",
+      limit: 500
+    })) {
+      patchSubmissionProgressForTest(this, request.id, {
+        resultStatus: undefined,
+        output: undefined
+      });
+    }
   }
 
   /** Seed legacy terminal evidence or an overflow attempt awaiting its retry. */
@@ -9761,8 +9965,12 @@ export class ThinkProgrammaticTestAgent extends Think {
     if (status === "error") streams.error(streamId, requestId);
     else streams.complete(streamId);
     if (status === "retry") {
-      this
-        .sql`UPDATE cf_think_submissions SET result_status = 'retry' WHERE request_id = ${requestId}`;
+      const running = runningSubmissionForRequest(this, requestId);
+      if (running) {
+        patchSubmissionProgressForTest(this, running.id, {
+          resultStatus: "retry"
+        });
+      }
     }
   }
 
@@ -9771,8 +9979,7 @@ export class ThinkProgrammaticTestAgent extends Think {
     submissionId: string,
     requestId: string
   ): Promise<void> {
-    this
-      .sql`UPDATE cf_think_submissions SET request_id = ${requestId} WHERE submission_id = ${submissionId}`;
+    patchSubmissionProgressForTest(this, submissionId, { requestId });
   }
 
   async resetTurnStateForTest(): Promise<void> {
@@ -10037,43 +10244,31 @@ export class ThinkProgrammaticTestAgent extends Think {
     createdAt?: number;
     messageIds?: string[];
   }): Promise<void> {
-    (
-      this as unknown as { _ensureSubmissionTable: () => void }
-    )._ensureSubmissionTable();
     const now = options.createdAt ?? Date.now();
-    const requestId = options.requestId ?? options.submissionId;
     const status = options.status ?? "pending";
-    const messagesAppliedAt =
-      options.messagesAppliedAt === undefined
-        ? null
-        : options.messagesAppliedAt;
-    const startedAt = status === "running" ? now : null;
-    const completedAt =
-      options.completedAt === undefined ? null : options.completedAt;
-    const metadataJson =
-      options.metadata === undefined ? null : JSON.stringify(options.metadata);
-    const errorMessage =
-      options.errorMessage === undefined ? null : options.errorMessage;
     const messageIds = options.messageIds ?? [crypto.randomUUID()];
-    const messagesJson = JSON.stringify(
-      messageIds.map((id) => ({
+    await seedSubmissionForTest(this, this.ctx.storage, {
+      submissionId: options.submissionId,
+      status,
+      messages: messageIds.map((id) => ({
         id,
         role: "user",
         parts: [{ type: "text", text: `Inserted ${options.submissionId}` }]
-      }))
-    );
-    this.sql`
-      INSERT INTO cf_think_submissions (
-        submission_id, idempotency_key, request_id, stream_id, status,
-        messages_json, metadata_json, error_message, created_at,
-        messages_applied_at, started_at, completed_at
-      )
-      VALUES (
-        ${options.submissionId}, NULL, ${requestId}, NULL, ${status},
-        ${messagesJson}, ${metadataJson}, ${errorMessage}, ${now}, ${messagesAppliedAt},
-        ${startedAt}, ${completedAt}
-      )
-    `;
+      })),
+      metadata: options.metadata,
+      progress: {
+        ...(options.requestId !== undefined && {
+          requestId: options.requestId
+        }),
+        ...(options.messagesAppliedAt != null && {
+          messagesAppliedAt: options.messagesAppliedAt
+        })
+      },
+      error: options.errorMessage,
+      createdAt: now,
+      startedAt: status === "running" ? now : null,
+      settledAt: options.completedAt
+    });
   }
 
   /** Wait until the alarm loop has delivered every queued workflow notification. */
@@ -10147,22 +10342,16 @@ export class ThinkProgrammaticTestAgent extends Think {
     submissionId: string;
     requestId?: string;
   }): Promise<void> {
-    (
-      this as unknown as { _ensureSubmissionTable: () => void }
-    )._ensureSubmissionTable();
     const now = Date.now();
-    const requestId = options.requestId ?? options.submissionId;
-    this.sql`
-      INSERT INTO cf_think_submissions (
-        submission_id, idempotency_key, request_id, stream_id, status,
-        messages_json, metadata_json, error_message, created_at,
-        messages_applied_at, started_at, completed_at
-      )
-      VALUES (
-        ${options.submissionId}, NULL, ${requestId}, NULL, 'running',
-        '{', NULL, NULL, ${now}, NULL, ${now}, NULL
-      )
-    `;
+    await seedSubmissionForTest(this, this.ctx.storage, {
+      submissionId: options.submissionId,
+      status: "running",
+      messages: null,
+      progress:
+        options.requestId !== undefined ? { requestId: options.requestId } : {},
+      createdAt: now,
+      startedAt: now
+    });
   }
 
   async insertRecoverableFiberForTest(
@@ -10484,12 +10673,15 @@ export class ThinkProgrammaticTestAgent extends Think {
       streamStatus:
         this._resumableStream.latestStreamInfoForRequest(requestId)?.status ??
         null,
-      resultStatus:
-        this.sql<{ result_status: string | null }>`
-          SELECT result_status FROM cf_think_submissions
-          WHERE request_id = ${requestId}
-          LIMIT 1
-        `[0]?.result_status ?? null,
+      resultStatus: ((
+        submissionInbox(this)
+          .list({ kind: "submission", limit: 500 })
+          .find(
+            (request) =>
+              ((request.progress as SubmissionProgressForTest | undefined)
+                ?.requestId ?? request.id) === requestId
+          )?.progress as SubmissionProgressForTest | undefined
+      )?.resultStatus ?? null) as string | null,
       hasActiveStream: this._resumableStream.hasActiveStream(),
       hasActiveRequestStream:
         this._resumableStream.latestActiveStreamInfoForRequest(requestId) !==
@@ -11860,21 +12052,15 @@ export class ThinkRecoveryTestAgent extends Think {
     });
 
     if (input.seedRunningSubmission) {
-      (
-        this as unknown as { _ensureSubmissionTable: () => void }
-      )._ensureSubmissionTable();
       const now = Date.now();
-      this.sql`
-        INSERT INTO cf_think_submissions (
-          submission_id, idempotency_key, request_id, stream_id, status,
-          messages_json, metadata_json, error_message, created_at,
-          messages_applied_at, started_at, completed_at
-        )
-        VALUES (
-          ${requestId}, NULL, ${requestId}, NULL, 'running',
-          ${JSON.stringify([])}, NULL, NULL, ${now}, ${now}, ${now}, NULL
-        )
-      `;
+      await seedSubmissionForTest(this, this.ctx.storage, {
+        submissionId: requestId,
+        status: "running",
+        messages: [],
+        progress: { messagesAppliedAt: now },
+        createdAt: now,
+        startedAt: now
+      });
     }
 
     const messengerKey = `cf_think_messenger_recovery:${begun.incidentId}`;
@@ -11935,13 +12121,10 @@ export class ThinkRecoveryTestAgent extends Think {
     const incidents = await this.ctx.storage.list<{ status: string }>({
       prefix: "cf:chat-recovery:incident:"
     });
-    const submissionRows = input.seedRunningSubmission
-      ? this.sql<{ status: string }>`
-          SELECT status FROM cf_think_submissions
-          WHERE request_id = ${requestId}
-          LIMIT 1
-        `
-      : [];
+    const seeded = input.seedRunningSubmission
+      ? submissionInbox(this).get(requestId)
+      : undefined;
+    const submissionRows = seeded ? [{ status: seeded.status }] : [];
     return {
       threw,
       exhaustedContexts: captured.length,
@@ -12685,7 +12868,6 @@ export class ThinkRecoveryTestAgent extends Think {
     // seams without exposing production test hooks. These are their signatures.
     const internals = this as unknown as {
       _turnQueue: TurnQueue;
-      _ensureSubmissionTable(): void;
       _chatRecoveryEngine(): unknown;
     };
     // The recovery engine writes the incident's outcome.
@@ -12696,19 +12878,15 @@ export class ThinkRecoveryTestAgent extends Think {
         reason?: string
       ): Promise<void>;
     };
-    internals._ensureSubmissionTable();
     const now = Date.now();
-    this.sql`
-      INSERT INTO cf_think_submissions (
-        submission_id, idempotency_key, request_id, stream_id, status,
-        messages_json, metadata_json, error_message, created_at,
-        messages_applied_at, started_at, completed_at
-      ) VALUES (
-        ${submissionId}, NULL, ${submissionId}, NULL, 'running',
-        ${JSON.stringify([userMessage])}, NULL, NULL, ${now},
-        ${now}, ${now}, NULL
-      )
-    `;
+    await seedSubmissionForTest(this, this.ctx.storage, {
+      submissionId,
+      status: "running",
+      messages: [userMessage],
+      progress: { messagesAppliedAt: now },
+      createdAt: now,
+      startedAt: now
+    });
 
     const callback =
       recoveryKind === "retry"
@@ -12762,11 +12940,14 @@ export class ThinkRecoveryTestAgent extends Think {
     const responseRequestIds: string[] = [];
     const terminalRequestIds: Array<string | null> = [];
     let requestIdAtSuccessorAcceptance: string | null = null;
-    const readSubmissionRequestId = () =>
-      this.sql<{ request_id: string }>`
-        SELECT request_id FROM cf_think_submissions
-        WHERE submission_id = ${submissionId}
-      `[0]?.request_id ?? null;
+    const readSubmissionRequestId = () => {
+      const request = submissionInbox(this).get(submissionId);
+      if (!request) return null;
+      return (
+        (request.progress as SubmissionProgressForTest | undefined)
+          ?.requestId ?? request.id
+      );
+    };
     const beforeAcceptance =
       pauseAt === "before-acceptance" || pauseAt === "after-foreign-turn";
     let latestLeafReads = 0;
@@ -12874,10 +13055,9 @@ export class ThinkRecoveryTestAgent extends Think {
         WHERE definition = ${ThinkRecoveryTestAgent.CHAT_FIBER_NAME}
           AND status IN ('pending', 'running')
       `;
-      const row = this.sql<{ request_id: string }>`
-        SELECT request_id FROM cf_think_submissions
-        WHERE submission_id = ${submissionId}
-      `[0];
+      const requestIdNow = readSubmissionRequestId();
+      const row =
+        requestIdNow === null ? undefined : { request_id: requestIdNow };
       if (pauseAt === "after-terminal-foreign-stream") {
         // A foreign producer invokes reclaim after the successor's cutover,
         // while the recovery callback is still paused before ledger settlement.
@@ -12921,10 +13101,10 @@ export class ThinkRecoveryTestAgent extends Think {
       await detachedFinished.promise;
       const afterCompletion =
         await this.getSubmissionStatusForTest(submissionId);
-      const completed = this.sql<{ error_message: string | null }>`
-        SELECT error_message FROM cf_think_submissions
-        WHERE submission_id = ${submissionId}
-      `[0];
+      const settled = submissionInbox(this).get(submissionId);
+      const completed = settled
+        ? { error_message: settled.error ?? null }
+        : undefined;
       return {
         duringHandoff,
         afterCompletion,
@@ -13038,29 +13218,21 @@ export class ThinkRecoveryTestAgent extends Think {
     requestId: string,
     submissionId = requestId
   ): Promise<void> {
-    (
-      this as unknown as { _ensureSubmissionTable(): void }
-    )._ensureSubmissionTable();
     const now = Date.now();
-    this.sql`
-      INSERT INTO cf_think_submissions (
-        submission_id, idempotency_key, request_id, stream_id, status,
-        messages_json, metadata_json, error_message, created_at,
-        messages_applied_at, started_at, completed_at
-      ) VALUES (
-        ${submissionId}, NULL, ${requestId}, NULL, 'running',
-        '[]', NULL, NULL, ${now}, ${now}, ${now}, NULL
-      )
-    `;
+    await seedSubmissionForTest(this, this.ctx.storage, {
+      submissionId,
+      status: "running",
+      messages: [],
+      progress: { requestId, messagesAppliedAt: now },
+      createdAt: now,
+      startedAt: now
+    });
   }
 
   async getSubmissionStatusForTest(
     submissionId: string
   ): Promise<string | null> {
-    const rows = this.sql<{ status: string }>`
-      SELECT status FROM cf_think_submissions WHERE submission_id = ${submissionId}
-    `;
-    return rows[0]?.status ?? null;
+    return submissionInbox(this).get(submissionId)?.status ?? null;
   }
 
   /** Drive the boot-time submission sweep to assert a parked (completed)
