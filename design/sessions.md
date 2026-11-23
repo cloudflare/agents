@@ -26,7 +26,7 @@ Every table is `WITHOUT ROWID` with a composite primary key and no secondary ind
 - `cf_agents_session_message_chunks`, keyed `(session_id, id, idx)`: the remaining slices of a message too large for one row
 - `cf_agents_session_compactions`, keyed `(session_id, id)`: non-destructive summary ranges
 - `cf_agents_session_attachment_meta`, keyed `hash`: size, media type and chunk count of one payload
-- `cf_agents_session_attachment_chunks`, keyed `(hash, idx)`: the payload bytes, in 1.5 MiB windows
+- `cf_agents_session_attachment_chunks`, keyed `(hash, idx)`: the payload bytes, in windows of the shared row budget (1.9 MB)
 - `cf_agents_session_attachment_refs`, keyed `(session_id, message_id, hash)`: which messages hold a payload alive
 - `cf_agents_session_config`, keyed `(session_id, key)`: lifted session configuration
 - `cf_agents_session_fts`: FTS5 index, created by the first `search()` on the object
@@ -47,7 +47,7 @@ Sessions then fetches message content in windows bounded by both 50 rows and 4 M
 
 `history()` releases each content window after yielding it. `historyBatches()` adds a caller-selected batch bound. `getHistory()` deliberately materializes the full path for compatibility callers.
 
-`getRecentHistory(maxBytes)` materializes a suffix under an explicit byte budget. Each row is charged its FULL stored size — the message row, every continuation row it was split across, and the attachment bytes it re-inflates — so a 12 MB message is charged 12 MB, not the 1.5 MiB its first slice occupies. Charging only the message row would let a short transcript of split messages blow the isolate's memory while reporting a tiny budget usage. There is no message-count floor beneath the budget: a floor that admitted rows regardless of size would defeat the bound it sits under. The newest message is always returned.
+`getRecentHistory(maxBytes)` materializes a suffix under an explicit byte budget. Each row is charged its FULL stored size — the message row, every continuation row it was split across, and the attachment bytes it re-inflates — so a 12 MB message is charged 12 MB, not the 1.9 MB its first slice occupies. Charging only the message row would let a short transcript of split messages blow the isolate's memory while reporting a tiny budget usage. There is no message-count floor beneath the budget: a floor that admitted rows regardless of size would defeat the bound it sits under. The newest message is always returned.
 
 Reading continuations does not cost the common case anything. The bounded window selects message rows exactly as it always did, and issues one extra query for continuations only for the ids in that window whose `content_chunks` is non-zero. A window with no split messages issues no second query at all.
 
@@ -55,7 +55,7 @@ Loaded-skill restoration in `agents/context` uses the same bounded content windo
 
 ## Row chunking
 
-A message is stored as one JSON string. The row budget (1.5 MiB, exactly `1536 * 1024`) is what one SQLite row holds; the headroom below 2 MiB covers row keys and SQLite record overhead. A message under that budget occupies one row with `content_chunks = 0`, which is the overwhelmingly common case and costs one billed row write. A message over it is cut into slices: slice 0 stays in the message row, the rest become continuation rows numbered from 1. A read concatenates them back.
+A message is stored as one JSON string. The row budget is `ROW_VALUE_BYTES` from `internal/platform-limits.ts` (1,900,000 bytes), shared with Streams and the event logs; it stays below the ~2.2 MB a row holds on older local runtimes, with room for keys and record overhead. A message under that budget occupies one row with `content_chunks = 0`, which is the overwhelmingly common case and costs one billed row write. A message over it is cut into slices: slice 0 stays in the message row, the rest become continuation rows numbered from 1. A read concatenates them back.
 
 Chunking buys nothing in space, and never claimed to: continuation rows live in the same Durable Object as the message they belong to, inside the same 10 GB. Billing counts rows written, not bytes, so a 500 KB message costs the same one billed row as a tiny one and a 5 MB message costs four. A host that wants bytes to leave the object writes them to a file store; Think's Workspace spills to R2 at 1,500,000 bytes.
 

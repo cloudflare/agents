@@ -51,8 +51,8 @@ const PAYLOAD_BYTES = 12_000;
  * rows. The part is still an inline `data:` URL, so eviction decodes it in
  * place exactly as it does a small one.
  */
-const SPLIT_MEDIA_CHARS = 1_600_000;
-const SPLIT_PAYLOAD_BYTES = 1_200_000;
+const SPLIT_MEDIA_CHARS = 2_400_000;
+const SPLIT_PAYLOAD_BYTES = 1_800_000;
 
 async function evictionAgent(name: string): Promise<MediaEvictionStub> {
   return (await getAgentByName(
