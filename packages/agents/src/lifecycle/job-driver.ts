@@ -264,7 +264,10 @@ export class JobDriver {
         await initialize();
         deferred = await this.#driveDueJobs();
         await this.#alarmScope.run({ executing: undefined }, runHostAlarm);
-        clean = true;
+        // A pass that deferred a failing job still failed: it must not clear
+        // memory-limit strikes, or failed passes between resets would keep
+        // the breaker from ever sealing.
+        clean = deferred === undefined;
       } catch (error) {
         // A platform failure from #driveJob carries its row out of the
         // rethrow; anything else (initialize/runHostAlarm) has no job to

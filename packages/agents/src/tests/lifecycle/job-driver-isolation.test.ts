@@ -66,6 +66,26 @@ describe("job driver isolation", () => {
     });
   });
 
+  it("keeps earlier memory-limit strikes through a pass that deferred a failure", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const failing = new Jobs("isolation-failing", []);
+      const { lifecycle } = install(failing);
+      await lifecycle.start();
+      await storage.put("cf_agents:oom_alarm_strikes", 2);
+      await failing.push({
+        id: "poison",
+        fn: "poison",
+        time: Date.now() - 1,
+        retry: QUICK
+      });
+
+      await expect(lifecycle.alarm()).rejects.toThrow("restarting");
+
+      // The pass failed, so it is no clean pass that may clear strikes.
+      expect(await storage.get("cf_agents:oom_alarm_strikes")).toBe(2);
+    });
+  });
+
   it("holds back the failing owner's later jobs, in order, for the deferral", async () => {
     await withCapabilityHarness(async ({ install, storage }) => {
       const ran: string[] = [];

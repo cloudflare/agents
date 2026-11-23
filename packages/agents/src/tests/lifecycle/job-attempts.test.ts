@@ -40,6 +40,10 @@ class Jobs extends LifecycleCapability {
   cancel(id: string) {
     return this.lifecycle.jobs.cancel(id);
   }
+
+  reschedule(id: string, time: number) {
+    return this.lifecycle.jobs.reschedule(id, time);
+  }
 }
 
 /** An owner with no onJobError: its job is its only wake. */
@@ -90,6 +94,31 @@ describe("durable job attempts", () => {
 
       expect(jobs.attempts).toEqual([2]);
       expect(jobs.get("job")).toBeUndefined();
+    });
+  });
+
+  it("starts the count again when a job reschedules itself", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const jobs = new Jobs();
+      const { lifecycle } = install(jobs);
+      await lifecycle.start();
+      await jobs.push({ id: "job", fn: "run", time: Date.now() + 60_000 });
+      interrupted(storage, "job", 2);
+      jobs.failWith = undefined;
+      const onJob = jobs.onJob.bind(jobs);
+      jobs.onJob = (context) => {
+        onJob(context);
+        void jobs.reschedule("job", Date.now() + 60_000);
+      };
+
+      await lifecycle.alarm();
+
+      const [row] = storage.sql
+        .exec<{ attempts: number }>(
+          "SELECT attempts FROM cf_agents_jobs WHERE id = 'job'"
+        )
+        .toArray();
+      expect(row?.attempts).toBe(0);
     });
   });
 
