@@ -617,6 +617,8 @@ describe("job driver hold and a reused id", () => {
       await lifecycle.alarm();
 
       expect(ran).toEqual(["free:first"]);
+      // Held back, not deleted: the held owner's job is still there.
+      expect(held.get("x")).toBeDefined();
     });
   });
 });
