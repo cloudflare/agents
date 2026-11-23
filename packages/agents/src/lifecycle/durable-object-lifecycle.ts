@@ -59,6 +59,11 @@ const LEGACY_NAME_STORAGE_KEY = "__ps_name";
  */
 const FACET_WAKE = "cf:facet-wake";
 
+/** First wait before a facet reports its wake again after a failed report. */
+const FACET_REPORT_RETRY_MS = 100;
+/** Longest wait between report retries. */
+const FACET_REPORT_RETRY_MAX_MS = 30_000;
+
 type FacetWakeMessage =
   | { readonly type: "arm"; readonly time: number | null }
   | { readonly type: "drive" };
@@ -1026,13 +1031,35 @@ export class Lifecycle<
     if (time === this.#reportedWake) return;
     const transport = lifecycleRouteTransports.get(this);
     if (!transport) return;
-    await this.#ctx.storage.sync();
-    await transport.toRoot({
-      capability: FACET_WAKE,
-      source: facet,
-      payload: { type: "arm", time } satisfies FacetWakeMessage
-    });
+    try {
+      await this.#ctx.storage.sync();
+      await transport.toRoot({
+        capability: FACET_WAKE,
+        source: facet,
+        payload: { type: "arm", time } satisfies FacetWakeMessage
+      });
+    } catch (error) {
+      // The job rows are stored; only the root does not know yet. Report
+      // again shortly, backing off, so a later mutation is not the only
+      // thing that would repair it (a fresh start reports too).
+      this.#retryReport();
+      throw error;
+    }
+    this.#reportRetryMs = FACET_REPORT_RETRY_MS;
     this.#reportedWake = time;
+  }
+
+  #reportRetryMs = FACET_REPORT_RETRY_MS;
+  #reportRetry: ReturnType<typeof setTimeout> | undefined;
+
+  #retryReport(): void {
+    if (this.#reportRetry !== undefined) return;
+    const delay = this.#reportRetryMs;
+    this.#reportRetryMs = Math.min(delay * 2, FACET_REPORT_RETRY_MAX_MS);
+    this.#reportRetry = setTimeout(() => {
+      this.#reportRetry = undefined;
+      this.rearmAlarm().catch(() => {});
+    }, delay);
   }
 
   /**
