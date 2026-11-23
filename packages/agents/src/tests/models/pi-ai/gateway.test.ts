@@ -276,7 +276,7 @@ describe("pi-ai: the endpoint follows the vendor's own base URL", () => {
     const binding = fakeBinding(() => sseResponse(workersAITextStream()));
     const ai = createAI({ binding: asAi(binding) });
     await collectEvents(
-      ai.stream(ai(groqModel("llama-3.1-8b-instant")), userContext("hi"))
+      ai.stream(ai(groqModel("openai/gpt-oss-20b")), userContext("hi"))
     );
     const call = binding.native[0];
     expect(call?.provider).toBe("groq");

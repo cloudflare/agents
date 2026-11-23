@@ -200,11 +200,9 @@ describe("pi-ai: Workers AI chat completions", () => {
     const binding = fakeBinding(() => sseResponse(workersAITextStream()));
     const ai = createAI({ binding: asAi(binding) });
     await collectEvents(
-      ai.streamSimple(
-        ai(groqModel("llama-3.1-8b-instant")),
-        userContext("hi"),
-        { sessionId: "s" }
-      )
+      ai.streamSimple(ai(groqModel("openai/gpt-oss-20b")), userContext("hi"), {
+        sessionId: "s"
+      })
     );
     expect(binding.native[0]?.headers).not.toHaveProperty("x-session-affinity");
   });
@@ -423,7 +421,7 @@ describe("pi-ai: Workers AI chat completions", () => {
     );
     const ai = createAI({ binding: asAi(binding) });
     const { events, message } = await collectEvents(
-      ai.stream(ai(groqModel("llama-3.1-8b-instant")), userContext("hi"))
+      ai.stream(ai(groqModel("openai/gpt-oss-20b")), userContext("hi"))
     );
     expect(events.map((e) => e.type)).toEqual(["error"]);
     expect(message.stopReason).toBe("error");
@@ -490,7 +488,7 @@ describe("pi-ai: vendor usage on the chat-completions wire", () => {
     );
     const ai = createAI({ binding: asAi(binding) });
     const message = await ai.complete(
-      ai(groqModel("llama-3.1-8b-instant")),
+      ai(groqModel("openai/gpt-oss-20b")),
       userContext("hi")
     );
     expect(message.usage.input).toBe(6);
@@ -513,7 +511,7 @@ describe("pi-ai: vendor usage on the chat-completions wire", () => {
           }
         ],
         id: "chatcmpl-r",
-        model: "llama-3.1-8b-instant",
+        model: "openai/gpt-oss-20b",
         object: "chat.completion",
         usage: {
           completion_tokens: 40,
@@ -525,7 +523,7 @@ describe("pi-ai: vendor usage on the chat-completions wire", () => {
     );
     const ai = createAI({ binding: asAi(binding) });
     const message = await ai.complete(
-      ai(groqModel("llama-3.1-8b-instant")),
+      ai(groqModel("openai/gpt-oss-20b")),
       userContext("hi")
     );
     expect((message.usage as { reasoning?: number }).reasoning).toBe(32);
@@ -545,7 +543,7 @@ describe("pi-ai: vendor usage on the chat-completions wire", () => {
           }
         ],
         id: "chatcmpl-c",
-        model: "llama-3.1-8b-instant",
+        model: "openai/gpt-oss-20b",
         object: "chat.completion",
         usage: {
           cached_tokens: 80,
@@ -557,7 +555,7 @@ describe("pi-ai: vendor usage on the chat-completions wire", () => {
     );
     const ai = createAI({ binding: asAi(binding) });
     const message = await ai.complete(
-      ai(groqModel("llama-3.1-8b-instant")),
+      ai(groqModel("openai/gpt-oss-20b")),
       userContext("hi")
     );
     expect(message.usage.cacheRead).toBe(80);
@@ -574,7 +572,7 @@ describe("pi-ai: vendor reasoning and tool calls on the chat-completions wire", 
     return JSON.stringify({
       choices: [{ delta, finish_reason: finishReason, index: 0 }],
       id: "chatcmpl-vendor",
-      model: "llama-3.1-8b-instant",
+      model: "openai/gpt-oss-20b",
       object: "chat.completion.chunk"
     });
   }
@@ -592,7 +590,7 @@ describe("pi-ai: vendor reasoning and tool calls on the chat-completions wire", 
     );
     const ai = createAI({ binding: asAi(binding) });
     const { message } = await collectEvents(
-      ai.stream(ai(groqModel("llama-3.1-8b-instant")), userContext("hi"))
+      ai.stream(ai(groqModel("openai/gpt-oss-20b")), userContext("hi"))
     );
 
     // The signature names the field, so pi replays the thinking under it.
@@ -612,7 +610,7 @@ describe("pi-ai: vendor reasoning and tool calls on the chat-completions wire", 
     );
     const ai = createAI({ binding: asAi(binding) });
     const { events, message } = await collectEvents(
-      ai.stream(ai(groqModel("llama-3.1-8b-instant")), userContext("hi"))
+      ai.stream(ai(groqModel("openai/gpt-oss-20b")), userContext("hi"))
     );
 
     expect(events.at(-1)?.type).toBe("error");
@@ -635,7 +633,7 @@ describe("pi-ai: vendor reasoning and tool calls on the chat-completions wire", 
     );
     const ai = createAI({ binding: asAi(binding) });
     const { message } = await collectEvents(
-      ai.stream(ai(groqModel("llama-3.1-8b-instant")), userContext("hi"))
+      ai.stream(ai(groqModel("openai/gpt-oss-20b")), userContext("hi"))
     );
 
     expect(message.stopReason).toBe("error");
@@ -649,7 +647,7 @@ describe("pi-ai: vendor reasoning and tool calls on the chat-completions wire", 
     );
     const ai = createAI({ binding: asAi(binding) });
     const { message } = await collectEvents(
-      ai.stream(ai(groqModel("llama-3.1-8b-instant")), userContext("hi"))
+      ai.stream(ai(groqModel("openai/gpt-oss-20b")), userContext("hi"))
     );
     expect(message.stopReason).toBe("stop");
   });
@@ -665,7 +663,7 @@ describe("pi-ai: vendor reasoning and tool calls on the chat-completions wire", 
     );
     const ai = createAI({ binding: asAi(binding) });
     const { message } = await collectEvents(
-      ai.stream(ai(groqModel("llama-3.1-8b-instant")), userContext("hi"))
+      ai.stream(ai(groqModel("openai/gpt-oss-20b")), userContext("hi"))
     );
     expect(message.content[0]).toMatchObject({
       thinking: "once",
@@ -724,11 +722,11 @@ describe("pi-ai: vendor reasoning and tool calls on the chat-completions wire", 
 
   it("keeps parallel tool calls apart in a vendor's JSON body", async () => {
     const binding = fakeBinding(() =>
-      jsonResponse(parallelToolJson("llama-3.1-8b-instant"))
+      jsonResponse(parallelToolJson("openai/gpt-oss-20b"))
     );
     const ai = createAI({ binding: asAi(binding) });
     const { events, message } = await collectEvents(
-      ai.stream(ai(groqModel("llama-3.1-8b-instant")), userContext("weather?"))
+      ai.stream(ai(groqModel("openai/gpt-oss-20b")), userContext("weather?"))
     );
 
     expect(message.stopReason).toBe("toolUse");
@@ -779,7 +777,7 @@ describe("pi-ai: cached input on the chat-completions wire", () => {
         }
       ],
       id: "chatcmpl-cache",
-      model: "llama-3.1-8b-instant",
+      model: "openai/gpt-oss-20b",
       object: "chat.completion",
       usage
     };
@@ -800,7 +798,7 @@ describe("pi-ai: cached input on the chat-completions wire", () => {
     const ai = createAI({ binding: asAi(binding) });
     // The prices are the model's own — a model object brings its metadata.
     const priced: Model<Api> = {
-      ...groqModel("llama-3.1-8b-instant"),
+      ...groqModel("openai/gpt-oss-20b"),
       cost: { cacheRead: 0.0028, cacheWrite: 0, input: 0.14, output: 0.28 }
     };
     const message = await ai.complete(ai(priced), userContext("hi"));
@@ -828,7 +826,7 @@ describe("pi-ai: cached input on the chat-completions wire", () => {
     );
     const ai = createAI({ binding: asAi(binding) });
     const message = await ai.complete(
-      ai(groqModel("llama-3.1-8b-instant")),
+      ai(groqModel("openai/gpt-oss-20b")),
       userContext("hi")
     );
 
@@ -843,7 +841,7 @@ describe("pi-ai: the vendor's own compat profile decides the body", () => {
   /** A vendor chat-completions model, with the compat profile under test. */
   function vendorModel(overrides: Partial<Model<Api>> = {}): Model<Api> {
     return {
-      ...groqModel("llama-3.1-8b-instant"),
+      ...groqModel("openai/gpt-oss-20b"),
       reasoning: true,
       ...overrides
     };
@@ -854,7 +852,7 @@ describe("pi-ai: the vendor's own compat profile decides the body", () => {
     const ai = createAI({ binding: asAi(binding) });
     const { message } = await collectEvents(
       ai.stream(
-        ai(groqModel("llama-3.1-8b-instant"), {
+        ai(groqModel("openai/gpt-oss-20b"), {
           chatTemplateKwargs: { enable_thinking: false },
           reasoningEffort: null
         }),
