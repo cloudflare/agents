@@ -177,7 +177,7 @@ const TOOL_ROLLBACK_EXEC_DELAY_MS = 600;
  * eviction shows up as a duplicate index.
  */
 
-/** The table submissions lived in before the inbox; a restart moves its rows. */
+/** The table submissions lived in before Tasks; a restart moves its rows. */
 const LEGACY_SUBMISSIONS_TABLE = `
   CREATE TABLE IF NOT EXISTS cf_think_submissions (
     submission_id TEXT PRIMARY KEY,
@@ -1902,7 +1902,7 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
     requestId: string,
     applied: boolean
   ): Promise<void> {
-    // Written as an older release left it: the restart moves it into the inbox.
+    // Written as an older release left it: the restart moves it into a run.
     this.ctx.storage.sql.exec(LEGACY_SUBMISSIONS_TABLE);
     const now = Date.now();
     const messagesJson = JSON.stringify([
@@ -1996,12 +1996,17 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
     await (
       this as unknown as { _migrateLegacySubmissions(): Promise<void> }
     )._migrateLegacySubmissions();
+    // Parked, as a submission whose turn chat recovery owns.
     this.ctx.storage.sql.exec(
-      "UPDATE cf_agents_inbox SET detached = 1 WHERE id = ?",
+      `UPDATE cf_agents_task_runs
+       SET status = 'pending', wait_reason = 'park', generation = NULL,
+           next_at = NULL
+       WHERE run_id = ?`,
       submissionId
     );
     this.ctx.storage.sql.exec(
-      "DELETE FROM cf_agents_jobs WHERE capability = 'inbox' AND fn = 'drain'"
+      "DELETE FROM cf_agents_jobs WHERE id = ?",
+      `task:${submissionId}`
     );
     const userMessage: UIMessage = {
       id: `user-${submissionId}`,

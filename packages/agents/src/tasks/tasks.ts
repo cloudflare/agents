@@ -2001,8 +2001,8 @@ export class Tasks<
       INSERT INTO cf_agents_task_runs
         (run_id, definition, input, status, metadata, idempotency_key, retain,
          attempt, generation, next_at, error_name, error_message,
-         cancel_requested, created_at, started_at, updated_at, settled_at,
-         lane, seq, notified)
+         cancel_requested, cancel_reason, created_at, started_at, updated_at,
+         settled_at, lane, seq, notified)
       VALUES
         (${record.runId}, ${record.definition},
          ${serializeTaskValue(record.input, `input of imported run "${record.runId}"`)},
@@ -2014,7 +2014,9 @@ export class Tasks<
          ${open && !queued ? now : null},
          ${record.status === "error" ? "Error" : null},
          ${record.status === "error" ? (record.error ?? null) : null},
-         0, ${record.createdAt}, ${record.startedAt ?? null}, ${now},
+         0,
+         ${record.status === "aborted" || record.status === "skipped" ? (record.error ?? null) : null},
+         ${record.createdAt}, ${record.startedAt ?? null}, ${now},
          ${open ? null : (record.settledAt ?? now)}, ${lane},
          ${lane === null ? null : this.#store.nextLaneSeq(lane)},
          ${open ? null : record.status})

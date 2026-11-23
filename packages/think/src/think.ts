@@ -1149,7 +1149,7 @@ function workflowNotificationItemId(
   return `workflow-notification:${submissionId}:${eventType}`;
 }
 
-/** The queue item that ran a submission before the inbox did. */
+/** The queue item that ran a submission before Tasks did. */
 function submissionRunItemId(submissionId: string): string {
   return `submission:${submissionId}`;
 }
@@ -5558,8 +5558,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /**
-   * The inbox's report of a status change. A terminal one queues the
-   * workflow event first: the inbox repeats a terminal report a reset cut
+   * Tasks' report of a status change. A terminal one queues the
+   * workflow event first: Tasks repeats a terminal report a reset cut
    * short, and the queue item's stable id makes the repeat a replace.
    */
   private async _onSubmissionStatus(submissionId: string): Promise<void> {
@@ -5996,7 +5996,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /**
-   * Run one submission. The inbox calls it from the alarm, one submission at
+   * Run one submission. Tasks calls it from the alarm, one submission at
    * a time in submission order. After an interruption (`run.attempt` above
    * 1) it first decides from the stored evidence whether the submission can
    * run again.
