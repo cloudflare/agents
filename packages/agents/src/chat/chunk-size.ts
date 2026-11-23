@@ -1,7 +1,6 @@
-const textEncoder = new TextEncoder();
+import { ROW_MAX_BYTES } from "../internal/platform-limits";
 
-/** Maximum serialized chunk body size before skipping storage (bytes). */
-export const CHUNK_MAX_BYTES = 1_800_000;
+const textEncoder = new TextEncoder();
 
 /** Byte size of a chunk body in its stored (JSON-escaped) encoding. */
 export function storedChunkBytes(body: string): number {
@@ -13,5 +12,5 @@ export function storedChunkBytes(body: string): number {
  * broadcast live, but absent from replay.
  */
 export function isChunkTooLargeToStore(body: string): boolean {
-  return storedChunkBytes(body) > CHUNK_MAX_BYTES;
+  return storedChunkBytes(body) > ROW_MAX_BYTES;
 }

@@ -8,13 +8,11 @@
  */
 
 import type { UIMessage } from "ai";
+import { ROW_MAX_BYTES } from "../internal/platform-limits";
 import { byteLength, sanitizeMessage } from "../sessions/sanitize";
 import { truncateToolOutput } from "./tool-output-truncation";
 
 export { byteLength, sanitizeMessage };
-
-/** Maximum serialized message size before compaction (bytes). 1.8MB with headroom below SQLite's 2MB limit. */
-export const ROW_MAX_BYTES = 1_800_000;
 
 /** Optional hooks for {@link enforceRowSizeLimit}. */
 export interface EnforceRowSizeLimitOptions {
@@ -27,7 +25,7 @@ export interface EnforceRowSizeLimitOptions {
 
 /**
  * Enforce SQLite row size limits by compacting tool outputs and text parts
- * when a serialized message exceeds the safety threshold (1.8MB). Shared by
+ * when a serialized message exceeds `ROW_MAX_BYTES`. Shared by
  * `@cloudflare/ai-chat` and `@cloudflare/think` so both compact identically.
  *
  * Compaction strategy:

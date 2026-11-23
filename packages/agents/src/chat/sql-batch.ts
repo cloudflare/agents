@@ -4,13 +4,9 @@
  * string fragment). Used to collapse per-row INSERT/DELETE loops into a small
  * number of multi-row statements.
  *
- * SQLite (Durable Object / D1) caps bound parameters at 100 per query, so
- * callers must chunk their inputs to stay within {@link MAX_BOUND_PARAMS}.
- * See https://developers.cloudflare.com/d1/platform/limits/
+ * SQLite caps bound parameters per query, so callers chunk their inputs to
+ * stay within `MAX_BOUND_PARAMS` (internal/platform-limits.ts).
  */
-
-/** Maximum bound parameters allowed in a single SQLite (DO / D1) query. */
-export const MAX_BOUND_PARAMS = 100;
 
 /**
  * Attach a self-referential `raw` property so a plain string[] satisfies the

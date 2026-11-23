@@ -4,6 +4,7 @@ import type {
   EventId,
   StreamId
 } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { KV_DELETE_MAX_KEYS } from "../../internal/platform-limits";
 
 /**
  * Durable Object–backed {@link EventStore} for SSE resumability.
@@ -47,8 +48,6 @@ import type {
 export class DurableObjectEventStore implements EventStore {
   private static readonly EVENT_KEY_PREFIX = "__mcp_event__:";
   private static readonly SEQ_PAD = 16;
-  /** DO storage caps multi-key delete at 128. */
-  private static readonly DELETE_CHUNK = 128;
   /** Defensive ceiling on a single replay batch. A live stream's
    *  event count is small (progress notifications + final result);
    *  this is here so a pathological history can't OOM the DO. */
@@ -134,8 +133,8 @@ export class DurableObjectEventStore implements EventStore {
    * wire — no future `Last-Event-ID` for this stream is expected to
    * resolve.
    *
-   * Lists and deletes in chunks of {@link DELETE_CHUNK} (128, the DO
-   * storage cap) so we never load the entire event log into memory.
+   * Lists and deletes in chunks of `KV_DELETE_MAX_KEYS` so we never load
+   * the entire event log into memory.
    * After deleting, the next `list` call won't see the deleted keys,
    * so passing `start: <prefix>` again is enough — no cursor bookkeeping.
    */
@@ -144,7 +143,7 @@ export class DurableObjectEventStore implements EventStore {
     for (;;) {
       const rows = await this.storage.list({
         prefix,
-        limit: DurableObjectEventStore.DELETE_CHUNK
+        limit: KV_DELETE_MAX_KEYS
       });
       if (rows.size === 0) break;
       await this.storage.delete([...rows.keys()]);

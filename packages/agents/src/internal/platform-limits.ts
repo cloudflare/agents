@@ -34,3 +34,42 @@ export const SQLITE_ROW_BYTES = 2_000_000;
  * @internal
  */
 export const ROW_VALUE_BYTES = SQLITE_ROW_BYTES - 100_000;
+
+/**
+ * The largest serialized chat message, or stream chunk body, kept in one
+ * row. Chat compacts a larger message and leaves a larger chunk out of
+ * replay.
+ *
+ * @internal
+ */
+export const ROW_MAX_BYTES = SQLITE_ROW_BYTES - 200_000;
+
+/** UTF-8 bytes one UTF-16 code unit takes at most. */
+const UTF8_BYTES_PER_UNIT = 3;
+
+/**
+ * The longest piece of split text kept in one row, in UTF-16 code units: at
+ * most 1.5 MB of UTF-8, which leaves 500 KB for the row's other columns.
+ *
+ * @internal
+ */
+export const ROW_PIECE_UNITS = Math.floor(
+  (SQLITE_ROW_BYTES - 500_000) / UTF8_BYTES_PER_UNIT
+);
+
+/**
+ * Bound parameters one SQL statement may carry (documented; measured the
+ * same in production and locally). Statements that bind a list chunk it.
+ *
+ * @internal
+ */
+export const MAX_BOUND_PARAMS = 100;
+
+/**
+ * Keys one multi-key `storage.delete([...])` call takes, as the docs state.
+ * Measured 23 Nov 2026, SQLite-backed objects accepted 20,000; the
+ * documented figure is kept.
+ *
+ * @internal
+ */
+export const KV_DELETE_MAX_KEYS = 128;

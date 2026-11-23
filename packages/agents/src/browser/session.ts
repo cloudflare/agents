@@ -292,7 +292,7 @@ const CDP_SESSION_NOT_FOUND = -32001;
 
 /**
  * Screenshots are kept whole in the chat message for the UI, and a stored
- * message must fit SQLite's 2 MB row (see `ROW_MAX_BYTES` in chat/sanitize.ts),
+ * message must fit one row (`ROW_MAX_BYTES` in internal/platform-limits.ts),
  * or the image is compacted away. Failing early lets the model retake it
  * smaller. Other results are cut to a preview before they're stored.
  *

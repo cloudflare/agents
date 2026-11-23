@@ -15,9 +15,13 @@ export {
   sanitizeMessage,
   enforceRowSizeLimit,
   byteLength,
-  ROW_MAX_BYTES,
   type EnforceRowSizeLimitOptions
 } from "./sanitize";
+export {
+  KV_DELETE_MAX_KEYS,
+  MAX_BOUND_PARAMS,
+  ROW_MAX_BYTES
+} from "../internal/platform-limits";
 
 export {
   StreamAccumulator,
@@ -121,7 +125,7 @@ export {
   type ChatRecoveryTaskReason
 } from "./recovery-task";
 
-export { MAX_BOUND_PARAMS, buildInClauseStrings } from "./sql-batch";
+export { buildInClauseStrings } from "./sql-batch";
 
 /**
  * @internal Platform-failure classifier shared with the chat hosts'
@@ -466,7 +470,6 @@ export {
   CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
   DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE,
   CHAT_RECOVERY_INCIDENT_TTL_MS,
-  KV_DELETE_MAX_KEYS,
   DEFAULT_CHAT_RECOVERY_NO_PROGRESS_TIMEOUT_MS,
   CHAT_RECOVERY_ALARM_DEBOUNCE_MS,
   CHAT_RECOVERING_FLAG_TTL_MS,

@@ -1,10 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { UIMessage } from "ai";
-import {
-  byteLength,
-  enforceRowSizeLimit,
-  ROW_MAX_BYTES
-} from "../../chat/sanitize";
+import { byteLength, enforceRowSizeLimit } from "../../chat/sanitize";
+import { ROW_MAX_BYTES } from "../../internal/platform-limits";
 import { createCompactFunction, type SessionMessage } from "../../sessions";
 import { buildSummaryPrompt } from "../../sessions/compaction-helpers";
 import {
