@@ -235,14 +235,21 @@ export class Context {
     // Only a user message nothing has answered yet starts a new turn: it is
     // the session's latest leaf. One with answers is a branch point (a
     // regeneration): recording against it would change what its earlier
-    // answers were sent.
-    let target_: Promise<SessionMessage | undefined> | undefined;
-    const target = (): Promise<SessionMessage | undefined> =>
-      (target_ ??= (async () =>
+    // answers were sent. One that already has a record was sent before (a
+    // recovered or retried turn): it is sent again as it was, and a change
+    // or refresh since then waits for the next new message.
+    let leaf_: Promise<SessionMessage | undefined> | undefined;
+    const latest = (): Promise<SessionMessage | undefined> =>
+      (leaf_ ??= (async () =>
         tail?.role === "user" &&
         (await this.#session.getLatestLeaf())?.id === tail.id
           ? tail
           : undefined)());
+    const resent = async () => {
+      const at = await latest();
+      return at !== undefined && (await this.#records([at])).has(at.id);
+    };
+    const target = async () => ((await resent()) ? undefined : latest());
 
     if (!delivered.system && !refresh) {
       delivered = await this.#carriedForward(delivered);
@@ -296,6 +303,8 @@ export class Context {
       delivered = { ...delivered, base: at.id };
     }
     if (changes.length === 0) return { system, reminder: null };
+    // A turn sent before is sent again exactly; the change waits.
+    if (await resent()) return { system, reminder: null };
     if (!at) {
       return {
         system,

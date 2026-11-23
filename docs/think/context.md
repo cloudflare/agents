@@ -59,7 +59,9 @@ A block declared `whenChanged: "remind"` is for values that move on while the co
 
 `this.context.refreshSystemPrompt()` renders the blocks again; the next turn records the new prompt. That costs one prompt-cache miss, so Think does it where the cache is already gone: after a compaction and after the history is cleared. A refresh survives the agent being evicted before its next turn.
 
-A regenerated answer is sent the prompt its own branch was sent, never a newer one.
+A regenerated answer is sent the prompt its own branch was sent, never a newer one. A turn that is recovered or retried after being cut off is sent again exactly as it was first sent; a change or a refresh that arrived in between waits for the next user message.
+
+A compaction summary is written from the stored messages, which never hold a reminder. So when a summary hides the turn that delivered a value, the next request restates that value once, right after the summary. A forked session keeps the prompt and reminders its copied turns were sent with.
 
 ## Change blocks from code
 

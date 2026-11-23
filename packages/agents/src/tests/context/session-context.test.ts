@@ -591,6 +591,37 @@ describe("Context", () => {
     });
   });
 
+  it("sends a recovered turn as it was first sent; a change since waits", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const { session, context, setDate } = await setup(storage, (s) =>
+        install(s)
+      );
+      await session.appendMessage(user("u1", "hello"));
+      await context.build();
+      await session.appendMessage(assistant("a1", "hi"));
+      setDate("Tuesday");
+      await session.appendMessage(user("u2", "what day?"));
+      const first = await context.build();
+      expect(JSON.stringify(first.messages)).toContain("Today is Tuesday.");
+
+      // The turn is cut before an answer is stored; a change and a refresh
+      // arrive; recovery runs the turn again.
+      setDate("Wednesday");
+      const recovered = await context.prepare();
+      expect(recovered.reminder).toBeNull();
+      expect(await context.build()).toEqual(first);
+      await context.refreshSystemPrompt();
+      expect(await context.build()).toEqual(first);
+
+      // The next new message takes the refresh.
+      await session.appendMessage(assistant("a2", "Tuesday"));
+      await session.appendMessage(user("u3", "now?"));
+      const next = await context.build();
+      expect(next.system).toContain("Today is Wednesday.");
+      expect(JSON.stringify(next.messages)).not.toContain("Today is Tuesday.");
+    });
+  });
+
   it("projects the same history to the same messages", async () => {
     await withCapabilityHarness(async ({ storage, install }) => {
       const { session, context, setDate } = await setup(storage, (s) =>
