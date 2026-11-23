@@ -18,6 +18,31 @@ const LEGACY_CONFIG_KEYS = [
   "skillsFingerprint"
 ] as const;
 
+/**
+ * Whether a table named exactly `table` exists. Preparing a query against a
+ * missing table fails and reads no rows, while a `sqlite_master` lookup reads
+ * every schema row, so the catalog is only consulted once the cheap probe
+ * finds something (it also accepts views and other letter cases). For one-way
+ * migration checks that run on every wake.
+ * @internal
+ */
+export function tableExists(sql: SqlStorage, table: string): boolean {
+  try {
+    sql.exec(`SELECT 1 FROM "${table}" LIMIT 0`);
+  } catch (error) {
+    if (String(error).includes("no such table")) return false;
+    throw error;
+  }
+  return (
+    sql
+      .exec(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        table
+      )
+      .toArray().length > 0
+  );
+}
+
 /** @internal */
 export class ThinkConfigStore extends LifecycleCapability {
   #ready = false;
@@ -75,19 +100,11 @@ export class ThinkConfigStore extends LifecycleCapability {
    * source. A key already in `think_config` wins.
    */
   migrateLegacy(): void {
-    const legacy = this.#sql
-      .exec<{ name: string }>(
-        `SELECT name FROM sqlite_master
-         WHERE type = 'table'
-           AND name IN ('assistant_config', 'assistant_config__lifted_v1')`
-      )
-      .toArray()
-      .map((row) => String(row.name));
     // Sessions leaves `assistant_config` alone; these keys are Think's, so
     // Think lifts them into its own table and drops the source.
-    const source = legacy.includes("assistant_config")
+    const source = tableExists(this.#sql, "assistant_config")
       ? "assistant_config"
-      : legacy.includes("assistant_config__lifted_v1")
+      : tableExists(this.#sql, "assistant_config__lifted_v1")
         ? "assistant_config__lifted_v1"
         : null;
     if (!source) return;
