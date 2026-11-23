@@ -374,4 +374,42 @@ describe("Tasks schema 4, started again", () => {
       }
     );
   });
+
+describe("Tasks wake while an attempt runs past its dispatch", () => {
+  it("keeps the alarm within 5 s while the attempt executes, so a reset is noticed (#2847)", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      instance.rememberingGate = new Promise(() => {});
+      await instance.tasks.run("remembering", undefined, {
+        runId: "long",
+        start: "alarm"
+      });
+    });
+    // The dispatch returns at its 5 s budget with the attempt still going.
+    await runDurableObjectAlarm(stub);
+    await new Promise((resolve) => setTimeout(resolve, 5_500));
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        expect(instance.rememberingSeen).toHaveLength(1);
+        expect((await instance.tasks.get("long"))?.status).toBe("running");
+        const alarm = await state.storage.getAlarm();
+        expect(alarm).not.toBeNull();
+        expect(alarm!).toBeLessThanOrEqual(Date.now() + 5_000);
+      }
+    );
+    // The next wake finds the attempt alive and comes back as soon.
+    await runInDurableObject(stub, async (_instance, state) => {
+      state.storage.sql.exec(
+        "UPDATE cf_agents_jobs SET time = ? WHERE id = 'task:long'",
+        Date.now() - 1
+      );
+    });
+    await runDurableObjectAlarm(stub);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await runInDurableObject(stub, async (_instance, state) => {
+      const alarm = await state.storage.getAlarm();
+      expect(alarm!).toBeLessThanOrEqual(Date.now() + 5_000);
+    });
+  }, 20_000);
 });

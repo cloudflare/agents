@@ -124,6 +124,19 @@ const WAKE_JOB_PREFIX = "task:";
 /** The job that delivers terminal reports a reset or a throw cut short. */
 const REPORT_JOB_ID = "tasks:reports";
 const REPORT_JOB_FN = "reports";
+/**
+ * When a run's wake job should fire: its deadline, but no later than
+ * {@link LIVE_WAKE_MS} from now while it runs.
+ */
+function wakeTime(
+  row: { next_at: number | null; status: string } | undefined
+): number | null {
+  if (row?.next_at == null) return null;
+  return row.status === "running"
+    ? Math.min(row.next_at, Date.now() + LIVE_WAKE_MS)
+    : row.next_at;
+}
+
 /** Terminal reports one report job delivers before it hands on to the next. */
 const REPORT_BATCH = 100;
 
@@ -149,6 +162,13 @@ const WAKE_JOB_RETRY = { maxAttempts: 1 } as const;
  * inline settle for queue liveness.
  */
 const DISPATCH_BUDGET_MS = 5_000;
+
+/**
+ * Farthest a running run's wake may be while its attempt executes: the
+ * attempt outlives its dispatch, so this wake is what notices a reset that
+ * killed it (#2847). One alarm write per interval while a run executes.
+ */
+const LIVE_WAKE_MS = 5_000;
 
 const TERMINAL_STATUSES: ReadonlySet<TaskStatus> = new Set([
   "completed",
@@ -594,9 +614,14 @@ export class Tasks<
     if (!this.#laneAllows(row)) return undefined;
     const active = this.#liveAttempt(runId);
     if (active) {
-      // A live attempt in this isolate; push the claim backstop forward so
-      // the due job does not hot-loop the alarm while it works.
-      this.#refreshClaim(runId);
+      // A live attempt in this isolate: its wake comes back in
+      // LIVE_WAKE_MS; the claim moves only once half of it is used.
+      if (
+        row?.next_at == null ||
+        row.next_at - Date.now() < this.#claimTimeoutMs() / 2
+      ) {
+        this.#refreshClaim(runId);
+      }
       this.lifecycle.trackAlarmWork(active.promise);
       return this.#wakeOutcome(runId);
     }
@@ -698,13 +723,13 @@ export class Tasks<
    * again either way.
    */
   #wakeOutcome(runId: string): LifecycleJobOutcome {
-    const rows = this.#store.sql<{ next_at: number | null }>`
-      SELECT next_at FROM cf_agents_task_runs
+    const rows = this.#store.sql<{ next_at: number | null; status: string }>`
+      SELECT next_at, status FROM cf_agents_task_runs
       WHERE run_id = ${runId}
         AND status IN ('pending', 'running')
     `;
-    const next = rows[0]?.next_at;
-    return typeof next === "number" ? { rescheduleAt: next } : undefined;
+    const next = wakeTime(rows[0]);
+    return next === null ? undefined : { rescheduleAt: next };
   }
 
   /**
@@ -724,9 +749,10 @@ export class Tasks<
   ): Promise<boolean> {
     const rows = this.#store.sql<{
       next_at: number | null;
+      status: string;
       created_at: number;
     }>`
-      SELECT next_at, created_at FROM cf_agents_task_runs
+      SELECT next_at, status, created_at FROM cf_agents_task_runs
       WHERE run_id = ${runId}
         AND status IN ('pending', 'running')
     `;
@@ -739,7 +765,7 @@ export class Tasks<
     ) {
       return true;
     }
-    const next = rows[0]?.next_at ?? null;
+    const next = wakeTime(rows[0]);
 
     const jobId = `${WAKE_JOB_PREFIX}${runId}`;
     if (next === null) {
