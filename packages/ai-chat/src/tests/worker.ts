@@ -7397,12 +7397,12 @@ export class AIChatAgentToolParent extends Agent<Env> {
     return runId;
   }
 
-  /**
-   * What wakes a root after a reset: its own alarm (the keep-alive or the
-   * deadman job). The Lifecycle starts, then drives what is due.
-   */
-  async rootAlarmForTest(): Promise<void> {
-    await this.alarm();
+  /** The root's alarm memory-limit strike count, or null when none. */
+  async oomStrikesForTest(): Promise<number | null> {
+    return (
+      (await this.ctx.storage.get<number>("cf_agents:oom_alarm_strikes")) ??
+      null
+    );
   }
 
   /** This root's mirror of a facet run's wake: its time, or null when gone. */
