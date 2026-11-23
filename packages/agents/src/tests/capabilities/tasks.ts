@@ -45,6 +45,14 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
        * {@link rememberingGate} (a reset there leaves it running), then
        * writes `after`.
        */
+      /** A result JSON cannot hold. */
+      unstorable: async () => BigInt(1) as unknown as string,
+
+      /** Fails with a message far past what a run keeps. */
+      verbose: async () => {
+        throw new Error("x".repeat(50_000));
+      },
+
       /** Records its label, parks on its gate, returns the label. */
       laned: async (input: { label: string }) => {
         this.lanedStarted.push(input.label);

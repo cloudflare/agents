@@ -506,12 +506,19 @@ function restoreStepError(row: TaskStepRow): Error {
 }
 
 /** Safe name/message projection of an arbitrary thrown value. */
+/** Longest error message a run keeps; a longer one is cut, not lost. */
+const MAX_ERROR_MESSAGE = 10_000;
+
 export function toErrorSummary(error: unknown): {
   name: string;
   message: string;
 } {
-  if (error instanceof Error) {
-    return { name: error.name, message: error.message };
+  const summary =
+    error instanceof Error
+      ? { name: error.name, message: error.message }
+      : { name: "Error", message: String(error) };
+  if (summary.message.length > MAX_ERROR_MESSAGE) {
+    summary.message = `${summary.message.slice(0, MAX_ERROR_MESSAGE)}…`;
   }
-  return { name: "Error", message: String(error) };
+  return summary;
 }

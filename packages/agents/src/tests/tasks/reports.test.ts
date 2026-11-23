@@ -197,3 +197,26 @@ describe("Tasks reports after a reset", () => {
     });
   });
 });
+
+describe("Tasks outcomes a run cannot keep as they are", () => {
+  it("ends a run `error` when its result cannot be stored, and cuts a long error message", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      await instance.tasks.run("unstorable", undefined, {
+        runId: "u",
+        start: "now"
+      });
+      expect(await instance.tasks.get("u")).toMatchObject({
+        status: "error",
+        error: { name: "TaskSerializationError" }
+      });
+      await instance.tasks.run("verbose", undefined, {
+        runId: "v",
+        start: "now"
+      });
+      const verbose = await instance.tasks.get("v");
+      if (verbose?.status !== "error") throw new Error("unreachable");
+      expect(verbose.error.message.length).toBe(10_001);
+    });
+  });
+});

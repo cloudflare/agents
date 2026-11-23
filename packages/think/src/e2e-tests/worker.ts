@@ -1904,9 +1904,6 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
   ): Promise<void> {
     // Written as an older release left it: the restart moves it into a run.
     this.ctx.storage.sql.exec(LEGACY_SUBMISSIONS_TABLE);
-    (
-      this as unknown as { _legacySubmissionsGone: boolean }
-    )._legacySubmissionsGone = false;
     const now = Date.now();
     const messagesJson = JSON.stringify([
       {
@@ -1937,9 +1934,6 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
   @callable()
   async seedRecoverableEmptySubmission(submissionId: string): Promise<void> {
     this.ctx.storage.sql.exec(LEGACY_SUBMISSIONS_TABLE);
-    (
-      this as unknown as { _legacySubmissionsGone: boolean }
-    )._legacySubmissionsGone = false;
     const now = Date.now();
     const userMessage: UIMessage = {
       id: `user-${submissionId}`,
