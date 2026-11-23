@@ -98,7 +98,8 @@ Older releases kept facet wakes on the root: first an index table,
 its first start after the upgrade, a root's Fibers moves both onto facet
 wakes and deletes them; the same start then makes every facet wake due at
 once (the Lifecycle's restart rule), so each such facet is driven right
-away.
+away, except one whose last drive never replied, which keeps its recheck
+delay and back-off.
 
 ### Observability
 

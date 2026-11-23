@@ -569,7 +569,11 @@ export class CounterSubAgent extends Agent {
       await new Promise<void>((resolve) => {
         this._releaseHeldFiber = resolve;
       });
-    }).catch(console.error);
+    }).catch((error: unknown) => {
+      // A start that fails before the body must fail the test, not hang it.
+      console.error(error);
+      bodyStarted();
+    });
     const result = await first;
     await started;
     return result;
