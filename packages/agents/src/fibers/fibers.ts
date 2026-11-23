@@ -13,8 +13,8 @@
  * One Lifecycle job (`recover`) wakes the object for that scan. While a
  * fiber runs in this isolate the job re-arms every `heartbeatMs`, which also
  * keeps the object alive; while orphaned rows remain and a scan made no
- * progress it backs off. On a facet the job is mirrored on the root, which
- * owns the physical alarm, and its dispatch routes back here.
+ * progress it backs off. In a sub-agent the job is in the sub-agent's own
+ * queue, which its root wakes like any other.
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -224,10 +224,6 @@ export class Fibers extends LifecycleCapability {
   #scanning: Promise<void> | undefined;
   /** Consecutive scans that made no progress while work was pending. */
   #noProgressScans = 0;
-  /**
-   * The wake this isolate last armed. A facet reads it instead of the
-   * root's mirror, so it can skip routing a no-op.
-   */
   /** The wake write in flight, if any. */
   #wakeSync: Promise<void> | undefined;
 
@@ -1071,10 +1067,9 @@ export class Fibers extends LifecycleCapability {
   }
 
   /**
-   * Push, re-time, or cancel this object's wake (mirrored on the root for a
-   * facet). One sync runs at a time, and the armed time is recorded only
-   * once the write succeeded, so a fiber starting during a sync that then
-   * fails arms the wake itself instead of trusting it.
+   * Push, re-time, or cancel this object's wake. One sync runs at a time,
+   * and each reads the job queue for the wake that is armed, so a fiber
+   * starting during a sync that then fails arms the wake itself.
    */
   async #syncWake(): Promise<void> {
     while (this.#wakeSync) {
