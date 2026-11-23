@@ -1,22 +1,20 @@
-/**
- * The largest WebSocket message a Durable Object can send. A larger one is
- * dropped silently: `send()` returns normally and the peer gets nothing,
- * not even a close (measured on a deployed Worker; see the WebSockets
- * section of design/durable-object-lifecycle.md). The documented limit for
- * received messages is the same 32 MiB.
- *
- * @internal
- */
-export const MAX_OUTBOUND_FRAME_BYTES = 32 * 1024 * 1024;
+import { WEBSOCKET_MESSAGE_BYTES } from "../internal/platform-limits";
 
 const utf8 = new TextEncoder();
 
-/** Whether a text frame is small enough to reach the peer. @internal */
+/**
+ * Whether a text frame is small enough to reach the peer. A larger one is
+ * dropped silently: `send()` returns normally and the peer gets nothing,
+ * not even a close (see the WebSockets section of
+ * design/durable-object-lifecycle.md).
+ *
+ * @internal
+ */
 export function fitsOutboundFrame(text: string): boolean {
   // At most 3 UTF-8 bytes per UTF-16 code unit: skip encoding small frames.
-  if (text.length * 3 <= MAX_OUTBOUND_FRAME_BYTES) return true;
-  if (text.length > MAX_OUTBOUND_FRAME_BYTES) return false;
-  return utf8.encode(text).byteLength <= MAX_OUTBOUND_FRAME_BYTES;
+  if (text.length * 3 <= WEBSOCKET_MESSAGE_BYTES) return true;
+  if (text.length > WEBSOCKET_MESSAGE_BYTES) return false;
+  return utf8.encode(text).byteLength <= WEBSOCKET_MESSAGE_BYTES;
 }
 
 /**
@@ -38,7 +36,7 @@ export function serializeRpcResponse(response: { readonly id: string }): {
       type: "rpc",
       id: response.id,
       success: false,
-      error: `RPC response is larger than the ${MAX_OUTBOUND_FRAME_BYTES}-byte WebSocket message limit`
+      error: `RPC response is larger than the ${WEBSOCKET_MESSAGE_BYTES}-byte WebSocket message limit`
     }),
     replaced: true
   };
