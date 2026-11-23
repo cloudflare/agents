@@ -153,12 +153,12 @@ RPC if you need parent-side side effects.
 - `getSchedule()` / `getSchedules()` are deprecated synchronous storage reads
   and throw on facets.
 - `keepAlive()` and `keepAliveWhile()` work on facets: the facet's `KeepAlive`
-  capability takes its hold on the root's through `routes.toRoot`. Facets still
-  do not get an independent physical alarm slot.
-- `runFiber()` works on facets. Fiber rows and snapshots live in the child
-  SQLite database. The child's `Fibers` capability mirrors its recovery wake
-  on the root through Lifecycle routing, and the root routes each due wake
-  back into the child ([fibers.md](./fibers.md)).
+  heartbeat is a job in the facet's own queue, woken through the root's wake
+  job for that facet path ([alarm-coordination.md](./alarm-coordination.md)).
+  Facets still do not get an independent physical alarm slot.
+- `runFiber()` works on facets. Fiber rows, snapshots and the recovery wake
+  live in the child's own storage, and the root wakes the child the same way
+  ([fibers.md](./fibers.md)).
 - Think chat recovery works on facets; recovered continuations can schedule from
   the child and are routed through the top-level parent's alarm.
 - `deleteSubAgent()` is idempotent and removes pending schedules for that

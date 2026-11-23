@@ -1088,7 +1088,10 @@ export class Fibers extends LifecycleCapability {
     const now = Date.now();
     const next = this.#nextWakeMs(now);
     const armed = this.lifecycle.jobs.get(WAKE_JOB_ID)?.time ?? null;
-    // A running fiber only needs some wake within a heartbeat.
+    // A running fiber only needs some wake within a heartbeat. The row may
+    // be there while its wake is not (in a sub-agent, a report to the root
+    // that failed), so the Lifecycle is asked to arm it again: a no-op when
+    // the wake is in place, and a failure here fails this fiber's start.
     if (
       this.#active.size > 0 &&
       next !== null &&
@@ -1096,6 +1099,7 @@ export class Fibers extends LifecycleCapability {
       armed > now &&
       armed <= next
     ) {
+      await this.lifecycle.jobs.rearm();
       return;
     }
     if (next === null && armed === null) return;

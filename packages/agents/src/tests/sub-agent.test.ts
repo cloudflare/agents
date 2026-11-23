@@ -1191,11 +1191,12 @@ describe("SubAgent", () => {
     const first =
       await agent.subAgentStartTwoFibersFirstWakeFails("wake-failure-child");
 
-    // The first fiber fails on its wake write; the held second one still
-    // has a wake mirrored on the root.
+    // The first fiber's report to the root fails. The held second one found
+    // the wake row in place, but its start asks the Lifecycle to arm it, so
+    // the root has the wake at once, without waiting for the report retry.
     expect(first).toBe("simulated fiber wake route failure");
     expect(await agent.subAgentRunningFiberCount("wake-failure-child")).toBe(1);
-    await expectFiberWakeOwners(agent, 1);
+    expect(await agent.fiberWakeOwners()).toHaveLength(1);
 
     await agent.subAgentReleaseHeldFiber("wake-failure-child");
     for (let attempt = 0; attempt < 50; attempt++) {
@@ -1405,18 +1406,23 @@ describe("SubAgent", () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
 
-    await agent.insertSubAgentInterruptedFiber(
+    // The rows of an earlier release: the sub-agent's fiber, and only the
+    // root's mirror job for its wake.
+    await agent.insertSubAgentInterruptedFiberRowsOnly(
       "mirror-job-child",
       "mirror-job-fiber-1",
-      "work",
-      { value: "mirrored" }
+      "work"
     );
     await agent.insertLegacyFiberMirrorJob("mirror-job-child");
+    expect(await agent.fiberWakeOwners()).toEqual([]);
     await agent.restartFibers();
 
-    // The mirror job is gone; the root's alarm (real or run here) may
-    // already have driven the facet, so only the outcome is checked.
+    // The mirror became the facet wake for that path.
     expect(await agent.legacyFiberMirrorJobCount()).toBe(0);
+    expect(await agent.fiberWakeOwners()).toHaveLength(1);
+
+    // After the upgrade the sub-agent starts fresh and arms its own wake.
+    await agent.subAgentArmOwnFiberWake("mirror-job-child");
     await drainDueFiberWakes(agent);
     expect(await agent.subAgentRecoveredFibers("mirror-job-child")).toEqual([
       expect.objectContaining({ id: "mirror-job-fiber-1" })

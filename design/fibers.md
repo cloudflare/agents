@@ -87,19 +87,16 @@ One Lifecycle job, `fibers:recover`, wakes the object for the scan:
   any scan that made progress.
 - With nothing left it is cancelled.
 
-A facet has no alarm slot. Its Fibers capability routes the wake to the
-root through `lifecycle.routes` (`syncWake`), and the root's Fibers keeps a
-mirror job `fibers:recover:<owner key>`. When the mirror fires, the root
-routes `recover` to the facet, which scans and returns its next wake; the
-root re-times or drops the mirror. A mirror whose facet is gone is dropped.
-Deleting a facet subtree cancels its mirrors
-(`__DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix`). This is the same scheme
-Tasks uses for routed runs.
+A facet has no alarm slot. Its Fibers capability keeps the `recover` job in
+the facet's own queue like a root does, and the Lifecycle wakes it through
+the root's one wake job for that facet path
+([alarm-coordination.md](./alarm-coordination.md), "Facets"). Fibers has no
+facet code of its own.
 
-Before this change the root kept an index table, `cf_agents_facet_runs`,
-and Agent's `housekeeping` host job scanned it on every alarm. The root's
-Fibers capability moves any rows left in that table onto mirror jobs due
-now when it starts, then drops the table.
+Older releases kept facet wakes on the root: first an index table,
+`cf_agents_facet_runs`, then mirror jobs `fibers:recover:<owner key>`. On
+its first start after the upgrade, a root's Fibers moves both onto facet
+wakes due at the same time and deletes them.
 
 ### Observability
 
