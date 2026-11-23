@@ -188,6 +188,16 @@ describe("event log", () => {
     ]);
   });
 
+  it("trims a log of batched blocks reading about the blocks it deletes, and takes a fractional limit", async () => {
+    const name = crypto.randomUUID();
+    // `fractional`: retention 5.5 events, batches of 10.
+    for (let i = 0; i < 4; i++) await stub(name).appendBatch("fractional", 10);
+    const rows = await stub(name).rows("fractional");
+    // 40 events in 4 blocks: trimmed back to within 5.5, newest block kept.
+    expect(rows).toEqual([{ seq_from: 30, seq_to: 40 }]);
+    expect(await stub(name).publish("fractional", "next")).toBe(41);
+  });
+
   it("sends batched events at once, stores them in batches, and replays the buffered tail", async () => {
     const name = crypto.randomUUID();
     const live = await connect(name);

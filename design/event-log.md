@@ -69,7 +69,7 @@ A log declared in a facet keeps its stream in the facet's own SQLite. Its follow
 
 - Every live event reads each connection's attachment to check its subscriptions. Cheap for a handful of connections per object; a cache would help an object with hundreds.
 - A crashed batch costs clients that saw its tail a full resync, even when nothing was in fact lost.
-- Retention deletes whole rows, so a log can hold up to one row more than its limits.
+- Retention waits for an eighth of slack and deletes whole blocks, so a log can hold up to an eighth more than its limits plus one flush (125 extra one-event rows at a 1,000-event limit).
 - Retention runs only for declared logs. Rows of a log a deploy stopped declaring stay in the tables until something deletes them.
 - The followed log names live in the connection's hibernation attachment beside user state, which the runtime caps at 2 KB. Keep log names short; a connection following many long-named logs can overflow it.
 

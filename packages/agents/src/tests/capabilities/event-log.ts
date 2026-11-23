@@ -67,6 +67,13 @@ export class EventLogObject extends DurableObject<Cloudflare.Env> {
     streams: this.#streams
   });
 
+  /** A fractional event retention (5.5) and batches of 10. */
+  readonly #fractional = declareEventLog(this.#webSockets, "fractional", {
+    streams: this.#streams,
+    retention: { maxEvents: 5.5 },
+    batching: { maxEvents: 10, maxDelayMs: 60_000 }
+  });
+
   /** Byte retention (300 KB) and the highest event ceiling (1.9 MB). */
   readonly #small = declareEventLog(this.#webSockets, "small", {
     streams: this.#streams,
@@ -96,6 +103,7 @@ export class EventLogObject extends DurableObject<Cloudflare.Env> {
     if (name === "feed") return this.#feed;
     if (name === "bare") return this.#bare;
     if (name === "small") return this.#small;
+    if (name === "fractional") return this.#fractional;
     if (name === "big") return this.#big;
     return this.#guarded;
   }
@@ -141,6 +149,14 @@ export class EventLogObject extends DurableObject<Cloudflare.Env> {
     } catch (error) {
       return error instanceof Error ? error.message : String(error);
     }
+  }
+
+  /** Append `count` events in one batch and close it (one block). */
+  async appendBatch(log: string, count: number): Promise<void> {
+    await this.lifecycle.start();
+    const batch = this.#log(log).batch();
+    for (let i = 0; i < count; i++) batch.append(i);
+    batch.close();
   }
 
   /** Publish an object whose `toJSON` gives a new value on every call. */

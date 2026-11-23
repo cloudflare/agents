@@ -883,8 +883,8 @@ export class Streams extends LifecycleCapability {
     }
     const { maxChunks, maxBytes } = retention;
     if (
-      totals.chunks <= maxChunks + Math.max(1, maxChunks >> 3) &&
-      totals.bytes <= maxBytes + Math.max(1, maxBytes >> 3)
+      totals.chunks <= maxChunks + Math.max(1, Math.floor(maxChunks / 8)) &&
+      totals.bytes <= maxBytes + Math.max(1, Math.floor(maxBytes / 8))
     ) {
       return;
     }
@@ -897,10 +897,15 @@ export class Streams extends LifecycleCapability {
     if (newest === undefined) return;
     let { chunks, bytes } = totals;
     let cut: number | undefined;
-    // Read the oldest blocks a page at a time until the rest is in limits:
-    // a page is the chunk excess (each block holds at least one chunk, so
-    // it never reads a block it will not delete), or 8 blocks when only
-    // bytes are over.
+    // Read the oldest blocks a page at a time until the rest is in limits.
+    // The first page is at most 8 blocks, and no more than the chunk
+    // excess (a block holds at least one chunk). After it, a page is the
+    // blocks the excess still needs at the sizes seen so far, so a log of
+    // one-event blocks and one of full batches both read about what they
+    // delete.
+    let seen = { blocks: 0, chunks: 0, bytes: 0 };
+    let limit =
+      chunks > maxChunks ? Math.min(8, Math.ceil(chunks - maxChunks)) : 8;
     pages: while (chunks > maxChunks || bytes > maxBytes) {
       const page = this.#sql<{ block: number; chunks: number; bytes: number }>`
         SELECT block, seq_to - seq_from AS chunks,
@@ -908,7 +913,7 @@ export class Streams extends LifecycleCapability {
         FROM cf_agents_stream_blocks
         WHERE stream_id = ${streamId} AND block > ${cut ?? -1}
           AND block < ${newest}
-        ORDER BY block ASC LIMIT ${Math.min(256, chunks > maxChunks ? chunks - maxChunks : 8)}
+        ORDER BY block ASC LIMIT ${limit}
       `;
       if (page.length === 0) break;
       for (const row of page) {
@@ -916,7 +921,21 @@ export class Streams extends LifecycleCapability {
         cut = row.block;
         chunks -= row.chunks;
         bytes -= row.bytes;
+        seen = {
+          blocks: seen.blocks + 1,
+          chunks: seen.chunks + row.chunks,
+          bytes: seen.bytes + row.bytes
+        };
       }
+      const need = Math.max(
+        chunks > maxChunks
+          ? (chunks - maxChunks) / (seen.chunks / seen.blocks || 1)
+          : 0,
+        bytes > maxBytes
+          ? (bytes - maxBytes) / (seen.bytes / seen.blocks || 1)
+          : 0
+      );
+      limit = Math.min(256, Math.max(1, Math.ceil(need)));
     }
     if (cut === undefined) return;
     this.#sql`
