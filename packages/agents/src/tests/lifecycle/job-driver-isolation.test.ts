@@ -39,6 +39,10 @@ class Jobs extends LifecycleCapability {
   reschedule(id: string, time: number) {
     return this.lifecycle.jobs.reschedule(id, time);
   }
+
+  cancel(id: string) {
+    return this.lifecycle.jobs.cancel(id);
+  }
 }
 
 const QUICK = { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 };
@@ -365,6 +369,76 @@ describe("job driver hold limit", () => {
   });
 });
 
+describe("memory-limit breaker and jobs without an owner", () => {
+  it("leaves an uninstalled owner's recovery-loop job alone when the breaker seals", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      class Oom extends LifecycleCapability {
+        constructor() {
+          super("oom-owner");
+        }
+        onJob(): void {
+          throw new Error(
+            "Durable Object's isolate exceeded its memory limit and was reset."
+          );
+        }
+        push(options: LifecycleJobPushOptions) {
+          return this.lifecycle.jobs.push(options);
+        }
+      }
+      const oom = new Oom();
+      const { lifecycle } = install(oom);
+      await lifecycle.start();
+      await oom.push({
+        id: "struck",
+        fn: "run",
+        time: Date.now() - 1,
+        recoveryLoop: true
+      });
+      // A recovery-loop row whose capability is not installed any more.
+      storage.sql.exec(
+        `INSERT INTO cf_agents_jobs (id, capability, fn, time, recovery_loop)
+         VALUES ('orphan-recovery', 'gone-owner', 'run', ?, 1)`,
+        Date.now() + 60_000
+      );
+      await storage.put("cf_agents:oom_alarm_strikes", 2);
+
+      await lifecycle.alarm().catch(() => {});
+
+      const ids = storage.sql
+        .exec<{ id: string }>("SELECT id FROM cf_agents_jobs ORDER BY id")
+        .toArray()
+        .map((row) => row.id);
+      // The struck loop is sealed; the ownerless row is kept.
+      expect(ids).toEqual(["orphan-recovery"]);
+    });
+  });
+});
+
+describe("exclusive jobs without an owner", () => {
+  it("do not hold back other owners' wakes", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const other = new Jobs("present-owner", []);
+      const { lifecycle } = install(other);
+      await lifecycle.start();
+      // Due before the missing owner's hold (at least a minute) ends.
+      const later = Date.now() + 30_000;
+      await other.push({ id: "ordinary", fn: "ok", time: later });
+      // An exclusive job left by a capability that is not installed now.
+      storage.sql.exec(
+        `INSERT INTO cf_agents_jobs (id, capability, fn, time, exclusive)
+         VALUES ('gone-exclusive', 'gone-owner', 'run', ?, 1)`,
+        Date.now() - 1
+      );
+
+      await lifecycle.alarm();
+
+      // The present owner's job sets the wake; the missing owner's exclusive
+      // job does not hold it back until that hold ends.
+      expect(await storage.getAlarm()).toBe(later);
+    });
+  });
+});
+
 describe("job driver staggered holds", () => {
   it("wakes for each held owner at its own hold's end, and lets an earlier ordinary job win", async () => {
     await withCapabilityHarness(async ({ install, storage }) => {
@@ -573,6 +647,83 @@ describe("job driver hold limit without onJobError", () => {
         [...storage.sql.exec("SELECT id FROM cf_agents_jobs")].map((r) => r.id)
       ).toEqual(["poison"]);
       expect(await storage.getAlarm()).not.toBeNull();
+    });
+  });
+});
+
+describe("job driver hold and a reused id", () => {
+  it("runs a free owner's job that took over a held owner's id mid-scan", async () => {
+    await withCapabilityHarness(async ({ install }) => {
+      const ran: string[] = [];
+      const held = new Jobs("retake-held", ran);
+      const free = new Jobs("retake-free", ran);
+      const { lifecycle } = install(held);
+      lifecycle.use(free);
+      await lifecycle.start();
+      await held.push({
+        id: "p",
+        fn: "poison",
+        time: Date.now() - 1,
+        retry: QUICK
+      });
+      await lifecycle.alarm().catch(() => {});
+      ran.length = 0;
+
+      // In the next scan, the free owner's first job cancels the held
+      // owner's "x" and takes the id over.
+      const now = Date.now();
+      await free.push({ id: "first", fn: "ok", time: now - 3 });
+      await held.push({ id: "x", fn: "ok", time: now - 2 });
+      free.onJob = async ({ job }: LifecycleJobContext) => {
+        ran.push(`free:${job.id}`);
+        if (job.id === "first") {
+          await held.cancel("x");
+          await free.push({ id: "x", fn: "ok", time: now - 2 });
+        }
+      };
+      await lifecycle.alarm();
+
+      expect(ran).toEqual(["free:first", "free:x"]);
+    });
+  });
+
+  it("does not run a held owner's job that took over an id mid-scan", async () => {
+    await withCapabilityHarness(async ({ install }) => {
+      const ran: string[] = [];
+      const held = new Jobs("reuse-held", ran);
+      const free = new Jobs("reuse-free", ran);
+      const { lifecycle } = install(held);
+      lifecycle.use(free);
+      await lifecycle.start();
+      await held.push({
+        id: "p",
+        fn: "poison",
+        time: Date.now() - 1,
+        retry: QUICK
+      });
+      await lifecycle.alarm().catch(() => {});
+      ran.length = 0;
+
+      // In the next scan, the free owner's first job cancels its own "x",
+      // and the held owner pushes a job under the same id.
+      const now = Date.now();
+      await free.push({ id: "first", fn: "ok", time: now - 3 });
+      await free.push({ id: "x", fn: "ok", time: now - 2 });
+      free.onJob = async ({ job }: LifecycleJobContext) => {
+        ran.push(`free:${job.id}`);
+        if (job.id === "first") {
+          await free.cancel("x");
+          await held.push({ id: "x", fn: "ok", time: now - 2 });
+        }
+      };
+      held.onJob = ({ job }: LifecycleJobContext) => {
+        ran.push(`held:${job.id}`);
+      };
+      await lifecycle.alarm();
+
+      expect(ran).toEqual(["free:first"]);
+      // Held back, not deleted: the held owner's job is still there.
+      expect(held.get("x")).toBeDefined();
     });
   });
 });

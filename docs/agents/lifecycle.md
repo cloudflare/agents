@@ -308,6 +308,12 @@ failure, so one bad item cannot block its owner forever. An owner without
 `onJobError()`, the host included, stays held for as long as the failure lasts:
 its job may be its only wake, so the Lifecycle does not end it.
 
+A job whose owning capability is not installed (removed by a deploy, or not
+constructed this time) is kept as it is and looked at again later, from a
+minute up to an hour apart, and runs once its owner is installed again. A
+capability you remove for good should delete its jobs when it goes, or each
+one keeps waking the object.
+
 An attempt that takes the isolate down (the CPU or wall-time limit, a reset)
 reports no error, so Lifecycle counts each attempt in the job's row before
 `onJob` runs and takes it off again when the attempt ends in a way the driver

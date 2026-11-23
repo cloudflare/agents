@@ -71,6 +71,9 @@ const MIN_UNREPORTED_ATTEMPTS = 3;
  */
 const MAX_HOLD_MS = 15 * 60_000;
 
+/** First wait before a job whose owner is not installed is looked at again. */
+const OWNERLESS_RETRY_MS = 60_000;
+
 /** Longest wait between attempts of a job whose attempts ran out. */
 const MAX_EXHAUSTED_BACKOFF_MS = 60 * 60_000;
 
@@ -105,6 +108,8 @@ function attemptsExhaustedError(row: JobStorageRow): Error {
 export type JobDeferral = {
   /** Each held owner with the time its hold ends. */
   readonly holds: ReadonlyArray<readonly [owner: string, until: number]>;
+  /** Held owners that are held because they are not installed. */
+  readonly ownerless?: readonly string[];
 };
 
 /** The dispatch hooks one job owner exposes to the driver. */
@@ -211,6 +216,10 @@ export class JobDriver {
    * them too, and an eviction just lets them run again.
    */
   readonly #heldOwners = new Map<string, number>();
+  /** Held owners whose hold is for not being installed. */
+  readonly #ownerlessOwners = new Set<string>();
+  /** Owners already reported missing in this isolate. */
+  readonly #reportedOwnerless = new Set<string>();
   /**
    * Work handed off by alarm-driven jobs that has not settled yet. While it
    * is non-empty the alarm domain is not quiescent, so a clean alarm must not
@@ -407,10 +416,19 @@ export class JobDriver {
   currentDeferral(): JobDeferral | undefined {
     const now = Date.now();
     for (const [owner, until] of this.#heldOwners) {
-      if (until <= now) this.#heldOwners.delete(owner);
+      if (until <= now) {
+        this.#heldOwners.delete(owner);
+        this.#ownerlessOwners.delete(owner);
+      }
     }
     if (this.#heldOwners.size === 0) return undefined;
-    return { holds: [...this.#heldOwners] };
+    const ownerless = [...this.#ownerlessOwners].filter((owner) =>
+      this.#heldOwners.has(owner)
+    );
+    return {
+      holds: [...this.#heldOwners],
+      ...(ownerless.length > 0 && { ownerless })
+    };
   }
 
   /**
@@ -449,9 +467,24 @@ export class JobDriver {
       // was taken. A row that is gone or no longer due belongs to that
       // newer intent — skip it (the final re-arm owns any future wake). A
       // row that changed but is still due dispatches with its fresh data.
+      // The row is read again before the hold check: a cancelled id can be
+      // pushed again by another owner, whose hold is what counts. That costs
+      // one row read per due job of a held owner.
       const row = this.#options.queue.dueRow(stale.id, nowMs);
       if (!row) continue;
       if (skip.has(row.capability)) continue;
+
+      const dispatch = await this.#options.resolveDispatch(row.capability);
+      if (!dispatch) {
+        // Keep it, and do not claim it: the owner may be installed again (a
+        // rollback, a library constructed conditionally), and its job may be
+        // its only record of the work. Its row is left as it is (time,
+        // attempts, hold), so its owner's order and history survive; the
+        // owner is held back in memory, longer the older the job.
+        this.#holdOwnerless(row);
+        skip.add(row.capability);
+        continue;
+      }
 
       let takeover = false;
       if (row.singleflight === 1 && row.running === 1) {
@@ -474,7 +507,7 @@ export class JobDriver {
       // sets feeds single-flight skipping and hung recovery.
       const claim = this.#options.queue.claim(row.id, nowMs, takeover);
       try {
-        const failure = await this.#driveJob(row, claim);
+        const failure = await this.#driveJob(row, claim, dispatch);
         if (failure) {
           deferred ??= { failure, owners: new Set() };
           deferred.owners.add(row.capability);
@@ -483,6 +516,7 @@ export class JobDriver {
             row.capability,
             Date.now() + DEADMAN_ALARM_DELAY_MS
           );
+          this.#ownerlessOwners.delete(row.capability);
         }
       } finally {
         this.#options.queue.release(claim);
@@ -511,26 +545,25 @@ export class JobDriver {
    */
   async #driveJob(
     row: JobStorageRow,
-    claim: JobClaim
+    claim: JobClaim,
+    dispatch: JobDispatch
   ): Promise<AttributedPlatformFailure | undefined> {
-    const { queue, resolveDispatch, disabled } = this.#options;
+    const { queue, disabled } = this.#options;
     // Whether the job is still the one this dispatch claimed: no cancel,
     // push, reschedule or hung takeover changed it since.
     const owned = () => queue.isCurrent(claim);
     const job = jobFromRow(row);
-    const dispatch = await resolveDispatch(row.capability);
-    if (!dispatch) {
-      console.error(
-        `No installed capability or host handler for job ${row.id} ` +
-          `(owner ${JSON.stringify(row.capability)}); dropping it`
-      );
-      queue.delete(row.id);
-      return undefined;
-    }
-
     const maxAttempts = job.retry?.maxAttempts ?? DEFAULT_JOB_RETRY.maxAttempts;
     const prior = row.attempts ?? 0;
     const unreportedLimit = Math.max(maxAttempts, MIN_UNREPORTED_ATTEMPTS);
+    if (prior >= unreportedLimit) {
+      this.#emitSafely("job:exhausted", {
+        capability: row.capability,
+        fn: row.fn,
+        id: row.id,
+        attempts: prior
+      });
+    }
     if (prior >= unreportedLimit && dispatch.onJobError) {
       // Every attempt so far ended with its isolate; running it again would
       // most likely end the same way. The owner decides what happens.
@@ -635,13 +668,15 @@ export class JobDriver {
       );
     } catch (error) {
       if (disabled()) return undefined;
+      let heldForMs = 0;
       const holdSpent =
         isPlatformFailure(error) &&
         dispatch.onJobError !== undefined &&
         !isDurableObjectMemoryLimitReset(error) &&
         !isDurableObjectResetError(error) &&
         owned() &&
-        Date.now() - queue.markHeld(row.id, Date.now()) >= MAX_HOLD_MS;
+        (heldForMs = Date.now() - queue.markHeld(row.id, Date.now())) >=
+          MAX_HOLD_MS;
       if (isPlatformFailure(error) && !holdSpent) {
         // Carry the row out with the error rather than through a shared
         // field: an overlapping alarm's own #driveJob may already be
@@ -690,6 +725,12 @@ export class JobDriver {
       // that has held its owner for MAX_HOLD_MS: the owner observes it and
       // decides advancement; default is completion.
       if (holdSpent) {
+        this.#emitSafely("job:hold_limit", {
+          capability: row.capability,
+          fn: row.fn,
+          id: row.id,
+          heldForMs
+        });
         console.error(
           `Job ${row.id} (${row.capability}/${row.fn}) kept failing with ` +
             `platform errors for ${MAX_HOLD_MS / 60_000} minutes; ` +
@@ -709,6 +750,42 @@ export class JobDriver {
     if (outcome === SUPERSEDED) return undefined;
     queue.applyOutcome(claim, outcome ?? undefined);
     return undefined;
+  }
+
+  /**
+   * Hold back an owner that is not installed, without writing to its jobs.
+   * The wait grows with the job's age, from a minute to an hour; an
+   * eviction forgets it and the next alarm looks again.
+   */
+  #holdOwnerless(row: JobStorageRow): void {
+    const ageMs = Date.now() - row.created_at * 1000;
+    const retryInMs = Math.min(
+      MAX_EXHAUSTED_BACKOFF_MS,
+      Math.max(OWNERLESS_RETRY_MS, Math.floor(ageMs / 2))
+    );
+    this.#heldOwners.set(row.capability, Date.now() + retryInMs);
+    this.#ownerlessOwners.add(row.capability);
+    if (this.#reportedOwnerless.has(row.capability)) return;
+    this.#reportedOwnerless.add(row.capability);
+    console.error(
+      `No installed capability or host handler for job ${row.id} ` +
+        `(owner ${JSON.stringify(row.capability)}); keeping it and ` +
+        `looking again in ${Math.round(retryInMs / 1000)}s`
+    );
+    this.#emitSafely("job:owner_missing", {
+      capability: row.capability,
+      fn: row.fn,
+      id: row.id
+    });
+  }
+
+  /** Best-effort telemetry: never blocks or fails a dispatch. */
+  #emitSafely(type: string, payload: unknown): void {
+    try {
+      this.#options.emit(type, payload);
+    } catch {
+      // telemetry never blocks the dispatch
+    }
   }
 
   #warnBacklog(due: ReadonlyArray<JobStorageRow>): void {
@@ -749,6 +826,20 @@ export class JobDriver {
     } catch {
       // a stale strike only costs one extra tolerated spike later
     }
+  }
+
+  /** Of `owners`, those with no installed capability or host handler. */
+  async #ownersNotInstalled(owners: readonly string[]): Promise<string[]> {
+    const missing: string[] = [];
+    for (const owner of new Set(owners)) {
+      // An owner that cannot be resolved (its start failed) counts as
+      // missing too: its jobs are left alone.
+      const dispatch = await this.#options
+        .resolveDispatch(owner)
+        .catch(() => undefined);
+      if (!dispatch) missing.push(owner);
+    }
+    return missing;
   }
 
   /**
@@ -876,8 +967,12 @@ export class JobDriver {
     // runs afterward, when the loop is already broken, and uses this snapshot
     // only to terminalize durable state owned outside the alarm host.
     let purgedRecoveryLoopJobs: LifecycleJob[] | undefined;
+    // A job whose owner is not installed is left untouched (rule 6): it is
+    // no part of a loop that runs, and its owner may come back to it.
+    let ownerless: string[] = [];
     try {
-      if (sealed) purgedRecoveryLoopJobs = queue.recoveryLoopJobs();
+      ownerless = await this.#ownersNotInstalled(queue.recoveryLoopOwners());
+      if (sealed) purgedRecoveryLoopJobs = queue.recoveryLoopJobs(ownerless);
     } catch {
       // best-effort at a failure boundary
     }
@@ -887,9 +982,9 @@ export class JobDriver {
       // would re-trigger it on the next wake, so they back off (or purge)
       // together with the row that struck.
       if (sealed) {
-        queue.purgeRecoveryLoopJobs();
+        queue.purgeRecoveryLoopJobs(ownerless);
       } else if (nextTime !== undefined) {
-        queue.delayRecoveryLoopJobs(nextTime);
+        queue.delayRecoveryLoopJobs(nextTime, ownerless);
       }
     } catch {
       // best-effort at a failure boundary
