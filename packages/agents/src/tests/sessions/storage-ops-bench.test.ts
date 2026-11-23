@@ -123,15 +123,16 @@ describe("Sessions storage-ops benchmark", () => {
       async (instance: SessionBenchObject) => {
         // An owner inside the compacted span is hidden behind the overlay in
         // either direction. The walk reaches the span's end, plans the prefix
-        // by id (one row per step, no byte subqueries) and stops at the
-        // overlay: bounded well under the full read, which pays the sized walk
-        // and hydrates everything.
+        // by id (a few rows per step, no byte subqueries, no content for
+        // the hidden rows) and stops at the overlay: under the full read,
+        // which pays the sized walk and hydrates every visible row.
         const hidden = await instance.benchOwnerLookup(200, {
           ownerFromLeaf: 100,
           compactedPrefix: 150
         });
         expect(hidden.found).toBeNull();
-        expect(hidden.newestFirst).toBeLessThan(hidden.fullRead / 2);
+        expect(hidden.newestFirst).toBeLessThan(200 * 4);
+        expect(hidden.newestFirst).toBeLessThan(hidden.fullRead);
       }
     );
   });
