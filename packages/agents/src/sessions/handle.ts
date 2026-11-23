@@ -176,15 +176,6 @@ export class Session {
   }
 
   /**
-   * @internal Sibling-package support, not a public API. How many rows the
-   * stored path holds, rows under an overlay included, at any length.
-   */
-  async internal_storedPathLength(): Promise<number> {
-    await this.#ready();
-    return this.#core.storedPathLength(this.sessionId);
-  }
-
-  /**
    * @internal Sibling-package support, not a public API. A page of the
    * stored path from the newest row back: depths `skip` to
    * `skip + limit - 1`, rows under an overlay included; with `after`, counted

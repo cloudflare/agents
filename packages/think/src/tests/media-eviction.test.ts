@@ -140,6 +140,22 @@ describe("mediaEviction — aged media leaves the conversation (#1710)", () => {
     expect(file?.byteLength).toBe(PAYLOAD_BYTES);
   });
 
+  it("starts a pass where the last one got to, so it re-reads only new rows", async () => {
+    const agent = (await evictionAgent(uniqueName("evict-cursor"))) as Awaited<
+      ReturnType<typeof evictionAgent>
+    > & {
+      evictionPassRowsForTest(
+        count: number
+      ): Promise<{ first: number; second: number }>;
+    };
+    await agent.setMediaEvictionForTest(AGED_POLICY);
+    const { first, second } = await agent.evictionPassRowsForTest(300);
+    // The first pass counts the path and examines every aged row.
+    expect(first).toBeGreaterThanOrEqual(300);
+    // The second reads from the leaf down to the first pass's cursor.
+    expect(second).toBeLessThan(40);
+  });
+
   it("evicts a payload larger than one row, leaving the bytes in one place", async () => {
     const agent = await evictionAgent(uniqueName("evict-split"));
     // Seed before enabling the policy: an append with the policy on would

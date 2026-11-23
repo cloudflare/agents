@@ -374,13 +374,11 @@ interface MediaEvictionPassHost {
   agedRowsHiddenFromCache(): boolean;
   /** Stored content bytes the last hydration measured, if known. */
   storedBytes(): number | null;
-  /** Rows on the stored path, rows under an overlay included. */
-  storedPathLength(): Promise<number>;
-  /** A page of the stored path from the newest row back, with sizes. */
+  /** A page of the stored path from the newest row back, sizes with `measure`. */
   storedPathRows(options: {
     skip: number;
     limit: number;
-    measure: true;
+    measure?: boolean;
     after?: string;
   }): Promise<ReadonlyArray<{ id: string; bytes: number }>>;
   readMessage(id: string): Promise<UIMessage | null>;
@@ -398,6 +396,13 @@ interface MediaEvictionPassHost {
    */
   queueRouted(): Promise<unknown>;
 }
+
+/**
+ * The newest aged row a completed pass examined, and its position from the
+ * root: one KV key, written when a pass moves it.
+ */
+const CURSOR_KEY = "think-media-eviction:cursor";
+type EvictionCursor = { id: string; index: number };
 
 /** Aged rows one stored-path read returns. */
 const MEDIA_EVICTION_PAGE_ROWS = 256;
@@ -442,6 +447,8 @@ export class MediaEvictionPasses extends LifecycleCapability {
    * that grows a cached row clears it outright ({@link invalidate}).
    */
   #fruitless: { storedBytes: number; appendsSince: number } | null = null;
+  /** A row grew: the durable cursor no longer vouches for what is below it. */
+  #cursorStale = false;
 
   constructor(host: MediaEvictionPassHost) {
     super("think-media-eviction");
@@ -471,6 +478,7 @@ export class MediaEvictionPasses extends LifecycleCapability {
   /** A cached row grew, so an aged row may now hold a payload. */
   invalidate(): void {
     this.#fruitless = null;
+    this.#cursorStale = true;
   }
 
   /**
@@ -575,10 +583,42 @@ export class MediaEvictionPasses extends LifecycleCapability {
     };
     try {
       const files = this.#host.openFiles();
-      // The aged rows are the stored path past the newest `keep`, read a
-      // page at a time from the cutoff back, so a pass holds one page
-      // whatever the path's length.
-      const total = await this.#host.storedPathLength();
+      // Where earlier passes got to: the newest aged row they examined, and
+      // its position from the root. Rows at or below it have been examined
+      // (and evicted or left), so a pass reads from the leaf down to it and
+      // no further: a restart re-reads only what was added since.
+      const storage = this.lifecycleServices?.storage;
+      if (this.#cursorStale) {
+        await storage?.delete(CURSOR_KEY);
+        this.#cursorStale = false;
+      }
+      const cursor = await storage?.get<EvictionCursor>(CURSOR_KEY);
+      // Count the rows above the cursor (ids only, one page at a time). The
+      // cutoff needs the path's length; the cursor's position stands in for
+      // everything below it. Without a cursor on this path (the first pass,
+      // a branch switch, a deleted row) the walk counts to the root.
+      let above = 0;
+      let reached = false;
+      // Pages start small and grow: the cursor is usually a few rows down.
+      for (let after: string | undefined, limit = 32; ;) {
+        const page = await this.#host.storedPathRows(
+          after === undefined ? { skip: 0, limit } : { skip: 0, limit, after }
+        );
+        limit = Math.min(limit * 4, MEDIA_EVICTION_PAGE_ROWS);
+        if (page.length === 0) break;
+        const at = cursor ? page.findIndex((row) => row.id === cursor.id) : -1;
+        if (at >= 0) {
+          above += at;
+          reached = true;
+          break;
+        }
+        above += page.length;
+        after = page[page.length - 1].id;
+      }
+      // A delete below the cursor makes `total` too large, which can only
+      // move the cut within one truncation step (`keep` depends on the
+      // length modulo the step and never drops below `keepRecentMessages`).
+      const total = reached && cursor ? cursor.index + 1 + above : above;
       const keep =
         total -
         mediaEvictionCutoff(
@@ -586,18 +626,30 @@ export class MediaEvictionPasses extends LifecycleCapability {
           config.keepRecentMessages,
           this.#host.truncationStep()
         );
+      // The aged rows this pass must examine: from the cutoff down to the
+      // cursor, or to the root.
+      const end = reached ? above : total;
+      let newestAged: string | undefined;
 
       let processed = 0;
       // The first page skips the newest `keep` rows; each later one starts
       // below the last row read, so a pass walks the path once.
       let after: string | undefined;
-      pages: for (let read = keep; read < total;) {
-        const page = await this.#host.storedPathRows(
-          after === undefined
-            ? { skip: keep, limit: MEDIA_EVICTION_PAGE_ROWS, measure: true }
-            : { skip: 0, limit: MEDIA_EVICTION_PAGE_ROWS, measure: true, after }
-        );
+      pages: for (let read = keep; read < end;) {
+        const page = (
+          await this.#host.storedPathRows(
+            after === undefined
+              ? { skip: keep, limit: MEDIA_EVICTION_PAGE_ROWS, measure: true }
+              : {
+                  skip: 0,
+                  limit: MEDIA_EVICTION_PAGE_ROWS,
+                  measure: true,
+                  after
+                }
+          )
+        ).slice(0, end - read);
         if (page.length === 0) break;
+        newestAged ??= page[0].id;
         read += page.length;
         after = page[page.length - 1].id;
         for (const row of page) {
@@ -633,6 +685,15 @@ export class MediaEvictionPasses extends LifecycleCapability {
         }
       }
 
+      // Every aged row down to the old cursor was examined: move it up to the
+      // newest aged row, one write. A pass that stopped at
+      // `maxRowsPerPass` leaves it where it was.
+      if (storage && newestAged !== undefined && !totals.backlogRemains) {
+        await storage.put(CURSOR_KEY, {
+          id: newestAged,
+          index: total - 1 - keep
+        } satisfies EvictionCursor);
+      }
       const storedBytes = this.#host.storedBytes();
       if (totals.messages > 0) {
         this.#fruitless = null;

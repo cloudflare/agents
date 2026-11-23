@@ -264,8 +264,13 @@ describe("Sessions path reads cut by a window", () => {
         ...Array.from({ length: 20 }, (_, i) => `m${81 + i}`)
       ]);
       const stats = await session.getHistoryRowStats();
+      // The 20 newest rows and the summary, each charged 1 KiB on top.
       const budget =
-        stats.slice(-20).reduce((sum, row) => sum + row.bytes, 0) + 1 + 2_000;
+        stats.slice(-20).reduce((sum, row) => sum + row.bytes, 0) +
+        21 * 1024 +
+        1 +
+        // Room for a few rows of the head (about 1 KB each, plus 1 KiB).
+        6_000;
       const recent = await session.getRecentHistory(budget);
       expect(recent.messages.map((m) => m.id)).toEqual(
         full.slice(full.length - recent.messages.length)
@@ -286,7 +291,8 @@ describe("Sessions path reads cut by a window", () => {
       expect(full[0]).toBe(`compaction_${longer.id}`);
       expect(full).toHaveLength(21);
       const stats = await session.getHistoryRowStats();
-      const budget = stats.slice(-10).reduce((sum, row) => sum + row.bytes, 0);
+      const budget =
+        stats.slice(-10).reduce((sum, row) => sum + row.bytes, 0) + 10 * 1024;
       const recent = await session.getRecentHistory(budget);
       expect(recent.messages.map((m) => m.id)).toEqual(full.slice(-10));
     });
@@ -298,9 +304,9 @@ describe("Sessions path reads cut by a window", () => {
       seed(sqlOf(instance), 1, 2000, 1000);
       const session = instance.sessions.session();
       await session.addCompaction("s".repeat(50_000), "m1", "m1990");
-      const recent = await session.getRecentHistory(20 * 1024);
-      // Summary plus the rows after it would be about 60 KB: the window
-      // starts after the overlay instead.
+      // Ten rows of about 1 KB, each charged 1 KiB on top: about 30 KB.
+      const recent = await session.getRecentHistory(30 * 1024);
+      // The summary (50 KB) does not fit after them.
       expect(recent.messages.map((m) => m.id)).toEqual(
         Array.from({ length: 10 }, (_, i) => `m${1991 + i}`)
       );

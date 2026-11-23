@@ -246,7 +246,6 @@ describe("MediaEvictionPasses", () => {
       cachedMessages: () => [],
       agedRowsHiddenFromCache: () => false,
       storedBytes: () => null,
-      storedPathLength: async () => 0,
       storedPathRows: async () => [],
       readMessage: async () => null,
       openFiles: () => ({ write: async () => {} }),
@@ -275,7 +274,6 @@ describe("MediaEvictionPasses", () => {
       cachedMessages: () => [],
       agedRowsHiddenFromCache: () => false,
       storedBytes: () => null,
-      storedPathLength: async () => rows.length,
       // The stored path from the newest row back.
       storedPathRows: async ({ skip, limit, after }) => {
         const fromLeaf = [...rows].reverse();

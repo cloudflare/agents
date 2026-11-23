@@ -203,11 +203,6 @@ export class ThinkSession {
     return (await this.#handle.getHistoryRowStats(leafId)).length;
   }
 
-  /** @internal Stored rows on the path at any length (media eviction). */
-  internal_storedPathLength(): Promise<number> {
-    return this.#handle.internal_storedPathLength();
-  }
-
   /** @internal A page of the stored path from the newest row back (media eviction). */
   internal_storedPathRows(options: {
     skip: number;

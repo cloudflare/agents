@@ -1136,7 +1136,8 @@ describe("Sessions capability", () => {
       const perRow = stats[0].bytes;
       expect(stats[0].tokenEstimate).toBeGreaterThan(0);
 
-      const recent = await session.getRecentHistory(perRow * 2 + 10);
+      // Each message is charged its stored bytes plus 1 KiB.
+      const recent = await session.getRecentHistory((perRow + 1024) * 2 + 10);
       expect(recent.messages).toHaveLength(2);
       expect(recent.truncated).toBe(true);
       expect(recent.totalContentBytes).toBe(
@@ -1176,7 +1177,7 @@ describe("Sessions capability", () => {
       const lastFive = (await session.getHistoryRowStats())
         .slice(-5)
         .reduce((sum, row) => sum + row.bytes, 0);
-      const budgeted = await session.getRecentHistory(lastFive);
+      const budgeted = await session.getRecentHistory(lastFive + 5 * 1024);
       expect(budgeted.messages.map((m) => m.id)).toEqual([
         "cap-9997",
         "cap-9998",
@@ -1495,7 +1496,7 @@ describe("Sessions capability", () => {
 
         // A budget that covers the big row's FULL size reaches it.
         const generous = await session.getRecentHistory(
-          bigRow.bytes + leafRow.bytes + 64
+          bigRow.bytes + leafRow.bytes + 2 * 1024 + 64
         );
         expect(generous.messages.map((m) => m.id)).toEqual(["h1", "h2"]);
 

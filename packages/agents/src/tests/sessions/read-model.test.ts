@@ -417,7 +417,6 @@ describe("Sessions reads past the root-first bound", () => {
       expect(recent.truncated).toBe(true);
       expect(recent.messages.at(-1)?.id).toBe("m200005");
       // Callers that count stored rows (retention, media eviction) page.
-      expect(await session.internal_storedPathLength()).toBe(200_005);
       expect(
         (
           await session.internal_storedPathRows({ skip: 200_000, limit: 10 })
@@ -441,6 +440,23 @@ describe("Sessions reads past the root-first bound", () => {
         "m200001",
         "m200000"
       ]);
+    });
+  }, 120_000);
+});
+
+describe("Sessions budgeted reads bound the message count", () => {
+  it("charges each message 1 KiB beyond its stored bytes", async () => {
+    const stub = await started();
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      // 10,000 messages of a few dozen stored bytes.
+      seed(sqlOf(instance), 1, 10_000);
+      const session = instance.sessions.session();
+      const recent = await session.getRecentHistory(1024 * 1024);
+      // Stored bytes alone would admit all 10,000.
+      expect(recent.messages.length).toBeLessThanOrEqual(1024);
+      expect(recent.messages.length).toBeGreaterThan(900);
+      expect(recent.truncated).toBe(true);
+      expect(recent.messages.at(-1)?.id).toBe("m10000");
     });
   }, 120_000);
 });

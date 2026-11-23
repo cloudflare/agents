@@ -14243,6 +14243,44 @@ export class ThinkMediaEvictionAgent extends Think {
   }
 
   /** One bounded Think-owned eviction pass. */
+  /**
+   * Rows of the stored path that two consecutive passes read, after `count`
+   * text messages: the second pass starts from where the first got to.
+   */
+  async evictionPassRowsForTest(count: number): Promise<{
+    first: number;
+    second: number;
+  }> {
+    for (let i = 0; i < count; i++) {
+      await this.appendMessageToHistory({
+        id: `text-${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `message ${i}` }]
+      } as UIMessage);
+    }
+    const session = this.session as unknown as {
+      internal_storedPathRows: (
+        options: Record<string, unknown>
+      ) => Promise<unknown[]>;
+    };
+    const rows = session.internal_storedPathRows.bind(session);
+    let read = 0;
+    session.internal_storedPathRows = async (options) => {
+      const page = await rows(options);
+      read += page.length;
+      return page;
+    };
+    try {
+      await this._evictAgedMediaBestEffort();
+      const first = read;
+      read = 0;
+      await this._evictAgedMediaBestEffort();
+      return { first, second: read };
+    } finally {
+      session.internal_storedPathRows = rows;
+    }
+  }
+
   async runEvictionForTest(): Promise<{
     messages: number;
     parts: number;
@@ -14426,16 +14464,22 @@ export class ThinkMediaEvictionAutoAgent extends ThinkMediaEvictionAgent {
     // The refresh's own pass runs and records nothing aged.
     await new Promise((resolve) => setTimeout(resolve, 150));
 
-    // Hold the next pass open AFTER its path-length read, so it finishes
-    // fruitless on a length that predates the appends below.
+    // Hold the next pass open AFTER its first stored-path read, so it
+    // finishes fruitless on rows that predate the appends below.
     const session = this.session as unknown as {
-      internal_storedPathLength: () => Promise<number>;
+      internal_storedPathRows: (
+        options: Record<string, unknown>
+      ) => Promise<unknown>;
     };
-    const length = session.internal_storedPathLength.bind(session);
-    session.internal_storedPathLength = async () => {
-      const total = await length();
-      await new Promise((resolve) => setTimeout(resolve, 150));
-      return total;
+    const rows = session.internal_storedPathRows.bind(session);
+    let held = false;
+    session.internal_storedPathRows = async (options) => {
+      const page = await rows(options);
+      if (!held) {
+        held = true;
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      }
+      return page;
     };
     const internal = this as unknown as {
       _cfMediaEviction: { running: boolean };

@@ -68,6 +68,17 @@ const COMPACTIONS_COLUMNS = `
 /** Steps one walk statement takes before the reader asks for the next batch. */
 const WALK_BATCH_STEPS = 512;
 
+/**
+ * What a byte-budgeted read charges each message beyond its stored bytes.
+ * A parsed message holds its JSON as UTF-16 strings plus the objects for
+ * the message and its parts, so a budget over stored bytes alone admits
+ * any number of tiny messages: 32 MiB took 190,570 messages of 100 bytes
+ * on a deployment, a prompt the object could not build without being
+ * reset. Charging 1 KiB per message bounds the count as well: at most
+ * 32,768 messages under 32 MiB. A bound, stated here, not a measurement.
+ */
+const RECENT_MESSAGE_OVERHEAD_BYTES = 1024;
+
 /** First batch of a byte-budgeted read: most budgets stop within it. */
 const RECENT_FIRST_BATCH_STEPS = 64;
 
@@ -1211,30 +1222,6 @@ export class SessionsCore {
   }
 
   /**
-   * How many rows the stored path holds, rows under an overlay included: a
-   * count over an id walk, holding nothing. For callers that count stored
-   * rows on a path of any length (media eviction's cutoff).
-   */
-  storedPathLength(sessionId: string, leafId?: string | null): number {
-    const leaf = this.#resolveLeafId(sessionId, leafId);
-    if (!leaf) return 0;
-    return (
-      this.io.sql<{ n: number }>(
-        `WITH RECURSIVE path(id, parent_id) AS (
-          SELECT id, parent_id FROM cf_agents_session_messages
-          WHERE session_id = ? AND id = ?
-          UNION ALL
-          SELECT m.id, m.parent_id FROM path p
-          CROSS JOIN cf_agents_session_messages m
-            ON m.session_id = ? AND m.id = p.parent_id
-        )
-        SELECT COUNT(*) AS n FROM path`,
-        [sessionId, leaf, sessionId]
-      )[0]?.n ?? 0
-    );
-  }
-
-  /**
    * A page of the stored path from the leaf back: the rows at depth `skip`
    * to `skip + limit - 1` (the leaf is depth 0), or counted from the parent
    * of `after`, rows under an overlay included, legacy hidden overlay rows
@@ -1499,7 +1486,8 @@ export class SessionsCore {
   /**
    * Byte-budgeted read of the most recent visible messages: the walk from
    * the leaf, until the next message would pass `maxContentBytes`. An
-   * overlay counts as its summary. The newest message is always returned,
+   * overlay counts as its summary, and every message is charged
+   * `RECENT_MESSAGE_OVERHEAD_BYTES` on top of its stored bytes. The newest message is always returned,
    * even alone over the budget, since returning nothing is worse. There is
    * no message-count floor: one used to admit rows regardless of size.
    * `totalContentBytes` is the size of the visible path. Once the budget
@@ -1527,12 +1515,13 @@ export class SessionsCore {
         const bytes = step.bytes ?? 0;
         totalContentBytes += bytes;
         if (truncated) continue;
-        if (window.length > 0 && used + bytes > maxContentBytes) {
+        const cost = bytes + RECENT_MESSAGE_OVERHEAD_BYTES;
+        if (window.length > 0 && used + cost > maxContentBytes) {
           truncated = true;
           continue;
         }
         window.push(step);
-        used += bytes;
+        used += cost;
       }
       if (truncated) break;
     }
