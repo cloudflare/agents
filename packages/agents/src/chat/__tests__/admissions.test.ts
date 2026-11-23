@@ -1,10 +1,10 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { describe, expect, it } from "vitest";
+import { splitPieces } from "../../internal/platform-limits";
 import {
   chatRecoveryNames,
   createChatAdmissionStore,
   newUserMessageIds,
-  splitPieces,
   type ChatAdmissionRecord,
   type HeldChatMessage
 } from "../admissions";

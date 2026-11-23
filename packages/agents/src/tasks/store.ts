@@ -5,12 +5,9 @@
  * machine; every byte that touches SQLite goes through here.
  */
 
+import { splitPieces } from "../internal/platform-limits";
 import { SqlError } from "../sql-error";
-import {
-  deserializeTaskValue,
-  INLINE_INPUT_UNITS,
-  splitPieces
-} from "./serialization";
+import { deserializeTaskValue, INLINE_INPUT_UNITS } from "./serialization";
 import type {
   TaskJson,
   TaskRecord,
