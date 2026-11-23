@@ -133,6 +133,11 @@ export class SessionsCore {
   readonly #listeners = new Set<SessionChangeListener>();
   readonly #tails = new Map<string, Tail>();
   readonly #pathTokens = new Map<string, PathTokens>();
+  /**
+   * Per session, per overlay id: whether its start is an ancestor of its
+   * end. One boolean per stored overlay; cleared by delete and clear.
+   */
+  readonly #overlayAncestry = new Map<string, Map<string, boolean>>();
   readonly #attachments: AttachmentStore;
   #tablesEnsured = false;
   /** True once the FTS index exists; it is built on the first `search()`. */
@@ -285,6 +290,7 @@ export class SessionsCore {
    */
   migrateLegacy(): boolean {
     this.#pathTokens.clear();
+    this.#overlayAncestry.clear();
     let complete = true;
     const drop = (name: string): void => {
       if (this.#tableExists(name)) this.io.sqlWrite(`DROP TABLE ${name}`, []);
@@ -855,56 +861,230 @@ export class SessionsCore {
   }
 
   /**
-   * Plan the overlays over a path window, root → leaf. A window that does
-   * not reach the root (`cut`: the depth cap or a byte budget stopped it)
-   * also applies an overlay that ends inside it but starts before it, from
-   * the window's first row; before, such an overlay was dropped and the raw
-   * rows came back (#2871). A start counts as before the window only when
-   * its row exists and is older than the window's first row, so an anchor
-   * on another branch or a deleted row stays inert, as in a full read.
-   * `clippedFromRoot` says the applied clipped overlay starts at a root row:
-   * nothing older than the window is missing.
+   * Plan the overlays over a path window, root → leaf, with the result a
+   * read of the whole path would give, clipped to the window. A window that
+   * does not reach the root (`cut`: the depth cap or a byte budget stopped
+   * it) can start inside an overlay; before, such an overlay was dropped
+   * and the raw rows came back (#2871).
+   *
+   * Such an overlay applies only if its start is an ancestor of its end
+   * (checked once per overlay and remembered until a delete), and only if
+   * no other overlay that the full read would apply first covers its start.
+   * When another overlay might (by `seq`), the walk goes on up the real
+   * parents until it holds every start that matters and plans over that
+   * range; `compact()` never writes such overlaps, so this is rare.
+   * `complete` says nothing older than the window is missing: it is not
+   * cut, or the overlay covering its first row starts at a root.
    */
   #planWindow(
     sessionId: string,
     ids: readonly string[],
     cut: boolean,
     compactions: readonly StoredCompaction[] = this.getCompactions(sessionId)
-  ): { spans: OverlaySpan[]; clippedFromRoot: boolean } {
-    const inWindow = cut ? new Set(ids) : null;
-    const outsideStarts = inWindow
-      ? compactions
-          .filter(
-            (c) => inWindow.has(c.toMessageId) && !inWindow.has(c.fromMessageId)
-          )
-          .map((c) => c.fromMessageId)
-      : [];
-    if (outsideStarts.length === 0) {
-      return { spans: planOverlays(ids, compactions), clippedFromRoot: false };
-    }
-    const rows = this.io.sql<{
-      id: string;
-      seq: number;
-      parent_id: string | null;
-    }>(
-      `SELECT id, seq, parent_id FROM cf_agents_session_messages
-       WHERE session_id = ? AND id IN (SELECT value FROM json_each(?))`,
-      [sessionId, JSON.stringify([ids[0], ...outsideStarts])]
+  ): { spans: OverlaySpan[]; complete: boolean } {
+    if (!cut) return { spans: planOverlays(ids, compactions), complete: true };
+    const inWindow = new Set(ids);
+    const candidates = compactions.filter(
+      (c) => inWindow.has(c.toMessageId) && !inWindow.has(c.fromMessageId)
     );
-    const firstSeq = rows.find((row) => row.id === ids[0])?.seq ?? -Infinity;
-    const before = new Map<string, number>();
-    const roots = new Set<string>();
-    for (const row of rows) {
-      if (row.id === ids[0] || row.seq >= firstSeq) continue;
-      before.set(row.id, row.seq);
-      if (row.parent_id === null) roots.add(row.id);
+    if (candidates.length === 0) {
+      return { spans: planOverlays(ids, compactions), complete: false };
     }
-    const spans = planOverlays(ids, compactions, before);
-    const from = spans[0]?.compaction.fromMessageId;
-    return {
-      spans,
-      clippedFromRoot: from !== undefined && before.has(from) && roots.has(from)
-    };
+    const anchors = new Map(
+      this.io
+        .sql<{ id: string; seq: number; parent_id: string | null }>(
+          `SELECT id, seq, parent_id FROM cf_agents_session_messages
+           WHERE session_id = ? AND id IN (SELECT value FROM json_each(?))`,
+          [
+            sessionId,
+            JSON.stringify([
+              ids[0],
+              ...compactions.flatMap((c) => [c.fromMessageId, c.toMessageId])
+            ])
+          ]
+        )
+        .map((row) => [row.id, row] as const)
+    );
+    const firstSeq = anchors.get(ids[0])?.seq ?? -Infinity;
+    const order = new Map(compactions.map((c, index) => [c.id, index]));
+    const startSeq = (c: StoredCompaction) =>
+      anchors.get(c.fromMessageId)?.seq ?? Infinity;
+    const live = candidates.filter((c) => startSeq(c) < firstSeq);
+    if (live.length === 0) {
+      return { spans: planOverlays(ids, compactions), complete: false };
+    }
+    // Another overlay ending between a candidate's start and the window,
+    // starting earlier (or at the same row and newer), may win first.
+    const contested = compactions.some((other) => {
+      if (inWindow.has(other.toMessageId)) return false;
+      const end = anchors.get(other.toMessageId)?.seq;
+      const from = anchors.get(other.fromMessageId)?.seq;
+      if (end === undefined || from === undefined || end >= firstSeq) {
+        return false;
+      }
+      return live.some(
+        (c) =>
+          end >= startSeq(c) &&
+          (from < startSeq(c) ||
+            (other.fromMessageId === c.fromMessageId &&
+              (order.get(other.id) ?? 0) > (order.get(c.id) ?? 0)))
+      );
+    });
+    if (contested) return this.#planByPrefix(sessionId, ids, compactions);
+
+    let chosen: StoredCompaction | undefined;
+    for (const c of live) {
+      if (!this.#startsAncestor(sessionId, c, anchors)) continue;
+      if (
+        !chosen ||
+        startSeq(c) < startSeq(chosen) ||
+        (startSeq(c) === startSeq(chosen) &&
+          (order.get(c.id) ?? 0) > (order.get(chosen.id) ?? 0))
+      ) {
+        chosen = c;
+      }
+    }
+    if (!chosen) {
+      return { spans: planOverlays(ids, compactions), complete: false };
+    }
+    const endIndex = ids.indexOf(chosen.toMessageId);
+    const spans: OverlaySpan[] = [
+      { startIndex: 0, endIndex, compaction: chosen }
+    ];
+    for (const span of planOverlays(ids.slice(endIndex + 1), compactions)) {
+      spans.push({
+        startIndex: span.startIndex + endIndex + 1,
+        endIndex: span.endIndex + endIndex + 1,
+        compaction: span.compaction
+      });
+    }
+    const complete = anchors.get(chosen.fromMessageId)?.parent_id === null;
+    return { spans, complete };
+  }
+
+  /**
+   * Whether an overlay's start is an ancestor of its end: an id walk up from
+   * the end, stopped once `seq` falls below the start's. Remembered per
+   * overlay until the next delete or clear, which are the only writes that
+   * move a row's ancestors.
+   */
+  #startsAncestor(
+    sessionId: string,
+    compaction: StoredCompaction,
+    anchors: ReadonlyMap<string, { id: string; seq: number }>
+  ): boolean {
+    let known = this.#overlayAncestry.get(sessionId);
+    const cached = known?.get(compaction.id);
+    if (cached !== undefined) return cached;
+    const from = anchors.get(compaction.fromMessageId);
+    const ok =
+      from !== undefined &&
+      this.io.sql<{ hit: number }>(
+        `WITH RECURSIVE up(id, parent_id) AS (
+          SELECT id, parent_id FROM cf_agents_session_messages
+          WHERE session_id = ? AND id = ?
+          UNION ALL
+          SELECT m.id, m.parent_id FROM up
+          CROSS JOIN cf_agents_session_messages m
+            ON m.session_id = ? AND m.id = up.parent_id
+          WHERE up.id <> ? AND m.seq >= ?
+        )
+        SELECT 1 AS hit FROM up WHERE id = ? LIMIT 1`,
+        [
+          sessionId,
+          compaction.toMessageId,
+          sessionId,
+          from.id,
+          from.seq,
+          from.id
+        ]
+      ).length > 0;
+    if (!known) {
+      known = new Map();
+      this.#overlayAncestry.set(sessionId, known);
+    }
+    known.set(compaction.id, ok);
+    return ok;
+  }
+
+  /**
+   * The exact plan for a cut window: walk up the real parents, ids only,
+   * until every row an overlay ending in the extended range starts at is
+   * held, plan over that range as a full read would, and clip to the
+   * window. An anchor that is not an ancestor is never reached.
+   */
+  #planByPrefix(
+    sessionId: string,
+    ids: readonly string[],
+    compactions: readonly StoredCompaction[]
+  ): { spans: OverlaySpan[]; complete: boolean } {
+    const known = new Set(ids);
+    const prefix: string[] = [];
+    let [top] = this.io.sql<{
+      id: string;
+      parent_id: string | null;
+      seq: number;
+    }>(
+      `SELECT id, parent_id, seq FROM cf_agents_session_messages
+       WHERE session_id = ? AND id = ?`,
+      [sessionId, ids[0]]
+    );
+    while (top?.parent_id) {
+      const outside = compactions
+        .filter((c) => known.has(c.toMessageId) && !known.has(c.fromMessageId))
+        .map((c) => c.fromMessageId);
+      if (outside.length === 0) break;
+      const [lowest] = this.io.sql<{ seq: number | null }>(
+        `SELECT MIN(seq) AS seq FROM cf_agents_session_messages
+         WHERE session_id = ? AND id IN (SELECT value FROM json_each(?))
+           AND seq < ?`,
+        [sessionId, JSON.stringify(outside), top.seq]
+      );
+      if (lowest?.seq == null) break;
+      const walked = this.io.sql<{
+        id: string;
+        parent_id: string | null;
+        seq: number;
+      }>(
+        `WITH RECURSIVE up(id, parent_id, seq, depth) AS (
+          SELECT id, parent_id, seq, 0 FROM cf_agents_session_messages
+          WHERE session_id = ? AND id = ?
+          UNION ALL
+          SELECT m.id, m.parent_id, m.seq, up.depth + 1 FROM up
+          CROSS JOIN cf_agents_session_messages m
+            ON m.session_id = ? AND m.id = up.parent_id
+          WHERE m.seq >= ?
+        )
+        SELECT id, parent_id, seq FROM up WHERE seq >= ? ORDER BY depth`,
+        [sessionId, top.parent_id, sessionId, lowest.seq, lowest.seq]
+      );
+      if (walked.length === 0) break;
+      const hidden = this.#hiddenOverlayIds(
+        sessionId,
+        walked.map((row) => row.id)
+      );
+      for (const row of walked) {
+        known.add(row.id);
+        if (!hidden.has(row.id)) prefix.unshift(row.id);
+      }
+      top = walked[walked.length - 1];
+    }
+    const spans: OverlaySpan[] = [];
+    for (const span of planOverlays([...prefix, ...ids], compactions)) {
+      if (span.endIndex < prefix.length) continue;
+      spans.push({
+        startIndex: Math.max(0, span.startIndex - prefix.length),
+        endIndex: span.endIndex - prefix.length,
+        compaction: span.compaction
+      });
+    }
+    const first = spans[0];
+    const complete =
+      first !== undefined &&
+      first.startIndex === 0 &&
+      prefix[0] === first.compaction.fromMessageId &&
+      top?.parent_id === null;
+    return { spans, complete };
   }
 
   /**
@@ -1189,20 +1369,52 @@ export class SessionsCore {
     // filled the cap is truncated only if the oldest row it walked still
     // has a parent; a branch of exactly the cap's length is complete.
     const capped = walked > MAX_PATH_DEPTH && cut;
-    const window = stats.slice(start);
-    const { spans, clippedFromRoot } = this.#planWindow(
+    let window = stats.slice(start);
+    let { spans, complete } = this.#planWindow(
       sessionId,
       window.map((row) => row.id),
       start > 0 || cut
     );
+    // The budget was taken over raw rows. An overlay clipped at the head of
+    // the window replaces some of them with its summary, which can be the
+    // larger: then the window starts after that overlay.
+    const head = spans[0];
+    if (
+      head?.startIndex === 0 &&
+      head.endIndex < window.length - 1 &&
+      !window.some((row) => row.id === head.compaction.fromMessageId) &&
+      this.#visibleBytes(window, spans) > maxContentBytes
+    ) {
+      start += head.endIndex + 1;
+      window = stats.slice(start);
+      ({ spans, complete } = this.#planWindow(
+        sessionId,
+        window.map((row) => row.id),
+        true
+      ));
+    }
     const messages: SessionMessage[] = [];
     for await (const message of this.#streamStats(sessionId, window, spans)) {
       messages.push(message);
     }
-    // An overlay clipped at the window's first row that starts at the root
-    // stands for everything older: nothing is missing.
-    const truncated = (start > 0 || capped) && !clippedFromRoot;
+    const truncated = (start > 0 || capped) && !complete;
     return { messages, truncated, totalContentBytes };
+  }
+
+  /** Bytes a window shows: rows outside the spans, each span as its summary. */
+  #visibleBytes(
+    rows: readonly PathRow[],
+    spans: readonly OverlaySpan[]
+  ): number {
+    let bytes = 0;
+    let index = 0;
+    for (const span of spans) {
+      for (; index < span.startIndex; index++) bytes += rows[index].bytes;
+      bytes += new TextEncoder().encode(span.compaction.summary).byteLength;
+      index = span.endIndex + 1;
+    }
+    for (; index < rows.length; index++) bytes += rows[index].bytes;
+    return bytes;
   }
 
   /**
@@ -1550,6 +1762,7 @@ export class SessionsCore {
     // The leaf may be among the deleted rows; re-derive on the next append.
     this.#tails.delete(sessionId);
     this.#pathTokens.delete(sessionId);
+    this.#overlayAncestry.delete(sessionId);
     this.io.emit("session:messages:deleted", {
       sessionId,
       count: uniqueIds.length
@@ -1580,6 +1793,7 @@ export class SessionsCore {
     });
     this.#tails.set(sessionId, { leafId: null, nextSeq: 1 });
     this.#pathTokens.delete(sessionId);
+    this.#overlayAncestry.delete(sessionId);
     this.io.emit("session:cleared", { sessionId });
   }
 

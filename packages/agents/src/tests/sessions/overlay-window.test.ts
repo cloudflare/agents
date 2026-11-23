@@ -217,4 +217,78 @@ describe("Sessions path reads cut by a window", () => {
       expect(isCompactionMessage(recent.messages[0])).toBe(false);
     });
   });
+
+  it("does not clip in an overlay anchored on an older sibling branch", async () => {
+    const stub = await open();
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      seed(sqlOf(instance), 1, 2000, 1000);
+      // A sibling of m2 under m1, numbered before every row of the window.
+      sqlOf(instance).exec(
+        `INSERT INTO cf_agents_session_messages
+          (session_id, id, seq, parent_id, role, content, token_estimate, created_at)
+         VALUES ('', 's', 0, 'm1', 'user',
+           '{"id":"s","role":"user","parts":[{"type":"text","text":"s"}]}', 1, 0)`
+      );
+      const session = instance.sessions.session();
+      await session.addCompaction("summary", "s", "m1990");
+      const recent = await session.getRecentHistory(1024 * 1024, {
+        leafId: "m2000"
+      });
+      expect(recent.messages.some(isCompactionMessage)).toBe(false);
+    });
+  });
+
+  it("does not revive an overlay a full read suppresses", async () => {
+    const stub = await open();
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      seed(sqlOf(instance), 1, 100, 1000);
+      const session = instance.sessions.session();
+      // A full read applies m1..m40; m30..m80 starts inside it and never
+      // applies, so m41..m100 are raw.
+      await session.addCompaction("a", "m1", "m40");
+      await session.addCompaction("b", "m30", "m80");
+      const full = (await session.getHistory()).map((m) => m.id);
+      expect(full.slice(1)).toEqual(
+        Array.from({ length: 60 }, (_, i) => `m${41 + i}`)
+      );
+      const stats = await session.getHistoryRowStats();
+      const budget = stats.slice(-51).reduce((sum, row) => sum + row.bytes, 0);
+      const recent = await session.getRecentHistory(budget);
+      expect(recent.messages.map((m) => m.id)).toEqual(
+        Array.from({ length: 51 }, (_, i) => `m${50 + i}`)
+      );
+      expect(recent.truncated).toBe(true);
+    });
+  });
+
+  it("does not revive an older overlay that shares its start with the one that applies", async () => {
+    const stub = await open();
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      seed(sqlOf(instance), 1, 100, 1000);
+      const session = instance.sessions.session();
+      await session.addCompaction("older", "m1", "m80");
+      await session.addCompaction("newer", "m1", "m40");
+      const stats = await session.getHistoryRowStats();
+      const budget = stats.slice(-51).reduce((sum, row) => sum + row.bytes, 0);
+      const recent = await session.getRecentHistory(budget);
+      expect(recent.messages.some(isCompactionMessage)).toBe(false);
+      expect(recent.messages[0].id).toBe("m50");
+    });
+  });
+
+  it("keeps a budgeted read within its budget when a clipped summary is larger than the rows it replaces", async () => {
+    const stub = await open();
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      seed(sqlOf(instance), 1, 2000, 1000);
+      const session = instance.sessions.session();
+      await session.addCompaction("s".repeat(50_000), "m1", "m1990");
+      const recent = await session.getRecentHistory(20 * 1024);
+      // Summary plus the rows after it would be about 60 KB: the window
+      // starts after the overlay instead.
+      expect(recent.messages.map((m) => m.id)).toEqual(
+        Array.from({ length: 10 }, (_, i) => `m${1991 + i}`)
+      );
+      expect(recent.truncated).toBe(true);
+    });
+  });
 });
