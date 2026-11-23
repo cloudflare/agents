@@ -118,9 +118,14 @@ type SchedulerJobPayload = {
   readonly cron?: string;
   readonly intervalSeconds?: number;
   /** Set only on schedules a root held for a sub-agent before sub-agents
-      kept their own; the root hands those over when they come due. */
+      kept their own; the root hands those over on its first alarm after
+      the upgrade. TEMPORARY, with the fields below. */
   readonly owner_path?: string | null;
   readonly owner_path_key?: string | null;
+  /** A held schedule's own due time while it waits to be handed over. */
+  readonly handover_time?: number;
+  /** In a sub-agent: a schedule its root handed over. */
+  readonly adopted?: true;
 };
 
 /** A root handing a schedule it held for a sub-agent to that sub-agent. */
@@ -130,6 +135,8 @@ type SchedulerAdoptMessage = {
   readonly fn: string;
   readonly job: SchedulerJobPayload;
   readonly retry?: RetryOptions;
+  /** When the schedule is due in the sub-agent. */
+  readonly time: number;
 };
 
 type InsertResult<T> = {
@@ -236,6 +243,7 @@ export class Scheduler<
   /** Migrate legacy schedule storage into the Lifecycle job queue. */
   async onStart(): Promise<void> {
     this.#warnedStartupCallbacks.clear();
+    await this.#handOverSoon();
     const storage = this.lifecycle.storage;
     const version =
       (await storage.get<number>(SCHEDULE_SCHEMA_VERSION_KEY)) ?? 0;
@@ -400,11 +408,35 @@ export class Scheduler<
    * Scheduler, due now, and drops its copy. A path that is gone drops the
    * schedule. Remove with the next minor release.
    */
+  /**
+   * TEMPORARY: make every schedule this root holds for a sub-agent due now,
+   * keeping its own time in the payload, so it is handed over on this
+   * start's first alarm instead of when it comes due. Until then the
+   * sub-agent cannot see, cancel or deduplicate against it.
+   */
+  async #handOverSoon(): Promise<void> {
+    const now = Date.now();
+    for (const { job, timing } of this.#ownedJobs()) {
+      if (!timing.owner_path || timing.handover_time !== undefined) continue;
+      if (job.time <= now) continue;
+      await this.lifecycle.jobs.push({
+        id: job.id,
+        fn: job.fn,
+        time: now,
+        payload: { ...timing, handover_time: job.time },
+        retry: job.retry,
+        singleflight: job.singleflight,
+        hungTimeoutSeconds: this.#hungScheduleTimeoutSeconds,
+        recoveryLoop: job.recoveryLoop
+      });
+    }
+  }
+
   async #handOver(
     job: LifecycleJob,
     timing: SchedulerJobPayload
   ): Promise<LifecycleJobOutcome | void> {
-    const { owner_path, owner_path_key, ...rest } = timing;
+    const { owner_path, owner_path_key, handover_time, ...rest } = timing;
     try {
       await this.lifecycle.routes.to(
         { key: owner_path_key ?? owner_path!, data: owner_path! },
@@ -413,7 +445,8 @@ export class Scheduler<
           id: job.id,
           fn: job.fn,
           job: rest,
-          retry: job.retry
+          retry: job.retry,
+          time: handover_time ?? job.time
         } satisfies SchedulerAdoptMessage
       );
     } catch (error) {
@@ -427,30 +460,39 @@ export class Scheduler<
   }
 
   /**
-   * In a sub-agent: take over a schedule its root held for it, unless the
-   * sub-agent already holds it or an idempotent copy of it.
+   * In a sub-agent: take over a schedule its root held for it, at its own
+   * time. When the sub-agent already created the same schedule itself since
+   * the upgrade (an `onStart` that schedules again, idempotent or not), the
+   * two are one: the earlier time is kept and nothing is added. Schedules
+   * handed over are never merged with each other.
    */
   async onRoute(context: LifecycleRouteContext): Promise<unknown> {
     const message = context.payload as SchedulerAdoptMessage;
     if (message.type !== "adopt") {
       throw new Error("Unknown routed Scheduler message");
     }
-    const { id, fn, job } = message;
+    const { id, fn, job, time } = message;
     if (this.lifecycle.jobs.get(id)) return true;
-    const copy = this.#ownedJobs().some(
+    const copy = this.#ownedJobs().find(
       ({ job: held, timing }) =>
+        !timing.adopted &&
         held.fn === fn &&
         timing.type === job.type &&
         timing.cron === job.cron &&
         timing.intervalSeconds === job.intervalSeconds &&
         JSON.stringify(timing.payload) === JSON.stringify(job.payload)
     );
-    if (copy && (job.type === "cron" || job.type === "interval")) return true;
+    if (copy) {
+      if (time < copy.job.time) {
+        await this.lifecycle.jobs.reschedule(copy.job.id, time);
+      }
+      return true;
+    }
     await this.lifecycle.jobs.push({
       id,
       fn,
-      time: Date.now(),
-      payload: job,
+      time,
+      payload: { ...job, adopted: true } satisfies SchedulerJobPayload,
       retry: message.retry,
       singleflight: job.type === "interval",
       hungTimeoutSeconds: this.#hungScheduleTimeoutSeconds,

@@ -533,6 +533,57 @@ describe("SubAgent", () => {
     });
   });
 
+  it("hands over a schedule the root held for a sub-agent on the root's next start, at its own time", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const before = Date.now();
+    await agent.insertLegacyRootSchedule(
+      "sched-soon",
+      "old-later",
+      "later",
+      120_000
+    );
+    await agent.restartSchedulerForTest();
+    await runDurableObjectAlarm(agent);
+
+    await vi.waitFor(async () => {
+      const [row] = await agent.subAgentScheduleTimes("sched-soon");
+      expect(row?.id).toBe("old-later");
+      // Its own time, not the hand-over time.
+      expect(row!.time).toBeGreaterThanOrEqual(before + 119_000);
+    });
+    expect(
+      (await agent.rootScheduleRows()).filter((r) => r.ownerPath === null)
+    ).toEqual([]);
+  });
+
+  it("keeps one copy when a sub-agent scheduled the same thing again before the hand-over", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.insertLegacyRootSchedule(
+      "sched-dup",
+      "old-dup",
+      "same",
+      60_000
+    );
+    // The sub-agent's start schedules it again, idempotently, without seeing
+    // the root's copy.
+    const own = await agent.subAgentScheduleDelayed("sched-dup", 300, "same", {
+      idempotent: true
+    });
+    await agent.restartSchedulerForTest();
+    await runDurableObjectAlarm(agent);
+
+    await vi.waitFor(async () => {
+      const rows = await agent.subAgentScheduleTimes("sched-dup");
+      // One schedule, at the earlier of the two times.
+      expect(rows.map((row) => row.id)).toEqual([own]);
+      expect(rows[0]!.time).toBeLessThan(Date.now() + 61_000);
+    });
+  });
+
   it("drops a schedule the root held for a deleted sub-agent", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);

@@ -248,6 +248,14 @@ export class CounterSubAgent extends Agent {
     `.map((row) => row.id);
   }
 
+  /** This sub-agent's own schedule rows, with their due times. */
+  scheduleTimes(): Array<{ id: string; time: number }> {
+    return this.sql<{ id: string; time: number }>`
+      SELECT id, time FROM cf_agents_jobs WHERE capability = 'scheduler'
+      ORDER BY time
+    `;
+  }
+
   async scheduleDelayedCallback(
     delaySeconds: number,
     value: string,
@@ -1785,6 +1793,20 @@ export class TestSubAgentParent extends Agent {
       }
     )._cf_forwardSubAgentWebSocketMessage(connection, STALE_FRAME_PROBE);
     return replacement.get(STALE_FRAME_PROBE);
+  }
+
+  async subAgentScheduleTimes(
+    subAgentName: string
+  ): Promise<Array<{ id: string; time: number }>> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.scheduleTimes();
+  }
+
+  /** Run the Scheduler's start again, as a root's next start does. */
+  async restartSchedulerForTest(): Promise<void> {
+    await (
+      this as unknown as { scheduler: { onStart(): Promise<void> } }
+    ).scheduler.onStart();
   }
 
   async subAgentScheduleDelayed(
