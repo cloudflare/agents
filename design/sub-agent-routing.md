@@ -192,8 +192,10 @@ facet class from the same Worker. The design has to stay inside these.
   facet made before its RPC returned to the parent survived a root reset
   straight after the call.
 - **No alarm.** `setAlarm()` in a facet rejects with `Facets currently cannot
-  set alarms.`, and one that is not awaited breaks that facet instance. A facet
-  is woken only by a call from its parent. No capability may call `setAlarm`
+  set alarms.`, and one that is not awaited breaks that facet instance. Nothing wakes a
+  facet at a time: it starts again only when its parent calls it, or on an
+  event of a hibernatable socket it accepted itself, which the SDK never
+  lets it do (see Sockets). No capability may call `setAlarm`
   in a facet.
 - **Sockets.** The root owns every socket and forwards events to the facet. A
   hibernatable socket a facet accepted itself did wake only the facet, but
