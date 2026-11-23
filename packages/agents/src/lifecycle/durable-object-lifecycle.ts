@@ -9,7 +9,7 @@ import {
   type LifecycleEventSink
 } from "./capability-runner";
 import { abortWithoutAlarmRetry } from "./abort";
-import { JobDriver, type JobDispatch } from "./job-driver";
+import { JobDriver, type JobDeferral, type JobDispatch } from "./job-driver";
 import {
   HOST_JOB_CAPABILITY,
   JobQueue,
@@ -348,7 +348,11 @@ export class Lifecycle<
       },
       emit: (type, payload) =>
         this.#emitCapabilityEvent({ source: "lifecycle", type, payload }),
-      rearm: () => this.rearmAlarm(),
+      rearm: (deferral) => this.#rearm(deferral),
+      commitAttempt: async () => {
+        if (this.#drivingFromRoot) await this.#ctx.storage.sync();
+        else await new Promise((resolve) => setTimeout(resolve, 0));
+      },
       armFallback: async (time) => {
         if (this.#facetAddress()) return;
         await this.#ctx.storage.setAlarm(time);
@@ -583,6 +587,7 @@ export class Lifecycle<
     // sent meanwhile; the reply is also what makes the job rows durable
     // before the root acts on it.
     this.#drivingFromRoot = true;
+    this.#driveDeferral = undefined;
     try {
       await this.alarm();
     } catch (error) {
@@ -592,7 +597,9 @@ export class Lifecycle<
     } finally {
       this.#drivingFromRoot = false;
     }
-    const next = this.#jobQueue.nextAlarmTime(Date.now());
+    // A held owner's jobs wake after their hold, as at a root.
+    const next = this.#wakeTime(this.#driveDeferral);
+    this.#driveDeferral = undefined;
     this.#reportedWake = next;
     return { next, stamp: this.#nextWakeStamp() } satisfies FacetDriveReply;
   }
@@ -1116,6 +1123,16 @@ export class Lifecycle<
    * public for composition roots and tests.
    */
   async rearmAlarm(): Promise<void> {
+    return this.#rearm();
+  }
+
+  /**
+   * Re-arm, optionally around a deferral: the held owners' jobs wake no
+   * sooner than its end, every other job at its own time.
+   */
+  async #rearm(
+    deferral: JobDeferral | undefined = this.#jobDriver.currentDeferral()
+  ): Promise<void> {
     if (this.#alarmsDisabled) return;
     if (this.#status === "starting") {
       this.#rearmRequestedDuringStart = true;
@@ -1125,21 +1142,21 @@ export class Lifecycle<
     const facet = this.#facetAddress();
     if (facet) {
       // The root's call that is driving this facet carries the next wake in
-      // its reply.
-      if (this.#drivingFromRoot) return;
+      // its reply, held back as this deferral says.
+      if (this.#drivingFromRoot) {
+        this.#driveDeferral = deferral;
+        return;
+      }
       await this.#serializeAlarmWrite(async () => {
         if (this.#alarmsDisabled) return;
-        await this.#reportWakeToRoot(
-          facet,
-          this.#jobQueue.nextAlarmTime(Date.now())
-        );
+        await this.#reportWakeToRoot(facet, this.#wakeTime(deferral));
       });
       return;
     }
 
     await this.#serializeAlarmWrite(async () => {
       if (this.#alarmsDisabled) return;
-      const alarm = this.#jobQueue.nextAlarmTime(Date.now());
+      const alarm = this.#wakeTime(deferral);
       // Each setAlarm() is billed as a row written, and most queue
       // mutations leave the earliest wake where it was.
       const current = await this.#ctx.storage.getAlarm();
@@ -1150,6 +1167,14 @@ export class Lifecycle<
       }
     });
   }
+
+  /** The next wake: every job at its own time, held owners' after the hold. */
+  #wakeTime(deferral?: JobDeferral): number | null {
+    return this.#jobQueue.nextAlarmTime(Date.now(), deferral);
+  }
+
+  /** The deferral the driver ended a drive from the root with. */
+  #driveDeferral: JobDeferral | undefined;
 
   /**
    * Tell the root this facet's next wake, when it changed. The job rows are

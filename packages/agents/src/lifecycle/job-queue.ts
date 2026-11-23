@@ -100,7 +100,15 @@ export type LifecycleJobOutcome =
 export type LifecycleJobContext = {
   /** The due job being executed. */
   readonly job: LifecycleJob;
-  /** 1-indexed dispatch attempt within the current alarm invocation. */
+  /**
+   * 1-indexed dispatch attempt: this invocation's attempt plus the earlier
+   * attempts that never reported back (the isolate was reset, or exceeded
+   * its CPU or wall-time limit). Those are counted durably before `onJob`
+   * runs, so after such an attempt the next invocation runs attempt 2. A
+   * push or a non-final outcome (`rescheduleAt`, `"yield"`) starts the count
+   * again. A number can repeat when its write was lost with the isolate; it
+   * is not a deduplication key.
+   */
   readonly attempt: number;
 };
 
@@ -142,6 +150,8 @@ export type JobStorageRow = {
   recovery_loop: number;
   running: number;
   execution_started_at: number | null;
+  /** Attempts that started and never reported back since the last push or progress. */
+  attempts: number;
   created_at: number;
 };
 
@@ -233,8 +243,21 @@ export class JobQueue {
         recovery_loop INTEGER NOT NULL DEFAULT 0,
         running INTEGER NOT NULL DEFAULT 0,
         execution_started_at INTEGER,
+        attempts INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL DEFAULT (unixepoch())
       ) WITHOUT ROWID`);
+    // Tables created before attempts were counted get the column; their
+    // pending jobs start at zero.
+    const columns = [
+      ...this.#storage.sql.exec<{ name: string }>(
+        "SELECT name FROM pragma_table_info('cf_agents_jobs')"
+      )
+    ];
+    if (!columns.some((column) => column.name === "attempts")) {
+      this.#storage.sql.exec(
+        "ALTER TABLE cf_agents_jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0"
+      );
+    }
     this.#tableEnsured = true;
   }
 
@@ -330,7 +353,8 @@ export class JobQueue {
          exclusive = excluded.exclusive,
          recovery_loop = excluded.recovery_loop,
          running = 0,
-         execution_started_at = NULL
+         execution_started_at = NULL,
+         attempts = 0
        WHERE cf_agents_jobs.capability = excluded.capability`,
       id,
       capability,
@@ -387,9 +411,10 @@ export class JobQueue {
     );
     if (existing.length === 0) return false;
     this.#revise(id);
+    // A reschedule is new intent, like a push: the count starts again.
     this.#sql(
       `UPDATE cf_agents_jobs
-       SET time = ?, running = 0, execution_started_at = NULL
+       SET time = ?, running = 0, execution_started_at = NULL, attempts = 0
        WHERE id = ? AND capability = ?`,
       Math.floor(time),
       id,
@@ -431,10 +456,14 @@ export class JobQueue {
     )[0];
   }
 
+  /**
+   * Mark a claimed job running and count the attempt it starts, in the one
+   * write a claim already made, so counting attempts costs no extra row.
+   */
   markRunning(id: string, nowMs: number): void {
     this.#sql(
       `UPDATE cf_agents_jobs
-       SET running = 1, execution_started_at = ?
+       SET running = 1, execution_started_at = ?, attempts = attempts + 1
        WHERE id = ?`,
       Math.floor(nowMs),
       id
@@ -446,6 +475,30 @@ export class JobQueue {
       `UPDATE cf_agents_jobs
        SET running = 0, execution_started_at = NULL
        WHERE id = ?`,
+      id
+    );
+  }
+
+  /**
+   * Record that one dispatch attempt is starting. Written before `onJob`
+   * runs, so an attempt that kills its isolate is still counted.
+   */
+  setAttempts(id: string, attempts: number): void {
+    this.#sql(
+      "UPDATE cf_agents_jobs SET attempts = ? WHERE id = ?",
+      attempts,
+      id
+    );
+  }
+
+  /**
+   * Move the due time of a job this dispatch holds, without touching its
+   * running marker or revision: the dispatch's own outcome still applies.
+   */
+  setTime(id: string, time: number): void {
+    this.#sql(
+      "UPDATE cf_agents_jobs SET time = ? WHERE id = ?",
+      Math.floor(time),
       id
     );
   }
@@ -533,7 +586,15 @@ export class JobQueue {
       return;
     }
     if (outcome === "yield") {
-      this.clearRunning(id);
+      // Due again at once, even if the driver moved it out before running.
+      this.#sql(
+        `UPDATE cf_agents_jobs
+         SET time = MIN(time, ?), running = 0, execution_started_at = NULL,
+             attempts = 0
+         WHERE id = ?`,
+        Math.floor(Date.now()),
+        id
+      );
       return;
     }
     if (
@@ -543,7 +604,7 @@ export class JobQueue {
     ) {
       this.#sql(
         `UPDATE cf_agents_jobs
-         SET time = ?, running = 0, execution_started_at = NULL
+         SET time = ?, running = 0, execution_started_at = NULL, attempts = 0
          WHERE id = ?`,
         Math.floor(outcome.rescheduleAt),
         id
@@ -562,24 +623,55 @@ export class JobQueue {
    * restarts and must re-fire immediately), merged with the earliest
    * hung-timeout recheck for in-flight single-flight jobs.
    */
-  nextAlarmTime(nowMs: number): number | null {
-    const exclusive = this.#sql<{ time: number | null }>(
-      "SELECT MIN(time) AS time FROM cf_agents_jobs WHERE exclusive = 1"
-    );
-    if (exclusive[0]?.time !== null && exclusive[0]?.time !== undefined) {
-      return exclusive[0].time;
+  nextAlarmTime(
+    nowMs: number,
+    hold?: {
+      readonly holds: ReadonlyArray<readonly [owner: string, until: number]>;
     }
+  ): number | null {
+    // Owners held back after a failure are left out of every candidate and
+    // come back as one wake each, at the later of their earliest job and
+    // their own hold's end. They bind as one JSON parameter, so any number
+    // of them fits.
+    const held = hold?.holds.length ? JSON.stringify(hold.holds) : null;
+    const owners =
+      held === null
+        ? ""
+        : " AND capability NOT IN (SELECT json_extract(value, '$[0]') FROM json_each(?))";
+    const excludeOwners = held === null ? [] : [held];
+    const heldWake = (exclusiveOnly: boolean): number | null =>
+      held === null
+        ? null
+        : (this.#sql<{ time: number | null }>(
+            `SELECT MIN(max(j.time, json_extract(h.value, '$[1]'))) AS time
+             FROM cf_agents_jobs j
+             JOIN json_each(?) h ON j.capability = json_extract(h.value, '$[0]')
+             ${exclusiveOnly ? "WHERE j.exclusive = 1" : ""}`,
+            held
+          )[0]?.time ?? null);
+    const exclusive = this.#sql<{ time: number | null }>(
+      `SELECT MIN(time) AS time FROM cf_agents_jobs WHERE exclusive = 1${owners}`,
+      ...excludeOwners
+    );
+    // A held owner's exclusive job is still exclusive: it wakes at the later
+    // of its time and its owner's hold's end, and still suppresses ordinary
+    // wakes.
+    const exclusiveTimes = [exclusive[0]?.time, heldWake(true)].filter(
+      (time): time is number => typeof time === "number"
+    );
+    if (exclusiveTimes.length > 0) return Math.min(...exclusiveTimes);
 
     const now = Math.floor(nowMs);
     let candidate: number | null = null;
 
     const ready = this.#sql<{ time: number | null }>(
       `SELECT MIN(time) AS time FROM cf_agents_jobs
-       WHERE singleflight = 0
+       WHERE (singleflight = 0
           OR running = 0
-          OR coalesce(execution_started_at, 0) + coalesce(hung_timeout_seconds, ?) * 1000 <= ?`,
+          OR coalesce(execution_started_at, 0) + coalesce(hung_timeout_seconds, ?) * 1000 <= ?)${owners}`,
       DEFAULT_HUNG_TIMEOUT_SECONDS,
-      now
+      now,
+      ...excludeOwners
     );
     if (ready[0]?.time !== null && ready[0]?.time !== undefined) {
       candidate = Math.max(ready[0].time, now + 1);
@@ -590,14 +682,20 @@ export class JobQueue {
        FROM cf_agents_jobs
        WHERE singleflight = 1
          AND running = 1
-         AND coalesce(execution_started_at, 0) + coalesce(hung_timeout_seconds, ?) * 1000 > ?`,
+         AND coalesce(execution_started_at, 0) + coalesce(hung_timeout_seconds, ?) * 1000 > ?${owners}`,
       DEFAULT_HUNG_TIMEOUT_SECONDS,
       DEFAULT_HUNG_TIMEOUT_SECONDS,
-      now
+      now,
+      ...excludeOwners
     );
     const recheck = inFlight[0]?.recheck;
     if (recheck !== null && recheck !== undefined) {
       candidate = candidate === null ? recheck : Math.min(candidate, recheck);
+    }
+
+    const wake = heldWake(false);
+    if (wake !== null) {
+      candidate = candidate === null ? wake : Math.min(candidate, wake);
     }
 
     return candidate;

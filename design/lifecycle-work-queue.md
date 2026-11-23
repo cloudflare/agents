@@ -94,7 +94,7 @@ due jobs are driven. Host `getNextAlarm()` is removed.
 
 ## The dispatch contract
 
-Four named rules define what a job owner can and cannot rely on:
+Five named rules define what a job owner can and cannot rely on:
 
 1. **Job ids are scoped to their owner.** Every queue verb — push
    included — sees only the owner's own jobs. A same-id push replaces the
@@ -127,12 +127,40 @@ Four named rules define what a job owner can and cannot rely on:
    pushed mid-drive. Owners that both push and return outcomes for the
    same job (Tasks) should derive both from the same durable state so
    they always agree.
-4. **Platform failures abort the drive loop.** A platform-class failure
-   (superseded isolate, memory-limit reset, platform transient) preserves
-   the failing job and re-throws, deferring the _remaining_ due jobs to
-   the platform's alarm retry. This is deliberate: platform failures are
-   properties of the isolate, not the job, so later jobs would fail the
-   same way, and the retry runs on a fresh invocation.
+4. **A reset stops the drive loop; a transient failure holds back only
+   its owner.** A superseded isolate, a storage reset or a memory-limit
+   reset condemns the isolate: the driver preserves the failing job and
+   re-throws, and the remaining due jobs wait for a fresh invocation (or
+   the breaker engages). A downstream stub's upgrade error matches the same
+   pattern and also stops the loop; the two cannot be told apart. Any other
+   platform-class failure (a `retryable` error, "Network connection lost.")
+   belongs to something the job called. The driver keeps that job and its
+   time, skips the rest of that owner's due jobs, and drives every other
+   owner's. The alarm re-arms with the held owner's jobs no sooner than
+   30 s out, and then still fails, so the failure is visible. Keeping the
+   times keeps an owner's order: a Queue item behind a deferred one does
+   not run first, and `list()` order does not change. Before this rule, one
+   such job stopped every job behind it, of every owner, for as long as the
+   downstream kept failing.
+5. **Unreported attempts are counted durably.** Before each dispatch
+   attempt the driver adds one to the row's `attempts` column and yields
+   one macrotask so the write starts; when the attempt ends in any way the
+   driver sees (a result, an application error, a platform failure) it
+   takes the one off again. A started write survives a CPU-limit kill or
+   `ctx.abort()` that follows; `storage.sync()` would also work but costs
+   about 38 ms per dispatch. So the column counts only attempts that took
+   their isolate down (CPU limit, the 15-minute alarm wall-time limit, a
+   reset), and `context.attempt` is that count plus this invocation's
+   attempt. When a job starts with `max(maxAttempts, 3)` of them, an owner
+   with `onJobError` gets a `JobAttemptsExhaustedError` and decides the
+   outcome; an owner without one keeps its job (it may be the owner's only
+   wake), and each further attempt first moves the job out by 30 s,
+   doubling to an hour. The floor of 3 is for deploys: a reset mid-attempt
+   also goes unreported, and a one-attempt job must survive one. A push or
+   a non-final outcome (`rescheduleAt`, `"yield"`) starts the count at
+   zero. Retries within one invocation stay bounded by `maxAttempts`.
+   Without this, a job that exceeded the CPU limit ran again every 30 s
+   forever with `attempt: 1` (measured on a deployed Worker, 22 Nov 2026).
 
 Everything else about drive order — in particular the interleaving of
 different owners' jobs within one alarm cycle — is unspecified. Owners may
@@ -164,11 +192,16 @@ and `Lifecycle` wires them to the host and capabilities through the narrow
    - stop if alarms were disabled mid-phase (host teardown);
    - a single-flight job whose previous run is in flight is skipped until it
      crosses its hung timeout, then forcibly re-run;
+   - a job with `max(maxAttempts, 3)` unreported attempts goes to
+     `onJobError` (or, with no `onJobError`, is backed off and run once);
    - dispatch `onJob` inside `tryN` using the job's retry options (defaults
-     3 attempts / 100 ms base / 3000 ms cap);
-   - platform-class failures (superseded isolate, platform transient on
-     exhaustion, memory-limit reset) preserve the job and re-throw so the
-     platform retries a fresh invocation or the breaker engages;
+     3 attempts / 100 ms base / 3000 ms cap), counting each attempt in the
+     row and yielding one macrotask first;
+   - a reset or memory-limit failure preserves the job and re-throws so a
+     fresh invocation runs the rest or the breaker engages; any other
+     platform-class failure (on exhaustion) holds back that job's owner for
+     30 s, keeping its jobs' times, and the loop goes on with other owners;
+     the alarm re-throws it after re-arming;
    - terminal application failures reach `onJobError`, whose drive result
      decides advancement (recurring schedules reschedule; one-shots
      complete);

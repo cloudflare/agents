@@ -22,13 +22,25 @@ class WakeProbe extends LifecycleCapability {
   }
 
   async onJob({ job }: LifecycleJobContext): Promise<void> {
-    // `slow-*` outruns the root's drive budget; `fail-*` throws.
+    // `slow-*` outruns the root's drive budget; `fail-*` throws; `abort-*`
+    // ends the isolate, the way a job over the memory limit does.
+    if (job.id.startsWith("abort")) {
+      (this.host as unknown as { ctx: DurableObjectState }).ctx.abort(
+        "job ended its isolate"
+      );
+    }
     if (job.id.startsWith("slow")) {
       await new Promise((resolve) => setTimeout(resolve, 6_500));
     }
     this.host
       .sql`INSERT INTO facet_wake_runs (id, at) VALUES (${job.id}, ${Date.now()})`;
     if (job.id.startsWith("fail")) throw new Error("facet job failed");
+  }
+
+  /** A job given up after its attempts: record it, and drop the job. */
+  onJobError({ job }: LifecycleJobContext): void {
+    this.host
+      .sql`INSERT INTO facet_wake_runs (id, at) VALUES (${`gave-up:${job.id}`}, ${Date.now()})`;
   }
 
   push(id: string, delayMs: number) {
@@ -85,6 +97,22 @@ let failingDrives = 0;
 export class FacetWakeLeaf extends WakeAgent {}
 
 export class FacetWakeMiddle extends WakeAgent {
+  syncs = 0;
+
+  /** Count this facet's `storage.sync()` calls from now on. */
+  countSyncs(): void {
+    const storage = this.ctx.storage;
+    const sync = storage.sync.bind(storage);
+    storage.sync = () => {
+      this.syncs += 1;
+      return sync();
+    };
+  }
+
+  syncCount(): number {
+    return this.syncs;
+  }
+
   override async _cf_routeLifecycle(
     target: Parameters<Agent["_cf_routeLifecycle"]>[0],
     envelope: Parameters<Agent["_cf_routeLifecycle"]>[1]
@@ -151,9 +179,27 @@ export class FacetWakeRoot extends WakeAgent {
       WHERE capability LIKE 'cf:facet-wake:%'`;
   }
 
+  /** Make every facet wake due now and forget unreported drives. */
+  makeFacetWakesDue(): void {
+    this.makeFacetWakesDueKeepingDrives();
+    for (const [key] of this.ctx.storage.kv.list({
+      prefix: "cf_agents:facet_drives:"
+    })) {
+      this.ctx.storage.kv.delete(key);
+    }
+  }
+
   /** End this root's isolate, and its facets with it. */
   resetTree(): void {
     this.ctx.abort("test reset");
+  }
+
+  async middleCountSyncs(name: string): Promise<void> {
+    await (await this.subAgent(FacetWakeMiddle, name)).countSyncs();
+  }
+
+  async middleSyncCount(name: string): Promise<number> {
+    return (await this.subAgent(FacetWakeMiddle, name)).syncCount();
   }
 
   failNextFacetDrives(count: number): void {
