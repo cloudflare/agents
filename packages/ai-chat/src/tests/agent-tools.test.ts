@@ -622,7 +622,10 @@ describe("AIChatAgent as an agent-tool child", () => {
   }, 20_000);
 
   it("keeps a routed run's claim mirrored on root after root detaches at the dispatch budget", async () => {
-    const parent = await getParent();
+    // Its own root: the run's late failure seals that root's breaker and
+    // resets its isolate, which must not land in a later test.
+    const parentName = crypto.randomUUID();
+    const parent = await getParent(parentName);
     const executing = {
       childName: crypto.randomUUID(),
       incidentId: `facet-slow-oom-mirror-${crypto.randomUUID()}`
@@ -637,7 +640,17 @@ describe("AIChatAgent as an agent-tool child", () => {
     const runId = await parent.driveFacetRecoverySlowOomSealForTest(executing);
 
     expect(await parent.rootHasRoutedTaskWakeForTest(runId)).toBe(true);
-  }, 10_000);
+
+    // Let the delayed failure land and seal inside this test.
+    await new Promise((resolve) => setTimeout(resolve, 4_000));
+    const freshParent = await getParent(parentName);
+    expect(
+      await freshParent.facetRecoveryIncidentStatusForTest(
+        executing.childName,
+        executing.incidentId
+      )
+    ).toBe("exhausted");
+  }, 20_000);
 
   it("runs a facet's chat turn as a Task run on the facet, not a legacy fiber", async () => {
     const parent = await getParent();
