@@ -1848,6 +1848,20 @@ export class TestSubAgentParent extends Agent {
     failingAdopts = count;
   }
 
+  /** Make the root's queue rows due, keeping their order. */
+  async makeRootQueueDueForTest(): Promise<void> {
+    this.sql`UPDATE cf_agents_jobs SET time = time - 120000
+      WHERE capability = 'queue'`;
+    await this.lifecycle.rearmAlarm();
+  }
+
+  rootJobPayload(id: string): unknown {
+    const [row] = this.sql<{ payload: string | null }>`
+      SELECT payload FROM cf_agents_jobs WHERE id = ${id}
+    `;
+    return row?.payload ? JSON.parse(row.payload) : undefined;
+  }
+
   rootQueueTimes(): Array<{ id: string; time: number }> {
     return this.sql<{ id: string; time: number }>`
       SELECT id, time FROM cf_agents_jobs WHERE capability = 'queue'

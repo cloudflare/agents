@@ -293,7 +293,17 @@ export class Queue<
       // hand-over is not the item's own failure, so it must never reach the
       // driver's failure handling, which could give the item up.
       console.error(`error handing queue item "${job.id}" over`, error);
-      return { rescheduleAt: Date.now() + HANDOVER_RETRY_MS };
+      // The sub-agent queues adopted items in arrival order, so this item and
+      // every later one held for the same sub-agent wait together, their
+      // order kept.
+      const key = path.owner_path_key ?? path.owner_path;
+      const delay = Date.now() + HANDOVER_RETRY_MS - job.time;
+      for (const { job: later, envelope } of this.#ownedJobs()) {
+        if ((envelope.owner_path_key ?? envelope.owner_path) !== key) continue;
+        if (later.time < job.time || later.id === job.id) continue;
+        await this.lifecycle.jobs.reschedule(later.id, later.time + delay);
+      }
+      return { rescheduleAt: job.time + delay };
     }
     return undefined;
   }

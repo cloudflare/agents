@@ -453,6 +453,21 @@ export class Scheduler<
       // hand-over is not the schedule's own failure, so it must never reach
       // the driver's failure handling, which could give it up.
       console.error(`error handing schedule "${job.id}" over`, error);
+      // Try again later, keeping the schedule's own time for the sub-agent.
+      await this.lifecycle.jobs.push({
+        id: job.id,
+        fn: job.fn,
+        time: Date.now() + HANDOVER_RETRY_MS,
+        payload: {
+          ...timing,
+          handover_time: handover_time ?? job.time
+        } satisfies SchedulerJobPayload,
+        retry: job.retry,
+        singleflight: job.singleflight,
+        hungTimeoutSeconds: this.#hungScheduleTimeoutSeconds,
+        recoveryLoop: job.recoveryLoop
+      });
+      // The push is newer intent: this outcome defers to it.
       return { rescheduleAt: Date.now() + HANDOVER_RETRY_MS };
     }
     return undefined;
