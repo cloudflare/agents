@@ -31,7 +31,7 @@ import type {
   StartFiberOptions,
   StartFiberResult
 } from "./fiber-types";
-import type { LifecycleRouteAddress } from "./lifecycle/capability";
+import { armFacetWake } from "./lifecycle/durable-object-lifecycle";
 import type { Tasks } from "./tasks/tasks";
 import { TaskSettlement } from "./tasks/settlement";
 import type {
@@ -691,7 +691,7 @@ export async function importLegacyFibers(
   tasks: Tasks,
   storage: DurableObjectStorage,
   facet: boolean,
-  armFacetWake: (address: LifecycleRouteAddress, time: number) => Promise<void>
+  lifecycle: object
 ): Promise<void> {
   const tables = legacyTables(storage);
   if (tables.size === 0) return;
@@ -713,7 +713,7 @@ export async function importLegacyFibers(
       facet ? `DELETE FROM ${table}` : `DROP TABLE IF EXISTS ${table}`
     );
   if (tables.has(LEGACY_FACET_INDEX)) {
-    await moveLegacyFacetWakes(storage, armFacetWake);
+    await moveLegacyFacetWakes(storage, lifecycle);
     discard(LEGACY_FACET_INDEX);
   }
   const hasRuns = tables.has("cf_agents_runs");
@@ -794,7 +794,7 @@ export async function importLegacyFibers(
  */
 async function moveLegacyFacetWakes(
   storage: DurableObjectStorage,
-  armFacetWake: (address: LifecycleRouteAddress, time: number) => Promise<void>
+  lifecycle: object
 ): Promise<void> {
   const owners = storage.sql
     .exec(
@@ -803,6 +803,7 @@ async function moveLegacyFacetWakes(
     .toArray() as { owner_path: string; owner_path_key: string }[];
   for (const owner of owners) {
     await armFacetWake(
+      lifecycle,
       { key: owner.owner_path_key, data: owner.owner_path },
       Date.now()
     );

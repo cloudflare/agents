@@ -2523,7 +2523,7 @@ export class Agent<
       this.tasks,
       this.ctx.storage,
       this._isFacet,
-      (source, time) => this._armFacetWake(source, time)
+      this.lifecycle
     );
     const scanMs = this._resolvedOptions.fiberRecoveryScanDeadlineMs;
     const startedAt = Date.now();
@@ -2540,18 +2540,6 @@ export class Agent<
         elapsedMs: Date.now() - startedAt
       });
     }
-  }
-
-  /** At the root: hold the facet wake for `source` at `time`. */
-  private async _armFacetWake(
-    source: LifecycleRouteAddress,
-    time: number
-  ): Promise<void> {
-    await this.lifecycle.route({
-      capability: "cf:facet-wake",
-      source,
-      payload: { type: "arm", time, stamp: 0 }
-    });
   }
 
   /**

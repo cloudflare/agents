@@ -715,7 +715,12 @@ export class CounterSubAgent extends Agent {
    * when it finds fibers an earlier isolate left behind.
    */
   async armOwnFiberWake(): Promise<void> {
-    await importLegacyFibers(this.tasks, this.ctx.storage, true, async () => {});
+    await importLegacyFibers(
+      this.tasks,
+      this.ctx.storage,
+      true,
+      this.lifecycle
+    );
   }
 
   async insertInterruptedManagedFiber(
@@ -950,7 +955,12 @@ export class InnerSubAgent extends Agent {
    * when it finds fibers an earlier isolate left behind.
    */
   async armOwnFiberWake(): Promise<void> {
-    await importLegacyFibers(this.tasks, this.ctx.storage, true, async () => {});
+    await importLegacyFibers(
+      this.tasks,
+      this.ctx.storage,
+      true,
+      this.lifecycle
+    );
   }
 
   getRecoveredFibers(): Array<{
