@@ -65,7 +65,7 @@ export interface ActionToolHost {
     summary: string;
     permissions: string[];
     risk?: "low" | "medium" | "high";
-  }): unknown;
+  }): Promise<unknown>;
 }
 
 /** @internal */
@@ -495,7 +495,7 @@ function actionToTool(
               runAction
             });
           }
-          return host.parkDurablePause({
+          return await host.parkDurablePause({
             toolName,
             input,
             ctx: actionContext,

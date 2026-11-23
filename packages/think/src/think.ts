@@ -290,14 +290,26 @@ import {
   type ChatRecoveryKind
 } from "agents/chat";
 import type { Streams } from "agents/streams";
+import { TaskSettlement, type TaskRecord } from "agents/internal";
 import {
-  Approvals,
+  DECISION_TASK,
+  EFFECT_TASK,
+  createEffectState,
+  effectRunId,
+  isPendingDecision,
+  parkDecision,
+  pendingDecisions,
+  registerDecisionTask,
+  registerEffectTask,
+  runEffectOnce,
   stableHash,
   stableStringify,
-  type EffectOutcome,
-  type TaskRecord,
-  type TaskSettlement
-} from "agents/internal";
+  sweepDecisions,
+  sweepEffects,
+  type DecisionInput,
+  type DecisionVerdict,
+  type EffectOutcome
+} from "./action-ledger";
 import type { TaskJson, TaskStep } from "agents/tasks";
 import {
   cancelReason,
@@ -386,7 +398,6 @@ function turnContextWithoutModel(ctx: TurnContext): Omit<TurnContext, "model"> {
 }
 
 const MAX_REPLY_ATTACHMENTS_PER_TURN = 32;
-const DEFERRED_RESOLVED_PAUSES_KEY = "cf_think_deferred_resolved_pauses";
 const PENDING_RESPONSE_HOOK_PREFIX = "cf_think_pending_response_hook:";
 const MESSENGER_RECOVERY_PREFIX = "cf_think_messenger_recovery:";
 
@@ -460,7 +471,12 @@ type StreamInterruptionRoute = {
   retryAfterSeconds?: number;
 };
 
-type ResolvedPauseOutcome = { executionId: string; output: unknown };
+/** A resolved pause whose outcome write or generation drop may not have landed, kept on its decision run. */
+type ResolvedPauseOutcome = {
+  runId: string;
+  executionId: string;
+  output: unknown;
+};
 
 function isPausedToolPart(part: Record<string, unknown>): boolean {
   const output = part.output as { status?: unknown } | null | undefined;
@@ -572,11 +588,10 @@ function keepResolvedPauses(
   });
 }
 
-const ACTION_PENDING_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
-const ACTION_PENDING_LAST_SWEPT_KEY =
-  "cf_think_action_pending_approvals:last_swept_at";
 /** Prefix for durable-pause action execution ids (vs codemode execution ids). */
 const ACTION_PAUSE_ID_PREFIX = "actpause_";
+/** An approved action whose claim waits for its lease: try the decision again later. */
+const DEFER_DECISION = Symbol("think.deferDecision");
 import { Workspace, type WorkspaceStub } from "@cloudflare/computer";
 import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 import {
@@ -1060,22 +1075,6 @@ type ActionLedgerEvent =
       type: "action:ledger:swept";
       payload: { settled: number; pending: number };
     };
-
-/**
- * A durably-parked `kind: "durable-pause"` action awaiting human approval. The
- * row is the compaction-safe record of everything needed to run `execute` on
- * approve (the transcript part can be summarized away before approval), so it
- * carries the action name, the model's input, and the approval descriptor.
- */
-type ActionPendingRow = {
-  execution_id: string;
-  action_name: string;
-  tool_call_id: string;
-  request_id: string | null;
-  input_json: string;
-  descriptor_json: string | null;
-  created_at: number;
-};
 
 type ActionPauseEvent =
   | {
@@ -1583,7 +1582,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     this.lifecycle.use(this._cfConfig);
     this.lifecycle.use(this._cfMediaEviction);
     this.lifecycle.use(this.streams);
-    this.lifecycle.use(this._approvals);
+    registerEffectTask(this.tasks, this._effects);
+    registerDecisionTask(this.tasks, (runId) => this._onDecisionSettled(runId));
     this._registerSubmissionTaskDefinition();
     this._registerChatTurnTaskDefinition();
     this._registerChatRecoveryTaskDefinition();
@@ -1796,8 +1796,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               // also when a step below fails.
               this._appStartedForAdmissions = true;
               await this._migrateLegacyActionLedger();
+              await this._migrateLegacyPauseRecords();
               await this._sweepApprovals();
-              await this._sweepActionPendingApprovals();
               await this._migrateLegacyWorkflowNotifications();
               await this._replayPendingResponseHooks();
               await this._replayMessengerRecoveryDeliveries();
@@ -2292,21 +2292,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * `streams.read()` consumer on this Durable Object.
    */
   readonly streams: Streams = createChatStreams();
-  /**
-   * Runs each action's side effect once per key (the action ledger) and
-   * holds durable-pause approvals. Retention reads the `actionLedger*` and
-   * `actionPendingApprovalTtlMs` fields when the capability starts.
-   */
-  private readonly _approvals: Approvals = new Approvals({
-    // Swept by `_sweepApprovals` once rows from an earlier version are in.
-    sweepOnStart: false,
-    retention: () => ({
-      effectSettledMs: this.actionLedgerRetention.settledMs,
-      effectPendingMs: this.actionLedgerRetention.pendingMs,
-      maxSweepRows: this.actionLedgerRetention.maxSweepRows,
-      decisionPendingMs: this.actionPendingApprovalTtlMs
-    })
-  });
+  /** The action ledger's effects in flight in this isolate (see `action-ledger.ts`). */
+  private readonly _effects = createEffectState();
+  /** What an approve or reject's continuation produced, read by its caller. */
+  private readonly _decisionOutputs = new Map<string, unknown>();
 
   protected _resumableStream!: ResumableStream;
   private _pendingResumeConnections: Set<string> = new Set();
@@ -2371,9 +2360,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   });
   // Resolved pauses, by tool call id, whose outcome write or generation drop
   // may not have landed: the outcome is being written, or its own turn was
-  // still streaming. See `_dropGenerationAfterResolvedPause`. Mirrored in
-  // storage with the outcome so both survive a restart before the next turn;
-  // loaded once per isolate.
+  // still streaming. See `_dropGenerationAfterResolvedPause`. Kept on the
+  // decision run's metadata with the outcome, so both survive a restart
+  // before the next turn; loaded once per isolate.
   private _deferredResolvedPauses = new Map<string, ResolvedPauseOutcome>();
   private _deferredResolvedPausesLoad: Promise<void> | undefined;
   private static MESSAGE_DEBOUNCE_MS = 750;
@@ -2412,7 +2401,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     cancelRequest: (requestId, reason) =>
       this.cancelChat(requestId, abortReasonText(reason) ?? undefined)
   });
-  private _actionPendingTableEnsured = false;
   private _submissionAbortControllers = new Map<string, AbortController>();
   private _submissionsApplyingMessages = new Set<string>();
   private _programmaticStreamErrors = new Map<string, string>();
@@ -4057,6 +4045,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     input: unknown;
     ctx: ActionContext;
     runAction: () => Promise<unknown>;
+    /**
+     * What to do with a claim another attempt left, when it may be taken
+     * over at `retryAt` (an explicit key with a finite lease). Without it,
+     * that claim answers `ActionPendingError`.
+     */
+    onReclaimableInDoubt?: (retryAt: number) => unknown;
   }): Promise<unknown> {
     const { toolName, idempotencyKey, input, ctx, runAction } = args;
     const key = await this._resolveActionLedgerKey(
@@ -4077,9 +4071,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     };
     if (!key) return await run();
 
-    let outcome: EffectOutcome<unknown>;
+    let outcome: EffectOutcome;
     try {
-      outcome = await this._approvals.once({
+      outcome = await runEffectOnce(this.tasks, this._effects, {
         key,
         name: toolName,
         input,
@@ -4090,7 +4084,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           idempotencyKey !== undefined
             ? this.actionLedgerPendingRetryLeaseMs
             : false,
-        context: { requestId: ctx.requestId, toolCallId: ctx.toolCallId },
         run
       });
     } catch (error) {
@@ -4104,12 +4097,23 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           payload: event
         });
         return outcome.value;
-      case "in-doubt":
+      case "in-doubt": {
         this._emitActionLedgerEvent({
           type: "action:ledger:pending",
           payload: event
         });
+        const lease = this.actionLedgerPendingRetryLeaseMs;
+        if (
+          args.onReclaimableInDoubt &&
+          idempotencyKey !== undefined &&
+          lease !== false
+        ) {
+          return args.onReclaimableInDoubt(
+            Date.now() + Math.max(0, lease - outcome.ageMs) + 1
+          );
+        }
         return actionPendingErrorEnvelope();
+      }
       case "conflict":
         this._emitActionLedgerEvent({
           type: "action:ledger:conflict",
@@ -4140,28 +4144,29 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
   /**
    * Park a `kind: "durable-pause"` action for human approval. Persists a
-   * compaction-safe pending row (action name + model input + approval
-   * descriptor) so the approval survives history compaction, deploys, and
-   * isolate eviction, then returns the minimal model-visible paused output.
+   * compaction-safe decision run (action name + model input, the approval
+   * descriptor as metadata) so the approval survives history compaction,
+   * deploys, and isolate eviction, then returns the minimal model-visible
+   * paused output.
    *
    * The action's `execute` does NOT run here — it runs later in
    * `approveExecution` via `_runLedgeredAction`, so the side effect is gated on
    * human approval AND remains replay-safe. The rich descriptor lives on the
-   * row and on the transcript part, never embedded in the model-visible output.
+   * run and on the transcript part, never embedded in the model-visible output.
    */
-  private _parkDurablePauseAction(args: {
+  private async _parkDurablePauseAction(args: {
     toolName: string;
     input: unknown;
     ctx: ActionContext;
     summary: string;
     permissions: string[];
     risk?: "low" | "medium" | "high";
-  }): {
+  }): Promise<{
     status: "paused";
     executionId: string;
     action: string;
     message: string;
-  } {
+  }> {
     const { toolName, input, ctx, summary, permissions, risk } = args;
     const executionId = `${ACTION_PAUSE_ID_PREFIX}${crypto.randomUUID()}`;
     const descriptor: ActionApprovalDescriptor = {
@@ -4174,14 +4179,16 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       ...(risk !== undefined && { risk }),
       kind: "durable-pause"
     };
-    this._insertActionPendingRow({
-      execution_id: executionId,
-      action_name: toolName,
-      tool_call_id: ctx.toolCallId,
-      request_id: ctx.requestId || null,
-      input_json: JSON.stringify(input),
-      descriptor_json: JSON.stringify(descriptor),
-      created_at: Date.now()
+    await parkDecision(this.tasks, {
+      id: executionId,
+      input: {
+        kind: "action",
+        action: toolName,
+        toolCallId: ctx.toolCallId,
+        requestId: ctx.requestId || null,
+        input: input as TaskJson
+      },
+      descriptor: descriptor as unknown as TaskJson
     });
     this._emitActionPauseEvent({
       type: "action:pause:created",
@@ -5172,66 +5179,171 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /**
-   * Delete expired ledger rows (at most once an hour unless `force`) and
-   * report them as `action:ledger:swept`.
+   * Delete expired effect runs and abandoned decisions, per the
+   * `actionLedger*` and `actionPendingApprovalTtlMs` retention, and report
+   * them as `action:ledger:swept` and `action:pause:swept`.
    */
-  private async _sweepApprovals(options?: {
-    force?: boolean;
-  }): Promise<{ settled: number; pending: number }> {
-    const swept = await this._approvals.sweep(options);
-    const result = {
-      settled: swept.settledEffects,
-      pending: swept.pendingEffects
-    };
-    if (swept.effects > 0 || options?.force) {
-      this._emitActionLedgerEvent({
-        type: "action:ledger:swept",
-        payload: result
+  private async _sweepApprovals(): Promise<{
+    settled: number;
+    pending: number;
+    decisions: number;
+  }> {
+    const now = Date.now();
+    const retention = this.actionLedgerRetention;
+    const limit = Math.max(0, Math.floor(retention.maxSweepRows));
+    const swept = await sweepEffects(this.tasks, {
+      settledBefore:
+        retention.settledMs === false ? null : now - retention.settledMs,
+      pendingBefore:
+        retention.pendingMs === false ? null : now - retention.pendingMs,
+      limit
+    });
+    this._emitActionLedgerEvent({
+      type: "action:ledger:swept",
+      payload: swept
+    });
+    const ttl = this.actionPendingApprovalTtlMs;
+    const decisions =
+      ttl === false ? 0 : await sweepDecisions(this.tasks, now - ttl, 500);
+    if (decisions > 0) {
+      this._emitActionPauseEvent({
+        type: "action:pause:swept",
+        payload: { swept: decisions }
       });
     }
-    return result;
+    return { ...swept, decisions };
   }
 
   /**
    * Move action ledger rows an earlier version wrote in
-   * `cf_think_action_ledger` into the Approvals effect ledger, then drop the
-   * table. One way. Keys, input hashes and recorded values keep their form,
-   * so a settled action still replays.
+   * `cf_think_action_ledger` into effect runs, then drop the table. One way.
+   * Keys, input hashes and recorded values keep their form, so a settled
+   * action still replays; an unsettled claim comes back in doubt.
    */
   private async _migrateLegacyActionLedger(): Promise<void> {
     if (!tableExists(this.ctx.storage.sql, "cf_think_action_ledger")) return;
     const rows = this.sql<{
       key: string;
       action_name: string;
-      request_id: string | null;
-      tool_call_id: string | null;
       input_hash: string;
       status: "pending" | "settled";
       result_json: string | null;
       created_at: number;
       updated_at: number;
     }>`
-      SELECT key, action_name, request_id, tool_call_id, input_hash, status,
-             result_json, created_at, updated_at
+      SELECT key, action_name, input_hash, status, result_json, created_at,
+             updated_at
       FROM cf_think_action_ledger
     `;
-    this._approvals.importRecords({
-      effects: rows.map((row) => ({
-        key: row.key,
-        name: row.action_name,
-        inputHash: row.input_hash,
-        status: row.status,
-        resultJson: row.result_json,
-        context: {
-          ...(row.request_id && { requestId: row.request_id }),
-          ...(row.tool_call_id && { toolCallId: row.tool_call_id })
-        },
-        createdAt: row.created_at,
-        updatedAt: row.updated_at
-      }))
-    });
+    for (const row of rows) {
+      const recorded =
+        row.result_json === null
+          ? undefined
+          : (JSON.parse(row.result_json) as {
+              valuePresent?: boolean;
+              value?: TaskJson;
+            });
+      await this.tasks.importRun({
+        runId: effectRunId(row.key),
+        definition: EFFECT_TASK,
+        status: row.status === "settled" ? "completed" : "running",
+        attempt: 1,
+        input: { name: row.action_name, inputHash: row.input_hash },
+        ...(row.status === "settled" && {
+          result:
+            recorded?.valuePresent === true ? (recorded.value ?? null) : null
+        }),
+        // The claim's age is what a reclaim measures.
+        createdAt: row.updated_at,
+        settledAt: row.updated_at
+      });
+    }
     this.sql`DROP TABLE cf_think_action_ledger`;
     await this.ctx.storage.delete("cf_think_action_ledger:last_swept_at");
+  }
+
+  /**
+   * Move what an earlier version stored for paused actions into decision
+   * runs, one way: parked `cf_think_action_pending_approvals` rows become
+   * parked decisions under the same ids, and resolved pauses whose outcome
+   * may not have reached the transcript (`cf_think_deferred_resolved_pauses`)
+   * become settled decisions the next inference finishes.
+   */
+  private async _migrateLegacyPauseRecords(): Promise<void> {
+    const [table] = this.sql<{ name: string }>`
+      SELECT name FROM sqlite_master
+      WHERE type = 'table' AND name = 'cf_think_action_pending_approvals'
+    `;
+    if (table) {
+      const rows = this.sql<{
+        execution_id: string;
+        action_name: string;
+        tool_call_id: string;
+        request_id: string | null;
+        input_json: string;
+        descriptor_json: string | null;
+        created_at: number;
+      }>`
+        SELECT execution_id, action_name, tool_call_id, request_id,
+               input_json, descriptor_json, created_at
+        FROM cf_think_action_pending_approvals
+      `;
+      const parse = (json: string | null): TaskJson | undefined => {
+        if (json === null) return undefined;
+        try {
+          return JSON.parse(json) as TaskJson;
+        } catch {
+          return undefined;
+        }
+      };
+      for (const row of rows) {
+        const descriptor = parse(row.descriptor_json);
+        await this.tasks.importRun({
+          runId: row.execution_id,
+          definition: DECISION_TASK,
+          status: "pending",
+          attempt: 0,
+          input: {
+            kind: "action",
+            action: row.action_name,
+            toolCallId: row.tool_call_id,
+            requestId: row.request_id,
+            input: parse(row.input_json) ?? {}
+          } satisfies DecisionInput,
+          ...(descriptor !== undefined && { metadata: { descriptor } }),
+          createdAt: row.created_at
+        });
+      }
+      this.sql`DROP TABLE cf_think_action_pending_approvals`;
+      await this.ctx.storage.delete(
+        "cf_think_action_pending_approvals:last_swept_at"
+      );
+    }
+    const deferredKey = "cf_think_deferred_resolved_pauses";
+    const deferred =
+      await this.ctx.storage.get<
+        Array<[string, { executionId: string; output: TaskJson }]>
+      >(deferredKey);
+    if (deferred) {
+      for (const [toolCallId, outcome] of deferred) {
+        await this.tasks.importRun({
+          runId: `migrated_${outcome.executionId}_${toolCallId}`,
+          definition: DECISION_TASK,
+          status: "completed",
+          attempt: 1,
+          metadata: {
+            resolvedPause: {
+              toolCallId,
+              executionId: outcome.executionId,
+              output: outcome.output
+            }
+          },
+          createdAt: Date.now()
+        });
+      }
+      await this.ctx.storage.delete(deferredKey);
+      this._deferredResolvedPausesLoad = undefined;
+    }
   }
 
   // ── Durable-pause action approvals ──────────────────────────────
@@ -5323,132 +5435,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       payload: Record<string, unknown>
     ) => void;
     emit.call(this, event.type, event.payload);
-  }
-
-  private _ensureActionPendingTable(): void {
-    if (this._actionPendingTableEnsured) return;
-    this.sql`
-      CREATE TABLE IF NOT EXISTS cf_think_action_pending_approvals (
-        execution_id TEXT PRIMARY KEY,
-        action_name TEXT NOT NULL,
-        tool_call_id TEXT NOT NULL,
-        request_id TEXT,
-        input_json TEXT NOT NULL,
-        descriptor_json TEXT,
-        created_at INTEGER NOT NULL
-      )
-    `;
-    this.sql`
-      CREATE INDEX IF NOT EXISTS cf_think_action_pending_created
-      ON cf_think_action_pending_approvals (created_at)
-    `;
-    this._actionPendingTableEnsured = true;
-  }
-
-  private _readActionPendingRow(executionId: string): ActionPendingRow | null {
-    this._ensureActionPendingTable();
-    const rows = this.sql<ActionPendingRow>`
-      SELECT execution_id, action_name, tool_call_id, request_id, input_json,
-             descriptor_json, created_at
-      FROM cf_think_action_pending_approvals
-      WHERE execution_id = ${executionId}
-      LIMIT 1
-    `;
-    return rows[0] ?? null;
-  }
-
-  private _insertActionPendingRow(row: ActionPendingRow): void {
-    this._ensureActionPendingTable();
-    this.sql`
-      INSERT INTO cf_think_action_pending_approvals (
-        execution_id, action_name, tool_call_id, request_id, input_json,
-        descriptor_json, created_at
-      )
-      VALUES (
-        ${row.execution_id}, ${row.action_name}, ${row.tool_call_id},
-        ${row.request_id}, ${row.input_json}, ${row.descriptor_json},
-        ${row.created_at}
-      )
-    `;
-  }
-
-  /**
-   * Atomically claim a pending-approval row for resolution: read it, then
-   * delete it. SQLite calls are synchronous and there is no `await` between the
-   * read and the delete, so within the single DO isolate this is race-free — a
-   * concurrent `approveExecution`/`rejectExecution` for the same id can only run
-   * at an await boundary, by which point the row is already gone (it sees
-   * `null` → "already resolved"). The returned row is the caller's to resolve.
-   */
-  private _claimActionPendingRow(executionId: string): ActionPendingRow | null {
-    this._ensureActionPendingTable();
-    const row = this._readActionPendingRow(executionId);
-    if (!row) return null;
-    this.sql`
-      DELETE FROM cf_think_action_pending_approvals
-      WHERE execution_id = ${executionId}
-    `;
-    return row;
-  }
-
-  private _listActionPendingRows(): ActionPendingRow[] {
-    this._ensureActionPendingTable();
-    return this.sql<ActionPendingRow>`
-      SELECT execution_id, action_name, tool_call_id, request_id, input_json,
-             descriptor_json, created_at
-      FROM cf_think_action_pending_approvals
-      ORDER BY created_at ASC
-    `;
-  }
-
-  private _deleteActionPendingRows(executionIds: string[]): number {
-    let deleted = 0;
-    for (let i = 0; i < executionIds.length; i += MAX_BOUND_PARAMS) {
-      const batch = executionIds.slice(i, i + MAX_BOUND_PARAMS);
-      const strings = buildInClauseStrings(
-        "DELETE FROM cf_think_action_pending_approvals WHERE execution_id IN ",
-        batch.length
-      );
-      this.sql(strings, ...batch);
-      deleted += batch.length;
-    }
-    return deleted;
-  }
-
-  private async _sweepActionPendingApprovals(options?: {
-    force?: boolean;
-  }): Promise<{ swept: number }> {
-    this._ensureActionPendingTable();
-    const ttl = this.actionPendingApprovalTtlMs;
-    if (ttl === false) return { swept: 0 };
-    const now = Date.now();
-    if (!options?.force) {
-      const lastSwept =
-        (await this.ctx.storage.get<number>(ACTION_PENDING_LAST_SWEPT_KEY)) ??
-        0;
-      if (now - lastSwept < ACTION_PENDING_SWEEP_INTERVAL_MS) {
-        return { swept: 0 };
-      }
-    }
-    const cutoff = now - ttl;
-    const rows = this.sql<{ execution_id: string }>`
-      SELECT execution_id
-      FROM cf_think_action_pending_approvals
-      WHERE created_at < ${cutoff}
-      ORDER BY created_at ASC
-      LIMIT 500
-    `;
-    const swept = this._deleteActionPendingRows(
-      rows.map((row) => row.execution_id)
-    );
-    await this.ctx.storage.put(ACTION_PENDING_LAST_SWEPT_KEY, now);
-    if (swept > 0) {
-      this._emitActionPauseEvent({
-        type: "action:pause:swept",
-        payload: { swept }
-      });
-    }
-    return { swept };
   }
 
   // ── Durable programmatic submissions ───────────────────────────
@@ -7819,13 +7805,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       typeof o.executionId === "string" ? o.executionId : undefined;
 
     if (executionId?.startsWith(ACTION_PAUSE_ID_PREFIX)) {
-      const row = this._readActionPendingRow(executionId);
-      if (!row?.descriptor_json) return undefined;
-      try {
-        return JSON.parse(row.descriptor_json) as ActionApprovalDescriptor;
-      } catch {
-        return undefined;
-      }
+      const record = this.tasks.peek(executionId);
+      return isPendingDecision(record)
+        ? (record?.metadata?.descriptor as ActionApprovalDescriptor | undefined)
+        : undefined;
     }
 
     const pending = Array.isArray(o.pending)
@@ -8548,21 +8531,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   async pendingApprovals(executionId?: string): Promise<PendingApproval[]> {
     const out: PendingApproval[] = [];
 
-    for (const row of this._listActionPendingRows()) {
-      if (executionId && row.execution_id !== executionId) continue;
-      if (!row.descriptor_json) continue;
-      let descriptor: ActionApprovalDescriptor;
-      try {
-        descriptor = JSON.parse(
-          row.descriptor_json
-        ) as ActionApprovalDescriptor;
-      } catch {
-        continue;
-      }
+    for (const record of pendingDecisions(this.tasks)) {
+      if (executionId && record.runId !== executionId) continue;
+      const descriptor = record.metadata?.descriptor;
+      if (descriptor === undefined) continue;
       out.push({
-        executionId: row.execution_id,
+        executionId: record.runId,
         source: "action",
-        descriptor
+        descriptor: descriptor as unknown as ActionApprovalDescriptor
       });
     }
 
@@ -8610,10 +8586,80 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * Client-callable.
    */
   async approveExecution(executionId: string): Promise<unknown> {
-    // Durable-pause action approvals own the `actpause_` id space and resolve
-    // against the pending-approval store, not the codemode runtime.
+    return this._decidePause(executionId, { approved: true });
+  }
+
+  /**
+   * Reject a paused execution's pending action, ending the run. The
+   * transcript's paused output is replaced with
+   * `{ status: "rejected", executionId, reason }` and the chat
+   * auto-continues so the model can adapt (or explain) instead of erroring.
+   * Pass `{ autoContinue: false }` to record the rejection without starting a
+   * model continuation.
+   *
+   * Client-callable.
+   */
+  async rejectExecution(
+    executionId: string,
+    reason?: string,
+    options?: RejectExecutionOptions
+  ): Promise<unknown> {
+    return this._decidePause(executionId, {
+      approved: false,
+      ...(reason !== undefined && { reason }),
+      ...(options?.autoContinue !== undefined && {
+        autoContinue: options.autoContinue
+      })
+    });
+  }
+
+  /**
+   * Decide a paused execution. A durable-pause action's decision run was
+   * parked with the pause (its id is the `actpause_` execution id): settling
+   * it from outside stores the verdict before the action runs, and its
+   * terminal report runs the action and writes the outcome, again after a
+   * reset until it has.
+   *
+   * A codemode execution holds its own pending call and runs the decision
+   * itself, so the runtime call is never repeated after a reset (it resumes
+   * whatever is paused now). Only its outcome is recorded, as a decision run
+   * that completes at once, so the transcript write survives a reset.
+   */
+  private async _decidePause(
+    executionId: string,
+    verdict: DecisionVerdict
+  ): Promise<unknown> {
+    const connectionId = getCurrentAgent().connection?.id;
+    const decided: DecisionVerdict = {
+      ...verdict,
+      ...(connectionId !== undefined && { connectionId })
+    };
+    const alreadyResolved = {
+      status: "error",
+      executionId,
+      error: `Execution "${executionId}" is no longer pending — it was approved or rejected elsewhere.`
+    };
     if (executionId.startsWith(ACTION_PAUSE_ID_PREFIX)) {
-      return await this._approveActionPause(executionId);
+      if (!isPendingDecision(this.tasks.peek(executionId))) {
+        return alreadyResolved;
+      }
+      const settled = await this.tasks.settle(
+        executionId,
+        decided as unknown as TaskJson
+      );
+      if (!settled) return alreadyResolved;
+      if (!this._decisionOutputs.has(executionId)) {
+        return {
+          status: "error",
+          executionId,
+          error:
+            "The decision was recorded; its outcome is written when the " +
+            "action can run."
+        };
+      }
+      const output = this._decisionOutputs.get(executionId);
+      this._decisionOutputs.delete(executionId);
+      return output;
     }
     const runtime = this._codemodeRuntime();
     if (!runtime) {
@@ -8625,61 +8671,153 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           "created on this agent."
       };
     }
-    const output = truncatePausedExecutionOutput(
-      await runtime.approve({ executionId })
+    let output: unknown;
+    if (verdict.approved) {
+      output = truncatePausedExecutionOutput(
+        await runtime.approve({ executionId })
+      );
+    } else {
+      const pending = await runtime.pending(executionId);
+      if (pending.length === 0) {
+        return {
+          status: "error",
+          executionId,
+          error: `Execution "${executionId}" is no longer pending.`
+        };
+      }
+      // `reject` reports whether it actually terminated the run. A `false`
+      // means the action was resolved between our `pending()` check and the
+      // reject (approve/reject interleave across facet RPC awaits — input
+      // gates only cover storage). Writing "rejected" then would clobber a
+      // paused part whose real outcome (e.g. an in-flight approval) is still
+      // coming, so surface an error instead.
+      const terminated = await runtime.reject({
+        executionId,
+        seq: pending[0].seq
+      });
+      if (!terminated) return alreadyResolved;
+      output = {
+        status: "rejected",
+        executionId,
+        reason: verdict.reason ?? "Rejected by user"
+      };
+    }
+    await this.tasks.run(
+      DECISION_TASK,
+      {
+        kind: "codemode",
+        executionId,
+        verdict: decided as unknown as TaskJson,
+        output: output as TaskJson
+      } satisfies DecisionInput,
+      { runId: `codemode_${crypto.randomUUID()}`, start: "now" }
     );
-    await this._applyExecutionOutcome(executionId, output);
     return output;
   }
 
   /**
-   * Approve a parked `kind: "durable-pause"` action and run its `execute`.
-   *
-   * Claim-by-delete makes this idempotent across tabs/recovery: only the caller
-   * that removes the row runs the action; a racing approve/reject sees no row
-   * and reports "already resolved". Authorization happened at PAUSE time — the
-   * human approval is the authority now, so we do not re-authorize (the turn
-   * context that `authorizeAction` needs is gone). The action runs through the
-   * ledger so its side effect stays replay-safe, the outcome replaces the
-   * paused transcript part, and the chat continues even with no socket open.
+   * A decision run completed (its terminal report): run what the verdict
+   * lets go on, and write the outcome into the transcript. At least once: a
+   * reset before this returns runs it again, and the approved action's side
+   * effect replays from the action ledger. Each try is counted, and the count
+   * synced, before the action runs, so one that keeps ending the isolate
+   * gives up after three and writes an error instead.
    */
-  private async _approveActionPause(executionId: string): Promise<unknown> {
-    const row = this._claimActionPendingRow(executionId);
-    if (!row) {
+  private async _onDecisionSettled(runId: string): Promise<void> {
+    const record = this.tasks.peek(runId);
+    const input = this.tasks.inputOf<DecisionInput>(runId);
+    if (!record || !input) return;
+    const result = record.result as
+      | { verdict: DecisionVerdict; output: unknown }
+      | DecisionVerdict
+      | null;
+    let executionId: string;
+    let verdict: DecisionVerdict;
+    let output: unknown;
+    if (input.kind === "codemode") {
+      const recorded = result as { verdict: DecisionVerdict; output: unknown };
+      executionId = input.executionId;
+      verdict = recorded.verdict;
+      output = recorded.output;
+    } else {
+      executionId = runId;
+      verdict = result as DecisionVerdict;
+      const tries = Number(record.metadata?.tries ?? 0) + 1;
+      this.tasks.updateMetadata(runId, (metadata) => ({
+        ...metadata,
+        tries
+      }));
+      await this.ctx.storage.sync();
+      output =
+        tries > 3
+          ? {
+              status: "error",
+              executionId,
+              action: input.action,
+              error: `The approved action did not finish in 3 tries.`
+            }
+          : await this._continueActionPause(runId, input, verdict);
+      if (output === DEFER_DECISION) {
+        // Its claim is still held by an attempt a reset cut off: give the
+        // try back and report again later, once the lease lets it run.
+        this.tasks.updateMetadata(runId, (metadata) => ({
+          ...metadata,
+          tries: tries - 1
+        }));
+        throw new Error(`Decision "${runId}" waits for its action's claim`);
+      }
+    }
+    this._decisionOutputs.set(runId, output);
+    await this._applyExecutionOutcome(runId, executionId, output, verdict);
+    if (
+      ![...this._deferredResolvedPauses.values()].some(
+        (pause) => pause.runId === runId
+      )
+    ) {
+      this.tasks.deleteRun(runId);
+    }
+  }
+
+  /**
+   * Run an approved durable-pause action, or build its rejection.
+   * Authorization happened at pause time — the human approval is the
+   * authority now, so the call is not authorized again (the turn context
+   * `authorizeAction` needs is gone).
+   */
+  private async _continueActionPause(
+    executionId: string,
+    input: Extract<DecisionInput, { kind: "action" }>,
+    verdict: DecisionVerdict
+  ): Promise<unknown> {
+    if (!verdict.approved) {
+      this._emitActionPauseEvent({
+        type: "action:pause:rejected",
+        payload: { action: input.action, executionId }
+      });
+      return {
+        status: "rejected",
+        executionId,
+        action: input.action,
+        reason: verdict.reason ?? "Rejected by user"
+      };
+    }
+    const action = await this._findRegisteredAction(input.action);
+    if (!action) {
       return {
         status: "error",
         executionId,
-        error: `Execution "${executionId}" is no longer pending — it was approved or rejected elsewhere.`
-      };
-    }
-
-    const action = await this._findRegisteredAction(row.action_name);
-    if (!action) {
-      const output = {
-        status: "error",
-        executionId,
-        action: row.action_name,
+        action: input.action,
         error:
-          `Action "${row.action_name}" is no longer registered, so the ` +
+          `Action "${input.action}" is no longer registered, so the ` +
           `approved call cannot run. The approval was consumed.`
       };
-      await this._applyExecutionOutcome(executionId, output);
-      return output;
     }
-
-    let input: unknown;
-    try {
-      input = JSON.parse(row.input_json);
-    } catch {
-      input = {};
-    }
-
-    const output = await this._runApprovedActionPause(action, row, input);
+    const output = await this._runApprovedActionPause(action, input);
+    if (output === DEFER_DECISION) return output;
     this._emitActionPauseEvent({
       type: "action:pause:approved",
-      payload: { action: row.action_name, executionId }
+      payload: { action: input.action, executionId }
     });
-    await this._applyExecutionOutcome(executionId, output);
     return output;
   }
 
@@ -8701,8 +8839,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    */
   private async _runApprovedActionPause(
     action: Action,
-    row: ActionPendingRow,
-    input: unknown
+    subject: Extract<DecisionInput, { kind: "action" }>
   ): Promise<unknown> {
     const config = action.config;
     const executeAction = config.execute as (
@@ -8719,8 +8856,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const ctx: ActionContext = {
       agent: this,
       env: this.env as Cloudflare.Env,
-      requestId: row.request_id ?? "",
-      toolCallId: row.tool_call_id,
+      requestId: subject.requestId ?? "",
+      toolCallId: subject.toolCallId,
       messages: [],
       signal,
       // No-op: a durable-pause approved action is delivered by a later
@@ -8741,17 +8878,20 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       });
       const runAction = async () => {
         const out = await Promise.race([
-          Promise.resolve(executeAction(input, ctx)),
+          Promise.resolve(executeAction(subject.input, ctx)),
           abortPromise
         ]);
         return prepareActionOutputForModel(out);
       };
       return await this._runLedgeredAction({
-        toolName: row.action_name,
+        toolName: subject.action,
         idempotencyKey,
-        input,
+        input: subject.input,
         ctx,
-        runAction
+        runAction,
+        // An approval a reset cut off can find its claim still held: run it
+        // once the lease lets it, instead of settling an error.
+        onReclaimableInDoubt: () => DEFER_DECISION
       });
     } catch (error) {
       return actionErrorEnvelope(error);
@@ -8759,101 +8899,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       if (onAbort) signal.removeEventListener("abort", onAbort);
       cleanup();
     }
-  }
-
-  /**
-   * Reject a paused execution's pending action, ending the run. The
-   * transcript's paused output is replaced with
-   * `{ status: "rejected", executionId, reason }` and the chat
-   * auto-continues so the model can adapt (or explain) instead of erroring.
-   * Pass `{ autoContinue: false }` to record the rejection without starting a
-   * model continuation.
-   *
-   * Client-callable.
-   */
-  async rejectExecution(
-    executionId: string,
-    reason?: string,
-    options?: RejectExecutionOptions
-  ): Promise<unknown> {
-    if (executionId.startsWith(ACTION_PAUSE_ID_PREFIX)) {
-      return await this._rejectActionPause(executionId, reason, options);
-    }
-    const runtime = this._codemodeRuntime();
-    if (!runtime) {
-      return {
-        status: "error",
-        executionId,
-        error:
-          "No codemode runtime is configured — the execute tool was never " +
-          "created on this agent."
-      };
-    }
-    const pending = await runtime.pending(executionId);
-    if (pending.length === 0) {
-      return {
-        status: "error",
-        executionId,
-        error: `Execution "${executionId}" is no longer pending.`
-      };
-    }
-    // `reject` reports whether it actually terminated the run. A `false`
-    // means the action was resolved between our `pending()` check and the
-    // reject (approve/reject interleave across facet RPC awaits — input
-    // gates only cover storage). Writing "rejected" then would clobber a
-    // paused part whose real outcome (e.g. an in-flight approval) is still
-    // coming, so surface an error instead.
-    const terminated = await runtime.reject({
-      executionId,
-      seq: pending[0].seq
-    });
-    if (!terminated) {
-      return {
-        status: "error",
-        executionId,
-        error: `Execution "${executionId}" is no longer pending — it was approved or rejected elsewhere.`
-      };
-    }
-    const output = {
-      status: "rejected",
-      executionId,
-      reason: reason ?? "Rejected by user"
-    };
-    await this._applyExecutionOutcome(executionId, output, options);
-    return output;
-  }
-
-  /**
-   * Reject a parked `kind: "durable-pause"` action. Claim-by-delete consumes
-   * the pending row (idempotent across tabs/recovery), the action's `execute`
-   * never runs, and the paused transcript part is replaced with a `rejected`
-   * outcome so the model can adapt or explain.
-   */
-  private async _rejectActionPause(
-    executionId: string,
-    reason?: string,
-    options?: RejectExecutionOptions
-  ): Promise<unknown> {
-    const row = this._claimActionPendingRow(executionId);
-    if (!row) {
-      return {
-        status: "error",
-        executionId,
-        error: `Execution "${executionId}" is no longer pending — it was approved or rejected elsewhere.`
-      };
-    }
-    const output = {
-      status: "rejected",
-      executionId,
-      action: row.action_name,
-      reason: reason ?? "Rejected by user"
-    };
-    this._emitActionPauseEvent({
-      type: "action:pause:rejected",
-      payload: { action: row.action_name, executionId }
-    });
-    await this._applyExecutionOutcome(executionId, output, options);
-    return output;
   }
 
   /**
@@ -8884,9 +8929,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * arrives, and that outcome's continuation would have nothing to answer.
    */
   private async _applyExecutionOutcome(
+    runId: string,
     executionId: string,
     output: unknown,
-    options?: RejectExecutionOptions
+    verdict: DecisionVerdict
   ): Promise<boolean> {
     const toolCallId = await this._findExecutionToolCallDurably(
       executionId,
@@ -8903,7 +8949,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       if (toolCallId) {
         // Recorded before the outcome is written, so a restart before either
         // write lands still applies both before the next inference.
-        await this._rememberResolvedPause(toolCallId, { executionId, output });
+        await this._rememberResolvedPause(toolCallId, {
+          runId,
+          executionId,
+          output
+        });
         const outcome = await this._applyToolUpdateToMessages(
           pausedExecutionUpdate(toolCallId, executionId, output)
         );
@@ -8942,13 +8992,16 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       } as UIMessage);
       return { status: "changed", messageId: note.id };
     };
-    const autoContinue = options?.autoContinue !== false;
-    // Continue on the approving connection when there is one (WS callable),
+    const autoContinue = verdict.autoContinue !== false;
+    // Continue on the deciding connection when there is one (WS callable),
     // else any open connection (DO-stub approval with clients attached). When
     // NO connection is open — an approval arriving via RPC from a dashboard,
     // webhook, or voice backend — fall back to a connection-independent
     // continuation so the model still advances and the result isn't stranded.
-    let target = getCurrentAgent().connection;
+    let target =
+      verdict.connectionId !== undefined
+        ? this.getConnection(verdict.connectionId)
+        : undefined;
     if (!target) {
       for (const open of this.getConnections()) {
         target = open;
@@ -9091,16 +9144,24 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
   private _loadResolvedPauses(): Promise<void> {
     this._deferredResolvedPausesLoad ??= (async () => {
-      const stored = await this.ctx.storage.get<
-        Array<[string, ResolvedPauseOutcome]>
-      >(DEFERRED_RESOLVED_PAUSES_KEY);
-      for (const [toolCallId, outcome] of stored ?? []) {
-        if (!this._deferredResolvedPauses.has(toolCallId)) {
-          this._deferredResolvedPauses.set(toolCallId, outcome);
+      for (const record of this.tasks.peekList({
+        definition: DECISION_TASK,
+        status: ["completed"],
+        order: "oldest"
+      })) {
+        const pause = record.metadata?.resolvedPause as
+          | { toolCallId: string; executionId: string; output: unknown }
+          | undefined;
+        if (pause && !this._deferredResolvedPauses.has(pause.toolCallId)) {
+          this._deferredResolvedPauses.set(pause.toolCallId, {
+            runId: record.runId,
+            executionId: pause.executionId,
+            output: pause.output
+          });
         }
       }
     })().catch((error: unknown) => {
-      // Let the next caller retry instead of treating the key as empty.
+      // Let the next caller retry instead of treating it as empty.
       this._deferredResolvedPausesLoad = undefined;
       throw error;
     });
@@ -9113,21 +9174,22 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   ): Promise<void> {
     await this._loadResolvedPauses();
     this._deferredResolvedPauses.set(toolCallId, outcome);
-    await this.ctx.storage.put(DEFERRED_RESOLVED_PAUSES_KEY, [
-      ...this._deferredResolvedPauses
-    ]);
+    this.tasks.updateMetadata(outcome.runId, (metadata) => ({
+      ...metadata,
+      resolvedPause: {
+        toolCallId,
+        executionId: outcome.executionId,
+        output: outcome.output as TaskJson
+      }
+    }));
   }
 
   private async _forgetResolvedPause(toolCallId: string): Promise<void> {
     await this._loadResolvedPauses();
-    if (!this._deferredResolvedPauses.delete(toolCallId)) return;
-    if (this._deferredResolvedPauses.size === 0) {
-      await this.ctx.storage.delete(DEFERRED_RESOLVED_PAUSES_KEY);
-    } else {
-      await this.ctx.storage.put(DEFERRED_RESOLVED_PAUSES_KEY, [
-        ...this._deferredResolvedPauses
-      ]);
-    }
+    const pause = this._deferredResolvedPauses.get(toolCallId);
+    if (!pause) return;
+    this._deferredResolvedPauses.delete(toolCallId);
+    this.tasks.deleteRun(pause.runId);
   }
 
   private async _flushDeferredResolvedPauses(): Promise<void> {

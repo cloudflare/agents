@@ -78,7 +78,13 @@ import {
 } from "agents/internal";
 import type { Session } from "../../think";
 import type { ContextConfig } from "agents/context";
-import { stableHash, type Approvals } from "agents/internal";
+import {
+  DECISION_TASK,
+  EFFECT_TASK,
+  effectRunId,
+  pendingDecisions,
+  stableHash
+} from "../../action-ledger";
 import { z } from "zod";
 import { WorkspaceFiles } from "../../workspace-files";
 import type { TaskRecord } from "agents/internal";
@@ -7616,19 +7622,6 @@ export class ThinkToolsTestAgent extends Think {
     return (await this.session.getHistory()) as UIMessage[];
   }
 
-  /** Fail the next storage read of `key`. */
-  async failNextStorageGetForTest(key: string): Promise<void> {
-    const storage = this.ctx.storage as unknown as {
-      get(key: string): Promise<unknown>;
-    };
-    const get = storage.get.bind(storage);
-    storage.get = async (requested: string) => {
-      if (requested !== key) return get(requested);
-      storage.get = get;
-      throw new Error("simulated storage read failure");
-    };
-  }
-
   /** Drop in-memory deferred-pause state, as an eviction would. */
   async forgetDeferredResolvedPausesForTest(): Promise<void> {
     const state = this as unknown as {
@@ -7640,11 +7633,9 @@ export class ThinkToolsTestAgent extends Think {
   }
 
   private _listActionPendingRowsForTest(): Array<{ execution_id: string }> {
-    return (
-      this as unknown as {
-        _listActionPendingRows: () => Array<{ execution_id: string }>;
-      }
-    )._listActionPendingRows();
+    return pendingDecisions(this.tasks).map((record) => ({
+      execution_id: record.runId
+    }));
   }
 
   async getBeforeStepLog(): Promise<
@@ -8234,20 +8225,25 @@ export class ThinkToolsTestAgent extends Think {
       updated_at: number;
     }>
   > {
-    this._approvalsForTest().importRecords({});
-    return this.sql<{
-      key: string;
-      action_name: string;
-      input_hash: string;
-      status: string;
-      result_json: string | null;
-      updated_at: number;
-    }>`
-      SELECT key, name AS action_name, input_hash, status, result_json,
-             updated_at
-      FROM cf_agents_effects
-      ORDER BY key ASC
-    `;
+    return this.tasks
+      .peekList({ definition: EFFECT_TASK, order: "oldest", limit: 1000 })
+      .map((record) => {
+        const input = this.tasks.inputOf<{ name: string; inputHash: string }>(
+          record.runId
+        );
+        return {
+          key: record.runId.slice("effect:".length),
+          action_name: input?.name ?? "",
+          input_hash: input?.inputHash ?? "",
+          status: record.status === "completed" ? "settled" : "pending",
+          result_json:
+            record.status === "completed"
+              ? JSON.stringify({ valuePresent: true, value: record.result })
+              : null,
+          updated_at: record.settledAt ?? record.createdAt
+        };
+      })
+      .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
   }
 
   async insertActionLedgerRowForTest(options: {
@@ -8259,25 +8255,20 @@ export class ThinkToolsTestAgent extends Think {
     updatedAt?: number;
   }): Promise<void> {
     const now = options.updatedAt ?? Date.now();
-    this._approvalsForTest().importRecords({
-      effects: [
-        {
-          key: options.key,
-          name: options.actionName ?? "echo",
-          inputHash: stableHash(options.input ?? { message: "hello" }),
-          status: options.status ?? "pending",
-          resultJson:
-            options.status === "settled"
-              ? JSON.stringify({
-                  valuePresent: options.output !== undefined,
-                  value: options.output
-                })
-              : null,
-          context: { toolCallId: "tc-seeded" },
-          createdAt: now,
-          updatedAt: now
-        }
-      ]
+    await this.tasks.importRun({
+      runId: effectRunId(options.key),
+      definition: EFFECT_TASK,
+      status: options.status === "settled" ? "completed" : "running",
+      attempt: 1,
+      input: {
+        name: options.actionName ?? "echo",
+        inputHash: stableHash(options.input ?? { message: "hello" })
+      },
+      ...(options.status === "settled" && {
+        result: (options.output ?? null) as TaskJson
+      }),
+      createdAt: now,
+      settledAt: now
     });
   }
 
@@ -8285,13 +8276,12 @@ export class ThinkToolsTestAgent extends Think {
     settled: number;
     pending: number;
   }> {
-    return (
+    const { settled, pending } = await (
       this as unknown as {
-        _sweepApprovals: (options: {
-          force?: boolean;
-        }) => Promise<{ settled: number; pending: number }>;
+        _sweepApprovals: () => Promise<{ settled: number; pending: number }>;
       }
-    )._sweepApprovals({ force: true });
+    )._sweepApprovals();
+    return { settled, pending };
   }
 
   /** Seed a row in the table an earlier version used, for the migration. */
@@ -8337,10 +8327,6 @@ export class ThinkToolsTestAgent extends Think {
         WHERE type = 'table' AND name = 'cf_think_action_ledger'
       `.length > 0
     );
-  }
-
-  private _approvalsForTest(): Approvals {
-    return (this as unknown as { _approvals: Approvals })._approvals;
   }
 
   // ── Durable-pause action test helpers ───────────────────────────
@@ -8432,17 +8418,22 @@ export class ThinkToolsTestAgent extends Think {
       descriptor_json: string | null;
     }>
   > {
-    return (
-      this as unknown as {
-        _listActionPendingRows: () => Array<{
-          execution_id: string;
-          action_name: string;
-          tool_call_id: string;
-          input_json: string;
-          descriptor_json: string | null;
-        }>;
-      }
-    )._listActionPendingRows();
+    return pendingDecisions(this.tasks).map((record) => {
+      const input = this.tasks.inputOf<{
+        action: string;
+        toolCallId: string;
+        input: unknown;
+      }>(record.runId);
+      const descriptor = record.metadata?.descriptor;
+      return {
+        execution_id: record.runId,
+        action_name: input?.action ?? "",
+        tool_call_id: input?.toolCallId ?? "",
+        input_json: JSON.stringify(input?.input),
+        descriptor_json:
+          descriptor === undefined ? null : JSON.stringify(descriptor)
+      };
+    });
   }
 
   async approveExecutionForTest(executionId: string): Promise<unknown> {
@@ -8470,13 +8461,12 @@ export class ThinkToolsTestAgent extends Think {
   }
 
   async sweepActionPendingApprovalsForTest(): Promise<{ swept: number }> {
-    return (
+    const { decisions } = await (
       this as unknown as {
-        _sweepActionPendingApprovals: (options: {
-          force?: boolean;
-        }) => Promise<{ swept: number }>;
+        _sweepApprovals: () => Promise<{ decisions: number }>;
       }
-    )._sweepActionPendingApprovals({ force: true });
+    )._sweepApprovals();
+    return { swept: decisions };
   }
 
   async setActionPendingApprovalTtlForTest(ttl: number | false): Promise<void> {
@@ -8490,9 +8480,8 @@ export class ThinkToolsTestAgent extends Think {
     createdAt: number
   ): Promise<void> {
     this.sql`
-      UPDATE cf_think_action_pending_approvals
-      SET created_at = ${createdAt}
-      WHERE execution_id = ${executionId}
+      UPDATE cf_agents_task_runs SET created_at = ${createdAt}
+      WHERE run_id = ${executionId} AND definition = ${DECISION_TASK}
     `;
   }
 

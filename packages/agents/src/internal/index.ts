@@ -22,7 +22,6 @@ export type {
   TaskRecord,
   TaskRegisterOptions
 } from "../tasks/types";
-export * from "../approvals";
 export {
   KeepAlive,
   DEFAULT_KEEP_ALIVE_INTERVAL_MS,
