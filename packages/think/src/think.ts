@@ -591,6 +591,8 @@ function keepResolvedPauses(
 const ACTION_PAUSE_ID_PREFIX = "actpause_";
 /** An approved action whose claim waits for its lease: try the decision again later. */
 const DEFER_DECISION = Symbol("think.deferDecision");
+/** A caller waits for this decision's outcome; its report has not run yet. */
+const DECISION_OUTPUT_PENDING = Symbol("think.decisionOutputPending");
 /** Tries a decided action gets before its outcome is an error. */
 const MAX_DECISION_TRIES = 3;
 import { Workspace, type WorkspaceStub } from "@cloudflare/computer";
@@ -4065,9 +4067,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     );
     // A failed run takes back the reply attachments it recorded.
     const attachmentCount = this._activeTurnReplyAttachments.length;
+    // The effect runs inside its task; the caller's connection and request
+    // stay ambient for it, as when it ran inline.
+    const caller = agentContext.getStore();
     const run = async () => {
       try {
-        return await runAction();
+        return await (caller
+          ? agentContext.run(caller, runAction)
+          : runAction());
       } catch (error) {
         this._activeTurnReplyAttachments.length = attachmentCount;
         throw error;
@@ -8400,9 +8407,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   async pendingApprovals(executionId?: string): Promise<PendingApproval[]> {
     const out: PendingApproval[] = [];
 
-    for (const record of pendingDecisions(this.tasks)) {
+    const decisions = executionId
+      ? [this.tasks.peek(decisionRunId(executionId))].filter(
+          (record): record is TaskRecord => isPendingDecision(record)
+        )
+      : pendingDecisions(this.tasks);
+    for (const record of decisions) {
       const id = decisionIdOf(record.runId);
-      if (executionId && id !== executionId) continue;
       const descriptor = record.metadata?.descriptor;
       if (descriptor === undefined) continue;
       out.push({
@@ -8514,12 +8525,23 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       if (!isPendingDecision(this.tasks.peek(runId))) {
         return alreadyResolved;
       }
-      const settled = await this.tasks.settle(
-        runId,
-        decided as unknown as TaskJson
-      );
+      // Its report fills this in; only a waiting caller makes an entry, and
+      // only the caller that made it removes it.
+      const owns = !this._decisionOutputs.has(runId);
+      if (owns) this._decisionOutputs.set(runId, DECISION_OUTPUT_PENDING);
+      let settled: boolean;
+      let output: unknown;
+      try {
+        settled = await this.tasks.settle(
+          runId,
+          decided as unknown as TaskJson
+        );
+        output = this._decisionOutputs.get(runId);
+      } finally {
+        if (owns) this._decisionOutputs.delete(runId);
+      }
       if (!settled) return alreadyResolved;
-      if (!this._decisionOutputs.has(runId)) {
+      if (output === DECISION_OUTPUT_PENDING) {
         return {
           status: "error",
           executionId,
@@ -8528,8 +8550,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             "action can run."
         };
       }
-      const output = this._decisionOutputs.get(runId);
-      this._decisionOutputs.delete(runId);
       return output;
     }
     const runtime = this._codemodeRuntime();
@@ -8542,13 +8562,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           "created on this agent."
       };
     }
+    const pending = await runtime.pending(executionId);
     let output: unknown;
     if (verdict.approved) {
       output = truncatePausedExecutionOutput(
         await runtime.approve({ executionId })
       );
     } else {
-      const pending = await runtime.pending(executionId);
       if (pending.length === 0) {
         return {
           status: "error",
@@ -8573,16 +8593,36 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         reason: verdict.reason ?? "Rejected by user"
       };
     }
-    await this.tasks.run(
-      DECISION_TASK,
-      {
-        kind: "codemode",
-        executionId,
-        verdict: decided as unknown as TaskJson,
-        output: output as TaskJson
-      } satisfies DecisionInput,
-      { runId: decisionRunId(`codemode_${crypto.randomUUID()}`), start: "now" }
-    );
+    if (pending.length === 0) {
+      // Nothing was pending (expired, settled, unknown): the runtime's error
+      // still reconciles a stale card, but a client calling with any id
+      // must not write runs, so nothing is recorded.
+      await this._applyExecutionOutcome("", executionId, output, decided);
+      return output;
+    }
+    try {
+      await this.tasks.run(
+        DECISION_TASK,
+        {
+          kind: "codemode",
+          executionId,
+          verdict: decided as unknown as TaskJson,
+          output: output as TaskJson
+        } satisfies DecisionInput,
+        {
+          runId: decisionRunId(`codemode_${crypto.randomUUID()}`),
+          start: "now"
+        }
+      );
+    } catch (error) {
+      // Too large to record (past the run input limit): the runtime has
+      // decided, so write the outcome now; only its reset safety is lost.
+      console.error(
+        `[Think] The outcome of "${executionId}" was not recorded`,
+        error
+      );
+      await this._applyExecutionOutcome("", executionId, output, decided);
+    }
     return output;
   }
 
@@ -8598,10 +8638,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const record = this.tasks.peek(runId);
     const input = this.tasks.inputOf<DecisionInput>(runId);
     if (!record || !input) return;
-    const result = record.result as
-      | { verdict: DecisionVerdict; output: unknown }
-      | DecisionVerdict
-      | null;
     // Counted, and synced, before anything runs: a try that ends the
     // isolate still counts.
     const tries = Number(record.metadata?.tries ?? 0) + 1;
@@ -8617,13 +8653,18 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     let verdict: DecisionVerdict;
     let output: unknown;
     if (input.kind === "codemode") {
-      const recorded = result as { verdict: DecisionVerdict; output: unknown };
       executionId = input.executionId;
-      verdict = recorded.verdict;
-      output = recorded.output;
+      verdict = input.verdict as unknown as DecisionVerdict;
+      output = input.output;
+    } else if (record.metadata?.outcome !== undefined) {
+      // The action already ran and its outcome was kept: only the
+      // transcript write is left, so the action is not run again.
+      executionId = decisionIdOf(runId);
+      verdict = record.result as unknown as DecisionVerdict;
+      output = (record.metadata.outcome as { output?: unknown }).output;
     } else {
       executionId = decisionIdOf(runId);
-      verdict = result as DecisionVerdict;
+      verdict = record.result as unknown as DecisionVerdict;
       output =
         tries > MAX_DECISION_TRIES
           ? {
@@ -8642,8 +8683,15 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         }));
         throw new Error(`Decision "${runId}" waits for its action's claim`);
       }
+      // Kept before the transcript write, so a retry of that write does not
+      // run the action again (one that threw has no effect run to replay).
+      this.tasks.updateMetadata(runId, (metadata) => ({
+        ...metadata,
+        outcome: { output: output as TaskJson }
+      }));
     }
-    this._decisionOutputs.set(runId, output);
+    if (this._decisionOutputs.has(runId))
+      this._decisionOutputs.set(runId, output);
     await this._applyExecutionOutcome(runId, executionId, output, verdict);
     if (
       ![...this._deferredResolvedPauses.values()].some(

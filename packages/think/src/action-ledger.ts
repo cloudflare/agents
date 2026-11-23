@@ -111,6 +111,15 @@ export function createEffectState(): EffectState {
 const EFFECT_RUN_PREFIX = "__cf_effect:";
 const DECISION_RUN_PREFIX = "__cf_decision:";
 
+/** The value an effect run recorded (`{}` for a void one). */
+export function recordedValue(result: unknown): unknown {
+  return result !== null &&
+    typeof result === "object" &&
+    Object.hasOwn(result, "value")
+    ? (result as { value: unknown }).value
+    : undefined;
+}
+
 /** The run id of an effect key. Run ids are one space per agent. */
 export function effectRunId(key: string): string {
   return `${EFFECT_RUN_PREFIX}${key}`;
@@ -163,7 +172,10 @@ export function registerEffectTask(tasks: Tasks, state: EffectState): void {
         state.unrecorded.set(step.id, { value });
         return TaskSettlement.skipped("unrecorded");
       }
-      return (json === undefined ? null : JSON.parse(json)) as TaskValue;
+      // Wrapped, so a void result replays as void and not as null.
+      return (
+        json === undefined ? {} : { value: JSON.parse(json) }
+      ) as TaskValue;
     },
     { attached: true }
   );
@@ -205,7 +217,7 @@ export async function runEffectOnce(
       return { status: "conflict" };
     }
     if (existing.status === "completed") {
-      return { status: "replayed", value: existing.result };
+      return { status: "replayed", value: recordedValue(existing.result) };
     }
     if (existing.status === "pending" || existing.status === "running") {
       const ageMs = Date.now() - existing.createdAt;
@@ -233,8 +245,12 @@ export async function runEffectOnce(
       const kept = state.unrecorded.get(runId);
       if (record?.status === "completed") {
         return reclaimedAge === undefined
-          ? { status: "ran", value: record.result }
-          : { status: "reclaimed", value: record.result, ageMs: reclaimedAge };
+          ? { status: "ran", value: recordedValue(record.result) }
+          : {
+              status: "reclaimed",
+              value: recordedValue(record.result),
+              ageMs: reclaimedAge
+            };
       }
       // Failed or unrecordable: the key is free again.
       tasks.deleteRun(runId);
@@ -332,9 +348,9 @@ export function registerDecisionTask(
     DECISION_TASK,
     (input) => {
       const decision = input as DecisionInput;
-      if (decision.kind === "codemode") {
-        return { verdict: decision.verdict, output: decision.output };
-      }
+      // A codemode decision is recorded: its verdict and outcome are its
+      // input, so nothing is stored twice.
+      if (decision.kind === "codemode") return null;
       return TaskSettlement.park("decision");
     },
     {
@@ -369,13 +385,20 @@ export function isPendingDecision(record: TaskRecord | undefined): boolean {
   );
 }
 
-/** The decisions still waiting for a verdict, oldest first. */
-export function pendingDecisions(tasks: Tasks): TaskRecord[] {
+/**
+ * The decisions still waiting for a verdict, oldest first: all of them
+ * unless `limit` is given (their number is bounded by the approval TTL).
+ */
+export function pendingDecisions(
+  tasks: Tasks,
+  limit = Number.MAX_SAFE_INTEGER
+): TaskRecord[] {
   return tasks
     .peekList({
       definition: DECISION_TASK,
       status: ["pending"],
-      order: "oldest"
+      order: "oldest",
+      limit
     })
     .filter(isPendingDecision);
 }
@@ -387,7 +410,7 @@ export async function sweepDecisions(
   limit: number
 ): Promise<number> {
   let swept = 0;
-  for (const record of pendingDecisions(tasks)) {
+  for (const record of pendingDecisions(tasks, limit)) {
     if (swept >= limit || record.createdAt >= before) break;
     await tasks.settle(record.runId, TaskSettlement.aborted("expired"));
     if (tasks.deleteRun(record.runId)) swept += 1;
@@ -438,7 +461,9 @@ export async function migrateLegacyActionRecords(
         input: { name: row.action_name, inputHash: row.input_hash },
         ...(row.status === "settled" && {
           result:
-            recorded?.valuePresent === true ? (recorded.value ?? null) : null
+            recorded?.valuePresent === true
+              ? { value: recorded.value ?? null }
+              : {}
         }),
         // The claim's age is what a reclaim measures.
         createdAt: row.updated_at,
@@ -471,7 +496,8 @@ export async function migrateLegacyActionRecords(
           action: row.action_name,
           toolCallId: row.tool_call_id,
           requestId: row.request_id,
-          input: parseJson(row.input_json) ?? {}
+          // Only a missing or unreadable input becomes `{}`; JSON null stays.
+          input: inputOrEmpty(parseJson(row.input_json))
         },
         descriptor: parseJson(row.descriptor_json)
       });
@@ -503,6 +529,10 @@ export async function migrateLegacyActionRecords(
   }
   await storage.delete(deferredKey);
   return true;
+}
+
+function inputOrEmpty(input: TaskJson | undefined): TaskJson {
+  return input === undefined ? {} : input;
 }
 
 function parseJson(json: string | null): TaskJson | undefined {

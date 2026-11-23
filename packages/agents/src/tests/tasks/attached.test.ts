@@ -186,4 +186,53 @@ describe("Tasks attached definitions", () => {
       }
     );
   });
+
+  it("deliver the reports after one that keeps failing", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        const stuck = "__cf_test_stuck_report" as unknown as "pipeline";
+        const fine = "__cf_test_fine_report" as unknown as "pipeline";
+        const delivered: string[] = [];
+        instance.tasks.register(stuck, async () => "x", {
+          attached: true,
+          onStatus: (record) => {
+            if (record.status === "completed") throw new Error("not yet");
+          }
+        });
+        instance.tasks.register(fine, async () => "x", {
+          attached: true,
+          onStatus: (record) => {
+            if (record.status === "completed") delivered.push(record.runId);
+          }
+        });
+        const now = Date.now();
+        for (const [runId, definition, settledAt] of [
+          ["first", stuck, now - 2],
+          ["second", fine, now - 1]
+        ] as const) {
+          await instance.tasks.importRun({
+            runId,
+            definition,
+            status: "completed",
+            attempt: 1,
+            createdAt: settledAt,
+            settledAt
+          });
+        }
+        state.storage.sql.exec(
+          "UPDATE cf_agents_task_runs SET notified = NULL"
+        );
+
+        await instance.tasks.onJob({
+          job: { id: "tasks:reports", fn: "reports" }
+        } as never);
+
+        expect(delivered).toEqual(["second"]);
+        expect(jobIds(state.storage)).toContain("tasks:reports");
+      }
+    );
+  });
 });

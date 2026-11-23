@@ -224,11 +224,27 @@ export class ThinkExecuteHitlAgent extends Think {
         verdict: { approved: true },
         output
       },
-      result: { verdict: { approved: true }, output },
       createdAt: Date.now()
     });
     this
       .sql`UPDATE cf_agents_task_runs SET notified = NULL WHERE run_id = ${runId}`;
+  }
+
+  /** Record a codemode outcome as an approval does, through its run. */
+  async recordCodemodeOutcomeForTest(
+    executionId: string,
+    output: { status: string; executionId: string; result: string }
+  ): Promise<void> {
+    await this.tasks.run(
+      DECISION_TASK,
+      { kind: "codemode", executionId, verdict: { approved: true }, output },
+      { runId: decisionRunId(`codemode_${crypto.randomUUID()}`), start: "now" }
+    );
+  }
+
+  async decisionOutputCountForTest(): Promise<number> {
+    return (this as unknown as { _decisionOutputs: Map<string, unknown> })
+      ._decisionOutputs.size;
   }
 
   /** How many decision runs are stored. */

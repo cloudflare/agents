@@ -1533,6 +1533,13 @@ describe("SubAgent", () => {
     ).resolves.toBe("running");
   });
 
+  it("keeps a facet's terminal report alive across a reset with the facet's report job", async () => {
+    const agent = await getAgentByName(env.TestSubAgentParent, uniqueName());
+    await expect(
+      agent.subAgentJobsDuringTerminalReport("report-child")
+    ).resolves.toContain("tasks:reports");
+  });
+
   it("runs a facet's lane runs one after the other, woken through the root", async () => {
     const agent = await getAgentByName(env.TestSubAgentParent, uniqueName());
     await expect(agent.subAgentRunLane("lane-child")).resolves.toEqual([

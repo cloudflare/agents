@@ -1,7 +1,11 @@
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { hasToolCall, Output, tool } from "ai";
 import { action, skills, Think, type ThinkSession } from "../../think";
-import { Agent } from "agents";
+import {
+  Agent,
+  getCurrentAgent,
+  __DO_NOT_USE_WILL_BREAK__agentContext as agentContext
+} from "agents";
 import type {
   Connection,
   AgentToolEventMessage,
@@ -85,6 +89,7 @@ import {
   EFFECT_TASK,
   effectKeyOf,
   effectRunId,
+  recordedValue,
   migrateLegacyActionRecords,
   pendingDecisions,
   stableHash
@@ -7970,6 +7975,7 @@ export class ThinkToolsTestAgent extends Think {
                 mode === "ledger-oversize-output" ||
                 mode === "ledger-slow" ||
                 mode === "ledger-symbol-output" ||
+                mode === "ledger-void" ||
                 mode === "ledger-approval" ||
                 mode === "attach-ledger"
               ? (this._actionIdempotencyKey ?? "echo-ledger-key")
@@ -8004,6 +8010,7 @@ export class ThinkToolsTestAgent extends Think {
             : undefined,
         execute: async ({ message }, ctx): Promise<unknown> => {
           this._actionExecutionCount++;
+          this._lastActionConnectionId = getCurrentAgent().connection?.id;
           this._lastActionContext = {
             requestId: ctx.requestId,
             toolCallId: ctx.toolCallId,
@@ -8040,6 +8047,9 @@ export class ThinkToolsTestAgent extends Think {
           }
           if (mode === "ledger-symbol-output") {
             return Symbol("not-json");
+          }
+          if (mode === "ledger-void") {
+            return undefined;
           }
           if (mode === "attach-ledger") {
             ctx.attachReply({ type: "voice_note" });
@@ -8085,6 +8095,7 @@ export class ThinkToolsTestAgent extends Think {
     | "ledger-oversize-output"
     | "ledger-slow"
     | "ledger-symbol-output"
+    | "ledger-void"
     | "ledger-approval"
     | "attach-ledger"
     | "attach-idempotency-key" = "default";
@@ -8159,6 +8170,8 @@ export class ThinkToolsTestAgent extends Think {
       | "ledger-oversize-output"
       | "ledger-slow"
       | "ledger-symbol-output"
+      | "ledger-void"
+      | "ledger-void"
       | "ledger-approval"
       | "attach-ledger"
       | "attach-idempotency-key" = "default"
@@ -8303,7 +8316,13 @@ export class ThinkToolsTestAgent extends Think {
           status: record.status === "completed" ? "settled" : "pending",
           result_json:
             record.status === "completed"
-              ? JSON.stringify({ valuePresent: true, value: record.result })
+              ? JSON.stringify({
+                  valuePresent: Object.hasOwn(
+                    (record.result ?? {}) as object,
+                    "value"
+                  ),
+                  value: recordedValue(record.result)
+                })
               : null,
           updated_at: record.settledAt ?? record.createdAt
         };
@@ -8330,7 +8349,9 @@ export class ThinkToolsTestAgent extends Think {
         inputHash: stableHash(options.input ?? { message: "hello" })
       },
       ...(options.status === "settled" && {
-        result: (options.output ?? null) as TaskJson
+        result: (options.output === undefined
+          ? {}
+          : { value: options.output }) as TaskJson
       }),
       createdAt: now,
       settledAt: now
@@ -8553,6 +8574,8 @@ export class ThinkToolsTestAgent extends Think {
   async insertLegacyActionPendingRowForTest(options: {
     executionId: string;
     message: string;
+    /** The stored model input as JSON, when not `{ message }`. */
+    inputJson?: string;
   }): Promise<void> {
     this.sql`
       CREATE TABLE IF NOT EXISTS cf_think_action_pending_approvals (
@@ -8578,7 +8601,7 @@ export class ThinkToolsTestAgent extends Think {
       )
       VALUES (
         ${options.executionId}, ${"pauseAction"}, ${"tc-legacy"}, ${null},
-        ${JSON.stringify({ message: options.message })},
+        ${options.inputJson ?? JSON.stringify({ message: options.message })},
         ${JSON.stringify(descriptor)}, ${Date.now()}
       )
     `;
@@ -8662,6 +8685,12 @@ export class ThinkToolsTestAgent extends Think {
     `;
   }
 
+  /** Outcomes held in memory for a caller waiting on its decision. */
+  async decisionOutputCountForTest(): Promise<number> {
+    return (this as unknown as { _decisionOutputs: Map<string, unknown> })
+      ._decisionOutputs.size;
+  }
+
   /** Whether a decision run is still stored under this id. */
   async hasDecisionRunForTest(executionId: string): Promise<boolean> {
     return (
@@ -8713,6 +8742,24 @@ export class ThinkToolsTestAgent extends Think {
 
   async setDenyActionReason(reason: string | null): Promise<void> {
     this._denyActionReason = reason;
+  }
+
+  private _lastActionConnectionId: string | undefined;
+
+  /** Run the echo action as a call on connection `connectionId` would. */
+  async executeEchoActionOnConnectionForTest(
+    connectionId: string
+  ): Promise<{ output: unknown; connectionId: string | undefined }> {
+    const output = await agentContext.run(
+      {
+        agent: this,
+        connection: { id: connectionId } as Connection,
+        request: undefined,
+        email: undefined
+      },
+      () => this.executeEchoActionToolForTest()
+    );
+    return { output, connectionId: this._lastActionConnectionId };
   }
 
   async getActionProbe(): Promise<{

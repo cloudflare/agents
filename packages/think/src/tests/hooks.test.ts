@@ -711,6 +711,36 @@ describe("Think — actions compile into guarded tools", () => {
     expect((await agent.getActionProbe()).count).toBe(1);
   });
 
+  it("replays a void action as void, not null", async () => {
+    const agent = await freshToolAgent(
+      `action-ledger-void-${crypto.randomUUID()}`
+    );
+    await agent.useEchoActionForTest("ledger-void");
+
+    expect(await agent.executeEchoActionToolForTest()).toBeUndefined();
+    expect(await agent.executeEchoActionToolForTest()).toBeUndefined();
+    expect((await agent.getActionProbe()).count).toBe(1);
+    expect(await agent.listActionLedgerRowsForTest()).toMatchObject([
+      {
+        status: "settled",
+        result_json: JSON.stringify({ valuePresent: false })
+      }
+    ]);
+  });
+
+  it("runs a ledgered action with its caller's connection", async () => {
+    const agent = await freshToolAgent(
+      `action-ledger-context-${crypto.randomUUID()}`
+    );
+    await agent.useEchoActionForTest("ledger-key");
+    await agent.setActionIdempotencyKey("context-key");
+
+    const { connectionId } =
+      await agent.executeEchoActionOnConnectionForTest("conn-1");
+
+    expect(connectionId).toBe("conn-1");
+  });
+
   it("hashes action input by value: key order is ignored, dates are told apart", () => {
     expect(stableHash({ a: 1, b: { c: 2, d: 3 } })).toBe(
       stableHash({ b: { d: 3, c: 2 }, a: 1 })

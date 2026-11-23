@@ -1656,6 +1656,9 @@ export class Tasks<
       }
     } else {
       await this.#syncWake(runId);
+      // A facet's run wake lives on its root, so the report job (a facet
+      // job, woken through the root) keeps the report alive here.
+      if (onStatus) await this.#pushReportJob(REPORT_RETRY_MS);
     }
     // Only the head settling moves its lane on: a run queued behind it that
     // ends (a cancel, a clear) leaves the head where it is.
@@ -1756,10 +1759,10 @@ export class Tasks<
         AND definition IN (SELECT value FROM json_each(${JSON.stringify(names)}))
       ORDER BY settled_at LIMIT ${REPORT_BATCH}
     `;
+    // A report that fails (it re-pushed the job) does not hold back the
+    // ones after it.
     for (const row of rows) {
-      if (!(await this.#deliverTerminal(row.run_id, row.retain !== 0))) {
-        return;
-      }
+      await this.#deliverTerminal(row.run_id, row.retain !== 0);
     }
     // More may be waiting past this batch: the next one runs now.
     if (rows.length === REPORT_BATCH) await this.#pushReportJob();

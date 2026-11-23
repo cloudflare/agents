@@ -209,6 +209,38 @@ describe("Think HITL — approve/reject paused executions", () => {
     ws.close();
   });
 
+  it("applies a recorded approval whose outcome is past one row", async () => {
+    const room = crypto.randomUUID();
+    const { agent, ws, executionId } = await runTurnToPause(room);
+    const result = "x".repeat(1_500_000);
+
+    await agent.recordCodemodeOutcomeForTest(executionId, {
+      status: "completed",
+      executionId,
+      result
+    });
+
+    await waitUntil(async () => {
+      const parts = await agent.executeParts();
+      return (parts[0].output as PausedOutput).status === "completed";
+    });
+    expect(await agent.decisionRunCountForTest()).toBe(0);
+    expect(await agent.decisionOutputCountForTest()).toBe(0);
+    ws.close();
+  });
+
+  it("holds no outcome in memory after a codemode approval", async () => {
+    const room = crypto.randomUUID();
+    const { agent, ws, executionId } = await runTurnToPause(room);
+    await callRpc(ws, "approveExecution", [executionId]);
+    await waitUntil(async () => {
+      const parts = await agent.executeParts();
+      return (parts[0].output as PausedOutput).status === "completed";
+    });
+    expect(await agent.decisionOutputCountForTest()).toBe(0);
+    ws.close();
+  });
+
   it("stores nothing for approvals of ids nothing is pending under", async () => {
     const { agent, ws } = await runTurnToPause(crypto.randomUUID());
     for (let i = 0; i < 3; i++) {

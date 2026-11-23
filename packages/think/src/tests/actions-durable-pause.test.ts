@@ -281,6 +281,40 @@ describe("durable-pause actions", () => {
     ).resolves.toMatchObject({ status: "error" });
   });
 
+  it("keeps a parked approval's JSON null input when it moves forward", async () => {
+    const agent = await freshPauseAgent(
+      `dp-legacy-null-${crypto.randomUUID()}`
+    );
+    await agent.insertLegacyActionPendingRowForTest({
+      executionId: "actpause_null",
+      message: "unused",
+      inputJson: "null"
+    });
+
+    await agent.migrateLegacyPauseRecordsForTest();
+
+    const [pending] = await agent.listActionPendingForTest();
+    expect(pending.input_json).toBe("null");
+  });
+
+  it("lists and finds every parked approval, past the first hundred", async () => {
+    const agent = await freshPauseAgent(`dp-many-${crypto.randomUUID()}`);
+    await agent.useDurablePauseActionForTest();
+    let newest = "";
+    for (let i = 0; i < 101; i++) {
+      newest =
+        ((await agent.parkDurablePauseForTest(`m${i}`)) as PausedOutput)
+          .executionId ?? "";
+    }
+
+    const all = JSON.parse(await agent.pendingApprovalsForTest()) as unknown[];
+    expect(all).toHaveLength(101);
+    const one = JSON.parse(
+      await agent.pendingApprovalsForTest(newest)
+    ) as Array<{ executionId: string }>;
+    expect(one.map((approval) => approval.executionId)).toEqual([newest]);
+  });
+
   it("keeps a resolved pause an earlier version had not written yet", async () => {
     const agent = await freshPauseAgent(`dp-legacy-kv-${crypto.randomUUID()}`);
     await agent.insertLegacyDeferredPauseForTest({
@@ -1122,6 +1156,31 @@ describe("resolving a durable pause drops pending-state generation (#2054)", () 
       "dp1"
     );
     expect(toolOutput(resolved, "dp1")).toBe("paused-exec: hello");
+  });
+
+  it("does not run a failed approved action again when writing its outcome is retried", async () => {
+    const agent = await freshPauseAgent(
+      `dp-throw-retry-${crypto.randomUUID()}`
+    );
+    await agent.useDurablePauseActionForTest({ execThrows: true });
+    expect((await agent.testChat("call pauseAction")).done).toBe(true);
+    const [pending] = await agent.listActionPendingForTest();
+    await agent.failNextToolUpdateForTest();
+
+    await agent.approveExecutionForTest(pending.execution_id);
+    expect(await agent.getDurablePauseExecCount()).toBe(1);
+    await agent.restartTasksForTest();
+
+    await vi.waitFor(
+      async () => {
+        expect(await agent.hasDecisionRunForTest(pending.execution_id)).toBe(
+          false
+        );
+      },
+      { timeout: 5000, interval: 50 }
+    );
+    expect(await agent.getDurablePauseExecCount()).toBe(1);
+    expect(await agent.decisionOutputCountForTest()).toBe(0);
   });
 
   it("gives up on a decided action that keeps ending the isolate", async () => {
