@@ -14,12 +14,16 @@
  * `splitContent(s).join("")` always equals `s`.
  */
 
+import { ROW_VALUE_BYTES } from "../internal/platform-limits";
+
 /**
  * Serialized byte ceiling for one stored row. A message larger than this is
  * split across continuation rows; the overwhelmingly common message fits in
  * one row and costs exactly one billed row write, as it always has.
+ * Readers concatenate however many slices there are, so rows written under
+ * an earlier ceiling read back the same.
  */
-export const MAX_INLINE_ROW_BYTES = 1536 * 1024;
+export const MAX_INLINE_ROW_BYTES = ROW_VALUE_BYTES;
 
 /**
  * Split a serialized message into row-sized slices, root slice first.
