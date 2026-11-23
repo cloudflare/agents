@@ -617,7 +617,7 @@ export class Tasks<
     const budget = new Promise<"budget">((resolve) => {
       budgetTimer = setTimeout(() => resolve("budget"), DISPATCH_BUDGET_MS);
     });
-    const runAttempt = this.#executeRun(runId);
+    const runAttempt = this.#executeRun(runId, true);
     const attempt = runAttempt.then(() => "settled" as const);
     try {
       // A platform failure inside the budget rejects the race and re-enters
@@ -1207,7 +1207,11 @@ export class Tasks<
   // ── Execution ────────────────────────────────────────────────────────────
 
   /** Claim and drive one due run to its next durable boundary. */
-  async #executeRun(runId: string): Promise<void> {
+  /**
+   * @param byOwnWake - The run's own wake job is dispatching it: that job's
+   *   outcome moves it to the claim deadline, so the claim needs no push.
+   */
+  async #executeRun(runId: string, byOwnWake = false): Promise<void> {
     if (this.#liveAttempt(runId)) return;
     if (!this.#laneAllows(runId)) return;
     // Read now: the caller that passed it may finish before the claim lands.
@@ -1270,7 +1274,11 @@ export class Tasks<
     // clears the queue row's in-flight marker, so it durably wins over a
     // root dispatch that later returns a stale outcome past its own
     // budget (job-queue's own "newer pushes win" guard on that marker).
-    await this.#syncWake(runId);
+    // A local run its own wake dispatches needs none: the dispatch's
+    // outcome is read from the row after the claim.
+    if (!byOwnWake || this.lifecycle.routes.source) {
+      await this.#syncWake(runId);
+    }
     // A cancel() that ran during that await found no live attempt and
     // settled the run itself. The claim is void then: start no handler.
     if (this.#store.getRun(runId)?.generation !== generation) return;
