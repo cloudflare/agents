@@ -242,6 +242,12 @@ export class Tasks<
   readonly #definitions: TaskHandlers;
   readonly #registered = new Map<string, TaskCallbacks[string]>();
   readonly #active = new Map<string, ActiveAttempt>();
+  /**
+   * `local` of each run accepted in this isolate whose caller still waits
+   * for its first attempt; removed when that caller's `run()` (or the warm
+   * attempt) ends.
+   */
+  readonly #locals = new Map<string, unknown>();
   #storeInstance: TaskStore | undefined;
   readonly #stepDefaults: ResolvedStepPolicy;
   readonly #onError: ((error: unknown) => void | Promise<void>) | undefined;
@@ -389,7 +395,11 @@ export class Tasks<
       !framework
     );
     if (start === "now" && receipt.accepted) {
-      await this.#executeRun(receipt.runId, options?.local);
+      try {
+        await this.#executeRun(receipt.runId);
+      } finally {
+        this.#locals.delete(receipt.runId);
+      }
     }
     return receipt;
   }
@@ -1106,13 +1116,23 @@ export class Tasks<
          ${options.idempotencyKey ?? null}, ${options.retain === false ? 0 : 1},
          0, ${now}, 0, ${now}, ${now})
     `;
+    // Before the wake is published: an attempt this isolate starts from it
+    // (the alarm can win the claim) still gets the caller's `local`.
+    if (options.local !== undefined && startMode !== "queued") {
+      this.#locals.set(runId, options.local);
+    }
     await this.#syncWake(runId);
     this.#emit("task:accepted", { runId, definition, accepted: true });
 
     // Warm path: begin the first attempt immediately when the host is past
     // startup. The durable deadline above is authoritative either way.
-    if (startMode === "warm" && this.lifecycle.status() !== "starting") {
-      void this.#executeRun(runId, options.local).catch(() => {});
+    if (startMode === "warm") {
+      if (this.lifecycle.status() === "starting") this.#locals.delete(runId);
+      else {
+        void this.#executeRun(runId)
+          .catch(() => {})
+          .finally(() => this.#locals.delete(runId));
+      }
     }
 
     return {
@@ -1127,8 +1147,10 @@ export class Tasks<
   // ── Execution ────────────────────────────────────────────────────────────
 
   /** Claim and drive one due run to its next durable boundary. */
-  async #executeRun(runId: string, local?: unknown): Promise<void> {
+  async #executeRun(runId: string): Promise<void> {
     if (this.#active.has(runId)) return;
+    // Read now: the caller that passed it may finish before the claim lands.
+    const local = this.#locals.get(runId);
     const row = this.#store.getRun(runId);
     if (!row || TERMINAL_STATUSES.has(row.status)) return;
 

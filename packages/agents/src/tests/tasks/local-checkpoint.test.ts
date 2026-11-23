@@ -14,27 +14,61 @@ const checkpointRows = (storage: DurableObjectStorage, runId: string) =>
 describe("Tasks local and checkpoint", () => {
   it("hands `local` to the first attempt in the caller's isolate", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
-    const runId = await runInDurableObject(
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      let open!: () => void;
+      instance.rememberingGate = new Promise((resolve) => (open = resolve));
+      const receipt = await instance.tasks.run("remembering", undefined, {
+        local: { closure: "live" }
+      });
+      for (let i = 0; i < 50 && instance.rememberingSeen.length === 0; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(instance.rememberingSeen).toEqual([
+        { local: { closure: "live" }, note: null }
+      ]);
+      open();
+      for (let i = 0; i < 50; i++) {
+        if ((await instance.tasks.get(receipt.runId))?.status === "completed")
+          break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect((await instance.tasks.get(receipt.runId))?.status).toBe(
+        "completed"
+      );
+    });
+  });
+
+  it("gives `local` to the attempt the alarm claims while the caller still waits", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
       stub,
-      async (instance: TaskHarnessObject) => {
-        instance.rememberingGate = new Promise(() => {});
-        const receipt = await instance.tasks.run("remembering", undefined, {
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        const started = instance.tasks.run("remembering", undefined, {
+          runId: "raced",
+          start: "now",
           local: { closure: "live" }
         });
-        for (let i = 0; i < 50 && instance.rememberingSeen.length === 0; i++) {
-          await new Promise((resolve) => setTimeout(resolve, 10));
+        // The wake is due as soon as the run is written: dispatch it before
+        // the caller gets to claim the run.
+        for (let i = 0; i < 100; i++) {
+          const written = state.storage.sql
+            .exec("SELECT 1 FROM cf_agents_task_runs WHERE run_id = 'raced'")
+            .toArray().length;
+          if (written) break;
+          await Promise.resolve();
         }
+        await (
+          instance.tasks as unknown as {
+            onJob(context: unknown): Promise<unknown>;
+          }
+        ).onJob({ job: { id: "task:raced", payload: { runId: "raced" } } });
+        await started;
         expect(instance.rememberingSeen).toEqual([
           { local: { closure: "live" }, note: null }
         ]);
-        return receipt.runId;
       }
     );
-
-    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
-      instance.rememberingGate = null;
-      await instance.tasks.cancel(runId);
-    });
   });
 
   it("gives an attempt after a reset no `local`, and the checkpoint the last one wrote", async () => {

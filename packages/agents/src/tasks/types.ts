@@ -243,8 +243,9 @@ export interface TaskRunOptions {
   start?: "now" | "alarm";
 
   /**
-   * @internal Handed to the first attempt as `step.local` when it runs in
-   * this invocation (`start` omitted or `"now"`); never stored.
+   * @internal Handed as `step.local` to an attempt this isolate starts while
+   * the caller still waits for the first one (`start` omitted or `"now"`),
+   * whether the caller or the alarm claimed it; never stored.
    */
   local?: unknown;
 }

@@ -83,6 +83,18 @@ export function createChatTurnTaskDefinition(
       { retries: { limit: 1 }, timeout: "1 day" },
       async ({ signal }) => {
         const entry = step.local as ChatTurnClosureEntry | undefined;
+        // The snapshot is a hint for recovery; stream cursors are the
+        // evidence. One that cannot be kept (a request body with a
+        // `bigint`) is skipped, and never fails the turn.
+        const keepSnapshot = (envelope: unknown): void => {
+          try {
+            // SAFETY: chat fiber snapshots are JSON envelopes, as fiber
+            // stash data always was; the write throws on anything else.
+            step.checkpoint.set(SNAPSHOT, envelope as TaskJson);
+          } catch (error) {
+            console.warn("[chat] turn snapshot not kept:", error);
+          }
+        };
         if (!entry) {
           // Replay after an unclean interruption: the producing isolate is
           // gone. The turn's last snapshot plus stream evidence drive
@@ -100,17 +112,14 @@ export function createChatTurnTaskDefinition(
           await hooks.storage.delete(legacyKey);
           return undefined;
         }
-        // SAFETY: chat fiber snapshots are JSON envelopes, as fiber stash
-        // data always was.
-        step.checkpoint.set(SNAPSHOT, entry.initial as TaskJson);
+        keepSnapshot(entry.initial);
         try {
           const value = await hooks.keepAliveWhile(() =>
             hooks.withStash(
               {
                 id: nonce,
                 signal,
-                stash: (data) =>
-                  step.checkpoint.set(SNAPSHOT, entry.wrap(data) as TaskJson)
+                stash: (data) => keepSnapshot(entry.wrap(data))
               },
               () => entry.run()
             )
