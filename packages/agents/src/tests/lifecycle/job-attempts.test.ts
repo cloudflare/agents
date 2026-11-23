@@ -101,6 +101,8 @@ describe("durable job attempts", () => {
       await lifecycle.alarm().catch(() => {});
 
       expect(jobs.attempts).toEqual([1]);
+      // Kept for the next isolate, not dropped as a failed job.
+      expect(jobs.get("job")).toBeDefined();
     });
   });
 
