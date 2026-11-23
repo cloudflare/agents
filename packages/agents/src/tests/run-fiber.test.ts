@@ -1011,6 +1011,22 @@ describe("runFiber", () => {
       ).resolves.toMatchObject({ status: "completed" });
     });
 
+    it("records the hook's error when it throws after saving an interrupted stage", async () => {
+      const agent = await freshManagedAgent("managed-stage-then-throws");
+      await agent.insertInterruptedManagedFiber(
+        "stage-then-throws",
+        "managed-stage-then-throws"
+      );
+      await agent.triggerRecoveryCheck();
+      await expect(
+        agent.inspectManagedFiber("stage-then-throws")
+      ).resolves.toMatchObject({
+        status: "error",
+        error: "Delivery failed",
+        snapshot: { stage: "posting" }
+      });
+    });
+
     it("applies a resolution the recovery hook gave before its isolate was reset", async () => {
       const agent = await freshManagedAgent("managed-resolved-then-reset");
       await agent.insertResolvedThenResetManagedRun("resolved-then-reset");

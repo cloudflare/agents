@@ -303,8 +303,13 @@ async function recover(
     );
     // A resolution the hook gave before it threw stands, as when
     // `resolveFiber` settled the fiber at once.
-    const resolved = step.checkpoint.get<StoredResolution>(RESOLVED);
-    if (managed && resolved) return settleResolved(host.tasks, step, resolved);
+    // An `interrupted` one is only a stage: the hook's error is the outcome.
+    const resolved = managed
+      ? step.checkpoint.get<StoredResolution>(RESOLVED)
+      : undefined;
+    if (resolved && resolved.status !== "interrupted") {
+      return settleResolved(host.tasks, step, resolved);
+    }
     if (managed) return TaskSettlement.failed(error);
     if (host.maxAgeMs > 0 && Date.now() - ctx.createdAt > host.maxAgeMs) {
       host.emit("fiber:recovery:skipped", {

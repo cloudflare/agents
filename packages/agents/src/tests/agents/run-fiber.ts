@@ -68,6 +68,13 @@ export class TestRunFiberAgent extends Agent {
       });
       return;
     }
+    if (ctx.name === "managed-stage-then-throws") {
+      await this.resolveFiber(ctx.id, {
+        status: "interrupted",
+        snapshot: { stage: "posting" }
+      });
+      throw new Error("Delivery failed");
+    }
     if (ctx.name === "managed-resolves-then-throws") {
       await this.resolveFiber(ctx.id, { status: "completed" });
       throw new Error("after resolving");
