@@ -749,6 +749,7 @@ export class JobDriver {
     error: unknown,
     executing: JobStorageRow | undefined
   ): Promise<void> {
+    console.warn("DBGSTRIKE", JSON.stringify(arguments[1] ? { id: (arguments[1] as { id?: string }).id, cap: (arguments[1] as { capability?: string }).capability } : null));
     const { queue } = this.#options;
     const first = this.#strike === undefined;
     // Set before the first await below: closes the window as tightly as

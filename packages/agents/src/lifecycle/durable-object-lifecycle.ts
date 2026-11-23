@@ -1355,6 +1355,7 @@ export class Lifecycle<
     const kv = this.#ctx.storage.kv;
     return {
       onJob: async ({ job }) => {
+        console.warn("DBGDRIVE", this.name, (job.payload as FacetWakePayload).key);
         const payload = job.payload as FacetWakePayload;
         const target: LifecycleRouteAddress = {
           key: payload.key,
