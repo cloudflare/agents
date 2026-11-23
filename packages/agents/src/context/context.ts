@@ -292,6 +292,8 @@ export class Context {
 
     const changes = await this.#changes(delivered.values);
     const system = renderSystem(delivered.system);
+    // Decided before this call writes anything to the turn.
+    const sentBefore = changes.length > 0 && (await resent());
     const at =
       delivered.carried || changes.length > 0 ? await target() : undefined;
     if (delivered.carried && at) {
@@ -304,7 +306,7 @@ export class Context {
     }
     if (changes.length === 0) return { system, reminder: null };
     // A turn sent before is sent again exactly; the change waits.
-    if (await resent()) return { system, reminder: null };
+    if (sentBefore) return { system, reminder: null };
     if (!at) {
       return {
         system,
