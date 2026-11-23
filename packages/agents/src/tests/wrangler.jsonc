@@ -382,6 +382,11 @@
         "class_name": "BroadcastSubAgent",
         "name": "BroadcastSubAgent"
       },
+      // An event log inside a facet (facet-only, no migration).
+      {
+        "class_name": "EventLogSubAgent",
+        "name": "EventLogSubAgent"
+      },
       // Request-body forwarding probes (issue #2015). The sub-agent is
       // facet-only (binding is a harness requirement, no migration); the
       // root agent is the canonical control path and needs storage.
