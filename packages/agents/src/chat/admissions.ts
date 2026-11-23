@@ -443,7 +443,7 @@ export async function chatRecoveryNames(input: {
  * turn definition, and legacy fibers (facets). A table that does not exist
  * yet holds none.
  */
-function interruptedTurnRequestIds(
+export function interruptedTurnRequestIds(
   sql: AgentToolSql,
   turnName: string
 ): string[] {

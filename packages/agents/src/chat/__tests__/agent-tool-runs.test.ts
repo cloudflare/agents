@@ -22,7 +22,8 @@ type SqlValue = string | number | null;
 const TABLES = {
   runs: "runs",
   milestones: "milestones",
-  requestIndex: "runs_request"
+  requestIndex: "runs_request",
+  turnDefinition: "chat-turn"
 };
 
 /** A store over `db`, counting the statements it runs. */
@@ -515,6 +516,51 @@ describe("AgentToolRuns", () => {
     await runs.reconcileStale("run-1");
     expect(store.read("run-1")?.status).toBe("completed");
     expect(runs.isRecoveredRunCancelled("req-1")).toBe(false);
+  });
+
+  it("leaves a stale run open while its turn's run waits to be recovered", async () => {
+    // The child's turn was cut off with its isolate. Its run is still open
+    // and has not been replayed, so no incident exists yet (a facet's run
+    // waits for its root to wake it).
+    const { runs, store } = setup();
+    store.seed("run-1");
+    store.bindRequest("run-1", "req-1");
+    store.raw(
+      `create table cf_agents_task_runs (run_id text, definition text, input text, state text)`
+    );
+    store.raw(
+      `insert into cf_agents_task_runs values ('chat_x', 'chat-turn', '{"requestId":"req-1"}', 'running')`
+    );
+
+    await runs.reconcileStale("run-1");
+    expect(store.read("run-1")?.status).toBe("running");
+
+    // A recovery that declined the turn decides, though the run that
+    // opened it has not settled yet.
+    const skipped = setup();
+    skipped.store.seed("run-1");
+    skipped.store.bindRequest("run-1", "req-1");
+    skipped.store.raw(
+      `create table cf_agents_task_runs (run_id text, definition text, input text, state text)`
+    );
+    skipped.store.raw(
+      `insert into cf_agents_task_runs values ('chat_x', 'chat-turn', '{"requestId":"req-1"}', 'running')`
+    );
+    skipped.setIncident("i-1", {
+      status: "skipped",
+      requestId: "req-1",
+      reason: "continue_disabled"
+    });
+    await skipped.runs.reconcileStale("run-1");
+    expect(skipped.store.read("run-1")?.status).toBe("error");
+
+    // Once that run settles, the stale row is settled as before.
+    store.raw(`update cf_agents_task_runs set state = 'completed'`);
+    await runs.reconcileStale("run-1");
+    expect(store.terminal("run-1")).toEqual({
+      status: "error",
+      error: "Agent tool run was interrupted before the child could finish."
+    });
   });
 
   it("settles a stale run from recovery: completed with a reply, error without", async () => {
@@ -1450,7 +1496,12 @@ describe("AgentToolRuns", () => {
             return { toArray: () => rows as Record<string, unknown>[] };
           }
         }),
-        { runs: "runs", milestones: "milestones", requestIndex: "runs_request" }
+        {
+          runs: "runs",
+          milestones: "milestones",
+          requestIndex: "runs_request",
+          turnDefinition: "chat-turn"
+        }
       );
       store.ensure();
       db.exec("drop table runs");
@@ -1473,7 +1524,12 @@ describe("AgentToolRuns", () => {
             return { toArray: () => rows as Record<string, unknown>[] };
           }
         }),
-        { runs: "runs", milestones: "milestones", requestIndex: "runs_request" }
+        {
+          runs: "runs",
+          milestones: "milestones",
+          requestIndex: "runs_request",
+          turnDefinition: "chat-turn"
+        }
       );
       expect(store.forRequest("req-1")).toMatchObject({
         runId: "old",

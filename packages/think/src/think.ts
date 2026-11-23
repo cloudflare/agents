@@ -2437,7 +2437,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     store: createAgentToolRunStore(() => this.ctx.storage.sql, {
       runs: "cf_agent_tool_child_runs",
       milestones: "cf_agent_tool_milestones",
-      requestIndex: "idx_agent_tool_child_runs_request_id"
+      requestIndex: "idx_agent_tool_child_runs_request_id",
+      turnDefinition: (this.constructor as typeof Think).CHAT_FIBER_NAME
     }),
     streams: () => this._resumableStream,
     storage: () => this.ctx.storage,
