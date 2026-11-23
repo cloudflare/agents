@@ -157,6 +157,21 @@ export type LifecycleHostInvoker = <T>(
 const lifecycleEventSinks = new WeakMap<object, LifecycleEventSink>();
 const lifecycleRouteTransports = new WeakMap<object, LifecycleRouteTransport>();
 const lifecycleHostInvokers = new WeakMap<object, LifecycleHostInvoker>();
+const facetWakeForgetters = new WeakMap<
+  object,
+  (key: string) => Promise<void>
+>();
+
+/**
+ * @internal At the root: drop the wake jobs of a facet path and every path
+ * below it, when that sub-tree is deleted.
+ */
+export function forgetFacetWakes(
+  lifecycle: object,
+  key: string
+): Promise<void> {
+  return facetWakeForgetters.get(lifecycle)?.(key) ?? Promise.resolve();
+}
 
 /**
  * Startup tokens of the Lifecycles whose startup the current async context
@@ -262,6 +277,7 @@ export class Lifecycle<
     this.#ctx = this.#host.ctx;
     this.#parentClassName = this.#host.constructor.name;
     this.#jobQueue = new JobQueue(this.#ctx.storage);
+    facetWakeForgetters.set(this, (key) => this.#forgetFacetWakes(key));
     this.#jobDriver = new JobDriver({
       queue: this.#jobQueue,
       storage: this.#ctx.storage,
@@ -537,10 +553,8 @@ export class Lifecycle<
   /**
    * At the root: drop the wake jobs of a facet path and its descendants,
    * when the sub-tree is deleted.
-   *
-   * @internal
    */
-  async forgetFacetWakes(key: string): Promise<void> {
+  async #forgetFacetWakes(key: string): Promise<void> {
     if (!this.#jobQueue.hasJobs()) return;
     const owner = facetWakeOwner(key);
     const rows = this.#ctx.storage.sql
