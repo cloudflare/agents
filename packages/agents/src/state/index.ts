@@ -204,9 +204,13 @@ export class State<T = unknown> extends LifecycleCapability {
     try {
       this.lifecycle.storage.sql.exec(write, STATE_ROW_ID, serialized);
     } catch (error) {
-      // A state larger than one row fails here (SQLITE_TOOBIG); SqlError
-      // says which limit that is.
-      throw new SqlError(write, error);
+      // A state larger than one row fails with SQLITE_TOOBIG: SqlError says
+      // which limit that is. Anything else is rethrown as it is, so flags
+      // such as `retryable` and `overloaded` stay on the error.
+      if (error instanceof Error && error.message.includes("SQLITE_TOOBIG")) {
+        throw new SqlError(write, error);
+      }
+      throw error;
     }
     this.#state = nextState;
 
