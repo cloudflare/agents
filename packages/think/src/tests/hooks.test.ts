@@ -922,6 +922,33 @@ describe("Think — actions compile into guarded tools", () => {
     expect(await agent.listActionLedgerRowsForTest()).toEqual([]);
   });
 
+  it("keeps a running action's claim through a sweep, however old", async () => {
+    const agent = await freshToolAgent(
+      `action-ledger-sweep-running-${crypto.randomUUID()}`
+    );
+    await agent.useEchoActionForTest("ledger-slow");
+    await agent.setActionIdempotencyKey("running-sweep");
+    await agent.setActionDelayForTest(300);
+    await agent.setActionLedgerRetentionForTest({
+      settledMs: false,
+      pendingMs: 10,
+      maxSweepRows: 10
+    });
+
+    const [output, swept] = await Promise.all([
+      agent.executeEchoActionToolForTest(),
+      new Promise((resolve) => setTimeout(resolve, 100)).then(() =>
+        agent.sweepActionLedgerForTest()
+      )
+    ]);
+
+    expect(swept).toEqual({ settled: 0, pending: 0 });
+    expect(output).toBe("action echo: hello");
+    expect(await agent.listActionLedgerRowsForTest()).toMatchObject([
+      { key: "action:echo:running-sweep", status: "settled" }
+    ]);
+  });
+
   it("sweeps expired action ledger rows without deleting fresh rows", async () => {
     const agent = await freshToolAgent(
       `action-ledger-sweep-${crypto.randomUUID()}`

@@ -1096,6 +1096,34 @@ describe("resolving a durable pause drops pending-state generation (#2054)", () 
     expect(toolOutput(resolved, "dp1")).toBe("paused-exec: hello");
   });
 
+  it("hands an outcome off again when writing it throws, and the approval still returns it", async () => {
+    const { agent, executionId } = await parkInTurn("dp-handoff-throws");
+    await agent.failNextToolUpdateForTest();
+
+    await expect(agent.approveExecutionForTest(executionId)).resolves.toBe(
+      "paused-exec: hello"
+    );
+    // The decision waits for its report job; nothing is lost.
+    expect(await agent.hasDecisionRunForTest(executionId)).toBe(true);
+    expect(await agent.hasAlarmForTest()).toBe(true);
+
+    await agent.restartTasksForTest();
+
+    await vi.waitFor(
+      async () => {
+        expect(await agent.hasDecisionRunForTest(executionId)).toBe(false);
+      },
+      { timeout: 5000, interval: 50 }
+    );
+    // The side effect replayed from its effect run.
+    expect(await agent.getDurablePauseExecCount()).toBe(1);
+    const resolved = ownerOf(
+      (await agent.getStoredMessages()) as UIMessage[],
+      "dp1"
+    );
+    expect(toolOutput(resolved, "dp1")).toBe("paused-exec: hello");
+  });
+
   it("gives up on a decided action that keeps ending the isolate", async () => {
     const { agent, executionId } = await parkInTurn("dp-reset-give-up");
     await agent.decideWithoutReportForTest(executionId, 3);

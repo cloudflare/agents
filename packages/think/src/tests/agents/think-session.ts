@@ -7620,6 +7620,22 @@ export class ThinkToolsTestAgent extends Think {
   }
 
   /** Skip the next transcript tool update, as a restart right before it would. */
+  /** Make the next transcript tool update throw, once. */
+  async failNextToolUpdateForTest(): Promise<void> {
+    const self = this as unknown as {
+      _applyToolUpdateToMessages(update: unknown): Promise<unknown>;
+    };
+    const original = self._applyToolUpdateToMessages;
+    self._applyToolUpdateToMessages = async () => {
+      self._applyToolUpdateToMessages = original;
+      throw new Error("tool update failed");
+    };
+  }
+
+  async hasAlarmForTest(): Promise<boolean> {
+    return (await this.ctx.storage.getAlarm()) !== null;
+  }
+
   async skipNextToolUpdateForTest(): Promise<void> {
     const self = this as unknown as {
       _applyToolUpdateToMessages(
