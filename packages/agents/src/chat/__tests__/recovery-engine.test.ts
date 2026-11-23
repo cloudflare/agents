@@ -1879,11 +1879,14 @@ describe("ChatRecoveryEngine.recoverInterruptedTurn (fake adapter + wake hooks)"
       Promise.reject(new Error("storage failed"));
     await h.engine.cancelScheduledRecovery("req-1");
 
-    await expect(
-      h.engine.recoverInterruptedTurn(h.turn, h.wake)
-    ).rejects.toThrow("storage failed");
-    expect(error).toHaveBeenCalled();
-    error.mockRestore();
+    try {
+      await expect(
+        h.engine.recoverInterruptedTurn(h.turn, h.wake)
+      ).rejects.toThrow("storage failed");
+      expect(error).toHaveBeenCalled();
+    } finally {
+      error.mockRestore();
+    }
   });
 
   it("ends a wake whose turn the user stopped as stopped, even with the budget spent", async () => {
