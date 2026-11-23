@@ -131,9 +131,11 @@ export interface StreamsSyncInternal {
   /** Whether `seq` is a stored chunk of the stream (not in a hole). */
   holds(streamId: string, seq: number): boolean;
   /**
-   * Delete the stream's oldest blocks while it holds more than
-   * `maxChunks` chunks or `maxBytes` stored UTF-8 bytes, never the newest
-   * block. Totals are read once per isolate and kept in memory.
+   * Bring the stream back to `maxChunks` chunks and `maxBytes` stored
+   * UTF-8 bytes by deleting its oldest blocks, never the newest, once it
+   * passes either limit by an eighth: a log at its limit trims once per
+   * eighth of it, in one range delete, not on every write. Totals are read
+   * once per isolate and kept in memory.
    */
   trim(
     streamId: string,
@@ -879,30 +881,50 @@ export class Streams extends LifecycleCapability {
       totals = { chunks: row?.chunks ?? 0, bytes: row?.bytes ?? 0 };
       this.#totals.set(streamId, totals);
     }
-    while (
-      totals.chunks > retention.maxChunks ||
-      totals.bytes > retention.maxBytes
+    const { maxChunks, maxBytes } = retention;
+    if (
+      totals.chunks <= maxChunks + Math.max(1, maxChunks >> 3) &&
+      totals.bytes <= maxBytes + Math.max(1, maxBytes >> 3)
     ) {
-      const blocks = this.#sql<{
-        block: number;
-        chunks: number;
-        bytes: number;
-      }>`
+      return;
+    }
+    // The newest block is never trimmed, so the head is never reused.
+    const newest = (
+      this.#liveTails.has(streamId)
+        ? this.#liveTails.get(streamId)
+        : this.#blockTail(streamId)
+    )?.block;
+    if (newest === undefined) return;
+    let { chunks, bytes } = totals;
+    let cut: number | undefined;
+    // Read the oldest blocks a page at a time until the rest is in limits:
+    // a page is the chunk excess (each block holds at least one chunk, so
+    // it never reads a block it will not delete), or 8 blocks when only
+    // bytes are over.
+    pages: while (chunks > maxChunks || bytes > maxBytes) {
+      const page = this.#sql<{ block: number; chunks: number; bytes: number }>`
         SELECT block, seq_to - seq_from AS chunks,
           length(CAST(body AS BLOB)) AS bytes
-        FROM cf_agents_stream_blocks WHERE stream_id = ${streamId}
-        ORDER BY block ASC LIMIT 2
+        FROM cf_agents_stream_blocks
+        WHERE stream_id = ${streamId} AND block > ${cut ?? -1}
+          AND block < ${newest}
+        ORDER BY block ASC LIMIT ${Math.min(256, chunks > maxChunks ? chunks - maxChunks : 8)}
       `;
-      // The newest block is never trimmed, so the head is never reused.
-      if (blocks.length < 2) break;
-      const oldest = blocks[0];
-      this.#sql`
-        DELETE FROM cf_agents_stream_blocks
-        WHERE stream_id = ${streamId} AND block = ${oldest.block}
-      `;
-      totals.chunks -= oldest.chunks;
-      totals.bytes -= oldest.bytes;
+      if (page.length === 0) break;
+      for (const row of page) {
+        if (chunks <= maxChunks && bytes <= maxBytes) break pages;
+        cut = row.block;
+        chunks -= row.chunks;
+        bytes -= row.bytes;
+      }
     }
+    if (cut === undefined) return;
+    this.#sql`
+      DELETE FROM cf_agents_stream_blocks
+      WHERE stream_id = ${streamId} AND block <= ${cut}
+    `;
+    totals.chunks = chunks;
+    totals.bytes = bytes;
   }
 
   /**

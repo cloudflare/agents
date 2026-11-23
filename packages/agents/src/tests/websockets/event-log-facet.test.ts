@@ -87,10 +87,11 @@ describe("event log in a facet", () => {
     for (let i = 1; i <= 8; i++) {
       expect(await parent.eventLogFacetPublish(child, `e${i}`)).toBe(i);
     }
-    // Retention 5, a block per publish: events 4..8 are kept.
+    // Retention 5, trimmed once past 6: back to 5 at the 7th, 6 after the
+    // 8th (events 3..8).
     expect(
       (await parent.eventLogFacetRows(child)).map((row) => row.seq_from)
-    ).toEqual([3, 4, 5, 6, 7]);
+    ).toEqual([2, 3, 4, 5, 6, 7]);
     expect(await parent.eventLogFacetHead(child)).toEqual({ epoch, seq: 8 });
     expect(await parent.rootHasStreamBlocks()).toBe(false);
 
