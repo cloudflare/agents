@@ -214,6 +214,7 @@ export class RunFiberTestAgent extends Agent<Record<string, unknown>> {
       FROM cf_agents_task_runs r
       WHERE r.definition IN ('__cf_fiber', '__cf_managed_fiber')
         AND r.status = 'running'
+        AND r.checkpoint -> '$.snapshot' IS NOT NULL
       LIMIT 1
     `;
     if (rows.length === 0) return null;
@@ -337,6 +338,7 @@ export class SubAgentFiberChild extends Agent<Record<string, unknown>> {
       FROM cf_agents_task_runs r
       WHERE r.definition IN ('__cf_fiber', '__cf_managed_fiber')
         AND r.status = 'running'
+        AND r.checkpoint -> '$.snapshot' IS NOT NULL
       LIMIT 1
     `;
     if (rows.length === 0) return null;
