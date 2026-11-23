@@ -2557,8 +2557,11 @@ export function useAgentChat<
           }
 
           let chunkData: unknown;
+          // A replayed end still ends the request below (the server tells a
+          // returning tab how a request it waited on ended).
           if (
             data.replay &&
+            !data.done &&
             streamStateRef.current.status !== "observing" &&
             !pendingReplayResumeRequestIdsRef.current.has(data.id)
           ) {

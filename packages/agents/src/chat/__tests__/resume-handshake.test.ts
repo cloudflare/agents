@@ -734,12 +734,13 @@ describe("ResumeHandshake (driver → golden frames)", () => {
         "probe-1",
         ["req-cut"]
       );
-      // A live terminal, so the tab clears the request as it would any end.
+      // Marked replay: the request ended while the tab was away.
       expect(frames[0]).toEqual({
         body: "",
         done: true,
         id: "req-cut",
         type: RESPONSE_TYPE,
+        replay: true,
         outcome: "aborted"
       });
       // Then it resumes the continuation, as before.

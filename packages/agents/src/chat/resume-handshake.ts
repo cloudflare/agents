@@ -237,8 +237,8 @@ export class ResumeHandshake {
    * terminal the host broadcast, kept durably in the recent terminals; a
    * recovery that takes a request over records its end). Nothing for the
    * active stream's request, for one whose terminal frames are still held
-   * behind its transcript, or for one with no recorded end. A live frame,
-   * not a replay: the tab clears the request as it would a terminal it saw.
+   * behind its transcript, or for one with no recorded end. Marked
+   * `replay`: the request ended while the tab was away.
    *
    * @returns Whether a terminal frame was sent.
    */
@@ -262,6 +262,7 @@ export class ResumeHandshake {
         done: true,
         id: requestId,
         type: this.host.responseMessageType,
+        replay: true,
         ...(ended.error && { error: true }),
         ...(messageIds && { messageIds }),
         ...(ended.outcome !== undefined && { outcome: ended.outcome })
