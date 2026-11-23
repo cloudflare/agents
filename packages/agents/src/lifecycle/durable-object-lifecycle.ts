@@ -216,6 +216,26 @@ const facetWakeForgetters = new WeakMap<
   (key: string) => Promise<void>
 >();
 
+const facetWakeArmers = new WeakMap<
+  object,
+  (address: LifecycleRouteAddress, time: number) => Promise<void>
+>();
+
+/**
+ * @internal At the root: hold a wake job for a facet path at `time`. For a
+ * capability moving a wake it used to mirror for a facet onto the facet
+ * wake, once, when the root starts. `lifecycle` is the Lifecycle or a
+ * capability's services object. It carries the lowest stamp, so any report
+ * from the facet itself wins over it.
+ */
+export function armFacetWake(
+  lifecycle: object,
+  address: LifecycleRouteAddress,
+  time: number
+): Promise<void> {
+  return facetWakeArmers.get(lifecycle)?.(address, time) ?? Promise.resolve();
+}
+
 /**
  * @internal At the root: drop the wake jobs of a facet path and every path
  * below it, when that sub-tree is deleted.
@@ -332,6 +352,9 @@ export class Lifecycle<
     this.#parentClassName = this.#host.constructor.name;
     this.#jobQueue = new JobQueue(this.#ctx.storage);
     facetWakeForgetters.set(this, (key) => this.#forgetFacetWakes(key));
+    facetWakeArmers.set(this, (address, time) =>
+      this.#holdFacetWake(address, time, 0)
+    );
     this.#jobDriver = new JobDriver({
       queue: this.#jobQueue,
       storage: this.#ctx.storage,
@@ -468,7 +491,7 @@ export class Lifecycle<
       source: lifecycleRouteTransports.get(lifecycle)?.source,
       payload
     });
-    return Object.freeze({
+    const services: LifecycleServices = Object.freeze({
       get name() {
         return lifecycle.name;
       },
@@ -513,6 +536,11 @@ export class Lifecycle<
         }
       })
     });
+    // A capability reaches the facet wake through its services object.
+    facetWakeArmers.set(services, (address, time) =>
+      this.#holdFacetWake(address, time, 0)
+    );
+    return services;
   }
 
   /**
@@ -566,8 +594,13 @@ export class Lifecycle<
 
   /** True while the root is driving this facet's jobs. */
   #drivingFromRoot = false;
-  /** The wake time this facet last gave its root. */
-  #reportedWake: number | null | undefined;
+  /**
+   * The wake time this facet last gave its root. It starts as "none": a
+   * facet with no jobs has nothing to tell, and a stale wake the root still
+   * holds for it drives it once and is dropped. A facet that starts with
+   * jobs still reports them once, in case the root lost its wake.
+   */
+  #reportedWake: number | null = null;
 
   async #onFacetWake(envelope: LifecycleRouteEnvelope): Promise<unknown> {
     const message = envelope.payload as FacetWakeMessage;

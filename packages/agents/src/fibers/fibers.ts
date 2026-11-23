@@ -19,11 +19,8 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { nanoid } from "nanoid";
-import {
-  LifecycleCapability,
-  type LifecycleRouteAddress,
-  type LifecycleRouteContext
-} from "../lifecycle/capability";
+import { LifecycleCapability } from "../lifecycle/capability";
+import { armFacetWake } from "../lifecycle/durable-object-lifecycle";
 import type {
   LifecycleJobContext,
   LifecycleJobOutcome
@@ -109,8 +106,8 @@ const MAX_RECOVERY_CRASHES = 3;
 
 const WAKE_JOB_ID = "fibers:recover";
 const WAKE_JOB_FN = "recover";
-const MIRROR_JOB_PREFIX = "fibers:recover:";
-// The root-side index of facet fibers before the wake was routed.
+// The root's index of facet fibers, and later its mirrored wakes for them,
+// from before a facet woke through the Lifecycle; moved onto facet wakes.
 const LEGACY_FACET_INDEX_TABLE = "cf_agents_facet_runs";
 
 // Ceiling for the recovery backoff. A scan that makes no progress (every
@@ -128,10 +125,6 @@ type MirrorJobPayload = {
   readonly owner_path: string;
   readonly owner_path_key: string;
 };
-
-type FibersRouteMessage =
-  | { readonly type: "syncWake"; readonly next: number | null }
-  | { readonly type: "recover" };
 
 type SqlValue = string | number | boolean | null;
 
@@ -235,7 +228,6 @@ export class Fibers extends LifecycleCapability {
    * The wake this isolate last armed. A facet reads it instead of the
    * root's mirror, so it can skip routing a no-op.
    */
-  #armedAt: number | null = null;
   /** The wake write in flight, if any. */
   #wakeSync: Promise<void> | undefined;
 
@@ -817,9 +809,7 @@ export class Fibers extends LifecycleCapability {
   /** Scan, then the wake this object needs next. */
   async #scanForWake(): Promise<number | null> {
     await this.#scan();
-    const next = this.#nextWakeMs(Date.now());
-    this.#armedAt = next;
-    return next;
+    return this.#nextWakeMs(Date.now());
   }
 
   #emitDetected(ctx: FiberRecoveryContext, managedRow: FiberLedgerRow | null) {
@@ -1102,9 +1092,7 @@ export class Fibers extends LifecycleCapability {
   async #writeWake(): Promise<void> {
     const now = Date.now();
     const next = this.#nextWakeMs(now);
-    const armed = this.lifecycle.routes.source
-      ? this.#armedAt
-      : (this.lifecycle.jobs.get(WAKE_JOB_ID)?.time ?? null);
+    const armed = this.lifecycle.jobs.get(WAKE_JOB_ID)?.time ?? null;
     // A running fiber only needs some wake within a heartbeat.
     if (
       this.#active.size > 0 &&
@@ -1116,15 +1104,6 @@ export class Fibers extends LifecycleCapability {
       return;
     }
     if (next === null && armed === null) return;
-    if (this.lifecycle.routes.source) {
-      await this.lifecycle.routes.toRoot({
-        type: "syncWake",
-        next
-      } satisfies FibersRouteMessage);
-      this.#armedAt = next;
-      return;
-    }
-    this.#armedAt = next;
     if (next === null) {
       await this.lifecycle.jobs.cancel(WAKE_JOB_ID);
       return;
@@ -1136,21 +1115,13 @@ export class Fibers extends LifecycleCapability {
     });
   }
 
-  async #pushMirror(owner: LifecycleRouteAddress, time: number): Promise<void> {
-    await this.lifecycle.jobs.push({
-      id: `${MIRROR_JOB_PREFIX}${owner.key}`,
-      fn: WAKE_JOB_FN,
-      time,
-      payload: {
-        owner_path: owner.data,
-        owner_path_key: owner.key
-      } satisfies MirrorJobPayload
-    });
-  }
-
   // ── Lifecycle capability hooks ───────────────────────────────────────────
 
-  /** Move the root's old facet fiber index onto mirrored wakes. */
+  /**
+   * Wake recovery for fibers an earlier isolate left behind, and, at a
+   * root, move the facet wakes it used to keep (an index table, then
+   * mirrored jobs) onto the Lifecycle's facet wake.
+   */
   async onStart(): Promise<void> {
     const storage = this.lifecycle.storage;
     const hasLegacyIndex =
@@ -1160,83 +1131,38 @@ export class Fibers extends LifecycleCapability {
           LEGACY_FACET_INDEX_TABLE
         )
         .toArray().length > 0;
-    if (!hasLegacyIndex) return;
-    const owners = storage.sql
-      .exec(
-        `SELECT DISTINCT owner_path, owner_path_key FROM ${LEGACY_FACET_INDEX_TABLE}`
-      )
-      .toArray() as MirrorJobPayload[];
-    for (const owner of owners) {
-      await this.#pushMirror(
-        { key: owner.owner_path_key, data: owner.owner_path },
-        Date.now()
-      );
+    if (hasLegacyIndex) {
+      const owners = storage.sql
+        .exec(
+          `SELECT DISTINCT owner_path, owner_path_key FROM ${LEGACY_FACET_INDEX_TABLE}`
+        )
+        .toArray() as MirrorJobPayload[];
+      for (const owner of owners) {
+        await armFacetWake(
+          this.lifecycle,
+          { key: owner.owner_path_key, data: owner.owner_path },
+          Date.now()
+        );
+      }
+      storage.sql.exec(`DROP TABLE ${LEGACY_FACET_INDEX_TABLE}`);
     }
-    storage.sql.exec(`DROP TABLE ${LEGACY_FACET_INDEX_TABLE}`);
+    for (const job of this.lifecycle.jobs.list()) {
+      if (!isMirrorJobPayload(job.payload)) continue;
+      await armFacetWake(
+        this.lifecycle,
+        { key: job.payload.owner_path_key, data: job.payload.owner_path },
+        job.time
+      );
+      await this.lifecycle.jobs.cancel(job.id);
+    }
+    if (this.#hasPendingRecovery()) await this.#writeWake();
   }
 
   async onJob(
-    context: LifecycleJobContext
+    _context: LifecycleJobContext
   ): Promise<LifecycleJobOutcome | void> {
-    const payload = context.job.payload;
-    if (isMirrorJobPayload(payload)) {
-      // The fibers live on a facet; its scan runs there.
-      try {
-        const outcome = await this.lifecycle.routes.to(
-          { key: payload.owner_path_key, data: payload.owner_path },
-          { type: "recover" } satisfies FibersRouteMessage
-        );
-        // `false`: the facet is gone and the route cleaned up after it.
-        if (outcome === false || outcome === null) return undefined;
-        return typeof outcome === "number"
-          ? { rescheduleAt: outcome }
-          : undefined;
-      } catch (error) {
-        // Keep the wake so a transient failure (a facet init error) retries.
-        console.error(
-          `[Agent] Facet fiber recovery failed for ${payload.owner_path_key}:`,
-          error
-        );
-        return { rescheduleAt: Date.now() + this.#options.heartbeatMs };
-      }
-    }
     const next = await this.#scanForWake();
     return next === null ? undefined : { rescheduleAt: next };
-  }
-
-  async onRoute(context: LifecycleRouteContext): Promise<unknown> {
-    const message = context.payload as FibersRouteMessage;
-    switch (message.type) {
-      case "syncWake": {
-        const owner = context.source;
-        if (!owner) throw new Error("Routed Fibers message missing source");
-        if (message.next === null) {
-          await this.lifecycle.jobs.cancel(`${MIRROR_JOB_PREFIX}${owner.key}`);
-        } else {
-          await this.#pushMirror(owner, message.next);
-        }
-        return true;
-      }
-      case "recover":
-        return this.#scanForWake();
-      default:
-        throw new Error("Unknown routed Fibers message");
-    }
-  }
-
-  /**
-   * @internal Cancel this root's mirrored wakes for a deleted facet subtree.
-   * The facets' fiber rows are wiped with their storage.
-   */
-  async __DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(
-    prefix: string
-  ): Promise<void> {
-    for (const job of this.lifecycle.jobs.list()) {
-      if (!isMirrorJobPayload(job.payload)) continue;
-      const key = job.payload.owner_path_key;
-      if (key !== prefix && !key.startsWith(`${prefix}/`)) continue;
-      await this.lifecycle.jobs.cancel(job.id);
-    }
   }
 
   // ── Storage ──────────────────────────────────────────────────────────────
