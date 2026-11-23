@@ -35,6 +35,10 @@ class Jobs extends LifecycleCapability {
   get(id: string) {
     return this.lifecycle.jobs.get(id);
   }
+
+  reschedule(id: string, time: number) {
+    return this.lifecycle.jobs.reschedule(id, time);
+  }
 }
 
 const QUICK = { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 };
@@ -329,6 +333,38 @@ describe("job driver hold and the alarm", () => {
   });
 });
 
+/** Jobs with an error hook: only such an owner's hold has a clock. */
+class HookedJobs extends Jobs {
+  onJobError(): void {}
+}
+
+describe("job driver hold limit", () => {
+  it("starts a job's hold clock again when its owner reschedules it", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const jobs = new HookedJobs("hold-reschedule", []);
+      const { lifecycle } = install(jobs);
+      await lifecycle.start();
+      await jobs.push({
+        id: "parked",
+        fn: "poison",
+        time: Date.now() - 1,
+        retry: QUICK
+      });
+      await lifecycle.alarm().catch(() => {});
+      const heldSince = () =>
+        storage.sql
+          .exec<{ held_since: number | null }>(
+            "SELECT held_since FROM cf_agents_jobs WHERE id = 'parked'"
+          )
+          .toArray()[0]?.held_since;
+      expect(heldSince()).toEqual(expect.any(Number));
+
+      await jobs.reschedule("parked", Date.now() + 60_000);
+      expect(heldSince()).toBeNull();
+    });
+  });
+});
+
 describe("job driver staggered holds", () => {
   it("wakes for each held owner at its own hold's end, and lets an earlier ordinary job win", async () => {
     await withCapabilityHarness(async ({ install, storage }) => {
@@ -371,6 +407,172 @@ describe("job driver staggered holds", () => {
       expect(alarm).not.toBeNull();
       expect(alarm!).toBeGreaterThanOrEqual(bHeldFrom + 30_000);
       expect(alarm!).toBeGreaterThan(aHeldBy + 30_000 + 500);
+    });
+  });
+});
+
+describe("job driver hold limit", () => {
+  it("reports a job to its owner once its callee has failed for 15 minutes", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const calls: string[] = [];
+      const errors: unknown[] = [];
+      const makeQueue = () =>
+        new Queue({
+          callbacks: {
+            bad: () => {
+              calls.push("bad");
+              throw retryableError();
+            },
+            good: () => void calls.push("good")
+          },
+          retry: QUICK,
+          onError: (error) => void errors.push(error)
+        });
+      const first = makeQueue();
+      const { lifecycle } = install(first);
+      await lifecycle.start();
+      const bad = await first.push("bad", null);
+      await first.push("good", null);
+
+      // Held: the item behind it waits.
+      await expect(lifecycle.alarm()).rejects.toThrow("restarting");
+      expect(calls).toEqual(["bad"]);
+      expect(errors).toEqual([]);
+
+      // The callee is still failing 16 minutes into the hold (a fresh
+      // isolate here, which also forgets the in-memory hold).
+      storage.sql.exec(
+        "UPDATE cf_agents_jobs SET held_since = ? WHERE id = ?",
+        Date.now() - 16 * 60_000,
+        bad.id
+      );
+      const later = makeQueue();
+      const fresh = install(later).lifecycle;
+      await fresh.start();
+      await fresh.alarm();
+
+      // The owner hears of it (Queue drops the item), and the rest runs.
+      expect(calls).toEqual(["bad", "bad", "good"]);
+      expect(errors).toMatchObject([
+        { message: "downstream object is restarting" }
+      ]);
+      expect(await later.list()).toEqual([]);
+    });
+  });
+
+  it("clears the hold clock when the owner returns a non-final outcome", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      let fail = true;
+      const make = () => {
+        const jobs = new Jobs("isolation-outcome", []);
+        jobs.onJob = () => {
+          if (fail) throw retryableError();
+          return { rescheduleAt: Date.now() + 60_000 };
+        };
+        Object.assign(jobs, { onJobError: () => undefined });
+        return jobs;
+      };
+      const jobs = make();
+      const { lifecycle } = install(jobs);
+      await lifecycle.start();
+      await jobs.push({
+        id: "flaky",
+        fn: "ok",
+        time: Date.now() - 1,
+        retry: QUICK
+      });
+      await expect(lifecycle.alarm()).rejects.toThrow("restarting");
+      const heldSince = () =>
+        [
+          ...storage.sql.exec(
+            "SELECT held_since FROM cf_agents_jobs WHERE id = 'flaky'"
+          )
+        ][0]?.held_since;
+      expect(heldSince()).toEqual(expect.any(Number));
+
+      // The callee recovers: the owner returns { rescheduleAt } (a fresh
+      // isolate here, which forgets the in-memory hold).
+      fail = false;
+      const fresh = install(make()).lifecycle;
+      await fresh.start();
+      await fresh.alarm();
+      expect(heldSince()).toBeNull();
+    });
+  });
+
+  it("starts the hold clock again after the job succeeds", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      let fail = true;
+      const queue = new Queue({
+        callbacks: {
+          flaky: () => {
+            if (fail) throw retryableError();
+          }
+        },
+        retry: QUICK
+      });
+      const { lifecycle } = install(queue);
+      await lifecycle.start();
+      const item = await queue.push("flaky", null, { id: "flaky" });
+      await expect(lifecycle.alarm()).rejects.toThrow("restarting");
+      const [held] = [
+        ...storage.sql.exec(
+          "SELECT held_since FROM cf_agents_jobs WHERE id = ?",
+          item.id
+        )
+      ];
+      expect(held?.held_since).toEqual(expect.any(Number));
+
+      // A same-id push is new intent: no hold carried over.
+      fail = false;
+      await queue.push("flaky", null, { id: "flaky" });
+      const [pushed] = [
+        ...storage.sql.exec(
+          "SELECT held_since FROM cf_agents_jobs WHERE id = ?",
+          item.id
+        )
+      ];
+      expect(pushed?.held_since).toBeNull();
+    });
+  });
+});
+
+describe("job driver hold limit without onJobError", () => {
+  it("keeps holding a job past the limit when its owner has no onJobError", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const ran: string[] = [];
+      const first = new Jobs("isolation-hookless", ran);
+      const { lifecycle } = install(first);
+      await lifecycle.start();
+      await first.push({
+        id: "poison",
+        fn: "poison",
+        time: Date.now() - 1,
+        retry: QUICK
+      });
+      await expect(lifecycle.alarm()).rejects.toThrow("restarting");
+      // No hold clock is kept for an owner the limit does not apply to.
+      expect(
+        [
+          ...storage.sql.exec(
+            "SELECT held_since FROM cf_agents_jobs WHERE id = 'poison'"
+          )
+        ][0]?.held_since
+      ).toBeNull();
+      storage.sql.exec(
+        "UPDATE cf_agents_jobs SET held_since = ? WHERE id = 'poison'",
+        Date.now() - 16 * 60_000
+      );
+
+      // A fresh isolate, past the limit: the job is kept (it may be its
+      // owner's only wake) and still has a wake.
+      const fresh = install(new Jobs("isolation-hookless", ran)).lifecycle;
+      await fresh.start();
+      await expect(fresh.alarm()).rejects.toThrow("restarting");
+      expect(
+        [...storage.sql.exec("SELECT id FROM cf_agents_jobs")].map((r) => r.id)
+      ).toEqual(["poison"]);
+      expect(await storage.getAlarm()).not.toBeNull();
     });
   });
 });

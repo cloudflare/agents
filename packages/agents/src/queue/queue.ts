@@ -17,11 +17,7 @@ import type {
   LifecycleJobContext,
   LifecycleJobOutcome
 } from "../lifecycle/job-queue";
-import {
-  isPlatformFailure,
-  resolveRetryConfig,
-  validateRetryOptions
-} from "../retries";
+import { resolveRetryConfig, validateRetryOptions } from "../retries";
 import type { RetryOptions } from "../retries";
 import type { QueueEventType, QueueOptions } from "./options";
 import type {
@@ -62,6 +58,9 @@ export function setQueueCallbackResolver(
 const QUEUE_SCHEMA_VERSION_KEY = "cf_agents:queue_schema_version";
 /** Version 1: queue items live in the Lifecycle job queue. */
 const CURRENT_QUEUE_SCHEMA_VERSION = 1;
+
+/** TEMPORARY: wait before a failed hand-over to a sub-agent is tried again. */
+const HANDOVER_RETRY_MS = 30_000;
 
 const DEFAULT_RETRY: Required<RetryOptions> = {
   maxAttempts: 3,
@@ -290,11 +289,35 @@ export class Queue<
         { type: "adopt", item } satisfies QueueAdoptMessage
       );
     } catch (error) {
-      // Keep the item for a later alarm; platform failures go to the
-      // driver's own handling.
-      if (isPlatformFailure(error)) throw error;
+      // Keep the item and try again later, whatever failed: a failed
+      // hand-over is not the item's own failure, so it must never reach the
+      // driver's failure handling, which could give the item up.
       console.error(`error handing queue item "${job.id}" over`, error);
-      return "yield";
+      // The sub-agent queues adopted items in arrival order, so every later
+      // item held for the same sub-agent waits behind this one: packed 1 ms
+      // apart from the retry on, or at its own time if that is later.
+      // Written last first, so a reset part-way still leaves them in order.
+      const key = path.owner_path_key ?? path.owner_path;
+      const retryAt = Date.now() + HANDOVER_RETRY_MS;
+      const later = this.#ownedJobs()
+        .filter(
+          ({ job: other, envelope }) =>
+            (envelope.owner_path_key ?? envelope.owner_path) === key &&
+            other.id !== job.id &&
+            other.time >= job.time
+        )
+        .map(({ job: other }) => other)
+        .sort((a, b) => a.time - b.time);
+      const moves: Array<[string, number]> = [];
+      let previous = retryAt;
+      for (const other of later) {
+        previous = Math.max(other.time, previous + 1);
+        if (previous !== other.time) moves.push([other.id, previous]);
+      }
+      for (const [id, time] of moves.reverse()) {
+        await this.lifecycle.jobs.reschedule(id, time);
+      }
+      return { rescheduleAt: retryAt };
     }
     return undefined;
   }

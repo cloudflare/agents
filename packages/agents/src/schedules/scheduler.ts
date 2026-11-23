@@ -16,11 +16,7 @@ import type {
   LifecycleJobContext,
   LifecycleJobOutcome
 } from "../lifecycle/job-queue";
-import {
-  isPlatformFailure,
-  resolveRetryConfig,
-  validateRetryOptions
-} from "../retries";
+import { resolveRetryConfig, validateRetryOptions } from "../retries";
 import type { RetryOptions } from "../retries";
 import {
   DeclaredScheduleSet,
@@ -95,6 +91,9 @@ const LEGACY_RECOVERY_LOOP_CALLBACKS = new Set([
   "_chatRecoveryContinue",
   "_chatRecoveryRetry"
 ]);
+
+/** TEMPORARY: wait before a failed hand-over to a sub-agent is tried again. */
+const HANDOVER_RETRY_MS = 30_000;
 
 const DEFAULT_RETRY: Required<RetryOptions> = {
   maxAttempts: 3,
@@ -450,11 +449,28 @@ export class Scheduler<
         } satisfies SchedulerAdoptMessage
       );
     } catch (error) {
-      // Keep the schedule for a later alarm; platform failures go to the
-      // driver's own handling.
-      if (isPlatformFailure(error)) throw error;
+      // Keep the schedule and try again later, whatever failed: a failed
+      // hand-over is not the schedule's own failure, so it must never reach
+      // the driver's failure handling, which could give it up.
       console.error(`error handing schedule "${job.id}" over`, error);
-      return "yield";
+      // A schedule cancelled meanwhile (its sub-agent deleted) stays gone.
+      if (!this.lifecycle.jobs.get(job.id)) return undefined;
+      // Try again later, keeping the schedule's own time for the sub-agent.
+      await this.lifecycle.jobs.push({
+        id: job.id,
+        fn: job.fn,
+        time: Date.now() + HANDOVER_RETRY_MS,
+        payload: {
+          ...timing,
+          handover_time: handover_time ?? job.time
+        } satisfies SchedulerJobPayload,
+        retry: job.retry,
+        singleflight: job.singleflight,
+        hungTimeoutSeconds: this.#hungScheduleTimeoutSeconds,
+        recoveryLoop: job.recoveryLoop
+      });
+      // The push is newer intent: this outcome defers to it.
+      return { rescheduleAt: Date.now() + HANDOVER_RETRY_MS };
     }
     return undefined;
   }

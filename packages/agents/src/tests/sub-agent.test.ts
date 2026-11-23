@@ -632,6 +632,99 @@ describe("SubAgent", () => {
     expect(await agent.rootQueueRows()).toEqual([]);
   });
 
+  it("keeps a held queue item when handing it to its sub-agent fails", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.failNextAdoptsForTest(1);
+    const before = Date.now();
+    await agent.insertLegacyRootQueueItem("handover-fails", "kept-item", "v");
+    await runDurableObjectAlarm(agent);
+
+    // Not given up as a failure of its own: still on the root, for a later
+    // try, and nothing ran.
+    await vi.waitFor(async () => {
+      const [row] = await agent.rootQueueTimes();
+      expect(row?.id).toBe("kept-item");
+      expect(row!.time).toBeGreaterThanOrEqual(before + 25_000);
+    });
+    expect(await agent.subAgentScheduleLog("handover-fails")).toEqual([]);
+  });
+
+  it("keeps a sub-agent's held queue items in order when one hand-over fails", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.failNextAdoptsForTest(1);
+    await agent.insertLegacyRootQueueItem(
+      "order-child",
+      "first-item",
+      "1",
+      60_000
+    );
+    // Pushed 50 s later: the gap must not become a wait once both are due.
+    await agent.insertLegacyRootQueueItem(
+      "order-child",
+      "second-item",
+      "2",
+      110_000
+    );
+    await agent.makeRootQueueDueForTest();
+    await runDurableObjectAlarm(agent);
+
+    // The second item waits behind the first, not ahead of it.
+    await vi.waitFor(async () => {
+      const rows = (await agent.rootQueueTimes()).sort(
+        (a, b) => a.time - b.time
+      );
+      expect(rows.map((row) => row.id)).toEqual(["first-item", "second-item"]);
+      expect(rows[0]!.time).toBeGreaterThan(Date.now() + 20_000);
+      expect(rows[1]!.time - rows[0]!.time).toBeLessThan(1_000);
+    });
+  });
+
+  it("does not bring back a held schedule dropped while its hand-over fails", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.holdNextFailingAdoptForTest();
+    await agent.insertLegacyRootSchedule("sched-drop", "old-drop", "v");
+    const alarm = runDurableObjectAlarm(agent).catch(() => {});
+    await vi.waitFor(async () => {
+      expect(await agent.failingAdoptEnteredForTest()).toBe(true);
+    });
+    // Dropped while the hand-over is in flight, as a sub-agent delete does.
+    await agent.dropRootJobForTest("old-drop");
+    await agent.releaseFailingAdoptForTest();
+    await alarm;
+    // Whichever alarm reached the gate, wait for its failure to come back;
+    // what is left of the hand-over then is one row check and its outcome.
+    await vi.waitFor(async () => {
+      expect(await agent.failingAdoptThrownForTest()).toBe(true);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    expect(await agent.rootJobPayload("old-drop")).toBeUndefined();
+  });
+
+  it("keeps a held schedule's own time when its hand-over fails", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.failNextAdoptsForTest(1);
+    const before = Date.now();
+    await agent.insertLegacyRootSchedule("sched-fail", "old-fail", "v");
+    await runDurableObjectAlarm(agent);
+
+    await vi.waitFor(async () => {
+      const payload = (await agent.rootJobPayload("old-fail")) as {
+        handover_time?: number;
+      };
+      expect(payload?.handover_time).toBeGreaterThanOrEqual(before);
+      expect(payload!.handover_time).toBeLessThan(before + 5_000);
+    });
+  });
+
   it("leaves other owners' jobs alone when a sub-agent is deleted", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);

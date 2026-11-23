@@ -21,7 +21,41 @@ const STALE_FRAME_PROBE = "stale-frame-probe";
 // ── SubAgent: Counter ───────────────────────────────────────────────
 // A SubAgent with its own SQLite counter table.
 
+/** Hand-overs into a CounterSubAgent that fail before they reach it. */
+let failingAdopts = 0;
+/** Held open while a failing hand-over is in flight, until released. */
+let failingAdoptGate:
+  | {
+      entered: boolean;
+      thrown: boolean;
+      release: () => void;
+      released: Promise<void>;
+    }
+  | undefined;
+
 export class CounterSubAgent extends Agent {
+  override async _cf_routeLifecycle(
+    target: Parameters<Agent["_cf_routeLifecycle"]>[0],
+    envelope: Parameters<Agent["_cf_routeLifecycle"]>[1]
+  ): Promise<unknown> {
+    if (
+      failingAdopts > 0 &&
+      (envelope.payload as { type?: string }).type === "adopt"
+    ) {
+      failingAdopts -= 1;
+      const gate = failingAdoptGate;
+      if (gate) {
+        gate.entered = true;
+        await gate.released;
+        gate.thrown = true;
+      }
+      throw Object.assign(new Error("simulated hand-over failure"), {
+        retryable: true
+      });
+    }
+    return super._cf_routeLifecycle(target, envelope);
+  }
+
   async treeScheduleRows(): Promise<TreeScheduleRow[]> {
     return treeScheduleRows(this, false);
   }
@@ -1823,6 +1857,59 @@ export class TestSubAgentParent extends Agent {
   ): Promise<Array<{ id: string; time: number }>> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.scheduleTimes();
+  }
+
+  failNextAdoptsForTest(count: number): void {
+    failingAdopts = count;
+  }
+
+  /** Fail the next hand-over, held open until `releaseFailingAdoptForTest`. */
+  holdNextFailingAdoptForTest(): void {
+    failingAdopts = 1;
+    let release = () => {};
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    failingAdoptGate = { entered: false, thrown: false, release, released };
+  }
+
+  failingAdoptEnteredForTest(): boolean {
+    return failingAdoptGate?.entered ?? false;
+  }
+
+  releaseFailingAdoptForTest(): void {
+    failingAdoptGate?.release();
+  }
+
+  /** The held hand-over has failed back to this root. */
+  failingAdoptThrownForTest(): boolean {
+    const thrown = failingAdoptGate?.thrown ?? false;
+    if (thrown) failingAdoptGate = undefined;
+    return thrown;
+  }
+
+  dropRootJobForTest(id: string): void {
+    this.sql`DELETE FROM cf_agents_jobs WHERE id = ${id}`;
+  }
+
+  /** Make the root's queue rows due, keeping their order. */
+  async makeRootQueueDueForTest(): Promise<void> {
+    this.sql`UPDATE cf_agents_jobs SET time = time - 120000
+      WHERE capability = 'queue'`;
+    await this.lifecycle.rearmAlarm();
+  }
+
+  rootJobPayload(id: string): unknown {
+    const [row] = this.sql<{ payload: string | null }>`
+      SELECT payload FROM cf_agents_jobs WHERE id = ${id}
+    `;
+    return row?.payload ? JSON.parse(row.payload) : undefined;
+  }
+
+  rootQueueTimes(): Array<{ id: string; time: number }> {
+    return this.sql<{ id: string; time: number }>`
+      SELECT id, time FROM cf_agents_jobs WHERE capability = 'queue'
+    `;
   }
 
   /** Run the Scheduler's start again, as a root's next start does. */

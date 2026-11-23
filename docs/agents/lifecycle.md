@@ -302,7 +302,11 @@ reset) preserve the job for a fresh invocation, and a terminal application
 failure reaches the owner's `onJobError()`, whose result decides advancement.
 Another platform-class failure, such as a dropped connection to a stub the job
 called, keeps that job and holds back its owner's due jobs, in their order, for
-30 seconds; other owners' due jobs still run.
+30 seconds; other owners' due jobs still run. If the job keeps failing that
+way for 15 minutes, its owner's `onJobError()` receives the error as a terminal
+failure, so one bad item cannot block its owner forever. An owner without
+`onJobError()`, the host included, stays held for as long as the failure lasts:
+its job may be its only wake, so the Lifecycle does not end it.
 
 An attempt that takes the isolate down (the CPU or wall-time limit, a reset)
 reports no error, so Lifecycle counts each attempt in the job's row before
