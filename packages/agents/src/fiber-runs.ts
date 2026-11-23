@@ -50,6 +50,8 @@ export const MANAGED_FIBER_TASK = "__cf_managed_fiber";
 const SNAPSHOT = "snapshot";
 /** Recovery attempts that ended the isolate before the hook returned. */
 const CRASHES = "crashes";
+/** When a managed fiber became `interrupted` (its `settledAt`). */
+const INTERRUPTED_AT = "interruptedAt";
 /** Consecutive recovery attempts whose hook threw. */
 const FAILURES = "failures";
 // A plain fiber's recovery that killed the isolate this many times is given
@@ -215,7 +217,7 @@ async function recover(
   // own budget.
   const counted = managed || !host.ownsRecoveryBudget(name);
   const crashes = step.checkpoint.get<number>(CRASHES) ?? 0;
-  if (managed && crashes >= 1) return TaskSettlement.park();
+  if (managed && crashes >= 1) return parkInterrupted(step);
   const payload = { fiberId: id, fiberName: name, managed };
   const elapsedMs = Date.now() - ctx.createdAt;
   host.emit("fiber:recovery:detected", {
@@ -293,11 +295,25 @@ async function recover(
   });
   if (!managed) return null;
   if (counted) step.checkpoint.set(CRASHES, crashes);
-  if (!result) return TaskSettlement.park();
+  if (!result) return parkInterrupted(step);
   if (result.snapshot !== undefined) {
     step.checkpoint.set(SNAPSHOT, toJson(result.snapshot));
   }
-  return settlementOf(host.tasks, id, result);
+  const settlement = settlementOf(host.tasks, id, result);
+  return settlement?.kind === "park"
+    ? parkInterrupted(step, settlement)
+    : settlement;
+}
+
+/** Park a managed fiber `interrupted`, keeping when that happened. */
+function parkInterrupted(
+  step: TaskStep,
+  settlement = TaskSettlement.park()
+): TaskSettlement {
+  if (step.checkpoint.get(INTERRUPTED_AT) === undefined) {
+    step.checkpoint.set(INTERRUPTED_AT, Date.now());
+  }
+  return settlement;
 }
 
 /** What a recovery result settles a managed fiber's run with. */
@@ -608,7 +624,11 @@ function inspection(tasks: Tasks, record: TaskRecord): FiberInspection {
   if (error !== undefined && status !== "completed") fiber.error = error;
   if (record.metadata !== undefined) fiber.metadata = record.metadata;
   if (record.startedAt !== undefined) fiber.startedAt = record.startedAt;
-  if (record.settledAt !== undefined) fiber.settledAt = record.settledAt;
+  const settledAt =
+    status === "interrupted"
+      ? tasks.checkpointOf<number>(record.runId, INTERRUPTED_AT)
+      : record.settledAt;
+  if (settledAt !== undefined) fiber.settledAt = settledAt;
   return fiber;
 }
 
@@ -784,7 +804,10 @@ async function importManaged(
       ? "running"
       : state.status;
   // An `interrupted` row already had its one recovery: it stays parked.
-  if (interrupted) checkpoint[CRASHES] = 1;
+  if (interrupted) {
+    checkpoint[CRASHES] = 1;
+    if (state.settledAt !== null) checkpoint[INTERRUPTED_AT] = state.settledAt;
+  }
   await tasks.importRun({
     runId: row.fiber_id,
     definition: MANAGED_FIBER_TASK,

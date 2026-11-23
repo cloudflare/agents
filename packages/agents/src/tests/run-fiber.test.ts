@@ -994,6 +994,8 @@ describe("runFiber", () => {
         status: "interrupted",
         snapshot: { step: 1 }
       });
+      // Interrupted counts as settled for inspection, as before.
+      expect(inspection?.settledAt).toEqual(expect.any(Number));
     });
 
     it("should recover pending managed ledger rows without run rows", async () => {
