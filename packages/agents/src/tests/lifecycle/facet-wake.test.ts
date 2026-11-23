@@ -72,16 +72,20 @@ describe("facet wake", () => {
     const agent = await root();
     await agent.middlePush("m", "fail-always", 0);
     await runDurableObjectAlarm(agent);
-    // The facet's driver ran it and settled its failure itself; the root's
-    // call did not fail, and nothing is left to wake.
-    await vi.waitFor(async () => {
-      expect(await agent.middleRan("m")).toContain("fail-always");
-    });
-    // The facet's driver retries it later; the root holds a wake for that
-    // retry, and nothing failed at the root.
-    expect(await agent.middlePending("m")).toEqual(["fail-always"]);
-    const [wake] = await agent.rootJobs();
-    expect(wake?.id.startsWith("facet:")).toBe(true);
+    // The facet's driver retried it and gave it up itself: it ran more than
+    // once inside the facet, and when it was given up nothing was left to
+    // wake. The root's own alarm did not fail.
+    await vi.waitFor(
+      async () => {
+        expect(
+          (await agent.middleRan("m")).filter((id) => id === "fail-always")
+            .length
+        ).toBeGreaterThan(1);
+        expect(await agent.middlePending("m")).toEqual([]);
+        expect(await agent.rootJobs()).toEqual([]);
+      },
+      { timeout: 8_000 }
+    );
   });
 
   it("keeps a facet's wake, backed off, when the call down fails", async () => {
