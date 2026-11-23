@@ -3708,6 +3708,9 @@ export class AIChatAgent<
         "skipped",
         "continue_disabled"
       );
+      // Nothing continues the cut-off request: end it for the tabs, and
+      // record it for a tab that comes back later.
+      this._frames.endUnstarted(null, input.requestId, "aborted");
       return;
     }
     // A turn that died before it streamed, or whose partial is gone, leaves

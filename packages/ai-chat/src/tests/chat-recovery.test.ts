@@ -6,6 +6,7 @@ import { connectChatWS, isUseChatResponseMessage } from "./test-utils";
 import { MessageType } from "../types";
 
 interface ChatTestStub {
+  recentTerminalForTest(requestId: string): Promise<unknown>;
   getPersistedMessages(): Promise<ChatMessage[]>;
   getActiveFibers(): Promise<Array<{ id: string; name: string }>>;
   getOnChatMessageCallCount(): Promise<number>;
@@ -621,6 +622,128 @@ describe("chatRecovery", () => {
         expect(lastCtx.streamId).toBe("stream-stash");
       }
     );
+  });
+
+  it("ends a cut-off request for the tabs when the app declines to continue it", async () => {
+    const room = crypto.randomUUID();
+    // A tab connected while recovery runs hears the end live.
+    const { ws } = await connectChatWS(
+      `/agents/chat-recovery-test-agent/${room}`
+    );
+    const heard: unknown[] = [];
+    ws.addEventListener("message", (event: MessageEvent) => {
+      heard.push(JSON.parse(event.data as string));
+    });
+    const stub = (await getAgentByName(
+      env.ChatRecoveryTestAgent,
+      room
+    )) as unknown as ChatTestStub;
+    await stub.setRecoveryOverride({ continue: false });
+    await stub.persistMessages([
+      { id: "user-1", role: "user", parts: [{ type: "text", text: "Hi" }] }
+    ] as ChatMessage[]);
+    await stub.insertInterruptedStream("stream-decl", "req-decl", [
+      {
+        body: JSON.stringify({ type: "start", messageId: "a-decl" }),
+        index: 0
+      },
+      { body: JSON.stringify({ type: "text-start" }), index: 1 },
+      {
+        body: JSON.stringify({ type: "text-delta", delta: "Part" }),
+        index: 2
+      }
+    ]);
+    await stub.insertInterruptedFiber("__cf_internal_chat_turn:req-decl");
+
+    await stub.triggerFiberRecovery();
+
+    await vi.waitFor(() =>
+      expect(
+        heard.some(
+          (m) =>
+            isUseChatResponseMessage(m) &&
+            m.id === "req-decl" &&
+            m.done === true &&
+            (m as { outcome?: string }).outcome === "aborted"
+        )
+      ).toBe(true)
+    );
+    ws.close();
+    // Recorded, so a tab that comes back later learns the request ended.
+    expect(await stub.recentTerminalForTest("req-decl")).toMatchObject({
+      outcome: "aborted"
+    });
+  });
+
+  it("tells a tab that comes back how a declined, discarded reply's request ended, without its chunks", async () => {
+    const room = crypto.randomUUID();
+    const stub = (await getAgentByName(
+      env.ChatRecoveryTestAgent,
+      room
+    )) as unknown as ChatTestStub;
+    await stub.setRecoveryOverride({ persist: false, continue: false });
+    await stub.persistMessages([
+      { id: "user-1", role: "user", parts: [{ type: "text", text: "Hi" }] }
+    ] as ChatMessage[]);
+    await stub.insertInterruptedStream("stream-gone", "req-gone", [
+      {
+        body: JSON.stringify({ type: "start", messageId: "a-gone" }),
+        index: 0
+      },
+      { body: JSON.stringify({ type: "text-start" }), index: 1 },
+      {
+        body: JSON.stringify({ type: "text-delta", delta: "Discarded" }),
+        index: 2
+      }
+    ]);
+    await stub.insertInterruptedFiber("__cf_internal_chat_turn:req-gone");
+    await stub.triggerFiberRecovery();
+
+    // The tab comes back still waiting on req-gone.
+    const { ws } = await connectChatWS(
+      `/agents/chat-recovery-test-agent/${room}`
+    );
+    const heard: Array<Record<string, unknown>> = [];
+    ws.addEventListener("message", (event: MessageEvent) => {
+      const m = JSON.parse(event.data as string) as Record<string, unknown>;
+      heard.push(m);
+      if (m.type === MessageType.CF_AGENT_STREAM_RESUMING) {
+        ws.send(
+          JSON.stringify({
+            type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+            id: m.id
+          })
+        );
+      }
+    });
+    ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST,
+        requestIds: ["req-gone"]
+      })
+    );
+
+    await vi.waitFor(() =>
+      expect(
+        heard.some(
+          (m) =>
+            isUseChatResponseMessage(m) &&
+            m.id === "req-gone" &&
+            m.done === true &&
+            (m as { outcome?: string }).outcome === "aborted"
+        )
+      ).toBe(true)
+    );
+    // The reply the app discarded does not come back.
+    expect(
+      heard.some(
+        (m) =>
+          isUseChatResponseMessage(m) &&
+          typeof m.body === "string" &&
+          m.body.includes("Discarded")
+      )
+    ).toBe(false);
+    ws.close();
   });
 
   describe("recovery preserves settled work (#1631)", () => {

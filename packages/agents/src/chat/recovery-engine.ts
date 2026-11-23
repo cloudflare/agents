@@ -924,6 +924,22 @@ export class ChatRecoveryEngine {
         streamStatus,
         detail
       });
+      // A recovery took the cut-off request over: what follows runs under
+      // its own request id. Tell the tabs, and record it, so a tab that
+      // comes back later (even after a hibernation) learns it ended. A
+      // recovery the host declined or gave up on reported its own end.
+      if (streamStillActive) {
+        const after = await this.adapter.getIncident(
+          chatRecoveryIncidentKey(incident.incidentId)
+        );
+        if (
+          after?.status !== "skipped" &&
+          after?.status !== "failed" &&
+          after?.status !== "exhausted"
+        ) {
+          this.#endTakenOver(requestId);
+        }
+      }
     } catch (error) {
       await this.updateIncident(
         incident.incidentId,
@@ -1183,6 +1199,15 @@ export class ChatRecoveryEngine {
       (incident.recoveryRootRequestId !== undefined &&
         this.#stoppedRequestIds.has(incident.recoveryRootRequestId))
     );
+  }
+
+  /** End a request a recovery took over (see the wake path). */
+  #endTakenOver(requestId: string): void {
+    try {
+      this.adapter.turns?.endRequest?.(requestId, "aborted");
+    } catch (error) {
+      console.error(`[chat] failed to end request ${requestId}`, error);
+    }
   }
 
   /**

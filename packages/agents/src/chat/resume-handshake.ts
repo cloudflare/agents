@@ -167,6 +167,12 @@ export class ResumeHandshake {
   ): Promise<void> {
     const { resumableStream, continuation, preStream } = this.host;
     if (resumableStream.hasActiveStream()) {
+      // A request the tab waits on that ended while it was away, and a
+      // recovery now streams under another id: end it first, or the tab
+      // never learns it is over.
+      for (const requestId of requestIds) {
+        this.sendEnded(connection, requestId);
+      }
       if (
         continuation.activeRequestId === resumableStream.activeRequestId &&
         continuation.activeConnectionId !== null &&
@@ -224,6 +230,44 @@ export class ResumeHandshake {
         probeId
       );
     }
+  }
+
+  /**
+   * Tell `connection` how `requestId` ended, if its end was recorded (a
+   * terminal the host broadcast, kept durably in the recent terminals; a
+   * recovery that takes a request over records its end). Nothing for the
+   * active stream's request, for one whose terminal frames are still held
+   * behind its transcript, or for one with no recorded end. Marked
+   * `replay`: the request ended while the tab was away.
+   *
+   * @returns Whether a terminal frame was sent.
+   */
+  sendEnded(connection: Connection, requestId: string): boolean {
+    const { resumableStream } = this.host;
+    if (
+      (resumableStream.hasActiveStream() &&
+        resumableStream.activeRequestId === requestId) ||
+      this.host.holdsTerminalFrames?.(requestId)
+    ) {
+      return false;
+    }
+    const ended = this.host.recentTerminal?.([requestId]);
+    if (!ended) return false;
+    const messageIds =
+      ended.messageIds ?? resumableStream.getOriginMessageIds(requestId);
+    return sendIfOpen(
+      connection,
+      JSON.stringify({
+        body: ended.body,
+        done: true,
+        id: requestId,
+        type: this.host.responseMessageType,
+        replay: true,
+        ...(ended.error && { error: true }),
+        ...(messageIds && { messageIds }),
+        ...(ended.outcome !== undefined && { outcome: ended.outcome })
+      })
+    );
   }
 
   private _sendResumeNone(
@@ -315,6 +359,14 @@ export class ResumeHandshake {
     } else if (await this._replayTerminalOnAck(connection, requestId)) {
       // Delivered the pending terminal error frame on the resumed stream the
       // client just ACKed (#1645).
+    } else if (
+      resumableStream.latestStreamInfoForRequest(requestId)?.cutOff &&
+      this._replayRecentTerminalOnAck(connection, requestId)
+    ) {
+      // A stream closed with no producer left (a recovery took the request
+      // over, or the app declined it): what it held is in the transcript if
+      // the app kept it, and must not come back if it did not. Only its
+      // recorded end is sent.
     } else if (
       resumableStream.replayCompletedChunksByRequestId(connection, requestId)
     ) {

@@ -37,6 +37,7 @@ import {
   CHAT_RECOVERY_TASK_NAME,
   ResumableStream,
   chatRecoveryTaskRunOptions,
+  recentChatTerminal,
   toolResultUpdate,
   type ChatTurns,
   type ReplyFlushState,
@@ -2969,6 +2970,11 @@ export class LogOnlyOnErrorAgent extends AIChatAgent<Env> {
 // ── ChatRecoveryTestAgent (chat recovery) ─────────────────────────────
 
 export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
+  /** The recorded end of `requestId` (the recent terminals), or null. */
+  recentTerminalForTest(requestId: string): unknown {
+    return recentChatTerminal(this.ctx.storage.kv, [requestId]);
+  }
+
   recoveryContexts: ChatRecoveryContext[] = [];
   exhaustedContexts: ChatRecoveryExhaustedContext[] = [];
   recoveryOverride: ChatRecoveryOptions | null = null;

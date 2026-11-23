@@ -61,6 +61,8 @@ interface FakeStreamState {
   replayErroredReturn: boolean;
   originMessageIds?: string[];
   outcome?: ChatTurnOutcome;
+  /** The latest stored stream of each request, by request id. */
+  streams?: Record<string, "streaming" | "completed" | "error">;
   calls: {
     replayChunks: string[];
     replayErrored: string[];
@@ -96,6 +98,12 @@ function makeStream(over: Partial<FakeStreamState> = {}): {
     },
     replayCompletedChunksByRequestId: () => state.replayCompletedReturn,
     getOriginMessageIds: () => state.originMessageIds,
+    latestStreamInfoForRequest: (requestId: string) => {
+      const status = state.streams?.[requestId];
+      return status
+        ? { id: `s-${requestId}`, status, createdAt: 0, cutOff: false }
+        : null;
+    },
     getOutcome: () => state.outcome,
     replayErroredChunksByRequestId: (_c: Connection, requestId: string) => {
       state.calls.replayErrored.push(requestId);
@@ -698,6 +706,141 @@ describe("ResumeHandshake (driver → golden frames)", () => {
         replay: true,
         outcome: "aborted"
       });
+    });
+
+    it("ends a request the tab waits on that a recovery took over, while the recovery streams", async () => {
+      // A reset cut req-cut off; recovery recorded its end and now streams
+      // under req-cont. The tab was away and still waits on req-cut.
+      const kv = kvStore();
+      recordRecentChatTerminal(kv, {
+        id: "req-cut",
+        done: true,
+        body: "",
+        outcome: "aborted"
+      });
+      const frames: SentFrame[] = [];
+      const { resumableStream } = makeStream({
+        active: true,
+        activeRequestId: "req-cont",
+        activeStreamId: "s-cont"
+      });
+      const handshake = new ResumeHandshake({
+        ...makeHost({ resumableStream }),
+        recentTerminal: (ids) => recentChatTerminal(kv, ids)
+      });
+
+      await handshake.handleResumeRequest(
+        makeConnection("c1", frames),
+        "probe-1",
+        ["req-cut"]
+      );
+      // Marked replay: the request ended while the tab was away.
+      expect(frames[0]).toEqual({
+        body: "",
+        done: true,
+        id: "req-cut",
+        type: RESPONSE_TYPE,
+        replay: true,
+        outcome: "aborted"
+      });
+      // Then it resumes the continuation, as before.
+      expect(frames[1]).toMatchObject({ id: "req-cont" });
+    });
+
+    it("sends only the recorded end of a cut-off stream on ACK, not its chunks", async () => {
+      // The app declined the recovery with `persist: false`: the stream's
+      // chunks are a reply it discarded.
+      const kv = kvStore();
+      recordRecentChatTerminal(kv, {
+        id: "req-cut",
+        done: true,
+        body: "",
+        outcome: "aborted"
+      });
+      const frames: SentFrame[] = [];
+      const { state, resumableStream } = makeStream({
+        replayCompletedReturn: true
+      });
+      (
+        resumableStream as unknown as {
+          latestStreamInfoForRequest: (id: string) => unknown;
+        }
+      ).latestStreamInfoForRequest = () => ({
+        id: "s-cut",
+        status: "completed",
+        createdAt: 0,
+        cutOff: true
+      });
+      let replayed = false;
+      (
+        resumableStream as unknown as {
+          replayCompletedChunksByRequestId: () => boolean;
+        }
+      ).replayCompletedChunksByRequestId = () => (replayed = true);
+      const handshake = new ResumeHandshake({
+        ...makeHost({ resumableStream }),
+        recentTerminal: (ids) => recentChatTerminal(kv, ids)
+      });
+
+      await handshake.handleResumeAck(makeConnection("c1", frames), "req-cut");
+      expect(replayed).toBe(false);
+      expect(state.calls.replayChunks).toEqual([]);
+      expect(frames.at(-1)).toMatchObject({
+        id: "req-cut",
+        done: true,
+        outcome: "aborted"
+      });
+    });
+
+    it("tells a tab directly how a request it stops ended", async () => {
+      const kv = kvStore();
+      recordRecentChatTerminal(kv, {
+        id: "req-cut",
+        done: true,
+        body: "",
+        outcome: "aborted"
+      });
+      const frames: SentFrame[] = [];
+      const { resumableStream } = makeStream();
+      const handshake = new ResumeHandshake({
+        ...makeHost({ resumableStream }),
+        recentTerminal: (ids) => recentChatTerminal(kv, ids)
+      });
+      // A fresh tab that only knows the id stops it: told directly.
+      handshake.sendEnded(makeConnection("c1", frames), "req-cut");
+      expect(frames[0]).toMatchObject({
+        id: "req-cut",
+        done: true,
+        outcome: "aborted"
+      });
+    });
+
+    it("sends no end without a recorded one, for the active request, or while it is held", () => {
+      const kv = kvStore();
+      recordRecentChatTerminal(kv, { id: "req-live", done: true });
+      recordRecentChatTerminal(kv, { id: "req-held", done: true });
+      const frames: SentFrame[] = [];
+      const { resumableStream } = makeStream({
+        active: true,
+        activeRequestId: "req-live",
+        // A closed stream alone (an attempt retried after compaction) is
+        // no evidence that the request ended.
+        streams: { "req-retried": "completed" },
+        outcome: "aborted"
+      });
+      const handshake = new ResumeHandshake({
+        ...makeHost({
+          resumableStream,
+          heldTerminalRequestIds: new Set(["req-held"])
+        }),
+        recentTerminal: (ids) => recentChatTerminal(kv, ids)
+      });
+      const conn = makeConnection("c1", frames);
+      expect(handshake.sendEnded(conn, "req-live")).toBe(false);
+      expect(handshake.sendEnded(conn, "req-held")).toBe(false);
+      expect(handshake.sendEnded(conn, "req-retried")).toBe(false);
+      expect(handshake.sendEnded(conn, "req-none")).toBe(false);
+      expect(frames).toEqual([]);
     });
 
     it("says idle for a tab that waits on nothing that ended", async () => {

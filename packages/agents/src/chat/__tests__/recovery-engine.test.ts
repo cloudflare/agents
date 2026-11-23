@@ -1866,6 +1866,45 @@ describe("ChatRecoveryEngine.recoverInterruptedTurn (fake adapter + wake hooks)"
     expect(ended).toEqual(["aborted:req-1"]);
   });
 
+  it("ends the cut-off request for the tabs once its stream is closed for a recovered turn", async () => {
+    const h = makeHarness({ onChatRecovery: {} });
+    const ended: string[] = [];
+    h.adapter.turns = {
+      attemptScope: new AsyncLocalStorage(),
+      endRequest: (requestId: string, outcome: string) =>
+        void ended.push(`${outcome}:${requestId}`)
+    } as unknown as ChatRecoveryTurnBindings;
+
+    await h.engine.recoverInterruptedTurn(h.turn, h.wake);
+
+    expect(h.completed).toEqual(["s1"]);
+    expect(h.dispatched).toHaveLength(1);
+    // Recorded and sent, so a tab back later learns the request ended.
+    expect(ended).toEqual(["aborted:req-1"]);
+  });
+
+  it("leaves the cut-off request's end to the host when it declines the recovery", async () => {
+    const h = makeHarness({ onChatRecovery: {} });
+    const ended: string[] = [];
+    h.adapter.turns = {
+      attemptScope: new AsyncLocalStorage(),
+      endRequest: (requestId: string, outcome: string) =>
+        void ended.push(`${outcome}:${requestId}`)
+    } as unknown as ChatRecoveryTurnBindings;
+    // `continue: false`: the host skips the incident and reports the
+    // interruption itself.
+    h.wake.dispatchRecoveredTurn = async ({ incident }) => {
+      await h.engine.updateIncident(
+        incident.incidentId,
+        "skipped",
+        "continue_disabled"
+      );
+    };
+
+    await h.engine.recoverInterruptedTurn(h.turn, h.wake);
+    expect(ended).toEqual([]);
+  });
+
   it("keeps the storage failure when ending the stopped request fails too", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const h = makeHarness();
