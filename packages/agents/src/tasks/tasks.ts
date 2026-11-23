@@ -1187,17 +1187,15 @@ export class Tasks<
       WHERE run_id = ${runId}
         AND status IN ('pending', 'running')
     `;
-    // Mirror the claim deadline before the handler runs, not after: a
-    // routed run's root has no other way to learn it, and a push here
-    // clears the queue row's in-flight marker, so it durably wins over a
-    // root dispatch that later returns a stale outcome past its own
-    // budget (job-queue's own "newer pushes win" guard on that marker).
-    // A local run its own wake dispatches needs none: the dispatch's
-    // outcome is read from the row after the claim. Nor does an attached
-    // attempt its caller started: it ends before its caller returns.
+    // Mirror the claim deadline before the handler runs: a push here clears
+    // the queue row's in-flight marker, so it durably wins over a dispatch
+    // that later returns a stale outcome past its own budget. A run its own
+    // wake dispatches needs none: the dispatch's outcome is read from the
+    // row after the claim. Nor does an attached attempt its caller started:
+    // it ends before its caller returns.
     const attached =
       !byOwnWake && this.#registeredOptions.get(row.definition)?.attached;
-    if (!attached && (!byOwnWake || this.lifecycle.routes.source)) {
+    if (!attached && !byOwnWake) {
       await this.#syncWake(runId);
       // A cancel() that ran during that await found no live attempt and
       // settled the run itself. The claim is void then: start no handler.
@@ -1710,7 +1708,7 @@ export class Tasks<
     const onStatus =
       row && this.#registeredOptions.get(row.definition)?.onStatus;
     let guarded = false;
-    if (onStatus && !this.lifecycle.routes.source) {
+    if (onStatus) {
       // The terminal report must outlive a reset before it returns: the
       // run's wake stays until then (when due it delivers the report), and
       // a run with none (queued in a lane) gets the report job.
@@ -1721,9 +1719,6 @@ export class Tasks<
       }
     } else {
       await this.#syncWake(runId);
-      // A facet's run wake lives on its root, so the report job (a facet
-      // job, woken through the root) keeps the report alive here.
-      if (onStatus) await this.#pushReportJob(REPORT_RETRY_MS);
     }
     // Only the head settling moves its lane on: a run queued behind it that
     // ends (a cancel, a clear) leaves the head where it is.
@@ -1746,7 +1741,7 @@ export class Tasks<
     } finally {
       if (guarded) await this.#releaseReportGuard();
     }
-    if (onStatus && !this.lifecycle.routes.source) {
+    if (onStatus) {
       await this.#syncWake(runId, { createdAt: row.created_at });
     }
   }
