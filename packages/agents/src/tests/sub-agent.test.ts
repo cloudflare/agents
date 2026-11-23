@@ -1524,8 +1524,9 @@ describe("SubAgent", () => {
       []
     );
 
-    // The continuation is a schedule due now, on the root's real alarm.
-    for (let attempt = 0; attempt < 100; attempt++) {
+    // The continuation is a schedule due now, on the root's real alarm,
+    // which reaches the child through its facet wake: allow it 5 s.
+    for (let attempt = 0; attempt < 500; attempt++) {
       if ((await agent.subAgentScheduleLog("chat-recovery-child")).length > 0) {
         break;
       }
