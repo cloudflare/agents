@@ -14,7 +14,12 @@ import {
   wrapChatFiberSnapshot
 } from "agents/chat";
 import type { ResumableStream } from "agents/chat";
-import { stableHash, type Approvals } from "agents/internal";
+import {
+  EFFECT_TASK,
+  effectKeyOf,
+  effectRunId,
+  stableHash
+} from "../action-ledger";
 import { agentTool } from "agents/agent-tools";
 import type { Adapter } from "chat";
 import {
@@ -2522,7 +2527,7 @@ export class ThinkWorkflowRecoveryE2EAgent extends Think<Env> {
 // resume with NO live client connection. This agent drives the full path
 // against the wrangler-dev runtime:
 //   1. a chat turn calls a `kind: "durable-pause"` action, which parks a row in
-//      `cf_think_action_pending_approvals` and ends the turn
+//      a decision run and ends the turn
 //   2. a real SIGKILL + restart proves the pending row + its descriptor survive
 //      the deploy (rebuilt from the durable store on cold start)
 //   3. `approveExecution` with no open socket runs the action exactly once and
@@ -2707,7 +2712,7 @@ export class ThinkActionPauseRecoveryE2EAgent extends Think<Env> {
 
 // ── Action ledger pending-retry lease recovery (crash → reclaim) ────
 //
-// A crashed executor leaves a `pending` row in `cf_agents_effects`. We
+// A crashed executor leaves an effect run in doubt. We
 // represent that crash artifact deterministically by seeding a stale `pending`
 // row (a crash leaves exactly such a row), then prove it survives a REAL deploy
 // (SIGKILL + restart) and is reclaimed by a subsequent invocation: an action
@@ -2828,19 +2833,16 @@ export class ThinkActionLedgerRecoveryE2EAgent extends Think<Env> {
   @callable()
   async seedStalePendingRow(): Promise<void> {
     const past = Date.now() - 600_000;
-    (this as unknown as { _approvals: Approvals })._approvals.importRecords({
-      effects: [
-        {
-          key: `action:slowAction:${LEDGER_RECOVERY_KEY}`,
-          name: "slowAction",
-          inputHash: stableHash({ message: LEDGER_RECOVERY_MESSAGE }),
-          status: "pending",
-          resultJson: null,
-          context: { toolCallId: "tc-crashed" },
-          createdAt: past,
-          updatedAt: past
-        }
-      ]
+    await this.tasks.importRun({
+      runId: effectRunId(`action:slowAction:${LEDGER_RECOVERY_KEY}`),
+      definition: EFFECT_TASK,
+      status: "running",
+      attempt: 1,
+      input: {
+        name: "slowAction",
+        inputHash: stableHash({ message: LEDGER_RECOVERY_MESSAGE })
+      },
+      createdAt: past
     });
   }
 
@@ -2855,11 +2857,13 @@ export class ThinkActionLedgerRecoveryE2EAgent extends Think<Env> {
   async listLedgerRows(): Promise<
     Array<{ key: string; status: string; updated_at: number }>
   > {
-    (this as unknown as { _approvals: Approvals })._approvals.importRecords({});
-    return this.sql<{ key: string; status: string; updated_at: number }>`
-      SELECT key, status, updated_at FROM cf_agents_effects
-      ORDER BY key ASC
-    `;
+    return this.tasks
+      .peekList({ definition: EFFECT_TASK, order: "oldest" })
+      .map((record) => ({
+        key: effectKeyOf(record.runId),
+        status: record.status === "completed" ? "settled" : "pending",
+        updated_at: record.settledAt ?? record.createdAt
+      }));
   }
 
   @callable()

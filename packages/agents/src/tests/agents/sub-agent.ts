@@ -126,6 +126,27 @@ export class CounterSubAgent extends Agent {
     return this.ctx.id.name;
   }
 
+  /**
+   * Run an attached framework run with a terminal report in this facet and
+   * return this facet's jobs as the report saw them.
+   */
+  async jobsDuringTerminalReportForTest(): Promise<string[]> {
+    let seen: string[] = [];
+    const name = "__cf_test_facet_report" as unknown as "remember";
+    this.tasks.register(name, async () => "done", {
+      attached: true,
+      onStatus: (record) => {
+        if (record.status !== "completed") return;
+        seen = this.ctx.storage.sql
+          .exec<{ id: string }>("SELECT id FROM cf_agents_jobs")
+          .toArray()
+          .map((row) => row.id);
+      }
+    });
+    await this.tasks.run(name, undefined as never, { start: "now" });
+    return seen;
+  }
+
   /** Run `remember` in this facet with a `local`, and report what it saw. */
   async runRememberForTest(): Promise<{
     status: string | undefined;
@@ -1765,6 +1786,13 @@ export class TestSubAgentParent extends Agent {
       INSERT OR IGNORE INTO cf_agents_sub_agents (class, name, created_at)
       VALUES (${"CounterSubAgent"}, ${subAgentName}, ${Date.now()})
     `;
+  }
+
+  async subAgentJobsDuringTerminalReport(
+    subAgentName: string
+  ): Promise<string[]> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.jobsDuringTerminalReportForTest();
   }
 
   async subAgentRunLane(

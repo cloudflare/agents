@@ -159,7 +159,7 @@ With `extensionLoader` set, Think creates an `ExtensionManager` (`@cloudflare/th
 
 These have their own user docs under `docs/think/`:
 
-- **Actions** (`getActions()`, `action()`): tools with an idempotency ledger (the [`Approvals`](./approvals.md) effect ledger, `cf_agents_effects`), approvals (`cf_think_action_pending_approvals`), and authorization.
+- **Actions** (`getActions()`, `action()`): tools with an idempotency ledger, durable-pause approvals, and authorization. The ledger and the approvals are Task runs; see [Actions on Tasks](#actions-on-tasks).
 - **Channels and messengers**: per-surface policy (`configureChannels()`) and Chat SDK webhook ingress with durable reply delivery.
 - **Scheduled tasks**: `getScheduledTasks()` mapped onto the Scheduler's declared schedules (`declareSchedules()`, internal, see [declared-schedules.md](./declared-schedules.md)) on startup, on the root agent only. Prompt tasks become durable submissions.
 - **Agent tools**: running Think or `AIChatAgent` children as tools, with run state in `cf_agent_tool_child_runs` and `cf_agent_tool_milestones`. See [agent-tools.md](./agent-tools.md).
@@ -169,21 +169,43 @@ These have their own user docs under `docs/think/`:
 
 Actions can record advisory delivery metadata for the current reply with `ctx.attachReply(attachment)`. The attachment never changes the model-visible tool output, and surfaces that do not understand a type ignore it. Think JSON-normalizes attachments on record, caps how many one turn can record, deep-copies snapshots on read, and exposes the producing attempt's attachments through `onChatResponse(result).attachments` and `replyAttachments(requestId?)`. Policy callbacks receive a no-op recorder, and attachments from an `execute` that later fails are discarded. `durable-pause` approved actions do not carry attachments across the continuation turn. Rendering belongs to channels and voice.
 
+## Actions on Tasks
+
+`packages/think/src/action-ledger.ts` is a module with no storage of its own. It defines two Task definitions; every row is a run in `cf_agents_task_runs`.
+
+**Effects (`__cf_think_action_effect`).** An action call with a ledger key runs as the run `__cf_effect:<key>`, with input `{ name, inputHash }` (`stableHash`, the 128-bit value hash Think always used: key order is ignored, a `Date` hashes by its time). Attempt 1 runs the call's `execute` from the run's `local`, at once (`start: "now"`), and the run's result is its recorded value.
+
+- A later call with the same key, name and input replays the result without running. Another name or input under the key answers `ActionKeyConflict`, also while the first call still runs in this isolate; a same-input caller in this isolate shares the running call.
+- A throw deletes the run, so a later call runs again. A value that is not JSON, or longer than 1,000,000 characters, is returned but not recorded (`action:ledger:serialize_failed`), and the run is deleted. An action's output is capped at 20,000 characters before the ledger sees it, so the second case is not reachable from an action.
+- A run a reset cut off comes back as attempt 2 with no `local`: it parks `in-doubt`, and runs nothing. A caller answers `ActionPendingError`, unless the key is an explicit `idempotencyKey` and the claim is older than `actionLedgerPendingRetryLeaseMs`: then the run is aborted, deleted and run again (`action:ledger:reclaimed`). A fallback `tool:<toolCallId>` key is never reclaimed.
+- Retention (`actionLedgerRetention`) deletes completed runs and claims left in doubt per their windows, at most `maxSweepRows` per start. A claim this isolate is running is never swept.
+
+**Decisions (`__cf_think_action_decision`).** A `durable-pause` action parks as the run `__cf_decision:<execution id>` (run ids are one space per agent, so each kind has its prefix; callers see the execution id), with the action, tool call and model input as input and the approval descriptor as metadata (`TaskSettlement.park("decision")`, no deadline). `pendingApprovals()` lists the parked runs. `approveExecution` / `rejectExecution` settle the run once with the verdict (`tasks.settle`); a second answer, or one after another verdict, gets "no longer pending".
+
+- The verdict is stored before anything runs. The run's terminal report (`onStatus`, at least once) runs the approved action through the ledger, writes the outcome into the transcript, and continues the chat. Tasks keeps the report job armed until the terminal report returned, and Think's try-counter sync makes it durable before the action starts, so a reset inside it is delivered again by the job about 30 s later with no request; the approved side effect replays from its effect run, or answers `ActionPendingError` for a `tool:` key whose claim is in doubt. In a facet, the job waits for the facet to be called (the facet wake goes through its root).
+- Each try is counted in the run's metadata and synced before the action runs. After three tries the outcome is an error; if even that write keeps failing, the decision is deleted.
+- An approved action whose claim a reset left behind, when the lease lets it be taken over later, does not settle with `ActionPendingError`: the report fails, without spending a try, and runs again from the report job.
+- An outcome that may not have reached the transcript stays on the decision's metadata as `resolvedPause` until the pre-inference flush writes it; then the run is deleted.
+- A codemode approval or rejection calls the codemode runtime once, from `approveExecution` / `rejectExecution`, and records the outcome as a decision run that completes at once. The runtime is never called again after a reset: `approve` resumes whatever is paused now, so a second call could approve a pause nobody approved.
+- `actionPendingApprovalTtlMs` expires parked decisions nobody answered (`action:pause:swept`).
+
+**Memory.** `EffectState` holds one entry per effect running in this isolate, removed when it settles. `_decisionOutputs` holds one entry per decision settled in this isolate, until its `approveExecution` call reads it. Resolved pauses waiting for the transcript are loaded once per isolate.
+
+**Released data.** On start, `cf_think_action_ledger` rows become effect runs (a settled row as a completed run that replays), `cf_think_action_pending_approvals` rows are parked again under their ids (their TTL counts from the move), and `cf_think_deferred_resolved_pauses` entries become completed decisions with `resolvedPause`. The old table and key are then dropped. The move is one way.
+
 ## SQLite tables
 
-| Table                                                     | Owner             | Purpose                                                     |
-| --------------------------------------------------------- | ----------------- | ----------------------------------------------------------- |
-| `cf_agents_session_messages` / `_message_chunks`          | Sessions          | Message tree and continuation rows for large messages       |
-| `cf_agents_session_compactions`                           | Sessions          | Compaction overlays                                         |
-| `cf_agents_session_attachment_meta` / `_chunks` / `_refs` | Sessions          | Content-addressed media payloads and their references       |
-| `cf_agents_session_fts`                                   | Sessions          | FTS5 index, created on first `search()`                     |
-| `cf_agents_context_blocks`                                | Context           | Context blocks and the frozen system prompt                 |
-| `cf_agents_streams` / `cf_agents_stream_blocks`           | Streams           | Resumable in-flight output                                  |
-| `cf_agents_task_runs` / `cf_agents_task_steps`            | Tasks (inherited) | Chat-turn, recovery, messenger-reply and submission runs    |
-| `think_config`                                            | Think             | `configure()` blob, client tools, request body, skill state |
-| `cf_agents_effects`                                       | Approvals         | Action idempotency (run once per key)                       |
-| `cf_think_action_pending_approvals`                       | Think             | Durable-pause approvals                                     |
-| `cf_agent_tool_child_runs` / `cf_agent_tool_milestones`   | Think             | Agent-tool runs                                             |
+| Table                                                     | Owner             | Purpose                                                                           |
+| --------------------------------------------------------- | ----------------- | --------------------------------------------------------------------------------- |
+| `cf_agents_session_messages` / `_message_chunks`          | Sessions          | Message tree and continuation rows for large messages                             |
+| `cf_agents_session_compactions`                           | Sessions          | Compaction overlays                                                               |
+| `cf_agents_session_attachment_meta` / `_chunks` / `_refs` | Sessions          | Content-addressed media payloads and their references                             |
+| `cf_agents_session_fts`                                   | Sessions          | FTS5 index, created on first `search()`                                           |
+| `cf_agents_context_blocks`                                | Context           | Context blocks and the frozen system prompt                                       |
+| `cf_agents_streams` / `cf_agents_stream_blocks`           | Streams           | Resumable in-flight output                                                        |
+| `cf_agents_task_runs` / `cf_agents_task_steps`            | Tasks (inherited) | Chat-turn, recovery, messenger-reply, submission, action-effect and decision runs |
+| `think_config`                                            | Think             | `configure()` blob, client tools, request body, skill state                       |
+| `cf_agent_tool_child_runs` / `cf_agent_tool_milestones`   | Think             | Agent-tool runs                                                                   |
 
 ## Current distinctions from AIChatAgent
 

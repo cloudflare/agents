@@ -125,8 +125,6 @@ export {
   type ChatRecoveryTaskReason
 } from "./recovery-task";
 
-export { buildInClauseStrings } from "./sql-batch";
-
 /**
  * @internal Platform-failure classifier shared with the chat hosts'
  * queue-dispatch deferral (#1730); sibling-package support, not a public API.

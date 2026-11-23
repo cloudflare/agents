@@ -372,7 +372,8 @@ export class Tasks<
       options.onStatus ||
       options.maxAttempts !== undefined ||
       options.keepCheckpoint ||
-      options.claimMs !== undefined
+      options.claimMs !== undefined ||
+      options.attached
     ) {
       this.#registeredOptions.set(name, options);
     }
@@ -396,6 +397,9 @@ export class Tasks<
     const framework = this.#registered.has(definition);
     if (!framework) this.#validateDefinitionName(definition);
     const start = options?.start;
+    if (start !== "now" && this.#registeredOptions.get(definition)?.attached) {
+      throw new Error(`Task "${definition}" starts only with start: "now"`);
+    }
     const receipt = await this.#accept(
       definition,
       input,
@@ -1123,8 +1127,11 @@ export class Tasks<
     // root dispatch that later returns a stale outcome past its own
     // budget (job-queue's own "newer pushes win" guard on that marker).
     // A local run its own wake dispatches needs none: the dispatch's
-    // outcome is read from the row after the claim.
-    if (!byOwnWake || this.lifecycle.routes.source) {
+    // outcome is read from the row after the claim. Nor does an attached
+    // attempt its caller started: it ends before its caller returns.
+    const attached =
+      !byOwnWake && this.#registeredOptions.get(row.definition)?.attached;
+    if (!attached && (!byOwnWake || this.lifecycle.routes.source)) {
       await this.#syncWake(runId);
       // A cancel() that ran during that await found no live attempt and
       // settled the run itself. The claim is void then: start no handler.
@@ -1649,6 +1656,9 @@ export class Tasks<
       }
     } else {
       await this.#syncWake(runId);
+      // A facet's run wake lives on its root, so the report job (a facet
+      // job, woken through the root) keeps the report alive here.
+      if (onStatus) await this.#pushReportJob(REPORT_RETRY_MS);
     }
     // Only the head settling moves its lane on: a run queued behind it that
     // ends (a cancel, a clear) leaves the head where it is.
@@ -1704,6 +1714,12 @@ export class Tasks<
     const record = this.#store.rowToRecord(row);
     const onStatus = this.#registeredOptions.get(row.definition)?.onStatus;
     if (!onStatus || row.notified === row.status) return record;
+    if (this.#reporting.has(runId)) {
+      // Still running in this isolate (a long report outlived its wake):
+      // keep a wake, do not report twice.
+      await this.#pushReportJob(REPORT_RETRY_MS);
+      return null;
+    }
     this.#reporting.add(runId);
     try {
       await this.lifecycle.runInHostContext(() => onStatus(record));
@@ -1721,11 +1737,20 @@ export class Tasks<
     return record;
   }
 
-  #pushReportJob(delayMs = 0): Promise<unknown> {
-    return this.lifecycle.jobs.push({
+  /**
+   * Arm the report job for `delayMs` from now. A job already due sooner is
+   * left alone (a burst of settles must not keep postponing a retry); one
+   * in flight is pushed again, so it outlives its dispatch.
+   */
+  async #pushReportJob(delayMs = 0): Promise<void> {
+    const now = Date.now();
+    const time = now + delayMs;
+    const existing = this.lifecycle.jobs.get(REPORT_JOB_ID);
+    if (existing && existing.time > now && existing.time <= time) return;
+    await this.lifecycle.jobs.push({
       id: REPORT_JOB_ID,
       fn: REPORT_JOB_FN,
-      time: Date.now() + delayMs,
+      time,
       retry: WAKE_JOB_RETRY
     });
   }
@@ -1743,13 +1768,20 @@ export class Tasks<
         AND definition IN (SELECT value FROM json_each(${JSON.stringify(names)}))
       ORDER BY settled_at LIMIT ${REPORT_BATCH}
     `;
+    // A report that fails (it re-pushed the job) does not hold back the
+    // ones after it.
+    let failed = false;
     for (const row of rows) {
-      if (!(await this.#deliverTerminal(row.run_id, row.retain !== 0))) {
-        return;
-      }
+      const delivered = await this.#deliverTerminal(
+        row.run_id,
+        row.retain !== 0
+      );
+      // A run deleted meanwhile has nothing to retry.
+      if (!delivered && this.#store.getRun(row.run_id)) failed = true;
     }
-    // More may be waiting past this batch: the next one runs now.
-    if (rows.length === REPORT_BATCH) await this.#pushReportJob();
+    // More may be waiting past this batch: the next one runs now, unless a
+    // failure here keeps its back-off (the same runs would come first).
+    if (rows.length === REPORT_BATCH && !failed) await this.#pushReportJob();
   }
 
   /**

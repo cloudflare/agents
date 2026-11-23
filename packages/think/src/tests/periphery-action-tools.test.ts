@@ -22,7 +22,7 @@ function host(overrides: Partial<ActionToolHost> = {}): ActionToolHost {
     recordApprovalDescriptor: vi.fn(),
     recordReplyAttachment: vi.fn(),
     runLedgered: async ({ runAction }) => runAction(),
-    parkDurablePause: ({ toolName }) => ({ status: "paused", toolName }),
+    parkDurablePause: async ({ toolName }) => ({ status: "paused", toolName }),
     ...overrides
   };
 }

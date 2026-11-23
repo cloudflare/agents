@@ -1,7 +1,11 @@
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { hasToolCall, Output, tool } from "ai";
 import { action, skills, Think, type ThinkSession } from "../../think";
-import { Agent } from "agents";
+import {
+  Agent,
+  getCurrentAgent,
+  __DO_NOT_USE_WILL_BREAK__agentContext as agentContext
+} from "agents";
 import type {
   Connection,
   AgentToolEventMessage,
@@ -78,7 +82,18 @@ import {
 } from "agents/internal";
 import type { Session } from "../../think";
 import type { ContextConfig } from "agents/context";
-import { stableHash, type Approvals } from "agents/internal";
+import {
+  DECISION_TASK,
+  decisionIdOf,
+  decisionRunId,
+  EFFECT_TASK,
+  effectKeyOf,
+  effectRunId,
+  recordedValue,
+  migrateLegacyActionRecords,
+  pendingDecisions,
+  stableHash
+} from "../../action-ledger";
 import { z } from "zod";
 import { WorkspaceFiles } from "../../workspace-files";
 import type { TaskRecord } from "agents/internal";
@@ -5536,6 +5551,51 @@ export class ThinkAgentToolParent extends Agent {
     agentToolReattachMaxWindowMs: 54_321
   };
 
+  /**
+   * Approvals inside a facet: a Think child parks a keyed durable-pause
+   * action, approves it, approves a second one with the same key (replayed
+   * from the effect run), then finishes a third decision a reset left
+   * unreported through the report job a start pushes.
+   */
+  async durablePauseInFacetForTest(): Promise<{
+    first: unknown;
+    second: unknown;
+    execCountAfterApprovals: number;
+    execCountAfterReplay: number;
+    decisionLeft: boolean;
+  }> {
+    const child = await this.subAgent(
+      ThinkToolsTestAgent,
+      `approvals-facet-${crypto.randomUUID()}`
+    );
+    await child.useDurablePauseActionForTest({ idempotencyKey: "facet-key" });
+    const park = async (message: string) =>
+      (
+        (await child.parkDurablePauseForTest(message)) as {
+          executionId: string;
+        }
+      ).executionId;
+    const first = await child.approveExecutionForTest(await park("facet"));
+    const second = await child.approveExecutionForTest(await park("facet"));
+    const execCountAfterApprovals = await child.getDurablePauseExecCount();
+    await child.useDurablePauseActionForTest();
+    const third = await park("after-reset");
+    await child.decideWithoutReportForTest(third);
+    await child.restartTasksForTest();
+    let decisionLeft = true;
+    for (let i = 0; i < 100 && decisionLeft; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      decisionLeft = await child.hasDecisionRunForTest(third);
+    }
+    return {
+      first,
+      second,
+      execCountAfterApprovals,
+      execCountAfterReplay: await child.getDurablePauseExecCount(),
+      decisionLeft
+    };
+  }
+
   private events: AgentToolEventMessage[] = [];
   private finishes: AgentToolFinishForTest[] = [];
   private startupObservedStatuses: string[][] = [];
@@ -7569,6 +7629,22 @@ export class ThinkToolsTestAgent extends Think {
   }
 
   /** Skip the next transcript tool update, as a restart right before it would. */
+  /** Make the next transcript tool update throw, once. */
+  async failNextToolUpdateForTest(): Promise<void> {
+    const self = this as unknown as {
+      _applyToolUpdateToMessages(update: unknown): Promise<unknown>;
+    };
+    const original = self._applyToolUpdateToMessages;
+    self._applyToolUpdateToMessages = async () => {
+      self._applyToolUpdateToMessages = original;
+      throw new Error("tool update failed");
+    };
+  }
+
+  async hasAlarmForTest(): Promise<boolean> {
+    return (await this.ctx.storage.getAlarm()) !== null;
+  }
+
   async skipNextToolUpdateForTest(): Promise<void> {
     const self = this as unknown as {
       _applyToolUpdateToMessages(
@@ -7616,19 +7692,6 @@ export class ThinkToolsTestAgent extends Think {
     return (await this.session.getHistory()) as UIMessage[];
   }
 
-  /** Fail the next storage read of `key`. */
-  async failNextStorageGetForTest(key: string): Promise<void> {
-    const storage = this.ctx.storage as unknown as {
-      get(key: string): Promise<unknown>;
-    };
-    const get = storage.get.bind(storage);
-    storage.get = async (requested: string) => {
-      if (requested !== key) return get(requested);
-      storage.get = get;
-      throw new Error("simulated storage read failure");
-    };
-  }
-
   /** Drop in-memory deferred-pause state, as an eviction would. */
   async forgetDeferredResolvedPausesForTest(): Promise<void> {
     const state = this as unknown as {
@@ -7640,11 +7703,9 @@ export class ThinkToolsTestAgent extends Think {
   }
 
   private _listActionPendingRowsForTest(): Array<{ execution_id: string }> {
-    return (
-      this as unknown as {
-        _listActionPendingRows: () => Array<{ execution_id: string }>;
-      }
-    )._listActionPendingRows();
+    return pendingDecisions(this.tasks).map((record) => ({
+      execution_id: decisionIdOf(record.runId)
+    }));
   }
 
   async getBeforeStepLog(): Promise<
@@ -7839,8 +7900,14 @@ export class ThinkToolsTestAgent extends Think {
           if (this._durablePauseAttachReply) {
             ctx.attachReply({ type: "voice_note" });
           }
+          if (this._durablePauseExecThrows === "large") {
+            throw new Error(`durable pause failed ${"x".repeat(1_200_000)}`);
+          }
           if (this._durablePauseExecThrows) {
             throw new Error("durable pause execute failed");
+          }
+          if (this._durablePauseLargeOutput) {
+            return `paused-exec: ${message} ${"y".repeat(25_000)}`;
           }
           return `paused-exec: ${message}`;
         }
@@ -7914,6 +7981,7 @@ export class ThinkToolsTestAgent extends Think {
                 mode === "ledger-oversize-output" ||
                 mode === "ledger-slow" ||
                 mode === "ledger-symbol-output" ||
+                mode === "ledger-void" ||
                 mode === "ledger-approval" ||
                 mode === "attach-ledger"
               ? (this._actionIdempotencyKey ?? "echo-ledger-key")
@@ -7948,6 +8016,7 @@ export class ThinkToolsTestAgent extends Think {
             : undefined,
         execute: async ({ message }, ctx): Promise<unknown> => {
           this._actionExecutionCount++;
+          this._lastActionConnectionId = getCurrentAgent().connection?.id;
           this._lastActionContext = {
             requestId: ctx.requestId,
             toolCallId: ctx.toolCallId,
@@ -7984,6 +8053,9 @@ export class ThinkToolsTestAgent extends Think {
           }
           if (mode === "ledger-symbol-output") {
             return Symbol("not-json");
+          }
+          if (mode === "ledger-void") {
+            return undefined;
           }
           if (mode === "attach-ledger") {
             ctx.attachReply({ type: "voice_note" });
@@ -8029,6 +8101,7 @@ export class ThinkToolsTestAgent extends Think {
     | "ledger-oversize-output"
     | "ledger-slow"
     | "ledger-symbol-output"
+    | "ledger-void"
     | "ledger-approval"
     | "attach-ledger"
     | "attach-idempotency-key" = "default";
@@ -8051,7 +8124,8 @@ export class ThinkToolsTestAgent extends Think {
     undefined;
   private _durablePauseIdempotencyKey: string | null = null;
   private _durablePauseExecCount = 0;
-  private _durablePauseExecThrows = false;
+  private _durablePauseExecThrows: boolean | "large" = false;
+  private _durablePauseLargeOutput = false;
   private _durablePauseAttachReply = false;
   private _actionDelayMs = 25;
   private _actionGrantedPermissions: string[] | null | undefined = undefined;
@@ -8103,6 +8177,8 @@ export class ThinkToolsTestAgent extends Think {
       | "ledger-oversize-output"
       | "ledger-slow"
       | "ledger-symbol-output"
+      | "ledger-void"
+      | "ledger-void"
       | "ledger-approval"
       | "attach-ledger"
       | "attach-idempotency-key" = "default"
@@ -8234,20 +8310,31 @@ export class ThinkToolsTestAgent extends Think {
       updated_at: number;
     }>
   > {
-    this._approvalsForTest().importRecords({});
-    return this.sql<{
-      key: string;
-      action_name: string;
-      input_hash: string;
-      status: string;
-      result_json: string | null;
-      updated_at: number;
-    }>`
-      SELECT key, name AS action_name, input_hash, status, result_json,
-             updated_at
-      FROM cf_agents_effects
-      ORDER BY key ASC
-    `;
+    return this.tasks
+      .peekList({ definition: EFFECT_TASK, order: "oldest", limit: 1000 })
+      .map((record) => {
+        const input = this.tasks.inputOf<{ name: string; inputHash: string }>(
+          record.runId
+        );
+        return {
+          key: effectKeyOf(record.runId),
+          action_name: input?.name ?? "",
+          input_hash: input?.inputHash ?? "",
+          status: record.status === "completed" ? "settled" : "pending",
+          result_json:
+            record.status === "completed"
+              ? JSON.stringify({
+                  valuePresent: Object.hasOwn(
+                    (record.result ?? {}) as object,
+                    "value"
+                  ),
+                  value: recordedValue(record.result)
+                })
+              : null,
+          updated_at: record.settledAt ?? record.createdAt
+        };
+      })
+      .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
   }
 
   async insertActionLedgerRowForTest(options: {
@@ -8259,25 +8346,22 @@ export class ThinkToolsTestAgent extends Think {
     updatedAt?: number;
   }): Promise<void> {
     const now = options.updatedAt ?? Date.now();
-    this._approvalsForTest().importRecords({
-      effects: [
-        {
-          key: options.key,
-          name: options.actionName ?? "echo",
-          inputHash: stableHash(options.input ?? { message: "hello" }),
-          status: options.status ?? "pending",
-          resultJson:
-            options.status === "settled"
-              ? JSON.stringify({
-                  valuePresent: options.output !== undefined,
-                  value: options.output
-                })
-              : null,
-          context: { toolCallId: "tc-seeded" },
-          createdAt: now,
-          updatedAt: now
-        }
-      ]
+    await this.tasks.importRun({
+      runId: effectRunId(options.key),
+      definition: EFFECT_TASK,
+      status: options.status === "settled" ? "completed" : "running",
+      attempt: 1,
+      input: {
+        name: options.actionName ?? "echo",
+        inputHash: stableHash(options.input ?? { message: "hello" })
+      },
+      ...(options.status === "settled" && {
+        result: (options.output === undefined
+          ? {}
+          : { value: options.output }) as TaskJson
+      }),
+      createdAt: now,
+      settledAt: now
     });
   }
 
@@ -8285,13 +8369,12 @@ export class ThinkToolsTestAgent extends Think {
     settled: number;
     pending: number;
   }> {
-    return (
+    const { settled, pending } = await (
       this as unknown as {
-        _sweepApprovals: (options: {
-          force?: boolean;
-        }) => Promise<{ settled: number; pending: number }>;
+        _sweepApprovals: () => Promise<{ settled: number; pending: number }>;
       }
-    )._sweepApprovals({ force: true });
+    )._sweepApprovals();
+    return { settled, pending };
   }
 
   /** Seed a row in the table an earlier version used, for the migration. */
@@ -8328,9 +8411,7 @@ export class ThinkToolsTestAgent extends Think {
   }
 
   async migrateLegacyActionLedgerForTest(): Promise<boolean> {
-    await (
-      this as unknown as { _migrateLegacyActionLedger: () => Promise<void> }
-    )._migrateLegacyActionLedger();
+    await migrateLegacyActionRecords(this.ctx.storage, this.tasks);
     return (
       this.sql<{ name: string }>`
         SELECT name FROM sqlite_master
@@ -8339,22 +8420,20 @@ export class ThinkToolsTestAgent extends Think {
     );
   }
 
-  private _approvalsForTest(): Approvals {
-    return (this as unknown as { _approvals: Approvals })._approvals;
-  }
-
   // ── Durable-pause action test helpers ───────────────────────────
 
   async useDurablePauseActionForTest(options?: {
     approval?: boolean | "predicate-hello";
     idempotencyKey?: string;
-    execThrows?: boolean;
+    execThrows?: boolean | "large";
+    largeOutput?: boolean;
     attachReply?: boolean;
   }): Promise<void> {
     this._useDurablePauseAction = true;
     this._durablePauseApproval = options?.approval;
     this._durablePauseIdempotencyKey = options?.idempotencyKey ?? null;
     this._durablePauseExecThrows = options?.execThrows ?? false;
+    this._durablePauseLargeOutput = options?.largeOutput ?? false;
     this._durablePauseAttachReply = options?.attachReply ?? false;
   }
 
@@ -8432,17 +8511,22 @@ export class ThinkToolsTestAgent extends Think {
       descriptor_json: string | null;
     }>
   > {
-    return (
-      this as unknown as {
-        _listActionPendingRows: () => Array<{
-          execution_id: string;
-          action_name: string;
-          tool_call_id: string;
-          input_json: string;
-          descriptor_json: string | null;
-        }>;
-      }
-    )._listActionPendingRows();
+    return pendingDecisions(this.tasks).map((record) => {
+      const input = this.tasks.inputOf<{
+        action: string;
+        toolCallId: string;
+        input: unknown;
+      }>(record.runId);
+      const descriptor = record.metadata?.descriptor;
+      return {
+        execution_id: decisionIdOf(record.runId),
+        action_name: input?.action ?? "",
+        tool_call_id: input?.toolCallId ?? "",
+        input_json: JSON.stringify(input?.input),
+        descriptor_json:
+          descriptor === undefined ? null : JSON.stringify(descriptor)
+      };
+    });
   }
 
   async approveExecutionForTest(executionId: string): Promise<unknown> {
@@ -8470,13 +8554,12 @@ export class ThinkToolsTestAgent extends Think {
   }
 
   async sweepActionPendingApprovalsForTest(): Promise<{ swept: number }> {
-    return (
+    const { decisions } = await (
       this as unknown as {
-        _sweepActionPendingApprovals: (options: {
-          force?: boolean;
-        }) => Promise<{ swept: number }>;
+        _sweepApprovals: () => Promise<{ decisions: number }>;
       }
-    )._sweepActionPendingApprovals({ force: true });
+    )._sweepApprovals();
+    return { swept: decisions };
   }
 
   async setActionPendingApprovalTtlForTest(ttl: number | false): Promise<void> {
@@ -8490,10 +8573,138 @@ export class ThinkToolsTestAgent extends Think {
     createdAt: number
   ): Promise<void> {
     this.sql`
-      UPDATE cf_think_action_pending_approvals
-      SET created_at = ${createdAt}
-      WHERE execution_id = ${executionId}
+      UPDATE cf_agents_task_runs SET created_at = ${createdAt}
+      WHERE run_id = ${decisionRunId(executionId)}
+        AND definition = ${DECISION_TASK}
     `;
+  }
+
+  /** Seed a parked approval in the table an earlier version used. */
+  async insertLegacyActionPendingRowForTest(options: {
+    executionId: string;
+    message: string;
+    /** The stored model input as JSON, when not `{ message }`. */
+    inputJson?: string;
+  }): Promise<void> {
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_think_action_pending_approvals (
+        execution_id TEXT PRIMARY KEY,
+        action_name TEXT NOT NULL,
+        tool_call_id TEXT NOT NULL,
+        request_id TEXT,
+        input_json TEXT NOT NULL,
+        descriptor_json TEXT,
+        created_at INTEGER NOT NULL
+      )
+    `;
+    const descriptor = {
+      kind: "durable-pause",
+      action: "pauseAction",
+      summary: "Approve pause action",
+      input: { message: options.message }
+    };
+    this.sql`
+      INSERT INTO cf_think_action_pending_approvals (
+        execution_id, action_name, tool_call_id, request_id, input_json,
+        descriptor_json, created_at
+      )
+      VALUES (
+        ${options.executionId}, ${"pauseAction"}, ${"tc-legacy"}, ${null},
+        ${options.inputJson ?? JSON.stringify({ message: options.message })},
+        ${JSON.stringify(descriptor)}, ${Date.now()}
+      )
+    `;
+  }
+
+  /** Seed the deferred-pause key an earlier version kept. */
+  async insertLegacyDeferredPauseForTest(options: {
+    toolCallId: string;
+    executionId: string;
+    output: string;
+  }): Promise<void> {
+    await this.ctx.storage.put("cf_think_deferred_resolved_pauses", [
+      [
+        options.toolCallId,
+        { executionId: options.executionId, output: options.output }
+      ]
+    ]);
+  }
+
+  /** Run the pause migration; true when the old table is still there. */
+  async migrateLegacyPauseRecordsForTest(): Promise<boolean> {
+    await migrateLegacyActionRecords(this.ctx.storage, this.tasks);
+    return (
+      this.sql<{ name: string }>`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name = 'cf_think_action_pending_approvals'
+      `.length > 0
+    );
+  }
+
+  /** The resolved pauses whose outcome waits for the transcript. */
+  async listDeferredResolvedPausesForTest(): Promise<
+    Array<{ toolCallId: string; executionId: string }>
+  > {
+    const self = this as unknown as {
+      _deferredResolvedPausesLoad: Promise<void> | undefined;
+      _deferredResolvedPauses: Map<string, { executionId: string }>;
+      _loadResolvedPauses: () => Promise<void>;
+    };
+    self._deferredResolvedPauses.clear();
+    self._deferredResolvedPausesLoad = undefined;
+    await self._loadResolvedPauses();
+    return [...self._deferredResolvedPauses].map(([toolCallId, pause]) => ({
+      toolCallId,
+      executionId: pause.executionId
+    }));
+  }
+
+  /**
+   * Leave a decision as a reset after its verdict and before its terminal
+   * report leaves it: completed with the verdict, unreported, with `tries`
+   * already spent.
+   */
+  async decideWithoutReportForTest(
+    executionId: string,
+    tries = 0
+  ): Promise<void> {
+    const now = Date.now();
+    this.sql`
+      UPDATE cf_agents_task_runs
+      SET status = 'completed', result = ${JSON.stringify({ approved: true })},
+          wait_reason = NULL, next_at = NULL, settled_at = ${now},
+          updated_at = ${now},
+          metadata = json_set(COALESCE(metadata, '{}'), '$.tries', ${tries}),
+          notified = NULL
+      WHERE run_id = ${decisionRunId(executionId)}
+        AND definition = ${DECISION_TASK}
+    `;
+  }
+
+  /** Start Tasks again, as a new isolate does: undelivered reports replay. */
+  async restartTasksForTest(): Promise<void> {
+    await this.tasks.onStart();
+  }
+
+  /** Age every effect run in doubt past any lease. */
+  async ageEffectClaimsForTest(): Promise<void> {
+    this.sql`
+      UPDATE cf_agents_task_runs SET created_at = ${Date.now() - 3_600_000}
+      WHERE definition = ${EFFECT_TASK} AND status IN ('pending', 'running')
+    `;
+  }
+
+  /** Outcomes held in memory for a caller waiting on its decision. */
+  async decisionOutputCountForTest(): Promise<number> {
+    return (this as unknown as { _decisionOutputs: Map<string, unknown> })
+      ._decisionOutputs.size;
+  }
+
+  /** Whether a decision run is still stored under this id. */
+  async hasDecisionRunForTest(executionId: string): Promise<boolean> {
+    return (
+      this.tasks.peek(decisionRunId(executionId))?.definition === DECISION_TASK
+    );
   }
 
   /** Derive a descriptor for a paused output (codemode-style) for unit tests. */
@@ -8540,6 +8751,24 @@ export class ThinkToolsTestAgent extends Think {
 
   async setDenyActionReason(reason: string | null): Promise<void> {
     this._denyActionReason = reason;
+  }
+
+  private _lastActionConnectionId: string | undefined;
+
+  /** Run the echo action as a call on connection `connectionId` would. */
+  async executeEchoActionOnConnectionForTest(
+    connectionId: string
+  ): Promise<{ output: unknown; connectionId: string | undefined }> {
+    const output = await agentContext.run(
+      {
+        agent: this,
+        connection: { id: connectionId } as Connection,
+        request: undefined,
+        email: undefined
+      },
+      () => this.executeEchoActionToolForTest()
+    );
+    return { output, connectionId: this._lastActionConnectionId };
   }
 
   async getActionProbe(): Promise<{

@@ -1,3 +1,4 @@
+import { stableHash } from "../action-ledger";
 import { describe, expect, it } from "vitest";
 import { env, exports } from "cloudflare:workers";
 import { getAgentByName } from "agents";
@@ -692,6 +693,63 @@ describe("Think — actions compile into guarded tools", () => {
     expect((await agent.getActionProbe()).count).toBe(1);
   });
 
+  it("answers a conflict, not the running value, for the same key with another input", async () => {
+    const agent = await freshToolAgent(
+      `action-ledger-running-conflict-${crypto.randomUUID()}`
+    );
+    await agent.useEchoActionForTest("ledger-slow");
+    await agent.setActionIdempotencyKey("running-key");
+    await agent.setActionDelayForTest(50);
+
+    const [first, second] = await Promise.all([
+      agent.executeEchoActionToolForTest(),
+      agent.executeEchoActionToolForTest("different")
+    ]);
+
+    expect(first).toBe("action echo: hello");
+    expect(second).toMatchObject({ error: { name: "ActionKeyConflict" } });
+    expect((await agent.getActionProbe()).count).toBe(1);
+  });
+
+  it("replays a void action as void, not null", async () => {
+    const agent = await freshToolAgent(
+      `action-ledger-void-${crypto.randomUUID()}`
+    );
+    await agent.useEchoActionForTest("ledger-void");
+
+    expect(await agent.executeEchoActionToolForTest()).toBeUndefined();
+    expect(await agent.executeEchoActionToolForTest()).toBeUndefined();
+    expect((await agent.getActionProbe()).count).toBe(1);
+    expect(await agent.listActionLedgerRowsForTest()).toMatchObject([
+      {
+        status: "settled",
+        result_json: JSON.stringify({ valuePresent: false })
+      }
+    ]);
+  });
+
+  it("runs a ledgered action with its caller's connection", async () => {
+    const agent = await freshToolAgent(
+      `action-ledger-context-${crypto.randomUUID()}`
+    );
+    await agent.useEchoActionForTest("ledger-key");
+    await agent.setActionIdempotencyKey("context-key");
+
+    const { connectionId } =
+      await agent.executeEchoActionOnConnectionForTest("conn-1");
+
+    expect(connectionId).toBe("conn-1");
+  });
+
+  it("hashes action input by value: key order is ignored, dates are told apart", () => {
+    expect(stableHash({ a: 1, b: { c: 2, d: 3 } })).toBe(
+      stableHash({ b: { d: 3, c: 2 }, a: 1 })
+    );
+    expect(stableHash({ at: new Date(1) })).not.toBe(
+      stableHash({ at: new Date(2) })
+    );
+  });
+
   it("does not execute when the action ledger has an unknown pending row", async () => {
     const agent = await freshToolAgent(
       `action-ledger-pending-${crypto.randomUUID()}`
@@ -894,17 +952,46 @@ describe("Think — actions compile into guarded tools", () => {
     expect(await agent.listActionLedgerRowsForTest()).toEqual([]);
   });
 
+  it("keeps a running action's claim through a sweep, however old", async () => {
+    const agent = await freshToolAgent(
+      `action-ledger-sweep-running-${crypto.randomUUID()}`
+    );
+    await agent.useEchoActionForTest("ledger-slow");
+    await agent.setActionIdempotencyKey("running-sweep");
+    await agent.setActionDelayForTest(300);
+    await agent.setActionLedgerRetentionForTest({
+      settledMs: false,
+      pendingMs: 10,
+      maxSweepRows: 10
+    });
+
+    const [output, swept] = await Promise.all([
+      agent.executeEchoActionToolForTest(),
+      new Promise((resolve) => setTimeout(resolve, 100)).then(() =>
+        agent.sweepActionLedgerForTest()
+      )
+    ]);
+
+    expect(swept).toEqual({ settled: 0, pending: 0 });
+    expect(output).toBe("action echo: hello");
+    expect(await agent.listActionLedgerRowsForTest()).toMatchObject([
+      { key: "action:echo:running-sweep", status: "settled" }
+    ]);
+  });
+
   it("sweeps expired action ledger rows without deleting fresh rows", async () => {
     const agent = await freshToolAgent(
       `action-ledger-sweep-${crypto.randomUUID()}`
     );
     await agent.useEchoActionForTest("ledger-key");
+    // Windows far wider than the test takes, so a fresh row on a slow
+    // runner is not old yet.
     await agent.setActionLedgerRetentionForTest({
-      settledMs: 10,
-      pendingMs: 10,
+      settledMs: 30_000,
+      pendingMs: 30_000,
       maxSweepRows: 10
     });
-    const old = Date.now() - 1_000;
+    const old = Date.now() - 60_000;
     await agent.insertActionLedgerRowForTest({
       key: "action:echo:old-settled",
       status: "settled",

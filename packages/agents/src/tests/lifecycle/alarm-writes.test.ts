@@ -92,4 +92,31 @@ describe("Lifecycle alarm writes", () => {
       expect(await storage.getAlarm()).toBeNull();
     });
   });
+
+  it("does not read or write the alarm to cancel a job that is not there", async () => {
+    const stub = env.CapabilityHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance, state) => {
+      const reads: number[] = [];
+      const { writes, ctx } = countingAlarmWrites(state);
+      const storage = bound(ctx.storage, {
+        getAlarm: (options?: DurableObjectGetAlarmOptions) => {
+          reads.push(Date.now());
+          return state.storage.getAlarm(options);
+        }
+      });
+      const host = Object.create(instance, {
+        ctx: { value: bound(ctx, { storage }) }
+      });
+      const jobs = new Jobs();
+      const lifecycle = new Lifecycle(host).use(jobs);
+      await lifecycle.start();
+      reads.length = 0;
+      writes.length = 0;
+
+      expect(await jobs.cancel("missing")).toBe(false);
+
+      expect(reads).toEqual([]);
+      expect(writes).toEqual([]);
+    });
+  });
 });

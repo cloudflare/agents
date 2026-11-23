@@ -250,6 +250,86 @@ describe("durable-pause actions", () => {
     expect(await agent.getDurablePauseExecCount()).toBe(1);
   });
 
+  it("keeps a parked approval an earlier version stored approvable", async () => {
+    const agent = await freshPauseAgent(`dp-legacy-${crypto.randomUUID()}`);
+    await agent.useDurablePauseActionForTest();
+    await agent.insertLegacyActionPendingRowForTest({
+      executionId: "actpause_legacy",
+      message: "old"
+    });
+
+    expect(await agent.migrateLegacyPauseRecordsForTest()).toBe(false);
+
+    const approvals = JSON.parse(
+      await agent.pendingApprovalsForTest()
+    ) as Array<{
+      executionId: string;
+      descriptor: { summary: string };
+    }>;
+    expect(approvals).toMatchObject([
+      {
+        executionId: "actpause_legacy",
+        descriptor: { summary: "Approve pause action" }
+      }
+    ]);
+    await expect(
+      agent.approveExecutionForTest("actpause_legacy")
+    ).resolves.toBe("paused-exec: old");
+    expect(await agent.getDurablePauseExecCount()).toBe(1);
+    await expect(
+      agent.approveExecutionForTest("actpause_legacy")
+    ).resolves.toMatchObject({ status: "error" });
+  });
+
+  it("keeps a parked approval's JSON null input when it moves forward", async () => {
+    const agent = await freshPauseAgent(
+      `dp-legacy-null-${crypto.randomUUID()}`
+    );
+    await agent.insertLegacyActionPendingRowForTest({
+      executionId: "actpause_null",
+      message: "unused",
+      inputJson: "null"
+    });
+
+    await agent.migrateLegacyPauseRecordsForTest();
+
+    const [pending] = await agent.listActionPendingForTest();
+    expect(pending.input_json).toBe("null");
+  });
+
+  it("lists and finds every parked approval, past the first hundred", async () => {
+    const agent = await freshPauseAgent(`dp-many-${crypto.randomUUID()}`);
+    await agent.useDurablePauseActionForTest();
+    let newest = "";
+    for (let i = 0; i < 101; i++) {
+      newest =
+        ((await agent.parkDurablePauseForTest(`m${i}`)) as PausedOutput)
+          .executionId ?? "";
+    }
+
+    const all = JSON.parse(await agent.pendingApprovalsForTest()) as unknown[];
+    expect(all).toHaveLength(101);
+    const one = JSON.parse(
+      await agent.pendingApprovalsForTest(newest)
+    ) as Array<{ executionId: string }>;
+    expect(one.map((approval) => approval.executionId)).toEqual([newest]);
+  });
+
+  it("keeps a resolved pause an earlier version had not written yet", async () => {
+    const agent = await freshPauseAgent(`dp-legacy-kv-${crypto.randomUUID()}`);
+    await agent.insertLegacyDeferredPauseForTest({
+      toolCallId: "tc-old",
+      executionId: "actpause_old",
+      output: "paused-exec: old"
+    });
+
+    await agent.migrateLegacyPauseRecordsForTest();
+
+    expect(await agent.listDeferredResolvedPausesForTest()).toEqual([
+      { toolCallId: "tc-old", executionId: "actpause_old" }
+    ]);
+  });
+
   it("sweeps abandoned pending rows past the TTL but keeps fresh ones", async () => {
     const agent = await freshPauseAgent(`dp-sweep-${crypto.randomUUID()}`);
     await agent.useDurablePauseActionForTest();
@@ -272,6 +352,23 @@ describe("durable-pause actions", () => {
     const remaining = await agent.listActionPendingForTest();
     expect(remaining).toHaveLength(1);
     expect(remaining[0].execution_id).toBe(fresh.executionId);
+  });
+});
+
+describe("durable-pause actions in a facet", () => {
+  it("parks, approves once, replays a keyed effect and finishes a reset-cut decision", async () => {
+    const parent = await getAgentByName(
+      env.ThinkAgentToolParent,
+      `dp-facet-${crypto.randomUUID()}`
+    );
+    const result = await parent.durablePauseInFacetForTest();
+    expect(result).toEqual({
+      first: "paused-exec: facet",
+      second: "paused-exec: facet",
+      execCountAfterApprovals: 1,
+      execCountAfterReplay: 2,
+      decisionLeft: false
+    });
   });
 });
 
@@ -1011,6 +1108,194 @@ describe("resolving a durable pause drops pending-state generation (#2054)", () 
     expect(generatedAfter(resolved, "dp1")).toEqual([]);
   });
 
+  it("finishes a decision a reset cut off after its verdict, running the action once", async () => {
+    const { agent, executionId } = await parkInTurn("dp-reset-decided");
+    await agent.decideWithoutReportForTest(executionId);
+    expect(await agent.getDurablePauseExecCount()).toBe(0);
+
+    // The report job a start pushes delivers the decision.
+    await agent.restartTasksForTest();
+
+    await vi.waitFor(
+      async () => {
+        expect(await agent.hasDecisionRunForTest(executionId)).toBe(false);
+      },
+      { timeout: 5000, interval: 50 }
+    );
+    expect(await agent.getDurablePauseExecCount()).toBe(1);
+    const resolved = ownerOf(
+      (await agent.getStoredMessages()) as UIMessage[],
+      "dp1"
+    );
+    expect(toolOutput(resolved, "dp1")).toBe("paused-exec: hello");
+  });
+
+  it("hands an outcome off again when writing it throws, and the approval still returns it", async () => {
+    const { agent, executionId } = await parkInTurn("dp-handoff-throws");
+    await agent.failNextToolUpdateForTest();
+
+    await expect(agent.approveExecutionForTest(executionId)).resolves.toBe(
+      "paused-exec: hello"
+    );
+    // The decision waits for its report job; nothing is lost.
+    expect(await agent.hasDecisionRunForTest(executionId)).toBe(true);
+    expect(await agent.hasAlarmForTest()).toBe(true);
+
+    await agent.restartTasksForTest();
+
+    await vi.waitFor(
+      async () => {
+        expect(await agent.hasDecisionRunForTest(executionId)).toBe(false);
+      },
+      { timeout: 5000, interval: 50 }
+    );
+    // The side effect replayed from its effect run.
+    expect(await agent.getDurablePauseExecCount()).toBe(1);
+    const resolved = ownerOf(
+      (await agent.getStoredMessages()) as UIMessage[],
+      "dp1"
+    );
+    expect(toolOutput(resolved, "dp1")).toBe("paused-exec: hello");
+  });
+
+  it("does not run a failed approved action again when writing its outcome is retried", async () => {
+    const agent = await freshPauseAgent(
+      `dp-throw-retry-${crypto.randomUUID()}`
+    );
+    await agent.useDurablePauseActionForTest({ execThrows: true });
+    expect((await agent.testChat("call pauseAction")).done).toBe(true);
+    const [pending] = await agent.listActionPendingForTest();
+    await agent.failNextToolUpdateForTest();
+
+    await agent.approveExecutionForTest(pending.execution_id);
+    expect(await agent.getDurablePauseExecCount()).toBe(1);
+    await agent.restartTasksForTest();
+
+    await vi.waitFor(
+      async () => {
+        expect(await agent.hasDecisionRunForTest(pending.execution_id)).toBe(
+          false
+        );
+      },
+      { timeout: 5000, interval: 50 }
+    );
+    expect(await agent.getDurablePauseExecCount()).toBe(1);
+    expect(await agent.decisionOutputCountForTest()).toBe(0);
+  });
+
+  it("writes a large error from an approved action, capped, when writing it is retried", async () => {
+    const agent = await freshPauseAgent(
+      `dp-large-error-${crypto.randomUUID()}`
+    );
+    await agent.useDurablePauseActionForTest({ execThrows: "large" });
+    expect((await agent.testChat("call pauseAction")).done).toBe(true);
+    const [pending] = await agent.listActionPendingForTest();
+    await agent.failNextToolUpdateForTest();
+
+    await agent.approveExecutionForTest(pending.execution_id);
+    await agent.restartTasksForTest();
+
+    await vi.waitFor(
+      async () => {
+        expect(await agent.hasDecisionRunForTest(pending.execution_id)).toBe(
+          false
+        );
+      },
+      { timeout: 5000, interval: 50 }
+    );
+    expect(await agent.getDurablePauseExecCount()).toBe(1);
+    const resolved = ownerOf(
+      (await agent.getStoredMessages()) as UIMessage[],
+      "dp1"
+    );
+    expect(JSON.stringify(toolOutput(resolved, "dp1")).length).toBeLessThan(
+      30_000
+    );
+  });
+
+  it("caps a large approved output once, counting what the action returned", async () => {
+    const agent = await freshPauseAgent(
+      `dp-large-output-${crypto.randomUUID()}`
+    );
+    await agent.useDurablePauseActionForTest({ largeOutput: true });
+    expect((await agent.testChat("call pauseAction")).done).toBe(true);
+    const [pending] = await agent.listActionPendingForTest();
+
+    const output = (await agent.approveExecutionForTest(
+      pending.execution_id
+    )) as string;
+
+    const returned = `paused-exec: hello ${"y".repeat(25_000)}`.length;
+    expect(output.split("[truncated").length).toBe(2);
+    expect(output.endsWith(`[truncated ${returned - 20_000} chars]`)).toBe(
+      true
+    );
+  });
+
+  it("gives up on a decided action that keeps ending the isolate", async () => {
+    const { agent, executionId } = await parkInTurn("dp-reset-give-up");
+    await agent.decideWithoutReportForTest(executionId, 3);
+
+    await agent.restartTasksForTest();
+
+    await vi.waitFor(
+      async () => {
+        expect(await agent.hasDecisionRunForTest(executionId)).toBe(false);
+      },
+      { timeout: 5000, interval: 50 }
+    );
+    expect(await agent.getDurablePauseExecCount()).toBe(0);
+    const resolved = ownerOf(
+      (await agent.getStoredMessages()) as UIMessage[],
+      "dp1"
+    );
+    expect(toolOutput(resolved, "dp1")).toMatchObject({
+      status: "error",
+      error: expect.stringContaining("3 tries")
+    });
+  });
+
+  it("runs an approval whose action claim a reset left behind once the lease lets it", async () => {
+    const agent = await freshPauseAgent(`dp-claim-${crypto.randomUUID()}`);
+    await agent.useDurablePauseActionForTest({ idempotencyKey: "dp-key" });
+    await agent.setActionLedgerPendingRetryLeaseForTest(60_000);
+    expect((await agent.testChat("call pauseAction")).done).toBe(true);
+    const [pending] = await agent.listActionPendingForTest();
+    await agent.insertActionLedgerRowForTest({
+      key: "action:pauseAction:dp-key",
+      actionName: "pauseAction",
+      input: { message: "hello" },
+      status: "pending"
+    });
+
+    const answer = (await agent.approveExecutionForTest(
+      pending.execution_id
+    )) as PausedOutput;
+
+    // Recorded, not settled with ActionPendingError.
+    expect(answer.status).toBe("error");
+    expect(await agent.getDurablePauseExecCount()).toBe(0);
+    expect(await agent.hasDecisionRunForTest(pending.execution_id)).toBe(true);
+
+    await agent.ageEffectClaimsForTest();
+    await agent.restartTasksForTest();
+
+    await vi.waitFor(
+      async () => {
+        expect(await agent.hasDecisionRunForTest(pending.execution_id)).toBe(
+          false
+        );
+      },
+      { timeout: 5000, interval: 50 }
+    );
+    expect(await agent.getDurablePauseExecCount()).toBe(1);
+    const resolved = ownerOf(
+      (await agent.getStoredMessages()) as UIMessage[],
+      "dp1"
+    );
+    expect(toolOutput(resolved, "dp1")).toBe("paused-exec: hello");
+  });
+
   it("writes the outcome after a restart before it reached the transcript", async () => {
     const { agent, executionId } = await parkInTurn("dp-stale-unwritten");
     await agent.holdConnectionlessContinuationForTest();
@@ -1035,20 +1320,6 @@ describe("resolving a durable pause drops pending-state generation (#2054)", () 
     );
     expect(toolOutput(resolved, "dp1")).toBe("paused-exec: hello");
     expect(generatedAfter(resolved, "dp1")).toEqual([]);
-  });
-
-  it("retries loading deferred cleanup after a failed storage read", async () => {
-    const agent = await approvedMidStreamWithoutContinuation("dp-stale-load");
-    await agent.forgetDeferredResolvedPausesForTest();
-    await agent.failNextStorageGetForTest("cf_think_deferred_resolved_pauses");
-
-    const failed = await agent.testChat("first try");
-    expect(failed.error).toContain("simulated storage read failure");
-    await agent.testChat("what is the status?");
-
-    const prompts = await agent.getDurablePausePromptsForTest();
-    expect(prompts.at(-1)).toContain("paused-exec: hello");
-    expect(prompts.at(-1)).not.toContain("Once approved");
   });
 
   it("keeps the outcome when a stale client resubmits the paused message", async () => {
