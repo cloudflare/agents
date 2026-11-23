@@ -36,6 +36,16 @@ export const SQLITE_ROW_BYTES = 2_000_000;
 export const ROW_VALUE_BYTES = SQLITE_ROW_BYTES - 100_000;
 
 /**
+ * The largest WebSocket message a Durable Object sends. Measured 23 Nov
+ * 2026: production delivered 33,554,359 bytes (32 MiB less 73) and dropped
+ * anything larger without an error; local workerd delivered 128 MiB. Kept
+ * 1 KiB under 32 MiB.
+ *
+ * @internal
+ */
+export const WEBSOCKET_MESSAGE_BYTES = 32 * 1024 * 1024 - 1024;
+
+/**
  * The largest serialized chat message, or stream chunk body, kept in one
  * row. Chat compacts a larger message and leaves a larger chunk out of
  * replay.
