@@ -280,15 +280,18 @@ describe("facet wake", () => {
     // Its last drive ended with the isolate.
     await agent.setRootJobAttempts(wake!.id, 1);
 
-    // No alarm runs meanwhile, so the read sees what the start left.
+    // No alarm runs meanwhile, so the read sees what the start left. The
+    // hold is shared by every root here, so it is always released.
     await agent.holdRootAlarms(true);
-    await agent.resetTree().catch(() => {});
-    const again = await getAgentByName(env.FacetWakeRoot, name);
     try {
+      await agent.resetTree().catch(() => {});
+      const again = await getAgentByName(env.FacetWakeRoot, name);
       // Made due at once, and still marked as a suspect for the next scan.
       expect(await again.rootJobAttempts(wake!.id)).toBe(1);
     } finally {
-      await again.holdRootAlarms(false);
+      await (
+        await getAgentByName(env.FacetWakeRoot, crypto.randomUUID())
+      ).holdRootAlarms(false);
     }
   });
 });
