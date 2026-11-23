@@ -1168,8 +1168,22 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       CF_SUB_AGENT_OUTER_URL_KEY
     );
     const uri = typeof outerUri === "string" ? outerUri : connection.uri;
-    return !!uri && this.#childMatch(uri) !== null;
+    if (!uri) return false;
+    // Event-log fan-out and the chat hosts' dispatch ask for every
+    // connection on every frame: parse a URI once per connection object.
+    // The answer is kept with the URI it came from, so a bridged
+    // connection whose URI is refreshed is parsed again.
+    const cached = this.#routesToChild.get(connection);
+    if (cached?.uri === uri) return cached.routes;
+    const routes = this.#childMatch(uri) !== null;
+    this.#routesToChild.set(connection, { uri, routes });
+    return routes;
   }
+
+  readonly #routesToChild = new WeakMap<
+    Connection,
+    { uri: string; routes: boolean }
+  >();
 
   /**
    * The sub-agent a connection URI routes to from here, skipping a leading
