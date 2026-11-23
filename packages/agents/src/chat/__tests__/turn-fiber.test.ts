@@ -30,7 +30,7 @@ describe("ChatTurnFibers", () => {
       runTask: async ({ requestId, continuation, nonce }, closure) => {
         log.push(`task:${requestId}:${continuation}:${nonce}`);
         try {
-          closure.settle.resolve(await closure.run());
+          closure.settle.resolve(await closure.run((fn) => fn()));
         } catch (error) {
           log.push("engine:failed");
           closure.settle.reject(error);
@@ -71,7 +71,7 @@ describe("ChatTurnFibers", () => {
     // The alarm, not the caller, claims the run and starts the closure.
     host.runTask = (_input, closure) =>
       caller.run("alarm", async () => {
-        closure.settle.resolve(await closure.run());
+        closure.settle.resolve(await closure.run((fn) => fn()));
       });
     const seen = await caller.run("caller", () =>
       fibers.run(

@@ -196,8 +196,7 @@ export interface TaskStep {
  */
 export interface TaskCheckpoint {
   get<T extends TaskJson>(key: string): T | undefined;
-  /** `undefined` removes the entry. */
-  set(key: string, value: TaskJson | undefined): void;
+  set(key: string, value: TaskJson): void;
 }
 
 export type TaskStatus =

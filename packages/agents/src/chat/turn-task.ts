@@ -18,8 +18,11 @@ export type ChatTurnClosureEntry = {
   readonly initial: unknown;
   /** Wrap user stash data into the durable snapshot envelope. */
   wrap(data: unknown): unknown;
-  /** Execute the live turn. */
-  run(): Promise<unknown>;
+  /**
+   * Execute the live turn in its caller's async context, with `inside`
+   * (the turn's fiber stash context) entered within it.
+   */
+  run(inside: <T>(fn: () => Promise<T>) => Promise<T>): Promise<unknown>;
   /** Settles the caller awaiting the turn's outcome. */
   readonly settle: {
     resolve(value: unknown): void;
@@ -115,13 +118,15 @@ export function createChatTurnTaskDefinition(
         keepSnapshot(entry.initial);
         try {
           const value = await hooks.keepAliveWhile(() =>
-            hooks.withStash(
-              {
-                id: nonce,
-                signal,
-                stash: (data) => keepSnapshot(entry.wrap(data))
-              },
-              () => entry.run()
+            entry.run((fn) =>
+              hooks.withStash(
+                {
+                  id: nonce,
+                  signal,
+                  stash: (data) => keepSnapshot(entry.wrap(data))
+                },
+                fn
+              )
             )
           );
           entry.settle.resolve(value);

@@ -20,9 +20,8 @@ function fakeStep(local: unknown): {
         const value = checkpoint.get(key);
         return value === undefined ? undefined : JSON.parse(value);
       },
-      set: (key: string, value: TaskJson | undefined) => {
-        if (value === undefined) checkpoint.delete(key);
-        else checkpoint.set(key, JSON.stringify(value));
+      set: (key: string, value: TaskJson) => {
+        checkpoint.set(key, JSON.stringify(value));
       }
     },
     do: async (
@@ -56,7 +55,7 @@ describe("createChatTurnTaskDefinition", () => {
       // A delegated request body with a bigint in it.
       initial: { lastBody: { count: 1n } },
       wrap: (data) => ({ lastBody: { count: 2n }, user: data }),
-      run: async () => "reply",
+      run: (inside) => inside(async () => "reply"),
       settle: { resolve, reject }
     };
     const { step, checkpoint } = fakeStep(entry);
@@ -74,7 +73,7 @@ describe("createChatTurnTaskDefinition", () => {
     const entry: ChatTurnClosureEntry = {
       initial: { snapshot: "s" },
       wrap: (data) => ({ snapshot: "s", user: data as TaskJson }),
-      run: async () => "reply",
+      run: (inside) => inside(async () => "reply"),
       settle: { resolve: () => {}, reject: () => {} }
     };
     const { step, checkpoint } = fakeStep(entry);

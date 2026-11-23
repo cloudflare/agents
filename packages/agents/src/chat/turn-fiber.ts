@@ -220,11 +220,11 @@ export class ChatTurnFibers {
       {
         initial: wrap(null),
         wrap,
-        run: () => {
+        run: (inside) => {
           // Tasks accepted the run durably before it invokes the closure.
           this.host.turnAccepted?.(requestId);
           turn.onAccepted?.(requestId);
-          return inCaller(body);
+          return inCaller(() => inside(body));
         },
         settle: { resolve: resolveOutcome, reject: rejectOutcome }
       }

@@ -125,26 +125,15 @@ export class TaskStore {
   }
 
   /**
-   * Write or remove a checkpoint entry for the attempt holding `generation`.
-   * A superseded attempt writes nothing.
+   * Write a checkpoint entry for the attempt holding `generation`. A
+   * superseded attempt writes nothing.
    */
   setCheckpoint(
     runId: string,
     generation: string,
     key: string,
-    value: TaskJson | undefined
+    value: TaskJson
   ): void {
-    if (value === undefined) {
-      this.write(
-        `DELETE FROM cf_agents_task_checkpoint
-         WHERE run_id = ? AND key = ? AND EXISTS (
-           SELECT 1 FROM cf_agents_task_runs
-           WHERE run_id = ? AND generation = ?
-         )`,
-        [runId, key, runId, generation]
-      );
-      return;
-    }
     this.write(
       `INSERT INTO cf_agents_task_checkpoint (run_id, key, value)
        SELECT ?, ?, ? WHERE EXISTS (
