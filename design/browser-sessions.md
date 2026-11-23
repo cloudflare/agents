@@ -70,7 +70,7 @@ On an `Agent`, call `this.lifecycle.use(this.browser)` in the constructor instea
 
 ### The host observer
 
-`connect({ observer: true })` also opens a second CDP connection to the same browser, in parallel with the first, and returns it as `BrowserConnection.observer`. `BrowserSession` asks for it and runs its host-only observer on it (see [Browser Tools](./browser-tools.md#the-host-observer)). A raw `connect()` doesn't open one. It's on by default: the observer answers page dialogs, which otherwise hang the tab, and costs about one round trip per session. `Browser({ observer: false })` turns it off.
+`connect({ hostObserver: true })` also opens a second CDP connection to the same browser, in parallel with the first, and returns it as `BrowserConnection.hostObserver`. `BrowserSession` asks for it and runs its host-only observer on it (see [Browser Tools](./browser-tools.md#the-host-observer)). A raw `connect()` doesn't open one. It's on by default: the observer answers page dialogs, which otherwise hang the tab, and costs about one round trip per session. `Browser({ hostObserver: false })` turns it off.
 
 - **Why a separate socket.** CDP sessions belong to the connection that made them, so model code on the first socket can't reach or detach the observer's. Opening both at once keeps the cost to about one round trip; opened one after the other, it was a whole extra WebSocket upgrade (about 300 ms).
 - **Failure is soft.** If the second socket doesn't open within 2 seconds, the session goes on without it, and a socket that arrives later is closed. Both sockets close together, so the observer never keeps the Durable Object in memory longer than the model's socket did.

@@ -149,7 +149,7 @@ export interface BrowserOptions {
    * turns it off. Raw {@link Browser.connect} callers get no observer
    * unless they ask for one.
    */
-  observer?: boolean;
+  hostObserver?: boolean;
   /**
    * Minimum interval between activity-driven `updatedAt` refreshes.
    * Defaults to {@link SESSION_TOUCH_INTERVAL_MS}, capped at half the
@@ -186,13 +186,13 @@ export interface BrowserConnectOptions {
   scope?: string;
   /**
    * Also open a host-only observer connection, at the same time as the
-   * main one, unless the `Browser` was created with `observer: false`.
-   * It comes back as {@link BrowserConnection.observer}. `BrowserSession`
+   * main one, unless the `Browser` was created with `hostObserver: false`.
+   * It comes back as {@link BrowserConnection.hostObserver}. `BrowserSession`
    * asks for it.
    *
    * @experimental May change or go away.
    */
-  observer?: boolean;
+  hostObserver?: boolean;
 }
 
 export interface BrowserConnection {
@@ -243,14 +243,14 @@ export interface BrowserConnection {
   spec(): Promise<SearchableCdpSpec>;
   /**
    * The host-only observer's connection, still opening, when it was asked
-   * for ({@link BrowserConnectOptions.observer}) and the browser offers
+   * for ({@link BrowserConnectOptions.hostObserver}) and the browser offers
    * one: a second CDP connection to the same browser, opened at the same
    * time as `cdp`. It rejects if it couldn't open. A `BrowserSession`
    * takes it and disconnects it when it closes.
    *
    * @experimental May change or go away.
    */
-  observer?: Promise<CdpConnection>;
+  hostObserver?: Promise<CdpConnection>;
 }
 
 /**
@@ -381,7 +381,7 @@ export class Browser extends LifecycleCapability {
       throw new Error("Browser scopes must be non-empty");
     }
     const withObserver =
-      options.observer === true && this.#options.observer !== false;
+      options.hostObserver === true && this.#options.hostObserver !== false;
     let resolved = await this.resolve();
     let cdp: CdpConnection;
     // Both start now: the model's socket, then the observer's beside it.
@@ -407,7 +407,7 @@ export class Browser extends LifecycleCapability {
       const entered = await this.#enterScope(scope, resolved.sessionId);
       return {
         ...this.#connection(resolved, scope, cdp, entered),
-        ...(observer ? { observer } : {})
+        ...(observer ? { hostObserver: observer } : {})
       };
     } catch (error) {
       dropObserver(observer);

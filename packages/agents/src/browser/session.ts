@@ -164,7 +164,7 @@ export interface BrowserSessionReport {
   /**
    * What the host's observer saw in the tabs this session worked in.
    * Present when the browser gives sessions an observer (`Browser`'s
-   * `observer`, on by default). For the host: don't show it to the model.
+   * `hostObserver`, on by default). For the host: don't show it to the model.
    *
    * @experimental May change or go away.
    */
@@ -758,10 +758,10 @@ export class BrowserSession {
   async #open(): Promise<ConnectedState> {
     const connected = await this.#browser.connect({
       ...(this.#scope === undefined ? {} : { scope: this.#scope }),
-      observer: true
+      hostObserver: true
     });
-    const observer = connected.observer
-      ? new HostObserver(connected.observer, this.#browser.name)
+    const observer = connected.hostObserver
+      ? new HostObserver(connected.hostObserver, this.#browser.name)
       : undefined;
     let initialPages: TargetInfo[];
     try {

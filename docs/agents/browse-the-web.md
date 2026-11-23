@@ -390,12 +390,12 @@ Handlers run synchronously as each event arrives, so code awaiting a command's r
 
 ### The host observer
 
-Each browser session has a host-only observer: a second CDP connection, opened alongside the model's, that follows the tabs the model works in. Model code can't see, address, or detach it. The model's first command to each tab waits for the observer to be ready there, at most about 250 ms, so the observer sees the first navigation; later commands don't wait. The observer follows page targets only. It costs about one round trip per session. To turn it off, create the `Browser` with `observer: false`:
+Each browser session has a host-only observer: a second CDP connection, opened alongside the model's, that follows the tabs the model works in. Model code can't see, address, or detach it. The model's first command to each tab waits for the observer to be ready there, at most about 250 ms, so the observer sees the first navigation; later commands don't wait. The observer follows page targets only. It costs about one round trip per session. To turn it off, create the `Browser` with `hostObserver: false`:
 
 ```ts
 browser = new Browser({
   provider: browserRun(this.env.BROWSER),
-  observer: false
+  hostObserver: false
 });
 ```
 

@@ -3,7 +3,7 @@
  * the record of what it saw.
  *
  * A `BrowserSession` opens one beside the model's connection when its
- * browser offers it (`BrowserConnection.observer`, opened at the same time
+ * browser offers it (`BrowserConnection.hostObserver`, opened at the same time
  * as the model's socket). It attaches to each tab the session attaches the
  * model to, enables Page and Network there, answers the page's dialogs, and
  * keeps a small record per tab: where the tab went, what each main document

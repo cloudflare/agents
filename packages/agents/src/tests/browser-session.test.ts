@@ -452,14 +452,16 @@ function call(session: BrowserSession, [method, input]: Call) {
   return fn.call(session, input);
 }
 
-function setup(options: { observer?: boolean } = {}) {
+function setup(options: { hostObserver?: boolean } = {}) {
   const fake = createFakeBrowser();
   const store = new MemorySessionStore();
   const browser = new Browser({
     provider: browserRun(fake.browser),
     name: "work",
     store,
-    ...(options.observer === undefined ? {} : { observer: options.observer })
+    ...(options.hostObserver === undefined
+      ? {}
+      : { hostObserver: options.hostObserver })
   });
 
   /** Run `calls` as one session and return its results and report. */
@@ -1334,8 +1336,8 @@ describe("BrowserSession observer", () => {
     expect(report?.observed).toMatchObject({ available: true });
   });
 
-  it("is off with observer: false", async () => {
-    const t = setup({ observer: false });
+  it("is off with hostObserver: false", async () => {
+    const t = setup({ hostObserver: false });
     const { report } = await t.run([navigateActive("https://example.com/")]);
     expect(t.sockets).toHaveLength(1);
     expect(report).not.toHaveProperty("observed");
@@ -1344,7 +1346,7 @@ describe("BrowserSession observer", () => {
   it("isn't opened for a raw browser.connect() unless asked for", async () => {
     const t = setup();
     const connected = await t.browser.connect();
-    expect(connected).not.toHaveProperty("observer");
+    expect(connected).not.toHaveProperty("hostObserver");
     expect(t.sockets).toHaveLength(1);
     connected.cdp.disconnect();
   });
