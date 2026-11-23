@@ -35,6 +35,10 @@ class Jobs extends LifecycleCapability {
   get(id: string) {
     return this.lifecycle.jobs.get(id);
   }
+
+  reschedule(id: string, time: number) {
+    return this.lifecycle.jobs.reschedule(id, time);
+  }
 }
 
 const QUICK = { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 };
@@ -325,6 +329,38 @@ describe("job driver hold and the alarm", () => {
       storage.sql.exec("DELETE FROM cf_agents_jobs WHERE id = 'poison'");
       await lifecycle.rearmAlarm();
       expect(await storage.getAlarm()).toBeNull();
+    });
+  });
+});
+
+/** Jobs with an error hook: only such an owner's hold has a clock. */
+class HookedJobs extends Jobs {
+  onJobError(): void {}
+}
+
+describe("job driver hold limit", () => {
+  it("starts a job's hold clock again when its owner reschedules it", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const jobs = new HookedJobs("hold-reschedule", []);
+      const { lifecycle } = install(jobs);
+      await lifecycle.start();
+      await jobs.push({
+        id: "parked",
+        fn: "poison",
+        time: Date.now() - 1,
+        retry: QUICK
+      });
+      await lifecycle.alarm().catch(() => {});
+      const heldSince = () =>
+        storage.sql
+          .exec<{ held_since: number | null }>(
+            "SELECT held_since FROM cf_agents_jobs WHERE id = 'parked'"
+          )
+          .toArray()[0]?.held_since;
+      expect(heldSince()).toEqual(expect.any(Number));
+
+      await jobs.reschedule("parked", Date.now() + 60_000);
+      expect(heldSince()).toBeNull();
     });
   });
 });

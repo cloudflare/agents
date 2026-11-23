@@ -632,6 +632,25 @@ describe("SubAgent", () => {
     expect(await agent.rootQueueRows()).toEqual([]);
   });
 
+  it("keeps a held queue item when handing it to its sub-agent fails", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.failNextAdoptsForTest(1);
+    const before = Date.now();
+    await agent.insertLegacyRootQueueItem("handover-fails", "kept-item", "v");
+    await runDurableObjectAlarm(agent);
+
+    // Not given up as a failure of its own: still on the root, for a later
+    // try, and nothing ran.
+    await vi.waitFor(async () => {
+      const [row] = await agent.rootQueueTimes();
+      expect(row?.id).toBe("kept-item");
+      expect(row!.time).toBeGreaterThanOrEqual(before + 25_000);
+    });
+    expect(await agent.subAgentScheduleLog("handover-fails")).toEqual([]);
+  });
+
   it("leaves other owners' jobs alone when a sub-agent is deleted", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);

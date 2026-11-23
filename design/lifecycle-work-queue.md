@@ -206,7 +206,9 @@ and `Lifecycle` wires them to the host and capabilities through the narrow
      fresh invocation runs the rest or the breaker engages; any other
      platform-class failure (on exhaustion) holds back that job's owner for
      30 s, keeping its jobs' times, and the loop goes on with other owners;
-     the alarm re-throws it after re-arming;
+     the alarm re-throws it after re-arming. A job held back this way for
+     15 minutes in a row goes to its owner's `onJobError` instead (an owner
+     without the hook stays held);
    - terminal application failures reach `onJobError`, whose drive result
      decides advancement (recurring schedules reschedule; one-shots
      complete);

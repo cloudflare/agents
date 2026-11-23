@@ -21,7 +21,26 @@ const STALE_FRAME_PROBE = "stale-frame-probe";
 // ── SubAgent: Counter ───────────────────────────────────────────────
 // A SubAgent with its own SQLite counter table.
 
+/** Hand-overs into a CounterSubAgent that fail before they reach it. */
+let failingAdopts = 0;
+
 export class CounterSubAgent extends Agent {
+  override async _cf_routeLifecycle(
+    target: Parameters<Agent["_cf_routeLifecycle"]>[0],
+    envelope: Parameters<Agent["_cf_routeLifecycle"]>[1]
+  ): Promise<unknown> {
+    if (
+      failingAdopts > 0 &&
+      (envelope.payload as { type?: string }).type === "adopt"
+    ) {
+      failingAdopts -= 1;
+      throw Object.assign(new Error("simulated hand-over failure"), {
+        retryable: true
+      });
+    }
+    return super._cf_routeLifecycle(target, envelope);
+  }
+
   async treeScheduleRows(): Promise<TreeScheduleRow[]> {
     return treeScheduleRows(this, false);
   }
@@ -1823,6 +1842,16 @@ export class TestSubAgentParent extends Agent {
   ): Promise<Array<{ id: string; time: number }>> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.scheduleTimes();
+  }
+
+  failNextAdoptsForTest(count: number): void {
+    failingAdopts = count;
+  }
+
+  rootQueueTimes(): Array<{ id: string; time: number }> {
+    return this.sql<{ id: string; time: number }>`
+      SELECT id, time FROM cf_agents_jobs WHERE capability = 'queue'
+    `;
   }
 
   /** Run the Scheduler's start again, as a root's next start does. */
