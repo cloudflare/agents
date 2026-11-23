@@ -48,11 +48,11 @@ Memory: one `local` per fiber started in this isolate, dropped when its attempt 
 
 ### Facets
 
-A fiber in a facet is a Task run in the facet's storage; its wake reaches the root as every facet job does. A root from a release before this kept `cf_agents_facet_runs`; startup moves each facet in it onto the facet wake, due now, and drops the table. The facet's own start carries its rows forward.
+A fiber in a facet is a Task run in the facet's storage; its wake reaches the root as every facet job does. A root from a release before this kept `cf_agents_facet_runs`; startup moves each facet in it onto the facet wake (Lifecycle's `armFacetWake`), due now, and drops the table. The facet's own start carries its rows forward, and a facet empties its old tables instead of dropping them: a facet's drop reset its tree on a deployment (RUNTIME-FACTS).
 
 ### Rows from older releases
 
-`importLegacyFibers` runs at startup, once (it finds the old tables in one schema read and drops them):
+`importLegacyFibers` runs at startup, once (it finds the old tables in one schema read; the root drops them, a facet empties them):
 
 - a `cf_agents_runs` row with no `completed_at` becomes an interrupted `__cf_fiber` run (`snapshot` → checkpoint, `recovery_crashes` → `crashes`); its next attempt is its recovery. One with `completed_at` settled and is dropped (#2305).
 - a `cf_agents_fibers` row becomes a `__cf_managed_fiber` run with its id, key, metadata, status, error and timestamps. `pending`/`running` ones come back interrupted (their run row, if any, merged into them); `interrupted` ones stay parked without running the hook again.
