@@ -325,12 +325,14 @@ export function registerDecisionTask(
 /** Park a durable-pause action for a decision. */
 export async function parkDecision(
   tasks: Tasks,
-  options: { id: string; input: DecisionInput; descriptor: TaskJson }
+  options: { id: string; input: DecisionInput; descriptor?: TaskJson }
 ): Promise<void> {
   await tasks.run(DECISION_TASK, options.input, {
     runId: options.id,
     start: "now",
-    metadata: { descriptor: options.descriptor }
+    ...(options.descriptor !== undefined && {
+      metadata: { descriptor: options.descriptor }
+    })
   });
 }
 

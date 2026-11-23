@@ -5542,6 +5542,51 @@ export class ThinkAgentToolParent extends Agent {
     agentToolReattachMaxWindowMs: 54_321
   };
 
+  /**
+   * Approvals inside a facet: a Think child parks a keyed durable-pause
+   * action, approves it, approves a second one with the same key (replayed
+   * from the effect run), then finishes a third decision a reset left
+   * unreported through the report job a start pushes.
+   */
+  async durablePauseInFacetForTest(): Promise<{
+    first: unknown;
+    second: unknown;
+    execCountAfterApprovals: number;
+    execCountAfterReplay: number;
+    decisionLeft: boolean;
+  }> {
+    const child = await this.subAgent(
+      ThinkToolsTestAgent,
+      `approvals-facet-${crypto.randomUUID()}`
+    );
+    await child.useDurablePauseActionForTest({ idempotencyKey: "facet-key" });
+    const park = async (message: string) =>
+      (
+        (await child.parkDurablePauseForTest(message)) as {
+          executionId: string;
+        }
+      ).executionId;
+    const first = await child.approveExecutionForTest(await park("facet"));
+    const second = await child.approveExecutionForTest(await park("facet"));
+    const execCountAfterApprovals = await child.getDurablePauseExecCount();
+    await child.useDurablePauseActionForTest();
+    const third = await park("after-reset");
+    await child.decideWithoutReportForTest(third);
+    await child.restartTasksForTest();
+    let decisionLeft = true;
+    for (let i = 0; i < 100 && decisionLeft; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      decisionLeft = await child.hasDecisionRunForTest(third);
+    }
+    return {
+      first,
+      second,
+      execCountAfterApprovals,
+      execCountAfterReplay: await child.getDurablePauseExecCount(),
+      decisionLeft
+    };
+  }
+
   private events: AgentToolEventMessage[] = [];
   private finishes: AgentToolFinishForTest[] = [];
   private startupObservedStatuses: string[][] = [];
@@ -8483,6 +8528,125 @@ export class ThinkToolsTestAgent extends Think {
       UPDATE cf_agents_task_runs SET created_at = ${createdAt}
       WHERE run_id = ${executionId} AND definition = ${DECISION_TASK}
     `;
+  }
+
+  /** Seed a parked approval in the table an earlier version used. */
+  async insertLegacyActionPendingRowForTest(options: {
+    executionId: string;
+    message: string;
+  }): Promise<void> {
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_think_action_pending_approvals (
+        execution_id TEXT PRIMARY KEY,
+        action_name TEXT NOT NULL,
+        tool_call_id TEXT NOT NULL,
+        request_id TEXT,
+        input_json TEXT NOT NULL,
+        descriptor_json TEXT,
+        created_at INTEGER NOT NULL
+      )
+    `;
+    const descriptor = {
+      kind: "durable-pause",
+      action: "pauseAction",
+      summary: "Approve pause action",
+      input: { message: options.message }
+    };
+    this.sql`
+      INSERT INTO cf_think_action_pending_approvals (
+        execution_id, action_name, tool_call_id, request_id, input_json,
+        descriptor_json, created_at
+      )
+      VALUES (
+        ${options.executionId}, ${"pauseAction"}, ${"tc-legacy"}, ${null},
+        ${JSON.stringify({ message: options.message })},
+        ${JSON.stringify(descriptor)}, ${Date.now()}
+      )
+    `;
+  }
+
+  /** Seed the deferred-pause key an earlier version kept. */
+  async insertLegacyDeferredPauseForTest(options: {
+    toolCallId: string;
+    executionId: string;
+    output: string;
+  }): Promise<void> {
+    await this.ctx.storage.put("cf_think_deferred_resolved_pauses", [
+      [
+        options.toolCallId,
+        { executionId: options.executionId, output: options.output }
+      ]
+    ]);
+  }
+
+  /** Run the pause migration; true when the old table is still there. */
+  async migrateLegacyPauseRecordsForTest(): Promise<boolean> {
+    await (
+      this as unknown as { _migrateLegacyPauseRecords: () => Promise<void> }
+    )._migrateLegacyPauseRecords();
+    return (
+      this.sql<{ name: string }>`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name = 'cf_think_action_pending_approvals'
+      `.length > 0
+    );
+  }
+
+  /** The resolved pauses whose outcome waits for the transcript. */
+  async listDeferredResolvedPausesForTest(): Promise<
+    Array<{ toolCallId: string; executionId: string }>
+  > {
+    const self = this as unknown as {
+      _deferredResolvedPausesLoad: Promise<void> | undefined;
+      _deferredResolvedPauses: Map<string, { executionId: string }>;
+      _loadResolvedPauses: () => Promise<void>;
+    };
+    self._deferredResolvedPauses.clear();
+    self._deferredResolvedPausesLoad = undefined;
+    await self._loadResolvedPauses();
+    return [...self._deferredResolvedPauses].map(([toolCallId, pause]) => ({
+      toolCallId,
+      executionId: pause.executionId
+    }));
+  }
+
+  /**
+   * Leave a decision as a reset after its verdict and before its terminal
+   * report leaves it: completed with the verdict, unreported, with `tries`
+   * already spent.
+   */
+  async decideWithoutReportForTest(
+    executionId: string,
+    tries = 0
+  ): Promise<void> {
+    const now = Date.now();
+    this.sql`
+      UPDATE cf_agents_task_runs
+      SET status = 'completed', result = ${JSON.stringify({ approved: true })},
+          wait_reason = NULL, next_at = NULL, settled_at = ${now},
+          updated_at = ${now},
+          metadata = json_set(COALESCE(metadata, '{}'), '$.tries', ${tries}),
+          notified = NULL
+      WHERE run_id = ${executionId} AND definition = ${DECISION_TASK}
+    `;
+  }
+
+  /** Start Tasks again, as a new isolate does: undelivered reports replay. */
+  async restartTasksForTest(): Promise<void> {
+    await this.tasks.onStart();
+  }
+
+  /** Age every effect run in doubt past any lease. */
+  async ageEffectClaimsForTest(): Promise<void> {
+    this.sql`
+      UPDATE cf_agents_task_runs SET created_at = ${Date.now() - 3_600_000}
+      WHERE definition = ${EFFECT_TASK} AND status IN ('pending', 'running')
+    `;
+  }
+
+  /** Whether a decision run is still stored under this id. */
+  async hasDecisionRunForTest(executionId: string): Promise<boolean> {
+    return this.tasks.peek(executionId)?.definition === DECISION_TASK;
   }
 
   /** Derive a descriptor for a paused output (codemode-style) for unit tests. */

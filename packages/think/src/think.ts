@@ -590,6 +590,8 @@ function keepResolvedPauses(
 const ACTION_PAUSE_ID_PREFIX = "actpause_";
 /** An approved action whose claim waits for its lease: try the decision again later. */
 const DEFER_DECISION = Symbol("think.deferDecision");
+/** Tries a decided action gets before its outcome is an error. */
+const MAX_DECISION_TRIES = 3;
 import { Workspace, type WorkspaceStub } from "@cloudflare/computer";
 import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 import {
@@ -4044,11 +4046,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     ctx: ActionContext;
     runAction: () => Promise<unknown>;
     /**
-     * What to do with a claim another attempt left, when it may be taken
-     * over at `retryAt` (an explicit key with a finite lease). Without it,
-     * that claim answers `ActionPendingError`.
+     * What to answer for a claim another attempt left that its lease lets
+     * be taken over later (an explicit key with a finite lease). Without
+     * it, that claim answers `ActionPendingError`.
      */
-    onReclaimableInDoubt?: (retryAt: number) => unknown;
+    onReclaimableInDoubt?: () => unknown;
   }): Promise<unknown> {
     const { toolName, idempotencyKey, input, ctx, runAction } = args;
     const key = await this._resolveActionLedgerKey(
@@ -4100,15 +4102,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           type: "action:ledger:pending",
           payload: event
         });
-        const lease = this.actionLedgerPendingRetryLeaseMs;
         if (
           args.onReclaimableInDoubt &&
           idempotencyKey !== undefined &&
-          lease !== false
+          this.actionLedgerPendingRetryLeaseMs !== false
         ) {
-          return args.onReclaimableInDoubt(
-            Date.now() + Math.max(0, lease - outcome.ageMs) + 1
-          );
+          return args.onReclaimableInDoubt();
         }
         return actionPendingErrorEnvelope();
       }
@@ -5280,10 +5279,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         request_id: string | null;
         input_json: string;
         descriptor_json: string | null;
-        created_at: number;
       }>`
         SELECT execution_id, action_name, tool_call_id, request_id,
-               input_json, descriptor_json, created_at
+               input_json, descriptor_json
         FROM cf_think_action_pending_approvals
       `;
       const parse = (json: string | null): TaskJson | undefined => {
@@ -5295,21 +5293,18 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         }
       };
       for (const row of rows) {
-        const descriptor = parse(row.descriptor_json);
-        await this.tasks.importRun({
-          runId: row.execution_id,
-          definition: DECISION_TASK,
-          status: "pending",
-          attempt: 0,
+        // Parked again through the definition, so it waits for its verdict
+        // at once. Its TTL counts from now.
+        await parkDecision(this.tasks, {
+          id: row.execution_id,
           input: {
             kind: "action",
             action: row.action_name,
             toolCallId: row.tool_call_id,
             requestId: row.request_id,
             input: parse(row.input_json) ?? {}
-          } satisfies DecisionInput,
-          ...(descriptor !== undefined && { metadata: { descriptor } }),
-          createdAt: row.created_at
+          },
+          descriptor: parse(row.descriptor_json)
         });
       }
       this.sql`DROP TABLE cf_think_action_pending_approvals`;
@@ -8729,6 +8724,17 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       | { verdict: DecisionVerdict; output: unknown }
       | DecisionVerdict
       | null;
+    // Counted, and synced, before anything runs: a try that ends the
+    // isolate still counts.
+    const tries = Number(record.metadata?.tries ?? 0) + 1;
+    this.tasks.updateMetadata(runId, (metadata) => ({ ...metadata, tries }));
+    await this.ctx.storage.sync();
+    if (tries > MAX_DECISION_TRIES + 1) {
+      // Even writing the give-up error failed: stop retrying.
+      console.error(`[Think] Decision "${runId}" was given up on`);
+      this.tasks.deleteRun(runId);
+      return;
+    }
     let executionId: string;
     let verdict: DecisionVerdict;
     let output: unknown;
@@ -8740,19 +8746,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     } else {
       executionId = runId;
       verdict = result as DecisionVerdict;
-      const tries = Number(record.metadata?.tries ?? 0) + 1;
-      this.tasks.updateMetadata(runId, (metadata) => ({
-        ...metadata,
-        tries
-      }));
-      await this.ctx.storage.sync();
       output =
-        tries > 3
+        tries > MAX_DECISION_TRIES
           ? {
               status: "error",
               executionId,
               action: input.action,
-              error: `The approved action did not finish in 3 tries.`
+              error: `The approved action did not finish in ${MAX_DECISION_TRIES} tries.`
             }
           : await this._continueActionPause(runId, input, verdict);
       if (output === DEFER_DECISION) {

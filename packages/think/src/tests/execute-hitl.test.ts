@@ -184,6 +184,31 @@ describe("Think HITL — approve/reject paused executions", () => {
     ws.close();
   });
 
+  it("applies a recorded approval after a reset without calling the runtime again", async () => {
+    const room = crypto.randomUUID();
+    const { agent, ws, executionId } = await runTurnToPause(room);
+    // As a reset leaves it after the runtime call and the recorded outcome,
+    // before the transcript write. Approving again would resume whatever is
+    // paused now.
+    await agent.recordCodemodeOutcomeWithoutReportForTest(executionId, {
+      status: "completed",
+      executionId,
+      result: "recorded"
+    });
+
+    await agent.restartTasksForTest();
+
+    await waitUntil(async () => {
+      const parts = await agent.executeParts();
+      return (parts[0].output as PausedOutput).status === "completed";
+    });
+    const parts = await agent.executeParts();
+    expect((parts[0].output as { result?: unknown }).result).toBe("recorded");
+    expect(await agent.gatedCallCount()).toBe(0);
+
+    ws.close();
+  });
+
   it("reject applies a rejected output with the reason and continues", async () => {
     const room = crypto.randomUUID();
     const { agent, ws, executionId } = await runTurnToPause(room);

@@ -1,3 +1,4 @@
+import { stableHash } from "../action-ledger";
 import { describe, expect, it } from "vitest";
 import { env, exports } from "cloudflare:workers";
 import { getAgentByName } from "agents";
@@ -690,6 +691,33 @@ describe("Think — actions compile into guarded tools", () => {
     });
 
     expect((await agent.getActionProbe()).count).toBe(1);
+  });
+
+  it("answers a conflict, not the running value, for the same key with another input", async () => {
+    const agent = await freshToolAgent(
+      `action-ledger-running-conflict-${crypto.randomUUID()}`
+    );
+    await agent.useEchoActionForTest("ledger-slow");
+    await agent.setActionIdempotencyKey("running-key");
+    await agent.setActionDelayForTest(50);
+
+    const [first, second] = await Promise.all([
+      agent.executeEchoActionToolForTest(),
+      agent.executeEchoActionToolForTest("different")
+    ]);
+
+    expect(first).toBe("action echo: hello");
+    expect(second).toMatchObject({ error: { name: "ActionKeyConflict" } });
+    expect((await agent.getActionProbe()).count).toBe(1);
+  });
+
+  it("hashes action input by value: key order is ignored, dates are told apart", () => {
+    expect(stableHash({ a: 1, b: { c: 2, d: 3 } })).toBe(
+      stableHash({ b: { d: 3, c: 2 }, a: 1 })
+    );
+    expect(stableHash({ at: new Date(1) })).not.toBe(
+      stableHash({ at: new Date(2) })
+    );
   });
 
   it("does not execute when the action ledger has an unknown pending row", async () => {

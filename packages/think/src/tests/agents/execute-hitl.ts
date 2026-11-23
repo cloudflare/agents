@@ -14,6 +14,7 @@
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { tool } from "ai";
 import { z } from "zod";
+import { DECISION_TASK } from "../../action-ledger";
 import { Think } from "../../think";
 import { createExecuteTool } from "../../tools/execute";
 
@@ -201,6 +202,38 @@ export class ThinkExecuteHitlAgent extends Think {
         }
       })
     };
+  }
+
+  /**
+   * Leave a codemode decision as a reset after its outcome was recorded and
+   * before its terminal report leaves it.
+   */
+  async recordCodemodeOutcomeWithoutReportForTest(
+    executionId: string,
+    output: { status: string; executionId: string; result: string }
+  ): Promise<void> {
+    const runId = `codemode_${crypto.randomUUID()}`;
+    await this.tasks.importRun({
+      runId,
+      definition: DECISION_TASK,
+      status: "completed",
+      attempt: 1,
+      input: {
+        kind: "codemode",
+        executionId,
+        verdict: { approved: true },
+        output
+      },
+      result: { verdict: { approved: true }, output },
+      createdAt: Date.now()
+    });
+    this
+      .sql`UPDATE cf_agents_task_runs SET notified = NULL WHERE run_id = ${runId}`;
+  }
+
+  /** Start Tasks again, as a new isolate does: undelivered reports replay. */
+  async restartTasksForTest(): Promise<void> {
+    await this.tasks.onStart();
   }
 
   /** How many times the gated tool actually executed. */
