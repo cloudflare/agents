@@ -60,6 +60,11 @@ describe("State capability", () => {
         /SQLITE_TOOBIG.*8 MiB in production/
       );
       expect(capability.get()).toBe("small");
+
+      // A fresh State over the same storage, as after eviction, reads it too.
+      const fresh = install(new State<string>());
+      await fresh.lifecycle.start();
+      expect(fresh.capability.get()).toBe("small");
     });
   });
 
