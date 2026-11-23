@@ -78,6 +78,20 @@ drives it with the same driver as a root. Only arming differs:
   carries the facet's next due time. The root's job moves there, or
   completes when the facet has nothing left. A path that no longer exists
   completes it too.
+- The root waits on a facet's drive for at most five seconds. After that
+  the call runs on by itself (tracked against the alarm's memory-limit
+  breaker), the path gets a recheck wake 30 s out, and the facet's reply
+  moves the wake when it comes. A drive request that arrives while one is
+  still running is answered "busy" and rechecked later, so a facet never
+  runs the same jobs twice at once.
+- A facet job that takes the isolate down (a job over the memory limit
+  resets the root with it) leaves no reply and nothing that could record a
+  failure after the call. The root therefore counts each drive in its own
+  storage, synced, before calling down, and clears the count on any reply.
+  After three drives of a path that ended unreported, the path is not
+  woken again for 30 s, doubling to an hour, however often the facet
+  reports. Giving the facet's own job up after its attempts is the job
+  driver's attempt count, inside the facet.
 - A failure inside the facet is handled by the facet's driver (retries,
   holds, attempts, its own memory-limit breaker). The root's call fails only
   when the facet cannot be reached or is reset, and the root's driver then
