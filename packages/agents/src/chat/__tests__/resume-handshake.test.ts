@@ -219,6 +219,29 @@ describe("ResumeHandshake (driver → golden frames)", () => {
     expect(pendingResumeConnections.has("c1")).toBe(false);
   });
 
+  it("#2703: a connection that closed and reconnects with the same id is parked again until it ACKs", async () => {
+    const frames: SentFrame[] = [];
+    const { resumableStream } = makeStream({
+      active: true,
+      activeRequestId: "req-1"
+    });
+    const pendingResumeConnections = new Set<string>();
+    const handshake = new ResumeHandshake(
+      makeHost({ resumableStream, pendingResumeConnections })
+    );
+    const conn = makeConnection("c1", frames);
+
+    handshake.notifyStreamResuming(conn);
+    await handshake.handleResumeAck(conn, "req-1");
+    // The tab drops; PartySocket reconnects with the same id.
+    handshake.release("c1");
+    const again = makeConnection("c1", frames);
+    handshake.notifyStreamResuming(again);
+
+    // Parked: no live chunks before its ACK, so the replay comes first.
+    expect(pendingResumeConnections.has("c1")).toBe(true);
+  });
+
   it("REQUEST while a DIFFERENT connection owns the active continuation → RESUME_NONE", async () => {
     const frames: SentFrame[] = [];
     const { resumableStream } = makeStream({

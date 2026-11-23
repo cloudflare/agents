@@ -109,6 +109,17 @@ export class ResumeHandshake {
   #acked: { requestId: string; ids: Set<string> } | null = null;
 
   /**
+   * Forget a closed connection: its resume offer and its ACK. A client
+   * that reconnects reuses its connection id (PartySocket does), and the
+   * new socket has neither the replay nor the live broadcast yet, so it
+   * must be parked again until it ACKs.
+   */
+  release(connectionId: string): void {
+    this.host.pendingResumeConnections.delete(connectionId);
+    this.#acked?.ids.delete(connectionId);
+  }
+
+  /**
    * Notify a connection that an active stream can be resumed; it should reply
    * with `STREAM_RESUME_ACK` to receive the replay.
    *

@@ -7154,7 +7154,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     ) => {
       releaseChatConnection(
         this._turns,
-        this._pendingResumeConnections,
+        this._resumeHandshake(),
         connection.id
       );
       return _onClose(connection, code, reason, wasClean);

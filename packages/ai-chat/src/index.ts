@@ -1084,7 +1084,7 @@ export class AIChatAgent<
     ) => {
       releaseChatConnection(
         this._turns,
-        this._pendingResumeConnections,
+        this._resumeHandshake(),
         connection.id
       );
       return _onClose(connection, code, reason, wasClean);
