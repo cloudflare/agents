@@ -9911,8 +9911,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         waitUntilStable: (timeout) => this.waitUntilStable({ timeout }),
         recordTerminalError: (requestId, errorText) =>
           this._recordTerminalChatStatus("error", requestId, errorText),
-        endSkippedRequest: (requestId) =>
-          this._frames.endUnstarted(null, requestId, "skipped"),
+        endRequest: (requestId, outcome) =>
+          this._frames.endUnstarted(null, requestId, outcome),
         reconcileAgentToolChildRuns: () => this._agentToolRuns.reconcileOwn(),
         trackAlarmWork: (turn) => this.lifecycle.trackAlarmWork(turn),
         attemptScope: new AsyncLocalStorage<ChatRecoveryAttemptScope>(),

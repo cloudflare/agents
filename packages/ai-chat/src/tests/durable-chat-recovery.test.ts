@@ -3596,10 +3596,15 @@ describe("platform-transient reader errors (#1964)", () => {
     const { ws } = await connectChatWS(
       `/agents/chat-recovery-test-agent/${room}`
     );
+    const frames: Array<Record<string, unknown>> = [];
+    ws.addEventListener("message", (event: MessageEvent) => {
+      frames.push(JSON.parse(event.data as string));
+    });
+    const stoppedId = incident.recoveryRootRequestId ?? incident.requestId;
     ws.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
-        id: incident.recoveryRootRequestId ?? incident.requestId
+        id: stoppedId
       })
     );
     await new Promise((resolve) => setTimeout(resolve, 200));
@@ -3608,6 +3613,16 @@ describe("platform-transient reader errors (#1964)", () => {
     expect(
       (await agentStub.getChatRecoveryIncidentsForTest()) as unknown[]
     ).toMatchObject([{ status: "skipped", reason: "user_cancelled" }]);
+    // Nothing of the recovery ran yet, so the stop itself ends the request:
+    // the tab gets its terminal, not a "recovering" that never resolves.
+    expect(frames).toContainEqual(
+      expect.objectContaining({
+        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+        id: stoppedId,
+        done: true,
+        outcome: "aborted"
+      })
+    );
     expect(await agentStub.getChatRecoveringForTest()).toBeNull();
     // Past the 1s backoff: the cancelled attempt never re-ran the model.
     await new Promise((resolve) => setTimeout(resolve, 2000));

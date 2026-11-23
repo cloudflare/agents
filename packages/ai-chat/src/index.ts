@@ -3320,8 +3320,8 @@ export class AIChatAgent<
           }),
         recordTerminalError: (requestId, errorText) =>
           this._recordChatTerminal(requestId, errorText),
-        endSkippedRequest: (requestId) =>
-          this._frames.endUnstarted(null, requestId, "skipped"),
+        endRequest: (requestId, outcome) =>
+          this._frames.endUnstarted(null, requestId, outcome),
         reconcileAgentToolChildRuns: () => this._agentToolRuns.reconcileOwn(),
         trackAlarmWork: (turn) => this.lifecycle.trackAlarmWork(turn),
         attemptScope: new AsyncLocalStorage<ChatRecoveryAttemptScope>(),

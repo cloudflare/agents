@@ -276,6 +276,12 @@ async function runAdmittedAttempt<
   const stopped = (): boolean => stop.signal.aborted || attempt.stopped.aborted;
   const recordStop = async (): Promise<void> => {
     await engine.recordRecoveryStop(incidentId);
+    // The stop names the request the tab waits on, whose last frame said
+    // "recovering": end it. The recovered turn's own frames, if it got as
+    // far as streaming, carry its own request id.
+    if (data?.originalRequestId) {
+      turns.endRequest?.(data.originalRequestId, "aborted");
+    }
     await host.onStopped?.();
   };
 
@@ -432,10 +438,14 @@ async function runAdmittedAttempt<
             ? (result.reason ?? RECOVERED_TURN_SKIPPED_REASON)
             : result.error
       );
-      // The recovered turn did nothing, so it sent no frame for the request
-      // the tab waits on: end that request.
-      if (skipped && data?.originalRequestId) {
-        turns.endSkippedRequest?.(data.originalRequestId);
+      // Nothing the recovered turn sent, if it sent anything, carries the
+      // request the tab waits on, whose last frame said "recovering": end
+      // that request. A turn stopped before its model call sends nothing.
+      if ((skipped || aborted) && data?.originalRequestId) {
+        turns.endRequest?.(
+          data.originalRequestId,
+          skipped ? "skipped" : "aborted"
+        );
       }
     }
     await host.afterOutcome?.(result);

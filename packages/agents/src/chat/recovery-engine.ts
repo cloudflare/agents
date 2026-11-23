@@ -328,11 +328,12 @@ export interface ChatRecoveryTurnBindings {
    */
   recordTerminalError(requestId: string, errorText: string): Promise<void>;
   /**
-   * Tell the tabs that a request recovery took over ended `skipped`: the
-   * recovered turn found nothing to do. Optional: without it the tab that
+   * Tell the tabs that a request recovery took over ended: `skipped` when
+   * the recovered turn found nothing to do, `aborted` when a stop reached the
+   * recovery before its turn started. Optional: without it the tab that
    * waits on the request learns only that recovery is over.
    */
-  endSkippedRequest?(requestId: string): void;
+  endRequest?(requestId: string, outcome: "skipped" | "aborted"): void;
   /** Close agent-tool child runs a recovered turn settled. */
   reconcileAgentToolChildRuns(): Promise<void>;
   /** Keep a detached recovered turn inside the current alarm's domain. */
@@ -1311,6 +1312,7 @@ export class ChatRecoveryEngine {
     this.#noteStoppedRequest(requestId);
     const incidents = (await this.adapter.listActiveIncidents?.()) ?? [];
     let cancelled = false;
+    let endedHere = false;
     for (const incident of incidents) {
       const running = this.#runningAttempts.get(incident.incidentId);
       const named = (current: ChatRecoveryIncident): boolean =>
@@ -1328,8 +1330,14 @@ export class ChatRecoveryEngine {
         named
       );
       running?.stopped.abort();
-      if (applied) cancelled = true;
+      if (!applied) continue;
+      cancelled = true;
+      // No attempt runs for it (it waits out its backoff), so nothing else
+      // will send the tab a terminal for the request it stopped. A running
+      // attempt ends the request itself when it stops (`runRecoveredTurn`).
+      if (!running) endedHere = true;
     }
+    if (endedHere) this.adapter.turns?.endRequest?.(requestId, "aborted");
     return cancelled;
   }
 
