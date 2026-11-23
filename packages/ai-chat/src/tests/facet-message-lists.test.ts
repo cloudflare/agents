@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { UIMessage as ChatMessage } from "ai";
 import { MessageType } from "../types";
 import { connectChatWS } from "./test-utils";
@@ -23,13 +23,16 @@ describe("AIChatAgent message lists inside a facet", () => {
     const messages: ChatMessage[] = [
       { id: "facet-1", role: "user", parts: [{ type: "text", text: "Hi" }] }
     ];
+    const lists = (frames: Array<Record<string, unknown>>) =>
+      frames.filter((f) => f.type === MessageType.CF_AGENT_CHAT_MESSAGES);
     ws1.send(
       JSON.stringify({ type: MessageType.CF_AGENT_CHAT_MESSAGES, messages })
     );
-    await new Promise((r) => setTimeout(r, 150));
-
-    const lists = (frames: Array<Record<string, unknown>>) =>
-      frames.filter((f) => f.type === MessageType.CF_AGENT_CHAT_MESSAGES);
+    await vi.waitFor(() => expect(lists(other).length).toBeGreaterThan(0), {
+      timeout: 5000
+    });
+    // The same broadcast would reach the sender; give a stray echo time to land.
+    await new Promise((r) => setTimeout(r, 200));
     expect(lists(other)).toContainEqual(
       expect.objectContaining({
         messages: [expect.objectContaining({ id: "facet-1" })]

@@ -330,7 +330,10 @@ describe("Think — message lists inside a facet", () => {
       );
       expect(lists.length).toBeGreaterThan(0);
       const last = lists[lists.length - 1].messages as Array<{ role: string }>;
-      expect(last.map((message) => message.role)).toContain("user");
+      expect(last.map((message) => message.role)).toEqual([
+        "user",
+        "assistant"
+      ]);
     } finally {
       await closeWS(ws);
     }
