@@ -123,7 +123,7 @@ import {
   type NormalizedActionAuthorization,
   type ReplyAttachment
 } from "./actions";
-import { ThinkConfigStore } from "./config-store";
+import { ThinkConfigStore, tableExists } from "./config-store";
 import { wrapToolsWithDecision } from "./tool-decision";
 import {
   ThinkContextOverflow,
@@ -5255,11 +5255,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * so a settled action still replays.
    */
   private async _migrateLegacyActionLedger(): Promise<void> {
-    const [table] = this.sql<{ name: string }>`
-      SELECT name FROM sqlite_master
-      WHERE type = 'table' AND name = 'cf_think_action_ledger'
-    `;
-    if (!table) return;
+    if (!tableExists(this.ctx.storage.sql, "cf_think_action_ledger")) return;
     const rows = this.sql<{
       key: string;
       action_name: string;
@@ -6024,12 +6020,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * deployed object has started on this version and migrated.
    */
   private async _migrateLegacyWorkflowNotifications(): Promise<void> {
-    const tables = this.ctx.storage.sql
-      .exec(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='cf_think_workflow_notifications'"
-      )
-      .toArray();
-    if (tables.length === 0) return;
+    if (!tableExists(this.ctx.storage.sql, "cf_think_workflow_notifications")) {
+      return;
+    }
 
     const rows = this.sql<{
       submission_id: string;

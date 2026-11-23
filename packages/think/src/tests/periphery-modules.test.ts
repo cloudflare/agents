@@ -5,6 +5,7 @@ import { ThinkTestAgent } from "./agents/think-session";
 import type { LanguageModel, ToolSet } from "ai";
 import { describe, expect, it } from "vitest";
 import { ThinkModelResolver, isWorkersAIModelId } from "../model";
+import { tableExists } from "../config-store";
 import { capabilityBlock, systemPromptForTurn } from "../system-prompt";
 
 type ConfigAccess = {
@@ -232,5 +233,24 @@ describe("unexecuted tool record", () => {
     );
     expect((await stub.testChat("hello")).done).toBe(true);
     expect(await stub.thinkConfigRowForTest("unexecutedTools")).toBe("[]");
+  });
+});
+
+describe("tableExists", () => {
+  it("tells a present table from a missing one, and the store keeps working", async () => {
+    const stub = await getAgentByName(
+      env.ThinkTestAgent as unknown as DurableObjectNamespace<ThinkTestAgent>,
+      `periphery-table-exists-${crypto.randomUUID()}`
+    );
+    await runInDurableObject(stub, (_instance, state) => {
+      const sql = state.storage.sql;
+      sql.exec("CREATE TABLE IF NOT EXISTS probe_present (id INTEGER)");
+      expect(tableExists(sql, "probe_present")).toBe(true);
+      expect(tableExists(sql, "probe_missing")).toBe(false);
+      sql.exec("INSERT INTO probe_present (id) VALUES (1)");
+      expect(sql.exec("SELECT id FROM probe_present").toArray()).toEqual([
+        { id: 1 }
+      ]);
+    });
   });
 });
