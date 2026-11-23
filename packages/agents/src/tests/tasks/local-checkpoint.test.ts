@@ -406,10 +406,13 @@ describe("Tasks wake while an attempt runs past its dispatch", () => {
         Date.now() - 1
       );
     });
+    const beforeWake = Date.now();
     await runDurableObjectAlarm(stub);
     await new Promise((resolve) => setTimeout(resolve, 200));
     await runInDurableObject(stub, async (_instance, state) => {
       const alarm = await state.storage.getAlarm();
+      // Moved forward by this wake, and no farther than 5 s.
+      expect(alarm!).toBeGreaterThan(beforeWake);
       expect(alarm!).toBeLessThanOrEqual(Date.now() + 5_000);
     });
   }, 20_000);

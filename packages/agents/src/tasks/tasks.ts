@@ -252,6 +252,8 @@ export class Tasks<
   readonly #registered = new Map<string, TaskFrameworkDefinition>();
   /** Terminal reports under way whose guard is the report job. */
   #guardedReports = 0;
+  /** A replay of owed reports is under way; its job must stay. */
+  #replaying = false;
   /** Reports are owed to the report job; nothing may cancel it. */
   #reportsOwed = false;
   readonly #active = new Map<string, ActiveAttempt>();
@@ -591,13 +593,19 @@ export class Tasks<
     return `checkpoint = CASE WHEN definition IN (${names.join(", ")}) THEN checkpoint ELSE NULL END`;
   }
 
-  /** Push a live attempt's durable claim deadline forward one claim window. */
+  /**
+   * Push a live attempt's claim forward, once half of it is used: its wake
+   * comes back every LIVE_WAKE_MS, and a write each time would be wasted.
+   */
   #refreshClaim(runId: string): void {
     const definition = this.#store.getRun(runId)?.definition ?? "";
+    const now = Date.now();
+    const timeout = this.#claimTimeoutMs(definition);
     this.#store.sql`
       UPDATE cf_agents_task_runs
-      SET next_at = ${Date.now() + this.#claimTimeoutMs(definition)}, updated_at = ${Date.now()}
+      SET next_at = ${now + timeout}, updated_at = ${now}
       WHERE run_id = ${runId} AND status = 'running'
+        AND (next_at IS NULL OR next_at < ${now + timeout / 2})
     `;
   }
 
@@ -622,13 +630,8 @@ export class Tasks<
     const active = this.#liveAttempt(runId);
     if (active) {
       // A live attempt in this isolate: its wake comes back in
-      // LIVE_WAKE_MS; the claim moves only once half of it is used.
-      if (
-        row?.next_at == null ||
-        row.next_at - Date.now() < this.#claimTimeoutMs() / 2
-      ) {
-        this.#refreshClaim(runId);
-      }
+      // LIVE_WAKE_MS.
+      this.#refreshClaim(runId);
       this.lifecycle.trackAlarmWork(active.promise);
       return this.#wakeOutcome(runId);
     }
@@ -1833,7 +1836,7 @@ export class Tasks<
    */
   async #releaseReportGuard(): Promise<void> {
     this.#guardedReports--;
-    if (this.#guardedReports === 0 && !this.#reportsOwed) {
+    if (this.#guardedReports === 0 && !this.#reportsOwed && !this.#replaying) {
       await this.lifecycle.jobs.cancel(REPORT_JOB_ID);
     }
   }
@@ -1841,6 +1844,15 @@ export class Tasks<
   /** Deliver the terminal reports a reset or a throw left undelivered. */
   async #replayReports(): Promise<void> {
     this.#reportsOwed = false;
+    this.#replaying = true;
+    try {
+      await this.#replayBatch();
+    } finally {
+      this.#replaying = false;
+    }
+  }
+
+  async #replayBatch(): Promise<void> {
     const names = [...this.#registeredOptions.keys()].filter(
       (name) => this.#registeredOptions.get(name)?.onStatus
     );

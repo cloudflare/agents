@@ -411,6 +411,65 @@ describe("Tasks terminal reports across a reset", () => {
     );
   });
 
+  it("keeps the report job while a replay is under way, when a guarded report returns meanwhile", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    let openReplay!: () => void;
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        instance.reportedGate = new Promise(() => {});
+        await instance.tasks.run(reported, undefined as never, {
+          runId: "head",
+          lane: "l",
+          start: "alarm"
+        });
+        await instance.tasks.run(reported, undefined as never, {
+          runId: "queued",
+          lane: "l",
+          start: "alarm"
+        });
+        // An owed report, as a reset leaves it, with its report job due.
+        instance.failReports = 1;
+        await instance.tasks.run(reported, undefined as never, {
+          runId: "owed",
+          start: "alarm"
+        });
+        await instance.tasks.cancel("owed");
+        state.storage.sql.exec(
+          "UPDATE cf_agents_jobs SET time = ? WHERE id = 'tasks:reports'",
+          Date.now() - 1
+        );
+        state.storage.sql.exec(
+          "UPDATE cf_agents_jobs SET time = ? WHERE id LIKE 'task:%'",
+          Date.now() + 600_000
+        );
+        await instance.lifecycle.rearmAlarm();
+        // The replay's report of "owed" waits here.
+        instance.terminalReportGate = new Promise(
+          (resolve) => (openReplay = resolve)
+        );
+      }
+    );
+    const alarm = runDurableObjectAlarm(stub);
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await until(() => instance.reportingOwedForTest());
+        // A guarded report runs through and returns while the replay waits.
+        instance.terminalReportGate = null;
+        await instance.tasks.cancel("queued");
+        expect(instance.reports).toContain("queued:aborted");
+        expect(
+          state.storage.sql
+            .exec("SELECT id FROM cf_agents_jobs WHERE id = 'tasks:reports'")
+            .toArray()
+        ).toHaveLength(1);
+        openReplay();
+      }
+    );
+    await alarm;
+  });
+
   it("replays more terminal reports than one batch holds", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(
