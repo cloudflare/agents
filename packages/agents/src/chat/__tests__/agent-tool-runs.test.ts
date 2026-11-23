@@ -134,6 +134,7 @@ function setup() {
     | Array<{ id: string; role: string; parts?: unknown[] }>
     | undefined;
   let holdList: Promise<void> | undefined;
+  let keepAliveError: Error | undefined;
   const lifecycles: Promise<unknown>[] = [];
   let requestIds = 0;
   let flushes = 0;
@@ -174,6 +175,7 @@ function setup() {
     responseType: "response",
     resetError: "cleared",
     keepAliveWhile: (fn) => {
+      if (keepAliveError) return Promise.reject(keepAliveError);
       const running = fn();
       lifecycles.push(running);
       return running;
@@ -234,6 +236,10 @@ function setup() {
     },
     setActiveRequest: (requestId: string | null) => {
       activeRequestId = requestId;
+    },
+    /** Make holding the isolate fail before the run's lifecycle runs. */
+    failKeepAlive: (error: Error) => {
+      keepAliveError = error;
     },
     setActiveStream: (requestId: string | null) => {
       activeStream = requestId;
@@ -332,6 +338,21 @@ describe("agentToolRunOutcome", () => {
 });
 
 describe("AgentToolRuns", () => {
+  it("settles a run error when holding the isolate fails before it runs", async () => {
+    const { runs, store, failKeepAlive } = setup();
+    failKeepAlive(new Error("Subrequest depth limit exceeded"));
+    const turn = heldTurn();
+    await runs.start("run-1", START, turn.run);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Nothing runs the turn, so the parent must not wait on it forever.
+    expect(store.terminal("run-1")).toEqual({
+      status: "error",
+      error: "Subrequest depth limit exceeded"
+    });
+    expect(runs.isLive("run-1")).toBe(false);
+  });
+
   it("runs the turn and writes its outcome once, then forgets the run", async () => {
     const { runs, store, settled } = setup();
     const turn = heldTurn();
