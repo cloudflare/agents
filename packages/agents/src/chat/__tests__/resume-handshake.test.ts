@@ -708,44 +708,60 @@ describe("ResumeHandshake (driver → golden frames)", () => {
       });
     });
 
-    it("ends a request the tab waits on that a recovery finished under another id", async () => {
-      // A root reset cut req-cut off. Recovery closed its stream `aborted`
-      // and now streams the continuation under req-cont. The tab was away
-      // the whole time and still waits on req-cut.
+    it("ends a request the tab waits on that a recovery took over, while the recovery streams", async () => {
+      // A reset cut req-cut off; recovery recorded its end and now streams
+      // under req-cont. The tab was away and still waits on req-cut.
+      const kv = kvStore();
+      recordRecentChatTerminal(kv, {
+        id: "req-cut",
+        done: true,
+        body: "",
+        outcome: "aborted"
+      });
       const frames: SentFrame[] = [];
       const { resumableStream } = makeStream({
         active: true,
         activeRequestId: "req-cont",
-        activeStreamId: "s-cont",
-        streams: { "req-cut": "completed", "req-cont": "streaming" },
-        outcome: "aborted"
+        activeStreamId: "s-cont"
       });
-      const handshake = new ResumeHandshake(makeHost({ resumableStream }));
+      const handshake = new ResumeHandshake({
+        ...makeHost({ resumableStream }),
+        recentTerminal: (ids) => recentChatTerminal(kv, ids)
+      });
 
       await handshake.handleResumeRequest(
         makeConnection("c1", frames),
         "probe-1",
         ["req-cut"]
       );
-      expect(frames[0]).toMatchObject({
-        id: "req-cut",
+      // A live terminal, so the tab clears the request as it would any end.
+      expect(frames[0]).toEqual({
+        body: "",
         done: true,
-        replay: true,
+        id: "req-cut",
+        type: RESPONSE_TYPE,
         outcome: "aborted"
       });
       // Then it resumes the continuation, as before.
       expect(frames[1]).toMatchObject({ id: "req-cont" });
     });
 
-    it("ends a request whose stream rows are gone but whose outcome is remembered", () => {
-      // The continuation's cutover deleted the cut-off stream's rows; the
-      // stream store still remembers how it ended.
+    it("tells a tab directly how a request it stops ended", async () => {
+      const kv = kvStore();
+      recordRecentChatTerminal(kv, {
+        id: "req-cut",
+        done: true,
+        body: "",
+        outcome: "aborted"
+      });
       const frames: SentFrame[] = [];
-      const { resumableStream } = makeStream({ outcome: "aborted" });
-      const handshake = new ResumeHandshake(makeHost({ resumableStream }));
-      expect(handshake.sendEnded(makeConnection("c1", frames), "req-cut")).toBe(
-        true
-      );
+      const { resumableStream } = makeStream();
+      const handshake = new ResumeHandshake({
+        ...makeHost({ resumableStream }),
+        recentTerminal: (ids) => recentChatTerminal(kv, ids)
+      });
+      // A fresh tab that only knows the id stops it: told directly.
+      handshake.sendEnded(makeConnection("c1", frames), "req-cut");
       expect(frames[0]).toMatchObject({
         id: "req-cut",
         done: true,
@@ -753,35 +769,30 @@ describe("ResumeHandshake (driver → golden frames)", () => {
       });
     });
 
-    it("ends a request the tab waits on that a recovery finished, then says idle", async () => {
-      const frames: SentFrame[] = [];
-      const { resumableStream } = makeStream({ outcome: "aborted" });
-      const handshake = new ResumeHandshake(makeHost({ resumableStream }));
-
-      await handshake.handleResumeRequest(
-        makeConnection("c1", frames),
-        "probe-1",
-        ["req-cut"]
-      );
-      expect(frames[0]).toMatchObject({
-        id: "req-cut",
-        done: true,
-        outcome: "aborted"
-      });
-      expect(frames[1]).toMatchObject({ type: "cf_agent_stream_resume_none" });
-    });
-
-    it("sends no end for the active request, an open stream, or a request with none", () => {
+    it("sends no end without a recorded one, for the active request, or while it is held", () => {
+      const kv = kvStore();
+      recordRecentChatTerminal(kv, { id: "req-live", done: true });
+      recordRecentChatTerminal(kv, { id: "req-held", done: true });
       const frames: SentFrame[] = [];
       const { resumableStream } = makeStream({
         active: true,
         activeRequestId: "req-live",
-        streams: { "req-live": "streaming", "req-open": "streaming" }
+        // A closed stream alone (an attempt retried after compaction) is
+        // no evidence that the request ended.
+        streams: { "req-retried": "completed" },
+        outcome: "aborted"
       });
-      const handshake = new ResumeHandshake(makeHost({ resumableStream }));
+      const handshake = new ResumeHandshake({
+        ...makeHost({
+          resumableStream,
+          heldTerminalRequestIds: new Set(["req-held"])
+        }),
+        recentTerminal: (ids) => recentChatTerminal(kv, ids)
+      });
       const conn = makeConnection("c1", frames);
       expect(handshake.sendEnded(conn, "req-live")).toBe(false);
-      expect(handshake.sendEnded(conn, "req-open")).toBe(false);
+      expect(handshake.sendEnded(conn, "req-held")).toBe(false);
+      expect(handshake.sendEnded(conn, "req-retried")).toBe(false);
       expect(handshake.sendEnded(conn, "req-none")).toBe(false);
       expect(frames).toEqual([]);
     });

@@ -910,6 +910,10 @@ export class ChatRecoveryEngine {
 
       if (streamStillActive) {
         await wake.completeRecoveredStream(streamId);
+        // The cut-off request is over: what follows runs under its own
+        // request id. Tell the tabs, and record it, so a tab that comes
+        // back later (even after a hibernation) learns it ended.
+        this.#endTakenOver(requestId);
       }
 
       await wake.dispatchRecoveredTurn({
@@ -1183,6 +1187,15 @@ export class ChatRecoveryEngine {
       (incident.recoveryRootRequestId !== undefined &&
         this.#stoppedRequestIds.has(incident.recoveryRootRequestId))
     );
+  }
+
+  /** End a request a recovery took over (see the wake path). */
+  #endTakenOver(requestId: string): void {
+    try {
+      this.adapter.turns?.endRequest?.(requestId, "aborted");
+    } catch (error) {
+      console.error(`[chat] failed to end request ${requestId}`, error);
+    }
   }
 
   /**

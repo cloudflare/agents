@@ -1866,6 +1866,23 @@ describe("ChatRecoveryEngine.recoverInterruptedTurn (fake adapter + wake hooks)"
     expect(ended).toEqual(["aborted:req-1"]);
   });
 
+  it("ends the cut-off request for the tabs once its stream is closed for a recovered turn", async () => {
+    const h = makeHarness({ onChatRecovery: {} });
+    const ended: string[] = [];
+    h.adapter.turns = {
+      attemptScope: new AsyncLocalStorage(),
+      endRequest: (requestId: string, outcome: string) =>
+        void ended.push(`${outcome}:${requestId}`)
+    } as unknown as ChatRecoveryTurnBindings;
+
+    await h.engine.recoverInterruptedTurn(h.turn, h.wake);
+
+    expect(h.completed).toEqual(["s1"]);
+    expect(h.dispatched).toHaveLength(1);
+    // Recorded and sent, so a tab back later learns the request ended.
+    expect(ended).toEqual(["aborted:req-1"]);
+  });
+
   it("keeps the storage failure when ending the stopped request fails too", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const h = makeHarness();

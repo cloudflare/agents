@@ -223,11 +223,7 @@ export class ResumeHandshake {
       // active, pending, terminal-replay, and pre-stream branch was exhausted.
       // The reason is backward-compatible (older clients ignore it) and lets a
       // reconnecting hook reconcile fallback streaming state without confusing
-      // continuation-affinity denial for idle (#1914). A request the tab
-      // waits on that a recovery finished while it was away ends first.
-      for (const requestId of requestIds) {
-        this.sendEnded(connection, requestId);
-      }
+      // continuation-affinity denial for idle (#1914).
       this._sendResumeNone(
         connection,
         STREAM_RESUME_NONE_REASONS.IDLE,
@@ -237,50 +233,38 @@ export class ResumeHandshake {
   }
 
   /**
-   * Tell `connection` how `requestId` ended, if it has ended: a recorded
-   * terminal, or a stored stream that closed (a recovery completes a cut-off
-   * stream `aborted` and continues under its own id). Nothing for the active
-   * stream's request, for a request with no stream, or for a stream still
-   * open.
+   * Tell `connection` how `requestId` ended, if its end was recorded (a
+   * terminal the host broadcast, kept durably in the recent terminals; a
+   * recovery that takes a request over records its end). Nothing for the
+   * active stream's request, for one whose terminal frames are still held
+   * behind its transcript, or for one with no recorded end. A live frame,
+   * not a replay: the tab clears the request as it would a terminal it saw.
    *
    * @returns Whether a terminal frame was sent.
    */
   sendEnded(connection: Connection, requestId: string): boolean {
     const { resumableStream } = this.host;
     if (
-      resumableStream.hasActiveStream() &&
-      resumableStream.activeRequestId === requestId
+      (resumableStream.hasActiveStream() &&
+        resumableStream.activeRequestId === requestId) ||
+      this.host.holdsTerminalFrames?.(requestId)
     ) {
       return false;
     }
-    const recent = this.host.recentTerminal?.([requestId]);
-    const stream = recent
-      ? null
-      : resumableStream.latestStreamInfoForRequest(requestId);
-    const outcome = recent
-      ? recent.outcome
-      : resumableStream.getOutcome(requestId);
-    // Ended: a recorded terminal, a closed stream, or a stream whose rows
-    // its cutover already deleted (its outcome is still remembered).
-    const ended = recent
-      ? true
-      : stream
-        ? stream.status === "completed"
-        : outcome !== undefined;
+    const ended = this.host.recentTerminal?.([requestId]);
     if (!ended) return false;
     const messageIds =
-      recent?.messageIds ?? resumableStream.getOriginMessageIds(requestId);
+      ended.messageIds ?? resumableStream.getOriginMessageIds(requestId);
     return sendIfOpen(
       connection,
       JSON.stringify({
-        body: recent?.body ?? "",
+        body: ended.body,
         done: true,
         id: requestId,
         type: this.host.responseMessageType,
-        replay: true,
-        ...(recent?.error && { error: true }),
+        ...(ended.error && { error: true }),
         ...(messageIds && { messageIds }),
-        ...(outcome !== undefined && { outcome })
+        ...(ended.outcome !== undefined && { outcome: ended.outcome })
       })
     );
   }
