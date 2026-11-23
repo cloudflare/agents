@@ -291,4 +291,36 @@ describe("Sessions path reads cut by a window", () => {
       expect(recent.truncated).toBe(true);
     });
   });
+
+  it("checks a shared start once when many stored summaries end in a cut window", async () => {
+    const stub = await open();
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const sql = sqlOf(instance);
+      seed(sql, 1, 20_000);
+      // What 50 runs of compact() leave: one start, ends 100 rows apart,
+      // every end inside the newest 10,001 rows.
+      for (let i = 1; i <= 50; i++) {
+        sql.exec(
+          `INSERT INTO cf_agents_session_compactions
+            (session_id, id, seq, summary, from_message_id, to_message_id, created_at)
+           VALUES ('', ?, ?, ?, 'm4', ?, 0)`,
+          `c${i}`,
+          i,
+          `summary ${i}`,
+          `m${10_000 + 100 * i}`
+        );
+      }
+      const session = instance.sessions.session();
+      await session.getLatestLeaf();
+      let history: SessionMessage[] = [];
+      const read = await rowsRead(sql, async () => {
+        history = await session.getHistory();
+      });
+      expect(history[0].id).toBe("compaction_c50");
+      expect(history).toHaveLength(1 + 15_000 - 10_000);
+      // One ancestry walk (about 2 rows a step over 15,000 rows) plus the
+      // window. Checking each summary on its own walked 50 times as far.
+      expect(read).toBeLessThan(120_000);
+    });
+  }, 120_000);
 });

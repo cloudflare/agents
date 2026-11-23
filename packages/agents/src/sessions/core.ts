@@ -932,17 +932,25 @@ export class SessionsCore {
     });
     if (contested) return this.#planByPrefix(sessionId, ids, compactions);
 
+    // Precedence order: earliest start, then the newest overlay. Every
+    // candidate ends in the window, so a start older than the window's
+    // first row is an ancestor of all their ends or of none: only the first
+    // candidate of each start is checked, and the first start on the path
+    // wins. `compact()` chains share one start, so a read walks once.
+    const ranked = [...live].sort(
+      (a, b) =>
+        startSeq(a) - startSeq(b) ||
+        (order.get(b.id) ?? 0) - (order.get(a.id) ?? 0)
+    );
+    const offPath = new Set<string>();
     let chosen: StoredCompaction | undefined;
-    for (const c of live) {
-      if (!this.#startsAncestor(sessionId, c, anchors)) continue;
-      if (
-        !chosen ||
-        startSeq(c) < startSeq(chosen) ||
-        (startSeq(c) === startSeq(chosen) &&
-          (order.get(c.id) ?? 0) > (order.get(chosen.id) ?? 0))
-      ) {
+    for (const c of ranked) {
+      if (offPath.has(c.fromMessageId)) continue;
+      if (this.#startsAncestor(sessionId, c, anchors)) {
         chosen = c;
+        break;
       }
+      offPath.add(c.fromMessageId);
     }
     if (!chosen) {
       return { spans: planOverlays(ids, compactions), complete: false };
@@ -1019,7 +1027,8 @@ export class SessionsCore {
     compactions: readonly StoredCompaction[]
   ): { spans: OverlaySpan[]; complete: boolean } {
     const known = new Set(ids);
-    const prefix: string[] = [];
+    // Collected nearest-first, reversed once at the end.
+    const upward: string[] = [];
     let [top] = this.io.sql<{
       id: string;
       parent_id: string | null;
@@ -1065,10 +1074,11 @@ export class SessionsCore {
       );
       for (const row of walked) {
         known.add(row.id);
-        if (!hidden.has(row.id)) prefix.unshift(row.id);
+        if (!hidden.has(row.id)) upward.push(row.id);
       }
       top = walked[walked.length - 1];
     }
+    const prefix = upward.reverse();
     const spans: OverlaySpan[] = [];
     for (const span of planOverlays([...prefix, ...ids], compactions)) {
       if (span.endIndex < prefix.length) continue;
