@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { runDurableObjectAlarm } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { getAgentByName } from "../../index";
 
 /**
@@ -66,5 +66,17 @@ describe("facet wake", () => {
 
     await agent.deleteMiddle("m");
     expect(await agent.rootJobs()).toEqual([]);
+  });
+
+  it("keeps a failing facet job inside the facet's own driver", async () => {
+    const agent = await root();
+    await agent.middlePush("m", "fail-always", 0);
+    await runDurableObjectAlarm(agent);
+    // The facet's driver ran it and settled its failure itself; the root's
+    // call did not fail, and nothing is left to wake.
+    await vi.waitFor(async () => {
+      expect(await agent.middleRan("m")).toContain("fail-always");
+      expect(await agent.rootJobs()).toEqual([]);
+    });
   });
 });

@@ -103,6 +103,10 @@ export class FacetWakeRoot extends WakeAgent {
     return (await this.subAgent(FacetWakeMiddle, middle)).leafPending(leaf);
   }
 
+  async middlePending(name: string): Promise<string[]> {
+    return (await this.subAgent(FacetWakeMiddle, name)).pendingJobs();
+  }
+
   async deleteMiddle(name: string): Promise<void> {
     await this.deleteSubAgent(FacetWakeMiddle, name);
   }

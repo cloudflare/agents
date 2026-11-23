@@ -60,6 +60,39 @@ latest alarm set since (the driver's startup fallback or deadman, or one a
 queue mutation during the alarm set), and the end-of-alarm re-arm writes only
 when that differs from the next wake.
 
+## Facets
+
+A facet (a sub-agent) has no alarm: `setAlarm` in a facet rejects, and one
+that is not awaited breaks the facet instance (measured, 23 Nov 2026). A
+facet's Lifecycle keeps its own `cf_agents_jobs` in its own storage and
+drives it with the same driver as a root. Only arming differs:
+
+- Where a root writes `setAlarm(T)`, a facet tells its root "wake path P at
+  T". The facet syncs its job rows first, because that call is not a reply.
+  The report is skipped when the time has not changed since the last one.
+- The root holds one job per facet path, id `facet:<path key>`, owned by
+  the Lifecycle itself under an owner id per path. A facet that keeps
+  failing therefore holds back only its own wake.
+- When that job fires, the root calls down the path (at most three levels)
+  and the facet runs its due jobs, its host `onAlarm` included. The reply
+  carries the facet's next due time. The root's job moves there, or
+  completes when the facet has nothing left. A path that no longer exists
+  completes it too.
+- A failure inside the facet is handled by the facet's driver (retries,
+  holds, attempts, its own memory-limit breaker). The root's call fails only
+  when the facet cannot be reached or is reset, and the root's driver then
+  treats it like any other job failure.
+- The facet's deadman and startup fallback are the root's wake job, which
+  stays until the reply re-arms it.
+- On startup, a facet with jobs reports its next wake once, in case the
+  root lost it.
+- Deleting a facet sub-tree drops the wake jobs of that path and every path
+  below it.
+
+Capabilities that still route a facet's work to the root themselves (Tasks,
+Fibers, Scheduler, Queue, KeepAlive) keep working beside this. They move
+onto it one at a time, and their routing is removed as they do.
+
 ## When the alarm fires
 
 `Lifecycle.alarm()` runs the event loop: arm the deadman, drive due jobs in
