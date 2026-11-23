@@ -156,7 +156,14 @@ export type JobDriverOptions = {
    * 38 ms) per dispatch. A facet driven by its root syncs: a job over the
    * memory limit there resets the whole tree, root included (measured).
    */
-  readonly commitAttempt: (jobId: string) => Promise<void>;
+  readonly commitAttempt: (jobId: string) => Promise<boolean>;
+  /**
+   * An attempt of `jobId` reported back, and no work it handed off is still
+   * running: it did not end with the isolate. Pairs with `commitAttempt`,
+   * whose `true` means the job's attempts kept ending with the isolate and
+   * the job is sealed instead of run.
+   */
+  readonly attemptSettled: (jobId: string) => void;
   /**
    * Schedule an isolate reset after a memory-limit strike is fully
    * recorded, suppressing any retry of the current alarm. Returns
@@ -252,6 +259,8 @@ export class JobDriver {
    * memory reset that alarm started.
    */
   readonly #outstandingAlarmWork = new Set<Promise<unknown>>();
+  /** Handed-off work still running, per job that handed it off. */
+  readonly #outstandingByJob = new Map<string, number>();
   /**
    * The strike being recorded for the current memory-limit event. One reset
    * is often observed by several flows (an in-alarm job plus handed-off work,
@@ -351,12 +360,12 @@ export class JobDriver {
 
   /**
    * Seal one job, as the memory-limit breaker seals a struck one: delete it
-   * and run the owners' and host's memory-limit policy. A facet's root asks
-   * for it when its drives of the facet keep dying: such a reset (a job
-   * over the memory limit takes the whole tree) leaves the facet no chance
-   * to count its own strikes.
+   * and run the owners' and host's memory-limit policy. For a job whose
+   * attempts kept ending with the isolate (`commitAttempt`): in a facet such
+   * a reset (a job over the memory limit takes the whole tree) leaves no
+   * chance to count a strike.
    */
-  async sealCrashedJob(id: string): Promise<void> {
+  async #sealCrashedJob(id: string): Promise<void> {
     const queue = this.#options.queue;
     const row = queue.row(id);
     if (!row) return;
@@ -390,11 +399,26 @@ export class JobDriver {
    * the same promise again (a claim-backstop wake for an attempt already
    * handed off) is a no-op.
    */
+  #attemptSettled(jobId: string): void {
+    try {
+      this.#options.attemptSettled(jobId);
+    } catch {
+      // a condemned isolate's storage; the count stays
+    }
+  }
+
   trackAlarmWork(work: Promise<unknown>): boolean {
     const scope = this.#alarmScope.getStore();
     if (!scope) return false;
     if (this.#outstandingAlarmWork.has(work)) return true;
     this.#outstandingAlarmWork.add(work);
+    const jobId = scope.executing?.id;
+    if (jobId !== undefined) {
+      this.#outstandingByJob.set(
+        jobId,
+        (this.#outstandingByJob.get(jobId) ?? 0) + 1
+      );
+    }
     void work.then(
       () => this.#settleAlarmWork(work, undefined, scope.executing),
       (error) => this.#settleAlarmWork(work, error, scope.executing)
@@ -417,6 +441,15 @@ export class JobDriver {
       }
     } finally {
       this.#outstandingAlarmWork.delete(work);
+      const jobId = executing?.id;
+      if (jobId !== undefined) {
+        const left = (this.#outstandingByJob.get(jobId) ?? 1) - 1;
+        if (left > 0) this.#outstandingByJob.set(jobId, left);
+        else {
+          this.#outstandingByJob.delete(jobId);
+          if (!isIsolateEndingError(error)) this.#attemptSettled(jobId);
+        }
+      }
     }
     // This settle is itself a quiescence transition — re-check freshly
     // rather than trusting whether an alarm looked in flight before this
@@ -693,13 +726,26 @@ export class JobDriver {
             // the failure before it took its count off.
             if (local > 1) queue.setAttempts(row.id, prior + 1);
             // The count must outlast an isolate this attempt ends.
-            await this.#options.commitAttempt(row.id);
+            if (await this.#options.commitAttempt(row.id)) {
+              await this.#sealCrashedJob(row.id);
+              return SUPERSEDED;
+            }
             // The wait let requests run: a cancel or same-id push made
             // meanwhile is newer intent.
             if (disabled() || !owned()) return SUPERSEDED;
             try {
-              return await dispatch.onJob({ job, attempt });
+              const result = await dispatch.onJob({ job, attempt });
+              if (!this.#outstandingByJob.has(row.id)) {
+                this.#attemptSettled(row.id);
+              }
+              return result;
             } catch (error) {
+              if (
+                !isIsolateEndingError(error) &&
+                !this.#outstandingByJob.has(row.id)
+              ) {
+                this.#attemptSettled(row.id);
+              }
               // The attempt reported back: it no longer counts as one that
               // ended with its isolate.
               try {
@@ -1072,4 +1118,11 @@ export class JobDriver {
 
     return { strikes, limit, sealed, nextTime, purgedRecoveryLoopJobs };
   }
+}
+
+/** The isolate is going away with this error: the attempt did not settle. */
+function isIsolateEndingError(error: unknown): boolean {
+  return (
+    isDurableObjectMemoryLimitReset(error) || isDurableObjectResetError(error)
+  );
 }

@@ -295,22 +295,46 @@ describe("facet wake", () => {
     }
   });
 
-  it("seals a facet job whose drives kept dying with the isolate", async () => {
+  it("seals a facet job whose attempts kept ending with the isolate", async () => {
     const agent = await root();
     await agent.middlePush("m", "crasher", 60_000);
-    const key = (await agent.rootJobs())[0]!.id.slice("facet:".length);
-    // Three drives ended with the tree, the last while "crasher" ran. Its
-    // own row may have been rewritten since (a start that re-arms it).
-    await agent.middleMarkDispatching("m", "crasher");
-    await agent.markUnreportedDrives(key, 3, 10 * 60_000);
+    // Three attempts started and never settled: each took the tree down.
+    await agent.middleMarkUnsettled("m", "crasher", 3);
     await agent.makeFacetWakesDueKeepingDrives();
+    await agent.middleMakeDue("m");
 
     await runDurableObjectAlarm(agent);
 
     // Sealed like a struck job at a root: its owner was told and it is gone.
     await vi.waitFor(async () => {
-      expect(await agent.middleRan("m")).toContain("sealed:crasher");
+      const ran = await agent.middleRan("m");
+      expect(ran).toContain("sealed:crasher");
+      expect(ran).not.toContain("crasher");
       expect(await agent.middlePending("m")).toEqual([]);
     });
+  });
+
+  it("forgets a facet job's unsettled attempts once one settles", async () => {
+    const agent = await root();
+    await agent.middlePush("m", "flaky", 60_000);
+    await agent.middleMarkUnsettled("m", "flaky", 2);
+    await agent.makeFacetWakesDueKeepingDrives();
+    await agent.middleMakeDue("m");
+
+    await runDurableObjectAlarm(agent);
+
+    await vi.waitFor(async () => {
+      expect(await agent.middleRan("m")).toContain("flaky");
+      expect(await agent.middleUnsettled("m", "flaky")).toBeUndefined();
+    });
+  });
+
+  it("does not hold a cancelled facet job's crashes against its replacement", async () => {
+    const agent = await root();
+    await agent.middlePush("m", "reused", 60_000);
+    await agent.middleMarkUnsettled("m", "reused", 3);
+    await agent.middleCancel("m", "reused");
+
+    expect(await agent.middleUnsettled("m", "reused")).toBeUndefined();
   });
 });

@@ -61,15 +61,33 @@ class WakeProbe extends LifecycleCapability {
     });
   }
 
+  cancel(id: string) {
+    return this.lifecycle.jobs.cancel(id);
+  }
+
   list() {
     return this.lifecycle.jobs.list().map((job) => job.id);
   }
 }
 
 abstract class WakeAgent extends Agent<Cloudflare.Env> {
-  /** Leave the mark a root's drive leaves while it runs `id`. */
-  markDispatching(id: string): void {
-    this.ctx.storage.kv.put("cf_agents:facet_dispatching", id);
+  /** Make this object's own jobs due, keeping their order. */
+  makeJobsDue(): void {
+    this
+      .sql`UPDATE cf_agents_jobs SET time = time - 120000 WHERE capability = 'facet-wake-probe'`;
+  }
+
+  /** Record `count` attempts of job `id` that ended with the isolate. */
+  markUnsettled(id: string, count: number): void {
+    this.ctx.storage.kv.put(`cf_agents:facet_unsettled:${id}`, count);
+  }
+
+  unsettled(id: string): number | undefined {
+    return this.ctx.storage.kv.get<number>(`cf_agents:facet_unsettled:${id}`);
+  }
+
+  cancelJob(id: string): Promise<boolean> {
+    return this.probe.cancel(id);
   }
 
   /** Recompute this object's wake, as any queue change does. */
@@ -290,8 +308,24 @@ export class FacetWakeRoot extends WakeAgent {
     });
   }
 
-  async middleMarkDispatching(name: string, id: string): Promise<void> {
-    await (await this.subAgent(FacetWakeMiddle, name)).markDispatching(id);
+  async middleMarkUnsettled(
+    name: string,
+    id: string,
+    count: number
+  ): Promise<void> {
+    await (await this.subAgent(FacetWakeMiddle, name)).markUnsettled(id, count);
+  }
+
+  async middleMakeDue(name: string): Promise<void> {
+    await (await this.subAgent(FacetWakeMiddle, name)).makeJobsDue();
+  }
+
+  async middleUnsettled(name: string, id: string): Promise<number | undefined> {
+    return (await this.subAgent(FacetWakeMiddle, name)).unsettled(id);
+  }
+
+  async middleCancel(name: string, id: string): Promise<boolean> {
+    return (await this.subAgent(FacetWakeMiddle, name)).cancelJob(id);
   }
 
   async deleteMiddle(name: string): Promise<void> {

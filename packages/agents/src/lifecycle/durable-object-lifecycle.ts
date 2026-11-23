@@ -96,8 +96,16 @@ function facetDriveNotBefore(drives: FacetDriveCount | undefined): number {
   );
 }
 
-/** In a facet: the job its root's drive is running, until the drive replies. */
-const FACET_DISPATCHING_KEY = "cf_agents:facet_dispatching";
+/**
+ * In a facet, per job: its attempts that started and never settled. A job
+ * over the memory limit there resets the whole tree before the facet can
+ * count a strike, and its owner may rewrite the row (and its attempt count)
+ * on the next start, so the count is kept apart from the row.
+ */
+const FACET_UNSETTLED_PREFIX = "cf_agents:facet_unsettled:";
+
+/** Unsettled attempts after which a facet seals the job instead of running it. */
+const FACET_UNSETTLED_LIMIT = 3;
 
 /** First wait before a facet reports its wake again after a failed report. */
 const FACET_REPORT_RETRY_MS = 100;
@@ -121,11 +129,7 @@ type FacetWakeMessage =
       readonly time: number | null;
       readonly stamp: number;
     }
-  | {
-      readonly type: "drive";
-      /** Drives of this facet that never replied, when that many. */
-      readonly crashed?: number;
-    };
+  | { readonly type: "drive" };
 
 /** A facet's drive reply: its next due time, or busy with another drive. */
 type FacetDriveReply =
@@ -392,13 +396,25 @@ export class Lifecycle<
       rearm: (deferral) => this.#rearm(deferral),
       drivenByRoot: () => this.#drivingFromRoot,
       commitAttempt: async (jobId) => {
-        if (this.#drivingFromRoot) {
-          // Which job this drive runs, kept until the drive replies: if the
-          // isolate dies with it, the root's next drive names the crash and
-          // this is the job to seal.
-          this.#ctx.storage.kv.put(FACET_DISPATCHING_KEY, jobId);
-          await this.#ctx.storage.sync();
-        } else await new Promise((resolve) => setTimeout(resolve, 0));
+        if (!this.#drivingFromRoot) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          return false;
+        }
+        const kv = this.#ctx.storage.kv;
+        const key = FACET_UNSETTLED_PREFIX + jobId;
+        const unsettled = kv.get<number>(key) ?? 0;
+        if (unsettled >= FACET_UNSETTLED_LIMIT) {
+          kv.delete(key);
+          return true;
+        }
+        kv.put(key, unsettled + 1);
+        await this.#ctx.storage.sync();
+        return false;
+      },
+      attemptSettled: (jobId) => {
+        if (this.#facetAddress()) {
+          this.#ctx.storage.kv.delete(FACET_UNSETTLED_PREFIX + jobId);
+        }
       },
       armFallback: async (time) => {
         if (this.#facetAddress()) return;
@@ -646,14 +662,6 @@ export class Lifecycle<
     this.#drivingFromRoot = true;
     this.#driveDeferral = undefined;
     try {
-      // The root's drives of this facet keep dying with the isolate: the job
-      // that was running each time is sealed, as the memory-limit breaker
-      // seals one at a root, before anything runs again.
-      if (message.type === "drive" && message.crashed !== undefined) {
-        const crashed = this.#ctx.storage.kv.get<string>(FACET_DISPATCHING_KEY);
-        if (crashed !== undefined)
-          await this.#jobDriver.sealCrashedJob(crashed);
-      }
       await this.alarm();
     } catch (error) {
       // The driver already held or retried the failing job and re-armed;
@@ -661,8 +669,6 @@ export class Lifecycle<
       console.error(this.#errorLogPrefix("facet wake"), error);
     } finally {
       this.#drivingFromRoot = false;
-      // The drive is replying, so no job it ran took the isolate down.
-      this.#ctx.storage.kv.delete(FACET_DISPATCHING_KEY);
     }
     // A held owner's jobs wake after their hold, as at a root.
     const next = this.#wakeTime(this.#driveDeferral);
@@ -1194,7 +1200,13 @@ export class Lifecycle<
       push: (options: LifecycleJobPushOptions) =>
         rearmAfter(() => this.#jobQueue.push(owner, options)),
       cancel: (id: string) =>
-        rearmAfter(() => this.#jobQueue.cancel(owner, id)),
+        rearmAfter(() => {
+          // A job pushed again under this id starts with no crashes.
+          if (this.#facetAddress()) {
+            this.#ctx.storage.kv.delete(FACET_UNSETTLED_PREFIX + id);
+          }
+          return this.#jobQueue.cancel(owner, id);
+        }),
       reschedule: (id: string, time: number) =>
         rearmAfter(() => this.#jobQueue.reschedule(owner, id, time)),
       get: (id: string) => this.#jobQueue.get(owner, id),
@@ -1460,13 +1472,7 @@ export class Lifecycle<
           .to(target, {
             capability: FACET_WAKE,
             source: transport.source,
-            payload: {
-              type: "drive",
-              ...(drives &&
-                drives.count >= FACET_DRIVE_UNREPORTED_LIMIT && {
-                  crashed: drives.count
-                })
-            } satisfies FacetWakeMessage
+            payload: { type: "drive" } satisfies FacetWakeMessage
           })
           .then(
             (reply) => ({
