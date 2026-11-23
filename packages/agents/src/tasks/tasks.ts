@@ -1749,7 +1749,14 @@ export class Tasks<
     // Nothing reads a settled run's checkpoint.
     this.#store.deleteCheckpoint(runId);
     await this.#syncWake(runId);
-    if (row?.lane != null) await this.#wakeLane(row.lane);
+    // Only the head settling moves its lane on: a run queued behind it that
+    // ends (a cancel, a clear) leaves the head where it is.
+    if (row?.lane != null && row.seq != null) {
+      const head = this.#store.laneHead(row.lane);
+      if (head?.seq != null && head.seq > row.seq) {
+        await this.#wakeLane(row.lane);
+      }
+    }
     const reported =
       row !== undefined &&
       (this.#registeredOptions.get(row.definition)?.onStatus !== undefined ||
