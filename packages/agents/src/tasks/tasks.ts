@@ -982,10 +982,10 @@ export class Tasks<
   }
 
   /**
-   * Request cooperative cancellation of one run.
+   * Cancel one run.
    *
-   * A live attempt is aborted and settles as cancelled at its next step
-   * boundary; a parked run settles immediately.
+   * The run settles `aborted` at once; a live attempt's signal aborts, and
+   * nothing it writes afterwards lands.
    *
    * @returns True when a non-terminal run accepted the request.
    */
@@ -996,15 +996,10 @@ export class Tasks<
 
     const active = this.#active.get(runId);
     if (active) {
-      const now = Date.now();
-      this.#store.sql`
-        UPDATE cf_agents_task_runs
-        SET cancel_requested = 1, cancel_reason = ${reason ?? null},
-            next_at = ${now}, updated_at = ${now}
-        WHERE run_id = ${runId}
-      `;
+      // Settled now: the attempt's signal aborts, and nothing it writes
+      // afterwards lands (its generation no longer owns the run).
       active.controller.abort(new TaskCancellation(reason));
-      await this.#syncWake(runId);
+      await this.#settleCancelled(runId, active.generation, reason);
       return true;
     }
     // A parked run settles in one write: #settleCancelled's UPDATE records
