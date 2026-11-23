@@ -285,4 +285,30 @@ describe("event log in a facet", () => {
     expect(seqs(await innerTab.until(EVENT_LOG_EVENTS, 2))).toEqual([1, 2]);
     innerTab.ws.close();
   });
+  it("keeps an unsubscribe when an older full-state write that still holds the subscription reaches the root", async () => {
+    const parentName = unique();
+    const child = unique();
+    const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+    const tab = await follow(parentName, child);
+    const other = await follow(parentName, child);
+    tab.subscribe();
+    other.subscribe();
+    await tab.until(EVENT_LOG_RESYNC);
+    await other.until(EVENT_LOG_RESYNC);
+    tab.unsubscribe();
+    tab.ws.send("noop");
+    const ids = await parent.eventLogFacetConnectionIds(child);
+    // A relay's stale copy of the socket's state, as it lands after the
+    // unsubscribe.
+    for (const id of ids) {
+      await parent._cf_setSubAgentConnectionState(id, { _cf_logs: ["feed"] });
+    }
+    await parent.eventLogFacetRehydrate(child);
+    await parent.eventLogFacetPublish(child, "after");
+    expect(seqs(await other.until(EVENT_LOG_EVENTS))).toEqual([1]);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(seqs(tab.frames.filter((f) => f.log === "feed"))).toEqual([]);
+    tab.ws.close();
+    other.ws.close();
+  });
 });

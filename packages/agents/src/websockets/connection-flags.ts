@@ -243,6 +243,17 @@ export function setConnectionFlag(
   else accessors.setRaw(next);
 }
 
+/**
+ * `state` without the event-log subscriptions a sub-agent's full-state
+ * write may carry: a facet sends those as their own flag write, and an
+ * older copy inside a relayed state must not bring a removed one back.
+ */
+export function withoutEventLogFlag(state: unknown): unknown {
+  if (!isRecord(state) || !(CF_EVENT_LOGS_KEY in state)) return state;
+  const { [CF_EVENT_LOGS_KEY]: _, ...rest } = state;
+  return rest;
+}
+
 export function isConnectionReadonly(connection: Connection): boolean {
   return !!getConnectionFlag(connection, CF_READONLY_KEY);
 }

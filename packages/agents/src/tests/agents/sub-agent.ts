@@ -2470,6 +2470,10 @@ export class TestSubAgentParent extends Agent {
     this.ctx.abort("test crash");
   }
 
+  async eventLogFacetConnectionIds(child: string): Promise<string[]> {
+    return (await this.subAgent(EventLogSubAgent, child)).connectionIds();
+  }
+
   async eventLogFacetRehydrate(child: string): Promise<void> {
     await (await this.subAgent(EventLogSubAgent, child)).rehydrateConnections();
   }

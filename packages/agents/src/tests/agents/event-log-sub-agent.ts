@@ -38,6 +38,11 @@ export class EventLogSubAgent extends Agent {
     }
   }
 
+  /** Ids of the facet's (bridged) connections. */
+  connectionIds(): string[] {
+    return [...this.getConnections()].map((connection) => connection.id);
+  }
+
   publish(data: string): number {
     return this.feed.publish(data);
   }

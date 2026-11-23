@@ -4,6 +4,7 @@ import {
   ensureConnectionWrapped,
   setConnectionFlag,
   setConnectionFlagWriter,
+  withoutEventLogFlag,
   getConnectionRawState,
   setConnectionProtocolEnabled
 } from "../websockets/connection-flags";
@@ -1048,7 +1049,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       return null;
     }
     ensureConnectionWrapped(connection);
-    connection.setState(state);
+    connection.setState(withoutEventLogFlag(state));
     return this.getForwardedState(connection);
   }
 
