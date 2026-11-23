@@ -569,7 +569,7 @@ describe("AIChatAgent as an agent-tool child", () => {
       childName: crypto.randomUUID(),
       incidentId: `facet-backoff-restart-${crypto.randomUUID()}`
     };
-    const runId = await parent.driveFacetRecoveryOomBackoffForTest(executing);
+    await parent.driveFacetRecoveryOomBackoffForTest(executing);
     // The strike resets the root's isolate. A request then restarts it,
     // during the breaker's backoff.
     await new Promise((resolve) => setTimeout(resolve, 100));
