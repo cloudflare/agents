@@ -162,9 +162,8 @@ export class RunFiberTestAgent extends Agent<Record<string, unknown>> {
     recoveredSnapshots: unknown[];
   } {
     const rows = this.sql<{ id: string; snapshot: string | null }>`
-      SELECT r.run_id AS id, c.value AS snapshot FROM cf_agents_task_runs r
-      LEFT JOIN cf_agents_task_checkpoint c
-        ON c.run_id = r.run_id AND c.key = 'snapshot'
+      SELECT r.run_id AS id, r.checkpoint -> '$.snapshot' AS snapshot
+      FROM cf_agents_task_runs r
       WHERE r.definition IN ('__cf_fiber', '__cf_managed_fiber')
         AND (r.status = 'running'
           OR (r.status = 'pending' AND coalesce(r.wait_reason, '') != 'park'))
@@ -211,9 +210,8 @@ export class RunFiberTestAgent extends Agent<Record<string, unknown>> {
   @callable()
   getRunningFiberSnapshot(): unknown {
     const rows = this.sql<{ snapshot: string | null }>`
-      SELECT c.value AS snapshot FROM cf_agents_task_runs r
-      JOIN cf_agents_task_checkpoint c
-        ON c.run_id = r.run_id AND c.key = 'snapshot'
+      SELECT r.checkpoint -> '$.snapshot' AS snapshot
+      FROM cf_agents_task_runs r
       WHERE r.definition IN ('__cf_fiber', '__cf_managed_fiber')
         AND r.status = 'running'
       LIMIT 1
@@ -291,9 +289,8 @@ export class SubAgentFiberChild extends Agent<Record<string, unknown>> {
     recoveredSnapshots: unknown[];
   } {
     const rows = this.sql<{ id: string; snapshot: string | null }>`
-      SELECT r.run_id AS id, c.value AS snapshot FROM cf_agents_task_runs r
-      LEFT JOIN cf_agents_task_checkpoint c
-        ON c.run_id = r.run_id AND c.key = 'snapshot'
+      SELECT r.run_id AS id, r.checkpoint -> '$.snapshot' AS snapshot
+      FROM cf_agents_task_runs r
       WHERE r.definition IN ('__cf_fiber', '__cf_managed_fiber')
         AND (r.status = 'running'
           OR (r.status = 'pending' AND coalesce(r.wait_reason, '') != 'park'))
@@ -336,9 +333,8 @@ export class SubAgentFiberChild extends Agent<Record<string, unknown>> {
 
   getRunningFiberSnapshot(): unknown {
     const rows = this.sql<{ snapshot: string | null }>`
-      SELECT c.value AS snapshot FROM cf_agents_task_runs r
-      JOIN cf_agents_task_checkpoint c
-        ON c.run_id = r.run_id AND c.key = 'snapshot'
+      SELECT r.checkpoint -> '$.snapshot' AS snapshot
+      FROM cf_agents_task_runs r
       WHERE r.definition IN ('__cf_fiber', '__cf_managed_fiber')
         AND r.status = 'running'
       LIMIT 1
