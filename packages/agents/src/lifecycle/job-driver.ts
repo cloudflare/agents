@@ -135,6 +135,15 @@ export type JobDriverOptions = {
   /** Recompute the physical alarm from queue state. */
   readonly rearm: (deferral?: JobDeferral) => Promise<void>;
   /**
+   * Make the claimed attempt's count outlast an isolate that ends during
+   * the attempt, before user code runs. A root yields one macrotask: a
+   * write that started survives a CPU-limit kill or abort (RUNTIME-FACTS,
+   * 22 Nov), and `storage.sync()` would cost a durable round trip (about
+   * 38 ms) per dispatch. A facet driven by its root syncs: a job over the
+   * memory limit there resets the whole tree, root included (measured).
+   */
+  readonly commitAttempt: () => Promise<void>;
+  /**
    * Schedule an isolate reset after a memory-limit strike is fully
    * recorded, suppressing any retry of the current alarm. Returns
    * immediately; the reset lands after the invocation settles, and the next
@@ -580,12 +589,8 @@ export class JobDriver {
             // The claim counted the first try; a retry counts again after
             // the failure before it took its count off.
             if (local > 1) queue.setAttempts(row.id, prior + 1);
-            // One macrotask lets the output gate start writing the count, and
-            // a write that started survives a CPU-limit kill or abort that
-            // follows. Awaiting microtasks is not enough, and
-            // `storage.sync()` costs a durable round trip (about 38 ms) per
-            // dispatch (RUNTIME-FACTS, 22 Nov).
-            await new Promise((resolve) => setTimeout(resolve, 0));
+            // The count must outlast an isolate this attempt ends.
+            await this.#options.commitAttempt();
             // The wait let requests run: a cancel or same-id push made
             // meanwhile is newer intent.
             if (disabled() || !owned()) return SUPERSEDED;

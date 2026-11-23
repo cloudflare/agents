@@ -349,6 +349,10 @@ export class Lifecycle<
       emit: (type, payload) =>
         this.#emitCapabilityEvent({ source: "lifecycle", type, payload }),
       rearm: (deferral) => this.#rearm(deferral),
+      commitAttempt: async () => {
+        if (this.#drivingFromRoot) await this.#ctx.storage.sync();
+        else await new Promise((resolve) => setTimeout(resolve, 0));
+      },
       armFallback: async (time) => {
         if (this.#facetAddress()) return;
         await this.#ctx.storage.setAlarm(time);

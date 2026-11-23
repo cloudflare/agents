@@ -237,4 +237,19 @@ describe("facet wake", () => {
     expect(await agent.middlePending("m")).toEqual([]);
     expect(await agent.middleRan("m")).toContain("gave-up:abort-always");
   }, 20_000);
+
+  it("syncs a driven facet's claimed attempt before the job runs", async () => {
+    const agent = await root();
+    await agent.middlePush("m", "later", 60_000);
+    await agent.middleCountSyncs("m");
+    await agent.middlePush("m", "now", 0);
+    const afterReport = await agent.middleSyncCount("m");
+    await agent.makeFacetWakesDue();
+    await runDurableObjectAlarm(agent);
+    await vi.waitFor(async () => {
+      expect(await agent.middleRan("m")).toContain("now");
+    });
+    // One sync for the claim of "now", before its job ran.
+    expect(await agent.middleSyncCount("m")).toBeGreaterThan(afterReport);
+  });
 });

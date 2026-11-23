@@ -101,6 +101,22 @@ let failingDrives = 0;
 export class FacetWakeLeaf extends WakeAgent {}
 
 export class FacetWakeMiddle extends WakeAgent {
+  syncs = 0;
+
+  /** Count this facet's `storage.sync()` calls from now on. */
+  countSyncs(): void {
+    const storage = this.ctx.storage;
+    const sync = storage.sync.bind(storage);
+    storage.sync = () => {
+      this.syncs += 1;
+      return sync();
+    };
+  }
+
+  syncCount(): number {
+    return this.syncs;
+  }
+
   override async _cf_routeLifecycle(
     target: Parameters<Agent["_cf_routeLifecycle"]>[0],
     envelope: Parameters<Agent["_cf_routeLifecycle"]>[1]
@@ -184,6 +200,14 @@ export class FacetWakeRoot extends WakeAgent {
   /** End this root's isolate, and its facets with it. */
   resetTree(): void {
     this.ctx.abort("test reset");
+  }
+
+  async middleCountSyncs(name: string): Promise<void> {
+    await (await this.subAgent(FacetWakeMiddle, name)).countSyncs();
+  }
+
+  async middleSyncCount(name: string): Promise<number> {
+    return (await this.subAgent(FacetWakeMiddle, name)).syncCount();
   }
 
   failNextFacetDrives(count: number): void {
