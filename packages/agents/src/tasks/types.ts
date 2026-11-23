@@ -468,6 +468,13 @@ export interface TaskRegisterOptions {
    * interval. Omitted: the step timeout plus slack.
    */
   claimMs?: number;
+  /**
+   * Runs start only attached (`start: "now"`) and each attempt ends before
+   * its caller returns, so no wake job is armed for the accept or the
+   * claim. A reset still loses nothing: the next start makes an interrupted
+   * attempt due and wakes it then.
+   */
+  attached?: true;
 }
 
 /** @internal Raw `cf_agents_task_steps` SQLite row. */

@@ -120,31 +120,35 @@ export function effectRunId(key: string): string {
  * unknown, and the next caller decides.
  */
 export function registerEffectTask(tasks: Tasks, state: EffectState): void {
-  tasks.register(EFFECT_TASK, async (_input, step) => {
-    const run = step.local as (() => Promise<unknown>) | undefined;
-    if (!run) return TaskSettlement.park("in-doubt");
-    let value: unknown;
-    try {
-      value = await run();
-    } catch (thrown) {
-      state.unrecorded.set(step.id, { thrown });
-      return TaskSettlement.failed(thrown);
-    }
-    let json: string | undefined;
-    try {
-      json = JSON.stringify(value);
-    } catch {
-      json = undefined;
-    }
-    if (
-      (value !== undefined && json === undefined) ||
-      (json !== undefined && json.length > MAX_RECORDED_CHARS)
-    ) {
-      state.unrecorded.set(step.id, { value });
-      return TaskSettlement.skipped("unrecorded");
-    }
-    return (json === undefined ? null : JSON.parse(json)) as TaskValue;
-  });
+  tasks.register(
+    EFFECT_TASK,
+    async (_input, step) => {
+      const run = step.local as (() => Promise<unknown>) | undefined;
+      if (!run) return TaskSettlement.park("in-doubt");
+      let value: unknown;
+      try {
+        value = await run();
+      } catch (thrown) {
+        state.unrecorded.set(step.id, { thrown });
+        return TaskSettlement.failed(thrown);
+      }
+      let json: string | undefined;
+      try {
+        json = JSON.stringify(value);
+      } catch {
+        json = undefined;
+      }
+      if (
+        (value !== undefined && json === undefined) ||
+        (json !== undefined && json.length > MAX_RECORDED_CHARS)
+      ) {
+        state.unrecorded.set(step.id, { value });
+        return TaskSettlement.skipped("unrecorded");
+      }
+      return (json === undefined ? null : JSON.parse(json)) as TaskValue;
+    },
+    { attached: true }
+  );
 }
 
 /**
@@ -316,6 +320,7 @@ export function registerDecisionTask(
       return TaskSettlement.park("decision");
     },
     {
+      attached: true,
       onStatus: async (snapshot) => {
         if (snapshot.status === "completed") await onSettled(snapshot.runId);
       }

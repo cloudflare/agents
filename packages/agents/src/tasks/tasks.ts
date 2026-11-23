@@ -372,7 +372,8 @@ export class Tasks<
       options.onStatus ||
       options.maxAttempts !== undefined ||
       options.keepCheckpoint ||
-      options.claimMs !== undefined
+      options.claimMs !== undefined ||
+      options.attached
     ) {
       this.#registeredOptions.set(name, options);
     }
@@ -396,6 +397,9 @@ export class Tasks<
     const framework = this.#registered.has(definition);
     if (!framework) this.#validateDefinitionName(definition);
     const start = options?.start;
+    if (start !== "now" && this.#registeredOptions.get(definition)?.attached) {
+      throw new Error(`Task "${definition}" starts only with start: "now"`);
+    }
     const receipt = await this.#accept(
       definition,
       input,
@@ -1123,8 +1127,11 @@ export class Tasks<
     // root dispatch that later returns a stale outcome past its own
     // budget (job-queue's own "newer pushes win" guard on that marker).
     // A local run its own wake dispatches needs none: the dispatch's
-    // outcome is read from the row after the claim.
-    if (!byOwnWake || this.lifecycle.routes.source) {
+    // outcome is read from the row after the claim. Nor does an attached
+    // attempt its caller started: it ends before its caller returns.
+    const attached =
+      !byOwnWake && this.#registeredOptions.get(row.definition)?.attached;
+    if (!attached && (!byOwnWake || this.lifecycle.routes.source)) {
       await this.#syncWake(runId);
       // A cancel() that ran during that await found no live attempt and
       // settled the run itself. The claim is void then: start no handler.
