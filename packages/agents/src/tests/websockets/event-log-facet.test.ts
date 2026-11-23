@@ -27,6 +27,7 @@ const unique = () => crypto.randomUUID().slice(0, 8);
 /** Every socket a test opened, and the roots they reached. */
 const opened: WebSocket[] = [];
 const roots = new Set<string>();
+const logRoots = new Set<string>();
 
 afterEach(async () => {
   // A facet's close handler and its queued writes to the root run after the
@@ -47,7 +48,14 @@ afterEach(async () => {
       { timeout: 2000 }
     );
   }
+  for (const name of [...logRoots]) {
+    const root = await getAgentByName(env.EventLogFacetParent, name);
+    await vi.waitFor(async () => expect(await root.rootSocketCount()).toBe(0), {
+      timeout: 2000
+    });
+  }
   roots.clear();
+  logRoots.clear();
 });
 
 async function connect(path: string) {
@@ -60,6 +68,8 @@ async function connect(path: string) {
   opened.push(ws);
   const root = /^\/agents\/test-sub-agent-parent\/([^/]+)\//.exec(path)?.[1];
   if (root) roots.add(root);
+  const logRoot = /^\/agents\/event-log-facet-parent\/([^/]+)/.exec(path)?.[1];
+  if (logRoot) logRoots.add(logRoot);
   const frames: Frame[] = [];
   ws.addEventListener("message", (event) => {
     try {

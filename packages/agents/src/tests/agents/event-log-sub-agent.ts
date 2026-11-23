@@ -89,6 +89,11 @@ export class EventLogFacetParent extends Agent {
     this.lifecycle.use(this.streams);
   }
 
+  /** How many sockets the root still holds, sub-agent ones included. */
+  rootSocketCount(): number {
+    return this.ctx.getWebSockets().length;
+  }
+
   publishRoot(data: string): number {
     return this.feed.publish(data);
   }
