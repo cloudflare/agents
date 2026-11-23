@@ -1026,7 +1026,7 @@ export class Lifecycle<
       throw error;
     }
     this.#deliverPendingEvents();
-    if (!this.#facetAddress() && this.#facetWakesDueNow()) {
+    if (false && !this.#facetAddress() && this.#facetWakesDueNow()) {
       this.#rearmRequestedDuringStart = true;
     }
     if (this.#rearmRequestedDuringStart) {
