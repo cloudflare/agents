@@ -85,7 +85,7 @@ drives it with the same driver as a root. Only arming differs:
   still running is answered "busy" and rechecked later, so a facet never
   runs the same jobs twice at once.
 - A facet job that takes the isolate down (a job over the memory limit
-  resets the root with it) leaves no reply and nothing that could record a
+  resets the root with it, measured on a deployed tree) leaves no reply and nothing that could record a
   failure after the call. The root therefore counts each drive in its own
   storage, synced, before calling down, and clears the count on any reply.
   After three drives of a path that ended unreported, the path is not
@@ -93,9 +93,15 @@ drives it with the same driver as a root. Only arming differs:
   reports. Giving the facet's own job up after its attempts is the job
   driver's attempt count, inside the facet.
 - A failure inside the facet is handled by the facet's driver (retries,
-  holds, attempts, its own memory-limit breaker). The root's call fails only
-  when the facet cannot be reached or is reset, and the root's driver then
-  treats it like any other job failure.
+  holds, attempts, its own memory-limit breaker). When the call down fails
+  (the facet cannot be reached or start, or was reset), the drive counts as
+  unreported: the root keeps the path's wake and tries again after the
+  recheck time or the back-off. The failure never reaches the root's own
+  driver, so it cannot hold or purge the root's own jobs.
+- Wake reports and drive replies carry a stamp that only goes up; the root
+  ignores a message older than the one its wake holds, so a late drive
+  reply cannot replace a newer report. A failed report is sent again,
+  backing off from 100 ms to 30 s.
 - The facet's deadman and startup fallback are the root's wake job, which
   stays until the reply re-arms it.
 - On startup, a facet with jobs reports its next wake once, in case the
