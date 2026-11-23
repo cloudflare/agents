@@ -167,3 +167,33 @@ describe("Tasks park and settle", () => {
     );
   });
 });
+
+describe("Tasks reports after a reset", () => {
+  it("delivers on start a terminal report a reset cut short", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.tasks.run(reported, undefined as never, {
+          runId: "r",
+          start: "now"
+        });
+        await until(() => instance.reports.includes("r:completed"));
+        // As if the isolate died before `notified` was written.
+        state.storage.sql.exec(
+          "UPDATE cf_agents_task_runs SET notified = NULL WHERE run_id = 'r'"
+        );
+        instance.reports.length = 0;
+        await (
+          instance.tasks as unknown as { onStart(): Promise<void> }
+        ).onStart();
+        await instance.lifecycle.rearmAlarm();
+      }
+    );
+    await runDurableObjectAlarm(stub);
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      await until(() => instance.reports.includes("r:completed"));
+      expect(instance.reports).toEqual(["r:completed"]);
+    });
+  });
+});
