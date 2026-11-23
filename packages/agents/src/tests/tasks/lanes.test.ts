@@ -123,4 +123,35 @@ describe("Tasks lanes", () => {
       expect(instance.lanedStarted).toEqual(["a", "b"]);
     });
   });
+
+  it("clears a lane: its running and queued runs end skipped, and the running attempt's later writes are dropped", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const first = gate();
+      instance.lanedGates.set("a", first.promise);
+      await instance.tasks.run(
+        "laned",
+        { label: "a" },
+        { runId: "a", lane: "l" }
+      );
+      await instance.tasks.run(
+        "laned",
+        { label: "b" },
+        { runId: "b", lane: "l" }
+      );
+      await until(() => instance.lanedStarted.length === 1);
+      const clearing = instance.tasks.clear("l", "reset");
+      // Written before the first await.
+      expect((await instance.tasks.get("a"))?.status).toBe("skipped");
+      await clearing;
+      expect(await instance.tasks.get("b")).toMatchObject({
+        status: "skipped",
+        reason: "reset"
+      });
+      first.open();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect((await instance.tasks.get("a"))?.status).toBe("skipped");
+      expect(instance.lanedStarted).toEqual(["a"]);
+    });
+  });
 });

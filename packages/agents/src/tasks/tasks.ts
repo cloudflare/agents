@@ -106,7 +106,7 @@ export function setTaskRoutedMemoryLimitHandler(
 const FIBER_SCHEMA_VERSION_KEY = "cf_agents:tasks_schema_version";
 /**
  * 2 renames the run statuses and adds `cf_agents_task_checkpoint`; 3 adds
- * lanes.
+ * lanes and `skipped`.
  */
 const CURRENT_FIBER_SCHEMA_VERSION = 3;
 
@@ -156,7 +156,8 @@ const DISPATCH_BUDGET_MS = 5_000;
 const TERMINAL_STATUSES: ReadonlySet<TaskStatus> = new Set([
   "completed",
   "error",
-  "aborted"
+  "aborted",
+  "skipped"
 ]);
 
 /**
@@ -221,7 +222,7 @@ export type TaskListOptions = {
 
 /** Filters accepted by {@link Tasks.delete}. */
 export type TaskDeleteOptions = {
-  status?: Array<"completed" | "error" | "aborted">;
+  status?: Array<"completed" | "error" | "aborted" | "skipped">;
   settledBefore?: Date;
   limit?: number;
 };
@@ -448,8 +449,7 @@ export class Tasks<
     const storage = this.lifecycle.storage;
     const version = (await storage.get<number>(FIBER_SCHEMA_VERSION_KEY)) ?? 0;
     if (version < CURRENT_FIBER_SCHEMA_VERSION) {
-      if (version === 1) this.#store.migrateStatuses();
-      if (version >= 1) this.#store.addLaneColumns();
+      if (version >= 1) this.#store.rebuildRuns();
       this.#store.ensureTables();
       await storage.put(FIBER_SCHEMA_VERSION_KEY, CURRENT_FIBER_SCHEMA_VERSION);
     }
@@ -992,7 +992,12 @@ export class Tasks<
    */
   async delete(options: TaskDeleteOptions = {}): Promise<number> {
     await this.lifecycle.ready();
-    const states = options.status ?? ["completed", "error", "aborted"];
+    const states = options.status ?? [
+      "completed",
+      "error",
+      "aborted",
+      "skipped"
+    ];
     if (states.length === 0) return 0;
     let query = `SELECT run_id, definition FROM cf_agents_task_runs WHERE status IN (${states.map(() => "?").join(", ")})`;
     const params: (string | number)[] = [...states];
@@ -1557,6 +1562,38 @@ export class Tasks<
       `;
     }
     await this.#syncWake(head.run_id);
+  }
+
+  /**
+   * @internal End every open run of `lane` as `skipped`, a running attempt
+   * included (its signal aborts; nothing it writes afterwards lands). The
+   * writes happen before the first await, so a caller that reads the lane
+   * right after the call sees them.
+   */
+  async clear(lane: string, reason?: string): Promise<void> {
+    if (this.lifecycle.status() !== "started") await this.lifecycle.ready();
+    const now = Date.now();
+    const rows = this.#store.sql<TaskRunRow>`
+      UPDATE cf_agents_task_runs
+      SET status = 'skipped', cancel_reason = ${reason ?? null},
+          generation = NULL, next_at = NULL, settled_at = ${now},
+          updated_at = ${now}
+      WHERE lane = ${lane} AND status IN ('pending', 'running')
+      RETURNING *
+    `;
+    for (const row of rows) {
+      this.#active
+        .get(row.run_id)
+        ?.controller.abort(new TaskCancellation(reason));
+    }
+    for (const row of rows) {
+      this.#emit("task:skipped", {
+        runId: row.run_id,
+        definition: row.definition,
+        reason: reason ?? null
+      });
+      await this.#finishTerminalSettlement(row.run_id, row);
+    }
   }
 
   /**

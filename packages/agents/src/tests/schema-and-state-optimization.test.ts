@@ -96,7 +96,7 @@ const EXPECTED_SCHEMA_DDL = [
         definition TEXT NOT NULL,
         input TEXT,
         status TEXT NOT NULL CHECK (status IN (
-          'pending', 'running', 'completed', 'error', 'aborted'
+          'pending', 'running', 'completed', 'error', 'aborted', 'skipped'
         )),
         result TEXT,
         error_name TEXT,
@@ -114,7 +114,9 @@ const EXPECTED_SCHEMA_DDL = [
         created_at INTEGER NOT NULL,
         started_at INTEGER,
         updated_at INTEGER NOT NULL,
-        settled_at INTEGER
+        settled_at INTEGER,
+        lane TEXT,
+        seq INTEGER
       ) WITHOUT ROWID`,
   `CREATE TABLE cf_agents_task_steps (
         run_id TEXT NOT NULL,

@@ -13,6 +13,7 @@ export type TaskEventType =
   | "task:completed"
   | "task:failed"
   | "task:cancelled"
+  | "task:skipped"
   | "task:deleted";
 
 /**

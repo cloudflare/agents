@@ -232,7 +232,7 @@ describe("Tasks schema 2", () => {
           (await instance.tasks.getByIdempotencyKey("key-done"))?.runId
         ).toBe("done");
         expect(await state.storage.get("cf_agents:tasks_schema_version")).toBe(
-          2
+          3
         );
         await instance.tasks.cancel("sleeping");
       }

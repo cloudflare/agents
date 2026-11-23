@@ -15,7 +15,7 @@ const RUNS_COLUMNS = `
         definition TEXT NOT NULL,
         input TEXT,
         status TEXT NOT NULL CHECK (status IN (
-          'pending', 'running', 'completed', 'error', 'aborted'
+          'pending', 'running', 'completed', 'error', 'aborted', 'skipped'
         )),
         result TEXT,
         error_name TEXT,
@@ -172,23 +172,28 @@ export class TaskStore {
   }
 
   /**
-   * Schema 1 to 2: the run's `state` column becomes `status`, with
-   * `waiting` folded into `pending` (its `wait_reason` says why), `failed`
-   * renamed `error` and `cancelled` renamed `aborted`. One transaction.
+   * Rebuild `cf_agents_task_runs` in the current shape, in one transaction,
+   * keeping every run. From schema 1 the `state` column becomes `status`,
+   * with `waiting` folded into `pending` (its `wait_reason` says why),
+   * `failed` renamed `error` and `cancelled` renamed `aborted`. From 1 or 2
+   * the table gains lanes (`lane`, `seq`) and the `skipped` status.
    */
-  migrateStatuses(): void {
-    const exists =
-      this.sql<{ n: number }>`
-        SELECT COUNT(*) AS n FROM sqlite_master
-        WHERE type = 'table' AND name = 'cf_agents_task_runs'
-      `[0].n > 0;
-    if (!exists) return;
-    const hasState =
-      this.sql<{ n: number }>`
-        SELECT COUNT(*) AS n FROM pragma_table_info('cf_agents_task_runs')
-        WHERE name = 'state'
-      `[0].n > 0;
-    if (!hasState) return;
+  rebuildRuns(): void {
+    const columns = new Set(
+      this.sql<{ name: string }>`
+        SELECT name FROM pragma_table_info('cf_agents_task_runs')
+      `.map((row) => row.name)
+    );
+    if (columns.size === 0) return;
+    const status = columns.has("state")
+      ? `CASE state
+           WHEN 'waiting' THEN 'pending'
+           WHEN 'failed' THEN 'error'
+           WHEN 'cancelled' THEN 'aborted'
+           ELSE state
+         END`
+      : "status";
+    const lane = columns.has("lane") ? "lane, seq" : "NULL, NULL";
     this.#storage.transactionSync(() => {
       const exec = (query: string) => {
         try {
@@ -198,47 +203,28 @@ export class TaskStore {
         }
       };
       exec(
-        `CREATE TABLE cf_agents_task_runs_v2 (${RUNS_COLUMNS}) WITHOUT ROWID`
+        `CREATE TABLE cf_agents_task_runs_next (${RUNS_COLUMNS}) WITHOUT ROWID`
       );
       exec(`
-        INSERT INTO cf_agents_task_runs_v2 (
+        INSERT INTO cf_agents_task_runs_next (
           run_id, definition, input, status, result, error_name,
           error_message, status_message, metadata, idempotency_key, retain,
           attempt, generation, next_at, wait_reason, cancel_requested,
-          cancel_reason, created_at, started_at, updated_at, settled_at
+          cancel_reason, created_at, started_at, updated_at, settled_at,
+          lane, seq
         )
         SELECT
-          run_id, definition, input,
-          CASE state
-            WHEN 'waiting' THEN 'pending'
-            WHEN 'failed' THEN 'error'
-            WHEN 'cancelled' THEN 'aborted'
-            ELSE state
-          END,
+          run_id, definition, input, ${status},
           result, error_name, error_message, status_message, metadata,
           idempotency_key, retain, attempt, generation, next_at, wait_reason,
           cancel_requested, cancel_reason, created_at, started_at, updated_at,
-          settled_at
+          settled_at, ${lane}
         FROM cf_agents_task_runs`);
       exec(`DROP TABLE cf_agents_task_runs`);
-      exec(`ALTER TABLE cf_agents_task_runs_v2 RENAME TO cf_agents_task_runs`);
+      exec(
+        `ALTER TABLE cf_agents_task_runs_next RENAME TO cf_agents_task_runs`
+      );
     });
-  }
-
-  /** Schema 2 to 3: a run may belong to a lane (`lane`, arrival `seq`). */
-  addLaneColumns(): void {
-    const columns = new Set(
-      this.sql<{ name: string }>`
-        SELECT name FROM pragma_table_info('cf_agents_task_runs')
-      `.map((row) => row.name)
-    );
-    if (columns.size === 0) return;
-    if (!columns.has("lane")) {
-      this.write("ALTER TABLE cf_agents_task_runs ADD COLUMN lane TEXT", []);
-    }
-    if (!columns.has("seq")) {
-      this.write("ALTER TABLE cf_agents_task_runs ADD COLUMN seq INTEGER", []);
-    }
   }
 
   ensureTables(): void {
@@ -354,6 +340,13 @@ export class TaskStore {
         return {
           ...base,
           status: "aborted",
+          ...(row.cancel_reason !== null ? { reason: row.cancel_reason } : {}),
+          settledAt: row.settled_at ?? row.updated_at
+        };
+      case "skipped":
+        return {
+          ...base,
+          status: "skipped",
           ...(row.cancel_reason !== null ? { reason: row.cancel_reason } : {}),
           settledAt: row.settled_at ?? row.updated_at
         };

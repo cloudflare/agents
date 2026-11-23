@@ -204,7 +204,9 @@ export type TaskStatus =
   | "running"
   | "completed"
   | "error"
-  | "aborted";
+  | "aborted"
+  /** @internal Ended without running to the end: its lane was cleared. */
+  | "skipped";
 
 /** Why a pending run that already ran waits (`wakeAt`). */
 export type TaskWaitReason = "sleep" | "retry";
@@ -319,6 +321,15 @@ export type TaskRunSnapshot<Output extends TaskValue> =
       runId: string;
       definition: string;
       status: "aborted";
+      reason?: string;
+      createdAt: number;
+      settledAt: number;
+      metadata?: Record<string, TaskJson>;
+    }
+  | {
+      runId: string;
+      definition: string;
+      status: "skipped";
       reason?: string;
       createdAt: number;
       settledAt: number;
