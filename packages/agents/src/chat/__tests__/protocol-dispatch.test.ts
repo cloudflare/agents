@@ -19,7 +19,7 @@ import type { ResumeHandshake } from "../resume-handshake";
 type Call = [string, ...unknown[]];
 
 /** A host that records every call, with fakes for the core parts it uses. */
-function recordingHost() {
+function recordingHost(endedFrame: string | null = null) {
   const calls: Call[] = [];
   const turns = {
     cancel: async (id: string) => {
@@ -75,9 +75,9 @@ function recordingHost() {
     handleResumeAck: async (connection: Connection, id: string) => {
       calls.push(["resume.ack", connection.id, id]);
     },
-    sendEnded: (connection: Connection, id: string) => {
-      calls.push(["resume.ended", connection.id, id]);
-      return false;
+    endedFrame: (id: string) => {
+      calls.push(["resume.endedFrame", id]);
+      return endedFrame;
     }
   };
   const stored = new Map<string, unknown>();
@@ -357,12 +357,50 @@ describe("dispatchChatProtocol", () => {
       send({ type: CHAT_MESSAGE_TYPES.CHAT_REQUEST_CANCEL, id: "r1" }),
       host
     );
+    // Whether it had ended is read before the stop: a request the stop
+    // ends sends its own terminal, and nothing is sent twice.
     expect(calls).toEqual([
+      ["resume.endedFrame", "r1"],
       ["turns.cancel", "r1"],
-      // A request that already ended while the tab was away gets its end.
-      ["resume.ended", connection.id, "r1"],
       ["emit", "message:cancel", { requestId: "r1" }]
     ]);
+  });
+
+  it("sends nothing more when the stop itself ended the request", async () => {
+    // The stop's own work outlasts the turn (AIChatAgent awaits recovery
+    // bookkeeping): by the time it returns, the turn's terminal is
+    // recorded. The tab already got that terminal; it must not get it twice.
+    const end = JSON.stringify({ id: "r1", done: true, outcome: "aborted" });
+    let recorded: string | null = null;
+    const { host } = recordingHost();
+    const handshake = host.resumeHandshake() as unknown as {
+      endedFrame: (id: string) => string | null;
+    };
+    handshake.endedFrame = () => recorded;
+    (
+      host.turns as unknown as { cancel: (id: string) => Promise<void> }
+    ).cancel = async () => {
+      recorded = end;
+    };
+    sent.length = 0;
+    await dispatchChatProtocol(
+      connection,
+      send({ type: CHAT_MESSAGE_TYPES.CHAT_REQUEST_CANCEL, id: "r1" }),
+      host
+    );
+    expect(sent).toEqual([]);
+  });
+
+  it("tells the stopping tab how a request that had already ended ended", async () => {
+    const end = JSON.stringify({ id: "r1", done: true, outcome: "aborted" });
+    const { host } = recordingHost(end);
+    sent.length = 0;
+    await dispatchChatProtocol(
+      connection,
+      send({ type: CHAT_MESSAGE_TYPES.CHAT_REQUEST_CANCEL, id: "r1" }),
+      host
+    );
+    expect(sent).toEqual([end]);
   });
 
   it("stops the continuation a tab waits on by its connection", async () => {

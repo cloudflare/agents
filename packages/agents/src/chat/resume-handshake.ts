@@ -233,41 +233,47 @@ export class ResumeHandshake {
   }
 
   /**
-   * Tell `connection` how `requestId` ended, if its end was recorded (a
-   * terminal the host broadcast, kept durably in the recent terminals; a
-   * recovery that takes a request over records its end). Nothing for the
-   * active stream's request, for one whose terminal frames are still held
-   * behind its transcript, or for one with no recorded end. Marked
-   * `replay`: the request ended while the tab was away.
+   * Tell `connection` how `requestId` ended ({@link endedFrame}).
    *
    * @returns Whether a terminal frame was sent.
    */
   sendEnded(connection: Connection, requestId: string): boolean {
+    const frame = this.endedFrame(requestId);
+    return frame !== null && sendIfOpen(connection, frame);
+  }
+
+  /**
+   * The frame that tells a tab how `requestId` ended, if its end was
+   * recorded (a terminal the host broadcast, kept durably in the recent
+   * terminals; a recovery that takes a request over records its end).
+   * `null` for the active stream's request, for one whose terminal frames
+   * are still held behind its transcript, for one with no recorded end, and
+   * for a "recovering" one, which has not ended. Marked `replay`: the
+   * request ended while the tab was away.
+   */
+  endedFrame(requestId: string): string | null {
     const { resumableStream } = this.host;
     if (
       (resumableStream.hasActiveStream() &&
         resumableStream.activeRequestId === requestId) ||
       this.host.holdsTerminalFrames?.(requestId)
     ) {
-      return false;
+      return null;
     }
     const ended = this.host.recentTerminal?.([requestId]);
-    if (!ended) return false;
+    if (!ended || ended.outcome === "recovering") return null;
     const messageIds =
       ended.messageIds ?? resumableStream.getOriginMessageIds(requestId);
-    return sendIfOpen(
-      connection,
-      JSON.stringify({
-        body: ended.body,
-        done: true,
-        id: requestId,
-        type: this.host.responseMessageType,
-        replay: true,
-        ...(ended.error && { error: true }),
-        ...(messageIds && { messageIds }),
-        ...(ended.outcome !== undefined && { outcome: ended.outcome })
-      })
-    );
+    return JSON.stringify({
+      body: ended.body,
+      done: true,
+      id: requestId,
+      type: this.host.responseMessageType,
+      replay: true,
+      ...(ended.error && { error: true }),
+      ...(messageIds && { messageIds }),
+      ...(ended.outcome !== undefined && { outcome: ended.outcome })
+    });
   }
 
   private _sendResumeNone(
