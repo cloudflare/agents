@@ -601,7 +601,7 @@ export class Tasks<
   async #dispatchRun(runId: string): Promise<LifecycleJobOutcome> {
     // A held lane's run (or one queued behind its head) waits for
     // releaseLane() or its head's settle to wake it again.
-    if (!this.#laneAllows(runId)) return undefined;
+    if (!this.#laneAllows(this.#store.getRun(runId))) return undefined;
     const active = this.#liveAttempt(runId);
     if (active) {
       // A live attempt in this isolate; push the claim backstop forward so
@@ -1226,11 +1226,11 @@ export class Tasks<
    */
   async #executeRun(runId: string, byOwnWake = false): Promise<void> {
     if (this.#liveAttempt(runId)) return;
-    if (!this.#laneAllows(runId)) return;
     // Read now: the caller that passed it may finish before the claim lands.
     const local = this.#locals.get(runId);
     const row = this.#store.getRun(runId);
     if (!row || TERMINAL_STATUSES.has(row.status)) return;
+    if (!this.#laneAllows(row)) return;
 
     const now = Date.now();
     if (row.cancel_requested === 1) {
@@ -1291,10 +1291,10 @@ export class Tasks<
     // outcome is read from the row after the claim.
     if (!byOwnWake || this.lifecycle.routes.source) {
       await this.#syncWake(runId);
+      // A cancel() that ran during that await found no live attempt and
+      // settled the run itself. The claim is void then: start no handler.
+      if (this.#store.getRun(runId)?.generation !== generation) return;
     }
-    // A cancel() that ran during that await found no live attempt and
-    // settled the run itself. The claim is void then: start no handler.
-    if (this.#store.getRun(runId)?.generation !== generation) return;
     const capped = this.#registeredOptions.get(row.definition)?.maxAttempts;
     if (capped !== undefined) {
       // The attempt counts only once it is durable: a reset before the first
@@ -1804,7 +1804,7 @@ export class Tasks<
     if (!row || !onStatus) return;
     try {
       await this.lifecycle.runInHostContext(() =>
-        onStatus(this.#store.rowToSnapshot(row))
+        onStatus(this.#store.rowToRecord(row))
       );
     } catch (error) {
       console.error(`[tasks] onStatus of "${row.definition}" failed`, error);
@@ -1826,9 +1826,7 @@ export class Tasks<
     if (!onStatus || row.notified === row.status) return record;
     this.#reporting.add(runId);
     try {
-      await this.lifecycle.runInHostContext(() =>
-        onStatus(this.#store.rowToSnapshot(row))
-      );
+      await this.lifecycle.runInHostContext(() => onStatus(record));
     } catch (error) {
       console.error(`[tasks] onStatus of "${row.definition}" failed`, error);
       await this.#pushReportJob(REPORT_RETRY_MS);
@@ -1941,11 +1939,10 @@ export class Tasks<
    * Whether a run may start now: a run outside a lane always may; a lane
    * run only when it is its lane's head and the lane is not held.
    */
-  #laneAllows(runId: string): boolean {
-    const row = this.#store.getRun(runId);
+  #laneAllows(row: TaskRunRow | undefined): boolean {
     if (row?.lane == null) return true;
     if (this.#heldLanes.has(row.lane)) return false;
-    return this.#store.laneHead(row.lane)?.run_id === runId;
+    return this.#store.laneHead(row.lane)?.run_id === row.run_id;
   }
 
   #hasUnreported(): boolean {

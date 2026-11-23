@@ -448,8 +448,9 @@ export interface TaskRegisterOptions {
    * an attempt claims it, and when it ends. The terminal call happens at
    * least once: a throw or a reset before it returns delivers it again
    * (30 s later after a throw), and `wait()` resolves only after it returned.
+   * It gets the run's record as stored at the call.
    */
-  onStatus?(snapshot: TaskRunSnapshot<TaskValue>): void | Promise<void>;
+  onStatus?(record: TaskRecord): void | Promise<void>;
   /**
    * Attempts a run may start before it ends `error`: an attempt is counted,
    * and committed, before the handler runs. Omitted: no limit.

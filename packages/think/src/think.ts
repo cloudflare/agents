@@ -5465,7 +5465,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       (input, step) => this._runSubmission(input as SubmissionPayload, step),
       {
         maxAttempts: 3,
-        onStatus: (snapshot) => this._onSubmissionStatus(snapshot.runId)
+        onStatus: (record) => this._onSubmissionStatus(record)
       }
     );
   }
@@ -5561,9 +5561,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * workflow event first: Tasks repeats a terminal report a reset cut
    * short, and the queue item's stable id makes the repeat a replace.
    */
-  private async _onSubmissionStatus(submissionId: string): Promise<void> {
-    const record = this._submissionRecord(submissionId);
-    if (!record) return;
+  private async _onSubmissionStatus(record: TaskRecord): Promise<void> {
+    const submissionId = record.runId;
     const inspection = submissionInspection(record);
     if (record.status === "pending" && record.attempt === 0) {
       this._emit("submission:create", {
@@ -5601,18 +5600,18 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         error: inspection.error
       });
     }
-    await this.keepAliveWhile(async () => {
-      const hook = { agent: this, ended: false };
-      try {
-        await submissionStatusHookContext.run(hook, () =>
-          this.onSubmissionStatus(inspection)
-        );
-      } catch (error) {
-        console.error("[Think] onSubmissionStatus failed", error);
-      } finally {
-        hook.ended = true;
-      }
-    });
+    // No keep-alive hold: Tasks reports inside the request or alarm that
+    // moved the submission (submit, an attempt, cancel, the report job).
+    const hook = { agent: this, ended: false };
+    try {
+      await submissionStatusHookContext.run(hook, () =>
+        this.onSubmissionStatus(inspection)
+      );
+    } catch (error) {
+      console.error("[Think] onSubmissionStatus failed", error);
+    } finally {
+      hook.ended = true;
+    }
   }
 
   /**
