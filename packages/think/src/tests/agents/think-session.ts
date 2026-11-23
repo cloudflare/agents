@@ -9944,6 +9944,41 @@ export class ThinkProgrammaticTestAgent extends Think {
     }
   }
 
+  /**
+   * Record a completed turn's structured output for a running submission
+   * whose metadata leaves less room than the output takes, and report what
+   * its progress kept.
+   */
+  async recordLargeTurnOutputForTest(
+    submissionId: string,
+    outputChars: number
+  ): Promise<{ resultStatus?: string; hasOutput: boolean }> {
+    await this.insertSubmissionForTest({
+      submissionId,
+      status: "running",
+      requestId: submissionId,
+      metadata: { big: "m".repeat(1_850_000) }
+    });
+    (
+      this as unknown as {
+        _recordSubmissionTurnResult(
+          requestId: string,
+          result: { status: "completed"; output?: unknown }
+        ): void;
+      }
+    )._recordSubmissionTurnResult(submissionId, {
+      status: "completed",
+      output: { text: "o".repeat(outputChars) }
+    });
+    const progress = this.tasks.peek(submissionId)?.metadata?.[PROGRESS_KEY] as
+      | { resultStatus?: string; output?: unknown }
+      | undefined;
+    return {
+      resultStatus: progress?.resultStatus,
+      hasOutput: progress?.output !== undefined
+    };
+  }
+
   /** A submission's run result as stored. */
   async submissionResultForTest(submissionId: string): Promise<unknown> {
     return this.tasks.peek(submissionId)?.result ?? null;

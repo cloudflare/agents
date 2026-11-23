@@ -119,6 +119,10 @@ type ThinkSubmissionTestStub = {
     limit?: number;
   }): Promise<ThinkSubmissionInspection[]>;
   submissionResultForTest(submissionId: string): Promise<unknown>;
+  recordLargeTurnOutputForTest(
+    submissionId: string,
+    outputChars: number
+  ): Promise<{ resultStatus?: string; hasOutput: boolean }>;
   parkSubmissionForTest(
     submissionId: string,
     progress: Record<string, unknown>
@@ -2173,6 +2177,56 @@ describe("Think durable submissions", () => {
     expect(Object.keys(inspected?.metadata ?? {}).length).toBeGreaterThan(
       17_000
     );
+  });
+
+  it("moves legacy metadata that used Think's progress key, and keeps a finished one's fields whole", async () => {
+    const agent = await freshAgent();
+    const now = Date.now();
+    await agent.seedLegacySubmissionTableForTest([
+      {
+        // The app's `__cf_progress` field was never readable back, so it
+        // frees no room when dropped.
+        submissionId: "legacy-progress-key",
+        status: "completed",
+        metadataJson: JSON.stringify({
+          __cf_progress: "p".repeat(900_000),
+          a: "a".repeat(600_000),
+          b: "b".repeat(500_000)
+        }),
+        createdAt: now - 2_000,
+        completedAt: now - 1_500
+      },
+      {
+        // Finished: it never records progress again, so it needs no room.
+        submissionId: "legacy-aborted-near-limit",
+        status: "aborted",
+        metadataJson: JSON.stringify({ big: "m".repeat(1_850_000) }),
+        createdAt: now - 1_000,
+        completedAt: now - 500
+      }
+    ]);
+    await agent.recoverSubmissionsForTest();
+    expect(await agent.hasLegacySubmissionTableForTest()).toBe(false);
+    const progressKey = await agent.inspectSubmissionForTest(
+      "legacy-progress-key"
+    );
+    expect(progressKey?.status).toBe("completed");
+    expect(Object.keys(progressKey?.metadata ?? {})).toEqual(["a", "b"]);
+    const aborted = await agent.inspectSubmissionForTest(
+      "legacy-aborted-near-limit"
+    );
+    expect(aborted?.status).toBe("aborted");
+    expect(String(aborted?.metadata?.big).length).toBe(1_850_000);
+  });
+
+  it("records a turn's result without an output its metadata has no room for", async () => {
+    const agent = await freshAgent();
+    await expect(
+      agent.recordLargeTurnOutputForTest("sub-large-output", 200_000)
+    ).resolves.toEqual({ resultStatus: "completed", hasOutput: false });
+    await expect(
+      agent.recordLargeTurnOutputForTest("sub-small-output", 1_000)
+    ).resolves.toEqual({ resultStatus: "completed", hasOutput: true });
   });
 
   it("lists the running submission when newer ones wait behind it", async () => {

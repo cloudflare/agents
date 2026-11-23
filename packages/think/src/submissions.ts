@@ -340,8 +340,28 @@ export function submissionSettlement(
 
 const utf8 = new TextEncoder();
 
-/** Room a migrated open submission keeps for the progress it records. */
+/**
+ * Room a migrated open submission keeps for the progress it records (ids
+ * and timestamps; a structured output too large for the room is left to
+ * the run's result, see `progressOutputFits`).
+ */
 const PROGRESS_HEADROOM_BYTES = 100_000;
+
+/**
+ * Whether a turn's structured output still fits in a submission's metadata
+ * beside what it holds. One that does not is not recorded as progress: the
+ * run's result carries it once the submission settles.
+ */
+export function progressOutputFits(
+  metadata: Record<string, TaskJson> | undefined,
+  output: unknown
+): boolean {
+  if (output === undefined) return true;
+  return (
+    jsonBytes(metadata ?? {}) + jsonBytes(output) + 16 <=
+    MAX_FRAMEWORK_METADATA_BYTES
+  );
+}
 
 function jsonBytes(value: unknown): number {
   return utf8.encode(JSON.stringify(value)).byteLength;
@@ -393,15 +413,20 @@ export function legacySubmissionImport(row: LegacySubmissionRow): {
   };
   // Released versions had no limit but the row's: what a run cannot hold
   // is dropped (and logged), so the submission itself still moves.
-  let appFields =
+  let appFields: Record<string, TaskJson> =
     metadata !== null &&
     typeof metadata === "object" &&
     !Array.isArray(metadata)
-      ? (metadata as Record<string, TaskJson>)
+      ? { ...(metadata as Record<string, TaskJson>) }
       : {};
+  // Think's own progress takes this key; an app field of that name was
+  // never readable back, and must not count as room.
+  delete appFields[SUBMISSION_PROGRESS_KEY];
   // An open submission still records its progress as it runs: leave room.
+  // A finished one never writes again.
+  const open = row.status === "pending" || row.status === "running";
   const budget =
-    MAX_FRAMEWORK_METADATA_BYTES - (completed ? 0 : PROGRESS_HEADROOM_BYTES);
+    MAX_FRAMEWORK_METADATA_BYTES - (open ? PROGRESS_HEADROOM_BYTES : 0);
   let bytes = jsonBytes({ ...appFields, [SUBMISSION_PROGRESS_KEY]: progress });
   if (bytes > budget) {
     // Drop the largest fields first (key and value, as stored), keeping
@@ -412,7 +437,6 @@ export function legacySubmissionImport(row: LegacySubmissionRow): {
         size: jsonBytes(key) + jsonBytes(value) + 2
       }))
       .sort((a, b) => b.size - a.size);
-    appFields = { ...appFields };
     const dropped: string[] = [];
     for (const { key, size } of sized) {
       if (bytes <= budget) break;

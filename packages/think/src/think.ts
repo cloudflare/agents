@@ -314,6 +314,7 @@ import {
   submissionRow,
   submissionSettlement,
   submissionTaskStatuses,
+  progressOutputFits,
   type SubmissionResult,
   TERMINAL_SUBMISSION_STATUSES,
   type CancelSubmissionResult,
@@ -8259,9 +8260,17 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       if (messageId) this._recordAbortedSubmissionMessage(requestId, messageId);
       return;
     }
+    const output = result.status === "completed" ? result.output : undefined;
+    // This write shares the stream's settling transaction, so it must not
+    // throw: an output too large to keep beside the metadata is left to the
+    // run's result.
     this._updateSubmissionProgress(row.submission_id, {
       resultStatus: result.status,
-      output: result.status === "completed" ? result.output : undefined,
+      output:
+        output !== undefined &&
+        progressOutputFits(this.tasks.peek(row.submission_id)?.metadata, output)
+          ? output
+          : undefined,
       ...(messageId !== undefined && { messageId })
     });
   }
