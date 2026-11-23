@@ -240,6 +240,8 @@ Or store an already-produced summary:
 await session.addCompaction(summary, fromMessageId, toMessageId);
 ```
 
+Some reads stop before the root: a byte-budgeted `getRecentHistory()`, and any read of a path longer than 10,001 rows. Such a read still applies an overlay that starts before the rows it read and ends among them. The summary comes first, then the rows after the overlay. Messages older than the overlay's start, such as the head the compaction function kept, are not in that read, and `getRecentHistory()` reports `truncated: true` when they exist.
+
 Sessions stamps each message with a token estimate when the row is written. `compactAfter()` gates on that O(1) aggregate and never reads the transcript to decide whether to compact. Auto-compaction failures are non-fatal: they log, emit `session:error`, and leave the transcript alone.
 
 To trim a transcript before handing it to a model, `truncateOlderMessages` is exported from [`agents/chat`](./chat-agents.md), not from `agents/sessions`. If your tools define `toModelOutput`, a truncated tool output may no longer match the tool's output schema. In that case, pass `toolOutputs: false` to `truncateOlderMessages` and call `truncateOlderToolResults` on the result of `convertToModelMessages`, which truncates what the model reads after `toModelOutput` has run. Provider-executed tool outputs are never truncated.
