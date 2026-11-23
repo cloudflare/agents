@@ -1194,8 +1194,12 @@ export class ChatRecoveryEngine {
   endStopped(incident: ChatRecoveryIncident): void {
     const ids = new Set([incident.recoveryRootRequestId, incident.requestId]);
     for (const id of ids) {
-      if (id !== undefined && this.#stoppedRequestIds.has(id)) {
+      if (id === undefined || !this.#stoppedRequestIds.has(id)) continue;
+      // A frame that fails to go out must not stop the cleanup around it.
+      try {
         this.adapter.turns?.endRequest?.(id, "aborted");
+      } catch (error) {
+        console.error(`[chat] failed to end stopped request ${id}`, error);
       }
     }
   }

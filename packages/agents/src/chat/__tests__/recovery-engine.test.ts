@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   ChatRecoveryEngine,
   buildChatRecoveryExhaustedContext,
@@ -1864,6 +1864,26 @@ describe("ChatRecoveryEngine.recoverInterruptedTurn (fake adapter + wake hooks)"
       h.engine.recoverInterruptedTurn(h.turn, h.wake)
     ).rejects.toThrow("storage failed");
     expect(ended).toEqual(["aborted:req-1"]);
+  });
+
+  it("keeps the storage failure when ending the stopped request fails too", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const h = makeHarness();
+    h.adapter.turns = {
+      attemptScope: new AsyncLocalStorage(),
+      endRequest: () => {
+        throw new Error("send failed");
+      }
+    } as unknown as ChatRecoveryTurnBindings;
+    h.wake.persistOrphanedStream = () =>
+      Promise.reject(new Error("storage failed"));
+    await h.engine.cancelScheduledRecovery("req-1");
+
+    await expect(
+      h.engine.recoverInterruptedTurn(h.turn, h.wake)
+    ).rejects.toThrow("storage failed");
+    expect(error).toHaveBeenCalled();
+    error.mockRestore();
   });
 
   it("ends a wake whose turn the user stopped as stopped, even with the budget spent", async () => {
