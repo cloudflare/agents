@@ -30,6 +30,7 @@ import { TaskStore } from "./store";
 import { createTaskStepEngine } from "./engine-port";
 import { parseTaskDuration } from "./duration";
 import { MissingTaskDefinitionError } from "./errors";
+import { TaskSettlement } from "./settlement";
 import type { TaskEventType, TasksOptions } from "./options";
 import {
   AttemptSupersededError,
@@ -41,7 +42,13 @@ import {
   type TaskStepEngine,
   type ResolvedStepPolicy
 } from "./replay";
-import { deserializeTaskValue, serializeTaskValue } from "./serialization";
+import {
+  deserializeTaskValue,
+  MAX_FRAMEWORK_METADATA_BYTES,
+  MAX_PARTED_INPUT_BYTES,
+  MAX_SERIALIZED_BYTES,
+  serializeTaskValue
+} from "./serialization";
 import type {
   Task,
   TaskCallbacks,
@@ -49,6 +56,9 @@ import type {
   TaskInput,
   TaskJson,
   TaskOutput,
+  TaskRegisterOptions,
+  TaskRecord,
+  TaskFrameworkDefinition,
   TaskReceipt,
   TaskRunOptions,
   TaskRunRow,
@@ -104,8 +114,11 @@ export function setTaskRoutedMemoryLimitHandler(
 }
 
 const FIBER_SCHEMA_VERSION_KEY = "cf_agents:tasks_schema_version";
-/** 2 renames the run statuses and adds `cf_agents_task_checkpoint`. */
-const CURRENT_FIBER_SCHEMA_VERSION = 2;
+/**
+ * 2 renames the run statuses and adds `cf_agents_task_checkpoint`; 3 adds
+ * lanes and `skipped`.
+ */
+const CURRENT_FIBER_SCHEMA_VERSION = 3;
 
 const DEFAULT_STEP_POLICY: ResolvedStepPolicy = {
   retryLimit: 5,
@@ -129,6 +142,14 @@ const MAX_DEFINITION_NAME_LENGTH = 256;
  * job id space.
  */
 const WAKE_JOB_PREFIX = "task:";
+/** The job that delivers terminal reports a reset or a throw cut short. */
+const REPORT_JOB_ID = "tasks:reports";
+const REPORT_JOB_FN = "reports";
+/** Terminal reports one report job delivers before it hands on to the next. */
+const REPORT_BATCH = 100;
+
+/** Wait before delivering again a report whose `onStatus` threw. */
+const REPORT_RETRY_MS = 30_000;
 /** Normal Task deadline dispatch. */
 const WAKE_JOB_FN = "wake";
 /**
@@ -153,7 +174,8 @@ const DISPATCH_BUDGET_MS = 5_000;
 const TERMINAL_STATUSES: ReadonlySet<TaskStatus> = new Set([
   "completed",
   "error",
-  "aborted"
+  "aborted",
+  "skipped"
 ]);
 
 /**
@@ -218,7 +240,9 @@ export type TaskListOptions = {
 
 /** Filters accepted by {@link Tasks.delete}. */
 export type TaskDeleteOptions = {
-  status?: Array<"completed" | "error" | "aborted">;
+  /** Only runs of this definition. */
+  definition?: string;
+  status?: Array<"completed" | "error" | "aborted" | "skipped">;
   settledBefore?: Date;
   limit?: number;
 };
@@ -240,7 +264,7 @@ export class Tasks<
   Handlers extends TaskHandlers = TaskCallbacks
 > extends LifecycleCapability {
   readonly #definitions: TaskHandlers;
-  readonly #registered = new Map<string, TaskCallbacks[string]>();
+  readonly #registered = new Map<string, TaskFrameworkDefinition>();
   readonly #active = new Map<string, ActiveAttempt>();
   /**
    * `local` of each run accepted in this isolate whose caller still waits
@@ -248,6 +272,17 @@ export class Tasks<
    * attempt) ends.
    */
   readonly #locals = new Map<string, unknown>();
+  /** Options of definitions registered with any. */
+  readonly #registeredOptions = new Map<string, TaskRegisterOptions>();
+  /** Callers of {@link wait}, by run id; removed when they resolve. */
+  readonly #waiters = new Map<
+    string,
+    Set<{ createdAt: number; resolve: (record: TaskRecord) => void }>
+  >();
+  /** Runs whose terminal report is being delivered in this isolate. */
+  readonly #reporting = new Set<string>();
+  /** Lanes {@link holdLane} holds in this isolate. */
+  readonly #heldLanes = new Set<string>();
   #storeInstance: TaskStore | undefined;
   readonly #stepDefaults: ResolvedStepPolicy;
   readonly #onError: ((error: unknown) => void | Promise<void>) | undefined;
@@ -347,7 +382,11 @@ export class Tasks<
    * registered, which is always a real conflict: this method runs exactly
    * once per name per Tasks construction.
    */
-  register(name: string, definition: TaskCallbacks[string]): void {
+  register(
+    name: string,
+    definition: TaskFrameworkDefinition,
+    options: TaskRegisterOptions = {}
+  ): void {
     if (typeof name !== "string" || name.length === 0) {
       throw new Error("Task definition names must be non-empty strings");
     }
@@ -367,6 +406,9 @@ export class Tasks<
       );
     }
     this.#registered.set(name, definition);
+    if (options.onStatus || options.maxAttempts !== undefined) {
+      this.#registeredOptions.set(name, options);
+    }
   }
 
   // ── Starting runs ────────────────────────────────────────────────────────
@@ -443,13 +485,14 @@ export class Tasks<
     const storage = this.lifecycle.storage;
     const version = (await storage.get<number>(FIBER_SCHEMA_VERSION_KEY)) ?? 0;
     if (version < CURRENT_FIBER_SCHEMA_VERSION) {
-      if (version === 1) this.#store.migrateStatuses();
+      if (version >= 1) this.#store.rebuildRuns();
       this.#store.ensureTables();
       await storage.put(FIBER_SCHEMA_VERSION_KEY, CURRENT_FIBER_SCHEMA_VERSION);
     }
     this.#reconcile();
     await this.#syncAllWakes();
     await this.#reviveRoutedWakes();
+    if (this.#hasUnreported()) await this.#pushReportJob();
   }
 
   /**
@@ -483,6 +526,10 @@ export class Tasks<
   async onJob(
     context: LifecycleJobContext
   ): Promise<LifecycleJobOutcome | void> {
+    if (context.job.fn === REPORT_JOB_FN) {
+      await this.#replayReports();
+      return undefined;
+    }
     const timing = isTaskWakeJobPayload(context.job.payload)
       ? context.job.payload
       : undefined;
@@ -556,7 +603,19 @@ export class Tasks<
    * queue job.
    */
   async #dispatchRun(runId: string): Promise<LifecycleJobOutcome> {
-    const active = this.#active.get(runId);
+    // A held lane's run (or one queued behind its head) waits for
+    // releaseLane() or its head's settle to wake it again.
+    const row = this.#store.getRun(runId);
+    if (row && TERMINAL_STATUSES.has(row.status)) {
+      // A wake kept for a terminal report a reset cut short.
+      if (this.#reporting.has(runId)) {
+        return { rescheduleAt: Date.now() + REPORT_RETRY_MS };
+      }
+      await this.#deliverTerminal(runId, row.retain !== 0);
+      return undefined;
+    }
+    if (!this.#laneAllows(row)) return undefined;
+    const active = this.#liveAttempt(runId);
     if (active) {
       // A live attempt in this isolate; push the claim backstop forward so
       // the due job does not hot-loop the alarm while it works.
@@ -576,7 +635,7 @@ export class Tasks<
     const budget = new Promise<"budget">((resolve) => {
       budgetTimer = setTimeout(() => resolve("budget"), DISPATCH_BUDGET_MS);
     });
-    const runAttempt = this.#executeRun(runId);
+    const runAttempt = this.#executeRun(runId, true);
     const attempt = runAttempt.then(() => "settled" as const);
     try {
       // A platform failure inside the budget rejects the race and re-enters
@@ -608,7 +667,7 @@ export class Tasks<
    * facet's own local alarm).
    */
   async #dispatchRoutedRun(runId: string): Promise<LifecycleJobOutcome> {
-    const active = this.#active.get(runId);
+    const active = this.#liveAttempt(runId);
     if (active) {
       this.#refreshClaim(runId);
       return this.#wakeOutcome(runId);
@@ -732,13 +791,25 @@ export class Tasks<
    */
   async #syncWake(
     runId: string,
-    options: { struck?: boolean } = {}
+    options: { struck?: boolean; createdAt?: number } = {}
   ): Promise<boolean> {
-    const rows = this.#store.sql<{ next_at: number | null }>`
-      SELECT next_at FROM cf_agents_task_runs
+    const rows = this.#store.sql<{
+      next_at: number | null;
+      created_at: number;
+    }>`
+      SELECT next_at, created_at FROM cf_agents_task_runs
       WHERE run_id = ${runId}
         AND status IN ('pending', 'running')
     `;
+    // A later run took this id (the earlier one was deleted): its wake is
+    // its own.
+    if (
+      options.createdAt !== undefined &&
+      rows[0] !== undefined &&
+      rows[0].created_at !== options.createdAt
+    ) {
+      return true;
+    }
     const next = rows[0]?.next_at ?? null;
 
     if (this.lifecycle.routes.source) {
@@ -943,10 +1014,10 @@ export class Tasks<
   }
 
   /**
-   * Request cooperative cancellation of one run.
+   * Cancel one run.
    *
-   * A live attempt is aborted and settles as cancelled at its next step
-   * boundary; a parked run settles immediately.
+   * The run settles `aborted` at once; a live attempt's signal aborts, and
+   * nothing it writes afterwards lands.
    *
    * @returns True when a non-terminal run accepted the request.
    */
@@ -955,17 +1026,12 @@ export class Tasks<
     const row = this.#store.getRun(runId);
     if (!row || TERMINAL_STATUSES.has(row.status)) return false;
 
-    const active = this.#active.get(runId);
+    const active = this.#liveAttempt(runId);
     if (active) {
-      const now = Date.now();
-      this.#store.sql`
-        UPDATE cf_agents_task_runs
-        SET cancel_requested = 1, cancel_reason = ${reason ?? null},
-            next_at = ${now}, updated_at = ${now}
-        WHERE run_id = ${runId}
-      `;
+      // Settled now: the attempt's signal aborts, and nothing it writes
+      // afterwards lands (its generation no longer owns the run).
       active.controller.abort(new TaskCancellation(reason));
-      await this.#syncWake(runId);
+      await this.#settleCancelled(runId, active.generation, reason);
       return true;
     }
     // A parked run settles in one write: #settleCancelled's UPDATE records
@@ -983,10 +1049,19 @@ export class Tasks<
    */
   async delete(options: TaskDeleteOptions = {}): Promise<number> {
     await this.lifecycle.ready();
-    const states = options.status ?? ["completed", "error", "aborted"];
+    const states = options.status ?? [
+      "completed",
+      "error",
+      "aborted",
+      "skipped"
+    ];
     if (states.length === 0) return 0;
     let query = `SELECT run_id, definition FROM cf_agents_task_runs WHERE status IN (${states.map(() => "?").join(", ")})`;
     const params: (string | number)[] = [...states];
+    if (options.definition !== undefined) {
+      query += " AND definition = ?";
+      params.push(options.definition);
+    }
     if (options.settledBefore) {
       query += " AND settled_at < ?";
       params.push(options.settledBefore.getTime());
@@ -1031,13 +1106,21 @@ export class Tasks<
       );
     }
 
+    // A framework definition's input may outgrow one row (Think's
+    // submissions carry whole message lists).
     const inputJson = serializeTaskValue(
       input,
-      `input for Task definition "${definition}"`
+      `input for Task definition "${definition}"`,
+      this.#registered.has(definition)
+        ? MAX_PARTED_INPUT_BYTES
+        : MAX_SERIALIZED_BYTES
     );
     const metadataJson = serializeTaskValue(
       options.metadata,
-      `metadata for Task definition "${definition}"`
+      `metadata for Task definition "${definition}"`,
+      this.#registered.has(definition)
+        ? MAX_FRAMEWORK_METADATA_BYTES
+        : MAX_SERIALIZED_BYTES
     );
 
     const byRunId =
@@ -1107,20 +1190,32 @@ export class Tasks<
 
     const runId = options.runId ?? `task_${nanoid()}`;
     const now = Date.now();
+    const lane = options.lane ?? null;
+    const placed = this.#store.placeInput(runId, inputJson);
+    // A run queued behind its lane's open run waits with no deadline (and
+    // no wake job) until that run settles.
+    const queued = lane !== null && this.#store.laneHead(lane) !== undefined;
     this.#store.sql`
       INSERT INTO cf_agents_task_runs
         (run_id, definition, input, status, metadata, idempotency_key, retain,
-         attempt, next_at, cancel_requested, created_at, updated_at)
+         attempt, next_at, cancel_requested, created_at, updated_at, lane, seq,
+         input_parts)
       VALUES
-        (${runId}, ${definition}, ${inputJson}, 'pending', ${metadataJson},
+        (${runId}, ${definition}, ${placed.input}, 'pending', ${metadataJson},
          ${options.idempotencyKey ?? null}, ${options.retain === false ? 0 : 1},
-         0, ${now}, 0, ${now}, ${now})
+         0, ${queued ? null : now}, 0, ${now}, ${now}, ${lane},
+         ${lane === null ? null : this.#store.nextLaneSeq(lane)},
+         ${placed.parts})
     `;
     // Before the wake is published: an attempt this isolate starts from it
     // (the alarm can win the claim) still gets the caller's `local`.
     if (options.local !== undefined && startMode !== "queued") {
       this.#locals.set(runId, options.local);
     }
+    // The run starts only once its `pending` report returned: its wake is
+    // published after it (a reset in between leaves the row's deadline,
+    // which the next start mirrors).
+    await this.#report(runId);
     try {
       await this.#syncWake(runId);
     } catch (error) {
@@ -1153,12 +1248,17 @@ export class Tasks<
   // ── Execution ────────────────────────────────────────────────────────────
 
   /** Claim and drive one due run to its next durable boundary. */
-  async #executeRun(runId: string): Promise<void> {
-    if (this.#active.has(runId)) return;
+  /**
+   * @param byOwnWake - The run's own wake job is dispatching it: that job's
+   *   outcome moves it to the claim deadline, so the claim needs no push.
+   */
+  async #executeRun(runId: string, byOwnWake = false): Promise<void> {
+    if (this.#liveAttempt(runId)) return;
     // Read now: the caller that passed it may finish before the claim lands.
     const local = this.#locals.get(runId);
     const row = this.#store.getRun(runId);
     if (!row || TERMINAL_STATUSES.has(row.status)) return;
+    if (!this.#laneAllows(row)) return;
 
     const now = Date.now();
     if (row.cancel_requested === 1) {
@@ -1191,6 +1291,14 @@ export class Tasks<
       });
     }
 
+    const cap = this.#registeredOptions.get(row.definition)?.maxAttempts;
+    if (cap !== undefined && row.attempt >= cap) {
+      await this.#settleFailed(runId, null, {
+        name: "TaskInterruptedError",
+        message: `Interrupted ${row.attempt} times`
+      });
+      return;
+    }
     const generation = nanoid();
     const attempt = row.attempt + 1;
     this.#store.sql`
@@ -1207,9 +1315,22 @@ export class Tasks<
     // clears the queue row's in-flight marker, so it durably wins over a
     // root dispatch that later returns a stale outcome past its own
     // budget (job-queue's own "newer pushes win" guard on that marker).
-    await this.#syncWake(runId);
-    // A cancel() that ran during that await found no live attempt and
-    // settled the run itself. The claim is void then: start no handler.
+    // A local run its own wake dispatches needs none: the dispatch's
+    // outcome is read from the row after the claim.
+    if (!byOwnWake || this.lifecycle.routes.source) {
+      await this.#syncWake(runId);
+      // A cancel() that ran during that await found no live attempt and
+      // settled the run itself. The claim is void then: start no handler.
+      if (this.#store.getRun(runId)?.generation !== generation) return;
+    }
+    const capped = this.#registeredOptions.get(row.definition)?.maxAttempts;
+    if (capped !== undefined) {
+      // The attempt counts only once it is durable: a reset before the first
+      // I/O would roll the claim back and the same attempt would run again.
+      await this.lifecycle.storage.sync();
+      if (this.#store.getRun(runId)?.generation !== generation) return;
+    }
+    await this.#report(runId);
     if (this.#store.getRun(runId)?.generation !== generation) return;
 
     const controller = new AbortController();
@@ -1234,8 +1355,25 @@ export class Tasks<
     try {
       await promise;
     } finally {
-      this.#active.delete(runId);
+      // A run reusing this id may have started its own attempt since.
+      if (this.#active.get(runId)?.generation === generation) {
+        this.#active.delete(runId);
+      }
     }
+  }
+
+  /**
+   * The attempt running `runId` in this isolate, if it still owns the run:
+   * one left behind by a cancel, or by a delete and a new run under the
+   * same id, does not count.
+   */
+  #liveAttempt(runId: string): ActiveAttempt | undefined {
+    const active = this.#active.get(runId);
+    if (!active) return undefined;
+    if (this.#store.getRun(runId)?.generation === active.generation) {
+      return active;
+    }
+    return undefined;
   }
 
   /** Run one claimed attempt and persist its outcome, generation-fenced. */
@@ -1250,7 +1388,7 @@ export class Tasks<
     local: unknown
   ): Promise<void> {
     const runId = row.run_id;
-    const input = deserializeTaskValue(row.input);
+    const input = deserializeTaskValue(this.#store.inputJson(row));
     const engine = this.#createEngine(
       runId,
       row.definition,
@@ -1263,6 +1401,9 @@ export class Tasks<
       startsLive: attempt === 1,
       interrupted,
       local,
+      id: runId,
+      attempt,
+      signal: controller.signal,
       createdAt: row.created_at,
       checkpoint: {
         get: <T extends TaskJson>(key: string) =>
@@ -1275,6 +1416,10 @@ export class Tasks<
       const output = await this.lifecycle.runInHostContext(() =>
         handler(input, step)
       );
+      if (output instanceof TaskSettlement) {
+        await this.#settleReturned(row, generation, output);
+        return;
+      }
       const resultJson = serializeTaskValue(
         output,
         `result of Task definition "${row.definition}"`
@@ -1285,12 +1430,16 @@ export class Tasks<
         `UPDATE cf_agents_task_runs
          SET status = 'completed', result = ?, generation = NULL, next_at = NULL,
              settled_at = ?, updated_at = ?
-         WHERE run_id = ? AND generation = ? AND status = 'running'`,
+         WHERE run_id = ? AND generation = ? AND status = 'running'
+           AND cancel_requested = 0`,
         [resultJson, Date.now(), Date.now()]
       );
       if (settled) {
         this.#emit("task:completed", { runId, definition: row.definition });
         await this.#finishTerminalSettlement(runId, row);
+      } else {
+        // A cancel requested while the attempt ran wins over its result.
+        await this.#settleRequestedCancel(runId, generation);
       }
       // Fence rejected: a newer generation owns the run, and every deadline
       // mutation it makes funnels through its own #syncWake — a push here
@@ -1298,6 +1447,139 @@ export class Tasks<
     } catch (thrown) {
       await this.#settleThrown(row, generation, thrown);
     }
+  }
+
+  /**
+   * Settle a run `aborted` when a cancel was requested while the attempt
+   * holding `generation` ran.
+   *
+   * @returns Whether it did.
+   */
+  async #settleRequestedCancel(
+    runId: string,
+    generation: string
+  ): Promise<boolean> {
+    const current = this.#store.getRun(runId);
+    if (current?.cancel_requested !== 1 || current.generation !== generation) {
+      return false;
+    }
+    await this.#settleCancelled(
+      runId,
+      generation,
+      current.cancel_reason ?? undefined
+    );
+    return true;
+  }
+
+  /** Persist a settlement a handler returned. */
+  async #settleReturned(
+    row: TaskRunRow,
+    generation: string,
+    settlement: TaskSettlement
+  ): Promise<void> {
+    const runId = row.run_id;
+    const now = Date.now();
+    if (await this.#settleRequestedCancel(runId, generation)) return;
+    if (settlement.kind === "failed") {
+      await this.#settleFailed(
+        runId,
+        generation,
+        toErrorSummary(settlement.error)
+      );
+      return;
+    }
+    if (settlement.kind === "aborted") {
+      await this.#settleCancelled(runId, generation, settlement.reason);
+      return;
+    }
+    if (settlement.kind === "skipped") {
+      const settled = this.#store.fencedWrite(
+        runId,
+        generation,
+        `UPDATE cf_agents_task_runs
+         SET status = 'skipped', cancel_reason = ?, generation = NULL,
+             next_at = NULL, settled_at = ?, updated_at = ?
+         WHERE run_id = ? AND generation = ? AND status = 'running'`,
+        [settlement.reason ?? null, now, now]
+      );
+      if (settled) {
+        this.#emit("task:skipped", {
+          runId,
+          definition: row.definition,
+          reason: settlement.reason ?? null
+        });
+        await this.#finishTerminalSettlement(runId, row);
+      }
+      return;
+    }
+    const parked = this.#store.fencedWrite(
+      runId,
+      generation,
+      `UPDATE cf_agents_task_runs
+       SET status = 'pending', wait_reason = 'park', cancel_reason = ?,
+           generation = NULL, next_at = NULL, updated_at = ?
+       WHERE run_id = ? AND generation = ? AND status = 'running'`,
+      [settlement.reason ?? null, now]
+    );
+    if (parked) {
+      this.#emit("task:waiting", {
+        runId,
+        definition: row.definition,
+        reason: "park",
+        wakeAt: null
+      });
+      await this.#syncWake(runId);
+      await this.#report(runId);
+    }
+  }
+
+  /**
+   * @internal End a run that no attempt runs in this isolate (parked, or
+   * left `running` by a reset) as `outcome` says: a returned settlement, or
+   * a value that completes it. Two settles that race end it once.
+   *
+   * @returns False unless the run was parked or interrupted.
+   */
+  async settle(
+    runId: string,
+    outcome: TaskSettlement | TaskValue
+  ): Promise<boolean> {
+    await this.lifecycle.ready();
+    if (this.#liveAttempt(runId)) return false;
+    const row = this.#store.getRun(runId);
+    if (!row) return false;
+    const parked = row.status === "pending" && row.wait_reason === "park";
+    if (!parked && row.status !== "running") return false;
+    // Take the run as an attempt of this call, so the settle writes below
+    // are fenced like an attempt's and a racing settle finds nothing.
+    const generation = nanoid();
+    const claimed = this.#store.write(
+      `UPDATE cf_agents_task_runs
+       SET status = 'running', generation = ?, wait_reason = NULL,
+           updated_at = ?
+       WHERE run_id = ? AND status = ? AND generation IS ?`,
+      [generation, Date.now(), runId, row.status, row.generation]
+    );
+    if (claimed === 0) return false;
+    if (outcome instanceof TaskSettlement) {
+      await this.#settleReturned(row, generation, outcome);
+      return true;
+    }
+    const now = Date.now();
+    const settled = this.#store.fencedWrite(
+      runId,
+      generation,
+      `UPDATE cf_agents_task_runs
+       SET status = 'completed', result = ?, generation = NULL, next_at = NULL,
+           settled_at = ?, updated_at = ?
+       WHERE run_id = ? AND generation = ? AND status = 'running'`,
+      [serializeTaskValue(outcome, `result of Task run "${runId}"`), now, now]
+    );
+    if (settled) {
+      this.#emit("task:completed", { runId, definition: row.definition });
+      await this.#finishTerminalSettlement(runId, row);
+    }
+    return true;
   }
 
   /** Persist a non-completed attempt outcome. */
@@ -1327,6 +1609,8 @@ export class Tasks<
       await this.#settleCancelled(runId, generation, thrown.reason);
       return;
     }
+    // The attempt failed because a requested cancel aborted it.
+    if (await this.#settleRequestedCancel(runId, generation)) return;
 
     if (isTaskSuspension(thrown)) {
       // A cancel requested mid-attempt wins over parking the run.
@@ -1512,9 +1796,469 @@ export class Tasks<
     row: TaskRunRow | undefined
   ): Promise<void> {
     // Nothing reads a settled run's checkpoint.
-    if (row?.retain === 0) this.#store.deleteRun(runId);
-    else this.#store.deleteCheckpoint(runId);
-    await this.#syncWake(runId);
+    this.#store.deleteCheckpoint(runId);
+    const onStatus =
+      row && this.#registeredOptions.get(row.definition)?.onStatus;
+    if (onStatus && !this.lifecycle.routes.source) {
+      // The terminal report must outlive a reset before it returns: the
+      // run's wake stays until then (when due it delivers the report), and
+      // a run with none (queued in a lane) gets the report job.
+      if (!this.lifecycle.jobs.get(`${WAKE_JOB_PREFIX}${runId}`)) {
+        await this.#pushReportJob(REPORT_RETRY_MS);
+      }
+    } else {
+      await this.#syncWake(runId);
+    }
+    // Only the head settling moves its lane on: a run queued behind it that
+    // ends (a cancel, a clear) leaves the head where it is.
+    if (row?.lane != null && row.seq != null) {
+      const head = this.#store.laneHead(row.lane);
+      if (head?.seq != null && head.seq > row.seq) {
+        await this.#wakeLane(row.lane);
+      }
+    }
+    const reported =
+      row !== undefined &&
+      (this.#registeredOptions.get(row.definition)?.onStatus !== undefined ||
+        this.#waiters.has(runId));
+    if (!reported) {
+      if (row?.retain === 0) this.#store.deleteRun(runId);
+      return;
+    }
+    await this.#deliverTerminal(runId, row.retain !== 0);
+    if (onStatus && !this.lifecycle.routes.source) {
+      await this.#syncWake(runId, { createdAt: row.created_at });
+    }
+  }
+
+  /**
+   * Report a run's status to its definition's `onStatus`, in host context.
+   * A throw is logged; a non-terminal report is not repeated.
+   */
+  async #report(runId: string): Promise<void> {
+    if (this.#registeredOptions.size === 0) return;
+    const row = this.#store.getRun(runId);
+    const onStatus =
+      row && this.#registeredOptions.get(row.definition)?.onStatus;
+    if (!row || !onStatus) return;
+    try {
+      await this.lifecycle.runInHostContext(() =>
+        onStatus(this.#store.rowToRecord(row))
+      );
+    } catch (error) {
+      console.error(`[tasks] onStatus of "${row.definition}" failed`, error);
+    }
+  }
+
+  /**
+   * Report a terminal run at least once: `notified` takes its status after
+   * `onStatus` returns. A throw (or a reset before the write) leaves it
+   * unreported, and the report job delivers it again.
+   *
+   * @returns The reported snapshot, or null when it is still unreported.
+   */
+  async #reportTerminal(runId: string): Promise<TaskRecord | null> {
+    const row = this.#store.getRun(runId);
+    if (!row || !TERMINAL_STATUSES.has(row.status)) return null;
+    const record = this.#store.rowToRecord(row);
+    const onStatus = this.#registeredOptions.get(row.definition)?.onStatus;
+    if (!onStatus || row.notified === row.status) return record;
+    this.#reporting.add(runId);
+    try {
+      await this.lifecycle.runInHostContext(() => onStatus(record));
+    } catch (error) {
+      console.error(`[tasks] onStatus of "${row.definition}" failed`, error);
+      await this.#pushReportJob(REPORT_RETRY_MS);
+      return null;
+    } finally {
+      this.#reporting.delete(runId);
+    }
+    this.#store.sql`
+      UPDATE cf_agents_task_runs SET notified = ${row.status}
+      WHERE run_id = ${runId} AND status = ${row.status}
+    `;
+    return record;
+  }
+
+  #pushReportJob(delayMs = 0): Promise<unknown> {
+    return this.lifecycle.jobs.push({
+      id: REPORT_JOB_ID,
+      fn: REPORT_JOB_FN,
+      time: Date.now() + delayMs,
+      retry: WAKE_JOB_RETRY
+    });
+  }
+
+  /** Deliver the terminal reports a reset or a throw left undelivered. */
+  async #replayReports(): Promise<void> {
+    const names = [...this.#registeredOptions.keys()].filter(
+      (name) => this.#registeredOptions.get(name)?.onStatus
+    );
+    if (names.length === 0) return;
+    const rows = this.#store.sql<TaskRunRow>`
+      SELECT * FROM cf_agents_task_runs
+      WHERE status IN ('completed', 'error', 'aborted', 'skipped')
+        AND (notified IS NULL OR notified != status)
+        AND definition IN (SELECT value FROM json_each(${JSON.stringify(names)}))
+      ORDER BY settled_at LIMIT ${REPORT_BATCH}
+    `;
+    for (const row of rows) {
+      if (!(await this.#deliverTerminal(row.run_id, row.retain !== 0))) {
+        return;
+      }
+    }
+    // More may be waiting past this batch: the next one runs now.
+    if (rows.length === REPORT_BATCH) await this.#pushReportJob();
+  }
+
+  /**
+   * Report a terminal run, then drop it if it is not retained and answer
+   * its waiters.
+   *
+   * @returns False when the report did not go through (it is retried).
+   */
+  async #deliverTerminal(runId: string, retain: boolean): Promise<boolean> {
+    const record = await this.#reportTerminal(runId);
+    if (!record) return false;
+    if (!retain) this.#store.deleteRun(runId);
+    this.#resolveWaiters(runId, record);
+    return true;
+  }
+
+  /** Resolve the waiters of this run (not of an earlier one of its id). */
+  #resolveWaiters(runId: string, record: TaskRecord): void {
+    const waiters = this.#waiters.get(runId);
+    if (!waiters) return;
+    for (const waiter of [...waiters]) {
+      if (waiter.createdAt === record.createdAt) waiter.resolve(record);
+    }
+  }
+
+  /**
+   * @internal Whether a run is terminal and its terminal report (if its
+   * definition has `onStatus`) returned.
+   */
+  isSettled(runId: string): boolean {
+    const row = this.#store.getRun(runId);
+    if (!row || !TERMINAL_STATUSES.has(row.status)) return false;
+    const onStatus = this.#registeredOptions.get(row.definition)?.onStatus;
+    return !onStatus || row.notified === row.status;
+  }
+
+  /**
+   * @internal Resolve with a run's record once it is settled
+   * ({@link isSettled}); at once for one that already is, with the record
+   * as it is on `timeoutMs`, with the record it had when deleted, and with
+   * `null` for an unknown id or when `signal` aborts. The wait lives in this
+   * isolate's memory.
+   */
+  async wait(
+    runId: string,
+    options: { timeoutMs?: number; signal?: AbortSignal } = {}
+  ): Promise<TaskRecord | null> {
+    await this.lifecycle.ready();
+    const row = this.#store.getRun(runId);
+    if (!row) return null;
+    if (this.isSettled(runId)) return this.#store.rowToRecord(row);
+    if (options.signal?.aborted) return null;
+    return new Promise((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const waiter = {
+        createdAt: row.created_at,
+        resolve: (record: TaskRecord) => done(record)
+      };
+      const done = (record: TaskRecord | null) => {
+        clearTimeout(timer);
+        options.signal?.removeEventListener("abort", onAbort);
+        const set = this.#waiters.get(runId);
+        set?.delete(waiter);
+        if (set?.size === 0) this.#waiters.delete(runId);
+        resolve(record);
+      };
+      const onAbort = () => done(null);
+      options.signal?.addEventListener("abort", onAbort, { once: true });
+      if (options.timeoutMs !== undefined) {
+        timer = setTimeout(
+          () => done(this.peek(runId) ?? null),
+          options.timeoutMs
+        );
+      }
+      let set = this.#waiters.get(runId);
+      if (!set) this.#waiters.set(runId, (set = new Set()));
+      set.add(waiter);
+    });
+  }
+
+  /**
+   * Whether a run may start now: a run outside a lane always may; a lane
+   * run only when it is its lane's head and the lane is not held.
+   */
+  #laneAllows(row: TaskRunRow | undefined): boolean {
+    if (row?.lane == null) return true;
+    if (this.#heldLanes.has(row.lane)) return false;
+    return this.#store.laneHead(row.lane)?.run_id === row.run_id;
+  }
+
+  #hasUnreported(): boolean {
+    const names = [...this.#registeredOptions.keys()].filter(
+      (name) => this.#registeredOptions.get(name)?.onStatus
+    );
+    if (names.length === 0) return false;
+    return (
+      this.#store.sql`
+        SELECT 1 FROM cf_agents_task_runs
+        WHERE status IN ('completed', 'error', 'aborted', 'skipped')
+          AND (notified IS NULL OR notified != status)
+          AND definition IN (SELECT value FROM json_each(${JSON.stringify(names)}))
+        LIMIT 1
+      `.length > 0
+    );
+  }
+
+  /** Give a lane's head a deadline of now if it waits without one. */
+  async #wakeLane(lane: string): Promise<void> {
+    if (this.#heldLanes.has(lane)) return;
+    const head = this.#store.laneHead(lane);
+    if (!head) return;
+    if (
+      head.status === "pending" &&
+      head.next_at === null &&
+      head.wait_reason !== "park"
+    ) {
+      const now = Date.now();
+      this.#store.sql`
+        UPDATE cf_agents_task_runs SET next_at = ${now}, updated_at = ${now}
+        WHERE run_id = ${head.run_id} AND status = 'pending'
+      `;
+    }
+    await this.#syncWake(head.run_id);
+  }
+
+  /**
+   * @internal One run's record, read synchronously (Tasks must have
+   * started), or `undefined` for an unknown run.
+   */
+  peek(runId: string): TaskRecord | undefined {
+    const row = this.#store.getRun(runId);
+    return row && this.#store.rowToRecord(row);
+  }
+
+  /** @internal The run holding an idempotency key, read synchronously. */
+  peekByIdempotencyKey(idempotencyKey: string): TaskRecord | undefined {
+    const row = this.#store.getRunByKey(idempotencyKey);
+    return row && this.#store.rowToRecord(row);
+  }
+
+  /**
+   * @internal Records of one definition, read synchronously, oldest or
+   * newest first. An empty `status` list matches nothing.
+   */
+  peekList(options: {
+    definition: string;
+    status?: readonly TaskStatus[];
+    /** Pending runs match only when parked (true) or only when not (false). */
+    parked?: boolean;
+    order?: "oldest" | "newest";
+    limit?: number;
+  }): TaskRecord[] {
+    if (options.status?.length === 0) return [];
+    const params: (string | number)[] = [options.definition];
+    let query = "SELECT * FROM cf_agents_task_runs WHERE definition = ?";
+    if (options.status) {
+      query += ` AND status IN (${options.status.map(() => "?").join(", ")})`;
+      params.push(...options.status);
+    }
+    if (options.parked !== undefined) {
+      query += ` AND (status != 'pending' OR (coalesce(wait_reason, '') = 'park') = ?)`;
+      params.push(options.parked ? 1 : 0);
+    }
+    const direction = options.order === "oldest" ? "ASC" : "DESC";
+    query += ` ORDER BY created_at ${direction}, run_id ${direction} LIMIT ?`;
+    params.push(options.limit ?? DEFAULT_LIST_LIMIT);
+    let rows: unknown[];
+    try {
+      rows = this.lifecycle.storage.sql.exec(query, ...params).toArray();
+    } catch (cause) {
+      throw new SqlError(query, cause);
+    }
+    // SAFETY: the query selects * from Tasks' own schema.
+    return (rows as TaskRunRow[]).map((row) => this.#store.rowToRecord(row));
+  }
+
+  /**
+   * @internal Delete one terminal run and what it kept.
+   *
+   * @returns False when the run is unknown or still open.
+   */
+  deleteRun(runId: string): boolean {
+    const row = this.#store.getRun(runId);
+    if (!row || !TERMINAL_STATUSES.has(row.status)) return false;
+    this.#store.deleteRun(runId);
+    this.#emit("task:deleted", { runId, definition: row.definition });
+    // A report in flight resolves its waiters when it returns.
+    if (!this.#reporting.has(runId)) {
+      this.#resolveWaiters(runId, this.#store.rowToRecord(row));
+    }
+    return true;
+  }
+
+  /**
+   * @internal Write a run that an adopter carries forward from its own
+   * older storage, once: a run already under `runId` is left alone. A
+   * `running` one comes back as interrupted (its next attempt re-runs it);
+   * terminal ones count as reported.
+   *
+   * @returns False when a run with this id exists.
+   */
+  async importRun(record: {
+    runId: string;
+    definition: string;
+    status: TaskStatus;
+    attempt: number;
+    input?: TaskJson;
+    metadata?: Record<string, TaskJson>;
+    idempotencyKey?: string;
+    lane?: string;
+    error?: string;
+    /** A completed run's result. */
+    result?: TaskJson;
+    retain?: boolean;
+    createdAt: number;
+    startedAt?: number;
+    settledAt?: number;
+  }): Promise<boolean> {
+    await this.lifecycle.ready();
+    if (this.#store.getRun(record.runId)) return false;
+    const open = record.status === "pending" || record.status === "running";
+    const lane = record.lane ?? null;
+    const queued =
+      open && lane !== null && this.#store.laneHead(lane) !== undefined;
+    const now = Date.now();
+    const importedInput = this.#store.placeInput(
+      record.runId,
+      serializeTaskValue(
+        record.input,
+        `input of imported run "${record.runId}"`,
+        MAX_PARTED_INPUT_BYTES
+      )
+    );
+    this.#store.sql`
+      INSERT INTO cf_agents_task_runs
+        (run_id, definition, input, status, metadata, idempotency_key, retain,
+         attempt, generation, next_at, error_name, error_message,
+         cancel_requested, cancel_reason, created_at, started_at, updated_at,
+         settled_at, lane, seq, notified, input_parts, result)
+      VALUES
+        (${record.runId}, ${record.definition},
+         ${importedInput.input},
+         ${record.status},
+         ${serializeTaskValue(record.metadata, `metadata of imported run "${record.runId}"`, MAX_FRAMEWORK_METADATA_BYTES)},
+         ${record.idempotencyKey ?? null}, ${record.retain === false ? 0 : 1},
+         ${record.attempt},
+         ${record.status === "running" ? "imported" : null},
+         ${open && !queued ? now : null},
+         ${record.status === "error" ? "Error" : null},
+         ${record.status === "error" ? (record.error ?? null) : null},
+         0,
+         ${record.status === "aborted" || record.status === "skipped" ? (record.error ?? null) : null},
+         ${record.createdAt}, ${record.startedAt ?? null}, ${now},
+         ${open ? null : (record.settledAt ?? now)}, ${lane},
+         ${lane === null ? null : this.#store.nextLaneSeq(lane)},
+         ${open ? null : record.status}, ${importedInput.parts},
+         ${record.status === "completed" ? serializeTaskValue(record.result, `result of imported run "${record.runId}"`) : null})
+    `;
+    if (open && !queued) await this.#syncWake(record.runId);
+    return true;
+  }
+
+  /** @internal Whether {@link holdLane} holds `lane` in this isolate. */
+  isLaneHeld(lane: string): boolean {
+    return this.#heldLanes.has(lane);
+  }
+
+  /** @internal A run's input as accepted, or `undefined` for an unknown run. */
+  inputOf<T = unknown>(runId: string): T | undefined {
+    const row = this.#store.getRun(runId);
+    return row
+      ? (deserializeTaskValue(this.#store.inputJson(row)) as T)
+      : undefined;
+  }
+
+  /**
+   * @internal Rewrite a run's metadata from host code (progress its caller
+   * tracks): `update` gets the current metadata and returns the next.
+   *
+   * @returns False for an unknown run.
+   */
+  updateMetadata(
+    runId: string,
+    update: (metadata: Record<string, TaskJson>) => Record<string, TaskJson>
+  ): boolean {
+    const row = this.#store.getRun(runId);
+    if (!row) return false;
+    const current =
+      row.metadata === null
+        ? {}
+        : (JSON.parse(row.metadata) as Record<string, TaskJson>);
+    const json = serializeTaskValue(
+      update(current),
+      `metadata of Task run "${runId}"`,
+      this.#registered.has(row.definition)
+        ? MAX_FRAMEWORK_METADATA_BYTES
+        : MAX_SERIALIZED_BYTES
+    );
+    this.#store.sql`
+      UPDATE cf_agents_task_runs SET metadata = ${json}, updated_at = ${Date.now()}
+      WHERE run_id = ${runId}
+    `;
+    return true;
+  }
+
+  /**
+   * @internal End every open run of `lane` as `skipped`, a running attempt
+   * included (its signal aborts; nothing it writes afterwards lands). The
+   * writes happen before the first await, so a caller that reads the lane
+   * right after the call sees them.
+   */
+  async clear(lane: string, reason?: string): Promise<void> {
+    if (this.lifecycle.status() !== "started") await this.lifecycle.ready();
+    const now = Date.now();
+    const rows = this.#store.sql<TaskRunRow>`
+      UPDATE cf_agents_task_runs
+      SET status = 'skipped', cancel_reason = ${reason ?? null},
+          generation = NULL, next_at = NULL, settled_at = ${now},
+          updated_at = ${now}
+      WHERE lane = ${lane} AND status IN ('pending', 'running')
+      RETURNING *
+    `;
+    for (const row of rows) {
+      this.#active
+        .get(row.run_id)
+        ?.controller.abort(new TaskCancellation(reason));
+    }
+    for (const row of rows) {
+      this.#emit("task:skipped", {
+        runId: row.run_id,
+        definition: row.definition,
+        reason: reason ?? null
+      });
+      await this.#finishTerminalSettlement(row.run_id, row);
+    }
+  }
+
+  /**
+   * @internal Keep a lane's runs from starting, in this isolate, until
+   * {@link releaseLane}: runs an earlier isolate left wait while the host
+   * decides who owns them.
+   */
+  holdLane(lane: string): void {
+    this.#heldLanes.add(lane);
+  }
+
+  /** @internal Let a held lane run again. */
+  async releaseLane(lane: string): Promise<void> {
+    if (!this.#heldLanes.delete(lane)) return;
+    await this.#wakeLane(lane);
   }
 
   /** Make deadlines sane after a fresh isolate: interrupted work wakes now. */
@@ -1526,10 +2270,19 @@ export class Tasks<
       UPDATE cf_agents_task_runs SET next_at = ${now}, updated_at = ${now}
       WHERE status = 'running' AND generation IS NOT NULL
     `;
-    // Non-terminal rows must always carry a deadline; repair any without one.
+    // Non-terminal rows must always carry a deadline, except runs queued
+    // behind their lane's head; repair any without one.
     this.#store.sql`
       UPDATE cf_agents_task_runs SET next_at = ${now}, updated_at = ${now}
       WHERE status = 'pending' AND next_at IS NULL
+        AND (wait_reason IS NULL OR wait_reason != 'park') AND (
+        lane IS NULL OR run_id = (
+          SELECT head.run_id FROM cf_agents_task_runs AS head
+          WHERE head.lane = cf_agents_task_runs.lane
+            AND head.status IN ('pending', 'running')
+          ORDER BY head.seq LIMIT 1
+        )
+      )
     `;
   }
 

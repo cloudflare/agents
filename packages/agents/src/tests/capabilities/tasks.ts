@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { getCurrentAgent, Lifecycle } from "../../lifecycle";
+import { TaskSettlement } from "../../tasks/settlement";
 import { Tasks, NonRetryableError, type TaskStep } from "../../tasks";
 import { Scheduler } from "../../schedules";
 
@@ -32,6 +33,10 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
   readonly rememberingSeen: Array<{ local: unknown; note: unknown }> = [];
   /** `remembering` parks on this until a test opens it. */
   rememberingGate: Promise<void> | null = null;
+  /** Labels of `laned` runs, in the order they started. */
+  readonly lanedStarted: string[] = [];
+  /** `laned` runs park on their label's gate, when it has one. */
+  readonly lanedGates = new Map<string, Promise<void>>();
 
   readonly tasks = new Tasks({
     definitions: {
@@ -40,6 +45,21 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
        * {@link rememberingGate} (a reset there leaves it running), then
        * writes `after`.
        */
+      /** A result JSON cannot hold. */
+      unstorable: async () => BigInt(1) as unknown as string,
+
+      /** Fails with a message far past what a run keeps. */
+      verbose: async () => {
+        throw new Error("x".repeat(50_000));
+      },
+
+      /** Records its label, parks on its gate, returns the label. */
+      laned: async (input: { label: string }) => {
+        this.lanedStarted.push(input.label);
+        await this.lanedGates.get(input.label);
+        return input.label;
+      },
+
       remembering: async (_input: undefined, step: TaskStep) => {
         this.rememberingSeen.push({
           local: step.local,
@@ -389,6 +409,42 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
       );
     }
   });
+
+  /** Statuses `__cf_reported` runs reported, as `runId:status`. */
+  readonly reports: string[] = [];
+  /** `__cf_reported` terminal reports throw while this is above zero. */
+  failReports = 0;
+  /** `__cf_reported` parks on this when set. */
+  reportedGate: Promise<void> | null = null;
+  /** `__cf_reported` terminal reports wait on this when set. */
+  terminalReportGate: Promise<void> | null = null;
+
+  constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
+    super(ctx, env);
+    this.tasks.register("__cf_echo", async (input) => (input as string).length);
+    this.tasks.register("__cf_parking", async () =>
+      TaskSettlement.park("detached")
+    );
+    this.tasks.register(
+      "__cf_reported",
+      async () => {
+        await this.reportedGate;
+        return "ok";
+      },
+      {
+        maxAttempts: 2,
+        onStatus: async (snapshot) => {
+          const terminal = !["pending", "running"].includes(snapshot.status);
+          if (terminal) await this.terminalReportGate;
+          if (terminal && this.failReports > 0) {
+            this.failReports--;
+            throw new Error("report failed");
+          }
+          this.reports.push(`${snapshot.runId}:${snapshot.status}`);
+        }
+      }
+    );
+  }
 
   readonly lifecycle = Lifecycle.install(this).use(this.tasks);
 }

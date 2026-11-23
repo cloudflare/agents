@@ -225,9 +225,7 @@ A snapshot is discriminated by `status`:
 | `error`     | Settled with a safe `error` projection.                                                                                     |
 | `aborted`   | Settled by cancellation, with its optional `reason`.                                                                        |
 
-Cancellation is cooperative: a parked run settles immediately, a live attempt
-is aborted through its signal and settles at its next step boundary. An
-external effect already accepted cannot be undone.
+Cancelling settles the run `aborted` at once. A live attempt's signal aborts, and nothing that attempt writes afterwards lands, though work it already started (an outside call) may still finish.
 
 ## Choosing an API
 

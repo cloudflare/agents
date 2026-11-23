@@ -213,7 +213,7 @@ describe("Think submission recovery e2e", () => {
     }
   });
 
-  it("re-enqueues a submission whose messages were never applied as pending", async () => {
+  it("runs a submission whose messages were never applied again", async () => {
     const agent = "submission-not-applied";
     const submissionId = "sub-not-applied";
     const requestId = "req-not-applied";
@@ -232,14 +232,14 @@ describe("Think submission recovery e2e", () => {
     // Restart: `_recoverSubmissionsOnStart` re-runs on the next DO start.
     wrangler = await restartWrangler(wrangler);
 
-    // The recovery transition re-enqueues it as `pending`. A later drain may
-    // advance it again, so assert via the recorded status log.
+    // The inbox runs it again as its next attempt, so the new isolate
+    // reports it running.
     const log = await pollUntil(
-      "submission status log (pending)",
+      "submission status log (running)",
       () => callAgent(agent, "getStatusLog") as Promise<string[]>,
-      (entries) => entries.includes(`${submissionId}:pending`)
+      (entries) => entries.includes(`${submissionId}:running`)
     );
-    expect(log).toContain(`${submissionId}:pending`);
+    expect(log).toContain(`${submissionId}:running`);
   });
 
   it("marks an applied-but-unrecoverable submission as error", async () => {
@@ -374,12 +374,13 @@ describe("Think submission recovery e2e", () => {
     await expect(callAgent(agent, "getStatusLog")).resolves.toEqual([
       `${submissionId}:completed`
     ]);
-    // Startup settled the ledger and cleared the stamp. Nothing leaks forever.
+    // Startup settled the submission; the stamp stays on its record and
+    // goes with it.
     await expect(
       callAgent(agent, "reclaimDuringSubmissionGap", [submissionId])
     ).resolves.toEqual({
       streamStatus: null,
-      resultStatus: null
+      resultStatus: "completed"
     });
   });
 

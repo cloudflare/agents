@@ -1,4 +1,5 @@
 import type { TaskDurationString } from "./duration";
+import type { TaskSettlement } from "./settlement";
 
 /**
  * JSON-serializable data accepted as Task input, step results, metadata,
@@ -53,6 +54,15 @@ export type TaskCallbacks = Record<
   string,
   (input: unknown, step: TaskStep) => TaskValue | Promise<TaskValue>
 >;
+
+/**
+ * @internal A framework definition (`Tasks.register`): it may also end its
+ * attempt with a returned {@link TaskSettlement}.
+ */
+export type TaskFrameworkDefinition = (
+  input: unknown,
+  step: TaskStep
+) => TaskValue | TaskSettlement | Promise<TaskValue | TaskSettlement>;
 
 /**
  * The input type a registered Task definition accepts.
@@ -177,6 +187,18 @@ export interface TaskStep {
    */
   readonly checkpoint: TaskCheckpoint;
 
+  /** @internal The run's id. */
+  readonly id: string;
+
+  /** @internal This attempt's number: 1 for the first. */
+  readonly attempt: number;
+
+  /**
+   * @internal Aborts when the run is cancelled or its lane cleared while
+   * this attempt runs.
+   */
+  readonly signal: AbortSignal;
+
   /** @internal When the run was accepted. */
   readonly createdAt: number;
 
@@ -204,10 +226,16 @@ export type TaskStatus =
   | "running"
   | "completed"
   | "error"
-  | "aborted";
+  | "aborted"
+  /** @internal Ended without running to the end: its lane was cleared. */
+  | "skipped";
 
 /** Why a pending run that already ran waits (`wakeAt`). */
-export type TaskWaitReason = "sleep" | "retry";
+export type TaskWaitReason =
+  | "sleep"
+  | "retry"
+  /** @internal Parked by its handler until `Tasks.settle()`. */
+  | "park";
 
 /** Safe projection of an error retained with a run that ended `error`. */
 export interface TaskError {
@@ -232,6 +260,12 @@ export interface TaskRunOptions {
 
   /** Keep terminal state for inspection. Defaults to `true`. */
   retain?: boolean;
+
+  /**
+   * @internal Runs of one lane run one at a time, in the order they were
+   * accepted; a run queued behind another waits with no deadline of its own.
+   */
+  lane?: string;
 
   /**
    * @internal Where the first attempt runs. Omitted: in this invocation,
@@ -317,6 +351,15 @@ export type TaskRunSnapshot<Output extends TaskValue> =
       createdAt: number;
       settledAt: number;
       metadata?: Record<string, TaskJson>;
+    }
+  | {
+      runId: string;
+      definition: string;
+      status: "skipped";
+      reason?: string;
+      createdAt: number;
+      settledAt: number;
+      metadata?: Record<string, TaskJson>;
     };
 
 /**
@@ -367,7 +410,53 @@ export type TaskRunRow = {
   started_at: number | null;
   updated_at: number;
   settled_at: number | null;
+  lane: string | null;
+  seq: number | null;
+  notified: string | null;
+  /** Pieces in `cf_agents_task_parts` holding an input too large for the row. */
+  input_parts: number | null;
 };
+
+/**
+ * @internal One run as host code reads it synchronously: every field the
+ * record keeps, whatever its status.
+ */
+export interface TaskRecord {
+  readonly runId: string;
+  readonly definition: string;
+  readonly status: TaskStatus;
+  readonly attempt: number;
+  readonly idempotencyKey?: string;
+  readonly metadata?: Record<string, TaskJson>;
+  /** A pending run that waits: `sleep`, `retry` or `park`. */
+  readonly waitReason?: TaskWaitReason;
+  readonly result?: TaskValue;
+  readonly error?: TaskError;
+  /** Why an `aborted`, `skipped` or parked run ended or waits. */
+  readonly reason?: string;
+  readonly createdAt: number;
+  readonly startedAt?: number;
+  readonly settledAt?: number;
+}
+
+/**
+ * @internal Options of a framework definition (`Tasks.register`).
+ */
+export interface TaskRegisterOptions {
+  /**
+   * Called in host context when a run of this definition is accepted, when
+   * an attempt claims it, and when it ends. The terminal call happens at
+   * least once: a throw or a reset before it returns delivers it again
+   * (30 s later after a throw), and `wait()` resolves only after it returned.
+   * It gets the run's record as stored at the call.
+   */
+  onStatus?(record: TaskRecord): void | Promise<void>;
+  /**
+   * Attempts a run may start before it ends `error`: an attempt is counted,
+   * and committed, before the handler runs. Omitted: no limit.
+   */
+  maxAttempts?: number;
+}
 
 /** @internal Raw `cf_agents_task_steps` SQLite row. */
 export type TaskStepRow = {

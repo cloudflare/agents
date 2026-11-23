@@ -176,6 +176,27 @@ const TOOL_ROLLBACK_EXEC_DELAY_MS = 600;
  * execution appends a ledger row. A completed step that re-runs after an
  * eviction shows up as a duplicate index.
  */
+
+/** The table submissions lived in before Tasks; a restart moves its rows. */
+const LEGACY_SUBMISSIONS_TABLE = `
+  CREATE TABLE IF NOT EXISTS cf_think_submissions (
+    submission_id TEXT PRIMARY KEY,
+    idempotency_key TEXT UNIQUE,
+    request_id TEXT,
+    stream_id TEXT,
+    status TEXT NOT NULL,
+    messages_json TEXT NOT NULL,
+    metadata_json TEXT,
+    error_message TEXT,
+    created_at INTEGER NOT NULL,
+    messages_applied_at INTEGER,
+    started_at INTEGER,
+    completed_at INTEGER,
+    result_status TEXT,
+    output_json TEXT,
+    message_id TEXT
+  )`;
+
 export class ThinkToolRollbackE2EAgent extends Think<Env> {
   static options = { keepAliveIntervalMs: 2_000 };
   override maxSteps = 500;
@@ -1881,8 +1902,8 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
     requestId: string,
     applied: boolean
   ): Promise<void> {
-    // Ensure the submissions table exists (inspect goes through the ensure path).
-    await this.inspectSubmission(submissionId);
+    // Written as an older release left it: the restart moves it into a run.
+    this.ctx.storage.sql.exec(LEGACY_SUBMISSIONS_TABLE);
     const now = Date.now();
     const messagesJson = JSON.stringify([
       {
@@ -1912,7 +1933,7 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
    */
   @callable()
   async seedRecoverableEmptySubmission(submissionId: string): Promise<void> {
-    await this.inspectSubmission(submissionId);
+    this.ctx.storage.sql.exec(LEGACY_SUBMISSIONS_TABLE);
     const now = Date.now();
     const userMessage: UIMessage = {
       id: `user-${submissionId}`,
@@ -1970,6 +1991,23 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
   @callable()
   async startRecoveryAtLedgerGap(submissionId: string): Promise<void> {
     await this.seedRunningSubmission(submissionId, submissionId, true);
+    // No restart here: move the seeded row now, as recovery owning it, so
+    // the recovery below finds it and nothing else runs it.
+    await (
+      this as unknown as { _migrateLegacySubmissions(): Promise<void> }
+    )._migrateLegacySubmissions();
+    // Parked, as a submission whose turn chat recovery owns.
+    this.ctx.storage.sql.exec(
+      `UPDATE cf_agents_task_runs
+       SET status = 'pending', wait_reason = 'park', generation = NULL,
+           next_at = NULL
+       WHERE run_id = ?`,
+      submissionId
+    );
+    this.ctx.storage.sql.exec(
+      "DELETE FROM cf_agents_jobs WHERE id = ?",
+      `task:${submissionId}`
+    );
     const userMessage: UIMessage = {
       id: `user-${submissionId}`,
       role: "user",
@@ -2045,12 +2083,11 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
         ? (stream.latestStreamInfoForRequest(submission.requestId)?.status ??
           null)
         : null,
-      resultStatus:
-        this.sql<{ result_status: string | null }>`
-          SELECT result_status FROM cf_think_submissions
-          WHERE submission_id = ${submissionId}
-          LIMIT 1
-        `[0]?.result_status ?? null
+      resultStatus: ((
+        this.tasks.peek(submissionId)?.metadata?.__cf_progress as
+          | { resultStatus?: string }
+          | undefined
+      )?.resultStatus ?? null) as string | null
     };
   }
 

@@ -294,8 +294,51 @@ import {
   Approvals,
   stableHash,
   stableStringify,
-  type EffectOutcome
+  type EffectOutcome,
+  type TaskRecord,
+  type TaskSettlement
 } from "agents/internal";
+import type { TaskJson, TaskStep } from "agents/tasks";
+import {
+  cancelReason,
+  isTerminalSubmissionStatus,
+  legacySubmissionImport,
+  SUBMISSION_KIND,
+  SUBMISSION_LANE,
+  SUBMISSION_PROGRESS_KEY,
+  submissionDetached,
+  submissionFailed,
+  submissionInspection,
+  submissionOutcome,
+  submissionProgress,
+  submissionRow,
+  submissionSettlement,
+  submissionTaskStatuses,
+  progressOutputFits,
+  type SubmissionResult,
+  TERMINAL_SUBMISSION_STATUSES,
+  type CancelSubmissionResult,
+  type DeleteSubmissionsOptions,
+  type LegacySubmissionRow,
+  type ListSubmissionsOptions,
+  type SubmissionPayload,
+  type SubmissionProgress,
+  type SubmissionTurnResult,
+  type SubmitMessagesResult,
+  type ThinkSubmissionInspection,
+  type ThinkSubmissionRow,
+  type ThinkSubmissionStatus,
+  type WaitForSubmissionOptions
+} from "./submissions";
+export type {
+  CancelSubmissionResult,
+  DeleteSubmissionsOptions,
+  ListSubmissionsOptions,
+  SubmitMessagesResult,
+  ThinkSubmissionInspection,
+  ThinkSubmissionStatus,
+  WaitForSubmissionOptions
+} from "./submissions";
 import type {
   ContinuationTurn,
   RecoveryLeafCheck,
@@ -1057,14 +1100,6 @@ type ActionReplyEvent = {
   payload: { action?: string; attachmentType: string };
 };
 
-export type ThinkSubmissionStatus =
-  | "pending"
-  | "running"
-  | "completed"
-  | "aborted"
-  | "skipped"
-  | "error";
-
 export type SubmitMessagesOptions = {
   submissionId?: string;
   idempotencyKey?: string;
@@ -1107,10 +1142,7 @@ type ConnectionlessContinuation = {
 };
 /** `think_config` key of the count of stops of every chat. */
 const CONNECTIONLESS_STOPS_KEY = "connectionlessStops";
-/** Queue callback that runs one media-eviction pass. */
-/** Queue callback that runs one pending submission. */
-const SUBMISSION_RUN_CALLBACK = "_cfRunSubmission";
-
+/** Queue item id of a submission's workflow event, one per event type. */
 function workflowNotificationItemId(
   submissionId: string,
   eventType: string
@@ -1118,6 +1150,7 @@ function workflowNotificationItemId(
   return `workflow-notification:${submissionId}:${eventType}`;
 }
 
+/** The queue item that ran a submission before Tasks did. */
 function submissionRunItemId(submissionId: string): string {
   return `submission:${submissionId}`;
 }
@@ -1152,98 +1185,6 @@ function dropGenerationAfterToolCall(
   );
   return kept.length === parts.length ? parts : kept;
 }
-
-export type ThinkSubmissionInspection = {
-  submissionId: string;
-  idempotencyKey?: string;
-  requestId?: string;
-  status: ThinkSubmissionStatus;
-  error?: string;
-  metadata?: Record<string, unknown>;
-  createdAt: number;
-  startedAt?: number;
-  completedAt?: number;
-  /** Id of the assistant message this submission's turn persisted. */
-  messageId?: string;
-};
-
-export type SubmitMessagesResult = ThinkSubmissionInspection & {
-  accepted: boolean;
-};
-
-export type WaitForSubmissionOptions = {
-  /**
-   * Stop waiting after this many milliseconds and return the submission as it
-   * is then, still `pending` or `running`, or `null` if it was deleted.
-   */
-  timeoutMs?: number;
-};
-
-/** What {@link Think.cancelSubmission} did. */
-export type CancelSubmissionResult =
-  | {
-      /** No submission has this id. */
-      outcome: "not_found";
-      submissionId: string;
-    }
-  | {
-      /** The submission had already finished; nothing changed. */
-      outcome: "already_terminal";
-      submissionId: string;
-      submission: ThinkSubmissionInspection;
-    }
-  | {
-      /** The submission is now `aborted`. */
-      outcome: "cancelled";
-      submissionId: string;
-      /**
-       * `"pending"`: removed before its turn started. `"running"`: its turn
-       * had been claimed and was signalled to abort; side effects already
-       * under way may still finish.
-       */
-      previousStatus: "pending" | "running";
-      /**
-       * Whether any of the submission's messages were written to the
-       * conversation when it was cancelled. A claimed submission can still be
-       * `false` when it is cancelled before its turn applies them.
-       */
-      messagesApplied: boolean;
-      submission: ThinkSubmissionInspection;
-    };
-
-export type ListSubmissionsOptions = {
-  status?: ThinkSubmissionStatus | ThinkSubmissionStatus[];
-  limit?: number;
-};
-
-export type DeleteSubmissionsOptions = {
-  status?: ThinkSubmissionStatus | ThinkSubmissionStatus[];
-  completedBefore?: Date;
-  limit?: number;
-};
-
-/** A turn's durable cutover fact, not the stream transport's lifecycle. */
-type SubmissionTurnResult =
-  | { status: "completed"; output?: unknown }
-  | { status: "aborted" | "retry" | "error" };
-
-type ThinkSubmissionRow = {
-  submission_id: string;
-  idempotency_key: string | null;
-  request_id: string | null;
-  stream_id: string | null;
-  status: ThinkSubmissionStatus;
-  messages_json: string;
-  metadata_json: string | null;
-  error_message: string | null;
-  created_at: number;
-  messages_applied_at: number | null;
-  started_at: number | null;
-  completed_at: number | null;
-  result_status: SubmissionTurnResult["status"] | null;
-  output_json: string | null;
-  message_id: string | null;
-};
 
 /** Payload of one queued workflow notification. */
 type WorkflowNotificationPayload = {
@@ -1643,6 +1584,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     this.lifecycle.use(this._cfMediaEviction);
     this.lifecycle.use(this.streams);
     this.lifecycle.use(this._approvals);
+    this._registerSubmissionTaskDefinition();
     this._registerChatTurnTaskDefinition();
     this._registerChatRecoveryTaskDefinition();
     this.#messengerReplies = new MessengerReplies(
@@ -1811,6 +1753,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       );
 
       // 8. User's onStart
+      // Rows of the retired submissions table move before the app's start:
+      // legacy fiber recovery there looks them up.
+      await this._runBestEffortOnStartStep(
+        "durable-work-recovery",
+        () => this._migrateLegacySubmissions(),
+        "Submissions of the retired table were not moved on this wake; the " +
+          "next successful wake moves them."
+      );
       await _onStart(props);
 
       // 9. Declarative scheduled tasks are code-defined and should reconcile
@@ -2462,7 +2412,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     cancelRequest: (requestId, reason) =>
       this.cancelChat(requestId, abortReasonText(reason) ?? undefined)
   });
-  private _submissionTableEnsured = false;
   private _actionPendingTableEnsured = false;
   private _submissionAbortControllers = new Map<string, AbortController>();
   private _submissionsApplyingMessages = new Set<string>();
@@ -5504,203 +5453,58 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
   // ── Durable programmatic submissions ───────────────────────────
 
-  private _ensureSubmissionTable(): void {
-    if (this._submissionTableEnsured) return;
-    this.sql`
-      CREATE TABLE IF NOT EXISTS cf_think_submissions (
-        submission_id TEXT PRIMARY KEY,
-        idempotency_key TEXT UNIQUE,
-        request_id TEXT,
-        stream_id TEXT,
-        status TEXT NOT NULL,
-        messages_json TEXT NOT NULL,
-        metadata_json TEXT,
-        error_message TEXT,
-        created_at INTEGER NOT NULL,
-        messages_applied_at INTEGER,
-        started_at INTEGER,
-        completed_at INTEGER,
-        -- Closed vocabulary: 'completed' | 'aborted' | 'retry'. NULL is legacy
-        -- or an unsettled attempt; 'retry' is NOT terminal completion evidence.
-        result_status TEXT,
-        output_json TEXT,
-        message_id TEXT
-      )
-    `;
-    // This table is unversioned. Add nullable columns for existing objects,
-    // preserving unstamped rows for the legacy stream-evidence fallback.
-    for (const statement of [
-      "ALTER TABLE cf_think_submissions ADD COLUMN result_status TEXT",
-      "ALTER TABLE cf_think_submissions ADD COLUMN output_json TEXT",
-      "ALTER TABLE cf_think_submissions ADD COLUMN message_id TEXT"
-    ]) {
-      try {
-        this.ctx.storage.sql.exec(statement);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (!message.toLowerCase().includes("duplicate column")) throw error;
+  /**
+   * Submissions are runs of one Task definition, all in one lane. Tasks owns
+   * the record, its order, cancel, reset, waiters and the replay after a
+   * reset; Think runs the turn and keeps what the turn learns about itself
+   * (its request id, whether its messages were applied, its cutover
+   * outcome) in the run's metadata.
+   */
+  private _registerSubmissionTaskDefinition(): void {
+    this.tasks.register(
+      SUBMISSION_KIND,
+      (input, step) => this._runSubmission(input as SubmissionPayload, step),
+      {
+        maxAttempts: 3,
+        onStatus: (record) => this._onSubmissionStatus(record)
       }
-    }
-    this.sql`
-      CREATE INDEX IF NOT EXISTS cf_think_submissions_status_created_idx
-      ON cf_think_submissions (status, created_at, submission_id)
-    `;
-    this.sql`
-      CREATE INDEX IF NOT EXISTS cf_think_submissions_request_status_idx
-      ON cf_think_submissions (request_id, status)
-    `;
-    this.sql`
-      CREATE INDEX IF NOT EXISTS cf_think_submissions_status_completed_idx
-      ON cf_think_submissions (status, completed_at, created_at)
-    `;
-    this._submissionTableEnsured = true;
-  }
-
-  private _readSubmission(submissionId: string): ThinkSubmissionRow | null {
-    this._ensureSubmissionTable();
-    const rows = this.sql<ThinkSubmissionRow>`
-      SELECT submission_id, idempotency_key, request_id, stream_id, status,
-             messages_json, metadata_json, error_message, created_at,
-             messages_applied_at, started_at, completed_at, result_status, output_json,
-             message_id
-      FROM cf_think_submissions
-      WHERE submission_id = ${submissionId}
-      LIMIT 1
-    `;
-    return rows[0] ?? null;
-  }
-
-  private _readSubmissionByIdempotencyKey(
-    idempotencyKey: string
-  ): ThinkSubmissionRow | null {
-    this._ensureSubmissionTable();
-    const rows = this.sql<ThinkSubmissionRow>`
-      SELECT submission_id, idempotency_key, request_id, stream_id, status,
-             messages_json, metadata_json, error_message, created_at,
-             messages_applied_at, started_at, completed_at, result_status, output_json,
-             message_id
-      FROM cf_think_submissions
-      WHERE idempotency_key = ${idempotencyKey}
-      LIMIT 1
-    `;
-    return rows[0] ?? null;
-  }
-
-  private _normalizeStatusFilter(
-    status?: ThinkSubmissionStatus | ThinkSubmissionStatus[]
-  ): Set<ThinkSubmissionStatus> | null {
-    if (!status) return null;
-    return new Set(Array.isArray(status) ? status : [status]);
-  }
-
-  private _listSubmissionRows(
-    options?: ListSubmissionsOptions
-  ): ThinkSubmissionRow[] {
-    this._ensureSubmissionTable();
-    const limit = Math.min(Math.max(options?.limit ?? 50, 1), 100);
-    const statuses = this._normalizeStatusFilter(options?.status);
-    if (statuses) {
-      return [...statuses]
-        .flatMap((status) => this._listSubmissionRowsByStatus(status, limit))
-        .sort((a, b) =>
-          b.created_at === a.created_at
-            ? b.submission_id.localeCompare(a.submission_id)
-            : b.created_at - a.created_at
-        )
-        .slice(0, limit);
-    }
-
-    const rows = this.sql<ThinkSubmissionRow>`
-      SELECT submission_id, idempotency_key, request_id, stream_id, status,
-             messages_json, metadata_json, error_message, created_at,
-             messages_applied_at, started_at, completed_at, result_status, output_json,
-             message_id
-      FROM cf_think_submissions
-      ORDER BY created_at DESC, submission_id DESC
-      LIMIT ${limit}
-    `;
-    return rows;
-  }
-
-  private _listSubmissionRowsByStatus(
-    status: ThinkSubmissionStatus,
-    limit: number
-  ): ThinkSubmissionRow[] {
-    return this.sql<ThinkSubmissionRow>`
-      SELECT submission_id, idempotency_key, request_id, stream_id, status,
-             messages_json, metadata_json, error_message, created_at,
-             messages_applied_at, started_at, completed_at, result_status, output_json,
-             message_id
-      FROM cf_think_submissions
-      WHERE status = ${status}
-      ORDER BY created_at DESC, submission_id DESC
-      LIMIT ${limit}
-    `;
-  }
-
-  private _inspectionFromSubmissionRow(
-    row: ThinkSubmissionRow
-  ): ThinkSubmissionInspection {
-    const metadata = this._parseJsonObject(row.metadata_json);
-    return {
-      submissionId: row.submission_id,
-      idempotencyKey: row.idempotency_key ?? undefined,
-      requestId: row.request_id ?? undefined,
-      status: row.status,
-      error: row.error_message ?? undefined,
-      metadata: metadata ?? undefined,
-      createdAt: row.created_at,
-      startedAt: row.started_at ?? undefined,
-      completedAt: row.completed_at ?? undefined,
-      ...(row.message_id !== null && { messageId: row.message_id })
-    };
-  }
-
-  private _parseJsonObject(
-    value: string | null
-  ): Record<string, unknown> | null {
-    if (value === null) return null;
-    try {
-      const parsed = JSON.parse(value) as unknown;
-      if (
-        parsed !== null &&
-        typeof parsed === "object" &&
-        !Array.isArray(parsed)
-      ) {
-        return parsed as Record<string, unknown>;
-      }
-    } catch {
-      // Invalid metadata should not prevent inspection.
-    }
-    return null;
-  }
-
-  private _parseSubmissionMessages(value: string): UIMessage[] {
-    const parsed = JSON.parse(value) as unknown;
-    if (!Array.isArray(parsed)) {
-      throw new Error("Stored submission messages are invalid");
-    }
-    return parsed as UIMessage[];
-  }
-
-  private _serializeSubmissionMessages(messages: UIMessage[]): string {
-    return JSON.stringify(
-      messages.map((message) =>
-        enforceRowSizeLimit(sanitizeMessage(message), {
-          warn: (warning) => console.warn(`[Think] ${warning}`)
-        })
-      )
     );
   }
 
-  private _serializeMetadata(
-    metadata: Record<string, unknown> | undefined
-  ): string | null {
-    return metadata === undefined ? null : JSON.stringify(metadata);
+  private _submissionRecord(submissionId: string): TaskRecord | undefined {
+    const record = this.tasks.peek(submissionId);
+    return record?.definition === SUBMISSION_KIND ? record : undefined;
+  }
+
+  private _readSubmission(submissionId: string): ThinkSubmissionRow | null {
+    const record = this._submissionRecord(submissionId);
+    return record ? submissionRow(record) : null;
+  }
+
+  /** Merge `patch` into a submission's progress. */
+  private _updateSubmissionProgress(
+    submissionId: string,
+    patch: Partial<SubmissionProgress>
+  ): void {
+    this.tasks.updateMetadata(submissionId, (metadata) => ({
+      ...metadata,
+      [SUBMISSION_PROGRESS_KEY]: {
+        ...((metadata[SUBMISSION_PROGRESS_KEY] ?? {}) as SubmissionProgress),
+        ...patch
+      } as TaskJson
+    }));
+  }
+
+  private _sanitizeSubmissionMessages(messages: UIMessage[]): UIMessage[] {
+    return messages.map((message) =>
+      enforceRowSizeLimit(sanitizeMessage(message), {
+        warn: (warning) => console.warn(`[Think] ${warning}`)
+      })
+    );
   }
 
   private _readWorkflowPromptContext(
-    metadata: Record<string, unknown> | null
+    metadata: Record<string, unknown> | null | undefined
   ): ThinkWorkflowPromptContext | null {
     const workflowPromptValue = metadata?.[THINK_WORKFLOW_PROMPT_METADATA_KEY];
     if (
@@ -5753,10 +5557,31 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     };
   }
 
-  private async _emitSubmissionStatus(row: ThinkSubmissionRow): Promise<void> {
-    const inspection = this._inspectionFromSubmissionRow(row);
-    const terminal = this._isTerminalSubmissionStatus(inspection.status);
-    if (terminal) this._terminalStatusEmits.add(inspection.submissionId);
+  /**
+   * Tasks' report of a status change. A terminal one queues the
+   * workflow event first: Tasks repeats a terminal report a reset cut
+   * short, and the queue item's stable id makes the repeat a replace.
+   */
+  private async _onSubmissionStatus(record: TaskRecord): Promise<void> {
+    const submissionId = record.runId;
+    const inspection = submissionInspection(record);
+    if (record.status === "pending" && record.attempt === 0) {
+      this._emit("submission:create", {
+        submissionId: inspection.submissionId,
+        requestId: inspection.requestId,
+        idempotencyKey: inspection.idempotencyKey
+      });
+    }
+    // Queued once per submission: a repeated report (a reset cut the user
+    // hook below short) must not queue an event the workflow already got.
+    const progress = submissionProgress(record);
+    if (
+      isTerminalSubmissionStatus(inspection.status) &&
+      !progress.workflowNotified &&
+      this._insertWorkflowNotification(inspection, record.result)
+    ) {
+      this._updateSubmissionProgress(submissionId, { workflowNotified: true });
+    }
     this._emit("submission:status", {
       submissionId: inspection.submissionId,
       requestId: inspection.requestId,
@@ -5776,58 +5601,19 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         error: inspection.error
       });
     }
+    // No keep-alive hold: Tasks reports inside the request or alarm that
+    // moved the submission (submit, an attempt, cancel, the report job).
+    const hook = { agent: this, ended: false };
     try {
-      await this.keepAliveWhile(async () => {
-        const hook = { agent: this, ended: false };
-        try {
-          await submissionStatusHookContext.run(hook, () =>
-            this.onSubmissionStatus(inspection)
-          );
-        } catch (error) {
-          console.error("[Think] onSubmissionStatus failed", error);
-        } finally {
-          hook.ended = true;
-        }
-      });
+      await submissionStatusHookContext.run(hook, () =>
+        this.onSubmissionStatus(inspection)
+      );
+    } catch (error) {
+      console.error("[Think] onSubmissionStatus failed", error);
     } finally {
-      if (terminal) {
-        const id = inspection.submissionId;
-        this._terminalStatusEmits.delete(id);
-        const held = this._waitersHeldForDeletedEmit.get(id);
-        this._waitersHeldForDeletedEmit.delete(id);
-        for (const waiter of held ?? []) waiter(inspection);
-        const current = this._readSubmission(id);
-        if (current?.created_at === row.created_at) {
-          this._resolveSubmissionWaiters(inspection);
-        }
-      }
+      hook.ended = true;
     }
   }
-
-  private _resolveSubmissionWaiters(
-    submission: ThinkSubmissionInspection
-  ): void {
-    const waiters = this._submissionWaiters.get(submission.submissionId);
-    this._submissionWaiters.delete(submission.submissionId);
-    for (const waiter of waiters ?? []) waiter(submission);
-  }
-
-  private _submissionWaiters = new Map<
-    string,
-    Set<(submission: ThinkSubmissionInspection) => void>
-  >();
-
-  /**
-   * Submissions whose row is terminal but whose `onSubmissionStatus` has not
-   * finished. `waitForSubmission` keeps waiting for these.
-   */
-  private _terminalStatusEmits = new Set<string>();
-
-  /** Waiters of a submission deleted while its terminal emit was in flight. */
-  private _waitersHeldForDeletedEmit = new Map<
-    string,
-    Set<(submission: ThinkSubmissionInspection) => void>
-  >();
 
   /**
    * Resolve once the submission reaches a terminal status (`completed`,
@@ -5850,47 +5636,24 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     submissionId: string,
     options?: WaitForSubmissionOptions
   ): Promise<ThinkSubmissionInspection | null> {
-    const row = this._readSubmission(submissionId);
-    if (!row) return null;
-    if (
-      this._isTerminalSubmissionStatus(row.status) &&
-      !this._terminalStatusEmits.has(submissionId)
-    ) {
-      return this._inspectionFromSubmissionRow(row);
-    }
-    const hook = submissionStatusHookContext.getStore();
-    if (hook?.agent === this && !hook.ended) {
-      throw new Error(
-        "waitForSubmission() cannot be called from onSubmissionStatus: the submission settles only after the hook returns"
-      );
-    }
-    if (this._activeAdmittedTurn()) {
-      throw new Error(
-        "waitForSubmission() cannot be called from inside an active turn: the submission runs only after this turn ends"
-      );
-    }
-    return new Promise((resolve) => {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const waiter = (submission: ThinkSubmissionInspection) => {
-        clearTimeout(timer);
-        resolve(submission);
-      };
-      let waiters = this._submissionWaiters.get(submissionId);
-      if (!waiters) {
-        waiters = new Set();
-        this._submissionWaiters.set(submissionId, waiters);
+    if (!this._readSubmission(submissionId)) return null;
+    if (!this.tasks.isSettled(submissionId)) {
+      const hook = submissionStatusHookContext.getStore();
+      if (hook?.agent === this && !hook.ended) {
+        throw new Error(
+          "waitForSubmission() cannot be called from onSubmissionStatus: the submission settles only after the hook returns"
+        );
       }
-      waiters.add(waiter);
-      if (options?.timeoutMs !== undefined) {
-        timer = setTimeout(() => {
-          const current = this._submissionWaiters.get(submissionId);
-          current?.delete(waiter);
-          if (current?.size === 0) this._submissionWaiters.delete(submissionId);
-          const latest = this._readSubmission(submissionId);
-          resolve(latest ? this._inspectionFromSubmissionRow(latest) : null);
-        }, options.timeoutMs);
+      if (this._activeAdmittedTurn()) {
+        throw new Error(
+          "waitForSubmission() cannot be called from inside an active turn: the submission runs only after this turn ends"
+        );
       }
+    }
+    const record = await this.tasks.wait(submissionId, {
+      timeoutMs: options?.timeoutMs
     });
+    return record ? submissionInspection(record) : null;
   }
 
   protected onSubmissionStatus(
@@ -5898,13 +5661,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   ): void | Promise<void> {}
 
   /**
-   * Queue the workflow event for a submission that just went terminal.
-   *
-   * The item is written synchronously (the Lifecycle has started whenever a
-   * submission transitions), so call this in the same synchronous block as
-   * the terminal status write: the two commit together and no recovery scan
-   * is needed. A repeated push for the same submission and event type
-   * replaces the pending item rather than duplicating it.
+   * Queue the workflow event for a submission that just went terminal. A
+   * repeated push for the same submission and event type replaces the
+   * pending item rather than duplicating it.
    */
   private _insertWorkflowNotification(
     submission: ThinkSubmissionInspection,
@@ -5940,18 +5699,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       console.error("[Think] Failed to queue workflow notification", error);
     });
     return true;
-  }
-
-  /** Queue the workflow event for a row that a caller just made terminal. */
-  private _enqueueTerminalWorkflowNotification(
-    row: ThinkSubmissionRow | null,
-    output?: unknown
-  ): void {
-    if (!row || !this._isTerminalSubmissionStatus(row.status)) return;
-    this._insertWorkflowNotification(
-      this._inspectionFromSubmissionRow(row),
-      output
-    );
   }
 
   /**
@@ -6057,135 +5804,52 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   async inspectSubmission(
     submissionId: string
   ): Promise<ThinkSubmissionInspection | null> {
-    const row = this._readSubmission(submissionId);
-    return row ? this._inspectionFromSubmissionRow(row) : null;
+    const record = this._submissionRecord(submissionId);
+    return record ? submissionInspection(record) : null;
   }
 
   async listSubmissions(
     options?: ListSubmissionsOptions
   ): Promise<ThinkSubmissionInspection[]> {
-    return this._listSubmissionRows(options).map((row) =>
-      this._inspectionFromSubmissionRow(row)
-    );
+    if (Array.isArray(options?.status) && options.status.length === 0) {
+      return [];
+    }
+    const status = options?.status
+      ? Array.isArray(options.status)
+        ? options.status
+        : [options.status]
+      : undefined;
+    return this.tasks
+      .peekList({
+        definition: SUBMISSION_KIND,
+        ...(status && submissionTaskStatuses(status)),
+        limit: Math.min(Math.max(options?.limit ?? 50, 1), 100)
+      })
+      .map(submissionInspection);
   }
 
   async deleteSubmission(submissionId: string): Promise<boolean> {
     const row = this._readSubmission(submissionId);
-    if (!row || !this._isTerminalSubmissionStatus(row.status)) return false;
-    this.sql`
-      DELETE FROM cf_think_submissions
-      WHERE submission_id = ${submissionId}
-        AND status IN ('completed', 'aborted', 'skipped', 'error')
-    `;
-    this._releaseDeletedSubmissionWaiters([row]);
-    return true;
-  }
-
-  private _releaseDeletedSubmissionWaiters(rows: ThinkSubmissionRow[]): void {
-    for (const row of rows) {
-      const id = row.submission_id;
-      if (!this._terminalStatusEmits.has(id)) {
-        this._resolveSubmissionWaiters(this._inspectionFromSubmissionRow(row));
-        continue;
-      }
-      // The in-flight emit settles these after its hook; a new row that
-      // reuses the id gets a fresh waiter set.
-      const waiters = this._submissionWaiters.get(id);
-      if (!waiters) continue;
-      this._submissionWaiters.delete(id);
-      const held = this._waitersHeldForDeletedEmit.get(id) ?? new Set();
-      for (const waiter of waiters) held.add(waiter);
-      this._waitersHeldForDeletedEmit.set(id, held);
-    }
+    if (!row || !isTerminalSubmissionStatus(row.status)) return false;
+    return this.tasks.deleteRun(submissionId);
   }
 
   async deleteSubmissions(options?: DeleteSubmissionsOptions): Promise<number> {
-    this._ensureSubmissionTable();
-    const statuses =
-      this._normalizeStatusFilter(options?.status) ??
-      new Set<ThinkSubmissionStatus>([
-        "completed",
-        "aborted",
-        "skipped",
-        "error"
-      ]);
-    const limit = Math.min(Math.max(options?.limit ?? 100, 1), 500);
-    const completedBefore = options?.completedBefore?.getTime();
-    const rows = [...statuses]
-      .flatMap((status) =>
-        this._listTerminalSubmissionRowsForDelete(
-          status,
-          limit,
-          completedBefore
-        )
-      )
-      .sort((a, b) =>
-        (a.completed_at ?? a.created_at) === (b.completed_at ?? b.created_at)
-          ? a.created_at - b.created_at
-          : (a.completed_at ?? a.created_at) - (b.completed_at ?? b.created_at)
-      )
-      .slice(0, limit);
-
-    const rowsToDelete = rows.filter((row) =>
-      this._isTerminalSubmissionStatus(row.status)
-    );
-    const idsToDelete = rowsToDelete.map((row) => row.submission_id);
-
-    // Batch deletes into `IN (...)` queries within the SQLite 100
-    // bound-parameter limit to minimize round-trips during cleanup.
-    let deleted = 0;
-    for (let i = 0; i < idsToDelete.length; i += MAX_BOUND_PARAMS) {
-      const batch = idsToDelete.slice(i, i + MAX_BOUND_PARAMS);
-      const strings = buildInClauseStrings(
-        "DELETE FROM cf_think_submissions WHERE status IN ('completed', 'aborted', 'skipped', 'error') AND submission_id IN ",
-        batch.length
-      );
-      this.sql(strings, ...batch);
-      deleted += batch.length;
-    }
-    this._releaseDeletedSubmissionWaiters(rowsToDelete);
-    return deleted;
-  }
-
-  private _listTerminalSubmissionRowsForDelete(
-    status: ThinkSubmissionStatus,
-    limit: number,
-    completedBefore: number | undefined
-  ): ThinkSubmissionRow[] {
-    if (completedBefore === undefined) {
-      return this.sql<ThinkSubmissionRow>`
-        SELECT submission_id, idempotency_key, request_id, stream_id, status,
-               messages_json, metadata_json, error_message, created_at,
-               messages_applied_at, started_at, completed_at, result_status, output_json,
-             message_id
-        FROM cf_think_submissions
-        WHERE status = ${status}
-        ORDER BY completed_at ASC, created_at ASC
-        LIMIT ${limit}
-      `;
-    }
-
-    return this.sql<ThinkSubmissionRow>`
-      SELECT submission_id, idempotency_key, request_id, stream_id, status,
-             messages_json, metadata_json, error_message, created_at,
-             messages_applied_at, started_at, completed_at, result_status, output_json,
-             message_id
-      FROM cf_think_submissions
-      WHERE status = ${status}
-        AND completed_at IS NOT NULL
-        AND completed_at < ${completedBefore}
-      ORDER BY completed_at ASC, created_at ASC
-      LIMIT ${limit}
-    `;
-  }
-
-  private _isTerminalSubmissionStatus(status: ThinkSubmissionStatus): boolean {
-    return (
-      status === "completed" ||
-      status === "aborted" ||
-      status === "skipped" ||
-      status === "error"
-    );
+    const requested = options?.status
+      ? Array.isArray(options.status)
+        ? options.status
+        : [options.status]
+      : TERMINAL_SUBMISSION_STATUSES;
+    const status = requested.filter(isTerminalSubmissionStatus);
+    if (status.length === 0) return 0;
+    return this.tasks.delete({
+      definition: SUBMISSION_KIND,
+      status,
+      ...(options?.completedBefore && {
+        settledBefore: options.completedBefore
+      }),
+      limit: Math.min(Math.max(options?.limit ?? 100, 1), 500)
+    });
   }
 
   async cancelSubmission(
@@ -6194,11 +5858,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   ): Promise<CancelSubmissionResult> {
     const row = this._readSubmission(submissionId);
     if (!row) return { outcome: "not_found", submissionId };
-    if (this._isTerminalSubmissionStatus(row.status)) {
+    if (isTerminalSubmissionStatus(row.status)) {
       return {
         outcome: "already_terminal",
         submissionId,
-        submission: this._inspectionFromSubmissionRow(row)
+        submission: await this._inspectRow(row)
       };
     }
     const previousStatus = row.status as "pending" | "running";
@@ -6208,59 +5872,44 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       row.messages_applied_at !== null ||
       this._submissionsApplyingMessages.has(submissionId);
     const runningHere = this._submissionAbortControllers.has(submissionId);
-
-    const completedAt = Date.now();
-    const errorMessage =
-      reason === undefined
-        ? null
-        : reason instanceof Error
-          ? reason.message
-          : String(reason);
     this._submissionAbortControllers.get(submissionId)?.abort(reason);
-    if (row.request_id) {
-      this.abortRequest(row.request_id, reason);
-    }
+    if (row.request_id) this.abortRequest(row.request_id, reason);
 
-    this.sql`
-      UPDATE cf_think_submissions
-      SET status = 'aborted',
-          error_message = ${errorMessage},
-          completed_at = ${completedAt},
-          result_status = NULL,
-          output_json = NULL
-      WHERE submission_id = ${submissionId}
-        AND status IN ('pending', 'running')
-    `;
-
-    const updated = this._readSubmission(submissionId);
-    if (!updated) return { outcome: "not_found", submissionId };
-    if (updated.status !== "aborted") {
-      return {
-        outcome: "already_terminal",
-        submissionId,
-        submission: this._inspectionFromSubmissionRow(updated)
-      };
+    const cancelled = await this.tasks.cancel(
+      submissionId,
+      cancelReason(reason)
+    );
+    const record = this._submissionRecord(submissionId);
+    if (!record) return { outcome: "not_found", submissionId };
+    const submission = submissionInspection(record);
+    if (!cancelled) {
+      return { outcome: "already_terminal", submissionId, submission };
     }
-    this._enqueueTerminalWorkflowNotification(updated);
-    this._terminalStatusEmits.add(submissionId);
-    try {
-      // A submission claimed before a restart has no in-memory record of its
-      // appends, so fall back to the stored-message check recovery uses.
-      if (!messagesApplied && previousStatus === "running" && !runningHere) {
-        messagesApplied =
-          (await this._getSubmissionMessagesAppliedState(updated)) !== "none";
-      }
-      await this.dequeue(submissionRunItemId(submissionId));
-    } finally {
-      await this._emitSubmissionStatus(updated);
+    // A submission claimed before a restart has no in-memory record of its
+    // appends, so fall back to the stored-message check recovery uses.
+    if (!messagesApplied && previousStatus === "running" && !runningHere) {
+      messagesApplied =
+        (await this._getSubmissionMessagesAppliedState(row)) !== "none";
     }
     return {
       outcome: "cancelled",
       submissionId,
       previousStatus,
       messagesApplied,
-      submission: this._inspectionFromSubmissionRow(updated)
+      submission
     };
+  }
+
+  private async _inspectRow(
+    row: ThinkSubmissionRow
+  ): Promise<ThinkSubmissionInspection> {
+    return (
+      (await this.inspectSubmission(row.submission_id)) ?? {
+        submissionId: row.submission_id,
+        status: row.status,
+        createdAt: row.created_at
+      }
+    );
   }
 
   async submitMessages(
@@ -6274,176 +5923,122 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       admission: "submit",
       trigger: "submission",
       execute: async () => {
-        this._ensureSubmissionTable();
         if (messages.length === 0) {
           throw new Error("submitMessages requires at least one message");
         }
-
+        // A retry must find a submission still in the retired table.
+        await this._migrateLegacySubmissions();
         const existingById = options?.submissionId
-          ? this._readSubmission(options.submissionId)
-          : null;
+          ? this.tasks.peek(options.submissionId)
+          : undefined;
         const existingByKey = options?.idempotencyKey
-          ? this._readSubmissionByIdempotencyKey(options.idempotencyKey)
-          : null;
-
+          ? this.tasks.peekByIdempotencyKey(options.idempotencyKey)
+          : undefined;
         if (
-          existingById &&
-          existingByKey &&
-          existingById.submission_id !== existingByKey.submission_id
+          (existingById &&
+            existingByKey &&
+            existingById.runId !== existingByKey.runId) ||
+          (existingByKey &&
+            options?.submissionId &&
+            existingByKey.runId !== options.submissionId) ||
+          (existingById &&
+            options?.idempotencyKey &&
+            existingById.idempotencyKey !== undefined &&
+            existingById.idempotencyKey !== options.idempotencyKey)
         ) {
           throw new Error(
             "submissionId and idempotencyKey refer to different submissions"
           );
         }
-        if (
-          existingByKey &&
-          options?.submissionId &&
-          existingByKey.submission_id !== options.submissionId
-        ) {
-          throw new Error(
-            "submissionId and idempotencyKey refer to different submissions"
-          );
-        }
-        if (
-          existingById &&
-          options?.idempotencyKey &&
-          existingById.idempotency_key !== null &&
-          existingById.idempotency_key !== options.idempotencyKey
-        ) {
-          throw new Error(
-            "submissionId and idempotencyKey refer to different submissions"
-          );
-        }
-
+        // A retry returns the submission as it is, whatever it sent. An open
+        // one is submitted again as stored, which wakes its lane.
         const existing = existingById ?? existingByKey;
         if (existing) {
-          if (existing.status === "pending") {
-            await this._queueSubmissionRun(existing.submission_id);
+          if (existing.definition !== SUBMISSION_KIND) {
+            throw new Error(
+              "submissionId and idempotencyKey refer to different submissions"
+            );
           }
-          return {
-            ...this._inspectionFromSubmissionRow(existing),
-            accepted: false
-          };
+          if (!isTerminalSubmissionStatus(submissionRow(existing).status)) {
+            // Accepted again under its id, which repairs a lost wake.
+            await this.tasks.run(
+              SUBMISSION_KIND,
+              this.tasks.inputOf<TaskJson>(existing.runId),
+              { runId: existing.runId, lane: SUBMISSION_LANE, start: "alarm" }
+            );
+          }
+          return { ...submissionInspection(existing), accepted: false };
         }
-
-        const submissionId = options?.submissionId ?? crypto.randomUUID();
-        const requestId = submissionId;
-        const now = Date.now();
-        const messagesJson = this._serializeSubmissionMessages(messages);
-        const metadataJson = this._serializeMetadata(options?.metadata);
-
-        this.sql`
-      INSERT INTO cf_think_submissions (
-        submission_id, idempotency_key, request_id, stream_id, status,
-        messages_json, metadata_json, error_message, created_at,
-        messages_applied_at, started_at, completed_at
-      )
-      VALUES (
-        ${submissionId}, ${options?.idempotencyKey ?? null}, ${requestId},
-        NULL, 'pending', ${messagesJson}, ${metadataJson}, NULL, ${now},
-        NULL, NULL, NULL
-      )
-    `;
-
-        const row = this._readSubmission(submissionId);
-        if (!row) {
-          throw new Error("Failed to persist submission");
-        }
-
-        this._emit("submission:create", {
-          submissionId: row.submission_id,
-          requestId: row.request_id ?? undefined,
-          idempotencyKey: row.idempotency_key ?? undefined
-        });
-        await this._emitSubmissionStatus(row);
-        await this._queueSubmissionRun(submissionId);
-
-        return {
-          ...this._inspectionFromSubmissionRow(row),
-          accepted: true
-        };
+        const receipt = await this.tasks.run(
+          SUBMISSION_KIND,
+          {
+            messages: this._sanitizeSubmissionMessages(messages)
+          } as unknown as TaskJson,
+          {
+            ...(options?.submissionId && { runId: options.submissionId }),
+            ...(options?.idempotencyKey && {
+              idempotencyKey: options.idempotencyKey
+            }),
+            ...(options?.metadata && {
+              metadata: options.metadata as Record<string, TaskJson>
+            }),
+            lane: SUBMISSION_LANE,
+            start: "alarm"
+          }
+        );
+        const record = this._submissionRecord(receipt.runId)!;
+        return { ...submissionInspection(record), accepted: true };
       }
     });
   }
 
   /**
-   * Queue the run of one pending submission. Idempotent: the stable id
-   * replaces an item already queued for the submission in place, keeping
-   * its FIFO slot, and re-arms the physical alarm so a lost alarm recovers.
+   * Run one submission. Tasks calls it from the alarm, one submission at
+   * a time in submission order. After an interruption (`run.attempt` above
+   * 1) it first decides from the stored evidence whether the submission can
+   * run again.
    */
-  private async _queueSubmissionRun(submissionId: string): Promise<void> {
-    await this.queue(
-      SUBMISSION_RUN_CALLBACK,
-      { submissionId },
-      { id: submissionRunItemId(submissionId) }
-    );
+  private async _runSubmission(
+    payload: SubmissionPayload,
+    step: TaskStep
+  ): Promise<TaskSettlement | TaskJson | undefined> {
+    return submissionSettlement(await this._decideSubmission(payload, step));
   }
 
-  /** Queue a run for every pending submission that has none. */
-  private async _queuePendingSubmissionRuns(): Promise<void> {
-    this._ensureSubmissionTable();
-    const pending = this.sql<{ submission_id: string }>`
-      SELECT submission_id
-      FROM cf_think_submissions
-      WHERE status = 'pending'
-      ORDER BY created_at ASC, submission_id ASC
-    `;
-    for (const row of pending) {
-      await this._queueSubmissionRun(row.submission_id);
+  private async _decideSubmission(
+    payload: SubmissionPayload,
+    step: TaskStep
+  ): Promise<SubmissionResult> {
+    const row = this._readSubmission(step.id);
+    if (row?.status !== "running") return { status: "skipped" };
+    if (!Array.isArray(payload?.messages)) {
+      return submissionFailed("Stored submission messages are invalid");
     }
-  }
-
-  /**
-   * Run one pending submission. Runs on the Lifecycle alarm loop through the
-   * Queue capability, one item at a time in submission order; a row that is
-   * no longer pending (cancelled, skipped, or claimed by an overlapping
-   * dispatch) is a no-op.
-   * @internal Queue callback.
-   */
-  async _cfRunSubmission(payload: { submissionId: string }): Promise<void> {
-    this._ensureSubmissionTable();
-    const row = this._readSubmission(payload.submissionId);
-    if (!row || row.status !== "pending") return;
-    if (this._submissionsBehindRecovery.has(row.submission_id)) {
-      // Queued again when the recovery settles.
-      if (await this._chatRecoveryNames()) return;
-      this._submissionsBehindRecovery.delete(row.submission_id);
+    if (step.attempt > 1) {
+      const outcome = await this._reconcileInterruptedSubmission(row);
+      if (outcome !== "rerun") return outcome;
     }
-    await this._admitTurn({
+    return this._admitTurn({
       admission: "execute-submission",
       trigger: "submission",
-      execute: () => this._executeSubmission(row)
+      execute: () => this._executeSubmission(row, payload.messages, step)
     });
   }
 
-  private async _executeSubmission(row: ThinkSubmissionRow): Promise<void> {
-    const requestId = row.request_id ?? row.submission_id;
-    const startedAt = Date.now();
-    this.sql`
-      UPDATE cf_think_submissions
-      SET status = 'running',
-          request_id = ${requestId},
-          started_at = ${startedAt}
-      WHERE submission_id = ${row.submission_id}
-        AND status = 'pending'
-    `;
-
-    const claimed = this._readSubmission(row.submission_id);
-    if (!claimed || claimed.status !== "running") return;
-
-    // Registered before the running hook so a cancel landing during the hook
-    // aborts this run and reports it as running here.
+  private async _executeSubmission(
+    row: ThinkSubmissionRow,
+    messages: UIMessage[],
+    run: TaskStep
+  ): Promise<SubmissionResult> {
+    const submissionId = row.submission_id;
+    const requestId = row.request_id ?? submissionId;
     const controller = new AbortController();
-    this._submissionAbortControllers.set(row.submission_id, controller);
-    let output: unknown;
-    // Whether this run wrote the terminal status. A cancel or reset that got
-    // there first emits it itself.
-    let finalizedHere = false;
+    const onAbort = () => controller.abort(run.signal.reason);
+    if (run.signal.aborted) onAbort();
+    else run.signal.addEventListener("abort", onAbort, { once: true });
+    this._submissionAbortControllers.set(submissionId, controller);
     try {
-      await this._emitSubmissionStatus(claimed);
-      const messages = this._parseSubmissionMessages(row.messages_json);
-      const metadata = this._parseJsonObject(row.metadata_json);
-      const workflowPrompt = this._readWorkflowPromptContext(metadata);
+      const workflowPrompt = this._readWorkflowPromptContext(row.metadata);
       const result = await this._runProgrammaticMessagesTurn(
         requestId,
         messages,
@@ -6462,94 +6057,52 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           allowNested: true,
           workflowPrompt: workflowPrompt ?? undefined,
           shouldApplyMessages: () =>
-            this._readSubmission(row.submission_id)?.status === "running",
+            this._readSubmission(submissionId)?.status === "running",
           onApplyingMessages: () => {
-            this._submissionsApplyingMessages.add(row.submission_id);
+            this._submissionsApplyingMessages.add(submissionId);
           },
           onMessagesApplied: () => {
-            this.sql`
-              UPDATE cf_think_submissions
-              SET messages_applied_at = ${Date.now()}
-              WHERE submission_id = ${row.submission_id}
-                AND status = 'running'
-                AND messages_applied_at IS NULL
-            `;
+            const current = this._readSubmission(submissionId);
+            if (
+              current?.status === "running" &&
+              current.messages_applied_at === null
+            ) {
+              this._updateSubmissionProgress(submissionId, {
+                messagesAppliedAt: Date.now()
+              });
+            }
           }
         }
       );
-      output = result.output;
-      if (this._recoveryOwnedSubmissions.delete(row.submission_id)) return;
-      const streamId =
-        this._resumableStream
-          .getAllStreamMetadata()
-          .find((metadata) => metadata.request_id === result.requestId)?.id ??
-        null;
-      const streamError = this._programmaticStreamErrors.get(result.requestId);
-      const finalStatus = this._getSubmissionFinalStatus(
-        result.status,
-        result.error ?? streamError
-      );
-      const errorMessage = result.error ?? streamError ?? null;
-      const completedAt = Date.now();
-      this.ctx.storage.transactionSync(() => {
-        finalizedHere =
-          this._readSubmission(row.submission_id)?.status === "running";
-        this.sql`
-          UPDATE cf_think_submissions
-          SET status = ${finalStatus},
-              request_id = ${result.requestId},
-              stream_id = ${streamId},
-              error_message = ${finalStatus === "error" ? errorMessage : null},
-              completed_at = ${completedAt},
-              result_status = NULL,
-              output_json = NULL
-          WHERE submission_id = ${row.submission_id}
-            AND status = 'running'
-        `;
-        const finalized = this._readSubmission(row.submission_id);
-        if (finalized && this._isTerminalSubmissionStatus(finalized.status)) {
-          this._insertWorkflowNotification(
-            this._inspectionFromSubmissionRow(finalized),
-            output
-          );
-        }
-      });
-    } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : String(error);
-      const completedAt = Date.now();
-      this.ctx.storage.transactionSync(() => {
-        finalizedHere =
-          this._readSubmission(row.submission_id)?.status === "running";
-        this.sql`
-          UPDATE cf_think_submissions
-          SET status = 'error',
-              error_message = ${errorMessage},
-              completed_at = ${completedAt},
-              result_status = NULL,
-              output_json = NULL
-          WHERE submission_id = ${row.submission_id}
-            AND status = 'running'
-        `;
-        const finalized = this._readSubmission(row.submission_id);
-        if (finalized && this._isTerminalSubmissionStatus(finalized.status)) {
-          this._insertWorkflowNotification(
-            this._inspectionFromSubmissionRow(finalized)
-          );
-        }
-      });
-    } finally {
-      this._programmaticStreamErrors.delete(requestId);
-      this._submissionAbortControllers.delete(row.submission_id);
-      this._submissionsApplyingMessages.delete(row.submission_id);
-      const updated = this._readSubmission(row.submission_id);
-      if (
-        finalizedHere &&
-        updated &&
-        this._isTerminalSubmissionStatus(updated.status)
-      ) {
-        await this._emitSubmissionStatus(updated);
+      // Recovery took the turn over and completes the submission.
+      if (this._recoveryOwnedSubmissions.delete(submissionId)) {
+        return submissionDetached();
       }
+      const streamId = this._resumableStream
+        .getAllStreamMetadata()
+        .find((metadata) => metadata.request_id === result.requestId)?.id;
+      const streamError = this._programmaticStreamErrors.get(result.requestId);
+      this._updateSubmissionProgress(submissionId, {
+        requestId: result.requestId,
+        streamId,
+        resultStatus: undefined,
+        output: undefined
+      });
+      return submissionOutcome(
+        this._getSubmissionFinalStatus(
+          result.status,
+          result.error ?? streamError
+        ),
+        result.error ?? streamError,
+        result.output
+      );
+    } finally {
+      run.signal.removeEventListener("abort", onAbort);
+      this._programmaticStreamErrors.delete(requestId);
+      if (this._submissionAbortControllers.get(submissionId) === controller) {
+        this._submissionAbortControllers.delete(submissionId);
+      }
+      this._submissionsApplyingMessages.delete(submissionId);
     }
   }
 
@@ -6560,216 +6113,184 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     return resultStatus === "completed" && streamError ? "error" : resultStatus;
   }
 
-  private _markPendingSubmissionsSkipped(): ThinkSubmissionRow[] {
-    this._ensureSubmissionTable();
-    const pending = this.sql<ThinkSubmissionRow>`
-      SELECT submission_id, idempotency_key, request_id, stream_id, status,
-             messages_json, metadata_json, error_message, created_at,
-             messages_applied_at, started_at, completed_at, result_status, output_json,
-             message_id
-      FROM cf_think_submissions
-      WHERE status = 'pending'
-    `;
-    this.sql`
-      UPDATE cf_think_submissions
-      SET status = 'skipped',
-          error_message = 'Submission was skipped by turn reset.',
-          completed_at = ${Date.now()}
-      WHERE status = 'pending'
-    `;
-    const skipped: ThinkSubmissionRow[] = [];
-    for (const row of pending) {
-      const updated = this._readSubmission(row.submission_id);
-      this._enqueueTerminalWorkflowNotification(updated);
-      if (updated) {
-        skipped.push(updated);
-        // Emitted one at a time after this returns; until each emit finishes,
-        // `waitForSubmission` keeps waiting on it.
-        this._terminalStatusEmits.add(updated.submission_id);
-      }
-      void this.dequeue(submissionRunItemId(row.submission_id)).catch(
-        (error) => {
-          console.error("[Think] Failed to dequeue skipped submission", error);
-        }
-      );
-    }
-    return skipped;
-  }
-
-  private async _emitSkippedSubmissions(
-    skipped: ThinkSubmissionRow[]
-  ): Promise<void> {
-    for (const row of skipped) {
-      const id = row.submission_id;
-      const updated = this._readSubmission(id);
-      if (
-        updated?.status === "skipped" &&
-        updated.created_at === row.created_at
-      ) {
-        try {
-          await this._emitSubmissionStatus(updated);
-          continue;
-        } catch (error) {
-          console.error("[Think] Failed to emit skipped submission", error);
-        }
-      }
-      // Deleted or replaced before its emit (or the emit failed): settle the
-      // waiters held for it so none is stranded.
-      this._terminalStatusEmits.delete(id);
-      const held = this._waitersHeldForDeletedEmit.get(id);
-      this._waitersHeldForDeletedEmit.delete(id);
-      const inspection = this._inspectionFromSubmissionRow(row);
-      for (const waiter of held ?? []) waiter(inspection);
-      if (updated?.created_at === row.created_at) {
-        this._resolveSubmissionWaiters(inspection);
-      }
-    }
-  }
-
-  private async _recoverSubmissionsOnStart(): Promise<void> {
-    this._ensureSubmissionTable();
-
-    const running = this.sql<ThinkSubmissionRow>`
-      SELECT submission_id, idempotency_key, request_id, stream_id, status,
-             messages_json, metadata_json, error_message, created_at,
-             messages_applied_at, started_at, completed_at, result_status, output_json,
-             message_id
-      FROM cf_think_submissions
-      WHERE status = 'running'
-    `;
-
-    for (const row of running) {
-      // A cutover fact wins even if an old Task/recovery callback remains.
-      // Streams also complete on abort and overflow retry, so their lifecycle
-      // alone cannot tell us whether this submission produced an answer.
-      if (
-        row.result_status === "completed" ||
-        row.result_status === "aborted"
-      ) {
-        await this._completeRecoveredSubmission(
+  /**
+   * What an interrupted submission does next, from its stored evidence:
+   * run again when none of its messages were applied, wait for the chat
+   * recovery that owns its turn (`detached`), or end.
+   */
+  private async _reconcileInterruptedSubmission(
+    row: ThinkSubmissionRow
+  ): Promise<SubmissionResult | "rerun"> {
+    // A cutover fact wins even if an old Task/recovery callback remains.
+    // Streams also complete on abort and overflow retry, so their lifecycle
+    // alone cannot tell us whether this submission produced an answer.
+    if (row.result_status === "completed" || row.result_status === "aborted") {
+      return (
+        (await this._recoveredSubmissionOutcome(
           row,
           row.result_status,
-          row.request_id,
           null
-        );
-        continue;
+        )) ?? submissionDetached()
+      );
+    }
+    if (row.messages_applied_at === null) {
+      let appliedState: "none" | "partial" | "all";
+      try {
+        appliedState = await this._getSubmissionMessagesAppliedState(row);
+      } catch (error) {
+        return submissionFailed(error);
       }
-      if (row.messages_applied_at === null) {
-        let appliedState: "none" | "partial" | "all";
-        try {
-          appliedState = await this._getSubmissionMessagesAppliedState(row);
-        } catch (error) {
-          this.sql`
-            UPDATE cf_think_submissions
-            SET status = 'error',
-                error_message = ${error instanceof Error ? error.message : String(error)},
-                completed_at = ${Date.now()}
-            WHERE submission_id = ${row.submission_id}
-              AND status = 'running'
-          `;
-          const updated = this._readSubmission(row.submission_id);
-          if (updated?.status === "error") {
-            this._enqueueTerminalWorkflowNotification(updated);
-            await this._emitSubmissionStatus(updated);
-          }
-          continue;
-        }
-        if (appliedState !== "none") {
-          this.sql`
-            UPDATE cf_think_submissions
-            SET status = 'error',
-                error_message = ${appliedState === "all" ? "Submission was interrupted after messages were applied." : "Submission was interrupted after messages were partially applied."},
-                completed_at = ${Date.now()}
-            WHERE submission_id = ${row.submission_id}
-              AND status = 'running'
-          `;
-          const updated = this._readSubmission(row.submission_id);
-          if (updated?.status === "error") {
-            this._enqueueTerminalWorkflowNotification(updated);
-            await this._emitSubmissionStatus(updated);
-          }
-          continue;
-        }
-        this.sql`
-          UPDATE cf_think_submissions
-          SET status = 'pending',
-              started_at = NULL
-          WHERE submission_id = ${row.submission_id}
-            AND status = 'running'
-        `;
-        const updated = this._readSubmission(row.submission_id);
-        if (updated?.status === "pending") {
-          await this._emitSubmissionStatus(updated);
-        }
-        continue;
-      }
-
-      if (
-        row.request_id &&
-        ((this._hasRecoverableChatTurn(row.request_id) &&
-          this._hasFreshRecoverableSubmissionEvidence(row)) ||
-          (await this._hasScheduledChatRecovery(row)))
-      ) {
-        continue;
-      }
-
-      // An error stamp survives its stream rows being reclaimed by a later
-      // turn; pending recovery above still takes priority, so it settles the
-      // ledger only once no retry remains. Legacy rows have no cutover fact;
-      // keep their exact-stream fallback. An overflow segment deliberately
-      // discarded its partial for a retry, so its completed stream is NOT an
-      // answer — without recovery a retry stamp falls through to interruption.
-      const terminalStream = row.request_id
-        ? this._resumableStream.latestStreamInfoForRequest(row.request_id)
-        : null;
-      const errored =
-        row.result_status === "error" || terminalStream?.status === "error";
-      if (
-        errored ||
-        (terminalStream?.status === "completed" &&
-          // Closed with no producer left: cut off, not answered.
-          !terminalStream.cutOff &&
-          row.result_status !== "retry")
-      ) {
-        await this._completeRecoveredSubmission(
+      if (appliedState === "none") return "rerun";
+      return submissionFailed(
+        appliedState === "all"
+          ? "Submission was interrupted after messages were applied."
+          : "Submission was interrupted after messages were partially applied."
+      );
+    }
+    if (
+      row.request_id &&
+      ((this._hasRecoverableChatTurn(row.request_id) &&
+        this._hasFreshRecoverableSubmissionEvidence(row)) ||
+        (await this._hasScheduledChatRecovery(row)))
+    ) {
+      return submissionDetached();
+    }
+    // An error stamp survives its stream rows being reclaimed by a later
+    // turn; pending recovery above still takes priority, so it settles the
+    // ledger only once no retry remains. Legacy rows have no cutover fact;
+    // keep their exact-stream fallback. An overflow segment deliberately
+    // discarded its partial for a retry, so its completed stream is NOT an
+    // answer — without recovery a retry stamp falls through to interruption.
+    const terminalStream = row.request_id
+      ? this._resumableStream.latestStreamInfoForRequest(row.request_id)
+      : null;
+    const errored =
+      row.result_status === "error" || terminalStream?.status === "error";
+    if (
+      errored ||
+      (terminalStream?.status === "completed" &&
+        // Closed with no producer left: cut off, not answered.
+        !terminalStream.cutOff &&
+        row.result_status !== "retry")
+    ) {
+      return (
+        (await this._recoveredSubmissionOutcome(
           row,
           errored ? "error" : "completed",
-          row.request_id,
           errored ? "Recovered chat stream had already errored." : null
+        )) ?? submissionDetached()
+      );
+    }
+    return submissionFailed(
+      "Submission was interrupted after messages were applied."
+    );
+  }
+
+  /**
+   * Startup work for submissions: move rows of the retired table, and hold
+   * the lane while a chat turn the reset cut off waits for recovery.
+   * Submissions an earlier isolate accepted run after that recovery, in
+   * order, as a client request queued behind it does.
+   */
+  private async _recoverSubmissionsOnStart(): Promise<void> {
+    await this._migrateLegacySubmissions();
+    if (await this._chatRecoveryNames()) {
+      this.tasks.holdLane(SUBMISSION_LANE);
+      this._recheckSubmissionHold();
+    }
+    // End the interrupted ones the stored evidence already decides; the
+    // rest run again as their next attempt, which reads the same evidence.
+    // A parked one (chat recovery owned its turn) is decided the same way:
+    // a reset may have cut its recovery off after the turn's outcome was
+    // stamped, and nothing else would settle it.
+    for (const record of this.tasks.peekList({
+      definition: SUBMISSION_KIND,
+      status: ["running", "pending"],
+      parked: true,
+      order: "oldest",
+      limit: 500
+    })) {
+      const outcome = await this._reconcileInterruptedSubmission(
+        submissionRow(record)
+      );
+      if (outcome === "rerun") continue;
+      if (record.status === "pending" && outcome.status === "detached")
+        continue;
+      await this._settleSubmission(record.runId, outcome);
+    }
+  }
+
+  /** Let held submissions run once no chat turn waits for recovery. */
+  private _releaseSubmissionsAfterRecovery(): void {
+    if (!this.tasks.isLaneHeld(SUBMISSION_LANE)) return;
+    void this._chatRecoveryNames().then(
+      (pending) => {
+        if (!pending) void this.tasks.releaseLane(SUBMISSION_LANE);
+      },
+      (error: unknown) => {
+        console.error("[Think] failed to check chat recovery", error);
+      }
+    );
+  }
+
+  /**
+   * Look again now and then while the lane is held, in case a recovery
+   * settled without telling us.
+   */
+  private _recheckSubmissionHold(): void {
+    setTimeout(() => {
+      if (!this.tasks.isLaneHeld(SUBMISSION_LANE)) return;
+      this._releaseSubmissionsAfterRecovery();
+      this._recheckSubmissionHold();
+    }, 30_000);
+  }
+
+  /**
+   * Move every `cf_think_submissions` row into a run and drop the table.
+   * A `running` row counts as interrupted and is reconciled by its next
+   * attempt. Idempotent: a missing table means a fresh object or a finished
+   * migration.
+   */
+  private async _migrateLegacySubmissions(): Promise<void> {
+    if (!tableExists(this.ctx.storage.sql, "cf_think_submissions")) return;
+    const rows = this.ctx.storage.sql
+      .exec(
+        "SELECT * FROM cf_think_submissions ORDER BY created_at ASC, submission_id ASC"
+      )
+      .toArray() as unknown as LegacySubmissionRow[];
+    let failed = 0;
+    for (const row of rows) {
+      try {
+        await this.tasks.importRun(legacySubmissionImport(row));
+      } catch (error) {
+        // Left in the old table for the next start; the rest still move.
+        failed++;
+        console.error(
+          `[Think] Submission ${row.submission_id} was not moved`,
+          error
         );
         continue;
       }
-
-      this.sql`
-        UPDATE cf_think_submissions
-        SET status = 'error',
-            error_message = 'Submission was interrupted after messages were applied.',
-            completed_at = ${Date.now()}
-        WHERE submission_id = ${row.submission_id}
-          AND status = 'running'
-      `;
-      const updated = this._readSubmission(row.submission_id);
-      if (updated?.status === "error") {
-        this._enqueueTerminalWorkflowNotification(updated);
-        await this._emitSubmissionStatus(updated);
-      }
+      this.ctx.storage.sql.exec(
+        "DELETE FROM cf_think_submissions WHERE submission_id = ?",
+        row.submission_id
+      );
+      // Its run item is Tasks' now.
+      await this.dequeue(submissionRunItemId(row.submission_id));
     }
-
-    // Rows still pending (reverted above, or accepted before their run
-    // item existed) get their run queued; queued ones keep their slot. They
-    // run once no interrupted turn waits for recovery.
-    for (const row of this.sql<{ submission_id: string }>`
-      SELECT submission_id FROM cf_think_submissions WHERE status = 'pending'
-    `) {
-      this._submissionsBehindRecovery.add(row.submission_id);
-    }
-    await this._queuePendingSubmissionRuns();
+    if (failed === 0)
+      this.ctx.storage.sql.exec("DROP TABLE cf_think_submissions");
   }
 
   private async _getSubmissionMessagesAppliedState(
     row: ThinkSubmissionRow
   ): Promise<"none" | "partial" | "all"> {
-    const messages = this._parseSubmissionMessages(row.messages_json);
+    const messages = this.tasks.inputOf<SubmissionPayload>(
+      row.submission_id
+    )?.messages;
+    if (!Array.isArray(messages)) {
+      throw new Error("Stored submission messages are invalid");
+    }
     if (messages.length === 0) return "all";
 
     let applied = 0;
@@ -8018,10 +7539,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       controller.abort(new Error("Turn state reset"));
     }
     this._submissionAbortControllers.clear();
-    const skippedSubmissions = this._markPendingSubmissionsSkipped();
-    void this.keepAliveWhile(() =>
-      this._emitSkippedSubmissions(skippedSubmissions)
-    ).catch((error) => {
+    // Every open submission ends skipped. The writes land before this
+    // returns; the status reports follow.
+    const skipping = this.tasks.clear(
+      SUBMISSION_LANE,
+      "Submission was skipped by turn reset."
+    );
+    void this.keepAliveWhile(() => skipping).catch((error) => {
       console.error("[Think] Failed to skip pending submissions", error);
     });
     this._lastTurnChannel = undefined;
@@ -8736,13 +8260,19 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       if (messageId) this._recordAbortedSubmissionMessage(requestId, messageId);
       return;
     }
-    this.sql`
-      UPDATE cf_think_submissions
-      SET result_status = ${result.status},
-          output_json = ${result.status === "completed" && result.output !== undefined ? JSON.stringify(result.output) : null},
-          message_id = COALESCE(${messageId ?? null}, message_id)
-      WHERE submission_id = ${row.submission_id} AND status = 'running'
-    `;
+    const output = result.status === "completed" ? result.output : undefined;
+    // This write shares the stream's settling transaction, so it must not
+    // throw: an output too large to keep beside the metadata is left to the
+    // run's result.
+    this._updateSubmissionProgress(row.submission_id, {
+      resultStatus: result.status,
+      output:
+        output !== undefined &&
+        progressOutputFits(this.tasks.peek(row.submission_id)?.metadata, output)
+          ? output
+          : undefined,
+      ...(messageId !== undefined && { messageId })
+    });
   }
 
   private _recordSubmissionMessage(requestId: string, messageId: string): void {
@@ -8751,11 +8281,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       this._recordAbortedSubmissionMessage(requestId, messageId);
       return;
     }
-    this.sql`
-      UPDATE cf_think_submissions
-      SET message_id = ${messageId}
-      WHERE submission_id = ${row.submission_id} AND status = 'running'
-    `;
+    this._updateSubmissionProgress(row.submission_id, { messageId });
   }
 
   /**
@@ -8768,14 +8294,16 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     requestId: string,
     messageId: string
   ): void {
-    this.sql`
-      UPDATE cf_think_submissions
-      SET message_id = ${messageId}
-      WHERE request_id = ${requestId}
-        AND status = 'aborted'
-        AND started_at IS NOT NULL
-        AND message_id IS NULL
-    `;
+    const row = this.tasks
+      .peekList({ definition: SUBMISSION_KIND, status: ["aborted"], limit: 50 })
+      .map(submissionRow)
+      .find(
+        (candidate) =>
+          candidate.request_id === requestId &&
+          candidate.started_at !== null &&
+          candidate.message_id === null
+      );
+    if (row) this._updateSubmissionProgress(row.submission_id, { messageId });
   }
 
   /**
@@ -9952,13 +9480,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       },
       recoverySettled: () => {
         this._resumeAdmissions();
-        if (this._submissionsBehindRecovery.size > 0) {
-          void this.keepAliveWhile(() =>
-            this._queuePendingSubmissionRuns()
-          ).catch((error) =>
-            console.error("[Think] failed to queue submissions:", error)
-          );
-        }
+        this._releaseSubmissionsAfterRecovery();
       },
       emitRecoveryEvent: (event) => {
         this._emit(event.type, {
@@ -10201,13 +9723,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * so the submission runner must leave them `running`.
    */
   private _recoveryOwnedSubmissions = new Set<string>();
-  /**
-   * Submissions that were pending when this isolate started. They were
-   * accepted behind a turn the reset may have cut off, so they run after
-   * that turn's recovery, as a client request queued behind it does
-   * (`ChatTurns.resumeAdmissions`).
-   */
-  private _submissionsBehindRecovery = new Set<string>();
 
   private _claimSubmissionForRecovery(
     submissionId: string | undefined,
@@ -10686,20 +10201,19 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const onAccepted = (successorRequestId: string): void => {
       if (signaled) return;
       signaled = true;
-      if (recoveredSubmission) {
-        this.sql`
-          UPDATE cf_think_submissions
-          SET request_id = ${successorRequestId}
-          WHERE submission_id = ${recoveredSubmission.submission_id}
-            AND status = 'running'
-        `;
+      if (
+        recoveredSubmission &&
+        this._readSubmission(recoveredSubmission.submission_id)?.status ===
+          "running"
+      ) {
+        this._updateSubmissionProgress(recoveredSubmission.submission_id, {
+          requestId: successorRequestId
+        });
       }
       onTurnStarted?.();
     };
     const workflowPrompt = recoveredSubmission
-      ? this._readWorkflowPromptContext(
-          this._parseJsonObject(recoveredSubmission.metadata_json)
-        )
+      ? this._readWorkflowPromptContext(recoveredSubmission.metadata)
       : null;
     return recoveredTurnAcceptanceContext.run(
       { agent: this, onAccepted, workflowPrompt: workflowPrompt ?? undefined },
@@ -10909,19 +10423,21 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   private _readRunningSubmissionForRecovery(
     recoveredRequestId: string
   ): ThinkSubmissionRow | null {
-    this._ensureSubmissionTable();
-    const rows = this.sql<ThinkSubmissionRow>`
-      SELECT submission_id, idempotency_key, request_id, stream_id, status,
-             messages_json, metadata_json, error_message, created_at,
-             messages_applied_at, started_at, completed_at, result_status, output_json,
-             message_id
-      FROM cf_think_submissions
-      WHERE submission_id = ${recoveredRequestId}
-         OR (request_id = ${recoveredRequestId} AND status = 'running')
-      ORDER BY (submission_id = ${recoveredRequestId}) DESC
-      LIMIT 1
-    `;
-    return rows[0]?.status === "running" ? rows[0] : null;
+    const exact = this._readSubmission(recoveredRequestId);
+    if (exact) return exact.status === "running" ? exact : null;
+    return (
+      this.tasks
+        .peekList({
+          definition: SUBMISSION_KIND,
+          status: ["running", "pending"],
+          limit: 500
+        })
+        .map(submissionRow)
+        .find(
+          (row) =>
+            row.status === "running" && row.request_id === recoveredRequestId
+        ) ?? null
+    );
   }
 
   private async _markRecoveredSubmissionInterrupted(
@@ -10930,43 +10446,28 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   ): Promise<void> {
     const row = this._readRunningSubmissionForRecovery(recoveredRequestId);
     if (!row) return;
-    this.sql`
-      UPDATE cf_think_submissions
-      SET status = 'error',
-          error_message = ${message},
-          completed_at = ${Date.now()},
-          result_status = NULL,
-          output_json = NULL
-      WHERE submission_id = ${row.submission_id}
-        AND status = 'running'
-    `;
-    const updated = this._readSubmission(row.submission_id);
-    if (updated?.status === "error") {
-      this._enqueueTerminalWorkflowNotification(updated);
-      await this._emitSubmissionStatus(updated);
-    }
+    this._updateSubmissionProgress(row.submission_id, {
+      resultStatus: undefined,
+      output: undefined
+    });
+    await this._settleSubmission(row.submission_id, submissionFailed(message));
   }
 
-  private async _completeRecoveredSubmission(
-    recoveredSubmission: ThinkSubmissionRow | string,
+  /**
+   * How a running submission recovery reached ends, given what its turn
+   * stamped at cutover: a stamp wins over the status recovery inferred.
+   * `null` leaves it running for the durable recovery that still owns it.
+   */
+  private async _recoveredSubmissionOutcome(
+    row: ThinkSubmissionRow,
     status: ThinkSubmissionStatus,
-    requestId: string | null,
     errorMessage: string | null
-  ): Promise<void> {
-    const row =
-      typeof recoveredSubmission === "string"
-        ? this._readRunningSubmissionForRecovery(recoveredSubmission)
-        : this._readSubmission(recoveredSubmission.submission_id);
-    // No await between this guard and the status write/notification enqueue:
-    // competing startup and detached-finalizer paths cannot both emit.
-    if (row?.status !== "running") return;
+  ): Promise<SubmissionResult | null> {
     let output: unknown;
     if (row.result_status === "completed" || row.result_status === "aborted") {
       status = row.result_status;
       errorMessage = null;
-      if (status === "completed" && row.output_json !== null) {
-        output = JSON.parse(row.output_json);
-      }
+      if (status === "completed") output = row.output;
     } else if (row.result_status === "error" && status === "completed") {
       // A stamped stream error contradicts inferred success: no later cutover
       // replaced the stamp, so the turn never durably produced an answer.
@@ -10980,41 +10481,57 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           this._hasRecoverableChatTurn(row.request_id) &&
           this._hasFreshRecoverableSubmissionEvidence(row)) ||
         (await this._hasScheduledChatRecovery(row))
-      )
-        return;
-      await this._markRecoveredSubmissionInterrupted(
-        row.submission_id,
+      ) {
+        return null;
+      }
+      return submissionFailed(
         "Submission was interrupted after messages were applied."
       );
-      return;
     }
-    const completedAt = Date.now();
+    return submissionOutcome(status, errorMessage, output);
+  }
+
+  private async _completeRecoveredSubmission(
+    recoveredSubmission: ThinkSubmissionRow | string,
+    status: ThinkSubmissionStatus,
+    requestId: string | null,
+    errorMessage: string | null
+  ): Promise<void> {
+    const row =
+      typeof recoveredSubmission === "string"
+        ? this._readRunningSubmissionForRecovery(recoveredSubmission)
+        : this._readSubmission(recoveredSubmission.submission_id);
+    if (row?.status !== "running") return;
+    const outcome = await this._recoveredSubmissionOutcome(
+      row,
+      status,
+      errorMessage
+    );
+    if (!outcome) return;
     const streamId = requestId
-      ? (this._resumableStream.latestStreamInfoForRequest(requestId)?.id ??
-        null)
-      : null;
-    this.ctx.storage.transactionSync(() => {
-      this.sql`
-        UPDATE cf_think_submissions
-        SET status = ${status},
-            request_id = COALESCE(${requestId}, request_id),
-            stream_id = COALESCE(${streamId}, stream_id),
-            error_message = ${errorMessage},
-            completed_at = ${completedAt},
-            result_status = NULL,
-            output_json = NULL
-        WHERE submission_id = ${row.submission_id}
-          AND status = 'running'
-      `;
-      this._enqueueTerminalWorkflowNotification(
-        this._readSubmission(row.submission_id),
-        output
-      );
+      ? this._resumableStream.latestStreamInfoForRequest(requestId)?.id
+      : undefined;
+    // A parked run is released once: competing startup and
+    // detached-finalizer paths cannot both end it.
+    this._updateSubmissionProgress(row.submission_id, {
+      ...(requestId !== null && { requestId }),
+      ...(streamId !== undefined && { streamId }),
+      resultStatus: undefined,
+      output: undefined
     });
-    const updated = this._readSubmission(row.submission_id);
-    if (updated && this._isTerminalSubmissionStatus(updated.status)) {
-      await this._emitSubmissionStatus(updated);
-    }
+    await this._settleSubmission(row.submission_id, outcome);
+  }
+
+  /**
+   * End a submission no attempt runs here: one whose turn chat recovery
+   * owns (a parked run) or one a reset left running. A run whose own
+   * attempt is under way decides for itself.
+   */
+  private async _settleSubmission(
+    submissionId: string,
+    result: SubmissionResult
+  ): Promise<void> {
+    await this.tasks.settle(submissionId, submissionSettlement(result));
   }
 
   protected async onChatRecovery(

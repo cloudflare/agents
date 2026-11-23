@@ -12,7 +12,16 @@
  * @packageDocumentation
  */
 
-export * from "../inbox";
+export { TaskSettlement } from "../tasks/settlement";
+export {
+  MAX_FRAMEWORK_METADATA_BYTES,
+  MAX_SERIALIZED_BYTES
+} from "../tasks/serialization";
+export type {
+  TaskFrameworkDefinition,
+  TaskRecord,
+  TaskRegisterOptions
+} from "../tasks/types";
 export * from "../approvals";
 export {
   KeepAlive,

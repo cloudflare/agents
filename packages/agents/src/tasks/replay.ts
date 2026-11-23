@@ -219,6 +219,9 @@ export class ReplayStep implements TaskStep {
   readonly local: unknown;
   readonly checkpoint: TaskCheckpoint;
   readonly createdAt: number;
+  readonly id: string;
+  readonly attempt: number;
+  readonly signal: AbortSignal;
 
   constructor(
     engine: TaskStepEngine,
@@ -228,6 +231,9 @@ export class ReplayStep implements TaskStep {
       local?: unknown;
       checkpoint: TaskCheckpoint;
       createdAt: number;
+      id: string;
+      attempt: number;
+      signal: AbortSignal;
     }
   ) {
     this.#engine = engine;
@@ -236,6 +242,9 @@ export class ReplayStep implements TaskStep {
     this.local = options.local;
     this.checkpoint = options.checkpoint;
     this.createdAt = options.createdAt;
+    this.id = options.id;
+    this.attempt = options.attempt;
+    this.signal = options.signal;
   }
 
   do<T extends TaskValue>(
@@ -497,12 +506,19 @@ function restoreStepError(row: TaskStepRow): Error {
 }
 
 /** Safe name/message projection of an arbitrary thrown value. */
+/** Longest error message a run keeps; a longer one is cut, not lost. */
+const MAX_ERROR_MESSAGE = 10_000;
+
 export function toErrorSummary(error: unknown): {
   name: string;
   message: string;
 } {
-  if (error instanceof Error) {
-    return { name: error.name, message: error.message };
+  const summary =
+    error instanceof Error
+      ? { name: error.name, message: error.message }
+      : { name: "Error", message: String(error) };
+  if (summary.message.length > MAX_ERROR_MESSAGE) {
+    summary.message = `${summary.message.slice(0, MAX_ERROR_MESSAGE)}…`;
   }
-  return { name: "Error", message: String(error) };
+  return summary;
 }

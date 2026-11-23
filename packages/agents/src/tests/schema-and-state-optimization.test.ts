@@ -91,19 +91,25 @@ const EXPECTED_SCHEMA_DDL = [
         value TEXT NOT NULL,
         PRIMARY KEY (run_id, key)
       ) WITHOUT ROWID`,
+  `CREATE TABLE cf_agents_task_parts (
+        run_id TEXT NOT NULL,
+        piece INTEGER NOT NULL,
+        data TEXT NOT NULL,
+        PRIMARY KEY (run_id, piece)
+      ) WITHOUT ROWID`,
   `CREATE TABLE cf_agents_task_runs (
         run_id TEXT PRIMARY KEY,
         definition TEXT NOT NULL,
         input TEXT,
         status TEXT NOT NULL CHECK (status IN (
-          'pending', 'running', 'completed', 'error', 'aborted'
+          'pending', 'running', 'completed', 'error', 'aborted', 'skipped'
         )),
         result TEXT,
         error_name TEXT,
         error_message TEXT,
         status_message TEXT,
         metadata TEXT,
-        idempotency_key TEXT UNIQUE,
+        idempotency_key TEXT,
         retain INTEGER NOT NULL DEFAULT 1,
         attempt INTEGER NOT NULL DEFAULT 0,
         generation TEXT,
@@ -114,7 +120,11 @@ const EXPECTED_SCHEMA_DDL = [
         created_at INTEGER NOT NULL,
         started_at INTEGER,
         updated_at INTEGER NOT NULL,
-        settled_at INTEGER
+        settled_at INTEGER,
+        lane TEXT,
+        seq INTEGER,
+        notified TEXT,
+        input_parts INTEGER
       ) WITHOUT ROWID`,
   `CREATE TABLE cf_agents_task_steps (
         run_id TEXT NOT NULL,

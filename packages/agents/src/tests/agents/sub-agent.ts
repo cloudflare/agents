@@ -27,6 +27,8 @@ export class CounterSubAgent extends Agent {
   readonly rememberSeen: Array<{ local: unknown; rows: number }> = [];
 
   override readonly taskDefinitions = {
+    /** Never ends, so a reset leaves it running. */
+    hang: async () => new Promise<never>(() => {}),
     /** Writes a checkpoint entry, then records `local` and the rows. */
     remember: async (_input: undefined, step: TaskStep) => {
       step.checkpoint.set("note", "kept");
@@ -42,6 +44,41 @@ export class CounterSubAgent extends Agent {
     return this.sql<{ n: number }>`
       SELECT COUNT(*) AS n FROM cf_agents_task_checkpoint
     `[0].n;
+  }
+
+  /**
+   * Queue two `remember` runs in one lane from the alarm (which a facet
+   * only gets through its root) and wait for both.
+   */
+  async runLaneForTest(): Promise<Array<string | undefined>> {
+    const first = await this.tasks.run("remember", undefined, {
+      lane: "facet-lane",
+      start: "alarm"
+    });
+    const second = await this.tasks.run("remember", undefined, {
+      lane: "facet-lane",
+      start: "alarm"
+    });
+    const records = [
+      await this.tasks.wait(first.runId, { timeoutMs: 5_000 }),
+      await this.tasks.wait(second.runId, { timeoutMs: 5_000 })
+    ];
+    return records.map((record) => record?.status);
+  }
+
+  /** Start a run that never ends, so a reset leaves it open. */
+  async startHangingRunForTest(): Promise<void> {
+    await this.tasks.run("hang", undefined, { runId: "hanging" });
+  }
+
+  /** Start as a call through a kept stub would, then report the run. */
+  async hangingRunAfterStartForTest(): Promise<string | undefined> {
+    await this.__unsafe_ensureInitialized();
+    return (await this.tasks.get("hanging"))?.status;
+  }
+
+  facetIdName(): string | undefined {
+    return this.ctx.id.name;
   }
 
   /** Run `remember` in this facet with a `local`, and report what it saw. */
@@ -1569,6 +1606,40 @@ export class TestSubAgentParent extends Agent {
     `;
   }
 
+  async subAgentRunLane(
+    subAgentName: string
+  ): Promise<Array<string | undefined>> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.runLaneForTest();
+  }
+
+  /**
+   * Leave a Task run open in the facet, reset the facet, and start it again
+   * through a stub kept from before, with no init call from this parent.
+   */
+  async subAgentHangingRunAfterKeptStubRestart(
+    subAgentName: string
+  ): Promise<string | undefined> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    await child.startHangingRunForTest();
+    const idName = await child.facetIdName();
+    this.abortSubAgent(CounterSubAgent, subAgentName);
+    const exports = this.ctx.exports as unknown as Record<
+      string,
+      DurableObjectClass & Pick<DurableObjectNamespace, "idFromName">
+    >;
+    const stub = this.ctx.facets.get(
+      `CounterSubAgent\0${subAgentName}`,
+      () => ({
+        class: exports.CounterSubAgent,
+        id: exports.TestSubAgentParent.idFromName(idName ?? subAgentName)
+      })
+    ) as unknown as {
+      hangingRunAfterStartForTest(): Promise<string | undefined>;
+    };
+    return stub.hangingRunAfterStartForTest();
+  }
+
   async subAgentRunRememberTask(subAgentName: string): Promise<{
     status: string | undefined;
     seen: Array<{ local: unknown; rows: number }>;
@@ -1825,8 +1896,13 @@ export class TestSubAgentParent extends Agent {
       async () => (await this.subAgentScheduleLog(subAgentName)).length > 0
     );
     await child.queueFlakyCallback("flaky-item", "same");
+    // Wait for the replacement's run, then for longer than the old item's
+    // retry delay (300 ms), so a retry that wrongly survived has run too.
+    await waitFor(
+      async () => (await this.subAgentScheduleLog(subAgentName)).length >= 2
+    );
     await waitFor(async () => (await child.queueRowIds()).length === 0);
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await new Promise((resolve) => setTimeout(resolve, 700));
     return (await this.subAgentScheduleLog(subAgentName)).length;
   }
 

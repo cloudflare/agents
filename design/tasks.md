@@ -29,9 +29,29 @@ Two ways to record progress, and no third:
 - `step.do(name, fn)` is for work that must not repeat: its result is journaled and returned on replay.
 - `step.checkpoint.set(key, value)` is for state a later attempt reads: the last value wins.
 
+## Lanes (internal)
+
+`run(..., { lane })`: runs of one lane run one at a time, in the order they were accepted (`seq`). A run queued behind its lane's open run has no deadline and no wake job; the head settling gives the next one a deadline of now. An interrupted head is the oldest open run, so it runs again before what is queued behind it. `holdLane(lane)` keeps a lane's runs from starting in this isolate (Think holds its submissions lane while chat recovery decides who owns an interrupted turn); `clear(lane, reason)` ends every open run of the lane `skipped`, writing before its first await.
+
+## Framework definitions: reports, attempt cap, settlements (internal)
+
+`register(name, handler, { onStatus, maxAttempts })`:
+
+- `onStatus(record)` gets the run's stored record and runs in host context when a run is accepted (before its wake is published, so the run starts only after it), when an attempt claims it, and when it ends. The terminal call happens at least once: `notified` takes the status after it returns; a throw retries it 30 s later through the `tasks:reports` job, and a reset before the write delivers it again from the start. A `retain: false` run stays until its terminal report returned. Reports run inside the request or alarm that moved the run, so they need no keep-alive hold.
+- A framework definition's input may be up to 16 MiB: past 500,000 UTF-16 code units it is stored in pieces in `cf_agents_task_parts (run_id, piece, data)`, never splitting a surrogate pair, and joined when the attempt or `inputOf` reads it. The pieces go with the run. Other definitions keep the 1 MiB value limit.
+- `maxAttempts`: the claim is committed with `storage.sync()` before the handler runs, and a run whose attempts are spent ends `error` (`TaskInterruptedError`).
+- The handler may return a `TaskSettlement`: `aborted`, `skipped`, `failed` (no retry), or `park` (the run stays `pending` with wait reason `park`, no deadline, its lane held, until `settle()` ends it).
+- `settle(runId, outcome)` ends a run no attempt runs in this isolate (parked, or left `running` by a reset) with a settlement or a completing value; a racing second settle gets `false`.
+- `wait(runId)` resolves with the run's record after its terminal report; with the record as it is on a timeout, and with its last record when it is deleted (a report in flight resolves its waiters when it returns). Waiters belong to one run, not to its id.
+- Host code reads records synchronously (`peek`, `peekByIdempotencyKey`, `peekList`), reads a run's input (`inputOf`), merges metadata (`updateMetadata`), deletes a terminal run (`deleteRun`) and carries runs forward from its own older storage (`importRun`, once per id).
+
+## Cancel
+
+`cancel(runId)` settles the run `aborted` at once. A live attempt's signal aborts, and nothing that attempt writes afterwards lands (its generation no longer owns the run). A cancel requested while an attempt runs wins over the attempt's result. An attempt left behind by a cancel, or by a delete and a new run under the same id, does not count as the run's live attempt.
+
 ## Memory
 
-Per isolate: one abort controller and one promise per running attempt (`#active`, removed when the attempt ends). `local` lives only on the attempt that received it. Nothing is cached per run beyond that; `list` pages.
+Per isolate: one abort controller and one promise per running attempt (`#active`, removed when the attempt ends); one `local` per run whose caller still waits for its first attempt (`#locals`); one entry per live `wait()` (`#waiters`, removed on resolve, timeout or abort); the runs whose terminal report is being delivered (`#reporting`); the held lanes (`#heldLanes`, a handful of names). Nothing is cached per run beyond that; lists page.
 
 ## The chat turn
 
