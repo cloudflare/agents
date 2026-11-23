@@ -1549,25 +1549,6 @@ export class AIChatAgent<
   }
 
   /**
-   * One client chat request, as the turn core runs it: decide, accept
-   * (pre-stream mark and abort controller, so a cancel while it waits in the
-   * queue is not lost, #2701), record it for a replay after a reset,
-   * persist, queue, the queued checks, then the turn. It always settles the
-   * pre-stream turn (#1784) and drops the abort controller, whatever a step
-   * does.
-   *
-   * A replay after an isolate reset (`messages: null`) has no connection:
-   * its messages are stored already, and its frames go to every connection.
-   */
-  /** User messages in `messages` that are not stored yet. */
-  private _newUserMessageIds(messages: UIMessage[]): string[] {
-    return newUserMessageIds(
-      messages,
-      new Set(this.messages.map((message) => message.id))
-    );
-  }
-
-  /**
    * What a regenerate needs to know about when it arrived: the messages it
    * keeps, and the stored user messages it did not send. A question another
    * tab sends later is in neither, and makes the regenerate skip.
@@ -1703,7 +1684,12 @@ export class AIChatAgent<
     // when this tab drew them and sent them back.
     const queued = transformedMessages ? this._turns.queuedMessageIds() : null;
     const sent = transformedMessages?.filter((m) => !queued?.has(m.id)) ?? [];
-    const heldIds = new Set(this._newUserMessageIds(sent));
+    const heldIds = new Set(
+      newUserMessageIds(
+        sent,
+        new Set(this.messages.map((message) => message.id))
+      )
+    );
     const held = sent.filter((message) => heldIds.has(message.id));
     let concurrencyDecision!: SubmitConcurrencyDecision;
     let epoch!: number;
@@ -1731,7 +1717,12 @@ export class AIChatAgent<
         concurrencyDecision = decision;
       },
       onDropped: () => {
-        if (connection) this._rollbackDroppedSubmit(connection);
+        if (connection) {
+          this._frames.send(connection, {
+            messages: this._messagesForClientSync(),
+            type: MessageType.CF_AGENT_CHAT_MESSAGES
+          });
+        }
         this._completeSkippedRequest(connection, chatMessageId);
       },
       // A genuinely-new turn supersedes any pending terminal record
@@ -2097,13 +2088,6 @@ export class AIChatAgent<
   /** Whether a connection with this id is still attached. */
   private _isConnectionPresent(connectionId: string): boolean {
     return this.getConnection(connectionId) !== undefined;
-  }
-
-  private _rollbackDroppedSubmit(connection: Connection) {
-    this._frames.send(connection, {
-      messages: this._messagesForClientSync(),
-      type: MessageType.CF_AGENT_CHAT_MESSAGES
-    });
   }
 
   /**

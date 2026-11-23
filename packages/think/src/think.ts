@@ -2396,47 +2396,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   private set _lastBody(body: Record<string, unknown> | undefined) {
     this._requestContext.body = body;
   }
-  private readonly _continuation = this._turns.continuation;
-  /**
-   * Accepted-but-not-yet-streamed turns and the connections parked waiting for
-   * one (#1784). See {@link ResumeHandshake} `preStream`.
-   *
-   * HIBERNATION INVARIANT: in-memory only, NOT persisted. Safe because the
-   * pre-stream window cannot overlap hibernation — a turn between `begin()` and
-   * stream start is an unresolved `onMessage` handler promise that pins the DO,
-   * so eviction only happens once a durable stream exists (resumed via
-   * `ResumableStream`) or the turn finished. Breaks if a pre-stream wait is ever
-   * moved onto a durable alarm that releases the DO; if so, persist this state.
-   */
-  private readonly _preStream = this._turns.preStream;
-  // Shared auto-continuation barrier (#1649 / #1650): owns the coalesce timer
-  // and the double-fire guard.
-  private readonly _autoContinuation = this._turns.autoContinuation;
   private _insideResponseHook = false;
   private _insideInferenceLoop = false;
-  private get _pendingInteractionPromise(): Promise<boolean> | null {
-    return this._turns.pendingInteraction;
-  }
-  private set _pendingInteractionPromise(value: Promise<boolean> | null) {
-    this._turns.pendingInteraction = value;
-  }
-  // Serialization tail for client-tool result/approval applies (#1649). Each
-  // apply is a read-modify-write of the full message; running siblings from a
-  // parallel tool batch concurrently lets last-write-wins clobber the others
-  // back to `input-available`. Chaining every apply off this tail makes them
-  // commit atomically in arrival order.
-  private get _interactionApplyTail(): Promise<void> {
-    return this._turns.interactionTail;
-  }
-  private set _interactionApplyTail(value: Promise<void>) {
-    this._turns.interactionTail = value;
-  }
   /** The stream every reply writes (`pumpReply`). */
   private readonly _replyStreams = new ReplyStreams({
     resumable: () => this._resumableStream,
     streamStarted: (requestId) =>
       this._turns.streamStarted(requestId, (c) =>
-        this._notifyStreamResuming(c)
+        this._resumeHandshake().notifyStreamResuming(c)
       ),
     // A connection offered the stream that never ACKed (`resume: false`, or
     // gone quiet) must still get the terminal frame and every later
@@ -3803,11 +3770,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           toolCallIds
         })
     });
-  }
-
-  /** Drain an abandoned inference stream so its trace span ends. */
-  private _drainInferenceStream(result: object): void {
-    drainInferenceStream(result, (promise) => this.ctx.waitUntil(promise));
   }
 
   /** Who a turn's AI SDK telemetry names: this agent and its admitted turn. */
@@ -7633,7 +7595,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
       if (this._resumableStream.hasActiveStream()) {
         // A stream is still in flight. The resume flow is the
-        // authoritative source of state: `_notifyStreamResuming` tells
+        // authoritative source of state: `notifyStreamResuming` tells
         // the client to send `STREAM_RESUME_ACK`, after which the
         // server replays buffered chunks and delivers a final
         // `MSG_CHAT_MESSAGES` broadcast once the turn completes.
@@ -7656,14 +7618,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             })
           );
         }
-        this._notifyStreamResuming(connection);
+        this._resumeHandshake().notifyStreamResuming(connection);
       } else {
         // No active stream. If a turn is accepted but its stream hasn't started
         // yet (#1784), park this connection and tell it to keep waiting (`park`
         // sends the keep-waiting frame; no-op otherwise). Either way send the
         // idle-connect transcript so the client renders the user message it
         // just submitted while it waits for the stream to begin.
-        this._preStream.park(connection);
+        this._turns.preStream.park(connection);
         for (const message of await this._buildIdleConnectMessages()) {
           connection.send(JSON.stringify(message));
         }
@@ -7893,7 +7855,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       isSubmitMessage,
       concurrency: this.messageConcurrency,
       onDropped: () => {
-        if (connection) this._rollbackDroppedSubmit(connection);
+        if (connection) {
+          connection.send(
+            JSON.stringify(this._frames.messagesFrame(this.messages))
+          );
+        }
         this._completeSkippedRequest(connection, requestId);
       },
       // A genuinely-new turn supersedes any pending terminal record (#1645)
@@ -8458,13 +8424,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       { toolName: string; input: unknown | undefined; inputText?: string }
     >();
     const persisted = (id: string | undefined) => {
-      if (id !== undefined) this._broadcastMessages();
+      if (id !== undefined) this._frames.broadcastMessages(this.messages);
       return id;
     };
     const host: ReplyPumpHost = {
       streams: this._replyStreams,
       send: (frame) => this._frames.broadcast(frame),
-      broadcastTranscript: () => this._broadcastMessages(),
+      broadcastTranscript: () => this._frames.broadcastMessages(this.messages),
       emit: ({ type, ...event }) => this._emit(type, event as never),
       turns: this._turns,
       stallTimeoutMs:
@@ -8580,7 +8546,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       {
         requestId,
         source: uiMessageStreamSource(result, () =>
-          this._drainInferenceStream(result)
+          drainInferenceStream(result, (promise) => this.ctx.waitUntil(promise))
         ),
         signal: abortSignal,
         messageId: crypto.randomUUID(),
@@ -8972,8 +8938,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * back to `input-available`, and the auto-continuation barrier later times
    * out and the transcript-repair backstop errors the lost siblings.
    *
-   * Chaining each apply off `_interactionApplyTail` makes the read-modify-write
-   * atomic per result and in arrival order. `_pendingInteractionPromise` is set
+   * Chaining each apply off `_turns.interactionTail` makes the read-modify-write
+   * atomic per result and in arrival order. `_turns.pendingInteraction` is set
    * to the newest link so the barrier's single-slot wake-up still observes the
    * latest apply; because the chain is serial, awaiting it transitively waits
    * for every predecessor.
@@ -11157,16 +11123,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // parked connections (#1784): a skip happens because a NEWER turn was
     // admitted (latest/merge supersede) or the queue generation advanced. The
     // earliest "successor exists" signal (`SubmitConcurrencyController.decide`)
-    // fires before the successor's `_preStream.begin()`, so releasing here would
+    // fires before the successor's `_turns.preStream.begin()`, so releasing here would
     // race a `begin()` that hasn't run yet and cut a parked client loose right
     // before the successor streams. Leave it parked: the successor flushes it on
     // stream start, or the final surviving turn's settle releases it. (Chat
     // clear releases parked connections explicitly via `resetTurnState`.)
     this._turns.settlePreStreamTurn(requestId, { releaseParked: false });
-  }
-
-  private _rollbackDroppedSubmit(connection: Connection): void {
-    connection.send(JSON.stringify(this._frames.messagesFrame(this.messages)));
   }
 
   // ── Auto-continuation ──────────────────────────────────────────
@@ -11176,25 +11138,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       connection,
       errorPrefix: "[Think] Auto-continuation failed:"
     };
-  }
-
-  /**
-   * Re-arm the barrier for a tool result/approval that arrived WITHOUT
-   * `autoContinue` (#1650). The client sends `autoContinue: false` for an
-   * errored tool result (it declines to auto-continue a standalone error), but
-   * in a parallel batch a SIBLING may already have requested continuation — and
-   * this result can be the one that completes the batch. In that case we must
-   * re-run the barrier check so the continuation the sibling requested still
-   * fires once the batch is whole.
-   *
-   * Unlike `_scheduleAutoContinuation` this never CREATES a pending
-   * continuation: a standalone errored tool (no opted-in sibling, so no pending)
-   * must not auto-continue. It also no-ops once the continuation is running
-   * (`pastCoalesce`) — a late result then defers/applies through the normal
-   * path rather than re-arming.
-   */
-  private _rearmPendingAutoContinuationForBatch(): void {
-    this._autoContinuation.rearmForBatch();
   }
 
   /**
@@ -11934,8 +11877,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     return (this._resumeHandshakeInstance ??= new ResumeHandshake({
       responseMessageType: MSG_CHAT_RESPONSE,
       resumableStream: this._resumableStream,
-      continuation: this._continuation,
-      preStream: this._preStream,
+      continuation: this._turns.continuation,
+      preStream: this._turns.preStream,
       pendingResumeConnections: this._pendingResumeConnections,
       pendingChatTerminal: () => this._pendingChatTerminal(),
       persistOrphanedStream: (streamId) =>
@@ -11948,16 +11891,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       recentTerminal: (requestIds) =>
         recentChatTerminal(this.ctx.storage.kv, requestIds)
     }));
-  }
-
-  /**
-   * Notify a connection about an active stream that can be resumed — delegates
-   * to the shared {@link ResumeHandshake}. Kept as a thin method because it is
-   * also called proactively from onConnect and the broadcast loop. See the
-   * driver for the #1733 double-send contract.
-   */
-  private _notifyStreamResuming(connection: Connection): void {
-    this._resumeHandshake().notifyStreamResuming(connection);
   }
 
   /**
@@ -11975,12 +11908,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const requestId =
       this._resumableStream.getStreamMetadata(streamId)?.request_id;
     if (requestId) this._recordSubmissionMessage(requestId, persistedId);
-    this._broadcastMessages();
-  }
-
-  /** Kept for the stream code pump is rewriting; use `_frames.broadcastMessages`. */
-  private _broadcastMessages(exclude?: string[]) {
-    this._frames.broadcastMessages(this.messages, exclude);
+    this._frames.broadcastMessages(this.messages);
   }
 }
 

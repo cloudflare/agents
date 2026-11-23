@@ -2168,7 +2168,7 @@ describe("Think — auto-continuation", () => {
     // continuation was requested — the fast sibling's autoContinue:true — lives
     // in the in-memory pending, not the persisted transcript. So if the isolate
     // is evicted between siblings, the errored completing result finds no
-    // pending and `_rearmPendingAutoContinuationForBatch` no-ops (it never
+    // pending and `autoContinuation.rearmForBatch` no-ops (it never
     // CREATES a pending): the continuation is silently dropped.
     //
     // This is NOT a regression (the old in-memory timer was equally fragile to
