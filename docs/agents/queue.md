@@ -47,7 +47,8 @@ circuit breaker. See [Durable Object lifecycle](./lifecycle.md#the-job-queue).
 Queue's API is small: callbacks are registered by name in the constructor,
 `push()` creates items typed against that registration, and `get()`,
 `list()`, `cancel()`, and `cancelAll()` manage them. All of these are
-asynchronous and work inside routed sub-agents.
+asynchronous. Inside a sub-agent, items are stored in the sub-agent itself
+and run there; the top-level parent's alarm wakes it.
 
 Queue Lifecycle hooks run without ambient host context. Registered callbacks
 are user code, so they run inside the host invocation context with the

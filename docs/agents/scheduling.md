@@ -384,7 +384,7 @@ This is the recommended approach since you cannot forget to dispose the heartbea
 
 The heartbeat does not conflict with scheduled work. Lifecycle selects one physical alarm from both contributions.
 
-Inside sub-agents, `keepAlive()` takes the hold on the top-level parent because facets do not have independent alarm slots. `keepAliveWhile()` works the same way because it calls `keepAlive()` and automatically disposes the delegated ref when the scoped work completes.
+Inside sub-agents, `keepAlive()` works the same way: the heartbeat is stored in the sub-agent, and the top-level parent's alarm wakes it, which keeps the whole tree awake. `keepAliveWhile()` works the same way because it calls `keepAlive()`.
 
 ### Multiple concurrent callers
 
