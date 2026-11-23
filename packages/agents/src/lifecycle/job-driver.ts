@@ -467,11 +467,9 @@ export class JobDriver {
       // was taken. A row that is gone or no longer due belongs to that
       // newer intent — skip it (the final re-arm owns any future wake). A
       // row that changed but is still due dispatches with its fresh data.
-      // A held owner is skipped before its row is read again. A cancelled
-      // id can be pushed again by another owner, so the fresh row's owner
-      // is checked too.
-      // The row is read again first: its id may now belong to another
-      // owner (a cancel and a same-id push), whose hold is what counts.
+      // The row is read again before the hold check: a cancelled id can be
+      // pushed again by another owner, whose hold is what counts. That costs
+      // one row read per due job of a held owner.
       const row = this.#options.queue.dueRow(stale.id, nowMs);
       if (!row) continue;
       if (skip.has(row.capability)) continue;
@@ -834,7 +832,12 @@ export class JobDriver {
   async #ownersNotInstalled(owners: readonly string[]): Promise<string[]> {
     const missing: string[] = [];
     for (const owner of new Set(owners)) {
-      if (!(await this.#options.resolveDispatch(owner))) missing.push(owner);
+      // An owner that cannot be resolved (its start failed) counts as
+      // missing too: its jobs are left alone.
+      const dispatch = await this.#options
+        .resolveDispatch(owner)
+        .catch(() => undefined);
+      if (!dispatch) missing.push(owner);
     }
     return missing;
   }
@@ -968,9 +971,7 @@ export class JobDriver {
     // no part of a loop that runs, and its owner may come back to it.
     let ownerless: string[] = [];
     try {
-      ownerless = await this.#ownersNotInstalled(
-        queue.recoveryLoopJobs().map((job) => job.capability)
-      );
+      ownerless = await this.#ownersNotInstalled(queue.recoveryLoopOwners());
       if (sealed) purgedRecoveryLoopJobs = queue.recoveryLoopJobs(ownerless);
     } catch {
       // best-effort at a failure boundary

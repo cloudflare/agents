@@ -586,6 +586,13 @@ export class JobQueue {
    * policy phase uses this snapshot after the rows are purged so routed owners
    * can terminalize their own durable recovery state.
    */
+  /** The owners of recovery-loop jobs, each once; no payload is read. */
+  recoveryLoopOwners(): string[] {
+    return this.#sql<{ capability: string }>(
+      "SELECT DISTINCT capability FROM cf_agents_jobs WHERE recovery_loop = 1"
+    ).map((row) => row.capability);
+  }
+
   recoveryLoopJobs(except: readonly string[] = []): LifecycleJob[] {
     return this.#sql(
       `SELECT * FROM cf_agents_jobs WHERE recovery_loop = 1
@@ -664,7 +671,9 @@ export class JobQueue {
    * The next physical alarm time derived from queue state, or `null` when
    * the queue holds nothing to wake for.
    *
-   * Exclusive jobs suppress ordinary candidates. An ordinary candidate is
+   * Exclusive jobs suppress ordinary candidates, except those of an owner
+   * the driver holds because it is not installed (`hold.ownerless`): such a
+   * job cannot run, so it wakes like an ordinary one. An ordinary candidate is
    * the earliest ready job clamped to the future (overdue rows survive
    * restarts and must re-fire immediately), merged with the earliest
    * hung-timeout recheck for in-flight single-flight jobs.
