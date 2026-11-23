@@ -288,12 +288,27 @@ export class TestWorkflowAgent extends Agent {
     }
   }
 
+  /** How many times `onWorkflowProgress` threw for `{ step: "throw" }`. */
+  progressThrows = 0;
+
+  getProgressThrows(): number {
+    return this.progressThrows;
+  }
+
+  async runHookThrowsWorkflowTest(workflowId: string): Promise<string> {
+    return this.runWorkflow("HOOK_THROWS_WORKFLOW", {}, { id: workflowId });
+  }
+
   // Override lifecycle callbacks to track them
   async onWorkflowProgress(
     workflowName: string,
     workflowId: string,
     progress: unknown
   ): Promise<void> {
+    if ((progress as { step?: unknown } | undefined)?.step === "throw") {
+      this.progressThrows += 1;
+      throw new Error("progress hook failed");
+    }
     this._callbacksReceived.push({
       type: "progress",
       workflowName,
@@ -773,6 +788,16 @@ export class TestWorkflowAgent extends Agent {
 
   async runAgentResetWorkflowTest(workflowId: string): Promise<string> {
     return this.runWorkflow("AGENT_RESET_WORKFLOW", {}, { id: workflowId });
+  }
+
+  async runAgentResetBetweenStepsWorkflowTest(
+    workflowId: string
+  ): Promise<string> {
+    return this.runWorkflow(
+      "AGENT_RESET_BETWEEN_STEPS_WORKFLOW",
+      { agentName: this.name },
+      { id: workflowId }
+    );
   }
 
   async runThrowInRunWorkflowTest(

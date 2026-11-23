@@ -31,4 +31,43 @@ describe("AgentWorkflow across an Agent reset", () => {
     });
     await expect(instance.waitForStatus("complete")).resolves.not.toThrow();
   });
+
+  it("survives a call outside a step after someone else reset the Agent (#1918)", async () => {
+    const agent = await getAgentByName(
+      env.TestWorkflowAgent,
+      `agent-reset-between-${crypto.randomUUID()}`
+    );
+    const workflowId = `agent-reset-between-wf-${crypto.randomUUID()}`;
+    await using instance = await introspectWorkflowInstance(
+      env.AGENT_RESET_BETWEEN_STEPS_WORKFLOW,
+      workflowId
+    );
+
+    await agent.runAgentResetBetweenStepsWorkflowTest(workflowId);
+
+    await expect(
+      instance.waitForStepResult({ name: "after-reset" })
+    ).resolves.toEqual("after reset");
+    await expect(instance.waitForStatus("complete")).resolves.not.toThrow();
+  });
+
+  it("does not repeat a callback whose Agent hook threw", async () => {
+    const agent = await getAgentByName(
+      env.TestWorkflowAgent,
+      `hook-throws-${crypto.randomUUID()}`
+    );
+    const workflowId = `hook-throws-wf-${crypto.randomUUID()}`;
+    await using instance = await introspectWorkflowInstance(
+      env.HOOK_THROWS_WORKFLOW,
+      workflowId
+    );
+
+    await agent.runHookThrowsWorkflowTest(workflowId);
+
+    await expect(instance.waitForStatus("complete")).resolves.not.toThrow();
+    await expect(instance.getOutput()).resolves.toContain(
+      "progress hook failed"
+    );
+    expect(await agent.getProgressThrows()).toBe(1);
+  });
 });

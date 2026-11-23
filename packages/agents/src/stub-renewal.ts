@@ -10,9 +10,8 @@
  *
  * The failed call still rejects and is not retried here: the caller's own
  * retry (a workflow step's retries, say) runs on the new stub. An error the
- * callee threw itself does not break a stub, but telling the two apart is
- * not reliable, so any rejection renews it; a new stub to the same object
- * costs nothing.
+ * callee threw itself (`remote: true`) does not break a stub and does not
+ * renew it; any other rejection does.
  *
  * Every property read is forwarded to the current stub's own RPC property,
  * so awaiting a remote getter and reading nested properties work as on the
@@ -24,18 +23,32 @@
  *
  * @internal
  */
+/**
+ * Read from a renewing stub: how many times it was renewed. A caller that
+ * may repeat its call (an idempotent callback) compares it before and
+ * after a failure to tell "the stub was broken" from any other error.
+ *
+ * @internal
+ */
+export const stubRenewals: unique symbol = Symbol("stubRenewals");
+
 export function renewingStub<T extends object>(
   first: T,
   open: () => T,
   prepare?: (stub: T) => Promise<unknown>
 ): T {
   let current = first;
+  let renewals = 0;
   /** The current stub still needs `prepare` before its first call. */
   let unprepared = false;
   let preparing: Promise<unknown> | undefined;
-  const renew = (failed: T) => {
+  const renew = (failed: T, error?: unknown) => {
     if (current !== failed) return;
+    // An error the callee's own code threw arrives with `remote: true` and
+    // leaves the stub working (measured); only the others mean a reset.
+    if (isRemoteError(error)) return;
     current = open();
+    renewals += 1;
     unprepared = prepare !== undefined;
     preparing = undefined;
   };
@@ -52,7 +65,10 @@ export function renewingStub<T extends object>(
           if (current === stub) unprepared = false;
         },
         (error: unknown) => {
-          renew(stub);
+          // The next call starts again, whatever the error: the Agent
+          // clears a failed startup and may succeed then.
+          if (preparing === attempt) preparing = undefined;
+          renew(stub, error);
           throw error;
         }
       );
@@ -67,7 +83,7 @@ export function renewingStub<T extends object>(
       // callbacks to be functions.
       result.then(
         () => {},
-        () => renew(stub)
+        (error: unknown) => renew(stub, error)
       );
     }
     return result;
@@ -77,6 +93,7 @@ export function renewingStub<T extends object>(
   // empty target is never read.
   return new Proxy({} as T, {
     get(_target, prop) {
+      if (prop === stubRenewals) return renewals;
       const stub = current;
       const value: unknown = Reflect.get(stub, prop);
       if (typeof value !== "function") return value;
@@ -92,7 +109,7 @@ export function renewingStub<T extends object>(
           try {
             return observe(stub, call());
           } catch (error) {
-            renew(stub);
+            renew(stub, error);
             throw error;
           }
         },
@@ -109,7 +126,7 @@ export function renewingStub<T extends object>(
               Reflect.apply(member, target, [
                 onFulfilled ?? ((result: unknown) => result),
                 (error: unknown) => {
-                  renew(stub);
+                  renew(stub, error);
                   if (onRejected) return onRejected(error);
                   throw error;
                 }
@@ -121,6 +138,14 @@ export function renewingStub<T extends object>(
       });
     }
   });
+}
+
+function isRemoteError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { remote?: unknown }).remote === true
+  );
 }
 
 function isThenable(value: unknown): value is PromiseLike<unknown> {
