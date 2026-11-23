@@ -81,7 +81,11 @@ export interface RecentHistoryResult {
   messages: SessionMessage[];
   /** True when older messages were left out to satisfy the byte budget. */
   truncated: boolean;
-  /** Summed stored size of the FULL path, in bytes. */
+  /**
+   * Summed stored size of the visible path, in bytes. When `truncated`, the
+   * read stops soon after the budget, so on a long path this is the part it
+   * measured: more than the budget, and at most the full size.
+   */
   totalContentBytes: number;
 }
 

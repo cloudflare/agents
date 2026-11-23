@@ -216,10 +216,14 @@ export function staleMessageIds(
   return current.map((message) => message.id).filter((id) => !keep.has(id));
 }
 
+/** Rows one retention pass deletes at most; a longer backlog drains over later persists. */
+const RETENTION_ROWS_PER_PASS = 20_000;
+
 /**
- * The oldest stored rows past `max`. Counts stored rows, not the hydrated
- * window: a transcript larger than the hydration budget holds rows the
- * in-memory list never saw.
+ * Stored rows on the path older than the newest `max`. Counts stored rows,
+ * not the hydrated window: a transcript larger than the hydration budget
+ * holds rows the in-memory list never saw. Reads the newest `max` ids plus
+ * one page past them, whatever the path's length.
  *
  * @internal
  */
@@ -227,7 +231,9 @@ export async function rowsPastRetention(
   session: Session,
   max: number
 ): Promise<string[]> {
-  const stored = await session.getHistoryRowStats();
-  const excess = stored.length - max;
-  return excess > 0 ? stored.slice(0, excess).map((row) => row.id) : [];
+  const past = await session.internal_storedPathRows({
+    skip: max,
+    limit: RETENTION_ROWS_PER_PASS
+  });
+  return past.map((row) => row.id);
 }

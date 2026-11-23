@@ -6,9 +6,11 @@ import type { SessionMessage } from "../../sessions";
 import { isCompactionMessage } from "../../sessions/compaction-helpers";
 
 /**
- * A path read is cut by the depth cap or by a byte budget. Neither cut may
- * turn a compaction overlay off (#2871), and neither read may cost rows in
- * proportion to the session rather than to the path.
+ * Long paths and byte budgets must not turn a compaction overlay off
+ * (#2871), and no read may cost rows in proportion to the session rather
+ * than to what it returns. The walk resolves from the leaf: past an overlay
+ * it continues at the row below it, so the head the compaction kept comes
+ * back with the summary however long the path is.
  */
 
 function sqlOf(instance: SessionHarnessObject): SqlStorage {
@@ -83,9 +85,11 @@ describe("Sessions path reads cut by a window", () => {
       }
 
       const history = await session.getHistory();
-      // The summary, then every row after the overlay's end: m9971..m10100.
-      expect(isCompactionMessage(history[0])).toBe(true);
-      expect(history.slice(1).map((m) => m.id)).toEqual(
+      // The head m1..m3, the summary, then every row after the overlay's
+      // end: m9971..m10100.
+      expect(history.slice(0, 3).map((m) => m.id)).toEqual(["m1", "m2", "m3"]);
+      expect(isCompactionMessage(history[3])).toBe(true);
+      expect(history.slice(4).map((m) => m.id)).toEqual(
         Array.from({ length: 130 }, (_, i) => `m${9971 + i}`)
       );
 
@@ -175,7 +179,7 @@ describe("Sessions path reads cut by a window", () => {
     });
   }, 60_000);
 
-  it("reports a budgeted read as truncated when the clipped overlay has a head before it", async () => {
+  it("shows the head below the overlay in a budgeted read", async () => {
     const stub = await open();
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
       seed(sqlOf(instance), 1, 2000, 1000);
@@ -183,15 +187,15 @@ describe("Sessions path reads cut by a window", () => {
       await session.addCompaction("summary", "m4", "m1980");
       expect(await session.getHistory()).toHaveLength(24);
 
+      // The visible path is about 24 KB: it fits, head included.
       const recent = await session.getRecentHistory(1024 * 1024);
-      expect(recent.messages).toHaveLength(21);
-      expect(isCompactionMessage(recent.messages[0])).toBe(true);
-      // m1..m3 sit before the overlay and outside the window.
-      expect(recent.truncated).toBe(true);
+      expect(recent.messages).toHaveLength(24);
+      expect(isCompactionMessage(recent.messages[3])).toBe(true);
+      expect(recent.truncated).toBe(false);
     });
   });
 
-  it("reports a budgeted read as complete when the clipped overlay starts at the root", async () => {
+  it("reports a budgeted read as complete when the overlay starts at the root", async () => {
     const stub = await open();
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
       seed(sqlOf(instance), 1, 2000, 1000);
@@ -203,26 +207,30 @@ describe("Sessions path reads cut by a window", () => {
     });
   });
 
-  it("does not clip in an overlay anchored on a newer sibling branch", async () => {
+  it("refuses an overlay anchored on another branch", async () => {
     const stub = await open();
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
-      seed(sqlOf(instance), 1, 2000, 1000);
+      seed(sqlOf(instance), 1, 20);
       const session = instance.sessions.session();
-      // A branch off m1 whose row is newer than the window's first row.
       await session.appendMessage(text("b1"), { parentId: "m1" });
-      await session.addCompaction("summary", "b1", "m1980");
-      const recent = await session.getRecentHistory(1024 * 1024, {
-        leafId: "m2000"
-      });
-      expect(isCompactionMessage(recent.messages[0])).toBe(false);
+      await expect(
+        session.addCompaction("summary", "b1", "m15")
+      ).rejects.toThrow(/not on the path/);
+      await expect(
+        session.addCompaction("summary", "m15", "m4")
+      ).rejects.toThrow(/not on the path/);
+      await expect(
+        session.addCompaction("summary", "missing", "m4")
+      ).rejects.toThrow(/not a message/);
+      expect(await session.getCompactions()).toEqual([]);
     });
   });
 
-  it("does not clip in an overlay anchored on an older sibling branch", async () => {
+  it("refuses an overlay anchored on an older sibling branch", async () => {
     const stub = await open();
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
       seed(sqlOf(instance), 1, 2000, 1000);
-      // A sibling of m2 under m1, numbered before every row of the window.
+      // A sibling of m2 under m1, numbered before every other row.
       sqlOf(instance).exec(
         `INSERT INTO cf_agents_session_messages
           (session_id, id, seq, parent_id, role, content, token_estimate, created_at)
@@ -230,7 +238,9 @@ describe("Sessions path reads cut by a window", () => {
            '{"id":"s","role":"user","parts":[{"type":"text","text":"s"}]}', 1, 0)`
       );
       const session = instance.sessions.session();
-      await session.addCompaction("summary", "s", "m1990");
+      await expect(
+        session.addCompaction("summary", "s", "m1990")
+      ).rejects.toThrow(/not on the path/);
       const recent = await session.getRecentHistory(1024 * 1024, {
         leafId: "m2000"
       });
@@ -238,41 +248,47 @@ describe("Sessions path reads cut by a window", () => {
     });
   });
 
-  it("does not revive an overlay a full read suppresses", async () => {
+  it("applies the newest overlay ending on the path, and a budgeted read is the tail of the full read", async () => {
     const stub = await open();
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
       seed(sqlOf(instance), 1, 100, 1000);
       const session = instance.sessions.session();
-      // A full read applies m1..m40; m30..m80 starts inside it and never
-      // applies, so m41..m100 are raw.
       await session.addCompaction("a", "m1", "m40");
-      await session.addCompaction("b", "m30", "m80");
+      const b = await session.addCompaction("b", "m30", "m80");
+      // The walk reaches m80 first: b applies and continues at m29; a ends
+      // inside b's range and is not reached.
       const full = (await session.getHistory()).map((m) => m.id);
-      expect(full.slice(1)).toEqual(
-        Array.from({ length: 60 }, (_, i) => `m${41 + i}`)
-      );
+      expect(full).toEqual([
+        ...Array.from({ length: 29 }, (_, i) => `m${1 + i}`),
+        `compaction_${b.id}`,
+        ...Array.from({ length: 20 }, (_, i) => `m${81 + i}`)
+      ]);
       const stats = await session.getHistoryRowStats();
-      const budget = stats.slice(-51).reduce((sum, row) => sum + row.bytes, 0);
+      const budget =
+        stats.slice(-20).reduce((sum, row) => sum + row.bytes, 0) + 1 + 2_000;
       const recent = await session.getRecentHistory(budget);
       expect(recent.messages.map((m) => m.id)).toEqual(
-        Array.from({ length: 51 }, (_, i) => `m${50 + i}`)
+        full.slice(full.length - recent.messages.length)
       );
+      expect(recent.messages.length).toBeGreaterThan(21);
       expect(recent.truncated).toBe(true);
     });
   });
 
-  it("does not revive an older overlay that shares its start with the one that applies", async () => {
+  it("applies the overlay that ends latest on the path when two share a start", async () => {
     const stub = await open();
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
       seed(sqlOf(instance), 1, 100, 1000);
       const session = instance.sessions.session();
-      await session.addCompaction("older", "m1", "m80");
-      await session.addCompaction("newer", "m1", "m40");
+      const longer = await session.addCompaction("longer", "m1", "m80");
+      await session.addCompaction("shorter", "m1", "m40");
+      const full = (await session.getHistory()).map((m) => m.id);
+      expect(full[0]).toBe(`compaction_${longer.id}`);
+      expect(full).toHaveLength(21);
       const stats = await session.getHistoryRowStats();
-      const budget = stats.slice(-51).reduce((sum, row) => sum + row.bytes, 0);
+      const budget = stats.slice(-10).reduce((sum, row) => sum + row.bytes, 0);
       const recent = await session.getRecentHistory(budget);
-      expect(recent.messages.some(isCompactionMessage)).toBe(false);
-      expect(recent.messages[0].id).toBe("m50");
+      expect(recent.messages.map((m) => m.id)).toEqual(full.slice(-10));
     });
   });
 
@@ -292,22 +308,21 @@ describe("Sessions path reads cut by a window", () => {
     });
   });
 
-  it("checks a shared start once when many stored summaries end in a cut window", async () => {
+  it("reads one summary when many stored summaries share a start", async () => {
     const stub = await open();
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
       const sql = sqlOf(instance);
       seed(sql, 1, 20_000);
-      // What 50 runs of compact() leave: one start, ends 100 rows apart,
-      // every end inside the newest 10,001 rows.
+      // What 50 runs of compact() leave: one start, ends 100 rows apart.
       for (let i = 1; i <= 50; i++) {
         sql.exec(
           `INSERT INTO cf_agents_session_compactions
-            (session_id, id, seq, summary, from_message_id, to_message_id, created_at)
-           VALUES ('', ?, ?, ?, 'm4', ?, 0)`,
-          `c${i}`,
+            (session_id, to_message_id, seq, id, summary, from_message_id, resume_id, created_at)
+           VALUES ('', ?, ?, ?, ?, 'm4', 'm3', 0)`,
+          `m${10_000 + 100 * i}`,
           i,
-          `summary ${i}`,
-          `m${10_000 + 100 * i}`
+          `c${i}`,
+          `summary ${i}`
         );
       }
       const session = instance.sessions.session();
@@ -316,21 +331,24 @@ describe("Sessions path reads cut by a window", () => {
       const read = await rowsRead(sql, async () => {
         history = await session.getHistory();
       });
-      expect(history[0].id).toBe("compaction_c50");
-      expect(history).toHaveLength(1 + 15_000 - 10_000);
-      // One ancestry walk (about 2 rows a step over 15,000 rows) plus the
-      // window. Checking each summary on its own walked 50 times as far.
-      expect(read).toBeLessThan(120_000);
+      expect(history.slice(0, 4).map((m) => m.id)).toEqual([
+        "m1",
+        "m2",
+        "m3",
+        "compaction_c50"
+      ]);
+      expect(history).toHaveLength(4 + 5_000);
+      // The visible rows only: a few rows read each.
+      expect(read).toBeLessThan(5_004 * 5);
     });
   }, 120_000);
 
-  it("skips every summary of a start on another branch and applies the next start on the path", async () => {
+  it("refuses summaries anchored on another branch and applies the one on the path", async () => {
     const stub = await open();
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
       const sql = sqlOf(instance);
       seed(sql, 1, 2000, 1000);
-      // A sibling of m2 under m1, numbered before every other row: two
-      // summaries start there and rank first by start.
+      // A sibling of m2 under m1, numbered before every other row.
       sql.exec(
         `INSERT INTO cf_agents_session_messages
           (session_id, id, seq, parent_id, role, content, token_estimate, created_at)
@@ -338,8 +356,12 @@ describe("Sessions path reads cut by a window", () => {
            '{"id":"s","role":"user","parts":[{"type":"text","text":"s"}]}', 1, 0)`
       );
       const session = instance.sessions.session();
-      await session.addCompaction("sibling a", "s", "m1985");
-      await session.addCompaction("sibling b", "s", "m1990");
+      await expect(
+        session.addCompaction("sibling a", "s", "m1985")
+      ).rejects.toThrow(/not on the path/);
+      await expect(
+        session.addCompaction("sibling b", "s", "m1990")
+      ).rejects.toThrow(/not on the path/);
       const onPath = await session.addCompaction("on path", "m4", "m1980");
       const recent = await session.getRecentHistory(1024 * 1024);
       expect(

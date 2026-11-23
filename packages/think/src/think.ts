@@ -2017,7 +2017,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         isCompactionMessage(message as SessionMessage)
       ),
     storedBytes: () => this._lastHydration?.totalContentBytes ?? null,
-    rowStats: () => this.session.getHistoryRowStats(),
+    storedPathLength: () => this.session.internal_storedPathLength(),
+    storedPathRows: (options) => this.session.internal_storedPathRows(options),
     readMessage: async (id) =>
       (await this.session.getMessage(id)) as UIMessage | null,
     openFiles: () => new WorkspaceFiles(this.workspace),

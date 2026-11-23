@@ -658,7 +658,7 @@ describe("Sessions capability", () => {
     });
   });
 
-  it("re-derives the estimate at the walk cap when the path holds a hidden overlay row", async () => {
+  it("counts every visible row past 10,001 rows and never a hidden overlay row", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
       const session = instance.sessions.session();
@@ -671,11 +671,16 @@ describe("Sessions capability", () => {
         });
         parentId = message.id;
       };
-      for (let i = 0; i < 9_999; i++) await importNext(text(`cap-${i}`, "x"));
-      // A record spanning no stored rows: it hides the echo and nothing else.
-      const compaction = await session.addCompaction("s", "gone-a", "gone-b");
-      await importNext(text(`compaction_${compaction.id}`, "s", "assistant"));
-      await importNext(text("cap-9999", "x"));
+      for (let i = 0; i < 10_000; i++) await importNext(text(`cap-${i}`, "x"));
+      // A record stored by an earlier release whose anchors never applied:
+      // it hides its echoed row and nothing else.
+      sqlOf(instance).exec(
+        `INSERT INTO cf_agents_session_compactions
+          (session_id, to_message_id, seq, id, summary, from_message_id, resume_id, created_at)
+         VALUES ('', 'gone-b', 1, 'legacy', 's', 'gone-a', NULL, 0)`
+      );
+      await importNext(text("compaction_legacy", "s", "assistant"));
+      await importNext(text("cap-10000", "x"));
 
       const perRow = (await session.getHistoryRowStats())[0].tokenEstimate;
       let compactions = 0;
@@ -684,19 +689,18 @@ describe("Sessions capability", () => {
           compactions++;
           return null;
         })
-        .compactAfter(perRow * 10_000);
+        .compactAfter(perRow * 10_002);
 
-      // The walk holds 10,001 stored rows, one hidden: 10,000 count, at the
-      // threshold. Each further append slides the window by a stored row,
-      // so a memo sized by visible rows would count one row too many.
-      await session.appendMessage(text("cap-10000", "x"));
-      expect(compactions).toBe(0);
+      // 10,002 visible rows: at the threshold. The hidden row does not count.
       await session.appendMessage(text("cap-10001", "x"));
       expect(compactions).toBe(0);
+      // There is no cap: one more row is over.
+      await session.appendMessage(text("cap-10002", "x"));
+      expect(compactions).toBe(1);
     });
   }, 120_000);
 
-  it("reports a capped path as truncated when it holds a hidden overlay row", async () => {
+  it("applies an overlay on a path past 10,001 rows that holds a hidden overlay row", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
       const session = instance.sessions.session();
@@ -715,12 +719,13 @@ describe("Sessions capability", () => {
       await importNext(text("cap-10000", "x"));
       await importNext(text("cap-10001", "x"));
 
-      // The walk cap counts stored rows: the newest 10,001 include the hidden
-      // one, so cap-0 and cap-1 are beyond it and the read is truncated.
+      // The summary, cap-2..cap-9999, cap-10000, cap-10001. The echoed
+      // overlay row is walked through and not shown.
       const recent = await session.getRecentHistory(Number.MAX_SAFE_INTEGER);
-      expect(recent.messages).toHaveLength(10_000);
-      expect(recent.messages[0].id).toBe("cap-2");
-      expect(recent.truncated).toBe(true);
+      expect(recent.messages).toHaveLength(10_001);
+      expect(recent.messages[0].id).toBe(`compaction_${compaction.id}`);
+      expect(recent.messages[1].id).toBe("cap-2");
+      expect(recent.truncated).toBe(false);
     });
   }, 120_000);
 
@@ -887,7 +892,7 @@ describe("Sessions capability", () => {
     });
   });
 
-  it("re-derives the estimate once the path reaches the walk cap", async () => {
+  it("keeps counting the estimate past 10,001 rows", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
       const session = instance.sessions.session();
@@ -899,8 +904,8 @@ describe("Sessions capability", () => {
         });
         parentId = `cap-${i}`;
       }
-      // Every row estimates the same; the walk returns at most 10,001 rows,
-      // so once the path is that long the estimate stops growing.
+      // Every row estimates the same, and the estimate keeps counting past
+      // the 10,001 rows a read used to stop at.
       const perRow = (await session.getHistoryRowStats())[0].tokenEstimate;
       let compactions = 0;
       session
@@ -908,16 +913,13 @@ describe("Sessions capability", () => {
           compactions++;
           return null;
         })
-        .compactAfter(perRow * 10_001);
+        .compactAfter(perRow * 10_002);
 
-      // Row 10,001 fills the window exactly: at the threshold, not over.
       await session.appendMessage(text("cap-10000", "x"));
-      expect(compactions).toBe(0);
-      // Rows past the cap slide the window. A memo that kept adding would
-      // cross the threshold here; the re-derived estimate does not.
       await session.appendMessage(text("cap-10001", "x"));
-      await session.appendMessage(text("cap-10002", "x"));
       expect(compactions).toBe(0);
+      await session.appendMessage(text("cap-10002", "x"));
+      expect(compactions).toBe(1);
     });
   }, 120_000);
 
@@ -1151,35 +1153,42 @@ describe("Sessions capability", () => {
     });
   });
 
-  it("reports truncation from the path cap only when older rows exist", async () => {
+  it("reads every row of a path past 10,001 rows; only a budget truncates", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
       const session = instance.sessions.session();
-      // The root is depth 0, so a read follows 10,001 rows. Import is the
-      // cheap write path: no sanitize, no change feed.
+      // Import is the cheap write path: no sanitize, no change feed.
       let parentId: string | null = null;
-      for (let i = 0; i < 10_001; i++) {
+      for (let i = 0; i < 10_002; i++) {
         await session.importMessage(text(`cap-${i}`, "x"), {
           parentId,
           createdAt: i
         });
         parentId = `cap-${i}`;
       }
-      const exact = await session.getRecentHistory(Number.MAX_SAFE_INTEGER);
-      expect(exact.messages).toHaveLength(10_001);
-      expect(exact.messages[0].id).toBe("cap-0");
-      expect(exact.truncated).toBe(false);
+      const all = await session.getRecentHistory(Number.MAX_SAFE_INTEGER);
+      expect(all.messages).toHaveLength(10_002);
+      expect(all.messages[0].id).toBe("cap-0");
+      expect(all.truncated).toBe(false);
+      expect(await session.getHistory()).toHaveLength(10_002);
+      expect(await session.getHistoryRowStats()).toHaveLength(10_002);
 
-      // One more row pushes the root past the cap: the read returns the same
-      // number of rows, but the oldest one now has a parent it could not see.
-      await session.importMessage(text("cap-10001", "x"), {
-        parentId,
-        createdAt: 10_001
-      });
-      const over = await session.getRecentHistory(Number.MAX_SAFE_INTEGER);
-      expect(over.messages).toHaveLength(10_001);
-      expect(over.messages[0].id).toBe("cap-1");
-      expect(over.truncated).toBe(true);
+      const lastFive = (await session.getHistoryRowStats())
+        .slice(-5)
+        .reduce((sum, row) => sum + row.bytes, 0);
+      const budgeted = await session.getRecentHistory(lastFive);
+      expect(budgeted.messages.map((m) => m.id)).toEqual([
+        "cap-9997",
+        "cap-9998",
+        "cap-9999",
+        "cap-10000",
+        "cap-10001"
+      ]);
+      expect(budgeted.truncated).toBe(true);
+      // The read stops soon after the budget: it measured more than the
+      // budget and never walked to the root to total the rest.
+      expect(budgeted.totalContentBytes).toBeGreaterThan(lastFive);
+      expect(budgeted.totalContentBytes).toBeLessThan(all.totalContentBytes);
     });
   }, 120_000);
 

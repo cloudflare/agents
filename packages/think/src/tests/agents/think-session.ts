@@ -14426,16 +14426,16 @@ export class ThinkMediaEvictionAutoAgent extends ThinkMediaEvictionAgent {
     // The refresh's own pass runs and records nothing aged.
     await new Promise((resolve) => setTimeout(resolve, 150));
 
-    // Hold the next pass open AFTER its row-stats read, so it finishes
-    // fruitless on stats that predate the appends below.
+    // Hold the next pass open AFTER its path-length read, so it finishes
+    // fruitless on a length that predates the appends below.
     const session = this.session as unknown as {
-      getHistoryRowStats: (...args: unknown[]) => Promise<unknown>;
+      internal_storedPathLength: () => Promise<number>;
     };
-    const stats = session.getHistoryRowStats.bind(session);
-    session.getHistoryRowStats = async (...args: unknown[]) => {
-      const rows = await stats(...args);
+    const length = session.internal_storedPathLength.bind(session);
+    session.internal_storedPathLength = async () => {
+      const total = await length();
       await new Promise((resolve) => setTimeout(resolve, 150));
-      return rows;
+      return total;
     };
     const internal = this as unknown as {
       _cfMediaEviction: { running: boolean };

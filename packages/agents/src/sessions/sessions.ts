@@ -21,7 +21,11 @@ import type { SqlParam } from "./io";
 import type { SessionChangeListener, SessionsOptions } from "./types";
 
 const SESSIONS_SCHEMA_VERSION_KEY = "cf_agents:sessions_schema_version";
-const CURRENT_SESSIONS_SCHEMA_VERSION = 1;
+/**
+ * 1: legacy `assistant_*` tables lifted. 2: compactions keyed by their end,
+ * with `resume_id`.
+ */
+const CURRENT_SESSIONS_SCHEMA_VERSION = 2;
 
 /**
  * Durable conversation history for a Lifecycle Object.
@@ -72,14 +76,20 @@ export class Sessions extends LifecycleCapability {
       // partial migration that recorded success would never be retried, and
       // the rows it left behind would stay unreachable through the new API
       // forever. The lift is idempotent, so retrying costs reads and nothing
-      // else.
-      if (this.#core.migrateLegacy()) {
+      // else. The compactions rebuild runs after it, so lifted overlays are
+      // rebuilt too; it is a no-op once done.
+      const lifted = version >= 1 || this.#core.migrateLegacy();
+      this.#core.rebuildCompactions();
+      if (lifted) {
         await storage.put(
           SESSIONS_SCHEMA_VERSION_KEY,
           CURRENT_SESSIONS_SCHEMA_VERSION
         );
       }
     }
+    // Not gated on the version: overlays an earlier release wrote (before
+    // the rebuild, or after a rollback) get their continuation here.
+    this.#core.resolveOverlays();
     // Not gated on the version: a lift that left rows behind retries on
     // every start until the table is gone.
     this.#core.liftLegacyFlatMessages();

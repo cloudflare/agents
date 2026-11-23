@@ -152,14 +152,14 @@ for await (const batch of session.historyBatches({
 Use a byte-budgeted recent window during Durable Object startup:
 
 ```ts
-const recent = await session.getRecentHistory(8 * 1024 * 1024, 4);
+const recent = await session.getRecentHistory(8 * 1024 * 1024);
 
 recent.messages;
 recent.truncated;
 recent.totalContentBytes;
 ```
 
-The second argument is a minimum number of recent messages. The minimum can exceed the byte budget, so choose it deliberately.
+The read walks back from the newest message and stops before the message that would pass the budget; the newest message is always returned. `truncated` is `true` when older messages were left out. `totalContentBytes` is the size of everything a full read would return; when `truncated`, it can be just the part the read measured, which is already more than the budget. Pass `{ leafId }` to read another branch.
 
 The budget counts what hydration actually costs. Each row is charged its full stored size — the message row plus every continuation row it was split across — so a 12 MB message is charged 12 MB, not the 1.9 MB its first slice occupies. That is what makes the budget a bound on isolate memory.
 
@@ -169,7 +169,7 @@ The budget counts what hydration actually costs. Each row is charged its full st
 const messages = await session.getHistory();
 ```
 
-Do not use `getHistory()` for an unbounded transcript inside a memory-constrained Durable Object. Prefer `history()`, `historyBatches()`, or `getRecentHistory()`.
+Do not use `getHistory()` for an unbounded transcript inside a memory-constrained Durable Object. Prefer `history()`, `historyBatches()`, or `getRecentHistory()`. `getHistory()`, `history()` and `getHistoryRowStats()` start at the root, so they hold one entry per message before reading content; past 200,000 visible messages they throw, and never return a shorter history. Read newest-first, use `getRecentHistory()`, or compact.
 
 Other reads:
 
@@ -240,7 +240,9 @@ Or store an already-produced summary:
 await session.addCompaction(summary, fromMessageId, toMessageId);
 ```
 
-Some reads stop before the root: a byte-budgeted `getRecentHistory()`, and any read of a path longer than 10,001 rows. Such a read still applies an overlay that starts before the rows it read and ends among them. The summary comes first, then the rows after the overlay. Messages older than the overlay's start, such as the head the compaction function kept, are not in that read, and `getRecentHistory()` reports `truncated: true` when they exist.
+An overlay applies wherever a read reaches the row it ends at, however long the path is and whatever a byte budget leaves out. The read shows the messages after the overlay, its summary, and then the messages before its start, such as the head the compaction function kept. When two stored overlays end on the same path, the one a read reaches first applies, which is the one ending later. Each `compact()` extends the previous overlay, so the head stays where the first compaction left it.
+
+`addCompaction()` throws when `fromMessageId` is not `toMessageId` or one of its ancestors, or when either is not a message of the session. Deleting messages keeps overlays applying: an overlay whose first, last or preceding message is deleted moves to the nearest message that remains, and an overlay whose whole range is deleted is removed.
 
 Sessions stamps each message with a token estimate when the row is written. `compactAfter()` gates on that O(1) aggregate and never reads the transcript to decide whether to compact. Auto-compaction failures are non-fatal: they log, emit `session:error`, and leave the transcript alone.
 
