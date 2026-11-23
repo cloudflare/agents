@@ -128,7 +128,7 @@ export class MyAgent extends Think<Env> {
 
 A block declared without a `provider` is auto-wired to durable per-agent SQLite, so `memory` above is writable through the `set_context` tool with no extra wiring. When context blocks are configured, Think builds the system prompt from an overridden `getSystemPrompt()` followed by those blocks. Think's default `getSystemPrompt()` is only used when there are no blocks. The frozen system prompt is always persisted, so a cold wake reuses the exact prompt string the model already cached.
 
-The assembled blocks are available as `this.context` once the Lifecycle has started. See the [Context documentation](https://github.com/cloudflare/agents/blob/main/docs/agents/context.md) for providers, tools, and frozen-prompt behavior.
+The assembled blocks are available as `this.context` once the Lifecycle has started. See [Context](./context.md) for providers, tools, and what the model is sent.
 
 ---
 

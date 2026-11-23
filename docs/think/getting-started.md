@@ -233,7 +233,7 @@ Now the model sees a `MEMORY` section in its system prompt and gets a `set_conte
 
 When you declare context blocks, the system prompt is built from those blocks, with an overridden `getSystemPrompt()` at the top. The `"soul"` block above acts as the system identity: it is read-only and always appears first. The `"memory"` block is writable, and the model updates it when it learns something useful. The frozen system prompt is always persisted, so a cold wake reuses the exact prompt string the model already cached.
 
-The assembled blocks are available as `this.context` once the Lifecycle has started. See the [Context documentation](https://github.com/cloudflare/agents/blob/main/docs/agents/context.md) for providers, tools, and frozen-prompt behavior, and the [Sessions documentation](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md) for compaction, search, and multi-session support.
+The assembled blocks are available as `this.context` once the Lifecycle has started. See [Context](./context.md) for providers, tools, and what the model is sent, and the [Sessions documentation](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md) for compaction, search, and multi-session support.
 
 ## 7. Add custom tools
 
@@ -315,5 +315,5 @@ See [Lifecycle Hooks](./lifecycle-hooks.md) for the full reference.
 - [Tools](./tools.md) — workspace tools, code execution, extensions
 - [Client Tools](./client-tools.md) — browser-side tools, approval flows, concurrency
 - [Sub-agents and Programmatic Turns](./sub-agents.md) — RPC streaming, scheduled turns, recovery
-- [Context](https://github.com/cloudflare/agents/blob/main/docs/agents/context.md) — context blocks, providers, prompt assembly
+- [Context](./context.md) — context blocks, providers, what the model is sent
 - [Sessions](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md) — compaction, search, attachments, multi-session

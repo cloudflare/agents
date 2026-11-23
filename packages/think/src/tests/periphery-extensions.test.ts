@@ -1,5 +1,5 @@
 import type { UIMessage } from "ai";
-import type { ContextBlocks } from "agents/context";
+import type { Context } from "agents/context";
 import { manifest } from "agents/skills";
 import { describe, expect, it, vi } from "vitest";
 import { callThinkHostApi, createThinkHostApi } from "../extensions/host-api";
@@ -179,7 +179,7 @@ describe("createThinkHostApi", () => {
           setBlock: async (label: string, content: string) => {
             blocks.set(label, content);
           }
-        }) as unknown as ContextBlocks,
+        }) as unknown as Context,
       messages: () => messages,
       appendMessage: async (message) => {
         appended.push(message);
@@ -237,7 +237,7 @@ describe("ThinkSkills", () => {
       }) => {
         blocks.push({ label: block.label, get: block.provider.get });
       }
-    } as unknown as ContextBlocks;
+    } as unknown as Context;
     return { context, blocks };
   }
 

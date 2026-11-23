@@ -8,7 +8,7 @@
  */
 
 import type { ToolSet } from "ai";
-import type { ContextBlocks } from "agents/context";
+import type { Context } from "agents/context";
 import { formatSkillDiagnostic, loadSkillCatalog } from "agents/skills";
 import type {
   SkillCatalog,
@@ -36,7 +36,7 @@ export class ThinkSkills {
    */
   async initialize(
     getSources: () => SkillSource[] | Promise<SkillSource[]>,
-    context: ContextBlocks
+    context: Context
   ): Promise<void> {
     try {
       const sources = await getSources();
