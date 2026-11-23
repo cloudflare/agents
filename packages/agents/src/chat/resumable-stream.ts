@@ -28,6 +28,7 @@ import { Streams, type StreamsSyncInternal } from "../streams/streams";
 import type { StreamJson, StreamRow, StreamState } from "../streams/types";
 import { sendReplayBodies, sendReplayControl } from "./replay-frames";
 import { CHUNK_MAX_BYTES, storedChunkBytes } from "./chunk-size";
+import { ROW_VALUE_BYTES } from "../internal/platform-limits";
 import type { ChatTurnOutcome } from "./wire-types";
 
 /** Number of chunks to pack into a single stored segment before flushing */
@@ -67,19 +68,12 @@ const ABANDONED_STREAM_RETENTION_MS = 60 * 60 * 1000;
 const MAX_REMEMBERED_DELETED_TERMINALS = 32;
 
 /**
- * Ceiling for one stored chat segment after JSON serialization, and the
- * `maxChunkBytes` the backing Streams capability must be constructed with.
- * Kept under the 2 MB SQLite row limit with headroom for escaping.
- */
-const CHAT_STREAM_MAX_CHUNK_BYTES = 1_900_000;
-
-/**
  * Construct the Streams capability instance a chat host must install to back
  * its `ResumableStream`: identical to `new Streams()` except for the raised
  * per-chunk ceiling that chat's packed segments require.
  */
 export function createChatStreams(): Streams {
-  return new Streams({ maxChunkBytes: CHAT_STREAM_MAX_CHUNK_BYTES });
+  return new Streams({ maxChunkBytes: ROW_VALUE_BYTES });
 }
 
 /**

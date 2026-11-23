@@ -14,6 +14,7 @@ import {
   bindLifecycleCapability,
   LifecycleCapability
 } from "../../lifecycle/capability";
+import { ROW_VALUE_BYTES } from "../../internal/platform-limits";
 import { Sessions } from "../../sessions/sessions";
 import { Streams } from "../../streams/streams";
 import type { MemoryLimitContext } from "../../lifecycle/capability-runner";
@@ -126,8 +127,6 @@ const DEFAULT_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 60_000;
 const DEFAULT_STALL_TIMEOUT_MS = 120_000;
 const MAX_OVERFLOW_RETRIES = 1;
-/** Ceiling for one stored segment, under the 2 MB SQLite row limit. */
-const STREAM_MAX_CHUNK_BYTES = 1_900_000;
 /** Chunks packed into one stored stream segment. */
 const SEGMENT_CHUNKS = 10;
 /** Raw bytes packed into one stored segment before it is written. */
@@ -382,7 +381,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
    * it rather than asking the host to install a Streams capability. It
    * shares the `cf_agents_streams` tables with any Streams the host has.
    */
-  readonly #streams = new Streams({ maxChunkBytes: STREAM_MAX_CHUNK_BYTES });
+  readonly #streams = new Streams({ maxChunkBytes: ROW_VALUE_BYTES });
   /**
    * The transcripts. The harness writes every message, and its operations
    * point at them, so it owns the Sessions capability too; a second one

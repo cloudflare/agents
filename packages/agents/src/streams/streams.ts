@@ -14,6 +14,7 @@
  */
 
 import { LifecycleCapability } from "../lifecycle/capability";
+import { ROW_VALUE_BYTES } from "../internal/platform-limits";
 import { SqlError } from "../sql-error";
 import {
   StreamClosedError,
@@ -41,17 +42,11 @@ const CURRENT_STREAM_SCHEMA_VERSION = 2;
 
 /**
  * A block row grows by UPDATE until its body reaches this many characters,
- * then the next append opens a new block. Sized well under the 2 MiB row
- * limit so a 1 MiB chunk always fits in a fresh block, and small enough
+ * then the next append opens a new block. Sized well under the row budget
+ * so a 1 MiB chunk always fits in a fresh block, and small enough
  * that a replay page parses one block at a time.
  */
 const BLOCK_MAX_CHARS = 256 * 1024;
-/**
- * Most bytes one buffered flush puts in a row; more chunks go to the next
- * block. A buffered chunk is at most this (`appendJson` callers check), and
- * a row this size plus its other columns fits SQLite's 2 MB limit.
- */
-const FLUSH_ROW_MAX_BYTES = 1_900_000;
 const INSERT_BLOCK = `INSERT INTO cf_agents_stream_blocks
   (stream_id, block, seq_from, seq_to, body, created_at, updated_at)
   VALUES (?, ?, ?, ?, ?, ?, ?)`;
@@ -107,8 +102,7 @@ export interface StreamsSyncInternal {
   /**
    * A buffered append of a chunk given as its JSON text and its UTF-8
    * size: the caller serialized and measured it once and checked its own
-   * size limit (at most 1.9 MB, so
-   * it fits a row). It gets its seq now and waits in memory with the
+   * size limit (at most `ROW_VALUE_BYTES`, so it fits a row). It gets its seq now and waits in memory with the
    * stream's earlier buffered chunks; all of them are written as one new
    * block (one INSERT) once `maxChunks` or `maxBytes` is reached, on
    * `flush()`, before a direct `append`, or when the stream settles (dropped
@@ -798,17 +792,14 @@ export class Streams extends LifecycleCapability {
     const { firstSeq, jsons, sizes } = buffer;
     const at = Date.now();
     // One block per flush, split only where the flush would pass the row
-    // limit: each chunk is at most FLUSH_ROW_MAX_BYTES (callers check), so
+    // budget: each chunk is at most ROW_VALUE_BYTES (callers check), so
     // every block fits a row.
     const rows: (string | number)[][] = [];
     let start = 0;
     while (start < jsons.length) {
       let end = start + 1;
       let bytes = sizes[start];
-      while (
-        end < jsons.length &&
-        bytes + sizes[end] + 1 <= FLUSH_ROW_MAX_BYTES
-      ) {
+      while (end < jsons.length && bytes + sizes[end] + 1 <= ROW_VALUE_BYTES) {
         bytes += sizes[end] + 1;
         end += 1;
       }
