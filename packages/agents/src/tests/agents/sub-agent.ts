@@ -23,6 +23,10 @@ const STALE_FRAME_PROBE = "stale-frame-probe";
 
 /** Hand-overs into a CounterSubAgent that fail before they reach it. */
 let failingAdopts = 0;
+/** Held open while a failing hand-over is in flight, until released. */
+let failingAdoptGate:
+  | { entered: boolean; release: () => void; released: Promise<void> }
+  | undefined;
 
 export class CounterSubAgent extends Agent {
   override async _cf_routeLifecycle(
@@ -34,6 +38,12 @@ export class CounterSubAgent extends Agent {
       (envelope.payload as { type?: string }).type === "adopt"
     ) {
       failingAdopts -= 1;
+      const gate = failingAdoptGate;
+      if (gate) {
+        gate.entered = true;
+        await gate.released;
+        failingAdoptGate = undefined;
+      }
       throw Object.assign(new Error("simulated hand-over failure"), {
         retryable: true
       });
@@ -1846,6 +1856,28 @@ export class TestSubAgentParent extends Agent {
 
   failNextAdoptsForTest(count: number): void {
     failingAdopts = count;
+  }
+
+  /** Fail the next hand-over, held open until `releaseFailingAdoptForTest`. */
+  holdNextFailingAdoptForTest(): void {
+    failingAdopts = 1;
+    let release = () => {};
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    failingAdoptGate = { entered: false, release, released };
+  }
+
+  failingAdoptEnteredForTest(): boolean {
+    return failingAdoptGate?.entered ?? false;
+  }
+
+  releaseFailingAdoptForTest(): void {
+    failingAdoptGate?.release();
+  }
+
+  dropRootJobForTest(id: string): void {
+    this.sql`DELETE FROM cf_agents_jobs WHERE id = ${id}`;
   }
 
   /** Make the root's queue rows due, keeping their order. */

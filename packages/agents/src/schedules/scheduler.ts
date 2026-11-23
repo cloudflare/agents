@@ -453,6 +453,8 @@ export class Scheduler<
       // hand-over is not the schedule's own failure, so it must never reach
       // the driver's failure handling, which could give it up.
       console.error(`error handing schedule "${job.id}" over`, error);
+      // A schedule cancelled meanwhile (its sub-agent deleted) stays gone.
+      if (!this.lifecycle.jobs.get(job.id)) return undefined;
       // Try again later, keeping the schedule's own time for the sub-agent.
       await this.lifecycle.jobs.push({
         id: job.id,
