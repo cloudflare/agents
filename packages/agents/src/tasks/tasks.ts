@@ -104,8 +104,11 @@ export function setTaskRoutedMemoryLimitHandler(
 }
 
 const FIBER_SCHEMA_VERSION_KEY = "cf_agents:tasks_schema_version";
-/** 2 renames the run statuses and adds `cf_agents_task_checkpoint`. */
-const CURRENT_FIBER_SCHEMA_VERSION = 2;
+/**
+ * 2 renames the run statuses and adds `cf_agents_task_checkpoint`; 3 adds
+ * lanes.
+ */
+const CURRENT_FIBER_SCHEMA_VERSION = 3;
 
 const DEFAULT_STEP_POLICY: ResolvedStepPolicy = {
   retryLimit: 5,
@@ -248,6 +251,8 @@ export class Tasks<
    * attempt) ends.
    */
   readonly #locals = new Map<string, unknown>();
+  /** Lanes {@link holdLane} holds in this isolate. */
+  readonly #heldLanes = new Set<string>();
   #storeInstance: TaskStore | undefined;
   readonly #stepDefaults: ResolvedStepPolicy;
   readonly #onError: ((error: unknown) => void | Promise<void>) | undefined;
@@ -444,6 +449,7 @@ export class Tasks<
     const version = (await storage.get<number>(FIBER_SCHEMA_VERSION_KEY)) ?? 0;
     if (version < CURRENT_FIBER_SCHEMA_VERSION) {
       if (version === 1) this.#store.migrateStatuses();
+      if (version >= 1) this.#store.addLaneColumns();
       this.#store.ensureTables();
       await storage.put(FIBER_SCHEMA_VERSION_KEY, CURRENT_FIBER_SCHEMA_VERSION);
     }
@@ -556,6 +562,9 @@ export class Tasks<
    * queue job.
    */
   async #dispatchRun(runId: string): Promise<LifecycleJobOutcome> {
+    // A held lane's run (or one queued behind its head) waits for
+    // releaseLane() or its head's settle to wake it again.
+    if (!this.#laneAllows(runId)) return undefined;
     const active = this.#active.get(runId);
     if (active) {
       // A live attempt in this isolate; push the claim backstop forward so
@@ -1107,14 +1116,19 @@ export class Tasks<
 
     const runId = options.runId ?? `task_${nanoid()}`;
     const now = Date.now();
+    const lane = options.lane ?? null;
+    // A run queued behind its lane's open run waits with no deadline (and
+    // no wake job) until that run settles.
+    const queued = lane !== null && this.#store.laneHead(lane) !== undefined;
     this.#store.sql`
       INSERT INTO cf_agents_task_runs
         (run_id, definition, input, status, metadata, idempotency_key, retain,
-         attempt, next_at, cancel_requested, created_at, updated_at)
+         attempt, next_at, cancel_requested, created_at, updated_at, lane, seq)
       VALUES
         (${runId}, ${definition}, ${inputJson}, 'pending', ${metadataJson},
          ${options.idempotencyKey ?? null}, ${options.retain === false ? 0 : 1},
-         0, ${now}, 0, ${now}, ${now})
+         0, ${queued ? null : now}, 0, ${now}, ${now}, ${lane},
+         ${lane === null ? null : this.#store.nextLaneSeq(lane)})
     `;
     // Before the wake is published: an attempt this isolate starts from it
     // (the alarm can win the claim) still gets the caller's `local`.
@@ -1155,6 +1169,7 @@ export class Tasks<
   /** Claim and drive one due run to its next durable boundary. */
   async #executeRun(runId: string): Promise<void> {
     if (this.#active.has(runId)) return;
+    if (!this.#laneAllows(runId)) return;
     // Read now: the caller that passed it may finish before the claim lands.
     const local = this.#locals.get(runId);
     const row = this.#store.getRun(runId);
@@ -1515,6 +1530,48 @@ export class Tasks<
     if (row?.retain === 0) this.#store.deleteRun(runId);
     else this.#store.deleteCheckpoint(runId);
     await this.#syncWake(runId);
+    if (row?.lane != null) await this.#wakeLane(row.lane);
+  }
+
+  /**
+   * Whether a run may start now: a run outside a lane always may; a lane
+   * run only when it is its lane's head and the lane is not held.
+   */
+  #laneAllows(runId: string): boolean {
+    const row = this.#store.getRun(runId);
+    if (row?.lane == null) return true;
+    if (this.#heldLanes.has(row.lane)) return false;
+    return this.#store.laneHead(row.lane)?.run_id === runId;
+  }
+
+  /** Give a lane's head a deadline of now if it waits without one. */
+  async #wakeLane(lane: string): Promise<void> {
+    if (this.#heldLanes.has(lane)) return;
+    const head = this.#store.laneHead(lane);
+    if (!head) return;
+    if (head.status === "pending" && head.next_at === null) {
+      const now = Date.now();
+      this.#store.sql`
+        UPDATE cf_agents_task_runs SET next_at = ${now}, updated_at = ${now}
+        WHERE run_id = ${head.run_id} AND status = 'pending'
+      `;
+    }
+    await this.#syncWake(head.run_id);
+  }
+
+  /**
+   * @internal Keep a lane's runs from starting, in this isolate, until
+   * {@link releaseLane}: runs an earlier isolate left wait while the host
+   * decides who owns them.
+   */
+  holdLane(lane: string): void {
+    this.#heldLanes.add(lane);
+  }
+
+  /** @internal Let a held lane run again. */
+  async releaseLane(lane: string): Promise<void> {
+    if (!this.#heldLanes.delete(lane)) return;
+    await this.#wakeLane(lane);
   }
 
   /** Make deadlines sane after a fresh isolate: interrupted work wakes now. */
@@ -1526,10 +1583,18 @@ export class Tasks<
       UPDATE cf_agents_task_runs SET next_at = ${now}, updated_at = ${now}
       WHERE status = 'running' AND generation IS NOT NULL
     `;
-    // Non-terminal rows must always carry a deadline; repair any without one.
+    // Non-terminal rows must always carry a deadline, except runs queued
+    // behind their lane's head; repair any without one.
     this.#store.sql`
       UPDATE cf_agents_task_runs SET next_at = ${now}, updated_at = ${now}
-      WHERE status = 'pending' AND next_at IS NULL
+      WHERE status = 'pending' AND next_at IS NULL AND (
+        lane IS NULL OR run_id = (
+          SELECT head.run_id FROM cf_agents_task_runs AS head
+          WHERE head.lane = cf_agents_task_runs.lane
+            AND head.status IN ('pending', 'running')
+          ORDER BY head.seq LIMIT 1
+        )
+      )
     `;
   }
 

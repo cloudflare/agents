@@ -234,6 +234,12 @@ export interface TaskRunOptions {
   retain?: boolean;
 
   /**
+   * @internal Runs of one lane run one at a time, in the order they were
+   * accepted; a run queued behind another waits with no deadline of its own.
+   */
+  lane?: string;
+
+  /**
    * @internal Where the first attempt runs. Omitted: in this invocation,
    * without waiting for it. `"now"`: in this invocation, and `run()`
    * resolves when that attempt ends. `"alarm"`: from the alarm, where
@@ -367,6 +373,8 @@ export type TaskRunRow = {
   started_at: number | null;
   updated_at: number;
   settled_at: number | null;
+  lane: string | null;
+  seq: number | null;
 };
 
 /** @internal Raw `cf_agents_task_steps` SQLite row. */

@@ -33,7 +33,9 @@ const RUNS_COLUMNS = `
         created_at INTEGER NOT NULL,
         started_at INTEGER,
         updated_at INTEGER NOT NULL,
-        settled_at INTEGER
+        settled_at INTEGER,
+        lane TEXT,
+        seq INTEGER
       `;
 
 /** @internal SQL-backed store for one Tasks capability instance. */
@@ -98,6 +100,27 @@ export class TaskStore {
       SELECT * FROM cf_agents_task_runs WHERE run_id = ${runId}
     `;
     return rows[0];
+  }
+
+  /**
+   * The run a lane runs next: its oldest open run (an interrupted one is
+   * older than anything queued behind it).
+   */
+  laneHead(lane: string): TaskRunRow | undefined {
+    return this.sql<TaskRunRow>`
+      SELECT * FROM cf_agents_task_runs
+      WHERE lane = ${lane} AND status IN ('pending', 'running')
+      ORDER BY seq LIMIT 1
+    `[0];
+  }
+
+  /** The sequence number the next run of `lane` gets. */
+  nextLaneSeq(lane: string): number {
+    return (
+      (this.sql<{ seq: number | null }>`
+        SELECT MAX(seq) AS seq FROM cf_agents_task_runs WHERE lane = ${lane}
+      `[0]?.seq ?? 0) + 1
+    );
   }
 
   getRunByKey(idempotencyKey: string): TaskRunRow | undefined {
@@ -202,6 +225,22 @@ export class TaskStore {
     });
   }
 
+  /** Schema 2 to 3: a run may belong to a lane (`lane`, arrival `seq`). */
+  addLaneColumns(): void {
+    const columns = new Set(
+      this.sql<{ name: string }>`
+        SELECT name FROM pragma_table_info('cf_agents_task_runs')
+      `.map((row) => row.name)
+    );
+    if (columns.size === 0) return;
+    if (!columns.has("lane")) {
+      this.write("ALTER TABLE cf_agents_task_runs ADD COLUMN lane TEXT", []);
+    }
+    if (!columns.has("seq")) {
+      this.write("ALTER TABLE cf_agents_task_runs ADD COLUMN seq INTEGER", []);
+    }
+  }
+
   ensureTables(): void {
     const rawSql = (query: string) => {
       try {
@@ -221,6 +260,12 @@ export class TaskStore {
     rawSql(`
       CREATE INDEX IF NOT EXISTS cf_agents_task_runs_definition
       ON cf_agents_task_runs (definition, created_at)
+    `);
+    // A lane's head and next run are read on every lane settle; only lane
+    // runs carry an entry.
+    rawSql(`
+      CREATE INDEX IF NOT EXISTS cf_agents_task_runs_lane
+      ON cf_agents_task_runs (lane, seq) WHERE lane IS NOT NULL
     `);
     rawSql(`
       CREATE TABLE IF NOT EXISTS cf_agents_task_steps (

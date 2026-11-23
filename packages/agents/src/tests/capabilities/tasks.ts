@@ -32,6 +32,10 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
   readonly rememberingSeen: Array<{ local: unknown; note: unknown }> = [];
   /** `remembering` parks on this until a test opens it. */
   rememberingGate: Promise<void> | null = null;
+  /** Labels of `laned` runs, in the order they started. */
+  readonly lanedStarted: string[] = [];
+  /** `laned` runs park on their label's gate, when it has one. */
+  readonly lanedGates = new Map<string, Promise<void>>();
 
   readonly tasks = new Tasks({
     definitions: {
@@ -40,6 +44,13 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
        * {@link rememberingGate} (a reset there leaves it running), then
        * writes `after`.
        */
+      /** Records its label, parks on its gate, returns the label. */
+      laned: async (input: { label: string }) => {
+        this.lanedStarted.push(input.label);
+        await this.lanedGates.get(input.label);
+        return input.label;
+      },
+
       remembering: async (_input: undefined, step: TaskStep) => {
         this.rememberingSeen.push({
           local: step.local,
