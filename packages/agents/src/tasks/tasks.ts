@@ -266,7 +266,10 @@ export class Tasks<
   /** Options of definitions registered with any. */
   readonly #registeredOptions = new Map<string, TaskRegisterOptions>();
   /** Callers of {@link wait}, by run id; removed when they resolve. */
-  readonly #waiters = new Map<string, Set<(record: TaskRecord) => void>>();
+  readonly #waiters = new Map<
+    string,
+    Set<{ createdAt: number; resolve: (record: TaskRecord) => void }>
+  >();
   /** Runs whose terminal report is being delivered in this isolate. */
   readonly #reporting = new Set<string>();
   /** Lanes {@link holdLane} holds in this isolate. */
@@ -594,7 +597,7 @@ export class Tasks<
     // A held lane's run (or one queued behind its head) waits for
     // releaseLane() or its head's settle to wake it again.
     if (!this.#laneAllows(runId)) return undefined;
-    const active = this.#active.get(runId);
+    const active = this.#liveAttempt(runId);
     if (active) {
       // A live attempt in this isolate; push the claim backstop forward so
       // the due job does not hot-loop the alarm while it works.
@@ -646,7 +649,7 @@ export class Tasks<
    * facet's own local alarm).
    */
   async #dispatchRoutedRun(runId: string): Promise<LifecycleJobOutcome> {
-    const active = this.#active.get(runId);
+    const active = this.#liveAttempt(runId);
     if (active) {
       this.#refreshClaim(runId);
       return this.#wakeOutcome(runId);
@@ -993,7 +996,7 @@ export class Tasks<
     const row = this.#store.getRun(runId);
     if (!row || TERMINAL_STATUSES.has(row.status)) return false;
 
-    const active = this.#active.get(runId);
+    const active = this.#liveAttempt(runId);
     if (active) {
       // Settled now: the attempt's signal aborts, and nothing it writes
       // afterwards lands (its generation no longer owns the run).
@@ -1202,7 +1205,7 @@ export class Tasks<
 
   /** Claim and drive one due run to its next durable boundary. */
   async #executeRun(runId: string): Promise<void> {
-    if (this.#active.has(runId)) return;
+    if (this.#liveAttempt(runId)) return;
     if (!this.#laneAllows(runId)) return;
     // Read now: the caller that passed it may finish before the claim lands.
     const local = this.#locals.get(runId);
@@ -1300,8 +1303,25 @@ export class Tasks<
     try {
       await promise;
     } finally {
-      this.#active.delete(runId);
+      // A run reusing this id may have started its own attempt since.
+      if (this.#active.get(runId)?.generation === generation) {
+        this.#active.delete(runId);
+      }
     }
+  }
+
+  /**
+   * The attempt running `runId` in this isolate, if it still owns the run:
+   * one left behind by a cancel, or by a delete and a new run under the
+   * same id, does not count.
+   */
+  #liveAttempt(runId: string): ActiveAttempt | undefined {
+    const active = this.#active.get(runId);
+    if (!active) return undefined;
+    if (this.#store.getRun(runId)?.generation === active.generation) {
+      return active;
+    }
+    return undefined;
   }
 
   /** Run one claimed attempt and persist its outcome, generation-fenced. */
@@ -1473,7 +1493,7 @@ export class Tasks<
     outcome: TaskSettlement | TaskValue
   ): Promise<boolean> {
     await this.lifecycle.ready();
-    if (this.#active.has(runId)) return false;
+    if (this.#liveAttempt(runId)) return false;
     const row = this.#store.getRun(runId);
     if (!row) return false;
     const parked = row.status === "pending" && row.wait_reason === "park";
@@ -1822,11 +1842,13 @@ export class Tasks<
     }
   }
 
+  /** Resolve the waiters of this run (not of an earlier one of its id). */
   #resolveWaiters(runId: string, record: TaskRecord): void {
     const waiters = this.#waiters.get(runId);
     if (!waiters) return;
-    this.#waiters.delete(runId);
-    for (const resolve of waiters) resolve(record);
+    for (const waiter of [...waiters]) {
+      if (waiter.createdAt === record.createdAt) waiter.resolve(record);
+    }
   }
 
   /**
@@ -1858,11 +1880,15 @@ export class Tasks<
     if (options.signal?.aborted) return null;
     return new Promise((resolve) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
+      const waiter = {
+        createdAt: row.created_at,
+        resolve: (record: TaskRecord) => done(record)
+      };
       const done = (record: TaskRecord | null) => {
         clearTimeout(timer);
         options.signal?.removeEventListener("abort", onAbort);
         const set = this.#waiters.get(runId);
-        set?.delete(done);
+        set?.delete(waiter);
         if (set?.size === 0) this.#waiters.delete(runId);
         resolve(record);
       };
@@ -1876,7 +1902,7 @@ export class Tasks<
       }
       let set = this.#waiters.get(runId);
       if (!set) this.#waiters.set(runId, (set = new Set()));
-      set.add(done);
+      set.add(waiter);
     });
   }
 
