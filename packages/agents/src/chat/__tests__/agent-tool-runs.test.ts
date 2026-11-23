@@ -535,6 +535,25 @@ describe("AgentToolRuns", () => {
     await runs.reconcileStale("run-1");
     expect(store.read("run-1")?.status).toBe("running");
 
+    // A recovery that declined the turn decides, though the run that
+    // opened it has not settled yet.
+    const skipped = setup();
+    skipped.store.seed("run-1");
+    skipped.store.bindRequest("run-1", "req-1");
+    skipped.store.raw(
+      `create table cf_agents_task_runs (run_id text, definition text, input text, state text)`
+    );
+    skipped.store.raw(
+      `insert into cf_agents_task_runs values ('chat_x', 'chat-turn', '{"requestId":"req-1"}', 'running')`
+    );
+    skipped.setIncident("i-1", {
+      status: "skipped",
+      requestId: "req-1",
+      reason: "continue_disabled"
+    });
+    await skipped.runs.reconcileStale("run-1");
+    expect(skipped.store.read("run-1")?.status).toBe("error");
+
     // Once that run settles, the stale row is settled as before.
     store.raw(`update cf_agents_task_runs set state = 'completed'`);
     await runs.reconcileStale("run-1");

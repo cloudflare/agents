@@ -1003,9 +1003,11 @@ export class AgentToolRuns {
     });
     let failed = false;
     let cancelled = false;
+    let matched = false;
     for (const incident of incidents.values()) {
       const root = incident.recoveryRootRequestId;
       if (!ids.has(incident.requestId) && !(root && ids.has(root))) continue;
+      matched = true;
       if (
         incident.status === "detected" ||
         incident.status === "scheduled" ||
@@ -1023,8 +1025,13 @@ export class AgentToolRuns {
     if (failed) return "failed";
     // A turn cut off with its isolate opens its incident only when its run
     // is replayed. Until then the open run is the evidence that recovery
-    // will come (a facet's run waits for its root to wake it).
-    if (this.host.store.openTurnRequestIds().some((id) => ids.has(id))) {
+    // will come (a facet's run waits for its root to wake it). Once an
+    // incident names the turn, the incident decides, even while the run
+    // that opened it is still settling.
+    if (
+      !matched &&
+      this.host.store.openTurnRequestIds().some((id) => ids.has(id))
+    ) {
       return "in-progress";
     }
     return undefined;

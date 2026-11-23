@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { describe, expect, it } from "vitest";
 import {
   ChatRecoveryEngine,
@@ -10,6 +11,7 @@ import {
   type ChatFiberWakeHooks,
   type ChatRecoveryScheduleCallback,
   type ChatRecoveryScheduleReason,
+  type ChatRecoveryTurnBindings,
   type DispatchRecoveredTurnInput,
   type InterruptedChatTurn,
   type RecoveryPartial,
@@ -554,6 +556,23 @@ describe("ChatRecoveryEngine.updateIncident (fake adapter)", () => {
       reason: "conversation_changed"
     });
     expect(fake.recovering).toEqual([{ active: false, requestId: undefined }]);
+  });
+
+  it("closes the agent-tool child runs a recovery that ran no turn held open", async () => {
+    for (const status of ["skipped", "failed"] as const) {
+      const fake = makeFakeAdapter();
+      let reconciled = 0;
+      const engine = new ChatRecoveryEngine({
+        ...fake.adapter,
+        turns: {
+          attemptScope: new AsyncLocalStorage(),
+          reconcileAgentToolChildRuns: async () => void reconciled++
+        } as unknown as ChatRecoveryTurnBindings
+      });
+      const { incidentId } = seedIncident(fake.storage);
+      await engine.updateIncident(incidentId, status, "continue_disabled");
+      expect(reconciled).toBe(1);
+    }
   });
 
   it("is a no-op when the incident id is undefined", async () => {
