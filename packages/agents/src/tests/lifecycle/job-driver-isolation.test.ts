@@ -4,6 +4,7 @@ import {
   type LifecycleJobContext,
   type LifecycleJobPushOptions
 } from "../../lifecycle";
+import { JobQueue } from "../../lifecycle/job-queue";
 import { Queue } from "../../queue";
 import { withCapabilityHarness } from "../shared/capability-harness";
 
@@ -410,6 +411,42 @@ describe("memory-limit breaker and jobs without an owner", () => {
         .map((row) => row.id);
       // The struck loop is sealed; the ownerless row is kept.
       expect(ids).toEqual(["orphan-recovery"]);
+    });
+  });
+});
+
+describe("memory-limit breaker when an owner's start fails", () => {
+  it("seals an installed owner's recovery-loop job even though its start keeps failing", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      class OomAtStart extends LifecycleCapability {
+        constructor() {
+          super("oom-at-start");
+        }
+        onStart(): void {
+          throw new Error(
+            "Durable Object's isolate exceeded its memory limit and was reset."
+          );
+        }
+        onJob(): void {}
+      }
+      const { lifecycle } = install(new OomAtStart());
+      new JobQueue(storage).list("oom-at-start"); // creates the job table
+      storage.sql.exec(
+        `INSERT INTO cf_agents_jobs (id, capability, fn, time, recovery_loop)
+         VALUES ('loop', 'oom-at-start', 'run', ?, 1)`,
+        Date.now() - 1
+      );
+      await storage.put("cf_agents:oom_alarm_strikes", 2);
+
+      await lifecycle.alarm().catch(() => {});
+
+      // Its owner is installed, so its loop is sealed with the strike, not
+      // kept as a missing owner's row that would wake the start again.
+      const ids = storage.sql
+        .exec<{ id: string }>("SELECT id FROM cf_agents_jobs")
+        .toArray()
+        .map((row) => row.id);
+      expect(ids).toEqual([]);
     });
   });
 });
