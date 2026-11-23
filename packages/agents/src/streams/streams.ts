@@ -131,9 +131,11 @@ export interface StreamsSyncInternal {
   /** Whether `seq` is a stored chunk of the stream (not in a hole). */
   holds(streamId: string, seq: number): boolean;
   /**
-   * Delete the stream's oldest blocks while it holds more than
-   * `maxChunks` chunks or `maxBytes` stored UTF-8 bytes, never the newest
-   * block. Totals are read once per isolate and kept in memory.
+   * Bring the stream back to `maxChunks` chunks and `maxBytes` stored
+   * UTF-8 bytes by deleting its oldest blocks, never the newest, once it
+   * passes either limit by an eighth: a log at its limit trims once per
+   * eighth of it, in one range delete, not on every write. Totals are read
+   * once per isolate and kept in memory.
    */
   trim(
     streamId: string,
@@ -879,30 +881,78 @@ export class Streams extends LifecycleCapability {
       totals = { chunks: row?.chunks ?? 0, bytes: row?.bytes ?? 0 };
       this.#totals.set(streamId, totals);
     }
-    while (
-      totals.chunks > retention.maxChunks ||
-      totals.bytes > retention.maxBytes
+    const { maxChunks, maxBytes } = retention;
+    if (
+      totals.chunks <= maxChunks + Math.max(1, Math.floor(maxChunks / 8)) &&
+      totals.bytes <= maxBytes + Math.max(1, Math.floor(maxBytes / 8))
     ) {
-      const blocks = this.#sql<{
-        block: number;
-        chunks: number;
-        bytes: number;
-      }>`
+      return;
+    }
+    // The newest block is never trimmed, so the head is never reused.
+    const newest = (
+      this.#liveTails.has(streamId)
+        ? this.#liveTails.get(streamId)
+        : this.#blockTail(streamId)
+    )?.block;
+    if (newest === undefined) return;
+    let { chunks, bytes } = totals;
+    let cut: number | undefined;
+    // Read the oldest blocks a page at a time until the rest is in limits.
+    // The first page is at most 8 blocks, and no more than the chunk
+    // excess (a block holds at least one chunk). After it, a page is the
+    // blocks the excess still needs at the sizes seen so far, so a log of
+    // one-event blocks and one of full batches both read about what they
+    // delete.
+    let seen = { blocks: 0, chunks: 0, bytes: 0 };
+    let limit =
+      chunks > maxChunks ? Math.min(8, Math.ceil(chunks - maxChunks)) : 8;
+    pages: while (chunks > maxChunks || bytes > maxBytes) {
+      const page = this.#sql<{ block: number; chunks: number; bytes: number }>`
         SELECT block, seq_to - seq_from AS chunks,
           length(CAST(body AS BLOB)) AS bytes
-        FROM cf_agents_stream_blocks WHERE stream_id = ${streamId}
-        ORDER BY block ASC LIMIT 2
+        FROM cf_agents_stream_blocks
+        WHERE stream_id = ${streamId} AND block > ${cut ?? -1}
+          AND block < ${newest}
+        ORDER BY block ASC LIMIT ${limit}
       `;
-      // The newest block is never trimmed, so the head is never reused.
-      if (blocks.length < 2) break;
-      const oldest = blocks[0];
-      this.#sql`
-        DELETE FROM cf_agents_stream_blocks
-        WHERE stream_id = ${streamId} AND block = ${oldest.block}
-      `;
-      totals.chunks -= oldest.chunks;
-      totals.bytes -= oldest.bytes;
+      if (page.length === 0) break;
+      for (const row of page) {
+        if (chunks <= maxChunks && bytes <= maxBytes) break pages;
+        cut = row.block;
+        chunks -= row.chunks;
+        bytes -= row.bytes;
+        seen = {
+          blocks: seen.blocks + 1,
+          chunks: seen.chunks + row.chunks,
+          bytes: seen.bytes + row.bytes
+        };
+      }
+      // Chunks: at most the chunk excess left, since every block holds one.
+      // Bytes give no such bound (one large block can clear the excess), so
+      // their estimate asks for at most 8 blocks per page.
+      const chunkNeed =
+        chunks > maxChunks
+          ? Math.min(
+              Math.ceil((chunks - maxChunks) / (seen.chunks / seen.blocks)),
+              Math.ceil(chunks - maxChunks)
+            )
+          : 0;
+      const byteNeed =
+        bytes > maxBytes
+          ? Math.min(
+              8,
+              Math.ceil((bytes - maxBytes) / (seen.bytes / seen.blocks))
+            )
+          : 0;
+      limit = Math.min(256, Math.max(1, chunkNeed, byteNeed));
     }
+    if (cut === undefined) return;
+    this.#sql`
+      DELETE FROM cf_agents_stream_blocks
+      WHERE stream_id = ${streamId} AND block <= ${cut}
+    `;
+    totals.chunks = chunks;
+    totals.bytes = bytes;
   }
 
   /**

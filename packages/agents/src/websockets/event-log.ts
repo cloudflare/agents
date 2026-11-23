@@ -55,10 +55,12 @@ export interface EventLogOptions<S = unknown> {
   /** The host's `Streams` capability: the log is one of its streams. */
   readonly streams: Streams;
   /**
-   * How much history the log keeps for replay. After every write the
-   * stream's oldest blocks are deleted while either limit is exceeded; the
-   * newest block is always kept, so a seq is never reused. A client whose
-   * cursor falls before the oldest kept event gets a resync.
+   * How much history the log keeps for replay. Once a write takes the log
+   * an eighth past either limit, its oldest blocks are deleted down to the
+   * limits in one statement, so a log at its limit trims once per eighth
+   * of it, not on every write. The newest block is always kept, so a seq
+   * is never reused. A client whose cursor falls before the oldest kept
+   * event gets a resync.
    */
   readonly retention?: {
     /** Events kept. Default 1000. */

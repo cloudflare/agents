@@ -153,26 +153,77 @@ describe("event log", () => {
 
   it("trims whole blocks to retention without reusing a seq, and resyncs a trimmed cursor", async () => {
     const name = crypto.randomUUID();
-    // 150 KB events: one per 256 KB block, so retention trims per event.
+    // A block per publish. Retention is 5 events and trims once the log
+    // holds 7: back to 5 (events 3..7), then event 8 makes 6.
     for (let i = 1; i <= 8; i++) {
       expect(await stub(name).publishSized(150_000)).toBe(i);
     }
-    // Retention is 5 events: chunks 3..7 (events 4..8) are kept.
     expect((await stub(name).rows()).map((row) => row.seq_from)).toEqual([
-      3, 4, 5, 6, 7
+      2, 3, 4, 5, 6, 7
     ]);
     const { epoch } = await stub(name).head();
 
     const client = await connect(name);
-    client.subscribe("feed", { epoch, seq: 2 });
+    client.subscribe("feed", { epoch, seq: 1 });
     await client.until(isType("resync"));
 
-    client.subscribe("feed", { epoch, seq: 3 });
+    client.subscribe("feed", { epoch, seq: 2 });
     const frames = await client.until(isType("synced"));
-    expect(events(frames).map((event) => event.seq)).toEqual([4, 5, 6, 7, 8]);
+    expect(events(frames).map((event) => event.seq)).toEqual([
+      3, 4, 5, 6, 7, 8
+    ]);
 
     expect(await stub(name).publish("feed", "next")).toBe(9);
     client.close();
+  });
+
+  it("lets a log pass its limit by an eighth, then trims back to the limit at once", async () => {
+    const name = crypto.randomUUID();
+    // Retention 5: an eighth is under one event, so the slack is one.
+    for (let i = 1; i <= 6; i++) await stub(name).publish("feed", i);
+    expect(await stub(name).rows()).toHaveLength(6);
+    await stub(name).publish("feed", 7);
+    expect((await stub(name).rows()).map((row) => row.seq_from)).toEqual([
+      2, 3, 4, 5, 6
+    ]);
+  });
+
+  it("trims a log of batched blocks reading about the blocks it deletes, and takes a fractional limit", async () => {
+    const name = crypto.randomUUID();
+    // `fractional`: retention 5.5 events, batches of 10.
+    for (let i = 0; i < 4; i++) await stub(name).appendBatch("fractional", 10);
+    const rows = await stub(name).rows("fractional");
+    // 40 events in 4 blocks: trimmed back to within 5.5, newest block kept.
+    expect(rows).toEqual([{ seq_from: 30, seq_to: 40 }]);
+    expect(await stub(name).publish("fractional", "next")).toBe(41);
+  });
+
+  it("reads about the blocks a byte trim deletes, even when one large block clears the excess", async () => {
+    const name = crypto.randomUUID();
+    // `small`: 300 KB retention. 8 small blocks, one of 100 KB, then enough
+    // 900-byte blocks to sit just under the 337.5 KB trigger.
+    await stub(name).publishText("small", "x".repeat(100), 8);
+    await stub(name).publishText("small", "x".repeat(100_000));
+    await stub(name).publishText("small", "x".repeat(900), 260);
+    const { rowsRead, rows } = await stub(name).publishCounted(
+      "small",
+      "x".repeat(10_000)
+    );
+    // The trim deletes the 9 oldest blocks; it reads pages of at most 8
+    // beyond them, not 256.
+    expect(rows).toBe(261);
+    expect(rowsRead).toBeLessThan(40);
+  });
+
+  it("trims across more than one page, reading about what it deletes", async () => {
+    const name = crypto.randomUUID();
+    // `paged`: retention 20. 20 one-event blocks, then a batch of 30.
+    for (let i = 0; i < 20; i++) await stub(name).publish("paged", i);
+    const { rowsRead, rows } = await stub(name).appendBatchCounted("paged", 30);
+    // The 20 old blocks go (8, then the 12 left); the batch is the newest
+    // block and stays.
+    expect(rows).toBe(1);
+    expect(rowsRead).toBeLessThan(50);
   });
 
   it("sends batched events at once, stores them in batches, and replays the buffered tail", async () => {
@@ -271,10 +322,11 @@ describe("event log", () => {
 
   it("judges a cursor after writing the buffer, so a trim on that write cannot drop what it needs", async () => {
     const name = crypto.randomUUID();
-    for (let i = 1; i <= 5; i++) await stub(name).publishSized(150_000);
+    for (let i = 1; i <= 6; i++) await stub(name).publishSized(150_000);
     const { epoch } = await stub(name).head();
     await stub(name).openBatch();
-    // Buffered: its write puts the log over 5 events and trims event 1.
+    // Buffered: its write makes 7 events, so the log trims to 5 and event 1
+    // goes.
     await stub(name).appendSized(10);
     const client = await connect(name);
     client.subscribe("feed", { epoch, seq: 0 });
@@ -306,8 +358,9 @@ describe("event log", () => {
   it("trims by stored bytes, counting multi-byte characters the way storage does", async () => {
     const name = crypto.randomUUID();
     // 20,000 emoji: 80 KB stored, 40,000 UTF-16 units, 20,000 characters.
-    await stub(name).publishText("small", "😀".repeat(20_000), 10);
-    // 300 KB of retention holds 3 of them (a 4th would be 320 KB).
+    await stub(name).publishText("small", "😀".repeat(20_000), 9);
+    // 300 KB of retention trims once the log passes 337.5 KB (the 5th and
+    // the 9th), back to 3 of them (a 4th would be 320 KB).
     expect(await stub(name).rows("small")).toHaveLength(3);
   });
 
