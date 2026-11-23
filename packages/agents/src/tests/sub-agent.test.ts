@@ -1,6 +1,6 @@
 import { env, exports } from "cloudflare:workers";
 import { runDurableObjectAlarm } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { getAgentByName } from "../index";
 import { MessageType } from "../types";
 
@@ -486,16 +486,13 @@ describe("SubAgent", () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
 
-    // Pushing from the facet routes the item to the root, which owns the
-    // physical alarm; the root row records the facet as its owner.
+    // The item lives in the facet's own queue; the root holds only the
+    // facet's wake.
     const itemId = await agent.subAgentQueue("queue-child", "hello");
-    const rows = await agent.rootQueueRows();
-    const row = rows.find((r) => r.id === itemId);
-    expect(row?.callback).toBe("queuedCallback");
-    expect(row?.ownerPath).toContain("CounterSubAgent");
+    expect(await agent.rootQueueRows()).toEqual([]);
 
-    // The item is due immediately; the platform alarm auto-fires and the
-    // root routes the dispatch back into the facet.
+    // The item is due immediately; the root's alarm wakes the facet, which
+    // runs it.
     const deadline = Date.now() + 5_000;
     let log = await agent.subAgentScheduleLog("queue-child");
     while (log.length === 0 && Date.now() < deadline) {
@@ -512,17 +509,35 @@ describe("SubAgent", () => {
         callback: "queuedCallback"
       }
     ]);
-    expect(await agent.rootQueueRows()).toEqual([]);
+    expect(await agent.subAgentQueueRowIds("queue-child")).toEqual([]);
   });
 
-  it("deleteSubAgent removes the sub-agent's pending queue items from the root", async () => {
+  it("hands a queue item the root held for a sub-agent to that sub-agent", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
 
-    const { beforeDelete, afterDelete } =
-      await agent.subAgentQueueThenDelete("queue-orphan-child");
-    expect(beforeDelete).toHaveLength(1);
-    expect(afterDelete).toEqual([]);
+    await agent.insertLegacyRootQueueItem("handover-child", "old-item", "kept");
+    await runDurableObjectAlarm(agent);
+
+    await vi.waitFor(async () => {
+      expect(await agent.subAgentScheduleLog("handover-child")).toEqual([
+        expect.objectContaining({ value: "kept", scheduleId: "old-item" })
+      ]);
+    });
+    expect(await agent.rootQueueRows()).toEqual([]);
+  });
+
+  it("drops a queue item the root held for a deleted sub-agent", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.insertLegacyRootQueueItem("gone-child", "orphan", "lost");
+    await agent.subAgentDelete("gone-child");
+    await runDurableObjectAlarm(agent);
+
+    await vi.waitFor(async () => {
+      expect(await agent.rootQueueRows()).toEqual([]);
+    });
   });
 
   it("should keep sub-agent interval schedules recurring and idempotent", async () => {

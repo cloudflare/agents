@@ -52,12 +52,6 @@ export interface DynamicAgentHostPort {
   readonly tasks: {
     __DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(prefix: string): Promise<void>;
   };
-  readonly _queue: {
-    __DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(prefix: string): Promise<void>;
-  };
-  readonly _fibers: {
-    __DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(prefix: string): Promise<void>;
-  };
   /** Overridable RPC entry points — call via the host so subclass overrides intercept. */
   _cf_broadcastToSubAgent(
     ownerPath: ReadonlyArray<AgentPathStep>,

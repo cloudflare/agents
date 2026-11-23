@@ -4,13 +4,12 @@
  * job queue; Lifecycle runs the alarm event loop, retry policy, and physical
  * alarm arming. Queue owns no storage of its own — each item is one job
  * whose `fn` is the callback name and whose payload carries the item's
- * payload and owner.
+ * payload. In a sub-agent the items live in the sub-agent's own job queue,
+ * which its root wakes.
  */
 
-import { nanoid } from "nanoid";
 import {
   LifecycleCapability,
-  type LifecycleRouteAddress,
   type LifecycleRouteContext
 } from "../lifecycle/capability";
 import type {
@@ -19,10 +18,8 @@ import type {
   LifecycleJobOutcome
 } from "../lifecycle/job-queue";
 import {
-  isDurableObjectCodeUpdateReset,
   isPlatformFailure,
   resolveRetryConfig,
-  tryN,
   validateRetryOptions
 } from "../retries";
 import type { RetryOptions } from "../retries";
@@ -72,39 +69,26 @@ const DEFAULT_RETRY: Required<RetryOptions> = {
   maxDelayMs: 3000
 };
 
-/** What a Queue job's payload carries: the item payload and its owner. */
+/**
+ * What a Queue job's payload carries: the item payload. Items a root held
+ * for a sub-agent before sub-agents kept their own queue also carry the
+ * sub-agent's path; the root hands those over when they come due.
+ */
 type QueueJobPayload = {
-  readonly payload: unknown;
-  readonly owner_path: string | null;
-  readonly owner_path_key: string | null;
-  /**
-   * Unique per push of a routed item. A facet waiting to retry compares it
-   * with the root's current job, so a same-id push stops the old retry even
-   * when it carries the same callback and payload.
-   */
-  readonly push_id?: string;
+  readonly payload?: unknown;
+  readonly owner_path?: string | null;
+  readonly owner_path_key?: string | null;
 };
 
-type QueueRouteMessage =
-  | {
-      readonly type: "push";
-      readonly callback: string;
-      readonly payload: unknown;
-      readonly options?: QueuePushOptions;
-    }
-  | { readonly type: "get" | "cancel"; readonly id: string }
-  | { readonly type: "list"; readonly criteria?: QueueCriteria }
-  | { readonly type: "cancelAll"; readonly callback?: string }
-  | { readonly type: "pending"; readonly id: string; readonly pushId?: string }
-  | {
-      readonly type: "dispatch";
-      readonly item: QueueItem<unknown>;
-      readonly pushId?: string;
-    };
+/** A root handing an item it held for a sub-agent to that sub-agent. */
+type QueueAdoptMessage = {
+  readonly type: "adopt";
+  readonly item: QueueItem<unknown>;
+};
 
 function isQueueJobPayload(value: unknown): value is QueueJobPayload {
   // `payload` is absent after a JSON round trip when the item carried none.
-  return typeof value === "object" && value !== null && "owner_path" in value;
+  return typeof value === "object" && value !== null;
 }
 
 /**
@@ -217,11 +201,7 @@ export class Queue<
         id: row.id,
         fn: row.callback,
         time: this.#nextTime(),
-        payload: {
-          payload,
-          owner_path: null,
-          owner_path_key: null
-        } satisfies QueueJobPayload,
+        payload: { payload } satisfies QueueJobPayload,
         retry: resolveRetryConfig(retry, this.#retryDefaults)
       });
     }
@@ -249,45 +229,7 @@ export class Queue<
       });
     }
 
-    if (job.payload.owner_path) {
-      // A routed item executes inside its owning Lifecycle; retries run
-      // there too, so this dispatch is a single routed attempt.
-      try {
-        await this.lifecycle.routes.to(
-          {
-            key: job.payload.owner_path_key ?? job.payload.owner_path,
-            data: job.payload.owner_path
-          },
-          {
-            type: "dispatch",
-            item,
-            pushId: job.payload.push_id
-          } satisfies QueueRouteMessage
-        );
-      } catch (error) {
-        if (isPlatformFailure(error)) {
-          // Preserve the item; Lifecycle defers platform-class failures to
-          // a fresh invocation or the memory-limit breaker.
-          throw error;
-        }
-        console.error(`error dispatching queue callback "${job.fn}"`, error);
-        this.#emit("queue:error", {
-          callback: job.fn,
-          id: job.id,
-          error: error instanceof Error ? error.message : String(error),
-          attempts: 0
-        });
-        try {
-          await this.#onError?.(error);
-        } catch {
-          // swallow onError errors
-        }
-        // Leave the item due so a later alarm cycle can retry dispatch, for
-        // example once a transport can resolve its owner again.
-        return "yield";
-      }
-      return undefined;
-    }
+    if (job.payload.owner_path) return this.#handOver(job, item);
 
     const handler = this.#resolveCallback(job.fn);
     if (!handler) {
@@ -328,113 +270,51 @@ export class Queue<
     return undefined;
   }
 
-  /** Handle Queue protocol messages routed by another Lifecycle. */
-  async onRoute(context: LifecycleRouteContext): Promise<unknown> {
-    const message = context.payload as QueueRouteMessage;
-    const owner = context.source ?? null;
-    switch (message.type) {
-      case "push":
-        return this.#insert(
-          owner,
-          message.callback,
-          message.payload,
-          message.options
-        );
-      case "get":
-        return this.#getForOwner(owner, message.id);
-      case "list":
-        return this.#listForOwner(owner, message.criteria);
-      case "cancel":
-        return this.#cancelForOwner(owner, message.id);
-      case "cancelAll":
-        return this.#cancelAllForOwner(owner, message.callback);
-      case "pending":
-        return this.#pendingForOwner(owner, message.id, message.pushId);
-      case "dispatch":
-        await this.#executeRouted(message.item, message.pushId);
-        return true;
-      default:
-        throw new Error("Unknown routed Queue message");
-    }
-  }
-
   /**
-   * Execute a routed item locally with the historical retry handling. Runs
-   * on the owning (facet) Queue, outside the root's event loop, so it applies
-   * its own in-process retry budget. Platform-class failures re-throw so the
-   * root preserves the item and the durable alarm retries on a fresh
-   * invocation.
+   * TEMPORARY, for items a root held for a sub-agent before this release:
+   * when one comes due, the root hands it to the sub-agent's own queue and
+   * drops its copy. A path that is gone drops the item. Remove with the
+   * next minor release.
    */
-  async #executeRouted(
-    item: QueueItem<unknown>,
-    pushId: string | undefined
-  ): Promise<void> {
-    const handler = this.#resolveCallback(item.callback);
-    if (!handler) {
-      console.error(`callback ${item.callback} not found`);
-      return;
-    }
-    const { maxAttempts, baseDelayMs, maxDelayMs } = resolveRetryConfig(
-      item.retry,
-      this.#retryDefaults
-    );
+  async #handOver(
+    job: LifecycleJob,
+    item: QueueItem<unknown>
+  ): Promise<LifecycleJobOutcome | void> {
+    const path = job.payload as QueueJobPayload;
     try {
-      await tryN(
-        maxAttempts,
-        async (attempt) => {
-          // The root keeps the item while this facet waits to retry. A
-          // cancel or same-id push made meanwhile is newer intent: do not
-          // run this item again.
-          if (attempt > 1 && !(await this.#stillQueued(item.id, pushId))) {
-            return;
-          }
-          if (attempt > 1) {
-            this.#emit("queue:retry", {
-              callback: item.callback,
-              id: item.id,
-              attempt,
-              maxAttempts
-            });
-          }
-          await this.lifecycle.runInHostContext(() =>
-            handler(item.payload, item)
-          );
-        },
+      await this.lifecycle.routes.to(
         {
-          baseDelayMs,
-          maxDelayMs,
-          shouldRetry: (error) => !isDurableObjectCodeUpdateReset(error)
-        }
+          key: path.owner_path_key ?? path.owner_path!,
+          data: path.owner_path!
+        },
+        { type: "adopt", item } satisfies QueueAdoptMessage
       );
     } catch (error) {
-      if (isPlatformFailure(error)) {
-        throw error;
-      }
-      console.error(
-        `queue callback "${item.callback}" failed after ${maxAttempts} attempts`,
-        error
-      );
-      this.#emit("queue:error", {
-        callback: item.callback,
-        id: item.id,
-        error: error instanceof Error ? error.message : String(error),
-        attempts: maxAttempts
-      });
-      try {
-        await this.#onError?.(error);
-      } catch {
-        // swallow onError errors
-      }
+      // Keep the item for a later alarm; platform failures go to the
+      // driver's own handling.
+      if (isPlatformFailure(error)) throw error;
+      console.error(`error handing queue item "${job.id}" over`, error);
+      return "yield";
     }
+    return undefined;
   }
 
-  /** Whether the root still holds this push of the item, not a replacement. */
-  async #stillQueued(id: string, pushId: string | undefined): Promise<boolean> {
-    return (await this.lifecycle.routes.toRoot({
-      type: "pending",
-      id,
-      pushId
-    } satisfies QueueRouteMessage)) as boolean;
+  /** In a sub-agent: take over an item its root held for it. */
+  async onRoute(context: LifecycleRouteContext): Promise<unknown> {
+    const message = context.payload as QueueAdoptMessage;
+    if (message.type !== "adopt") {
+      throw new Error("Unknown routed Queue message");
+    }
+    const { item } = message;
+    if (this.lifecycle.jobs.get(item.id)) return true;
+    await this.lifecycle.jobs.push({
+      id: item.id,
+      fn: item.callback,
+      time: this.#nextTime(),
+      payload: { payload: item.payload } satisfies QueueJobPayload,
+      retry: resolveRetryConfig(item.retry, this.#retryDefaults)
+    });
+    return true;
   }
 
   // ── Queue API ────────────────────────────────────────────────────────────
@@ -444,8 +324,7 @@ export class Queue<
    * the Lifecycle alarm event loop runs it in push order after this call
    * returns.
    *
-   * Once the Lifecycle has started (and this Queue is not routed through
-   * another Lifecycle), the item row is written synchronously before this
+   * Once the Lifecycle has started, the item row is written synchronously before this
    * method's promise is even returned, so a caller may pair a push with its
    * own writes in one synchronous block — the item then commits atomically
    * with them.
@@ -457,21 +336,11 @@ export class Queue<
   ): Promise<QueueItem<QueuePayload<Handlers[Name]>>> {
     if (this.lifecycle.status() !== "started") await this.lifecycle.ready();
     this.#validatePush(callback, options);
-    const item = this.lifecycle.routes.source
-      ? ((await this.lifecycle.routes.toRoot({
-          type: "push",
-          callback,
-          payload,
-          options
-        } satisfies QueueRouteMessage)) as QueueItem<
-          QueuePayload<Handlers[Name]>
-        >)
-      : await this.#insert<QueuePayload<Handlers[Name]>>(
-          null,
-          callback,
-          payload,
-          options
-        );
+    const item = await this.#insert<QueuePayload<Handlers[Name]>>(
+      callback,
+      payload,
+      options
+    );
     this.#emit("queue:create", { callback, id: item.id });
     return item;
   }
@@ -479,49 +348,30 @@ export class Queue<
   /** Cancel one pending item. Returns false when no item matched. */
   async cancel(id: string): Promise<boolean> {
     await this.lifecycle.ready();
-    if (this.lifecycle.routes.source) {
-      return (await this.lifecycle.routes.toRoot({
-        type: "cancel",
-        id
-      } satisfies QueueRouteMessage)) as boolean;
-    }
-    return this.#cancelForOwner(null, id);
+    if (!this.#get(id)) return false;
+    return this.lifecycle.jobs.cancel(id);
   }
 
   /** Cancel every pending item, or every item for one callback. Returns the count. */
   async cancelAll(callback?: string): Promise<number> {
     await this.lifecycle.ready();
-    if (this.lifecycle.routes.source) {
-      return (await this.lifecycle.routes.toRoot({
-        type: "cancelAll",
-        callback
-      } satisfies QueueRouteMessage)) as number;
+    let cancelled = 0;
+    for (const item of this.#list({ callback })) {
+      if (await this.lifecycle.jobs.cancel(item.id)) cancelled++;
     }
-    return this.#cancelAllForOwner(null, callback);
+    return cancelled;
   }
 
   /** Read one pending item. */
   async get<T = unknown>(id: string): Promise<QueueItem<T> | undefined> {
     await this.lifecycle.ready();
-    if (this.lifecycle.routes.source) {
-      return (await this.lifecycle.routes.toRoot({
-        type: "get",
-        id
-      } satisfies QueueRouteMessage)) as QueueItem<T> | undefined;
-    }
-    return this.#getForOwner<T>(null, id);
+    return this.#get<T>(id);
   }
 
   /** List pending items in push order, optionally filtered by callback. */
   async list<T = unknown>(criteria?: QueueCriteria): Promise<QueueItem<T>[]> {
     await this.lifecycle.ready();
-    if (this.lifecycle.routes.source) {
-      return (await this.lifecycle.routes.toRoot({
-        type: "list",
-        criteria
-      } satisfies QueueRouteMessage)) as QueueItem<T>[];
-    }
-    return this.#listForOwner<T>(null, criteria);
+    return this.#list<T>(criteria);
   }
 
   // ── Internals ────────────────────────────────────────────────────────────
@@ -572,7 +422,6 @@ export class Queue<
   }
 
   async #insert<T>(
-    owner: LifecycleRouteAddress | null,
     callback: string,
     payload: unknown,
     options?: QueuePushOptions
@@ -583,19 +432,12 @@ export class Queue<
       options?.id !== undefined
         ? this.lifecycle.jobs.get(options.id)
         : undefined;
-    const keepTime =
-      existing !== undefined &&
-      this.#getForOwner(owner, existing.id) !== undefined;
+    const keepTime = existing !== undefined;
     const job = await this.lifecycle.jobs.push({
       id: options?.id,
       fn: callback,
       time: keepTime ? existing.time : this.#nextTime(),
-      payload: {
-        payload,
-        owner_path: owner?.data ?? null,
-        owner_path_key: owner?.key ?? null,
-        push_id: owner ? nanoid(9) : undefined
-      } satisfies QueueJobPayload,
+      payload: { payload } satisfies QueueJobPayload,
       retry: resolveRetryConfig(options?.retry, this.#retryDefaults)
     });
     return this.#jobToItem<T>(job, job.payload as QueueJobPayload);
@@ -622,73 +464,22 @@ export class Queue<
     return owned;
   }
 
-  #getForOwner<T>(
-    owner: LifecycleRouteAddress | null,
-    id: string
-  ): QueueItem<T> | undefined {
-    const ownerKey = owner?.key ?? null;
+  /** One item this Queue holds for itself (not one held for a sub-agent). */
+  #get<T>(id: string): QueueItem<T> | undefined {
     const job = this.lifecycle.jobs.get(id);
     if (!job || !isQueueJobPayload(job.payload)) return undefined;
-    if ((job.payload.owner_path_key ?? null) !== ownerKey) return undefined;
+    if (job.payload.owner_path) return undefined;
     return this.#jobToItem<T>(job, job.payload);
   }
 
-  #listForOwner<T>(
-    owner: LifecycleRouteAddress | null,
-    criteria: QueueCriteria = {}
-  ): QueueItem<T>[] {
-    const ownerKey = owner?.key ?? null;
+  #list<T>(criteria: QueueCriteria = {}): QueueItem<T>[] {
     const items: QueueItem<T>[] = [];
     for (const { job, envelope } of this.#ownedJobs()) {
-      if ((envelope.owner_path_key ?? null) !== ownerKey) continue;
+      if (envelope.owner_path) continue;
       if (criteria.callback && job.fn !== criteria.callback) continue;
       items.push(this.#jobToItem<T>(job, envelope));
     }
     return items;
-  }
-
-  #pendingForOwner(
-    owner: LifecycleRouteAddress | null,
-    id: string,
-    pushId: string | undefined
-  ): boolean {
-    const job = this.lifecycle.jobs.get(id);
-    if (!job || !isQueueJobPayload(job.payload)) return false;
-    if ((job.payload.owner_path_key ?? null) !== (owner?.key ?? null)) {
-      return false;
-    }
-    return job.payload.push_id === pushId;
-  }
-
-  async #cancelForOwner(
-    owner: LifecycleRouteAddress | null,
-    id: string
-  ): Promise<boolean> {
-    if (!this.#getForOwner(owner, id)) return false;
-    return this.lifecycle.jobs.cancel(id);
-  }
-
-  async #cancelAllForOwner(
-    owner: LifecycleRouteAddress | null,
-    callback?: string
-  ): Promise<number> {
-    let cancelled = 0;
-    for (const item of this.#listForOwner(owner, { callback })) {
-      if (await this.lifecycle.jobs.cancel(item.id)) cancelled++;
-    }
-    return cancelled;
-  }
-
-  /** @internal Remove items owned by one routed Lifecycle subtree. */
-  async __DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(
-    prefix: string
-  ): Promise<void> {
-    for (const { job, envelope } of this.#ownedJobs()) {
-      const ownerKey = envelope.owner_path_key ?? envelope.owner_path;
-      if (!envelope.owner_path || ownerKey === null) continue;
-      if (ownerKey !== prefix && !ownerKey.startsWith(`${prefix}/`)) continue;
-      await this.lifecycle.jobs.cancel(job.id);
-    }
   }
 
   // ── Events ───────────────────────────────────────────────────────────────

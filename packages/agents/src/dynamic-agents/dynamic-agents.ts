@@ -308,9 +308,6 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       await this.#host.tasks.__DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(
         prefix
       );
-      await this.#host._queue.__DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(
-        prefix
-      );
     }
   }
 
