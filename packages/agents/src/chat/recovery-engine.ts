@@ -779,8 +779,9 @@ export class ChatRecoveryEngine {
           await wake.persistOrphanedStream(streamId);
         }
         if (streamStillActive) await wake.completeRecoveredStream(streamId);
-        this.endStopped(incident);
       } finally {
+        // Even when storing what it streamed failed, the tab is told.
+        this.endStopped(incident);
         this.#settled();
       }
       return;
