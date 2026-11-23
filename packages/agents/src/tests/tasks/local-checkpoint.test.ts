@@ -332,3 +332,46 @@ describe("Tasks schema 4", () => {
     );
   });
 });
+
+describe("Tasks schema 4, started again", () => {
+  it("finishes the move on a start after one that added the column and failed", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        // As a failed schema-4 start leaves it: the column added, the old
+        // table still there, the version still 3.
+        state.storage.sql.exec(`
+          CREATE TABLE cf_agents_task_checkpoint (
+            run_id TEXT NOT NULL,
+            key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            PRIMARY KEY (run_id, key)
+          ) WITHOUT ROWID`);
+        state.storage.sql.exec(
+          `INSERT INTO cf_agents_task_runs
+             (run_id, definition, status, retain, attempt, cancel_requested,
+              created_at, updated_at)
+           VALUES ('again', 'remembering', 'pending', 1, 0, 0, 1, 1)`
+        );
+        state.storage.sql.exec(
+          "INSERT INTO cf_agents_task_checkpoint VALUES ('again', 'note', '1')"
+        );
+        await state.storage.put("cf_agents:tasks_schema_version", 3);
+
+        await instance.tasks.onStart();
+
+        const [row] = state.storage.sql
+          .exec<{ checkpoint: string }>(
+            "SELECT checkpoint FROM cf_agents_task_runs WHERE run_id = 'again'"
+          )
+          .toArray();
+        expect(JSON.parse(row.checkpoint)).toEqual({ note: 1 });
+        expect(await state.storage.get("cf_agents:tasks_schema_version")).toBe(
+          4
+        );
+      }
+    );
+  });
+});

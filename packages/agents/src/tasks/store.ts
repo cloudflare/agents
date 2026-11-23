@@ -211,8 +211,17 @@ export class TaskStore {
     );
   }
 
-  /** Schema 3 to 4: the run row gains its checkpoint column. */
+  /**
+   * Schema 3 to 4: the run row gains its checkpoint column. A start that
+   * added it and then failed before the version was written added it
+   * already.
+   */
   addCheckpointColumn(): void {
+    const [present] = this.sql<{ name: string }>`
+      SELECT name FROM pragma_table_info('cf_agents_task_runs')
+      WHERE name = 'checkpoint'
+    `;
+    if (present) return;
     this.sql`ALTER TABLE cf_agents_task_runs ADD COLUMN checkpoint TEXT`;
   }
 
