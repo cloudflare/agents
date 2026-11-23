@@ -745,6 +745,24 @@ export class Lifecycle<
       await this.#jobsForOwner(capability).cancel(facetWakeJobId(path));
       this.#ctx.storage.kv.delete(facetDriveKey(path));
     }
+    // TEMPORARY: rows an earlier release kept on the root for this facet
+    // sub-tree (queue items, schedules, wake mirrors), which their owners
+    // hand over when they come due. A deleted sub-tree's rows must not
+    // reach a sub-agent created later on the same path. Remove with the
+    // hand-overs, in the next minor release.
+    const legacy = this.#ctx.storage.sql
+      .exec<{ capability: string; id: string }>(
+        `SELECT capability, id FROM cf_agents_jobs
+         WHERE json_extract(payload, '$.owner_path_key') = ?
+            OR substr(json_extract(payload, '$.owner_path_key'), 1, ?) = ?`,
+        key,
+        key.length + 1,
+        `${key}/`
+      )
+      .toArray();
+    for (const { capability, id } of legacy) {
+      await this.#jobsForOwner(capability).cancel(id);
+    }
   }
 
   #emitCapabilityEvent(event: LifecycleEvent): void {

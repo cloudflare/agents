@@ -531,13 +531,19 @@ describe("SubAgent", () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
 
-    await agent.insertLegacyRootQueueItem("gone-child", "orphan", "lost");
+    // Not due yet, so it is still on the root when the sub-agent goes.
+    await agent.insertLegacyRootQueueItem(
+      "gone-child",
+      "orphan",
+      "lost",
+      60_000
+    );
     await agent.subAgentDelete("gone-child");
+    // Deleting the sub-agent drops the item at once: a sub-agent created
+    // later on the same path must not receive it.
+    expect(await agent.rootQueueRows()).toEqual([]);
     await runDurableObjectAlarm(agent);
-
-    await vi.waitFor(async () => {
-      expect(await agent.rootQueueRows()).toEqual([]);
-    });
+    expect(await agent.subAgentScheduleLog("gone-child")).toEqual([]);
   });
 
   it("should keep sub-agent interval schedules recurring and idempotent", async () => {

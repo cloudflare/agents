@@ -1705,13 +1705,14 @@ export class TestSubAgentParent extends Agent {
   async insertLegacyRootQueueItem(
     subAgentName: string,
     id: string,
-    value: string
+    value: string,
+    delayMs = 0
   ): Promise<void> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     const selfPath = await child.getSelfPath();
     this.sql`
       INSERT INTO cf_agents_jobs (id, capability, fn, time, payload)
-      VALUES (${id}, 'queue', 'queuedCallback', ${Date.now()},
+      VALUES (${id}, 'queue', 'queuedCallback', ${Date.now() + delayMs},
         ${JSON.stringify({
           payload: { value },
           owner_path: JSON.stringify(selfPath),
