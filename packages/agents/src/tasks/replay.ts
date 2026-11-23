@@ -24,7 +24,6 @@ import {
 import { deserializeTaskValue } from "./serialization";
 import type {
   TaskCheckpoint,
-  TaskJson,
   TaskStep,
   TaskStepAttempt,
   TaskStepConfig,
@@ -220,7 +219,6 @@ export class ReplayStep implements TaskStep {
   readonly local: unknown;
   readonly checkpoint: TaskCheckpoint;
   readonly createdAt: number;
-  readonly released: TaskJson | undefined;
   readonly id: string;
   readonly attempt: number;
   readonly signal: AbortSignal;
@@ -233,7 +231,6 @@ export class ReplayStep implements TaskStep {
       local?: unknown;
       checkpoint: TaskCheckpoint;
       createdAt: number;
-      released?: TaskJson;
       id: string;
       attempt: number;
       signal: AbortSignal;
@@ -245,7 +242,6 @@ export class ReplayStep implements TaskStep {
     this.local = options.local;
     this.checkpoint = options.checkpoint;
     this.createdAt = options.createdAt;
-    this.released = options.released;
     this.id = options.id;
     this.attempt = options.attempt;
     this.signal = options.signal;

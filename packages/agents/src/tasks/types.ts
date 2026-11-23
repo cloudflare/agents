@@ -202,12 +202,6 @@ export interface TaskStep {
   /** @internal When the run was accepted. */
   readonly createdAt: number;
 
-  /**
-   * @internal What `Tasks.release()` handed a parked run, on the attempt it
-   * started; `undefined` otherwise.
-   */
-  readonly released: TaskJson | undefined;
-
   /** The stable external deduplication key `step.do(name, ...)` would get. */
   idempotencyKey(name: string): string;
 }
@@ -240,7 +234,7 @@ export type TaskStatus =
 export type TaskWaitReason =
   | "sleep"
   | "retry"
-  /** @internal Parked by its handler until `Tasks.release()`. */
+  /** @internal Parked by its handler until `Tasks.settle()`. */
   | "park";
 
 /** Safe projection of an error retained with a run that ended `error`. */

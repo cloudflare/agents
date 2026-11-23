@@ -1241,10 +1241,7 @@ export class Tasks<
     }
 
     const cap = this.#registeredOptions.get(row.definition)?.maxAttempts;
-    // An attempt a release started is not a re-run after a reset.
-    const released =
-      cap === undefined ? undefined : this.#store.getReleased(runId);
-    if (cap !== undefined && released === undefined && row.attempt >= cap) {
+    if (cap !== undefined && row.attempt >= cap) {
       await this.#settleFailed(runId, null, {
         name: "TaskInterruptedError",
         message: `Interrupted ${row.attempt} times`
@@ -1336,10 +1333,6 @@ export class Tasks<
       attempt,
       signal: controller.signal,
       createdAt: row.created_at,
-      // Only a framework definition can park, so only its runs are read.
-      released: this.#registered.has(row.definition)
-        ? store.getReleased(runId)
-        : undefined,
       checkpoint: {
         get: <T extends TaskJson>(key: string) =>
           store.getCheckpoint(runId, key) as T | undefined,
@@ -1469,32 +1462,50 @@ export class Tasks<
   }
 
   /**
-   * @internal Wake a parked run: its next attempt runs now and sees `value`
-   * as `step.released`.
+   * @internal End a run that no attempt runs in this isolate (parked, or
+   * left `running` by a reset) as `outcome` says: a returned settlement, or
+   * a value that completes it. Two settles that race end it once.
    *
-   * @returns False unless the run was parked.
+   * @returns False unless the run was parked or interrupted.
    */
-  async release(
+  async settle(
     runId: string,
-    update: { value?: TaskJson } = {}
+    outcome: TaskSettlement | TaskValue
   ): Promise<boolean> {
     await this.lifecycle.ready();
+    if (this.#active.has(runId)) return false;
     const row = this.#store.getRun(runId);
-    if (row?.status !== "pending" || row.wait_reason !== "park") return false;
-    if (row.generation !== null) return false;
-    const now = Date.now();
-    // The write that unparks is the one that wins a race of two releases.
-    const released = this.#store.write(
+    if (!row) return false;
+    const parked = row.status === "pending" && row.wait_reason === "park";
+    if (!parked && row.status !== "running") return false;
+    // Take the run as an attempt of this call, so the settle writes below
+    // are fenced like an attempt's and a racing settle finds nothing.
+    const generation = nanoid();
+    const claimed = this.#store.write(
       `UPDATE cf_agents_task_runs
-       SET wait_reason = NULL, cancel_reason = NULL, next_at = ?, updated_at = ?
-       WHERE run_id = ? AND status = 'pending' AND wait_reason = 'park'`,
-      [now, now, runId]
+       SET status = 'running', generation = ?, wait_reason = NULL,
+           updated_at = ?
+       WHERE run_id = ? AND status = ? AND generation IS ?`,
+      [generation, Date.now(), runId, row.status, row.generation]
     );
-    if (released === 0) return false;
-    this.#store.putReleased(runId, update.value ?? null);
-    await this.#syncWake(runId);
-    if (row.lane === null || this.#laneAllows(runId)) {
-      void this.#executeRun(runId).catch(() => {});
+    if (claimed === 0) return false;
+    if (outcome instanceof TaskSettlement) {
+      await this.#settleReturned(row, generation, outcome);
+      return true;
+    }
+    const now = Date.now();
+    const settled = this.#store.fencedWrite(
+      runId,
+      generation,
+      `UPDATE cf_agents_task_runs
+       SET status = 'completed', result = ?, generation = NULL, next_at = NULL,
+           settled_at = ?, updated_at = ?
+       WHERE run_id = ? AND generation = ? AND status = 'running'`,
+      [serializeTaskValue(outcome, `result of Task run "${runId}"`), now, now]
+    );
+    if (settled) {
+      this.#emit("task:completed", { runId, definition: row.definition });
+      await this.#finishTerminalSettlement(runId, row);
     }
     return true;
   }

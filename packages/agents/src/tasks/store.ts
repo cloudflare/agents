@@ -15,12 +15,6 @@ import type {
   TaskValue
 } from "./types";
 
-/**
- * The checkpoint entry holding a release's value. Handlers' keys never start
- * with a NUL character.
- */
-const RELEASED_KEY = "\u0000released";
-
 /** Columns of `cf_agents_task_runs`. */
 const RUNS_COLUMNS = `
         run_id TEXT PRIMARY KEY,
@@ -178,21 +172,6 @@ export class TaskStore {
        ON CONFLICT (run_id, key) DO UPDATE SET value = excluded.value`,
       [runId, key, JSON.stringify(value), runId, generation]
     );
-  }
-
-  /** Keep the value a release hands the run's next attempt. */
-  putReleased(runId: string, value: TaskJson): void {
-    this.write(
-      `INSERT INTO cf_agents_task_checkpoint (run_id, key, value)
-       VALUES (?, ?, ?)
-       ON CONFLICT (run_id, key) DO UPDATE SET value = excluded.value`,
-      [runId, RELEASED_KEY, JSON.stringify(value)]
-    );
-  }
-
-  /** What a release handed this run, or `undefined` when none did. */
-  getReleased(runId: string): TaskJson | undefined {
-    return this.getCheckpoint(runId, RELEASED_KEY);
   }
 
   deleteCheckpoint(runId: string): void {

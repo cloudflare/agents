@@ -9949,15 +9949,10 @@ export class ThinkProgrammaticTestAgent extends Think {
     );
   }
 
-  /**
-   * What a restart does to submissions: Think's startup work, then each
-   * interrupted run's next attempt, which decides from the stored evidence.
-   */
   async recoverSubmissionsForTest(): Promise<void> {
     await (
       this as unknown as { _recoverSubmissionsOnStart: () => Promise<void> }
     )._recoverSubmissionsOnStart();
-    await drainSubmissionInboxForTest(this);
   }
 
   /** Emulate a row written before submissions stamped cutover facts. */

@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { seedTaskRun, type TaskHarnessObject } from "../capabilities/tasks";
+import { TaskSettlement } from "../../tasks/settlement";
 
 const reported = "__cf_reported" as unknown as "pipeline";
 
@@ -101,10 +102,10 @@ describe("Tasks reports, wait and the attempt cap", () => {
   });
 });
 
-describe("Tasks park and release", () => {
+describe("Tasks park and settle", () => {
   const parking = "__cf_parking" as unknown as "pipeline";
 
-  it("parks a run until release hands its next attempt a value; a second release gets false", async () => {
+  it("parks a run, holding its lane, until settle ends it; a second settle gets false", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(
       stub,
@@ -128,17 +129,40 @@ describe("Tasks park and release", () => {
         await new Promise((resolve) => setTimeout(resolve, 30));
         expect(instance.lanedStarted).toEqual([]);
 
-        expect(await instance.tasks.release("p", { value: "done" })).toBe(true);
-        expect(await instance.tasks.release("p", { value: "again" })).toBe(
-          false
-        );
-        await until(
-          async () => (await instance.tasks.get("p"))?.status === "completed"
-        );
+        expect(await instance.tasks.settle("p", "done")).toBe(true);
+        expect(await instance.tasks.settle("p", "again")).toBe(false);
         expect(await instance.tasks.get("p")).toMatchObject({
+          status: "completed",
           result: "done"
         });
         await until(() => instance.lanedStarted.length === 1);
+      }
+    );
+  });
+
+  it("settles a run a reset left running, without another attempt", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        seedTaskRun(state.storage, {
+          runId: "gone",
+          definition: "laned",
+          input: { label: "gone" },
+          status: "running",
+          generation: "dead-generation",
+          attempt: 1,
+          nextAt: Date.now() + 60_000
+        });
+        expect(
+          await instance.tasks.settle("gone", TaskSettlement.aborted("stale"))
+        ).toBe(true);
+        expect(await instance.tasks.get("gone")).toMatchObject({
+          status: "aborted",
+          reason: "stale"
+        });
+        expect(instance.lanedStarted).toEqual([]);
       }
     );
   });

@@ -28,7 +28,7 @@ export class TaskSettlement {
 
   /**
    * Leave the run `pending` with wait reason `park` and no deadline, its
-   * lane held by it, until `Tasks.release()` gives its next attempt a value.
+   * lane held by it, until `Tasks.settle()` ends it.
    */
   static park(reason?: string): TaskSettlement {
     return new TaskSettlement("park", reason, undefined);

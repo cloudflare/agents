@@ -6004,10 +6004,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     payload: SubmissionPayload,
     step: TaskStep
   ): Promise<TaskSettlement | TaskJson | undefined> {
-    // Chat recovery finished the turn of a submission it took over.
-    if (step.released !== undefined) {
-      return submissionSettlement(step.released as SubmissionResult);
-    }
     return submissionSettlement(await this._decideSubmission(payload, step));
   }
 
@@ -6196,14 +6192,27 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * Startup work for submissions: move rows of the retired table, and hold
    * the lane while a chat turn the reset cut off waits for recovery.
    * Submissions an earlier isolate accepted run after that recovery, in
-   * order, as a client request queued behind it does; an interrupted one's
-   * next attempt decides from the stored evidence whether it runs again.
+   * order, as a client request queued behind it does.
    */
   private async _recoverSubmissionsOnStart(): Promise<void> {
     await this._migrateLegacySubmissions();
     if (await this._chatRecoveryNames()) {
       this.tasks.holdLane(SUBMISSION_LANE);
       this._recheckSubmissionHold();
+    }
+    // End the interrupted ones the stored evidence already decides; the
+    // rest run again as their next attempt, which reads the same evidence.
+    for (const record of this.tasks.peekList({
+      definition: SUBMISSION_KIND,
+      status: ["running"],
+      order: "oldest",
+      limit: 500
+    })) {
+      const outcome = await this._reconcileInterruptedSubmission(
+        submissionRow(record)
+      );
+      if (outcome !== "rerun")
+        await this._settleSubmission(record.runId, outcome);
     }
   }
 
@@ -10507,17 +10516,15 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /**
-   * End a submission whose turn chat recovery owns: its parked run's next
-   * attempt returns `result`. A run that is not parked (its own attempt is
-   * under way, or comes next after a reset) decides from the same evidence.
+   * End a submission no attempt runs here: one whose turn chat recovery
+   * owns (a parked run) or one a reset left running. A run whose own
+   * attempt is under way decides for itself.
    */
   private async _settleSubmission(
     submissionId: string,
     result: SubmissionResult
   ): Promise<void> {
-    await this.tasks.release(submissionId, {
-      value: result as unknown as TaskJson
-    });
+    await this.tasks.settle(submissionId, submissionSettlement(result));
   }
 
   protected async onChatRecovery(
