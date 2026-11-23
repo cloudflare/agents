@@ -374,6 +374,7 @@ describe("Tasks schema 4, started again", () => {
       }
     );
   });
+});
 
 describe("Tasks wake while an attempt runs past its dispatch", () => {
   it("keeps the alarm within 5 s while the attempt executes, so a reset is noticed (#2847)", async () => {
