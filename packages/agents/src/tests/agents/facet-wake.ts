@@ -85,10 +85,6 @@ abstract class WakeAgent extends Agent<Cloudflare.Env> {
     );
   }
 
-  jobRows(): unknown[] {
-    return this.sql`SELECT id, time, running, attempts FROM cf_agents_jobs`;
-  }
-
   pendingJobs(): string[] {
     return this.probe.list();
   }
@@ -171,10 +167,6 @@ export class FacetWakeRoot extends WakeAgent {
 
   async middleStarts(name: string): Promise<number[]> {
     return (await this.subAgent(FacetWakeMiddle, name)).starts();
-  }
-
-  async middleJobRows(name: string): Promise<unknown[]> {
-    return (await this.subAgent(FacetWakeMiddle, name)).jobRows();
   }
 
   async middlePending(name: string): Promise<string[]> {
