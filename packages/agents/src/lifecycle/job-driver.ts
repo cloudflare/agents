@@ -12,7 +12,6 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
-  isDurableObjectCodeUpdateReset,
   isDurableObjectMemoryLimitReset,
   isDurableObjectResetError,
   isPlatformFailure,
@@ -619,8 +618,9 @@ export class JobDriver {
             // isolate is condemned, and a retry can read half-claimed state
             // as "nothing to do", converting the reset into a silent success
             // that the breaker never sees). Defer both to the alarm boundary.
+            // The isolate is going away: retrying in it is wasted.
             shouldRetry: (error) =>
-              !isDurableObjectCodeUpdateReset(error) &&
+              !isDurableObjectResetError(error) &&
               !isDurableObjectMemoryLimitReset(error)
           }
         )

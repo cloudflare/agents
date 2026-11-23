@@ -82,6 +82,28 @@ function interrupted(storage: DurableObjectStorage, id: string, n: number) {
 }
 
 describe("durable job attempts", () => {
+  it("does not retry a job in an isolate whose storage was reset", async () => {
+    await withCapabilityHarness(async ({ install }) => {
+      const jobs = new Jobs();
+      const { lifecycle } = install(jobs);
+      await lifecycle.start();
+      jobs.failWith = () =>
+        new Error(
+          "Internal error in Durable Object storage caused object to be reset."
+        );
+      await jobs.push({
+        id: "job",
+        fn: "run",
+        time: Date.now() - 1,
+        retry: QUICK
+      });
+
+      await lifecycle.alarm().catch(() => {});
+
+      expect(jobs.attempts).toEqual([1]);
+    });
+  });
+
   it("continues the count after attempts that ended with their isolate", async () => {
     await withCapabilityHarness(async ({ install, storage }) => {
       const jobs = new Jobs();
