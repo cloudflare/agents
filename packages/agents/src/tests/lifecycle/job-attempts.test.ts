@@ -100,6 +100,34 @@ class Ordered extends LifecycleCapability {
 }
 
 describe("jobs after an attempt that ended its isolate", () => {
+  it("move a suspect owner's exclusive job with its other jobs, keeping its order", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const ran: string[] = [];
+      const suspect = new Ordered("suspect-exclusive", ran);
+      const other = new Ordered("other-exclusive", ran);
+      const { lifecycle } = install(suspect);
+      lifecycle.use(other);
+      await lifecycle.start();
+      const now = Date.now();
+      await suspect.push({ id: "s1", fn: "run", time: now + 60_000 });
+      await suspect.push({
+        id: "s2",
+        fn: "run",
+        time: now + 60_001,
+        exclusive: true
+      });
+      await other.push({ id: "o1", fn: "run", time: now + 60_002 });
+      storage.sql.exec(
+        "UPDATE cf_agents_jobs SET time = time - 120000, attempts = CASE id WHEN 's1' THEN 1 ELSE 0 END"
+      );
+
+      await lifecycle.alarm();
+
+      // The suspect's exclusive job does not jump ahead of its own s1.
+      expect(ran.indexOf("s1")).toBeLessThan(ran.indexOf("s2"));
+    });
+  });
+
   it("run every other owner's due job first, keeping the suspect owner's order", async () => {
     await withCapabilityHarness(async ({ install, storage }) => {
       const ran: string[] = [];

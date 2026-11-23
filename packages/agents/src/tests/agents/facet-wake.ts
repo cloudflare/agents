@@ -214,6 +214,18 @@ export class FacetWakeRoot extends WakeAgent {
     }
   }
 
+  setRootJobAttempts(id: string, attempts: number): void {
+    this.sql`UPDATE cf_agents_jobs SET attempts = ${attempts} WHERE id = ${id}`;
+  }
+
+  rootJobAttempts(id: string): number | null {
+    return (
+      this.sql<{ attempts: number }>`
+        SELECT attempts FROM cf_agents_jobs WHERE id = ${id}
+      `[0]?.attempts ?? null
+    );
+  }
+
   /** End this root's isolate, and its facets with it. */
   resetTree(): void {
     this.ctx.abort("test reset");

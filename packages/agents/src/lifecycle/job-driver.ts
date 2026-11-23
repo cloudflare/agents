@@ -169,7 +169,7 @@ export type JobDriverOptions = {
  * reported back moved to the end, each owner's own order kept. Such a job
  * most likely ended its isolate last time (a memory-limit reset takes every
  * job in flight with it), so every other owner's due job runs before it is
- * tried again. Exclusive jobs keep their place.
+ * tried again.
  */
 function suspectsLast(due: JobStorageRow[]): JobStorageRow[] {
   const suspects = new Set<string>();
@@ -180,8 +180,8 @@ function suspectsLast(due: JobStorageRow[]): JobStorageRow[] {
     if ((row.attempts ?? 0) > 0) suspects.add(row.capability);
   }
   if (suspects.size === 0) return due;
-  const moved = (row: JobStorageRow) =>
-    suspects.has(row.capability) && !row.exclusive;
+  // The suspect owner's exclusive jobs move too, so its own order holds.
+  const moved = (row: JobStorageRow) => suspects.has(row.capability);
   return due.filter((row) => !moved(row)).concat(due.filter(moved));
 }
 

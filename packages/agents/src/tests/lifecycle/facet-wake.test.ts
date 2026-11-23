@@ -271,4 +271,18 @@ describe("facet wake", () => {
     expect(wake!.time).toBeLessThan(Date.now() + 61_000);
     expect(await agent.middleSyncCount("m")).toBe(0);
   });
+
+  it("keeps a crashed facet wake's attempt count when the root starts again", async () => {
+    const name = crypto.randomUUID();
+    const agent = await getAgentByName(env.FacetWakeRoot, name);
+    await agent.middlePush("m", "later", 60_000);
+    const [wake] = await agent.rootJobs();
+    // Its last drive ended with the isolate.
+    await agent.setRootJobAttempts(wake!.id, 1);
+
+    await agent.resetTree().catch(() => {});
+    const again = await getAgentByName(env.FacetWakeRoot, name);
+    // Made due at once, and still marked as a suspect for the next scan.
+    expect(await again.rootJobAttempts(wake!.id)).toBe(1);
+  });
 });
