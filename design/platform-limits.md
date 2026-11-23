@@ -1,6 +1,6 @@
 # Platform limits
 
-Code that decides how much to put in one SQLite row takes its figure from `packages/agents/src/internal/platform-limits.ts`. That module is internal. It is not exported to apps and has no docs page.
+`packages/agents/src/internal/platform-limits.ts` holds the SQLite row budget and the budgets derived from it. Streams, event logs, and the chat and harness stream segments take their row ceiling from it. Other row-sized constants still restate the 2 MB figure and are moving to it one area at a time. The module is internal. It is not exported to apps and has no docs page.
 
 ## How it works
 
