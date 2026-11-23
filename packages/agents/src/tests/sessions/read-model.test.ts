@@ -124,14 +124,18 @@ describe("Sessions deletes keep overlays", () => {
     });
   });
 
-  it("drops an overlay once every row it covered is gone", async () => {
-    await compacted(async (session) => {
+  it("drops an overlay, and its annotations, once every row it covered is gone", async () => {
+    await compacted(async (session, overlay) => {
+      await session.internal_setAnnotation("ctx", overlay, "kept on overlay");
       await session.deleteMessages(range(4, 20));
       expect((await session.getHistory()).map((m) => m.id)).toEqual([
         ...range(1, 3),
         ...range(21, 30)
       ]);
       expect(await session.getCompactions()).toEqual([]);
+      expect((await session.internal_annotations("ctx", [overlay])).size).toBe(
+        0
+      );
     });
   });
 

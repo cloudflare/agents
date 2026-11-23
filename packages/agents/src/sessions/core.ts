@@ -83,6 +83,21 @@ const COMPACTIONS_COLUMNS = `
  */
 const TAIL_INDEX_ROWS = 3 * 1_000;
 
+/**
+ * Session config keys under this prefix belong to the transcript and are
+ * deleted by `clearMessages`; every other key survives a clear. The end
+ * bound is the prefix with its last character incremented (`:` + 1 = `;`),
+ * so the delete is a primary-key range.
+ */
+const TRANSCRIPT_CONFIG_PREFIX = "transcript:";
+const TRANSCRIPT_CONFIG_PREFIX_END = "transcript;";
+
+/**
+ * First batch of a newest-first annotation lookup: the record it looks for
+ * is usually within the newest few messages.
+ */
+const NEWEST_FIRST_WINDOW_ROWS = 8;
+
 /** Steps one walk statement takes before the reader asks for the next batch. */
 const WALK_BATCH_STEPS = 512;
 
@@ -363,6 +378,16 @@ export class SessionsCore {
         key TEXT NOT NULL,
         value TEXT NOT NULL,
         PRIMARY KEY (session_id, key)
+      ) WITHOUT ROWID`,
+      []
+    );
+    this.io.sqlWrite(
+      `CREATE TABLE IF NOT EXISTS cf_agents_session_annotations (
+        session_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        value TEXT NOT NULL,
+        PRIMARY KEY (session_id, message_id, kind)
       ) WITHOUT ROWID`,
       []
     );
@@ -2160,6 +2185,11 @@ export class SessionsCore {
       [sessionId, ids]
     );
     this.#attachments.releaseMessages(sessionId, batch);
+    this.io.sqlWrite(
+      `DELETE FROM cf_agents_session_annotations
+       WHERE session_id = ? AND message_id IN (SELECT value FROM json_each(?))`,
+      [sessionId, ids]
+    );
     if (this.#fts) {
       this.io.sqlWrite(
         `DELETE FROM cf_agents_session_fts
@@ -2178,7 +2208,8 @@ export class SessionsCore {
    * whose end row is deleted ends at that row's nearest surviving ancestor;
    * one whose continuation row is deleted continues at that row's nearest
    * surviving ancestor. An overlay left with nothing between its
-   * continuation and its end covers no row and is deleted.
+   * continuation and its end covers no row and is deleted, with its
+   * annotations.
    */
   #overlaysFollowSplice(sessionId: string, batch: readonly string[]): string[] {
     const ids = JSON.stringify(batch);
@@ -2237,6 +2268,11 @@ export class SessionsCore {
           [sessionId, overlay.to_message_id, overlay.seq]
         );
         removed.push(`${COMPACTION_PREFIX}${overlay.id}`);
+        this.io.sqlWrite(
+          `DELETE FROM cf_agents_session_annotations
+           WHERE session_id = ? AND message_id = ?`,
+          [sessionId, `${COMPACTION_PREFIX}${overlay.id}`]
+        );
         continue;
       }
       this.io.sqlWrite(
@@ -2267,6 +2303,18 @@ export class SessionsCore {
       );
       this.io.sqlWrite(
         "DELETE FROM cf_agents_session_compactions WHERE session_id = ?",
+        [sessionId]
+      );
+      this.io.sqlWrite(
+        "DELETE FROM cf_agents_session_annotations WHERE session_id = ?",
+        [sessionId]
+      );
+      // Keys under `transcript:` belong to the transcript; any other key
+      // (an event-log epoch, say) outlives a clear.
+      this.io.sqlWrite(
+        `DELETE FROM cf_agents_session_config
+         WHERE session_id = ? AND key >= '${TRANSCRIPT_CONFIG_PREFIX}'
+           AND key < '${TRANSCRIPT_CONFIG_PREFIX_END}'`,
         [sessionId]
       );
       this.#attachments.releaseSession(sessionId);
@@ -2305,9 +2353,9 @@ export class SessionsCore {
   ): StoredCompaction {
     const id = crypto.randomUUID();
     const now = Date.now();
-    // Validation is a read (the ancestry walk can cover the whole span): it
-    // runs before the write transaction, so the transaction holds writes
-    // only. Nothing awaits in between.
+    // Validation and the annotations to carry are reads (the ancestry walk
+    // can cover the whole span): they run before the write transaction, so
+    // the transaction holds writes only. Nothing awaits in between.
     let from = fromMessageId;
     let resume: string;
     const extended = extendsId
@@ -2324,6 +2372,7 @@ export class SessionsCore {
     } else {
       resume = this.#overlayResume(sessionId, from, toMessageId);
     }
+    const carried = this.#annotationsToCarry(sessionId, from, toMessageId);
     this.io.transaction(() => {
       const seq =
         this.io.sql<{ seq: number }>(
@@ -2336,6 +2385,9 @@ export class SessionsCore {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [sessionId, toMessageId, seq, id, summary, from, resume, now]
       );
+      for (const { kind, value } of carried) {
+        this.setAnnotation(sessionId, kind, `${COMPACTION_PREFIX}${id}`, value);
+      }
     });
     // The new overlay changes which rows count; re-derive on the next read.
     this.#pathTokens.delete(sessionId);
@@ -2425,6 +2477,167 @@ export class SessionsCore {
         SELECT 1 AS hit FROM up WHERE id = ? LIMIT 1`,
         [sessionId, id, sessionId, ancestor.id, ancestor.seq, ancestor.id]
       ).length > 0
+    );
+  }
+
+  // ── Annotations and session config (internal) ──────────────────────────
+  //
+  // An annotation is server-side data a first-party module keeps about one
+  // message, by kind. It is never part of the message and never sent to a
+  // client. It goes with its message and on clear. An overlay carries the
+  // newest annotation of each kind from the rows it hides, so a reader of
+  // the visible path never looks below an overlay for one.
+
+  /** True when the session holds any annotation: a primary-key prefix probe. */
+  #hasAnnotations(sessionId: string): boolean {
+    return (
+      this.io.sql<{ one: number }>(
+        "SELECT 1 AS one FROM cf_agents_session_annotations WHERE session_id = ? LIMIT 1",
+        [sessionId]
+      ).length > 0
+    );
+  }
+
+  /**
+   * For each kind, the annotation of the newest row in `from..to` (on the
+   * path from `to` back to `from`), or of an overlay ending there: what a
+   * new overlay over that range carries. Ids only, no content. A read, so
+   * the walk runs before the overlay's write transaction, never inside it.
+   */
+  #annotationsToCarry(
+    sessionId: string,
+    fromMessageId: string,
+    toMessageId: string
+  ): Array<{ kind: string; value: string }> {
+    if (!this.#hasAnnotations(sessionId)) return [];
+    return this.io.sql<{ kind: string; value: string }>(
+      `WITH RECURSIVE span(id, parent_id, depth) AS (
+        SELECT id, parent_id, 0 FROM cf_agents_session_messages
+        WHERE session_id = ?1 AND id = ?2
+        UNION ALL
+        SELECT m.id, m.parent_id, s.depth + 1 FROM span s
+        CROSS JOIN cf_agents_session_messages m
+          ON m.session_id = ?1 AND m.id = s.parent_id
+        WHERE s.id <> ?3
+      ),
+      found AS (
+        SELECT a.kind, a.value, span.depth, 0 AS on_overlay
+        FROM span CROSS JOIN cf_agents_session_annotations a
+          ON a.session_id = ?1 AND a.message_id = span.id
+        UNION ALL
+        -- An overlay hidden by this one may carry its own annotation (set
+        -- on its summary message): it sits where that overlay ends, and
+        -- outranks the rows it hid there.
+        SELECT a.kind, a.value, span.depth, 1 AS on_overlay
+        FROM span
+        CROSS JOIN cf_agents_session_compactions c
+          ON c.session_id = ?1 AND c.to_message_id = span.id
+        CROSS JOIN cf_agents_session_annotations a
+          ON a.session_id = ?1 AND a.message_id = '${COMPACTION_PREFIX}' || c.id
+      ),
+      ranked AS (
+        SELECT kind, value,
+          ROW_NUMBER() OVER (
+            PARTITION BY kind ORDER BY depth, on_overlay DESC
+          ) AS rank
+        FROM found
+      )
+      SELECT kind, value FROM ranked WHERE rank = 1`,
+      [sessionId, toMessageId, fromMessageId]
+    );
+  }
+
+  /** Annotations of `kind` for the given message ids; only annotated ids are returned. */
+  annotations(
+    sessionId: string,
+    kind: string,
+    messageIds: readonly string[]
+  ): Map<string, string> {
+    const found = new Map<string, string>();
+    if (messageIds.length === 0) return found;
+    const rows = this.io.sql<{ message_id: string; value: string }>(
+      `SELECT message_id, value FROM cf_agents_session_annotations
+       WHERE session_id = ? AND kind = ?
+         AND message_id IN (SELECT value FROM json_each(?))`,
+      [sessionId, kind, JSON.stringify(messageIds)]
+    );
+    for (const row of rows) found.set(row.message_id, row.value);
+    return found;
+  }
+
+  setAnnotation(
+    sessionId: string,
+    kind: string,
+    messageId: string,
+    value: string
+  ): void {
+    this.io.sqlWrite(
+      `INSERT INTO cf_agents_session_annotations
+         (session_id, message_id, kind, value)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT (session_id, message_id, kind)
+         DO UPDATE SET value = excluded.value`,
+      [sessionId, messageId, kind, value]
+    );
+  }
+
+  /**
+   * The newest annotation of `kind` among the messages `getHistory({ leafId })`
+   * returns, overlay messages included: the visible walk from the leaf,
+   * newest first, one indexed probe per batch of steps, stopping at the
+   * first hit. A per-turn record near the leaf costs a few rows; nothing
+   * proportional to the path or to the annotations stored is read or held.
+   */
+  latestAnnotation(
+    sessionId: string,
+    kind: string,
+    leafId?: string | null
+  ): { messageId: string; value: string } | null {
+    if (!this.#hasAnnotations(sessionId)) return null;
+    for (const batch of this.#walkBatches(
+      sessionId,
+      leafId,
+      false,
+      NEWEST_FIRST_WINDOW_ROWS
+    )) {
+      const ids = batch
+        .filter((step) => !step.hidden)
+        .map((step) =>
+          step.overlayId === null
+            ? step.id
+            : `${COMPACTION_PREFIX}${step.overlayId}`
+        );
+      const found = this.annotations(sessionId, kind, ids);
+      for (const messageId of ids) {
+        const value = found.get(messageId);
+        if (value !== undefined) return { messageId, value };
+      }
+    }
+    return null;
+  }
+
+  config(sessionId: string, key: string): string | null {
+    return (
+      this.io.sql<{ value: string }>(
+        "SELECT value FROM cf_agents_session_config WHERE session_id = ? AND key = ?",
+        [sessionId, key]
+      )[0]?.value ?? null
+    );
+  }
+
+  setConfig(sessionId: string, key: string, value: string | null): void {
+    if (value === null) {
+      this.io.sqlWrite(
+        "DELETE FROM cf_agents_session_config WHERE session_id = ? AND key = ?",
+        [sessionId, key]
+      );
+      return;
+    }
+    this.io.sqlWrite(
+      `INSERT INTO cf_agents_session_config (session_id, key, value)
+       VALUES (?, ?, ?)
+       ON CONFLICT (session_id, key) DO UPDATE SET value = excluded.value`,
+      [sessionId, key, value]
     );
   }
 
