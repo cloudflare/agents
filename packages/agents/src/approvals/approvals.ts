@@ -381,7 +381,8 @@ export class Approvals extends LifecycleCapability {
           [encoded.json, Date.now(), key]
         );
       } catch {
-        // SQLite will not store the value (past its 2 MB row limit). The
+        // SQLite will not store the value (past the runtime's row cap, see
+        // internal/platform-limits.ts). The
         // effect ran; nothing is recorded, as for a value that is not JSON.
         this.#releaseEffect(key);
         settled = 0;
@@ -853,7 +854,8 @@ export class Approvals extends LifecycleCapability {
           [outcomeJson, Date.now(), id]
         );
       } catch (error) {
-        // An outcome SQLite will not store (past its 2 MB row limit) fails
+        // An outcome SQLite will not store (past the runtime's row cap, see
+        // internal/platform-limits.ts) fails
         // the same way on every run: settle with the error instead.
         this.#write(
           `UPDATE cf_agents_decisions
