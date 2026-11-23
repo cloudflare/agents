@@ -1674,20 +1674,20 @@ describe("SubAgent", () => {
     await agent.restartFibers();
 
     expect(await agent.legacyFacetRunIndexExists()).toBe(false);
-    expect(await agent.fiberWakeOwners()).toHaveLength(1);
 
-    // After the upgrade the sub-agent starts fresh and arms its own fiber
-    // wake, which the root's wake for its path then drives.
-    await agent.subAgentArmOwnFiberWake("legacy-index-child");
-    await drainDueFiberWakes(agent);
-
-    expect(await agent.fiberWakeOwners()).toEqual([]);
-    expect(await agent.subAgentRecoveredFibers("legacy-index-child")).toEqual([
-      expect.objectContaining({
-        id: "legacy-index-fiber-1",
-        snapshot: { value: "legacy-checkpoint" }
-      })
-    ]);
+    // The index became a wake for the sub-agent's path, due now: the
+    // sub-agent starts and recovers the fiber, and then the wake goes.
+    await vi.waitFor(async () => {
+      expect(await agent.subAgentRecoveredFibers("legacy-index-child")).toEqual(
+        [
+          expect.objectContaining({
+            id: "legacy-index-fiber-1",
+            snapshot: { value: "legacy-checkpoint" }
+          })
+        ]
+      );
+      expect(await agent.fiberWakeOwners()).toEqual([]);
+    });
   });
 
   it("prunes a stale root fiber wake when the facet has no run rows", async () => {

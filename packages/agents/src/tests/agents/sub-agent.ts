@@ -1529,8 +1529,8 @@ export class TestSubAgentParent extends Agent {
   ): Promise<unknown> {
     if (
       this._fiberWakeRouteFailuresRemaining > 0 &&
-      envelope.capability === "tasks" &&
-      (envelope.payload as { type?: string }).type === "syncWake"
+      envelope.capability === "cf:facet-wake" &&
+      (envelope.payload as { type?: string }).type === "arm"
     ) {
       this._fiberWakeRouteFailuresRemaining -= 1;
       throw new Error("simulated fiber wake route failure");
