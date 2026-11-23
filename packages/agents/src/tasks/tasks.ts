@@ -1709,8 +1709,17 @@ export class Tasks<
     const row = this.#store.getRun(runId);
     if (!row || !TERMINAL_STATUSES.has(row.status)) return null;
     const record = this.#store.rowToRecord(row);
-    const onStatus = this.#registeredOptions.get(row.definition)?.onStatus;
+    const options = this.#registeredOptions.get(row.definition);
+    const onStatus = options?.onStatus;
     if (!onStatus || row.notified === row.status) return record;
+    if (this.#reporting.has(runId)) {
+      // Still running in this isolate: keep the wake, do not report twice.
+      if (options.reportWake) await this.#pushReportJob(REPORT_RETRY_MS);
+      return null;
+    }
+    // Armed before the report runs, so a reset inside it is delivered
+    // again by the job, not only on the next start.
+    if (options.reportWake) await this.#pushReportJob(REPORT_RETRY_MS);
     this.#reporting.add(runId);
     try {
       await this.lifecycle.runInHostContext(() => onStatus(record));
@@ -1725,6 +1734,9 @@ export class Tasks<
       UPDATE cf_agents_task_runs SET notified = ${row.status}
       WHERE run_id = ${runId} AND status = ${row.status}
     `;
+    if (options.reportWake && !this.#hasUnreported()) {
+      await this.lifecycle.jobs.cancel(REPORT_JOB_ID);
+    }
     return record;
   }
 

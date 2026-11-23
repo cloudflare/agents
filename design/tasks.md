@@ -35,12 +35,13 @@ Two ways to record progress, and no third:
 
 ## Framework definitions: reports, attempt cap, settlements (internal)
 
-`register(name, handler, { onStatus, maxAttempts, keepCheckpoint, claimMs, attached })`:
+`register(name, handler, { onStatus, maxAttempts, keepCheckpoint, claimMs, attached, reportWake })`:
 
 - `onStatus(record)` gets the run's stored record and runs in host context when a run is accepted (before its wake is published, so the run starts only after it), when an attempt claims it, and when it ends. The terminal call happens at least once: `notified` takes the status after it returns; a throw retries it 30 s later through the `tasks:reports` job, and a reset before the write delivers it again from the start. A `retain: false` run stays until its terminal report returned. Reports run inside the request or alarm that moved the run, so they need no keep-alive hold.
 - A framework definition's input may be up to 16 MiB: past 500,000 UTF-16 code units it is stored in pieces in `cf_agents_task_parts (run_id, piece, data)`, never splitting a surrogate pair, and joined when the attempt or `inputOf` reads it. The pieces go with the run. Other definitions keep the 1 MiB value limit.
 - `maxAttempts`: the claim is committed with `storage.sync()` before the handler runs, and a run whose attempts are spent ends `error` (`TaskInterruptedError`).
 - `attached: true`: runs start only with `start: "now"` (another start throws), and no wake job is armed for the accept or the claim, because the attempt ends before its caller returns. A reset loses nothing: the next start makes the interrupted attempt due and wakes it then. Think's action effects and decisions use it, so an action call arms no alarm.
+- `reportWake: true`: the report job is armed (30 s out) before each terminal `onStatus` and cancelled when it returns, so a reset inside a long report is delivered again by the job, with no request. A report still running in this isolate is not started twice. Think's decisions use it: their report runs the approved action.
 - The handler may return a `TaskSettlement`: `aborted`, `skipped`, `failed` (no retry), or `park` (the run stays `pending` with wait reason `park`, no deadline, its lane held, until `settle()` ends it).
 - `settle(runId, outcome, { checkpoint })` ends a run no attempt runs in this isolate (parked, or left `running` by a reset) with a settlement or a completing value, writing `checkpoint` entries under the same fence; a racing second settle gets `false`. This is the one way to settle from outside: fibers (`resolveFiber`) and approvals use it.
 - `claimMs`: how long an attempt's claim lasts before the run counts as interrupted. The claim's wake renews it while the attempt runs in this isolate, so that wake is also the object's keep-alive. Fibers set it to the keep-alive interval; omitted, it is the step timeout plus slack.

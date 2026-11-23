@@ -1203,15 +1203,17 @@ export class Lifecycle<
     return Object.freeze({
       push: (options: LifecycleJobPushOptions) =>
         rearmAfter(() => this.#jobQueue.push(owner, options)),
-      cancel: (id: string) =>
-        rearmAfter(() => {
-          const cancelled = this.#jobQueue.cancel(owner, id);
-          // A job pushed again under this id starts with no crashes.
-          if (cancelled && this.#facetAddress()) {
-            this.#ctx.storage.kv.delete(FACET_UNSETTLED_PREFIX + id);
-          }
-          return cancelled;
-        }),
+      // Nothing to cancel changes nothing, so the alarm is not recomputed.
+      cancel: async (id: string) => {
+        const cancelled = this.#jobQueue.cancel(owner, id);
+        if (!cancelled) return false;
+        // A job pushed again under this id starts with no crashes.
+        if (this.#facetAddress()) {
+          this.#ctx.storage.kv.delete(FACET_UNSETTLED_PREFIX + id);
+        }
+        await this.rearmAlarm();
+        return true;
+      },
       reschedule: (id: string, time: number) =>
         rearmAfter(() => this.#jobQueue.reschedule(owner, id, time)),
       get: (id: string) => this.#jobQueue.get(owner, id),

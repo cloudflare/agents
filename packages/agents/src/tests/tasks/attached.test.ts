@@ -84,4 +84,36 @@ describe("Tasks attached definitions", () => {
       });
     });
   });
+
+  it("arm the report job during a reportWake report, and cancel it once the report returns", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        const reportName = "__cf_test_report_wake" as unknown as "pipeline";
+        let jobsDuringReport: string[] = [];
+        let reports = 0;
+        instance.tasks.register(reportName, async () => "done", {
+          attached: true,
+          reportWake: true,
+          onStatus: async (record) => {
+            if (record.status !== "completed") return;
+            reports += 1;
+            jobsDuringReport = jobIds(state.storage);
+          }
+        });
+
+        await instance.tasks.run(reportName, undefined as never, {
+          runId: "w",
+          start: "now"
+        });
+
+        // A reset inside the report would leave this job to deliver it.
+        expect(jobsDuringReport).toEqual(["tasks:reports"]);
+        expect(jobIds(state.storage)).toEqual([]);
+        expect(reports).toBe(1);
+      }
+    );
+  });
 });
