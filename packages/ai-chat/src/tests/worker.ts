@@ -7452,14 +7452,14 @@ export class AIChatAgentToolParent extends Agent<Env> {
     `;
     await this.alarm();
     for (let i = 0; i < 100; i++) {
-      const state = await child.getTaskStatusForTest(runId);
+      const state = await child.getTaskRunStateForTest(runId);
       if (state === "completed" || state === "error") break;
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     return {
       mirrored,
       recoveries: await child.getTurnRecoveriesForTest(),
-      state: await child.getTaskStatusForTest(runId)
+      state: await child.getTaskRunStateForTest(runId)
     };
   }
 
