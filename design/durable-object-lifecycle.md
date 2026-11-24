@@ -78,6 +78,19 @@ host) returns immediately instead of waiting on itself; an async-context marker
 tells those nested calls apart from independent ones. `lifecycle.isStarted()`
 reports whether startup has finished.
 
+## What is a capability
+
+Code is a capability when it needs its own storage (tables, keys), or an alarm
+or scheduled work (it pushes Lifecycle jobs or must be woken). Anything else is
+a plain internal module: functions or a small class that takes what it needs.
+A harness is a capability too, as the unit a host installs
+([rfc-capability-instances.md](./rfc-capability-instances.md)).
+
+A capability has one id, and `Lifecycle.use()` refuses a second capability
+with the same id, so an object has one `Streams`, one `Tasks` and one
+`Sessions` today. [rfc-capability-instances.md](./rfc-capability-instances.md)
+is accepted and changes that; this section will describe it once it is built.
+
 ## Alarm ownership and scheduling
 
 Lifecycle owns the one physical Durable Object alarm. A capability can return
