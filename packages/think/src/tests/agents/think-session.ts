@@ -385,6 +385,27 @@ async function recoverInterruptedTurnsForTest(agent: Think): Promise<void> {
   )._recoverFibers();
 }
 
+/**
+ * The agent's non-terminal runs holding a scheduled recovery attempt for
+ * `callback`, oldest first: a recovery Task run, or a replayed chat-turn run
+ * whose `model-turn` step journaled the attempt it runs itself.
+ */
+function pendingRecoveryRunIds(agent: Think, callback: string): string[] {
+  return agent.sql<{ run_id: string }>`
+    SELECT run_id, created_at FROM cf_agents_task_runs
+    WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+      AND status IN ('pending', 'running')
+      AND json_extract(metadata, '$.callback') = ${callback}
+    UNION ALL
+    SELECT r.run_id, r.created_at FROM cf_agents_task_runs r
+    JOIN cf_agents_task_steps s
+      ON s.run_id = r.run_id AND s.step_name = 'model-turn'
+    WHERE r.status IN ('pending', 'running')
+      AND json_extract(s.result, '$.callback') = ${callback}
+    ORDER BY created_at ASC
+  `.map((row) => row.run_id);
+}
+
 function recoveryTransportCountsForTest(
   agent: Think,
   callback: string
@@ -393,14 +414,8 @@ function recoveryTransportCountsForTest(
     SELECT COUNT(*) AS count FROM cf_agents_jobs
     WHERE capability = 'scheduler' AND fn = ${callback}
   `;
-  const tasks = agent.sql<{ count: number }>`
-    SELECT COUNT(*) AS count FROM cf_agents_task_runs
-    WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
-      AND status IN ('pending', 'running')
-      AND json_extract(metadata, '$.callback') = ${callback}
-  `;
   return {
-    tasks: tasks[0]?.count ?? 0,
+    tasks: pendingRecoveryRunIds(agent, callback).length,
     schedules: scheduled[0]?.count ?? 0
   };
 }
@@ -414,15 +429,7 @@ async function runQueuedRecoveryTaskForTest(
   agent: Think,
   callback: "_chatRecoveryContinue" | "_chatRecoveryRetry"
 ): Promise<boolean> {
-  const rows = agent.sql<{ run_id: string }>`
-    SELECT run_id FROM cf_agents_task_runs
-    WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
-      AND status IN ('pending', 'running')
-      AND json_extract(metadata, '$.callback') = ${callback}
-    ORDER BY created_at ASC
-    LIMIT 1
-  `;
-  const runId = rows[0]?.run_id;
+  const runId = pendingRecoveryRunIds(agent, callback)[0];
   if (!runId) return false;
   const past = Date.now() - 1_000;
   agent.sql`
@@ -13770,15 +13777,17 @@ export class ThinkRecoveryTestAgent extends Think {
     // `payload` as `never`. The scheduled payload only needs its recovery-link
     // fields exposed for assertions.
   ): Promise<{ recoveredRequestId?: string; requestId?: string } | null> {
+    // A recovery Task run's input, or the attempt a replayed turn's run
+    // journaled to run itself.
+    const runId = pendingRecoveryRunIds(this, callback)[0];
     const taskRows = this.sql<{ payload: string }>`
-      SELECT json_extract(input, '$.data') AS payload
-      FROM cf_agents_task_runs
-      WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
-        AND status IN ('pending', 'running')
-        AND json_extract(metadata, '$.callback') = ${callback}
-      ORDER BY created_at ASC
-      LIMIT 1
-    `;
+      SELECT COALESCE(
+        (SELECT json_extract(result, '$.data') FROM cf_agents_task_steps
+         WHERE run_id = ${runId ?? ""} AND step_name = 'model-turn'),
+        (SELECT json_extract(input, '$.data') FROM cf_agents_task_runs
+         WHERE run_id = ${runId ?? ""})
+      ) AS payload
+    `.filter((row) => row.payload != null);
     const scheduledRows = this.sql<{ payload: string }>`
       SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
       WHERE capability = 'scheduler' AND fn = ${callback}
