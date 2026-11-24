@@ -230,10 +230,18 @@ describe("Sessions capability", () => {
       await session.appendMessage(
         text("big", `needle ${"x ".repeat(1_500_000)}`)
       );
-      // The index as an earlier release built it: no split messages, no marker.
+      await session.appendMessage(
+        text("big2", `haystack ${"x ".repeat(1_500_000)}`)
+      );
+      // The index as an earlier release built it: no marker, one split
+      // message missing and one already indexed.
       sqlOf(instance).exec(
         `CREATE VIRTUAL TABLE cf_agents_session_fts
          USING fts5(id UNINDEXED, session_id UNINDEXED, role UNINDEXED, content, tokenize='porter unicode61')`
+      );
+      sqlOf(instance).exec(
+        `INSERT INTO cf_agents_session_fts (id, session_id, role, content)
+         VALUES ('big2', '', 'user', 'haystack')`
       );
     });
     await evictDurableObject(stub);
@@ -244,6 +252,8 @@ describe("Sessions capability", () => {
       ]);
       // Once: a second search finds it once, not twice.
       expect(await session.search("needle")).toHaveLength(1);
+      // The one already indexed is not indexed again.
+      expect(await session.search("haystack")).toHaveLength(1);
     });
   });
 

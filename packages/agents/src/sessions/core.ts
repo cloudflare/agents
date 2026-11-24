@@ -322,16 +322,20 @@ export class SessionsCore {
       "SELECT session_id, id FROM cf_agents_session_messages WHERE content_chunks > 0",
       []
     );
-    for (const { session_id: sessionId, id } of split) {
-      if (
-        check &&
-        this.io.sql<{ one: number }>(
-          "SELECT 1 AS one FROM cf_agents_session_fts WHERE id = ? AND session_id = ?",
-          [id, sessionId]
-        ).length > 0
-      ) {
-        continue;
+    // Which split messages an older index already holds: one scan of the
+    // index for all of them (its id columns are not indexed).
+    const indexed = new Set<string>();
+    if (check && split.length > 0) {
+      for (const row of this.io.sql<{ session_id: string; id: string }>(
+        `SELECT session_id, id FROM cf_agents_session_fts
+         WHERE id IN (SELECT value FROM json_each(?))`,
+        [JSON.stringify(split.map((row) => row.id))]
+      )) {
+        indexed.add(`${row.session_id}\u0000${row.id}`);
       }
+    }
+    for (const { session_id: sessionId, id } of split) {
+      if (indexed.has(`${sessionId}\u0000${id}`)) continue;
       const json = this.#content(sessionId, id);
       const message = json === null ? null : this.#parse(json);
       if (message) this.#indexFts(sessionId, message, false);
