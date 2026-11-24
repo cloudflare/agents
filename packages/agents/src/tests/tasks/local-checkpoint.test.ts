@@ -466,3 +466,47 @@ describe("Tasks step writes are fenced in their own statement", () => {
     );
   });
 });
+
+describe("Tasks step cost", () => {
+  it("reads no run row to journal a step", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.tasks.run("pipeline", undefined as never, {
+          runId: "warm",
+          start: "now"
+        });
+        const sql = state.storage.sql as unknown as {
+          exec: (query: string, ...rest: unknown[]) => unknown;
+        };
+        const exec = sql.exec.bind(sql);
+        const queries: string[] = [];
+        sql.exec = (query: string, ...rest: unknown[]) => {
+          queries.push(query);
+          return exec(query, ...rest);
+        };
+        try {
+          await instance.tasks.run("pipeline", undefined as never, {
+            runId: "measured",
+            start: "now"
+          });
+        } finally {
+          sql.exec = exec;
+        }
+        const stepWrites = queries.filter(
+          (q) =>
+            /cf_agents_task_steps/.test(q) && /^\s*(INSERT|UPDATE)/i.test(q)
+        );
+        expect(stepWrites.length).toBeGreaterThan(0);
+        // Each journal write carries its own fence, so no run-row read is
+        // issued for it: the reads left are the claim's, the reports' and
+        // the settle's (12 when every step write read the row first).
+        const runReads = queries.filter((q) =>
+          /SELECT \* FROM cf_agents_task_runs WHERE run_id/.test(q)
+        ).length;
+        expect(runReads).toBeLessThanOrEqual(8);
+      }
+    );
+  });
+});
