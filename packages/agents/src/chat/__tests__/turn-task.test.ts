@@ -133,6 +133,21 @@ describe("createChatTurnTaskDefinition", () => {
     expect(recovered).toEqual([{ __snapshot: { s: 1 }, user: { step: 3 } }]);
   });
 
+  it("hands a replay whose snapshot could not be kept the app's stash data", async () => {
+    const recovered: unknown[] = [];
+    const { step, checkpoint } = fakeStep(undefined);
+    checkpoint.set("stash", JSON.stringify({ step: 4 }));
+    await createChatTurnTaskDefinition({
+      ...hooks,
+      storage: {
+        get: async () => undefined,
+        delete: async () => true
+      } as unknown as DurableObjectStorage,
+      recover: async (turn) => void recovered.push(turn.persisted)
+    })({ requestId: "r1", continuation: false, nonce: "n1" }, step);
+    expect(recovered).toEqual([{ step: 4 }]);
+  });
+
   it("hands a replay of a run from before the input carried it the envelope it checkpointed", async () => {
     const recovered: unknown[] = [];
     const { step, checkpoint } = fakeStep(undefined);

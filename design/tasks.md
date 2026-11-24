@@ -68,7 +68,7 @@ Per isolate: one abort controller and one promise per running attempt (`#active`
 
 ## The chat turn
 
-The chat-turn definition (`chat/turn-task.ts`) passes the turn's closure as `local` and keeps the turn's stash envelope in the checkpoint entry `snapshot`. A turn accepted by a version before checkpoints kept the envelope in storage under `__cf_chat_turn_snapshot:chat_<nonce>`; its recovery reads that key once when no checkpoint entry exists, then deletes it.
+The chat-turn definition (`chat/turn-task.ts`) passes the turn's closure as `local`. The run's input carries the turn's snapshot in its stash envelope (`envelope`, left out when it cannot be kept as JSON or would not fit), and the checkpoint entry `stash` holds the app's latest `stash()` data. A replay hands recovery the envelope with that data. Older runs are still read: a run from before the input carried the snapshot has its whole envelope in the checkpoint entry `snapshot`, and a turn accepted before checkpoints kept it in storage under `__cf_chat_turn_snapshot:chat_<nonce>` (read once, then deleted).
 
 ## Fibers
 

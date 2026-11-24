@@ -104,13 +104,19 @@ export function createChatTurnTaskDefinition(
           // gone. The turn's snapshot and last stash data, plus stream
           // evidence, drive user-visible recovery.
           const legacyKey = legacySnapshotKey(nonce);
+          const stash = step.checkpoint.get(STASH);
           const persisted =
             step.checkpoint.get(LEGACY_ENVELOPE) ??
             (envelope &&
             typeof envelope === "object" &&
             !Array.isArray(envelope)
-              ? { ...envelope, user: step.checkpoint.get(STASH) ?? null }
-              : ((await hooks.storage.get(legacyKey)) ?? null));
+              ? { ...envelope, user: stash ?? null }
+              : ((await hooks.storage.get(legacyKey)) ??
+                // No snapshot was kept (it could not be): recovery still
+                // gets the app's data, which a value with no snapshot key
+                // is read as.
+                stash ??
+                null));
           await hooks.recover({
             requestId,
             persisted,
