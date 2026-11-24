@@ -1876,37 +1876,49 @@ export class SessionsCore {
   #deleteBatch(sessionId: string, batch: readonly string[]): void {
     const ids = JSON.stringify(batch);
     const orphanedCopies = this.#overlaysFollowSplice(sessionId, batch);
-    this.io.sqlWrite(
+    // Each surviving child of a deleted row moves to its nearest surviving
+    // ancestor. The pairs are read once (finding the children scans the
+    // session's rows once: there is no `parent_id` index, which would cost a
+    // row on every append), then the children are updated by key.
+    const rewired = this.io.sql<{
+      child_id: string;
+      ancestor_id: string | null;
+    }>(
       `WITH RECURSIVE
-       deleted(id) AS (SELECT value FROM json_each(?)),
+       children(child_id, ancestor_id) AS MATERIALIZED (
+         SELECT id, parent_id FROM cf_agents_session_messages
+         WHERE session_id = ?2
+           AND parent_id IN (SELECT value FROM json_each(?1))
+           AND id NOT IN (SELECT value FROM json_each(?1))
+       ),
        rewire(child_id, ancestor_id) AS (
-         SELECT child.id, child.parent_id
-         FROM cf_agents_session_messages AS child
-         JOIN deleted ON deleted.id = child.parent_id
-         WHERE child.session_id = ?
-           AND child.id NOT IN (SELECT id FROM deleted)
+         SELECT child_id, ancestor_id FROM children
          UNION ALL
          SELECT rewire.child_id, parent.parent_id
          FROM rewire
          JOIN cf_agents_session_messages AS parent
-           ON parent.id = rewire.ancestor_id
-         JOIN deleted ON deleted.id = parent.id
-         WHERE parent.session_id = ?
-       ),
-       nearest(child_id, ancestor_id) AS (
-         SELECT child_id, ancestor_id FROM rewire
-         WHERE ancestor_id IS NULL
-            OR ancestor_id NOT IN (SELECT id FROM deleted)
+           ON parent.session_id = ?2 AND parent.id = rewire.ancestor_id
+         WHERE rewire.ancestor_id IN (SELECT value FROM json_each(?1))
        )
-     UPDATE cf_agents_session_messages
-     SET parent_id = (
-       SELECT nearest.ancestor_id FROM nearest
-       WHERE nearest.child_id = cf_agents_session_messages.id
-     )
-       WHERE session_id = ?
-         AND id IN (SELECT child_id FROM nearest)`,
-      [ids, sessionId, sessionId, sessionId]
+       SELECT child_id, ancestor_id FROM rewire
+       WHERE ancestor_id IS NULL
+          OR ancestor_id NOT IN (SELECT value FROM json_each(?1))`,
+      [ids, sessionId]
     );
+    // One keyed update per new parent: a deleted run has one child.
+    const byAncestor = new Map<string | null, string[]>();
+    for (const row of rewired) {
+      const children = byAncestor.get(row.ancestor_id);
+      if (children) children.push(row.child_id);
+      else byAncestor.set(row.ancestor_id, [row.child_id]);
+    }
+    for (const [ancestor, children] of byAncestor) {
+      this.io.sqlWrite(
+        `UPDATE cf_agents_session_messages SET parent_id = ?
+         WHERE session_id = ? AND id IN (SELECT value FROM json_each(?))`,
+        [ancestor, sessionId, JSON.stringify(children)]
+      );
+    }
     this.io.sqlWrite(
       `DELETE FROM cf_agents_session_messages
        WHERE session_id = ? AND id IN (SELECT value FROM json_each(?))`,

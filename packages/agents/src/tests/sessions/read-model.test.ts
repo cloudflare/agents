@@ -466,6 +466,47 @@ describe("Sessions budgeted reads bound the message count", () => {
   }, 120_000);
 });
 
+describe("Sessions delete cost", () => {
+  it("scans the session's rows once to splice a delete", async () => {
+    const stub = await started();
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      seed(sqlOf(instance), 1, 20_000);
+      const session = instance.sessions.session();
+      // Settle the once-per-object tail lookup outside the measurement.
+      await session.getLatestLeaf();
+      const read = await rowsRead(sqlOf(instance), () =>
+        session.deleteMessages(["m10000"])
+      );
+      // Finding the deleted row's children reads each row once; the rest
+      // are key lookups. Before, the splice read each row three times.
+      expect(read).toBeLessThan(24_000);
+      const history = await session.getHistory();
+      expect(history).toHaveLength(19_999);
+      expect(history[9_999].id).toBe("m10001");
+    });
+  }, 120_000);
+
+  it("splices a run of 5,000 deleted ids without walking the id list per step", async () => {
+    const stub = await started();
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      seed(sqlOf(instance), 1, 20_000);
+      const session = instance.sessions.session();
+      await session.getLatestLeaf();
+      const read = await rowsRead(sqlOf(instance), () =>
+        session.deleteMessages(range(5_001, 10_000))
+      );
+      // The splice walks up the 5,000-row run once, testing membership in
+      // the id list by an index. Joining the list instead read 25 million
+      // rows here and reset the object at 100,000 stored rows.
+      expect(read).toBeLessThan(150_000);
+      const history = await session.getHistory();
+      expect(history).toHaveLength(15_000);
+      expect(history[4_999].id).toBe("m5000");
+      expect(history[5_000].id).toBe("m10001");
+    });
+  }, 120_000);
+});
+
 describe("Sessions legacy stored summaries and hidden rows", () => {
   it("removes a summary's stored copy with the summary when its range is deleted", async () => {
     const stub = await started();
