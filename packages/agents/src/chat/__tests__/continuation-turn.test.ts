@@ -382,6 +382,68 @@ describe("the continuation turn", () => {
     expect(records()).toContain("cont-3");
   });
 
+  it("holds a restored continuation's replay until its turn is on the queue", async () => {
+    const db = new DatabaseSync(":memory:");
+    const admissions = () => ({
+      store: createChatAdmissionStore(() => ({
+        exec: (query: string, ...bindings: unknown[]) => {
+          const rows = db.prepare(query).all(...(bindings as SQLInputValue[]));
+          return { toArray: () => rows as Record<string, unknown>[] };
+        }
+      })),
+      recoveryPending: async () => false,
+      recoveryOwns: async () => false,
+      replayRequest: () => null
+    });
+    turns = new ChatTurns<TestConnection>(host, {
+      defaultDebounceMs: 750,
+      admissions: admissions()
+    });
+    host.turns = turns;
+    await result("a1");
+    turns.continuation.clearPending();
+
+    // The reset. The restarted host awaits (a keep-alive hold, say) before
+    // it puts a continuation turn on the queue.
+    const restarted = new FakeHost();
+    restarted.transcript = host.transcript;
+    const after = new ChatTurns<TestConnection>(restarted, {
+      defaultDebounceMs: 750,
+      admissions: admissions()
+    });
+    restarted.turns = after;
+    let enqueueNow!: () => void;
+    const held = new Promise<void>((resolve) => {
+      enqueueNow = resolve;
+    });
+    const base = restarted.turn.bind(restarted);
+    restarted.turn = () => {
+      const turn = base();
+      return {
+        ...turn,
+        enqueue: async (requestId, body, onQueued) => {
+          await held;
+          const queued = turn.enqueue(requestId, body);
+          onQueued?.();
+          return queued;
+        }
+      };
+    };
+    let replayed = false;
+    const resumed = after.resumeAdmissions().then(() => {
+      replayed = true;
+    });
+    await drain();
+    // A request that woke the agent waits behind the replay, so it cannot
+    // be queued ahead of the continuation.
+    expect(replayed).toBe(false);
+    enqueueNow();
+    await resumed;
+    expect(replayed).toBe(true);
+    await drain();
+    expect(restarted.ran).toEqual(["cont-1"]);
+  });
+
   it("runs nothing once the conversation moved on, and releases the waiting connection", async () => {
     await result("a1");
     host.transcript = [...host.transcript, user("u2")];

@@ -2330,8 +2330,8 @@ export class AIChatAgent<
       // before the continuation starts. keepAlive() is called inside the
       // turn to prevent hibernation while streaming, without deferring the
       // queue registration.
-      enqueue: (requestId, turn) =>
-        this._runExclusiveChatTurn(
+      enqueue: (requestId, turn, onQueued) => {
+        const queued = this._runExclusiveChatTurn(
           requestId,
           async () => {
             const dispose = await this.keepAlive();
@@ -2342,7 +2342,12 @@ export class AIChatAgent<
             }
           },
           { epoch }
-        ),
+        );
+        // `_runExclusiveChatTurn` puts the turn on the queue before it
+        // first awaits.
+        onQueued?.();
+        return queued;
+      },
       // The one turn body every server-started turn runs, for the
       // continuation's connection. Its tools and body are the stored ones,
       // read now that the turn starts.

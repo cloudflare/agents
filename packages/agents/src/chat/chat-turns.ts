@@ -443,12 +443,18 @@ export class ChatTurns<
               return Promise.resolve();
             }
             if (continuation) {
-              this.#resumeContinuation(
-                record.requestId,
-                continuation.targetMessageIds
+              // Settles once the continuation's turn is queued: the replay
+              // settling counts as queued.
+              return new Promise<void>((resolve) =>
+                this.#resumeContinuation(
+                  record.requestId,
+                  continuation.targetMessageIds,
+                  () => {
+                    onQueued();
+                    resolve();
+                  }
+                )
               );
-              onQueued();
-              return Promise.resolve();
             }
             const request = admissions.replayRequest(record);
             if (!request) {
@@ -486,7 +492,11 @@ export class ChatTurns<
       unscheduled: new Set(),
       dropped: (event) => host.continuationDropped?.(event),
       // A continuation that ends without a turn leaves no record behind.
-      released: (requestId) => this.admissions?.end(requestId)
+      released: (requestId) => {
+        this.admissions?.end(requestId);
+        this.#continuationQueued(requestId);
+      },
+      queued: (requestId) => this.#continuationQueued(requestId)
     };
   }
 
@@ -974,13 +984,18 @@ export class ChatTurns<
    * under its request id (so its turn's fiber releases the record), while
    * one of the messages it answers is still the latest. No tab waits on it.
    */
-  #resumeContinuation(requestId: string, targetMessageIds: string[]): void {
+  #resumeContinuation(
+    requestId: string,
+    targetMessageIds: string[],
+    onQueued: () => void
+  ): void {
     const target = { targetMessageIds };
     if (
       this.continuation.pending ||
       !continuationTargetIsLatest(this.host.messages(), target)
     ) {
       this.admissions?.end(requestId);
+      onQueued();
       return;
     }
     this.continuation.pending = {
@@ -995,7 +1010,23 @@ export class ChatTurns<
     };
     // Queued at once, in replay order: a request that woke the agent must
     // not run, and store its question, before the answer's continuation.
+    // The replay waits until its turn is on the queue (a host may await
+    // before it enqueues), or until it will not run now.
+    this.#replayWaiting.set(requestId, onQueued);
     this.autoContinuation.fireWhenStable();
+    if (this.#continuationParts.firing.size === 0) {
+      this.#continuationQueued(requestId);
+    }
+  }
+
+  /** Replays waiting for a restored continuation's turn to be queued. */
+  readonly #replayWaiting = new Map<string, () => void>();
+
+  #continuationQueued(requestId: string): void {
+    const waiting = this.#replayWaiting.get(requestId);
+    if (!waiting) return;
+    this.#replayWaiting.delete(requestId);
+    waiting();
   }
 
   /**
@@ -1524,13 +1555,9 @@ export class ChatTurns<
   #dropWaiting(stoppedRequestId: string | null): void {
     this.#stoppedTurn = stoppedRequestId;
     this.#stops++;
-    // A dropped continuation's record goes with it: a reset must not run
-    // what a stop dropped.
-    const dropped = this.continuation.pending?.requestId;
+    // A dropped continuation's record goes with it (`released`): a reset
+    // must not run what a stop dropped.
     dropWaitingContinuations(this.#continuationParts, stoppedRequestId);
-    if (dropped !== undefined && this.continuation.pending === null) {
-      this.admissions?.end(dropped);
-    }
   }
 
   /**
