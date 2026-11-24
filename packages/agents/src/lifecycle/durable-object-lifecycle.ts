@@ -748,19 +748,15 @@ export class Lifecycle<
     let moved = false;
     for (const { capability, time } of rows) {
       const path = capability.slice(prefix.length);
-      // A path whose last drive never replied (perhaps the very reset that
-      // restarted this root) keeps its recheck delay and back-off, even when
-      // its wake is already due: nothing in this fresh isolate is driving it.
+      // Driven at once, even when its last drive never replied: that is
+      // most often an ordinary drive the reset cut off, and a job that keeps
+      // ending the isolate is sealed by the facet's own count of unsettled
+      // attempts. Only a path whose drives keep dying (the back-off, from
+      // the third) waits.
       const drives = this.#ctx.storage.kv.get<FacetDriveCount>(
         facetDriveKey(path)
       );
-      const target = drives
-        ? Math.max(
-            now,
-            drives.at + FACET_DRIVE_RECHECK_MS,
-            facetDriveNotBefore(drives)
-          )
-        : Math.min(time, now);
+      const target = Math.max(Math.min(time, now), facetDriveNotBefore(drives));
       if (target === time) continue;
       // Retimed in place: its attempt count is the sign that the last drive
       // crashed, which the scan reads to run other owners' jobs first.
