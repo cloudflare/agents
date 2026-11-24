@@ -353,24 +353,27 @@ try {
   const { targetId } = (await cdp.send("Target.createTarget", {
     url: "about:blank"
   })) as { targetId: string };
-  const sessionId = await cdp.attachToTarget(targetId);
-  await cdp.send("Page.enable", {}, { sessionId });
+  try {
+    const sessionId = await cdp.attachToTarget(targetId);
+    await cdp.send("Page.enable", {}, { sessionId });
 
-  const stop = cdp.on(
-    "Page.frameNavigated",
-    ({ params }) => console.log("navigated", params.frame),
-    { sessionId }
-  );
+    const stop = cdp.on(
+      "Page.frameNavigated",
+      ({ params }) => console.log("navigated", params.frame),
+      { sessionId }
+    );
 
-  // Start waiting before sending the command that causes the event, and
-  // await both together.
-  await Promise.all([
-    cdp.waitFor("Page.loadEventFired", { sessionId, timeoutMs: 30_000 }),
-    cdp.send("Page.navigate", { url: "https://example.com" }, { sessionId })
-  ]);
-  stop();
-  // The browser outlives the connection, so close the tab you opened.
-  await cdp.send("Target.closeTarget", { targetId });
+    // Start waiting before sending the command that causes the event, and
+    // await both together.
+    await Promise.all([
+      cdp.waitFor("Page.loadEventFired", { sessionId, timeoutMs: 30_000 }),
+      cdp.send("Page.navigate", { url: "https://example.com" }, { sessionId })
+    ]);
+    stop();
+  } finally {
+    // The browser outlives the connection, so close the tab you opened.
+    await cdp.send("Target.closeTarget", { targetId });
+  }
 } finally {
   cdp.disconnect();
 }
