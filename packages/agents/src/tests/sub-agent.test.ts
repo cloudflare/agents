@@ -1533,6 +1533,15 @@ describe("SubAgent", () => {
     expect(await agent.fiberWakeOwners()).toHaveLength(1);
   });
 
+  it("keeps the root's alarm within 5 s while a facet's run executes past its dispatch (#2847)", async () => {
+    const agent = await getAgentByName(env.TestSubAgentParent, uniqueName());
+    const { status, alarmIn } =
+      await agent.subAgentRootAlarmDuringLongRun("long-child");
+    expect(status).toBe("running");
+    expect(alarmIn).not.toBeNull();
+    expect(alarmIn!).toBeLessThanOrEqual(5_000);
+  }, 20_000);
+
   it("restarts a facet with an open Task run through a stub it already had", async () => {
     // Tasks wakes open runs while capabilities start, before Agent's own
     // startup reads the stored facet flag. A wake that took the facet for a

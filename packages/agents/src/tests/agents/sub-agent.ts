@@ -112,6 +112,15 @@ export class CounterSubAgent extends Agent {
   }
 
   /** Start a run that never ends, so a reset leaves it open. */
+  /** Start a run that never ends from the alarm, as a submission is. */
+  async startLongAlarmRunForTest(): Promise<void> {
+    await this.tasks.run("hang", undefined, { runId: "long", start: "alarm" });
+  }
+
+  async runStatusForTest(runId: string): Promise<string | undefined> {
+    return (await this.tasks.get(runId))?.status;
+  }
+
   async startHangingRunForTest(): Promise<void> {
     await this.tasks.run("hang", undefined, { runId: "hanging" });
   }
@@ -1806,6 +1815,24 @@ export class TestSubAgentParent extends Agent {
    * Leave a Task run open in the facet, reset the facet, and start it again
    * through a stub kept from before, with no init call from this parent.
    */
+  /**
+   * Start a never-ending alarm run in a facet and, after its dispatch
+   * budget passed, report the root's alarm: it must stay within 5 s, so a
+   * reset of the tree is noticed in seconds (#2847).
+   */
+  async subAgentRootAlarmDuringLongRun(
+    subAgentName: string
+  ): Promise<{ status?: string; alarmIn: number | null }> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    await child.startLongAlarmRunForTest();
+    await new Promise((resolve) => setTimeout(resolve, 7_000));
+    const alarm = await this.ctx.storage.getAlarm();
+    return {
+      status: await child.runStatusForTest("long"),
+      alarmIn: alarm === null ? null : alarm - Date.now()
+    };
+  }
+
   async subAgentHangingRunAfterKeptStubRestart(
     subAgentName: string
   ): Promise<string | undefined> {
