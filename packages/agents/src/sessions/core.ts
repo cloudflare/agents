@@ -127,6 +127,25 @@ function contentDigest(json: string): string {
   return createHash("sha256").update(json, "utf8").digest("hex");
 }
 
+/**
+ * The text a message contributes to the search index. The index holds it in
+ * one row, so only the first row budget is searchable; the rest would not
+ * fit (`SQLITE_TOOBIG`). A cut inside a word is moved back to the last
+ * whitespace, so no fragment is indexed as if it were a word.
+ */
+function searchableText(message: SessionMessage): string {
+  const text = message.parts
+    .filter((part) => part.type === "text")
+    .map((part) => part.text ?? "")
+    .join(" ");
+  const first = splitContent(text)[0] ?? "";
+  if (first.length === text.length || /\s/.test(text[first.length])) {
+    return first;
+  }
+  const lastSpace = first.search(/\s\S*$/);
+  return lastSpace > 0 ? first.slice(0, lastSpace) : first;
+}
+
 export class SessionsCore {
   readonly io: SessionsIo;
   readonly #reservedMetadataKeys: readonly string[];
@@ -274,6 +293,22 @@ export class SessionsCore {
        GROUP BY m.id, m.session_id, m.role`,
       []
     );
+    // A split message's first slice is not valid JSON on its own, so the SQL
+    // above skips it. Index those one at a time from their reassembled
+    // content: one message in memory at a time.
+    const split = this.io.sql<{ session_id: string; id: string }>(
+      `SELECT m.session_id, m.id FROM cf_agents_session_messages m
+       WHERE m.content_chunks > 0
+         AND NOT EXISTS (
+           SELECT 1 FROM cf_agents_session_fts AS existing
+           WHERE existing.id = m.id AND existing.session_id = m.session_id
+         )`,
+      []
+    );
+    for (const { session_id: sessionId, id } of split) {
+      const message = this.getMessage(sessionId, id);
+      if (message) this.#indexFts(sessionId, message, false);
+    }
   }
 
   /**
@@ -1890,22 +1925,16 @@ export class SessionsCore {
     replace: boolean
   ): void {
     if (!this.#fts) return;
-    // The index holds a message's text in one row, so only the first
-    // row-budget of it is searchable; the rest would not fit (TOOBIG).
-    const text =
-      splitContent(
-        message.parts
-          .filter((part) => part.type === "text")
-          .map((part) => part.text ?? "")
-          .join(" ")
-      )[0] ?? "";
+    const text = searchableText(message);
     if (replace) {
-      const existing = this.io.sql<{ content: string }>(
-        "SELECT content FROM cf_agents_session_fts WHERE id = ? AND session_id = ?",
+      const existing = this.io.sql<{ content: string; role: string }>(
+        "SELECT content, role FROM cf_agents_session_fts WHERE id = ? AND session_id = ?",
         [message.id, sessionId]
       );
       if (existing.length > 0) {
-        if (existing[0].content === text) return;
+        if (existing[0].content === text && existing[0].role === message.role) {
+          return;
+        }
         this.io.sqlWrite(
           "DELETE FROM cf_agents_session_fts WHERE id = ? AND session_id = ?",
           [message.id, sessionId]

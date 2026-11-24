@@ -22,9 +22,9 @@ import { MAX_INLINE_ROW_BYTES } from "./chunking";
 import type { SessionsIo } from "./io";
 
 /**
- * SQLite window for one attachment chunk. Attachments are immutable, so a
- * larger row means fewer billed writes; this leaves headroom below SQLite's
- * 2 MiB ceiling for the row key and record overhead.
+ * SQLite window for one attachment chunk: the shared row budget
+ * (`ROW_VALUE_BYTES`, via `MAX_INLINE_ROW_BYTES`). Attachments are
+ * immutable, so a larger row means fewer billed writes.
  */
 const ATTACHMENT_CHUNK_BYTES = MAX_INLINE_ROW_BYTES;
 

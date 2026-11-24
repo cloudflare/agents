@@ -185,6 +185,48 @@ describe("Sessions capability", () => {
     });
   });
 
+  it("does not index a word the row budget cuts in two", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      await session.search("warm");
+      // The budget ends three bytes into "needle".
+      const prefix = `${"x".repeat(MAX_INLINE_ROW_BYTES - 4)} `;
+      await session.appendMessage(text("cut", `${prefix}needle and more`));
+      expect(await session.search("nee")).toEqual([]);
+      expect(await session.search("needle")).toEqual([]);
+    });
+  });
+
+  it("refreshes the search row when only a message's role changes", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      await session.search("warm");
+      await session.appendMessage(text("r", "the quick brown fox", "user"));
+      await session.updateMessage(
+        text("r", "the quick brown fox", "assistant")
+      );
+      expect(await session.search("quick")).toMatchObject([
+        { id: "r", role: "assistant" }
+      ]);
+    });
+  });
+
+  it("backfills a message stored across continuation rows on the first search", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      // Stored before anything searched: split across continuation rows.
+      await session.appendMessage(
+        text("big", `needle ${"x ".repeat(1_500_000)}`)
+      );
+      expect((await session.search("needle")).map((hit) => hit.id)).toEqual([
+        "big"
+      ]);
+    });
+  });
+
   it("splices children to the grandparent on mid-chain delete", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
