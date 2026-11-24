@@ -406,6 +406,82 @@ function pendingRecoveryRunIds(agent: Think, callback: string): string[] {
   `.map((row) => row.run_id);
 }
 
+/**
+ * The schedule reason of each recovery attempt a turn's own run took, per
+ * agent: the Task path keys only a first (`initial`) schedule, and tests read
+ * that from the run's idempotency key.
+ */
+const turnAttemptReasons = new WeakMap<Think, string[]>();
+
+function trackTurnAttemptReasons(agent: Think): void {
+  if (turnAttemptReasons.has(agent)) return;
+  const reasons: string[] = [];
+  turnAttemptReasons.set(agent, reasons);
+  const engine = (
+    agent as unknown as { _chatRecoveryEngine(): unknown }
+  )._chatRecoveryEngine() as {
+    scheduleRecovery(input: {
+      reason?: string;
+      into?: (attempt: unknown) => boolean;
+    }): Promise<boolean>;
+  };
+  const schedule = engine.scheduleRecovery.bind(engine);
+  engine.scheduleRecovery = (input) => {
+    const into = input.into;
+    return schedule(
+      into
+        ? {
+            ...input,
+            into: (attempt) => {
+              const taken = into(attempt);
+              if (taken) reasons.push(input.reason ?? "initial");
+              return taken;
+            }
+          }
+        : input
+    );
+  };
+}
+
+/**
+ * The latest scheduled recovery attempt: a recovery Task run's, or one a
+ * turn's run journaled. `keyed` is whether the Task would key it.
+ */
+function latestRecoveryAttemptForTest(
+  agent: Think,
+  pendingOnly = false
+): { delay: number | null; keyed: boolean } | undefined {
+  const row = agent.sql<{
+    delay: number | null;
+    key: string | null;
+    turn: number;
+  }>`
+    SELECT delay, key, turn FROM (
+      SELECT json_extract(input, '$.delaySeconds') AS delay,
+             idempotency_key AS key, 0 AS turn, created_at AS at
+      FROM cf_agents_task_runs
+      WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+        AND (${pendingOnly ? 1 : 0} = 0 OR status = 'pending')
+      UNION ALL
+      SELECT json_extract(s.result, '$.delaySeconds'), NULL, 1, s.updated_at
+      FROM cf_agents_task_steps s
+      JOIN cf_agents_task_runs r ON r.run_id = s.run_id
+      WHERE s.step_name = 'model-turn'
+        AND json_extract(s.result, '$.callback') IS NOT NULL
+        AND (${pendingOnly ? 1 : 0} = 0 OR r.status IN ('pending', 'running'))
+    )
+    ORDER BY at DESC
+    LIMIT 1
+  `[0];
+  if (!row) return undefined;
+  return {
+    delay: row.delay,
+    keyed: row.turn
+      ? turnAttemptReasons.get(agent)?.at(-1) === "initial"
+      : row.key != null
+  };
+}
+
 function recoveryTransportCountsForTest(
   agent: Think,
   callback: string
@@ -4261,6 +4337,7 @@ export class ThinkTestAgent extends Think {
       inStream: true
     });
     this._errorAttemptsRemaining = failures;
+    trackTurnAttemptReasons(this);
     await this.testChat("trigger transient error");
     const delays: Array<number | null> = [];
     const keyed: boolean[] = [];
@@ -4269,19 +4346,9 @@ export class ThinkTestAgent extends Think {
       const continues = recoveryWorkCountForTest(this, "_chatRecoveryContinue");
       const retries = recoveryWorkCountForTest(this, "_chatRecoveryRetry");
       if (continues === 0 && retries === 0) break;
-      const pending = this.sql<{
-        delay: number | null;
-        idempotency_key: string | null;
-      }>`
-        SELECT json_extract(input, '$.delaySeconds') AS delay, idempotency_key
-        FROM cf_agents_task_runs
-        WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
-          AND status = 'pending'
-        ORDER BY created_at DESC
-        LIMIT 1
-      `[0];
+      const pending = latestRecoveryAttemptForTest(this, true);
       delays.push(pending?.delay ?? null);
-      keyed.push(pending?.idempotency_key != null);
+      keyed.push(pending?.keyed ?? false);
       await runRecoveryWorkForTest(
         this,
         continues > 0 ? "_chatRecoveryContinue" : "_chatRecoveryRetry"
@@ -4324,14 +4391,7 @@ export class ThinkTestAgent extends Think {
     delaySeconds: number | null;
     finalRoles: string[];
   }> {
-    const delaySeconds =
-      this.sql<{ delay: number | null }>`
-        SELECT json_extract(input, '$.delaySeconds') AS delay
-        FROM cf_agents_task_runs
-        WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
-        ORDER BY created_at DESC
-        LIMIT 1
-      `[0]?.delay ?? null;
+    const delaySeconds = latestRecoveryAttemptForTest(this)?.delay ?? null;
     const scheduledContinues = recoveryWorkCountForTest(
       this,
       "_chatRecoveryContinue"
@@ -4565,14 +4625,7 @@ export class ThinkTestAgent extends Think {
     }
     try {
       const first = await this.testChat("trigger transient scenario");
-      const delaySeconds =
-        this.sql<{ delay: number | null }>`
-          SELECT json_extract(input, '$.delaySeconds') AS delay
-          FROM cf_agents_task_runs
-          WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
-          ORDER BY created_at DESC
-          LIMIT 1
-        `[0]?.delay ?? null;
+      const delaySeconds = latestRecoveryAttemptForTest(this)?.delay ?? null;
       return {
         first,
         scheduled:
