@@ -2121,16 +2121,25 @@ describe("ChatRecoveryEngine.recoverInterruptedTurn (fake adapter + wake hooks)"
 });
 
 describe("transient recovery backoff", () => {
-  it("doubles per retry, capped at 30s", () => {
-    expect(
-      [1, 2, 3, 5, 6, 12].map((r) => chatRecoveryBackoffSeconds(r))
-    ).toEqual([1, 2, 4, 16, 30, 30]);
+  it("doubles per retry, capped at 30s, jittered below that", () => {
+    const ceilings = [1, 2, 4, 16, 30, 30];
+    [1, 2, 3, 5, 6, 12].forEach((retries, i) => {
+      for (let n = 0; n < 200; n++) {
+        const seconds = chatRecoveryBackoffSeconds(retries);
+        expect(seconds).toBeGreaterThanOrEqual(0);
+        expect(seconds).toBeLessThan(ceilings[i]);
+      }
+    });
   });
 
   it("waits at least Retry-After, capped at 60s", () => {
     expect(chatRecoveryBackoffSeconds(1, 7)).toBe(7);
-    expect(chatRecoveryBackoffSeconds(4, 2)).toBe(8);
     expect(chatRecoveryBackoffSeconds(1, 600)).toBe(60);
+    for (let n = 0; n < 200; n++) {
+      const seconds = chatRecoveryBackoffSeconds(4, 2);
+      expect(seconds).toBeGreaterThanOrEqual(2);
+      expect(seconds).toBeLessThan(8);
+    }
   });
 
   it("reads retry-after-ms only when it is a plain number", () => {

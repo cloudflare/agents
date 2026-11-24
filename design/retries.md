@@ -23,15 +23,17 @@ The `cloudflare/actors` library includes well-tested retry primitives (`tryN`, `
 
 Three functions, one type:
 
-| Export                                            | Purpose                                                                                                                                                                                                         |
-| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `RetryOptions`                                    | Interface: `{ maxAttempts?, baseDelayMs?, maxDelayMs? }`                                                                                                                                                        |
-| `jitterBackoff(attempt, baseDelayMs, maxDelayMs)` | Full Jitter backoff per [AWS blog post](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/). Returns `random(0, min(2^attempt * base, max))`.                                            |
-| `tryN(n, fn, options?)`                           | Retry `fn` up to `n` total attempts. Accepts optional `shouldRetry` predicate to bail early on non-retryable errors.                                                                                            |
-| `validateRetryOptions(options, defaults?)`        | Eagerly validate retry config. When `defaults` are provided, resolves partial options against them before cross-field checks.                                                                                   |
-| `isErrorRetryable(err)`                           | Returns `true` if the error has `retryable: true` but is not an overloaded Durable Object error. Follows [CF best practices](https://developers.cloudflare.com/durable-objects/best-practices/error-handling/). |
+| Export                                               | Purpose                                                                                                                                                                                                                    |
+| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `RetryOptions`                                       | Interface: `{ maxAttempts?, baseDelayMs?, maxDelayMs? }`                                                                                                                                                                   |
+| `backoffDelay(attempt, { baseMs, maxMs?, jitter? })` | The one backoff formula in the SDK: `min(baseMs * 2^(attempt-1), maxMs)`, spread over `[0, delay)` (Full Jitter, [AWS](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/)) unless `jitter: false`. |
+| `tryN(n, fn, options?)`                              | Retry `fn` up to `n` total attempts. Accepts optional `shouldRetry` predicate to bail early on non-retryable errors.                                                                                                       |
+| `validateRetryOptions(options, defaults?)`           | Eagerly validate retry config. When `defaults` are provided, resolves partial options against them before cross-field checks.                                                                                              |
+| `isErrorRetryable(err)`                              | Returns `true` if the error has `retryable: true` but is not an overloaded Durable Object error. Follows [CF best practices](https://developers.cloudflare.com/durable-objects/best-practices/error-handling/).            |
 
 `tryN` is the only retry loop. Everything else composes on top of it.
+
+Every exponential backoff in `agents` and Think calls `backoffDelay`: `tryN` (first retry up to `2 * baseDelayMs`, as documented), Durable Object routing retries, a fiber's failing recovery hook, chat transient-error recovery, a Tasks step with `backoff: "exponential"`, and Think's workflow-notification and messenger-reply retries. Two sites pass `jitter: false`, each for a stated reason: the job driver's backoff for a job whose attempts ran out (it must never come sooner than the deadman delay, and one object's crash loop is not a shared retry), and the facet drive recheck (it is recomputed from a stored count on every check, so the same count must give the same time). The harness backoffs (`harness/think`, `harness/pi`, `harness/container`) still have their own formulas and move with the harnesses onto Tasks.
 
 ### Input validation
 

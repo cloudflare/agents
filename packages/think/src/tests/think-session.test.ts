@@ -910,7 +910,9 @@ describe("Think — error handling", () => {
       expect(result.first.error).toBeUndefined();
       expect(result.first.interruptedCalls).toBe(1);
       expect(result.scheduledContinues).toBe(1);
-      expect(result.delaySeconds).toBe(1);
+      // The first retry waits under a second, jittered.
+      expect(result.delaySeconds).toBeGreaterThanOrEqual(0);
+      expect(result.delaySeconds).toBeLessThan(1);
       expect(result.assistantMessages).toBe(1);
       expect(result.finalAssistantText.length).toBeGreaterThan(0);
     }
@@ -942,7 +944,13 @@ describe("Think — error handling", () => {
     const agent = await freshAgent(`transient-backoff-${crypto.randomUUID()}`);
     const result = await agent.collectTransientBackoffForTest(20);
 
-    expect(result.delays).toEqual([1, 2, 4, 8, 16, 30, 30, 30, 30, 30]);
+    // Each delay is jittered below its doubling ceiling, capped at 30s.
+    const ceilings = [1, 2, 4, 8, 16, 30, 30, 30, 30, 30];
+    expect(result.delays).toHaveLength(ceilings.length);
+    result.delays.forEach((delay, i) => {
+      expect(delay).toBeGreaterThanOrEqual(0);
+      expect(delay).toBeLessThan(ceilings[i]);
+    });
   });
 
   it("classifies an in-stream error once when overflow recovery is on", async () => {
@@ -966,7 +974,10 @@ describe("Think — error handling", () => {
     const agent = await freshAgent(`transient-chain-${crypto.randomUUID()}`);
     const result = await agent.collectTransientBackoffForTest(3);
 
-    expect(result.delays).toEqual([1, 2, 4]);
+    expect(result.delays).toHaveLength(3);
+    result.delays.forEach((delay, i) => {
+      expect(delay).toBeLessThan([1, 2, 4][i]);
+    });
     // Only the first attempt joins duplicate detections; the attempts it
     // chains must not join the run that schedules them.
     expect(result.keyed).toEqual([true, false, false]);
@@ -1042,7 +1053,8 @@ describe("Think — error handling", () => {
     { retryAfter: "7", inStream: true, delay: 7 },
     { retryAfter: "7", inStream: false, delay: 7 },
     { retryAfter: "600", inStream: true, delay: 60 },
-    { retryAfter: "0", inStream: true, delay: 1 }
+    // Retry-After 0 leaves the backoff: under a second, jittered.
+    { retryAfter: "0", inStream: true, delay: undefined }
   ])(
     "honors Retry-After $retryAfter on a rate limit (inStream: $inStream)",
     async ({ retryAfter, inStream, delay }) => {
@@ -1055,7 +1067,12 @@ describe("Think — error handling", () => {
       });
 
       expect(result.scheduled).toBe(1);
-      expect(result.delaySeconds).toBe(delay);
+      if (delay === undefined) {
+        expect(result.delaySeconds).toBeGreaterThanOrEqual(0);
+        expect(result.delaySeconds).toBeLessThan(1);
+      } else {
+        expect(result.delaySeconds).toBe(delay);
+      }
     }
   );
 
@@ -1188,7 +1205,9 @@ describe("Think — error handling", () => {
 
       const recovered = await agent.runScheduledRecoveryForTest();
       expect(recovered.scheduledContinues).toBe(1);
-      expect(recovered.delaySeconds).toBe(1);
+      // The first retry waits under a second, jittered.
+      expect(recovered.delaySeconds).toBeGreaterThanOrEqual(0);
+      expect(recovered.delaySeconds).toBeLessThan(1);
       expect(recovered.finalRoles).toEqual(["user", "assistant"]);
     } finally {
       await closeWS(ws);

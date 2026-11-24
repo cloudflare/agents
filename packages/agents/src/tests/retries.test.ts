@@ -1,45 +1,40 @@
 import { describe, expect, it } from "vitest";
 import {
+  backoffDelay,
   isDurableObjectCodeUpdateReset,
   isDurableObjectMemoryLimitReset,
   isDurableObjectStorageReset,
   isErrorRetryable,
   isPlatformTransientError,
-  jitterBackoff,
   tryN,
   validateRetryOptions
 } from "../retries";
 
 describe("retries", () => {
-  describe("jitterBackoff", () => {
-    it("returns values within [0, maxDelayMs] range", () => {
-      const baseDelayMs = 100;
-      const maxDelayMs = 3000;
-      const iterations = 10000;
-
-      const delays = new Set<number>();
-      for (let i = 0; i < iterations; i++) {
-        const delay = jitterBackoff(i, baseDelayMs, maxDelayMs);
-        delays.add(delay);
-        expect(delay).toBeGreaterThanOrEqual(0);
-        expect(delay).toBeLessThanOrEqual(maxDelayMs);
-      }
-      // Should have a good spread of unique delays
-      expect(delays.size).toBeGreaterThan(maxDelayMs * 0.5);
+  describe("backoffDelay", () => {
+    it("doubles from the base delay up to the cap without jitter", () => {
+      const delays = [1, 2, 3, 4, 5, 6].map((attempt) =>
+        backoffDelay(attempt, { baseMs: 100, maxMs: 1000, jitter: false })
+      );
+      expect(delays).toEqual([100, 200, 400, 800, 1000, 1000]);
     });
 
-    it("increases upper bound with attempt number", () => {
-      // Early attempts should have lower upper bound
-      const earlyDelays: number[] = [];
-      const lateDelays: number[] = [];
-      for (let i = 0; i < 1000; i++) {
-        earlyDelays.push(jitterBackoff(1, 100, 10000));
-        lateDelays.push(jitterBackoff(5, 100, 10000));
+    it("has no cap unless given one, and stays finite", () => {
+      expect(backoffDelay(11, { baseMs: 1, jitter: false })).toBe(1024);
+      expect(backoffDelay(10_000, { baseMs: 1, jitter: false })).toBe(2 ** 52);
+      expect(backoffDelay(10_000, { baseMs: 0, jitter: false })).toBe(0);
+    });
+
+    it("spreads delays over [0, delay) by default", () => {
+      const delays = new Set<number>();
+      for (let i = 0; i < 10_000; i++) {
+        const delay = backoffDelay(4, { baseMs: 100, maxMs: 3000 });
+        expect(delay).toBeGreaterThanOrEqual(0);
+        expect(delay).toBeLessThan(800);
+        delays.add(delay);
       }
-      const earlyMax = Math.max(...earlyDelays);
-      const lateMax = Math.max(...lateDelays);
-      // Late attempts should generally reach higher values
-      expect(lateMax).toBeGreaterThan(earlyMax);
+      // Retries after a shared failure do not line up.
+      expect(delays.size).toBeGreaterThan(400);
     });
   });
 

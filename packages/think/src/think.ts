@@ -353,7 +353,11 @@ import type {
   ReplyRemoval,
   TurnFailureHost
 } from "agents/chat";
-import { replyIsEmpty, stripTrailingReasoning } from "agents/chat";
+import {
+  backoffDelay,
+  replyIsEmpty,
+  stripTrailingReasoning
+} from "agents/chat";
 import type {
   BeforeTurnRepairResult,
   RepairedTranscriptSink,
@@ -5624,10 +5628,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         // keep the item alive past this cutoff.
         throw new Error(summary);
       }
-      const delaySeconds = Math.min(
-        WORKFLOW_NOTIFICATION_MAX_BACKOFF_SECONDS,
-        2 ** Math.min(attempts, 20)
-      );
+      const delaySeconds =
+        backoffDelay(attempts + 1, {
+          baseMs: 1000,
+          maxMs: WORKFLOW_NOTIFICATION_MAX_BACKOFF_SECONDS * 1000
+        }) / 1000;
       console.error(
         `[Think] Workflow notification delivery failed (attempt ${attempts}); ` +
           `retrying in ${delaySeconds}s`,
@@ -11185,7 +11190,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       );
       return;
     }
-    const delaySeconds = 2 ** (attempts + 1);
+    const delaySeconds = backoffDelay(attempts + 2, { baseMs: 1000 }) / 1000;
     console.error(
       `[Think] recovered messenger reply delivery failed; retrying in ${delaySeconds}s`,
       error

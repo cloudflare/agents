@@ -8,6 +8,7 @@ import {
   type LifecycleEvent,
   type LifecycleEventSink
 } from "./capability-runner";
+import { backoffDelay } from "../retries";
 import { abortWithoutAlarmRetry } from "./abort";
 import { JobDriver, type JobDeferral, type JobDispatch } from "./job-driver";
 import {
@@ -87,12 +88,15 @@ function facetDriveKey(key: string): string {
 function facetDriveNotBefore(drives: FacetDriveCount | undefined): number {
   if (!drives || drives.count < FACET_DRIVE_UNREPORTED_LIMIT) return 0;
   const over = drives.count - FACET_DRIVE_UNREPORTED_LIMIT;
+  // No jitter: this is recomputed from the stored count on every check, so
+  // the same count must give the same time.
   return (
     drives.at +
-    Math.min(
-      FACET_DRIVE_MAX_BACKOFF_MS,
-      FACET_DRIVE_RECHECK_MS * 2 ** Math.min(over, 10)
-    )
+    backoffDelay(over + 1, {
+      baseMs: FACET_DRIVE_RECHECK_MS,
+      maxMs: FACET_DRIVE_MAX_BACKOFF_MS,
+      jitter: false
+    })
   );
 }
 

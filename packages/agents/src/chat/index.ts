@@ -597,3 +597,6 @@ export {
   type ChatRecentTerminal,
   type RecentTerminalsKv
 } from "./recent-terminals";
+
+/** @internal The SDK's one backoff formula, for `Think`. Not a public API. */
+export { backoffDelay } from "../retries";

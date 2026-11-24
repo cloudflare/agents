@@ -77,23 +77,35 @@ export function validateRetryOptions(
   }
 }
 
+/** How {@link backoffDelay} grows and spreads a delay. */
+export type BackoffOptions = {
+  /** The delay before the first retry, before jitter. */
+  baseMs: number;
+  /** The longest delay. Default: no limit. */
+  maxMs?: number;
+  /**
+   * Spread the delay uniformly over `[0, delay)` ("full jitter"), so
+   * retries after a shared failure do not line up. Default: true. Pass
+   * false where the same inputs must give the same delay.
+   */
+  jitter?: boolean;
+};
+
 /**
- * Returns the number of milliseconds to wait before retrying a request.
- * Uses the "Full Jitter" approach from
+ * The delay before retry number `attempt` (1-based): `baseMs` doubled for
+ * each attempt after the first, capped at `maxMs`, then jittered. Uses the
+ * "Full Jitter" approach from
  * https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/
- *
- * @param attempt The current attempt number (1-indexed).
- * @param baseDelayMs Base delay multiplier in ms.
- * @param maxDelayMs Maximum delay cap in ms.
- * @returns Milliseconds to wait before retrying.
  */
-export function jitterBackoff(
+export function backoffDelay(
   attempt: number,
-  baseDelayMs: number,
-  maxDelayMs: number
+  { baseMs, maxMs = Number.POSITIVE_INFINITY, jitter = true }: BackoffOptions
 ): number {
-  const upperBoundMs = Math.min(2 ** attempt * baseDelayMs, maxDelayMs);
-  return Math.floor(Math.random() * upperBoundMs);
+  // Past 2 ** 52 the cap has long taken over; this also keeps 0 * Infinity
+  // out of the product.
+  const exponent = Math.min(Math.max(attempt - 1, 0), 52);
+  const delay = Math.min(baseMs * 2 ** exponent, maxMs);
+  return jitter ? Math.floor(Math.random() * delay) : delay;
 }
 
 /**
@@ -144,7 +156,11 @@ export async function tryN<T>(
       ) {
         throw err;
       }
-      const delay = jitterBackoff(attempt, baseDelayMs, maxDelayMs);
+      // The first retry waits up to twice the base delay, as documented.
+      const delay = backoffDelay(attempt + 1, {
+        baseMs: baseDelayMs,
+        maxMs: maxDelayMs
+      });
       await new Promise((resolve) => setTimeout(resolve, delay));
       attempt = nextAttempt;
     }
