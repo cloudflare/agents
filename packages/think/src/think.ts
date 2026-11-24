@@ -250,6 +250,7 @@ import {
   keepStoredReplies,
   reconcileMessages,
   CHAT_RECOVERY_TASK_NAME,
+  listActiveChatRecoveryIncidents,
   type ChatRecoveryAttemptInput,
   type ChatRecoveryTaskHooks,
   chatRecoveryProgressReader,
@@ -6305,23 +6306,36 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       return true;
     }
     // A replayed turn's own run runs its recovery attempt (its backoff, then
-    // the continuation) instead of a recovery run.
-    const turnRuns = await this.tasks.list({
-      definition: (this.constructor as typeof Think).CHAT_FIBER_NAME,
-      status: ["pending"],
-      limit: Number.MAX_SAFE_INTEGER
-    });
-    // Only a run asleep in its attempt's backoff: one not yet replayed has
-    // planned nothing, and the freshness check decides for it.
-    if (
-      turnRuns.some(
-        (run) =>
-          run.status === "pending" &&
-          run.waitReason === "sleep" &&
-          matchesSubmission(run.metadata?.requestId)
-      )
-    ) {
-      return true;
+    // the continuation) instead of a recovery run. Such a run counts once its
+    // replay planned an attempt: an incident for its request is scheduled or
+    // attempting. A run not yet replayed has planned nothing, and the
+    // freshness check decides for it.
+    const planned = new Set(
+      (await listActiveChatRecoveryIncidents(this.ctx.storage))
+        .filter(
+          ({ incident }) =>
+            incident.status === "scheduled" || incident.status === "attempting"
+        )
+        .map(({ incident }) => incident.requestId)
+    );
+    if (planned.size > 0) {
+      const turnRuns = await this.tasks.list({
+        definition: (this.constructor as typeof Think).CHAT_FIBER_NAME,
+        status: ["pending", "running"],
+        limit: Number.MAX_SAFE_INTEGER
+      });
+      if (
+        turnRuns.some((run) => {
+          const requestId = run.metadata?.requestId;
+          return (
+            typeof requestId === "string" &&
+            planned.has(requestId) &&
+            matchesSubmission(requestId)
+          );
+        })
+      ) {
+        return true;
+      }
     }
 
     // Legacy scheduled recovery callbacks remain readable while durable rows

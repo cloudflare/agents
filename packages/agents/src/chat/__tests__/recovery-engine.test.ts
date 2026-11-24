@@ -716,6 +716,50 @@ describe("ChatRecoveryEngine.scheduleRecovery (fake adapter)", () => {
     expect(fake.recovering).toEqual([{ active: true, requestId: "root-1" }]);
   });
 
+  it("hands the attempt to the caller's run, or to the host's Task when the run declines it", async () => {
+    const fake = makeFakeAdapter();
+    const engine = new ChatRecoveryEngine(fake.adapter);
+    const data = { incidentId: "i", lastBody: { text: "x".repeat(64) } };
+
+    const taken: unknown[] = [];
+    await engine.scheduleRecovery({
+      incident: seedIncident(fake.storage),
+      recoveryKind: "continue",
+      callback: "_chatRecoveryContinue",
+      data,
+      into: (attempt) => {
+        taken.push(attempt);
+        return true;
+      }
+    });
+    expect(taken).toEqual([
+      {
+        callback: "_chatRecoveryContinue",
+        data: { ...data, delivery: 1 },
+        delaySeconds: 0
+      }
+    ]);
+    expect(fake.schedules).toEqual([]);
+
+    // Declined (too large to journal): the Task gets the intact payload.
+    await engine.scheduleRecovery({
+      incident: seedIncident(fake.storage, { incidentId: "inc-2" }),
+      recoveryKind: "continue",
+      callback: "_chatRecoveryContinue",
+      data,
+      delaySeconds: 3,
+      into: () => false
+    });
+    expect(fake.schedules).toEqual([
+      {
+        callback: "_chatRecoveryContinue",
+        data: { ...data, delivery: 1 },
+        reason: "initial",
+        delaySeconds: 3
+      }
+    ]);
+  });
+
   it("emits the scheduled event with the incident's request id + the EXPLICIT recoveryKind", async () => {
     const fake = makeFakeAdapter();
     const engine = new ChatRecoveryEngine(fake.adapter);
