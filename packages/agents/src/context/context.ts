@@ -45,11 +45,12 @@ const RECORD = CONTEXT_RECORD_KIND;
 /** Session config key of a refresh asked for and not yet recorded. */
 const REFRESH = "transcript:context:refresh";
 /**
- * Set on a transcript that started after Context (its first message had no
- * prompt frozen before it), so that prompt never applies to it; a clear
- * removes it with the transcript.
+ * The first message this session recorded a prompt on while a prompt frozen
+ * before Context existed. Turns with no record are from before Context only
+ * while it exists: a clear deletes it, and the transcript after a clear
+ * never uses the frozen prompt. Not a `transcript:` key, so a clear keeps it.
  */
-const FRESH = "transcript:context:fresh";
+const FIRST_RECORD = "context:first-record";
 
 /** One block's prompt section: its label and its rendered text. */
 type Section = readonly [label: string, text: string];
@@ -105,11 +106,7 @@ export interface ContextSession {
   internal_config(key: string): Promise<string | null>;
   /** @internal */
   internal_setConfig(key: string, value: string | null): Promise<void>;
-  /** @internal */
-  internal_storedPathRows(options: {
-    skip: number;
-    limit: number;
-  }): Promise<Array<{ id: string }>>;
+  getMessage(id: string): Promise<SessionMessage | null>;
 }
 
 /**
@@ -205,8 +202,8 @@ export class Context {
   readonly #promptStore: ContextProvider | undefined;
   /** The prompt store's text, read once: the prompt of turns sent before Context. */
   #frozen: string | null | undefined;
-  /** Whether the transcript started after Context (see FRESH). */
-  #fresh: boolean | undefined;
+  /** The FIRST_RECORD id, read once (null: none yet). */
+  #firstRecord: string | null | undefined;
   /** Whether a refresh waits to be recorded; read from the session once. */
   #refresh: boolean | undefined;
   /** Records by message id, as last read or written (see `#records`). */
@@ -269,13 +266,10 @@ export class Context {
     // A retry is sent as its first attempt was: no refresh, no new change.
     const retry = options.retry === true;
 
-    // Decided on every turn with no record, a refresh included: after a
-    // clear the transcript is new, and a frozen prompt must not come back.
-    const released = delivered.system
-      ? null
-      : await this.#released(history, { retry });
-    if (!delivered.system && !refresh) {
-      delivered = await this.#carriedForward(delivered, released);
+    // A path with no record was sent the frozen prompt, if any: before a
+    // pending refresh is weighed, so a regeneration keeps it.
+    if (!delivered.system) {
+      delivered = await this.#carriedForward(delivered, await this.#released());
     }
 
     // A pending refresh applies only to a turn that can record it; a
@@ -306,6 +300,7 @@ export class Context {
       if (at) {
         if (!unchanged) {
           await this.#put(at.id, { system: sections });
+          await this.#noteFirstRecord(at.id);
         }
         if (refresh) await this.#setRefresh(false);
       }
@@ -322,6 +317,7 @@ export class Context {
         system: delivered.system,
         delivered: [...delivered.values].filter(([label]) => label !== CARRIED)
       });
+      await this.#noteFirstRecord(at.id);
       delivered = { ...delivered, base: at.id };
     }
     if (changes.length === 0) return { system, reminder: null };
@@ -427,7 +423,7 @@ export class Context {
       const found = await this.#delivered(history);
       const delivered = await this.#carriedForward(
         found,
-        found.system ? null : await this.#released(history, { read: true })
+        found.system ? null : await this.#released()
       );
       if (delivered.system) return renderSystem(delivered.system);
     }
@@ -443,7 +439,6 @@ export class Context {
     // Also the step after clearing the transcript (Think does both): the
     // records read so far may belong to messages that are gone.
     this.#cache.clear();
-    this.#fresh = undefined;
     await this.#blocks.load();
     await this.#setRefresh(true);
     return renderSystem(await this.#blocks.internal_sections());
@@ -459,7 +454,7 @@ export class Context {
     const found = await this.#delivered(history);
     const delivered = await this.#carriedForward(
       found,
-      found.system ? null : await this.#released(history, { read: true })
+      found.system ? null : await this.#released()
     );
     if (!delivered.system) return null;
     const changes = await this.#changes(delivered.values);
@@ -605,36 +600,28 @@ export class Context {
   }
 
   /**
-   * The prompt frozen before Context, when this transcript was sent it:
-   * not once the transcript started after Context. A first message with
-   * nothing before it starts such a transcript, and a turn that prepares
-   * it marks the transcript so; a retry of it was sent before, so it keeps
-   * the frozen prompt (a first turn after Context that was cut and retried
-   * has a record or the mark from its first attempt). `read` marks nothing.
+   * The prompt frozen before Context, for a path with no record: until the
+   * session records a prompt, and after that while the message it first
+   * recorded on exists (the turns before it were sent the frozen prompt).
    */
-  async #released(
-    history: readonly SessionMessage[],
-    how: { readonly retry?: boolean; readonly read?: boolean }
-  ): Promise<string | null> {
+  async #released(): Promise<string | null> {
     if (!this.#promptStore) return null;
     this.#frozen ??= await this.#promptStore.get();
     if (this.#frozen === null) return null;
-    this.#fresh ??= (await this.#session.internal_config(FRESH)) !== null;
-    if (this.#fresh) return null;
-    if (how.retry) return this.#frozen;
-    const tail = history.at(-1);
-    const first =
-      history.length === 1 &&
-      tail?.role === "user" &&
-      (await this.#session.getLatestLeaf())?.id === tail.id &&
-      (await this.#session.internal_storedPathRows({ skip: 1, limit: 1 }))
-        .length === 0;
-    if (!first) return this.#frozen;
-    if (!how.read) {
-      await this.#session.internal_setConfig(FRESH, "1");
-      this.#fresh = true;
-    }
-    return null;
+    this.#firstRecord ??= await this.#session.internal_config(FIRST_RECORD);
+    if (this.#firstRecord === null) return this.#frozen;
+    return (await this.#session.getMessage(this.#firstRecord)) === null
+      ? null
+      : this.#frozen;
+  }
+
+  /** Remember the first message recorded on while a frozen prompt exists. */
+  async #noteFirstRecord(messageId: string): Promise<void> {
+    if (this.#frozen === undefined || this.#frozen === null) return;
+    this.#firstRecord ??= await this.#session.internal_config(FIRST_RECORD);
+    if (this.#firstRecord !== null) return;
+    await this.#session.internal_setConfig(FIRST_RECORD, messageId);
+    this.#firstRecord = messageId;
   }
 
   async #refreshPending(): Promise<boolean> {

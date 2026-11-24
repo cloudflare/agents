@@ -759,6 +759,63 @@ describe("Context", () => {
     });
   });
 
+  it("never brings a frozen prompt back to a retry after a clear without a refresh", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const sessions = new Sessions();
+      install(sessions);
+      const session = sessions.session();
+      const released = "Released prompt.";
+      const make = () =>
+        new Context(session, {
+          sql: storageSql(storage),
+          blocks: [
+            { label: "soul", provider: { get: async () => "Be kind." } }
+          ],
+          promptStore: { get: async () => released }
+        });
+      const context = make();
+      await session.appendMessage(user("u1", "hello"));
+      await session.appendMessage(assistant("a1", "hi"));
+      await session.appendMessage(user("u2", "again"));
+      expect((await context.build()).system).toBe(released);
+
+      // A session-level clear: no refresh. A new turn is accepted, then
+      // recovered before it was prepared, in this instance and in a new one.
+      await session.clearMessages();
+      await session.appendMessage(user("n1", "new chat"));
+      expect((await make().prepare({ retry: true })).system).not.toBe(released);
+      expect((await context.prepare({ retry: true })).system).not.toBe(
+        released
+      );
+      await session.appendMessage(assistant("m1", "hi"));
+      await session.appendMessage(user("n2", "more"));
+      expect((await context.build()).system).not.toBe(released);
+    });
+  });
+
+  it("gives a regenerated answer from before the upgrade the release's prompt while a refresh waits", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const sessions = new Sessions();
+      install(sessions);
+      const session = sessions.session();
+      const released = "Released prompt.";
+      const context = new Context(session, {
+        sql: storageSql(storage),
+        blocks: [{ label: "soul", provider: { get: async () => "Be kind." } }],
+        promptStore: { get: async () => released }
+      });
+      await session.appendMessage(user("u1", "hello"));
+      await session.appendMessage(assistant("a1", "hi"));
+      // A refresh is asked for before any turn after the upgrade.
+      await context.refreshSystemPrompt();
+      const u1 = (await session.getMessage("u1"))!;
+      expect((await context.prepare({ messages: [u1] })).system).toBe(released);
+      // The next new turn takes the refresh.
+      await session.appendMessage(user("u2", "again"));
+      expect((await context.build()).system).toContain("Be kind.");
+    });
+  });
+
   it("projects the same history to the same messages", async () => {
     await withCapabilityHarness(async ({ storage, install }) => {
       const { session, context, setDate } = await setup(storage, (s) =>
