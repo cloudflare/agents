@@ -3,7 +3,8 @@ import {
   AgentSearchProvider,
   Context,
   type ContextConfig,
-  type SqlProvider
+  type SqlProvider,
+  type WritableContextProvider
 } from "../../context";
 import { Sessions, type Session, type SessionMessage } from "../../sessions";
 import { withCapabilityHarness } from "../shared/capability-harness";
@@ -674,8 +675,8 @@ describe("Context", () => {
               whenChanged: "remind"
             }
           ],
-          // As Think's `_system_prompt` row: read, never written.
-          promptStore: { get: async () => released, set: async () => {} }
+          // As Think's `_system_prompt` row.
+          promptStore: { get: async () => released }
         });
       const context = make();
       // Turns the release answered: no record on them.
@@ -694,6 +695,46 @@ describe("Context", () => {
       expect((await context.prepare({ messages: [u1] })).system).toBe(released);
       // And after an eviction (a new instance).
       expect((await make().prepare({ messages: [u1] })).system).toBe(released);
+    });
+  });
+
+  it("never brings a frozen prompt back after the transcript is cleared", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const sessions = new Sessions();
+      install(sessions);
+      const session = sessions.session();
+      const released = "Released prompt.";
+      let writes = 0;
+      // A writable store, as `withCachedPrompt()` takes: never written.
+      const store: WritableContextProvider = {
+        get: async () => released,
+        set: async () => {
+          writes++;
+        }
+      };
+      const make = () =>
+        new Context(session, {
+          sql: storageSql(storage),
+          blocks: [],
+          promptStore: store
+        });
+      const context = make();
+      await session.appendMessage(user("u1", "hello"));
+      await session.appendMessage(assistant("a1", "hi"));
+      await session.appendMessage(user("u2", "again"));
+      expect((await context.build()).system).toBe(released);
+
+      // As Think clears: the transcript, then a refresh.
+      await session.clearMessages();
+      await context.refreshSystemPrompt();
+      await session.appendMessage(user("n1", "new chat"));
+      expect((await context.build()).system).not.toContain(released);
+      await session.appendMessage(assistant("m1", "hi"));
+      await session.appendMessage(user("n2", "more"));
+      expect((await context.build()).system).not.toContain(released);
+      // After an eviction too.
+      expect((await make().build()).system).not.toContain(released);
+      expect(writes).toBe(0);
     });
   });
 

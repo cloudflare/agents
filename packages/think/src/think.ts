@@ -391,9 +391,7 @@ import { ThinkSession } from "./session";
 import {
   AgentContextProvider,
   Context,
-  type ContextConfig,
-  type SqlProvider,
-  type WritableContextProvider
+  type ContextConfig
 } from "agents/context";
 
 /** Copy a turn context without reading its lazily resolved `model`. */
@@ -977,20 +975,6 @@ type TurnSpec<T> = QueueTurnSpec<T> | NonQueueTurnSpec<T>;
 
 /** What an RPC `chat()` caller is told when the chat is cleared under it. */
 const CHAT_CLEARED_ERROR = "The chat was cleared before the turn finished.";
-
-/**
- * The row an earlier release froze its system prompt in, read and never
- * written: it is the prompt the turns before the upgrade were sent with (a
- * regenerated answer from then is sent it again). Each prompt recorded
- * since lives on the session.
- */
-function releasedPromptRow(
-  agent: SqlProvider,
-  label: string
-): WritableContextProvider {
-  const row = new AgentContextProvider(agent, label);
-  return { get: () => row.get(), set: async () => {} };
-}
 
 /** Whether a turn re-runs or continues one that was cut off. */
 function isRecoveryTrigger(trigger: TurnTrigger | undefined): boolean {
@@ -1628,10 +1612,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           this.session = await this.configureSession(
             new ThinkSession(this.sessions.session(), () => this.context)
           );
-          // The session records the prompt each turn was sent with. A
-          // custom store from `withCachedPrompt()` carries a prompt frozen
-          // before Context forward and receives each new one; without one,
-          // the `_system_prompt` row a release froze is read, never written.
+          // The session records the prompt each turn was sent with. The
+          // prompt a release froze (in a custom `withCachedPrompt()` store,
+          // or the `_system_prompt` row) is read, never written: the turns
+          // sent before the upgrade are sent it.
           const sessionId = this.session.sessionId;
           this.#contextBlocks = new Context(
             this.sessions.session(this.session.sessionId),
@@ -1644,7 +1628,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               sql: this,
               promptStore:
                 this.session.internal_promptStore() ??
-                releasedPromptRow(
+                new AgentContextProvider(
                   this,
                   sessionId ? `_system_prompt_${sessionId}` : "_system_prompt"
                 )

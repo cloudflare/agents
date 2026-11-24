@@ -32,8 +32,7 @@ import {
   renderReminder,
   type ContextBlock,
   type ContextConfig,
-  type ContextProvider,
-  type WritableContextProvider
+  type ContextProvider
 } from "./blocks";
 import { AgentContextProvider, type SqlProvider } from "./sqlite-provider";
 
@@ -45,6 +44,12 @@ export const CONTEXT_RECORD_KIND = "context";
 const RECORD = CONTEXT_RECORD_KIND;
 /** Session config key of a refresh asked for and not yet recorded. */
 const REFRESH = "transcript:context:refresh";
+/**
+ * Set on a transcript that started after Context (its first message had no
+ * prompt frozen before it), so that prompt never applies to it; a clear
+ * removes it with the transcript.
+ */
+const FRESH = "transcript:context:fresh";
 
 /** One block's prompt section: its label and its rendered text. */
 type Section = readonly [label: string, text: string];
@@ -100,6 +105,11 @@ export interface ContextSession {
   internal_config(key: string): Promise<string | null>;
   /** @internal */
   internal_setConfig(key: string, value: string | null): Promise<void>;
+  /** @internal */
+  internal_storedPathRows(options: {
+    skip: number;
+    limit: number;
+  }): Promise<Array<{ id: string }>>;
 }
 
 /**
@@ -121,14 +131,13 @@ export interface ContextOptions {
   /** Storage for blocks declared without a provider, instead of SQLite. */
   readonly defaultProvider?: (label: string) => ContextProvider;
   /**
-   * A store that also holds the system prompt as text. Read once, when a
-   * turn has no recorded prompt on its path, so a prompt frozen before
-   * Context (`ContextBlocks`' prompt store) is what those earlier turns are
-   * sent with, the first one after the upgrade included. Written with every
-   * snapshot Context records; a store whose `set` does nothing keeps the
-   * frozen prompt for the earlier turns for good.
+   * Where a prompt frozen before Context is kept (`ContextBlocks`' prompt
+   * store). Read once, never written: the turns sent before Context have
+   * no record, so they are sent this prompt, the first turn after the
+   * upgrade included. A transcript that starts after Context (a new one,
+   * or after a clear) never uses it.
    */
-  readonly promptStore?: WritableContextProvider;
+  readonly promptStore?: ContextProvider;
 }
 
 /**
@@ -193,12 +202,11 @@ export interface BuiltContext extends PreparedContext {
 export class Context {
   readonly #session: ContextSession;
   readonly #blocks: ContextBlocks;
-  readonly #promptStore: WritableContextProvider | undefined;
-  /**
-   * The prompt store's text as first read: the prompt of turns that have no
-   * record (sent before Context), so a later snapshot never replaces it.
-   */
+  readonly #promptStore: ContextProvider | undefined;
+  /** The prompt store's text, read once: the prompt of turns sent before Context. */
   #frozen: string | null | undefined;
+  /** Whether the transcript started after Context (see FRESH). */
+  #fresh: boolean | undefined;
   /** Whether a refresh waits to be recorded; read from the session once. */
   #refresh: boolean | undefined;
   /** Records by message id, as last read or written (see `#records`). */
@@ -261,8 +269,13 @@ export class Context {
     // A retry is sent as its first attempt was: no refresh, no new change.
     const retry = options.retry === true;
 
+    // Decided on every turn with no record, a refresh included: after a
+    // clear the transcript is new, and a frozen prompt must not come back.
+    const released = delivered.system
+      ? null
+      : await this.#released(history, !retry);
     if (!delivered.system && !refresh) {
-      delivered = await this.#carriedForward(delivered);
+      delivered = await this.#carriedForward(delivered, released);
     }
 
     // A pending refresh applies only to a turn that can record it; a
@@ -293,7 +306,6 @@ export class Context {
       if (at) {
         if (!unchanged) {
           await this.#put(at.id, { system: sections });
-          await this.#promptStore?.set(system);
         }
         if (refresh) await this.#setRefresh(false);
       }
@@ -412,8 +424,10 @@ export class Context {
   async freezeSystemPrompt(options: ContextReadOptions = {}): Promise<string> {
     const history = await this.#history(options);
     if (!(await this.#refreshPending())) {
+      const found = await this.#delivered(history);
       const delivered = await this.#carriedForward(
-        await this.#delivered(history)
+        found,
+        found.system ? null : await this.#released(history, false)
       );
       if (delivered.system) return renderSystem(delivered.system);
     }
@@ -429,6 +443,7 @@ export class Context {
     // Also the step after clearing the transcript (Think does both): the
     // records read so far may belong to messages that are gone.
     this.#cache.clear();
+    this.#fresh = undefined;
     await this.#blocks.load();
     await this.#setRefresh(true);
     return renderSystem(await this.#blocks.internal_sections());
@@ -440,8 +455,11 @@ export class Context {
    */
   async reminder(options: ContextReadOptions = {}): Promise<string | null> {
     if (await this.#refreshPending()) return null;
+    const history = await this.#history(options);
+    const found = await this.#delivered(history);
     const delivered = await this.#carriedForward(
-      await this.#delivered(await this.#history(options))
+      found,
+      found.system ? null : await this.#released(history, false)
     );
     if (!delivered.system) return null;
     const changes = await this.#changes(delivered.values);
@@ -574,16 +592,45 @@ export class Context {
    * the same bytes. A remind block counts as delivered when the frozen text
    * shows its current section, which is how it was compared before.
    */
-  async #carriedForward(delivered: Delivered): Promise<Delivered> {
-    if (delivered.system || !this.#promptStore) return delivered;
-    this.#frozen ??= await this.#promptStore.get();
-    const frozen = this.#frozen;
-    if (frozen === null) return delivered;
+  async #carriedForward(
+    delivered: Delivered,
+    frozen: string | null
+  ): Promise<Delivered> {
+    if (delivered.system || frozen === null) return delivered;
     const values = new Map<string, string>([[CARRIED, frozen]]);
     for (const [label, text] of await this.#blocks.internal_remindSections()) {
       if (promptRendersSection(frozen, text)) values.set(label, text);
     }
     return { system: [[CARRIED, frozen]], values, carried: true };
+  }
+
+  /**
+   * The prompt frozen before Context, when this transcript was sent it:
+   * not once the transcript started after Context. With `mark`, a first
+   * message that had nothing before it marks the transcript as such.
+   */
+  async #released(
+    history: readonly SessionMessage[],
+    mark: boolean
+  ): Promise<string | null> {
+    if (!this.#promptStore) return null;
+    this.#frozen ??= await this.#promptStore.get();
+    if (this.#frozen === null) return null;
+    this.#fresh ??= (await this.#session.internal_config(FRESH)) !== null;
+    if (this.#fresh) return null;
+    const tail = history.at(-1);
+    const first =
+      history.length === 1 &&
+      tail?.role === "user" &&
+      (await this.#session.getLatestLeaf())?.id === tail.id &&
+      (await this.#session.internal_storedPathRows({ skip: 1, limit: 1 }))
+        .length === 0;
+    if (!first) return this.#frozen;
+    if (mark) {
+      await this.#session.internal_setConfig(FRESH, "1");
+      this.#fresh = true;
+    }
+    return null;
   }
 
   async #refreshPending(): Promise<boolean> {

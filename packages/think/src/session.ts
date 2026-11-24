@@ -113,8 +113,8 @@ export class ThinkSession {
    * Persist the frozen system prompt.
    *
    * @deprecated The session records the prompt each turn was sent with, so
-   * this is not needed. A custom `provider` is still honoured: it carries a
-   * prompt frozen before forward and receives every new snapshot.
+   * this is not needed. A custom `provider` is still read: a prompt frozen
+   * in it before is what the turns sent before are sent. It is not written.
    */
   withCachedPrompt(provider?: WritableContextProvider): this {
     if (provider) this.#promptStore = provider;

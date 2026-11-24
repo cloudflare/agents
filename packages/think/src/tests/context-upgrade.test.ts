@@ -145,6 +145,7 @@ describe("Think context upgrade", () => {
     expect(await agent.upgradedPromptRowForTest()).toEqual({
       afterCarry: 1,
       afterRefresh: 1,
+      unchanged: true,
       refreshed: true
     });
   });

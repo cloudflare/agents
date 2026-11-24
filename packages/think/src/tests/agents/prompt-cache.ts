@@ -299,6 +299,19 @@ export class ThinkUpgradeTestAgent extends ThinkPromptCacheTestAgent {
     await this.context.load();
     const frozen = options.frozen ?? (await this.context.freezeSystemPrompt());
     await new AgentContextProvider(this, "_system_prompt").set(frozen);
+    // The turn the release answered with that prompt.
+    const self = this as unknown as {
+      _upsertMessageInHistory(msg: UIMessage, parentId?: string): Promise<void>;
+    };
+    await self._upsertMessageInHistory({
+      id: "r0",
+      role: "user",
+      parts: [{ type: "text", text: "before the upgrade" }]
+    });
+    await self._upsertMessageInHistory(
+      { id: "r1", role: "assistant", parts: [{ type: "text", text: "ok" }] },
+      "r0"
+    );
     this.setEnvironmentForTest(options.environment);
     const turns: UpgradeReport["turns"] = [];
     for (let turn = 0; turn < options.turns; turn++) {
@@ -432,9 +445,10 @@ export class ThinkUpgradeTestAgent extends ThinkPromptCacheTestAgent {
   async upgradedPromptRowForTest(): Promise<{
     afterCarry: number;
     afterRefresh: number;
+    unchanged: boolean;
     refreshed: boolean;
   }> {
-    await this.upgradeFromFrozenPromptForTest({
+    const report = await this.upgradeFromFrozenPromptForTest({
       frozenEnvironment: "Today is Monday.",
       environment: "Today is Monday.",
       turns: 1
@@ -449,6 +463,9 @@ export class ThinkUpgradeTestAgent extends ThinkPromptCacheTestAgent {
     return {
       afterCarry,
       afterRefresh: this.promptRowsForTest(),
+      unchanged:
+        (await new AgentContextProvider(this, "_system_prompt").get()) ===
+        report.frozen,
       refreshed: (systemOf(this.requestForTest(before)) ?? "").includes(
         "Today is Tuesday."
       )
