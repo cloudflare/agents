@@ -193,6 +193,11 @@ export class DynamicAgentsInternal extends LifecycleCapability {
   /** In a facet: the jurisdiction its root was addressed in, if any. */
   #rootJurisdiction?: string;
 
+  /** In a facet: the jurisdiction its root was addressed in, if any. */
+  get rootJurisdiction(): string | undefined {
+    return this.#rootJurisdiction;
+  }
+
   constructor(host: DynamicAgentHostPort) {
     super("dynamic-agents");
     this.#host = host;
