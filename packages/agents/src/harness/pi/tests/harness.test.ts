@@ -84,6 +84,21 @@ async function alarmCleared(
   return alarm === null;
 }
 
+/**
+ * Wait until the wake's alarm is armed. A due wake's alarm may be firing at
+ * the moment of the read (unset until the run re-arms it).
+ */
+async function alarmArmed(
+  stub: DurableObjectStub<PiHarnessTestObject>
+): Promise<boolean> {
+  let alarm = await stub.alarmTime();
+  for (let i = 0; i < 100 && alarm === null; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    alarm = await stub.alarmTime();
+  }
+  return alarm !== null;
+}
+
 describe("PiHarness on pi-durable", () => {
   it("answers a prompt with a tool call and keeps the transcript across eviction", async () => {
     const stub = fresh();
@@ -141,7 +156,9 @@ describe("PiHarness on pi-durable", () => {
     const eviction = await evictWhenIdle(stub);
     expect(eviction.result).toBe("kept");
     // The alarm firing does not move the work to a new instance.
+    expect(await alarmArmed(stub)).toBe(true);
     expect(await runDurableObjectAlarm(stub)).toBe(true);
+    expect(await alarmArmed(stub)).toBe(true);
     expect(await runDurableObjectAlarm(stub)).toBe(true);
     expect(await stub.instance()).toBe(instance);
 
@@ -369,7 +386,7 @@ describe("PiHarness on pi-durable", () => {
     const receipt = await stub.submit("gate");
     await stub.gateStarted(1);
     // The wake job keeps a heartbeat while it waits on pi's running work.
-    expect(await stub.alarmTime()).not.toBeNull();
+    expect(await alarmArmed(stub)).toBe(true);
 
     // Graceful eviction waits for the in-flight step, which is the point of
     // the heartbeat, so crash the object instead.
@@ -986,14 +1003,7 @@ describe("PiHarness with parked tool calls", () => {
 
     expect(await stub.approve("ok")).toBe("delivered");
     expect(await stub.wakeJobTime()).not.toBeNull();
-    // The wake is due now, so its alarm may be firing at this moment (unset
-    // until the run re-arms it): wait for the alarm to be armed.
-    let alarm = await stub.alarmTime();
-    for (let i = 0; i < 100 && alarm === null; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      alarm = await stub.alarmTime();
-    }
-    expect(alarm).not.toBeNull();
+    expect(await alarmArmed(stub)).toBe(true);
     await stub.gateStarted(1);
 
     await abortAllDurableObjects();
