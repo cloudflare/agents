@@ -462,8 +462,19 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     const watch = await this.harness.session().watch();
     const chunks: string[] = [];
     const messages: string[][] = [];
+    let markAnswered!: () => void;
+    const answered = new Promise<void>((resolve) => {
+      markAnswered = resolve;
+    });
     watch.start(async (events: readonly SessionEvent[]) => {
       for (const event of events) {
+        if (
+          event.type === "operation" &&
+          event.status.operationId === "answer-late-1" &&
+          event.status.status === "done"
+        ) {
+          markAnswered();
+        }
         if (event.type === "chunk" && "toolCallId" in event.chunk) {
           if (event.chunk.type === "tool-input-available") {
             chunks.push(`${event.chunk.toolCallId}@${event.chunk.owner}`);
@@ -480,16 +491,19 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     });
     this.addLateTool();
     await this.promptAs("late client", participantId);
-    await this.answerAs(
+    const session = this.harness.session();
+    const { operationId } = await session.submit(
       {
         type: "tool-result",
         toolCallId: "late-1",
-        result: { ok: true, output: "here" }
+        result: { ok: true, output: "here" },
+        from: { participantId }
       },
-      participantId
+      { operationId: "answer-late-1" }
     );
-    // The watch delivers events in batches; let the answer's arrive.
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // The answer's terminal event follows its message in the watch.
+    await answered;
+    await session.wait(operationId);
     await watch.stop();
     return { chunks, messages };
   }
