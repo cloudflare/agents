@@ -229,6 +229,7 @@ interface ChatRecoveryTestStub {
       prelude?: "partial" | "approval" | "start-only" | "none";
       priorAssistant?: boolean;
       responseHeaders?: Record<string, string>;
+      statusCode?: number;
     }
   ): Promise<"completed" | "error" | "aborted" | "skipped">;
   getScheduledRecoveryDelayForTest(): Promise<number | null>;
@@ -3310,6 +3311,43 @@ describe("stall watchdog (chatStreamStallTimeoutMs)", () => {
     expect(
       await agentStub.getScheduleCountForCallback("_chatRecoveryContinue")
     ).toBe(0);
+  });
+});
+
+describe("provider errors the chat turn reads itself", () => {
+  it.each([
+    ["a rate limit", 429, "Rate limit reached for requests"],
+    ["an overloaded provider", 529, "Overloaded"],
+    ["a server error", 503, "Service unavailable"]
+  ])(
+    "routes %s mid-stream into bounded recovery",
+    async (_what, status, msg) => {
+      const agentStub = await getTestAgent(
+        `provider-error-${status}-${crypto.randomUUID()}`
+      );
+      expect(
+        await agentStub.driveFailingReaderTurnForTest(msg, 1, {
+          statusCode: status
+        })
+      ).toBe("aborted");
+      const incidents =
+        (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
+          recoveryKind: string;
+        }>;
+      expect(incidents.length).toBeGreaterThanOrEqual(1);
+    }
+  );
+
+  it("leaves an error the provider says nothing about terminal", async () => {
+    const agentStub = await getTestAgent(
+      `provider-error-401-${crypto.randomUUID()}`
+    );
+    expect(
+      await agentStub.driveFailingReaderTurnForTest("Invalid API key", 1, {
+        statusCode: 401
+      })
+    ).toBe("error");
+    expect(await agentStub.getChatRecoveryIncidentsForTest()).toEqual([]);
   });
 });
 
