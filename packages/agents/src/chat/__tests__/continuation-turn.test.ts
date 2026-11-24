@@ -429,6 +429,11 @@ describe("the continuation turn", () => {
         }
       };
     };
+    let finishModel!: () => void;
+    restarted.model = () =>
+      new Promise<void>((resolve) => {
+        finishModel = resolve;
+      });
     let replayed = false;
     const resumed = after.resumeAdmissions().then(() => {
       replayed = true;
@@ -439,9 +444,12 @@ describe("the continuation turn", () => {
     expect(replayed).toBe(false);
     enqueueNow();
     await resumed;
+    // Settled at queue entry, not when the turn's model call finishes.
     expect(replayed).toBe(true);
     await drain();
     expect(restarted.ran).toEqual(["cont-1"]);
+    finishModel();
+    await drain();
   });
 
   it("runs nothing once the conversation moved on, and releases the waiting connection", async () => {
@@ -1559,7 +1567,7 @@ describe("what a continuation turn runs", () => {
       messages: () => host.transcript,
       clientToolNames: () => new Set<string>(),
       streamed: new Map<string, boolean>(),
-      firing: new Set<object>(),
+      firing: new Set<{ readonly requestId: string }>(),
       unscheduled: new Set<string>(),
       dropped: () => {}
     };
@@ -1578,7 +1586,7 @@ describe("what a continuation turn runs", () => {
       messages: () => host.transcript,
       clientToolNames: () => new Set<string>(),
       streamed: new Map<string, boolean>(),
-      firing: new Set<object>(),
+      firing: new Set<{ readonly requestId: string }>(),
       unscheduled: new Set<string>(),
       dropped: () => {}
     };
@@ -1604,7 +1612,7 @@ describe("what a continuation turn runs", () => {
       messages: () => host.transcript,
       clientToolNames: () => new Set<string>(),
       streamed: new Map<string, boolean>(),
-      firing: new Set<object>(),
+      firing: new Set<{ readonly requestId: string }>(),
       unscheduled: new Set<string>(),
       dropped: () => {}
     };

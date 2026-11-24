@@ -82,7 +82,7 @@ export interface ContinuationTurnParts<
    * `enqueue` may await before the turn is on the queue, and the queue alone
    * would report idle in that window.
    */
-  readonly firing: Set<object>;
+  readonly firing: Set<{ readonly requestId: string }>;
   /**
    * The request ids of continuation turns no pending continuation stands
    * for, between their fire and the start of their turn. A stop that drops
@@ -310,7 +310,7 @@ export async function runContinuationTurn<
     ? unscheduled.errorPrefix
     : pending!.errorPrefix;
   const signal = parts.aborts.getSignal(requestId);
-  const firing = {};
+  const firing = { requestId };
   parts.firing.add(firing);
   if (unscheduled) parts.unscheduled.add(requestId);
 

@@ -1014,7 +1014,13 @@ export class ChatTurns<
     // before it enqueues), or until it will not run now.
     this.#replayWaiting.set(requestId, onQueued);
     this.autoContinuation.fireWhenStable();
-    if (this.#continuationParts.firing.size === 0) {
+    // Not fired now (a tool batch still waits on a sibling, say): nothing
+    // will queue it before a request may.
+    if (
+      ![...this.#continuationParts.firing].some(
+        (firing) => firing.requestId === requestId
+      )
+    ) {
       this.#continuationQueued(requestId);
     }
   }
