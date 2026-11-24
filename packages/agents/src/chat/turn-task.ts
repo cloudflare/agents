@@ -180,11 +180,14 @@ export function createChatTurnTaskDefinition(
       }
     );
     if (attempt) {
-      await runChatRecoveryAttempt(
-        step,
-        hooks.attempts,
-        attempt as unknown as ChatRecoveryAttemptInput
-      );
+      const scheduled = attempt as unknown as ChatRecoveryAttemptInput;
+      await runChatRecoveryAttempt(step, hooks.attempts, {
+        ...scheduled,
+        // Always suspend first, even with no backoff: the attempt then runs
+        // from the alarm, where the host keeps the continuation's model turn
+        // inside the memory-limit breaker, as the recovery Task did.
+        delaySeconds: Math.max(scheduled.delaySeconds, 0.001)
+      });
     }
   };
 }

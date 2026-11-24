@@ -206,7 +206,7 @@ describe("createChatTurnTaskDefinition", () => {
     expect(recovered).toEqual([{ __snapshot: { s: 0 }, user: { step: 9 } }]);
   });
 
-  it("runs a replay's recovery attempt in its own run, after the backoff", async () => {
+  it("runs a replay's recovery attempt in its own run, after the backoff, from a suspension", async () => {
     const { step } = fakeStep(undefined);
     const steps: string[] = [];
     const stepDo = step.do.bind(step);
@@ -239,5 +239,21 @@ describe("createChatTurnTaskDefinition", () => {
     })({ requestId: "r1", nonce: "n1" }, step);
     expect(steps).toEqual(["model-turn", "backoff:2000", "continuation"]);
     expect(continued).toEqual([{ incidentId: "i1" }]);
+    // With no backoff it still suspends, so the attempt runs from the alarm.
+    steps.length = 0;
+    await createChatTurnTaskDefinition({
+      ...hooks,
+      storage: {
+        get: async () => undefined,
+        delete: async () => true
+      } as unknown as DurableObjectStorage,
+      recover: async (turn) =>
+        turn.attempt({
+          callback: "_chatRecoveryRetry",
+          data: {},
+          delaySeconds: 0
+        })
+    })({ requestId: "r2", nonce: "n2" }, step);
+    expect(steps).toEqual(["model-turn", "backoff:1", "continuation"]);
   });
 });
