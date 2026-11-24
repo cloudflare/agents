@@ -6304,6 +6304,16 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     ) {
       return true;
     }
+    // A replayed turn's own run runs its recovery attempt (its backoff, then
+    // the continuation) instead of a recovery run.
+    const turnRuns = await this.tasks.list({
+      definition: (this.constructor as typeof Think).CHAT_FIBER_NAME,
+      status: ["pending", "running"],
+      limit: Number.MAX_SAFE_INTEGER
+    });
+    if (turnRuns.some((run) => matchesSubmission(run.metadata?.requestId))) {
+      return true;
+    }
 
     // Legacy scheduled recovery callbacks remain readable while durable rows
     // created before the Tasks transport upgrade drain naturally.
