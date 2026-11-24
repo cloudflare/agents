@@ -129,7 +129,12 @@ export interface ContextOptions {
    * Where a prompt frozen before Context is kept (`ContextBlocks`' prompt
    * store). Read once, never written: the turns sent before Context have
    * no record, so they are sent this prompt, the first turn after the
-   * upgrade included, until the session is cleared.
+   * upgrade included, until the session is cleared. Context knows of a
+   * clear from the session config key `session:cleared-at`, which a
+   * Sessions session's `clearMessages()` sets; a session of your own that
+   * clears its history must set it too (to any value), or the frozen
+   * prompt applies again after the clear. A store that throws or holds
+   * nothing counts as no prompt.
    */
   readonly promptStore?: ContextProvider;
 }
