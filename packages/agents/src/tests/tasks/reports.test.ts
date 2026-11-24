@@ -599,3 +599,35 @@ describe("Tasks patchMetadata", () => {
     });
   });
 });
+
+describe("Tasks patchMetadata bound", () => {
+  it("writes a field past one value's 1 MiB within the metadata's room, and refuses one past it", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      await instance.tasks.importRun({
+        runId: "b",
+        definition: "__cf_echo",
+        status: "pending",
+        attempt: 0,
+        metadata: { app: "a" },
+        createdAt: 1
+      });
+      expect(
+        instance.tasks.patchMetadata("b", "progress", {
+          out: "o".repeat(1_200_000)
+        })
+      ).toBe(true);
+      expect(
+        instance.tasks.patchMetadata("b", "progress", {
+          more: "p".repeat(800_000)
+        })
+      ).toBe(false);
+      const progress = instance.tasks.peek("b")?.metadata?.progress as Record<
+        string,
+        string
+      >;
+      expect(progress.out.length).toBe(1_200_000);
+      expect(progress.more).toBeUndefined();
+    });
+  });
+});

@@ -122,7 +122,8 @@ type ThinkSubmissionTestStub = {
   keepAliveHoldsForTest(): Promise<number>;
   recordLargeTurnOutputForTest(
     submissionId: string,
-    outputChars: number
+    outputChars: number,
+    metadataChars?: number
   ): Promise<{ resultStatus?: string; hasOutput: boolean }>;
   parkSubmissionForTest(
     submissionId: string,
@@ -2270,6 +2271,12 @@ describe("Think durable submissions", () => {
     ).resolves.toEqual({ resultStatus: "completed", hasOutput: false });
     await expect(
       agent.recordLargeTurnOutputForTest("sub-small-output", 1_000)
+    ).resolves.toEqual({ resultStatus: "completed", hasOutput: true });
+    // Past one value's 1 MiB but within the metadata's room beside small
+    // metadata: kept, and the write (inside the stream's settle) does not
+    // throw.
+    await expect(
+      agent.recordLargeTurnOutputForTest("sub-mib-output", 1_200_000, 10)
     ).resolves.toEqual({ resultStatus: "completed", hasOutput: true });
   });
 

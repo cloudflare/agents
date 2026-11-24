@@ -2179,10 +2179,12 @@ export class Tasks<
   /**
    * @internal Write fields of the object a run's metadata keeps under
    * `key`, in one write that reads nothing: each field in `patch` replaces
-   * the stored one, and a `null` removes it. For progress written on the hot path; {@link updateMetadata}
+   * the stored one, and a `null` removes it. A write that would take the
+   * whole metadata past the framework bound changes nothing and returns
+   * false. For progress written on the hot path; {@link updateMetadata}
    * rewrites the whole metadata.
    *
-   * @returns False for an unknown run.
+   * @returns False for an unknown run, or when the write would pass the bound.
    */
   patchMetadata(
     runId: string,
@@ -2190,7 +2192,8 @@ export class Tasks<
     patch: Record<string, TaskJson | null>
   ): boolean {
     // Each field is replaced whole (not merged into an object it held),
-    // and a `null` removes it.
+    // and a `null` removes it. The bound is the whole metadata's, as for
+    // updateMetadata: a write that would pass it changes nothing.
     const set: (string | null)[] = [];
     const remove: string[] = [];
     let setSql = "";
@@ -2203,24 +2206,25 @@ export class Tasks<
         setSql += ", '$.' || json_quote(?), json(?)";
         set.push(
           field,
-          serializeTaskValue(value, `metadata of Task run "${runId}"`)
+          serializeTaskValue(
+            value,
+            `metadata of Task run "${runId}"`,
+            MAX_FRAMEWORK_METADATA_BYTES
+          )
         );
       }
     }
-    const entry =
-      "coalesce(json_extract(metadata, '$.' || json_quote(?)), '{}')";
-    let value = entry;
-    if (setSql) value = `json_set(${value}${setSql})`;
-    if (removeSql) value = `json_remove(${value}${removeSql})`;
+    let entry = "coalesce(json_extract(metadata, '$.' || json_quote(?)), '{}')";
+    if (setSql) entry = `json_set(${entry}${setSql})`;
+    if (removeSql) entry = `json_remove(${entry}${removeSql})`;
+    const next = `json_set(coalesce(metadata, '{}'), '$.' || json_quote(?), json(${entry}))`;
+    const params = [key, key, ...set, ...remove];
     return (
       this.#store.write(
         `UPDATE cf_agents_task_runs
-         SET metadata = json_set(
-               coalesce(metadata, '{}'), '$.' || json_quote(?), json(${value})
-             ),
-             updated_at = ?
-         WHERE run_id = ?`,
-        [key, key, ...set, ...remove, Date.now(), runId]
+         SET metadata = ${next}, updated_at = ?
+         WHERE run_id = ? AND length(CAST(${next} AS BLOB)) <= ?`,
+        [...params, Date.now(), runId, ...params, MAX_FRAMEWORK_METADATA_BYTES]
       ) > 0
     );
   }
