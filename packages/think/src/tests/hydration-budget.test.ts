@@ -145,6 +145,22 @@ describe("hydrationByteBudget — windowed hydration (#1710)", () => {
     ]);
   });
 
+  it("matches an older reply the client holds under another id, storing it once", async () => {
+    const agent = (await getAgentByName(
+      env.ThinkWindowedHydrationAgent,
+      uniqueName("seeded-windowed-copy")
+    )) as unknown as WindowedHydrationStub & {
+      reconcileOptimisticCopyForTest(): Promise<string[]>;
+    };
+    expect((await agent.getHydrationInfoForTest())?.truncated).toBe(true);
+    const ids = await agent.reconcileOptimisticCopyForTest();
+    expect(ids).not.toContain("client-copy");
+    expect(ids).toEqual([
+      ...Array.from({ length: 10 }, (_, i) => `seed-${i}`),
+      "new-user"
+    ]);
+  });
+
   it("reconciles on a path too long to read root-first", async () => {
     const name = uniqueName("windowed-long-path");
     const agent = (await getAgentByName(

@@ -291,7 +291,11 @@ describe("Sessions carries released overlays forward", () => {
         releasedOverlay("s1", 1, "m2", "m20", "short"),
         releasedOverlay("s2", 2, "m2", "b1", "short"),
         // 6: a start row that was deleted.
-        releasedOverlay("gone", 3, "deleted-row", "m25", "short")
+        releasedOverlay("gone", 3, "deleted-row", "m25", "short"),
+        // An older hand-written overlay ending on the b branch whose start
+        // is not an ancestor of its end (b1 hangs off m10, not m15). Its seq
+        // order is fine; it must not apply.
+        releasedOverlay("cross", 0, "m15", "b2", "short")
       ]);
       await instance.kvPut("cf_agents:sessions_schema_version", 1);
 
@@ -314,12 +318,13 @@ describe("Sessions carries released overlays forward", () => {
         "summary c2"
       ]);
       expect((await short.getCompactions()).map((c) => c.id)).toEqual([
+        "cross",
         "s1",
         "s2",
         "gone"
       ]);
       expect(instance.eventsOfType("session:overlays:unresolved")).toEqual([
-        { type: "session:overlays:unresolved", payload: { count: 1 } }
+        { type: "session:overlays:unresolved", payload: { count: 2 } }
       ]);
       expect(
         await instance.kvGet<number>("cf_agents:sessions_schema_version")
@@ -459,4 +464,58 @@ describe("Sessions budgeted reads bound the message count", () => {
       expect(recent.messages.at(-1)?.id).toBe("m10000");
     });
   }, 120_000);
+});
+
+describe("Sessions legacy stored summaries and hidden rows", () => {
+  it("removes a summary's stored copy with the summary when its range is deleted", async () => {
+    const stub = await started();
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      seed(sqlOf(instance), 1, 30);
+      const session = instance.sessions.session();
+      const overlay = await session.addCompaction("s", "m4", "m20");
+      // A copy of the summary an earlier release stored as a row (#1984).
+      sqlOf(instance).exec(
+        `INSERT INTO cf_agents_session_messages
+          (session_id, id, seq, parent_id, role, content, token_estimate, created_at)
+         VALUES ('', ?, 31, 'm30', 'assistant',
+           json_object('id', ?, 'role', 'assistant',
+             'parts', json_array(json_object('type', 'text', 'text', 's'))), 1, 31)`,
+        `compaction_${overlay.id}`,
+        `compaction_${overlay.id}`
+      );
+      await session.appendMessage(text("m32"), {
+        parentId: `compaction_${overlay.id}`
+      });
+      await session.deleteMessages(range(4, 20));
+      expect((await session.getHistory()).map((m) => m.id)).toEqual([
+        ...range(1, 3),
+        ...range(21, 30),
+        "m32"
+      ]);
+    });
+  });
+
+  it("counts only visible rows when a stored-path page skips the newest", async () => {
+    const stub = await started();
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      seed(sqlOf(instance), 1, 10);
+      const session = instance.sessions.session();
+      const overlay = await session.addCompaction("s", "m1", "m1");
+      // A hidden stored summary row just below the leaf.
+      sqlOf(instance).exec(
+        `INSERT INTO cf_agents_session_messages
+          (session_id, id, seq, parent_id, role, content, token_estimate, created_at)
+         VALUES ('', ?, 11, 'm10', 'assistant', '{}', 1, 11)`,
+        `compaction_${overlay.id}`
+      );
+      await session.appendMessage(text("m12"), {
+        parentId: `compaction_${overlay.id}`
+      });
+      const page = await session.internal_storedPathRows({
+        skip: 2,
+        limit: 3
+      });
+      expect(page.map((row) => row.id)).toEqual(["m9", "m8", "m7"]);
+    });
+  });
 });

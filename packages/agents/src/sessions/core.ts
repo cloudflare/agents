@@ -108,8 +108,8 @@ function pathTooLong(leafId: string | null | undefined): Error {
   const error = new Error(
     `Sessions: the path${leafId ? ` to "${leafId}"` : ""} holds more than ` +
       `${MAX_ROOT_FIRST_STEPS.toLocaleString("en-US")} visible messages, too many to read root-first. ` +
-      "Read it newest-first with history({ newestFirst: true }), use " +
-      "getRecentHistory(), or compact the session."
+      "Read it newest-first with history({ newestFirst: true }) or use " +
+      "getRecentHistory()."
   );
   error.name = "SessionPathTooLongError";
   return error;
@@ -517,28 +517,62 @@ export class SessionsCore {
       []
     );
     if (pending.length === 0) return;
-    const newest = new Map<string, number>();
+    // Every derived overlay's start must be an ancestor of its end, or the
+    // walk would continue on another branch. The checks are reads (a walk
+    // can cover a long span), so they run before the transaction. Overlays
+    // are grouped by start: one walk up from the highest end decides every
+    // end it passes (they are on that path), which is one walk for a whole
+    // chain of `compact()` overlays.
+    type Pending = (typeof pending)[number];
+    const groups = new Map<string, Pending[]>();
     for (const row of pending) {
-      newest.set(
-        row.session_id,
-        Math.max(newest.get(row.session_id) ?? 0, row.seq)
-      );
+      if (
+        row.from_seq === null ||
+        row.to_seq === null ||
+        row.from_seq > row.to_seq
+      ) {
+        continue;
+      }
+      const key = `${row.session_id}\u0000${row.from_message_id}`;
+      groups.set(key, [...(groups.get(key) ?? []), row]);
     }
-    // The checks are reads (the ancestry walk can cover a long span): they
-    // run first, and the transaction holds only the writes.
-    const resolved = pending.filter(
-      (row) =>
-        row.from_seq !== null &&
-        row.to_seq !== null &&
-        row.from_seq <= row.to_seq &&
-        (newest.get(row.session_id) !== row.seq ||
-          row.from_message_id === row.to_message_id ||
-          this.#isAncestor(
-            row.session_id,
-            { id: row.from_message_id, seq: row.from_seq },
-            row.to_message_id
-          ))
-    );
+    const resolved: Pending[] = [];
+    for (const group of groups.values()) {
+      const remaining = group.sort((a, b) => (b.to_seq ?? 0) - (a.to_seq ?? 0));
+      while (remaining.length > 0) {
+        const top = remaining[0];
+        const from = top.from_message_id;
+        const hits = new Set(
+          this.io
+            .sql<{ id: string }>(
+              `WITH RECURSIVE up(id, parent_id) AS (
+                SELECT id, parent_id FROM cf_agents_session_messages
+                WHERE session_id = ?1 AND id = ?2
+                UNION ALL
+                SELECT m.id, m.parent_id FROM up
+                CROSS JOIN cf_agents_session_messages m
+                  ON m.session_id = ?1 AND m.id = up.parent_id
+                WHERE up.id <> ?3 AND m.seq >= ?4
+              )
+              SELECT id FROM up WHERE id IN (SELECT value FROM json_each(?5))`,
+              [
+                top.session_id,
+                top.to_message_id,
+                from,
+                top.from_seq,
+                JSON.stringify([from, ...remaining.map((r) => r.to_message_id)])
+              ]
+            )
+            .map((row) => row.id)
+        );
+        const onPath = (row: Pending) =>
+          row === top || hits.has(row.to_message_id);
+        if (hits.has(from)) resolved.push(...remaining.filter(onPath));
+        // Off this path: a later walk from the next highest end decides.
+        const rest = remaining.filter((row) => !onPath(row));
+        remaining.splice(0, remaining.length, ...rest);
+      }
+    }
     const unresolved = pending.length - resolved.length;
     this.io.transaction(() => {
       for (const row of resolved) {
@@ -1243,46 +1277,52 @@ export class SessionsCore {
             [sessionId, options.after]
           )[0]?.parent_id ?? null);
     if (!leaf || options.limit <= 0) return [];
-    const rows = this.io.sql<{ id: string; bytes: number }>(
-      `WITH RECURSIVE path(id, parent_id, depth) AS (
-        SELECT id, parent_id, 0 FROM cf_agents_session_messages
-        WHERE session_id = ? AND id = ?
-        UNION ALL
-        SELECT m.id, m.parent_id, p.depth + 1 FROM path p
-        CROSS JOIN cf_agents_session_messages m
-          ON m.session_id = ? AND m.id = p.parent_id
-        WHERE p.depth + 1 < ?
-      )
-      SELECT path.id AS id, ${options.measure ? ROW_BYTES_SQL : "0"} AS bytes
-      FROM path ${
-        options.measure
-          ? `CROSS JOIN cf_agents_session_messages am
-               ON am.session_id = ? AND am.id = path.id`
-          : ""
+    // Depths count visible rows: a legacy hidden overlay row is walked
+    // through but neither counted nor returned, so it cannot shorten a
+    // caller's protected tail. Hidden rows are rare; when some fall in the
+    // range, the walk widens by that many and repeats.
+    const wanted = options.skip + options.limit;
+    let reach = wanted;
+    let page: string[];
+    for (;;) {
+      const walked = this.io
+        .sql<{ id: string }>(
+          `WITH RECURSIVE path(id, parent_id, depth) AS (
+            SELECT id, parent_id, 0 FROM cf_agents_session_messages
+            WHERE session_id = ? AND id = ?
+            UNION ALL
+            SELECT m.id, m.parent_id, p.depth + 1 FROM path p
+            CROSS JOIN cf_agents_session_messages m
+              ON m.session_id = ? AND m.id = p.parent_id
+            WHERE p.depth + 1 < ?
+          )
+          SELECT id FROM path`,
+          [sessionId, leaf, sessionId, reach]
+        )
+        .map((row) => row.id);
+      const hidden = this.#hiddenOverlayIds(sessionId, walked);
+      const visible =
+        hidden.size === 0 ? walked : walked.filter((id) => !hidden.has(id));
+      if (visible.length >= wanted || walked.length < reach) {
+        page = visible.slice(options.skip, wanted);
+        break;
       }
-      WHERE path.depth >= ?`,
-      options.measure
-        ? [
-            sessionId,
-            leaf,
-            sessionId,
-            options.skip + options.limit,
-            sessionId,
-            options.skip
-          ]
-        : [
-            sessionId,
-            leaf,
-            sessionId,
-            options.skip + options.limit,
-            options.skip
-          ]
+      reach += wanted - visible.length;
+    }
+    if (!options.measure || page.length === 0) {
+      return page.map((id) => ({ id, bytes: 0 }));
+    }
+    const bytes = new Map(
+      this.io
+        .sql<{ id: string; bytes: number }>(
+          `SELECT am.id AS id, ${ROW_BYTES_SQL} AS bytes
+           FROM cf_agents_session_messages am
+           WHERE am.session_id = ? AND am.id IN (SELECT value FROM json_each(?))`,
+          [sessionId, JSON.stringify(page)]
+        )
+        .map((row) => [row.id, row.bytes] as const)
     );
-    const hidden = this.#hiddenOverlayIds(
-      sessionId,
-      rows.map((row) => row.id)
-    );
-    return hidden.size === 0 ? rows : rows.filter((row) => !hidden.has(row.id));
+    return page.map((id) => ({ id, bytes: bytes.get(id) ?? 0 }));
   }
 
   /**
@@ -1835,7 +1875,7 @@ export class SessionsCore {
 
   #deleteBatch(sessionId: string, batch: readonly string[]): void {
     const ids = JSON.stringify(batch);
-    this.#overlaysFollowSplice(sessionId, batch);
+    const orphanedCopies = this.#overlaysFollowSplice(sessionId, batch);
     this.io.sqlWrite(
       `WITH RECURSIVE
        deleted(id) AS (SELECT value FROM json_each(?)),
@@ -1885,6 +1925,10 @@ export class SessionsCore {
         [sessionId, ids]
       );
     }
+    // A removed overlay no longer hides a stored copy of its summary (a
+    // `compaction_<id>` row an earlier release wrote back, #1984): it goes
+    // too, spliced like any deleted row.
+    if (orphanedCopies.length > 0) this.#deleteBatch(sessionId, orphanedCopies);
   }
 
   /**
@@ -1894,7 +1938,7 @@ export class SessionsCore {
    * surviving ancestor. An overlay left with nothing between its
    * continuation and its end covers no row and is deleted.
    */
-  #overlaysFollowSplice(sessionId: string, batch: readonly string[]): void {
+  #overlaysFollowSplice(sessionId: string, batch: readonly string[]): string[] {
     const ids = JSON.stringify(batch);
     const affected = this.io.sql<{
       seq: number;
@@ -1909,7 +1953,7 @@ export class SessionsCore {
            OR resume_id IN (SELECT value FROM json_each(?)))`,
       [sessionId, ids, ids]
     );
-    if (affected.length === 0) return;
+    if (affected.length === 0) return [];
     const gone = new Set(batch);
     const starts = [
       ...new Set(
@@ -1939,6 +1983,7 @@ export class SessionsCore {
     );
     const moved = (id: string) =>
       gone.has(id) ? (survivor.get(id) ?? null) : id;
+    const removed: string[] = [];
     for (const overlay of affected) {
       const resume =
         overlay.resume_id === "" ? "" : (moved(overlay.resume_id) ?? "");
@@ -1949,6 +1994,7 @@ export class SessionsCore {
            WHERE session_id = ? AND to_message_id = ? AND seq = ?`,
           [sessionId, overlay.to_message_id, overlay.seq]
         );
+        removed.push(`${COMPACTION_PREFIX}${overlay.id}`);
         continue;
       }
       this.io.sqlWrite(
@@ -1957,6 +2003,14 @@ export class SessionsCore {
         [to, resume, sessionId, overlay.to_message_id, overlay.seq]
       );
     }
+    if (removed.length === 0) return [];
+    return this.io
+      .sql<{ id: string }>(
+        `SELECT id FROM cf_agents_session_messages
+         WHERE session_id = ? AND id IN (SELECT value FROM json_each(?))`,
+        [sessionId, JSON.stringify(removed)]
+      )
+      .map((row) => row.id);
   }
 
   clearMessages(sessionId: string): void {

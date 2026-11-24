@@ -14031,6 +14031,44 @@ export class ThinkWindowedHydrationAgent extends Think {
   }
 
   /**
+   * The client holds an older reply under its own id (an optimistic copy):
+   * it sends that copy, the window and a new message. Returns the stored
+   * history's ids.
+   */
+  async reconcileOptimisticCopyForTest(): Promise<string[]> {
+    const inWindow = new Set(this.messages.map((m) => m.id));
+    const older = (await this.session.getHistory()).find(
+      (m) => m.role === "assistant" && !inWindow.has(m.id)
+    );
+    if (!older) throw new Error("no assistant message older than the window");
+    const incoming = [
+      { ...older, id: "client-copy" },
+      ...this.messages,
+      {
+        id: "new-user",
+        role: "user",
+        parts: [{ type: "text", text: "next question" }]
+      }
+    ] as UIMessage[];
+    const host = this as unknown as {
+      _reconcileAndPersistIncoming(
+        messages: UIMessage[],
+        options: {
+          requestId: string;
+          isRegeneration: boolean;
+          isCurrent: () => boolean;
+        }
+      ): Promise<unknown>;
+    };
+    await host._reconcileAndPersistIncoming(incoming, {
+      requestId: "optimistic-copy",
+      isRegeneration: false,
+      isCurrent: () => true
+    });
+    return (await this.session.getHistory()).map((m) => m.id);
+  }
+
+  /**
    * Reconcile a client transcript on a windowed cache: the client sends a
    * stored message older than the window, the window, and a new message.
    */
@@ -14326,6 +14364,67 @@ export class ThinkMediaEvictionAgent extends Think {
     }
     const first = await pass;
     return { firstPassMessages: first?.messages ?? 0, lateId: "late-media" };
+  }
+
+  /**
+   * An aged media row with large text-only rows above it, then four
+   * protected fillers. Large rows are read to look for media, so they count
+   * toward `maxRowsPerPass`.
+   */
+  async seedLargeTextAboveMediaForTest(largeRows: number): Promise<void> {
+    await this.appendMessageToHistory({
+      id: "media",
+      role: "user",
+      parts: [
+        {
+          type: "file",
+          mediaType: "image/png",
+          url: `data:image/png;base64,${"A".repeat(BIG_MEDIA_CHARS)}`
+        }
+      ]
+    } as UIMessage);
+    for (let i = 0; i < largeRows + 4; i++) {
+      await this.appendMessageToHistory({
+        id: `text-${i}`,
+        role: i % 2 === 0 ? "assistant" : "user",
+        parts: [
+          {
+            type: "text",
+            text: i < largeRows ? "x".repeat(BIG_MEDIA_CHARS) : `filler ${i}`
+          }
+        ]
+      } as UIMessage);
+    }
+  }
+
+  /**
+   * Media that a late update puts on a row the cache does not hold: a pass
+   * runs over text rows, so its cursor is past them, then `c1` is hidden
+   * under a summary and gets an image. Returns the second pass's result.
+   */
+  async lateMediaOnHiddenRowForTest(): Promise<number> {
+    for (let i = 0; i < 10; i++) {
+      await this.appendMessageToHistory({
+        id: `c${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `message ${i}` }]
+      } as UIMessage);
+    }
+    await this._evictAgedMediaBestEffort();
+    await this.session.addCompaction("summary", "c0", "c3");
+    await this.syncMessagesFromStorage();
+    await this.session.updateMessage({
+      id: "c1",
+      role: "assistant",
+      parts: [
+        {
+          type: "file",
+          mediaType: "image/png",
+          url: `data:image/png;base64,${"A".repeat(BIG_MEDIA_CHARS)}`
+        }
+      ]
+    } as UIMessage);
+    return (await this._evictAgedMediaBestEffort())?.messages ?? 0;
   }
 
   /** One bounded Think-owned eviction pass. */

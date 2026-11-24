@@ -482,6 +482,16 @@ export class MediaEvictionPasses extends LifecycleCapability {
   }
 
   /**
+   * A row the cache does not hold changed (a late tool result on an older
+   * reply). It may now hold media below the cursor, so the next pass starts
+   * over. A pass's own rewrites land while it runs and are not counted.
+   */
+  rowChangedOutsideCache(): void {
+    if (this.#running) return;
+    this.#cursorStale = true;
+  }
+
+  /**
    * Queue a pass if one could evict anything. A request that lands while a
    * pass runs is re-evaluated once the pass ends, so media aged by an append
    * during the pass is not left until the next one. Passes run from the
@@ -631,11 +641,12 @@ export class MediaEvictionPasses extends LifecycleCapability {
       const end = reached ? above : total;
       let newestAged: string | undefined;
 
-      let processed = 0;
-      // The first page skips the newest `keep` rows; each later one starts
-      // below the last row read, so a pass walks the path once.
+      // Collect the rows large enough to hold an evictable payload, with
+      // their depth from the leaf; smaller rows are skipped without being
+      // read, and a rewritten row drops below the line for every later pass.
+      const candidates: Array<{ id: string; depth: number }> = [];
       let after: string | undefined;
-      pages: for (let read = keep; read < end;) {
+      for (let read = keep; read < end;) {
         const page = (
           await this.#host.storedPathRows(
             after === undefined
@@ -650,48 +661,58 @@ export class MediaEvictionPasses extends LifecycleCapability {
         ).slice(0, end - read);
         if (page.length === 0) break;
         newestAged ??= page[0].id;
+        page.forEach((row, at) => {
+          if (row.bytes >= config.minPartBytes) {
+            candidates.push({ id: row.id, depth: read + at });
+          }
+        });
         read += page.length;
         after = page[page.length - 1].id;
-        for (const row of page) {
-          // The stored row is not large enough to hold an evictable payload —
-          // skip without reading it. A rewritten row drops below this line and
-          // is skipped by every later pass.
-          if (row.bytes < config.minPartBytes) continue;
-          if (processed >= config.maxRowsPerPass) {
-            totals.backlogRemains = true;
-            break pages;
-          }
-          processed++;
-
-          const message = await this.#host.readMessage(row.id);
-          if (!message) continue;
-
-          const result = await evictMediaFromMessage(message, {
-            minPartBytes: config.minPartBytes,
-            write: async (index, bytes, mediaType) => {
-              const path = evictedFilePath(message.id, index, mediaType);
-              await files.write(path, bytes);
-              return path;
-            }
-          });
-          if (!result.changed) continue;
-
-          // The rewritten row no longer carries the payload, so the bytes now
-          // exist only as the Workspace file.
-          await this.#host.updateMessage(result.message);
-          totals.messages++;
-          totals.parts += result.parts;
-          totals.bytes += result.bytes;
-        }
       }
 
-      // Every aged row down to the old cursor was examined: move it up to the
-      // newest aged row, one write. A pass that stopped at
-      // `maxRowsPerPass` leaves it where it was.
-      if (storage && newestAged !== undefined && !totals.backlogRemains) {
+      // Oldest first, so a pass cut short at `maxRowsPerPass` has examined
+      // everything from the cursor up to its last row, and the cursor can
+      // move there. A run of large rows without media no longer stalls it.
+      let reachedTo: { id: string; depth: number } | undefined;
+      for (let i = candidates.length - 1; i >= 0; i--) {
+        if (candidates.length - 1 - i >= config.maxRowsPerPass) {
+          totals.backlogRemains = true;
+          break;
+        }
+        const row = candidates[i];
+        reachedTo = row;
+        const message = await this.#host.readMessage(row.id);
+        if (!message) continue;
+
+        const result = await evictMediaFromMessage(message, {
+          minPartBytes: config.minPartBytes,
+          write: async (index, bytes, mediaType) => {
+            const path = evictedFilePath(message.id, index, mediaType);
+            await files.write(path, bytes);
+            return path;
+          }
+        });
+        if (!result.changed) continue;
+
+        // The rewritten row no longer carries the payload, so the bytes now
+        // exist only as the Workspace file.
+        await this.#host.updateMessage(result.message);
+        totals.messages++;
+        totals.parts += result.parts;
+        totals.bytes += result.bytes;
+      }
+
+      // Move the cursor up to what this pass examined, one write: the newest
+      // aged row, or the last candidate a pass cut short reached.
+      const advanceTo = totals.backlogRemains
+        ? reachedTo
+        : newestAged === undefined
+          ? undefined
+          : { id: newestAged, depth: keep };
+      if (storage && advanceTo) {
         await storage.put(CURSOR_KEY, {
-          id: newestAged,
-          index: total - 1 - keep
+          id: advanceTo.id,
+          index: total - 1 - advanceTo.depth
         } satisfies EvictionCursor);
       }
       const storedBytes = this.#host.storedBytes();

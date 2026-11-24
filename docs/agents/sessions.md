@@ -159,7 +159,7 @@ recent.truncated;
 recent.totalContentBytes;
 ```
 
-The read walks back from the newest message and stops before the message that would pass the budget; the newest message is always returned. `truncated` is `true` when older messages were left out. `totalContentBytes` is the size of everything a full read would return; when `truncated`, it can be just the part the read measured, which is already more than the budget. Pass `{ leafId }` to read another branch.
+The read walks back from the newest message and stops before the message that would pass the budget; the newest message is always returned. `truncated` is `true` when older messages were left out. `totalContentBytes` is the size of everything a full read would return; when `truncated`, it can be just the stored size of the part the read measured. Pass `{ leafId }` to read another branch.
 
 The budget counts what hydration actually costs. Each row is charged its full stored size — the message row plus every continuation row it was split across — so a 12 MB message is charged 12 MB, not the 1.9 MB its first slice occupies. That is what makes the budget a bound on isolate memory.
 
@@ -169,7 +169,7 @@ The budget counts what hydration actually costs. Each row is charged its full st
 const messages = await session.getHistory();
 ```
 
-Do not use `getHistory()` for an unbounded transcript inside a memory-constrained Durable Object. Prefer `history()`, `historyBatches()`, or `getRecentHistory()`. `getHistory()`, `history()` and `getHistoryRowStats()` start at the root, so they hold one entry per message before reading content; past 200,000 visible messages they throw, and never return a shorter history. Read newest-first, use `getRecentHistory()`, or compact.
+Do not use `getHistory()` for an unbounded transcript inside a memory-constrained Durable Object. Prefer `history()`, `historyBatches()`, or `getRecentHistory()`. `getHistory()`, `history()` and `getHistoryRowStats()` start at the root, so they hold one entry per message before reading content; past 200,000 visible messages they throw, and never return a shorter history. Read newest-first or use `getRecentHistory()`.
 
 Other reads:
 

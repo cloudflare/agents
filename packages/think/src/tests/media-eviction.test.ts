@@ -24,6 +24,8 @@ type MediaEvictionStub = {
     backlogRemains: boolean;
   } | null>;
   getStoredMessageForTest(id: string): Promise<UIMessage | null>;
+  seedLargeTextAboveMediaForTest(largeRows: number): Promise<void>;
+  lateMediaOnHiddenRowForTest(): Promise<number>;
   getContinuationRowCountForTest(): Promise<number>;
   readEvictedFileForTest(path: string): Promise<{
     byteLength: number;
@@ -242,6 +244,24 @@ describe("mediaEviction — aged media leaves the conversation (#1710)", () => {
       },
       { timeout: 10_000, interval: 50 }
     );
+  });
+
+  it("reaches older media past large text rows that fill a pass", async () => {
+    const agent = await evictionAgent(uniqueName("evict-large-text"));
+    await agent.seedLargeTextAboveMediaForTest(3);
+    await agent.setMediaEvictionForTest({ ...AGED_POLICY, maxRowsPerPass: 2 });
+
+    await agent.runEvictionForTest();
+    await agent.runEvictionForTest();
+    expect(
+      JSON.stringify(await agent.getStoredMessageForTest("media"))
+    ).toContain("[evicted image/png,");
+  });
+
+  it("evicts media a late update puts on a row the cache does not hold", async () => {
+    const agent = await evictionAgent(uniqueName("evict-late-hidden"));
+    await agent.setMediaEvictionForTest(AGED_POLICY);
+    expect(await agent.lateMediaOnHiddenRowForTest()).toBe(1);
   });
 
   it("mediaEviction:false keeps the image visible to the model", async () => {

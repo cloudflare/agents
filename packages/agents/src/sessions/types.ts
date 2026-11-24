@@ -83,8 +83,10 @@ export interface RecentHistoryResult {
   truncated: boolean;
   /**
    * Summed stored size of the visible path, in bytes. When `truncated`, the
-   * read stops soon after the budget, so on a long path this is the part it
-   * measured: more than the budget, and at most the full size.
+   * read stops soon after the budget, so on a long path this is the stored
+   * size of the part it measured, at most the full size. The budget also
+   * charges each message a fixed overhead that this total leaves out, so a
+   * truncated read can report less than the budget.
    */
   totalContentBytes: number;
 }

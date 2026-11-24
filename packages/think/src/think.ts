@@ -1663,6 +1663,18 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
                     }
                     await this._cfTranscript.sync();
                     return true;
+                  case "update":
+                    // An update to a row the cache does not hold (an older
+                    // reply a late tool result lands on) may have put media
+                    // on a row media eviction already examined.
+                    if (
+                      !this._cfTranscript.messages.some(
+                        (message) => message.id === event.message.id
+                      )
+                    ) {
+                      this._cfMediaEviction.rowChangedOutsideCache();
+                    }
+                    return false;
                   case "import":
                     // A row the cache never saw. Re-derive at the next safe
                     // boundary instead of mirroring a migration row by row.
@@ -8266,9 +8278,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * A windowed cache holds the newest part of the path. A client holds what
    * it was sent (that window) plus its new messages, so the stored rows
    * reconciliation needs beyond the window are those of incoming messages
-   * older than it: each is read by id, never the whole path (which past
-   * 200,000 messages cannot be read root-first at all). A new message costs
-   * one key probe that finds nothing.
+   * older than it: each is read by id, and a new message costs one key
+   * probe that finds nothing. Only an older reply stored under another id
+   * needs the whole path to be matched, and that reads it (up to the
+   * root-first bound of 200,000 messages).
    *
    * Returns a snapshot: the writes that follow patch the cache through the
    * change feed while the caller is still iterating.
@@ -8280,12 +8293,26 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     if (this._cfTranscript.coversActivePath) return window;
     const inWindow = new Set(window.map((message) => message.id));
     const older: UIMessage[] = [];
+    let unmatchedReply = false;
     for (const message of incoming) {
       if (inWindow.has(message.id)) continue;
       const stored = await this.session.getMessage(message.id);
       if (stored) older.push(stored as UIMessage);
+      else if (message.role === "assistant") unmatchedReply = true;
     }
-    return [...older, ...window];
+    if (!unmatchedReply) return [...older, ...window];
+    // An older reply the client holds under another id (an optimistic copy)
+    // is matched to its stored row by content and tool calls, which needs
+    // the stored path. Read it whole when it can be read root-first; past
+    // that bound, the window and the rows found by id are all there is.
+    try {
+      return await this._readMessagesFromStorage();
+    } catch (error) {
+      if ((error as { name?: unknown }).name !== "SessionPathTooLongError") {
+        throw error;
+      }
+      return [...older, ...window];
+    }
   }
 
   /**
