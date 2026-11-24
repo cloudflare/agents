@@ -4,7 +4,7 @@ import { MockLanguageModelV4 } from "ai/test";
 import { z } from "zod";
 import { Channels, type OperationResult } from "../../experimental/channels";
 import { WebChannel } from "../../experimental/channels/web";
-import { AiSdkHarness } from "../../harness/ai-sdk";
+import { ThinkHarness } from "../../harness/think";
 import { Lifecycle } from "../../lifecycle";
 
 const usage = {
@@ -58,10 +58,10 @@ function stream(reply: ScriptedReply) {
 }
 
 /**
- * Channels over an AI SDK harness whose model replies from a script. Tests
+ * Channels over ThinkHarness, whose model replies from a script. Tests
  * set the script over RPC and talk to the agent through WebSockets.
  */
-export class AiSdkHarnessObject extends DurableObject<Cloudflare.Env> {
+export class ThinkChannelsObject extends DurableObject<Cloudflare.Env> {
   #script: ScriptedReply[] = [];
   #release!: () => void;
   readonly #held = new Promise<void>((resolve) => {
@@ -70,7 +70,7 @@ export class AiSdkHarnessObject extends DurableObject<Cloudflare.Env> {
   /** Model calls so far, with the prompt each saw. */
   readonly prompts: unknown[] = [];
 
-  readonly harness = new AiSdkHarness({
+  readonly harness = new ThinkHarness({
     model: new MockLanguageModelV4({
       doStream: async ({ prompt }) => {
         this.prompts.push(prompt);

@@ -101,8 +101,8 @@
         "name": "ChannelsHarnessObject"
       },
       {
-        "class_name": "AiSdkHarnessObject",
-        "name": "AiSdkHarnessObject"
+        "class_name": "ThinkChannelsObject",
+        "name": "ThinkChannelsObject"
       },
       {
         "class_name": "CutoverHarnessObject",
@@ -545,7 +545,7 @@
         "TaskSchedulerCoexistObject",
         "StreamHarnessObject",
         "ChannelsHarnessObject",
-        "AiSdkHarnessObject",
+        "ThinkChannelsObject",
         "CutoverHarnessObject",
         "SqliteStrategiesBench",
         "TaskStreamComposeObject",
