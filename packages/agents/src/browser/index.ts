@@ -55,6 +55,8 @@ export {
 export { DEFAULT_BROWSER_SCOPE, conversationScope } from "./scope";
 
 export type {
+  BrowserHostObserver,
+  BrowserHostTab,
   BrowserObservedDialog,
   BrowserObservedDocument,
   BrowserObservedNavigation,

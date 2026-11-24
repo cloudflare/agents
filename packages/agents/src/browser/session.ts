@@ -34,8 +34,8 @@ import {
 } from "./browser-functions";
 import {
   HostObserver,
-  observerNotices,
-  type BrowserObserverRecord
+  type BrowserObserverRecord,
+  type HostObserverResult
 } from "./observer";
 import { DEFAULT_BROWSER_SCOPE } from "./scope";
 import type { SearchableCdpSpec } from "./spec";
@@ -163,8 +163,9 @@ export interface BrowserSessionReport {
   notices: string[];
   /**
    * What the host's observer saw in the tabs this session worked in.
-   * Present when the browser gives sessions an observer (`Browser`'s
-   * `hostObserver`, on by default). For the host: don't show it to the model.
+   * Present when the session had a host connection, as every
+   * `BrowserSession` on a `Browser` does. For the host: don't show it to
+   * the model.
    *
    * @experimental May change or go away.
    */
@@ -660,7 +661,7 @@ export class BrowserSession {
       }
       if (!state) return undefined;
       this.#state = undefined;
-      let observed: BrowserObserverRecord | undefined;
+      let observed: HostObserverResult | undefined;
       try {
         const open = await this.#recordNewTabs(state);
         const active = await this.#saveActiveTarget(state, open);
@@ -673,8 +674,8 @@ export class BrowserSession {
       }
       return {
         ...state.report,
-        notices: [...reportNotices(state.report), ...observerNotices(observed)],
-        ...(observed ? { observed } : {})
+        notices: [...reportNotices(state.report), ...(observed?.notices ?? [])],
+        ...(observed ? { observed: observed.record } : {})
       };
     } finally {
       // Release the lock only after the active tab is saved, so the next
@@ -760,8 +761,13 @@ export class BrowserSession {
       ...(this.#scope === undefined ? {} : { scope: this.#scope }),
       hostObserver: true
     });
-    const observer = connected.hostObserver
-      ? new HostObserver(connected.hostObserver, this.#browser.name)
+    const host = connected.hostObserver;
+    const observer = host
+      ? new HostObserver(host.cdp, {
+          browserName: this.#browser.name,
+          scope: connected.scope,
+          hook: host.hook
+        })
       : undefined;
     let initialPages: TargetInfo[];
     try {

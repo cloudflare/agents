@@ -22,6 +22,7 @@ import {
 } from "./browser-functions";
 import { browserCapabilityId } from "./capability-id";
 import type { CdpConnection } from "./cdp-connection";
+import type { BrowserHostObserver } from "./observer";
 import {
   internalHostError,
   isInternalHostMessage,
@@ -139,17 +140,21 @@ export interface BrowserOptions {
   /** Default CDP command timeout for {@link Browser.connect}. */
   timeoutMs?: number;
   /**
-   * Give each {@link BrowserSession} a host-only observer: a second CDP
-   * connection, opened alongside the model's, that follows the tabs the
-   * session works in. It answers the pages' JavaScript dialogs, which
-   * otherwise hang the tab, and records where the tabs went and what each
-   * page returned in the report's `observed`. Model code can't reach it.
+   * Your code on the host's own CDP connection, run once per tab each
+   * {@link BrowserSession} works in, with that tab (see
+   * `BrowserHostTab`). Model code can't reach the connection.
    *
-   * On by default: it costs about one round trip per session. `false`
-   * turns it off. Raw {@link Browser.connect} callers get no observer
-   * unless they ask for one.
+   * Every session opens the host connection beside the model's, whether or
+   * not you pass a hook: the SDK answers the pages' JavaScript dialogs on
+   * it, which otherwise hang the tab, and records where the tabs went in
+   * the report's `observed`. It costs about one round trip per session.
+   * The hook runs after the SDK's own code in each tab, and isn't called
+   * when the connection couldn't open: treat it as advice, not
+   * enforcement. See {@link BrowserHostObserver} for the rest.
+   *
+   * @experimental May change before stabilizing.
    */
-  hostObserver?: boolean;
+  hostObserver?: BrowserHostObserver;
   /**
    * Minimum interval between activity-driven `updatedAt` refreshes.
    * Defaults to {@link SESSION_TOUCH_INTERVAL_MS}, capped at half the
@@ -185,12 +190,10 @@ export interface BrowserConnectOptions {
    */
   scope?: string;
   /**
-   * Also open a host-only observer connection, at the same time as the
-   * main one, unless the `Browser` was created with `hostObserver: false`.
-   * It comes back as {@link BrowserConnection.hostObserver}. `BrowserSession`
-   * asks for it.
+   * Also open the host's own connection, at the same time as the main one.
+   * It comes back as {@link BrowserConnection.hostObserver}.
    *
-   * @experimental May change or go away.
+   * @internal For `BrowserSession`, which asks for it.
    */
   hostObserver?: boolean;
 }
@@ -242,15 +245,22 @@ export interface BrowserConnection {
    */
   spec(): Promise<SearchableCdpSpec>;
   /**
-   * The host-only observer's connection, still opening, when it was asked
-   * for ({@link BrowserConnectOptions.hostObserver}) and the browser offers
-   * one: a second CDP connection to the same browser, opened at the same
-   * time as `cdp`. It rejects if it couldn't open. A `BrowserSession`
-   * takes it and disconnects it when it closes.
+   * The host's own connection, when it was asked for
+   * ({@link BrowserConnectOptions.hostObserver}), with the `Browser`'s hook
+   * to run on it. A `BrowserSession` takes it and disconnects it when it
+   * closes.
    *
-   * @experimental May change or go away.
+   * @internal For `BrowserSession`.
    */
-  hostObserver?: Promise<CdpConnection>;
+  hostObserver?: {
+    /**
+     * A second CDP connection to the same browser, opened at the same time
+     * as `cdp` and still opening. It rejects if it couldn't open.
+     */
+    cdp: Promise<CdpConnection>;
+    /** {@link BrowserOptions.hostObserver}, when it was given. */
+    hook?: BrowserHostObserver;
+  };
 }
 
 /**
@@ -380,8 +390,9 @@ export class Browser extends LifecycleCapability {
     if (scope.trim() === "") {
       throw new Error("Browser scopes must be non-empty");
     }
-    const withObserver =
-      options.hostObserver === true && this.#options.hostObserver !== false;
+    // Every session gets the host connection, because dialog answering is
+    // always on. An off switch for it would go here.
+    const withObserver = options.hostObserver === true;
     let resolved = await this.resolve();
     let cdp: CdpConnection;
     // Both start now: the model's socket, then the observer's beside it.
@@ -405,9 +416,12 @@ export class Browser extends LifecycleCapability {
     }
     try {
       const entered = await this.#enterScope(scope, resolved.sessionId);
+      const { hostObserver: hook } = this.#options;
       return {
         ...this.#connection(resolved, scope, cdp, entered),
-        ...(observer ? { hostObserver: observer } : {})
+        ...(observer
+          ? { hostObserver: { cdp: observer, ...(hook ? { hook } : {}) } }
+          : {})
       };
     } catch (error) {
       dropObserver(observer);
