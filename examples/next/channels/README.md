@@ -67,10 +67,12 @@ and the TUI can share a room; each is its own participant.
 `pnpm tui2 [harness] [room]` runs the Agents SDK terminal client built on Pi
 TUI (`npx agents tui <url>`) against either agent, for example
 `pnpm tui2 think lobby`. It shows turns started from other surfaces, lets you
-provide client-tool results, and can start, fork, list and switch
-conversations (`/new`, `/fork`, `/conversations`, `/switch <id>`). A
-conversation is also reachable directly at
-`/channels/<harness>/<room>/<conversation>`.
+provide client-tool results, and can start, fork and list conversations
+(`/new`, `/fork`, `/conversations`). To open another conversation, start the
+client on its URL, `/channels/<harness>/<room>/<conversation>`: the client's
+`/switch` rewrites `/channels/<room>/<conversation>` URLs, and this
+example's routes have a harness segment first. The Think agent's default
+conversation has an empty id; it is the one `/channels/think/<room>` opens.
 
 ## The pi agent
 
