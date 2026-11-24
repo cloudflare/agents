@@ -1928,7 +1928,7 @@ describe("Think — context blocks", () => {
     await expect(agent.getContextReminder()).resolves.toBeNull();
   });
 
-  it("warns when reactive overflow recovery has no classifier", async () => {
+  it("does not warn when reactive overflow recovery has no classifier: the provider's error is read", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const agent = await getAgentByName(
       env.ThinkMissingClassifierWarningAgent as unknown as DurableObjectNamespace<ThinkMissingClassifierWarningAgent>,
@@ -1947,7 +1947,7 @@ describe("Think — context blocks", () => {
               "contextOverflow.reactive is enabled but classifyChatError() is not overridden"
             )
         );
-      expect(classifierWarnings).toHaveLength(1);
+      expect(classifierWarnings).toHaveLength(0);
     } finally {
       warn.mockRestore();
     }

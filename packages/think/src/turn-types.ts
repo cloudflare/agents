@@ -23,6 +23,7 @@ import type {
   ClientToolSchema,
   SaveMessagesResult
 } from "agents/chat";
+import { CONTEXT_OVERFLOW_PATTERN } from "agents/chat";
 import type { SessionMessage } from "agents/sessions";
 import type { DeliveryKind, MessengerContext } from "./messengers";
 // Type-only, for the `{@link Think.*}` references in this file's docs.
@@ -645,8 +646,6 @@ export interface ContextOverflowConfig {
  * is anchored to `of` to match the real OpenAI phrasing without matching
  * unrelated prose. Apps that need stricter matching can wrap this classifier.
  */
-const CONTEXT_OVERFLOW_PATTERN =
-  /prompt is too long|context[_ ]length[_ ]exceeded|maximum context length|exceeds the maximum number of tokens|input token count|reduce the length of|input is too long|too many (?:input )?tokens|context window/i;
 
 /**
  * Opt-in default classifier for {@link Think.classifyChatError}. Matches the

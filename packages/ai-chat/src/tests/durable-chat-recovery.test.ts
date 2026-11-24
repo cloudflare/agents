@@ -222,6 +222,10 @@ interface ChatRecoveryTestStub {
     timeoutMs?: number;
     hangTurns?: number;
   }): Promise<"completed" | "error" | "aborted" | "skipped">;
+  driveStreamTextProviderErrorForTest(
+    statusCode: number,
+    rethrow: boolean
+  ): Promise<string>;
   driveFailingReaderTurnForTest(
     message: string,
     turns?: number,
@@ -229,6 +233,7 @@ interface ChatRecoveryTestStub {
       prelude?: "partial" | "approval" | "start-only" | "none";
       priorAssistant?: boolean;
       responseHeaders?: Record<string, string>;
+      statusCode?: number;
     }
   ): Promise<"completed" | "error" | "aborted" | "skipped">;
   getScheduledRecoveryDelayForTest(): Promise<number | null>;
@@ -3310,6 +3315,78 @@ describe("stall watchdog (chatStreamStallTimeoutMs)", () => {
     expect(
       await agentStub.getScheduleCountForCallback("_chatRecoveryContinue")
     ).toBe(0);
+  });
+});
+
+describe("provider errors the chat turn reads itself", () => {
+  it.each([
+    ["a rate limit", 429, "Rate limit reached for requests"],
+    ["an overloaded provider", 529, "Overloaded"],
+    ["a server error", 503, "Service unavailable"]
+  ])(
+    "routes %s mid-stream into bounded recovery",
+    async (_what, status, msg) => {
+      const agentStub = await getTestAgent(
+        `provider-error-${status}-${crypto.randomUUID()}`
+      );
+      expect(
+        await agentStub.driveFailingReaderTurnForTest(msg, 1, {
+          statusCode: status
+        })
+      ).toBe("aborted");
+      const incidents =
+        (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
+          recoveryKind: string;
+        }>;
+      expect(incidents.length).toBeGreaterThanOrEqual(1);
+    }
+  );
+
+  it("reads a streamText provider error when the app lets it fail the stream", async () => {
+    const agentStub = await getTestAgent(
+      `provider-error-streamtext-${crypto.randomUUID()}`
+    );
+    expect(await agentStub.driveStreamTextProviderErrorForTest(429, true)).toBe(
+      "aborted"
+    );
+    expect(
+      ((await agentStub.getChatRecoveryIncidentsForTest()) as unknown[]).length
+    ).toBeGreaterThanOrEqual(1);
+  });
+
+  it("reads an in-stream overload the app's onError sends as JSON", async () => {
+    const agentStub = await getTestAgent(
+      `provider-error-overload-${crypto.randomUUID()}`
+    );
+    expect(await agentStub.driveStreamTextProviderErrorForTest(0, true)).toBe(
+      "aborted"
+    );
+    expect(
+      ((await agentStub.getChatRecoveryIncidentsForTest()) as unknown[]).length
+    ).toBeGreaterThanOrEqual(1);
+  });
+
+  it("cannot read a provider error that toUIMessageStreamResponse() masked", async () => {
+    // The default `onError` sends "An error occurred." with no status.
+    const agentStub = await getTestAgent(
+      `provider-error-masked-${crypto.randomUUID()}`
+    );
+    expect(
+      await agentStub.driveStreamTextProviderErrorForTest(429, false)
+    ).toBe("error");
+    expect(await agentStub.getChatRecoveryIncidentsForTest()).toEqual([]);
+  });
+
+  it("leaves an error the provider says nothing about terminal", async () => {
+    const agentStub = await getTestAgent(
+      `provider-error-401-${crypto.randomUUID()}`
+    );
+    expect(
+      await agentStub.driveFailingReaderTurnForTest("Invalid API key", 1, {
+        statusCode: 401
+      })
+    ).toBe("error");
+    expect(await agentStub.getChatRecoveryIncidentsForTest()).toEqual([]);
   });
 });
 

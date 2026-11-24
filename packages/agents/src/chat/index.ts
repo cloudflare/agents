@@ -536,6 +536,16 @@ export { ChatRecoverySupersededError, isTurnStopped } from "./turn-stop";
  * @internal The reply pump both chat hosts run every reply through, with
  * its sources and its stream. Sibling-package support, not a public API.
  */
+/**
+ * What a model provider's error means for a chat turn. Sibling-package
+ * support, not a public API.
+ */
+export {
+  classifyProviderError,
+  CONTEXT_OVERFLOW_PATTERN,
+  type ProviderErrorClassification
+} from "./provider-errors";
+
 export {
   LiveReply,
   pumpReply,

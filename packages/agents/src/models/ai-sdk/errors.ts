@@ -8,8 +8,7 @@ import {
   type CloudflareAIAttempt,
   type CloudflareAIErrorCode,
   CloudflareAIError as CoreCloudflareAIError,
-  isRetryableStatus,
-  normalizeThrownError as normalizeCoreError
+  isRetryableStatus
 } from "../core/errors";
 
 export {
@@ -150,16 +149,4 @@ export function toAISDKError(error: unknown): unknown {
   return error instanceof CoreCloudflareAIError
     ? CloudflareAIError.fromCore(error)
     : error;
-}
-
-/**
- * Normalizes a thrown Workers AI binding error into a {@link CloudflareAIError}.
- * Abort errors and errors that are already `APICallError`s pass through.
- */
-export function normalizeThrownError(
-  error: unknown,
-  context: Parameters<typeof normalizeCoreError>[1]
-): unknown {
-  if (APICallError.isInstance(error)) return error;
-  return toAISDKError(normalizeCoreError(error, context));
 }

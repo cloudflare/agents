@@ -7,8 +7,10 @@ import {
 import type {
   UIMessage as ChatMessage,
   GenerateTextOnFinishCallback,
+  LanguageModel,
   ToolSet
 } from "ai";
+import { APICallError, streamText } from "ai";
 import {
   Agent,
   type AgentContext,
@@ -286,7 +288,8 @@ export type FailingReaderPrelude =
 function makeFailingSSEResponse(
   errorMessage: string,
   prelude: FailingReaderPrelude = "partial",
-  responseHeaders?: Record<string, string>
+  responseHeaders?: Record<string, string>,
+  statusCode?: number
 ) {
   const encoder = new TextEncoder();
   const chunks = {
@@ -323,9 +326,11 @@ function makeFailingSSEResponse(
       // A provider error carries its response headers (AI SDK
       // `APICallError.responseHeaders`).
       controller.error(
-        responseHeaders
-          ? Object.assign(new Error(errorMessage), { responseHeaders })
-          : new Error(errorMessage)
+        Object.assign(new Error(errorMessage), {
+          ...(responseHeaders && { responseHeaders }),
+          // A provider's HTTP error (AI SDK `APICallError.statusCode`).
+          ...(statusCode !== undefined && { statusCode })
+        })
       );
     }
   });
@@ -3095,15 +3100,81 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       }
     }
 
+    if (this._streamTextProviderError) {
+      const { statusCode, rethrow } = this._streamTextProviderError;
+      this._streamTextProviderError = null;
+      // A provider that answers with an HTTP error, behind `streamText`.
+      const model = {
+        specificationVersion: "v3",
+        provider: "test",
+        modelId: "failing",
+        supportedUrls: {},
+        doGenerate: () => {
+          throw new Error("not used");
+        },
+        doStream: async () => {
+          if (statusCode === 0) {
+            // Anthropic's in-stream overload: a plain object, no status.
+            return {
+              stream: new ReadableStream({
+                start(controller) {
+                  controller.enqueue({
+                    type: "error",
+                    error: { type: "overloaded_error", message: "Overloaded" }
+                  });
+                  controller.close();
+                }
+              })
+            };
+          }
+          throw new APICallError({
+            message: "Rate limit reached for requests",
+            url: "https://api.example.com/v1/chat",
+            requestBodyValues: {},
+            statusCode
+          });
+        }
+      } as unknown as LanguageModel;
+      return streamText({
+        model,
+        prompt: "hi",
+        maxRetries: 0
+      }).toUIMessageStreamResponse(
+        rethrow
+          ? {
+              // Let the provider's error fail the stream, so the host
+              // reads its status, instead of masking it as text.
+              onError: (error) => {
+                if (APICallError.isInstance(error)) throw error;
+                return error instanceof Error
+                  ? error.message
+                  : JSON.stringify(error);
+              }
+            }
+          : undefined
+      );
+    }
+
     if (this._failingTurn) {
       this._failingReaderCalls++;
-      const { message, remaining, prelude, responseHeaders } =
+      const { message, remaining, prelude, responseHeaders, statusCode } =
         this._failingTurn;
       this._failingTurn =
         remaining > 1
-          ? { message, remaining: remaining - 1, prelude, responseHeaders }
+          ? {
+              message,
+              remaining: remaining - 1,
+              prelude,
+              responseHeaders,
+              statusCode
+            }
           : null;
-      return makeFailingSSEResponse(message, prelude, responseHeaders);
+      return makeFailingSSEResponse(
+        message,
+        prelude,
+        responseHeaders,
+        statusCode
+      );
     }
 
     if (this._emitStreamError) {
@@ -4318,8 +4389,30 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     remaining: number;
     prelude: FailingReaderPrelude;
     responseHeaders?: Record<string, string>;
+    statusCode?: number;
   } | null = null;
   private _failingReaderCalls = 0;
+  private _streamTextProviderError: {
+    statusCode: number;
+    rethrow: boolean;
+  } | null = null;
+
+  /** Run one turn through `streamText` against a provider failing with `statusCode`. */
+  async driveStreamTextProviderErrorForTest(
+    statusCode: number,
+    rethrow: boolean
+  ): Promise<SaveMessagesResult["status"]> {
+    this._streamTextProviderError = { statusCode, rethrow };
+    const result = await this.saveMessages((current) => [
+      ...current,
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text: "hello" }]
+      }
+    ]);
+    return result.status;
+  }
 
   getFailingReaderCallsForTest(): number {
     return this._failingReaderCalls;
@@ -4345,6 +4438,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       prelude?: FailingReaderPrelude;
       priorAssistant?: boolean;
       responseHeaders?: Record<string, string>;
+      statusCode?: number;
     } = {}
   ): Promise<SaveMessagesResult["status"]> {
     if (options.priorAssistant) {
@@ -4365,7 +4459,8 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       message,
       remaining: turns,
       prelude: options.prelude ?? "partial",
-      responseHeaders: options.responseHeaders
+      responseHeaders: options.responseHeaders,
+      statusCode: options.statusCode
     };
     const result = await this.saveMessages((current) => [
       ...current,
