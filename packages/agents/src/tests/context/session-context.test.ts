@@ -724,7 +724,8 @@ describe("Context", () => {
       await session.appendMessage(user("u2", "again"));
       expect((await context.build()).system).toBe(released);
 
-      // As Think clears: the transcript, then a refresh.
+      // As Think clears: mark it, the transcript, then a refresh.
+      await session.internal_setConfig("session:cleared-at", "1");
       await session.clearMessages();
       await context.refreshSystemPrompt();
       await session.appendMessage(user("n1", "new chat"));
@@ -779,8 +780,10 @@ describe("Context", () => {
       await session.appendMessage(user("u2", "again"));
       expect((await context.build()).system).toBe(released);
 
-      // A session-level clear: no refresh. A new turn is accepted, then
-      // recovered before it was prepared, in this instance and in a new one.
+      // A session-level clear, as a host marks it: no refresh. A new turn is
+      // accepted, then recovered before it was prepared, in this instance
+      // and in a new one.
+      await session.internal_setConfig("session:cleared-at", "1");
       await session.clearMessages();
       await session.appendMessage(user("n1", "new chat"));
       expect((await make().prepare({ retry: true })).system).not.toBe(released);
@@ -813,6 +816,67 @@ describe("Context", () => {
       // The next new turn takes the refresh.
       await session.appendMessage(user("u2", "again"));
       expect((await context.build()).system).toContain("Be kind.");
+    });
+  });
+
+  it("keeps the frozen prompt for turns from before the upgrade when a later message is deleted", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const sessions = new Sessions();
+      install(sessions);
+      const session = sessions.session();
+      const released = "Released prompt.";
+      const make = () =>
+        new Context(session, {
+          sql: storageSql(storage),
+          blocks: [
+            { label: "soul", provider: { get: async () => "Be kind." } }
+          ],
+          promptStore: { get: async () => released }
+        });
+      await session.appendMessage(user("u1", "hello"));
+      await session.appendMessage(assistant("a1", "hi"));
+      await session.appendMessage(user("u2", "follow-up"));
+      expect((await make().build()).system).toBe(released);
+      // Delete only the follow-up, which holds the session's first record.
+      await session.deleteMessages(["u2"]);
+      const u1 = (await session.getMessage("u1"))!;
+      expect((await make().prepare({ messages: [u1] })).system).toBe(released);
+    });
+  });
+
+  it("never brings a frozen prompt back after a clear that came before any record", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const sessions = new Sessions();
+      install(sessions);
+      const session = sessions.session();
+      const released = "Released prompt: memory empty.";
+      let memory = "empty";
+      const make = () =>
+        new Context(session, {
+          sql: storageSql(storage),
+          blocks: [
+            {
+              label: "memory",
+              provider: { get: async () => `Memory: ${memory}.` }
+            }
+          ],
+          promptStore: { get: async () => released }
+        });
+      // Turns the release answered; Context has not been asked anything yet.
+      await session.appendMessage(user("u1", "hello"));
+      await session.appendMessage(assistant("a1", "hi"));
+      memory = "likes tea";
+      await session.internal_setConfig("session:cleared-at", "1");
+      await session.clearMessages();
+
+      // A new turn, cut before it prepared and recovered, then the next one.
+      await session.appendMessage(user("n1", "new chat"));
+      const recovered = await make().prepare({ retry: true });
+      expect(recovered.system).not.toContain(released);
+      expect(recovered.system).toContain("likes tea");
+      await session.appendMessage(assistant("m1", "hi"));
+      await session.appendMessage(user("n2", "more"));
+      expect((await make().build()).system).toContain("likes tea");
     });
   });
 

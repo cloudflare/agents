@@ -149,4 +149,18 @@ describe("Think context upgrade", () => {
       refreshed: true
     });
   });
+  it("never sends the frozen prompt after the transcript is cleared", async () => {
+    for (const how of ["session", "chat"] as const) {
+      const agent = await getAgentByName(
+        env.ThinkUpgradeTestAgent,
+        crypto.randomUUID()
+      );
+      const { frozen, systems } = await agent.clearedAfterUpgradeForTest(how);
+      expect(frozen).toContain("Today is Monday.");
+      for (const system of systems) {
+        expect(system, how).not.toContain(frozen);
+        expect(system, how).toContain("Today is Tuesday.");
+      }
+    }
+  });
 });

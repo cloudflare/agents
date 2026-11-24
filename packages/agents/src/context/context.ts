@@ -45,12 +45,11 @@ const RECORD = CONTEXT_RECORD_KIND;
 /** Session config key of a refresh asked for and not yet recorded. */
 const REFRESH = "transcript:context:refresh";
 /**
- * The first message this session recorded a prompt on while a prompt frozen
- * before Context existed. Turns with no record are from before Context only
- * while it exists: a clear deletes it, and the transcript after a clear
- * never uses the frozen prompt. Not a `transcript:` key, so a clear keeps it.
+ * Set by the host when it clears the session's transcript (Think does), a
+ * key a clear keeps: a session cleared since the upgrade has no turn from
+ * before Context left, so a frozen prompt no longer applies.
  */
-const FIRST_RECORD = "context:first-record";
+const CLEARED_AT = "session:cleared-at";
 
 /** One block's prompt section: its label and its rendered text. */
 type Section = readonly [label: string, text: string];
@@ -106,7 +105,6 @@ export interface ContextSession {
   internal_config(key: string): Promise<string | null>;
   /** @internal */
   internal_setConfig(key: string, value: string | null): Promise<void>;
-  getMessage(id: string): Promise<SessionMessage | null>;
 }
 
 /**
@@ -131,8 +129,8 @@ export interface ContextOptions {
    * Where a prompt frozen before Context is kept (`ContextBlocks`' prompt
    * store). Read once, never written: the turns sent before Context have
    * no record, so they are sent this prompt, the first turn after the
-   * upgrade included. A transcript that starts after Context (a new one,
-   * or after a clear) never uses it.
+   * upgrade included, until the session is cleared: a host that clears
+   * sets the session config key `session:cleared-at` (Think does).
    */
   readonly promptStore?: ContextProvider;
 }
@@ -202,8 +200,6 @@ export class Context {
   readonly #promptStore: ContextProvider | undefined;
   /** The prompt store's text, read once: the prompt of turns sent before Context. */
   #frozen: string | null | undefined;
-  /** The FIRST_RECORD id, read once (null: none yet). */
-  #firstRecord: string | null | undefined;
   /** Whether a refresh waits to be recorded; read from the session once. */
   #refresh: boolean | undefined;
   /** Records by message id, as last read or written (see `#records`). */
@@ -300,7 +296,6 @@ export class Context {
       if (at) {
         if (!unchanged) {
           await this.#put(at.id, { system: sections });
-          await this.#noteFirstRecord(at.id);
         }
         if (refresh) await this.#setRefresh(false);
       }
@@ -317,7 +312,6 @@ export class Context {
         system: delivered.system,
         delivered: [...delivered.values].filter(([label]) => label !== CARRIED)
       });
-      await this.#noteFirstRecord(at.id);
       delivered = { ...delivered, base: at.id };
     }
     if (changes.length === 0) return { system, reminder: null };
@@ -600,28 +594,17 @@ export class Context {
   }
 
   /**
-   * The prompt frozen before Context, for a path with no record: until the
-   * session records a prompt, and after that while the message it first
-   * recorded on exists (the turns before it were sent the frozen prompt).
+   * The prompt frozen before Context, for a path with no record (a turn from
+   * before the upgrade), until the session is cleared. Read each time, so a
+   * clear counts at once; only a turn with no record asks.
    */
   async #released(): Promise<string | null> {
     if (!this.#promptStore) return null;
     this.#frozen ??= await this.#promptStore.get();
     if (this.#frozen === null) return null;
-    this.#firstRecord ??= await this.#session.internal_config(FIRST_RECORD);
-    if (this.#firstRecord === null) return this.#frozen;
-    return (await this.#session.getMessage(this.#firstRecord)) === null
-      ? null
-      : this.#frozen;
-  }
-
-  /** Remember the first message recorded on while a frozen prompt exists. */
-  async #noteFirstRecord(messageId: string): Promise<void> {
-    if (this.#frozen === undefined || this.#frozen === null) return;
-    this.#firstRecord ??= await this.#session.internal_config(FIRST_RECORD);
-    if (this.#firstRecord !== null) return;
-    await this.#session.internal_setConfig(FIRST_RECORD, messageId);
-    this.#firstRecord = messageId;
+    return (await this.#session.internal_config(CLEARED_AT)) === null
+      ? this.#frozen
+      : null;
   }
 
   async #refreshPending(): Promise<boolean> {

@@ -472,6 +472,32 @@ export class ThinkUpgradeTestAgent extends ThinkPromptCacheTestAgent {
     };
   }
 
+  /**
+   * An upgraded agent whose blocks changed since the freeze clears its
+   * transcript (through the session, or Think's chat clear) before any turn
+   * on this version, then takes two turns: their system prompts.
+   */
+  async clearedAfterUpgradeForTest(
+    how: "session" | "chat"
+  ): Promise<{ frozen: string; systems: string[] }> {
+    const report = await this.upgradeFromFrozenPromptForTest({
+      frozenEnvironment: "Today is Monday.",
+      environment: "Today is Tuesday.",
+      turns: 0
+    });
+    if (how === "session") await this.session.clearMessages();
+    else await this.clearMessages();
+    const systems: string[] = [];
+    for (const id of ["n1", "n2"]) {
+      const before = this.requestCountForTest();
+      await this.saveMessages([
+        { id, role: "user", parts: [{ type: "text", text: id }] }
+      ]);
+      systems.push(systemOf(this.requestForTest(before)) ?? "");
+    }
+    return { frozen: report.frozen, systems };
+  }
+
   /** A client message that carries a context record of its own. */
   async forgedRecordForTest(): Promise<{
     system: string | undefined;
