@@ -8280,8 +8280,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * reconciliation needs beyond the window are those of incoming messages
    * older than it: each is read by id, and a new message costs one key
    * probe that finds nothing. An older reply stored under another id is
-   * looked for newest-first past the window, one message in memory at a
-   * time, until it is matched.
+   * looked for along the visible path, newest-first, holding only its
+   * oldest candidates.
    *
    * Returns a snapshot: the writes that follow patch the cache through the
    * change feed while the caller is still iterating.
@@ -8302,24 +8302,36 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     }
     if (unmatched.length === 0) return [...older, ...window];
     // An older reply the client holds under another id (an optimistic copy)
-    // is matched to its stored row by content and tool calls. Look for each
-    // newest-first past the window, holding one message at a time, and stop
-    // once every one has its row.
-    const matched: UIMessage[] = [];
+    // is matched to a stored row by content and tool calls, oldest
+    // unclaimed row first. Walk the visible path newest-first, one message
+    // in memory at a time, and keep for each such reply its `k` oldest
+    // candidates (`k` = how many replies are unmatched): enough for the
+    // batch reconciler to pick exactly as it would over the whole path,
+    // holding at most k² messages. Rows already in the window or found by
+    // id are not candidates again. This reads the visible path (it is a
+    // rare case); the memory stays bounded.
+    const known = new Set([...inWindow, ...older.map((message) => message.id)]);
+    const found = unmatched.map(
+      () => [] as Array<{ at: number; message: UIMessage }>
+    );
+    let at = 0;
     for await (const message of this.session.history({ newestFirst: true })) {
-      if (unmatched.length === 0) break;
-      if (message.role !== "assistant" || inWindow.has(message.id)) continue;
+      at++;
+      if (message.role !== "assistant" || known.has(message.id)) continue;
       const stored = message as UIMessage;
-      const index = unmatched.findIndex(
-        (reply) =>
-          reconcileMessages([reply], [stored], sanitizeMessage)[0].id ===
-          stored.id
-      );
-      if (index === -1) continue;
-      unmatched.splice(index, 1);
-      matched.unshift(stored);
+      unmatched.forEach((reply, index) => {
+        const [paired] = reconcileMessages([reply], [stored], sanitizeMessage);
+        if (paired.id !== stored.id) return;
+        found[index].push({ at, message: stored });
+        if (found[index].length > unmatched.length) found[index].shift();
+      });
     }
-    return [...matched, ...older, ...window];
+    const candidates = new Map<string, { at: number; message: UIMessage }>();
+    for (const entry of found.flat()) candidates.set(entry.message.id, entry);
+    const oldestFirst = [...candidates.values()]
+      .sort((a, b) => b.at - a.at)
+      .map((entry) => entry.message);
+    return [...oldestFirst, ...older, ...window];
   }
 
   /**

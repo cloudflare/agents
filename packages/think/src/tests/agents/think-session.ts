@@ -14030,6 +14030,102 @@ export class ThinkWindowedHydrationAgent extends Think {
     return row?.parent_id ?? null;
   }
 
+  /** Reconcile `incoming` plus the window and a new message. */
+  private async _reconcileWithWindowForTest(
+    older: UIMessage[],
+    requestId: string
+  ): Promise<void> {
+    const host = this as unknown as {
+      _reconcileAndPersistIncoming(
+        messages: UIMessage[],
+        options: {
+          requestId: string;
+          isRegeneration: boolean;
+          isCurrent: () => boolean;
+        }
+      ): Promise<unknown>;
+    };
+    await host._reconcileAndPersistIncoming(
+      [
+        ...older,
+        ...this.messages,
+        {
+          id: "new-user",
+          role: "user",
+          parts: [{ type: "text", text: "next question" }]
+        }
+      ] as UIMessage[],
+      { requestId, isRegeneration: false, isCurrent: () => true }
+    );
+  }
+
+  /** A tool reply part; `output` only once it has one. */
+  private _toolReplyForTest(id: string, callId: string, output?: string) {
+    return {
+      id,
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-lookup",
+          toolCallId: callId,
+          input: {},
+          ...(output === undefined
+            ? { state: "input-available" }
+            : { state: "output-available", output })
+        }
+      ]
+    } as unknown as UIMessage;
+  }
+
+  /**
+   * The client sends an older stored reply under its own id and a stale copy
+   * of it under another. Returns the stored reply's tool state afterwards.
+   */
+  async reconcileStaleCopyForTest(): Promise<string | undefined> {
+    await this.session.updateMessage(
+      this._toolReplyForTest("seed-3", "call-stale", "done")
+    );
+    await this.syncMessagesFromStorage();
+    await this._reconcileWithWindowForTest(
+      [
+        this._toolReplyForTest("seed-3", "call-stale", "done"),
+        this._toolReplyForTest("client-copy", "call-stale")
+      ],
+      "stale-copy"
+    );
+    const stored = await this.session.getMessage("seed-3");
+    return (stored?.parts[0] as { state?: string } | undefined)?.state;
+  }
+
+  /**
+   * Two older replies reuse one tool call id: the earlier waits for a client
+   * result, the later has one. The client sends its result for the earlier
+   * under its own id. Returns both stored outputs.
+   */
+  async reconcileReusedCallForTest(): Promise<{
+    earlier: unknown;
+    later: unknown;
+  }> {
+    await this.session.updateMessage(
+      this._toolReplyForTest("seed-1", "call-reused")
+    );
+    await this.session.updateMessage(
+      this._toolReplyForTest("seed-3", "call-reused", "late")
+    );
+    await this.syncMessagesFromStorage();
+    await this._reconcileWithWindowForTest(
+      [this._toolReplyForTest("client-copy", "call-reused", "early")],
+      "reused-call"
+    );
+    const output = async (id: string) =>
+      (
+        (await this.session.getMessage(id))?.parts[0] as
+          | { output?: unknown }
+          | undefined
+      )?.output;
+    return { earlier: await output("seed-1"), later: await output("seed-3") };
+  }
+
   /**
    * A reply hidden by compaction holds a tool result; the client resends it
    * in its stale pending state, alongside an older reply under another id.

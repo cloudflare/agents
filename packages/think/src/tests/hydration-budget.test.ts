@@ -173,6 +173,32 @@ describe("hydrationByteBudget — windowed hydration (#1710)", () => {
     );
   });
 
+  it("does not let a stale copy take the id of a reply the client also sent", async () => {
+    const agent = (await getAgentByName(
+      env.ThinkWindowedHydrationAgent,
+      uniqueName("seeded-windowed-stale-copy")
+    )) as unknown as WindowedHydrationStub & {
+      reconcileStaleCopyForTest(): Promise<string | undefined>;
+    };
+    expect(await agent.reconcileStaleCopyForTest()).toBe("output-available");
+  });
+
+  it("pairs a reused tool call with the oldest unclaimed reply past the window", async () => {
+    const agent = (await getAgentByName(
+      env.ThinkWindowedHydrationAgent,
+      uniqueName("seeded-windowed-reused-call")
+    )) as unknown as WindowedHydrationStub & {
+      reconcileReusedCallForTest(): Promise<{
+        earlier: unknown;
+        later: unknown;
+      }>;
+    };
+    expect(await agent.reconcileReusedCallForTest()).toEqual({
+      earlier: "early",
+      later: "late"
+    });
+  });
+
   it("reconciles on a path too long to read root-first", async () => {
     const name = uniqueName("windowed-long-path");
     const agent = (await getAgentByName(
