@@ -191,11 +191,11 @@ export interface BrowserConnectOptions {
   scope?: string;
   /**
    * Also open the host's own connection, at the same time as the main one.
-   * It comes back as {@link BrowserConnection.hostObserver}.
+   * It comes back as {@link BrowserConnection.hostConnection}.
    *
    * @internal For `BrowserSession`, which asks for it.
    */
-  hostObserver?: boolean;
+  hostConnection?: boolean;
 }
 
 export interface BrowserConnection {
@@ -246,13 +246,13 @@ export interface BrowserConnection {
   spec(): Promise<SearchableCdpSpec>;
   /**
    * The host's own connection, when it was asked for
-   * ({@link BrowserConnectOptions.hostObserver}), with the `Browser`'s hook
+   * ({@link BrowserConnectOptions.hostConnection}), with the `Browser`'s hook
    * to run on it. A `BrowserSession` takes it and disconnects it when it
    * closes.
    *
    * @internal For `BrowserSession`.
    */
-  hostObserver?: {
+  hostConnection?: {
     /**
      * A second CDP connection to the same browser, opened at the same time
      * as `cdp` and still opening. It rejects if it couldn't open.
@@ -392,7 +392,7 @@ export class Browser extends LifecycleCapability {
     }
     // Every session gets the host connection, because dialog answering is
     // always on. An off switch for it would go here.
-    const withObserver = options.hostObserver === true;
+    const withObserver = options.hostConnection === true;
     let resolved = await this.resolve();
     let cdp: CdpConnection;
     // Both start now: the model's socket, then the observer's beside it.
@@ -420,7 +420,7 @@ export class Browser extends LifecycleCapability {
       return {
         ...this.#connection(resolved, scope, cdp, entered),
         ...(observer
-          ? { hostObserver: { cdp: observer, ...(hook ? { hook } : {}) } }
+          ? { hostConnection: { cdp: observer, ...(hook ? { hook } : {}) } }
           : {})
       };
     } catch (error) {

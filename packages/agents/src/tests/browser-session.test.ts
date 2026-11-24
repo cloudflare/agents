@@ -162,6 +162,18 @@ class FakeBrowserInstance {
         };
       case "Target.closeTarget":
         this.tabs = this.tabs.filter((t) => t.targetId !== params.targetId);
+        // Chrome ends every CDP session on the tab, on every connection.
+        for (const [sessionId, targetId] of this.attached) {
+          if (targetId !== params.targetId) continue;
+          this.attached.delete(sessionId);
+          for (const socket of this.sockets) {
+            if (!socket.sessions.has(sessionId)) continue;
+            socket.event({
+              method: "Target.detachedFromTarget",
+              params: { sessionId, targetId }
+            });
+          }
+        }
         return { result: { success: true } };
       case "Target.attachToTarget": {
         const sessionId = `cdp-${++this.#nextSession}`;
@@ -1307,7 +1319,7 @@ describe("BrowserSession observer", () => {
   it("isn't opened for a raw browser.connect() unless asked for", async () => {
     const t = setup();
     const connected = await t.browser.connect();
-    expect(connected).not.toHaveProperty("hostObserver");
+    expect(connected).not.toHaveProperty("hostConnection");
     expect(t.sockets).toHaveLength(1);
     connected.cdp.disconnect();
   });
@@ -1484,6 +1496,97 @@ describe("BrowserSession observer", () => {
       'The page opened a prompt dialog ("prompt?"), and the host dismissed it, so prompt() returned null. To answer it, set `window.prompt = () => "<answer>"` in the page before the step that opens it.',
       'The page opened a beforeunload dialog ("beforeunload?"), and the host accepted it.'
     ]);
+  });
+
+  it("lists five dialogs, then says how many more it answered", async () => {
+    const t = setup();
+    const session = t.browser.session();
+    const target = evaluatedIn(await call(session, evaluateActive));
+    for (let i = 1; i <= 7; i++) {
+      t.instance().emit(target, "Page.javascriptDialogOpening", {
+        type: "alert",
+        message: `Alert ${i}`
+      });
+    }
+    const report = await session.close();
+    expect(report?.notices).toHaveLength(6);
+    expect(report?.notices[4]).toContain('("Alert 5")');
+    expect(report?.notices[5]).toBe(
+      "The host answered 2 more dialogs the same way."
+    );
+  });
+
+  it("tells the model only about tabs it worked in", async () => {
+    const t = setup();
+    await t.run([evaluateActive]);
+    const old = t.activeTab()!;
+    const session = t.browser.session();
+    // The observer starts on the scope's tab, but the model moves on.
+    await call(session, createTabCall);
+    await call(session, evaluateActive);
+    t.instance().emit(old, "Page.javascriptDialogOpening", {
+      type: "alert",
+      message: "Elsewhere"
+    });
+    const report = await session.close();
+    const hostSocket = t.sockets[3];
+    expect(
+      hostSocket.sent.filter(
+        ({ method }) => method === "Page.handleJavaScriptDialog"
+      )
+    ).toHaveLength(1);
+    expect(report?.notices).toEqual([]);
+  });
+
+  it("doesn't call a tab the model didn't work in blocked", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const t = setup();
+      await t.run([evaluateActive]);
+      t.instance().blocked.add(t.activeTab()!);
+      const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const session = t.browser.session();
+      const opening = call(session, createTabCall).then(() =>
+        call(session, evaluateActive)
+      );
+      await vi.advanceTimersByTimeAsync(250);
+      await opening;
+      const closing = session.close();
+      await vi.advanceTimersByTimeAsync(3_000);
+      const report = await closing;
+      warned.mockRestore();
+      expect(report?.notices).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("drops the blocked notice for a blocked tab the model closed", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const t = setup();
+      const instance = await t.start();
+      const stuck = instance.addTab("https://stuck.example/");
+      instance.blocked.add(stuck);
+      const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const session = t.browser.session();
+      const attaching = session.attachToTarget({ targetId: stuck });
+      await vi.advanceTimersByTimeAsync(250);
+      await attaching;
+      // The observer's setup times out, and it finds the tab blocked.
+      await vi.advanceTimersByTimeAsync(1_000);
+      await session.send({
+        method: "Target.closeTarget",
+        params: { targetId: stuck }
+      });
+      const closing = session.close();
+      await vi.advanceTimersByTimeAsync(3_000);
+      const report = await closing;
+      warned.mockRestore();
+      expect(report?.notices).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("ignores events tagged with another connection's session id", async () => {
@@ -1796,20 +1899,34 @@ describe("BrowserSession hostObserver hook", () => {
       const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
       const session = t.browser.session();
       let firstDone = false;
-      const first = call(session, evaluateActive).then(() => {
+      const first = call(session, evaluateActive).then((result) => {
         firstDone = true;
+        return result;
       });
       await vi.advanceTimersByTimeAsync(249);
       expect(firstDone).toBe(false);
       await vi.advanceTimersByTimeAsync(1);
-      await first;
+      const target = evaluatedIn(await first);
       expect(firstDone).toBe(true);
       expect(warned).toHaveBeenCalledWith(
         expect.stringMatching(
           /hostObserver hadn't finished in tab target-\d+ after 250ms/
         )
       );
-      // Later commands don't wait, and it isn't logged again.
+      // Later commands don't wait, even a raw attach to the same tab,
+      // which waits for the observer again, and it isn't logged again.
+      let attached = false;
+      const attaching = session
+        .send({
+          method: "Target.attachToTarget",
+          params: { targetId: target, flatten: true }
+        })
+        .then(() => {
+          attached = true;
+        });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(attached).toBe(true);
+      await attaching;
       await call(session, evaluateActive);
       const closing = session.close();
       await vi.advanceTimersByTimeAsync(1_000);
@@ -1922,18 +2039,20 @@ describe("BrowserSession hostObserver hook", () => {
     ]);
   });
 
-  it("keeps at most 20 of notify()'s sentences", async () => {
+  it("keeps at most 10 of notify()'s sentences, each cut to 500 characters", async () => {
     const t = setup({
       hostObserver: (tab) => {
-        for (let i = 0; i < 25; i++) tab.notify(`Notice ${i}.`);
+        tab.notify("y".repeat(600));
+        for (let i = 1; i < 25; i++) tab.notify(`Notice ${i}.`);
       }
     });
     const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { report } = await t.run([evaluateActive]);
     expect(warned).toHaveBeenCalledTimes(1);
     warned.mockRestore();
-    expect(report?.notices).toHaveLength(20);
-    expect(report?.notices[19]).toBe("Notice 19.");
+    expect(report?.notices).toHaveLength(10);
+    expect(report?.notices[0]).toBe("y".repeat(500));
+    expect(report?.notices[9]).toBe("Notice 9.");
   });
 
   it("binds on() to its own tab", async () => {
@@ -1993,6 +2112,171 @@ describe("BrowserSession hostObserver hook", () => {
     expect(report?.notices[0]).toContain(
       'opened a confirm dialog ("Delete?"), and the host dismissed it'
     );
+  });
+
+  it("says when the setup, not the hook, held up the first command", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const hook = vi.fn();
+      const t = setup({ hostObserver: hook });
+      // A slow tab: the host's Page.enable gets no reply in time.
+      t.silentMethods.set(2, ["Page.enable"]);
+      const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const session = t.browser.session();
+      const first = call(session, evaluateActive);
+      await vi.advanceTimersByTimeAsync(250);
+      await first;
+      expect(warned).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /The host connection wasn't set up in tab target-\d+ after 250ms .* before hostObserver was called\./
+        )
+      );
+      expect(warned).not.toHaveBeenCalledWith(
+        expect.stringContaining("hadn't finished")
+      );
+      const closing = session.close();
+      await vi.advanceTimersByTimeAsync(3_000);
+      await closing;
+      warned.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("logs a cleanup that throws, and goes on", async () => {
+    const t = setup({
+      hostObserver: () => () => {
+        throw new Error("cleanup threw");
+      }
+    });
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { error, report } = await t.run([evaluateActive]);
+    expect(warned).toHaveBeenCalledWith(
+      expect.stringContaining("failed to run hostObserver's cleanup in tab"),
+      expect.objectContaining({ message: "cleanup threw" })
+    );
+    warned.mockRestore();
+    expect(error).toBeUndefined();
+    expect(report?.notices).toEqual([]);
+  });
+
+  it("doesn't run a cleanup returned after the 1 s bound", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      let ran = false;
+      const t = setup({
+        hostObserver: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 1_500));
+          return () => {
+            ran = true;
+          };
+        }
+      });
+      const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const session = t.browser.session();
+      const first = call(session, evaluateActive);
+      await vi.advanceTimersByTimeAsync(250);
+      await first;
+      const closing = session.close();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await closing;
+      expect(warned).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /cleanups didn't finish within 1000ms .*: hostObserver in tab target-\d+ \(still running, so its cleanup won't run\)/
+        )
+      );
+      // The hook returns its cleanup after the connection closed.
+      await vi.advanceTimersByTimeAsync(1_000);
+      warned.mockRestore();
+      expect(ran).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("binds waitFor() to its own tab", async () => {
+    const waited: Array<[string, unknown]> = [];
+    const t = setup({
+      hostObserver: (tab) => {
+        tab.waitFor("Page.frameNavigated", { timeoutMs: 60_000 }).then(
+          (event) => waited.push([tab.targetId, event.sessionId]),
+          () => waited.push([tab.targetId, "rejected"])
+        );
+      }
+    });
+    const instance = await t.start();
+    const other = instance.addTab("https://other.example/");
+    const session = t.browser.session();
+    const target = evaluatedIn(await call(session, evaluateActive));
+    const { sessionId } = await session.attachToTarget({ targetId: other });
+    await call(session, navigate("https://b.example/", sessionId));
+    expect(waited).toEqual([[other, expect.stringMatching(/^cdp-/)]]);
+    await session.close();
+    // The first tab's wait heard nothing, and ends with the connection.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(waited).toEqual([
+      [other, expect.stringMatching(/^cdp-/)],
+      [target, "rejected"]
+    ]);
+  });
+
+  it("passes send()'s timeoutMs through", async () => {
+    const errors: string[] = [];
+    const t = setup({
+      hostObserver: async (tab) => {
+        await tab
+          .send("Runtime.evaluate", { expression: "slow" }, { timeoutMs: 50 })
+          .catch((error: unknown) => errors.push(String(error)));
+      }
+    });
+    t.silentMethods.set(2, ["Runtime.evaluate"]);
+    await t.run([evaluateActive]);
+    expect(errors).toEqual([
+      expect.stringContaining("CDP command timed out after 50ms")
+    ]);
+  });
+
+  it("loses to the built-in even from a raw tab.cdp listener in another tab", async () => {
+    const answers: unknown[] = [];
+    let listening = false;
+    const t = setup({
+      hostObserver: (tab) => {
+        // Once, in the first tab: a listener for every tab's dialogs.
+        if (listening) return;
+        listening = true;
+        tab.cdp.on("Page.javascriptDialogOpening", (event) => {
+          tab.cdp
+            .send(
+              "Page.handleJavaScriptDialog",
+              { accept: true },
+              { sessionId: event.sessionId }
+            )
+            .then(
+              () => answers.push("answered"),
+              (error: unknown) => answers.push(String(error))
+            );
+        });
+      }
+    });
+    const instance = await t.start();
+    const other = instance.addTab("https://other.example/");
+    const session = t.browser.session();
+    await call(session, evaluateActive);
+    await session.attachToTarget({ targetId: other });
+    instance.emit(other, "Page.javascriptDialogOpening", {
+      type: "confirm",
+      message: "Delete?"
+    });
+    const report = await session.close();
+    const sent = t.sockets[1].sent.filter(
+      ({ method }) => method === "Page.handleJavaScriptDialog"
+    );
+    expect(sent.map(({ params }) => params)).toEqual([
+      { accept: false },
+      { accept: true }
+    ]);
+    expect(answers).toEqual([expect.stringContaining("No dialog is showing")]);
+    expect(report?.notices[0]).toContain("and the host dismissed it");
   });
 
   it("isn't called when the host connection can't open", async () => {

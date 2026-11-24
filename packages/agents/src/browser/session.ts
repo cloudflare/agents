@@ -743,9 +743,9 @@ export class BrowserSession {
   async #open(): Promise<ConnectedState> {
     const connected = await this.#browser.connect({
       ...(this.#scope === undefined ? {} : { scope: this.#scope }),
-      hostObserver: true
+      hostConnection: true
     });
-    const host = connected.hostObserver;
+    const host = connected.hostConnection;
     const observer = host
       ? new HostObserver(host.cdp, {
           browserName: this.#browser.name,

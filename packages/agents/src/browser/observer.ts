@@ -33,6 +33,8 @@ import {
   CdpTimeoutError,
   type CdpConnection,
   type CdpEvent,
+  type CdpEventHandler,
+  type CdpSendOptions,
   type CdpWaitForOptions
 } from "./cdp-connection";
 
@@ -72,11 +74,15 @@ const MAX_DIALOG_MESSAGE_LENGTH = 200;
 /** Dialog notices given to the model per session. */
 const MAX_DIALOG_NOTICES = 5;
 
-/** Notices a hook can add per session, with `notify()`. */
-const MAX_HOOK_NOTICES = 20;
+/**
+ * Notices a hook can add per session, with `notify()`. Small, so a hook
+ * that misbehaves can't push the SDK's own notices out of a runner's
+ * output tail (Computer keeps the last 16 KiB of stderr).
+ */
+const MAX_HOOK_NOTICES = 10;
 
 /** The longest notice a hook can add; longer ones are cut. */
-const MAX_HOOK_NOTICE_LENGTH = 1_000;
+const MAX_HOOK_NOTICE_LENGTH = 500;
 
 /**
  * One tab, as the developer's {@link BrowserHostObserver} sees it: the
@@ -97,7 +103,7 @@ export interface BrowserHostTab {
   send(
     method: string,
     params?: unknown,
-    options?: { timeoutMs?: number }
+    options?: Omit<CdpSendOptions, "sessionId">
   ): Promise<unknown>;
   /**
    * Listen for this tab's `method` events, and return a function that
@@ -105,28 +111,39 @@ export interface BrowserHostTab {
    * the SDK enables only what its built-ins need. Handlers run as
    * `CdpConnection.on` runs them; one that throws is logged.
    */
-  on(method: string, handler: (event: CdpEvent) => void): () => void;
-  /** Wait for this tab's next `method` event, as `CdpConnection.waitFor`. */
+  on(method: string, handler: CdpEventHandler): () => void;
+  /**
+   * Wait for this tab's next `method` event, as `CdpConnection.waitFor`.
+   * One still waiting when the session closes rejects, so catch it.
+   */
   waitFor(
     method: string,
     options?: Omit<CdpWaitForOptions, "sessionId">
   ): Promise<CdpEvent>;
   /**
    * Add a sentence to the notices the model gets when the session closes,
-   * after the SDK's own. Up to 20 per session, each cut to 1,000
-   * characters. Ignored once the notices are collected.
+   * after the SDK's own. Up to 10 per session, each cut to 500
+   * characters. Ignored once the notices are collected. The model reads it
+   * as the host speaking, so quote any text the page controls.
    */
   notify(notice: string): void;
-  /** The host's connection, for browser-level commands and events. */
+  /**
+   * The host's connection, for browser-level commands and events. Don't
+   * answer dialogs from a listener on it: the SDK answers them first.
+   */
   readonly cdp: CdpConnection;
-  /** The host's CDP session id on this tab, valid on {@link cdp} only. */
+  /**
+   * The host's CDP session id on this tab, valid on {@link cdp} only. Not
+   * `cdp.sessionId`, which is the Browser Run session's id.
+   */
   readonly sessionId: string;
 }
 
 /**
  * Your code on the host's CDP connection: runs once per tab a
  * `BrowserSession` works in, with that tab. It may return a cleanup, which
- * runs when the session closes, while the connection is still open.
+ * runs when the session closes, while the connection is still open. A
+ * cleanup returned more than ~1 s into the close isn't run.
  *
  * The model's first command to the tab waits for it (and its promise), at
  * most 250 ms; after that the model goes ahead and it keeps running. A hook
@@ -146,9 +163,10 @@ export type BrowserHostObserver = (
 type HostTabCleanup = () => void | Promise<void>;
 
 /**
- * Code that runs on the host's connection in each tab: one of the SDK's
- * built-ins, or the developer's hook. The observer calls `watch` once per
- * tab, and runs the cleanup it returns at close.
+ * Code that runs on the host's connection: one of the SDK's built-ins, or
+ * the developer's hook. The observer calls `connect` once, when the
+ * connection opens, and `watch` once per tab, and runs the cleanup `watch`
+ * returns at close.
  *
  * @internal The seam built-ins plug into; developers pass a
  * {@link BrowserHostObserver}.
@@ -156,7 +174,18 @@ type HostTabCleanup = () => void | Promise<void>;
 export interface HostTabWatcher {
   /** What to call it in log messages. */
   readonly name: string;
-  watch(tab: BrowserHostTab): ReturnType<BrowserHostObserver>;
+  /**
+   * Set up on the connection, before any tab is attached, so its listeners
+   * are ahead of any the hook adds, even raw ones on `tab.cdp`. `tabOf`
+   * finds the tab an event came from, or `undefined` for events from
+   * sessions that aren't this connection's tabs.
+   */
+  connect?(
+    cdp: CdpConnection,
+    tabOf: (event: CdpEvent) => BrowserHostTab | undefined
+  ): void;
+  /** Set up in one tab, once Page is about to be enabled there. */
+  watch?(tab: BrowserHostTab): ReturnType<BrowserHostObserver>;
   /**
    * The watcher's sentences for the model, collected at close after every
    * cleanup ran. `workedIn` is the tabs the session worked in, when known.
@@ -182,7 +211,9 @@ interface AnsweredDialog {
  * host never says yes for the model. Its notices tell the model what was
  * asked and answered, and how to answer yes.
  *
- * It needs Page enabled in the tab, which the observer's setup does.
+ * It listens once per connection, before the hook can add a listener, so
+ * it answers first even when the hook listens on the raw connection. It
+ * needs Page enabled in the tab, which the observer's setup does.
  */
 export function dialogWatcher(): HostTabWatcher {
   /** The first dialogs answered, enough for the notices. */
@@ -191,8 +222,10 @@ export function dialogWatcher(): HostTabWatcher {
   const counts = new Map<string, number>();
   return {
     name: "dialog answering",
-    watch(tab) {
-      tab.on("Page.javascriptDialogOpening", (event) => {
+    connect(cdp, tabOf) {
+      cdp.on("Page.javascriptDialogOpening", (event) => {
+        const tab = tabOf(event);
+        if (!tab) return;
         const type = String(event.params.type ?? "alert");
         const accepted = type === "alert" || type === "beforeunload";
         tab
@@ -280,7 +313,8 @@ interface RunningWatcher {
   targetId: string;
   /** Its cleanup, once `watch` settles; never rejects. */
   cleanup: Promise<HostTabCleanup | undefined>;
-  settled: boolean;
+  /** `watching` until `watch` settles, `cleaning` while its cleanup runs. */
+  state: "watching" | "watched" | "cleaning" | "done";
 }
 
 export class HostObserver {
@@ -293,8 +327,15 @@ export class HostObserver {
    * what the model's first command there waits for.
    */
   readonly #holds = new Map<string, Promise<void>>();
-  /** Tabs whose hold was cut off and logged, so it's logged once. */
+  /**
+   * Tabs whose hold the cap cut off: later holds there return at once, and
+   * the warning is logged once.
+   */
   readonly #cutOff = new Set<string>();
+  /** The tab objects, by the observer's CDP session id. */
+  readonly #hostTabs = new Map<string, BrowserHostTab>();
+  /** Set once close stops waiting for cleanups: later ones don't run. */
+  #cleanupsOver = false;
   /** Observed tabs, by the observer's CDP session id. */
   readonly #tabsBySession = new Map<string, ObservedTabState>();
   /** Observed tabs in the order they were attached. */
@@ -365,7 +406,7 @@ export class HostObserver {
     capMs = OBSERVER_FIRST_COMMAND_WAIT_MS
   ): Promise<void> {
     const hold = this.#holds.get(targetId);
-    if (!hold) return;
+    if (!hold || this.#cutOff.has(targetId)) return;
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     const outcome = await Promise.race([
       hold.then(() => "ready" as const),
@@ -375,25 +416,25 @@ export class HostObserver {
     ]);
     clearTimeout(timeoutId);
     if (outcome === "ready" || this.#cutOff.has(targetId)) return;
-    const running = this.#running.filter(
-      (watcher) => watcher.targetId === targetId && !watcher.settled
-    );
-    // A hook that hasn't started yet, because the setup is slow, counts.
-    const waitingHook =
-      this.#hook &&
-      !this.#running.some(
-        (watcher) =>
-          watcher.targetId === targetId && watcher.name === this.#hook?.name
-      );
-    const names = [
-      ...running.map((watcher) => watcher.name),
-      ...(waitingHook && this.#hook ? [this.#hook.name] : [])
-    ];
-    if (names.length === 0) return;
     this.#cutOff.add(targetId);
-    console.warn(
-      `[agents/browser] ${names.join(" and ")} hadn't finished in tab ${targetId} after ${capMs}ms for browser "${this.#browserName}", so the model's first command there went ahead. It keeps running.`
+    const unfinished = this.#running.filter(
+      (watcher) => watcher.targetId === targetId && watcher.state === "watching"
     );
+    const hookStarted = this.#running.some(
+      (watcher) =>
+        watcher.targetId === targetId && watcher.name === this.#hook?.name
+    );
+    if (unfinished.length > 0) {
+      const names = unfinished.map((watcher) => watcher.name).join(" and ");
+      console.warn(
+        `[agents/browser] ${names} hadn't finished in tab ${targetId} after ${capMs}ms for browser "${this.#browserName}", so the model's first command there went ahead. It keeps running.`
+      );
+    } else if (this.#hook && !hookStarted) {
+      // The SDK's setup is what's slow: the hook hasn't been called.
+      console.warn(
+        `[agents/browser] The host connection wasn't set up in tab ${targetId} after ${capMs}ms for browser "${this.#browserName}", so the model's first command there went ahead before hostObserver was called.`
+      );
+    }
   }
 
   /**
@@ -401,8 +442,9 @@ export class HostObserver {
    * setups still running, then sends one last command to each tab and
    * waits for its reply, so the events Chrome sent before it have arrived.
    * A tab that looked blocked but answers it wasn't: it was only slow.
-   * Then it runs the watchers' cleanups, at most ~1 s in all, and collects
-   * the notices: the built-ins', blocked tabs, then the hook's. Never
+   * Then it runs the watchers' cleanups, at most ~1 s in all, closes the
+   * connection, and collects the notices: the built-ins', blocked tabs,
+   * then the hook's. Never
    * rejects; later calls resolve with the same notices. The SDK's notices
    * cover only the tabs in `workedIn` when given: the observer may start
    * on a tab the model then doesn't use. The hook's are kept whichever tab
@@ -447,17 +489,22 @@ export class HostObserver {
   /**
    * Run every watcher's cleanup, waiting for a watcher still running to
    * return its cleanup first, all within {@link OBSERVER_CLEANUP_TIMEOUT_MS}.
+   * A cleanup returned after that isn't run: the connection is closing.
    */
   async #cleanUp(): Promise<void> {
     if (this.#running.length === 0) return;
     const cleaning = Promise.allSettled(
-      this.#running.map(async ({ name, targetId, cleanup }) => {
+      this.#running.map(async (running) => {
+        const { name, targetId, cleanup } = running;
         const run = await cleanup;
-        if (!run) return;
+        if (!run || this.#cleanupsOver) return;
+        running.state = "cleaning";
         try {
           await run();
         } catch (error) {
           this.#warn(`run ${name}'s cleanup in tab ${targetId}`, error);
+        } finally {
+          running.state = "done";
         }
       })
     );
@@ -472,9 +519,20 @@ export class HostObserver {
       })
     ]);
     clearTimeout(timeoutId);
+    this.#cleanupsOver = true;
     if (outcome === "timeout") {
+      const pending = this.#running.flatMap(({ name, targetId, state }) => {
+        if (state === "watching") {
+          return [
+            `${name} in tab ${targetId} (still running, so its cleanup won't run)`
+          ];
+        }
+        if (state === "cleaning")
+          return [`${name}'s cleanup in tab ${targetId}`];
+        return [];
+      });
       console.warn(
-        `[agents/browser] The host observer's cleanups didn't finish within ${OBSERVER_CLEANUP_TIMEOUT_MS}ms for browser "${this.#browserName}"; closing its connection anyway.`
+        `[agents/browser] The host observer's cleanups didn't finish within ${OBSERVER_CLEANUP_TIMEOUT_MS}ms for browser "${this.#browserName}": ${pending.join(", ")}. Closing its connection anyway.`
       );
     }
   }
@@ -537,17 +595,21 @@ export class HostObserver {
     this.#tabsBySession.set(sessionId, tab);
     this.#tabs.push(tab);
     const hostTab = this.#hostTab(cdp, sessionId, targetId);
-    // The built-ins listen before Page is enabled, so they hear its events
-    // first, and from the start.
-    for (const watcher of this.#builtIns) this.#start(watcher, hostTab);
+    // Known before Page is enabled, so the built-ins' connection listeners
+    // route its first events to it.
+    this.#hostTabs.set(sessionId, hostTab);
+    for (const watcher of this.#builtIns) {
+      if (watcher.watch) this.#start(watcher, watcher.watch, hostTab);
+    }
     const send = (method: string, params?: unknown) =>
       cdp.send(method, params, {
         sessionId,
         timeoutMs: OBSERVER_SETUP_TIMEOUT_MS
       });
-    // Page.enable is what dialog answering needs. Page.getFrameTree checks
-    // the renderer answers: behind an open dialog it times out. Sent
-    // together, so the check costs no extra round trip.
+    // Page.enable is what dialog answering needs. Behind an open dialog it
+    // times out, and so does Page.getFrameTree, either of which flags the
+    // tab blocked. The frame tree is also the flush command at close; sent
+    // together, it costs no extra round trip.
     const results = await Promise.allSettled([
       send("Page.enable"),
       send("Page.getFrameTree")
@@ -566,7 +628,8 @@ export class HostObserver {
     }
     // The hook runs once the tab is known to be a page. Not once the
     // session is closing: nothing would hear what it set up.
-    if (this.#hook && !this.#closing) this.#start(this.#hook, hostTab);
+    const hook = this.#hook;
+    if (hook?.watch && !this.#closing) this.#start(hook, hook.watch, hostTab);
   }
 
   /** The tab object watchers get, bound to the host's session on it. */
@@ -581,12 +644,7 @@ export class HostObserver {
       cdp,
       sessionId,
       send: (method, params, options) =>
-        cdp.send(method, params, {
-          sessionId,
-          ...(options?.timeoutMs === undefined
-            ? {}
-            : { timeoutMs: options.timeoutMs })
-        }),
+        cdp.send(method, params, { ...options, sessionId }),
       on: (method, handler) => cdp.on(method, handler, { sessionId }),
       waitFor: (method, options) =>
         cdp.waitFor(method, { ...options, sessionId }),
@@ -614,11 +672,15 @@ export class HostObserver {
    * Call a watcher in a tab, and keep its cleanup for close. A watcher
    * that throws or rejects is logged.
    */
-  #start(watcher: HostTabWatcher, tab: BrowserHostTab): void {
+  #start(
+    watcher: HostTabWatcher,
+    watch: NonNullable<HostTabWatcher["watch"]>,
+    tab: BrowserHostTab
+  ): void {
     const running: RunningWatcher = {
       name: watcher.name,
       targetId: tab.targetId,
-      settled: false,
+      state: "watching",
       cleanup: Promise.resolve(undefined)
     };
     const fail = (error: unknown) => {
@@ -628,7 +690,7 @@ export class HostObserver {
     let result: ReturnType<BrowserHostObserver>;
     try {
       // Called now, not on a later tick, so its listeners miss nothing.
-      result = watcher.watch(tab);
+      result = watch(tab);
     } catch (error) {
       result = fail(error);
     }
@@ -636,7 +698,7 @@ export class HostObserver {
       .then((cleanup) => (typeof cleanup === "function" ? cleanup : undefined))
       .catch(fail)
       .finally(() => {
-        running.settled = true;
+        if (running.state === "watching") running.state = "watched";
       });
     this.#running.push(running);
   }
@@ -644,6 +706,7 @@ export class HostObserver {
   /** Stop following a target. */
   #forget(cdp: CdpConnection, sessionId: string, tab: ObservedTabState): void {
     this.#tabsBySession.delete(sessionId);
+    this.#hostTabs.delete(sessionId);
     this.#tabs.splice(this.#tabs.indexOf(tab), 1);
     cdp.send("Target.detachFromTarget", { sessionId }).catch(() => undefined);
   }
@@ -678,11 +741,26 @@ export class HostObserver {
     this.#warn(`set up tab ${targetId}`, setupError);
   }
 
+  /**
+   * The connection's own listeners, before any tab is attached: the
+   * built-ins' `connect`, then tab detaches.
+   */
   #listen(cdp: CdpConnection): void {
-    // A tab that closed, or whose session ended: nothing to flush at close.
+    // Looked up by session id, so events Browser Run tags with another
+    // connection's session ids are ignored.
+    const tabOf = (event: CdpEvent) =>
+      event.sessionId === undefined
+        ? undefined
+        : this.#hostTabs.get(event.sessionId);
+    for (const watcher of this.#builtIns) watcher.connect?.(cdp, tabOf);
+    // A tab that closed, or whose session ended: nothing to flush at close,
+    // and a tab the model closed isn't blocked any more.
     cdp.on("Target.detachedFromTarget", (event) => {
       const { sessionId } = event.params;
-      if (typeof sessionId === "string") this.#tabsBySession.delete(sessionId);
+      if (typeof sessionId !== "string") return;
+      const tab = this.#tabsBySession.get(sessionId);
+      if (tab) delete tab.blocked;
+      this.#tabsBySession.delete(sessionId);
     });
   }
 
