@@ -200,8 +200,6 @@ export class Context {
   readonly #promptStore: ContextProvider | undefined;
   /** The prompt store's text, read once: the prompt of turns sent before Context. */
   #frozen: string | null | undefined;
-  /** The prompt store failed on this call: it may hold a prompt, so record nothing. */
-  #storeFailed = false;
   /** Whether a refresh waits to be recorded; read from the session once. */
   #refresh: boolean | undefined;
   /** Records by message id, as last read or written (see `#records`). */
@@ -266,7 +264,6 @@ export class Context {
 
     // A path with no record was sent the frozen prompt, if any: before a
     // pending refresh is weighed, so a regeneration keeps it.
-    this.#storeFailed = false;
     if (!delivered.system) {
       delivered = await this.#carriedForward(delivered, await this.#released());
     }
@@ -295,9 +292,7 @@ export class Context {
           ([label, text]) =>
             !delivered.values.has(label) || delivered.values.get(label) === text
         );
-      // While the store that may hold the frozen prompt cannot be read,
-      // this turn is sent the blocks and records nothing.
-      const at = this.#storeFailed ? undefined : await target();
+      const at = await target();
       if (at) {
         if (!unchanged) {
           await this.#put(at.id, { system: sections });
@@ -605,10 +600,10 @@ export class Context {
    */
   async #released(): Promise<string | null> {
     if (!this.#promptStore) return null;
-    // A store that fails never fails a turn; a store that holds nothing
-    // means there is no prompt from before. Only a prompt is kept: after a
-    // failure or an empty read the next turn reads the store again, and a
-    // turn whose read failed records nothing.
+    // A store that fails never fails a turn: the turn is sent the blocks
+    // and records them, as what it was sent. Only a prompt is kept, so after
+    // a failure or an empty read the store is read again, for the turns
+    // from before the upgrade that have no record.
     if (this.#frozen === undefined || this.#frozen === null) {
       const store = this.#promptStore;
       const read = await Promise.resolve()
@@ -623,10 +618,7 @@ export class Context {
             return undefined;
           }
         );
-      if (read === undefined) {
-        this.#storeFailed = true;
-        return null;
-      }
+      if (read === undefined) return null;
       this.#frozen = read;
     }
     if (this.#frozen === null) return null;

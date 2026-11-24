@@ -914,37 +914,53 @@ describe("Context", () => {
     }
   });
 
-  it("reads the frozen prompt once the store recovers from a failure", async () => {
+  it("records what a turn was sent while the frozen prompt store was down", async () => {
     await withCapabilityHarness(async ({ storage, install }) => {
       const sessions = new Sessions();
       install(sessions);
       const session = sessions.session();
       const released = "Released prompt.";
       let down = true;
-      const context = new Context(session, {
-        sql: storageSql(storage),
-        blocks: [{ label: "soul", provider: { get: async () => "Be kind." } }],
-        promptStore: {
-          get: async () => {
-            if (down) throw new Error("store down");
-            return released;
+      const make = () =>
+        new Context(session, {
+          sql: storageSql(storage),
+          blocks: [
+            { label: "soul", provider: { get: async () => "Be kind." } }
+          ],
+          promptStore: {
+            get: async () => {
+              if (down) throw new Error("store down");
+              return released;
+            }
           }
-        }
-      });
+        });
+      const context = make();
       // A turn the release answered, then the first turn after the upgrade
-      // while the store is down: sent the blocks, nothing recorded.
+      // while the store is down: sent the blocks, and that is recorded.
       await session.appendMessage(user("u1", "hello"));
       await session.appendMessage(assistant("a1", "hi"));
       await session.appendMessage(user("u2", "again"));
-      expect((await context.build()).system).toContain("Be kind.");
-      expect((await session.internal_annotations("context", ["u2"])).size).toBe(
-        0
-      );
-      // The store is back: the next turn is sent the frozen prompt.
-      down = false;
+      const outage = await context.build();
+      expect(outage.system).toContain("Be kind.");
       await session.appendMessage(assistant("a2", "ok"));
+      down = false;
+      // The store is back. The next turn extends what was sent.
       await session.appendMessage(user("u3", "more"));
-      expect((await context.build()).system).toBe(released);
+      expect((await context.build()).system).toBe(outage.system);
+      // Regenerating the outage reply sends what it was sent; regenerating
+      // the release's reply sends the release's prompt, in a new instance too.
+      const u1 = (await session.getMessage("u1"))!;
+      const u2 = (await session.getMessage("u2"))!;
+      for (const ctx of [context, make()]) {
+        expect(
+          (
+            await ctx.prepare({
+              messages: [u1, (await session.getMessage("a1"))!, u2]
+            })
+          ).system
+        ).toBe(outage.system);
+        expect((await ctx.prepare({ messages: [u1] })).system).toBe(released);
+      }
     });
   });
 
