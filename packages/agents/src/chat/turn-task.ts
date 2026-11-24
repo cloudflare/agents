@@ -12,6 +12,12 @@
  */
 
 import type { TaskJson, TaskStep } from "../tasks";
+import { MAX_SERIALIZED_BYTES } from "../tasks/serialization";
+import type { ChatRecoveryAttemptInput } from "./recovery-engine";
+import {
+  runChatRecoveryAttempt,
+  type ChatRecoveryTaskHooks
+} from "./recovery-task";
 
 /** One live turn closure: the `local` value of the turn's run in this isolate. */
 export type ChatTurnClosureEntry = {
@@ -62,14 +68,20 @@ export type ChatTurnTaskHooks = {
    * (`ChatRecoveryEngine.recoverInterruptedTurn` behind it).
    *
    * @param turn - `persisted` is the snapshot envelope the turn stored, or
-   *   `null` when none survived.
+   *   `null` when none survived. `attempt` receives the recovery attempt,
+   *   which this run then runs itself.
    */
   recover(turn: {
     requestId: string;
     persisted: unknown;
     createdAt: number;
+    attempt: (attempt: ChatRecoveryAttemptInput) => boolean;
   }): Promise<void>;
+  /** The host's recovery callbacks, as the recovery Task runs them. */
+  readonly attempts: ChatRecoveryTaskHooks;
 };
+
+const utf8 = new TextEncoder();
 
 /** The checkpoint entry holding the app's latest `stash()` data. */
 const STASH = "stash";
@@ -96,7 +108,9 @@ export function createChatTurnTaskDefinition(
 ): (input: unknown, step: TaskStep) => Promise<void> {
   return async (input, step) => {
     const { requestId, nonce, envelope } = input as ChatTurnTaskInput;
-    await step.do(
+    // A replay's recovery attempt, journaled as the step's result so a
+    // reset during its backoff or dispatch runs the same attempt again.
+    const attempt = await step.do(
       "model-turn",
       { retries: { limit: 1 }, timeout: "1 day" },
       async ({ signal }) => {
@@ -120,13 +134,27 @@ export function createChatTurnTaskDefinition(
                 (stash !== undefined
                   ? { [hooks.snapshotKey]: null, user: stash }
                   : null)));
+          let scheduled: ChatRecoveryAttemptInput | undefined;
           await hooks.recover({
             requestId,
             persisted,
-            createdAt: step.createdAt
+            createdAt: step.createdAt,
+            attempt: (next) => {
+              // A step result is at most 1 MiB; an attempt carrying a larger
+              // request body goes to the recovery Task, whose input is parted.
+              if (
+                utf8.encode(JSON.stringify(next)).byteLength >
+                MAX_SERIALIZED_BYTES - 1024
+              ) {
+                return false;
+              }
+              scheduled = next;
+              return true;
+            }
           });
           await hooks.storage.delete(legacyKey);
-          return undefined;
+          // SAFETY: the attempt is the recovery engine's JSON payload.
+          return (scheduled ?? null) as TaskJson;
         }
         try {
           const value = await hooks.keepAliveWhile(() =>
@@ -160,8 +188,18 @@ export function createChatTurnTaskDefinition(
           entry.settle.reject(error);
           throw error;
         }
-        return undefined;
+        return null;
       }
     );
+    if (attempt) {
+      const scheduled = attempt as unknown as ChatRecoveryAttemptInput;
+      await runChatRecoveryAttempt(step, hooks.attempts, {
+        ...scheduled,
+        // Always suspend first, even with no backoff: the attempt then runs
+        // from the alarm, where the host keeps the continuation's model turn
+        // inside the memory-limit breaker, as the recovery Task did.
+        delaySeconds: Math.max(scheduled.delaySeconds, 0.001)
+      });
+    }
   };
 }

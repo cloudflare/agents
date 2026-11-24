@@ -46,6 +46,32 @@ import {
 } from "agents/chat";
 
 /** The fiber run table of a release before fibers ran on Tasks. */
+/**
+ * This agent's non-terminal runs holding a scheduled recovery attempt for
+ * `callback`, oldest first: a recovery Task run, or a replayed chat-turn run
+ * whose `model-turn` step journaled the attempt it runs itself.
+ */
+function pendingRecoveryRunIds(sql: SqlStorage, callback: string): string[] {
+  return sql
+    .exec<{ run_id: string }>(
+      `SELECT run_id, created_at FROM cf_agents_task_runs
+       WHERE definition = ? AND status IN ('pending', 'running')
+         AND json_extract(metadata, '$.callback') = ?
+       UNION ALL
+       SELECT r.run_id, r.created_at FROM cf_agents_task_runs r
+       JOIN cf_agents_task_steps s
+         ON s.run_id = r.run_id AND s.step_name = 'model-turn'
+       WHERE r.status IN ('pending', 'running')
+         AND json_extract(s.result, '$.callback') = ?
+       ORDER BY created_at ASC`,
+      CHAT_RECOVERY_TASK_NAME,
+      callback,
+      callback
+    )
+    .toArray()
+    .map((row) => row.run_id);
+}
+
 function createLegacyFiberTableForTest(sql: SqlStorage): void {
   sql.exec(`
     CREATE TABLE IF NOT EXISTS cf_agents_runs (
@@ -4796,15 +4822,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   private async _runQueuedRecoveryTaskForTest(
     callback: "_chatRecoveryContinue" | "_chatRecoveryRetry"
   ): Promise<boolean> {
-    const rows = this.sql<{ run_id: string }>`
-      SELECT run_id FROM cf_agents_task_runs
-      WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
-        AND status IN ('pending', 'running')
-        AND json_extract(metadata, '$.callback') = ${callback}
-      ORDER BY created_at ASC
-      LIMIT 1
-    `;
-    const runId = rows[0]?.run_id;
+    const runId = pendingRecoveryRunIds(this.ctx.storage.sql, callback)[0];
     if (!runId) return false;
     const past = Date.now() - 1_000;
     this.sql`
@@ -5020,12 +5038,9 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       SELECT COUNT(*) AS count FROM cf_agents_jobs
       WHERE capability = 'scheduler' AND fn = ${callback}
     `;
-    const tasks = this.sql<{ count: number }>`
-      SELECT COUNT(*) AS count FROM cf_agents_task_runs
-      WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
-        AND status IN ('pending', 'running')
-        AND json_extract(metadata, '$.callback') = ${callback}
-    `;
+    const tasks = [
+      { count: pendingRecoveryRunIds(this.ctx.storage.sql, callback).length }
+    ];
     return {
       tasks: tasks[0]?.count ?? 0,
       schedules: schedules[0]?.count ?? 0
@@ -5093,12 +5108,9 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       SELECT COUNT(*) as count FROM cf_agents_jobs
       WHERE capability = 'scheduler' AND fn = ${callback}
     `;
-    const tasks = this.sql<{ count: number }>`
-      SELECT COUNT(*) AS count FROM cf_agents_task_runs
-      WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
-        AND status IN ('pending', 'running')
-        AND json_extract(metadata, '$.callback') = ${callback}
-    `;
+    const tasks = [
+      { count: pendingRecoveryRunIds(this.ctx.storage.sql, callback).length }
+    ];
     return (scheduled[0]?.count ?? 0) + (tasks[0]?.count ?? 0);
   }
 
@@ -5887,12 +5899,9 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
 
   /** Count this facet's own non-terminal recovery Task runs for `callback`. */
   getChatRecoveryTaskRunCountForTest(callback: string): number {
-    const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) AS count FROM cf_agents_task_runs
-      WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
-        AND status IN ('pending', 'running')
-        AND json_extract(metadata, '$.callback') = ${callback}
-    `;
+    const rows = [
+      { count: pendingRecoveryRunIds(this.ctx.storage.sql, callback).length }
+    ];
     return rows[0]?.count ?? 0;
   }
 

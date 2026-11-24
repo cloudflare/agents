@@ -23,6 +23,7 @@
 import type { ChatRecoveryOptions } from "./lifecycle";
 import { partialHasSettledToolResults } from "./recovery-codec";
 import type {
+  ChatRecoveryAttemptInput,
   ChatRecoveryEngine,
   ChatRecoveryScheduleReason
 } from "./recovery-engine";
@@ -162,6 +163,8 @@ export type RecoveredTurnSchedule = {
   extra?: Record<string, unknown>;
   delaySeconds?: number;
   reason?: ChatRecoveryScheduleReason;
+  /** See `ChatRecoveryEngine.scheduleRecovery`. */
+  into?: (attempt: ChatRecoveryAttemptInput) => boolean;
 };
 
 /**
@@ -179,6 +182,7 @@ export async function scheduleRecoveredTurn(
     incident,
     delaySeconds: input.delaySeconds,
     reason: input.reason,
+    into: input.into,
     recoveryKind: input.recoveryKind,
     callback: input.retryUserId
       ? "_chatRecoveryRetry"
