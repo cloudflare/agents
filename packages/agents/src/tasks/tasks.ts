@@ -173,6 +173,8 @@ const DISPATCH_BUDGET_MS = 5_000;
  */
 const LIVE_WAKE_MS = 5_000;
 
+const UTF8 = new TextEncoder();
+
 const TERMINAL_STATUSES: ReadonlySet<TaskStatus> = new Set([
   "completed",
   "error",
@@ -2217,7 +2219,9 @@ export class Tasks<
     // New fields past the bound on their own fail as the whole metadata's
     // check below does: false, nothing written.
     let incoming = 0;
-    for (let i = 1; i < set.length; i += 2) incoming += set[i]?.length ?? 0;
+    for (let i = 1; i < set.length; i += 2) {
+      incoming += UTF8.encode(set[i] ?? "").byteLength;
+    }
     if (incoming > MAX_FRAMEWORK_METADATA_BYTES) return false;
     // What is stored under `key` is kept only when it is an object.
     let entry =

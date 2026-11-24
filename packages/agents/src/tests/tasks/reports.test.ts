@@ -644,6 +644,12 @@ describe("Tasks patchMetadata bound", () => {
           huge: "h".repeat(2_000_000)
         })
       ).toBe(false);
+      // Counted in bytes: 700,000 three-byte characters are 2.1 MB.
+      expect(
+        instance.tasks.patchMetadata("b", "progress", {
+          wide: "€".repeat(700_000)
+        })
+      ).toBe(false);
       const progress = instance.tasks.peek("b")?.metadata?.progress as Record<
         string,
         string
