@@ -243,6 +243,28 @@ describe("hydrationByteBudget — windowed hydration (#1710)", () => {
     expect(await agent.hydrationsForBatchForTest(20)).toBe(1);
   });
 
+  it("pairs the oldest reply the lookback reaches", async () => {
+    const name = uniqueName("windowed-lookback-edge");
+    const agent = (await getAgentByName(
+      env.ThinkWindowedHydrationAgent,
+      name
+    )) as unknown as WindowedHydrationStub & {
+      seedLongPathForTest(count: number): Promise<void>;
+      reconcileCopiesOnLongPathForTest(ids: string[]): Promise<string[]>;
+    };
+    const count = 20_000;
+    await agent.seedLongPathForTest(count);
+    await evictDurableObject(env.ThinkWindowedHydrationAgent.getByName(name));
+    // The window holds the newest w messages; the lookback covers the
+    // max(1,000, 10,001 - w) messages below it.
+    const window = (await agent.getCachedMessageIdsForTest()).length;
+    const edge = count - window - Math.max(1_000, 10_001 - window) + 1;
+    expect(edge % 2).toBe(0); // a seeded reply
+    expect(await agent.reconcileCopiesOnLongPathForTest([`m${edge}`])).toEqual(
+      []
+    );
+  }, 120_000);
+
   it("reconciles on a path too long to read root-first", async () => {
     const name = uniqueName("windowed-long-path");
     const agent = (await getAgentByName(

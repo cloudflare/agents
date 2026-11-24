@@ -8346,6 +8346,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       newestFirst: true,
       leafId: start?.id
     })) {
+      // The walk starts at the window's oldest message, which is cached.
+      if (message.id === start?.id) continue;
       if (++at > lookback) break;
       if (known.has(message.id)) continue;
       if (message.role !== "assistant") continue;
