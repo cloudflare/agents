@@ -94,9 +94,10 @@ export function setTaskDefinitionResolver(
 const FIBER_SCHEMA_VERSION_KEY = "cf_agents:tasks_schema_version";
 /**
  * 2 renames the run statuses and adds `cf_agents_task_checkpoint`; 3 adds
- * lanes and `skipped`.
+ * lanes and `skipped`; 4 moves the checkpoint into the run's `checkpoint`
+ * column and drops that table.
  */
-const CURRENT_FIBER_SCHEMA_VERSION = 3;
+const CURRENT_FIBER_SCHEMA_VERSION = 4;
 
 const DEFAULT_STEP_POLICY: ResolvedStepPolicy = {
   retryLimit: 5,
@@ -456,7 +457,9 @@ export class Tasks<
     const storage = this.lifecycle.storage;
     const version = (await storage.get<number>(FIBER_SCHEMA_VERSION_KEY)) ?? 0;
     if (version < CURRENT_FIBER_SCHEMA_VERSION) {
-      if (version >= 1) this.#store.rebuildRuns();
+      if (version === 1 || version === 2) this.#store.rebuildRuns();
+      if (version === 3) this.#store.addCheckpointColumn();
+      if (version === 2 || version === 3) this.#store.moveCheckpointTable();
       this.#store.ensureTables();
       await storage.put(FIBER_SCHEMA_VERSION_KEY, CURRENT_FIBER_SCHEMA_VERSION);
     }
@@ -537,6 +540,28 @@ export class Tasks<
     }
 
     return this.#dispatchRun(runId);
+  }
+
+  /** Definitions whose runs keep their checkpoint after they settle. */
+  #keptCheckpoints(): string[] {
+    return [...this.#registeredOptions]
+      .filter(([, options]) => options.keepCheckpoint)
+      .map(([name]) => name);
+  }
+
+  #keptCheckpointsJson(): string {
+    return JSON.stringify(this.#keptCheckpoints());
+  }
+
+  /**
+   * The terminal update's clause that clears a settled run's checkpoint,
+   * unless its definition keeps it (`keepCheckpoint`).
+   */
+  #clearCheckpointSql(): string {
+    const kept = this.#keptCheckpoints();
+    if (kept.length === 0) return "checkpoint = NULL";
+    const names = kept.map((name) => `'${name.replaceAll("'", "''")}'`);
+    return `checkpoint = CASE WHEN definition IN (${names.join(", ")}) THEN checkpoint ELSE NULL END`;
   }
 
   /** Push a live attempt's durable claim deadline forward one claim window. */
@@ -1249,7 +1274,7 @@ export class Tasks<
           runId,
           generation,
           `UPDATE cf_agents_task_runs
-           SET status = 'completed', result = ?, generation = NULL, next_at = NULL,
+           SET status = 'completed', result = ?, generation = NULL, ${this.#clearCheckpointSql()}, next_at = NULL,
                settled_at = ?, updated_at = ?
            WHERE run_id = ? AND generation = ? AND status = 'running'
              AND cancel_requested = 0`,
@@ -1339,7 +1364,7 @@ export class Tasks<
         runId,
         generation,
         `UPDATE cf_agents_task_runs
-         SET status = 'skipped', cancel_reason = ?, generation = NULL,
+         SET status = 'skipped', cancel_reason = ?, generation = NULL, ${this.#clearCheckpointSql()},
              next_at = NULL, settled_at = ?, updated_at = ?
          WHERE run_id = ? AND generation = ? AND status = 'running'`,
         [settlement.reason ?? null, now, now]
@@ -1416,7 +1441,7 @@ export class Tasks<
       runId,
       generation,
       `UPDATE cf_agents_task_runs
-       SET status = 'completed', result = ?, generation = NULL, next_at = NULL,
+       SET status = 'completed', result = ?, generation = NULL, ${this.#clearCheckpointSql()}, next_at = NULL,
            settled_at = ?, updated_at = ?
        WHERE run_id = ? AND generation = ? AND status = 'running'`,
       [serializeTaskValue(outcome, `result of Task run "${runId}"`), now, now]
@@ -1564,7 +1589,7 @@ export class Tasks<
         generation,
         `UPDATE cf_agents_task_runs
          SET status = 'aborted', cancel_requested = 1, cancel_reason = ?,
-             generation = NULL, next_at = NULL, settled_at = ?, updated_at = ?
+             generation = NULL, ${this.#clearCheckpointSql()}, next_at = NULL, settled_at = ?, updated_at = ?
          WHERE run_id = ? AND generation = ?
            AND status = 'running'`,
         [reason ?? null, now, now]
@@ -1573,7 +1598,7 @@ export class Tasks<
       const written = this.#store.write(
         `UPDATE cf_agents_task_runs
          SET status = 'aborted', cancel_requested = 1, cancel_reason = ?,
-             generation = NULL, next_at = NULL, settled_at = ?, updated_at = ?
+             generation = NULL, ${this.#clearCheckpointSql()}, next_at = NULL, settled_at = ?, updated_at = ?
          WHERE run_id = ?
            AND status IN ('pending', 'running')`,
         [reason ?? null, now, now, runId]
@@ -1608,7 +1633,7 @@ export class Tasks<
         generation,
         `UPDATE cf_agents_task_runs
          SET status = 'error', error_name = ?, error_message = ?,
-             generation = NULL, next_at = NULL, settled_at = ?, updated_at = ?
+             generation = NULL, ${this.#clearCheckpointSql()}, next_at = NULL, settled_at = ?, updated_at = ?
          WHERE run_id = ? AND generation = ?
            AND status = 'running'`,
         [error.name, error.message, now, now]
@@ -1617,7 +1642,7 @@ export class Tasks<
       const written = this.#store.write(
         `UPDATE cf_agents_task_runs
          SET status = 'error', error_name = ?, error_message = ?,
-             generation = NULL, next_at = NULL, settled_at = ?, updated_at = ?
+             generation = NULL, ${this.#clearCheckpointSql()}, next_at = NULL, settled_at = ?, updated_at = ?
          WHERE run_id = ?
            AND status IN ('pending', 'running')`,
         [error.name, error.message, now, now, runId]
@@ -1641,10 +1666,6 @@ export class Tasks<
     runId: string,
     row: TaskRunRow | undefined
   ): Promise<void> {
-    // Nothing reads a settled run's checkpoint unless its definition keeps it.
-    if (!(row && this.#registeredOptions.get(row.definition)?.keepCheckpoint)) {
-      this.#store.deleteCheckpoint(runId);
-    }
     const onStatus =
       row && this.#registeredOptions.get(row.definition)?.onStatus;
     if (onStatus && !this.lifecycle.routes.source) {
@@ -2027,7 +2048,7 @@ export class Tasks<
         (run_id, definition, input, status, metadata, idempotency_key, retain,
          attempt, generation, next_at, error_name, error_message,
          cancel_requested, cancel_reason, created_at, started_at, updated_at,
-         settled_at, lane, seq, notified, input_parts, result)
+         settled_at, lane, seq, notified, input_parts, result, checkpoint)
       VALUES
         (${record.runId}, ${record.definition},
          ${importedInput.input},
@@ -2045,14 +2066,9 @@ export class Tasks<
          ${open ? null : (record.settledAt ?? now)}, ${lane},
          ${lane === null ? null : this.#store.nextLaneSeq(lane)},
          ${open ? null : record.status}, ${importedInput.parts},
-         ${record.status === "completed" ? serializeTaskValue(record.result, `result of imported run "${record.runId}"`) : null})
+         ${record.status === "completed" ? serializeTaskValue(record.result, `result of imported run "${record.runId}"`) : null},
+         ${record.checkpoint && Object.keys(record.checkpoint).length > 0 ? JSON.stringify(record.checkpoint) : null})
     `;
-    for (const [key, value] of Object.entries(record.checkpoint ?? {})) {
-      this.#store.sql`
-        INSERT INTO cf_agents_task_checkpoint (run_id, key, value)
-        VALUES (${record.runId}, ${key}, ${JSON.stringify(value)})
-      `;
-    }
     if (open && !queued) await this.#syncWake(record.runId);
     return true;
   }
@@ -2141,7 +2157,11 @@ export class Tasks<
     const rows = this.#store.sql<TaskRunRow>`
       UPDATE cf_agents_task_runs
       SET status = 'skipped', cancel_reason = ${reason ?? null},
-          generation = NULL, next_at = NULL, settled_at = ${now},
+          generation = NULL,
+          checkpoint = CASE WHEN definition IN (
+            SELECT value FROM json_each(${this.#keptCheckpointsJson()})
+          ) THEN checkpoint ELSE NULL END,
+          next_at = NULL, settled_at = ${now},
           updated_at = ${now}
       WHERE lane = ${lane} AND status IN ('pending', 'running')
       RETURNING *

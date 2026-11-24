@@ -6,10 +6,15 @@ import { seedTaskRun, type TaskHarnessObject } from "../capabilities/tasks";
 const checkpointRows = (storage: DurableObjectStorage, runId: string) =>
   storage.sql
     .exec(
-      "SELECT key, value FROM cf_agents_task_checkpoint WHERE run_id = ?",
+      "SELECT j.key AS key, j.value AS value FROM cf_agents_task_runs, json_each(checkpoint) j WHERE run_id = ?",
       runId
     )
-    .toArray();
+    .toArray()
+    .map((row) => ({
+      key: row.key,
+      value:
+        typeof row.value === "string" ? row.value : JSON.stringify(row.value)
+    }));
 
 describe("Tasks local and checkpoint", () => {
   it("hands `local` to the first attempt in the caller's isolate", async () => {
@@ -88,10 +93,9 @@ describe("Tasks local and checkpoint", () => {
           nextAt: Date.now() - 1000
         });
         state.storage.sql.exec(
-          "INSERT INTO cf_agents_task_checkpoint (run_id, key, value) VALUES (?, ?, ?)",
-          "reset-run",
-          "note",
-          JSON.stringify({ attempt: 1 })
+          "UPDATE cf_agents_task_runs SET checkpoint = ? WHERE run_id = ?",
+          JSON.stringify({ note: { attempt: 1 } }),
+          "reset-run"
         );
         await instance.lifecycle.rearmAlarm();
       }
@@ -232,9 +236,141 @@ describe("Tasks schema 2", () => {
           (await instance.tasks.getByIdempotencyKey("key-done"))?.runId
         ).toBe("done");
         expect(await state.storage.get("cf_agents:tasks_schema_version")).toBe(
-          3
+          4
         );
         await instance.tasks.cancel("sleeping");
+      }
+    );
+  });
+});
+
+describe("Tasks checkpoint column", () => {
+  it("keeps any key as given, overwrites one in place, and clears the column at settle", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.tasks.run("oddKeys" as never, undefined as never, {
+          runId: "odd",
+          start: "now"
+        });
+        expect(instance.tasks.peek("odd")?.result).toEqual([
+          { i: 0 },
+          { i: 1 },
+          { i: 2 },
+          { i: 9 }
+        ]);
+        const [row] = state.storage.sql
+          .exec<{ checkpoint: string | null }>(
+            "SELECT checkpoint FROM cf_agents_task_runs WHERE run_id = 'odd'"
+          )
+          .toArray();
+        expect(row.checkpoint).toBeNull();
+      }
+    );
+  });
+});
+
+describe("Tasks schema 4", () => {
+  it("moves schema 3's checkpoint rows into their run's column and drops the table", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        // As schema 3 left it: no column, a checkpoint table with rows.
+        state.storage.sql.exec(
+          "ALTER TABLE cf_agents_task_runs DROP COLUMN checkpoint"
+        );
+        state.storage.sql.exec(`
+          CREATE TABLE cf_agents_task_checkpoint (
+            run_id TEXT NOT NULL,
+            key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            PRIMARY KEY (run_id, key)
+          ) WITHOUT ROWID`);
+        state.storage.sql.exec(
+          `INSERT INTO cf_agents_task_runs
+             (run_id, definition, status, retain, attempt, cancel_requested,
+              created_at, updated_at)
+           VALUES ('old', 'remembering', 'pending', 1, 0, 0, 1, 1)`
+        );
+        for (const [key, value] of [
+          ["note", { attempt: 1 }],
+          ['odd."key', [1, 2]]
+        ] as const) {
+          state.storage.sql.exec(
+            "INSERT INTO cf_agents_task_checkpoint VALUES ('old', ?, ?)",
+            key,
+            JSON.stringify(value)
+          );
+        }
+        await state.storage.put("cf_agents:tasks_schema_version", 3);
+
+        await instance.tasks.onStart();
+
+        expect(
+          state.storage.sql
+            .exec(
+              "SELECT name FROM sqlite_master WHERE name = 'cf_agents_task_checkpoint'"
+            )
+            .toArray()
+        ).toEqual([]);
+        const [row] = state.storage.sql
+          .exec<{ checkpoint: string }>(
+            "SELECT checkpoint FROM cf_agents_task_runs WHERE run_id = 'old'"
+          )
+          .toArray();
+        expect(JSON.parse(row.checkpoint)).toEqual({
+          note: { attempt: 1 },
+          'odd."key': [1, 2]
+        });
+        expect(await state.storage.get("cf_agents:tasks_schema_version")).toBe(
+          4
+        );
+      }
+    );
+  });
+});
+
+describe("Tasks schema 4, started again", () => {
+  it("finishes the move on a start after one that added the column and failed", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        // As a failed schema-4 start leaves it: the column added, the old
+        // table still there, the version still 3.
+        state.storage.sql.exec(`
+          CREATE TABLE cf_agents_task_checkpoint (
+            run_id TEXT NOT NULL,
+            key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            PRIMARY KEY (run_id, key)
+          ) WITHOUT ROWID`);
+        state.storage.sql.exec(
+          `INSERT INTO cf_agents_task_runs
+             (run_id, definition, status, retain, attempt, cancel_requested,
+              created_at, updated_at)
+           VALUES ('again', 'remembering', 'pending', 1, 0, 0, 1, 1)`
+        );
+        state.storage.sql.exec(
+          "INSERT INTO cf_agents_task_checkpoint VALUES ('again', 'note', '1')"
+        );
+        await state.storage.put("cf_agents:tasks_schema_version", 3);
+
+        await instance.tasks.onStart();
+
+        const [row] = state.storage.sql
+          .exec<{ checkpoint: string }>(
+            "SELECT checkpoint FROM cf_agents_task_runs WHERE run_id = 'again'"
+          )
+          .toArray();
+        expect(JSON.parse(row.checkpoint)).toEqual({ note: 1 });
+        expect(await state.storage.get("cf_agents:tasks_schema_version")).toBe(
+          4
+        );
       }
     );
   });

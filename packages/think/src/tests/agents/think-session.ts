@@ -313,21 +313,17 @@ async function insertInterruptedTurnForTest(
   const requestId = name.slice(prefix.length);
   // Make sure the Tasks tables exist before writing a row into them.
   await agent.tasks.get(runId);
-  if (snapshot) {
-    agent.sql`
-      INSERT INTO cf_agents_task_checkpoint (run_id, key, value)
-      VALUES (${runId}, 'snapshot', ${JSON.stringify(snapshot)})
-    `;
-  }
+  const checkpoint = snapshot ? JSON.stringify({ snapshot }) : null;
   const now = Date.now();
   agent.sql`
     INSERT INTO cf_agents_task_runs
       (run_id, definition, input, status, metadata, idempotency_key, retain,
-       attempt, next_at, cancel_requested, created_at, updated_at)
+       attempt, next_at, cancel_requested, created_at, updated_at, checkpoint)
     VALUES
       (${runId}, ${Think.CHAT_FIBER_NAME},
        ${JSON.stringify({ requestId, continuation: false, nonce })}, 'pending',
-       ${JSON.stringify({ requestId })}, NULL, 0, 0, ${now}, 0, ${now}, ${now})
+       ${JSON.stringify({ requestId })}, NULL, 0, 0, ${now}, 0, ${now}, ${now},
+       ${checkpoint})
   `;
 }
 
@@ -337,20 +333,51 @@ async function insertInterruptedTurnForTest(
  * its turn to chat recovery, then the fiber scan recovers fiber rows.
  */
 async function recoverInterruptedTurnsForTest(agent: Think): Promise<void> {
-  const runs = agent.sql<{ run_id: string; input: string; metadata: string }>`
-    SELECT run_id, input, metadata FROM cf_agents_task_runs
+  const runs = agent.sql<{
+    run_id: string;
+    input: string;
+    metadata: string;
+    checkpoint: string | null;
+  }>`
+    SELECT run_id, input, metadata, checkpoint FROM cf_agents_task_runs
     WHERE definition = ${Think.CHAT_FIBER_NAME} AND status = 'pending'
     ORDER BY created_at
   `;
   for (const run of runs) {
-    // Accepted again under its id, so this invocation runs it.
+    // Accepted again under its id, so this invocation runs it; the
+    // checkpoint it had goes back on the new row before the claim reads it.
     agent.sql`DELETE FROM cf_agents_task_runs WHERE run_id = ${run.run_id}`;
+    if (run.checkpoint !== null) {
+      // The new row gets the checkpoint as it is inserted, before the
+      // attempt's claim reads it (a trigger cannot take parameters).
+      agent.sql`
+        CREATE TABLE IF NOT EXISTS cf_test_checkpoints (
+          run_id TEXT PRIMARY KEY, checkpoint TEXT
+        )
+      `;
+      agent.sql`
+        INSERT OR REPLACE INTO cf_test_checkpoints VALUES (${run.run_id}, ${run.checkpoint})
+      `;
+      agent.sql`
+        CREATE TRIGGER IF NOT EXISTS cf_test_restore_checkpoint
+        AFTER INSERT ON cf_agents_task_runs
+        BEGIN
+          UPDATE cf_agents_task_runs SET checkpoint = (
+            SELECT checkpoint FROM cf_test_checkpoints WHERE run_id = NEW.run_id
+          )
+          WHERE run_id = NEW.run_id
+            AND NEW.run_id IN (SELECT run_id FROM cf_test_checkpoints);
+        END
+      `;
+    }
     await agent.tasks.run(Think.CHAT_FIBER_NAME, JSON.parse(run.input), {
       runId: run.run_id,
       retain: false,
       metadata: JSON.parse(run.metadata),
       start: "now"
     });
+    agent.sql`DROP TRIGGER IF EXISTS cf_test_restore_checkpoint`;
+    agent.sql`DROP TABLE IF EXISTS cf_test_checkpoints`;
   }
   await (
     agent as unknown as { _recoverFibers(): Promise<void> }

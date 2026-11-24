@@ -520,8 +520,9 @@ export class TestRunFiberAgent extends Agent {
       ["resolved", { status: "completed" }]
     ] as const) {
       this.sql`
-        INSERT INTO cf_agents_task_checkpoint (run_id, key, value)
-        VALUES (${id}, ${key}, ${JSON.stringify(value)})
+        UPDATE cf_agents_task_runs
+        SET checkpoint = json_set(coalesce(checkpoint, '{}'), '$.' || json_quote(${key}), json(${JSON.stringify(value)}))
+        WHERE run_id = ${id}
       `;
     }
   }
@@ -755,11 +756,11 @@ export class TestRunFiberAgent extends Agent {
   }
 
   private _readRunSnapshot(id: string): unknown {
-    const rows = this.sql<{ value: string }>`
-      SELECT value FROM cf_agents_task_checkpoint
-      WHERE run_id = ${id} AND key = 'snapshot' LIMIT 1
+    const rows = this.sql<{ value: string | null }>`
+      SELECT checkpoint -> '$.snapshot' AS value
+      FROM cf_agents_task_runs WHERE run_id = ${id}
     `;
-    return rows[0] ? JSON.parse(rows[0].value) : null;
+    return rows[0]?.value != null ? JSON.parse(rows[0].value) : null;
   }
 
   private _legacyFiberTables(): void {

@@ -60,6 +60,14 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
         return input.label;
       },
 
+      /** Checkpoint keys JSON paths would misread, read back. */
+      oddKeys: async (_input: undefined, step: TaskStep) => {
+        const keys = ["a.b", 'q"x', "$[0]", "plain"];
+        keys.forEach((key, i) => step.checkpoint.set(key, { i }));
+        step.checkpoint.set("plain", { i: 9 });
+        return keys.map((key) => step.checkpoint.get(key) ?? null);
+      },
+
       remembering: async (_input: undefined, step: TaskStep) => {
         this.rememberingSeen.push({
           local: step.local,

@@ -1,6 +1,6 @@
 /**
  * Storage layer for the Tasks capability: owns the `cf_agents_task_runs`,
- * `cf_agents_task_steps` and `cf_agents_task_checkpoint` tables — DDL, row access, generation-fenced writes,
+ * `cf_agents_task_steps` and `cf_agents_task_parts` tables — DDL, row access, generation-fenced writes,
  * and the snapshot projection. The engine in `tasks.ts` holds the state
  * machine; every byte that touches SQLite goes through here.
  */
@@ -44,7 +44,8 @@ const RUNS_COLUMNS = `
         lane TEXT,
         seq INTEGER,
         notified TEXT,
-        input_parts INTEGER
+        input_parts INTEGER,
+        checkpoint TEXT
       `;
 
 /** @internal SQL-backed store for one Tasks capability instance. */
@@ -176,25 +177,25 @@ export class TaskStore {
 
   deleteRun(runId: string): void {
     this.sql`DELETE FROM cf_agents_task_parts WHERE run_id = ${runId}`;
-    this.deleteCheckpoint(runId);
     this.sql`DELETE FROM cf_agents_task_steps WHERE run_id = ${runId}`;
     this.sql`DELETE FROM cf_agents_task_runs WHERE run_id = ${runId}`;
   }
 
   /** A checkpoint entry of a run, or `undefined`. */
   getCheckpoint(runId: string, key: string): TaskJson | undefined {
-    const rows = this.sql<{ value: string }>`
-      SELECT value FROM cf_agents_task_checkpoint
-      WHERE run_id = ${runId} AND key = ${key}
+    const rows = this.sql<{ checkpoint: string | null }>`
+      SELECT checkpoint FROM cf_agents_task_runs WHERE run_id = ${runId}
     `;
-    return rows[0] === undefined
-      ? undefined
-      : (JSON.parse(rows[0].value) as TaskJson);
+    const checkpoint = rows[0]?.checkpoint;
+    if (checkpoint == null) return undefined;
+    const entries = JSON.parse(checkpoint) as Record<string, TaskJson>;
+    return Object.hasOwn(entries, key) ? entries[key] : undefined;
   }
 
   /**
-   * Write a checkpoint entry for the attempt holding `generation`. A
-   * superseded attempt writes nothing.
+   * Write a checkpoint entry for the attempt holding `generation`: one
+   * update of the run's row. A superseded attempt writes nothing. The
+   * terminal update clears the column.
    */
   setCheckpoint(
     runId: string,
@@ -203,17 +204,42 @@ export class TaskStore {
     value: TaskJson
   ): void {
     this.write(
-      `INSERT INTO cf_agents_task_checkpoint (run_id, key, value)
-       SELECT ?, ?, ? WHERE EXISTS (
-         SELECT 1 FROM cf_agents_task_runs WHERE run_id = ? AND generation = ?
-       )
-       ON CONFLICT (run_id, key) DO UPDATE SET value = excluded.value`,
-      [runId, key, JSON.stringify(value), runId, generation]
+      `UPDATE cf_agents_task_runs
+       SET checkpoint = json_set(coalesce(checkpoint, '{}'), '$.' || json_quote(?), json(?))
+       WHERE run_id = ? AND generation = ?`,
+      [key, JSON.stringify(value), runId, generation]
     );
   }
 
-  deleteCheckpoint(runId: string): void {
-    this.sql`DELETE FROM cf_agents_task_checkpoint WHERE run_id = ${runId}`;
+  /**
+   * Schema 3 to 4: the run row gains its checkpoint column. A start that
+   * added it and then failed before the version was written added it
+   * already.
+   */
+  addCheckpointColumn(): void {
+    const [present] = this.sql<{ name: string }>`
+      SELECT name FROM pragma_table_info('cf_agents_task_runs')
+      WHERE name = 'checkpoint'
+    `;
+    if (present) return;
+    this.sql`ALTER TABLE cf_agents_task_runs ADD COLUMN checkpoint TEXT`;
+  }
+
+  /**
+   * Schema 2 or 3 to 4: move `cf_agents_task_checkpoint` rows into their
+   * run's `checkpoint` column, then drop the table.
+   */
+  moveCheckpointTable(): void {
+    this.#storage.transactionSync(() => {
+      this.#storage.sql.exec(`
+        UPDATE cf_agents_task_runs SET checkpoint = (
+          SELECT json_group_object(key, json(value))
+          FROM cf_agents_task_checkpoint c
+          WHERE c.run_id = cf_agents_task_runs.run_id
+        )
+        WHERE run_id IN (SELECT run_id FROM cf_agents_task_checkpoint)`);
+      this.#storage.sql.exec(`DROP TABLE cf_agents_task_checkpoint`);
+    });
   }
 
   /**
@@ -242,6 +268,7 @@ export class TaskStore {
     const lane = columns.has("lane") ? "lane, seq" : "NULL, NULL";
     const notified = columns.has("notified") ? "notified" : "NULL";
     const parts = columns.has("input_parts") ? "input_parts" : "NULL";
+    const checkpoint = columns.has("checkpoint") ? "checkpoint" : "NULL";
     this.#storage.transactionSync(() => {
       const exec = (query: string) => {
         try {
@@ -259,14 +286,14 @@ export class TaskStore {
           error_message, status_message, metadata, idempotency_key, retain,
           attempt, generation, next_at, wait_reason, cancel_requested,
           cancel_reason, created_at, started_at, updated_at, settled_at,
-          lane, seq, notified, input_parts
+          lane, seq, notified, input_parts, checkpoint
         )
         SELECT
           run_id, definition, input, ${status},
           result, error_name, error_message, status_message, metadata,
           idempotency_key, retain, attempt, generation, next_at, wait_reason,
           cancel_requested, cancel_reason, created_at, started_at, updated_at,
-          settled_at, ${lane}, ${notified}, ${parts}
+          settled_at, ${lane}, ${notified}, ${parts}, ${checkpoint}
         FROM cf_agents_task_runs`);
       exec(`DROP TABLE cf_agents_task_runs`);
       exec(
@@ -332,13 +359,6 @@ export class TaskStore {
         piece INTEGER NOT NULL,
         data TEXT NOT NULL,
         PRIMARY KEY (run_id, piece)
-      ) WITHOUT ROWID`);
-    rawSql(`
-      CREATE TABLE IF NOT EXISTS cf_agents_task_checkpoint (
-        run_id TEXT NOT NULL,
-        key TEXT NOT NULL,
-        value TEXT NOT NULL,
-        PRIMARY KEY (run_id, key)
       ) WITHOUT ROWID`);
   }
 

@@ -87,7 +87,7 @@ export class CounterSubAgent extends Agent {
 
   checkpointRowCount(): number {
     return this.sql<{ n: number }>`
-      SELECT COUNT(*) AS n FROM cf_agents_task_checkpoint
+      SELECT COUNT(*) AS n FROM cf_agents_task_runs WHERE checkpoint IS NOT NULL
     `[0].n;
   }
 
