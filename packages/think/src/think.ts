@@ -250,6 +250,8 @@ import {
   keepStoredReplies,
   reconcileMessages,
   CHAT_RECOVERY_TASK_NAME,
+  type ChatRecoveryAttemptInput,
+  type ChatRecoveryTaskHooks,
   chatRecoveryProgressReader,
   chatRecoveryStorageAdapter,
   createChatRecoveryTaskDefinition,
@@ -1580,7 +1582,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     registerDecisionTask(this.tasks, (runId) => this._onDecisionSettled(runId));
     this._registerSubmissionTaskDefinition();
     this._registerChatTurnTaskDefinition();
-    this._registerChatRecoveryTaskDefinition();
     this.#messengerReplies = new MessengerReplies(
       this.tasks,
       () => this._messengerRuntime
@@ -2965,11 +2966,20 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   });
 
   /**
-   * Register the shared chat-turn Task definition (see
+   * Register the shared chat-turn and chat-recovery Task definitions (see
    * `agents/chat` `createChatTurnTaskDefinition` for the turn logic): the
    * host wires its protected internals through the hooks.
    */
   private _registerChatTurnTaskDefinition(): void {
+    // SAFETY: the recovery engine is the sole producer of each callback's
+    // payload and Tasks persists it verbatim, so the callback name selects
+    // the matching host input type.
+    const attempts: ChatRecoveryTaskHooks = {
+      _chatRecoveryContinue: (data) =>
+        this._chatRecoveryContinue(data as ChatRecoveryContinueData),
+      _chatRecoveryRetry: (data) =>
+        this._chatRecoveryRetry(data as ChatRecoveryRetryData)
+    };
     const chatFiberName = (this.constructor as typeof Think).CHAT_FIBER_NAME;
     this.tasks.register(
       chatFiberName,
@@ -2978,24 +2988,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         snapshotKey: "__cfThinkChatFiberSnapshot",
         keepAliveWhile: (fn) => this.keepAliveWhile(fn),
         withStash: (context, fn) => this._withFiberStash(context, fn),
-        recover: (turn) => this._recoverChatTurn(turn)
+        recover: (turn) => this._recoverChatTurn(turn),
+        attempts
       })
     );
-  }
-
-  /** Register the shared Tasks transport for recovery continuations. */
-  private _registerChatRecoveryTaskDefinition(): void {
-    // SAFETY: the recovery engine is the sole producer of each callback's
-    // payload and the Task persists it verbatim, so the callback name selects
-    // the matching host input type.
+    // The recovery Task: attempts scheduled outside a replayed turn's run.
     this.tasks.register(
       CHAT_RECOVERY_TASK_NAME,
-      createChatRecoveryTaskDefinition({
-        _chatRecoveryContinue: (data) =>
-          this._chatRecoveryContinue(data as ChatRecoveryContinueData),
-        _chatRecoveryRetry: (data) =>
-          this._chatRecoveryRetry(data as ChatRecoveryRetryData)
-      })
+      createChatRecoveryTaskDefinition(attempts)
     );
   }
 
@@ -9888,6 +9888,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     requestId: string;
     persisted: unknown;
     createdAt: number;
+    attempt?: (attempt: ChatRecoveryAttemptInput) => void;
   }): Promise<void> {
     if (await this._settlePersistedChatTurn(turn.requestId)) return;
     const { snapshot, user } = unwrapChatFiberSnapshot<"think-chat-turn">(
@@ -9900,7 +9901,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         requestId: turn.requestId,
         snapshot,
         recoveryData: user,
-        createdAt: turn.createdAt
+        createdAt: turn.createdAt,
+        attempt: turn.attempt
       },
       this._chatRecoveryWakeHooks()
     );

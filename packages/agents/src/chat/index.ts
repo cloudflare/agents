@@ -493,6 +493,7 @@ export {
   type ChatRecoveryTurnBindings,
   type ChatRecoveryAttemptScope,
   type ChatRecoveryScheduleReason,
+  type ChatRecoveryAttemptInput,
   type ChatRecoveryScheduleCallback,
   type ChatRecoveryAdapter,
   type ChatFiberWakeHooks,

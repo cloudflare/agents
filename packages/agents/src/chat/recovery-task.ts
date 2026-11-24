@@ -11,20 +11,16 @@
 
 import { isPlatformFailure, tryN } from "../retries";
 import type { TaskRunOptions, TaskStep } from "../tasks/types";
-import type { ChatRecoveryScheduleCallback } from "./recovery-engine";
+import type {
+  ChatRecoveryAttemptInput,
+  ChatRecoveryScheduleCallback
+} from "./recovery-engine";
 
 /** Reserved Task definition shared by the chat hosts. */
 export const CHAT_RECOVERY_TASK_NAME = "__cf_internal_chat_recovery";
 
 /** Input persisted for one recovery continuation attempt. */
-export type ChatRecoveryTaskInput = {
-  /** Host continuation to dispatch. */
-  readonly callback: ChatRecoveryScheduleCallback;
-  /** Continuation context owned by the chat host. */
-  readonly data: Record<string, unknown>;
-  /** Durable delay before dispatch, in seconds. */
-  readonly delaySeconds: number;
-};
+export type ChatRecoveryTaskInput = ChatRecoveryAttemptInput;
 
 /** Why a recovery attempt is being enqueued. */
 export type ChatRecoveryTaskReason =
@@ -227,17 +223,33 @@ export function createChatRecoveryTaskDefinition(
   hooks: ChatRecoveryTaskHooks
 ): (input: unknown, step: TaskStep) => Promise<void> {
   return async (unknownInput, step) => {
-    const input = parseChatRecoveryTaskInput(unknownInput);
-    if (input.delaySeconds > 0) {
-      await step.sleep("backoff", input.delaySeconds * 1000);
-    }
-    await step.do(
-      "continuation",
-      {
-        retries: { limit: 3, delay: 100, backoff: "exponential" },
-        timeout: "15 minutes"
-      },
-      () => hooks[input.callback](input.data)
+    await runChatRecoveryAttempt(
+      step,
+      hooks,
+      parseChatRecoveryTaskInput(unknownInput)
     );
   };
+}
+
+/**
+ * Run one recovery attempt as steps of `step`'s run: wait out its backoff,
+ * then dispatch the host callback. Shared by the recovery Task and the
+ * chat-turn run that recovers its own interrupted turn.
+ */
+export async function runChatRecoveryAttempt(
+  step: TaskStep,
+  hooks: ChatRecoveryTaskHooks,
+  input: ChatRecoveryAttemptInput
+): Promise<void> {
+  if (input.delaySeconds > 0) {
+    await step.sleep("backoff", input.delaySeconds * 1000);
+  }
+  await step.do(
+    "continuation",
+    {
+      retries: { limit: 3, delay: 100, backoff: "exponential" },
+      timeout: "15 minutes"
+    },
+    () => hooks[input.callback](input.data)
+  );
 }

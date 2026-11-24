@@ -29,7 +29,8 @@ function fakeStep(local: unknown): {
       _name: string,
       _config: unknown,
       fn: (attempt: { signal: AbortSignal }) => Promise<unknown>
-    ) => fn({ signal: new AbortController().signal })
+    ) => fn({ signal: new AbortController().signal }),
+    sleep: async () => {}
   } as unknown as TaskStep;
   return { step, checkpoint };
 }
@@ -45,7 +46,11 @@ const hooks = {
     context.stash({ step: 1 });
     return fn();
   },
-  recover: async () => {}
+  recover: async () => {},
+  attempts: {
+    _chatRecoveryContinue: async () => {},
+    _chatRecoveryRetry: async () => {}
+  }
 };
 
 describe("createChatTurnTaskDefinition", () => {
@@ -199,5 +204,40 @@ describe("createChatTurnTaskDefinition", () => {
       recover: async (turn) => void recovered.push(turn.persisted)
     })({ requestId: "r1", nonce: "n1" }, step);
     expect(recovered).toEqual([{ __snapshot: { s: 0 }, user: { step: 9 } }]);
+  });
+
+  it("runs a replay's recovery attempt in its own run, after the backoff", async () => {
+    const { step } = fakeStep(undefined);
+    const steps: string[] = [];
+    const stepDo = step.do.bind(step);
+    Object.assign(step, {
+      do: (name: string, config: unknown, fn: never) => {
+        steps.push(name);
+        return stepDo(name, config as never, fn);
+      },
+      sleep: async (name: string, ms: number) => {
+        steps.push(`${name}:${ms}`);
+      }
+    });
+    const continued: unknown[] = [];
+    await createChatTurnTaskDefinition({
+      ...hooks,
+      storage: {
+        get: async () => undefined,
+        delete: async () => true
+      } as unknown as DurableObjectStorage,
+      recover: async (turn) =>
+        turn.attempt({
+          callback: "_chatRecoveryContinue",
+          data: { incidentId: "i1" },
+          delaySeconds: 2
+        }),
+      attempts: {
+        _chatRecoveryContinue: async (data) => void continued.push(data),
+        _chatRecoveryRetry: async () => {}
+      }
+    })({ requestId: "r1", nonce: "n1" }, step);
+    expect(steps).toEqual(["model-turn", "backoff:2000", "continuation"]);
+    expect(continued).toEqual([{ incidentId: "i1" }]);
   });
 });
