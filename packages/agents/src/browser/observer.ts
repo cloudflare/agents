@@ -30,6 +30,7 @@
  */
 
 import {
+  CdpProtocolError,
   CdpTimeoutError,
   type CdpConnection,
   type CdpEvent,
@@ -201,6 +202,8 @@ interface AnsweredDialog {
   /** Cut to 200 characters. */
   message: string;
   accepted: boolean;
+  /** Chrome refused the answer: someone else answered it first. */
+  refused?: boolean;
 }
 
 /**
@@ -214,7 +217,9 @@ interface AnsweredDialog {
  *
  * It listens once per connection, before the hook can add a listener, so
  * it answers first even when the hook listens on the raw connection. It
- * needs Page enabled in the tab, which the observer's setup does.
+ * needs Page enabled in the tab, which the observer's setup does. A dialog
+ * someone else answered first (model code that enabled Page and answered
+ * it, say) isn't in the notices: Chrome refuses the host's answer.
  */
 export function dialogWatcher(): HostTabWatcher {
   /** The first dialogs answered, enough for the notices. */
@@ -229,14 +234,7 @@ export function dialogWatcher(): HostTabWatcher {
         if (!tab) return;
         const type = String(event.params.type ?? "alert");
         const accepted = type === "alert" || type === "beforeunload";
-        tab
-          .send(
-            "Page.handleJavaScriptDialog",
-            { accept: accepted },
-            { timeoutMs: OBSERVER_COMMAND_TIMEOUT_MS }
-          )
-          // Another session on the tab may have answered first.
-          .catch(() => undefined);
+        // Kept now, so the notices list dialogs in the order they opened.
         const dialog: AnsweredDialog = {
           targetId: tab.targetId,
           type,
@@ -250,13 +248,27 @@ export function dialogWatcher(): HostTabWatcher {
         if (answered.length < MAX_ANSWERED_DIALOGS_KEPT) {
           answered.push(dialog);
         }
+        tab
+          .send(
+            "Page.handleJavaScriptDialog",
+            { accept: accepted },
+            { timeoutMs: OBSERVER_COMMAND_TIMEOUT_MS }
+          )
+          .catch((error: unknown) => {
+            // Another session on the tab answered first, so the host's
+            // answer isn't what the page got. A timeout means the tab
+            // hung, and the host did send it, so that one stays.
+            if (!(error instanceof CdpProtocolError)) return;
+            dialog.refused = true;
+            counts.set(tab.targetId, (counts.get(tab.targetId) ?? 1) - 1);
+          });
       });
     },
     notices(workedIn) {
       const inSession = (targetId: string) =>
         !workedIn || workedIn.has(targetId);
       const shown = answered
-        .filter((dialog) => inSession(dialog.targetId))
+        .filter((dialog) => !dialog.refused && inSession(dialog.targetId))
         .slice(0, MAX_DIALOG_NOTICES);
       let total = 0;
       for (const [targetId, count] of counts) {
@@ -266,9 +278,10 @@ export function dialogWatcher(): HostTabWatcher {
         (dialog) =>
           `The page opened ${dialog.type === "alert" ? "an" : "a"} ${dialog.type} dialog (${JSON.stringify(dialog.message)}), and the host ${dialog.accepted ? "accepted" : "dismissed"} it${dialogEffect(dialog)}.`
       );
-      if (total > shown.length) {
+      const more = total - shown.length;
+      if (more > 0) {
         notices.push(
-          `The host answered ${total - shown.length} more dialogs the same way.`
+          `The host answered ${more} more ${more === 1 ? "dialog" : "dialogs"} the same way.`
         );
       }
       return notices;

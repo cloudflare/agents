@@ -1498,6 +1498,40 @@ describe("BrowserSession observer", () => {
     ]);
   });
 
+  it("leaves out a dialog someone else answered first", async () => {
+    const t = setup();
+    const session = t.browser.session();
+    const target = evaluatedIn(await call(session, evaluateActive));
+    const instance = t.instance();
+    instance.emit(target, "Page.javascriptDialogOpening", {
+      type: "confirm",
+      message: "Delete?"
+    });
+    // Model code that enabled Page answered it before the host's answer
+    // arrived, so Chrome refuses the host's.
+    instance.dialogs.set(target, 0);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    for (let i = 1; i <= 6; i++) {
+      instance.emit(target, "Page.javascriptDialogOpening", {
+        type: "alert",
+        message: `Alert ${i}`
+      });
+    }
+    const report = await session.close();
+    const answers = t.sockets[1].sent.filter(
+      ({ method }) => method === "Page.handleJavaScriptDialog"
+    );
+    expect(answers).toHaveLength(7);
+    // Not "dismissed, so confirm() returned false": the page got another
+    // answer. And it isn't counted among the "more".
+    expect(report?.notices).toHaveLength(6);
+    expect(report?.notices[0]).toContain('("Alert 1")');
+    expect(report?.notices.join(" ")).not.toContain("Delete?");
+    expect(report?.notices[5]).toBe(
+      "The host answered 1 more dialog the same way."
+    );
+  });
+
   it("lists five dialogs, then says how many more it answered", async () => {
     const t = setup();
     const session = t.browser.session();
@@ -1706,6 +1740,45 @@ describe("BrowserSession observer", () => {
     }
   });
 
+  it("tells the model to reload a blocked tab it attached to raw, too", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const t = setup();
+      const instance = await t.start();
+      const stuck = instance.addTab("https://stuck.example/");
+      instance.blocked.add(stuck);
+      const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const session = t.browser.session();
+      const attaching = session.send({
+        method: "Target.attachToTarget",
+        params: { targetId: stuck, flatten: true }
+      });
+      await vi.advanceTimersByTimeAsync(250);
+      const { sessionId } = (await attaching) as { sessionId: string };
+      await vi.advanceTimersByTimeAsync(1_000);
+      const sending = session
+        .send({
+          method: "Runtime.evaluate",
+          params: { expression: "1" },
+          sessionId,
+          timeoutMs: 500
+        })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(500);
+      const error = String(await sending);
+      expect(error).toContain("CDP command timed out after 500ms");
+      expect(error).toContain(
+        `Reload or navigate this tab: send Page.reload with sessionId: "${sessionId}"`
+      );
+      const closing = session.close();
+      await vi.advanceTimersByTimeAsync(3_000);
+      await closing;
+      warned.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("leaves a plain timeout alone in a tab that isn't blocked", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
@@ -1826,6 +1899,39 @@ describe("BrowserSession hostObserver hook", () => {
       sessionId
     }
   ];
+
+  it("holds a second command sent to the tab while the first still waits", async () => {
+    const t = setup({
+      hostObserver: () => new Promise((resolve) => setTimeout(resolve, 100))
+    });
+    await t.run([evaluateActive]);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const session = t.browser.session();
+      const done: string[] = [];
+      const first = call(session, evaluateActive).then(() => {
+        done.push("first");
+      });
+      await vi.advanceTimersByTimeAsync(50);
+      // The first command has attached, and waits for the hook.
+      const second = call(session, evaluateActive).then(() => {
+        done.push("second");
+      });
+      await vi.advanceTimersByTimeAsync(10);
+      expect(done).toEqual([]);
+      await vi.advanceTimersByTimeAsync(100);
+      await Promise.all([first, second]);
+      expect(done).toEqual(["first", "second"]);
+      // One attach for both.
+      const modelAttaches = t.sockets[2].sent.filter(
+        ({ method }) => method === "Target.attachToTarget"
+      );
+      expect(modelAttaches).toHaveLength(1);
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it("runs once per tab, with the tab, before the model's first command there", async () => {
     const calls: Array<{

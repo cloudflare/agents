@@ -369,6 +369,16 @@ interface ConnectedState {
   /** Live CDP session per target, valid on this socket only. */
   attached: Map<TargetId, LiveSessionId>;
   /**
+   * Attaches under way, until the observer is ready there too, so a second
+   * command to the tab waits with the first rather than skipping the hold.
+   */
+  attaching: Map<TargetId, Promise<LiveSessionId>>;
+  /**
+   * Sessions model code attached itself with a raw `Target.attachToTarget`,
+   * so a timeout in one can say the tab is blocked.
+   */
+  rawSessions: Map<LiveSessionId, TargetId>;
+  /**
    * Tabs this session attached to, through `attachToTarget` or a raw
    * `Target.attachToTarget`. Their popups are this session's new tabs.
    */
@@ -770,6 +780,8 @@ export class BrowserSession {
       connected,
       ...(observer ? { observer } : {}),
       attached: new Map(),
+      attaching: new Map(),
+      rawSessions: new Map(),
       workedIn: new Set(),
       initialPages: new Set(initialPages.map((page) => page.targetId)),
       activeResolved: false,
@@ -961,8 +973,24 @@ export class BrowserSession {
     targetId: TargetId,
     timeoutMs?: number
   ): Promise<LiveSessionId> {
+    const pending = state.attaching.get(targetId);
+    if (pending) return pending;
     const existing = state.attached.get(targetId);
     if (existing) return existing;
+    const attaching = this.#attachNow(state, targetId, timeoutMs);
+    state.attaching.set(targetId, attaching);
+    try {
+      return await attaching;
+    } finally {
+      state.attaching.delete(targetId);
+    }
+  }
+
+  async #attachNow(
+    state: ConnectedState,
+    targetId: TargetId,
+    timeoutMs?: number
+  ): Promise<LiveSessionId> {
     state.observer?.attach(targetId);
     const live = (await state.connected.cdp.attachToTarget(targetId, {
       timeoutMs
@@ -994,8 +1022,15 @@ export class BrowserSession {
     } else if (method === "Target.attachToTarget" && targetId) {
       this.#setActive(state, targetId);
       state.workedIn.add(targetId);
+      const live = (result as { sessionId?: unknown } | undefined)?.sessionId;
+      if (typeof live === "string") {
+        state.rawSessions.set(live as LiveSessionId, targetId);
+      }
     } else if (method === "Target.closeTarget" && targetId) {
       state.attached.delete(targetId);
+      for (const [live, target] of state.rawSessions) {
+        if (target === targetId) state.rawSessions.delete(live);
+      }
       state.closed.add(targetId);
       // The next "active" use picks a tab afresh.
       if (state.activeTargetId === targetId) state.activeTargetId = undefined;
@@ -1004,6 +1039,11 @@ export class BrowserSession {
       for (const [target, live] of state.attached) {
         if (target === targetId || live === params?.sessionId) {
           state.attached.delete(target);
+        }
+      }
+      for (const [live, target] of state.rawSessions) {
+        if (target === targetId || live === params?.sessionId) {
+          state.rawSessions.delete(live);
         }
       }
     }
@@ -1041,7 +1081,10 @@ export class BrowserSession {
     live: LiveSessionId | undefined
   ): Promise<unknown> {
     if (error instanceof CdpTimeoutError) {
-      const targetId = [...state.attached].find(([, id]) => id === live)?.[0];
+      const targetId = live
+        ? ([...state.attached].find(([, id]) => id === live)?.[0] ??
+          state.rawSessions.get(live))
+        : undefined;
       if (targetId && state.observer?.isBlocked(targetId)) {
         return new Error(
           `${error.message}. This tab isn't responding, probably because ` +
