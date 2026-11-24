@@ -59,6 +59,7 @@ import {
 } from "./before-turn";
 import {
   ContinuationState,
+  continuationTargetIsLatest,
   type ContinuationConnection
 } from "./continuation-state";
 import {
@@ -435,6 +436,20 @@ export class ChatTurns<
             }
           },
           replay: (record, onQueued) => {
+            const continuation = continuationRecord(record);
+            if (continuation && record.stopped) {
+              this.admissions?.end(record.requestId);
+              onQueued();
+              return Promise.resolve();
+            }
+            if (continuation) {
+              this.#resumeContinuation(
+                record.requestId,
+                continuation.targetMessageIds
+              );
+              onQueued();
+              return Promise.resolve();
+            }
             const request = admissions.replayRequest(record);
             if (!request) {
               this.#restoredDecisions.delete(record.requestId);
@@ -918,11 +933,64 @@ export class ChatTurns<
     return this.#applyUnlessStopped(
       apply,
       autoContinue,
-      (outcome) =>
-        this.autoContinuation.afterInteraction(outcome, autoContinue, spec),
+      (outcome) => {
+        this.autoContinuation.afterInteraction(outcome, autoContinue, spec);
+        if (autoContinue && outcome.status === "changed") {
+          this.#admitContinuation();
+        }
+      },
       enqueue,
       connectionId === undefined ? connectionOf(spec) : connectionId
     );
+  }
+
+  /**
+   * The continuation a client's answer scheduled is kept as an admission
+   * record until its turn has a fiber, like a client request: it waits in
+   * memory (the coalesce timer, a sibling's answer) and a reset there would
+   * lose it, leaving the answered call that nothing continues (P1). After a
+   * reset the record schedules it again ({@link #resumeContinuation}).
+   */
+  #admitContinuation(): void {
+    const pending = this.continuation.pending;
+    if (!this.admissions || !pending || pending.pastCoalesce) return;
+    this.admissions.admit({
+      requestId: pending.requestId,
+      messages: [],
+      afterUserId: null,
+      decision: { strategy: null, overlapping: false, debounceUntilMs: null },
+      payload: {
+        trigger: CONTINUATION_TRIGGER,
+        targetMessageIds: [...pending.targetMessageIds]
+      }
+    });
+  }
+
+  /**
+   * Schedule again the continuation an earlier isolate kept a record of,
+   * under its request id (so its turn's fiber releases the record), while
+   * one of the messages it answers is still the latest. No tab waits on it.
+   */
+  #resumeContinuation(requestId: string, targetMessageIds: string[]): void {
+    const target = { targetMessageIds };
+    if (
+      this.continuation.pending ||
+      !continuationTargetIsLatest(this.host.messages(), target)
+    ) {
+      this.admissions?.end(requestId);
+      return;
+    }
+    this.continuation.pending = {
+      // SAFETY: only `id` and `send` are used, and nothing is sent to it.
+      connection: DETACHED_CONNECTION as unknown as TConnection,
+      connectionId: null,
+      requestId,
+      errorPrefix: null,
+      prerequisite: null,
+      pastCoalesce: false,
+      targetMessageIds
+    };
+    this.autoContinuation.armTimer();
   }
 
   /**
@@ -1451,7 +1519,13 @@ export class ChatTurns<
   #dropWaiting(stoppedRequestId: string | null): void {
     this.#stoppedTurn = stoppedRequestId;
     this.#stops++;
+    // A dropped continuation's record goes with it: a reset must not run
+    // what a stop dropped.
+    const dropped = this.continuation.pending?.requestId;
     dropWaitingContinuations(this.#continuationParts, stoppedRequestId);
+    if (dropped !== undefined && this.continuation.pending === null) {
+      this.admissions?.end(dropped);
+    }
   }
 
   /**
@@ -1623,3 +1697,32 @@ function connectionOf<TConnection extends ContinuationConnection>(
     return null;
   }
 }
+
+/** The trigger of a continuation's admission record (P1). */
+const CONTINUATION_TRIGGER = "continuation";
+
+/** A continuation's admission record's payload, or `undefined`. */
+function continuationRecord(
+  record: ChatAdmissionRecord
+): { targetMessageIds: string[] } | undefined {
+  const payload = record.payload as
+    | { trigger?: unknown; targetMessageIds?: unknown }
+    | undefined;
+  if (
+    payload?.trigger !== CONTINUATION_TRIGGER ||
+    !Array.isArray(payload.targetMessageIds)
+  ) {
+    return undefined;
+  }
+  return {
+    targetMessageIds: payload.targetMessageIds.filter(
+      (id): id is string => typeof id === "string"
+    )
+  };
+}
+
+/**
+ * The connection a continuation resumed after a reset answers to: no tab
+ * waits on it, so what it would tell one goes nowhere.
+ */
+const DETACHED_CONNECTION = { id: "", send: () => {} };
