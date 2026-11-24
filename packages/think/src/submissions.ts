@@ -8,7 +8,6 @@ import type { UIMessage } from "ai";
 import type { TaskJson, TaskStatus } from "agents/tasks";
 import {
   MAX_FRAMEWORK_METADATA_BYTES,
-  MAX_SERIALIZED_BYTES,
   TaskSettlement,
   type TaskRecord
 } from "agents/internal";
@@ -348,11 +347,6 @@ const utf8 = new TextEncoder();
 const PROGRESS_HEADROOM_BYTES = 100_000;
 
 /**
- * Whether a turn's structured output still fits in a submission's metadata
- * beside what it holds. One that does not is not recorded as progress: the
- * run's result carries it once the submission settles.
- */
-/**
  * The metadata a new submission is stored with: the app's own fields, without
  * Think's progress key (Think writes it), checked against the room that
  * leaves the turn's progress (ids, timestamps) beside it.
@@ -374,6 +368,33 @@ export function admittedSubmissionMetadata(
   return app as Record<string, TaskJson>;
 }
 
+/**
+ * Largest structured output a submission may complete with. Only a workflow
+ * prompt has one, and its workflow is sent it in one event, which holds at
+ * most 1 MiB (Workflows' event payload limit); the rest of the event (ids,
+ * status) gets the margin.
+ */
+const MAX_SUBMISSION_OUTPUT_BYTES = 1_048_576 - 4_096;
+
+/** Whether a submission's structured output can be delivered. */
+export function submissionOutputFits(output: unknown): boolean {
+  return (
+    output === undefined || jsonBytes(output) <= MAX_SUBMISSION_OUTPUT_BYTES
+  );
+}
+
+/** A submission that completed with an output too large to deliver. */
+export function submissionOutputTooLarge(output: unknown): SubmissionOutcome {
+  return submissionFailed(
+    `Structured output is ${jsonBytes(output)} bytes; a workflow event holds at most ${MAX_SUBMISSION_OUTPUT_BYTES}`
+  );
+}
+
+/**
+ * Whether a turn's structured output still fits in a submission's metadata
+ * beside what it holds. One that does not is not recorded as progress: the
+ * run's result carries it once the submission settles.
+ */
 export function progressOutputFits(
   metadata: Record<string, TaskJson> | undefined,
   output: unknown
@@ -475,7 +496,7 @@ export function legacySubmissionImport(row: LegacySubmissionRow): {
     );
   }
   let result = completed ? output : undefined;
-  if (result !== undefined && jsonBytes(result) > MAX_SERIALIZED_BYTES) {
+  if (result !== undefined && !submissionOutputFits(result)) {
     console.warn(
       `[Think] Submission "${row.submission_id}": its output is too large to keep and was dropped`
     );

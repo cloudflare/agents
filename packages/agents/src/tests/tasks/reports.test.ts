@@ -659,3 +659,32 @@ describe("Tasks patchMetadata bound", () => {
     });
   });
 });
+
+describe("Tasks listing without results", () => {
+  it("lists records without reading results, inputs or checkpoints", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.tasks.run("__cf_echo" as never, "abc" as never, {
+          runId: "listed",
+          start: "now"
+        });
+        // A result that would not parse: a listing without results never
+        // touches it.
+        state.storage.sql.exec(
+          "UPDATE cf_agents_task_runs SET result = '{' WHERE run_id = 'listed'"
+        );
+        const [light] = instance.tasks.peekList({
+          definition: "__cf_echo",
+          results: false
+        });
+        expect(light).toMatchObject({ runId: "listed", status: "completed" });
+        expect(light).not.toHaveProperty("result");
+        expect(() =>
+          instance.tasks.peekList({ definition: "__cf_echo" })
+        ).toThrow();
+      }
+    );
+  });
+});

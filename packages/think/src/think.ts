@@ -321,6 +321,8 @@ import {
   submissionRow,
   submissionSettlement,
   submissionTaskStatuses,
+  submissionOutputFits,
+  submissionOutputTooLarge,
   admittedSubmissionMetadata,
   progressOutputFits,
   type SubmissionResult,
@@ -5717,6 +5719,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       .peekList({
         definition: SUBMISSION_KIND,
         ...(status && submissionTaskStatuses(status)),
+        results: false,
         limit: Math.min(Math.max(options?.limit ?? 50, 1), 100)
       })
       .map(submissionInspection);
@@ -5898,7 +5901,16 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     payload: SubmissionPayload,
     step: TaskStep
   ): Promise<TaskSettlement | TaskJson | undefined> {
-    return submissionSettlement(await this._decideSubmission(payload, step));
+    const outcome = await this._decideSubmission(payload, step);
+    // An output its workflow could not be sent ends the submission `error`
+    // with the reason, not at the result's serialization.
+    if (
+      outcome.status === "completed" &&
+      !submissionOutputFits(outcome.output)
+    ) {
+      return submissionSettlement(submissionOutputTooLarge(outcome.output));
+    }
+    return submissionSettlement(outcome);
   }
 
   private async _decideSubmission(
