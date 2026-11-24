@@ -7,6 +7,7 @@
 import { bundleWithEsbuild, bundlerOnlyOptionsWarning } from "./bundler";
 import { hasNodejsCompat, parseWranglerConfig } from "./config";
 import { hasDependencies, installDependencies } from "./installer";
+import { DEFAULT_PYTHON_COMPATIBILITY_DATE } from "./installer-python";
 import { transformAndResolve } from "./transformer";
 import type { CreateWorkerOptions, CreateWorkerResult, Modules } from "./types";
 import {
@@ -118,7 +119,13 @@ export async function createWorker(
   const installWarnings: string[] = [];
   if (hasDependencies(fileSystem)) {
     const installResult = await installDependencies(fileSystem, {
-      ...(registry ? { registry } : {})
+      ...(registry ? { registry } : {}),
+      python: {
+        compatibilityDate:
+          wranglerConfig?.compatibilityDate ??
+          DEFAULT_PYTHON_COMPATIBILITY_DATE,
+        compatibilityFlags: wranglerConfig?.compatibilityFlags ?? []
+      }
     });
     installWarnings.push(...installResult.warnings);
   }
@@ -142,7 +149,13 @@ export async function createWorker(
   if (entryPoint.endsWith(".py")) {
     const modules: Modules = {};
     for (const path of fileSystem.list()) {
-      if (path === "pyproject.toml") {
+      // Config files are read above, not uploaded as modules.
+      if (
+        path === "pyproject.toml" ||
+        path === "wrangler.toml" ||
+        path === "wrangler.json" ||
+        path === "wrangler.jsonc"
+      ) {
         continue;
       }
       const content = fileSystem.read(path);
@@ -155,7 +168,9 @@ export async function createWorker(
       mainModule: entryPoint,
       modules,
       wranglerConfig: {
-        compatibilityDate: wranglerConfig?.compatibilityDate ?? "2026-07-02",
+        compatibilityDate:
+          wranglerConfig?.compatibilityDate ??
+          DEFAULT_PYTHON_COMPATIBILITY_DATE,
         compatibilityFlags: wranglerConfig?.compatibilityFlags ?? []
       },
       warnings: installWarnings

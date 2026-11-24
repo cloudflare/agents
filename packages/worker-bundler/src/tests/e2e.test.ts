@@ -1336,6 +1336,54 @@ describe("createWorker with pyproject.toml", () => {
     expect(body.parsed).toEqual({ hello: "world" });
   });
 
+  // The compatibility date picks the Python the Worker runs, and the wheels
+  // must match it: 3.12 before 2025-09-29, 3.13 until 2026-09-07, 3.14 after.
+  it.each([
+    ["2025-09-01", "3.12"],
+    ["2026-01-01", "3.13"],
+    ["2026-09-08", "3.14"]
+  ])(
+    "installs native wheels for the Python a %s compatibility date runs (%s)",
+    async (compatibilityDate, python) => {
+      const id = "test-worker-" + testId++;
+      const createWorkerResult = await createWorker({
+        files: {
+          "index.py": [
+            "import sys",
+            "from workers import Response, WorkerEntrypoint",
+            "from yaml import _yaml",
+            "class Default(WorkerEntrypoint):",
+            "  async def fetch(self, request):",
+            "    return Response.json({",
+            '      "python": f"{sys.version_info.major}.{sys.version_info.minor}",',
+            '      "native": _yaml.__name__',
+            "    })"
+          ].join("\n"),
+          "pyproject.toml": [
+            "[project]",
+            'name = "dummy"',
+            'version = "0.0.0"',
+            'dependencies = ["pyyaml"]'
+          ].join("\n"),
+          "wrangler.toml": `compatibility_date = "${compatibilityDate}"`
+        }
+      });
+      const worker = env.LOADER.get(id, () => ({
+        mainModule: createWorkerResult.mainModule,
+        modules: createWorkerResult.modules,
+        compatibilityDate:
+          createWorkerResult.wranglerConfig!.compatibilityDate!,
+        compatibilityFlags:
+          createWorkerResult.wranglerConfig!.compatibilityFlags!
+      }));
+      const response = await worker
+        .getEntrypoint()
+        .fetch(new Request("http://worker/"));
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ python, native: "yaml._yaml" });
+    }
+  );
+
   it("imports larger packages", async () => {
     const id = "test-worker-" + testId++;
     const createWorkerResult = await createWorker({
