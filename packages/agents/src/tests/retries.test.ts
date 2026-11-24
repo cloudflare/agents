@@ -25,16 +25,26 @@ describe("retries", () => {
       expect(backoffDelay(10_000, { baseMs: 0, jitter: false })).toBe(0);
     });
 
-    it("spreads delays over [0, delay) by default", () => {
+    it("spreads delays over [delay / 2, delay) by default, so each wait is longer", () => {
       const delays = new Set<number>();
       for (let i = 0; i < 10_000; i++) {
         const delay = backoffDelay(4, { baseMs: 100, maxMs: 3000 });
-        expect(delay).toBeGreaterThanOrEqual(0);
+        expect(delay).toBeGreaterThanOrEqual(400);
         expect(delay).toBeLessThan(800);
+        // Always above anything the attempt before could draw.
+        expect(delay).toBeGreaterThan(backoffDelay(3, { baseMs: 100 }));
         delays.add(delay);
       }
       // Retries after a shared failure do not line up.
-      expect(delays.size).toBeGreaterThan(400);
+      expect(delays.size).toBeGreaterThan(200);
+    });
+
+    it("spreads delays over [0, delay) with full jitter", () => {
+      for (let i = 0; i < 10_000; i++) {
+        const delay = backoffDelay(4, { baseMs: 100, jitter: "full" });
+        expect(delay).toBeGreaterThanOrEqual(0);
+        expect(delay).toBeLessThan(800);
+      }
     });
   });
 

@@ -183,7 +183,8 @@ async function retryDurableObjectOperation<T>(
 
       const delayMs = backoffDelay(attempt, {
         baseMs: resolved.baseDelayMs,
-        maxMs: resolved.maxDelayMs
+        maxMs: resolved.maxDelayMs,
+        jitter: "full"
       });
       try {
         await resolved.onRetry?.({

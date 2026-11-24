@@ -84,28 +84,33 @@ export type BackoffOptions = {
   /** The longest delay. Default: no limit. */
   maxMs?: number;
   /**
-   * Spread the delay uniformly over `[0, delay)` ("full jitter"), so
-   * retries after a shared failure do not line up. Default: true. Pass
-   * false where the same inputs must give the same delay.
+   * How the delay is spread, so retries after a shared failure do not line
+   * up ([AWS](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/)):
+   *
+   * - `"equal"` (default): uniformly over `[delay / 2, delay)`. Each wait is
+   *   at least half the delay and longer than the one before.
+   * - `"full"`: uniformly over `[0, delay)`.
+   * - `false`: exactly `delay`, where the same inputs must give the same
+   *   delay.
    */
-  jitter?: boolean;
+  jitter?: "equal" | "full" | false;
 };
 
 /**
  * The delay before retry number `attempt` (1-based): `baseMs` doubled for
- * each attempt after the first, capped at `maxMs`, then jittered. Uses the
- * "Full Jitter" approach from
- * https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/
+ * each attempt after the first, capped at `maxMs`, then jittered.
  */
 export function backoffDelay(
   attempt: number,
-  { baseMs, maxMs = Number.POSITIVE_INFINITY, jitter = true }: BackoffOptions
+  { baseMs, maxMs = Number.POSITIVE_INFINITY, jitter = "equal" }: BackoffOptions
 ): number {
   // Past 2 ** 52 the cap has long taken over; this also keeps 0 * Infinity
   // out of the product.
   const exponent = Math.min(Math.max(attempt - 1, 0), 52);
   const delay = Math.min(baseMs * 2 ** exponent, maxMs);
-  return jitter ? Math.floor(Math.random() * delay) : delay;
+  if (jitter === false) return delay;
+  const floor = jitter === "equal" ? delay / 2 : 0;
+  return Math.floor(floor + Math.random() * (delay - floor));
 }
 
 /**
@@ -156,10 +161,11 @@ export async function tryN<T>(
       ) {
         throw err;
       }
-      // The first retry waits up to twice the base delay, as documented.
+      // As documented: full jitter, the first retry up to twice the base.
       const delay = backoffDelay(attempt + 1, {
         baseMs: baseDelayMs,
-        maxMs: maxDelayMs
+        maxMs: maxDelayMs,
+        jitter: "full"
       });
       await new Promise((resolve) => setTimeout(resolve, delay));
       attempt = nextAttempt;

@@ -121,7 +121,8 @@ export interface TaskStepConfig {
     delay?: number | TaskDurationString;
     /**
      * Delay growth across retries. Defaults to exponential, which is
-     * jittered: each delay is drawn from `[0, delay * 2^(retry - 1))`.
+     * jittered: retry `n` waits between half and all of
+     * `delay * 2^(n - 1)`.
      */
     backoff?: "constant" | "linear" | "exponential";
   };

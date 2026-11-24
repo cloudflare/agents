@@ -910,8 +910,8 @@ describe("Think — error handling", () => {
       expect(result.first.error).toBeUndefined();
       expect(result.first.interruptedCalls).toBe(1);
       expect(result.scheduledContinues).toBe(1);
-      // The first retry waits under a second, jittered.
-      expect(result.delaySeconds).toBeGreaterThanOrEqual(0);
+      // The first retry waits between half a second and a second.
+      expect(result.delaySeconds).toBeGreaterThanOrEqual(0.5);
       expect(result.delaySeconds).toBeLessThan(1);
       expect(result.assistantMessages).toBe(1);
       expect(result.finalAssistantText.length).toBeGreaterThan(0);
@@ -944,11 +944,12 @@ describe("Think — error handling", () => {
     const agent = await freshAgent(`transient-backoff-${crypto.randomUUID()}`);
     const result = await agent.collectTransientBackoffForTest(20);
 
-    // Each delay is jittered below its doubling ceiling, capped at 30s.
+    // Each delay is jittered within the upper half of its doubling
+    // ceiling, capped at 30s.
     const ceilings = [1, 2, 4, 8, 16, 30, 30, 30, 30, 30];
     expect(result.delays).toHaveLength(ceilings.length);
     result.delays.forEach((delay, i) => {
-      expect(delay).toBeGreaterThanOrEqual(0);
+      expect(delay).toBeGreaterThanOrEqual(ceilings[i] / 2);
       expect(delay).toBeLessThan(ceilings[i]);
     });
   });
@@ -976,6 +977,7 @@ describe("Think — error handling", () => {
 
     expect(result.delays).toHaveLength(3);
     result.delays.forEach((delay, i) => {
+      expect(delay).toBeGreaterThanOrEqual([1, 2, 4][i] / 2);
       expect(delay).toBeLessThan([1, 2, 4][i]);
     });
     // Only the first attempt joins duplicate detections; the attempts it
@@ -1053,7 +1055,7 @@ describe("Think — error handling", () => {
     { retryAfter: "7", inStream: true, delay: 7 },
     { retryAfter: "7", inStream: false, delay: 7 },
     { retryAfter: "600", inStream: true, delay: 60 },
-    // Retry-After 0 leaves the backoff: under a second, jittered.
+    // Retry-After 0 leaves the backoff: between half a second and a second.
     { retryAfter: "0", inStream: true, delay: undefined }
   ])(
     "honors Retry-After $retryAfter on a rate limit (inStream: $inStream)",
@@ -1068,7 +1070,7 @@ describe("Think — error handling", () => {
 
       expect(result.scheduled).toBe(1);
       if (delay === undefined) {
-        expect(result.delaySeconds).toBeGreaterThanOrEqual(0);
+        expect(result.delaySeconds).toBeGreaterThanOrEqual(0.5);
         expect(result.delaySeconds).toBeLessThan(1);
       } else {
         expect(result.delaySeconds).toBe(delay);
@@ -1205,8 +1207,8 @@ describe("Think — error handling", () => {
 
       const recovered = await agent.runScheduledRecoveryForTest();
       expect(recovered.scheduledContinues).toBe(1);
-      // The first retry waits under a second, jittered.
-      expect(recovered.delaySeconds).toBeGreaterThanOrEqual(0);
+      // The first retry waits between half a second and a second.
+      expect(recovered.delaySeconds).toBeGreaterThanOrEqual(0.5);
       expect(recovered.delaySeconds).toBeLessThan(1);
       expect(recovered.finalRoles).toEqual(["user", "assistant"]);
     } finally {
