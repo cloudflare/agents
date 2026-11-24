@@ -12,6 +12,7 @@
  */
 
 import type { TaskJson, TaskStep } from "../tasks";
+import { MAX_SERIALIZED_BYTES } from "../tasks/serialization";
 import type { ChatRecoveryAttemptInput } from "./recovery-engine";
 import {
   runChatRecoveryAttempt,
@@ -74,11 +75,13 @@ export type ChatTurnTaskHooks = {
     requestId: string;
     persisted: unknown;
     createdAt: number;
-    attempt: (attempt: ChatRecoveryAttemptInput) => void;
+    attempt: (attempt: ChatRecoveryAttemptInput) => boolean;
   }): Promise<void>;
   /** The host's recovery callbacks, as the recovery Task runs them. */
   readonly attempts: ChatRecoveryTaskHooks;
 };
+
+const utf8 = new TextEncoder();
 
 /** The checkpoint entry holding the app's latest `stash()` data. */
 const STASH = "stash";
@@ -137,7 +140,16 @@ export function createChatTurnTaskDefinition(
             persisted,
             createdAt: step.createdAt,
             attempt: (next) => {
+              // A step result is at most 1 MiB; an attempt carrying a larger
+              // request body goes to the recovery Task, whose input is parted.
+              if (
+                utf8.encode(JSON.stringify(next)).byteLength >
+                MAX_SERIALIZED_BYTES - 1024
+              ) {
+                return false;
+              }
               scheduled = next;
+              return true;
             }
           });
           await hooks.storage.delete(legacyKey);

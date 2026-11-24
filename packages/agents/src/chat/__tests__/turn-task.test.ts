@@ -227,7 +227,7 @@ describe("createChatTurnTaskDefinition", () => {
         delete: async () => true
       } as unknown as DurableObjectStorage,
       recover: async (turn) =>
-        turn.attempt({
+        void turn.attempt({
           callback: "_chatRecoveryContinue",
           data: { incidentId: "i1" },
           delaySeconds: 2
@@ -248,12 +248,41 @@ describe("createChatTurnTaskDefinition", () => {
         delete: async () => true
       } as unknown as DurableObjectStorage,
       recover: async (turn) =>
-        turn.attempt({
+        void turn.attempt({
           callback: "_chatRecoveryRetry",
           data: {},
           delaySeconds: 0
         })
     })({ requestId: "r2", nonce: "n2" }, step);
     expect(steps).toEqual(["model-turn", "backoff:1", "continuation"]);
+  });
+
+  it("hands back an attempt too large to journal, and runs nothing after the replay", async () => {
+    const { step } = fakeStep(undefined);
+    const steps: string[] = [];
+    const stepDo = step.do.bind(step);
+    Object.assign(step, {
+      do: (name: string, config: unknown, fn: never) => {
+        steps.push(name);
+        return stepDo(name, config as never, fn);
+      }
+    });
+    let taken: boolean | undefined;
+    await createChatTurnTaskDefinition({
+      ...hooks,
+      storage: {
+        get: async () => undefined,
+        delete: async () => true
+      } as unknown as DurableObjectStorage,
+      recover: async (turn) => {
+        taken = turn.attempt({
+          callback: "_chatRecoveryContinue",
+          data: { lastBody: { text: "x".repeat(1_100_000) } },
+          delaySeconds: 0
+        });
+      }
+    })({ requestId: "r3", nonce: "n3" }, step);
+    expect(taken).toBe(false);
+    expect(steps).toEqual(["model-turn"]);
   });
 });

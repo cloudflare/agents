@@ -6308,10 +6308,19 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // the continuation) instead of a recovery run.
     const turnRuns = await this.tasks.list({
       definition: (this.constructor as typeof Think).CHAT_FIBER_NAME,
-      status: ["pending", "running"],
+      status: ["pending"],
       limit: Number.MAX_SAFE_INTEGER
     });
-    if (turnRuns.some((run) => matchesSubmission(run.metadata?.requestId))) {
+    // Only a run asleep in its attempt's backoff: one not yet replayed has
+    // planned nothing, and the freshness check decides for it.
+    if (
+      turnRuns.some(
+        (run) =>
+          run.status === "pending" &&
+          run.waitReason === "sleep" &&
+          matchesSubmission(run.metadata?.requestId)
+      )
+    ) {
       return true;
     }
 
@@ -9898,7 +9907,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     requestId: string;
     persisted: unknown;
     createdAt: number;
-    attempt?: (attempt: ChatRecoveryAttemptInput) => void;
+    attempt?: (attempt: ChatRecoveryAttemptInput) => boolean;
   }): Promise<void> {
     if (await this._settlePersistedChatTurn(turn.requestId)) return;
     const { snapshot, user } = unwrapChatFiberSnapshot<"think-chat-turn">(

@@ -434,9 +434,10 @@ export interface InterruptedChatTurn {
   createdAt: number;
   /**
    * Where the recovery attempt goes when the turn's own run runs it, instead
-   * of a recovery Task of its own.
+   * of a recovery Task of its own. Returns `false` when the run cannot keep
+   * it, and the attempt goes to the recovery Task.
    */
-  attempt?: (attempt: ChatRecoveryAttemptInput) => void;
+  attempt?: (attempt: ChatRecoveryAttemptInput) => boolean;
 }
 
 /**
@@ -832,7 +833,7 @@ export class ChatRecoveryEngine {
       streamStillActive: boolean;
       streamStatus: ChatStreamStatus | undefined;
       partial: RecoveryPartial;
-      into?: (attempt: ChatRecoveryAttemptInput) => void;
+      into?: (attempt: ChatRecoveryAttemptInput) => boolean;
     }
   ): Promise<void> {
     const { adapter } = this;
@@ -1131,7 +1132,7 @@ export class ChatRecoveryEngine {
     reason?: ChatRecoveryScheduleReason;
     delaySeconds?: number;
     /** Hand the attempt to the caller's own run instead of the host's Task. */
-    into?: (attempt: ChatRecoveryAttemptInput) => void;
+    into?: (attempt: ChatRecoveryAttemptInput) => boolean;
   }): Promise<boolean> {
     const { incident } = input;
     // One write: the status, what the scheduled attempt will do (so a turn
@@ -1207,13 +1208,15 @@ export class ChatRecoveryEngine {
     });
     const data =
       delivery === undefined ? input.data : { ...input.data, delivery };
-    if (input.into) {
-      input.into({
+    // The caller's run takes the attempt when it can keep it; otherwise
+    // (an attempt too large to journal) it goes to the host's Task.
+    if (
+      !input.into?.({
         callback: input.callback,
         data,
         delaySeconds: input.delaySeconds ?? 0
-      });
-    } else {
+      })
+    ) {
       await this.adapter.scheduleRecovery(
         input.callback,
         data,

@@ -164,7 +164,7 @@ export type RecoveredTurnSchedule = {
   delaySeconds?: number;
   reason?: ChatRecoveryScheduleReason;
   /** See `ChatRecoveryEngine.scheduleRecovery`. */
-  into?: (attempt: ChatRecoveryAttemptInput) => void;
+  into?: (attempt: ChatRecoveryAttemptInput) => boolean;
 };
 
 /**

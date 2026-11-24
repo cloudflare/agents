@@ -3556,7 +3556,7 @@ export class AIChatAgent<
     requestId: string;
     persisted: unknown;
     createdAt: number;
-    attempt?: (attempt: ChatRecoveryAttemptInput) => void;
+    attempt?: (attempt: ChatRecoveryAttemptInput) => boolean;
   }): Promise<void> {
     const { snapshot, user } = unwrapChatFiberSnapshot<"ai-chat-turn">(
       "__cfAIChatFiberSnapshot",
