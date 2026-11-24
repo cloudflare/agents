@@ -282,7 +282,7 @@ function operationInput(
     return { kind: "messages", messages: input as readonly UIMessage[] };
   }
   if (isToolAnswer(input)) {
-    const { from, ...answer } = input as ToolAnswer & HarnessInputFrom;
+    const { from, ...answer } = input;
     return {
       kind: "answer",
       answer,
@@ -291,8 +291,7 @@ function operationInput(
     };
   }
   if (isUIMessage(input)) return { kind: "messages", messages: [input] };
-  // SAFETY: the remaining ThinkInput is the shared HarnessInput, which
-  // Channels sends with the participant it came from.
+  // SAFETY: the remaining ThinkInput is the shared HarnessInput.
   const harnessInput = input as HarnessInput & HarnessInputFrom;
   return {
     kind: "messages",
