@@ -5,7 +5,7 @@
  */
 
 import type { UIMessage } from "ai";
-import type { ContextBlocks } from "agents/context";
+import type { Context } from "agents/context";
 import { WorkspaceFiles, resolveWorkspacePath } from "../workspace-files";
 import type { ThinkWorkspace } from "../workspace-files";
 
@@ -54,7 +54,7 @@ export type ThinkHostOperation = keyof ThinkHostApi;
  */
 interface ThinkHostApiOptions {
   readonly workspace: () => ThinkWorkspace;
-  readonly context: () => ContextBlocks;
+  readonly context: () => Context;
   readonly messages: () => UIMessage[];
   /**
    * Append a message to the session directly. It must not start a turn: an

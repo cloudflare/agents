@@ -31,23 +31,28 @@ describe("prompt-cache prefix stability (#2200)", () => {
     expect(prefixBreaks(report)).toEqual([]);
   });
 
-  it("sends a changed remind block after the prefix until a refresh promotes it (#2089)", async () => {
-    const report = await measure("prefix-context-reminder", {
-      turns: 6,
-      environmentByTurn: [
-        "Today is 2026-09-28.",
-        "Today is 2026-09-28.",
-        "Today is 2026-09-29."
-      ],
-      refreshSystemPromptAtTurns: [0, 4]
-    });
+  it("sends a changed remind block once, where it was delivered, until a refresh promotes it (#2089)", async () => {
+    const report = await measure(
+      `prefix-context-reminder-${crypto.randomUUID()}`,
+      {
+        turns: 6,
+        environmentByTurn: [
+          "Today is 2026-09-28.",
+          "Today is 2026-09-28.",
+          "Today is 2026-09-29."
+        ],
+        refreshSystemPromptAtTurns: [0, 4]
+      }
+    );
     const [first] = report;
     expect(first.system).toContain("Today is 2026-09-28.");
+    // The change rides on turn 2's user message and is recorded there, so
+    // later requests render it in the same place rather than moving it.
     expect(report.map((turn) => turn.reminded)).toEqual([
       false,
       false,
       true,
-      true,
+      false,
       false,
       false
     ]);
@@ -55,10 +60,9 @@ describe("prompt-cache prefix stability (#2200)", () => {
       Array(4).fill(first.system)
     );
     expect(report[4].system).toContain("Today is 2026-09-29.");
-    // A standing reminder moves to each new user message, so only the
-    // previous user message falls out of the cache, never the system prompt.
+    // Every request extends the one before it, except the refresh.
     expect(report[2].firstChangedMessage).toBeNull();
-    expect(report[3].firstChangedMessage).toBe(report[2].messages - 1);
+    expect(report[3].firstChangedMessage).toBeNull();
     expect(report[4].firstChangedMessage).toBe(0);
     expect(report[5].firstChangedMessage).toBeNull();
   });

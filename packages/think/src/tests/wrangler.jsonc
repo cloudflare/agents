@@ -216,6 +216,10 @@
         "name": "ThinkPromptCacheTestAgent"
       },
       {
+        "class_name": "ThinkUpgradeTestAgent",
+        "name": "ThinkUpgradeTestAgent"
+      },
+      {
         "class_name": "ThinkMediaEvictionAutoAgent",
         "name": "ThinkMediaEvictionAutoAgent"
       },
@@ -300,6 +304,7 @@
         "ThinkWindowedHydrationAgent",
         "ThinkMediaEvictionAgent",
         "ThinkPromptCacheTestAgent",
+        "ThinkUpgradeTestAgent",
         "ThinkMediaEvictionAutoAgent",
         "ThinkPointerHydrationAgent",
         "ThinkLegacySessionApiAgent",

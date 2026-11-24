@@ -8,7 +8,7 @@
  */
 
 import type { ToolSet, TypedToolCall } from "ai";
-import type { ContextBlocks } from "agents/context";
+import type { Context } from "agents/context";
 import type {
   ChunkContext,
   ExtensionConfig,
@@ -112,7 +112,7 @@ export function createThinkExtensionManager(
 export async function loadThinkExtensions(
   manager: ExtensionManager,
   configs: ExtensionConfig[],
-  context: ContextBlocks
+  context: Context
 ): Promise<void> {
   for (const config of configs) {
     await manager.load(config.manifest, config.source);

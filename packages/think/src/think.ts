@@ -380,9 +380,8 @@ import {
 import { ThinkSession } from "./session";
 import {
   AgentContextProvider,
-  ContextBlocks,
-  type ContextConfig,
-  type WritableContextProvider
+  Context,
+  type ContextConfig
 } from "agents/context";
 
 /** Copy a turn context without reading its lazily resolved `model`. */
@@ -967,6 +966,11 @@ type TurnSpec<T> = QueueTurnSpec<T> | NonQueueTurnSpec<T>;
 /** What an RPC `chat()` caller is told when the chat is cleared under it. */
 const CHAT_CLEARED_ERROR = "The chat was cleared before the turn finished.";
 
+/** Whether a turn re-runs or continues one that was cut off. */
+function isRecoveryTrigger(trigger: TurnTrigger | undefined): boolean {
+  return trigger === "recovery-retry" || trigger === "recovery-continue";
+}
+
 const admittedTurnContext = new AsyncLocalStorage<{
   agent: unknown;
   requestId: string;
@@ -1422,27 +1426,20 @@ export class Think<
   session!: ThinkSession;
 
   /** Prompt context blocks for this agent, built from `configureContext()`. */
-  #contextBlocks: ContextBlocks | undefined;
+  #contextBlocks: Context | undefined;
 
   /**
-   * The agent's context blocks. Available once the Lifecycle has started.
+   * The agent's context blocks, bound to the default session: the session
+   * records the prompt each turn was sent with. Available once the
+   * Lifecycle has started.
    */
-  protected get context(): ContextBlocks {
+  protected get context(): Context {
     if (!this.#contextBlocks) {
       throw new Error(
         "Context is not initialized yet; it is available after onStart()."
       );
     }
     return this.#contextBlocks;
-  }
-
-  /** Durable SQLite storage for one context block of this agent. */
-  #contextProvider(label: string): WritableContextProvider {
-    const sessionId = this.session?.sessionId ?? "";
-    return new AgentContextProvider(
-      this,
-      sessionId ? `${label}_${sessionId}` : label
-    );
   }
 
   /** Cached messages, kept in sync with session storage. */
@@ -1620,14 +1617,27 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           this.session = await this.configureSession(
             new ThinkSession(this.sessions.session(), () => this.context)
           );
-          this.#contextBlocks = new ContextBlocks(
-            [
-              ...(await this.configureContext()),
-              ...this.session.internal_takePendingContext()
-            ],
-            this.session.internal_promptStore() ??
-              this.#contextProvider("_system_prompt"),
-            (label) => this.#contextProvider(label)
+          // The session records the prompt each turn was sent with. The
+          // prompt store (a custom one from `withCachedPrompt()`, or the
+          // `_system_prompt` row) carries the prompt frozen before Context
+          // forward on the first turn, and keeps holding the latest one.
+          const sessionId = this.session.sessionId;
+          this.#contextBlocks = new Context(
+            this.sessions.session(this.session.sessionId),
+            {
+              blocks: [
+                ...(await this.configureContext()),
+                ...this.session.internal_takePendingContext()
+              ],
+              // Blocks without a provider live in this agent's SQLite.
+              sql: this,
+              promptStore:
+                this.session.internal_promptStore() ??
+                new AgentContextProvider(
+                  this,
+                  sessionId ? `_system_prompt_${sessionId}` : "_system_prompt"
+                )
+            }
           );
           // Load blocks now rather than on the first turn, as Think always
           // has: the synchronous accessors (`this.context.getBlock()` and the
@@ -2617,8 +2627,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    *
    * @internal Exposed to subclasses for tests.
    */
-  protected async _buildBaseSystemPrompt(): Promise<string> {
-    const blocks = await this.context.freezeSystemPrompt();
+  protected async _buildBaseSystemPrompt(
+    blocksPrompt?: string
+  ): Promise<string> {
+    const blocks = blocksPrompt ?? (await this.context.freezeSystemPrompt());
     if (!isMethodOverridden(this, "getSystemPrompt")) {
       return blocks || this.getSystemPrompt();
     }
@@ -3703,19 +3715,30 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * head through the exact same pipeline.
    */
   private async _assembleModelMessages(
-    tools: ToolSet
+    tools: ToolSet,
+    turnHistory?: BeforeTurnRepairResult
   ): Promise<ModelMessage[]> {
-    return modelMessagesFromHistory(await this._turnHistory(), {
-      tools,
-      truncationStep: this.truncationStep,
-      incompleteToolCallIds: (messages) => unsettledToolCallIds(messages),
-      onIncompleteToolCalls: (toolCallIds) =>
-        this._emit("chat:transcript:repaired", {
-          removedToolCalls: toolCallIds.length,
-          normalizedInputs: 0,
-          toolCallIds
-        })
-    });
+    const repaired = turnHistory ?? (await this._turnHistory());
+    // The projection renders each recorded context change after the user
+    // message it was delivered with, so earlier turns are sent unchanged.
+    // SAFETY: the projection only adds text parts to stored UI messages.
+    const messages = (await this.context.project(
+      repaired.messages
+    )) as UIMessage[];
+    return modelMessagesFromHistory(
+      { ...repaired, messages },
+      {
+        tools,
+        truncationStep: this.truncationStep,
+        incompleteToolCallIds: (messages) => unsettledToolCallIds(messages),
+        onIncompleteToolCalls: (toolCallIds) =>
+          this._emit("chat:transcript:repaired", {
+            removedToolCalls: toolCallIds.length,
+            normalizedInputs: 0,
+            toolCallIds
+          })
+      }
+    );
   }
 
   /** Who a turn's AI SDK telemetry names: this agent and its admitted turn. */
@@ -3850,15 +3873,25 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           : channelDefinition.instructions
         : undefined;
 
-    const rawBaseSystem = await this._buildBaseSystemPrompt();
+    // Start the turn's context: the prompt the transcript was sent with
+    // and, recorded against the user message that ends the history, any
+    // remind block that changed since. `_assembleModelMessages` projects
+    // that record; a reminder comes back only when it could not be recorded.
+    const turnHistory = await this._turnHistory();
+    const prepared = await this.context.prepare({
+      messages: turnHistory.messages,
+      // A recovered turn is sent as its first attempt was.
+      retry: isRecoveryTrigger(admittedTurnContext.getStore()?.trigger)
+    });
+    const rawBaseSystem = await this._buildBaseSystemPrompt(prepared.system);
     const baseSystem = channelInstructions
       ? `${channelInstructions}\n\n${rawBaseSystem}`
       : rawBaseSystem;
     const system = systemPromptForTurn(baseSystem, tools);
 
-    this._turnContextReminder = await this.context.reminder();
+    this._turnContextReminder = prepared.reminder;
     const messages = withContextReminder(
-      await this._assembleModelMessages(tools),
+      await this._assembleModelMessages(tools, turnHistory),
       this._turnContextReminder
     );
 

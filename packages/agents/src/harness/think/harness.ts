@@ -41,6 +41,7 @@ import type {
 } from "../../experimental/channels/harness";
 import type { CompactResult } from "../../sessions/compaction-helpers";
 import type { Session } from "../../sessions/handle";
+import { CONTEXT_RECORD_KIND, type Context } from "../../context/context";
 import type { SearchResult, SessionMessage } from "../../sessions/types";
 import type { StreamJson } from "../../streams/types";
 import {
@@ -376,6 +377,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   readonly #live = new Map<ThinkSessionId, LiveRun>();
   readonly #waiters = new Map<string, Set<() => void>>();
   readonly #configured = new Set<ThinkSessionId>();
+  /** Each session's context, from the `context` option, built on first use. */
+  readonly #contexts = new Map<ThinkSessionId, Context | undefined>();
   /**
    * In-flight model output. Only the harness reads it, so the harness owns
    * it rather than asking the host to install a Streams capability. It
@@ -703,6 +706,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       else this.#ownClears.set(session, left);
     }
     this.#tables().deleteSettled(session);
+    // The session's context read records of the messages just cleared.
+    this.#contexts.delete(session);
     this.#events.emit(session, { type: "reset" });
     if (handoff) {
       const note: UIMessage = {
@@ -816,6 +821,19 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       if (!message) continue;
       await target.appendMessage(message, { parentId });
       parentId = message.id;
+    }
+    // The copied turns keep the context they were sent with, so the fork's
+    // next request opens with the same prompt as the session it came from.
+    const records = await source.internal_annotations(
+      CONTEXT_RECORD_KIND,
+      rows.map((row) => row.id)
+    );
+    for (const [messageId, value] of records) {
+      await target.internal_setAnnotation(
+        CONTEXT_RECORD_KIND,
+        messageId,
+        value
+      );
     }
     return fork;
   }
@@ -1165,14 +1183,44 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const history = asUIMessages(
       await handle.getHistory({ leafId: existing ? existing.id : op.parentId })
     );
-    const system = await resolve(this.#options.system, session);
+    // The session's context blocks follow the `system` option. The first
+    // call of an operation starts the turn, recording on the user message
+    // the prompt it is sent with and any remind block that changed; every
+    // call sends the transcript as a projection of those records, so
+    // earlier turns go out unchanged and the prefix cache holds. A reminder
+    // that could not be recorded (a continuation) waits for the next turn.
+    // Every call prepares the session's context. The call that starts a
+    // turn records on its user message the prompt it is sent with and any
+    // remind block that changed; every call sends the transcript as a
+    // projection of those records, so earlier turns go out unchanged. A
+    // change that cannot be recorded (a continuation, or a regeneration
+    // from an answered message) rides on this request alone.
+    const context = this.#context(session);
+    let contextSystem = "";
+    let request = history;
+    if (context) {
+      const prepared = await context.prepare({
+        messages: history,
+        // A call after an interruption is sent as the first attempt was.
+        retry: op.interruptions > 0
+      });
+      contextSystem = prepared.system;
+      request = withReminder(
+        asUIMessages(await context.project(history)),
+        prepared.reminder
+      );
+    }
+    const system = joinSystem(
+      await resolve(this.#options.system, session),
+      contextSystem
+    );
     const config =
       (await hooks?.beforeTurn?.({
         session,
         operationId,
         step: op.steps,
         continuation: existing !== undefined,
-        messages: history,
+        messages: request,
         system,
         tools: Object.keys(tools)
       })) ?? {};
@@ -1182,7 +1230,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const effectiveSystem = config.system ?? system;
     const messages: ModelMessage[] =
       config.messages ??
-      (await convertToModelMessages(history, {
+      (await convertToModelMessages(request, {
         tools,
         ignoreIncompleteToolCalls: true
       }));
@@ -1839,6 +1887,17 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     return this.#handle(session).compact();
   }
 
+  /** A session's context, from the `context` option. */
+  #context(session: ThinkSessionId): Context | undefined {
+    if (!this.#contexts.has(session)) {
+      this.#contexts.set(
+        session,
+        this.#options.context?.(this.#handle(session), session)
+      );
+    }
+    return this.#contexts.get(session);
+  }
+
   #handle(session: ThinkSessionId): Session {
     this.#bindOwned();
     const handle = this.#sessions.session(session);
@@ -1856,7 +1915,12 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   }
 
   async #tools(session: ThinkSessionId): Promise<ToolSet> {
-    const tools = (await resolve(this.#options.tools, session)) ?? {};
+    // Context tools (`set_context`, `search_context`) come first, so a tool
+    // from the options with the same name replaces one.
+    const tools = {
+      ...((await this.#context(session)?.tools()) ?? {}),
+      ...((await resolve(this.#options.tools, session)) ?? {})
+    };
     const client = createToolsFromClientSchemas(
       this.#tables().clientTools(session)
     );
@@ -2305,4 +2369,37 @@ export class ThinkSessions implements HarnessSessions {
   list(): Promise<ThinkSessionInfo[]> {
     return this.#harness.listSessions();
   }
+}
+
+/** The `system` option and the context prompt, either of which may be empty. */
+function joinSystem(
+  system: string | undefined,
+  context: string
+): string | undefined {
+  if (!context) return system;
+  return system ? `${system}\n\n${context}` : context;
+}
+
+/**
+ * Carry a reminder that was not recorded on this request only: after the
+ * last user message's own content, or as a user message of its own after
+ * an assistant message.
+ */
+function withReminder(
+  messages: UIMessage[],
+  reminder: string | null
+): UIMessage[] {
+  if (!reminder) return messages;
+  const part = { type: "text" as const, text: reminder };
+  const last = messages.at(-1);
+  if (last?.role === "user") {
+    return [
+      ...messages.slice(0, -1),
+      { ...last, parts: [...last.parts, part] }
+    ];
+  }
+  return [
+    ...messages,
+    { id: "cf_agents_context_reminder", role: "user", parts: [part] }
+  ];
 }

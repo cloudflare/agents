@@ -6,7 +6,7 @@
 
 **Sessions stores messages. It is not a file store.** Media you attach to a message is kept out of the message row and stored separately, addressed by content, and put back verbatim when you read. That keeps a message row small however large its attachments are — but it does not reclaim database space, because the payload lives in the same Durable Object. A Durable Object's 10 GB ceiling is therefore the real bound on how much media one conversation can hold: roughly 39,000 200 KB images, measured. An application that handles files should keep them in a file store and put a reference in the message. Think does exactly that with its [Workspace](../think/index.md), which spills to R2.
 
-Prompt assembly lives in [`agents/context`](./context.md) and composes with a session handle rather than living inside it.
+Think's [context](https://github.com/cloudflare/agents/blob/main/docs/think/context.md) arranges the system prompt beside a session; it never changes a message.
 
 `Think` and `AIChatAgent` use this capability for message persistence. You can also install it on a plain Durable Object.
 
@@ -409,7 +409,7 @@ For user-facing chat applications, prefer one Durable Object per conversation. T
 
 `Think` and `AIChatAgent` use Sessions internally.
 
-- Think uses branches, compaction, search, and the change feed. Its prompt context comes from [`agents/context`](./context.md). Aged media leaves the conversation through Think's own media eviction, which is a context-window technique and unrelated to how Sessions stores a row.
+- Think uses branches, compaction, search, and the change feed. Its prompt context is described in [Think context](https://github.com/cloudflare/agents/blob/main/docs/think/context.md). Aged media leaves the conversation through Think's own media eviction, which is a context-window technique and unrelated to how Sessions stores a row.
 - AIChatAgent uses the default handle as a linear chain. Its existing destructive regeneration, mutable `messages` array, retention option, and wire protocol remain unchanged.
 
 Existing `assistant_*` Session tables and `cf_ai_chat_agent_messages` are lifted automatically, then dropped once every row is verified copied.

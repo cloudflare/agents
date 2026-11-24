@@ -892,7 +892,7 @@ You do not need new machinery to gate egress per call: `beforeToolCall` can `blo
 
 ## Session and context
 
-Think splits conversation storage from prompt assembly. [`agents/sessions`](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md) stores messages; [`agents/context`](https://github.com/cloudflare/agents/blob/main/docs/agents/context.md) builds the system prompt. Think wires both during `onStart`.
+Think splits conversation storage from prompt assembly. [`agents/sessions`](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md) stores messages; [context](./context.md) builds the system prompt and records on the session what each turn was sent. Think wires both during `onStart`.
 
 `configureSession()` configures the default session handle: compaction and search.
 
@@ -933,7 +933,7 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
-A block declared without a `provider` is auto-wired to durable per-agent SQLite, so `memory` above is writable through the `set_context` tool with no extra wiring. The frozen system prompt is always persisted, so there is nothing to opt into: a cold wake reuses the exact prompt string the model already cached.
+A block declared without a `provider` is auto-wired to durable per-agent SQLite, so `memory` above is writable through the `set_context` tool with no extra wiring. The transcript records the system prompt each turn was sent with, so there is nothing to opt into: a cold wake reuses the exact prompt the model already cached. A changed `whenChanged: "remind"` block is delivered once, after the user message of the turn that noticed it, and stays there in later requests. See [Context](./context.md).
 
 The assembled blocks are available as `this.context` once the Lifecycle has started.
 
@@ -974,7 +974,7 @@ Startup hydration reads a recent window bounded by `hydrationByteBudget` (32 MiB
 
 ### Prompt caching
 
-Providers cache on a byte-identical prompt prefix, so a request only reads the cache up to the first byte that differs from an earlier request. Think keeps that prefix stable: the frozen system prompt is persisted, and each turn's first model request extends the previous request unless one of the context-reduction mechanisms rewrote history. Each mechanism rewrites the prefix on a bounded schedule:
+Providers cache on a byte-identical prompt prefix, so a request only reads the cache up to the first byte that differs from an earlier request. Think keeps that prefix stable: the transcript records the system prompt and every context change where it was delivered, and each turn's first model request extends the previous request unless one of the context-reduction mechanisms rewrote history. Each mechanism rewrites the prefix on a bounded schedule:
 
 | Mechanism            | What it rewrites                                                                   | How often the prefix changes                |
 | -------------------- | ---------------------------------------------------------------------------------- | ------------------------------------------- |
@@ -1057,6 +1057,7 @@ The Agent Skills parser, sources, and script runner live in
 - [Getting Started](./getting-started.md) — Build a Think agent step by step
 - [Lifecycle Hooks](./lifecycle-hooks.md) — `beforeTurn`, `beforeStep`, `onStepFinish`, `onChunk`, `onChatResponse`, and more
 - [Tools](./tools.md) — Workspace tools, code execution, extensions
+- [Context](./context.md) — Context blocks, memory, and what the model is sent (experimental)
 - [Actions](./actions.md) — Server actions with idempotency, approvals, authorization, and reply attachments
 - [Channels](./channels.md) — Per-channel policy, channel selection, and out-of-band notices
 - [Messengers](./messengers.md) — Chat SDK messenger ingress and delivery

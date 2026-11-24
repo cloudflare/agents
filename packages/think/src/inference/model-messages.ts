@@ -149,7 +149,7 @@ export function ensureValidContinueCheckpoint(
 }
 
 /**
- * Carry a context reminder (`ContextBlocks.reminder()`) after the cached
+ * Carry a context reminder (`Context.prepare()`) after the cached
  * prefix without persisting it. It joins the final user message when there is
  * one, since not every provider accepts two user messages in a row. A request
  * ending in a partial assistant message gets the continue checkpoint here,

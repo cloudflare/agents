@@ -39,7 +39,7 @@ import type {
 } from "agents/sessions";
 import type {
   ContextBlock,
-  ContextBlocks,
+  Context,
   ContextConfig,
   WritableContextProvider
 } from "agents/context";
@@ -61,14 +61,14 @@ export interface CompactAfterOptions {
 
 export class ThinkSession {
   readonly #handle: Session;
-  readonly #context: () => ContextBlocks;
+  readonly #context: () => Context;
   /** Blocks queued by `withContext()`; `null` once startup consumed them. */
   #pendingContext: ContextConfig[] | null = [];
   #promptStore: WritableContextProvider | undefined;
   #compactionErrorHandler: CompactionErrorHandler | null = null;
 
   /** @internal Constructed by Think during `onStart`. */
-  constructor(handle: Session, context: () => ContextBlocks) {
+  constructor(handle: Session, context: () => Context) {
     this.#handle = handle;
     this.#context = context;
   }
@@ -112,8 +112,9 @@ export class ThinkSession {
   /**
    * Persist the frozen system prompt.
    *
-   * @deprecated The frozen prompt is always persisted now, so this is a
-   * no-op. A custom `provider` is still honoured as the prompt store.
+   * @deprecated The session records the prompt each turn was sent with, so
+   * this is not needed. A custom `provider` is still honoured: it carries a
+   * prompt frozen before forward and receives every new snapshot.
    */
   withCachedPrompt(provider?: WritableContextProvider): this {
     if (provider) this.#promptStore = provider;

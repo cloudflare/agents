@@ -57,4 +57,7 @@ export {
   ThinkMessengerRouteTestAgent
 } from "./messengers";
 export { ThinkMcpToolMaterializationAgent } from "./mcp-tool-materialization";
-export { ThinkPromptCacheTestAgent } from "./prompt-cache";
+export {
+  ThinkPromptCacheTestAgent,
+  ThinkUpgradeTestAgent
+} from "./prompt-cache";
