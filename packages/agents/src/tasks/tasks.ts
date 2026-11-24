@@ -2214,11 +2214,14 @@ export class Tasks<
         );
       }
     }
-    let entry = "coalesce(json_extract(metadata, '$.' || json_quote(?)), '{}')";
+    // What is stored under `key` is kept only when it is an object.
+    let entry =
+      "CASE WHEN json_type(metadata, '$.' || json_quote(?)) = 'object' " +
+      "THEN json_extract(metadata, '$.' || json_quote(?)) ELSE '{}' END";
     if (setSql) entry = `json_set(${entry}${setSql})`;
     if (removeSql) entry = `json_remove(${entry}${removeSql})`;
     const next = `json_set(coalesce(metadata, '{}'), '$.' || json_quote(?), json(${entry}))`;
-    const params = [key, key, ...set, ...remove];
+    const params = [key, key, key, ...set, ...remove];
     return (
       this.#store.write(
         `UPDATE cf_agents_task_runs

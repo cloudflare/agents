@@ -596,6 +596,22 @@ describe("Tasks patchMetadata", () => {
       expect(instance.tasks.patchMetadata("missing", "progress", {})).toBe(
         false
       );
+      // Something other than an object under the key (an app's value of
+      // that name) is replaced by the patched object.
+      await instance.tasks.importRun({
+        runId: "s",
+        definition: "__cf_echo",
+        status: "pending",
+        attempt: 0,
+        metadata: { progress: "draft" },
+        createdAt: 1
+      });
+      expect(instance.tasks.patchMetadata("s", "progress", { a: 1 })).toBe(
+        true
+      );
+      expect(instance.tasks.peek("s")?.metadata).toEqual({
+        progress: { a: 1 }
+      });
     });
   });
 });
