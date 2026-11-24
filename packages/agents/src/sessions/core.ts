@@ -2500,12 +2500,14 @@ export class SessionsCore {
 
   /**
    * For each kind, the newest annotation among what a new overlay over
-   * `to` hides: the rows from `to` down to, not including, `resume` (the
-   * row the walk continues at below it; `''` for the root), and the
-   * summaries of overlays the walk would apply at those rows. Bounded by
-   * `resume`, not by the start row, because deletes keep `resume` right
-   * and can remove the start. Ids only, no content. A read, so the walk
-   * runs before the overlay's write transaction, never inside it.
+   * `to` hides: what the walk shows from `to` down to, not including,
+   * `resume` (the row the walk continues at below it; `''` for the root).
+   * An older overlay counts as its summary, which carries the newest
+   * annotation of what it hid, and the walk jumps past its rows, so the
+   * cost follows what is visible, not what is stored. Bounded by `resume`,
+   * not by the start row, because deletes keep `resume` right and can
+   * remove the start. Ids only, no content. A read, so the walk runs
+   * before the overlay's write transaction, never inside it.
    */
   #annotationsToCarry(
     sessionId: string,
@@ -2514,24 +2516,40 @@ export class SessionsCore {
   ): Array<{ kind: string; value: string }> {
     if (!this.#hasAnnotations(sessionId)) return [];
     return this.io.sql<{ kind: string; value: string }>(
-      `WITH RECURSIVE span(id, parent_id, depth) AS (
+      `WITH RECURSIVE
+      stop(seq) AS (
+        SELECT COALESCE(
+          (SELECT seq FROM cf_agents_session_messages
+           WHERE session_id = ?1 AND id = ?3),
+          -1)
+      ),
+      -- The rows the walk shows from the end down to the continuation: at a row
+      -- where an older overlay applies (the newest ending there with a
+      -- known continuation), the walk jumps to that overlay's continuation,
+      -- as reads do, instead of passing every row it hid. Along an ancestor
+      -- chain seq falls, so the walk stops at or below the continuation.
+      span(id, parent_id, depth) AS (
         SELECT id, parent_id, 0 FROM cf_agents_session_messages
         WHERE session_id = ?1 AND id = ?2
         UNION ALL
-        SELECT m.id, m.parent_id, s.depth + 1 FROM span s
-        CROSS JOIN cf_agents_session_messages m
-          ON m.session_id = ?1 AND m.id = s.parent_id
-        WHERE s.parent_id <> ?3
+        SELECT next.id, next.parent_id, s.depth + 1 FROM span s
+        CROSS JOIN cf_agents_session_messages next
+          ON next.session_id = ?1 AND next.id = COALESCE(
+            (SELECT c.resume_id FROM cf_agents_session_compactions c
+             WHERE c.session_id = ?1 AND c.to_message_id = s.id
+               AND c.resume_id IS NOT NULL
+             ORDER BY c.seq DESC LIMIT 1),
+            s.parent_id)
+        WHERE next.seq > (SELECT seq FROM stop)
       ),
       found AS (
         SELECT a.kind, a.value, span.depth, 0 AS on_overlay
         FROM span CROSS JOIN cf_agents_session_annotations a
           ON a.session_id = ?1 AND a.message_id = span.id
         UNION ALL
-        -- An overlay this one hides may carry its own annotation (set on
-        -- its summary message). Only the overlay the walk applies at a row
-        -- counts: the newest there with a known continuation. It sits where
-        -- it ends and outranks the rows it hid there.
+        -- The overlay the walk applies at a row carries the newest
+        -- annotation of what it hid (and any set on its summary message).
+        -- It sits where it ends and outranks the row it hid there.
         SELECT a.kind, a.value, span.depth, 1 AS on_overlay
         FROM span
         CROSS JOIN cf_agents_session_compactions c
