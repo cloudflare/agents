@@ -3881,6 +3881,113 @@ describe("Think — onChatRecovery", () => {
     ]);
   });
 
+  it("ends a turn found interrupted whose conversation moved on for the tabs", async () => {
+    const room = crypto.randomUUID();
+    // A tab is connected while the recovery runs.
+    const response = await exports.default.fetch(
+      `http://example.com/agents/think-recovery-test-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    expect(response.status).toBe(101);
+    const ws = response.webSocket as WebSocket;
+    ws.accept();
+    try {
+      const agent = await freshRecoveryAgent(room);
+      await agent.persistTestMessage({
+        id: "u-old",
+        role: "user",
+        parts: [{ type: "text", text: "old question" }]
+      });
+      await agent.insertInterruptedStream("stream-moved", "req-moved", [
+        {
+          body: JSON.stringify({ type: "start", messageId: "assistant-moved" }),
+          index: 0
+        },
+        { body: JSON.stringify({ type: "text-start" }), index: 1 },
+        {
+          body: JSON.stringify({ type: "text-delta", delta: "Part" }),
+          index: 2
+        }
+      ]);
+      await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-moved", {
+        __cfThinkChatFiberSnapshot: {
+          kind: "think-chat-turn",
+          version: 1,
+          requestId: "req-moved",
+          continuation: true,
+          latestMessageId: "u-old",
+          latestMessageRole: "user",
+          latestUserMessageId: "u-old",
+          startedAt: Date.now()
+        },
+        user: null
+      });
+      // A newer question is the latest message: the conversation moved on.
+      await agent.persistTestMessage({
+        id: "u-new",
+        role: "user",
+        parts: [{ type: "text", text: "newer question" }]
+      });
+
+      const heard = waitForProtocolMessage(
+        ws,
+        (m) => m.id === "req-moved" && m.done === true
+      );
+      await agent.triggerFiberRecovery();
+
+      // Nothing continues it, so its end is sent and recorded.
+      expect(await heard).toMatchObject({ outcome: "aborted" });
+      expect(await agent.recentTerminalForTest("req-moved")).toMatchObject({
+        outcome: "aborted"
+      });
+    } finally {
+      await closeWS(ws);
+    }
+  });
+
+  it("answers the question again when onChatRecovery drops a new turn's partial", async () => {
+    const agent = await freshRecoveryAgent(crypto.randomUUID());
+
+    await agent.setRecoveryOverride({ persist: false });
+    await agent.persistTestMessage({
+      id: "u-drop",
+      role: "user",
+      parts: [{ type: "text", text: "question" }]
+    });
+    await agent.insertInterruptedStream("stream-drop", "req-drop", [
+      {
+        body: JSON.stringify({ type: "start", messageId: "assistant-drop" }),
+        index: 0
+      },
+      { body: JSON.stringify({ type: "text-start" }), index: 1 },
+      {
+        body: JSON.stringify({ type: "text-delta", delta: "Dropped" }),
+        index: 2
+      }
+    ]);
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-drop", {
+      __cfThinkChatFiberSnapshot: {
+        kind: "think-chat-turn",
+        version: 1,
+        requestId: "req-drop",
+        continuation: false,
+        latestMessageId: "u-drop",
+        latestMessageRole: "user",
+        latestUserMessageId: "u-drop",
+        startedAt: Date.now()
+      },
+      user: null
+    });
+
+    // Nothing of the reply was stored, so the question is the latest message
+    // again: recovery answers it, it does not continue a reply that is not
+    // there.
+    await expect(agent.triggerFiberRecovery()).resolves.toEqual({
+      scheduledContinueCount: 0,
+      scheduledRetryCount: 1
+    });
+  });
+
   it("exhausts chat recovery after the configured max attempts", async () => {
     const agent = await freshRecoveryAgent("recovery-exhaustion");
 
