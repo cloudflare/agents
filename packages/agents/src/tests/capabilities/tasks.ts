@@ -68,6 +68,13 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
         return keys.map((key) => step.checkpoint.get(key) ?? null);
       },
 
+      /** One journaled step that waits on `stepGate` inside it. */
+      gatedStep: async (_input: undefined, step: TaskStep) =>
+        step.do("a", async () => {
+          await this.stepGate;
+          return 1;
+        }),
+
       remembering: async (_input: undefined, step: TaskStep) => {
         this.rememberingSeen.push({
           local: step.local,
@@ -422,6 +429,8 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
   readonly reports: string[] = [];
   /** `__cf_reported` terminal reports throw while this is above zero. */
   failReports = 0;
+  /** `gatedStep` waits on this inside its step. */
+  stepGate: Promise<void> | null = null;
   /** `__cf_reported` parks on this when set. */
   reportedGate: Promise<void> | null = null;
   /** `__cf_reported` terminal reports wait on this when set. */
