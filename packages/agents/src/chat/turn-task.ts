@@ -116,6 +116,12 @@ export function currentTurnAttempt():
 /** The checkpoint entry holding the app's latest `stash()` data. */
 const STASH = "stash";
 /**
+ * The checkpoint entry holding the recovery attempt a live turn's
+ * interruption planned, kept at once so a reset before the step ends still
+ * runs it.
+ */
+const ATTEMPT = "attempt";
+/**
  * The checkpoint entry a turn accepted before its input carried the
  * snapshot kept its whole envelope under. Read by its recovery only.
  */
@@ -146,6 +152,11 @@ export function createChatTurnTaskDefinition(
       async ({ signal }) => {
         const entry = step.local as ChatTurnClosureEntry | undefined;
         if (!entry) {
+          // The live turn planned its recovery before the isolate died: run
+          // that attempt. Its stream already ended as recovering, so the
+          // evidence would read the turn as finished.
+          const planned = step.checkpoint.get(ATTEMPT);
+          if (planned) return planned;
           // Replay after an unclean interruption: the producing isolate is
           // gone. The turn's snapshot and last stash data, plus stream
           // evidence, drive user-visible recovery.
@@ -185,6 +196,13 @@ export function createChatTurnTaskDefinition(
         let open = true;
         const take = (next: ChatRecoveryAttemptInput): boolean => {
           if (!open || scheduled || !journalable(next)) return false;
+          try {
+            // SAFETY: the attempt is the recovery engine's JSON payload.
+            step.checkpoint.set(ATTEMPT, next as unknown as TaskJson);
+          } catch {
+            // Not kept: the recovery Task takes it, durably, instead.
+            return false;
+          }
           scheduled = next;
           return true;
         };

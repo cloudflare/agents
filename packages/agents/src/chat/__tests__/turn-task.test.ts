@@ -3,6 +3,7 @@ import type { TaskJson, TaskStep } from "../../tasks";
 import { unwrapChatFiberSnapshot } from "../recovery";
 import {
   createChatTurnTaskDefinition,
+  currentTurnAttempt,
   type ChatTurnClosureEntry
 } from "../turn-task";
 
@@ -284,5 +285,58 @@ describe("createChatTurnTaskDefinition", () => {
     })({ requestId: "r3", nonce: "n3" }, step);
     expect(taken).toBe(false);
     expect(steps).toEqual(["model-turn"]);
+  });
+
+  it("runs the attempt a live turn planned before its isolate died, without planning again", async () => {
+    const { step, checkpoint } = fakeStep(undefined);
+    checkpoint.set(
+      "attempt",
+      JSON.stringify({
+        callback: "_chatRecoveryContinue",
+        data: { incidentId: "i9" },
+        delaySeconds: 0
+      })
+    );
+    const continued: unknown[] = [];
+    const recover = vi.fn(async () => {});
+    await createChatTurnTaskDefinition({
+      ...hooks,
+      recover,
+      attempts: {
+        _chatRecoveryContinue: async (data) => void continued.push(data),
+        _chatRecoveryRetry: async () => {}
+      }
+    })({ requestId: "r9", nonce: "n9" }, step);
+    expect(recover).not.toHaveBeenCalled();
+    expect(continued).toEqual([{ incidentId: "i9" }]);
+  });
+
+  it("keeps a live turn's planned attempt in the checkpoint at once", async () => {
+    const { step, checkpoint } = fakeStep(undefined);
+    let kept: string | undefined;
+    const entry: ChatTurnClosureEntry = {
+      onStash: () => {},
+      run: (inside) =>
+        inside(async () => {
+          currentTurnAttempt()?.({
+            callback: "_chatRecoveryRetry",
+            data: { incidentId: "i8" },
+            delaySeconds: 1
+          });
+          kept = checkpoint.get("attempt");
+          return "reply";
+        }),
+      settle: { resolve: () => {}, reject: () => {} }
+    };
+    Object.assign(step, { local: entry });
+    await createChatTurnTaskDefinition(hooks)(
+      { requestId: "r8", nonce: "n8" },
+      step
+    );
+    expect(kept && JSON.parse(kept)).toEqual({
+      callback: "_chatRecoveryRetry",
+      data: { incidentId: "i8" },
+      delaySeconds: 1
+    });
   });
 });
