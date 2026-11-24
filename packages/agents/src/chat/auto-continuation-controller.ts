@@ -108,6 +108,11 @@ export interface AutoContinuationHost<
    * Reads everything it needs from `continuation.pending`, so it takes no args.
    */
   fire(): void;
+  /**
+   * A continuation became pending (an answer scheduled it, or a deferred
+   * follow-up was activated). Optional.
+   */
+  scheduled?(): void;
 }
 
 export class AutoContinuationController<
@@ -310,6 +315,7 @@ export class AutoContinuationController<
       this.host.generateRequestId()
     );
     if (!pending) return;
+    this.host.scheduled?.();
     this.fireWhenStable();
   }
 

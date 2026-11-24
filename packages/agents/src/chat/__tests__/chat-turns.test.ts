@@ -1,4 +1,6 @@
+import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { ChatRecoverySupersededError } from "../turn-stop";
+import { createChatAdmissionStore } from "../admissions";
 import { ChatStreamStalledError } from "../stall-watchdog";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { UIMessage } from "ai";
@@ -152,6 +154,127 @@ describe("ChatTurns", () => {
     expect(turns.continuation.pending?.targetMessageIds).toEqual(["a1"]);
     await vi.advanceTimersByTimeAsync(COALESCE);
     expect(host.fired).toBe(1);
+  });
+
+  it("continues an answer after a reset that landed before its continuation ran", async () => {
+    // A tab approved a tool call with autoContinue; the isolate reset during
+    // the coalesce window, before the continuation's turn existed (P1).
+    const db = new DatabaseSync(":memory:");
+    const admissions = () => ({
+      store: createChatAdmissionStore(() => ({
+        exec: (query: string, ...bindings: unknown[]) => {
+          const rows = db.prepare(query).all(...(bindings as SQLInputValue[]));
+          return { toArray: () => rows as Record<string, unknown>[] };
+        }
+      })),
+      recoveryPending: async () => false,
+      recoveryOwns: async () => false,
+      replayRequest: () => null
+    });
+    host.transcript = [user("u1"), toolReply("a1", "approval-responded")];
+    const before = new ChatTurns(host, {
+      defaultDebounceMs: 750,
+      admissions: admissions()
+    });
+    await before.applyInteraction(
+      async () => ({ status: "changed", messageId: "a1" }),
+      true,
+      spec
+    );
+    const requestId = before.continuation.pending?.requestId;
+    // The reset: nothing in memory survives, the record does.
+    before.continuation.clearPending();
+    const restarted = new FakeHost();
+    restarted.transcript = host.transcript;
+    const after = new ChatTurns(restarted, {
+      defaultDebounceMs: 750,
+      admissions: admissions()
+    });
+    await after.resumeAdmissions();
+    // Queued at once, not after the coalesce timer: a request that woke the
+    // agent must not run before it.
+    expect(restarted.fired).toBe(1);
+    await vi.advanceTimersByTimeAsync(COALESCE);
+    expect(restarted.fired).toBe(1);
+
+    // Its turn's fiber releases the record: a second reset runs nothing.
+    after.turnAccepted(requestId!);
+    const again = new ChatTurns(restarted, {
+      defaultDebounceMs: 750,
+      admissions: admissions()
+    });
+    await again.resumeAdmissions();
+    expect(again.continuation.pending).toBeNull();
+  });
+
+  it("does not continue after a reset what a stop dropped", async () => {
+    const db = new DatabaseSync(":memory:");
+    const admissions = () => ({
+      store: createChatAdmissionStore(() => ({
+        exec: (query: string, ...bindings: unknown[]) => {
+          const rows = db.prepare(query).all(...(bindings as SQLInputValue[]));
+          return { toArray: () => rows as Record<string, unknown>[] };
+        }
+      })),
+      recoveryPending: async () => false,
+      recoveryOwns: async () => false,
+      replayRequest: () => null
+    });
+    host.transcript = [user("u1"), toolReply("a1", "approval-responded")];
+    const before = new ChatTurns(host, {
+      defaultDebounceMs: 750,
+      admissions: admissions()
+    });
+    await before.applyInteraction(
+      async () => ({ status: "changed", messageId: "a1" }),
+      true,
+      spec
+    );
+    before.cancelWaitingContinuation(connection.id);
+    const restarted = new FakeHost();
+    restarted.transcript = host.transcript;
+    const after = new ChatTurns(restarted, {
+      defaultDebounceMs: 750,
+      admissions: admissions()
+    });
+    await after.resumeAdmissions();
+    expect(after.continuation.pending).toBeNull();
+  });
+
+  it("drops a kept continuation whose answered message is no longer the latest", async () => {
+    const db = new DatabaseSync(":memory:");
+    const admissions = () => ({
+      store: createChatAdmissionStore(() => ({
+        exec: (query: string, ...bindings: unknown[]) => {
+          const rows = db.prepare(query).all(...(bindings as SQLInputValue[]));
+          return { toArray: () => rows as Record<string, unknown>[] };
+        }
+      })),
+      recoveryPending: async () => false,
+      recoveryOwns: async () => false,
+      replayRequest: () => null
+    });
+    host.transcript = [user("u1"), toolReply("a1", "approval-responded")];
+    const before = new ChatTurns(host, {
+      defaultDebounceMs: 750,
+      admissions: admissions()
+    });
+    await before.applyInteraction(
+      async () => ({ status: "changed", messageId: "a1" }),
+      true,
+      spec
+    );
+    before.continuation.clearPending();
+    const restarted = new FakeHost();
+    restarted.transcript = [...host.transcript, user("u2")];
+    const after = new ChatTurns(restarted, {
+      defaultDebounceMs: 750,
+      admissions: admissions()
+    });
+    await after.resumeAdmissions();
+    expect(after.continuation.pending).toBeNull();
+    await vi.advanceTimersByTimeAsync(COALESCE);
+    expect(restarted.fired).toBe(0);
   });
 
   it("reports a missing tool call", async () => {

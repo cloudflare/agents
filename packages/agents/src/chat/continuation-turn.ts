@@ -82,7 +82,7 @@ export interface ContinuationTurnParts<
    * `enqueue` may await before the turn is on the queue, and the queue alone
    * would report idle in that window.
    */
-  readonly firing: Set<object>;
+  readonly firing: Set<{ readonly requestId: string }>;
   /**
    * The request ids of continuation turns no pending continuation stands
    * for, between their fire and the start of their turn. A stop that drops
@@ -95,6 +95,10 @@ export interface ContinuationTurnParts<
    * answered my tool result" has something to look at.
    */
   dropped(event: ContinuationDropped): void;
+  /** The pending continuation `requestId` was released. Optional. */
+  released?(requestId: string): void;
+  /** The continuation turn `requestId` is on the queue. Optional. */
+  queued?(requestId: string): void;
 }
 
 /** A continuation that will not run, and why. */
@@ -158,7 +162,12 @@ export interface ContinuationTurn<
    * before the transcript is read (`Think` drops the text written after a
    * pause that has since resolved) it does before it calls `turn`.
    */
-  enqueue(requestId: string, turn: () => Promise<void>): Promise<unknown>;
+  enqueue(
+    requestId: string,
+    turn: () => Promise<void>,
+    /** Called once the turn is on the queue. Optional for the host. */
+    onQueued?: () => void
+  ): Promise<unknown>;
   /**
    * Run the turn with `continuation: true`, for the connection and tools of
    * `continuation`: the host's turn body (recovery fiber, agent context,
@@ -301,7 +310,7 @@ export async function runContinuationTurn<
     ? unscheduled.errorPrefix
     : pending!.errorPrefix;
   const signal = parts.aborts.getSignal(requestId);
-  const firing = {};
+  const firing = { requestId };
   parts.firing.add(firing);
   if (unscheduled) parts.unscheduled.add(requestId);
 
@@ -329,22 +338,27 @@ export async function runContinuationTurn<
     return null;
   };
 
+  const queued = () => parts.queued?.(requestId);
   try {
-    await turn.enqueue(requestId, async () => {
-      // On the queue and running: the queue says the chat is busy now.
-      parts.firing.delete(firing);
-      parts.unscheduled.delete(requestId);
-      try {
-        const continuation = claim();
-        if (!continuation || !signal) return;
-        await runContinuationBody(parts, turn, continuation, signal, outcome);
-      } finally {
-        // Inside the turn, so the next turn in the queue sees settled slots.
-        // With no pending continuation of its own there is nothing to
-        // settle, and the settle finds nothing.
-        settleContinuationTurn(parts, requestId);
-      }
-    });
+    await turn.enqueue(
+      requestId,
+      async () => {
+        // On the queue and running: the queue says the chat is busy now.
+        parts.firing.delete(firing);
+        parts.unscheduled.delete(requestId);
+        try {
+          const continuation = claim();
+          if (!continuation || !signal) return;
+          await runContinuationBody(parts, turn, continuation, signal, outcome);
+        } finally {
+          // Inside the turn, so the next turn in the queue sees settled slots.
+          // With no pending continuation of its own there is nothing to
+          // settle, and the settle finds nothing.
+          settleContinuationTurn(parts, requestId);
+        }
+      },
+      queued
+    );
   } catch (error) {
     // A stopped turn fails with the stop's reason. That is not an error.
     if (!isTurnStopped(signal)) {
@@ -358,6 +372,8 @@ export async function runContinuationTurn<
     // the turn from the queue): a turn that ran has settled already.
     parts.aborts.remove(requestId);
     releaseOwnPending(parts, requestId);
+    // However it ended, nothing waits for it to be queued any more.
+    queued();
   }
 
   // The turn has left the queue: `onChatResponse` may start a turn itself.
@@ -449,8 +465,10 @@ function releaseOwnPending<TConnection extends ContinuationConnection>(
 function releasePending<TConnection extends ContinuationConnection>(
   parts: ContinuationTurnParts<TConnection>
 ): void {
+  const requestId = parts.continuation.pending?.requestId;
   parts.continuation.sendResumeNone();
   parts.continuation.clearPending();
+  if (requestId !== undefined) parts.released?.(requestId);
 }
 
 /**

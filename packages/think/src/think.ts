@@ -10701,11 +10701,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    */
   private _continuationTurn(): ContinuationTurn<Connection, UIMessage> {
     return {
-      enqueue: (requestId, turn) =>
+      enqueue: (requestId, turn, onQueued) =>
         this._admitTurn({
           admission: "queue",
           trigger: "auto-continuation",
           requestId,
+          onQueued,
           continuation: true,
           inheritChannel: true,
           allowNested: true,
