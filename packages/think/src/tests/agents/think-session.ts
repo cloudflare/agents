@@ -13977,6 +13977,398 @@ export class ThinkWindowedHydrationAgent extends Think {
     return (await this.session.getHistory()).map((m) => m.id);
   }
 
+  /** Seed a linear path of `count` small messages straight into storage. */
+  async seedLongPathForTest(count: number): Promise<void> {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO cf_agents_session_messages
+        (session_id, id, seq, parent_id, role, content, token_estimate, created_at)
+       WITH RECURSIVE n(i) AS (
+         SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < CAST(? AS INTEGER))
+       SELECT '', 'm' || i, i, CASE WHEN i = 1 THEN NULL ELSE 'm' || (i - 1) END,
+         CASE WHEN i % 2 = 1 THEN 'user' ELSE 'assistant' END,
+         json_object('id', 'm' || i,
+           'role', CASE WHEN i % 2 = 1 THEN 'user' ELSE 'assistant' END,
+           'parts', json_array(json_object('type', 'text', 'text', 'x'))),
+         1, i FROM n`,
+      count
+    );
+  }
+
+  /**
+   * Budgeted hydrations (`getRecentHistory` calls) during a client submit of
+   * one new message and during one chat turn, on a windowed cache.
+   */
+  async hydrationsPerRequestForTest(): Promise<{
+    submit: number;
+    turn: number;
+  }> {
+    const session = this.session as unknown as {
+      getRecentHistory: (...args: unknown[]) => Promise<unknown>;
+    };
+    const read = session.getRecentHistory.bind(session);
+    let count = 0;
+    session.getRecentHistory = async (...args) => {
+      count++;
+      return read(...args);
+    };
+    try {
+      const host = this as unknown as {
+        _reconcileAndPersistIncoming(
+          messages: UIMessage[],
+          options: {
+            requestId: string;
+            isRegeneration: boolean;
+            isCurrent: () => boolean;
+          }
+        ): Promise<unknown>;
+      };
+      await host._reconcileAndPersistIncoming(
+        [
+          ...this.messages,
+          {
+            id: "submitted",
+            role: "user",
+            parts: [{ type: "text", text: "a question" }]
+          }
+        ] as UIMessage[],
+        { requestId: "count", isRegeneration: false, isCurrent: () => true }
+      );
+      const submit = count;
+      count = 0;
+      await this.chat("another question", new TestCollectingCallback());
+      return { submit, turn: count };
+    } finally {
+      session.getRecentHistory = read;
+    }
+  }
+
+  /**
+   * Budgeted hydrations while `addMessages` injects a batch of short
+   * messages at the tail of a windowed cache.
+   */
+  async hydrationsForBatchForTest(count: number): Promise<number> {
+    const session = this.session as unknown as {
+      getRecentHistory: (...args: unknown[]) => Promise<unknown>;
+    };
+    const read = session.getRecentHistory.bind(session);
+    let hydrations = 0;
+    session.getRecentHistory = async (...args) => {
+      hydrations++;
+      return read(...args);
+    };
+    try {
+      await this.addMessages(
+        Array.from({ length: count }, (_, i) => ({
+          id: `batch-${i}`,
+          role: i % 2 === 0 ? "user" : "assistant",
+          parts: [{ type: "text", text: `short ${i}` }]
+        })) as UIMessage[]
+      );
+      return hydrations;
+    } finally {
+      session.getRecentHistory = read;
+    }
+  }
+
+  /**
+   * On a seeded long path, the client sends copies of two older replies
+   * under new ids. Returns which copies were stored as new messages.
+   */
+  async reconcileCopiesOnLongPathForTest(ids: string[]): Promise<string[]> {
+    const copies: UIMessage[] = [];
+    for (const id of ids) {
+      // Seeded replies all read "x": give these their own text.
+      const reply = {
+        id,
+        role: "assistant",
+        parts: [{ type: "text", text: `reply ${id}` }]
+      } as UIMessage;
+      await this.session.updateMessage(reply);
+      copies.push({ ...reply, id: `copy-${id}` });
+    }
+    const host = this as unknown as {
+      _reconcileAndPersistIncoming(
+        messages: UIMessage[],
+        options: {
+          requestId: string;
+          isRegeneration: boolean;
+          isCurrent: () => boolean;
+        }
+      ): Promise<unknown>;
+    };
+    await host._reconcileAndPersistIncoming(
+      [
+        ...copies,
+        ...this.messages,
+        {
+          id: "new-user",
+          role: "user",
+          parts: [{ type: "text", text: "next question" }]
+        }
+      ] as UIMessage[],
+      { requestId: "long-copies", isRegeneration: false, isCurrent: () => true }
+    );
+    return this.ctx.storage.sql
+      .exec<{ id: string }>(
+        "SELECT id FROM cf_agents_session_messages WHERE session_id = '' AND id LIKE 'copy-%' ORDER BY id"
+      )
+      .toArray()
+      .map((row) => row.id);
+  }
+
+  /**
+   * Reconcile on a path too long to read root-first: the client sends the
+   * oldest message (outside the window) and a new one. Returns the new
+   * message's stored parent.
+   */
+  async reconcileOnLongPathForTest(): Promise<string | null> {
+    const oldest = await this.session.getMessage("m1");
+    const host = this as unknown as {
+      _reconcileAndPersistIncoming(
+        messages: UIMessage[],
+        options: {
+          requestId: string;
+          isRegeneration: boolean;
+          isCurrent: () => boolean;
+        }
+      ): Promise<unknown>;
+    };
+    await host._reconcileAndPersistIncoming(
+      [
+        oldest,
+        {
+          id: "new-user",
+          role: "user",
+          parts: [{ type: "text", text: "next question" }]
+        }
+      ] as UIMessage[],
+      { requestId: "long-path", isRegeneration: false, isCurrent: () => true }
+    );
+    const [row] = this.ctx.storage.sql
+      .exec<{ parent_id: string | null }>(
+        "SELECT parent_id FROM cf_agents_session_messages WHERE session_id = '' AND id = 'new-user'"
+      )
+      .toArray();
+    return row?.parent_id ?? null;
+  }
+
+  /** Reconcile `incoming` plus the window and a new message. */
+  private async _reconcileWithWindowForTest(
+    older: UIMessage[],
+    requestId: string
+  ): Promise<void> {
+    const host = this as unknown as {
+      _reconcileAndPersistIncoming(
+        messages: UIMessage[],
+        options: {
+          requestId: string;
+          isRegeneration: boolean;
+          isCurrent: () => boolean;
+        }
+      ): Promise<unknown>;
+    };
+    await host._reconcileAndPersistIncoming(
+      [
+        ...older,
+        ...this.messages,
+        {
+          id: "new-user",
+          role: "user",
+          parts: [{ type: "text", text: "next question" }]
+        }
+      ] as UIMessage[],
+      { requestId, isRegeneration: false, isCurrent: () => true }
+    );
+  }
+
+  /** A tool reply part; `output` only once it has one. */
+  private _toolReplyForTest(id: string, callId: string, output?: string) {
+    return {
+      id,
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-lookup",
+          toolCallId: callId,
+          input: {},
+          ...(output === undefined
+            ? { state: "input-available" }
+            : { state: "output-available", output })
+        }
+      ]
+    } as unknown as UIMessage;
+  }
+
+  /**
+   * The client sends an older stored reply under its own id and a stale copy
+   * of it under another. Returns the stored reply's tool state afterwards.
+   */
+  async reconcileStaleCopyForTest(): Promise<string | undefined> {
+    await this.session.updateMessage(
+      this._toolReplyForTest("seed-3", "call-stale", "done")
+    );
+    await this.syncMessagesFromStorage();
+    await this._reconcileWithWindowForTest(
+      [
+        this._toolReplyForTest("seed-3", "call-stale", "done"),
+        this._toolReplyForTest("client-copy", "call-stale")
+      ],
+      "stale-copy"
+    );
+    const stored = await this.session.getMessage("seed-3");
+    return (stored?.parts[0] as { state?: string } | undefined)?.state;
+  }
+
+  /**
+   * Two older replies reuse one tool call id: the earlier waits for a client
+   * result, the later has one. The client sends its result for the earlier
+   * under its own id. Returns both stored outputs.
+   */
+  async reconcileReusedCallForTest(): Promise<{
+    earlier: unknown;
+    later: unknown;
+  }> {
+    await this.session.updateMessage(
+      this._toolReplyForTest("seed-1", "call-reused")
+    );
+    await this.session.updateMessage(
+      this._toolReplyForTest("seed-3", "call-reused", "late")
+    );
+    await this.syncMessagesFromStorage();
+    await this._reconcileWithWindowForTest(
+      [this._toolReplyForTest("client-copy", "call-reused", "early")],
+      "reused-call"
+    );
+    const output = async (id: string) =>
+      (
+        (await this.session.getMessage(id))?.parts[0] as
+          | { output?: unknown }
+          | undefined
+      )?.output;
+    return { earlier: await output("seed-1"), later: await output("seed-3") };
+  }
+
+  /**
+   * A reply hidden by compaction holds a tool result; the client resends it
+   * in its stale pending state, alongside an older reply under another id.
+   * Returns the stored tool state afterwards.
+   */
+  async reconcileHiddenToolResultForTest(): Promise<string | undefined> {
+    const toolPart = (state: string) => ({
+      type: "tool-lookup",
+      toolCallId: "call-hidden",
+      state,
+      input: {},
+      ...(state === "output-available" ? { output: "done" } : {})
+    });
+    await this.session.updateMessage({
+      id: "seed-1",
+      role: "assistant",
+      parts: [toolPart("output-available")]
+    } as unknown as UIMessage);
+    await this.session.addCompaction("summary", "seed-0", "seed-2");
+    await this.syncMessagesFromStorage();
+    const copy = await this.session.getMessage("seed-3");
+    const incoming = [
+      { id: "seed-1", role: "assistant", parts: [toolPart("input-available")] },
+      { ...copy, id: "client-copy" },
+      ...this.messages,
+      {
+        id: "new-user",
+        role: "user",
+        parts: [{ type: "text", text: "next question" }]
+      }
+    ] as unknown as UIMessage[];
+    const host = this as unknown as {
+      _reconcileAndPersistIncoming(
+        messages: UIMessage[],
+        options: {
+          requestId: string;
+          isRegeneration: boolean;
+          isCurrent: () => boolean;
+        }
+      ): Promise<unknown>;
+    };
+    await host._reconcileAndPersistIncoming(incoming, {
+      requestId: "hidden-tool-result",
+      isRegeneration: false,
+      isCurrent: () => true
+    });
+    const stored = await this.session.getMessage("seed-1");
+    return (stored?.parts[0] as { state?: string } | undefined)?.state;
+  }
+
+  /**
+   * The client holds an older reply under its own id (an optimistic copy):
+   * it sends that copy, the window and a new message. Returns the stored
+   * history's ids.
+   */
+  async reconcileOptimisticCopyForTest(): Promise<string[]> {
+    const inWindow = new Set(this.messages.map((m) => m.id));
+    const older = (await this.session.getHistory()).find(
+      (m) => m.role === "assistant" && !inWindow.has(m.id)
+    );
+    if (!older) throw new Error("no assistant message older than the window");
+    const incoming = [
+      { ...older, id: "client-copy" },
+      ...this.messages,
+      {
+        id: "new-user",
+        role: "user",
+        parts: [{ type: "text", text: "next question" }]
+      }
+    ] as UIMessage[];
+    const host = this as unknown as {
+      _reconcileAndPersistIncoming(
+        messages: UIMessage[],
+        options: {
+          requestId: string;
+          isRegeneration: boolean;
+          isCurrent: () => boolean;
+        }
+      ): Promise<unknown>;
+    };
+    await host._reconcileAndPersistIncoming(incoming, {
+      requestId: "optimistic-copy",
+      isRegeneration: false,
+      isCurrent: () => true
+    });
+    return (await this.session.getHistory()).map((m) => m.id);
+  }
+
+  /**
+   * Reconcile a client transcript on a windowed cache: the client sends a
+   * stored message older than the window, the window, and a new message.
+   */
+  async reconcileOlderThanWindowForTest(): Promise<string[]> {
+    const stored = await this.session.getMessage("seed-0");
+    const incoming = [
+      stored,
+      ...this.messages,
+      {
+        id: "new-user",
+        role: "user",
+        parts: [{ type: "text", text: "next question" }]
+      }
+    ] as UIMessage[];
+    const host = this as unknown as {
+      _reconcileAndPersistIncoming(
+        messages: UIMessage[],
+        options: {
+          requestId: string;
+          isRegeneration: boolean;
+          isCurrent: () => boolean;
+        }
+      ): Promise<unknown>;
+    };
+    await host._reconcileAndPersistIncoming(incoming, {
+      requestId: "reconcile-test",
+      isRegeneration: false,
+      isCurrent: () => true
+    });
+    return (await this.session.getHistory()).map((m) => m.id);
+  }
+
   async getOnStartDegradationsForTest(): Promise<OnStartDegradationForTest[]> {
     return this._onStartDegradations.map((d) => ({
       step: d.step,
@@ -14242,7 +14634,106 @@ export class ThinkMediaEvictionAgent extends Think {
     return { firstPassMessages: first?.messages ?? 0, lateId: "late-media" };
   }
 
+  /**
+   * An aged media row with large text-only rows above it, then four
+   * protected fillers. Large rows are read to look for media, so they count
+   * toward `maxRowsPerPass`.
+   */
+  async seedLargeTextAboveMediaForTest(largeRows: number): Promise<void> {
+    await this.appendMessageToHistory({
+      id: "media",
+      role: "user",
+      parts: [
+        {
+          type: "file",
+          mediaType: "image/png",
+          url: `data:image/png;base64,${"A".repeat(BIG_MEDIA_CHARS)}`
+        }
+      ]
+    } as UIMessage);
+    for (let i = 0; i < largeRows + 4; i++) {
+      await this.appendMessageToHistory({
+        id: `text-${i}`,
+        role: i % 2 === 0 ? "assistant" : "user",
+        parts: [
+          {
+            type: "text",
+            text: i < largeRows ? "x".repeat(BIG_MEDIA_CHARS) : `filler ${i}`
+          }
+        ]
+      } as UIMessage);
+    }
+  }
+
+  /**
+   * Media that a late update puts on a row the cache does not hold: a pass
+   * runs over text rows, so its cursor is past them, then `c1` is hidden
+   * under a summary and gets an image. Returns the second pass's result.
+   */
+  async lateMediaOnHiddenRowForTest(): Promise<number> {
+    for (let i = 0; i < 10; i++) {
+      await this.appendMessageToHistory({
+        id: `c${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `message ${i}` }]
+      } as UIMessage);
+    }
+    await this._evictAgedMediaBestEffort();
+    await this.session.addCompaction("summary", "c0", "c3");
+    await this.syncMessagesFromStorage();
+    await this.session.updateMessage({
+      id: "c1",
+      role: "assistant",
+      parts: [
+        {
+          type: "file",
+          mediaType: "image/png",
+          url: `data:image/png;base64,${"A".repeat(BIG_MEDIA_CHARS)}`
+        }
+      ]
+    } as UIMessage);
+    return (await this._evictAgedMediaBestEffort())?.messages ?? 0;
+  }
+
   /** One bounded Think-owned eviction pass. */
+  /**
+   * Rows of the stored path that two consecutive passes read, after `count`
+   * text messages: the second pass starts from where the first got to.
+   */
+  async evictionPassRowsForTest(count: number): Promise<{
+    first: number;
+    second: number;
+  }> {
+    for (let i = 0; i < count; i++) {
+      await this.appendMessageToHistory({
+        id: `text-${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `message ${i}` }]
+      } as UIMessage);
+    }
+    const session = this.session as unknown as {
+      internal_storedPathRows: (
+        options: Record<string, unknown>
+      ) => Promise<unknown[]>;
+    };
+    const rows = session.internal_storedPathRows.bind(session);
+    let read = 0;
+    session.internal_storedPathRows = async (options) => {
+      const page = await rows(options);
+      read += page.length;
+      return page;
+    };
+    try {
+      await this._evictAgedMediaBestEffort();
+      const first = read;
+      read = 0;
+      await this._evictAgedMediaBestEffort();
+      return { first, second: read };
+    } finally {
+      session.internal_storedPathRows = rows;
+    }
+  }
+
   async runEvictionForTest(): Promise<{
     messages: number;
     parts: number;
@@ -14426,16 +14917,22 @@ export class ThinkMediaEvictionAutoAgent extends ThinkMediaEvictionAgent {
     // The refresh's own pass runs and records nothing aged.
     await new Promise((resolve) => setTimeout(resolve, 150));
 
-    // Hold the next pass open AFTER its row-stats read, so it finishes
-    // fruitless on stats that predate the appends below.
+    // Hold the next pass open AFTER its first stored-path read, so it
+    // finishes fruitless on rows that predate the appends below.
     const session = this.session as unknown as {
-      getHistoryRowStats: (...args: unknown[]) => Promise<unknown>;
+      internal_storedPathRows: (
+        options: Record<string, unknown>
+      ) => Promise<unknown>;
     };
-    const stats = session.getHistoryRowStats.bind(session);
-    session.getHistoryRowStats = async (...args: unknown[]) => {
-      const rows = await stats(...args);
-      await new Promise((resolve) => setTimeout(resolve, 150));
-      return rows;
+    const rows = session.internal_storedPathRows.bind(session);
+    let held = false;
+    session.internal_storedPathRows = async (options) => {
+      const page = await rows(options);
+      if (!held) {
+        held = true;
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      }
+      return page;
     };
     const internal = this as unknown as {
       _cfMediaEviction: { running: boolean };

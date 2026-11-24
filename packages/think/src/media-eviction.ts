@@ -374,7 +374,13 @@ interface MediaEvictionPassHost {
   agedRowsHiddenFromCache(): boolean;
   /** Stored content bytes the last hydration measured, if known. */
   storedBytes(): number | null;
-  rowStats(): Promise<ReadonlyArray<{ id: string; bytes: number }>>;
+  /** A page of the stored path from the newest row back, sizes with `measure`. */
+  storedPathRows(options: {
+    skip: number;
+    limit: number;
+    measure?: boolean;
+    after?: string;
+  }): Promise<ReadonlyArray<{ id: string; bytes: number }>>;
   readMessage(id: string): Promise<UIMessage | null>;
   /**
    * A file writer for one pass, opened once at the start of the pass so every
@@ -390,6 +396,16 @@ interface MediaEvictionPassHost {
    */
   queueRouted(): Promise<unknown>;
 }
+
+/**
+ * The newest aged row a completed pass examined, and its position from the
+ * root: one KV key, written when a pass moves it.
+ */
+const CURSOR_KEY = "think-media-eviction:cursor";
+type EvictionCursor = { id: string; index: number };
+
+/** Aged rows one stored-path read returns. */
+const MEDIA_EVICTION_PAGE_ROWS = 256;
 
 /** One pass at a time: requests coalesce on this job id. */
 const PASS_JOB_ID = "think-media-eviction:pass";
@@ -431,6 +447,8 @@ export class MediaEvictionPasses extends LifecycleCapability {
    * that grows a cached row clears it outright ({@link invalidate}).
    */
   #fruitless: { storedBytes: number; appendsSince: number } | null = null;
+  /** A row grew: the durable cursor no longer vouches for what is below it. */
+  #cursorStale = false;
 
   constructor(host: MediaEvictionPassHost) {
     super("think-media-eviction");
@@ -460,6 +478,17 @@ export class MediaEvictionPasses extends LifecycleCapability {
   /** A cached row grew, so an aged row may now hold a payload. */
   invalidate(): void {
     this.#fruitless = null;
+    this.#cursorStale = true;
+  }
+
+  /**
+   * A row the cache does not hold changed (a late tool result on an older
+   * reply). It may now hold media below the cursor, so the next pass starts
+   * over. A pass's own rewrites land while it runs and are not counted.
+   */
+  rowChangedOutsideCache(): void {
+    if (this.#running) return;
+    this.#cursorStale = true;
   }
 
   /**
@@ -564,28 +593,94 @@ export class MediaEvictionPasses extends LifecycleCapability {
     };
     try {
       const files = this.#host.openFiles();
-      const stats = await this.#host.rowStats();
-      const aged = stats.slice(
-        0,
+      // Where earlier passes got to: the newest aged row they examined, and
+      // its position from the root. Rows at or below it have been examined
+      // (and evicted or left), so a pass reads from the leaf down to it and
+      // no further: a restart re-reads only what was added since.
+      const storage = this.lifecycleServices?.storage;
+      if (this.#cursorStale) {
+        await storage?.delete(CURSOR_KEY);
+        this.#cursorStale = false;
+      }
+      const cursor = await storage?.get<EvictionCursor>(CURSOR_KEY);
+      // Count the rows above the cursor (ids only, one page at a time). The
+      // cutoff needs the path's length; the cursor's position stands in for
+      // everything below it. Without a cursor on this path (the first pass,
+      // a branch switch, a deleted row) the walk counts to the root.
+      let above = 0;
+      let reached = false;
+      // Pages start small and grow: the cursor is usually a few rows down.
+      for (let after: string | undefined, limit = 32; ;) {
+        const page = await this.#host.storedPathRows(
+          after === undefined ? { skip: 0, limit } : { skip: 0, limit, after }
+        );
+        limit = Math.min(limit * 4, MEDIA_EVICTION_PAGE_ROWS);
+        if (page.length === 0) break;
+        const at = cursor ? page.findIndex((row) => row.id === cursor.id) : -1;
+        if (at >= 0) {
+          above += at;
+          reached = true;
+          break;
+        }
+        above += page.length;
+        after = page[page.length - 1].id;
+      }
+      // A delete below the cursor makes `total` too large, which can only
+      // move the cut within one truncation step (`keep` depends on the
+      // length modulo the step and never drops below `keepRecentMessages`).
+      const total = reached && cursor ? cursor.index + 1 + above : above;
+      const keep =
+        total -
         mediaEvictionCutoff(
-          stats.length,
+          total,
           config.keepRecentMessages,
           this.#host.truncationStep()
-        )
-      );
+        );
+      // The aged rows this pass must examine: from the cutoff down to the
+      // cursor, or to the root.
+      const end = reached ? above : total;
+      let newestAged: string | undefined;
 
-      let processed = 0;
-      for (const row of aged) {
-        // The stored row is not large enough to hold an evictable payload —
-        // skip without reading it. A rewritten row drops below this line and
-        // is skipped by every later pass.
-        if (row.bytes < config.minPartBytes) continue;
-        if (processed >= config.maxRowsPerPass) {
+      // Collect the rows large enough to hold an evictable payload, with
+      // their depth from the leaf; smaller rows are skipped without being
+      // read, and a rewritten row drops below the line for every later pass.
+      const candidates: Array<{ id: string; depth: number }> = [];
+      let after: string | undefined;
+      for (let read = keep; read < end;) {
+        const page = (
+          await this.#host.storedPathRows(
+            after === undefined
+              ? { skip: keep, limit: MEDIA_EVICTION_PAGE_ROWS, measure: true }
+              : {
+                  skip: 0,
+                  limit: MEDIA_EVICTION_PAGE_ROWS,
+                  measure: true,
+                  after
+                }
+          )
+        ).slice(0, end - read);
+        if (page.length === 0) break;
+        newestAged ??= page[0].id;
+        page.forEach((row, at) => {
+          if (row.bytes >= config.minPartBytes) {
+            candidates.push({ id: row.id, depth: read + at });
+          }
+        });
+        read += page.length;
+        after = page[page.length - 1].id;
+      }
+
+      // Oldest first, so a pass cut short at `maxRowsPerPass` has examined
+      // everything from the cursor up to its last row, and the cursor can
+      // move there. A run of large rows without media no longer stalls it.
+      let reachedTo: { id: string; depth: number } | undefined;
+      for (let i = candidates.length - 1; i >= 0; i--) {
+        if (candidates.length - 1 - i >= config.maxRowsPerPass) {
           totals.backlogRemains = true;
           break;
         }
-        processed++;
-
+        const row = candidates[i];
+        reachedTo = row;
         const message = await this.#host.readMessage(row.id);
         if (!message) continue;
 
@@ -607,6 +702,19 @@ export class MediaEvictionPasses extends LifecycleCapability {
         totals.bytes += result.bytes;
       }
 
+      // Move the cursor up to what this pass examined, one write: the newest
+      // aged row, or the last candidate a pass cut short reached.
+      const advanceTo = totals.backlogRemains
+        ? reachedTo
+        : newestAged === undefined
+          ? undefined
+          : { id: newestAged, depth: keep };
+      if (storage && advanceTo) {
+        await storage.put(CURSOR_KEY, {
+          id: advanceTo.id,
+          index: total - 1 - advanceTo.depth
+        } satisfies EvictionCursor);
+      }
       const storedBytes = this.#host.storedBytes();
       if (totals.messages > 0) {
         this.#fruitless = null;

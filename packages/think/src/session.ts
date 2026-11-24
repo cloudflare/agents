@@ -203,6 +203,16 @@ export class ThinkSession {
     return (await this.#handle.getHistoryRowStats(leafId)).length;
   }
 
+  /** @internal A page of the stored path from the newest row back (media eviction). */
+  internal_storedPathRows(options: {
+    skip: number;
+    limit: number;
+    measure?: boolean;
+    after?: string;
+  }): Promise<Array<{ id: string; bytes: number }>> {
+    return this.#handle.internal_storedPathRows(options);
+  }
+
   getMessage(id: string): Promise<SessionMessage | null> {
     return this.#handle.getMessage(id);
   }

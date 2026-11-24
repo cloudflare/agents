@@ -175,6 +175,23 @@ export class Session {
     return this.#core.pathRowStats(this.sessionId, leafId);
   }
 
+  /**
+   * @internal Sibling-package support, not a public API. A page of the
+   * stored path from the newest row back: depths `skip` to
+   * `skip + limit - 1`, rows under an overlay included; with `after`, counted
+   * from that row's parent, to continue from a previous page. With
+   * `measure`, each row carries its hydrated size.
+   */
+  async internal_storedPathRows(options: {
+    skip: number;
+    limit: number;
+    measure?: boolean;
+    after?: string;
+  }): Promise<Array<{ id: string; bytes: number }>> {
+    await this.#ready();
+    return this.#core.storedPathRows(this.sessionId, options);
+  }
+
   async getMessage(id: string): Promise<SessionMessage | null> {
     await this.#ready();
     return this.#core.getMessage(this.sessionId, id);
@@ -459,24 +476,27 @@ export class Session {
     const historyIds = new Set(history.map((message) => message.id));
     if (!historyIds.has(result.toMessageId)) return null;
 
-    // Iterative compaction extends only an overlay visible on this branch.
-    const existing = this.#core
-      .getCompactions(this.sessionId)
-      .filter(
-        (compaction) =>
-          historyIds.has(`${COMPACTION_PREFIX}${compaction.id}`) ||
-          (historyIds.has(compaction.fromMessageId) &&
-            historyIds.has(compaction.toMessageId))
-      );
-    const fromId =
-      existing.length > 0 ? existing[0].fromMessageId : result.fromMessageId;
-
-    this.#core.addCompaction(
+    // Iterative compaction extends the overlay this branch shows, keeping
+    // its start and the head below it.
+    const visible = history.find((message) => isCompactionMessage(message));
+    // A range ending at a summary message re-summarizes that overlay: the
+    // new one ends where it ends and supersedes it.
+    let toMessageId = result.toMessageId;
+    if (toMessageId.startsWith(COMPACTION_PREFIX)) {
+      const ended = this.#core
+        .getCompactions(this.sessionId)
+        .find((c) => `${COMPACTION_PREFIX}${c.id}` === toMessageId);
+      if (!ended) return null;
+      toMessageId = ended.toMessageId;
+    }
+    const stored = this.#core.addCompaction(
       this.sessionId,
       result.summary,
-      fromId,
-      result.toMessageId
+      result.fromMessageId,
+      toMessageId,
+      visible?.id.slice(COMPACTION_PREFIX.length)
     );
+    const fromId = stored.fromMessageId;
     await this.#core.notify({ type: "compact", sessionId: this.sessionId });
     return { ...result, fromMessageId: fromId };
   }

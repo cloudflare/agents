@@ -24,6 +24,8 @@ type MediaEvictionStub = {
     backlogRemains: boolean;
   } | null>;
   getStoredMessageForTest(id: string): Promise<UIMessage | null>;
+  seedLargeTextAboveMediaForTest(largeRows: number): Promise<void>;
+  lateMediaOnHiddenRowForTest(): Promise<number>;
   getContinuationRowCountForTest(): Promise<number>;
   readEvictedFileForTest(path: string): Promise<{
     byteLength: number;
@@ -140,6 +142,22 @@ describe("mediaEviction — aged media leaves the conversation (#1710)", () => {
     expect(file?.byteLength).toBe(PAYLOAD_BYTES);
   });
 
+  it("starts a pass where the last one got to, so it re-reads only new rows", async () => {
+    const agent = (await evictionAgent(uniqueName("evict-cursor"))) as Awaited<
+      ReturnType<typeof evictionAgent>
+    > & {
+      evictionPassRowsForTest(
+        count: number
+      ): Promise<{ first: number; second: number }>;
+    };
+    await agent.setMediaEvictionForTest(AGED_POLICY);
+    const { first, second } = await agent.evictionPassRowsForTest(300);
+    // The first pass counts the path and examines every aged row.
+    expect(first).toBeGreaterThanOrEqual(300);
+    // The second reads from the leaf down to the first pass's cursor.
+    expect(second).toBeLessThan(40);
+  });
+
   it("evicts a payload larger than one row, leaving the bytes in one place", async () => {
     const agent = await evictionAgent(uniqueName("evict-split"));
     // Seed before enabling the policy: an append with the policy on would
@@ -226,6 +244,24 @@ describe("mediaEviction — aged media leaves the conversation (#1710)", () => {
       },
       { timeout: 10_000, interval: 50 }
     );
+  });
+
+  it("reaches older media past large text rows that fill a pass", async () => {
+    const agent = await evictionAgent(uniqueName("evict-large-text"));
+    await agent.seedLargeTextAboveMediaForTest(3);
+    await agent.setMediaEvictionForTest({ ...AGED_POLICY, maxRowsPerPass: 2 });
+
+    await agent.runEvictionForTest();
+    await agent.runEvictionForTest();
+    expect(
+      JSON.stringify(await agent.getStoredMessageForTest("media"))
+    ).toContain("[evicted image/png,");
+  });
+
+  it("evicts media a late update puts on a row the cache does not hold", async () => {
+    const agent = await evictionAgent(uniqueName("evict-late-hidden"));
+    await agent.setMediaEvictionForTest(AGED_POLICY);
+    expect(await agent.lateMediaOnHiddenRowForTest()).toBe(1);
   });
 
   it("mediaEviction:false keeps the image visible to the model", async () => {

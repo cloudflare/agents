@@ -1253,6 +1253,23 @@ type StoredThinkClientRequest = {
   branchParentId: string | undefined;
 };
 
+/**
+ * What a budgeted read (`getRecentHistory`) charges each message on top of
+ * its stored bytes; growth since a refresh is charged the same way.
+ */
+const HYDRATION_MESSAGE_OVERHEAD_BYTES = 1024;
+
+/**
+ * How many messages past a windowed cache reconciliation looks for an older
+ * reply the client holds under another id: the newest 10,001 messages
+ * counting the window (what a reconcile read before the depth cap was
+ * lifted), and never fewer than 1,000. At most that many point reads, and
+ * only for a submit that carries such a reply.
+ */
+function reconcileLookback(windowLength: number): number {
+  return Math.max(1_000, 10_001 - windowLength);
+}
+
 export class Think<
   Env extends Cloudflare.Env = Cloudflare.Env,
   State = unknown,
@@ -1656,17 +1673,35 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               intercept: async (event) => {
                 switch (event.type) {
                   case "append":
-                    // A branch append moves the path itself, which no
-                    // in-place patch expresses.
-                    if (event.inserted && event.parentId === undefined) {
+                    // An append under the cached tail extends the cached
+                    // path in place. A branch append moves the path itself,
+                    // which no in-place patch expresses.
+                    if (
+                      !event.inserted ||
+                      event.parentId === undefined ||
+                      event.parentId ===
+                        (this._cfTranscript.messages.at(-1)?.id ?? null)
+                    ) {
                       return false;
                     }
                     await this._cfTranscript.sync();
                     return true;
+                  case "update":
+                    // An update to a row the cache does not hold (an older
+                    // reply a late tool result lands on) may have put media
+                    // on a row media eviction already examined.
+                    if (
+                      !this._cfTranscript.messages.some(
+                        (message) => message.id === event.message.id
+                      )
+                    ) {
+                      this._cfMediaEviction.rowChangedOutsideCache();
+                    }
+                    return false;
                   case "import":
                     // A row the cache never saw. Re-derive at the next safe
                     // boundary instead of mirroring a migration row by row.
-                    this._cfTranscript.coversActivePath = false;
+                    this._cfTranscript.markStale();
                     return true;
                   case "clear":
                     this._cfTranscript.replace([]);
@@ -1693,7 +1728,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
                 // where an eviction pass becomes worth scheduling; the gate
                 // decides from memory. It also grows the cache past what the
                 // last refresh measured.
-                this._cfTranscript.noteGrowth(cachedMessageBytes(message));
+                // A budgeted refresh charges each message 1 KiB on top of
+                // its bytes, so growth is charged the same way.
+                this._cfTranscript.noteGrowth(
+                  cachedMessageBytes(message) + HYDRATION_MESSAGE_OVERHEAD_BYTES
+                );
                 this._cfMediaEviction.noteAppend();
               }
             });
@@ -1863,25 +1902,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /**
-   * Read the durable message path from session storage.
-   *
-   * Intentionally UNBUDGETED — unlike the cache refresh in `_cfTranscript.sync()`,
-   * which routes through `session.getRecentHistory(hydrationByteBudget)`, this
-   * returns the full active path. Its caller, message reconciliation, must see
-   * every message: it diffs incoming client messages against the complete
-   * server transcript, so a windowed read would drop rows and corrupt the
-   * result. It is reached only when the live cache does not already cover the
-   * path (`_serverTranscriptForReconcile`); tool-update application resolves
-   * its one target row without it (`_resolveToolCallOwner`).
-   *
-   * These full reads are not the unbounded boot-time hydration that bricked the
-   * DO in #1710: they run during a live turn (never in `onStart`), so an
-   * `SQLITE_NOMEM` here surfaces as a recoverable turn-level error rather than a
-   * partyserver init-reset/alarm-retry loop. They also inherit step 1's
-   * mitigation — `session.getHistory()` now fetches content in bounded chunks
-   * (`messagesByPathIds`) instead of carrying blobs through the recursive CTE
-   * and its `ORDER BY` sorter — and background media eviction shrinks the stored
-   * footprint over time, so the steady-state read size converges down.
+   * Read the whole visible path from session storage, for a cache refresh
+   * with no `hydrationByteBudget` (the budget turned off). Sessions throws
+   * past 200,000 visible messages rather than return a shorter path.
    */
   private async _readMessagesFromStorage(): Promise<UIMessage[]> {
     return (await this.session.getHistory()) as UIMessage[];
@@ -2017,7 +2040,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         isCompactionMessage(message as SessionMessage)
       ),
     storedBytes: () => this._lastHydration?.totalContentBytes ?? null,
-    rowStats: () => this.session.getHistoryRowStats(),
+    storedPathRows: (options) => this.session.internal_storedPathRows(options),
     readMessage: async (id) =>
       (await this.session.getMessage(id)) as UIMessage | null,
     openFiles: () => new WorkspaceFiles(this.workspace),
@@ -6406,14 +6429,15 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       }
     }
 
-    // The live cache is kept coherent automatically by the Sessions change
-    // listener wired in `onStart`, which handles
-    // both linear appends and branches (an explicit `parentId` triggers a full
-    // resync). So `addMessages` only owns the broadcast — and suppresses it
-    // mid-turn: pushing a full `MSG_CHAT_MESSAGES` snapshot while a turn streams
+    // The live cache is kept coherent by the Sessions change listener wired
+    // in `onStart`: appends under the cached tail land in place, a branch
+    // forces a full resync. A windowed cache that a batch grew past its
+    // allowance re-windows here. Otherwise `addMessages` only owns the
+    // broadcast — and suppresses it mid-turn: pushing a full `MSG_CHAT_MESSAGES` snapshot while a turn streams
     // would clobber the in-progress assistant message on connected clients (the
     // same reason the streaming path defers its snapshot). The injected messages
     // ride along on the turn's next broadcast.
+    await this._cfTranscript.refreshIfNeeded();
     if (this._insideInferenceLoop) return;
     if (options?.broadcast !== false) {
       this._frames.broadcastMessages(this.messages);
@@ -7313,8 +7337,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               await this._persistIncomingMessage(message, undefined, "web");
             }
             if (!isCurrent()) return false;
-            if (!this._cfTranscript.coversActivePath)
-              await this._cfTranscript.sync();
+            await this._cfTranscript.refreshIfNeeded();
             return true;
           }
         );
@@ -8223,7 +8246,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       "load_chat_history",
       "interaction",
       spanAttributes,
-      () => this._serverTranscriptForReconcile()
+      () => this._serverTranscriptForReconcile(incomingMessages)
     );
     const serverMessagesById = new Map(
       serverMessages.map((message) => [message.id, message])
@@ -8263,11 +8286,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         if (!options.isCurrent()) return false;
         // The change feed patched the cache for every write above (a linear
         // append lands in place; a branch append already forced a full
-        // refresh), so a cache that covers the path is current. Only a
-        // windowed or unhydrated cache needs storage to re-derive its view.
-        if (!this._cfTranscript.coversActivePath) {
-          await this._cfTranscript.sync();
-        }
+        // refresh), so the cache is current unless it can't answer.
+        await this._cfTranscript.refreshIfNeeded();
         return true;
       }
     );
@@ -8276,18 +8296,75 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
   /**
    * The server transcript that reconciliation diffs client messages against.
-   * The live cache answers when it holds the whole active path — the common
-   * case, kept current by the change feed after every durable write. A
-   * windowed or unhydrated cache falls back to the full storage read, since
-   * reconciliation must see every message (`_readMessagesFromStorage`).
+   * The live cache answers when it holds the whole active path, the common
+   * case, kept current by the change feed after every durable write.
+   *
+   * A windowed cache holds the newest part of the path. A client holds what
+   * it was sent (that window) plus its new messages, so the stored rows
+   * reconciliation needs beyond the window are those of incoming messages
+   * older than it: each is read by id, and a new message costs one key
+   * probe that finds nothing. An older reply stored under another id is
+   * looked for past the window, newest-first, within `reconcileLookback`
+   * messages, holding only its oldest candidates.
    *
    * Returns a snapshot: the writes that follow patch the cache through the
    * change feed while the caller is still iterating.
    */
-  private async _serverTranscriptForReconcile(): Promise<UIMessage[]> {
-    if (this._cfTranscript.coversActivePath)
-      return [...this._cfTranscript.messages];
-    return this._readMessagesFromStorage();
+  private async _serverTranscriptForReconcile(
+    incoming: readonly UIMessage[]
+  ): Promise<UIMessage[]> {
+    const window = [...this._cfTranscript.messages];
+    if (this._cfTranscript.coversActivePath) return window;
+    const inWindow = new Set(window.map((message) => message.id));
+    const older: UIMessage[] = [];
+    const unmatched: UIMessage[] = [];
+    for (const message of incoming) {
+      if (inWindow.has(message.id)) continue;
+      const stored = await this.session.getMessage(message.id);
+      if (stored) older.push(stored as UIMessage);
+      else if (message.role === "assistant") unmatched.push(message);
+    }
+    if (unmatched.length === 0) return [...older, ...window];
+    // An older reply the client holds under another id (an optimistic copy)
+    // is matched to a stored row by content and tool calls, oldest
+    // unclaimed row first. Look past the window, newest-first from its
+    // oldest stored message, one message in memory at a time, as far as
+    // `reconcileLookback` allows, and keep for each such reply its `k`
+    // oldest candidates (`k` = how many replies are unmatched): the batch
+    // reconciler then picks as it would over that range, holding at most
+    // k² messages. Rows found by id are not candidates again.
+    const start = window.find(
+      (message) => !isCompactionMessage(message as SessionMessage)
+    );
+    const lookback = reconcileLookback(window.length);
+    const known = new Set([...inWindow, ...older.map((message) => message.id)]);
+    const found = unmatched.map(
+      () => [] as Array<{ at: number; message: UIMessage }>
+    );
+    let at = 0;
+    for await (const message of this.session.history({
+      newestFirst: true,
+      leafId: start?.id
+    })) {
+      // The walk starts at the window's oldest message, which is cached.
+      if (message.id === start?.id) continue;
+      if (++at > lookback) break;
+      if (known.has(message.id)) continue;
+      if (message.role !== "assistant") continue;
+      const stored = message as UIMessage;
+      unmatched.forEach((reply, index) => {
+        const [paired] = reconcileMessages([reply], [stored], sanitizeMessage);
+        if (paired.id !== stored.id) return;
+        found[index].push({ at, message: stored });
+        if (found[index].length > unmatched.length) found[index].shift();
+      });
+    }
+    const candidates = new Map<string, { at: number; message: UIMessage }>();
+    for (const entry of found.flat()) candidates.set(entry.message.id, entry);
+    const oldestFirst = [...candidates.values()]
+      .sort((a, b) => b.at - a.at)
+      .map((entry) => entry.message);
+    return [...oldestFirst, ...older, ...window];
   }
 
   /**

@@ -314,6 +314,11 @@ export class SessionHarnessObject extends DurableObject<Cloudflare.Env> {
     return this.ctx.storage.get<T>(key);
   }
 
+  /** Seed a KV value BEFORE the Lifecycle starts (a released schema version). */
+  async kvPut(key: string, value: unknown): Promise<void> {
+    await this.ctx.storage.put(key, value);
+  }
+
   /** Legacy config rows, which Sessions leaves untouched for Think to lift. */
   readLegacyConfig(): Array<{ key: string; value: string }> {
     return this.ctx.storage.sql
