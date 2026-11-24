@@ -133,6 +133,29 @@ describe("facet wake", () => {
     expect(wake?.time).toBeGreaterThanOrEqual(now + 25_000);
   });
 
+  it("rechecks a facet whose drive outran its budget within seconds", async () => {
+    const agent = await root();
+    await agent.middlePush("m", "slow-recheck", 0);
+    // Whichever alarm drives it, the drive runs on past the 5 s budget,
+    // and the path's wake moves to the recheck. That is kept close (a root
+    // reset in this window is noticed by it), not 30 s out.
+    void runDurableObjectAlarm(agent).catch(() => {});
+    await vi.waitFor(
+      async () => {
+        const wake = (await agent.rootJobs()).find((job) =>
+          job.id.startsWith("facet:")
+        );
+        expect(wake!.time).toBeGreaterThan(Date.now());
+        expect(wake!.time).toBeLessThan(Date.now() + 10_000);
+      },
+      { timeout: 6_500, interval: 100 }
+    );
+    await vi.waitFor(
+      async () => expect(await agent.middleRan("m")).toEqual(["slow-recheck"]),
+      { timeout: 10_000 }
+    );
+  }, 20_000);
+
   it("does not hold the root's own jobs behind a slow facet job", async () => {
     const agent = await root();
     await agent.middlePush("m", "slow-job", 0);
