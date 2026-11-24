@@ -3098,13 +3098,15 @@ export class Agent<
     name: string,
     parentPath: ReadonlyArray<{ className: string; name: string }> = [],
     identityName = name,
-    rootChannel?: RootFacetRpcSurface
+    rootChannel?: RootFacetRpcSurface,
+    rootJurisdiction?: string
   ): Promise<void> {
     return this._dynamicAgents.init(
       name,
       parentPath,
       identityName,
-      rootChannel
+      rootChannel,
+      rootJurisdiction
     );
   }
 
