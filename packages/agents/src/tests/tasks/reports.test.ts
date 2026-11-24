@@ -638,6 +638,12 @@ describe("Tasks patchMetadata bound", () => {
           more: "p".repeat(800_000)
         })
       ).toBe(false);
+      // One field past the bound alone fails the same way: false, unchanged.
+      expect(
+        instance.tasks.patchMetadata("b", "progress", {
+          huge: "h".repeat(2_000_000)
+        })
+      ).toBe(false);
       const progress = instance.tasks.peek("b")?.metadata?.progress as Record<
         string,
         string

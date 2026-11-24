@@ -2209,11 +2209,16 @@ export class Tasks<
           serializeTaskValue(
             value,
             `metadata of Task run "${runId}"`,
-            MAX_FRAMEWORK_METADATA_BYTES
+            Number.POSITIVE_INFINITY
           )
         );
       }
     }
+    // New fields past the bound on their own fail as the whole metadata's
+    // check below does: false, nothing written.
+    let incoming = 0;
+    for (let i = 1; i < set.length; i += 2) incoming += set[i]?.length ?? 0;
+    if (incoming > MAX_FRAMEWORK_METADATA_BYTES) return false;
     // What is stored under `key` is kept only when it is an object.
     let entry =
       "CASE WHEN json_type(metadata, '$.' || json_quote(?)) = 'object' " +
