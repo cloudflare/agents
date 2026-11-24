@@ -182,6 +182,19 @@ describe("CdpConnection.on", () => {
     ]);
   });
 
+  it("calls no more handlers once one ends the connection", () => {
+    const { socket, cdp } = connect();
+    const heard: string[] = [];
+    cdp.on("Page.loadEventFired", () => {
+      heard.push("first");
+      cdp.disconnect();
+    });
+    cdp.on("Page.loadEventFired", () => heard.push("second"));
+
+    socket.event("Page.loadEventFired");
+    expect(heard).toEqual(["first"]);
+  });
+
   it("stops delivering once the connection is disconnected", () => {
     const { socket, cdp } = connect();
     const heard: string[] = [];
@@ -276,6 +289,41 @@ describe("CdpConnection.waitFor", () => {
     await expect(cdp.waitFor("Page.loadEventFired")).rejects.toThrow(
       "CDP connection closed while waiting for Page.loadEventFired"
     );
+  });
+
+  it("isn't an unhandled rejection when it ends before it's awaited", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (event: PromiseRejectionEvent) => {
+      unhandled.push(event.reason);
+      event.preventDefault();
+    };
+    addEventListener("unhandledrejection", onUnhandled);
+    try {
+      const { socket, cdp } = connect();
+      // The docs' order, awaited one at a time: the command fails first.
+      const loaded = cdp.waitFor("Page.loadEventFired", { sessionId: "s1" });
+      const navigated = cdp.send(
+        "Page.navigate",
+        { url: "https://example.com/" },
+        { sessionId: "s1" }
+      );
+      socket.peerClose();
+      await expect(navigated).rejects.toThrow("CDP connection closed");
+      // And one started once the connection has ended.
+      const late = cdp.waitFor("Page.loadEventFired");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(unhandled).toEqual([]);
+
+      // Awaiting them still throws.
+      await expect(loaded).rejects.toThrow(
+        "CDP connection closed while waiting for Page.loadEventFired"
+      );
+      await expect(late).rejects.toThrow(
+        "CDP connection closed while waiting for Page.loadEventFired"
+      );
+    } finally {
+      removeEventListener("unhandledrejection", onUnhandled);
+    }
   });
 
   it("rejects with the signal's reason when it aborts", async () => {

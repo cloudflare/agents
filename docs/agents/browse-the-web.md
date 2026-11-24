@@ -349,31 +349,36 @@ A `CdpConnection`, from any of these or from `browser.connect()`, also delivers 
 
 ```ts
 const { cdp } = await this.browser.connect();
-const { targetId } = (await cdp.send("Target.createTarget", {
-  url: "about:blank"
-})) as { targetId: string };
-const sessionId = await cdp.attachToTarget(targetId);
-await cdp.send("Page.enable", {}, { sessionId });
+try {
+  const { targetId } = (await cdp.send("Target.createTarget", {
+    url: "about:blank"
+  })) as { targetId: string };
+  const sessionId = await cdp.attachToTarget(targetId);
+  await cdp.send("Page.enable", {}, { sessionId });
 
-const stop = cdp.on(
-  "Page.frameNavigated",
-  ({ params }) => console.log("navigated", params.frame),
-  { sessionId }
-);
+  const stop = cdp.on(
+    "Page.frameNavigated",
+    ({ params }) => console.log("navigated", params.frame),
+    { sessionId }
+  );
 
-// Start waiting before sending the command that causes the event.
-const loaded = cdp.waitFor("Page.loadEventFired", {
-  sessionId,
-  timeoutMs: 30_000
-});
-await cdp.send("Page.navigate", { url: "https://example.com" }, { sessionId });
-await loaded;
-stop();
+  // Start waiting before sending the command that causes the event, and
+  // await both together.
+  await Promise.all([
+    cdp.waitFor("Page.loadEventFired", { sessionId, timeoutMs: 30_000 }),
+    cdp.send("Page.navigate", { url: "https://example.com" }, { sessionId })
+  ]);
+  stop();
+  // The browser outlives the connection, so close the tab you opened.
+  await cdp.send("Target.closeTarget", { targetId });
+} finally {
+  cdp.disconnect();
+}
 ```
 
 Without `sessionId`, a listener hears the event from every CDP session on the connection and from the browser itself. `sessionId: null` hears browser-level events only. Browser Run sends `Cloudflare.handoffComplete` once at browser level and once more in each attached session, so listen for it with `sessionId: null` to hear it once.
 
-Handlers run synchronously as each event arrives, so code awaiting a command's reply has already seen the events sent before it. A handler that throws is logged and doesn't stop the others. `waitFor()` rejects on timeout (by default the connection's command timeout), when its `signal` aborts, and when the connection closes.
+Handlers run synchronously as each event arrives, so code awaiting a command's reply has already seen the events sent before it. A handler that throws is logged and does not stop the others, and no handler runs once the connection ends. `waitFor()` rejects on timeout (by default the connection's command timeout), when its `signal` aborts, and when the connection closes. A wait that rejects before your code awaits it is not reported as an unhandled rejection, so a failed command beside it leaves nothing behind.
 
 ## Local development
 

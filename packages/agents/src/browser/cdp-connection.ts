@@ -186,7 +186,8 @@ export class CdpConnection {
    * code awaiting a command's reply has already seen the events sent before
    * it. A handler that throws is logged and doesn't stop the others. One
    * removed during a delivery isn't called for that event, and one added
-   * during it is first called for the next.
+   * during it is first called for the next. Once the connection ends, even
+   * from inside a handler, no handler is called again.
    *
    * @experimental The API surface may change before stabilizing.
    */
@@ -217,21 +218,33 @@ export class CdpConnection {
   /**
    * Resolve with the next `method` event that matches `options`, heard as
    * {@link on} hears it. It starts listening when called, so call it before
-   * sending the command that causes the event, and await it after:
+   * sending the command that causes the event, and await both together:
    *
    * ```ts
-   * const loaded = cdp.waitFor("Page.loadEventFired", { sessionId });
-   * await cdp.send("Page.navigate", { url }, { sessionId });
-   * await loaded;
+   * const [loaded] = await Promise.all([
+   *   cdp.waitFor("Page.loadEventFired", { sessionId }),
+   *   cdp.send("Page.navigate", { url }, { sessionId })
+   * ]);
    * ```
    *
    * Rejects when `timeoutMs` passes (by default the connection's command
    * timeout), when `signal` aborts, with its reason, when the connection
-   * ends, and when `predicate` throws.
+   * ends, and when `predicate` throws. A wait that rejects before anything
+   * awaits it, or that nothing ever awaits, isn't an unhandled rejection:
+   * awaiting it still throws.
    *
    * @experimental The API surface may change before stabilizing.
    */
   waitFor(method: string, options: CdpWaitForOptions = {}): Promise<CdpEvent> {
+    const waiting = this.#waitFor(method, options);
+    // The rejection is the caller's to see, when it awaits. Code that awaits
+    // the command first loses the wait when the command fails, or when the
+    // connection closes under both; that's not worth an unhandled rejection.
+    waiting.catch(() => undefined);
+    return waiting;
+  }
+
+  #waitFor(method: string, options: CdpWaitForOptions): Promise<CdpEvent> {
     const { predicate, signal } = options;
     const timeoutMs = options.timeoutMs ?? this.#defaultTimeoutMs;
     if (this.#ended) {
@@ -413,6 +426,11 @@ export class CdpConnection {
   #end(error: Error): void {
     if (this.#ended) return;
     this.#ended = true;
+    // Inactive, so a delivery under way skips them, as it skips a handler
+    // removed during it: the connection can end from inside a handler.
+    for (const listeners of this.#listeners.values()) {
+      for (const listener of listeners) listener.active = false;
+    }
     this.#listeners.clear();
     for (const endWait of [...this.#endWaits]) endWait(error);
   }
