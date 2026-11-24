@@ -251,6 +251,10 @@ const cancelled = {
 describe("runRecoveryCallback", () => {
   it("runs the callback's attempt with the origin message ids in its scope", async () => {
     const t = setup();
+    let finishModel!: () => void;
+    const modelDone = new Promise<void>((resolve) => {
+      finishModel = resolve;
+    });
     let scoped: string[] | undefined;
     t.turns.attempts._chatRecoveryRetry = async (data, onTurnStarted) => {
       const host: RecoveredTurnHost<RecoveryAttemptData, RecoveredTurnResult> =
@@ -261,7 +265,7 @@ describe("runRecoveryCallback", () => {
             // The model turn starts: the callback hands it off and returns,
             // and the turn goes on detached.
             onTurnStarted();
-            await new Promise((resolve) => setTimeout(resolve, 0));
+            await modelDone;
             scoped = t.engine.activeOriginMessageIds;
             finished();
             return { status: "completed" };
@@ -277,9 +281,11 @@ describe("runRecoveryCallback", () => {
       incidentId: INCIDENT,
       originMessageIds: ["user-1"]
     });
-    // The callback returned at the handoff; the detached turn still sees
-    // the ids.
+    // The callback returned at the handoff, while the model turn still runs.
+    expect(scoped).toBeUndefined();
+    finishModel();
     await done;
+    // The detached turn still sees the ids.
     expect(scoped).toEqual(["user-1"]);
     // A request outside the attempt never inherits the ids.
     expect(t.engine.activeOriginMessageIds).toBeUndefined();
