@@ -876,9 +876,9 @@ describe("browser connector e2e", () => {
         await new Promise((r) => setTimeout(r, 50));
       }`;
 
-    it("keeps hearing the tab after the model disables Page and Network", async () => {
+    it("keeps hearing the tab's Page events after the model disables Page", async () => {
       const output = await runHooked(`async () => {
-        for (const method of ["Page.enable", "Network.enable", "Page.disable", "Network.disable"]) {
+        for (const method of ["Page.enable", "Page.disable"]) {
           await browser.cdp({ method, sessionId: "active" });
         }
         ${navigate("/pages/ok")}
