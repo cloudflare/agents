@@ -487,6 +487,17 @@ type WorkflowBinding<E> = {
 type WorkflowName<E> = WorkflowBinding<E> | (string & {});
 
 /**
+ * How long after an alarm handler returns a destroy inside it aborts the
+ * instance. Measured on a deployment: the handler sets an alarm (the job
+ * driver's 30 s fallback), and the destroy deletes it. An abort inside the
+ * handler (4 of 4, also with a `storage.sync()` first, 3 of 3), or right
+ * after the handler returned (1 of 1, and 3 of 3 with a sync first), still
+ * had that alarm run 30 s later and construct the object again. An abort
+ * 500 ms after the handler returned did not (4 of 4), nor 2 s (1 of 1).
+ */
+const ABORT_AFTER_ALARM_MS = 500;
+
+/**
  * Base class for creating Agent implementations
  * @template Env Environment type containing bindings
  * @template TState State type to store within the Agent
@@ -2685,13 +2696,31 @@ export class Agent<
     // alarm precisely so teardown runs here, with this invocation's full
     // execution budget) and the convergence point for a destroy that a
     // previous invocation started but couldn't finish.
-    if ((await this._deferredDestroy.pendingAt()) !== null) {
-      await this.destroy();
-      return;
-    }
+    this._alarmDepth++;
+    try {
+      if ((await this._deferredDestroy.pendingAt()) !== null) {
+        await this.destroy();
+        return;
+      }
 
-    await this.lifecycle.alarm();
+      await this.lifecycle.alarm();
+    } finally {
+      this._alarmDepth--;
+      const reason = this._abortAfterAlarm;
+      if (this._alarmDepth === 0 && reason !== undefined) {
+        this._abortAfterAlarm = undefined;
+        setTimeout(
+          () => abortWithoutAlarmRetry(this.ctx, reason),
+          ABORT_AFTER_ALARM_MS
+        );
+      }
+    }
   }
+
+  /** Alarm invocations in progress on this instance. */
+  private _alarmDepth = 0;
+  /** Set by a destroy inside an alarm: abort once the alarm has returned. */
+  private _abortAfterAlarm: string | undefined;
 
   // ── Sub-agent routing (external addressability for facets) ──────────────
 
@@ -6290,9 +6319,16 @@ export class Agent<
     // destroy landed via the alarm preamble, suppressing the alarm retry
     // stops the platform re-running the alarm on a fresh instance whose
     // constructor would recreate the just-deleted schema.
-    setTimeout(() => {
-      abortWithoutAlarmRetry(this.ctx, "destroyed");
-    }, 0);
+    //
+    // Inside an alarm the abort waits until shortly after the alarm handler
+    // returns (#2605): see ABORT_AFTER_ALARM_MS.
+    if (this._alarmDepth > 0) {
+      this._abortAfterAlarm = "destroyed";
+    } else {
+      setTimeout(() => {
+        abortWithoutAlarmRetry(this.ctx, "destroyed");
+      }, 0);
+    }
 
     this._emit("destroy");
   }
