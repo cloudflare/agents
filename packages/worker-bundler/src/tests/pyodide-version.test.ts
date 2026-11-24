@@ -88,6 +88,15 @@ describe("selectLatestCompatibleWheel", () => {
     expect(picked?.filename).toBe("httpx-0.28.1-py3-none-any.whl");
   });
 
+  it("keeps a universal pre-release over final platform wheels", () => {
+    expect(
+      selectLatestCompatibleWheel([
+        wheel("pkg-1.0-cp312-cp312-manylinux_2_17_x86_64.whl"),
+        wheel("pkg-2.0b1-py3-none-any.whl")
+      ])?.filename
+    ).toBe("pkg-2.0b1-py3-none-any.whl");
+  });
+
   it("takes a pre-release when there is nothing else", () => {
     expect(
       selectLatestCompatibleWheel([wheel("pkg-2.0b1-py3-none-any.whl")])

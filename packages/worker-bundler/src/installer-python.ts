@@ -514,22 +514,22 @@ function isPreRelease(version: string): boolean {
 export function selectLatestCompatibleWheel(
   files: PyPASimpleFile[]
 ): PyPASimpleFile | null {
-  const all = files.filter((f) => f.filename.endsWith(".whl"));
-  const final = all.filter((f) => {
-    const version = parseVersionFromWheelName(f.filename);
-    return version !== undefined && !isPreRelease(version);
-  });
-  const wheels = final.length > 0 ? final : all;
+  const wheels = files.filter((f) => f.filename.endsWith(".whl"));
   if (wheels.length === 0) return null;
 
-  // Filter to universal wheels (py3-none-any or py2.py3-none-any)
+  // Universal wheels (py3-none-any or py2.py3-none-any) first: a platform
+  // wheel may not import. Within them, final releases first.
   const universal = wheels.filter(
     (w) =>
       w.filename.endsWith("-py3-none-any.whl") ||
       w.filename.endsWith("-py2.py3-none-any.whl")
   );
-
-  const candidates = universal.length > 0 ? universal : wheels;
+  const compatible = universal.length > 0 ? universal : wheels;
+  const final = compatible.filter((f) => {
+    const version = parseVersionFromWheelName(f.filename);
+    return version !== undefined && !isPreRelease(version);
+  });
+  const candidates = final.length > 0 ? final : compatible;
 
   // Select the wheel with the highest version
   let latest: PyPASimpleFile | null = null;

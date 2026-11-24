@@ -1340,12 +1340,14 @@ describe("createWorker with pyproject.toml", () => {
   // must match it: 3.12 before 2025-09-29, 3.13 until 2026-09-07, 3.14 after.
   // pyyaml and numpy each import a C extension.
   it.each([
-    ["2025-09-01", "3.12"],
-    ["2026-01-01", "3.13"],
-    ["2026-09-08", "3.14"]
+    ["2025-09-01", "", "3.12"],
+    ["2026-01-01", "", "3.13"],
+    ["2026-09-08", "", "3.14"],
+    // The early 3.14 flag runs Pyodide 314.0.4 on an older date.
+    ["2025-09-01", "python_workers_20260610", "3.14"]
   ])(
-    "installs native wheels for the Python a %s compatibility date runs (%s)",
-    async (compatibilityDate, python) => {
+    "installs native wheels for the Python a %s date with flags [%s] runs (%s)",
+    async (compatibilityDate, flag, python) => {
       const id = "test-worker-" + testId++;
       const createWorkerResult = await createWorker({
         files: {
@@ -1368,7 +1370,10 @@ describe("createWorker with pyproject.toml", () => {
             'version = "0.0.0"',
             'dependencies = ["pyyaml", "numpy"]'
           ].join("\n"),
-          "wrangler.toml": `compatibility_date = "${compatibilityDate}"`
+          "wrangler.toml": [
+            `compatibility_date = "${compatibilityDate}"`,
+            `compatibility_flags = [${flag ? `"${flag}"` : ""}]`
+          ].join("\n")
         }
       });
       const worker = env.LOADER.get(id, () => ({
