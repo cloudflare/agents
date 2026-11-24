@@ -3882,7 +3882,16 @@ describe("Think — onChatRecovery", () => {
   });
 
   it("ends a turn found interrupted whose conversation moved on for the tabs", async () => {
-    const agent = await freshRecoveryAgent(crypto.randomUUID());
+    const room = crypto.randomUUID();
+    // A tab is connected while the recovery runs.
+    const response = await exports.default.fetch(
+      `http://example.com/agents/think-recovery-test-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    expect(response.status).toBe(101);
+    const ws = response.webSocket as WebSocket;
+    ws.accept();
+    const agent = await freshRecoveryAgent(room);
     await agent.persistTestMessage({
       id: "u-old",
       role: "user",
@@ -3919,12 +3928,18 @@ describe("Think — onChatRecovery", () => {
       parts: [{ type: "text", text: "newer question" }]
     });
 
+    const heard = waitForProtocolMessage(
+      ws,
+      (m) => m.id === "req-moved" && m.done === true
+    );
     await agent.triggerFiberRecovery();
 
     // Nothing continues it, so its end is sent and recorded.
+    expect(await heard).toMatchObject({ outcome: "aborted" });
     expect(await agent.recentTerminalForTest("req-moved")).toMatchObject({
       outcome: "aborted"
     });
+    await closeWS(ws);
   });
 
   it("answers the question again when onChatRecovery drops a new turn's partial", async () => {
