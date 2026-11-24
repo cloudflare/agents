@@ -44,6 +44,13 @@ export interface ChatFrameConnection {
 export interface ChatFramesOptions {
   /** Send to every connection except the `without` ids. */
   broadcast(message: string, without: string[]): void;
+  /**
+   * The connections a broadcast reaches: the same objects the host's
+   * message and resume handlers receive for each socket, since the end
+   * ledger keys by object (an Agent's `getConnections()` does; measured on
+   * a deployment).
+   */
+  connections(): Iterable<{ readonly id: string }>;
   /** Where recent terminal frames are recorded. */
   kv: RecentTerminalsKv;
   /** Connections that were told a stream resumes and have not acked yet. */
@@ -64,8 +71,62 @@ export interface ChatFramesOptions {
   listsReachResumingTabs?: boolean;
 }
 
+/**
+ * Which sockets were sent each recent request's end, so a socket is sent it
+ * once (`OneTerminalPerRequest`): a stop, a resume and a recovery's
+ * broadcast can each want to tell it. Keyed by the connection object, not
+ * its id: a tab that reconnects keeps its id on a new socket, and that
+ * socket was told nothing. Bounded to the newest requests; an older one
+ * that comes up again is sent its end again. In memory.
+ *
+ * @internal
+ */
+export class EndedRequests {
+  static readonly MAX = 64;
+  /** By request: the sockets it was sent to. */
+  readonly #ended = new Map<string, WeakSet<object>>();
+
+  /** Whether `connection` was sent the end of `requestId`. */
+  has(connection: object, requestId: string): boolean {
+    return this.#ended.get(requestId)?.has(connection) ?? false;
+  }
+
+  /** `connection` was sent the end of `requestId`. */
+  note(connection: object, requestId: string): void {
+    let to = this.#ended.get(requestId);
+    if (!to) {
+      to = new WeakSet();
+      this.#ended.set(requestId, to);
+      if (this.#ended.size > EndedRequests.MAX) {
+        const oldest = this.#ended.keys().next().value;
+        if (oldest !== undefined) this.#ended.delete(oldest);
+      }
+    }
+    to.add(connection);
+  }
+}
+
+/** The request a frame ends, if it is a terminal: a `done` that is not "recovering". */
+export function endedRequestOf(frame: ChatFrame): string | undefined {
+  const fields = frame as {
+    type?: unknown;
+    id?: unknown;
+    done?: unknown;
+    outcome?: unknown;
+  };
+  return fields.type === CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE &&
+    typeof fields.id === "string" &&
+    fields.done === true &&
+    fields.outcome !== "recovering"
+    ? fields.id
+    : undefined;
+}
+
 /** @internal */
 export class ChatFrames {
+  /** Which tabs were sent which request's end. */
+  readonly ended = new EndedRequests();
+
   /**
    * Origin ids of the socket requests being handled, by request id. After
    * a request is handled (or after a restart) its stream holds them.
@@ -86,10 +147,18 @@ export class ChatFrames {
   /** Send `frame` to every tab except `exclude` and resuming tabs. */
   broadcast(frame: ChatFrame, exclude: readonly string[] = []): void {
     const ready = this.#prepare(frame);
-    this.options.broadcast(JSON.stringify(ready), [
-      ...exclude,
-      ...this.options.resuming
-    ]);
+    const without = [...exclude, ...this.options.resuming];
+    const ends = endedRequestOf(ready);
+    if (ends !== undefined) {
+      // A socket is told a request's end once.
+      const left = new Set(without);
+      for (const connection of this.options.connections()) {
+        if (left.has(connection.id)) continue;
+        if (this.ended.has(connection, ends)) without.push(connection.id);
+        else this.ended.note(connection, ends);
+      }
+    }
+    this.options.broadcast(JSON.stringify(ready), without);
     this.#record(ready);
   }
 
@@ -124,6 +193,11 @@ export class ChatFrames {
   /** Send `frame` to one tab. A closed socket is ignored. */
   send(connection: ChatFrameConnection, frame: ChatFrame): void {
     const ready = this.#prepare(frame);
+    const ends = endedRequestOf(ready);
+    if (ends !== undefined) {
+      if (this.ended.has(connection, ends)) return;
+      this.ended.note(connection, ends);
+    }
     try {
       connection.send(JSON.stringify(ready));
     } catch {

@@ -115,6 +115,40 @@ describe("Cancel request", () => {
     ws.close(1000);
   });
 
+  it.each([
+    ["mid-stream", { format: "plaintext", chunkCount: 100, chunkDelayMs: 50 }],
+    ["before its response", { failOnAbort: "before-response" }]
+  ])(
+    "sends the stopping tab one terminal frame for a request stopped %s",
+    async (_when, body) => {
+      const room = crypto.randomUUID();
+      const { ws } = await connectSlowStream(room);
+      await new Promise((r) => setTimeout(r, 50));
+      const requestId = "req-one-terminal";
+      const terminals: unknown[] = [];
+      ws.addEventListener("message", (e: MessageEvent) => {
+        const data = JSON.parse(e.data as string);
+        if (
+          isUseChatResponseMessage(data) &&
+          data.id === requestId &&
+          data.done
+        ) {
+          terminals.push(data);
+        }
+      });
+
+      sendChatRequest(ws, requestId, [userMessage], body);
+      await new Promise((r) => setTimeout(r, 300));
+      sendCancel(ws, requestId);
+      // Long enough for anything sent after the stop's own work to arrive.
+      await new Promise((r) => setTimeout(r, 1000));
+
+      expect(terminals).toHaveLength(1);
+      expect(terminals[0]).toMatchObject({ outcome: "aborted" });
+      ws.close(1000);
+    }
+  );
+
   it("cancel during plaintext streaming sends done and stops chunks", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);

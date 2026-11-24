@@ -10,6 +10,7 @@ import {
   type PendingChatTerminal,
   type ResumeHandshakeHost
 } from "../resume-handshake";
+import { EndedRequests } from "../chat-frames";
 import { ContinuationState } from "../continuation-state";
 import type { ResumableStream } from "../resumable-stream";
 import { PreStreamTurns } from "../pre-stream-turns";
@@ -790,6 +791,78 @@ describe("ResumeHandshake (driver → golden frames)", () => {
         done: true,
         outcome: "aborted"
       });
+    });
+
+    it("tells a tab a request's end once across a resume, a replay and a stop", async () => {
+      const kv = kvStore();
+      recordRecentChatTerminal(kv, {
+        id: "req-cut",
+        done: true,
+        body: "",
+        outcome: "aborted"
+      });
+      const frames: SentFrame[] = [];
+      const { resumableStream } = makeStream({
+        active: true,
+        activeRequestId: "req-cont",
+        activeStreamId: "s-cont"
+      });
+      const ended = new EndedRequests();
+      const handshake = new ResumeHandshake({
+        ...makeHost({ resumableStream }),
+        recentTerminal: (ids) => recentChatTerminal(kv, ids),
+        ended
+      });
+      const conn = makeConnection("c1", frames);
+
+      await handshake.handleResumeRequest(conn, "probe-1", ["req-cut"]);
+      await handshake.handleResumeAck(conn, "req-cut");
+      handshake.sendEnded(conn, "req-cut");
+      expect(
+        frames.filter((f) => f.id === "req-cut" && f.done === true)
+      ).toHaveLength(1);
+      expect(ended.has(conn, "req-cut")).toBe(true);
+      // The same tab back on a new socket (its id kept) gets the end again.
+      const again: SentFrame[] = [];
+      const back = makeConnection("c1", again);
+      await handshake.handleResumeRequest(back, "probe-2", ["req-cut"]);
+      expect(
+        again.filter((f) => f.id === "req-cut" && f.done === true)
+      ).toHaveLength(1);
+    });
+
+    it("gives a tab back on a new socket a request's end through its ACK", async () => {
+      const kv = kvStore();
+      recordRecentChatTerminal(kv, {
+        id: "req-done",
+        done: true,
+        body: "",
+        outcome: "completed"
+      });
+      const { resumableStream } = makeStream();
+      const ended = new EndedRequests();
+      const handshake = new ResumeHandshake({
+        ...makeHost({ resumableStream }),
+        recentTerminal: (ids) => recentChatTerminal(kv, ids),
+        ended
+      });
+      const ends = (sink: SentFrame[]) =>
+        sink.filter((f) => f.id === "req-done" && f.done === true);
+
+      // The first socket is told, and an ACK on it does not repeat it.
+      const first: SentFrame[] = [];
+      const one = makeConnection("c1", first);
+      await handshake.handleResumeRequest(one, "p1", ["req-done"]);
+      await handshake.handleResumeAck(one, "req-done");
+      await handshake.handleResumeAck(one, "req-done");
+      expect(ends(first)).toHaveLength(1);
+
+      // The same tab on a new socket (its id kept) is told through its ACK.
+      const second: SentFrame[] = [];
+      const two = makeConnection("c1", second);
+      await handshake.handleResumeRequest(two, "p2", ["req-done"]);
+      await handshake.handleResumeAck(two, "req-done");
+      expect(ends(second)).toHaveLength(1);
     });
 
     it("tells a tab directly how a request it stops ended", async () => {

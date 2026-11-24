@@ -202,15 +202,21 @@ export async function dispatchChatProtocol<TConnection extends Connection>(
       await host.messages(connection, event.messages);
       return true;
 
-    case "cancel":
+    case "cancel": {
+      // A request that had already ended when the stop arrived (a recovery
+      // finished it under another id while this tab was away) gets its end
+      // from here. Read before the stop: a request the stop ends sends its
+      // own terminal, and one end per request is all a tab gets.
+      const ended = host.resumeHandshake().endedFrame(event.id);
       // Aborts the request's turn, queued or running, a recovery attempt
       // running for it, and the continuations waiting on it.
       await host.turns.cancel(event.id);
-      // A stop of a request that already ended while this tab was away (a
-      // recovery finished it under another id) still gets its end.
-      host.resumeHandshake().sendEnded(connection, event.id);
+      if (ended !== null) {
+        host.resumeHandshake().sendEnded(connection, event.id, ended);
+      }
       host.emit("message:cancel", { requestId: event.id });
       return true;
+    }
 
     case "cancel-continuation":
       // A stop from a tab that waits for a tool continuation to start. It

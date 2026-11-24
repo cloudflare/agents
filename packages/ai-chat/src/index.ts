@@ -595,6 +595,7 @@ export class AIChatAgent<
   /** Where every chat frame to tabs goes out (the shared `ChatFrames`). */
   private readonly _frames = new ChatFrames({
     broadcast: (message, without) => this.broadcast(message, without),
+    connections: () => this.getConnections(),
     kv: this.ctx.storage.kv,
     resuming: this._pendingResumeConnections,
     storedOriginIds: (requestId) =>
@@ -1244,6 +1245,7 @@ export class AIChatAgent<
       holdsTerminalFrames: (requestId) =>
         this._turns.liveReply?.requestId === requestId &&
         this._turns.liveReply.ended,
+      ended: this._frames.ended,
       recentTerminal: (requestIds) =>
         recentChatTerminal(this.ctx.storage.kv, requestIds)
     }));
