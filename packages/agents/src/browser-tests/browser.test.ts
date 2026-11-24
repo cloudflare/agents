@@ -197,20 +197,6 @@ type StoredSessions = Record<
   { sessionId: string; createdAt: number; updatedAt: number }
 >;
 
-interface ObservedTab {
-  targetId: string;
-  initialUrl?: string;
-  navigations: Array<{ url: string; sameDocument?: true }>;
-  dialogs: Array<{ type: string; message: string; accepted: boolean }>;
-  blocked?: { url?: string };
-  documents: Array<{
-    url: string;
-    status?: number;
-    redirects: Array<{ url: string; status: number }>;
-    error?: string;
-  }>;
-}
-
 interface NamedRunOutput {
   status: "completed" | "error";
   result?: unknown;
@@ -220,14 +206,11 @@ interface NamedRunOutput {
     newTabs: Array<{ targetId: string; url?: string }>;
     tabClosed: boolean;
     tabShared: boolean;
-    observed?:
-      | { available: true; tabs: ObservedTab[] }
-      | { available: false; reason: string };
     notices: string[];
   } | null;
 }
 
-/** Run code against the browser whose sessions have a host observer. */
+/** Run code against the observer tests' browser, which has no hook. */
 async function runObserved(
   code: string,
   scope?: string
@@ -235,15 +218,21 @@ async function runObserved(
   return (await callAgent("runObserved", [code, scope])) as NamedRunOutput;
 }
 
-/** The observer's tabs from a run, failing when it had none. */
-function observedTabs(output: NamedRunOutput): ObservedTab[] {
-  const observed = output.report?.observed;
-  if (!observed?.available) {
-    throw new Error(
-      `the observer was unavailable: ${observed ? observed.reason : "no record"}`
-    );
-  }
-  return observed.tabs;
+/**
+ * Run code against the browser whose `hostObserver` hook reports each
+ * tab's main-frame navigations in a notice.
+ */
+async function runHooked(code: string): Promise<NamedRunOutput> {
+  return (await callAgent("runHooked", [code])) as NamedRunOutput;
+}
+
+/** The notice the hook gives for one tab that navigated to `paths`. */
+function heardNotice(paths: string[]) {
+  return expect.stringMatching(
+    new RegExp(
+      `^The hook heard \\S+ navigate to ${JSON.stringify(paths).replace(/[[\]]/g, "\\$&")}\\.$`
+    )
+  );
 }
 
 /** Run code against the persistent named browser, in a scope. */
@@ -867,6 +856,7 @@ describe("browser connector e2e", () => {
   describe("host observer", () => {
     afterAll(async () => {
       await callAgent("closeObserved");
+      await callAgent("closeHooked");
     });
 
     /** Model code: navigate the active tab and wait until it has loaded. */
@@ -886,53 +876,19 @@ describe("browser connector e2e", () => {
         await new Promise((r) => setTimeout(r, 50));
       }`;
 
-    it("records each navigation's document, with its status and redirects", async () => {
-      const output = await runObserved(`async () => {
-        ${navigate("/pages/redirect")}
-        ${navigate("/pages/missing")}
-      }`);
-      expect(output.status).toBe("completed");
-      const [tab, ...others] = observedTabs(output);
-      expect(others).toEqual([]);
-      expect(tab.navigations.map((n) => n.url)).toEqual([
-        `${BASE_URL}/pages/ok`,
-        `${BASE_URL}/pages/missing`
-      ]);
-      expect(tab.documents).toEqual([
-        {
-          url: `${BASE_URL}/pages/ok`,
-          status: 200,
-          redirects: [{ url: `${BASE_URL}/pages/redirect`, status: 302 }]
-        },
-        { url: `${BASE_URL}/pages/missing`, status: 404, redirects: [] }
-      ]);
-
-      // The next session reads where the tab already is.
-      const next = await runObserved(`async () => {
-        await browser.cdp({ method: "Runtime.evaluate", params: { expression: "1" }, sessionId: "active" });
-      }`);
-      expect(observedTabs(next)[0].initialUrl).toBe(
-        `${BASE_URL}/pages/missing`
-      );
-    });
-
-    it("keeps observing after the model disables Page and Network", async () => {
-      const output = await runObserved(`async () => {
+    it("keeps hearing the tab after the model disables Page and Network", async () => {
+      const output = await runHooked(`async () => {
         for (const method of ["Page.enable", "Network.enable", "Page.disable", "Network.disable"]) {
           await browser.cdp({ method, sessionId: "active" });
         }
         ${navigate("/pages/ok")}
       }`);
       expect(output.status).toBe("completed");
-      const [tab] = observedTabs(output);
-      expect(tab.documents.at(-1)).toMatchObject({
-        url: `${BASE_URL}/pages/ok`,
-        status: 200
-      });
+      expect(output.report?.notices).toEqual([heardNotice(["/pages/ok"])]);
     });
 
     it("isn't detached by the model's Target.detachFromTarget({ targetId })", async () => {
-      const output = await runObserved(`async () => {
+      const output = await runHooked(`async () => {
         const { targetInfos } = await browser.cdp({ method: "Target.getTargets" });
         const { result } = await browser.cdp({
           method: "Runtime.evaluate",
@@ -954,11 +910,7 @@ describe("browser connector e2e", () => {
       expect(output.status).toBe("completed");
       // Chrome didn't hand the model the observer's session to detach.
       expect(String(output.result)).toContain("No session");
-      const [tab] = observedTabs(output);
-      expect(tab.documents.at(-1)).toMatchObject({
-        url: `${BASE_URL}/pages/missing`,
-        status: 404
-      });
+      expect(output.report?.notices).toEqual([heardNotice(["/pages/missing"])]);
     });
 
     it("answers a page's alert(), so the run doesn't hang", async () => {
@@ -981,56 +933,23 @@ describe("browser connector e2e", () => {
       expect(output.status).toBe("completed");
       // The alert was accepted and the confirm dismissed.
       expect(output.result).toBe("false ok");
-      expect(observedTabs(output)[0].dialogs).toEqual([
-        { type: "alert", message: "hello", accepted: true },
-        { type: "confirm", message: "sure?", accepted: false }
+      expect(output.report?.notices).toEqual([
+        'The page opened an alert dialog ("hello"), and the host accepted it.',
+        expect.stringContaining(
+          'The page opened a confirm dialog ("sure?"), and the host dismissed it, so confirm() returned false.'
+        )
       ]);
-      expect(output.report?.notices).toEqual(
-        expect.arrayContaining([expect.stringContaining("confirm dialog")])
-      );
-    });
-
-    it("records a main document that failed to load", async () => {
-      // Nothing listens on this port.
-      const output = await runObserved(`async () => {
-        await browser.cdp({ method: "Page.navigate", params: { url: "http://localhost:18799/" }, sessionId: "active" });
-        await new Promise((r) => setTimeout(r, 500));
-      }`);
-      expect(output.status).toBe("completed");
-      expect(observedTabs(output)[0].documents.at(-1)).toMatchObject({
-        url: "http://localhost:18799/",
-        error: expect.stringMatching(/^net::ERR_/)
-      });
     });
 
     it("runs the hostObserver hook on the model's tab, and it hears the navigation", async () => {
-      try {
-        const output = (await callAgent("runHooked", [
-          `async () => {
-            ${navigate("/pages/redirect")}
-            ${navigate("/pages/missing")}
-          }`
-        ])) as NamedRunOutput;
-        expect(output.status).toBe("completed");
-        const [tab] = observedTabs(output);
-        expect(output.report?.notices).toEqual([
-          `The hook heard ${tab.targetId} navigate to ["/pages/ok","/pages/missing"].`
-        ]);
-      } finally {
-        await callAgent("closeHooked");
-      }
-    });
-
-    it("records a same-document navigation", async () => {
-      const output = await runObserved(`async () => {
-        ${navigate("/pages/ok")}
-        await browser.cdp({ method: "Runtime.evaluate", params: { expression: "history.pushState(null, '', '/pages/next'); 1" }, sessionId: "active" });
+      const output = await runHooked(`async () => {
+        ${navigate("/pages/redirect")}
+        ${navigate("/pages/missing")}
       }`);
       expect(output.status).toBe("completed");
-      expect(observedTabs(output)[0].navigations.at(-1)).toEqual({
-        url: `${BASE_URL}/pages/next`,
-        sameDocument: true
-      });
+      expect(output.report?.notices).toEqual([
+        heardNotice(["/pages/ok", "/pages/missing"])
+      ]);
     });
   });
 });
