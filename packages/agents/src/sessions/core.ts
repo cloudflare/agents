@@ -304,8 +304,10 @@ const SEARCH_WORD = /[\p{L}\p{N}\p{M}\p{Co}]/u;
  * word), or -1 when `text` is one word. Scans back one code point at a time:
  * a regex anchored at the end backtracks and runs out of stack on a slice of
  * several megabytes.
+ *
+ * @internal Exported for its test.
  */
-function lastSeparator(text: string): number {
+export function lastSeparator(text: string): number {
   for (let end = text.length; end > 0;) {
     let start = end - 1;
     const low = text.charCodeAt(start);
