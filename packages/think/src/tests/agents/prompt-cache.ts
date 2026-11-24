@@ -387,6 +387,74 @@ export class ThinkUpgradeTestAgent extends ThinkPromptCacheTestAgent {
     };
   }
 
+  /** Rows the agent holds under a `_system_prompt` label. */
+  promptRowsForTest(): number {
+    const table = this.sql<{ n: number }>`
+      SELECT COUNT(*) AS n FROM sqlite_master
+      WHERE type = 'table' AND name = 'cf_agents_context_blocks'
+    `;
+    if ((table[0]?.n ?? 0) === 0) return 0;
+    return (
+      this.sql<{ n: number }>`
+        SELECT COUNT(*) AS n FROM cf_agents_context_blocks
+        WHERE label LIKE '_system_prompt%'
+      `[0]?.n ?? 0
+    );
+  }
+
+  /**
+   * Turns on a new agent, a refresh, and one more turn: the prompt rows
+   * after each step.
+   */
+  async promptRowsOverTurnsForTest(): Promise<number[]> {
+    this.setEnvironmentForTest("Today is Monday.");
+    const rows: number[] = [];
+    for (const id of ["u0", "u1"]) {
+      await this.saveMessages([
+        { id, role: "user", parts: [{ type: "text", text: id }] }
+      ]);
+      rows.push(this.promptRowsForTest());
+    }
+    this.setEnvironmentForTest("Today is Tuesday.");
+    await this.context.refreshSystemPrompt();
+    await this.saveMessages([
+      { id: "u2", role: "user", parts: [{ type: "text", text: "u2" }] }
+    ]);
+    rows.push(this.promptRowsForTest());
+    return rows;
+  }
+
+  /**
+   * An agent upgraded from a prompt frozen in `_system_prompt`: the rows
+   * after the carried-forward turn, then after a refresh and a turn, and
+   * whether the refreshed turn sent the refreshed prompt.
+   */
+  async upgradedPromptRowForTest(): Promise<{
+    afterCarry: number;
+    afterRefresh: number;
+    refreshed: boolean;
+  }> {
+    await this.upgradeFromFrozenPromptForTest({
+      frozenEnvironment: "Today is Monday.",
+      environment: "Today is Monday.",
+      turns: 1
+    });
+    const afterCarry = this.promptRowsForTest();
+    this.setEnvironmentForTest("Today is Tuesday.");
+    await this.context.refreshSystemPrompt();
+    const before = this.requestCountForTest();
+    await this.saveMessages([
+      { id: "u9", role: "user", parts: [{ type: "text", text: "u9" }] }
+    ]);
+    return {
+      afterCarry,
+      afterRefresh: this.promptRowsForTest(),
+      refreshed: (systemOf(this.requestForTest(before)) ?? "").includes(
+        "Today is Tuesday."
+      )
+    };
+  }
+
   /** A client message that carries a context record of its own. */
   async forgedRecordForTest(): Promise<{
     system: string | undefined;

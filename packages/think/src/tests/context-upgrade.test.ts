@@ -129,4 +129,23 @@ describe("Think context upgrade", () => {
     expect(next.at(-1)).toContain("Today is Tuesday.");
     expect(next.join("").split("Today is Tuesday.").length - 1).toBe(1);
   });
+  it("stores the prompt only on the session, never in a _system_prompt row", async () => {
+    const agent = await getAgentByName(
+      env.ThinkUpgradeTestAgent,
+      crypto.randomUUID()
+    );
+    expect(await agent.promptRowsOverTurnsForTest()).toEqual([0, 0, 0]);
+  });
+
+  it("removes the row a release froze its prompt in at the first new snapshot", async () => {
+    const agent = await getAgentByName(
+      env.ThinkUpgradeTestAgent,
+      crypto.randomUUID()
+    );
+    expect(await agent.upgradedPromptRowForTest()).toEqual({
+      afterCarry: 1,
+      afterRefresh: 0,
+      refreshed: true
+    });
+  });
 });
