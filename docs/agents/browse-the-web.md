@@ -424,7 +424,7 @@ browser = new Browser({
 ```
 
 - `tab.send()`, `tab.on()`, and `tab.waitFor()` are bound to the host's CDP session on that tab, so `tab.on()` hears only that tab's events. Enable the domains you listen to yourself. `tab.cdp` is the raw connection, for browser-level commands, and `tab.sessionId` is the host's CDP session id on the tab (not `tab.cdp.sessionId`, which is the Browser Run session's id). `tab.targetId` and `tab.scope` say which tab and scope it is.
-- The hook returns nothing or a cleanup function. A one-line arrow that returns a command's promise, such as `(tab) => tab.send("Network.enable")`, is a type error: write a block body, `(tab) => { void tab.send("Network.enable"); }`.
+- The hook returns nothing or a cleanup function. A one-line arrow that returns a command's promise, such as `(tab) => tab.send("Network.enable")`, is a type error: make it async and await the command, `async (tab) => { await tab.send("Network.enable"); }`, so the model's first command waits for it and a failure is logged.
 - The hook runs again on the same tab in every session, and with `browserTool` a session is one tool call. Keep state that should outlive a call in your agent.
 - It also runs on the scope's tab when the session starts, before the model's first command, even if the model then works in another tab.
 - The model's first command to the tab waits for the SDK's setup and your hook's promise together, at most about 250 ms. After that the model goes ahead, your hook keeps running, and a warning is logged.
