@@ -1,0 +1,52 @@
+import { expectTypeOf } from "vitest";
+import {
+  Browser,
+  browserRun,
+  type BrowserHostObserver,
+  type BrowserHostTab,
+  type CdpEvent
+} from "../browser";
+
+declare const env: { BROWSER: Fetcher };
+
+// The shapes a hook may take: sync or async, with or without a cleanup,
+// and a cleanup that is sync or async.
+const shapes: BrowserHostObserver[] = [
+  () => {},
+  async () => {},
+  () => () => {},
+  () => async () => {},
+  async () => () => {},
+  async () => async () => {},
+  (tab) => {
+    void tab.send("Network.enable");
+  }
+];
+new Browser({ provider: browserRun(env.BROWSER), hostObserver: shapes[0] });
+
+// A hook that returns anything else, such as a command's promise, is a
+// type error: write a block body, or `void` the promise.
+// @ts-expect-error Promise<unknown> is not a cleanup.
+const returnsSend: BrowserHostObserver = (tab) => tab.send("Page.enable");
+void returnsSend;
+
+expectTypeOf<BrowserHostTab["targetId"]>().toEqualTypeOf<string>();
+expectTypeOf<BrowserHostTab["scope"]>().toEqualTypeOf<string>();
+expectTypeOf<BrowserHostTab["sessionId"]>().toEqualTypeOf<string>();
+expectTypeOf<BrowserHostTab["notify"]>().toEqualTypeOf<
+  (notice: string) => void
+>();
+expectTypeOf<BrowserHostTab["send"]>().returns.toEqualTypeOf<
+  Promise<unknown>
+>();
+expectTypeOf<BrowserHostTab["waitFor"]>().returns.toEqualTypeOf<
+  Promise<CdpEvent>
+>();
+expectTypeOf<BrowserHostTab["on"]>().returns.toEqualTypeOf<() => void>();
+
+declare const tab: BrowserHostTab;
+// The tab's session id is bound: callers can't pass their own.
+// @ts-expect-error sessionId is not a send option on a tab.
+void tab.send("Page.enable", {}, { sessionId: "other" });
+// @ts-expect-error sessionId is not a waitFor option on a tab.
+void tab.waitFor("Page.loadEventFired", { sessionId: "other" });
