@@ -315,6 +315,13 @@ export type ChatRecoveryAttemptScope = {
   rootRequestId?: string;
   /** The schedule this delivery of the attempt is for, when it has one. */
   delivery?: number;
+  /**
+   * The message ids the interrupted request came from (#2280). The
+   * recovered turn runs under a fresh request id, and the host stamps these
+   * on its frames. A concurrent client request is outside the scope and
+   * never inherits them.
+   */
+  originMessageIds?: string[];
 };
 
 /** The host's turn machinery, as the engine uses it. */
@@ -357,19 +364,6 @@ export interface ChatRecoveryTurnBindings {
   };
   /** The latest stored message: what a continuation turn continues. */
   latestMessage(): { id: string; role: string } | undefined;
-  /**
-   * An async-context scope (an `AsyncLocalStorage<string[] | undefined>`)
-   * the engine runs a recovery callback in, holding the message ids the
-   * interrupted request came from (#2280). The recovered turn runs under a
-   * fresh request id, and the host reads the scope to stamp those ids on its
-   * frames. A concurrent client request is outside the scope and never
-   * inherits them.
-   */
-  originMessageIdsScope: {
-    run<T>(originMessageIds: string[] | undefined, fn: () => T): T;
-    getStore(): string[] | undefined;
-    exit<T>(fn: () => T): T;
-  };
   /**
    * The body of each recovery callback: one attempt. It calls
    * `onTurnStarted` once the model turn begins.
@@ -1427,6 +1421,14 @@ export class ChatRecoveryEngine {
     return this.adapter.turns?.attemptScope.getStore()?.rootRequestId;
   }
 
+  /**
+   * The message ids the request a running recovery attempt recovers came
+   * from, or `undefined` outside an attempt. See {@link inAttempt}.
+   */
+  get activeOriginMessageIds(): string[] | undefined {
+    return this.adapter.turns?.attemptScope.getStore()?.originMessageIds;
+  }
+
   /** The host's turn bindings. Throws for a host that did not supply them. */
   get turns(): ChatRecoveryTurnBindings {
     const turns = this.adapter.turns;
@@ -1460,9 +1462,6 @@ export class ChatRecoveryEngine {
     data: Record<string, unknown> | undefined
   ): Promise<void> {
     const { turns } = this;
-    const originMessageIds = Array.isArray(data?.originMessageIds)
-      ? (data.originMessageIds as string[])
-      : undefined;
     return dispatchChatRecoveryToHandoff({
       // Each run is one attempt under the interruption budget: it counts an
       // earlier attempt that died and records itself before any heavy work.
@@ -1470,10 +1469,7 @@ export class ChatRecoveryEngine {
         this.runRecoveryAttempt({
           callback,
           data,
-          run: () =>
-            turns.originMessageIdsScope.run(originMessageIds, () =>
-              turns.attempts[callback](data, onTurnStarted)
-            )
+          run: () => turns.attempts[callback](data, onTurnStarted)
         }),
       track: (turn) => turns.trackAlarmWork(turn),
       redefer: (dedupeKey) =>
@@ -1647,8 +1643,8 @@ export class ChatRecoveryEngine {
   }
 
   /**
-   * Run `fn` outside any recovery attempt's scope, and outside the
-   * origin-message-ids scope that goes with it. Only the attempt's own turn
+   * Run `fn` outside any recovery attempt's scope (and the origin message
+   * ids it holds). Only the attempt's own turn
    * is the attempt's. Code that runs in the turn's async chain but is not
    * the turn must leave the scope: the app's `onChatResponse` hook, which
    * may start a turn of its own, and the firing of a continuation a tool
@@ -1657,7 +1653,7 @@ export class ChatRecoveryEngine {
   outsideAttempt<T>(fn: () => T): T {
     const turns = this.adapter.turns;
     if (!turns) return fn();
-    return turns.attemptScope.exit(() => turns.originMessageIdsScope.exit(fn));
+    return turns.attemptScope.exit(fn);
   }
 
   /**

@@ -107,7 +107,6 @@ function setup(scenario: Scenario = {}) {
     attemptScope: new AsyncLocalStorage<ChatRecoveryAttemptScope>(),
     latestMessage: () =>
       scenario.latestMessage ?? { id: "assistant-1", role: "assistant" },
-    originMessageIdsScope: new AsyncLocalStorage<string[] | undefined>(),
     recordTerminalError: async (requestId, errorText) => {
       terminalErrors.push({ requestId, errorText });
     },
@@ -250,24 +249,46 @@ const cancelled = {
 } as const;
 
 describe("runRecoveryCallback", () => {
-  it("runs the callback's attempt inside the origin-message-ids scope", async () => {
+  it("runs the callback's attempt with the origin message ids in its scope", async () => {
     const t = setup();
+    let finishModel!: () => void;
+    const modelDone = new Promise<void>((resolve) => {
+      finishModel = resolve;
+    });
     let scoped: string[] | undefined;
-    let outside: string[] | undefined;
     t.turns.attempts._chatRecoveryRetry = async (data, onTurnStarted) => {
-      scoped = t.turns.originMessageIdsScope.getStore();
-      expect(data).toMatchObject({ incidentId: INCIDENT });
-      onTurnStarted();
+      const host: RecoveredTurnHost<RecoveryAttemptData, RecoveredTurnResult> =
+        {
+          ...t.host,
+          data: { ...(data as RecoveryAttemptData), incidentId: INCIDENT },
+          runTurn: async () => {
+            // The model turn starts: the callback hands it off and returns,
+            // and the turn goes on detached.
+            onTurnStarted();
+            await modelDone;
+            scoped = t.engine.activeOriginMessageIds;
+            finished();
+            return { status: "completed" };
+          }
+        };
+      await t.engine.runRecoveredTurn(host);
     };
+    let finished!: () => void;
+    const done = new Promise<void>((resolve) => {
+      finished = resolve;
+    });
     await t.engine.runRecoveryCallback("_chatRecoveryRetry", {
       incidentId: INCIDENT,
       originMessageIds: ["user-1"]
     });
-    outside = t.turns.originMessageIdsScope.getStore();
-
+    // The callback returned at the handoff, while the model turn still runs.
+    expect(scoped).toBeUndefined();
+    finishModel();
+    await done;
+    // The detached turn still sees the ids.
     expect(scoped).toEqual(["user-1"]);
-    // A request outside the callback never inherits the ids.
-    expect(outside).toBeUndefined();
+    // A request outside the attempt never inherits the ids.
+    expect(t.engine.activeOriginMessageIds).toBeUndefined();
   });
 });
 
@@ -1051,21 +1072,23 @@ describe("runRecoveredTurn", () => {
 
   it("runs outsideAttempt code outside the attempt's scope and the origin ids scope", async () => {
     let inside: string | undefined;
+    let idsInside: string[] | undefined;
     let outside: string | undefined = "unset";
     let idsOutside: string[] | undefined = ["unset"];
     const t = setup({
       duringTurn: ({ engine }) => {
         inside = engine.activeRootRequestId;
-        t.turns.originMessageIdsScope.run(["user-1"], () => {
-          engine.outsideAttempt(() => {
-            outside = engine.activeRootRequestId;
-            idsOutside = t.turns.originMessageIdsScope.getStore();
-          });
+        idsInside = engine.activeOriginMessageIds;
+        engine.outsideAttempt(() => {
+          outside = engine.activeRootRequestId;
+          idsOutside = engine.activeOriginMessageIds;
         });
       }
     });
+    t.host.data = { ...t.host.data, originMessageIds: ["user-1"] };
     await t.run();
     expect(inside).toBe(ROOT);
+    expect(idsInside).toEqual(["user-1"]);
     expect(outside).toBeUndefined();
     expect(idsOutside).toBeUndefined();
   });

@@ -382,16 +382,6 @@ export class AIChatAgent<
   }
 
   /**
-   * The originating user message ids of the active recovery chain (#2280),
-   * carried in the recovery payload because the successor turn runs under a
-   * fresh request id. Scoped to the recovery callback's async context, so a
-   * concurrent client request never inherits them.
-   */
-  private _chatRecoveryOriginIdsScope = new AsyncLocalStorage<
-    string[] | undefined
-  >();
-
-  /**
    * The turn core shared with `@cloudflare/think`: the turn queue, abort
    * registry, submit concurrency, continuation slots and barrier, pre-stream
    * set and tool-result apply chain, with the rules that tie them together.
@@ -510,7 +500,7 @@ export class AIChatAgent<
     },
     originMessageIds: (requestId) =>
       this._frames.requestOrigins.get(requestId) ??
-      this._chatRecoveryOriginIdsScope.getStore(),
+      this._chatRecoveryEngine().activeOriginMessageIds,
     transaction: (fn) => this.ctx.storage.transactionSync(fn)
   });
 
@@ -588,7 +578,7 @@ export class AIChatAgent<
     resuming: this._pendingResumeConnections,
     storedOriginIds: (requestId) =>
       this._resumableStream.getOriginMessageIds(requestId),
-    recoveryOriginIds: () => this._chatRecoveryOriginIdsScope.getStore(),
+    recoveryOriginIds: () => this._chatRecoveryEngine().activeOriginMessageIds,
     clientView: (messages) => this._turns.clientView(messages)
   });
 
@@ -3317,7 +3307,6 @@ export class AIChatAgent<
         trackAlarmWork: (turn) => this.lifecycle.trackAlarmWork(turn),
         attemptScope: new AsyncLocalStorage<ChatRecoveryAttemptScope>(),
         latestMessage: () => this.messages.at(-1),
-        originMessageIdsScope: this._chatRecoveryOriginIdsScope,
         // SAFETY: the recovery engine is the sole producer of each
         // callback's payload and the Task persists it verbatim, so the
         // callback name selects the matching host input type.

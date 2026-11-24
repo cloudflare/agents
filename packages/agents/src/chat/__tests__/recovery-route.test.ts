@@ -116,7 +116,6 @@ function setup(scenario: Scenario = {}) {
       trackAlarmWork: () => {},
       attemptScope: new AsyncLocalStorage<ChatRecoveryAttemptScope>(),
       latestMessage: () => undefined,
-      originMessageIdsScope: new AsyncLocalStorage<string[] | undefined>(),
       endRequest: (requestId, outcome) =>
         void log.push(`end-${outcome}:${requestId}`),
       recordTerminalError: async (requestId, errorText) => {
