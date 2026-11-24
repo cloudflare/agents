@@ -967,6 +967,35 @@ export class SessionsCore {
     );
   }
 
+  /** Which of `ids` are stored in the session: key probes, ids only. */
+  existingIds(sessionId: string, ids: readonly string[]): Set<string> {
+    const found = new Set<string>();
+    for (let i = 0; i < ids.length; i += DELETE_BATCH_IDS) {
+      for (const row of this.io.sql<{ id: string }>(
+        `SELECT id FROM cf_agents_session_messages
+         WHERE session_id = ? AND id IN (SELECT value FROM json_each(?))`,
+        [sessionId, JSON.stringify(ids.slice(i, i + DELETE_BATCH_IDS))]
+      )) {
+        found.add(row.id);
+      }
+    }
+    // A summary the visible transcript shows (`compaction_<id>`) has no
+    // stored row: it exists while its overlay does.
+    const summaries = ids
+      .filter((id) => id.startsWith(COMPACTION_PREFIX))
+      .map((id) => id.slice(COMPACTION_PREFIX.length));
+    if (summaries.length > 0) {
+      for (const row of this.io.sql<{ id: string }>(
+        `SELECT id FROM cf_agents_session_compactions
+         WHERE session_id = ? AND id IN (SELECT value FROM json_each(?))`,
+        [sessionId, JSON.stringify(summaries)]
+      )) {
+        found.add(`${COMPACTION_PREFIX}${row.id}`);
+      }
+    }
+    return found;
+  }
+
   getMessage(sessionId: string, id: string): SessionMessage | null {
     const content = this.#content(sessionId, id);
     const parsed = content === null ? null : this.#parse(content);

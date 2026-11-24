@@ -654,6 +654,41 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     return asUIMessages(await this.#handle(session).getHistory());
   }
 
+  /** @internal Which of `ids` a session already stores (key probes). */
+  async storedIds(
+    session: ThinkSessionId,
+    ids: readonly string[]
+  ): Promise<Set<string>> {
+    return this.#handle(session).internal_existingIds(ids);
+  }
+
+  /**
+   * @internal The approval id a tool call carries, from the newest message
+   * back: a turn's approval sits near the end, so the read stops early.
+   */
+  async approvalId(
+    session: ThinkSessionId,
+    toolCallId: string
+  ): Promise<string | undefined> {
+    for await (const message of this.#handle(session).history({
+      newestFirst: true
+    })) {
+      for (const part of message.parts) {
+        const record = part as {
+          toolCallId?: unknown;
+          approval?: { id?: unknown };
+        };
+        if (
+          record.toolCallId === toolCallId &&
+          typeof record.approval?.id === "string"
+        ) {
+          return record.approval.id;
+        }
+      }
+    }
+    return undefined;
+  }
+
   /** @internal Abort everything in a session and clear its transcript. */
   async reset(session: ThinkSessionId, handoff?: string): Promise<void> {
     await this.abort(session);
