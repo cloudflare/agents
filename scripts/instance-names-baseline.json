@@ -1,0 +1,15 @@
+{
+  "packages/agents/src/dynamic-agents/dynamic-agents.ts": 10,
+  "packages/agents/src/harness/think/harness.ts": 2,
+  "packages/agents/src/lifecycle/capability.ts": 10,
+  "packages/agents/src/lifecycle/deferred-destroy.ts": 1,
+  "packages/agents/src/mcp/client/manager.ts": 1,
+  "packages/agents/src/queue/queue.ts": 6,
+  "packages/agents/src/routing/routed-agents.ts": 1,
+  "packages/agents/src/schedules/scheduler.ts": 5,
+  "packages/agents/src/sessions/sessions.ts": 2,
+  "packages/agents/src/state/index.ts": 8,
+  "packages/agents/src/streams/streams.ts": 12,
+  "packages/agents/src/tasks/tasks.ts": 7,
+  "packages/agents/src/workflow-tracking/workflows.ts": 8
+}
