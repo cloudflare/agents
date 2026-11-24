@@ -816,6 +816,7 @@ export class AIChatAgent<
       chatFiberName,
       createChatTurnTaskDefinition({
         storage: this.ctx.storage,
+        snapshotKey: "__cfAIChatFiberSnapshot",
         keepAliveWhile: (fn) => this.keepAliveWhile(fn),
         withStash: (context, fn) => this._withFiberStash(context, fn),
         recover: (turn) => this._recoverChatTurn(turn)

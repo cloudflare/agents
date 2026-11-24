@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { TaskJson, TaskStep } from "../../tasks";
+import { unwrapChatFiberSnapshot } from "../recovery";
 import {
   createChatTurnTaskDefinition,
   type ChatTurnClosureEntry
@@ -35,6 +36,7 @@ function fakeStep(local: unknown): {
 
 const hooks = {
   storage: {} as DurableObjectStorage,
+  snapshotKey: "__snapshot",
   keepAliveWhile: <T>(fn: () => Promise<T>) => fn(),
   withStash: <T>(
     context: { stash: (data: unknown) => void },
@@ -145,7 +147,13 @@ describe("createChatTurnTaskDefinition", () => {
       } as unknown as DurableObjectStorage,
       recover: async (turn) => void recovered.push(turn.persisted)
     })({ requestId: "r1", continuation: false, nonce: "n1" }, step);
-    expect(recovered).toEqual([{ step: 4 }]);
+    expect(recovered).toEqual([{ __snapshot: null, user: { step: 4 } }]);
+    // Read back, it is the app's data, even when that data looks like an
+    // envelope.
+    expect(unwrapChatFiberSnapshot("__snapshot", recovered[0])).toEqual({
+      snapshot: null,
+      user: { step: 4 }
+    });
   });
 
   it("hands a replay of a run from before the input carried it the envelope it checkpointed", async () => {

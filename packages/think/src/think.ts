@@ -2982,6 +2982,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       chatFiberName,
       createChatTurnTaskDefinition({
         storage: this.ctx.storage,
+        snapshotKey: "__cfThinkChatFiberSnapshot",
         keepAliveWhile: (fn) => this.keepAliveWhile(fn),
         withStash: (context, fn) => this._withFiberStash(context, fn),
         recover: (turn) => this._recoverChatTurn(turn)

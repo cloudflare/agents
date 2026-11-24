@@ -45,6 +45,8 @@ export type ChatTurnTaskInput = {
 export type ChatTurnTaskHooks = {
   /** Where turns before checkpoints kept their snapshot. */
   readonly storage: DurableObjectStorage;
+  /** The key the host's stash envelope keeps its snapshot under. */
+  readonly snapshotKey: string;
   keepAliveWhile<T>(fn: () => Promise<T>): Promise<T>;
   /** The host's fiber stash context, so `this.stash()` keeps working. */
   withStash<T>(
@@ -113,10 +115,11 @@ export function createChatTurnTaskDefinition(
               ? { ...envelope, user: stash ?? null }
               : ((await hooks.storage.get(legacyKey)) ??
                 // No snapshot was kept (it could not be): recovery still
-                // gets the app's data, which a value with no snapshot key
-                // is read as.
-                stash ??
-                null));
+                // gets the app's data, in an envelope whose snapshot is
+                // null, so data shaped like an envelope is not read as one.
+                (stash !== undefined
+                  ? { [hooks.snapshotKey]: null, user: stash }
+                  : null)));
           await hooks.recover({
             requestId,
             persisted,
