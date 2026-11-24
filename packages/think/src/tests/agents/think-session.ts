@@ -14031,6 +14031,56 @@ export class ThinkWindowedHydrationAgent extends Think {
   }
 
   /**
+   * A reply hidden by compaction holds a tool result; the client resends it
+   * in its stale pending state, alongside an older reply under another id.
+   * Returns the stored tool state afterwards.
+   */
+  async reconcileHiddenToolResultForTest(): Promise<string | undefined> {
+    const toolPart = (state: string) => ({
+      type: "tool-lookup",
+      toolCallId: "call-hidden",
+      state,
+      input: {},
+      ...(state === "output-available" ? { output: "done" } : {})
+    });
+    await this.session.updateMessage({
+      id: "seed-1",
+      role: "assistant",
+      parts: [toolPart("output-available")]
+    } as unknown as UIMessage);
+    await this.session.addCompaction("summary", "seed-0", "seed-2");
+    await this.syncMessagesFromStorage();
+    const copy = await this.session.getMessage("seed-3");
+    const incoming = [
+      { id: "seed-1", role: "assistant", parts: [toolPart("input-available")] },
+      { ...copy, id: "client-copy" },
+      ...this.messages,
+      {
+        id: "new-user",
+        role: "user",
+        parts: [{ type: "text", text: "next question" }]
+      }
+    ] as unknown as UIMessage[];
+    const host = this as unknown as {
+      _reconcileAndPersistIncoming(
+        messages: UIMessage[],
+        options: {
+          requestId: string;
+          isRegeneration: boolean;
+          isCurrent: () => boolean;
+        }
+      ): Promise<unknown>;
+    };
+    await host._reconcileAndPersistIncoming(incoming, {
+      requestId: "hidden-tool-result",
+      isRegeneration: false,
+      isCurrent: () => true
+    });
+    const stored = await this.session.getMessage("seed-1");
+    return (stored?.parts[0] as { state?: string } | undefined)?.state;
+  }
+
+  /**
    * The client holds an older reply under its own id (an optimistic copy):
    * it sends that copy, the window and a new message. Returns the stored
    * history's ids.

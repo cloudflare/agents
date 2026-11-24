@@ -161,6 +161,18 @@ describe("hydrationByteBudget — windowed hydration (#1710)", () => {
     ]);
   });
 
+  it("keeps a compacted reply's tool result when the client resends it stale", async () => {
+    const agent = (await getAgentByName(
+      env.ThinkWindowedHydrationAgent,
+      uniqueName("seeded-windowed-hidden-tool")
+    )) as unknown as WindowedHydrationStub & {
+      reconcileHiddenToolResultForTest(): Promise<string | undefined>;
+    };
+    expect(await agent.reconcileHiddenToolResultForTest()).toBe(
+      "output-available"
+    );
+  });
+
   it("reconciles on a path too long to read root-first", async () => {
     const name = uniqueName("windowed-long-path");
     const agent = (await getAgentByName(

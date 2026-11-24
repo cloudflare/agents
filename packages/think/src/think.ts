@@ -8279,9 +8279,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * it was sent (that window) plus its new messages, so the stored rows
    * reconciliation needs beyond the window are those of incoming messages
    * older than it: each is read by id, and a new message costs one key
-   * probe that finds nothing. Only an older reply stored under another id
-   * needs the whole path to be matched, and that reads it (up to the
-   * root-first bound of 200,000 messages).
+   * probe that finds nothing. An older reply stored under another id is
+   * looked for newest-first past the window, one message in memory at a
+   * time, until it is matched.
    *
    * Returns a snapshot: the writes that follow patch the cache through the
    * change feed while the caller is still iterating.
@@ -8293,26 +8293,33 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     if (this._cfTranscript.coversActivePath) return window;
     const inWindow = new Set(window.map((message) => message.id));
     const older: UIMessage[] = [];
-    let unmatchedReply = false;
+    const unmatched: UIMessage[] = [];
     for (const message of incoming) {
       if (inWindow.has(message.id)) continue;
       const stored = await this.session.getMessage(message.id);
       if (stored) older.push(stored as UIMessage);
-      else if (message.role === "assistant") unmatchedReply = true;
+      else if (message.role === "assistant") unmatched.push(message);
     }
-    if (!unmatchedReply) return [...older, ...window];
+    if (unmatched.length === 0) return [...older, ...window];
     // An older reply the client holds under another id (an optimistic copy)
-    // is matched to its stored row by content and tool calls, which needs
-    // the stored path. Read it whole when it can be read root-first; past
-    // that bound, the window and the rows found by id are all there is.
-    try {
-      return await this._readMessagesFromStorage();
-    } catch (error) {
-      if ((error as { name?: unknown }).name !== "SessionPathTooLongError") {
-        throw error;
-      }
-      return [...older, ...window];
+    // is matched to its stored row by content and tool calls. Look for each
+    // newest-first past the window, holding one message at a time, and stop
+    // once every one has its row.
+    const matched: UIMessage[] = [];
+    for await (const message of this.session.history({ newestFirst: true })) {
+      if (unmatched.length === 0) break;
+      if (message.role !== "assistant" || inWindow.has(message.id)) continue;
+      const stored = message as UIMessage;
+      const index = unmatched.findIndex(
+        (reply) =>
+          reconcileMessages([reply], [stored], sanitizeMessage)[0].id ===
+          stored.id
+      );
+      if (index === -1) continue;
+      unmatched.splice(index, 1);
+      matched.unshift(stored);
     }
+    return [...matched, ...older, ...window];
   }
 
   /**
