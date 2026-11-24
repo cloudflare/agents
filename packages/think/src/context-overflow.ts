@@ -19,6 +19,7 @@ import type { ModelMessage } from "ai";
 import {
   ChatStreamStalledError,
   TransientChatStreamError,
+  classifyProviderError,
   isDurableObjectResetError
 } from "agents/chat";
 import type {
@@ -83,8 +84,6 @@ export class ThinkContextOverflow {
    * and a genuine remaining overflow falls through to the reactive backstop.
    */
   #proactiveCompactions = 0;
-  /** One-time guard for the "recovery enabled but no classifier" warning. */
-  #warnedMissingClassifier = false;
 
   constructor(options: ThinkContextOverflowOptions) {
     this.#options = options;
@@ -118,18 +117,23 @@ export class ThinkContextOverflow {
     error: unknown,
     requestId: string
   ): ChatErrorClassification | undefined {
-    if (!this.#options.classifierOverridden()) return undefined;
-    try {
-      return (
-        this.#options.classify(error, { stage: "stream", requestId }) ??
-        undefined
-      );
-    } catch (err) {
-      console.warn(
-        `[Think] classifyChatError threw; treating as unclassified: ${err instanceof Error ? err.message : String(err)}`
-      );
-      return undefined;
+    // The app's hook wins; without a verdict from it, what the provider's
+    // error says (`classifyProviderError`).
+    if (this.#options.classifierOverridden()) {
+      try {
+        const verdict = this.#options.classify(error, {
+          stage: "stream",
+          requestId
+        });
+        if (verdict) return verdict;
+      } catch (err) {
+        console.warn(
+          `[Think] classifyChatError threw; treating as unclassified: ${err instanceof Error ? err.message : String(err)}`
+        );
+        return undefined;
+      }
     }
+    return classifyProviderError(error);
   }
 
   /**
@@ -139,25 +143,14 @@ export class ThinkContextOverflow {
    */
   isRecoverable(classification: ChatErrorClassification | undefined): boolean {
     if (!this.reactiveEnabled) return false;
-    // DX guard: enabling recovery without teaching Think which errors are
-    // overflows silently does nothing. Warn once instead of failing quietly.
-    if (!this.#options.classifierOverridden()) {
-      if (!this.#warnedMissingClassifier) {
-        this.#warnedMissingClassifier = true;
-        console.warn(
-          '[Think] contextOverflow.reactive is enabled but classifyChatError() is not overridden, so no error will ever be treated as a context overflow and recovery will never run. Override classifyChatError() (or assign the exported defaultContextOverflowClassifier) to return "context_overflow" for your provider\'s context-window error (e.g. Anthropic "prompt is too long", OpenAI context_length_exceeded).'
-        );
-      }
-      return false;
-    }
     return classification === "context_overflow";
   }
 
   /**
-   * The `"transient"` or `"rate_limit"` class the app assigned a stream
-   * error, else `undefined`. Such errors route into bounded chat recovery like
-   * a stream stall instead of terminalizing the turn (#2085). Without a
-   * `classifyChatError` override nothing is transient. A Durable Object reset
+   * The `"transient"` or `"rate_limit"` class of a stream error (the app's
+   * hook, else what the provider's error says), else `undefined`. Such errors
+   * route into bounded chat recovery like a stream stall instead of
+   * terminalizing the turn (#2085). A Durable Object reset
    * is never transient here: the restart's own recovery owns the turn.
    */
   transientClassification(

@@ -45,16 +45,27 @@ describe("ThinkContextOverflow", () => {
     expect(guard.isRecoverable("context_overflow")).toBe(false);
   });
 
-  it("warns once when reactive is on but nothing classifies", () => {
+  it("reads the provider's error when no classifier is overridden, with no warning", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { guard } = overflow(
       { reactive: true },
       { classifierOverridden: () => false }
     );
-    expect(guard.isRecoverable("context_overflow")).toBe(false);
-    expect(guard.isRecoverable("context_overflow")).toBe(false);
-    expect(warn).toHaveBeenCalledOnce();
+    const classification = guard.classifyStreamError(
+      new Error("prompt is too long: 210000 tokens > 200000 maximum"),
+      "r"
+    );
+    expect(classification).toBe("context_overflow");
+    expect(guard.isRecoverable(classification)).toBe(true);
+    expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
+  });
+
+  it("lets the app's classifier win over the provider's error", () => {
+    const { guard } = overflow({ reactive: true }, { classify: () => "fatal" });
+    expect(
+      guard.classifyStreamError(new Error("prompt is too long"), "r")
+    ).toBe("fatal");
   });
 
   it("treats a thrown classifier as unclassified", () => {

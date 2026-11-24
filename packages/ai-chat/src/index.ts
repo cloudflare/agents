@@ -37,6 +37,7 @@ import {
   transcriptJson
 } from "./transcript";
 import {
+  classifyProviderError,
   reconcileOrphanPartial,
   ChatRequestContext,
   interruptedToolPartAsError,
@@ -4311,8 +4312,11 @@ export class AIChatAgent<
       stallTimeoutMs: this.chatStreamStallTimeoutMs,
       // An in-band error is the provider's answer. A dropped connection
       // (#1964) is worth a retry.
+      // What the provider's error says: a rate limit or a transient
+      // failure goes into bounded chat recovery, like a dropped stream.
       classify: (error, inBand) =>
-        !inBand && isRecoverableStreamReadError(error)
+        (!inBand && isRecoverableStreamReadError(error)) ||
+        isTransientProviderError(error)
           ? "transient"
           : "terminal",
       describeError: (error) => streamErrorText(error),
@@ -4378,4 +4382,10 @@ export class AIChatAgent<
     this._resumableStream.destroy();
     await super.destroy();
   }
+}
+
+/** A provider error that says to try again: a rate limit or a transient failure. */
+function isTransientProviderError(error: unknown): boolean {
+  const meaning = classifyProviderError(error);
+  return meaning === "rate_limit" || meaning === "transient";
 }
