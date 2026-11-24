@@ -69,11 +69,13 @@ const FACET_DRIVE_BUDGET_MS = 5_000;
 /** The root's wake for a facet whose drive call failed. */
 const FACET_DRIVE_RECHECK_MS = 30_000;
 /**
- * The root's wake for a facet whose drive outran the budget or was busy.
- * Short: it is also how soon a root reset in that window is noticed, since
- * nothing else starts the root (facet-probe R8: 30 s here held 30 facets'
- * recovery for 30 s). While this isolate's own drive still runs, the wake
- * only moves on; it calls nothing and writes no count.
+ * The root's first wake for a facet whose drive outran the budget or was
+ * busy. Short: it is also how soon a root reset in that window is noticed,
+ * since nothing else starts the root (facet-probe R8: 30 s here held 30
+ * facets' recovery for 30 s). While this isolate's own drive still runs,
+ * the wake only moves on, calling nothing and writing no count, and its
+ * interval doubles up to FACET_DRIVE_RECHECK_MS, so a long drive costs
+ * about what it did before.
  */
 const FACET_DRIVE_RUNNING_RECHECK_MS = 5_000;
 /**
@@ -1450,8 +1452,11 @@ export class Lifecycle<
    * exists completes it too. A failed call goes through the driver's usual
    * failure handling, so a reset facet is retried with a fresh stub.
    */
-  /** Facet paths whose drive outran its budget here and still runs. */
-  readonly #drivesRunning = new Set<string>();
+  /**
+   * Facet paths whose drive outran its budget here and still runs, with
+   * the interval of the next recheck.
+   */
+  readonly #drivesRunning = new Map<string, number>();
 
   #facetWakeDispatch(): JobDispatch | undefined {
     const transport = lifecycleRouteTransports.get(this);
@@ -1466,8 +1471,13 @@ export class Lifecycle<
         };
         // This isolate's drive of the path outran its budget and still runs:
         // nothing to start, only the wake to keep.
-        if (this.#drivesRunning.has(target.key)) {
-          return { rescheduleAt: Date.now() + FACET_DRIVE_RUNNING_RECHECK_MS };
+        const running = this.#drivesRunning.get(target.key);
+        if (running !== undefined) {
+          this.#drivesRunning.set(
+            target.key,
+            Math.min(running * 2, FACET_DRIVE_RECHECK_MS)
+          );
+          return { rescheduleAt: Date.now() + running };
         }
         const countKey = facetDriveKey(target.key);
         const drives = kv.get<FacetDriveCount>(countKey);
@@ -1546,7 +1556,7 @@ export class Lifecycle<
         // wake when it comes, unless a newer report got there first.
         // Meanwhile the path keeps a recheck wake.
         this.trackAlarmWork(call);
-        this.#drivesRunning.add(target.key);
+        this.#drivesRunning.set(target.key, FACET_DRIVE_RUNNING_RECHECK_MS * 2);
         void call.finally(() => this.#drivesRunning.delete(target.key));
         void call.then(({ next, stamp }) =>
           this.#holdFacetWake(target, next, stamp).catch((error: unknown) =>
