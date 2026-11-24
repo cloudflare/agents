@@ -14043,6 +14043,34 @@ export class ThinkWindowedHydrationAgent extends Think {
   }
 
   /**
+   * Budgeted hydrations while `addMessages` injects a batch of short
+   * messages at the tail of a windowed cache.
+   */
+  async hydrationsForBatchForTest(count: number): Promise<number> {
+    const session = this.session as unknown as {
+      getRecentHistory: (...args: unknown[]) => Promise<unknown>;
+    };
+    const read = session.getRecentHistory.bind(session);
+    let hydrations = 0;
+    session.getRecentHistory = async (...args) => {
+      hydrations++;
+      return read(...args);
+    };
+    try {
+      await this.addMessages(
+        Array.from({ length: count }, (_, i) => ({
+          id: `batch-${i}`,
+          role: i % 2 === 0 ? "user" : "assistant",
+          parts: [{ type: "text", text: `short ${i}` }]
+        })) as UIMessage[]
+      );
+      return hydrations;
+    } finally {
+      session.getRecentHistory = read;
+    }
+  }
+
+  /**
    * On a seeded long path, the client sends copies of two older replies
    * under new ids. Returns which copies were stored as new messages.
    */

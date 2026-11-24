@@ -231,6 +231,18 @@ describe("hydrationByteBudget — windowed hydration (#1710)", () => {
     });
   });
 
+  it("re-windows after a batch of short messages outgrows the allowance", async () => {
+    const agent = (await getAgentByName(
+      env.ThinkWindowedHydrationAgent,
+      uniqueName("seeded-windowed-batch")
+    )) as unknown as WindowedHydrationStub & {
+      hydrationsForBatchForTest(count: number): Promise<number>;
+    };
+    expect((await agent.getHydrationInfoForTest())?.truncated).toBe(true);
+    // 20 short messages are charged 1 KiB each, past an eighth of 64 KiB.
+    expect(await agent.hydrationsForBatchForTest(20)).toBe(1);
+  });
+
   it("reconciles on a path too long to read root-first", async () => {
     const name = uniqueName("windowed-long-path");
     const agent = (await getAgentByName(

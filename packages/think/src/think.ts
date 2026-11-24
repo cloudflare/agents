@@ -1254,6 +1254,12 @@ type StoredThinkClientRequest = {
 };
 
 /**
+ * What a budgeted read (`getRecentHistory`) charges each message on top of
+ * its stored bytes; growth since a refresh is charged the same way.
+ */
+const HYDRATION_MESSAGE_OVERHEAD_BYTES = 1024;
+
+/**
  * How many messages past a windowed cache reconciliation looks for an older
  * reply the client holds under another id: the newest 10,001 messages
  * counting the window (what a reconcile read before the depth cap was
@@ -1722,7 +1728,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
                 // where an eviction pass becomes worth scheduling; the gate
                 // decides from memory. It also grows the cache past what the
                 // last refresh measured.
-                this._cfTranscript.noteGrowth(cachedMessageBytes(message));
+                // A budgeted refresh charges each message 1 KiB on top of
+                // its bytes, so growth is charged the same way.
+                this._cfTranscript.noteGrowth(
+                  cachedMessageBytes(message) + HYDRATION_MESSAGE_OVERHEAD_BYTES
+                );
                 this._cfMediaEviction.noteAppend();
               }
             });
@@ -6419,14 +6429,15 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       }
     }
 
-    // The live cache is kept coherent automatically by the Sessions change
-    // listener wired in `onStart`, which handles
-    // both linear appends and branches (an explicit `parentId` triggers a full
-    // resync). So `addMessages` only owns the broadcast — and suppresses it
-    // mid-turn: pushing a full `MSG_CHAT_MESSAGES` snapshot while a turn streams
+    // The live cache is kept coherent by the Sessions change listener wired
+    // in `onStart`: appends under the cached tail land in place, a branch
+    // forces a full resync. A windowed cache that a batch grew past its
+    // allowance re-windows here. Otherwise `addMessages` only owns the
+    // broadcast — and suppresses it mid-turn: pushing a full `MSG_CHAT_MESSAGES` snapshot while a turn streams
     // would clobber the in-progress assistant message on connected clients (the
     // same reason the streaming path defers its snapshot). The injected messages
     // ride along on the turn's next broadcast.
+    await this._cfTranscript.refreshIfNeeded();
     if (this._insideInferenceLoop) return;
     if (options?.broadcast !== false) {
       this._frames.broadcastMessages(this.messages);
@@ -8335,8 +8346,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       newestFirst: true,
       leafId: start?.id
     })) {
-      if (known.has(message.id)) continue;
       if (++at > lookback) break;
+      if (known.has(message.id)) continue;
       if (message.role !== "assistant") continue;
       const stored = message as UIMessage;
       unmatched.forEach((reply, index) => {
