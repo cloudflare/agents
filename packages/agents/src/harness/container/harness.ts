@@ -696,7 +696,7 @@ export class ContainerHarness extends LifecycleCapability {
   // ── Used by ContainerSession and ContainerSessions ───────────────────────
 
   /** @internal */
-  async store(): Promise<HarnessStore> {
+  async openStore(): Promise<HarnessStore> {
     return this.#openStore();
   }
 
@@ -2153,7 +2153,7 @@ export class ContainerSessions {
    * @returns Each session's id, parent, and whether it is busy.
    */
   async list(): Promise<ContainerSessionInfo[]> {
-    const store = await this.#harness.store();
+    const store = await this.#harness.openStore();
     const busy = new Set(
       store.operations({ status: OPEN }).map((operation) => operation.session)
     );

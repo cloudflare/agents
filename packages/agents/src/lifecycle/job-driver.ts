@@ -898,6 +898,9 @@ export class JobDriver {
       fn: row.fn,
       id: row.id
     });
+    // The instance itself is missing (a deploy removed or renamed it): its
+    // rows are kept; reported once per start.
+    this.#emitSafely("capability_missing", { capability: row.capability });
   }
 
   /** Best-effort telemetry: never blocks or fails a dispatch. */

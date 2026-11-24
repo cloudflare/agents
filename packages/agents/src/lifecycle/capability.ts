@@ -128,20 +128,98 @@ export type LifecycleServices = {
 
 const installedServices = new WeakMap<object, LifecycleServices>();
 
+/** A name an app gives an instance: `[a-z][a-z0-9-]{0,31}`. */
+const INSTANCE_NAME = /^[a-z][a-z0-9-]{0,31}$/;
+
+/** Names a composer derived ({@link LifecycleCapability.composedName}). */
+const composedNames = new Set<string>();
+
+/** The capabilities each capability composes, in the order it composed them. */
+const composedBy = new WeakMap<LifecycleCapability, LifecycleCapability[]>();
+
+/**
+ * Storage names one capability instance owns. The default instance's are
+ * today's names byte for byte; a named instance's carry its name, so two
+ * instances of one kind never share a table, an index or a key.
+ *
+ * @internal
+ */
+export type LifecycleCapabilityStore = {
+  /** The real name of this instance's table `name` (`cf_agents_<name>…`). */
+  readonly table: (name: string) => string;
+  /** The real name of this instance's index `name` (`idx_cf_agents_<name>…`). */
+  readonly index: (name: string) => string;
+  /** The real KV key for this instance's key `name` (`cf_agents:…<name>`). */
+  readonly key: (name: string) => string;
+};
+
 /**
  * Base class for capabilities that consume standard Lifecycle services.
  */
 export abstract class LifecycleCapability<Props extends object = object> {
+  /**
+   * The kind and, for a named instance, its name: `kind` or `kind/name`.
+   * Jobs, events and storage names are derived from it.
+   */
   readonly capabilityId: string;
+  /** The kind, fixed by the class (`"streams"`). */
+  readonly kind: string;
+  /** The instance's name, or undefined for the default instance. */
+  readonly instanceName: string | undefined;
 
   /** How this capability claims traffic; see {@link DurableObjectCapability.claims}. */
   readonly claims: "selective" | "catch-all" = "selective";
 
-  protected constructor(capabilityId: string) {
-    if (capabilityId.trim() === "") {
+  protected constructor(kind: string, instanceName?: string) {
+    if (kind.trim() === "") {
       throw new Error("Lifecycle capability IDs must be non-empty");
     }
-    this.capabilityId = capabilityId;
+    if (
+      instanceName !== undefined &&
+      !INSTANCE_NAME.test(instanceName) &&
+      !composedNames.has(instanceName)
+    ) {
+      throw new Error(
+        `${JSON.stringify(instanceName)} is not a valid instance name: use ` +
+          "a lowercase letter, then up to 31 lowercase letters, digits or " +
+          "hyphens."
+      );
+    }
+    this.kind = kind;
+    this.instanceName = instanceName;
+    this.capabilityId =
+      instanceName === undefined ? kind : `${kind}/${instanceName}`;
+  }
+
+  /**
+   * The name to give a capability this one composes: derived from this
+   * instance's id, so it can never equal a name an app chose.
+   */
+  protected get composedName(): string {
+    const name = `@${this.capabilityId.replace(/\//g, "-")}`;
+    composedNames.add(name);
+    return name;
+  }
+
+  /**
+   * Declare a capability this one builds on. `Lifecycle.use()` installs it
+   * (and what it composes) before this one. Returns it.
+   */
+  protected compose<T extends LifecycleCapability>(capability: T): T {
+    const list = composedBy.get(this) ?? [];
+    list.push(capability);
+    composedBy.set(this, list);
+    return capability;
+  }
+
+  /**
+   * This instance's storage names. Resolve them once (in the constructor)
+   * and build statement text from them once.
+   *
+   * @internal
+   */
+  protected get store(): LifecycleCapabilityStore {
+    return capabilityStore(this.capabilityId, this.instanceName);
   }
 
   /** Default startup hook; capabilities override when they own startup work. */
@@ -175,6 +253,51 @@ export function bindLifecycleCapability(
   services: LifecycleServices
 ): void {
   installedServices.set(capability, services);
+}
+
+/**
+ * @internal The storage names of instance `instanceName` (undefined for the
+ * default). A table or index of a name an app chose ends `__n_<name>`, of
+ * a derived one `__c_<name>`, with `-` as `_`, so the two never meet. A
+ * named instance's KV keys are `cf_agents:<id>:<name>`.
+ */
+export function capabilityStore(
+  capabilityId: string,
+  instanceName: string | undefined
+): LifecycleCapabilityStore {
+  if (instanceName === undefined) {
+    return {
+      table: (name) => `cf_agents_${name}`,
+      index: (name) => `idx_cf_agents_${name}`,
+      key: (name) => `cf_agents:${name}`
+    };
+  }
+  const derived = instanceName.startsWith("@");
+  const plain = (derived ? instanceName.slice(1) : instanceName).replace(
+    /-/g,
+    "_"
+  );
+  const suffix = `__${derived ? "c" : "n"}_${plain}`;
+  return {
+    table: (name) => `cf_agents_${name}${suffix}`,
+    index: (name) => `idx_cf_agents_${name}${suffix}`,
+    key: (name) => `cf_agents:${capabilityId}:${name}`
+  };
+}
+
+/**
+ * @internal The capabilities `capability` composes, then what each of
+ * those composes, in install order: composed first, then the composer.
+ */
+export function capabilityInstallOrder(
+  capability: LifecycleCapability
+): LifecycleCapability[] {
+  const order: LifecycleCapability[] = [];
+  for (const composed of composedBy.get(capability) ?? []) {
+    order.push(...capabilityInstallOrder(composed));
+  }
+  order.push(capability);
+  return order;
 }
 
 /** @internal Read a capability ID without exposing installation internals. */
