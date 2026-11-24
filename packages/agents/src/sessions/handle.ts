@@ -192,6 +192,16 @@ export class Session {
     return this.#core.storedPathRows(this.sessionId, options);
   }
 
+  /**
+   * @internal Sibling-package support, not a public API. Which of `ids`
+   * this session holds: stored rows, and the summaries its overlays show
+   * (`compaction_<id>`). Key probes, no content read.
+   */
+  async internal_existingIds(ids: readonly string[]): Promise<Set<string>> {
+    await this.#ready();
+    return this.#core.existingIds(this.sessionId, ids);
+  }
+
   async getMessage(id: string): Promise<SessionMessage | null> {
     await this.#ready();
     return this.#core.getMessage(this.sessionId, id);

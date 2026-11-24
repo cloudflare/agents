@@ -237,12 +237,14 @@ export class ThinkChat extends LifecycleCapability {
           await session.regenerate(undefined, { operationId: event.id });
           return;
         }
-        const known = new Set(
-          (await session.messages()).map((message) => message.id)
+        // Only the incoming ids are checked against storage: a key probe
+        // each, no transcript read.
+        const incoming = body.messages ?? [];
+        const known = await this.#harness.storedIds(
+          this.#session,
+          incoming.map((message) => message.id)
         );
-        const fresh = (body.messages ?? []).filter(
-          (message) => !known.has(message.id)
-        );
+        const fresh = incoming.filter((message) => !known.has(message.id));
         const receipt = await session.submit(fresh, {
           operationId: event.id,
           source: "client",
@@ -311,7 +313,10 @@ export class ThinkChat extends LifecycleCapability {
         return;
       }
       case "tool-approval": {
-        const approvalId = await this.#approvalId(event.toolCallId);
+        const approvalId = await this.#harness.approvalId(
+          this.#session,
+          event.toolCallId
+        );
         if (approvalId === undefined) return;
         const operationId = crypto.randomUUID();
         this.#requesters.set(operationId, connection.id);
@@ -395,23 +400,6 @@ export class ThinkChat extends LifecycleCapability {
     });
     this.#replayed.set(connection.id, { operationId, continuation });
     this.#awaitingAck.delete(connection.id);
-  }
-
-  async #approvalId(toolCallId: string): Promise<string | undefined> {
-    const messages = await this.#harness.session(this.#session).messages();
-    for (const message of [...messages].reverse()) {
-      for (const part of message.parts) {
-        if (
-          "toolCallId" in part &&
-          part.toolCallId === toolCallId &&
-          "approval" in part &&
-          part.approval
-        ) {
-          return part.approval.id;
-        }
-      }
-    }
-    return undefined;
   }
 
   // ── Harness events ───────────────────────────────────────────────────────

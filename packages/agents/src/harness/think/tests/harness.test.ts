@@ -50,6 +50,33 @@ describe("ThinkHarness turns", () => {
     expect(text(await stub.prompt("again"))).toBe("echo: again");
   });
 
+  it("checks incoming ids against storage without reading the transcript", async () => {
+    const stub = fresh();
+    await stub.prompt("hello");
+    const ids = await stub.messageIds();
+    await runInDurableObject(stub, async (instance: ThinkHarnessTestObject) => {
+      const session = instance.harness.session().id;
+      const known = await instance.harness.storedIds(session, [
+        ...ids,
+        "not-stored"
+      ]);
+      expect([...known].sort()).toEqual([...ids].sort());
+      expect(
+        await instance.harness.approvalId(session, "no-such-call")
+      ).toBeUndefined();
+    });
+  });
+
+  it("counts a compaction summary the transcript shows as known", async () => {
+    const stub = fresh();
+    await stub.prompt("hello");
+    await stub.prompt("again");
+    // A client resends the visible transcript, summary included; the
+    // summary has no stored row but must not read as a new message.
+    const { summary, known } = await stub.summaryIdKnown();
+    expect(known).toEqual([summary]);
+  });
+
   it("runs a server tool and answers from its result in one message", async () => {
     const stub = fresh();
     const result = await stub.prompt("multiply 4");
@@ -203,7 +230,17 @@ describe("ThinkHarness approvals and client tools", () => {
     );
     expect(await stub.dangerousRuns()).toBe(0);
 
-    const approvalId = (await stub.lastToolCalls())[0]?.approvalId ?? "";
+    const [call] = await stub.lastToolCalls();
+    const approvalId = call?.approvalId ?? "";
+    // The lookup chat answers approvals with: newest message first.
+    await runInDurableObject(stub, async (instance: ThinkHarnessTestObject) => {
+      expect(
+        await instance.harness.approvalId(
+          instance.harness.session().id,
+          call?.toolCallId ?? ""
+        )
+      ).toBe(approvalId);
+    });
     const receipt = await stub.answer({
       type: "approval",
       approvalId,

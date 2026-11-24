@@ -443,6 +443,22 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return seen;
   }
 
+  /**
+   * Compact the first exchange and ask which ids the session holds: the
+   * visible transcript's summary id among them.
+   */
+  async summaryIdKnown(): Promise<{ summary: string; known: string[] }> {
+    const handle = this.#handles.get("");
+    const [first, second] = (await handle?.getHistory()) ?? [];
+    const overlay = await handle?.addCompaction("summary", first.id, second.id);
+    const summary = `compaction_${overlay?.id}`;
+    const known = await this.harness.storedIds(this.harness.session().id, [
+      summary,
+      "compaction_none"
+    ]);
+    return { summary, known: [...known] };
+  }
+
   /** Create the operations table as it was before `abandon_reason`. */
   createOldOperationsTable(): void {
     this.ctx.storage.sql.exec(`CREATE TABLE cf_think_harness_operations (
