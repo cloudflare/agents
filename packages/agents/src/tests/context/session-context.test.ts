@@ -887,6 +887,12 @@ describe("Context", () => {
           throw new Error("store down");
         }
       },
+      {
+        // Throws before returning a promise.
+        get: (): Promise<string | null> => {
+          throw new Error("store down");
+        }
+      },
       { get: async (): Promise<string | null> => null },
       { get: async () => "" }
     ]) {
@@ -906,6 +912,40 @@ describe("Context", () => {
         expect(built.system).toContain("Be kind.");
       });
     }
+  });
+
+  it("reads the frozen prompt once the store recovers from a failure", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const sessions = new Sessions();
+      install(sessions);
+      const session = sessions.session();
+      const released = "Released prompt.";
+      let down = true;
+      const context = new Context(session, {
+        sql: storageSql(storage),
+        blocks: [{ label: "soul", provider: { get: async () => "Be kind." } }],
+        promptStore: {
+          get: async () => {
+            if (down) throw new Error("store down");
+            return released;
+          }
+        }
+      });
+      // A turn the release answered, then the first turn after the upgrade
+      // while the store is down: sent the blocks, nothing recorded.
+      await session.appendMessage(user("u1", "hello"));
+      await session.appendMessage(assistant("a1", "hi"));
+      await session.appendMessage(user("u2", "again"));
+      expect((await context.build()).system).toContain("Be kind.");
+      expect((await session.internal_annotations("context", ["u2"])).size).toBe(
+        0
+      );
+      // The store is back: the next turn is sent the frozen prompt.
+      down = false;
+      await session.appendMessage(assistant("a2", "ok"));
+      await session.appendMessage(user("u3", "more"));
+      expect((await context.build()).system).toBe(released);
+    });
   });
 
   it("projects the same history to the same messages", async () => {

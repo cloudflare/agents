@@ -200,6 +200,8 @@ export class Context {
   readonly #promptStore: ContextProvider | undefined;
   /** The prompt store's text, read once: the prompt of turns sent before Context. */
   #frozen: string | null | undefined;
+  /** The prompt store failed on this call: it may hold a prompt, so record nothing. */
+  #storeFailed = false;
   /** Whether a refresh waits to be recorded; read from the session once. */
   #refresh: boolean | undefined;
   /** Records by message id, as last read or written (see `#records`). */
@@ -264,6 +266,7 @@ export class Context {
 
     // A path with no record was sent the frozen prompt, if any: before a
     // pending refresh is weighed, so a regeneration keeps it.
+    this.#storeFailed = false;
     if (!delivered.system) {
       delivered = await this.#carriedForward(delivered, await this.#released());
     }
@@ -292,7 +295,9 @@ export class Context {
           ([label, text]) =>
             !delivered.values.has(label) || delivered.values.get(label) === text
         );
-      const at = await target();
+      // While the store that may hold the frozen prompt cannot be read,
+      // this turn is sent the blocks and records nothing.
+      const at = this.#storeFailed ? undefined : await target();
       if (at) {
         if (!unchanged) {
           await this.#put(at.id, { system: sections });
@@ -600,15 +605,30 @@ export class Context {
    */
   async #released(): Promise<string | null> {
     if (!this.#promptStore) return null;
-    // A store that fails or holds nothing never fails a turn: there is
-    // just no prompt from before.
-    this.#frozen ??= await this.#promptStore.get().then(
-      (text) => (typeof text === "string" && text.length > 0 ? text : null),
-      (error: unknown) => {
-        console.warn("Context could not read the frozen prompt store", error);
+    // A store that fails never fails a turn; a store that holds nothing
+    // means there is no prompt from before. Only a prompt is kept: after a
+    // failure or an empty read the next turn reads the store again, and a
+    // turn whose read failed records nothing.
+    if (this.#frozen === undefined || this.#frozen === null) {
+      const store = this.#promptStore;
+      const read = await Promise.resolve()
+        .then(() => store.get())
+        .then(
+          (text) => (typeof text === "string" && text.length > 0 ? text : null),
+          (error: unknown) => {
+            console.warn(
+              "Context could not read the frozen prompt store",
+              error
+            );
+            return undefined;
+          }
+        );
+      if (read === undefined) {
+        this.#storeFailed = true;
         return null;
       }
-    );
+      this.#frozen = read;
+    }
     if (this.#frozen === null) return null;
     return (await this.#session.internal_config(CLEARED_AT)) === null
       ? this.#frozen
