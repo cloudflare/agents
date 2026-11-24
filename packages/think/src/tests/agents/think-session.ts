@@ -13995,6 +13995,54 @@ export class ThinkWindowedHydrationAgent extends Think {
   }
 
   /**
+   * Budgeted hydrations (`getRecentHistory` calls) during a client submit of
+   * one new message and during one chat turn, on a windowed cache.
+   */
+  async hydrationsPerRequestForTest(): Promise<{
+    submit: number;
+    turn: number;
+  }> {
+    const session = this.session as unknown as {
+      getRecentHistory: (...args: unknown[]) => Promise<unknown>;
+    };
+    const read = session.getRecentHistory.bind(session);
+    let count = 0;
+    session.getRecentHistory = async (...args) => {
+      count++;
+      return read(...args);
+    };
+    try {
+      const host = this as unknown as {
+        _reconcileAndPersistIncoming(
+          messages: UIMessage[],
+          options: {
+            requestId: string;
+            isRegeneration: boolean;
+            isCurrent: () => boolean;
+          }
+        ): Promise<unknown>;
+      };
+      await host._reconcileAndPersistIncoming(
+        [
+          ...this.messages,
+          {
+            id: "submitted",
+            role: "user",
+            parts: [{ type: "text", text: "a question" }]
+          }
+        ] as UIMessage[],
+        { requestId: "count", isRegeneration: false, isCurrent: () => true }
+      );
+      const submit = count;
+      count = 0;
+      await this.chat("another question", new TestCollectingCallback());
+      return { submit, turn: count };
+    } finally {
+      session.getRecentHistory = read;
+    }
+  }
+
+  /**
    * On a seeded long path, the client sends copies of two older replies
    * under new ids. Returns which copies were stored as new messages.
    */

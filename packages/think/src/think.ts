@@ -1667,9 +1667,15 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               intercept: async (event) => {
                 switch (event.type) {
                   case "append":
-                    // A branch append moves the path itself, which no
-                    // in-place patch expresses.
-                    if (event.inserted && event.parentId === undefined) {
+                    // An append under the cached tail extends the cached
+                    // path in place. A branch append moves the path itself,
+                    // which no in-place patch expresses.
+                    if (
+                      !event.inserted ||
+                      event.parentId === undefined ||
+                      event.parentId ===
+                        (this._cfTranscript.messages.at(-1)?.id ?? null)
+                    ) {
                       return false;
                     }
                     await this._cfTranscript.sync();
@@ -1689,7 +1695,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
                   case "import":
                     // A row the cache never saw. Re-derive at the next safe
                     // boundary instead of mirroring a migration row by row.
-                    this._cfTranscript.coversActivePath = false;
+                    this._cfTranscript.markStale();
                     return true;
                   case "clear":
                     this._cfTranscript.replace([]);
@@ -7320,8 +7326,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               await this._persistIncomingMessage(message, undefined, "web");
             }
             if (!isCurrent()) return false;
-            if (!this._cfTranscript.coversActivePath)
-              await this._cfTranscript.sync();
+            await this._cfTranscript.refreshIfNeeded();
             return true;
           }
         );
@@ -8270,11 +8275,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         if (!options.isCurrent()) return false;
         // The change feed patched the cache for every write above (a linear
         // append lands in place; a branch append already forced a full
-        // refresh), so a cache that covers the path is current. Only a
-        // windowed or unhydrated cache needs storage to re-derive its view.
-        if (!this._cfTranscript.coversActivePath) {
-          await this._cfTranscript.sync();
-        }
+        // refresh), so the cache is current unless it can't answer.
+        await this._cfTranscript.refreshIfNeeded();
         return true;
       }
     );

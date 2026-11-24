@@ -92,6 +92,11 @@ export class ThinkTranscriptCache {
    * storage and re-windows (#1710).
    */
   #bytesSinceSync = 0;
+  /**
+   * `true` after a windowed refresh while the cache is still that window
+   * plus messages appended at its tail: current, only longer.
+   */
+  #windowCurrent = false;
   #warnedWindowed = false;
   /**
    * Snapshot of the last windowed emit, so a chronically oversized session
@@ -110,6 +115,34 @@ export class ThinkTranscriptCache {
   replace(messages: UIMessage[]): UIMessage[] {
     this.messages = messages;
     return this.messages;
+  }
+
+  /**
+   * Storage changed in a way the cache can't follow in place (an import):
+   * the next boundary re-reads.
+   */
+  markStale(): void {
+    this.coversActivePath = false;
+    this.#windowCurrent = false;
+  }
+
+  /**
+   * Re-read storage at a safe boundary only when the cache can't answer: it
+   * isn't hydrated, it was marked stale, or a window has grown past an
+   * eighth of the budget since its refresh (re-windowing trims it). A window
+   * that only had messages appended at its tail is current, so a chat
+   * request doesn't re-hydrate after each write. The cache holds at most
+   * the budget plus that eighth.
+   */
+  async refreshIfNeeded(): Promise<void> {
+    if (this.coversActivePath) return;
+    if (
+      this.#windowCurrent &&
+      this.#bytesSinceSync <= this.#host.budget() / 8
+    ) {
+      return;
+    }
+    await this.sync();
   }
 
   /** Charge `bytes` of growth since the last refresh against the budget. */
@@ -138,6 +171,7 @@ export class ThinkTranscriptCache {
   async sync(): Promise<UIMessage[]> {
     // A refresh that throws leaves the cache unreliable until the next one.
     this.coversActivePath = false;
+    this.#windowCurrent = false;
     this.#bytesSinceSync = 0;
     const budget = this.#host.budget();
     if (!Number.isFinite(budget) || budget <= 0) {
@@ -186,6 +220,7 @@ export class ThinkTranscriptCache {
     }
     const hydrated = this.replace(recent.messages);
     this.coversActivePath = !recent.truncated;
+    this.#windowCurrent = recent.truncated;
     this.#host.refreshed();
     return hydrated;
   }

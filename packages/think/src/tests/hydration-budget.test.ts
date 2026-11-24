@@ -217,6 +217,20 @@ describe("hydrationByteBudget — windowed hydration (#1710)", () => {
     ).toEqual(["copy-m100"]);
   }, 120_000);
 
+  it("does not re-hydrate a window after appends at its tail", async () => {
+    const agent = (await getAgentByName(
+      env.ThinkWindowedHydrationAgent,
+      uniqueName("seeded-windowed-hydrations")
+    )) as unknown as WindowedHydrationStub & {
+      hydrationsPerRequestForTest(): Promise<{ submit: number; turn: number }>;
+    };
+    expect((await agent.getHydrationInfoForTest())?.truncated).toBe(true);
+    expect(await agent.hydrationsPerRequestForTest()).toEqual({
+      submit: 0,
+      turn: 0
+    });
+  });
+
   it("reconciles on a path too long to read root-first", async () => {
     const name = uniqueName("windowed-long-path");
     const agent = (await getAgentByName(
