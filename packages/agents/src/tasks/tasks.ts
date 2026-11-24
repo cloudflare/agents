@@ -2177,6 +2177,55 @@ export class Tasks<
   }
 
   /**
+   * @internal Write fields of the object a run's metadata keeps under
+   * `key`, in one write that reads nothing: each field in `patch` replaces
+   * the stored one, and a `null` removes it. For progress written on the hot path; {@link updateMetadata}
+   * rewrites the whole metadata.
+   *
+   * @returns False for an unknown run.
+   */
+  patchMetadata(
+    runId: string,
+    key: string,
+    patch: Record<string, TaskJson | null>
+  ): boolean {
+    // Each field is replaced whole (not merged into an object it held),
+    // and a `null` removes it.
+    const set: (string | null)[] = [];
+    const remove: string[] = [];
+    let setSql = "";
+    let removeSql = "";
+    for (const [field, value] of Object.entries(patch)) {
+      if (value === null) {
+        removeSql += ", '$.' || json_quote(?)";
+        remove.push(field);
+      } else {
+        setSql += ", '$.' || json_quote(?), json(?)";
+        set.push(
+          field,
+          serializeTaskValue(value, `metadata of Task run "${runId}"`)
+        );
+      }
+    }
+    const entry =
+      "coalesce(json_extract(metadata, '$.' || json_quote(?)), '{}')";
+    let value = entry;
+    if (setSql) value = `json_set(${value}${setSql})`;
+    if (removeSql) value = `json_remove(${value}${removeSql})`;
+    return (
+      this.#store.write(
+        `UPDATE cf_agents_task_runs
+         SET metadata = json_set(
+               coalesce(metadata, '{}'), '$.' || json_quote(?), json(${value})
+             ),
+             updated_at = ?
+         WHERE run_id = ?`,
+        [key, key, ...set, ...remove, Date.now(), runId]
+      ) > 0
+    );
+  }
+
+  /**
    * @internal Rewrite a run's metadata from host code (progress its caller
    * tracks): `update` gets the current metadata and returns the next.
    *

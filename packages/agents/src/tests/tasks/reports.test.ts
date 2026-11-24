@@ -566,3 +566,36 @@ describe("Tasks record reads for framework definitions", () => {
     });
   });
 });
+
+describe("Tasks patchMetadata", () => {
+  it("replaces each field whole, removes a null one, and leaves the rest", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      await instance.tasks.importRun({
+        runId: "m",
+        definition: "__cf_echo",
+        status: "pending",
+        attempt: 0,
+        metadata: {
+          app: "kept",
+          progress: { a: 1, out: { x: 1 }, gone: true }
+        },
+        createdAt: 1
+      });
+      expect(
+        instance.tasks.patchMetadata("m", "progress", {
+          out: { y: 2 },
+          gone: null,
+          "odd.key": "v"
+        })
+      ).toBe(true);
+      expect(instance.tasks.peek("m")?.metadata).toEqual({
+        app: "kept",
+        progress: { a: 1, out: { y: 2 }, "odd.key": "v" }
+      });
+      expect(instance.tasks.patchMetadata("missing", "progress", {})).toBe(
+        false
+      );
+    });
+  });
+});
