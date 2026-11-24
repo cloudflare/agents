@@ -44,6 +44,8 @@ export const CONTEXT_RECORD_KIND = "context";
 const RECORD = CONTEXT_RECORD_KIND;
 /** Session config key of a refresh asked for and not yet recorded. */
 const REFRESH = "transcript:context:refresh";
+/** Blocks written from code since the model last saw them (a JSON list). */
+const CHANGED = "transcript:context:changed";
 /**
  * Set by the host when it clears the session's transcript (Think does), a
  * key a clear keeps: a session cleared since the upgrade has no turn from
@@ -200,6 +202,8 @@ export class Context {
   readonly #promptStore: ContextProvider | undefined;
   /** The prompt store's text, read once: the prompt of turns sent before Context. */
   #frozen: string | null | undefined;
+  /** The CHANGED labels, read from the session once. */
+  #changed: Set<string> | undefined;
   /** Whether a refresh waits to be recorded; read from the session once. */
   #refresh: boolean | undefined;
   /** Records by message id, as last read or written (see `#records`). */
@@ -303,6 +307,7 @@ export class Context {
           await this.#put(at.id, { system: sections });
         }
         if (refresh) await this.#setRefresh(false);
+        await this.#setChanged(null);
       }
       return { system, reminder: null };
     }
@@ -340,6 +345,7 @@ export class Context {
       ...(delivered.base !== at.id && { base: delivered.base }),
       delivered: [...values]
     });
+    await this.#setChanged(null);
     return { system, reminder: null };
   }
 
@@ -481,12 +487,16 @@ export class Context {
    * Write a writable block. The model sees it at the next refresh, or as a
    * reminder for a remind block.
    */
-  setBlock(label: string, content: string): Promise<ContextBlock> {
-    return this.#blocks.setBlock(label, content);
+  async setBlock(label: string, content: string): Promise<ContextBlock> {
+    const block = await this.#blocks.setBlock(label, content);
+    await this.#setChanged(label);
+    return block;
   }
 
-  appendToBlock(label: string, content: string): Promise<ContextBlock> {
-    return this.#blocks.appendToBlock(label, content);
+  async appendToBlock(label: string, content: string): Promise<ContextBlock> {
+    const block = await this.#blocks.appendToBlock(label, content);
+    await this.#setChanged(label);
+    return block;
   }
 
   /** Add a block. It enters the prompt at the next refresh. */
@@ -499,9 +509,27 @@ export class Context {
     return this.#blocks.removeBlock(label);
   }
 
-  /** The model's tools for these blocks: `set_context`, `search_context`. */
-  tools(): Promise<ToolSet> {
-    return this.#blocks.tools();
+  /**
+   * The model's tools for these blocks: `set_context`, `search_context`. A
+   * write through `set_context` is the model's own: nothing re-delivers it.
+   */
+  async tools(): Promise<ToolSet> {
+    const tools = await this.#blocks.tools();
+    const set = tools.set_context;
+    const execute = set?.execute;
+    if (!set || !execute) return tools;
+    return {
+      ...tools,
+      set_context: {
+        ...set,
+        execute: async (input, options) => {
+          const result = await execute(input, options);
+          const label = (input as { label?: unknown }).label;
+          if (typeof label === "string") await this.#ownWrite(label);
+          return result;
+        }
+      }
+    };
   }
 
   // ── Internal ────────────────────────────────────────────────────
@@ -559,13 +587,13 @@ export class Context {
 
     const { id, record } = found;
     if (record.system) {
+      // What was delivered since includes the changes, and a value the
+      // model wrote itself after them, so it is applied last.
       const values = new Map<string, string>([
         ...record.system,
+        ...(record.changes ?? []),
         ...(record.delivered ?? [])
       ]);
-      for (const [label, text] of record.changes ?? []) {
-        values.set(label, text);
-      }
       return { system: record.system, values, base: id };
     }
     const baseId = record.base;
@@ -667,9 +695,74 @@ export class Context {
   }
 
   /** Remind blocks whose section differs from the one last delivered. */
+  /**
+   * Blocks whose value differs from what the model was last shown: remind
+   * blocks, read afresh, and blocks written from code since (CHANGED).
+   */
   async #changes(delivered: ReadonlyMap<string, string>): Promise<Section[]> {
     const current = await this.#blocks.internal_remindSections();
+    const changed = await this.#changedLabels();
+    if (changed.size > 0) {
+      const remind = new Set(current.map(([label]) => label));
+      for (const section of await this.#blocks.internal_sections()) {
+        if (changed.has(section[0]) && !remind.has(section[0])) {
+          current.push(section);
+        }
+      }
+    }
     return current.filter(([label, text]) => delivered.get(label) !== text);
+  }
+
+  async #changedLabels(): Promise<Set<string>> {
+    this.#changed ??= new Set(
+      JSON.parse(
+        (await this.#session.internal_config(CHANGED)) ?? "[]"
+      ) as string[]
+    );
+    return this.#changed;
+  }
+
+  /** Mark a block written from code, or (`null`) clear the marks. */
+  async #setChanged(label: string | null): Promise<void> {
+    const changed = await this.#changedLabels();
+    if (label === null) {
+      if (changed.size === 0) return;
+      changed.clear();
+      await this.#session.internal_setConfig(CHANGED, null);
+      return;
+    }
+    if (changed.has(label)) return;
+    changed.add(label);
+    await this.#session.internal_setConfig(
+      CHANGED,
+      JSON.stringify([...changed])
+    );
+  }
+
+  /**
+   * The model wrote this block itself: its tool call and result are in the
+   * transcript, so the newest record takes the value as delivered and no
+   * turn sends it again.
+   */
+  async #ownWrite(label: string): Promise<void> {
+    // Only a remind block is compared with what was delivered.
+    if (!this.#blocks.internal_reminds(label)) return;
+    const leaf = await this.#session.getLatestLeaf();
+    if (!leaf) return;
+    const latest = await this.#session.internal_latestAnnotation(
+      RECORD,
+      leaf.id
+    );
+    if (!latest) return;
+    const section = (await this.#blocks.internal_sections()).find(
+      ([name]) => name === label
+    );
+    if (!section) return;
+    const record = JSON.parse(latest.value) as ContextRecord;
+    await this.#put(latest.messageId, {
+      ...record,
+      delivered: mergeSections(record.delivered ?? [], [section])
+    });
   }
 
   /**

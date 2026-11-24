@@ -1685,10 +1685,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
                     this._cfTranscript.replace([]);
                     this._cfTranscript.coversActivePath = true;
                     return true;
-                  case "compaction":
                   case "delete":
                     await this._cfTranscript.sync();
                     return true;
+                  // The cached prefix is gone and the summary hides the
+                  // turns that wrote the blocks: the next turn rebuilds the
+                  // prompt from them.
+                  case "compaction":
                   case "compact":
                     await this._cfTranscript.sync();
                     await this.#contextBlocks?.refreshSystemPrompt();

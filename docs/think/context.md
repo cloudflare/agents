@@ -53,15 +53,17 @@ Blocks can also come from the `withContext()` chain in `configureSession()`; tho
 
 ## What the model is sent
 
-The first turn renders every block and records that exact prompt on the session. Every later turn opens with the same text, so the provider can reuse the cached prefix. A write to a block, from the model or from your code, is saved at once but does not change the prompt.
+The first turn renders every block and records that exact prompt on the session. Every later turn opens with the same text, so the provider can reuse the cached prefix.
 
-A block declared `whenChanged: "remind"` is for values that move on while the conversation runs: the date, the state of a workspace. When its value changes, the next turn sends the new value once, after that turn's user message, and records it there. Every later request shows it in the same place, so nothing already sent is rewritten. An ordinary block reaches the model at the next refresh.
+When the model writes a block with `set_context`, the block is saved at once and the prompt stays as it is: the tool call and its result in the conversation are the model's record of the write, so nothing sends it again. The prompt is rebuilt from the blocks at the first turn after a compaction, when the cached prefix is gone anyway, and a change the model did not make (a write from your code, or a `whenChanged: "remind"` block whose value moved on) is sent once, after the next user message.
+
+A block declared `whenChanged: "remind"` is for values that move on while the conversation runs: the date, the state of a workspace. When its value changes, the next turn sends the new value once, after that turn's user message, and records it there. Every later request shows it in the same place, so nothing already sent is rewritten. A value that changes in an ordinary block's provider, without a write through `this.context`, reaches the model at the next rebuild.
 
 `this.context.refreshSystemPrompt()` renders the blocks again; the next turn records the new prompt. That costs one prompt-cache miss, so Think does it where the cache is already gone: after a compaction and after the history is cleared. A refresh survives the agent being evicted before its next turn.
 
 A regenerated answer is sent the prompt its own branch was sent, never a newer one. A turn that is recovered or retried after being cut off is sent again exactly as it was first sent; a change or a refresh that arrived in between waits for the next user message.
 
-A compaction summary is written from the stored messages, which never hold a reminder. So when a summary hides the turn that delivered a value, the next request restates that value once, right after the summary. A forked session keeps the prompt and reminders its copied turns were sent with.
+A compaction summary is written from the stored messages, which never hold a reminder. A request after a compaction that cannot rebuild the prompt (a continuation of the last answer) restates, once and right after the summary, a value the hidden turns delivered. A forked session keeps the prompt and reminders its copied turns were sent with.
 
 ## Change blocks from code
 
@@ -77,7 +79,7 @@ this.context.removeBlock("project");
 await this.context.refreshSystemPrompt();
 ```
 
-Added and removed blocks enter or leave the prompt at the next refresh.
+A block written with `setBlock()` or `appendToBlock()` reaches the model once, after the next user message. Added and removed blocks enter or leave the prompt at the next rebuild: after a compaction, or a refresh.
 
 ## What changed
 

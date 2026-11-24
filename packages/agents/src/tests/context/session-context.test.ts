@@ -205,6 +205,53 @@ describe("Context", () => {
     });
   });
 
+  it("sends a block written from code once, after the next user message", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const { session, context } = await setup(storage, (s) => install(s), [
+        { label: "notes", maxTokens: 100 }
+      ]);
+      await session.appendMessage(user("u1", "hello"));
+      const first = await context.build();
+      await session.appendMessage(assistant("a1", "hi"));
+      await context.setBlock("notes", "The user moved to Lisbon.");
+      await session.appendMessage(user("u2", "where am I?"));
+      const second = await context.build();
+      expect(second.system).toBe(first.system);
+      expect(texts(second.messages.at(-1))[1]).toContain("moved to Lisbon");
+      await session.appendMessage(assistant("a2", "Lisbon"));
+      await session.appendMessage(user("u3", "thanks"));
+      const third = await context.build();
+      expect(
+        JSON.stringify(third.messages).split("moved to Lisbon").length - 1
+      ).toBe(1);
+    });
+  });
+
+  it("does not send back a block the model wrote itself", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const { session, context } = await setup(storage, (s) => install(s), [
+        { label: "todo", whenChanged: "remind" }
+      ]);
+      await session.appendMessage(user("u1", "plan it"));
+      const first = await context.build();
+      const tools = await context.tools();
+      const setContext = tools.set_context as unknown as {
+        execute(input: unknown, options: unknown): Promise<unknown>;
+      };
+      await setContext.execute(
+        { label: "todo", content: "1. draft", action: "replace" },
+        { toolCallId: "t1", messages: [] }
+      );
+      await session.appendMessage(assistant("a1", "wrote the plan"));
+      await session.appendMessage(user("u2", "next"));
+      const second = await context.build();
+      expect(second.system).toBe(first.system);
+      expect(JSON.stringify(second.messages)).not.toContain("1. draft");
+      // The store has it at once.
+      expect(context.getBlock("todo")?.content).toBe("1. draft");
+    });
+  });
+
   it("keeps the prompt when compaction hides its snapshot, until a refresh", async () => {
     await withCapabilityHarness(async ({ storage, install }) => {
       const { session, context, setDate } = await setup(storage, (s) =>

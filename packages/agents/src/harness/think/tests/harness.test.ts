@@ -789,6 +789,23 @@ describe("ThinkHarness context", () => {
     expect(next).toMatch(/\|user:now\?[^|]*Tuesday/);
   });
 
+  it("rebuilds the context from the blocks after a compaction", async () => {
+    const stub = fresh();
+    await stub.prompt("hello", session);
+    await stub.setEnvironment("Tuesday");
+    await stub.prompt("again", session);
+    await stub.prompt("more", session);
+    expect(await stub.compact(session)).toBe(true);
+    await stub.prompt("after", session);
+    const [first] = await stub.promptTexts();
+    const last = (await stub.promptTexts()).at(-1) ?? "";
+    const system = last.split("|")[0];
+    expect(system).not.toBe(first.split("|")[0]);
+    expect(system).toContain("Tuesday");
+    // In the prompt, not again as a reminder.
+    expect(last.slice(system.length)).not.toContain("Tuesday");
+  });
+
   it("gives a fork the prompt its turns were sent with", async () => {
     const stub = fresh();
     await stub.prompt("hello", session);

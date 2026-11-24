@@ -1446,7 +1446,11 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           });
         });
         try {
-          await handle.compact();
+          // The next call rebuilds the context from the blocks: the prefix
+          // is gone and the summary hides the turns that wrote them.
+          if (await handle.compact()) {
+            await this.#context(session)?.refreshSystemPrompt();
+          }
         } catch (error) {
           console.warn("ThinkHarness could not compact the session", error);
         }
@@ -1947,8 +1951,11 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
 
   /** @internal Compact a session with its compaction function. */
   async compact(session: ThinkSessionId): Promise<CompactResult | null> {
-    // The change feed reports the compaction as a transcript event.
-    return this.#handle(session).compact();
+    // The change feed reports the compaction as a transcript event. The
+    // next turn rebuilds the context from the blocks.
+    const result = await this.#handle(session).compact();
+    if (result) await this.#context(session)?.refreshSystemPrompt();
+    return result;
   }
 
   /** A session's context, from the `context` option. */

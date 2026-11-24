@@ -590,6 +590,11 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return seen;
   }
 
+  /** Compact a session with its compaction function. */
+  async compact(session?: string): Promise<boolean> {
+    return (await this.harness.session(session).compact()) !== null;
+  }
+
   /** Delete a message, then compact, on the Sessions handle; the events seen. */
   async deleteAndCompact(messageId: string): Promise<string[]> {
     const seen: string[] = [];
