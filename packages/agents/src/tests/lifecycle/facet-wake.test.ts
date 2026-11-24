@@ -215,6 +215,25 @@ describe("facet wake", () => {
     expect(await again.alarmAt()).toBe(wake!.time);
   });
 
+  it("drives an already due facet wake in the alarm that starts the root", async () => {
+    const name = crypto.randomUUID();
+    const agent = await getAgentByName(env.FacetWakeRoot, name);
+    await agent.middlePush("m", "later", 60_000);
+    const key = (await agent.rootJobs())[0]!.id.slice("facet:".length);
+    await agent.markUnreportedDrives(key, 1);
+    await agent.makeFacetWakesDueKeepingDrives();
+
+    await agent.resetTree().catch(() => {});
+    // The alarm, not a request, starts the root; its own scan drives the
+    // facet, with no second wake needed.
+    const namespace = env.FacetWakeRoot;
+    expect(
+      await runDurableObjectAlarm(namespace.get(namespace.idFromName(name)))
+    ).toBe(true);
+    const again = await getAgentByName(env.FacetWakeRoot, name);
+    expect(await again.unreportedDrives(key)).toBe(0);
+  });
+
   it("drives an already due facet wake at once when the root starts again, past a later fallback alarm", async () => {
     const name = crypto.randomUUID();
     const agent = await getAgentByName(env.FacetWakeRoot, name);
