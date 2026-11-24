@@ -2001,6 +2001,8 @@
     "browserExtract",
     "BrowserFunction",
     "BrowserFunctionDocs",
+    "BrowserHostObserver",
+    "BrowserHostTab",
     "BrowserInternalHosts",
     "browserLinks",
     "BrowserLiveView",
