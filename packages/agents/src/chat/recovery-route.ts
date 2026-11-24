@@ -22,6 +22,7 @@
 
 import type { ChatRecoveryOptions } from "./lifecycle";
 import { partialHasSettledToolResults } from "./recovery-codec";
+import { currentTurnAttempt } from "./turn-task";
 import type {
   ChatRecoveryAttemptInput,
   ChatRecoveryEngine,
@@ -368,7 +369,9 @@ async function route(
     originMessageIds: host.originMessageIds,
     extra: await host.scheduleData?.(kind),
     delaySeconds,
-    reason: chained ? "chained_retry" : undefined
+    reason: chained ? "chained_retry" : undefined,
+    // The live turn's own run runs the attempt after the turn.
+    into: currentTurnAttempt()
   });
   // A stop landed between the interruption and this schedule.
   if (!scheduled) return "stopped";

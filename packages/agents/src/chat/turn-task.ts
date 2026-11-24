@@ -11,6 +11,7 @@
  * snapshot key vocabulary, and the settle plumbing live here once.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { TaskJson, TaskStep } from "../tasks";
 import { MAX_SERIALIZED_BYTES } from "../tasks/serialization";
 import type { ChatRecoveryAttemptInput } from "./recovery-engine";
@@ -83,6 +84,35 @@ export type ChatTurnTaskHooks = {
 
 const utf8 = new TextEncoder();
 
+/**
+ * Whether a recovery attempt fits in a step result (at most 1 MiB). One
+ * carrying a larger request body goes to the recovery Task, whose input is
+ * parted.
+ */
+function journalable(attempt: ChatRecoveryAttemptInput): boolean {
+  return (
+    utf8.encode(JSON.stringify(attempt)).byteLength <=
+    MAX_SERIALIZED_BYTES - 1024
+  );
+}
+
+/** Where a live turn's interruption hands its recovery attempt. */
+const turnAttempt = new AsyncLocalStorage<
+  (attempt: ChatRecoveryAttemptInput) => boolean
+>();
+
+/**
+ * The running chat turn's own run, as a place for the recovery attempt of an
+ * interruption routed inside it, or `undefined` outside a live turn. It
+ * declines (returns `false`) once the turn's step has ended, or when the
+ * attempt is too large to journal.
+ */
+export function currentTurnAttempt():
+  | ((attempt: ChatRecoveryAttemptInput) => boolean)
+  | undefined {
+  return turnAttempt.getStore();
+}
+
 /** The checkpoint entry holding the app's latest `stash()` data. */
 const STASH = "stash";
 /**
@@ -140,14 +170,7 @@ export function createChatTurnTaskDefinition(
             persisted,
             createdAt: step.createdAt,
             attempt: (next) => {
-              // A step result is at most 1 MiB; an attempt carrying a larger
-              // request body goes to the recovery Task, whose input is parted.
-              if (
-                utf8.encode(JSON.stringify(next)).byteLength >
-                MAX_SERIALIZED_BYTES - 1024
-              ) {
-                return false;
-              }
+              if (!journalable(next)) return false;
               scheduled = next;
               return true;
             }
@@ -156,30 +179,41 @@ export function createChatTurnTaskDefinition(
           // SAFETY: the attempt is the recovery engine's JSON payload.
           return (scheduled ?? null) as TaskJson;
         }
+        // An interruption routed inside the live turn plans its recovery
+        // attempt here, and this run runs it after the turn, as a replay does.
+        let scheduled: ChatRecoveryAttemptInput | undefined;
+        let open = true;
+        const take = (next: ChatRecoveryAttemptInput): boolean => {
+          if (!open || scheduled || !journalable(next)) return false;
+          scheduled = next;
+          return true;
+        };
         try {
           const value = await hooks.keepAliveWhile(() =>
             entry.run((fn) =>
-              hooks.withStash(
-                {
-                  id: nonce,
-                  signal,
-                  stash: (data) => {
-                    entry.onStash(data);
-                    // Stash data is a hint for recovery; stream cursors are
-                    // the evidence. Data that cannot be kept is skipped,
-                    // and never fails the turn.
-                    try {
-                      // SAFETY: stash data is JSON, as fiber stash data
-                      // always was; the write throws on anything else.
-                      // `stash(undefined)` clears the data, as the envelope
-                      // with no `user` field did.
-                      step.checkpoint.set(STASH, (data ?? null) as TaskJson);
-                    } catch (error) {
-                      console.warn("[chat] turn stash data not kept:", error);
+              turnAttempt.run(take, () =>
+                hooks.withStash(
+                  {
+                    id: nonce,
+                    signal,
+                    stash: (data) => {
+                      entry.onStash(data);
+                      // Stash data is a hint for recovery; stream cursors are
+                      // the evidence. Data that cannot be kept is skipped,
+                      // and never fails the turn.
+                      try {
+                        // SAFETY: stash data is JSON, as fiber stash data
+                        // always was; the write throws on anything else.
+                        // `stash(undefined)` clears the data, as the envelope
+                        // with no `user` field did.
+                        step.checkpoint.set(STASH, (data ?? null) as TaskJson);
+                      } catch (error) {
+                        console.warn("[chat] turn stash data not kept:", error);
+                      }
                     }
-                  }
-                },
-                fn
+                  },
+                  fn
+                )
               )
             )
           );
@@ -187,8 +221,11 @@ export function createChatTurnTaskDefinition(
         } catch (error) {
           entry.settle.reject(error);
           throw error;
+        } finally {
+          open = false;
         }
-        return null;
+        // SAFETY: the attempt is the recovery engine's JSON payload.
+        return (scheduled ?? null) as TaskJson;
       }
     );
     if (attempt) {
