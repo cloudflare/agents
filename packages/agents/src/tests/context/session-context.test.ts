@@ -657,6 +657,46 @@ describe("Context", () => {
     });
   });
 
+  it("gives a regenerated answer from before the upgrade the release's prompt, after a refresh", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const sessions = new Sessions();
+      install(sessions);
+      const session = sessions.session();
+      let date = "Monday";
+      const released = "Released prompt: today is Monday.";
+      const make = () =>
+        new Context(session, {
+          sql: storageSql(storage),
+          blocks: [
+            {
+              label: "environment",
+              provider: { get: async () => `Today is ${date}.` },
+              whenChanged: "remind"
+            }
+          ],
+          // As Think's `_system_prompt` row: read, never written.
+          promptStore: { get: async () => released, set: async () => {} }
+        });
+      const context = make();
+      // Turns the release answered: no record on them.
+      await session.appendMessage(user("u1", "hello"));
+      await session.appendMessage(assistant("a1", "hi"));
+      await session.appendMessage(user("u2", "again"));
+      expect((await context.build()).system).toBe(released);
+      await session.appendMessage(assistant("a2", "ok"));
+      date = "Tuesday";
+      await context.refreshSystemPrompt();
+      await session.appendMessage(user("u3", "now?"));
+      expect((await context.build()).system).toContain("Today is Tuesday.");
+
+      // Regenerate a1: its history ends at u1, before any record.
+      const u1 = (await session.getMessage("u1"))!;
+      expect((await context.prepare({ messages: [u1] })).system).toBe(released);
+      // And after an eviction (a new instance).
+      expect((await make().prepare({ messages: [u1] })).system).toBe(released);
+    });
+  });
+
   it("projects the same history to the same messages", async () => {
     await withCapabilityHarness(async ({ storage, install }) => {
       const { session, context, setDate } = await setup(storage, (s) =>

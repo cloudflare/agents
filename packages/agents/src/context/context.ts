@@ -121,10 +121,12 @@ export interface ContextOptions {
   /** Storage for blocks declared without a provider, instead of SQLite. */
   readonly defaultProvider?: (label: string) => ContextProvider;
   /**
-   * A store that also holds the system prompt as text. Read once, when the
-   * session has no recorded prompt yet, so a prompt frozen before Context
-   * (`ContextBlocks`' prompt store) carries forward unchanged; written with
-   * every snapshot Context records.
+   * A store that also holds the system prompt as text. Read once, when a
+   * turn has no recorded prompt on its path, so a prompt frozen before
+   * Context (`ContextBlocks`' prompt store) is what those earlier turns are
+   * sent with, the first one after the upgrade included. Written with every
+   * snapshot Context records; a store whose `set` does nothing keeps the
+   * frozen prompt for the earlier turns for good.
    */
   readonly promptStore?: WritableContextProvider;
 }
@@ -192,7 +194,10 @@ export class Context {
   readonly #session: ContextSession;
   readonly #blocks: ContextBlocks;
   readonly #promptStore: WritableContextProvider | undefined;
-  /** The prompt store's text, read once; only Context writes it after. */
+  /**
+   * The prompt store's text as first read: the prompt of turns that have no
+   * record (sent before Context), so a later snapshot never replaces it.
+   */
   #frozen: string | null | undefined;
   /** Whether a refresh waits to be recorded; read from the session once. */
   #refresh: boolean | undefined;
@@ -289,7 +294,6 @@ export class Context {
         if (!unchanged) {
           await this.#put(at.id, { system: sections });
           await this.#promptStore?.set(system);
-          this.#frozen = system;
         }
         if (refresh) await this.#setRefresh(false);
       }

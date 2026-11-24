@@ -979,22 +979,17 @@ type TurnSpec<T> = QueueTurnSpec<T> | NonQueueTurnSpec<T>;
 const CHAT_CLEARED_ERROR = "The chat was cleared before the turn finished.";
 
 /**
- * The row an earlier release froze its system prompt in: read to carry that
- * prompt forward, deleted when the session records a new one (the session
- * holds it from then on), never written.
+ * The row an earlier release froze its system prompt in, read and never
+ * written: it is the prompt the turns before the upgrade were sent with (a
+ * regenerated answer from then is sent it again). Each prompt recorded
+ * since lives on the session.
  */
 function releasedPromptRow(
   agent: SqlProvider,
   label: string
 ): WritableContextProvider {
   const row = new AgentContextProvider(agent, label);
-  return {
-    get: () => row.get(),
-    set: async () => {
-      if ((await row.get()) === null) return;
-      agent.sql`DELETE FROM cf_agents_context_blocks WHERE label = ${label}`;
-    }
-  };
+  return { get: () => row.get(), set: async () => {} };
 }
 
 /** Whether a turn re-runs or continues one that was cut off. */
@@ -1636,8 +1631,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           // The session records the prompt each turn was sent with. A
           // custom store from `withCachedPrompt()` carries a prompt frozen
           // before Context forward and receives each new one; without one,
-          // the `_system_prompt` row a release froze is carried forward
-          // once and removed at the next snapshot.
+          // the `_system_prompt` row a release froze is read, never written.
           const sessionId = this.session.sessionId;
           this.#contextBlocks = new Context(
             this.sessions.session(this.session.sessionId),

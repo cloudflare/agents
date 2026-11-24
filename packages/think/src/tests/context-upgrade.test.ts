@@ -137,14 +137,14 @@ describe("Think context upgrade", () => {
     expect(await agent.promptRowsOverTurnsForTest()).toEqual([0, 0, 0]);
   });
 
-  it("removes the row a release froze its prompt in at the first new snapshot", async () => {
+  it("keeps the row a release froze its prompt in, for the turns before the upgrade", async () => {
     const agent = await getAgentByName(
       env.ThinkUpgradeTestAgent,
       crypto.randomUUID()
     );
     expect(await agent.upgradedPromptRowForTest()).toEqual({
       afterCarry: 1,
-      afterRefresh: 0,
+      afterRefresh: 1,
       refreshed: true
     });
   });
