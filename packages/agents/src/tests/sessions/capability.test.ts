@@ -223,6 +223,63 @@ describe("Sessions capability", () => {
     });
   });
 
+  it("keeps a combining mark and an emoji whole at the row budget", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      await session.search("warm");
+      // The budget ends right before a combining accent, inside the word.
+      await session.appendMessage(
+        text("accent", `${"x".repeat(MAX_INLINE_ROW_BYTES - 5)} nee\u0301dle`)
+      );
+      expect(await session.search("nee")).toEqual([]);
+      // The separator before the cut word is an emoji (two UTF-16 units).
+      await session.appendMessage(
+        text(
+          "emoji",
+          `start ${"y".repeat(MAX_INLINE_ROW_BYTES - 13)}\u{1F600}abcdef`
+        )
+      );
+      const [hit] = await session.search("start");
+      expect(hit.id).toBe("emoji");
+      expect(hit.content).not.toMatch(
+        /\uFFFD|[\uD800-\uDBFF](?![\uDC00-\uDFFF])/
+      );
+      expect(hit.content.endsWith("y")).toBe(true);
+    });
+  });
+
+  it("backfills a split message whose id another session's indexed message shares", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      await instance.sessions
+        .session("a")
+        .appendMessage(text("same", `alpha ${"x ".repeat(1_500_000)}`));
+      await instance.sessions
+        .session("b")
+        .appendMessage(text("same", `beta ${"x ".repeat(1_500_000)}`));
+      // An earlier release's index holding only session a's copy.
+      sqlOf(instance).exec(
+        `CREATE VIRTUAL TABLE cf_agents_session_fts
+         USING fts5(id UNINDEXED, session_id UNINDEXED, role UNINDEXED, content, tokenize='porter unicode61')`
+      );
+      sqlOf(instance).exec(
+        `INSERT INTO cf_agents_session_fts (id, session_id, role, content)
+         VALUES ('same', 'a', 'user', 'alpha')`
+      );
+    });
+    // Start on the upgraded code with that index in place.
+    await evictDurableObject(stub);
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      expect(
+        (await instance.sessions.session("b").search("beta")).map((h) => h.id)
+      ).toEqual(["same"]);
+      expect(await instance.sessions.session("a").search("alpha")).toHaveLength(
+        1
+      );
+    });
+  });
+
   it("indexes the split messages an index from an earlier release left out", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {

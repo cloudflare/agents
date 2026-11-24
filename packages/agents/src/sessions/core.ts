@@ -130,9 +130,10 @@ function contentDigest(json: string): string {
 /**
  * The text a message contributes to the search index. The index holds it in
  * one row, so only the first row budget is searchable; the rest would not
- * fit (`SQLITE_TOOBIG`). A cut inside a word is moved back to the last
- * separator the index's `unicode61` tokenizer splits on (anything that is
- * not a letter or a digit), so no fragment is indexed as if it were a word.
+ * fit (`SQLITE_TOOBIG`). A cut inside a word is moved back to before the
+ * last separator, so no fragment is indexed as if it were a word. A word is
+ * what the index's `unicode61` tokenizer keeps together: letters, digits,
+ * combining marks and private-use characters, read by code point.
  */
 function searchableText(message: SessionMessage): string {
   const text = message.parts
@@ -140,20 +141,18 @@ function searchableText(message: SessionMessage): string {
     .map((part) => part.text ?? "")
     .join(" ");
   const first = splitContent(text)[0] ?? "";
-  if (
-    first.length === text.length ||
-    SEARCH_SEPARATOR.test(text[first.length])
-  ) {
+  const next = text.codePointAt(first.length);
+  if (next === undefined || !SEARCH_WORD.test(String.fromCodePoint(next))) {
     return first;
   }
   const cut = first.search(LAST_SEARCH_WORD);
-  return cut > 0 ? first.slice(0, cut + 1) : first;
+  return cut > 0 ? first.slice(0, cut) : first;
 }
 
-/** What the `unicode61` tokenizer treats as a word: letters and digits. */
-const SEARCH_SEPARATOR = /[^\p{L}\p{N}]/u;
+/** A character the `unicode61` tokenizer keeps inside a word. */
+const SEARCH_WORD = /[\p{L}\p{N}\p{M}\p{Co}]/u;
 /** The last separator and the (cut) word after it, at the end of a string. */
-const LAST_SEARCH_WORD = /[^\p{L}\p{N}][\p{L}\p{N}]*$/u;
+const LAST_SEARCH_WORD = /[^\p{L}\p{N}\p{M}\p{Co}][\p{L}\p{N}\p{M}\p{Co}]*$/u;
 
 /**
  * The search index's own marker, a row at a fixed rowid with no text (it
