@@ -45,8 +45,11 @@ type NamedRunOutput = (
 /** The named session the persistent-browser tests drive. */
 const NAMED_SESSION = "e2e";
 
-/** The browser the host observer tests drive (the observer is on by default). */
+/** The browser the host observer tests drive (every session has one). */
 const OBSERVED_SESSION = "e2e-observed";
+
+/** The browser whose sessions run a `hostObserver` hook. */
+const HOOKED_SESSION = "e2e-hooked";
 
 /** Pages the observer tests navigate to, served by this Worker. */
 function servePage(url: URL): Response | undefined {
@@ -144,6 +147,31 @@ export class BrowserTestAgent extends Agent<Env> {
   }
 
   /**
+   * A browser whose hook listens for each tab's main-frame navigations, and
+   * tells the model what it heard when the session closes.
+   */
+  #hookedBrowser(): Browser {
+    return new Browser({
+      provider: browserRun(this.env.BROWSER),
+      name: HOOKED_SESSION,
+      store: this.#store(),
+      hostObserver: (tab) => {
+        const heard: string[] = [];
+        tab.on("Page.frameNavigated", ({ params }) => {
+          const frame = params.frame as { parentId?: string; url?: string };
+          if (!frame.parentId && frame.url) {
+            heard.push(new URL(frame.url).pathname);
+          }
+        });
+        return () =>
+          tab.notify(
+            `The hook heard ${tab.targetId} navigate to ${JSON.stringify(heard)}.`
+          );
+      }
+    });
+  }
+
+  /**
    * Run code against the persistent browser the way `browserTool`
    * does: one session per run, the code in a Dynamic Worker. Includes the
    * session's report.
@@ -163,6 +191,18 @@ export class BrowserTestAgent extends Agent<Env> {
   @callable()
   async closeObserved(): Promise<void> {
     await this.#observedBrowser().close();
+  }
+
+  /** {@link runNamed}, on the browser with a `hostObserver` hook. */
+  @callable()
+  async runHooked(code: string, scope?: string): Promise<NamedRunOutput> {
+    return this.#runIn(this.#hookedBrowser(), code, scope);
+  }
+
+  /** Close the hooked browser so it doesn't outlive the suite. */
+  @callable()
+  async closeHooked(): Promise<void> {
+    await this.#hookedBrowser().close();
   }
 
   async #runIn(

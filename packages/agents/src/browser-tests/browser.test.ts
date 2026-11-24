@@ -1003,6 +1003,24 @@ describe("browser connector e2e", () => {
       });
     });
 
+    it("runs the hostObserver hook on the model's tab, and it hears the navigation", async () => {
+      try {
+        const output = (await callAgent("runHooked", [
+          `async () => {
+            ${navigate("/pages/redirect")}
+            ${navigate("/pages/missing")}
+          }`
+        ])) as NamedRunOutput;
+        expect(output.status).toBe("completed");
+        const [tab] = observedTabs(output);
+        expect(output.report?.notices).toEqual([
+          `The hook heard ${tab.targetId} navigate to ["/pages/ok","/pages/missing"].`
+        ]);
+      } finally {
+        await callAgent("closeHooked");
+      }
+    });
+
     it("records a same-document navigation", async () => {
       const output = await runObserved(`async () => {
         ${navigate("/pages/ok")}
