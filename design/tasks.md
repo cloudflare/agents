@@ -52,6 +52,12 @@ Two ways to record progress, and no third:
 
 A run started now (`start: "now"`) outside a lane gets its first wake from the claim that follows at once, not from the accept; until then the row's deadline is the wake a restart reconciles. A finished run that nobody keeps (`retain: false`), reports or waits for is deleted in one fenced write instead of completed and then deleted; if that delete fails it is completed in place, so a finished attempt is never taken for an interrupted one (#2305).
 
+## Wakes while an attempt runs, and around a terminal report
+
+An alarm-driven attempt outlives its dispatch: the dispatch waits at most 5 s (`DISPATCH_BUDGET_MS`) and then hands the attempt off with `trackAlarmWork`. From then on, while the claimed run is `running`, its wake job is never more than 5 s away (`LIVE_WAKE_MS`), whatever its claim deadline: each wake that finds the attempt alive comes back as soon, and only moves the claim once half of it is used. That wake is what notices a reset that killed the attempt (#2847: a reset 10 s into a long submitted turn was picked up after 30 s instead of a few seconds). Each such wake costs the job row's claim and reschedule writes and one alarm write; the run row is written only when the claim moves. An `attached` attempt arms no wake (its caller holds it, and the next start recovers it), and a run the memory-limit breaker struck (its claim stripped, generation `NULL`) is not clamped: it waits out its backoff. A sub-agent's runs use its own queue and take the same path, woken through the root.
+
+A terminal report must outlive a reset before it returns. A run with a wake job keeps it until the report returned (a due wake of a terminal, unreported run delivers the report); a run with none (queued in a lane, or parked and settled from outside) holds the `tasks:reports` job as a guard while its report runs. The guard is cancelled when the last guarded report returns, provided no report is owed to that job and no replay of owed reports is under way. A report that throws, a reset, or a batch of more than 100 owed reports keeps the job until it runs.
+
 ## Cancel
 
 `cancel(runId)` settles the run `aborted` at once. A live attempt's signal aborts, and nothing that attempt writes afterwards lands (its generation no longer owns the run). A cancel requested while an attempt runs wins over the attempt's result. An attempt left behind by a cancel, or by a delete and a new run under the same id, does not count as the run's live attempt.
