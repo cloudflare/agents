@@ -62,6 +62,8 @@ export type RecoveryAttemptData = {
   lastBody?: Record<string, unknown> | null;
   /** The client tools it ran with. `null` when it had none. */
   lastClientTools?: ClientToolSchema[] | null;
+  /** The message ids the interrupted request came from (#2280). */
+  originMessageIds?: string[];
 };
 
 /** What the recovered turn returned. */
@@ -232,7 +234,12 @@ export async function runRecoveredTurn<
           host.data?.originalRequestId ?? engine.activeRootRequestId,
         ...(typeof host.data?.delivery === "number" && {
           delivery: host.data.delivery
-        })
+        }),
+        ...(Array.isArray(host.data?.originMessageIds)
+          ? { originMessageIds: host.data.originMessageIds }
+          : engine.activeOriginMessageIds && {
+              originMessageIds: engine.activeOriginMessageIds
+            })
       },
       () => runAdmittedAttempt(engine, host)
     );

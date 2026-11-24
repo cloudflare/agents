@@ -107,7 +107,6 @@ function setup(scenario: Scenario = {}) {
     attemptScope: new AsyncLocalStorage<ChatRecoveryAttemptScope>(),
     latestMessage: () =>
       scenario.latestMessage ?? { id: "assistant-1", role: "assistant" },
-    originMessageIdsScope: new AsyncLocalStorage<string[] | undefined>(),
     recordTerminalError: async (requestId, errorText) => {
       terminalErrors.push({ requestId, errorText });
     },
@@ -250,24 +249,30 @@ const cancelled = {
 } as const;
 
 describe("runRecoveryCallback", () => {
-  it("runs the callback's attempt inside the origin-message-ids scope", async () => {
+  it("runs the callback's attempt with the origin message ids in its scope", async () => {
     const t = setup();
     let scoped: string[] | undefined;
-    let outside: string[] | undefined;
     t.turns.attempts._chatRecoveryRetry = async (data, onTurnStarted) => {
-      scoped = t.turns.originMessageIdsScope.getStore();
-      expect(data).toMatchObject({ incidentId: INCIDENT });
+      const host: RecoveredTurnHost<RecoveryAttemptData, RecoveredTurnResult> =
+        {
+          ...t.host,
+          data: { ...(data as RecoveryAttemptData), incidentId: INCIDENT },
+          runTurn: async () => {
+            scoped = t.engine.activeOriginMessageIds;
+            return { status: "completed" };
+          }
+        };
+      await t.engine.runRecoveredTurn(host);
       onTurnStarted();
     };
     await t.engine.runRecoveryCallback("_chatRecoveryRetry", {
       incidentId: INCIDENT,
       originMessageIds: ["user-1"]
     });
-    outside = t.turns.originMessageIdsScope.getStore();
 
     expect(scoped).toEqual(["user-1"]);
-    // A request outside the callback never inherits the ids.
-    expect(outside).toBeUndefined();
+    // A request outside the attempt never inherits the ids.
+    expect(t.engine.activeOriginMessageIds).toBeUndefined();
   });
 });
 
@@ -1056,11 +1061,9 @@ describe("runRecoveredTurn", () => {
     const t = setup({
       duringTurn: ({ engine }) => {
         inside = engine.activeRootRequestId;
-        t.turns.originMessageIdsScope.run(["user-1"], () => {
-          engine.outsideAttempt(() => {
-            outside = engine.activeRootRequestId;
-            idsOutside = t.turns.originMessageIdsScope.getStore();
-          });
+        engine.outsideAttempt(() => {
+          outside = engine.activeRootRequestId;
+          idsOutside = engine.activeOriginMessageIds;
         });
       }
     });

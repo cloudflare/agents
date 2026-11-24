@@ -12725,8 +12725,11 @@ export class ThinkRecoveryTestAgent extends Think {
     unrelated: string[] | undefined;
   }> {
     const self = this as unknown as {
-      _chatRecoveryOriginIdsScope: {
-        run<R>(store: string[], fn: () => R): R;
+      _chatRecoveryEngine(): {
+        runInAttemptScope<R>(
+          attempt: { originMessageIds: string[] },
+          fn: () => Promise<R>
+        ): Promise<R>;
       };
       _frames: { originIds(requestId: string): string[] | undefined };
     };
@@ -12734,10 +12737,12 @@ export class ThinkRecoveryTestAgent extends Think {
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
-    const scoped = self._chatRecoveryOriginIdsScope.run(ids, async () => {
-      await gate;
-      return self._frames.originIds("successor");
-    });
+    const scoped = self
+      ._chatRecoveryEngine()
+      .runInAttemptScope({ originMessageIds: ids }, async () => {
+        await gate;
+        return self._frames.originIds("successor");
+      });
     const unrelated = self._frames.originIds("unrelated");
     release();
     return { successor: await scoped, unrelated };

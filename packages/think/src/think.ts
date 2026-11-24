@@ -1265,20 +1265,6 @@ export class Think<
     return this._chatRecoveryEngine().activeRootRequestId;
   }
   /**
-   * The originating user message ids of the active recovery chain (#2280),
-   * carried in the recovery payload because the successor turn runs under a
-   * fresh request id. Scoped to the recovery callback's async context, so a
-   * concurrent client request never inherits them.
-   */
-  private _chatRecoveryOriginIdsScope = new AsyncLocalStorage<
-    string[] | undefined
-  >();
-
-  private get _activeChatRecoveryOriginIds(): string[] | undefined {
-    return this._chatRecoveryOriginIdsScope.getStore();
-  }
-
-  /**
    * Whether Think automatically converts connected MCP tools to AI SDK tools
    * and merges them into each model turn.
    *
@@ -2332,7 +2318,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     resuming: this._pendingResumeConnections,
     storedOriginIds: (requestId) =>
       this._resumableStream.getOriginMessageIds(requestId),
-    recoveryOriginIds: () => this._activeChatRecoveryOriginIds,
+    recoveryOriginIds: () => this._chatRecoveryEngine().activeOriginMessageIds,
     clientView: (messages) => this._turns.clientView(messages),
     listsReachResumingTabs: true
   });
@@ -2379,7 +2365,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     },
     originMessageIds: (requestId) =>
       this._frames.requestOrigins.get(requestId) ??
-      this._activeChatRecoveryOriginIds,
+      this._chatRecoveryEngine().activeOriginMessageIds,
     transaction: (fn) => this.ctx.storage.transactionSync(fn),
     record: (requestId, result) =>
       this._recordSubmissionTurnResult(requestId, result)
@@ -9530,7 +9516,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         trackAlarmWork: (turn) => this.lifecycle.trackAlarmWork(turn),
         attemptScope: new AsyncLocalStorage<ChatRecoveryAttemptScope>(),
         latestMessage: () => this.messages.at(-1),
-        originMessageIdsScope: this._chatRecoveryOriginIdsScope,
         // SAFETY: the recovery engine is the sole producer of each
         // callback's payload and the Task persists it verbatim, so the
         // callback name selects the matching host input type.
