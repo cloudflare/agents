@@ -13977,6 +13977,92 @@ export class ThinkWindowedHydrationAgent extends Think {
     return (await this.session.getHistory()).map((m) => m.id);
   }
 
+  /** Seed a linear path of `count` small messages straight into storage. */
+  async seedLongPathForTest(count: number): Promise<void> {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO cf_agents_session_messages
+        (session_id, id, seq, parent_id, role, content, token_estimate, created_at)
+       WITH RECURSIVE n(i) AS (
+         SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < CAST(? AS INTEGER))
+       SELECT '', 'm' || i, i, CASE WHEN i = 1 THEN NULL ELSE 'm' || (i - 1) END,
+         CASE WHEN i % 2 = 1 THEN 'user' ELSE 'assistant' END,
+         json_object('id', 'm' || i,
+           'role', CASE WHEN i % 2 = 1 THEN 'user' ELSE 'assistant' END,
+           'parts', json_array(json_object('type', 'text', 'text', 'x'))),
+         1, i FROM n`,
+      count
+    );
+  }
+
+  /**
+   * Reconcile on a path too long to read root-first: the client sends the
+   * oldest message (outside the window) and a new one. Returns the new
+   * message's stored parent.
+   */
+  async reconcileOnLongPathForTest(): Promise<string | null> {
+    const oldest = await this.session.getMessage("m1");
+    const host = this as unknown as {
+      _reconcileAndPersistIncoming(
+        messages: UIMessage[],
+        options: {
+          requestId: string;
+          isRegeneration: boolean;
+          isCurrent: () => boolean;
+        }
+      ): Promise<unknown>;
+    };
+    await host._reconcileAndPersistIncoming(
+      [
+        oldest,
+        {
+          id: "new-user",
+          role: "user",
+          parts: [{ type: "text", text: "next question" }]
+        }
+      ] as UIMessage[],
+      { requestId: "long-path", isRegeneration: false, isCurrent: () => true }
+    );
+    const [row] = this.ctx.storage.sql
+      .exec<{ parent_id: string | null }>(
+        "SELECT parent_id FROM cf_agents_session_messages WHERE session_id = '' AND id = 'new-user'"
+      )
+      .toArray();
+    return row?.parent_id ?? null;
+  }
+
+  /**
+   * Reconcile a client transcript on a windowed cache: the client sends a
+   * stored message older than the window, the window, and a new message.
+   */
+  async reconcileOlderThanWindowForTest(): Promise<string[]> {
+    const stored = await this.session.getMessage("seed-0");
+    const incoming = [
+      stored,
+      ...this.messages,
+      {
+        id: "new-user",
+        role: "user",
+        parts: [{ type: "text", text: "next question" }]
+      }
+    ] as UIMessage[];
+    const host = this as unknown as {
+      _reconcileAndPersistIncoming(
+        messages: UIMessage[],
+        options: {
+          requestId: string;
+          isRegeneration: boolean;
+          isCurrent: () => boolean;
+        }
+      ): Promise<unknown>;
+    };
+    await host._reconcileAndPersistIncoming(incoming, {
+      requestId: "reconcile-test",
+      isRegeneration: false,
+      isCurrent: () => true
+    });
+    return (await this.session.getHistory()).map((m) => m.id);
+  }
+
   async getOnStartDegradationsForTest(): Promise<OnStartDegradationForTest[]> {
     return this._onStartDegradations.map((d) => ({
       step: d.step,

@@ -1863,25 +1863,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /**
-   * Read the durable message path from session storage.
-   *
-   * Intentionally UNBUDGETED — unlike the cache refresh in `_cfTranscript.sync()`,
-   * which routes through `session.getRecentHistory(hydrationByteBudget)`, this
-   * returns the full active path. Its caller, message reconciliation, must see
-   * every message: it diffs incoming client messages against the complete
-   * server transcript, so a windowed read would drop rows and corrupt the
-   * result. It is reached only when the live cache does not already cover the
-   * path (`_serverTranscriptForReconcile`); tool-update application resolves
-   * its one target row without it (`_resolveToolCallOwner`).
-   *
-   * These full reads are not the unbounded boot-time hydration that bricked the
-   * DO in #1710: they run during a live turn (never in `onStart`), so an
-   * `SQLITE_NOMEM` here surfaces as a recoverable turn-level error rather than a
-   * partyserver init-reset/alarm-retry loop. They also inherit step 1's
-   * mitigation — `session.getHistory()` now fetches content in bounded chunks
-   * (`messagesByPathIds`) instead of carrying blobs through the recursive CTE
-   * and its `ORDER BY` sorter — and background media eviction shrinks the stored
-   * footprint over time, so the steady-state read size converges down.
+   * Read the whole visible path from session storage, for a cache refresh
+   * with no `hydrationByteBudget` (the budget turned off). Sessions throws
+   * past 200,000 visible messages rather than return a shorter path.
    */
   private async _readMessagesFromStorage(): Promise<UIMessage[]> {
     return (await this.session.getHistory()) as UIMessage[];
@@ -8223,7 +8207,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       "load_chat_history",
       "interaction",
       spanAttributes,
-      () => this._serverTranscriptForReconcile()
+      () => this._serverTranscriptForReconcile(incomingMessages)
     );
     const serverMessagesById = new Map(
       serverMessages.map((message) => [message.id, message])
@@ -8276,18 +8260,32 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
   /**
    * The server transcript that reconciliation diffs client messages against.
-   * The live cache answers when it holds the whole active path — the common
-   * case, kept current by the change feed after every durable write. A
-   * windowed or unhydrated cache falls back to the full storage read, since
-   * reconciliation must see every message (`_readMessagesFromStorage`).
+   * The live cache answers when it holds the whole active path, the common
+   * case, kept current by the change feed after every durable write.
+   *
+   * A windowed cache holds the newest part of the path. A client holds what
+   * it was sent (that window) plus its new messages, so the stored rows
+   * reconciliation needs beyond the window are those of incoming messages
+   * older than it: each is read by id, never the whole path (which past
+   * 200,000 messages cannot be read root-first at all). A new message costs
+   * one key probe that finds nothing.
    *
    * Returns a snapshot: the writes that follow patch the cache through the
    * change feed while the caller is still iterating.
    */
-  private async _serverTranscriptForReconcile(): Promise<UIMessage[]> {
-    if (this._cfTranscript.coversActivePath)
-      return [...this._cfTranscript.messages];
-    return this._readMessagesFromStorage();
+  private async _serverTranscriptForReconcile(
+    incoming: readonly UIMessage[]
+  ): Promise<UIMessage[]> {
+    const window = [...this._cfTranscript.messages];
+    if (this._cfTranscript.coversActivePath) return window;
+    const inWindow = new Set(window.map((message) => message.id));
+    const older: UIMessage[] = [];
+    for (const message of incoming) {
+      if (inWindow.has(message.id)) continue;
+      const stored = await this.session.getMessage(message.id);
+      if (stored) older.push(stored as UIMessage);
+    }
+    return [...older, ...window];
   }
 
   /**

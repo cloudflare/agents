@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { evictDurableObject } from "cloudflare:test";
 import { getAgentByName } from "agents";
 import { subscribe } from "agents/observability";
 import { describe, expect, it } from "vitest";
@@ -128,6 +129,36 @@ describe("hydrationByteBudget — windowed hydration (#1710)", () => {
     expect(result.cacheCoversPath).toBe(false);
     expect(result.storedState).toBe("output-available");
   });
+
+  it("reconciles a client message older than the window by id, without reading the whole path", async () => {
+    const agent = (await getAgentByName(
+      env.ThinkWindowedHydrationAgent,
+      uniqueName("seeded-windowed-reconcile")
+    )) as unknown as WindowedHydrationStub & {
+      reconcileOlderThanWindowForTest(): Promise<string[]>;
+    };
+    expect((await agent.getHydrationInfoForTest())?.truncated).toBe(true);
+    // The old message is matched to its stored row, not stored again.
+    expect(await agent.reconcileOlderThanWindowForTest()).toEqual([
+      ...Array.from({ length: 10 }, (_, i) => `seed-${i}`),
+      "new-user"
+    ]);
+  });
+
+  it("reconciles on a path too long to read root-first", async () => {
+    const name = uniqueName("windowed-long-path");
+    const agent = (await getAgentByName(
+      env.ThinkWindowedHydrationAgent,
+      name
+    )) as unknown as WindowedHydrationStub & {
+      seedLongPathForTest(count: number): Promise<void>;
+      reconcileOnLongPathForTest(): Promise<string | null>;
+    };
+    await agent.seedLongPathForTest(200_005);
+    // Start again on the seeded rows: a windowed cache, a fresh tail.
+    await evictDurableObject(env.ThinkWindowedHydrationAgent.getByName(name));
+    expect(await agent.reconcileOnLongPathForTest()).toBe("m200005");
+  }, 120_000);
 
   it("emits chat:hydration:windowed on change, not on every sync", async () => {
     const events: Array<{
