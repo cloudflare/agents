@@ -1700,24 +1700,27 @@ export class DynamicAgentsInternal extends LifecycleCapability {
    * from the root's WebSocket state.
    */
   async restoreFacetContext(): Promise<void> {
-    const isFacet =
-      await this.#host.ctx.storage.get<boolean>("cf_agents_is_facet");
-    if (isFacet) this.#host._isFacet = true;
+    // One read for all four keys: every agent's start does this, a root's
+    // included.
+    const stored = await this.#host.ctx.storage.get([
+      "cf_agents_is_facet",
+      "cf_agents_facet_name",
+      ROOT_JURISDICTION_KEY,
+      "cf_agents_parent_path"
+    ]);
+    if (stored.get("cf_agents_is_facet")) this.#host._isFacet = true;
 
-    const storedFacetName = await this.#host.ctx.storage.get<string>(
-      "cf_agents_facet_name"
-    );
+    const storedFacetName = stored.get("cf_agents_facet_name");
     if (typeof storedFacetName === "string") {
       this.#host._facetName = storedFacetName;
     }
 
-    this.#rootJurisdiction =
-      (await this.#host.ctx.storage.get<string>(ROOT_JURISDICTION_KEY)) ??
-      this.#rootJurisdiction;
+    const storedJurisdiction = stored.get(ROOT_JURISDICTION_KEY);
+    if (typeof storedJurisdiction === "string") {
+      this.#rootJurisdiction = storedJurisdiction;
+    }
 
-    const storedParentPath = await this.#host.ctx.storage.get<
-      Array<{ className: string; name: string }>
-    >("cf_agents_parent_path");
+    const storedParentPath = stored.get("cf_agents_parent_path");
     if (isValidParentPath(storedParentPath)) {
       this.#host._parentPath = storedParentPath;
     }
