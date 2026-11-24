@@ -1552,6 +1552,28 @@ describe("SubAgent", () => {
     expect(alarmIn!).toBeLessThanOrEqual(5_000);
   }, 20_000);
 
+  it("restarts every sub-agent's long interrupted run at once after a reset of the tree, not one per 5 s", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+    const children = ["long-a", "long-b", "long-c"];
+    for (const child of children) await agent.subAgentStartCountedRun(child);
+    // Each first attempt is running past its dispatch.
+    await new Promise((resolve) => setTimeout(resolve, 6_000));
+    const resetAt = Date.now();
+    await agent.resetTreeForTest().catch(() => {});
+    // Start the root again; its restart drives each sub-agent in turn.
+    const again = await getAgentByName(env.TestSubAgentParent, name);
+    await new Promise((resolve) => setTimeout(resolve, 4_000));
+    const restarts: number[] = [];
+    for (const child of children) {
+      const starts = await again.subAgentAttemptStarts(child);
+      restarts.push(starts["attempt:2"] ?? Number.POSITIVE_INFINITY);
+    }
+    // A drive no longer waits out a sub-agent's 5 s dispatch budget, so the
+    // pass reaches the last sub-agent within a second or two.
+    for (const at of restarts) expect(at - resetAt).toBeLessThan(3_500);
+  }, 30_000);
+
   it("restarts a facet with an open Task run through a stub it already had", async () => {
     // Tasks wakes open runs while capabilities start, before Agent's own
     // startup reads the stored facet flag. A wake that took the facet for a

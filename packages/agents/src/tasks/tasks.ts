@@ -167,6 +167,13 @@ const WAKE_JOB_RETRY = { maxAttempts: 1 } as const;
 const DISPATCH_BUDGET_MS = 5_000;
 
 /**
+ * The dispatch budget in a sub-agent: its root drives sub-agents one after
+ * another, so a long attempt must hand the drive back quickly. Short
+ * attempts still settle inside it.
+ */
+const SUB_AGENT_DISPATCH_BUDGET_MS = 250;
+
+/**
  * Farthest a running run's wake may be while its attempt executes: the
  * attempt outlives its dispatch, so this wake is what notices a reset that
  * killed it (#2847). One alarm write per interval while a run executes.
@@ -645,7 +652,15 @@ export class Tasks<
     // below (newer pushes win over drive results).
     let budgetTimer: ReturnType<typeof setTimeout> | undefined;
     const budget = new Promise<"budget">((resolve) => {
-      budgetTimer = setTimeout(() => resolve("budget"), DISPATCH_BUDGET_MS);
+      budgetTimer = setTimeout(
+        () => resolve("budget"),
+        // A sub-agent is driven by its root, one sub-agent after another:
+        // a long attempt detaches almost at once, so the root's pass is not
+        // held 5 s per sub-agent (30 sub-agents restarted one per 5 s).
+        this.lifecycle.routes.source
+          ? SUB_AGENT_DISPATCH_BUDGET_MS
+          : DISPATCH_BUDGET_MS
+      );
     });
     const runAttempt = this.#executeRun(runId, true);
     const attempt = runAttempt.then(() => "settled" as const);

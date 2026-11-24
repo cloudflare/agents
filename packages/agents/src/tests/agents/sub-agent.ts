@@ -78,6 +78,11 @@ export class CounterSubAgent extends Agent {
   override readonly taskDefinitions = {
     /** Never ends, so a reset leaves it running. */
     hang: async () => new Promise<never>(() => {}),
+    /** Records when each attempt started, then never ends. */
+    hangCounted: async (_input: undefined, step: TaskStep) => {
+      this.ctx.storage.kv.put(`attempt:${step.attempt}`, Date.now());
+      return new Promise<never>(() => {});
+    },
     /** Writes a checkpoint entry, then records `local` and the rows. */
     remember: async (_input: undefined, step: TaskStep) => {
       step.checkpoint.set("note", "kept");
@@ -116,6 +121,22 @@ export class CounterSubAgent extends Agent {
   }
 
   /** Start a run that never ends, so a reset leaves it open. */
+  /** Start a counted never-ending run from the alarm. */
+  async startCountedAlarmRunForTest(): Promise<void> {
+    await this.tasks.run("hangCounted", undefined, {
+      runId: "counted",
+      start: "alarm"
+    });
+  }
+
+  attemptStartsForTest(): Record<string, number> {
+    return Object.fromEntries(
+      [...this.ctx.storage.kv.list<number>({ prefix: "attempt:" })].map(
+        ([key, at]) => [key, at]
+      )
+    );
+  }
+
   /** Start a run that never ends from the alarm, as a submission is. */
   async startLongAlarmRunForTest(): Promise<void> {
     await this.tasks.run("hang", undefined, { runId: "long", start: "alarm" });
@@ -1835,6 +1856,23 @@ export class TestSubAgentParent extends Agent {
       status: await child.runStatusForTest("long"),
       alarmIn: alarm === null ? null : alarm - Date.now()
     };
+  }
+
+  async subAgentStartCountedRun(subAgentName: string): Promise<void> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    await child.startCountedAlarmRunForTest();
+  }
+
+  async subAgentAttemptStarts(
+    subAgentName: string
+  ): Promise<Record<string, number>> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.attemptStartsForTest();
+  }
+
+  /** Reset this root and every sub-agent in its isolate. */
+  resetTreeForTest(): void {
+    this.ctx.abort("test reset");
   }
 
   async subAgentHangingRunAfterKeptStubRestart(
