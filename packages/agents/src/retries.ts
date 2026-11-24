@@ -88,7 +88,8 @@ export type BackoffOptions = {
    * up ([AWS](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/)):
    *
    * - `"equal"` (default): uniformly over `[delay / 2, delay)`. Each wait is
-   *   at least half the delay and longer than the one before.
+   *   at least half the delay and, until `maxMs` caps the delay, longer than
+   *   the one before.
    * - `"full"`: uniformly over `[0, delay)`.
    * - `false`: exactly `delay`, where the same inputs must give the same
    *   delay.

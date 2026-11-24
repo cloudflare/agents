@@ -1320,17 +1320,21 @@ export class Lifecycle<
       this.#retryReport();
       throw error;
     }
-    this.#reportRetryMs = FACET_REPORT_RETRY_MS;
+    this.#reportFailures = 0;
     this.#reportedWake = time;
   }
 
-  #reportRetryMs = FACET_REPORT_RETRY_MS;
+  /** Wake reports to the root that failed in a row, for the backoff. */
+  #reportFailures = 0;
   #reportRetry: ReturnType<typeof setTimeout> | undefined;
 
   #retryReport(): void {
     if (this.#reportRetry !== undefined) return;
-    const delay = this.#reportRetryMs;
-    this.#reportRetryMs = Math.min(delay * 2, FACET_REPORT_RETRY_MAX_MS);
+    this.#reportFailures += 1;
+    const delay = backoffDelay(this.#reportFailures, {
+      baseMs: FACET_REPORT_RETRY_MS,
+      maxMs: FACET_REPORT_RETRY_MAX_MS
+    });
     this.#reportRetry = setTimeout(() => {
       this.#reportRetry = undefined;
       this.rearmAlarm().catch(() => {});
