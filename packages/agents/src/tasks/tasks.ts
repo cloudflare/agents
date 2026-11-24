@@ -571,23 +571,14 @@ export class Tasks<
     return this.#dispatchRun(runId);
   }
 
-  /** Definitions whose runs keep their checkpoint after they settle. */
-  #keptCheckpoints(): string[] {
-    return [...this.#registeredOptions]
-      .filter(([, options]) => options.keepCheckpoint)
-      .map(([name]) => name);
-  }
-
-  #keptCheckpointsJson(): string {
-    return JSON.stringify(this.#keptCheckpoints());
-  }
-
   /**
    * The terminal update's clause that clears a settled run's checkpoint,
    * unless its definition keeps it (`keepCheckpoint`).
    */
   #clearCheckpointSql(): string {
-    const kept = this.#keptCheckpoints();
+    const kept = [...this.#registeredOptions]
+      .filter(([, options]) => options.keepCheckpoint)
+      .map(([name]) => name);
     if (kept.length === 0) return "checkpoint = NULL";
     const names = kept.map((name) => `'${name.replaceAll("'", "''")}'`);
     return `checkpoint = CASE WHEN definition IN (${names.join(", ")}) THEN checkpoint ELSE NULL END`;
@@ -2224,18 +2215,21 @@ export class Tasks<
   async clear(lane: string, reason?: string): Promise<void> {
     if (this.lifecycle.status() !== "started") await this.lifecycle.ready();
     const now = Date.now();
-    const rows = this.#store.sql<TaskRunRow>`
-      UPDATE cf_agents_task_runs
-      SET status = 'skipped', cancel_reason = ${reason ?? null},
-          generation = NULL,
-          checkpoint = CASE WHEN definition IN (
-            SELECT value FROM json_each(${this.#keptCheckpointsJson()})
-          ) THEN checkpoint ELSE NULL END,
-          next_at = NULL, settled_at = ${now},
-          updated_at = ${now}
-      WHERE lane = ${lane} AND status IN ('pending', 'running')
-      RETURNING *
-    `;
+    const query = `UPDATE cf_agents_task_runs
+      SET status = 'skipped', cancel_reason = ?, generation = NULL,
+          ${this.#clearCheckpointSql()}, next_at = NULL, settled_at = ?,
+          updated_at = ?
+      WHERE lane = ? AND status IN ('pending', 'running')
+      RETURNING *`;
+    let rows: TaskRunRow[];
+    try {
+      // SAFETY: RETURNING * from Tasks' own schema.
+      rows = this.lifecycle.storage.sql
+        .exec(query, reason ?? null, now, now, lane)
+        .toArray() as unknown as TaskRunRow[];
+    } catch (cause) {
+      throw new SqlError(query, cause);
+    }
     for (const row of rows) {
       this.#active
         .get(row.run_id)
