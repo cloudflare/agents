@@ -3354,6 +3354,18 @@ describe("provider errors the chat turn reads itself", () => {
     ).toBeGreaterThanOrEqual(1);
   });
 
+  it("reads an in-stream overload the app's onError sends as JSON", async () => {
+    const agentStub = await getTestAgent(
+      `provider-error-overload-${crypto.randomUUID()}`
+    );
+    expect(await agentStub.driveStreamTextProviderErrorForTest(0, true)).toBe(
+      "aborted"
+    );
+    expect(
+      ((await agentStub.getChatRecoveryIncidentsForTest()) as unknown[]).length
+    ).toBeGreaterThanOrEqual(1);
+  });
+
   it("cannot read a provider error that toUIMessageStreamResponse() masked", async () => {
     // The default `onError` sends "An error occurred." with no status.
     const agentStub = await getTestAgent(

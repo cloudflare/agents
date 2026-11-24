@@ -3112,7 +3112,21 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
         doGenerate: () => {
           throw new Error("not used");
         },
-        doStream: () => {
+        doStream: async () => {
+          if (statusCode === 0) {
+            // Anthropic's in-stream overload: a plain object, no status.
+            return {
+              stream: new ReadableStream({
+                start(controller) {
+                  controller.enqueue({
+                    type: "error",
+                    error: { type: "overloaded_error", message: "Overloaded" }
+                  });
+                  controller.close();
+                }
+              })
+            };
+          }
           throw new APICallError({
             message: "Rate limit reached for requests",
             url: "https://api.example.com/v1/chat",
@@ -3132,7 +3146,9 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
               // reads its status, instead of masking it as text.
               onError: (error) => {
                 if (APICallError.isInstance(error)) throw error;
-                return error instanceof Error ? error.message : String(error);
+                return error instanceof Error
+                  ? error.message
+                  : JSON.stringify(error);
               }
             }
           : undefined

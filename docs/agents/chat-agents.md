@@ -611,7 +611,9 @@ return result.toUIMessageStreamResponse({
     if (APICallError.isInstance(error) || RetryError.isInstance(error)) {
       throw error;
     }
-    return error instanceof Error ? error.message : String(error);
+    // An in-stream error (such as an overload) is a plain object: send it
+    // as JSON, so the agent can still read it.
+    return error instanceof Error ? error.message : JSON.stringify(error);
   }
 });
 ```
