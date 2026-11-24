@@ -232,6 +232,10 @@ describe("facet wake", () => {
     ).toBe(true);
     const again = await getAgentByName(env.FacetWakeRoot, name);
     expect(await again.unreportedDrives(key)).toBe(0);
+    // The facet replied with its own next job, so its wake is still held.
+    const [wake] = await again.rootJobs();
+    expect(wake?.id).toBe(`facet:${key}`);
+    expect(wake!.time).toBeGreaterThan(Date.now() + 30_000);
   });
 
   it("drives an already due facet wake at once when the root starts again, past a later fallback alarm", async () => {
