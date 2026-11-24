@@ -1542,6 +1542,24 @@ describe("SubAgent", () => {
     expect(alarmIn!).toBeLessThanOrEqual(5_000);
   }, 20_000);
 
+  it("runs a facet's interrupted run again within about 5 s of a reset of the tree, with nothing touching it (#2847)", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+    await agent.subAgentStartCountedRun("reset-child");
+    // Past the first dispatch budget, the attempt still running; the reset
+    // lands as the next 5 s wake drives the sub-agent.
+    await new Promise((resolve) => setTimeout(resolve, 10_050));
+    const resetAt = Date.now();
+    await agent.resetTreeForTest().catch(() => {});
+    // Nothing calls the tree: only its alarm can start it again.
+    await new Promise((resolve) => setTimeout(resolve, 9_000));
+    const starts = await (
+      await getAgentByName(env.TestSubAgentParent, name)
+    ).subAgentAttemptStarts("reset-child");
+    expect(starts["attempt:2"]).toBeDefined();
+    expect(starts["attempt:2"] - resetAt).toBeLessThan(7_000);
+  }, 30_000);
+
   it("restarts a facet with an open Task run through a stub it already had", async () => {
     // Tasks wakes open runs while capabilities start, before Agent's own
     // startup reads the stored facet flag. A wake that took the facet for a

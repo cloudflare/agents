@@ -748,19 +748,23 @@ export class Lifecycle<
     let moved = false;
     for (const { capability, time } of rows) {
       const path = capability.slice(prefix.length);
-      // A path whose last drive never replied (perhaps the very reset that
-      // restarted this root) keeps its recheck delay and back-off, even when
-      // its wake is already due: nothing in this fresh isolate is driving it.
+      // A path whose drives keep ending unreplied keeps its recheck delay
+      // and back-off, even when its wake is already due. One unreplied
+      // drive is driven at once: a reset of the tree often lands while a
+      // drive is in flight (a running Task's wake drives every 5 s), and a
+      // facet job that keeps ending the isolate is bounded by the facet's
+      // own unsettled-attempt count and by the next unreplied drive.
       const drives = this.#ctx.storage.kv.get<FacetDriveCount>(
         facetDriveKey(path)
       );
-      const target = drives
-        ? Math.max(
-            now,
-            drives.at + FACET_DRIVE_RECHECK_MS,
-            facetDriveNotBefore(drives)
-          )
-        : Math.min(time, now);
+      const target =
+        drives && drives.count > 1
+          ? Math.max(
+              now,
+              drives.at + FACET_DRIVE_RECHECK_MS,
+              facetDriveNotBefore(drives)
+            )
+          : Math.min(time, now);
       if (target === time) continue;
       // Retimed in place: its attempt count is the sign that the last drive
       // crashed, which the scan reads to run other owners' jobs first.
