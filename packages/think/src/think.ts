@@ -1253,6 +1253,17 @@ type StoredThinkClientRequest = {
   branchParentId: string | undefined;
 };
 
+/**
+ * How many messages past a windowed cache reconciliation looks for an older
+ * reply the client holds under another id: the newest 10,001 messages
+ * counting the window (what a reconcile read before the depth cap was
+ * lifted), and never fewer than 1,000. At most that many point reads, and
+ * only for a submit that carries such a reply.
+ */
+function reconcileLookback(windowLength: number): number {
+  return Math.max(1_000, 10_001 - windowLength);
+}
+
 export class Think<
   Env extends Cloudflare.Env = Cloudflare.Env,
   State = unknown,
@@ -8280,8 +8291,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * reconciliation needs beyond the window are those of incoming messages
    * older than it: each is read by id, and a new message costs one key
    * probe that finds nothing. An older reply stored under another id is
-   * looked for along the visible path, newest-first, holding only its
-   * oldest candidates.
+   * looked for past the window, newest-first, within `reconcileLookback`
+   * messages, holding only its oldest candidates.
    *
    * Returns a snapshot: the writes that follow patch the cache through the
    * change feed while the caller is still iterating.
@@ -8303,21 +8314,28 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     if (unmatched.length === 0) return [...older, ...window];
     // An older reply the client holds under another id (an optimistic copy)
     // is matched to a stored row by content and tool calls, oldest
-    // unclaimed row first. Walk the visible path newest-first, one message
-    // in memory at a time, and keep for each such reply its `k` oldest
-    // candidates (`k` = how many replies are unmatched): enough for the
-    // batch reconciler to pick exactly as it would over the whole path,
-    // holding at most k² messages. Rows already in the window or found by
-    // id are not candidates again. This reads the visible path (it is a
-    // rare case); the memory stays bounded.
+    // unclaimed row first. Look past the window, newest-first from its
+    // oldest stored message, one message in memory at a time, as far as
+    // `reconcileLookback` allows, and keep for each such reply its `k`
+    // oldest candidates (`k` = how many replies are unmatched): the batch
+    // reconciler then picks as it would over that range, holding at most
+    // k² messages. Rows found by id are not candidates again.
+    const start = window.find(
+      (message) => !isCompactionMessage(message as SessionMessage)
+    );
+    const lookback = reconcileLookback(window.length);
     const known = new Set([...inWindow, ...older.map((message) => message.id)]);
     const found = unmatched.map(
       () => [] as Array<{ at: number; message: UIMessage }>
     );
     let at = 0;
-    for await (const message of this.session.history({ newestFirst: true })) {
-      at++;
-      if (message.role !== "assistant" || known.has(message.id)) continue;
+    for await (const message of this.session.history({
+      newestFirst: true,
+      leafId: start?.id
+    })) {
+      if (known.has(message.id)) continue;
+      if (++at > lookback) break;
+      if (message.role !== "assistant") continue;
       const stored = message as UIMessage;
       unmatched.forEach((reply, index) => {
         const [paired] = reconcileMessages([reply], [stored], sanitizeMessage);

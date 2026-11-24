@@ -13995,6 +13995,52 @@ export class ThinkWindowedHydrationAgent extends Think {
   }
 
   /**
+   * On a seeded long path, the client sends copies of two older replies
+   * under new ids. Returns which copies were stored as new messages.
+   */
+  async reconcileCopiesOnLongPathForTest(ids: string[]): Promise<string[]> {
+    const copies: UIMessage[] = [];
+    for (const id of ids) {
+      // Seeded replies all read "x": give these their own text.
+      const reply = {
+        id,
+        role: "assistant",
+        parts: [{ type: "text", text: `reply ${id}` }]
+      } as UIMessage;
+      await this.session.updateMessage(reply);
+      copies.push({ ...reply, id: `copy-${id}` });
+    }
+    const host = this as unknown as {
+      _reconcileAndPersistIncoming(
+        messages: UIMessage[],
+        options: {
+          requestId: string;
+          isRegeneration: boolean;
+          isCurrent: () => boolean;
+        }
+      ): Promise<unknown>;
+    };
+    await host._reconcileAndPersistIncoming(
+      [
+        ...copies,
+        ...this.messages,
+        {
+          id: "new-user",
+          role: "user",
+          parts: [{ type: "text", text: "next question" }]
+        }
+      ] as UIMessage[],
+      { requestId: "long-copies", isRegeneration: false, isCurrent: () => true }
+    );
+    return this.ctx.storage.sql
+      .exec<{ id: string }>(
+        "SELECT id FROM cf_agents_session_messages WHERE session_id = '' AND id LIKE 'copy-%' ORDER BY id"
+      )
+      .toArray()
+      .map((row) => row.id);
+  }
+
+  /**
    * Reconcile on a path too long to read root-first: the client sends the
    * oldest message (outside the window) and a new one. Returns the new
    * message's stored parent.

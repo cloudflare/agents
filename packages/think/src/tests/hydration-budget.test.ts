@@ -199,6 +199,24 @@ describe("hydrationByteBudget — windowed hydration (#1710)", () => {
     });
   });
 
+  it("looks a bounded distance past the window for an older reply under another id", async () => {
+    const name = uniqueName("windowed-lookback");
+    const agent = (await getAgentByName(
+      env.ThinkWindowedHydrationAgent,
+      name
+    )) as unknown as WindowedHydrationStub & {
+      seedLongPathForTest(count: number): Promise<void>;
+      reconcileCopiesOnLongPathForTest(ids: string[]): Promise<string[]>;
+    };
+    await agent.seedLongPathForTest(20_000);
+    await evictDurableObject(env.ThinkWindowedHydrationAgent.getByName(name));
+    // m17000 is 3,000 back and pairs with its row; m100 is past the
+    // lookback (the newest 10,001 messages), so its copy is stored as new.
+    expect(
+      await agent.reconcileCopiesOnLongPathForTest(["m17000", "m100"])
+    ).toEqual(["copy-m100"]);
+  }, 120_000);
+
   it("reconciles on a path too long to read root-first", async () => {
     const name = uniqueName("windowed-long-path");
     const agent = (await getAgentByName(
