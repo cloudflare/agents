@@ -62,8 +62,17 @@ describe("fetchWithinUrlPolicy", () => {
   });
 
   it("refuses a redirect to a private address without following it", async () => {
+    let cancelled = false;
     const net = fakeNetwork({
-      "https://mcp.example.com/mcp": redirect("http://10.0.0.1/mcp", 307)
+      "https://mcp.example.com/mcp": () =>
+        new Response(
+          new ReadableStream({
+            cancel() {
+              cancelled = true;
+            }
+          }),
+          { status: 307, headers: { location: "http://10.0.0.1/mcp" } }
+        )
     });
     await expect(
       fetchWithinUrlPolicy(net.fetch)("https://mcp.example.com/mcp", {
@@ -72,6 +81,8 @@ describe("fetchWithinUrlPolicy", () => {
       })
     ).rejects.toThrow("Blocked URL");
     expect(net.sent.map((s) => s.url)).toEqual(["https://mcp.example.com/mcp"]);
+    // The refused redirect's body is not left open.
+    expect(cancelled).toBe(true);
   });
 
   it("follows allowed redirects as fetch does", async () => {

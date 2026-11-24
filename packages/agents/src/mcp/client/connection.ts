@@ -113,7 +113,7 @@ function withStaticHeaders<
     return merged;
   };
   const sse = options as SSEClientTransportOptions;
-  const streamFetch = sse.eventSourceInit?.fetch ?? fetch;
+  const streamFetch = sse.eventSourceInit?.fetch ?? options.fetch ?? fetch;
   return {
     ...options,
     requestInit: {
@@ -137,7 +137,8 @@ function withStaticHeaders<
 /**
  * Send every request an HTTP transport makes (MCP messages, OAuth discovery
  * and token requests, the SSE stream) through the URL policy, redirects
- * included.
+ * included. Apply before {@link withStaticHeaders}, so the static headers
+ * are added once per request and a redirect to another origin drops them.
  */
 function withUrlPolicy<
   T extends StreamableHTTPClientTransportOptions | SSEClientTransportOptions
@@ -1054,8 +1055,8 @@ export class MCPClientConnection {
           new StreamableHTTPClientTransport(
             this.url,
             this.authorizationTurnOptions(
-              withUrlPolicy(
-                withStaticHeaders(
+              withStaticHeaders(
+                withUrlPolicy(
                   this.options.transport as StreamableHTTPClientTransportOptions
                 )
               )
@@ -1067,8 +1068,8 @@ export class MCPClientConnection {
           new SSEClientTransport(
             this.url,
             this.authorizationTurnOptions(
-              withUrlPolicy(
-                withStaticHeaders(
+              withStaticHeaders(
+                withUrlPolicy(
                   this.options.transport as SSEClientTransportOptions
                 )
               )

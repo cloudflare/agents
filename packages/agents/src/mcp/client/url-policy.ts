@@ -102,6 +102,7 @@ export function fetchWithinUrlPolicy(
       const response = await base(url, request);
       const location = response.headers.get("location");
       if (!isRedirect(response.status) || location === null) return response;
+      await response.body?.cancel();
       if (hops === MAX_REDIRECTS) {
         throw new Error(
           `${url.origin} redirected more than ${MAX_REDIRECTS} times`
@@ -111,7 +112,6 @@ export function fetchWithinUrlPolicy(
         location,
         validateRedirect(location, url, MCP_URL_POLICY)
       );
-      await response.body?.cancel();
       request = redirectedRequest(request, response.status, url, next);
       url = next;
     }
