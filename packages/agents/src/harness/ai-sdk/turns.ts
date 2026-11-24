@@ -407,38 +407,49 @@ export function answerToolCall(
   messages: readonly UIMessage[],
   event: ToolCallAnswer
 ): UIMessage | undefined {
-  for (const message of messages) {
-    const index = message.parts.findIndex((part) => answers(part, event));
-    if (index === -1) continue;
-    const parts = [...message.parts];
-    const part = parts[index] as UIToolPart;
-    // SAFETY: the new state is set with exactly the fields it requires.
-    parts[index] = (
-      event.type === "approval-response"
-        ? {
-            ...part,
-            // As the AI SDK records them: a rejection ends the call.
-            state: event.approved ? "approval-responded" : "output-denied",
-            approval: {
-              id: event.approvalId,
-              approved: event.approved,
-              ...(event.reason !== undefined && { reason: event.reason })
-            }
+  const message = answeredMessage(messages, event);
+  if (!message) return undefined;
+  const index = message.parts.findIndex((part) => answers(part, event));
+  const parts = [...message.parts];
+  const part = parts[index] as UIToolPart;
+  // SAFETY: the new state is set with exactly the fields it requires.
+  parts[index] = (
+    event.type === "approval-response"
+      ? {
+          ...part,
+          // As the AI SDK records them: a rejection ends the call.
+          state: event.approved ? "approval-responded" : "output-denied",
+          approval: {
+            id: event.approvalId,
+            approved: event.approved,
+            ...(event.reason !== undefined && { reason: event.reason })
           }
-        : event.type === "tool-result" && event.result.ok
-          ? { ...part, state: "output-available", output: event.result.output }
-          : {
-              ...part,
-              state: "output-error",
-              errorText:
-                event.type === "tool-result" && !event.result.ok
-                  ? (event.result.errorText ?? "")
-                  : ""
-            }
-    ) as UIPart;
-    return { ...message, parts };
-  }
-  return undefined;
+        }
+      : event.type === "tool-result" && event.result.ok
+        ? { ...part, state: "output-available", output: event.result.output }
+        : {
+            ...part,
+            state: "output-error",
+            errorText:
+              event.type === "tool-result" && !event.result.ok
+                ? (event.result.errorText ?? "")
+                : ""
+          }
+  ) as UIPart;
+  return { ...message, parts };
+}
+
+/**
+ * The message holding the tool call an answer settles: the first one with
+ * a call still waiting for it. {@link answerToolCall} settles that call.
+ */
+export function answeredMessage(
+  messages: readonly UIMessage[],
+  event: ToolCallAnswer
+): UIMessage | undefined {
+  return messages.find((message) =>
+    message.parts.some((part) => answers(part, event))
+  );
 }
 
 function answers(part: UIPart, event: ToolCallAnswer): boolean {

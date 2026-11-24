@@ -273,6 +273,60 @@ describe("ThinkHarness approvals and client tools", () => {
     expect(await stub.dangerousRuns()).toBe(0);
   });
 
+  it("lets only the participant who asked answer a client tool", async () => {
+    const stub = fresh();
+    await stub.promptAs("client", "alice");
+    expect(await stub.watchedToolOwners()).toEqual(["alice"]);
+    const toolCallId = (await stub.lastToolCalls())[0]?.toolCallId ?? "";
+    const result = {
+      type: "tool-result" as const,
+      toolCallId,
+      result: { ok: true as const, output: "because" }
+    };
+    expect(reason(await stub.answerAs(result, "bob"))).toBe("not_owner");
+    expect(text(await stub.answerAs(result, "alice"))).toBe(
+      "tool said: because"
+    );
+    // The continued message still belongs to Alice.
+    expect(await stub.watchedToolOwners()).toEqual(["alice"]);
+  });
+
+  it("gives a client tool added after a watch opened its owner", async () => {
+    const stub = fresh();
+    const seen = await stub.ownersAfterLateTool("alice");
+    // Streamed, as the calls arrive.
+    expect(seen.chunks).toEqual(["late-1@alice", "late-2@alice"]);
+    // After the first is answered, the call still waiting keeps its owner.
+    expect(seen.messages.at(-1)).toEqual([
+      "late-1@alice:output-available",
+      "late-2@alice:input-available"
+    ]);
+  });
+
+  it("finds the owner on the call an answer settles when a tool-call id is reused", async () => {
+    const stub = fresh();
+    const result = (output: string) => ({
+      type: "tool-result" as const,
+      toolCallId: "reused-call",
+      result: { ok: true as const, output }
+    });
+    // Alice's call is answered and settled; Bob's later call has the same id.
+    await stub.promptAs("client reused id", "alice");
+    expect(text(await stub.answerAs(result("lisbon"), "alice"))).toBe(
+      "tool said: lisbon"
+    );
+    await stub.promptAs("client reused id", "bob");
+    expect(await stub.watchedToolOwners()).toEqual(["alice", "bob"]);
+
+    // The waiting call is Bob's: Alice may not answer it, Bob may.
+    expect(reason(await stub.answerAs(result("porto"), "alice"))).toBe(
+      "not_owner"
+    );
+    expect(text(await stub.answerAs(result("porto"), "bob"))).toBe(
+      "tool said: porto"
+    );
+  });
+
   it("waits for a client tool result, then continues", async () => {
     const stub = fresh();
     const first = await stub.prompt("client");

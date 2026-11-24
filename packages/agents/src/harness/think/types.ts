@@ -18,6 +18,7 @@ import type {
 import type { ClientToolSchema } from "../../chat/client-tools";
 import type {
   HarnessInput,
+  HarnessInputFrom,
   OperationResult,
   Receipt,
   ToolAnswer
@@ -42,14 +43,18 @@ export type ThinkSessionId = string;
  * - a tool result or an approval (`ToolAnswer`), which continues the turn
  *   that was waiting for it.
  *
+ * The shared harness input and answers may name the participant they come
+ * from (`from`); a turn's client tools belong to the participant who
+ * started it.
+ *
  * @experimental
  */
 export type ThinkInput =
   | string
   | UIMessage
   | readonly UIMessage[]
-  | HarnessInput
-  | ToolAnswer;
+  | (HarnessInput & HarnessInputFrom)
+  | (ToolAnswer & HarnessInputFrom);
 
 /**
  * What a submission does when the session is already running. Only

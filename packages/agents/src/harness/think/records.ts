@@ -27,13 +27,20 @@ import {
 /** What an operation asks the harness to do, as stored. */
 export type OperationInput =
   /** Place these user messages, then answer them. */
-  | { readonly kind: "messages"; readonly messages: readonly UIMessage[] }
+  | {
+      readonly kind: "messages";
+      readonly messages: readonly UIMessage[];
+      /** The participant whose client runs the answer's client tools. */
+      readonly owner?: string;
+    }
   /** Record a tool result or approval, then continue the turn it unblocks. */
   | {
       readonly kind: "answer";
       readonly answer: ToolAnswer;
       /** Whether to continue the turn once nothing else is awaited. */
       readonly autoContinue: boolean;
+      /** The participant who sent the answer. */
+      readonly from?: string;
     }
   /** Answer a user message again, on a new branch beside earlier answers. */
   | { readonly kind: "regenerate"; readonly messageId?: string }
