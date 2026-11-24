@@ -63,6 +63,7 @@ import {
   enforceRowSizeLimit,
   LiveReply,
   StreamAccumulator,
+  recentChatTerminal,
   toolApprovalUpdate,
   toolResultUpdate,
   type ChatProtocolHost
@@ -11362,6 +11363,11 @@ export class ThinkAsyncHookTestAgent extends Think {
 // Tests chatRecovery, fiber wrapping, onChatRecovery hook.
 
 export class ThinkRecoveryTestAgent extends Think {
+  /** The recorded end of `requestId` (the recent terminals), or null. */
+  recentTerminalForTest(requestId: string): unknown {
+    return recentChatTerminal(this.ctx.storage.kv, [requestId]);
+  }
+
   override chatRecovery: ChatRecoveryConfig = true;
 
   private _recoveryContexts: Array<{

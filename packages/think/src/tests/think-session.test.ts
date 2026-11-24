@@ -3881,6 +3881,52 @@ describe("Think — onChatRecovery", () => {
     ]);
   });
 
+  it("ends a turn found interrupted whose conversation moved on for the tabs", async () => {
+    const agent = await freshRecoveryAgent(crypto.randomUUID());
+    await agent.persistTestMessage({
+      id: "u-old",
+      role: "user",
+      parts: [{ type: "text", text: "old question" }]
+    });
+    await agent.insertInterruptedStream("stream-moved", "req-moved", [
+      {
+        body: JSON.stringify({ type: "start", messageId: "assistant-moved" }),
+        index: 0
+      },
+      { body: JSON.stringify({ type: "text-start" }), index: 1 },
+      {
+        body: JSON.stringify({ type: "text-delta", delta: "Part" }),
+        index: 2
+      }
+    ]);
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-moved", {
+      __cfThinkChatFiberSnapshot: {
+        kind: "think-chat-turn",
+        version: 1,
+        requestId: "req-moved",
+        continuation: true,
+        latestMessageId: "u-old",
+        latestMessageRole: "user",
+        latestUserMessageId: "u-old",
+        startedAt: Date.now()
+      },
+      user: null
+    });
+    // A newer question is the latest message: the conversation moved on.
+    await agent.persistTestMessage({
+      id: "u-new",
+      role: "user",
+      parts: [{ type: "text", text: "newer question" }]
+    });
+
+    await agent.triggerFiberRecovery();
+
+    // Nothing continues it, so its end is sent and recorded.
+    expect(await agent.recentTerminalForTest("req-moved")).toMatchObject({
+      outcome: "aborted"
+    });
+  });
+
   it("answers the question again when onChatRecovery drops a new turn's partial", async () => {
     const agent = await freshRecoveryAgent(crypto.randomUUID());
 

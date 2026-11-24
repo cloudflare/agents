@@ -9976,6 +9976,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             requestId,
             null
           );
+          // Nothing continues the cut-off request: end it for the tabs,
+          // and record it for a tab that comes back later.
+          this._frames.endUnstarted(null, requestId, "aborted");
         }
       }
     };
