@@ -173,6 +173,8 @@ const DISPATCH_BUDGET_MS = 5_000;
  */
 const LIVE_WAKE_MS = 5_000;
 
+const UTF8 = new TextEncoder();
+
 const TERMINAL_STATUSES: ReadonlySet<TaskStatus> = new Set([
   "completed",
   "error",
@@ -2174,6 +2176,69 @@ export class Tasks<
     return row
       ? (deserializeTaskValue(this.#store.inputJson(row)) as T)
       : undefined;
+  }
+
+  /**
+   * @internal Write fields of the object a run's metadata keeps under
+   * `key`, in one write that reads nothing: each field in `patch` replaces
+   * the stored one, and a `null` removes it. A write that would take the
+   * whole metadata past the framework bound changes nothing and returns
+   * false. For progress written on the hot path; {@link updateMetadata}
+   * rewrites the whole metadata.
+   *
+   * @returns False for an unknown run, or when the write would pass the bound.
+   */
+  patchMetadata(
+    runId: string,
+    key: string,
+    patch: Record<string, TaskJson | null>
+  ): boolean {
+    // Each field is replaced whole (not merged into an object it held),
+    // and a `null` removes it. The bound is the whole metadata's, as for
+    // updateMetadata: a write that would pass it changes nothing.
+    const set: (string | null)[] = [];
+    const remove: string[] = [];
+    let setSql = "";
+    let removeSql = "";
+    for (const [field, value] of Object.entries(patch)) {
+      if (value === null) {
+        removeSql += ", '$.' || json_quote(?)";
+        remove.push(field);
+      } else {
+        setSql += ", '$.' || json_quote(?), json(?)";
+        set.push(
+          field,
+          serializeTaskValue(
+            value,
+            `metadata of Task run "${runId}"`,
+            Number.POSITIVE_INFINITY
+          )
+        );
+      }
+    }
+    // New fields past the bound on their own fail as the whole metadata's
+    // check below does: false, nothing written.
+    let incoming = 0;
+    for (let i = 1; i < set.length; i += 2) {
+      incoming += UTF8.encode(set[i] ?? "").byteLength;
+    }
+    if (incoming > MAX_FRAMEWORK_METADATA_BYTES) return false;
+    // What is stored under `key` is kept only when it is an object.
+    let entry =
+      "CASE WHEN json_type(metadata, '$.' || json_quote(?)) = 'object' " +
+      "THEN json_extract(metadata, '$.' || json_quote(?)) ELSE '{}' END";
+    if (setSql) entry = `json_set(${entry}${setSql})`;
+    if (removeSql) entry = `json_remove(${entry}${removeSql})`;
+    const next = `json_set(coalesce(metadata, '{}'), '$.' || json_quote(?), json(${entry}))`;
+    const params = [key, key, key, ...set, ...remove];
+    return (
+      this.#store.write(
+        `UPDATE cf_agents_task_runs
+         SET metadata = ${next}, updated_at = ?
+         WHERE run_id = ? AND length(CAST(${next} AS BLOB)) <= ?`,
+        [...params, Date.now(), runId, ...params, MAX_FRAMEWORK_METADATA_BYTES]
+      ) > 0
+    );
   }
 
   /**

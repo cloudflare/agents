@@ -566,3 +566,96 @@ describe("Tasks record reads for framework definitions", () => {
     });
   });
 });
+
+describe("Tasks patchMetadata", () => {
+  it("replaces each field whole, removes a null one, and leaves the rest", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      await instance.tasks.importRun({
+        runId: "m",
+        definition: "__cf_echo",
+        status: "pending",
+        attempt: 0,
+        metadata: {
+          app: "kept",
+          progress: { a: 1, out: { x: 1 }, gone: true }
+        },
+        createdAt: 1
+      });
+      expect(
+        instance.tasks.patchMetadata("m", "progress", {
+          out: { y: 2 },
+          gone: null,
+          "odd.key": "v"
+        })
+      ).toBe(true);
+      expect(instance.tasks.peek("m")?.metadata).toEqual({
+        app: "kept",
+        progress: { a: 1, out: { y: 2 }, "odd.key": "v" }
+      });
+      expect(instance.tasks.patchMetadata("missing", "progress", {})).toBe(
+        false
+      );
+      // Something other than an object under the key (an app's value of
+      // that name) is replaced by the patched object.
+      await instance.tasks.importRun({
+        runId: "s",
+        definition: "__cf_echo",
+        status: "pending",
+        attempt: 0,
+        metadata: { progress: "draft" },
+        createdAt: 1
+      });
+      expect(instance.tasks.patchMetadata("s", "progress", { a: 1 })).toBe(
+        true
+      );
+      expect(instance.tasks.peek("s")?.metadata).toEqual({
+        progress: { a: 1 }
+      });
+    });
+  });
+});
+
+describe("Tasks patchMetadata bound", () => {
+  it("writes a field past one value's 1 MiB within the metadata's room, and refuses one past it", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      await instance.tasks.importRun({
+        runId: "b",
+        definition: "__cf_echo",
+        status: "pending",
+        attempt: 0,
+        metadata: { app: "a" },
+        createdAt: 1
+      });
+      expect(
+        instance.tasks.patchMetadata("b", "progress", {
+          out: "o".repeat(1_200_000)
+        })
+      ).toBe(true);
+      expect(
+        instance.tasks.patchMetadata("b", "progress", {
+          more: "p".repeat(800_000)
+        })
+      ).toBe(false);
+      // One field past the bound alone fails the same way: false, unchanged.
+      expect(
+        instance.tasks.patchMetadata("b", "progress", {
+          huge: "h".repeat(2_000_000)
+        })
+      ).toBe(false);
+      // Counted in bytes: 700,000 three-byte characters are 2.1 MB.
+      expect(
+        instance.tasks.patchMetadata("b", "progress", {
+          wide: "€".repeat(700_000)
+        })
+      ).toBe(false);
+      const progress = instance.tasks.peek("b")?.metadata?.progress as Record<
+        string,
+        string
+      >;
+      expect(progress.out.length).toBe(1_200_000);
+      expect(progress.more).toBeUndefined();
+    });
+  });
+});

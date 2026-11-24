@@ -10243,13 +10243,14 @@ export class ThinkProgrammaticTestAgent extends Think {
    */
   async recordLargeTurnOutputForTest(
     submissionId: string,
-    outputChars: number
+    outputChars: number,
+    metadataChars = 1_850_000
   ): Promise<{ resultStatus?: string; hasOutput: boolean }> {
     await this.insertSubmissionForTest({
       submissionId,
       status: "running",
       requestId: submissionId,
-      metadata: { big: "m".repeat(1_850_000) }
+      metadata: { big: "m".repeat(metadataChars) }
     });
     (
       this as unknown as {

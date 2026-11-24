@@ -352,6 +352,28 @@ const PROGRESS_HEADROOM_BYTES = 100_000;
  * beside what it holds. One that does not is not recorded as progress: the
  * run's result carries it once the submission settles.
  */
+/**
+ * The metadata a new submission is stored with: the app's own fields, without
+ * Think's progress key (Think writes it), checked against the room that
+ * leaves the turn's progress (ids, timestamps) beside it.
+ *
+ * @throws When the app's metadata leaves no room for the progress.
+ */
+export function admittedSubmissionMetadata(
+  metadata: Record<string, unknown> | undefined
+): Record<string, TaskJson> | undefined {
+  if (metadata === undefined) return undefined;
+  const { [SUBMISSION_PROGRESS_KEY]: _progress, ...app } = metadata;
+  const limit = MAX_FRAMEWORK_METADATA_BYTES - PROGRESS_HEADROOM_BYTES;
+  const bytes = jsonBytes(app);
+  if (bytes > limit) {
+    throw new Error(
+      `Submission metadata is ${bytes} bytes; at most ${limit} fit beside the submission's progress`
+    );
+  }
+  return app as Record<string, TaskJson>;
+}
+
 export function progressOutputFits(
   metadata: Record<string, TaskJson> | undefined,
   output: unknown

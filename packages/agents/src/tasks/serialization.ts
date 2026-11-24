@@ -48,6 +48,8 @@ export function serializeTaskValue(
     );
   }
 
+  // No limit: the caller sizes the value itself (one encode, not two).
+  if (maxBytes === Number.POSITIVE_INFINITY) return json;
   const bytes = utf8.encode(json).byteLength;
   if (bytes > maxBytes) {
     throw new TaskSerializationError(

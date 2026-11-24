@@ -321,6 +321,7 @@ import {
   submissionRow,
   submissionSettlement,
   submissionTaskStatuses,
+  admittedSubmissionMetadata,
   progressOutputFits,
   type SubmissionResult,
   TERMINAL_SUBMISSION_STATUSES,
@@ -5378,13 +5379,17 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     submissionId: string,
     patch: Partial<SubmissionProgress>
   ): void {
-    this.tasks.updateMetadata(submissionId, (metadata) => ({
-      ...metadata,
-      [SUBMISSION_PROGRESS_KEY]: {
-        ...((metadata[SUBMISSION_PROGRESS_KEY] ?? {}) as SubmissionProgress),
-        ...patch
-      } as TaskJson
-    }));
+    // One write that reads nothing; an `undefined` field is removed.
+    this.tasks.patchMetadata(
+      submissionId,
+      SUBMISSION_PROGRESS_KEY,
+      Object.fromEntries(
+        Object.entries(patch).map(([field, value]) => [
+          field,
+          value === undefined ? null : (value as TaskJson)
+        ])
+      )
+    );
   }
 
   private _readWorkflowPromptContext(
@@ -5864,7 +5869,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               idempotencyKey: options.idempotencyKey
             }),
             ...(options?.metadata && {
-              metadata: options.metadata as Record<string, TaskJson>
+              metadata: admittedSubmissionMetadata(
+                options.metadata as Record<string, unknown>
+              )
             }),
             lane: SUBMISSION_LANE,
             start: "alarm"
@@ -5921,6 +5928,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     if (run.signal.aborted) onAbort();
     else run.signal.addEventListener("abort", onAbort, { once: true });
     this._submissionAbortControllers.set(submissionId, controller);
+    let applied = false;
     try {
       const workflowPrompt = this._readWorkflowPromptContext(row.metadata);
       const result = await this._runProgrammaticMessagesTurn(
@@ -5940,17 +5948,21 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           // no deadlock, no need to scope this to detached notify.
           allowNested: true,
           workflowPrompt: workflowPrompt ?? undefined,
-          shouldApplyMessages: () =>
-            this._readSubmission(submissionId)?.status === "running",
+          // A run that left `running` (a cancel, a clear) aborted this
+          // attempt's signal.
+          shouldApplyMessages: () => !run.signal.aborted,
           onApplyingMessages: () => {
             this._submissionsApplyingMessages.add(submissionId);
           },
           onMessagesApplied: () => {
-            const current = this._readSubmission(submissionId);
+            // Stamped once: `row` is the attempt's start, and only this
+            // callback sets the stamp.
             if (
-              current?.status === "running" &&
-              current.messages_applied_at === null
+              !run.signal.aborted &&
+              row.messages_applied_at === null &&
+              !applied
             ) {
+              applied = true;
               this._updateSubmissionProgress(submissionId, {
                 messagesAppliedAt: Date.now()
               });
