@@ -114,7 +114,8 @@ export interface BrowserHostTab {
   on(method: string, handler: CdpEventHandler): () => void;
   /**
    * Wait for this tab's next `method` event, as `CdpConnection.waitFor`.
-   * One still waiting when the session closes rejects, so catch it.
+   * One still waiting when the session closes rejects, for code that
+   * awaits it; one nothing awaits isn't an unhandled rejection.
    */
   waitFor(
     method: string,
