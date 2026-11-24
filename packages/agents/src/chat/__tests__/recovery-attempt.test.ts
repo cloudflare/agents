@@ -1056,19 +1056,23 @@ describe("runRecoveredTurn", () => {
 
   it("runs outsideAttempt code outside the attempt's scope and the origin ids scope", async () => {
     let inside: string | undefined;
+    let idsInside: string[] | undefined;
     let outside: string | undefined = "unset";
     let idsOutside: string[] | undefined = ["unset"];
     const t = setup({
       duringTurn: ({ engine }) => {
         inside = engine.activeRootRequestId;
+        idsInside = engine.activeOriginMessageIds;
         engine.outsideAttempt(() => {
           outside = engine.activeRootRequestId;
           idsOutside = engine.activeOriginMessageIds;
         });
       }
     });
+    t.host.data = { ...t.host.data, originMessageIds: ["user-1"] };
     await t.run();
     expect(inside).toBe(ROOT);
+    expect(idsInside).toEqual(["user-1"]);
     expect(outside).toBeUndefined();
     expect(idsOutside).toBeUndefined();
   });
