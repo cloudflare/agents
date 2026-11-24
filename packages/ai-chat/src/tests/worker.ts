@@ -7,8 +7,10 @@ import {
 import type {
   UIMessage as ChatMessage,
   GenerateTextOnFinishCallback,
+  LanguageModel,
   ToolSet
 } from "ai";
+import { APICallError, streamText } from "ai";
 import {
   Agent,
   type AgentContext,
@@ -3098,6 +3100,44 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       }
     }
 
+    if (this._streamTextProviderError) {
+      const { statusCode, rethrow } = this._streamTextProviderError;
+      this._streamTextProviderError = null;
+      // A provider that answers with an HTTP error, behind `streamText`.
+      const model = {
+        specificationVersion: "v3",
+        provider: "test",
+        modelId: "failing",
+        supportedUrls: {},
+        doGenerate: () => {
+          throw new Error("not used");
+        },
+        doStream: () => {
+          throw new APICallError({
+            message: "Rate limit reached for requests",
+            url: "https://api.example.com/v1/chat",
+            requestBodyValues: {},
+            statusCode
+          });
+        }
+      } as unknown as LanguageModel;
+      return streamText({
+        model,
+        prompt: "hi",
+        maxRetries: 0
+      }).toUIMessageStreamResponse(
+        rethrow
+          ? {
+              // Let the provider's error fail the stream, so the host
+              // reads its status, instead of masking it as text.
+              onError: (error) => {
+                throw error;
+              }
+            }
+          : undefined
+      );
+    }
+
     if (this._failingTurn) {
       this._failingReaderCalls++;
       const { message, remaining, prelude, responseHeaders, statusCode } =
@@ -4335,6 +4375,27 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     statusCode?: number;
   } | null = null;
   private _failingReaderCalls = 0;
+  private _streamTextProviderError: {
+    statusCode: number;
+    rethrow: boolean;
+  } | null = null;
+
+  /** Run one turn through `streamText` against a provider failing with `statusCode`. */
+  async driveStreamTextProviderErrorForTest(
+    statusCode: number,
+    rethrow: boolean
+  ): Promise<SaveMessagesResult["status"]> {
+    this._streamTextProviderError = { statusCode, rethrow };
+    const result = await this.saveMessages((current) => [
+      ...current,
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text: "hello" }]
+      }
+    ]);
+    return result.status;
+  }
 
   getFailingReaderCallsForTest(): number {
     return this._failingReaderCalls;

@@ -222,6 +222,10 @@ interface ChatRecoveryTestStub {
     timeoutMs?: number;
     hangTurns?: number;
   }): Promise<"completed" | "error" | "aborted" | "skipped">;
+  driveStreamTextProviderErrorForTest(
+    statusCode: number,
+    rethrow: boolean
+  ): Promise<string>;
   driveFailingReaderTurnForTest(
     message: string,
     turns?: number,
@@ -3337,6 +3341,29 @@ describe("provider errors the chat turn reads itself", () => {
       expect(incidents.length).toBeGreaterThanOrEqual(1);
     }
   );
+
+  it("reads a streamText provider error when the app lets it fail the stream", async () => {
+    const agentStub = await getTestAgent(
+      `provider-error-streamtext-${crypto.randomUUID()}`
+    );
+    expect(await agentStub.driveStreamTextProviderErrorForTest(429, true)).toBe(
+      "aborted"
+    );
+    expect(
+      ((await agentStub.getChatRecoveryIncidentsForTest()) as unknown[]).length
+    ).toBeGreaterThanOrEqual(1);
+  });
+
+  it("cannot read a provider error that toUIMessageStreamResponse() masked", async () => {
+    // The default `onError` sends "An error occurred." with no status.
+    const agentStub = await getTestAgent(
+      `provider-error-masked-${crypto.randomUUID()}`
+    );
+    expect(
+      await agentStub.driveStreamTextProviderErrorForTest(429, false)
+    ).toBe("error");
+    expect(await agentStub.getChatRecoveryIncidentsForTest()).toEqual([]);
+  });
 
   it("leaves an error the provider says nothing about terminal", async () => {
     const agentStub = await getTestAgent(
