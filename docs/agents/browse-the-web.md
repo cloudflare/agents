@@ -142,7 +142,7 @@ To show a screenshot, the model returns it from its code. The full result, image
 - The code runs in a fresh Dynamic Worker for each call, with no network access: `browser` is its only way out.
 - The tool's description covers the `browser` API and the CDP mistakes models commonly make, so the model does not need a discovery pass first.
 - If several chats or users share one `Browser` (for example, many threads on one Durable Object), pass each one's id as `scope`: `browserTool({ browser, loader, scope: threadId })`. Each scope keeps its own active tab, so one chat never drives another's page, while cookies and logins stay shared. Tools that leave `scope` out share one tab. Calls in the same scope wait for each other (and for your own sessions opened with `lock: true`); calls in different scopes run in parallel. The wait does not count toward `timeoutMs`.
-- The result's `notice` tells the model what happened to its browser: it was lost (idle past `keepAliveMs`, closed, or crashed) and the code ran in a new one, another chat closed its tab or works in it too, or the page opened new tabs.
+- The result's `notice` tells the model what happened to its browser: it was lost (idle past `keepAliveMs`, closed, or crashed) and the code ran in a new one, another chat closed its tab or works in it too, the page opened new tabs, the host answered a page dialog or found a tab a dialog left blocked (see [Page dialogs](#page-dialogs)), or your `hostObserver` added a sentence (see [Run your own code on the model's tabs](#run-your-own-code-on-the-models-tabs)).
 - Each call times out after `timeoutMs` (default 60 seconds).
 - When the harness aborts a call (the user stops the chat, say), a call still waiting for its scope gives up, and a running call ends with an error result and frees its scope. Anything its code already did in the browser stays done.
 - Results are cut to about 24,000 characters. A screenshot can be at most 1 MB, so a full-page screenshot of a long page fails; the model is told to capture the viewport or use JPEG instead.
@@ -405,12 +405,16 @@ browser = new Browser({
   provider: browserRun(this.env.BROWSER),
   hostObserver: async (tab) => {
     let failed = 0;
-    tab.on("Network.loadingFailed", () => failed++);
-    tab.on("Page.frameNavigated", ({ params }) => {
-      console.log(tab.scope, "navigated to", params.frame);
+    tab.on("Network.loadingFailed", ({ params }) => {
+      // Chrome also reports requests the page cancelled, by navigating away, say.
+      if (!params.canceled) failed++;
     });
-    await tab.send("Network.enable");
-    await tab.send("Page.enable");
+    tab.on("Page.frameNavigated", ({ params }) => {
+      const frame = params.frame as { parentId?: string; url: string };
+      // The main frame only. The URL can carry tokens: redact it before you log it.
+      if (!frame.parentId) console.log(tab.scope, "navigated to", frame.url);
+    });
+    await Promise.all([tab.send("Network.enable"), tab.send("Page.enable")]);
     // Runs when the session closes, while the connection is still open.
     return () => {
       if (failed > 0) tab.notify(`${failed} requests failed during this run.`);
@@ -419,13 +423,16 @@ browser = new Browser({
 });
 ```
 
-- `tab.send()`, `tab.on()`, and `tab.waitFor()` are bound to the host's CDP session on that tab, so `tab.on()` hears only that tab's events. Enable the domains you listen to yourself. `tab.cdp` and `tab.sessionId` are the raw connection and session id, for browser-level commands. `tab.targetId` and `tab.scope` say which tab and scope it is.
+- `tab.send()`, `tab.on()`, and `tab.waitFor()` are bound to the host's CDP session on that tab, so `tab.on()` hears only that tab's events. Enable the domains you listen to yourself. `tab.cdp` is the raw connection, for browser-level commands, and `tab.sessionId` is the host's CDP session id on the tab (not `tab.cdp.sessionId`, which is the Browser Run session's id). `tab.targetId` and `tab.scope` say which tab and scope it is.
+- The hook returns nothing or a cleanup function. A one-line arrow that returns a command's promise, such as `(tab) => tab.send("Network.enable")`, is a type error: write a block body, `(tab) => { void tab.send("Network.enable"); }`.
+- The hook runs again on the same tab in every session, and with `browserTool` a session is one tool call. Keep state that should outlive a call in your agent.
+- It also runs on the scope's tab when the session starts, before the model's first command, even if the model then works in another tab.
 - The model's first command to the tab waits for the SDK's setup and your hook's promise together, at most about 250 ms. After that the model goes ahead, your hook keeps running, and a warning is logged.
-- A hook or cleanup that throws or rejects is logged and never fails the run.
-- When the session closes, the SDK finishes its own work, then runs the cleanups with the connection still open, for at most about 1 second in all, then collects the notices and closes the connection. Listeners end with it.
-- `tab.notify(sentence)` adds a sentence to the notices the model gets when the session closes (`report.notices`, and the tool's `notice`), after the SDK's own. A session keeps up to 20. Anything else the hook learns, it writes to your agent's storage, state, or logs itself.
+- A hook or cleanup that throws or rejects is logged and never fails the run. A `tab.waitFor()` still pending when the session closes rejects, so catch it.
+- When the session closes, the SDK finishes its own work, then runs the cleanups with the connection still open, for at most about 1 second in all, then closes the connection and collects the notices. A cleanup your hook returns after that second is not run. A cleanup's commands fail if the model closed the tab, which is logged. Listeners end with the connection.
+- `tab.notify(sentence)` adds a sentence to the notices the model gets when the session closes (`report.notices`, and the tool's `notice`), after the SDK's own. A session keeps up to 10, each cut to 500 characters. The model reads them as the host speaking, so quote any text the page controls, as the dialog notices do. Anything else the hook learns, it writes to your agent's storage, state, or logs itself.
 - The hook is advice, not enforcement. If the host connection does not open, the hook is not called and the session runs without it, and model code can still close a tab or block requests. Do not build an allowlist or any other control on it.
-- The SDK's dialog answering runs before your hook in each tab, so it hears each event first. Your hook can listen to `Page.javascriptDialogOpening`, but if it also sends `Page.handleJavaScriptDialog`, the SDK has already answered and the command fails with "No dialog is showing".
+- The SDK answers each dialog before your hook hears it, even from a listener on `tab.cdp`. Your hook can listen to `Page.javascriptDialogOpening`, but do not answer dialogs from it: if it sends `Page.handleJavaScriptDialog`, the SDK has already answered and the command fails with "No dialog is showing". Do not send `Page.disable` on the tab either, because the SDK's dialog answering uses the same CDP session.
 - The hook runs in every session, on every tab the model uses. A hook that enables Network parses an event for every request in your Durable Object. A hook that changes what the page does can break it: `Fetch.enable` without answering each `Fetch.requestPaused` hangs every request in the tab.
 
 ## Local development

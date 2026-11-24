@@ -3,7 +3,7 @@
  * the code that runs on it in each tab.
  *
  * A `BrowserSession` opens one beside the model's connection
- * (`BrowserConnection.hostObserver`, opened at the same time as the model's
+ * (`BrowserConnection.hostConnection`, opened at the same time as the model's
  * socket). It attaches to each tab the session attaches the model to, and
  * runs its per-tab watchers there: the SDK's built-ins first (dialog
  * answering), then the developer's `hostObserver` hook, if any. Built-ins
