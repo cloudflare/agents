@@ -258,18 +258,28 @@ describe("runRecoveryCallback", () => {
           ...t.host,
           data: { ...(data as RecoveryAttemptData), incidentId: INCIDENT },
           runTurn: async () => {
+            // The model turn starts: the callback hands it off and returns,
+            // and the turn goes on detached.
+            onTurnStarted();
+            await new Promise((resolve) => setTimeout(resolve, 0));
             scoped = t.engine.activeOriginMessageIds;
+            finished();
             return { status: "completed" };
           }
         };
       await t.engine.runRecoveredTurn(host);
-      onTurnStarted();
     };
+    let finished!: () => void;
+    const done = new Promise<void>((resolve) => {
+      finished = resolve;
+    });
     await t.engine.runRecoveryCallback("_chatRecoveryRetry", {
       incidentId: INCIDENT,
       originMessageIds: ["user-1"]
     });
-
+    // The callback returned at the handoff; the detached turn still sees
+    // the ids.
+    await done;
     expect(scoped).toEqual(["user-1"]);
     // A request outside the attempt never inherits the ids.
     expect(t.engine.activeOriginMessageIds).toBeUndefined();
