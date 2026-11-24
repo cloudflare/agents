@@ -1876,7 +1876,7 @@ describe("ChatRecoveryEngine.recoverInterruptedTurn (fake adapter + wake hooks)"
     await h.engine.recoverInterruptedTurn(h.turn, h.wake);
 
     expect(h.completed).toEqual(["s1"]);
-    expect(h.dispatched).toHaveLength(1);
+    expect(h.scheduled).toHaveLength(1);
     // Recorded and sent, so a tab back later learns the request ended.
     expect(ended).toEqual(["aborted:req-1"]);
   });
