@@ -590,6 +590,11 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return seen;
   }
 
+  /** Compact on the Sessions handle, around the harness (as auto-compaction). */
+  async compactOnHandle(session: string): Promise<boolean> {
+    return (await this.#handles.get(session)?.compact()) != null;
+  }
+
   /** Compact a session with its compaction function. */
   async compact(session?: string): Promise<boolean> {
     return (await this.harness.session(session).compact()) !== null;

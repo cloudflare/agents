@@ -806,6 +806,20 @@ describe("ThinkHarness context", () => {
     expect(last.slice(system.length)).not.toContain("Tuesday");
   });
 
+  it("rebuilds the context after a compaction made on the Sessions handle", async () => {
+    const stub = fresh();
+    await stub.prompt("hello", session);
+    await stub.setEnvironment("Tuesday");
+    await stub.prompt("again", session);
+    await stub.prompt("more", session);
+    expect(await stub.compactOnHandle(session)).toBe(true);
+    await stub.prompt("after", session);
+    const last = (await stub.promptTexts()).at(-1) ?? "";
+    const system = last.split("|")[0];
+    expect(system).toContain("Tuesday");
+    expect(last.slice(system.length)).not.toContain("Tuesday");
+  });
+
   it("gives a fork the prompt its turns were sent with", async () => {
     const stub = fresh();
     await stub.prompt("hello", session);

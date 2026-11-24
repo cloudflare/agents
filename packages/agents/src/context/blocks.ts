@@ -422,11 +422,6 @@ export class ContextBlocks {
     return sections;
   }
 
-  /** @internal Whether a block is declared `whenChanged: "remind"`. */
-  internal_reminds(label: string): boolean {
-    return this.remindLabels().has(label);
-  }
-
   private remindLabels(): Set<string> {
     return new Set(
       this.configs

@@ -1446,11 +1446,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           });
         });
         try {
-          // The next call rebuilds the context from the blocks: the prefix
-          // is gone and the summary hides the turns that wrote them.
-          if (await handle.compact()) {
-            await this.#context(session)?.refreshSystemPrompt();
-          }
+          await handle.compact();
         } catch (error) {
           console.warn("ThinkHarness could not compact the session", error);
         }
@@ -1888,9 +1884,20 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           if ((this.#ownClears.get(session) ?? 0) > 0) return;
           this.#events.emit(session, { type: "reset" });
           return;
-        case "delete":
         case "compact":
         case "compaction":
+          // Any compaction, the harness's own or Sessions' automatic one:
+          // the prefix is gone and the summary hides the turns that wrote
+          // the blocks, so the next turn rebuilds the context from them.
+          void this.#contexts
+            .get(session)
+            ?.refreshSystemPrompt()
+            .catch((error: unknown) =>
+              console.warn("ThinkHarness could not refresh the context", error)
+            );
+          this.#events.emit(session, { type: "transcript" });
+          return;
+        case "delete":
           // No one message describes these: the active path changed.
           this.#events.emit(session, { type: "transcript" });
           return;
@@ -1951,11 +1958,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
 
   /** @internal Compact a session with its compaction function. */
   async compact(session: ThinkSessionId): Promise<CompactResult | null> {
-    // The change feed reports the compaction as a transcript event. The
-    // next turn rebuilds the context from the blocks.
-    const result = await this.#handle(session).compact();
-    if (result) await this.#context(session)?.refreshSystemPrompt();
-    return result;
+    // The change feed reports the compaction as a transcript event.
+    return this.#handle(session).compact();
   }
 
   /** A session's context, from the `context` option. */

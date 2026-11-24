@@ -312,7 +312,7 @@ export class Context {
       return { system, reminder: null };
     }
 
-    const changes = await this.#changes(delivered.values);
+    const { changes, own } = await this.#changes(delivered, history);
     const system = renderSystem(delivered.system);
     const at =
       delivered.carried || changes.length > 0 ? await target() : undefined;
@@ -337,6 +337,8 @@ export class Context {
     // since, so it alone answers what the model has seen.
     const values = new Map(delivered.values);
     values.delete(CARRIED);
+    // What the model wrote itself counts as delivered from here on.
+    for (const [label, text] of own) values.set(label, text);
     for (const [label, text] of changes) values.set(label, text);
     const existing = (await this.#records([at.id])).get(at.id);
     await this.#put(at.id, {
@@ -444,6 +446,9 @@ export class Context {
     // Also the step after clearing the transcript (Think does both): the
     // records read so far may belong to messages that are gone.
     this.#cache.clear();
+    // Set before the first await, so a caller that cannot wait (a change
+    // feed) still has the next turn in this instance see it.
+    this.#refresh = true;
     await this.#blocks.load();
     await this.#setRefresh(true);
     return renderSystem(await this.#blocks.internal_sections());
@@ -462,7 +467,7 @@ export class Context {
       found.system ? null : (await this.#released()).prompt
     );
     if (!delivered.system) return null;
-    const changes = await this.#changes(delivered.values);
+    const { changes } = await this.#changes(delivered, history);
     return changes.length > 0
       ? renderReminder(changes.map(([, text]) => text))
       : null;
@@ -509,27 +514,9 @@ export class Context {
     return this.#blocks.removeBlock(label);
   }
 
-  /**
-   * The model's tools for these blocks: `set_context`, `search_context`. A
-   * write through `set_context` is the model's own: nothing re-delivers it.
-   */
-  async tools(): Promise<ToolSet> {
-    const tools = await this.#blocks.tools();
-    const set = tools.set_context;
-    const execute = set?.execute;
-    if (!set || !execute) return tools;
-    return {
-      ...tools,
-      set_context: {
-        ...set,
-        execute: async (input, options) => {
-          const result = await execute(input, options);
-          const label = (input as { label?: unknown }).label;
-          if (typeof label === "string") await this.#ownWrite(label);
-          return result;
-        }
-      }
-    };
+  /** The model's tools for these blocks: `set_context`, `search_context`. */
+  tools(): Promise<ToolSet> {
+    return this.#blocks.tools();
   }
 
   // ── Internal ────────────────────────────────────────────────────
@@ -587,14 +574,14 @@ export class Context {
 
     const { id, record } = found;
     if (record.system) {
-      // What was delivered since includes the changes, and a value the
-      // model wrote itself after them, so it is applied last.
       const values = new Map<string, string>([
         ...record.system,
-        ...(record.changes ?? []),
         ...(record.delivered ?? [])
       ]);
-      return { system: record.system, values, base: id };
+      for (const [label, text] of record.changes ?? []) {
+        values.set(label, text);
+      }
+      return { system: record.system, values, base: id, at: id };
     }
     const baseId = record.base;
     const system = baseId
@@ -604,7 +591,8 @@ export class Context {
     return {
       system,
       values: new Map([...system, ...(record.delivered ?? [])]),
-      base: baseId
+      base: baseId,
+      at: id
     };
   }
 
@@ -696,21 +684,34 @@ export class Context {
 
   /** Remind blocks whose section differs from the one last delivered. */
   /**
-   * Blocks whose value differs from what the model was last shown: remind
-   * blocks, read afresh, and blocks written from code since (CHANGED).
+   * What the model has not been shown: a remind block whose value differs
+   * from the one last delivered, unless the model wrote it itself (its
+   * `set_context` call is in the history since the newest record), and any
+   * block written from code since (CHANGED), always.
    */
-  async #changes(delivered: ReadonlyMap<string, string>): Promise<Section[]> {
-    const current = await this.#blocks.internal_remindSections();
+  async #changes(
+    delivered: Delivered,
+    history: readonly SessionMessage[]
+  ): Promise<{ changes: Section[]; own: Section[] }> {
+    const own = ownWrites(history, delivered.at);
+    const remind = await this.#blocks.internal_remindSections();
+    const changes = remind.filter(
+      ([label, text]) => !own.has(label) && delivered.values.get(label) !== text
+    );
     const changed = await this.#changedLabels();
-    if (changed.size > 0) {
-      const remind = new Set(current.map(([label]) => label));
-      for (const section of await this.#blocks.internal_sections()) {
-        if (changed.has(section[0]) && !remind.has(section[0])) {
-          current.push(section);
-        }
+    const current =
+      changed.size > 0 || own.size > 0
+        ? await this.#blocks.internal_sections()
+        : [];
+    for (const section of current) {
+      if (changed.has(section[0]) && !changes.some(([l]) => l === section[0])) {
+        changes.push(section);
       }
     }
-    return current.filter(([label, text]) => delivered.get(label) !== text);
+    return {
+      changes,
+      own: current.filter(([label]) => own.has(label) && !changed.has(label))
+    };
   }
 
   async #changedLabels(): Promise<Set<string>> {
@@ -737,32 +738,6 @@ export class Context {
       CHANGED,
       JSON.stringify([...changed])
     );
-  }
-
-  /**
-   * The model wrote this block itself: its tool call and result are in the
-   * transcript, so the newest record takes the value as delivered and no
-   * turn sends it again.
-   */
-  async #ownWrite(label: string): Promise<void> {
-    // Only a remind block is compared with what was delivered.
-    if (!this.#blocks.internal_reminds(label)) return;
-    const leaf = await this.#session.getLatestLeaf();
-    if (!leaf) return;
-    const latest = await this.#session.internal_latestAnnotation(
-      RECORD,
-      leaf.id
-    );
-    if (!latest) return;
-    const section = (await this.#blocks.internal_sections()).find(
-      ([name]) => name === label
-    );
-    if (!section) return;
-    const record = JSON.parse(latest.value) as ContextRecord;
-    await this.#put(latest.messageId, {
-      ...record,
-      delivered: mergeSections(record.delivered ?? [], [section])
-    });
   }
 
   /**
@@ -844,9 +819,49 @@ type Delivered = {
   values: Map<string, string>;
   /** The message that holds the snapshot. */
   base?: string;
+  /** The message that holds the newest record. */
+  at?: string;
   /** The snapshot is a prompt frozen before Context, not yet recorded. */
   carried?: boolean;
 };
+
+/**
+ * Blocks the model wrote itself with `set_context` in the history after the
+ * message holding the newest record (all of it when that message is not in
+ * the history): the tool call and its result are the model's record.
+ */
+function ownWrites(
+  history: readonly SessionMessage[],
+  recordAt: string | undefined
+): Set<string> {
+  const from =
+    recordAt === undefined
+      ? 0
+      : history.findIndex((message) => message.id === recordAt) + 1;
+  const labels = new Set<string>();
+  for (const message of history.slice(from)) {
+    if (message.role !== "assistant") continue;
+    for (const part of message.parts) {
+      const tool = part as {
+        type: string;
+        toolName?: string;
+        state?: string;
+        input?: { label?: unknown };
+      };
+      const named =
+        tool.type === "tool-set_context" ||
+        (tool.type === "dynamic-tool" && tool.toolName === "set_context");
+      if (
+        named &&
+        tool.state === "output-available" &&
+        typeof tool.input?.label === "string"
+      ) {
+        labels.add(tool.input.label);
+      }
+    }
+  }
+  return labels;
+}
 
 function renderSystem(sections: readonly Section[]): string {
   return sections
