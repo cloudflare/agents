@@ -966,6 +966,11 @@ type TurnSpec<T> = QueueTurnSpec<T> | NonQueueTurnSpec<T>;
 /** What an RPC `chat()` caller is told when the chat is cleared under it. */
 const CHAT_CLEARED_ERROR = "The chat was cleared before the turn finished.";
 
+/** Whether a turn re-runs or continues one that was cut off. */
+function isRecoveryTrigger(trigger: TurnTrigger | undefined): boolean {
+  return trigger === "recovery-retry" || trigger === "recovery-continue";
+}
+
 const admittedTurnContext = new AsyncLocalStorage<{
   agent: unknown;
   requestId: string;
@@ -3874,7 +3879,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // that record; a reminder comes back only when it could not be recorded.
     const turnHistory = await this._turnHistory();
     const prepared = await this.context.prepare({
-      messages: turnHistory.messages
+      messages: turnHistory.messages,
+      // A recovered turn is sent as its first attempt was.
+      retry: isRecoveryTrigger(admittedTurnContext.getStore()?.trigger)
     });
     const rawBaseSystem = await this._buildBaseSystemPrompt(prepared.system);
     const baseSystem = channelInstructions

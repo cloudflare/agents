@@ -714,6 +714,27 @@ describe("ThinkHarness context", () => {
     expect(prompt).toMatch(/\|user:[^|]*Today is Tuesday\.[^|]*$/);
   });
 
+  it("sends a call recovered after an eviction as its first attempt; a change since waits", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    await stub.prompt("hello", session);
+    const receipt = await stub.submit("slow", { session });
+    await stub.streamed();
+    const first = (await stub.promptTexts()).at(-1) ?? "";
+    await stub.setEnvironment("Tuesday");
+
+    stub = await crash(name);
+    await runDurableObjectAlarm(stub);
+    expect((await stub.wait(receipt.operationId, session)).status).toBe("done");
+    const recovered = (await stub.promptTexts()).at(-1) ?? "";
+    expect(recovered.startsWith(first)).toBe(true);
+    expect(recovered).not.toContain("Tuesday");
+
+    await stub.prompt("now?", session);
+    const next = (await stub.promptTexts()).at(-1) ?? "";
+    expect(next).toMatch(/\|user:now\?[^|]*Tuesday/);
+  });
+
   it("gives a fork the prompt its turns were sent with", async () => {
     const stub = fresh();
     await stub.prompt("hello", session);

@@ -143,6 +143,16 @@ export interface ContextReadOptions {
   readonly messages?: readonly SessionMessage[];
 }
 
+/** @experimental Options of {@link Context.prepare}. */
+export interface ContextPrepareOptions extends ContextReadOptions {
+  /**
+   * This request is another attempt of a turn already sent (chat recovery
+   * after a cut, or a retried model call). It is sent as the first attempt
+   * was: a change or a pending refresh since then waits for the next turn.
+   */
+  readonly retry?: boolean;
+}
+
 /**
  * The system prompt for a turn, and any reminder the host must place.
  *
@@ -227,7 +237,7 @@ export class Context {
    * (or a new one after {@link refreshSystemPrompt}), or the remind blocks
    * that changed since the model last saw them.
    */
-  async prepare(options: ContextReadOptions = {}): Promise<PreparedContext> {
+  async prepare(options: ContextPrepareOptions = {}): Promise<PreparedContext> {
     const history = await this.#history(options);
     const refresh = await this.#refreshPending();
     let delivered = await this.#delivered(history);
@@ -235,21 +245,16 @@ export class Context {
     // Only a user message nothing has answered yet starts a new turn: it is
     // the session's latest leaf. One with answers is a branch point (a
     // regeneration): recording against it would change what its earlier
-    // answers were sent. One that already has a record was sent before (a
-    // recovered or retried turn): it is sent again as it was, and a change
-    // or refresh since then waits for the next new message.
-    let leaf_: Promise<SessionMessage | undefined> | undefined;
-    const latest = (): Promise<SessionMessage | undefined> =>
-      (leaf_ ??= (async () =>
+    // answers were sent.
+    let target_: Promise<SessionMessage | undefined> | undefined;
+    const target = (): Promise<SessionMessage | undefined> =>
+      (target_ ??= (async () =>
         tail?.role === "user" &&
         (await this.#session.getLatestLeaf())?.id === tail.id
           ? tail
           : undefined)());
-    const resent = async () => {
-      const at = await latest();
-      return at !== undefined && (await this.#records([at])).has(at.id);
-    };
-    const target = async () => ((await resent()) ? undefined : latest());
+    // A retry is sent as its first attempt was: no refresh, no new change.
+    const retry = options.retry === true;
 
     if (!delivered.system && !refresh) {
       delivered = await this.#carriedForward(delivered);
@@ -258,7 +263,8 @@ export class Context {
     // A pending refresh applies only to a turn that can record it; a
     // regeneration keeps its branch's prompt and leaves the refresh pending.
     const refreshes =
-      refresh && (!delivered.system || (await target()) !== undefined);
+      refresh &&
+      (!delivered.system || (!retry && (await target()) !== undefined));
     if (!delivered.system || refreshes) {
       // A new snapshot reads every block afresh, even after a refresh: a
       // block may have changed since the refresh was asked for.
@@ -292,8 +298,6 @@ export class Context {
 
     const changes = await this.#changes(delivered.values);
     const system = renderSystem(delivered.system);
-    // Decided before this call writes anything to the turn.
-    const sentBefore = changes.length > 0 && (await resent());
     const at =
       delivered.carried || changes.length > 0 ? await target() : undefined;
     if (delivered.carried && at) {
@@ -306,7 +310,7 @@ export class Context {
     }
     if (changes.length === 0) return { system, reminder: null };
     // A turn sent before is sent again exactly; the change waits.
-    if (sentBefore) return { system, reminder: null };
+    if (retry) return { system, reminder: null };
     if (!at) {
       return {
         system,

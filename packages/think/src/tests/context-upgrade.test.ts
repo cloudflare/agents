@@ -115,4 +115,18 @@ describe("Think context upgrade", () => {
     expect(sent.split("Today is Tuesday.").length).toBe(2);
     expect(next.messages.at(-1)).not.toContain("Today is Tuesday.");
   });
+  it("sends a recovered turn as its first attempt; a change since waits", async () => {
+    const agent = await getAgentByName(
+      env.ThinkUpgradeTestAgent,
+      crypto.randomUUID()
+    );
+    const { first, retry, next } = await agent.recoveredTurnForTest();
+    expect(retry.length).toBeGreaterThan(0);
+    // The retry opens with exactly what the first attempt sent.
+    expect(retry.slice(0, first.length)).toEqual(first);
+    expect(retry.join("")).not.toContain("Today is Tuesday.");
+    // The change goes out once, on the next new message.
+    expect(next.at(-1)).toContain("Today is Tuesday.");
+    expect(next.join("").split("Today is Tuesday.").length - 1).toBe(1);
+  });
 });

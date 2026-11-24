@@ -1199,7 +1199,11 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     let contextSystem = "";
     let request = history;
     if (context) {
-      const prepared = await context.prepare({ messages: history });
+      const prepared = await context.prepare({
+        messages: history,
+        // A call after an interruption is sent as the first attempt was.
+        retry: op.interruptions > 0
+      });
       contextSystem = prepared.system;
       request = withReminder(
         asUIMessages(await context.project(history)),

@@ -591,7 +591,7 @@ describe("Context", () => {
     });
   });
 
-  it("sends a recovered turn as it was first sent; a change since waits", async () => {
+  it("sends a retry as the first attempt was; a change since waits", async () => {
     await withCapabilityHarness(async ({ storage, install }) => {
       const { session, context, setDate } = await setup(storage, (s) =>
         install(s)
@@ -605,13 +605,17 @@ describe("Context", () => {
       expect(JSON.stringify(first.messages)).toContain("Today is Tuesday.");
 
       // The turn is cut before an answer is stored; a change and a refresh
-      // arrive; recovery runs the turn again.
+      // arrive; recovery sends the turn again.
       setDate("Wednesday");
-      const recovered = await context.prepare();
-      expect(recovered.reminder).toBeNull();
-      expect(await context.build()).toEqual(first);
+      const again = await context.prepare({ retry: true });
+      expect(again).toEqual({ system: first.system, reminder: null });
+      expect(await context.project(await session.getHistory())).toEqual(
+        first.messages
+      );
       await context.refreshSystemPrompt();
-      expect(await context.build()).toEqual(first);
+      expect((await context.prepare({ retry: true })).system).toBe(
+        first.system
+      );
 
       // The next new message takes the refresh.
       await session.appendMessage(assistant("a2", "Tuesday"));
@@ -619,6 +623,37 @@ describe("Context", () => {
       const next = await context.build();
       expect(next.system).toContain("Today is Wednesday.");
       expect(JSON.stringify(next.messages)).not.toContain("Today is Tuesday.");
+    });
+  });
+
+  it("sends a retry as the first attempt was when that attempt recorded nothing", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const { session, context, setDate } = await setup(storage, (s) =>
+        install(s)
+      );
+      await session.appendMessage(user("u1", "hello"));
+      await context.build();
+      await session.appendMessage(assistant("a1", "hi"));
+      // Nothing changed, so the first attempt of u2 records nothing.
+      await session.appendMessage(user("u2", "again"));
+      const first = await context.build();
+      expect(
+        (await session.internal_annotations("context", ["u2"])).has("u2")
+      ).toBe(false);
+
+      setDate("Tuesday");
+      const again = await context.prepare({ retry: true });
+      expect(again.reminder).toBeNull();
+      expect(await context.project(await session.getHistory())).toEqual(
+        first.messages
+      );
+
+      await session.appendMessage(assistant("a2", "ok"));
+      await session.appendMessage(user("u3", "and?"));
+      const next = await context.build();
+      expect(JSON.stringify(next.messages.at(-1))).toContain(
+        "Today is Tuesday."
+      );
     });
   });
 

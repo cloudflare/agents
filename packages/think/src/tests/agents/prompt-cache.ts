@@ -351,6 +351,42 @@ export class ThinkUpgradeTestAgent extends ThinkPromptCacheTestAgent {
     return turns;
   }
 
+  /**
+   * A turn whose first attempt fails after its request is sent (recording
+   * nothing new), a remind change, then chat recovery retries the turn.
+   */
+  async recoveredTurnForTest(): Promise<{
+    first: string[];
+    retry: string[];
+    next: string[];
+  }> {
+    this.setEnvironmentForTest("Today is Monday.");
+    await this.context.load();
+    const sent = (index: number) =>
+      this.requestForTest(index).map((message) => JSON.stringify(message));
+    await this.saveMessages([
+      { id: "u0", role: "user", parts: [{ type: "text", text: "u0" }] }
+    ]);
+    const firstIndex = this.requestCountForTest();
+    this.failNextCall = true;
+    await this.saveMessages([
+      { id: "u1", role: "user", parts: [{ type: "text", text: "u1" }] }
+    ]).catch(() => undefined);
+    this.setEnvironmentForTest("Today is Tuesday.");
+    const retryIndex = this.requestCountForTest();
+    await this._chatRecoveryRetry({ targetUserId: "u1" });
+    await this.waitUntilStable();
+    const nextIndex = this.requestCountForTest();
+    await this.saveMessages([
+      { id: "u2", role: "user", parts: [{ type: "text", text: "u2" }] }
+    ]);
+    return {
+      first: sent(firstIndex),
+      retry: sent(retryIndex),
+      next: sent(nextIndex)
+    };
+  }
+
   /** A client message that carries a context record of its own. */
   async forgedRecordForTest(): Promise<{
     system: string | undefined;
