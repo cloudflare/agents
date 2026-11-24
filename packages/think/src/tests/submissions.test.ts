@@ -457,6 +457,24 @@ describe("Think durable submissions", () => {
     expect(lifecycle).toContain("completed");
   });
 
+  it("stores a submitted message over 1.8 MB whole", async () => {
+    const agent = await freshAgent();
+    await agent.setDelayedChunkResponse(["ok"], 1);
+    const text = "y".repeat(2_000_000);
+
+    await agent.testSubmitMessages(text, { submissionId: "sub-large" });
+    await waitForSubmission(
+      agent,
+      "sub-large",
+      (submission) => submission.status === "completed"
+    );
+
+    const stored = await agent.getStoredMessages();
+    const part = stored[0]?.parts?.[0] as { text?: string } | undefined;
+    expect(part?.text).toBe(text);
+    expect(stored[0]?.metadata).toBeUndefined();
+  });
+
   it("detached notify submits a follow-up turn that drains to a model response", async () => {
     const agent = await freshAgent();
     await agent.setProgrammaticResponseForTest("Background follow-up");
