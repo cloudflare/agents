@@ -20,7 +20,7 @@ Prompt assembly is not part of this capability. Context blocks, frozen prompts, 
 
 A row write on Durable Object SQLite costs roughly 1000 times a row read. That ratio is the constraint the schema is built around.
 
-Every table is `WITHOUT ROWID` with a composite primary key and no secondary index:
+Every table is `WITHOUT ROWID` with a composite primary key. There is one secondary index, `cf_agents_session_messages_by_seq` on `(session_id, seq)`, and an object only gets it once one of its sessions reaches 3,000 rows (see "Finding the newest row"):
 
 - `cf_agents_session_messages`, keyed `(session_id, id)`: `seq`, parent, `type`, role, the first slice of the message JSON, the count of continuation rows, stamped token estimate, timestamp
 - `cf_agents_session_message_chunks`, keyed `(session_id, id, idx)`: the remaining slices of a message too large for one row
@@ -38,6 +38,12 @@ State is derived, not maintained. The active leaf and the token estimate that ga
 Message, continuation, and FTS mutations run in one synchronous SQLite transaction. A message and its continuations always commit, are replaced, and are deleted together.
 
 Bulk deletion uses one recursive rewire and one set-based delete. Deleting a linear prefix rewrites only the first surviving boundary child rather than one child per deleted message.
+
+## Finding the newest row
+
+An append attaches to the session's newest row, the one with the highest `seq`, and Sessions keeps it in memory. On the first touch of a session in an isolate, and after any delete, it is found again. Without an index that is a scan of the session's own rows (its key prefix), 2 rows read per stored row: 2,000,001 rows, 0.25-0.4 s deployed, for a 1M-row session.
+
+Once a session holds 3,000 stored rows, Sessions creates `cf_agents_session_messages_by_seq` on `(session_id, seq)` and the lookup reads one row. The number comes from prices. A row written costs about 1,000 rows read, a wake appends about 3 rows, the index adds one write per append and costs about N row writes to build, and a session is assumed to have as many wakes ahead as it has had. The index pays when N > 3 x 1,000. Rows are counted, not read off the newest `seq`, which stays high after retention trims a chat. The newest `seq` is kept as an upper bound on the rows, through appends too, and the session is counted (one `count(*)`) only when that bound reaches 3,000; if it holds fewer, the bound drops to the count. Building the index is best-effort: one that fails (the database near its size limit) leaves the scan in place. An object whose sessions all stay below that never pays a write for an index it doesn't need, which covers most chats. The index is on the table, so once one session reaches 3,000 rows every session in that object pays the extra write per append. Ordering by rowid is not an option: the table is `WITHOUT ROWID`, and as a rowid table the text key would need its own index, which also writes 2 rows per insert.
 
 ## History reads
 
