@@ -23,6 +23,12 @@ import {
   ToolCallArgumentsStream
 } from "@earendil-works/pi-ai";
 import { convertMessages } from "@earendil-works/pi-ai/api/openai-completions";
+import { isOpenRouterModel } from "@earendil-works/pi-ai/utils/openrouter-cost";
+import {
+  applyOpenRouterNativeFinishReason,
+  flagOpenRouterEmptyStop,
+  readOpenRouterNativeFinishReason
+} from "@earendil-works/pi-ai/utils/openrouter-finish-reason";
 import {
   type CompatWarning,
   normalizeChatCompletion,
@@ -186,6 +192,12 @@ class CompletionAssembler {
   >();
   private readonly closedToolCalls = new Set<number>();
   private lastToolIndex: number | undefined;
+  /**
+   * OpenRouter's `native_finish_reason`, the upstream provider's own reason.
+   * Kept across chunks, as pi-ai does, so a trailing chunk that repeats
+   * `finish_reason` without it does not drop it.
+   */
+  private nativeFinishReason: string | undefined;
   private readonly blocks: Block[];
 
   constructor(
@@ -346,13 +358,28 @@ class CompletionAssembler {
     }
   }
 
-  private applyFinishReason(reason: string | null | undefined): boolean {
+  private applyFinishReason(choice: Choice | undefined): boolean {
+    if (choice !== undefined && isOpenRouterModel(this.model)) {
+      this.nativeFinishReason =
+        readOpenRouterNativeFinishReason(choice) ?? this.nativeFinishReason;
+    }
+    const reason = choice?.finish_reason;
     if (reason === null || reason === undefined) return false;
+    this.output.rawStopReason = reason;
     this.output.stopReason = mapFinishReason(reason);
     if (this.output.stopReason === "error") {
       // pi-ai's own wording: its retry classifier matches
       // "Provider finish_reason: error", a vendor's mid-stream failure.
       this.output.errorMessage = `Provider finish_reason: ${reason}`;
+    }
+    if (this.nativeFinishReason !== undefined) {
+      // pi-ai's own recording: rawStopReason "stop.MALFORMED_RESPONSE", and
+      // the native reason appended to an error message.
+      applyOpenRouterNativeFinishReason(
+        this.output,
+        reason,
+        this.nativeFinishReason
+      );
     }
     return true;
   }
@@ -377,7 +404,7 @@ class CompletionAssembler {
     if (chunk.usage !== undefined && chunk.usage !== null) {
       this.output.usage = usageFromOpenAI(this.model, chunk.usage);
     }
-    const finished = this.applyFinishReason(choice?.finish_reason);
+    const finished = this.applyFinishReason(choice);
     const delta = choice?.delta ?? choice?.message;
     if (delta !== undefined) {
       for (const field of REASONING_FIELDS) {
@@ -431,6 +458,12 @@ class CompletionAssembler {
       }
     } else if (this.output.stopReason === "stop" && hasToolCalls) {
       this.output.stopReason = "toolUse";
+    }
+    if (this.nativeFinishReason !== undefined) {
+      // pi-ai's own check: OpenRouter reports an upstream failure it does not
+      // recognize as "stop", so a stop with no text or tool calls whose native
+      // reason is not a clean stop becomes the retryable empty-response error.
+      flagOpenRouterEmptyStop(this.output, this.nativeFinishReason);
     }
   }
 }

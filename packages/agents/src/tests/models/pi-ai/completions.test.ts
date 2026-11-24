@@ -11,6 +11,7 @@ import {
   field,
   groqModel,
   jsonResponse,
+  openrouterModel,
   sseResponse,
   userContext,
   workersAITextStream,
@@ -639,6 +640,150 @@ describe("pi-ai: vendor reasoning and tool calls on the chat-completions wire", 
     expect(message.stopReason).toBe("error");
     expect(message.errorMessage).toBe("Provider finish_reason: error");
     expect(isRetryableAssistantError(message)).toBe(true);
+  });
+
+  it("records OpenRouter's native finish reason as pi-ai does", async () => {
+    // OpenRouter sends the upstream provider's own reason beside the
+    // normalized one, and pi-ai records both; the message keeps pi-ai's
+    // prefix, so its retry classifier still matches.
+    const nativeChunk = (finishReason: string | null, native?: string) =>
+      JSON.stringify({
+        choices: [
+          {
+            delta: {},
+            finish_reason: finishReason,
+            index: 0,
+            ...(native !== undefined && { native_finish_reason: native })
+          }
+        ],
+        id: "gen-openrouter",
+        object: "chat.completion.chunk"
+      });
+    const binding = fakeBinding(() =>
+      sseResponse([
+        vendorChunk({ content: "The answer is", role: "assistant" }),
+        nativeChunk("error", "MALFORMED_FUNCTION_CALL"),
+        nativeChunk("error"),
+        "[DONE]"
+      ])
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const { message } = await collectEvents(
+      ai.stream(
+        ai(openrouterModel("meta-llama/llama-3.3-70b-instruct")),
+        userContext("hi")
+      )
+    );
+
+    expect(message.stopReason).toBe("error");
+    expect(message.rawStopReason).toBe("error.MALFORMED_FUNCTION_CALL");
+    expect(message.errorMessage).toBe(
+      "Provider finish_reason: error (native_finish_reason: MALFORMED_FUNCTION_CALL)"
+    );
+    expect(isRetryableAssistantError(message)).toBe(true);
+  });
+
+  describe("an OpenRouter stop with no visible output", () => {
+    // OpenRouter reports an upstream failure it does not recognize as "stop";
+    // pi-ai retries such a stop when nothing visible came before it.
+    async function openRouterStop(
+      deltas: Record<string, unknown>[],
+      native: string
+    ) {
+      const binding = fakeBinding(() =>
+        sseResponse([
+          ...deltas.map((delta) => vendorChunk(delta)),
+          JSON.stringify({
+            choices: [
+              {
+                delta: {},
+                finish_reason: "stop",
+                index: 0,
+                native_finish_reason: native
+              }
+            ],
+            id: "gen-openrouter",
+            object: "chat.completion.chunk"
+          }),
+          "[DONE]"
+        ])
+      );
+      const ai = createAI({ binding: asAi(binding) });
+      const { message } = await collectEvents(
+        ai.stream(
+          ai(openrouterModel("meta-llama/llama-3.3-70b-instruct")),
+          userContext("hi")
+        )
+      );
+      return message;
+    }
+
+    it("is a retryable error after reasoning only and a failing native reason", async () => {
+      const message = await openRouterStop(
+        [{ reasoning: "Let me think.", role: "assistant" }],
+        "MALFORMED_RESPONSE"
+      );
+      expect(message.stopReason).toBe("error");
+      expect(message.rawStopReason).toBe("stop.MALFORMED_RESPONSE");
+      expect(message.errorMessage).toBe(
+        "OpenRouter returned an empty response (native_finish_reason: MALFORMED_RESPONSE)"
+      );
+      expect(isRetryableAssistantError(message)).toBe(true);
+    });
+
+    it("counts whitespace as no output, and Gemini's OTHER as a failure", async () => {
+      const message = await openRouterStop(
+        [{ content: "  ", role: "assistant" }],
+        "OTHER"
+      );
+      expect(message.stopReason).toBe("error");
+      expect(isRetryableAssistantError(message)).toBe(true);
+    });
+
+    it("stays a stop when the native reason is a clean stop, in any case", async () => {
+      for (const native of ["end_turn", "End_Turn"]) {
+        const message = await openRouterStop([], native);
+        expect(message.stopReason).toBe("stop");
+        expect(message.rawStopReason).toBe(`stop.${native}`);
+        expect(message.errorMessage).toBeUndefined();
+      }
+    });
+
+    it("stays a stop when text came before a failing native reason", async () => {
+      const message = await openRouterStop(
+        [{ content: "Done.", role: "assistant" }],
+        "MALFORMED_RESPONSE"
+      );
+      expect(message.stopReason).toBe("stop");
+      expect(message.rawStopReason).toBe("stop.MALFORMED_RESPONSE");
+    });
+  });
+
+  it("records the raw finish reason and ignores native_finish_reason off OpenRouter", async () => {
+    const binding = fakeBinding(() =>
+      sseResponse([
+        JSON.stringify({
+          choices: [
+            {
+              delta: { content: "hi", role: "assistant" },
+              finish_reason: "stop",
+              index: 0,
+              native_finish_reason: "MALFORMED_RESPONSE"
+            }
+          ],
+          id: "chatcmpl-vendor",
+          object: "chat.completion.chunk"
+        }),
+        "[DONE]"
+      ])
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const { message } = await collectEvents(
+      ai.stream(ai(groqModel("openai/gpt-oss-20b")), userContext("hi"))
+    );
+
+    expect(message.stopReason).toBe("stop");
+    expect(message.rawStopReason).toBe("stop");
   });
 
   it("completes a stream that ends with [DONE] and no finish reason", async () => {
