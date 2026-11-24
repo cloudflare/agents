@@ -292,14 +292,32 @@ function searchableText(message: SessionMessage): string {
   if (next === undefined || !SEARCH_WORD.test(String.fromCodePoint(next))) {
     return first;
   }
-  const cut = first.search(LAST_SEARCH_WORD);
+  const cut = lastSeparator(first);
   return cut > 0 ? first.slice(0, cut) : first;
 }
 
 /** A character the `unicode61` tokenizer keeps inside a word. */
 const SEARCH_WORD = /[\p{L}\p{N}\p{M}\p{Co}]/u;
-/** The last separator and the (cut) word after it, at the end of a string. */
-const LAST_SEARCH_WORD = /[^\p{L}\p{N}\p{M}\p{Co}][\p{L}\p{N}\p{M}\p{Co}]*$/u;
+
+/**
+ * The index of the last separator in `text` (the character before its final
+ * word), or -1 when `text` is one word. Scans back one code point at a time:
+ * a regex anchored at the end backtracks and runs out of stack on a slice of
+ * several megabytes.
+ */
+function lastSeparator(text: string): number {
+  for (let end = text.length; end > 0;) {
+    let start = end - 1;
+    const low = text.charCodeAt(start);
+    if (low >= 0xdc00 && low <= 0xdfff && start > 0) {
+      const high = text.charCodeAt(start - 1);
+      if (high >= 0xd800 && high <= 0xdbff) start--;
+    }
+    if (!SEARCH_WORD.test(text.slice(start, end))) return start;
+    end = start;
+  }
+  return -1;
+}
 
 /**
  * The search index's own marker, a row at a fixed rowid with no text (it
