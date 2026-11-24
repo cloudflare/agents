@@ -38,7 +38,7 @@
     "@changesets/changelog-github": "^0.7.0",
     "@changesets/cli": "^2.31.0",
     "@cloudflare/vite-plugin": "1.62.3",
-    "@cloudflare/vitest-plugin": "1.9.0",
+    "@cloudflare/vitest-plugin": "1.9.1",
     "@cloudflare/workers-types": "^5.20261014.1",
     "@modelcontextprotocol/sdk": "1.32.2",
     "@openai/agents": "^0.12.0",
