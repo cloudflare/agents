@@ -212,7 +212,6 @@ src/
     browser-functions.ts # the `browser` API model code calls: functions, docs, CDP rules
     sandbox.ts          # runs browserTool's code in a Dynamic Worker with a `browser` global
     browser-tool.ts     # harness-neutral browserTool core shared by the tools/ adapters
-    truncate.ts         # truncateResult, copied from codemode
     tool-helpers.ts     # model-output + ctx helpers shared by ai.ts and the tools/ adapters
     tanstack-ai.ts      # legacy createBrowserTools for TanStack AI (re-exported by tools/tanstack-ai.ts)
     tools/              # browserTool adapters for a persistent Browser: ai-sdk.ts, tanstack-ai.ts, pi.ts

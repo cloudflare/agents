@@ -8,7 +8,7 @@ import { runBrowserCode } from "./sandbox";
 import { DEFAULT_BROWSER_SCOPE } from "./scope";
 import { BrowserSession, type BrowserSource } from "./session";
 import { transformBrowserResult } from "./tool-helpers";
-import { truncateResult } from "./truncate";
+import { truncateResult } from "@cloudflare/codemode";
 
 export interface BrowserToolOptions {
   /**

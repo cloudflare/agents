@@ -4,7 +4,7 @@
  */
 import type { JSONValue } from "ai";
 import { DEFAULT_MAX_RESULT_BYTES } from "./session";
-import { truncateResult } from "./truncate";
+import { truncateResult } from "@cloudflare/codemode";
 import { redactBase64Payloads } from "../core/base64-redaction";
 import { __DO_NOT_USE_WILL_BREAK__agentContext as agentContext } from "../internal_context";
 
