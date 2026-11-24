@@ -156,6 +156,33 @@ describe("createChatTurnTaskDefinition", () => {
     });
   });
 
+  it("does not read stash data shaped like an envelope as a snapshot", async () => {
+    const recovered: unknown[] = [];
+    const { step, checkpoint } = fakeStep(undefined);
+    const lookalike = {
+      __snapshot: {
+        version: 1,
+        kind: "k",
+        requestId: "other",
+        continuation: false
+      },
+      user: "not mine"
+    };
+    checkpoint.set("stash", JSON.stringify(lookalike));
+    await createChatTurnTaskDefinition({
+      ...hooks,
+      storage: {
+        get: async () => undefined,
+        delete: async () => true
+      } as unknown as DurableObjectStorage,
+      recover: async (turn) => void recovered.push(turn.persisted)
+    })({ requestId: "r1", continuation: false, nonce: "n1" }, step);
+    expect(unwrapChatFiberSnapshot("__snapshot", recovered[0])).toEqual({
+      snapshot: null,
+      user: lookalike
+    });
+  });
+
   it("hands a replay of a run from before the input carried it the envelope it checkpointed", async () => {
     const recovered: unknown[] = [];
     const { step, checkpoint } = fakeStep(undefined);
