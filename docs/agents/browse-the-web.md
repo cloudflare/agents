@@ -390,16 +390,45 @@ Handlers run synchronously as each event arrives, so code awaiting a command's r
 
 ### The host observer
 
-Each browser session has a host-only observer: a second CDP connection, opened alongside the model's, that follows the tabs the model works in. Model code can't see, address, or detach it. The model's first command to each tab waits for the observer to be ready there, at most about 250 ms, so the observer sees the first navigation; later commands don't wait. The observer follows page targets only. It costs about one round trip per session. To turn it off, create the `Browser` with `hostObserver: false`:
+Each browser session opens a second CDP connection beside the model's, for the host. Model code cannot see, address, or detach it. It follows the tabs the session works in (page targets only): the scope's tab when the session starts, and each tab the model attaches to. The model's first command to each tab waits for it to be ready there, at most about 250 ms, so it hears the first navigation; later commands do not wait. It costs about one round trip per session. If it cannot connect within 2 seconds, the session goes on without it.
+
+#### Page dialogs
+
+The SDK answers JavaScript dialogs on the host connection as soon as they open, because an unanswered `alert()`, `confirm()`, or `prompt()` blocks every later command in its tab. It accepts `alert` and `beforeunload`, and dismisses `confirm` and `prompt`, so the host never says yes for the model. The model gets a notice for each dialog saying what was asked and how it was answered. To answer yes, model code overrides the dialog in the page before the step that opens it, for example with `window.confirm = () => true` or `window.prompt = () => "answer"`. A dialog that opened before the host could answer it cannot be answered later, and leaves its tab blocked. The model is told to reload or navigate such a tab when a command to it times out, and again when the session closes if the tab still does not respond.
+
+#### Run your own code on the model's tabs
+
+Pass `hostObserver` (experimental) to run your own code on the host connection, once per tab each session works in. It gets the tab, and can return a cleanup that runs when the session closes:
 
 ```ts
 browser = new Browser({
   provider: browserRun(this.env.BROWSER),
-  hostObserver: false
+  hostObserver: async (tab) => {
+    let failed = 0;
+    tab.on("Network.loadingFailed", () => failed++);
+    tab.on("Page.frameNavigated", ({ params }) => {
+      console.log(tab.scope, "navigated to", params.frame);
+    });
+    await tab.send("Network.enable");
+    await tab.send("Page.enable");
+    // Runs when the session closes, while the connection is still open.
+    return () => {
+      if (failed > 0) tab.notify(`${failed} requests failed during this run.`);
+    };
+  }
 });
 ```
 
-The observer answers JavaScript dialogs as soon as they open, because an unanswered `alert()`, `confirm()`, or `prompt()` blocks every later command in its tab. It accepts `alert` and `beforeunload`, and dismisses `confirm` and `prompt`, so the host never says yes for the model. The model gets a notice for each dialog. To answer yes, model code overrides the dialog in the page before the step that opens it, for example with `window.confirm = () => true` or `window.prompt = () => "answer"`. A dialog that opened before the observer could answer it can't be answered later, and leaves its tab blocked. The model is told to reload or navigate such a tab when a command to it times out, and again when the session closes if the tab still doesn't respond.
+- `tab.send()`, `tab.on()`, and `tab.waitFor()` are bound to the host's CDP session on that tab, so `tab.on()` hears only that tab's events. Enable the domains you listen to yourself. `tab.cdp` and `tab.sessionId` are the raw connection and session id, for browser-level commands. `tab.targetId` and `tab.scope` say which tab and scope it is.
+- The model's first command to the tab waits for the SDK's setup and your hook's promise together, at most about 250 ms. After that the model goes ahead, your hook keeps running, and a warning is logged.
+- A hook or cleanup that throws or rejects is logged and never fails the run.
+- When the session closes, the SDK finishes its own work, then runs the cleanups with the connection still open, for at most about 1 second in all, then collects the notices and closes the connection. Listeners end with it.
+- `tab.notify(sentence)` adds a sentence to the notices the model gets when the session closes (`report.notices`, and the tool's `notice`), after the SDK's own. A session keeps up to 20. Anything else the hook learns, it writes to your agent's storage, state, or logs itself.
+- The hook is advice, not enforcement. If the host connection does not open, the hook is not called and the session runs without it, and model code can still close a tab or block requests. Do not build an allowlist or any other control on it.
+- The SDK's dialog answering runs before your hook in each tab, so it hears each event first. Your hook can listen to `Page.javascriptDialogOpening`, but if it also sends `Page.handleJavaScriptDialog`, the SDK has already answered and the command fails with "No dialog is showing".
+- The hook runs in every session, on every tab the model uses. A hook that enables Network parses an event for every request in your Durable Object. A hook that changes what the page does can break it: `Fetch.enable` without answering each `Fetch.requestPaused` hangs every request in the tab.
+
+#### What the host connection records
 
 When the session closes, `BrowserSessionReport.observed` (experimental: its shape may change) holds what the observer saw in each tab: its initial URL, main-frame navigations, each main document's status, redirects, and load error, and the dialogs it answered. A tab the observer couldn't follow is left out, so a missing tab means "unknown". The URLs are kept whole, query strings and fragments included, so they can carry tokens (OAuth codes, magic links): redact them before logging the report. It's for the host: `browserTool` passes only notices to the model. If the observer can't connect within 2 seconds, the session goes on without it and `observed` says why. The record is advisory, not enforcement: model code can still close a tab or block requests.
 
