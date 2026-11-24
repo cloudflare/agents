@@ -328,6 +328,22 @@ describe("Session config", () => {
     });
   });
 
+  it("clearMessages records when it ran, in a key a later clear keeps", async () => {
+    await withSession(async (session) => {
+      expect(await session.internal_config("session:cleared-at")).toBeNull();
+      await appendAll(session, 1, 2);
+      await session.clearMessages();
+      const first = Number(await session.internal_config("session:cleared-at"));
+      expect(first).toBeGreaterThan(0);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await session.clearMessages();
+      const second = Number(
+        await session.internal_config("session:cleared-at")
+      );
+      expect(second).toBeGreaterThan(first);
+    });
+  });
+
   it("is per session", async () => {
     await withSession(async (_session, instance) => {
       const a = instance.sessions.session("a");
