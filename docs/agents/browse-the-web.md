@@ -428,10 +428,6 @@ browser = new Browser({
 - The SDK's dialog answering runs before your hook in each tab, so it hears each event first. Your hook can listen to `Page.javascriptDialogOpening`, but if it also sends `Page.handleJavaScriptDialog`, the SDK has already answered and the command fails with "No dialog is showing".
 - The hook runs in every session, on every tab the model uses. A hook that enables Network parses an event for every request in your Durable Object. A hook that changes what the page does can break it: `Fetch.enable` without answering each `Fetch.requestPaused` hangs every request in the tab.
 
-#### What the host connection records
-
-When the session closes, `BrowserSessionReport.observed` (experimental: its shape may change) holds what the observer saw in each tab: its initial URL, main-frame navigations, each main document's status, redirects, and load error, and the dialogs it answered. A tab the observer couldn't follow is left out, so a missing tab means "unknown". The URLs are kept whole, query strings and fragments included, so they can carry tokens (OAuth codes, magic links): redact them before logging the report. It's for the host: `browserTool` passes only notices to the model. If the observer can't connect within 2 seconds, the session goes on without it and `observed` says why. The record is advisory, not enforcement: model code can still close a tab or block requests.
-
 ## Local development
 
 Recent Wrangler releases support Browser Run in local development. `npx wrangler dev` provisions the browser automatically, so the same `browser: env.BROWSER` setup works locally and when deployed.
