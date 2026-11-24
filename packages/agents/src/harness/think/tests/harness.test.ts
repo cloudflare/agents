@@ -291,6 +291,30 @@ describe("ThinkHarness approvals and client tools", () => {
     expect(await stub.watchedToolOwners()).toEqual(["alice"]);
   });
 
+  it("finds the owner on the call an answer settles when a tool-call id is reused", async () => {
+    const stub = fresh();
+    const result = (output: string) => ({
+      type: "tool-result" as const,
+      toolCallId: "reused-call",
+      result: { ok: true as const, output }
+    });
+    // Alice's call is answered and settled; Bob's later call has the same id.
+    await stub.promptAs("client reused id", "alice");
+    expect(text(await stub.answerAs(result("lisbon"), "alice"))).toBe(
+      "tool said: lisbon"
+    );
+    await stub.promptAs("client reused id", "bob");
+    expect(await stub.watchedToolOwners()).toEqual(["alice", "bob"]);
+
+    // The waiting call is Bob's: Alice may not answer it, Bob may.
+    expect(reason(await stub.answerAs(result("porto"), "alice"))).toBe(
+      "not_owner"
+    );
+    expect(text(await stub.answerAs(result("porto"), "bob"))).toBe(
+      "tool said: porto"
+    );
+  });
+
   it("waits for a client tool result, then continues", async () => {
     const stub = fresh();
     const first = await stub.prompt("client");

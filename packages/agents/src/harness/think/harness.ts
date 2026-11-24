@@ -46,6 +46,7 @@ import { CONTEXT_RECORD_KIND, type Context } from "../../context/context";
 import type { SearchResult, SessionMessage } from "../../sessions/types";
 import type { StreamJson } from "../../streams/types";
 import {
+  answeredMessage,
   answerToolCall,
   toResponseChunk,
   toTranscriptMessage,
@@ -1113,13 +1114,10 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         if (answer.type === "tool-result" && input.from !== undefined) {
           // Only the client of the participant who started the turn runs
           // a client tool.
+          // The call this answer settles, as answerToolCall finds it: a
+          // provider may reuse a tool-call id across replies.
           const owner = ownerOf(
-            history.find((message) =>
-              message.parts.some(
-                (part) =>
-                  isToolCallPart(part) && part.toolCallId === answer.toolCallId
-              )
-            )?.metadata
+            answeredMessage(history, toolCallAnswer(answer))?.metadata
           );
           if (owner !== undefined && owner !== input.from) {
             unanswered = "not_owner";

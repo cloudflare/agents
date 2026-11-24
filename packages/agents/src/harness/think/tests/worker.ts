@@ -309,6 +309,11 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         parts = callReply([{ name: "dangerous" }]);
       } else if (text === "client") {
         parts = callReply([{ name: "ask", input: { question: "why?" } }]);
+      } else if (text === "client reused id") {
+        // A provider that reuses tool-call ids across replies.
+        parts = callReply([
+          { name: "ask", input: { question: "again?" }, id: "reused-call" }
+        ]);
       } else if (text === "slow") {
         return this.#slow(12);
       } else if (text === "slow-short") {
