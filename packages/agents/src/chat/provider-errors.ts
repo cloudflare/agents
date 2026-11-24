@@ -65,13 +65,17 @@ function textOf(error: unknown): string {
  * @internal
  */
 export function classifyProviderError(
-  error: unknown
+  error: unknown,
+  depth = 0
 ): ProviderErrorClassification | undefined {
   const last =
     error !== null && typeof error === "object" && "lastError" in error
       ? (error as { lastError: unknown }).lastError
       : undefined;
-  if (last !== undefined) return classifyProviderError(last);
+  // Bounded: a wrapper that points back at itself is read as it is.
+  if (last !== undefined && depth < 4) {
+    return classifyProviderError(last, depth + 1);
+  }
   const status = statusOf(error);
   const text = status === undefined || status < 500 ? textOf(error) : "";
   if (

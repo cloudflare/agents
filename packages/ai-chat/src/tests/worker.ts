@@ -3131,7 +3131,8 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
               // Let the provider's error fail the stream, so the host
               // reads its status, instead of masking it as text.
               onError: (error) => {
-                throw error;
+                if (APICallError.isInstance(error)) throw error;
+                return error instanceof Error ? error.message : String(error);
               }
             }
           : undefined

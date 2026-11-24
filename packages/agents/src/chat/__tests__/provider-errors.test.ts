@@ -95,6 +95,14 @@ describe("classifyProviderError", () => {
     ).toBe("transient");
   });
 
+  it("reads a wrapper whose last error points back at itself without looping", () => {
+    const circular: { message: string; lastError?: unknown } = {
+      message: "retries ran out"
+    };
+    circular.lastError = circular;
+    expect(classifyProviderError(circular)).toBeUndefined();
+  });
+
   it("reads an AI SDK RetryError by its last error", () => {
     const exhausted = new RetryError({
       message: "Failed after 3 attempts.",
