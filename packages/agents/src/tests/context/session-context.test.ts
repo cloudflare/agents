@@ -738,6 +738,27 @@ describe("Context", () => {
     });
   });
 
+  it("keeps the frozen prompt for a first turn from before the upgrade that is retried", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const sessions = new Sessions();
+      install(sessions);
+      const session = sessions.session();
+      const released = "Released prompt.";
+      const context = new Context(session, {
+        sql: storageSql(storage),
+        blocks: [{ label: "soul", provider: { get: async () => "Be kind." } }],
+        promptStore: { get: async () => released }
+      });
+      // The release sent u1 and was cut before an answer was stored.
+      await session.appendMessage(user("u1", "hello"));
+      expect((await context.prepare({ retry: true })).system).toBe(released);
+      // The answer, then a new turn: still the release's prompt.
+      await session.appendMessage(assistant("a1", "hi"));
+      await session.appendMessage(user("u2", "again"));
+      expect((await context.build()).system).toBe(released);
+    });
+  });
+
   it("projects the same history to the same messages", async () => {
     await withCapabilityHarness(async ({ storage, install }) => {
       const { session, context, setDate } = await setup(storage, (s) =>

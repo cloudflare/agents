@@ -273,7 +273,7 @@ export class Context {
     // clear the transcript is new, and a frozen prompt must not come back.
     const released = delivered.system
       ? null
-      : await this.#released(history, !retry);
+      : await this.#released(history, { retry });
     if (!delivered.system && !refresh) {
       delivered = await this.#carriedForward(delivered, released);
     }
@@ -427,7 +427,7 @@ export class Context {
       const found = await this.#delivered(history);
       const delivered = await this.#carriedForward(
         found,
-        found.system ? null : await this.#released(history, false)
+        found.system ? null : await this.#released(history, { read: true })
       );
       if (delivered.system) return renderSystem(delivered.system);
     }
@@ -459,7 +459,7 @@ export class Context {
     const found = await this.#delivered(history);
     const delivered = await this.#carriedForward(
       found,
-      found.system ? null : await this.#released(history, false)
+      found.system ? null : await this.#released(history, { read: true })
     );
     if (!delivered.system) return null;
     const changes = await this.#changes(delivered.values);
@@ -606,18 +606,22 @@ export class Context {
 
   /**
    * The prompt frozen before Context, when this transcript was sent it:
-   * not once the transcript started after Context. With `mark`, a first
-   * message that had nothing before it marks the transcript as such.
+   * not once the transcript started after Context. A first message with
+   * nothing before it starts such a transcript, and a turn that prepares
+   * it marks the transcript so; a retry of it was sent before, so it keeps
+   * the frozen prompt (a first turn after Context that was cut and retried
+   * has a record or the mark from its first attempt). `read` marks nothing.
    */
   async #released(
     history: readonly SessionMessage[],
-    mark: boolean
+    how: { readonly retry?: boolean; readonly read?: boolean }
   ): Promise<string | null> {
     if (!this.#promptStore) return null;
     this.#frozen ??= await this.#promptStore.get();
     if (this.#frozen === null) return null;
     this.#fresh ??= (await this.#session.internal_config(FRESH)) !== null;
     if (this.#fresh) return null;
+    if (how.retry) return this.#frozen;
     const tail = history.at(-1);
     const first =
       history.length === 1 &&
@@ -626,7 +630,7 @@ export class Context {
       (await this.#session.internal_storedPathRows({ skip: 1, limit: 1 }))
         .length === 0;
     if (!first) return this.#frozen;
-    if (mark) {
+    if (!how.read) {
       await this.#session.internal_setConfig(FRESH, "1");
       this.#fresh = true;
     }
