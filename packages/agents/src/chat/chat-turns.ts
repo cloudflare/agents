@@ -709,8 +709,13 @@ export class ChatTurns<
    * recovery settles: nothing happens while an interrupted turn still waits
    * for recovery. See `admissions.ts`.
    */
-  resumeAdmissions(): Promise<void> {
-    return this.admissions?.resume() ?? Promise.resolve();
+  async resumeAdmissions(): Promise<void> {
+    const admissions = this.admissions;
+    // Held awake only while there is something to replay: a start with no
+    // records arms and drops no keep-alive job. Async, so a store that
+    // throws rejects (the hosts log it) instead of failing their start.
+    if (!admissions?.hasOrphans()) return;
+    await this.host.keepAliveWhile(() => admissions.resume());
   }
 
   /**

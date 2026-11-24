@@ -1552,10 +1552,11 @@ export class AIChatAgent<
     // legacy fiber recovery runs first). Its replays then wait for the
     // call `onStart` makes once it is done.
     if (!this._appStartedForAdmissions) return;
-    void this.keepAliveWhile(() => this._turns.resumeAdmissions()).catch(
-      (error) =>
+    void this._turns
+      .resumeAdmissions()
+      .catch((error) =>
         console.error("[AIChatAgent] failed to replay requests:", error)
-    );
+      );
   }
 
   /**
