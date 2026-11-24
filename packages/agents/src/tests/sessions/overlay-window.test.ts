@@ -111,7 +111,11 @@ describe("Sessions path reads cut by a window", () => {
         fromMessageId: messages[0].id,
         toMessageId: messages[messages.length - 21].id
       }));
-      await session.compact();
+      // Each round takes the oldest part within the compaction budget.
+      for (let round = 0; round < 6; round++) {
+        if ((await session.getHistory()).length <= 21) break;
+        await session.compact();
+      }
       expect(await session.getHistory()).toHaveLength(21);
       await session.appendMessage(text("m12001"));
       const history = await session.getHistory();

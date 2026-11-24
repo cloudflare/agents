@@ -309,20 +309,70 @@ export interface CompactOptions {
  *   .compactAfter(100_000);
  * ```
  */
+/**
+ * @internal Set by `compact()` on the messages of a round that holds only
+ * the oldest part of the visible path: how many newer visible messages it
+ * left out, and their estimated tokens. They are the most recent, so they
+ * count toward the recent tail a compaction function keeps.
+ */
+export const OLDEST_PART: unique symbol = Symbol("agents.sessions.oldestPart");
+
+type LeftOut = { messages: number; tokens: number };
+
+/** What a round left out after its messages; `null` for the whole path. */
+function leftOutAfter(messages: readonly SessionMessage[]): LeftOut | null {
+  return (messages as { [OLDEST_PART]?: LeftOut })[OLDEST_PART] ?? null;
+}
+
+/**
+ * The tail cut when the minimum tail is already met by messages after
+ * these: the newest messages that fit `tailTokens` stay, and none does when
+ * even the newest is over it (unlike `findTailCutByTokens`, which always
+ * keeps one).
+ */
+function tailCutWithin(
+  messages: SessionMessage[],
+  headEnd: number,
+  tailTokens: number
+): number {
+  let cut = messages.length;
+  let kept = 0;
+  for (let i = messages.length - 1; i >= headEnd; i--) {
+    const tokens = estimateMessageTokens([messages[i]]);
+    if (kept + tokens > tailTokens) break;
+    kept += tokens;
+    cut = i;
+  }
+  return cut === messages.length ? cut : alignBoundaryBackward(messages, cut);
+}
+
 export function createCompactFunction(opts: CompactOptions) {
   const keepRecentTokens = opts.keepRecentTokens ?? 20_000;
 
   return async (messages: SessionMessage[]): Promise<CompactResult | null> => {
-    if (messages.length <= PROTECT_HEAD + MIN_TAIL_MESSAGES) return null;
+    // A round of a long session gets only its oldest part. The messages
+    // it left out are the newest, so they count toward the recent tail:
+    // only what they don't make up of `keepRecentTokens` and of the
+    // minimum tail is kept at the end of this part.
+    const leftOut = leftOutAfter(messages);
+    const tailTokens = Math.max(0, keepRecentTokens - (leftOut?.tokens ?? 0));
+    const tailMessages = Math.max(
+      0,
+      MIN_TAIL_MESSAGES - (leftOut?.messages ?? 0)
+    );
+    if (messages.length <= PROTECT_HEAD + tailMessages) return null;
 
     // 1. Find compression boundaries
     const compressStart = alignBoundaryForward(messages, PROTECT_HEAD);
-    const compressEnd = findTailCutByTokens(
-      messages,
-      compressStart,
-      keepRecentTokens,
-      MIN_TAIL_MESSAGES
-    );
+    const compressEnd =
+      tailMessages === 0
+        ? tailCutWithin(messages, compressStart, tailTokens)
+        : findTailCutByTokens(
+            messages,
+            compressStart,
+            tailTokens,
+            tailMessages
+          );
 
     if (compressEnd <= compressStart) {
       return null;
