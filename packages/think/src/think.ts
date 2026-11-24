@@ -321,6 +321,7 @@ import {
   submissionRow,
   submissionSettlement,
   submissionTaskStatuses,
+  admittedSubmissionMetadata,
   progressOutputFits,
   type SubmissionResult,
   TERMINAL_SUBMISSION_STATUSES,
@@ -5882,7 +5883,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               idempotencyKey: options.idempotencyKey
             }),
             ...(options?.metadata && {
-              metadata: options.metadata as Record<string, TaskJson>
+              metadata: admittedSubmissionMetadata(
+                options.metadata as Record<string, unknown>
+              )
             }),
             lane: SUBMISSION_LANE,
             start: "alarm"

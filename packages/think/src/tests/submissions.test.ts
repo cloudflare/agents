@@ -417,6 +417,41 @@ describe("Think durable submissions", () => {
     await expect(agent.keepAliveHoldsForTest()).resolves.toBe(0);
   });
 
+  it("ignores an app's own __cf_progress field and still records the turn's progress", async () => {
+    const agent = await freshAgent();
+    await agent.testSubmitMessages("with a clashing field", {
+      submissionId: "sub-progress-clash",
+      metadata: { __cf_progress: "draft", source: "app" }
+    });
+    const done = await agent.waitForSubmissionForTest("sub-progress-clash", {
+      timeoutMs: 10_000
+    });
+    expect(done).toMatchObject({
+      status: "completed",
+      metadata: { source: "app" }
+    });
+    expect(done?.messageId).toBeDefined();
+  });
+
+  it("refuses metadata that leaves no room for the turn's progress, and keeps the progress of metadata that fits", async () => {
+    const agent = await freshAgent();
+    await expect(
+      agent.testSubmitMessagesError("too much metadata", {
+        submissionId: "sub-meta-full",
+        metadata: { big: "m".repeat(1_850_000) }
+      })
+    ).resolves.toMatch(/fit beside the submission's progress/);
+    await agent.testSubmitMessages("metadata that fits", {
+      submissionId: "sub-meta-fits",
+      metadata: { big: "m".repeat(1_700_000) }
+    });
+    const done = await agent.waitForSubmissionForTest("sub-meta-fits", {
+      timeoutMs: 10_000
+    });
+    expect(done?.status).toBe("completed");
+    expect(done?.messageId).toBeDefined();
+  });
+
   it("accepts a submission quickly and completes it through the normal turn path", async () => {
     const agent = await freshAgent();
     await agent.setDelayedChunkResponse(["slow ", "response"], 50);
