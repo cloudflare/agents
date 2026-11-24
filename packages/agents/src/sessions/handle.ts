@@ -465,7 +465,8 @@ export class Session {
    * first-party module keeps about messages of this session, by kind. Never
    * part of a message and never sent to a client; deleted with its message
    * and on clear; an overlay carries the newest annotation of each kind
-   * from the rows it hides. Returns only the ids that have one.
+   * from the rows it hides, and keeps it after those rows are deleted (its
+   * summary was written with them). Returns only the ids that have one.
    */
   async internal_annotations(
     kind: string,

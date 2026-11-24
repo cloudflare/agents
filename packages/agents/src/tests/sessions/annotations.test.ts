@@ -339,4 +339,39 @@ describe("Session config", () => {
       expect(await b.internal_config("transcript:k")).toBe("b");
     });
   });
+
+  it("carries past an older overlay by its summary, not row by row", async () => {
+    await withSession(async (session, instance) => {
+      const sql = sqlOf(instance);
+      await session.getCompactions();
+      sql.exec(
+        `INSERT INTO cf_agents_session_messages
+          (session_id, id, seq, parent_id, role, content, token_estimate, created_at)
+         WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 15000)
+         SELECT '', 'm' || i, i, CASE WHEN i = 1 THEN NULL ELSE 'm' || (i - 1) END,
+           'user', json_object('id', 'm' || i, 'role', 'user',
+             'parts', json_array(json_object('type', 'text', 'text', 'x'))),
+           1, i FROM n`
+      );
+      await session.internal_setAnnotation("ctx", "m50", "a");
+      const first = await meter(sql, () =>
+        session.addCompaction("first", "m1", "m10000")
+      );
+      // One message lookup and one overlay probe per step: the first
+      // compaction costs what it did before the walk could jump (60,013).
+      expect(first.rowsRead).toBeLessThan(61_000);
+      // The first overlay carried m50's value; the row itself can go.
+      await session.deleteMessages(["m50"]);
+      const { rowsRead } = await meter(sql, () =>
+        session.addCompaction("second", "m1", "m15000")
+      );
+      const latest = await session.internal_latestAnnotation("ctx");
+      expect(latest?.value).toBe("a");
+      // The carry walks the 5,000 rows above the first overlay and takes
+      // its summary's value, instead of the 15,000 rows down to the root
+      // (90,010 rows read before, 50,020 now; the rest is the compaction's
+      // own checks).
+      expect(rowsRead).toBeLessThan(60_000);
+    });
+  }, 120_000);
 });
