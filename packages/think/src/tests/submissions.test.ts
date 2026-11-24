@@ -390,6 +390,26 @@ describe("Think durable submissions", () => {
     );
   });
 
+  it("never marks a live turn stale, however long it runs past the stale window (#2498)", async () => {
+    const agent = await freshAgent();
+    // The window only judges an interrupted turn's recovery evidence; a
+    // turn whose isolate lives holds its run and is never reconciled.
+    await agent.setSubmissionRecoveryStaleMsForTest(50);
+    try {
+      await agent.setDelayedChunkResponse(["a", "b", "c", "d"], 300);
+      await agent.testSubmitMessages("a long turn", {
+        submissionId: "sub-long-live"
+      });
+      const done = await agent.waitForSubmissionForTest("sub-long-live", {
+        timeoutMs: 10_000
+      });
+      expect(done?.status).toBe("completed");
+      expect(done!.completedAt! - done!.startedAt!).toBeGreaterThan(1_000);
+    } finally {
+      await agent.setSubmissionRecoveryStaleMsForTest(15 * 60 * 1000);
+    }
+  });
+
   it("accepts a submission quickly and completes it through the normal turn path", async () => {
     const agent = await freshAgent();
     await agent.setDelayedChunkResponse(["slow ", "response"], 50);
