@@ -162,6 +162,11 @@ describe("Tasks clear and the checkpoint", () => {
     await runInDurableObject(
       stub,
       async (instance: TaskHarnessObject, state) => {
+        // Registered here, not by the harness: the other tests keep the
+        // plain clear (no definition keeps its checkpoint).
+        instance.tasks.register("__cf_kept", async () => "kept", {
+          keepCheckpoint: true
+        });
         await instance.tasks.get("warm");
         const now = Date.now();
         for (const [runId, definition, seq] of [
