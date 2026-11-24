@@ -46,14 +46,24 @@ type PartRecord = Record<string, unknown> & { type: string };
  * Sanitize a message for persistence by removing ephemeral provider-specific
  * data that should not be stored or sent back in subsequent requests.
  *
- * 1. Strips OpenAI ephemeral fields (itemId, reasoningEncryptedContent)
- * 2. Filters truly empty reasoning parts (no text, no remaining providerMetadata)
+ * 1. Strips OpenAI ephemeral fields (itemId, reasoningEncryptedContent). A
+ *    stored reasoning id replayed after a client-tool round trip reaches
+ *    the provider twice (#728).
+ * 2. Except: when the message holds a provider-executed tool part (OpenAI's
+ *    `web_search`, ...), its reasoning parts keep `openai.itemId`. The next
+ *    request references that tool call by id, and OpenAI refuses the
+ *    reference without the reasoning item that preceded it (#2639).
+ * 3. Filters truly empty reasoning parts (no text, no remaining providerMetadata)
  */
 export function sanitizeMessage<M extends { parts: readonly object[] }>(
   message: M
 ): M {
+  const keepReasoningIds = (message.parts as readonly PartRecord[]).some(
+    (part) => part.providerExecuted === true
+  );
   const parts = (message.parts as readonly PartRecord[]).flatMap((part) => {
     let sanitized = part;
+    const keepItemId = keepReasoningIds && part.type === "reasoning";
     for (const key of ["providerMetadata", "callProviderMetadata"] as const) {
       const metadata = sanitized[key];
       if (
@@ -61,7 +71,7 @@ export function sanitizeMessage<M extends { parts: readonly object[] }>(
         typeof metadata === "object" &&
         "openai" in (metadata as Record<string, unknown>)
       ) {
-        sanitized = stripOpenAIMetadata(sanitized, key);
+        sanitized = stripOpenAIMetadata(sanitized, key, keepItemId);
       }
     }
     if (sanitized.type === "reasoning") {
@@ -82,7 +92,8 @@ export function sanitizeMessage<M extends { parts: readonly object[] }>(
 
 function stripOpenAIMetadata(
   part: PartRecord,
-  metadataKey: "providerMetadata" | "callProviderMetadata"
+  metadataKey: "providerMetadata" | "callProviderMetadata",
+  keepItemId: boolean
 ): PartRecord {
   const metadata = part[metadataKey] as {
     openai?: Record<string, unknown>;
@@ -91,10 +102,12 @@ function stripOpenAIMetadata(
   if (!metadata?.openai) return part;
 
   const {
-    itemId: _itemId,
+    itemId,
     reasoningEncryptedContent: _rec,
-    ...restOpenai
+    ...stripped
   } = metadata.openai;
+  const restOpenai =
+    keepItemId && itemId !== undefined ? { ...stripped, itemId } : stripped;
   const { openai: _openai, ...restMetadata } = metadata;
 
   let next: Record<string, unknown> | undefined;
