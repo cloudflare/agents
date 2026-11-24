@@ -22,26 +22,32 @@ export interface PythonRuntime {
 /**
  * The Pyodide release whose lockfile gives the wheels to install: it must
  * match the Python the Worker runs, which its compatibility date and flags
- * pick. Wheels built for another Python fail to import. Measured 24 Nov 2026
- * on dynamic Workers in production: Python 3.12 before 2025-09-29, 3.13 from
- * 2025-09-29 (or with `python_workers_20250116`), 3.14 from 2026-09-08 (or
- * with `python_workers_314`, which the docs describe).
+ * pick. Wheels built for another Python or toolchain fail to import.
+ * Measured 24 Nov 2026 on dynamic Workers in production:
+ * - Python 3.14 from 2026-09-08, or with `python_workers_314` or
+ *   `python_workers_20260610`; `no_python_workers_314` turns the date off.
+ *   A 2026-09-08 date with `python_workers_20250116` still runs 3.14.
+ * - Python 3.13 from 2025-09-29, or with `python_workers_20250116`;
+ *   `no_python_workers_20250116` turns the date off.
+ * - Python 3.12.1 otherwise, Pyodide 0.26.0a2 (Emscripten 3.1.52).
  */
 export function pyodideVersionFor(runtime: PythonRuntime): string {
   const flags = runtime.compatibilityFlags;
+  const date = runtime.compatibilityDate;
   if (
     flags.includes("python_workers_314") ||
-    runtime.compatibilityDate >= "2026-09-08"
+    flags.includes("python_workers_20260610") ||
+    (date >= "2026-09-08" && !flags.includes("no_python_workers_314"))
   ) {
     return "v314.0.6";
   }
   if (
     flags.includes("python_workers_20250116") ||
-    runtime.compatibilityDate >= "2025-09-29"
+    (date >= "2025-09-29" && !flags.includes("no_python_workers_20250116"))
   ) {
     return "v0.28.2";
   }
-  return "v0.27.5";
+  return "v0.26.0a2";
 }
 
 /** A Pyodide release and its lockfile, when it could be fetched. */

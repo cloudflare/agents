@@ -99,6 +99,21 @@ async function alarmArmed(
   return alarm !== null;
 }
 
+/**
+ * Run the wake's alarm once it is armed. The runtime may fire a due alarm
+ * between the armed check and the run, leaving nothing to run: then wait for
+ * the heartbeat to re-arm it and try again.
+ */
+async function runArmedAlarm(
+  stub: DurableObjectStub<PiHarnessTestObject>
+): Promise<boolean> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    if (!(await alarmArmed(stub))) return false;
+    if (await runDurableObjectAlarm(stub)) return true;
+  }
+  return false;
+}
+
 describe("PiHarness on pi-durable", () => {
   it("answers a prompt with a tool call and keeps the transcript across eviction", async () => {
     const stub = fresh();
@@ -156,10 +171,8 @@ describe("PiHarness on pi-durable", () => {
     const eviction = await evictWhenIdle(stub);
     expect(eviction.result).toBe("kept");
     // The alarm firing does not move the work to a new instance.
-    expect(await alarmArmed(stub)).toBe(true);
-    expect(await runDurableObjectAlarm(stub)).toBe(true);
-    expect(await alarmArmed(stub)).toBe(true);
-    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    expect(await runArmedAlarm(stub)).toBe(true);
+    expect(await runArmedAlarm(stub)).toBe(true);
     expect(await stub.instance()).toBe(instance);
 
     expect(await stub.releaseHold()).toBe(true);

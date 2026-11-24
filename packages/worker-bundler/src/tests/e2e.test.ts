@@ -1338,6 +1338,7 @@ describe("createWorker with pyproject.toml", () => {
 
   // The compatibility date picks the Python the Worker runs, and the wheels
   // must match it: 3.12 before 2025-09-29, 3.13 until 2026-09-07, 3.14 after.
+  // pyyaml and numpy each import a C extension.
   it.each([
     ["2025-09-01", "3.12"],
     ["2026-01-01", "3.13"],
@@ -1352,18 +1353,20 @@ describe("createWorker with pyproject.toml", () => {
             "import sys",
             "from workers import Response, WorkerEntrypoint",
             "from yaml import _yaml",
+            "import numpy",
             "class Default(WorkerEntrypoint):",
             "  async def fetch(self, request):",
             "    return Response.json({",
             '      "python": f"{sys.version_info.major}.{sys.version_info.minor}",',
-            '      "native": _yaml.__name__',
+            '      "native": _yaml.__name__,',
+            '      "sum": int(numpy.arange(4).sum())',
             "    })"
           ].join("\n"),
           "pyproject.toml": [
             "[project]",
             'name = "dummy"',
             'version = "0.0.0"',
-            'dependencies = ["pyyaml"]'
+            'dependencies = ["pyyaml", "numpy"]'
           ].join("\n"),
           "wrangler.toml": `compatibility_date = "${compatibilityDate}"`
         }
@@ -1380,7 +1383,11 @@ describe("createWorker with pyproject.toml", () => {
         .getEntrypoint()
         .fetch(new Request("http://worker/"));
       expect(response.status).toBe(200);
-      expect(await response.json()).toEqual({ python, native: "yaml._yaml" });
+      expect(await response.json()).toEqual({
+        python,
+        native: "yaml._yaml",
+        sum: 6
+      });
     }
   );
 
