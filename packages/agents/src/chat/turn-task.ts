@@ -134,7 +134,9 @@ export function createChatTurnTaskDefinition(
                     try {
                       // SAFETY: stash data is JSON, as fiber stash data
                       // always was; the write throws on anything else.
-                      step.checkpoint.set(STASH, data as TaskJson);
+                      // `stash(undefined)` clears the data, as the envelope
+                      // with no `user` field did.
+                      step.checkpoint.set(STASH, (data ?? null) as TaskJson);
                     } catch (error) {
                       console.warn("[chat] turn stash data not kept:", error);
                     }

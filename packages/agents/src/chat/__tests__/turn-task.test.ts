@@ -92,6 +92,24 @@ describe("createChatTurnTaskDefinition", () => {
     expect(JSON.parse(checkpoint.get("stash")!)).toEqual({ step: 1 });
   });
 
+  it("clears the stash data on stash(undefined)", async () => {
+    const entry: ChatTurnClosureEntry = {
+      onStash: () => {},
+      run: (inside) => inside(async () => "reply"),
+      settle: { resolve: () => {}, reject: () => {} }
+    };
+    const { step, checkpoint } = fakeStep(entry);
+    await createChatTurnTaskDefinition({
+      ...hooks,
+      withStash: (context, fn) => {
+        context.stash({ step: 1 });
+        context.stash(undefined);
+        return fn();
+      }
+    })({ requestId: "r1", continuation: false, nonce: "n1" }, step);
+    expect(JSON.parse(checkpoint.get("stash")!)).toBeNull();
+  });
+
   it("hands a replay the input's snapshot with the last stash data", async () => {
     const recovered: unknown[] = [];
     const { step, checkpoint } = fakeStep(undefined);

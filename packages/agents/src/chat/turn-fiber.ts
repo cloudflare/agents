@@ -33,6 +33,7 @@ import { wrapChatFiberSnapshot, type ChatFiberSnapshot } from "./recovery";
 import { isTurnStopped } from "./turn-stop";
 import { isDurableObjectMemoryLimitReset } from "../retries";
 import type { TaskJson } from "../tasks";
+import { MAX_PARTED_INPUT_BYTES } from "../tasks/serialization";
 import type { ChatTurnClosureEntry, ChatTurnTaskInput } from "./turn-task";
 
 /** What {@link ChatTurnFibers} needs from the agent that hosts it. */
@@ -239,11 +240,28 @@ export class ChatTurnFibers {
   }
 }
 
-/** `value` as JSON, or `undefined` when it cannot be kept as JSON. */
+/**
+ * Room in a run's input for what is not the snapshot (the request id, the
+ * nonce, JSON punctuation).
+ */
+const INPUT_HEADROOM_BYTES = 64 * 1024;
+
+/**
+ * `value` as JSON, or `undefined` when it cannot be kept as JSON or would
+ * not fit in a run's input (`MAX_PARTED_INPUT_BYTES`).
+ */
 function asJson(value: unknown): TaskJson | undefined {
   try {
+    const text = JSON.stringify(value);
+    if (
+      new TextEncoder().encode(text).byteLength >
+      MAX_PARTED_INPUT_BYTES - INPUT_HEADROOM_BYTES
+    ) {
+      console.warn("[chat] turn snapshot not kept: too large for the run");
+      return undefined;
+    }
     // SAFETY: a JSON round trip yields JSON.
-    return JSON.parse(JSON.stringify(value)) as TaskJson;
+    return JSON.parse(text) as TaskJson;
   } catch (error) {
     console.warn("[chat] turn snapshot not kept:", error);
     return undefined;

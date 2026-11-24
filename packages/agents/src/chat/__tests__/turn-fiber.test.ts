@@ -166,6 +166,31 @@ describe("ChatTurnFibers", () => {
     });
   });
 
+  it("starts a turn whose snapshot would not fit in a run's input without one", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let input: Record<string, unknown> = {};
+    const runTask = host.runTask;
+    host.runTask = (taskInput, local) => {
+      input = taskInput;
+      return runTask(taskInput, local);
+    };
+    const turnSnapshot = {
+      ...snapshot("r1"),
+      lastBody: { big: "x".repeat(17 * 1024 * 1024) }
+    } as unknown as ReturnType<typeof snapshot>;
+    try {
+      expect(
+        await fibers.run(
+          { requestId: "r1", continuation: false, snapshot: turnSnapshot },
+          async () => "reply"
+        )
+      ).toBe("reply");
+      expect(input.envelope).toBeUndefined();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("starts a turn whose snapshot cannot be kept as JSON without one", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     let input: Record<string, unknown> = {};

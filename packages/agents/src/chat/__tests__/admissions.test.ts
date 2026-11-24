@@ -579,16 +579,29 @@ describe("durable admission", () => {
 });
 
 describe("chatRecoveryNames", () => {
-  function setup(incidents: Array<Record<string, unknown>>) {
+  function setup(
+    incidents: Array<Record<string, unknown>>,
+    options: { partedRun?: boolean } = {}
+  ) {
     const db = new DatabaseSync(":memory:");
     db.exec(
-      "create table cf_agents_task_runs (definition text, status text, input text)"
+      "create table cf_agents_task_runs (definition text, status text, input text, metadata text)"
     );
-    db.prepare("insert into cf_agents_task_runs values (?, ?, ?)").run(
+    db.prepare("insert into cf_agents_task_runs values (?, ?, ?, ?)").run(
       "turn",
       "running",
-      JSON.stringify({ requestId: "r1" })
+      JSON.stringify({ requestId: "r1" }),
+      null
     );
+    if (options.partedRun) {
+      // A run whose large input is kept in parts: only its metadata names it.
+      db.prepare("insert into cf_agents_task_runs values (?, ?, ?, ?)").run(
+        "turn",
+        "pending",
+        null,
+        JSON.stringify({ requestId: "r-big" })
+      );
+    }
     const sql = {
       exec: (query: string, ...bindings: unknown[]) => {
         const rows = db.prepare(query).all(...(bindings as SQLInputValue[]));
@@ -601,6 +614,19 @@ describe("chatRecoveryNames", () => {
     } as unknown as Pick<DurableObjectStorage, "list">;
     return { sql, storage };
   }
+
+  it("knows a turn whose run keeps its input in parts by its metadata", async () => {
+    const { sql, storage } = setup([], { partedRun: true });
+    expect(
+      await chatRecoveryNames({
+        sql,
+        storage,
+        turnName: "turn",
+        liveRequestIds: new Set(),
+        requestId: "r-big"
+      })
+    ).toBe(true);
+  });
 
   it("a turn's run that nothing has picked up waits for recovery", async () => {
     const { sql, storage } = setup([]);
