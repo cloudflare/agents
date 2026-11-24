@@ -53,6 +53,15 @@ const JOB_BACKLOG_WARNING_THRESHOLD = 10;
  */
 const DEADMAN_ALARM_DELAY_MS = 30_000;
 
+/**
+ * The alarm armed before a drive: a reset of the object while its alarm is
+ * driving jobs is not always retried by the platform, and then this alarm is
+ * what wakes it. A drive that ends re-arms over it, and an alarm set while
+ * one runs does not start a second drive, so a short one costs nothing
+ * while the object lives.
+ */
+const DRIVE_FALLBACK_DELAY_MS = 5_000;
+
 /** A retry found its job cancelled or replaced, so it did not run. */
 const SUPERSEDED = Symbol("superseded");
 
@@ -541,7 +550,7 @@ export class JobDriver {
     // error) still wakes this object to resume. The normal re-arm at the end
     // of the alarm phase overwrites it.
     if (!this.#options.disabled()) {
-      await this.#options.armFallback(nowMs + DEADMAN_ALARM_DELAY_MS);
+      await this.#options.armFallback(nowMs + DRIVE_FALLBACK_DELAY_MS);
     }
 
     for (const stale of due) {
