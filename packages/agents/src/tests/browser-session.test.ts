@@ -12,7 +12,6 @@ import { conversationScope } from "../browser/scope";
 import {
   BrowserSession,
   lockedScopes,
-  type BrowserSessionReport,
   type BrowserSource
 } from "../browser/session";
 import type {
@@ -125,52 +124,10 @@ class FakeBrowserInstance {
     }
   }
 
-  /**
-   * Navigate a tab the way Chrome reports it: the main document's request,
-   * a redirect, an image the observer should ignore, the response, then
-   * the commit.
-   */
+  /** Navigate a tab: the main frame commits the new URL. */
   navigate(targetId: string, url: string): void {
     const tab = this.tabs.find((t) => t.targetId === targetId);
     if (!tab) return;
-    if (url.startsWith("https://refused.example")) {
-      // Nothing listens there: the request fails, and nothing commits.
-      this.emit(targetId, "Network.requestWillBeSent", {
-        requestId: "doc-refused",
-        type: "Document",
-        frameId: targetId,
-        request: { url }
-      });
-      this.emit(targetId, "Network.loadingFailed", {
-        requestId: "doc-refused",
-        type: "Document",
-        errorText: "net::ERR_CONNECTION_REFUSED"
-      });
-      return;
-    }
-    const redirectFrom = `${url}?from=redirect`;
-    const request = (requestUrl: string, extra = {}) =>
-      this.emit(targetId, "Network.requestWillBeSent", {
-        requestId: "doc-1",
-        type: "Document",
-        frameId: targetId,
-        request: { url: requestUrl },
-        ...extra
-      });
-    request(redirectFrom);
-    request(url, { redirectResponse: { url: redirectFrom, status: 302 } });
-    this.emit(targetId, "Network.requestWillBeSent", {
-      requestId: "img-1",
-      type: "Image",
-      frameId: targetId,
-      request: { url: `${url}/logo.png` }
-    });
-    this.emit(targetId, "Network.responseReceived", {
-      requestId: "doc-1",
-      type: "Document",
-      frameId: targetId,
-      response: { url, status: 200 }
-    });
     tab.url = url;
     this.emit(targetId, "Page.frameNavigated", {
       frame: { id: targetId, url }
@@ -289,16 +246,6 @@ class FakeBrowserInstance {
               String(this.attached.get(command.sessionId)),
               navigateTo
             );
-          }
-          const pushed = /^history\.pushState\(null, "", "(.*)"\)$/.exec(
-            String(params.expression)
-          )?.[1];
-          if (pushed) {
-            const target = String(this.attached.get(command.sessionId));
-            this.emit(target, "Page.navigatedWithinDocument", {
-              frameId: target,
-              url: pushed
-            });
           }
           return {
             result: {
@@ -574,8 +521,7 @@ describe("BrowserSession", () => {
       newTabs: [],
       tabClosed: false,
       tabShared: false,
-      notices: [],
-      observed: expect.objectContaining({ available: true })
+      notices: []
     });
     expect(t.activeTab()).toBe("target-2");
   });
@@ -1333,22 +1279,29 @@ describe("BrowserSession observer", () => {
     }
   }
 
-  function tabsOf(report: BrowserSessionReport | undefined) {
-    const record = report?.observed;
-    if (!record?.available) throw new Error("the observer was unavailable");
-    return record.tabs;
-  }
+  /**
+   * A hook that listens for each tab's main-frame navigations, and says
+   * what it heard when the session closes: the probe for what the host
+   * connection hears.
+   */
+  const hearNavigations: BrowserHostObserver = (tab) => {
+    const heard: unknown[] = [];
+    tab.on("Page.frameNavigated", ({ params }) => {
+      heard.push((params.frame as { url?: unknown }).url);
+    });
+    return () => tab.notify(`${tab.targetId} ${JSON.stringify(heard)}`);
+  };
 
   /** What the observer's socket sent: the second socket opened. */
   function observerSent(t: ReturnType<typeof setup>) {
     return t.sockets[1].sent.map(({ method }) => method);
   }
 
-  it("is on by default", async () => {
+  it("opens for every session, without a hook", async () => {
     const t = setup();
-    const { report } = await t.run([navigateActive("https://example.com/")]);
+    await t.run([navigateActive("https://example.com/")]);
     expect(t.sockets).toHaveLength(2);
-    expect(report?.observed).toMatchObject({ available: true });
+    expect(observerSent(t)).toContain("Page.enable");
   });
 
   it("isn't opened for a raw browser.connect() unless asked for", async () => {
@@ -1369,50 +1322,21 @@ describe("BrowserSession observer", () => {
     await session.close();
   });
 
-  it("records where the model's tab went and what each document returned", async () => {
+  it("enables only Page in each tab, and closes with the session", async () => {
     const t = setup();
     const instance = await t.start();
-    const { target, error, report } = await observed(t, [
+    const { error, report } = await observed(t, [
       navigateActive("https://example.com/")
     ]);
     expect(error).toBeUndefined();
 
-    expect(report?.observed).toEqual({
-      available: true,
-      tabs: [
-        {
-          targetId: target,
-          initialUrl: "about:blank",
-          navigations: [{ url: "https://example.com/" }],
-          documents: [
-            {
-              url: "https://example.com/",
-              status: 200,
-              redirects: [
-                { url: "https://example.com/?from=redirect", status: 302 }
-              ]
-            }
-          ],
-          dialogs: []
-        }
-      ]
-    });
     expect(observerSent(t)).toEqual([
       "Target.attachToTarget",
       "Page.enable",
-      "Network.enable",
       "Page.getFrameTree",
-      // The flush before the record is read.
+      // The check at close, before the notices are read.
       "Page.getFrameTree"
     ]);
-    expect(
-      t.sockets[1].sent.find(({ method }) => method === "Network.enable")
-        ?.params
-    ).toEqual({
-      maxPostDataSize: 0,
-      maxTotalBufferSize: 0,
-      maxResourceBufferSize: 0
-    });
     expect(report?.notices).toEqual([]);
     // Both sockets are closed with the session.
     expect(t.sockets.every((socket) => socket.closed)).toBe(true);
@@ -1424,7 +1348,7 @@ describe("BrowserSession observer", () => {
     try {
       const t = setup();
       // A slow tab: the observer's enables get no reply in time.
-      t.silentMethods.set(2, ["Page.enable", "Network.enable"]);
+      t.silentMethods.set(2, ["Page.enable"]);
       const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
       const session = t.browser.session();
       let firstDone = false;
@@ -1435,7 +1359,7 @@ describe("BrowserSession observer", () => {
       await vi.advanceTimersByTimeAsync(249);
       expect(firstDone).toBe(false);
       await vi.advanceTimersByTimeAsync(1);
-      const target = evaluatedIn(await first);
+      await first;
       // Later commands don't wait.
       await call(session, evaluateActive);
       const closing = session.close();
@@ -1443,8 +1367,6 @@ describe("BrowserSession observer", () => {
       const report = await closing;
       warned.mockRestore();
       // Its setup timed out, but it answered at close: slow, not blocked.
-      expect(tabsOf(report)[0].targetId).toBe(target);
-      expect(tabsOf(report)[0]).not.toHaveProperty("blocked");
       expect(report?.notices).toEqual([]);
     } finally {
       vi.useRealTimers();
@@ -1464,9 +1386,7 @@ describe("BrowserSession observer", () => {
       method: "Target.attachToTarget",
       params: { targetId: stored }
     });
-    const report = await session.close();
-    // The model never used the tab, so it isn't in the record.
-    expect(tabsOf(report)).toEqual([]);
+    await session.close();
   });
 
   it("doesn't follow a target that isn't a page, nor call it blocked", async () => {
@@ -1481,28 +1401,24 @@ describe("BrowserSession observer", () => {
     await session.attachToTarget({ targetId: worker });
     const report = await session.close();
     warned.mockRestore();
-    expect(tabsOf(report)).toEqual([]);
     expect(report?.notices).toEqual([]);
     expect(observerSent(t)).toContain("Target.detachFromTarget");
     // Nor run the developer's hook there.
     expect(hook).not.toHaveBeenCalled();
   });
 
-  it("keeps observing after the model disables Page and Network", async () => {
-    const t = setup();
+  it("keeps hearing the tab after the model disables Page", async () => {
+    const t = setup({ hostObserver: hearNavigations });
     const disable = (method: string): Call => [
       "send",
       { method, sessionId: "active" }
     ];
-    const { report } = await observed(t, [
+    const { target, report } = await observed(t, [
       ["send", { method: "Page.enable", sessionId: "active" }],
       disable("Page.disable"),
-      disable("Network.disable"),
       navigateActive("https://example.com/")
     ]);
-    expect(tabsOf(report)[0].navigations).toEqual([
-      { url: "https://example.com/" }
-    ]);
+    expect(report?.notices).toEqual([`${target} ["https://example.com/"]`]);
   });
 
   it("keeps its traffic out of the model's socket and debug log", async () => {
@@ -1512,18 +1428,18 @@ describe("BrowserSession observer", () => {
       ["getDebugLog", {}]
     ]);
     const modelMethods = t.sockets[0].sent.map(({ method }) => method);
-    expect(modelMethods).not.toContain("Network.enable");
     expect(modelMethods).not.toContain("Page.enable");
     const log = JSON.stringify(results[1]);
-    expect(log).not.toContain("Network.enable");
-    expect(log).not.toContain("Network.requestWillBeSent");
+    expect(log).not.toContain("Page.enable");
+    expect(log).not.toContain("Page.frameNavigated");
   });
 
   it("follows a raw Target.attachToTarget but not the page's popups", async () => {
-    const t = setup();
+    const hooked: string[] = [];
+    const t = setup({ hostObserver: (tab) => void hooked.push(tab.targetId) });
     const instance = await t.start();
     const other = instance.addTab("https://other.example/");
-    const { report } = await observed(t, [
+    const { target, report } = await observed(t, [
       openPopup,
       [
         "send",
@@ -1534,18 +1450,12 @@ describe("BrowserSession observer", () => {
       ]
     ]);
     expect(report?.newTabs).toHaveLength(1);
-    const popup = report?.newTabs[0].targetId;
-    const tabs = tabsOf(report);
     // The tab "active" opened, then the one attached raw; not the popup.
-    expect(tabs).toHaveLength(2);
-    expect(tabs[0].targetId).not.toBe(popup);
-    expect(tabs[1]).toMatchObject({
-      targetId: other,
-      initialUrl: "https://other.example/"
-    });
+    expect(hooked).toEqual([target, other]);
+    expect(hooked).not.toContain(report?.newTabs[0].targetId);
   });
 
-  it("answers dialogs at once, records them, and tells the model", async () => {
+  it("answers dialogs at once, and tells the model", async () => {
     const t = setup();
     const session = t.browser.session();
     const target = evaluatedIn(await call(session, evaluateActive));
@@ -1567,14 +1477,9 @@ describe("BrowserSession observer", () => {
       { accept: false },
       { accept: true }
     ]);
-    expect(tabsOf(report)[0].dialogs).toEqual([
-      { type: "alert", message: "x".repeat(200), accepted: true },
-      { type: "confirm", message: "confirm?", accepted: false },
-      { type: "prompt", message: "prompt?", accepted: false },
-      { type: "beforeunload", message: "beforeunload?", accepted: true }
-    ]);
     expect(report?.notices).toEqual([
-      expect.stringContaining("opened an alert dialog"),
+      // The message is cut to 200 characters.
+      `The page opened an alert dialog ("${"x".repeat(200)}"), and the host accepted it.`,
       'The page opened a confirm dialog ("confirm?"), and the host dismissed it, so confirm() returned false. To answer OK, set `window.confirm = () => true` in the page before the step that opens it.',
       'The page opened a prompt dialog ("prompt?"), and the host dismissed it, so prompt() returned null. To answer it, set `window.prompt = () => "<answer>"` in the page before the step that opens it.',
       'The page opened a beforeunload dialog ("beforeunload?"), and the host accepted it.'
@@ -1593,7 +1498,7 @@ describe("BrowserSession observer", () => {
     });
     const report = await session.close();
     expect(observerSent(t)).not.toContain("Page.handleJavaScriptDialog");
-    expect(tabsOf(report)[0].dialogs).toEqual([]);
+    expect(report?.notices).toEqual([]);
   });
 
   it("reports a tab a dialog left blocked, and how to recover it", async () => {
@@ -1612,10 +1517,6 @@ describe("BrowserSession observer", () => {
       await vi.advanceTimersByTimeAsync(3_000);
       const report = await closing;
       warned.mockRestore();
-      expect(tabsOf(report)[0]).toMatchObject({
-        targetId: stuck,
-        blocked: { url: "https://stuck.example/" }
-      });
       expect(report?.notices).toEqual([
         `The tab ${stuck} (https://stuck.example/) isn't responding, probably because of a dialog that opened before the host could answer it, which can't be answered now. Its page commands time out until you send Page.reload to it or navigate it.`
       ]);
@@ -1626,7 +1527,7 @@ describe("BrowserSession observer", () => {
     }
   });
 
-  it("goes on without the observer when it can't connect, and says so", async () => {
+  it("goes on without the observer when it can't connect, and logs it", async () => {
     const t = setup();
     t.upgradeOverrides.set(
       2,
@@ -1634,13 +1535,14 @@ describe("BrowserSession observer", () => {
     );
     const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { error, results, report } = await t.run([evaluateActive]);
+    expect(warned).toHaveBeenCalledWith(
+      expect.stringContaining("The observer failed to connect"),
+      expect.anything()
+    );
     warned.mockRestore();
     expect(error).toBeUndefined();
     expect(evaluatedIn(results[0])).toBe(t.activeTab());
-    expect(report?.observed).toEqual({
-      available: false,
-      reason: expect.stringContaining("couldn't connect")
-    });
+    expect(report?.notices).toEqual([]);
   });
 
   it("goes on without the observer when it doesn't connect within 2 s", async () => {
@@ -1652,50 +1554,18 @@ describe("BrowserSession observer", () => {
       const running = t.run([evaluateActive]);
       await vi.advanceTimersByTimeAsync(2_000);
       const { error, report } = await running;
+      expect(warned).toHaveBeenCalledWith(
+        expect.stringContaining("The observer failed to connect"),
+        expect.objectContaining({
+          message: "the observer didn't connect within 2000ms"
+        })
+      );
       warned.mockRestore();
       expect(error).toBeUndefined();
-      expect(report?.observed).toEqual({
-        available: false,
-        reason: "the observer didn't connect within 2000ms"
-      });
+      expect(report?.notices).toEqual([]);
     } finally {
       vi.useRealTimers();
     }
-  });
-
-  it("records a main document that failed to load", async () => {
-    const t = setup();
-    const { report } = await observed(t, [
-      navigateActive("https://refused.example/")
-    ]);
-    expect(tabsOf(report)[0].documents).toEqual([
-      {
-        url: "https://refused.example/",
-        redirects: [],
-        error: "net::ERR_CONNECTION_REFUSED"
-      }
-    ]);
-    expect(tabsOf(report)[0].navigations).toEqual([]);
-  });
-
-  it("records a same-document navigation", async () => {
-    const t = setup();
-    const { report } = await observed(t, [
-      [
-        "send",
-        {
-          method: "Runtime.evaluate",
-          params: {
-            expression:
-              'history.pushState(null, "", "https://example.com/next")'
-          },
-          sessionId: "active"
-        }
-      ]
-    ]);
-    expect(tabsOf(report)[0].navigations).toEqual([
-      { url: "https://example.com/next", sameDocument: true }
-    ]);
   });
 
   it("tells the model to reload a blocked tab when its command times out", async () => {
@@ -1770,9 +1640,8 @@ describe("BrowserSession observer sockets", () => {
     await t.start();
     // The stored browser is gone when the model's socket upgrades.
     t.upgradeOverrides.set(1, async () => new Response(null, { status: 410 }));
-    const { error, report } = await t.run([evaluateActive]);
+    const { error } = await t.run([evaluateActive]);
     expect(error).toBeUndefined();
-    expect(report?.observed).toMatchObject({ available: true });
     // The first observer (to the gone browser), then the new browser's two.
     expect(t.sockets).toHaveLength(3);
     const replacement = t.instances.get("session-2");
@@ -1796,9 +1665,12 @@ describe("BrowserSession observer sockets", () => {
       const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
       const running = t.run([evaluateActive]);
       await vi.advanceTimersByTimeAsync(2_000);
-      const { report } = await running;
+      await running;
+      expect(warned).toHaveBeenCalledWith(
+        expect.stringContaining("The observer failed to connect"),
+        expect.anything()
+      );
       warned.mockRestore();
-      expect(report?.observed).toMatchObject({ available: false });
       release();
       await vi.advanceTimersByTimeAsync(0);
       expect(t.sockets).toHaveLength(2);
@@ -1972,7 +1844,6 @@ describe("BrowserSession hostObserver hook", () => {
       warned.mockRestore();
       expect(error).toBeUndefined();
       expect(evaluatedIn(results[0])).toBe(t.activeTab());
-      expect(report?.observed).toMatchObject({ available: true });
       expect(report?.notices).toEqual([]);
     }
   });
@@ -2022,7 +1893,7 @@ describe("BrowserSession hostObserver hook", () => {
         expect.stringContaining("cleanups didn't finish within 1000ms")
       );
       warned.mockRestore();
-      expect(report?.observed).toMatchObject({ available: true });
+      expect(report?.notices).toEqual([]);
       expect(t.sockets.every((socket) => socket.closed)).toBe(true);
     } finally {
       vi.useRealTimers();
@@ -2136,7 +2007,7 @@ describe("BrowserSession hostObserver hook", () => {
     warned.mockRestore();
     expect(error).toBeUndefined();
     expect(hook).not.toHaveBeenCalled();
-    expect(report?.observed).toMatchObject({ available: false });
+    expect(report?.notices).toEqual([]);
   });
 });
 

@@ -32,11 +32,7 @@ import {
   type BrowserFunction,
   type SessionHosts
 } from "./browser-functions";
-import {
-  HostObserver,
-  type BrowserObserverRecord,
-  type HostObserverResult
-} from "./observer";
+import { HostObserver } from "./observer";
 import { DEFAULT_BROWSER_SCOPE } from "./scope";
 import type { SearchableCdpSpec } from "./spec";
 import { validate } from "./validate";
@@ -161,15 +157,6 @@ export interface BrowserSessionReport {
    * empty when nothing did. Show them after the run's result.
    */
   notices: string[];
-  /**
-   * What the host's observer saw in the tabs this session worked in.
-   * Present when the session had a host connection, as every
-   * `BrowserSession` on a `Browser` does. For the host: don't show it to
-   * the model.
-   *
-   * @experimental May change or go away.
-   */
-  observed?: BrowserObserverRecord;
 }
 
 const RESTARTED_NOTICE =
@@ -182,9 +169,7 @@ const TAB_SHARED_NOTICE =
   "Another conversation using this browser is also working in your tab, so its page may change between your runs. Open a tab of your own with Target.createTarget if you need one.";
 
 /** What the report says, in sentences the model reads. */
-function reportNotices(
-  report: Omit<BrowserSessionReport, "notices" | "observed">
-) {
+function reportNotices(report: Omit<BrowserSessionReport, "notices">) {
   return [
     report.restarted && RESTARTED_NOTICE,
     report.tabClosed && !report.restarted && TAB_CLOSED_NOTICE,
@@ -396,7 +381,7 @@ interface ConnectedState {
   activeResolved: boolean;
   /** Tabs this session closed with `Target.closeTarget`. */
   closed: Set<TargetId>;
-  report: Omit<BrowserSessionReport, "notices" | "observed">;
+  report: Omit<BrowserSessionReport, "notices">;
 }
 
 const SEND_SCHEMA = {
@@ -661,7 +646,7 @@ export class BrowserSession {
       }
       if (!state) return undefined;
       this.#state = undefined;
-      let observed: HostObserverResult | undefined;
+      let hostNotices: string[] = [];
       try {
         const open = await this.#recordNewTabs(state);
         const active = await this.#saveActiveTarget(state, open);
@@ -669,13 +654,12 @@ export class BrowserSession {
           await this.#recordSharedTab(state, active);
         }
       } finally {
-        observed = await state.observer?.close(state.workedIn);
+        hostNotices = (await state.observer?.close(state.workedIn)) ?? [];
         state.connected.cdp.disconnect();
       }
       return {
         ...state.report,
-        notices: [...reportNotices(state.report), ...(observed?.notices ?? [])],
-        ...(observed ? { observed: observed.record } : {})
+        notices: [...reportNotices(state.report), ...hostNotices]
       };
     } finally {
       // Release the lock only after the active tab is saved, so the next

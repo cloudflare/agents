@@ -146,8 +146,8 @@ export interface BrowserOptions {
    *
    * Every session opens the host connection beside the model's, whether or
    * not you pass a hook: the SDK answers the pages' JavaScript dialogs on
-   * it, which otherwise hang the tab, and records where the tabs went in
-   * the report's `observed`. It costs about one round trip per session.
+   * it, which otherwise hang the tab. It costs about one round trip per
+   * session.
    * The hook runs after the SDK's own code in each tab, and isn't called
    * when the connection couldn't open: treat it as advice, not
    * enforcement. See {@link BrowserHostObserver} for the rest.

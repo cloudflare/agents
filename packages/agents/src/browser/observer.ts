@@ -1,16 +1,15 @@
 /**
- * `HostObserver`: the host's own CDP connection to a session's browser, the
- * code that runs on it in each tab, and the record of what it saw.
+ * `HostObserver`: the host's own CDP connection to a session's browser, and
+ * the code that runs on it in each tab.
  *
  * A `BrowserSession` opens one beside the model's connection
  * (`BrowserConnection.hostObserver`, opened at the same time as the model's
  * socket). It attaches to each tab the session attaches the model to, and
  * runs its per-tab watchers there: the SDK's built-ins first (dialog
  * answering), then the developer's `hostObserver` hook, if any. Built-ins
- * register first, so they hear each event first. It also enables Page and
- * Network there and keeps a small record per tab: where the tab went, what
- * each main document returned, and which dialogs were answered. The
- * session reads the record and the notices when it closes.
+ * register first, so they hear each event first. It enables Page there,
+ * which dialog answering needs, and notices tabs a dialog left blocked.
+ * The session reads its notices for the model when it closes.
  *
  * It has its own WebSocket because Chrome keeps CDP sessions per connection:
  * model code can't address or detach the observer's sessions, its
@@ -26,8 +25,8 @@
  * observer's setup and the watchers there, at most ~250 ms, so they hear
  * the first navigation; later commands never wait. A watcher that throws is
  * logged. If it can't connect in time, or a tab can't be observed, the
- * session goes on without it and the record says so. It follows page
- * targets only.
+ * session goes on without it, and the failure to connect is logged. It
+ * follows page targets only.
  */
 
 import {
@@ -61,14 +60,11 @@ const OBSERVER_SETUP_TIMEOUT_MS = 1_000;
 /** The limit on the observer's other commands. */
 const OBSERVER_COMMAND_TIMEOUT_MS = 2_000;
 
-/** The limit on the last command per tab before the record is read. */
+/** The limit on the last command per tab before the notices are read. */
 const OBSERVER_FLUSH_TIMEOUT_MS = 1_000;
 
-/** Navigations, documents and dialogs kept per tab; older ones are dropped. */
-const MAX_OBSERVED_ENTRIES_PER_TAB = 50;
-
-/** Redirects kept per document. */
-const MAX_OBSERVED_REDIRECTS = 20;
+/** Answered dialogs kept per session for the notices; later ones are only counted. */
+const MAX_ANSWERED_DIALOGS_KEPT = 50;
 
 /** The longest dialog message kept. */
 const MAX_DIALOG_MESSAGE_LENGTH = 200;
@@ -146,75 +142,6 @@ export type BrowserHostObserver = (
   | (() => void | Promise<void>)
   | Promise<void | (() => void | Promise<void>)>;
 
-/** A main-frame navigation the observer saw. */
-export interface BrowserObservedNavigation {
-  url: string;
-  /** A same-document navigation: a fragment change or `history.pushState`. */
-  sameDocument?: true;
-}
-
-/** One redirect a main document went through. */
-export interface BrowserObservedRedirect {
-  url: string;
-  status: number;
-}
-
-/** A main-frame document request and what it returned. */
-export interface BrowserObservedDocument {
-  /** The document's URL, after any redirects. */
-  url: string;
-  /** The HTTP status, once a response arrived. */
-  status?: number;
-  /** The redirects before it, oldest first. */
-  redirects: BrowserObservedRedirect[];
-  /** Why it failed, when it did (`Network.loadingFailed`'s `errorText`). */
-  error?: string;
-}
-
-/** A JavaScript dialog the page opened, and how the observer answered it. */
-export interface BrowserObservedDialog {
-  /** `alert`, `confirm`, `prompt` or `beforeunload`. */
-  type: string;
-  /** The dialog's message, cut to 200 characters. */
-  message: string;
-  /** `true` when the observer accepted it, `false` when it dismissed it. */
-  accepted: boolean;
-}
-
-/** What the observer saw in one tab. */
-export interface BrowserObservedTab {
-  targetId: string;
-  /** Where the tab was when the observer attached. */
-  initialUrl?: string;
-  /** Main-frame navigations, oldest first. */
-  navigations: BrowserObservedNavigation[];
-  /** Main-frame document requests, oldest first. */
-  documents: BrowserObservedDocument[];
-  /** Dialogs the observer answered, oldest first. */
-  dialogs: BrowserObservedDialog[];
-  /**
-   * The tab didn't answer the observer's setup, nor its last command at
-   * close, while the browser did: probably a dialog that opened before the
-   * host could answer it, which nobody can answer now. Page commands in it
-   * time out until it's reloaded or navigated. `url` is where it was.
-   */
-  blocked?: { url?: string };
-}
-
-/**
- * What a session's observer saw, or why there was nothing to see.
- *
- * `tabs` can leave out a tab the session worked in even when `available`
- * is `true`: the observer couldn't attach to it or set it up, it wasn't a
- * page, or the observer's connection closed. Read a missing tab as
- * "unknown", not as "nothing happened there".
- *
- * @experimental The shape may change before stabilizing.
- */
-export type BrowserObserverRecord =
-  | { available: true; tabs: BrowserObservedTab[] }
-  | { available: false; reason: string };
-
 /** What a {@link HostTabWatcher} may return: a cleanup for close. */
 type HostTabCleanup = () => void | Promise<void>;
 
@@ -253,13 +180,11 @@ interface AnsweredDialog {
  * answers each one as it opens: `alert` is accepted and `beforeunload` too,
  * so navigation goes ahead; `confirm` and `prompt` are dismissed, so the
  * host never says yes for the model. Its notices tell the model what was
- * asked and answered, and how to answer yes. `onAnswer` hears each answer.
+ * asked and answered, and how to answer yes.
  *
  * It needs Page enabled in the tab, which the observer's setup does.
  */
-export function dialogWatcher(
-  onAnswer?: (dialog: AnsweredDialog) => void
-): HostTabWatcher {
+export function dialogWatcher(): HostTabWatcher {
   /** The first dialogs answered, enough for the notices. */
   const answered: AnsweredDialog[] = [];
   /** How many dialogs were answered per tab. */
@@ -288,10 +213,9 @@ export function dialogWatcher(
           accepted
         };
         counts.set(tab.targetId, (counts.get(tab.targetId) ?? 0) + 1);
-        if (answered.length < MAX_OBSERVED_ENTRIES_PER_TAB) {
+        if (answered.length < MAX_ANSWERED_DIALOGS_KEPT) {
           answered.push(dialog);
         }
-        onAnswer?.(dialog);
       });
     },
     notices(workedIn) {
@@ -338,19 +262,16 @@ export interface HostObserverOptions {
   hook?: BrowserHostObserver | undefined;
 }
 
-/** What {@link HostObserver.close} returns. */
-export interface HostObserverResult {
-  record: BrowserObserverRecord;
-  /** Sentences for the model: the built-ins', blocked tabs, then the hook's. */
-  notices: string[];
-}
-
 interface ObservedTabState {
-  record: BrowserObservedTab;
-  /** The main frame's id: the target id until the frame tree says otherwise. */
-  mainFrameId: string;
-  /** Main documents waiting for a response, by request id. */
-  loading: Map<string, BrowserObservedDocument>;
+  targetId: string;
+  /**
+   * The tab didn't answer the observer's setup, while the browser did:
+   * probably a dialog that opened before the host could answer it, which
+   * nobody can answer now. Page commands in it time out until it's
+   * reloaded or navigated. `url` is where it was. Cleared when the tab
+   * answers at close after all.
+   */
+  blocked?: { url?: string };
 }
 
 /** A watcher started in a tab, until close runs its cleanup. */
@@ -362,10 +283,9 @@ interface RunningWatcher {
   settled: boolean;
 }
 
-type Connected = { cdp: CdpConnection } | { cdp?: undefined; reason: string };
-
 export class HostObserver {
-  readonly #ready: Promise<Connected>;
+  /** The connection, or `undefined` when it couldn't open in time. */
+  readonly #ready: Promise<CdpConnection | undefined>;
   /** Each tab's attach and setup, by target id, so a tab is attached once. */
   readonly #attaching = new Map<string, Promise<void>>();
   /**
@@ -389,7 +309,7 @@ export class HostObserver {
   #hookNotices?: string[] = [];
   /** Whether the hook passed too many notices, which was logged. */
   #droppedNotices = false;
-  #closing?: Promise<HostObserverResult>;
+  #closing?: Promise<string[]>;
   readonly #browserName: string;
   readonly #scope: string;
 
@@ -400,16 +320,7 @@ export class HostObserver {
   ) {
     this.#browserName = options.browserName;
     this.#scope = options.scope;
-    this.#builtIns = [
-      dialogWatcher((dialog) => {
-        const tab = this.#tabs.find(
-          ({ record }) => record.targetId === dialog.targetId
-        );
-        if (!tab) return;
-        const { type, message, accepted } = dialog;
-        keepLast(tab.record.dialogs, { type, message, accepted });
-      })
-    ];
+    this.#builtIns = [dialogWatcher()];
     const { hook } = options;
     if (hook) this.#hook = { name: "hostObserver", watch: hook };
     this.#ready = this.#connect(connecting);
@@ -420,9 +331,7 @@ export class HostObserver {
    * page commands time out until it's reloaded or navigated.
    */
   isBlocked(targetId: string): boolean {
-    return this.#tabs.some(
-      ({ record }) => record.targetId === targetId && record.blocked
-    );
+    return this.#tabs.some((tab) => tab.targetId === targetId && tab.blocked);
   }
 
   /**
@@ -488,32 +397,25 @@ export class HostObserver {
   }
 
   /**
-   * Read the record and notices, and close the connection. Waits for tab
+   * Collect the notices for the model, and close the connection. Waits for tab
    * setups still running, then sends one last command to each tab and
    * waits for its reply, so the events Chrome sent before it have arrived.
    * A tab that looked blocked but answers it wasn't: it was only slow.
    * Then it runs the watchers' cleanups, at most ~1 s in all, and collects
-   * the notices. Never rejects; later calls resolve with the same result,
-   * whose record and notices cover only the tabs in `workedIn` when given:
-   * the observer may start on a tab the model then doesn't use. The hook's
-   * notices are kept whichever tab they came from.
+   * the notices: the built-ins', blocked tabs, then the hook's. Never
+   * rejects; later calls resolve with the same notices. The SDK's notices
+   * cover only the tabs in `workedIn` when given: the observer may start
+   * on a tab the model then doesn't use. The hook's are kept whichever tab
+   * they came from.
    */
-  close(workedIn?: ReadonlySet<string>): Promise<HostObserverResult> {
+  close(workedIn?: ReadonlySet<string>): Promise<string[]> {
     this.#closing ??= this.#close(workedIn);
     return this.#closing;
   }
 
-  async #close(
-    workedIn: ReadonlySet<string> | undefined
-  ): Promise<HostObserverResult> {
-    const connected = await this.#ready;
-    if (!connected.cdp) {
-      return {
-        record: { available: false, reason: connected.reason },
-        notices: []
-      };
-    }
-    const { cdp } = connected;
+  async #close(workedIn: ReadonlySet<string> | undefined): Promise<string[]> {
+    const cdp = await this.#ready;
+    if (!cdp) return [];
     try {
       await Promise.allSettled(this.#attaching.values());
       await Promise.allSettled(
@@ -523,7 +425,7 @@ export class HostObserver {
             timeoutMs: OBSERVER_FLUSH_TIMEOUT_MS
           });
           // It answers: it was slow, not blocked.
-          delete tab.record.blocked;
+          delete tab.blocked;
         })
       );
       await this.#cleanUp();
@@ -531,23 +433,15 @@ export class HostObserver {
       cdp.disconnect();
     }
     const tabs = this.#tabs.filter(
-      ({ record }) => !workedIn || workedIn.has(record.targetId)
+      ({ targetId }) => !workedIn || workedIn.has(targetId)
     );
     const hookNotices = this.#hookNotices ?? [];
     this.#hookNotices = undefined;
-    return {
-      record: {
-        available: true,
-        tabs: tabs.map(({ record }) => structuredClone(record))
-      },
-      notices: [
-        ...this.#builtIns.flatMap(
-          (watcher) => watcher.notices?.(workedIn) ?? []
-        ),
-        ...blockedNotices(tabs.map(({ record }) => record)),
-        ...hookNotices
-      ]
-    };
+    return [
+      ...this.#builtIns.flatMap((watcher) => watcher.notices?.(workedIn) ?? []),
+      ...blockedNotices(tabs),
+      ...hookNotices
+    ];
   }
 
   /**
@@ -585,7 +479,10 @@ export class HostObserver {
     }
   }
 
-  async #connect(connecting: Promise<CdpConnection>): Promise<Connected> {
+  /** Wait for the connection, at most {@link OBSERVER_CONNECT_TIMEOUT_MS}; log a failure. */
+  async #connect(
+    connecting: Promise<CdpConnection>
+  ): Promise<CdpConnection | undefined> {
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     const timedOut = new Promise<"timeout">((resolve) => {
       timeoutId = setTimeout(
@@ -597,30 +494,32 @@ export class HostObserver {
     try {
       outcome = await Promise.race([connecting, timedOut]);
     } catch (error) {
-      const reason = `the observer couldn't connect: ${errorMessage(error)}`;
       this.#warn("connect", error);
-      return { reason };
+      return undefined;
     } finally {
       clearTimeout(timeoutId);
     }
     if (outcome === "timeout") {
-      const reason = `the observer didn't connect within ${OBSERVER_CONNECT_TIMEOUT_MS}ms`;
-      this.#warn("connect", new Error(reason));
+      this.#warn(
+        "connect",
+        new Error(
+          `the observer didn't connect within ${OBSERVER_CONNECT_TIMEOUT_MS}ms`
+        )
+      );
       // Drop the connection if it arrives late.
       connecting.then(
         (late) => late.disconnect(),
         () => undefined
       );
-      return { reason };
+      return undefined;
     }
     // Closed while connecting: close() disconnects it.
     if (!this.#closing) this.#listen(outcome);
-    return { cdp: outcome };
+    return outcome;
   }
 
   async #attachTab(targetId: string): Promise<void> {
-    const connected = await this.#ready;
-    const { cdp } = connected;
+    const cdp = await this.#ready;
     if (!cdp || this.#closing) return;
     let sessionId: string;
     try {
@@ -634,11 +533,7 @@ export class HostObserver {
       }
       return;
     }
-    const tab: ObservedTabState = {
-      record: { targetId, navigations: [], documents: [], dialogs: [] },
-      mainFrameId: targetId,
-      loading: new Map()
-    };
+    const tab: ObservedTabState = { targetId };
     this.#tabsBySession.set(sessionId, tab);
     this.#tabs.push(tab);
     const hostTab = this.#hostTab(cdp, sessionId, targetId);
@@ -650,26 +545,14 @@ export class HostObserver {
         sessionId,
         timeoutMs: OBSERVER_SETUP_TIMEOUT_MS
       });
-    // Sent together: each costs a round trip, and none needs another.
-    const [page, network, frameTree] = await Promise.allSettled([
+    // Page.enable is what dialog answering needs. Page.getFrameTree checks
+    // the renderer answers: behind an open dialog it times out. Sent
+    // together, so the check costs no extra round trip.
+    const results = await Promise.allSettled([
       send("Page.enable"),
-      send("Network.enable", {
-        // Request bodies never reach the host, and Chrome keeps no
-        // response bodies for it.
-        maxPostDataSize: 0,
-        maxTotalBufferSize: 0,
-        maxResourceBufferSize: 0
-      }),
       send("Page.getFrameTree")
     ]);
-    if (frameTree.status === "fulfilled") {
-      const frame = mainFrameOf(frameTree.value);
-      if (frame) {
-        tab.mainFrameId = frame.id;
-        tab.record.initialUrl = frame.url;
-      }
-    }
-    const errors = [page, network, frameTree].flatMap((result) =>
+    const errors = results.flatMap((result) =>
       result.status === "rejected" ? [result.reason as unknown] : []
     );
     if (errors.some((error) => !(error instanceof CdpTimeoutError))) {
@@ -758,7 +641,7 @@ export class HostObserver {
     this.#running.push(running);
   }
 
-  /** Stop following a target, and leave it out of the record. */
+  /** Stop following a target. */
   #forget(cdp: CdpConnection, sessionId: string, tab: ObservedTabState): void {
     this.#tabsBySession.delete(sessionId);
     this.#tabs.splice(this.#tabs.indexOf(tab), 1);
@@ -777,7 +660,7 @@ export class HostObserver {
     tab: ObservedTabState,
     setupError: unknown
   ): Promise<void> {
-    const { targetId } = tab.record;
+    const { targetId } = tab;
     try {
       const info = await cdp.send(
         "Target.getTargetInfo",
@@ -787,7 +670,7 @@ export class HostObserver {
       const targetInfo = asRecord(asRecord(info)?.targetInfo);
       if (targetInfo?.type === "page") {
         const { url } = targetInfo;
-        tab.record.blocked = typeof url === "string" ? { url } : {};
+        tab.blocked = typeof url === "string" ? { url } : {};
       }
     } catch {
       // The browser doesn't answer either: not a stuck tab.
@@ -795,93 +678,12 @@ export class HostObserver {
     this.#warn(`set up tab ${targetId}`, setupError);
   }
 
-  /** The record's listeners. Dialog answering is a watcher; see the constructor. */
   #listen(cdp: CdpConnection): void {
-    // Each handler looks the event's session up in #tabsBySession, so it
-    // ignores sessions that aren't this connection's: Browser Run tags its
-    // `Cloudflare.*` events with every connection's session ids.
-    cdp.on("Page.frameNavigated", (event) => {
-      const tab = this.#tab(event);
-      const frame = asRecord(event.params.frame);
-      if (!tab || !frame || frame.parentId !== undefined) return;
-      if (typeof frame.id === "string") tab.mainFrameId = frame.id;
-      if (typeof frame.url !== "string") return;
-      const fragment =
-        typeof frame.urlFragment === "string" ? frame.urlFragment : "";
-      keepLast(tab.record.navigations, { url: frame.url + fragment });
-    });
-    cdp.on("Page.navigatedWithinDocument", (event) => {
-      const tab = this.#tab(event);
-      const { frameId, url } = event.params;
-      if (!tab || frameId !== tab.mainFrameId || typeof url !== "string") {
-        return;
-      }
-      keepLast(tab.record.navigations, { url, sameDocument: true });
-    });
-    // Network sends an event for every request: drop all but the main
-    // frame's documents on arrival.
-    cdp.on("Network.requestWillBeSent", (event) => {
-      const { params } = event;
-      if (params.type !== "Document") return;
-      const tab = this.#tab(event);
-      if (!tab || params.frameId !== tab.mainFrameId) return;
-      const requestId = String(params.requestId);
-      const url = asRecord(params.request)?.url;
-      if (typeof url !== "string") return;
-      const redirect = asRecord(params.redirectResponse);
-      const redirected = tab.loading.get(requestId);
-      if (redirect && redirected) {
-        keepLast(
-          redirected.redirects,
-          { url: String(redirect.url), status: Number(redirect.status) },
-          MAX_OBSERVED_REDIRECTS
-        );
-        redirected.url = url;
-        return;
-      }
-      const document: BrowserObservedDocument = { url, redirects: [] };
-      keepLast(tab.record.documents, document);
-      tab.loading.set(requestId, document);
-      // Forget requests whose documents were dropped from the record.
-      if (tab.loading.size > MAX_OBSERVED_ENTRIES_PER_TAB) {
-        const oldest = tab.loading.keys().next().value;
-        if (oldest !== undefined) tab.loading.delete(oldest);
-      }
-    });
-    cdp.on("Network.responseReceived", (event) => {
-      const { params } = event;
-      if (params.type !== "Document") return;
-      const document = this.#loading(event);
-      const response = asRecord(params.response);
-      if (!document || !response) return;
-      if (typeof response.url === "string") document.url = response.url;
-      if (typeof response.status === "number") {
-        document.status = response.status;
-      }
-      this.#tab(event)?.loading.delete(String(params.requestId));
-    });
-    cdp.on("Network.loadingFailed", (event) => {
-      const { params } = event;
-      if (params.type !== "Document") return;
-      const document = this.#loading(event);
-      if (!document) return;
-      document.error = String(params.errorText ?? "failed");
-      this.#tab(event)?.loading.delete(String(params.requestId));
-    });
+    // A tab that closed, or whose session ended: nothing to flush at close.
     cdp.on("Target.detachedFromTarget", (event) => {
       const { sessionId } = event.params;
       if (typeof sessionId === "string") this.#tabsBySession.delete(sessionId);
     });
-  }
-
-  #tab(event: CdpEvent): ObservedTabState | undefined {
-    return event.sessionId === undefined
-      ? undefined
-      : this.#tabsBySession.get(event.sessionId);
-  }
-
-  #loading(event: CdpEvent): BrowserObservedDocument | undefined {
-    return this.#tab(event)?.loading.get(String(event.params.requestId));
   }
 
   #warn(action: string, error: unknown): void {
@@ -893,7 +695,7 @@ export class HostObserver {
 }
 
 /** Tell the model about tabs a dialog left blocked, and how to recover them. */
-function blockedNotices(tabs: BrowserObservedTab[]): string[] {
+function blockedNotices(tabs: ObservedTabState[]): string[] {
   return tabs.flatMap((tab) => {
     if (!tab.blocked) return [];
     const where = tab.blocked.url ? ` (${tab.blocked.url})` : "";
@@ -903,30 +705,8 @@ function blockedNotices(tabs: BrowserObservedTab[]): string[] {
   });
 }
 
-/** Append `entry`, dropping the oldest entries past `limit`. */
-function keepLast<T>(
-  entries: T[],
-  entry: T,
-  limit = MAX_OBSERVED_ENTRIES_PER_TAB
-): void {
-  entries.push(entry);
-  if (entries.length > limit) entries.splice(0, entries.length - limit);
-}
-
-function mainFrameOf(result: unknown): { id: string; url: string } | undefined {
-  const frame = asRecord(asRecord(asRecord(result)?.frameTree)?.frame);
-  if (typeof frame?.id !== "string" || typeof frame.url !== "string") {
-    return undefined;
-  }
-  return { id: frame.id, url: frame.url };
-}
-
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
