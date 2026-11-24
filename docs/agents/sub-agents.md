@@ -179,7 +179,7 @@ For code with **no static class at all** — dynamically-loaded or generated Dur
 
 ### Notes for testing
 
-Tests that use `@cloudflare/vitest-pool-workers` may need to list facet classes as test-only Durable Object bindings so `ctx.exports` provides a facet-compatible class value. Keep those facet classes out of `new_sqlite_classes`; the extra binding belongs only in test `wrangler.jsonc` files and is not a production Worker requirement.
+Tests that use `@cloudflare/vitest-plugin` may need to list facet classes as test-only Durable Object bindings so `ctx.exports` provides a facet-compatible class value. Keep those facet classes out of `new_sqlite_classes`; the extra binding belongs only in test `wrangler.jsonc` files and is not a production Worker requirement.
 
 ### `this.dynamicAgents.delete(Cls, name)`
 

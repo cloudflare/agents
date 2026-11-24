@@ -673,7 +673,7 @@ describe("non-Workers runtime guard", () => {
   // ESM-WASM loader can't resolve esbuild's `gojs` import namespace
   // (cloudflare/agents#1306). Verify the runtime guard fires before the
   // .wasm file is ever touched, and that the error message points users at
-  // @cloudflare/vitest-pool-workers.
+  // @cloudflare/vitest-plugin.
   afterEach(() => {
     vi.unstubAllGlobals();
   });
@@ -688,8 +688,8 @@ describe("non-Workers runtime guard", () => {
     expect(isCloudflareWorkersRuntime()).toBe(false);
   });
 
-  it("NOT_IN_WORKERS_ERROR mentions vitest-pool-workers as the fix", () => {
-    expect(NOT_IN_WORKERS_ERROR).toMatch(/@cloudflare\/vitest-pool-workers/);
+  it("NOT_IN_WORKERS_ERROR mentions the Vitest plugin as the fix", () => {
+    expect(NOT_IN_WORKERS_ERROR).toMatch(/@cloudflare\/vitest-plugin/);
     expect(NOT_IN_WORKERS_ERROR).toMatch(/Cloudflare Workers runtime/);
   });
 });
@@ -1334,6 +1334,101 @@ describe("createWorker with pyproject.toml", () => {
     expect(body.yaml).toBe("yaml");
     expect(body.hasCLoader).toBe(true);
     expect(body.parsed).toEqual({ hello: "world" });
+  });
+
+  // The compatibility date picks the Python the Worker runs, and the wheels
+  // must match it: 3.12 before 2025-09-29, 3.13 until 2026-09-07, 3.14 after.
+  // pyyaml and numpy each import a C extension.
+  it.each([
+    ["2025-09-01", "", "3.12"],
+    ["2026-01-01", "", "3.13"],
+    ["2026-09-08", "", "3.14"],
+    // The early 3.14 flag runs Pyodide 314.0.4 on an older date.
+    ["2025-09-01", "python_workers_20260610", "3.14"]
+  ])(
+    "installs native wheels for the Python a %s date with flags [%s] runs (%s)",
+    async (compatibilityDate, flag, python) => {
+      const id = "test-worker-" + testId++;
+      const createWorkerResult = await createWorker({
+        files: {
+          "index.py": [
+            "import sys",
+            "from workers import Response, WorkerEntrypoint",
+            "from yaml import _yaml",
+            "import numpy",
+            "class Default(WorkerEntrypoint):",
+            "  async def fetch(self, request):",
+            "    return Response.json({",
+            '      "python": f"{sys.version_info.major}.{sys.version_info.minor}",',
+            '      "native": _yaml.__name__,',
+            '      "sum": int(numpy.arange(4).sum())',
+            "    })"
+          ].join("\n"),
+          "pyproject.toml": [
+            "[project]",
+            'name = "dummy"',
+            'version = "0.0.0"',
+            'dependencies = ["pyyaml", "numpy"]'
+          ].join("\n"),
+          "wrangler.toml": [
+            `compatibility_date = "${compatibilityDate}"`,
+            `compatibility_flags = [${flag ? `"${flag}"` : ""}]`
+          ].join("\n")
+        }
+      });
+      const worker = env.LOADER.get(id, () => ({
+        mainModule: createWorkerResult.mainModule,
+        modules: createWorkerResult.modules,
+        compatibilityDate:
+          createWorkerResult.wranglerConfig!.compatibilityDate!,
+        compatibilityFlags:
+          createWorkerResult.wranglerConfig!.compatibilityFlags!
+      }));
+      const response = await worker
+        .getEntrypoint()
+        .fetch(new Request("http://worker/"));
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        python,
+        native: "yaml._yaml",
+        sum: 6
+      });
+    }
+  );
+
+  it("installs a final HTTPX release from PyPI for a Python 3.12 date", async () => {
+    // Pyodide 0.26.0a2, which 3.12 runs, has no HTTPX wheel, so it comes
+    // from PyPI, where the newest upload is a pre-release without AsyncClient.
+    const id = "test-worker-" + testId++;
+    const createWorkerResult = await createWorker({
+      files: {
+        "index.py": [
+          "from workers import Response, WorkerEntrypoint",
+          "import httpx",
+          "class Default(WorkerEntrypoint):",
+          "  async def fetch(self, request):",
+          '    return Response.json({"client": httpx.AsyncClient.__name__})'
+        ].join("\n"),
+        "pyproject.toml": [
+          "[project]",
+          'name = "dummy"',
+          'version = "0.0.0"',
+          'dependencies = ["httpx"]'
+        ].join("\n"),
+        "wrangler.toml": 'compatibility_date = "2025-09-01"'
+      }
+    });
+    expect(createWorkerResult.warnings ?? []).toEqual([]);
+    const worker = env.LOADER.get(id, () => ({
+      mainModule: createWorkerResult.mainModule,
+      modules: createWorkerResult.modules,
+      compatibilityDate: createWorkerResult.wranglerConfig!.compatibilityDate!,
+      compatibilityFlags: createWorkerResult.wranglerConfig!.compatibilityFlags!
+    }));
+    const response = await worker
+      .getEntrypoint()
+      .fetch(new Request("http://worker/"));
+    expect(await response.json()).toEqual({ client: "AsyncClient" });
   });
 
   it("imports larger packages", async () => {

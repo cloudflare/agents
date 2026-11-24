@@ -2,9 +2,9 @@ import { SQLITE_ROW_BYTES } from "./internal/platform-limits";
 
 /**
  * What to do about SQLite's size errors, appended to the runtime's message.
- * The row cap depends on the runtime (measured: 8 MiB in production, about
- * 2.2 MB in workerd before 1.20260820, the version every released
- * `@cloudflare/vitest-pool-workers` runs).
+ * The row cap depends on the runtime (measured: 8 MiB in production and in
+ * workerd 1.20260930 or later, about 2.2 MB in earlier workerd, which every
+ * `@cloudflare/vitest-pool-workers` release runs).
  */
 function sizeHint(message: string): string {
   if (!message.includes("SQLITE_TOOBIG")) return "";
@@ -12,7 +12,7 @@ function sizeHint(message: string): string {
     return (
       ". A row or bound value is larger than this runtime stores: 8 MiB in" +
       " production, about 2.2 MB in local workerd before 1.20260820 (and in" +
-      " the vitest pool), 4 MiB before 1.20260930. Upgrade an older local" +
+      " @cloudflare/vitest-pool-workers), 4 MiB before 1.20260930. Upgrade an older local" +
       ` runtime, or keep values under ${SQLITE_ROW_BYTES.toLocaleString("en-US")} bytes per row.`
     );
   }

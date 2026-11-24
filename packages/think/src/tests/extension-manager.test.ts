@@ -2,7 +2,7 @@
  * Tests for the Extension system: ExtensionManager, HostBridgeLoopback, and
  * the extension Worker contract.
  *
- * Uses vitest-pool-workers with a real WorkerLoader binding.
+ * Uses the Vitest plugin with a real WorkerLoader binding.
  */
 import { describe, it, expect, beforeEach } from "vitest";
 import { env } from "cloudflare:workers";

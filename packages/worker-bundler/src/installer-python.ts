@@ -8,9 +8,54 @@ import type { FileSystem, FileEntry } from "./file-system";
 import { unzipSync } from "fflate";
 import { parse as parseToml } from "smol-toml";
 
-// TODO: Update PYODIDE_VERSION once the patch addressing the Python version mismatch for dynamic workers is merged
-const PYODIDE_VERSION = "v0.27.5"; // Used for retrieving a pyodide lockfile, which is done per Pyodide version. If incompatible wheels are being served, this may be why
 const PYPI_SIMPLE_API = "https://pypi.org/simple";
+
+/** The compatibility date a Python Worker gets when its config sets none. */
+export const DEFAULT_PYTHON_COMPATIBILITY_DATE = "2026-07-02";
+
+/** The compatibility settings a Python Worker runs with. */
+export interface PythonRuntime {
+  compatibilityDate: string;
+  compatibilityFlags: readonly string[];
+}
+
+/**
+ * The Pyodide release whose lockfile gives the wheels to install: it must
+ * match the Python the Worker runs, which its compatibility date and flags
+ * pick. Wheels built for another Python or toolchain fail to import.
+ * Measured 24 Nov 2026 on dynamic Workers in production:
+ * - Python 3.14 (Pyodide 314.0.6) from 2026-09-08, or with
+ *   `python_workers_314`; `no_python_workers_314` turns the date off. A
+ *   2026-09-08 date with `python_workers_20250116` still runs it.
+ * - Otherwise Python 3.14 on Pyodide 314.0.4 with `python_workers_20260610`.
+ * - Python 3.13 from 2025-09-29, or with `python_workers_20250116`;
+ *   `no_python_workers_20250116` turns the date off.
+ * - Python 3.12.1 otherwise, Pyodide 0.26.0a2 (Emscripten 3.1.52).
+ */
+export function pyodideVersionFor(runtime: PythonRuntime): string {
+  const flags = runtime.compatibilityFlags;
+  const date = runtime.compatibilityDate;
+  if (
+    flags.includes("python_workers_314") ||
+    (date >= "2026-09-08" && !flags.includes("no_python_workers_314"))
+  ) {
+    return "v314.0.6";
+  }
+  if (flags.includes("python_workers_20260610")) return "v314.0.4";
+  if (
+    flags.includes("python_workers_20250116") ||
+    (date >= "2025-09-29" && !flags.includes("no_python_workers_20250116"))
+  ) {
+    return "v0.28.2";
+  }
+  return "v0.26.0a2";
+}
+
+/** A Pyodide release and its lockfile, when it could be fetched. */
+interface Pyodide {
+  version: string;
+  lockfile: PyodideLockfile | null;
+}
 
 // Deliberately keeping this minimal
 export interface PyprojectToml {
@@ -21,7 +66,8 @@ export interface PyprojectToml {
   };
 }
 
-interface PyPASimpleFile {
+/** @internal */
+export interface PyPASimpleFile {
   filename: string;
   url: string;
   hashes?: Record<string, string>;
@@ -70,14 +116,17 @@ interface PyodideWheelInfo {
 
 // Making this global so it will only need to be fetched once per invocation
 // TODO: Consider caching this somewhere since it's not likely to change between runs
-let pyodideLockfile: PyodideLockfile | null = null;
+/** Lockfiles fetched so far, one per Pyodide release (three at most). */
+const pyodideLockfiles = new Map<string, PyodideLockfile>();
 
 /**
- * Install Python dependencies declared in a pyproject.toml file.
+ * Install Python dependencies declared in a pyproject.toml file, as wheels for
+ * the Python `runtime` picks.
  */
 export async function installDependenciesPython(
   fileSystem: FileSystem,
-  pyprojectTomlContent: string
+  pyprojectTomlContent: string,
+  runtime: PythonRuntime
 ): Promise<InstallResult> {
   const result: InstallResult = {
     installed: [],
@@ -96,9 +145,12 @@ export async function installDependenciesPython(
   const depsToInstall: string[] = pyprojectToml.project?.dependencies ?? [];
   depsToInstall.push("workers-runtime-sdk");
 
-  if (!pyodideLockfile) {
+  const version = pyodideVersionFor(runtime);
+  let lockfile = pyodideLockfiles.get(version) ?? null;
+  if (!lockfile) {
     try {
-      pyodideLockfile = await fetchPyodideLockfile(PYODIDE_VERSION);
+      lockfile = await fetchPyodideLockfile(version);
+      if (lockfile) pyodideLockfiles.set(version, lockfile);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       result.warnings.push(
@@ -106,6 +158,7 @@ export async function installDependenciesPython(
       );
     }
   }
+  const pyodide: Pyodide = { version, lockfile };
 
   // Track installed packages to avoid duplicates
   const installedPackages = new Set<string>();
@@ -121,7 +174,8 @@ export async function installDependenciesPython(
         fileSystem,
         installedPackages,
         inProgress,
-        PYPI_SIMPLE_API
+        PYPI_SIMPLE_API,
+        pyodide
       )
     )
   );
@@ -154,7 +208,8 @@ export async function installPythonPackage(
   fileSystem: FileSystem,
   installedPackages: Set<string>,
   inProgress: Map<string, Promise<void>>,
-  backupRegistry: string
+  backupRegistry: string,
+  pyodide: Pyodide
 ): Promise<void> {
   const name = parsePythonDependencySpecifier(dependencySpecifier)["name"];
   // Skip if already installed in this run
@@ -186,7 +241,7 @@ export async function installPythonPackage(
       let version: string = "";
 
       // Try the Pyodide index first, then fall back to PyPI if that fails
-      let registryResult = await retrieveFromPyodide(name);
+      let registryResult = await retrieveFromPyodide(name, pyodide);
       if (registryResult) {
         [response, wheel, version] = registryResult;
       } else {
@@ -220,7 +275,8 @@ export async function installPythonPackage(
             fileSystem,
             installedPackages,
             inProgress,
-            PYPI_SIMPLE_API
+            PYPI_SIMPLE_API,
+            pyodide
           )
         )
       );
@@ -263,9 +319,10 @@ async function retrieveFromPyPI(
 
 // TODO: Alter the flow to use the PyPA simple api (index.pyodide.org)
 async function retrieveFromPyodide(
-  name: string
+  name: string,
+  pyodide: Pyodide
 ): Promise<[Response, PyPASimpleFile, string] | null> {
-  const pyodideWheel = getPyodideWheel(name);
+  const pyodideWheel = getPyodideWheel(name, pyodide);
   if (!pyodideWheel) {
     return null;
   }
@@ -361,14 +418,17 @@ function normalizePythonName(name: string): string {
  *
  * Returns `null` if the lockfile is not loaded or the package is not present.
  */
-function getPyodideWheel(name: string): PyodideWheelInfo | null {
-  if (!pyodideLockfile) return null;
+function getPyodideWheel(
+  name: string,
+  pyodide: Pyodide
+): PyodideWheelInfo | null {
+  if (!pyodide.lockfile) return null;
 
   const normalizedName = normalizePythonName(name);
-  const pkg = pyodideLockfile.packages[normalizedName];
+  const pkg = pyodide.lockfile.packages[normalizedName];
   if (!pkg) return null;
 
-  const baseUrl = `https://cdn.jsdelivr.net/pyodide/${PYODIDE_VERSION}/full`;
+  const baseUrl = `https://cdn.jsdelivr.net/pyodide/${pyodide.version}/full`;
   const url = pkg.file_name.startsWith("http")
     ? pkg.file_name
     : `${baseUrl}/${pkg.file_name}`;
@@ -438,20 +498,38 @@ async function fetchPythonPackageMetadata(
  * Selects the latest version from compatible wheels.
  * TODO: implement proper platform/python version matching
  */
-function selectLatestCompatibleWheel(
+/** Whether a PEP 440 version is a pre-release or development release. */
+function isPreRelease(version: string): boolean {
+  return /(a|b|rc|alpha|beta|c|pre|preview|dev)\d*/i.test(
+    version.replace(/^\d+(\.\d+)*/, "").replace(/\.post\d+/i, "")
+  );
+}
+
+/**
+ * The newest wheel to install from a registry listing: universal wheels
+ * first, final releases over pre-releases (as pip does without `--pre`).
+ *
+ * @internal Exported for its test.
+ */
+export function selectLatestCompatibleWheel(
   files: PyPASimpleFile[]
 ): PyPASimpleFile | null {
   const wheels = files.filter((f) => f.filename.endsWith(".whl"));
   if (wheels.length === 0) return null;
 
-  // Filter to universal wheels (py3-none-any or py2.py3-none-any)
+  // Universal wheels (py3-none-any or py2.py3-none-any) first: a platform
+  // wheel may not import. Within them, final releases first.
   const universal = wheels.filter(
     (w) =>
       w.filename.endsWith("-py3-none-any.whl") ||
       w.filename.endsWith("-py2.py3-none-any.whl")
   );
-
-  const candidates = universal.length > 0 ? universal : wheels;
+  const compatible = universal.length > 0 ? universal : wheels;
+  const final = compatible.filter((f) => {
+    const version = parseVersionFromWheelName(f.filename);
+    return version !== undefined && !isPreRelease(version);
+  });
+  const candidates = final.length > 0 ? final : compatible;
 
   // Select the wheel with the highest version
   let latest: PyPASimpleFile | null = null;

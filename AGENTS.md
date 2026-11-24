@@ -119,7 +119,7 @@ Oxlint does **not** handle formatting — Oxfmt does.
 
 ## Testing
 
-Tests use **vitest** with `@cloudflare/vitest-pool-workers` for running inside the Workers runtime.
+Tests use **vitest** with `@cloudflare/vitest-plugin` for running inside the Workers runtime.
 
 ```bash
 pnpm run test             # agents + ai-chat unit/integration tests

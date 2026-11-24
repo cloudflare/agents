@@ -14,7 +14,7 @@
         "class_name": "SubAgentFiberParent"
       },
       // Test-harness-only binding: production only needs to export this
-      // facet class, but vitest-pool-workers needs it here for ctx.exports.
+      // facet class, but the Vitest plugin needs it here for ctx.exports.
       {
         "name": "SubAgentFiberChild",
         "class_name": "SubAgentFiberChild"

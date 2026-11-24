@@ -266,7 +266,7 @@ Multiple separate test suites, each with its own vitest config:
 pnpm run test:workers   # or: pnpm exec vitest -r src/tests
 ```
 
-Runs inside the Workers runtime via `@cloudflare/vitest-pool-workers`. Uses a `wrangler.jsonc` to configure Durable Object bindings, queues, workflows, etc. Tests cover: state, scheduling, sub-agent routing, callable methods, WebSocket message handling, email routing, MCP protocol, workflows.
+Runs inside the Workers runtime via `@cloudflare/vitest-plugin`. Uses a `wrangler.jsonc` to configure Durable Object bindings, queues, workflows, etc. Tests cover: state, scheduling, sub-agent routing, callable methods, WebSocket message handling, email routing, MCP protocol, workflows.
 
 ### Faking HTTP servers in integration tests
 

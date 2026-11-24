@@ -258,7 +258,7 @@ Extension Workers loaded through `WorkerLoader` can only receive `Fetcher` / `Se
 
 Tests live in `packages/think/src/`:
 
-- `tests/` — Workers-runtime tests through `@cloudflare/vitest-pool-workers`, covering the turn loop, WebSocket protocol, client tools, recovery and eviction, submissions, actions, channels, messengers, scheduled tasks, extensions, tools, and workflows.
+- `tests/` — Workers-runtime tests through `@cloudflare/vitest-plugin`, covering the turn loop, WebSocket protocol, client tools, recovery and eviction, submissions, actions, channels, messengers, scheduled tasks, extensions, tools, and workflows.
 - `e2e-tests/` — process-level recovery tests against `wrangler dev` (chat, submission, workflow, messenger, stall, and action recovery).
 - `react-tests/` — `useAgentChat` stream resume.
 - `tests-d/` and `*.test-d.ts` — type tests.

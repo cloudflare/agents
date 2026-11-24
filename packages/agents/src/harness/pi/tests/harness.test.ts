@@ -84,6 +84,36 @@ async function alarmCleared(
   return alarm === null;
 }
 
+/**
+ * Wait until the wake's alarm is armed. A due wake's alarm may be firing at
+ * the moment of the read (unset until the run re-arms it).
+ */
+async function alarmArmed(
+  stub: DurableObjectStub<PiHarnessTestObject>
+): Promise<boolean> {
+  let alarm = await stub.alarmTime();
+  for (let i = 0; i < 100 && alarm === null; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    alarm = await stub.alarmTime();
+  }
+  return alarm !== null;
+}
+
+/**
+ * Run the wake's alarm once it is armed. The runtime may fire a due alarm
+ * between the armed check and the run, leaving nothing to run: then wait for
+ * the heartbeat to re-arm it and try again.
+ */
+async function runArmedAlarm(
+  stub: DurableObjectStub<PiHarnessTestObject>
+): Promise<boolean> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    if (!(await alarmArmed(stub))) return false;
+    if (await runDurableObjectAlarm(stub)) return true;
+  }
+  return false;
+}
+
 describe("PiHarness on pi-durable", () => {
   it("answers a prompt with a tool call and keeps the transcript across eviction", async () => {
     const stub = fresh();
@@ -141,8 +171,8 @@ describe("PiHarness on pi-durable", () => {
     const eviction = await evictWhenIdle(stub);
     expect(eviction.result).toBe("kept");
     // The alarm firing does not move the work to a new instance.
-    expect(await runDurableObjectAlarm(stub)).toBe(true);
-    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    expect(await runArmedAlarm(stub)).toBe(true);
+    expect(await runArmedAlarm(stub)).toBe(true);
     expect(await stub.instance()).toBe(instance);
 
     expect(await stub.releaseHold()).toBe(true);
@@ -369,7 +399,7 @@ describe("PiHarness on pi-durable", () => {
     const receipt = await stub.submit("gate");
     await stub.gateStarted(1);
     // The wake job keeps a heartbeat while it waits on pi's running work.
-    expect(await stub.alarmTime()).not.toBeNull();
+    expect(await alarmArmed(stub)).toBe(true);
 
     // Graceful eviction waits for the in-flight step, which is the point of
     // the heartbeat, so crash the object instead.
@@ -986,7 +1016,7 @@ describe("PiHarness with parked tool calls", () => {
 
     expect(await stub.approve("ok")).toBe("delivered");
     expect(await stub.wakeJobTime()).not.toBeNull();
-    expect(await stub.alarmTime()).not.toBeNull();
+    expect(await alarmArmed(stub)).toBe(true);
     await stub.gateStarted(1);
 
     await abortAllDurableObjects();
@@ -1246,9 +1276,16 @@ describe("PiHarness's root session", () => {
 
     await abortAllDurableObjects();
     stub = fresh(name);
-    // pi reopens and resumes with nothing to do, so no wake is left.
+    // pi reopens and resumes with nothing to do, so no wake is left once
+    // the wake its startup pushed has run.
     expect(await stub.instance()).not.toBe(before);
     expect(await stub.rootExists()).toBe(false);
+    let jobs = await stub.wakeJobs();
+    for (let i = 0; i < 100 && jobs.length > 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      jobs = await stub.wakeJobs();
+    }
+    expect(jobs).toEqual([]);
     expect(await stub.alarmTime()).toBeNull();
 
     expect(await stub.seedRoot()).toMatchObject({ created: true });

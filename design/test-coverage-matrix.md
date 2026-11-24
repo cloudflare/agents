@@ -21,18 +21,18 @@ including non-recovery features.
 
 ## Layer model (recap)
 
-| Layer   | Name                            | Runtime                                                              | Where                                                           | Runs in                                       |
-| ------- | ------------------------------- | -------------------------------------------------------------------- | --------------------------------------------------------------- | --------------------------------------------- |
-| **0**   | Type-level                      | `tsrs`, `*.test-d.ts`                                                | `packages/*/src/tests-d/`, `*.test-d.ts`                        | PR + release (`check` → typecheck)            |
-| **1/2** | Unit / adapter contract         | in-process vitest (Node)                                             | `src/chat/__tests__/`, `src/tests/` (pure)                      | PR (affected) + release (all)                 |
-| **3**   | Workers-pool integration        | `@cloudflare/vitest-pool-workers` (simulated workerd, in-process DO) | `src/tests/` + `vitest.config.ts` using `cloudflareTest()`      | PR (affected) + release (all)                 |
-| **3b**  | React hooks (browser)           | Playwright via `@vitest/browser-playwright`, or jsdom                | `src/react-tests/`                                              | PR + release (when in package default `test`) |
-| **3c**  | Browser connector e2e           | Node vitest spawning `wrangler dev`                                  | `packages/agents/src/browser-tests/`                            | **not in CI** (excluded from default `test`)  |
-| **3d**  | OpenTelemetry bridge e2e        | Node vitest, packed `agents`, `wrangler dev`, Local Explorer         | `packages/agents/src/otel-tests/`                               | **not in CI** (excluded from default `test`)  |
-| **4**   | Local e2e (SIGKILL / reconnect) | Node vitest, child `wrangler dev`, persistent state dir              | `src/e2e-tests/`, `e2e/*.test.ts`                               | **nightly**                                   |
-| **4b**  | Playwright app e2e              | Playwright `webServer: wrangler dev`                                 | `packages/*/e2e/*.spec.ts`, `examples/*/e2e/`                   | **nightly** (ai-chat only today)              |
-| **5**   | Deployed (real edge)            | `wrangler deploy` + HTTP to `*.workers.dev`                          | `deployed-recovery.test.ts`, `experimental/chat-recovery-probe` | **nightly schedule** / opt-in                 |
-| **6**   | Release gates                   | composite                                                            | RFC checklist                                                   | PR = L0–3; nightly = L4                       |
+| Layer   | Name                            | Runtime                                                        | Where                                                           | Runs in                                       |
+| ------- | ------------------------------- | -------------------------------------------------------------- | --------------------------------------------------------------- | --------------------------------------------- |
+| **0**   | Type-level                      | `tsrs`, `*.test-d.ts`                                          | `packages/*/src/tests-d/`, `*.test-d.ts`                        | PR + release (`check` → typecheck)            |
+| **1/2** | Unit / adapter contract         | in-process vitest (Node)                                       | `src/chat/__tests__/`, `src/tests/` (pure)                      | PR (affected) + release (all)                 |
+| **3**   | Workers-pool integration        | `@cloudflare/vitest-plugin` (simulated workerd, in-process DO) | `src/tests/` + `vitest.config.ts` using `cloudflareTest()`      | PR (affected) + release (all)                 |
+| **3b**  | React hooks (browser)           | Playwright via `@vitest/browser-playwright`, or jsdom          | `src/react-tests/`                                              | PR + release (when in package default `test`) |
+| **3c**  | Browser connector e2e           | Node vitest spawning `wrangler dev`                            | `packages/agents/src/browser-tests/`                            | **not in CI** (excluded from default `test`)  |
+| **3d**  | OpenTelemetry bridge e2e        | Node vitest, packed `agents`, `wrangler dev`, Local Explorer   | `packages/agents/src/otel-tests/`                               | **not in CI** (excluded from default `test`)  |
+| **4**   | Local e2e (SIGKILL / reconnect) | Node vitest, child `wrangler dev`, persistent state dir        | `src/e2e-tests/`, `e2e/*.test.ts`                               | **nightly**                                   |
+| **4b**  | Playwright app e2e              | Playwright `webServer: wrangler dev`                           | `packages/*/e2e/*.spec.ts`, `examples/*/e2e/`                   | **nightly** (ai-chat only today)              |
+| **5**   | Deployed (real edge)            | `wrangler deploy` + HTTP to `*.workers.dev`                    | `deployed-recovery.test.ts`, `experimental/chat-recovery-probe` | **nightly schedule** / opt-in                 |
+| **6**   | Release gates                   | composite                                                      | RFC checklist                                                   | PR = L0–3; nightly = L4                       |
 
 ### CI → layer mapping
 

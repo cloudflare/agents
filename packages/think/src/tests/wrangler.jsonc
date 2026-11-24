@@ -235,7 +235,7 @@
         "class_name": "BrowserToolsHost",
         "name": "BrowserToolsHost"
       },
-      // Facet-only class. vitest-pool-workers needs it listed as a binding so
+      // Facet-only class. The Vitest plugin needs it listed as a binding so
       // a facet-compatible class value resolves; it stays out of
       // new_sqlite_classes below (the host agent owns the SQLite store).
       {
