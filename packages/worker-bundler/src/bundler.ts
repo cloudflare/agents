@@ -364,7 +364,7 @@ export const NOT_IN_WORKERS_ERROR =
   "@cloudflare/worker-bundler is only supported inside the Cloudflare Workers runtime (workerd). " +
   "It cannot run in plain Node.js — including Vitest, Jest or other Node-based test runners — " +
   "because it bundles via a `WebAssembly.Module` import that only the Workers module loader can resolve. " +
-  "To test code that uses this package, run your tests with @cloudflare/vitest-pool-workers so they execute inside workerd. " +
+  "To test code that uses this package, run your tests with @cloudflare/vitest-plugin so they execute inside workerd. " +
   "See https://developers.cloudflare.com/workers/testing/vitest-integration/ for setup.";
 
 /**

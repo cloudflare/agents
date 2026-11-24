@@ -113,7 +113,7 @@
         "name": "AIChatAgentToolParent"
       },
       // Test-harness-only binding: production only needs to export this
-      // facet class, but vitest-pool-workers needs it here for ctx.exports.
+      // facet class, but the Vitest plugin needs it here for ctx.exports.
       {
         "class_name": "AIChatAgentToolChild",
         "name": "AIChatAgentToolChild"

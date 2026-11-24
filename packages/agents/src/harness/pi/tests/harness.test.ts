@@ -986,7 +986,14 @@ describe("PiHarness with parked tool calls", () => {
 
     expect(await stub.approve("ok")).toBe("delivered");
     expect(await stub.wakeJobTime()).not.toBeNull();
-    expect(await stub.alarmTime()).not.toBeNull();
+    // The wake is due now, so its alarm may be firing at this moment (unset
+    // until the run re-arms it): wait for the alarm to be armed.
+    let alarm = await stub.alarmTime();
+    for (let i = 0; i < 100 && alarm === null; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      alarm = await stub.alarmTime();
+    }
+    expect(alarm).not.toBeNull();
     await stub.gateStarted(1);
 
     await abortAllDurableObjects();
@@ -1246,9 +1253,16 @@ describe("PiHarness's root session", () => {
 
     await abortAllDurableObjects();
     stub = fresh(name);
-    // pi reopens and resumes with nothing to do, so no wake is left.
+    // pi reopens and resumes with nothing to do, so no wake is left once
+    // the wake its startup pushed has run.
     expect(await stub.instance()).not.toBe(before);
     expect(await stub.rootExists()).toBe(false);
+    let jobs = await stub.wakeJobs();
+    for (let i = 0; i < 100 && jobs.length > 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      jobs = await stub.wakeJobs();
+    }
+    expect(jobs).toEqual([]);
     expect(await stub.alarmTime()).toBeNull();
 
     expect(await stub.seedRoot()).toMatchObject({ created: true });

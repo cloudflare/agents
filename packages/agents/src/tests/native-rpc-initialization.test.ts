@@ -213,7 +213,7 @@ describe("native Durable Object RPC initialization", () => {
     // native nor a migrated legacy name exists here. Failing with the
     // lifecycle's addressing guidance is safer than preserving the old bug
     // where RPC ran against uninitialized state.
-    // Invoke in-process because vitest-pool-workers reports an expected remote
+    // Invoke in-process because the Vitest plugin reports an expected remote
     // stub rejection as an unhandled rejection even when the promise is caught.
     await expect(
       runInDurableObject(stub, (instance) => instance.applicationRpc())

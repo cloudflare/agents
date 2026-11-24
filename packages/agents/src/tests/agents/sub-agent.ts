@@ -3817,7 +3817,7 @@ export { _a as TestMinifiedNameParentAgent };
 // root Agent (`BodyProbeRootAgent`). The root is the control: it
 // proves the *test harness* can stream a request body, so a hang on
 // the facet path can be attributed to the forwarder rather than to
-// vitest-pool-workers.
+// the Vitest plugin.
 
 function toHex(buf: ArrayBuffer): string {
   return Array.from(new Uint8Array(buf))

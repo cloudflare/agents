@@ -22,7 +22,7 @@
         "class_name": "ThinkRecoveryHelperParent"
       },
       // Test-harness-only binding: production only needs to export this
-      // facet class, but vitest-pool-workers needs it here for ctx.exports.
+      // facet class, but the Vitest plugin needs it here for ctx.exports.
       {
         "name": "ThinkRecoveryHelperAgent",
         "class_name": "ThinkRecoveryHelperAgent"
@@ -48,7 +48,7 @@
         "class_name": "ThinkAgentToolNaturalParentE2EAgent"
       },
       // Test-harness-only binding: production only needs to export the child
-      // facet class, but vitest-pool-workers needs it here for ctx.exports.
+      // facet class, but the Vitest plugin needs it here for ctx.exports.
       {
         "name": "ThinkSlowChildE2EAgent",
         "class_name": "ThinkSlowChildE2EAgent"

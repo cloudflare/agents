@@ -8,8 +8,11 @@ import type { FileSystem, FileEntry } from "./file-system";
 import { unzipSync } from "fflate";
 import { parse as parseToml } from "smol-toml";
 
-// TODO: Update PYODIDE_VERSION once the patch addressing the Python version mismatch for dynamic workers is merged
-const PYODIDE_VERSION = "v0.27.5"; // Used for retrieving a pyodide lockfile, which is done per Pyodide version. If incompatible wheels are being served, this may be why
+// The Pyodide release whose lockfile gives the wheels to install. It must
+// match the Python a dynamic Worker runs: measured 23 Nov 2026, production and
+// workerd 1.20261119 run Python 3.13.2 (Pyodide 0.28, ABI pyodide_2025_0) for
+// a 2026 compatibility date. Wheels for another ABI fail to import.
+const PYODIDE_VERSION = "v0.28.2";
 const PYPI_SIMPLE_API = "https://pypi.org/simple";
 
 // Deliberately keeping this minimal

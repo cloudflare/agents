@@ -8,7 +8,7 @@ Bundle and serve full-stack applications on Cloudflare's [Worker Loader binding]
 
 This package only runs **inside the Cloudflare Workers runtime (`workerd`)** — both in production and in `wrangler dev`. It bundles via an `esbuild-wasm` `WebAssembly.Module` import that only the Workers module loader can resolve.
 
-It will **not** work under plain Node.js. In particular, importing it from a Vitest/Jest test that uses the default Node pool will surface an error pointing you here. To test code that depends on `@cloudflare/worker-bundler`, run your tests with [`@cloudflare/vitest-pool-workers`](https://developers.cloudflare.com/workers/testing/vitest-integration/) so the test body executes inside `workerd`. See `packages/worker-bundler/src/tests/vitest.config.ts` in this repo for an example setup.
+It will **not** work under plain Node.js. In particular, importing it from a Vitest/Jest test that uses the default Node pool will surface an error pointing you here. To test code that depends on `@cloudflare/worker-bundler`, run your tests with [`@cloudflare/vitest-plugin`](https://developers.cloudflare.com/workers/testing/vitest-integration/) so the test body executes inside `workerd`. See `packages/worker-bundler/src/tests/vitest.config.ts` in this repo for an example setup.
 
 ## Installation
 

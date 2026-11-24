@@ -1,7 +1,7 @@
 /**
  * Tests for the Executor interface contract and DynamicWorkerExecutor.
  *
- * Uses vitest-pool-workers — tests run inside a real Workers runtime
+ * Uses the Vitest plugin — tests run inside a real Workers runtime
  * with a real WorkerLoader binding, no mocks needed.
  */
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";

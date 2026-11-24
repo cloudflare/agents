@@ -673,7 +673,7 @@ describe("non-Workers runtime guard", () => {
   // ESM-WASM loader can't resolve esbuild's `gojs` import namespace
   // (cloudflare/agents#1306). Verify the runtime guard fires before the
   // .wasm file is ever touched, and that the error message points users at
-  // @cloudflare/vitest-pool-workers.
+  // @cloudflare/vitest-plugin.
   afterEach(() => {
     vi.unstubAllGlobals();
   });
@@ -688,8 +688,8 @@ describe("non-Workers runtime guard", () => {
     expect(isCloudflareWorkersRuntime()).toBe(false);
   });
 
-  it("NOT_IN_WORKERS_ERROR mentions vitest-pool-workers as the fix", () => {
-    expect(NOT_IN_WORKERS_ERROR).toMatch(/@cloudflare\/vitest-pool-workers/);
+  it("NOT_IN_WORKERS_ERROR mentions the Vitest plugin as the fix", () => {
+    expect(NOT_IN_WORKERS_ERROR).toMatch(/@cloudflare\/vitest-plugin/);
     expect(NOT_IN_WORKERS_ERROR).toMatch(/Cloudflare Workers runtime/);
   });
 });

@@ -186,7 +186,7 @@ the same either way, but it is worth knowing that a running pi turn never
 lets the object drain.
 
 The test pool never evicts an idle object by itself, because
-vitest-pool-workers sets `unsafePreventEviction`, so a test cannot see work
+The Vitest plugin sets `unsafePreventEviction`, so a test cannot see work
 that only lives in memory being lost when nothing holds the object. The
 tests' `evictWhenIdle` asks for a graceful eviction and reports whether the
 object was kept, which is how they check that the wake still holds the

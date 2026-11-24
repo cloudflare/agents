@@ -1,10 +1,10 @@
 import path from "node:path";
-import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
+import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import agents from "agents/vite";
 import { defineConfig } from "vitest/config";
 import { stripNodeModulesSourceMapReferences } from "../../scripts/vitest/strip-node-modules-source-map-references";
 
-// FAST unit harness: runs the worker inside vitest-pool-workers (miniflare /
+// FAST unit harness: runs the worker inside the Vitest plugin (miniflare /
 // workerd), NOT a real `wrangler dev`. This exercises the pure HTTP-surface
 // logic in src/index.ts — help text, routing, 404s — with real bindings
 // (ThinkAgent DO namespace, R2_SKILLS, AI, ASSETS) but WITHOUT the "container"
