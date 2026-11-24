@@ -162,9 +162,9 @@ export abstract class LifecycleCapability<Props extends object = object> {
    * Jobs, events and storage names are derived from it.
    */
   readonly capabilityId: string;
-  /** The kind, fixed by the class (`"streams"`). */
+  /** @internal The kind, fixed by the class (`"streams"`). */
   readonly kind: string;
-  /** The instance's name, or undefined for the default instance. */
+  /** @internal The instance's name, or undefined for the default instance. */
   readonly instanceName: string | undefined;
 
   /** How this capability claims traffic; see {@link DurableObjectCapability.claims}. */
@@ -192,8 +192,8 @@ export abstract class LifecycleCapability<Props extends object = object> {
   }
 
   /**
-   * The name to give a capability this one composes: derived from this
-   * instance's id, so it can never equal a name an app chose.
+   * @internal The name to give a capability this one composes: derived
+   * from this instance's id, so it can never equal a name an app chose.
    */
   protected get composedName(): string {
     const name = `@${this.capabilityId.replace(/\//g, "-")}`;
@@ -202,8 +202,8 @@ export abstract class LifecycleCapability<Props extends object = object> {
   }
 
   /**
-   * Declare a capability this one builds on. `Lifecycle.use()` installs it
-   * (and what it composes) before this one. Returns it.
+   * @internal Declare a capability this one builds on. `Lifecycle.use()`
+   * installs it (and what it composes) before this one. Returns it.
    */
   protected compose<T extends LifecycleCapability>(capability: T): T {
     const list = composedBy.get(this) ?? [];
