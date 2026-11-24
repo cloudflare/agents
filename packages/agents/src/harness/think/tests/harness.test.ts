@@ -291,6 +291,11 @@ describe("ThinkHarness approvals and client tools", () => {
     expect(await stub.watchedToolOwners()).toEqual(["alice"]);
   });
 
+  it("gives a client tool added after a watch opened its owner", async () => {
+    const stub = fresh();
+    expect(await stub.ownersAfterLateTool("alice")).toContain("alice");
+  });
+
   it("finds the owner on the call an answer settles when a tool-call id is reused", async () => {
     const stub = fresh();
     const result = (output: string) => ({

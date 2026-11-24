@@ -12,4 +12,14 @@ export {
   createSendMessageTool,
   type CreateSendMessageToolOptions
 } from "./send-message-tool";
-export * from "./turns";
+export {
+  answerToolCall,
+  awaitsInput,
+  toResponseChunk,
+  toResponseChunks,
+  toTranscriptMessage,
+  toUIMessage,
+  toUIMessageChunk,
+  type AiSdkConversionOptions,
+  type ToolCallAnswer
+} from "./turns";

@@ -168,6 +168,8 @@ type LiveRun = {
   partial: UIMessageChunk[];
   /** Whether that call continues a message already persisted. */
   continues: boolean;
+  /** The tools this run resolved, which decide which calls are a client's. */
+  tools?: ToolSet;
 };
 
 /** What an operation's run asks of the drive when it stops early. */
@@ -763,7 +765,12 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       if (event.type === "chunk" && event.chunk.type === "start") {
         owner = ownerOf(event.chunk.messageMetadata);
       }
-      const events = toSessionEvents(event, tools, owner);
+      // A run resolves the session's tools again; its calls follow those.
+      const events = toSessionEvents(
+        event,
+        this.#live.get(session)?.tools ?? tools,
+        owner
+      );
       if (watcher) watcher.push(events);
       else early.push(events);
     });
@@ -786,7 +793,10 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           operations: [running.operationId],
           ...(partial.length > 0 && {
             partial: partial.flatMap((chunk) => {
-              const converted = toResponseChunk(chunk, { tools, owner });
+              const converted = toResponseChunk(chunk, {
+                tools: live?.tools ?? tools,
+                owner
+              });
               return converted ? [converted] : [];
             })
           })
@@ -1001,6 +1011,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       }
       const message = await this.#message(op);
       const tools = await this.#tools(session);
+      live.tools = tools;
       const action = nextAction(
         op,
         message,

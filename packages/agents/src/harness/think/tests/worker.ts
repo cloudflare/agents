@@ -36,6 +36,7 @@ const CATALOGUE_KEY = "test:catalogue";
 const CONTEXT_SESSION = "with-context";
 const BLOCK_KEY = "test:block";
 const ENDED_KEY = "test:ended";
+const LATE_TOOL_KEY = "test:late-tool";
 
 const usage = {
   inputTokens: {
@@ -159,7 +160,7 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         return { stream: this.#reply(messages) };
       }
     }),
-    tools: {
+    tools: () => ({
       multiply: tool({
         description: "Multiply by three",
         inputSchema: z.object({ value: z.number() }),
@@ -192,8 +193,15 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
       ask: tool({
         description: "Runs on the client",
         inputSchema: z.object({ question: z.string() })
+      }),
+      // A client tool the app adds only once `addLateTool()` is called.
+      ...(this.ctx.storage.kv.get<boolean>(LATE_TOOL_KEY) && {
+        late: tool({
+          description: "Runs on the client, added later",
+          inputSchema: z.object({})
+        })
       })
-    },
+    }),
     recovery: { backoffMs: 10 },
     hooks: {
       classifyError: classifyContextOverflow,
@@ -309,6 +317,8 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         parts = callReply([{ name: "dangerous" }]);
       } else if (text === "client") {
         parts = callReply([{ name: "ask", input: { question: "why?" } }]);
+      } else if (text === "late client") {
+        parts = callReply([{ name: "late" }]);
       } else if (text === "client reused id") {
         // A provider that reuses tool-call ids across replies.
         parts = callReply([
@@ -434,6 +444,31 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
       from: { participantId }
     });
     return session.wait(operationId);
+  }
+
+  addLateTool(): void {
+    this.ctx.storage.kv.put(LATE_TOOL_KEY, true);
+  }
+
+  /**
+   * Open a watch, add a client tool, then have a participant's turn call it:
+   * the owner each call carries in the watch's events.
+   */
+  async ownersAfterLateTool(participantId: string) {
+    const watch = await this.harness.session().watch();
+    const owners: (string | undefined)[] = [];
+    watch.start(async (events: readonly SessionEvent[]) => {
+      for (const event of events) {
+        if (event.type !== "message") continue;
+        for (const part of event.message.parts) {
+          if (part.type === "tool") owners.push(part.owner);
+        }
+      }
+    });
+    this.addLateTool();
+    await this.promptAs("late client", participantId);
+    await watch.stop();
+    return owners;
   }
 
   /** The owner of each tool call, as a watch of the session sees it. */
