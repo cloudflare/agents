@@ -434,8 +434,7 @@ describe("routeStreamInterruption", () => {
       name: "a wait longer than the cap",
       headers: { "retry-after": "600" },
       delay: 60
-    },
-    { name: "no header", headers: {}, delay: 1 }
+    }
   ])(
     "reads the provider's wait from the error: $name",
     async ({ headers, delay }) => {
@@ -448,6 +447,17 @@ describe("routeStreamInterruption", () => {
       expect(t.scheduled[0]?.delaySeconds).toBe(delay);
     }
   );
+
+  it("backs off between half a second and a second when the provider gives no wait", async () => {
+    const t = setup({
+      storedReplyId: "assistant-1",
+      error: apiCallError({})
+    });
+    t.host.backoff = true;
+    expect(await t.run()).toBe("scheduled");
+    expect(t.scheduled[0]?.delaySeconds).toBeGreaterThanOrEqual(0.5);
+    expect(t.scheduled[0]?.delaySeconds).toBeLessThan(1);
+  });
 
   it("reads an HTTP-date retry-after", async () => {
     const t = setup({

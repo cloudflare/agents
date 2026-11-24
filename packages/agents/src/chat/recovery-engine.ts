@@ -9,6 +9,7 @@
  * @internal Not a public API.
  */
 
+import { backoffDelay } from "../retries";
 import { ChatRecoverySupersededError } from "./turn-stop";
 import type {
   ChatRecoveryExhaustedContext,
@@ -2233,10 +2234,11 @@ export function chatRecoveryBackoffSeconds(
   retries: number,
   retryAfterSeconds?: number
 ): number {
-  const backoff = Math.min(
-    2 ** (retries - 1),
-    CHAT_RECOVERY_MAX_BACKOFF_SECONDS
-  );
+  const backoff =
+    backoffDelay(retries, {
+      baseMs: 1000,
+      maxMs: CHAT_RECOVERY_MAX_BACKOFF_SECONDS * 1000
+    }) / 1000;
   if (retryAfterSeconds === undefined) return backoff;
   return Math.min(
     Math.max(backoff, retryAfterSeconds),

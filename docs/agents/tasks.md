@@ -139,7 +139,8 @@ callback that ignores it still loses the attempt, and a stale attempt's late
 writes are rejected.
 
 A callback that throws retries on a durable delay (default: 5 attempts,
-exponential backoff). Throw `NonRetryableError` to fail the run immediately.
+exponential backoff with jitter: each delay is drawn between half and all
+of the doubled delay, so runs that failed together do not retry together). Throw `NonRetryableError` to fail the run immediately.
 
 ## Replay semantics
 

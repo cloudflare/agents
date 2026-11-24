@@ -1,4 +1,5 @@
 import type { Agent } from "./index";
+import { backoffDelay } from "./retries";
 import { camelCaseToKebabCase } from "./utils";
 
 const namespaceMapCache = new WeakMap<
@@ -159,17 +160,6 @@ function isRetryableDurableObjectError(error: unknown): boolean {
   return typed.retryable === true && typed.overloaded !== true;
 }
 
-function routingRetryDelayMs(
-  attempt: number,
-  options: ResolvedRoutingRetryOptions
-): number {
-  const upperBoundMs = Math.min(
-    options.maxDelayMs,
-    options.baseDelayMs * 2 ** (attempt - 1)
-  );
-  return Math.floor(Math.random() * upperBoundMs);
-}
-
 async function retryDurableObjectOperation<T>(
   operation: () => Promise<T>,
   context: RoutingRetryContext,
@@ -191,7 +181,11 @@ async function retryDurableObjectOperation<T>(
         throw error;
       }
 
-      const delayMs = routingRetryDelayMs(attempt, resolved);
+      const delayMs = backoffDelay(attempt, {
+        baseMs: resolved.baseDelayMs,
+        maxMs: resolved.maxDelayMs,
+        jitter: "full"
+      });
       try {
         await resolved.onRetry?.({
           error,

@@ -12,6 +12,7 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
+  backoffDelay,
   isDurableObjectMemoryLimitReset,
   isDurableObjectResetError,
   isPlatformFailure,
@@ -76,14 +77,6 @@ const OWNERLESS_RETRY_MS = 60_000;
 
 /** Longest wait between attempts of a job whose attempts ran out. */
 const MAX_EXHAUSTED_BACKOFF_MS = 60 * 60_000;
-
-/** Wait before the next attempt of a job `over` attempts past its budget. */
-function exhaustedBackoffMs(over: number): number {
-  return Math.min(
-    MAX_EXHAUSTED_BACKOFF_MS,
-    DEADMAN_ALARM_DELAY_MS * 2 ** Math.min(over, 10)
-  );
-}
 
 /**
  * The error a job's owner sees in `onJobError` when its attempts ran out
@@ -681,7 +674,14 @@ export class JobDriver {
       // attempt per backoff instead of one every deadman delay.
       queue.setTime(
         row.id,
-        Date.now() + exhaustedBackoffMs(prior - unreportedLimit)
+        Date.now() +
+          // No jitter: the next attempt must never come sooner than the
+          // deadman delay, and each object's crash loop is its own.
+          backoffDelay(prior - unreportedLimit + 1, {
+            baseMs: DEADMAN_ALARM_DELAY_MS,
+            maxMs: MAX_EXHAUSTED_BACKOFF_MS,
+            jitter: false
+          })
       );
     }
     let attempt = prior;

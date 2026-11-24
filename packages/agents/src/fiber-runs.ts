@@ -32,6 +32,7 @@ import type {
   StartFiberResult
 } from "./fiber-types";
 import { armFacetWake } from "./lifecycle/durable-object-lifecycle";
+import { backoffDelay } from "./retries";
 import type { Tasks } from "./tasks/tasks";
 import { TaskSettlement } from "./tasks/settlement";
 import type {
@@ -72,7 +73,6 @@ const FAILURES = "failures";
 const MAX_RECOVERY_CRASHES = 3;
 // Ceiling of the retry backoff for a recovery hook that keeps throwing.
 const MAX_BACKOFF_MS = 5 * 60_000;
-const BACKOFF_MAX_EXP = 20;
 
 type FiberInput = { name: string };
 
@@ -322,10 +322,13 @@ async function recover(
     // Retried later, backing off while it keeps throwing (#1707).
     const failures = (step.checkpoint.get<number>(FAILURES) ?? 0) + 1;
     step.checkpoint.set(FAILURES, failures);
-    const exp = Math.min(failures, BACKOFF_MAX_EXP);
+    // The sleep's wake time is stored once, so the jitter is too.
     await step.sleep(
       `retry:${failures}`,
-      Math.min(MAX_BACKOFF_MS, host.heartbeatMs * 2 ** exp)
+      backoffDelay(failures + 1, {
+        baseMs: host.heartbeatMs,
+        maxMs: MAX_BACKOFF_MS
+      })
     );
     return null;
   }

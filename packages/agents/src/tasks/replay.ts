@@ -10,6 +10,7 @@
  */
 
 import {
+  backoffDelay,
   isDurableObjectCodeUpdateReset,
   isDurableObjectMemoryLimitReset,
   isPlatformFailure
@@ -169,7 +170,12 @@ export function computeRetryDelayMs(
       delay = base * failedAttempt;
       break;
     case "exponential":
-      delay = base * 2 ** (failedAttempt - 1);
+      // Jittered, so runs that failed together do not retry together;
+      // capped first, so steps at the cap keep their jitter.
+      delay = backoffDelay(failedAttempt, {
+        baseMs: base,
+        maxMs: MAX_RETRY_DELAY_MS
+      });
       break;
   }
   return Math.min(delay, MAX_RETRY_DELAY_MS);
