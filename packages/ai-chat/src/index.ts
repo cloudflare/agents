@@ -786,14 +786,14 @@ export class AIChatAgent<
     snapshotKey: "__cfAIChatFiberSnapshot",
     generateId: () => nanoid(),
     turnSignal: (requestId) => this._abortRegistry.getExistingSignal(requestId),
-    runTask: ({ requestId, continuation, nonce }, local) =>
+    runTask: (input, local) =>
       this.tasks.run(
         (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME,
-        { requestId, continuation, nonce },
+        input,
         {
-          runId: `chat_${nonce}`,
+          runId: `chat_${input.nonce}`,
           retain: false,
-          metadata: { requestId },
+          metadata: { requestId: input.requestId },
           start: "now",
           local
         }

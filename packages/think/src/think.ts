@@ -2953,14 +2953,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     snapshotKey: "__cfThinkChatFiberSnapshot",
     generateId: () => crypto.randomUUID(),
     turnSignal: (requestId) => this._turns.aborts.getExistingSignal(requestId),
-    runTask: ({ requestId, continuation, nonce }, local) =>
+    runTask: (input, local) =>
       this.tasks.run(
         (this.constructor as typeof Think).CHAT_FIBER_NAME,
-        { requestId, continuation, nonce },
+        input,
         {
-          runId: `chat_${nonce}`,
+          runId: `chat_${input.nonce}`,
           retain: false,
-          metadata: { requestId },
+          metadata: { requestId: input.requestId },
           start: "now",
           local
         }

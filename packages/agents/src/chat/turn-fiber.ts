@@ -32,7 +32,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { wrapChatFiberSnapshot, type ChatFiberSnapshot } from "./recovery";
 import { isTurnStopped } from "./turn-stop";
 import { isDurableObjectMemoryLimitReset } from "../retries";
-import type { ChatTurnClosureEntry } from "./turn-task";
+import type { TaskJson } from "../tasks";
+import type { ChatTurnClosureEntry, ChatTurnTaskInput } from "./turn-task";
 
 /** What {@link ChatTurnFibers} needs from the agent that hosts it. */
 export interface ChatTurnFiberHost {
@@ -46,11 +47,7 @@ export interface ChatTurnFiberHost {
   turnSignal(requestId: string): AbortSignal | undefined;
   /** Start the chat-turn Task, with the turn's closure as its `local`. */
   runTask(
-    input: {
-      requestId: string;
-      continuation: boolean;
-      nonce: string;
-    },
+    input: ChatTurnTaskInput,
     local: ChatTurnClosureEntry
   ): Promise<unknown>;
   /**
@@ -146,9 +143,8 @@ export class ChatTurnFibers {
       recoveryData: null as unknown,
       snapshot
     };
-    const wrap = (data: unknown) => {
+    const onStash = (data: unknown) => {
       liveTurn.recoveryData = data;
-      return wrapChatFiberSnapshot(this.host.snapshotKey, snapshot, data);
     };
     const run = this.host.turnBody(continuation, fn, requestId);
     // What a stopped turn throws because of the stop is not a failure
@@ -186,7 +182,7 @@ export class ChatTurnFibers {
 
     this.liveTurns.set(requestId, liveTurn);
     try {
-      return settled(await this.#runAsTask(turn, wrap, body));
+      return settled(await this.#runAsTask(turn, onStash, body));
     } finally {
       if (this.liveTurns.get(requestId) === liveTurn) {
         this.liveTurns.delete(requestId);
@@ -196,10 +192,10 @@ export class ChatTurnFibers {
 
   async #runAsTask<T>(
     turn: ChatTurnFiber,
-    wrap: (data: unknown) => unknown,
+    onStash: (data: unknown) => void,
     body: () => Promise<T>
   ): Promise<T> {
-    const { requestId, continuation } = turn;
+    const { requestId, continuation, snapshot } = turn;
     const nonce = this.host.generateId();
     let resolveOutcome!: (value: unknown) => void;
     let rejectOutcome!: (error: unknown) => void;
@@ -215,11 +211,21 @@ export class ChatTurnFibers {
     // request, a caller's result capture), whichever attempt claims it: the
     // caller's, or the alarm's when that claims the run first.
     const inCaller = AsyncLocalStorage.snapshot();
+    // The snapshot is a hint for recovery; stream cursors are the evidence.
+    // One that cannot be kept as JSON (a request body with a `bigint`) is
+    // left out, and never fails the turn.
+    const envelope = asJson(
+      wrapChatFiberSnapshot(this.host.snapshotKey, snapshot, null)
+    );
     await this.host.runTask(
-      { requestId, continuation, nonce },
       {
-        initial: wrap(null),
-        wrap,
+        requestId,
+        continuation,
+        nonce,
+        ...(envelope !== undefined && { envelope })
+      },
+      {
+        onStash,
         run: (inside) => {
           // Tasks accepted the run durably before it invokes the closure.
           this.host.turnAccepted?.(requestId);
@@ -230,5 +236,16 @@ export class ChatTurnFibers {
       }
     );
     return (await outcome) as T;
+  }
+}
+
+/** `value` as JSON, or `undefined` when it cannot be kept as JSON. */
+function asJson(value: unknown): TaskJson | undefined {
+  try {
+    // SAFETY: a JSON round trip yields JSON.
+    return JSON.parse(JSON.stringify(value)) as TaskJson;
+  } catch (error) {
+    console.warn("[chat] turn snapshot not kept:", error);
+    return undefined;
   }
 }
