@@ -262,15 +262,17 @@ await this.addMcpServer("portal", "https://portal.example.com/mcp", {
 
 ### URL Security
 
-MCP server URLs are validated before connection to prevent Server-Side Request Forgery (SSRF). The following URL targets are blocked:
+MCP server URLs are checked before connecting, to prevent Server-Side Request Forgery (SSRF). The client checks every request it sends with the same rules: MCP messages, the SSE stream, OAuth discovery and token requests, and each redirect it follows. It refuses:
 
-- Private/internal IP ranges (RFC 1918: `10.x`, `172.16-31.x`, `192.168.x`)
-- Unspecified addresses (`0.0.0.0`, `::`)
-- Link-local addresses (`169.254.x`, `fe80::`)
-- Cloud metadata endpoints (`169.254.169.254`)
-- IPv6 unique-local addresses (`fc00::/7`)
+- URLs that are not `http` or `https`, or that carry a username or password
+- Private and reserved IPv4 ranges: `10.x`, `172.16-31.x`, `192.168.x`, carrier-grade NAT (`100.64.0.0/10`), link-local and cloud metadata (`169.254.x`), `0.0.0.0/8`, multicast and reserved (`224.0.0.0/3`), `192.0.0.0/24` and `198.18.0.0/15`
+- The same IPv4 ranges written as IPv6 (IPv4-mapped, IPv4-compatible, NAT64 `64:ff9b::/96` and 6to4 `2002::/16`)
+- IPv6 unspecified (`::`), unique-local (`fc00::/7`), link-local (`fe80::/10`), site-local (`fec0::/10`) and multicast (`ff00::/8`)
+- Names ending in `.internal`
 
-Loopback development URLs such as `localhost`, `127.0.0.1`, and `::1` are allowed.
+Loopback URLs are allowed for local development: `localhost`, names ending in `.localhost`, `127.0.0.0/8` and `[::1]`.
+
+The check reads the URL only and does not resolve DNS. Deployed Workers cannot reach private networks; the check matters most under `wrangler dev` and in other runtimes.
 
 ### Return Value
 

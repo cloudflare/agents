@@ -5390,17 +5390,43 @@ describe("MCPClientManager OAuth Integration", () => {
       })
     );
 
-    it(
-      "should allow IPv6 fec0:: (deprecated site-local, outside /10)",
+    // The forms below passed this check before it used the web tools'
+    // URL policy (packages/agents/src/web/url-policy.ts).
+    it.each([
+      ["IPv6 site-local", "http://[fec0::1]/mcp"],
+      ["IPv6 multicast", "http://[ff02::1]/mcp"],
+      ["NAT64 form of a link-local address", "http://[64:ff9b::a9fe:a9fe]/mcp"],
+      ["NAT64 form of a private address", "http://[64:ff9b::a00:1]/mcp"],
+      ["6to4 form of a link-local address", "http://[2002:a9fe:a9fe::]/mcp"],
+      ["6to4 form of a private address", "http://[2002:a00:1::]/mcp"],
+      ["IPv4-compatible IPv6", "http://[::a9fe:a9fe]/mcp"],
+      ["a .internal name", "http://instance-data.ec2.internal/mcp"],
+      ["another .internal name", "http://metadata.internal/mcp"],
+      ["carrier-grade NAT", "http://100.64.0.1/mcp"],
+      ["IETF protocol assignments", "http://192.0.0.192/mcp"],
+      ["benchmarking", "http://198.18.0.1/mcp"],
+      ["IPv4 multicast", "http://224.0.0.1/mcp"],
+      ["IPv4 broadcast", "http://255.255.255.255/mcp"],
+      ["IPv4-mapped loopback", "http://[::ffff:127.0.0.1]/mcp"],
+      ["a URL with credentials", "https://user:secret@mcp.example.com/mcp"],
+      ["a non-HTTP URL", "ftp://mcp.example.com/mcp"]
+    ])("should reject %s", (_, url) =>
       managerTest(async ({ manager }) => {
-        // RFC 3879 deprecated fec0::/10 site-local; it is not link-local
-        // and is out of scope for this specific SSRF rule.
         await expect(
-          manager.registerServer("s-fec0", {
-            url: "http://[fec0::1]/mcp",
-            name: "ok"
+          manager.registerServer("s-refused", { url, name: "bad" })
+        ).rejects.toThrow("Blocked URL");
+      })()
+    );
+
+    it(
+      "should allow .localhost names for local development",
+      managerTest(async ({ manager }) => {
+        await expect(
+          manager.registerServer("s-dot-localhost", {
+            url: "http://mcp.localhost:8787/mcp",
+            name: "local"
           })
-        ).resolves.toBe("s-fec0");
+        ).resolves.toBe("s-dot-localhost");
       })
     );
 

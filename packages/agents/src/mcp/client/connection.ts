@@ -27,7 +27,8 @@ import {
   fetchMcpTools
 } from "./catalog";
 import type { AgentMcpOAuthProvider } from "./do-oauth-client-provider";
-import { AuthorizationTurns } from "./authorization-turns";
+import { AuthorizationTurns, type TransportFetch } from "./authorization-turns";
+import { fetchWithinUrlPolicy } from "./url-policy";
 import {
   advertisedElicitation,
   createMcpSdkClient,
@@ -130,6 +131,31 @@ function withStaticHeaders<
           ) as typeof init.headers
         })
     }
+  };
+}
+
+/**
+ * Send every request an HTTP transport makes (MCP messages, OAuth discovery
+ * and token requests, the SSE stream) through the URL policy, redirects
+ * included.
+ */
+function withUrlPolicy<
+  T extends StreamableHTTPClientTransportOptions | SSEClientTransportOptions
+>(options: T): T {
+  const { eventSourceInit } = options as SSEClientTransportOptions;
+  return {
+    ...options,
+    fetch: fetchWithinUrlPolicy(options.fetch),
+    ...(eventSourceInit?.fetch && {
+      eventSourceInit: {
+        ...eventSourceInit,
+        // The SSE stream's fetch is typed with the eventsource package's
+        // narrower request and response; at runtime it is a fetch.
+        fetch: fetchWithinUrlPolicy(
+          eventSourceInit.fetch as TransportFetch
+        ) as typeof eventSourceInit.fetch
+      }
+    })
   };
 }
 
@@ -1028,8 +1054,10 @@ export class MCPClientConnection {
           new StreamableHTTPClientTransport(
             this.url,
             this.authorizationTurnOptions(
-              withStaticHeaders(
-                this.options.transport as StreamableHTTPClientTransportOptions
+              withUrlPolicy(
+                withStaticHeaders(
+                  this.options.transport as StreamableHTTPClientTransportOptions
+                )
               )
             )
           )
@@ -1039,8 +1067,10 @@ export class MCPClientConnection {
           new SSEClientTransport(
             this.url,
             this.authorizationTurnOptions(
-              withStaticHeaders(
-                this.options.transport as SSEClientTransportOptions
+              withUrlPolicy(
+                withStaticHeaders(
+                  this.options.transport as SSEClientTransportOptions
+                )
               )
             )
           )
