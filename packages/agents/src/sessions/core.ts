@@ -306,7 +306,7 @@ const SEARCH_WORD = /[\p{L}\p{N}\p{M}\p{Co}]/u;
  * several megabytes.
  */
 function lastSeparator(text: string): number {
-  for (let end = text.length; end > 0; ) {
+  for (let end = text.length; end > 0;) {
     let start = end - 1;
     const low = text.charCodeAt(start);
     if (low >= 0xdc00 && low <= 0xdfff && start > 0) {
